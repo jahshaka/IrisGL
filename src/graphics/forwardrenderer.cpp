@@ -1,14 +1,3 @@
-/**************************************************************************
-This file is part of IrisGL
-http://www.irisgl.org
-Copyright (c) 2016  GPLv3 Jahshaka LLC <coders@jahshaka.com>
-
-This is free software: you may copy, redistribute
-and/or modify it under the terms of the GPLv3 License
-
-For more information see the LICENSE file
-*************************************************************************/
-
 #include "forwardrenderer.h"
 #include "../core/scene.h"
 #include "../core/scenenode.h"
@@ -41,6 +30,7 @@ namespace iris
 ForwardRenderer::ForwardRenderer(QOpenGLFunctions_3_2_Core* gl)
 {
     this->gl = gl;
+    this->GLA = gl;
     renderData = new RenderData();
 
     billboard = new Billboard(gl);
@@ -56,19 +46,22 @@ QSharedPointer<ForwardRenderer> ForwardRenderer::create(QOpenGLFunctions_3_2_Cor
     return QSharedPointer<ForwardRenderer>(new ForwardRenderer(gl));
 }
 
-//all scene's transform should be updated
-void ForwardRenderer::renderScene(QOpenGLContext* ctx,Viewport* vp)
+// all scene's transform should be updated
+void ForwardRenderer::renderScene(QOpenGLContext* ctx,
+                                  Viewport* vp,
+                                  QMatrix4x4& viewMatrix,
+                                  QMatrix4x4& projMatrix)
 {
     auto cam = scene->camera;
 
-    //STEP 1: RENDER SCENE
+    // STEP 1: RENDER SCENE
     renderData->scene = scene;
 
     cam->setAspectRatio(vp->getAspectRatio());
     cam->updateCameraMatrices();
 
-    renderData->projMatrix = cam->projMatrix;
-    renderData->viewMatrix = cam->viewMatrix;
+    projMatrix = renderData->projMatrix = cam->projMatrix;
+    viewMatrix = renderData->viewMatrix = cam->viewMatrix;
     renderData->eyePos = cam->globalTransform.column(3).toVector3D();
 
     renderData->fogColor = scene->fogColor;
@@ -80,19 +73,16 @@ void ForwardRenderer::renderScene(QOpenGLContext* ctx,Viewport* vp)
 
     renderNode(renderData,scene->rootNode);
 
-    //STEP 2: RENDER SKY
+    // STEP 2: RENDER SKY
     renderSky(renderData);
 
-    //STEP 3: RENDER LINES (for e.g. light radius and the camera frustum)
+    // STEP 3: RENDER LINES (for e.g. light radius and the camera frustum)
 
-    //STEP 4: RENDER BILLBOARD ICONS
+    // STEP 4: RENDER BILLBOARD ICONS
     renderBillboardIcons(renderData);
 
-    //STEP 5: RENDER SELECTED OBJECT
-    if(!!selectedSceneNode)
-        renderSelectedNode(renderData,selectedSceneNode);
-
-    //STEP 6: RENDER GIZMOS
+    // STEP 5: RENDER SELECTED OBJECT
+    if (!!selectedSceneNode) renderSelectedNode(renderData,selectedSceneNode);
 }
 
 void ForwardRenderer::renderSceneVr(QOpenGLContext* ctx,Viewport* vp)
