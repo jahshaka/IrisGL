@@ -31,7 +31,7 @@ public:
     {
         modified = false;
         location = -1;
-        name = nullptr;
+        //name = nullptr;
         //value = QVariant();
         type = -1;
     }
