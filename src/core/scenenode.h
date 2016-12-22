@@ -31,7 +31,7 @@ enum class SceneNodeType
 class SceneNode:public QEnableSharedFromThis<SceneNode>
 {
 public:
-    //cached local and global transform
+    // cached local and global transform
     QMatrix4x4 localTransform;
     QMatrix4x4 globalTransform;
 
@@ -48,7 +48,7 @@ public:
     SceneNodePtr parent;
     QList<SceneNodePtr> children;
 
-    //editor specific
+    // editor specific
     bool duplicable;
     bool visible;
     bool removable;
@@ -58,10 +58,7 @@ public:
 
 public:
     SceneNode();
-    virtual ~SceneNode()
-    {
-
-    }
+    virtual ~SceneNode() {}
 
     static SceneNodePtr create();
 
@@ -70,39 +67,40 @@ public:
 
     long getNodeId();
 
-    bool isDuplicable()
-    {
+    bool isDuplicable() {
         return duplicable;
     }
 
-    bool isVisible()
-    {
+    bool isVisible() {
         return visible;
     }
 
-    void show()
-    {
+    void show() {
         visible = true;
     }
 
-    void hide()
-    {
+    void hide() {
         visible = false;
     }
 
-    bool isRemovable()
-    {
+    bool isRemovable() {
         return removable;
     }
 
     SceneNodeType getSceneNodeType();
-    void addChild(SceneNodePtr node);
+    /**
+     * @brief addChild
+     * @param node
+     * @param keepTransform keeps visual transform
+     */
+    void addChild(SceneNodePtr node, bool keepTransform = true);
     void removeFromParent();
     void removeChild(SceneNodePtr node);
 
     bool isRootNode();
 
     QVector3D getGlobalPosition();
+    QMatrix4x4 getGlobalTransform();
 
     virtual void update(float dt);
 
