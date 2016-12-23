@@ -15,6 +15,7 @@ SOURCES += \
     $$PWD/Src/OVR_StereoProjection.cpp \
     $$PWD/Src/OVR_CAPIShim.c
 
+LIBS += -ldl
 
 INCLUDEPATH += $$PWD/Include
 CONFIG += c++14
