@@ -58,15 +58,34 @@ SceneNodeType SceneNode::getSceneNodeType()
     return sceneNodeType;
 }
 
-void SceneNode::addChild(SceneNodePtr node)
+void SceneNode::addChild(SceneNodePtr node, bool keepTransform)
 {
-    //todo: check if child is already a node
+    auto initialGlobalTransform = node->getGlobalTransform();
+
+    // @TODO: check if child is already a node
     auto self = sharedFromThis();
 
     children.append(node);
     node->setParent(self);
     node->setScene(self->scene);
     scene->addNode(node);
+
+    if (keepTransform) {
+        // @TODO: ensure global transform is calculated
+        // this->update(0);///shortcut for now
+        auto thisGlobalTransform = this->getGlobalTransform();
+
+        auto diff = initialGlobalTransform * thisGlobalTransform.inverted();
+
+        auto pos = diff.column(3).toVector3D();
+        node->pos = pos;
+        node->rot = QQuaternion::fromRotationMatrix(diff.normalMatrix());
+
+        auto data = diff.data();
+
+        // extracts the scale from the transform
+        node->scale = QVector3D(data[0], data[5], data[10]);
+    }
 }
 
 void SceneNode::removeFromParent()
@@ -101,13 +120,15 @@ void SceneNode::update(float dt)
     localTransform.rotate(rot);
     localTransform.scale(scale);
 
-    if(!!parent)
-        globalTransform = this->parent->globalTransform*localTransform;
-    else
+    if (!!parent) {
+        globalTransform = this->parent->globalTransform * localTransform;
+    } else {
         globalTransform = localTransform;
+    }
 
-    for(auto child:children)
+    for (auto child : children) {
         child->update(dt);
+    }
 }
 
 void SceneNode::setParent(SceneNodePtr node)
@@ -132,6 +153,22 @@ long SceneNode::generateNodeId()
 QVector3D SceneNode::getGlobalPosition()
 {
     return globalTransform.column(3).toVector3D();
+}
+
+QMatrix4x4 SceneNode::getGlobalTransform()
+{
+    localTransform.setToIdentity();
+
+    localTransform.translate(pos);
+    localTransform.rotate(rot);
+    localTransform.scale(scale);
+
+    if (parent.isNull()) {
+        // this is a check for the root node
+        return localTransform;
+    } else {
+        return parent->getGlobalTransform() * localTransform;
+    }
 }
 
 long SceneNode::nextId = 0;

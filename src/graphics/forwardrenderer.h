@@ -1,19 +1,8 @@
-/**************************************************************************
-This file is part of IrisGL
-http://www.irisgl.org
-Copyright (c) 2016  GPLv3 Jahshaka LLC <coders@jahshaka.com>
-
-This is free software: you may copy, redistribute
-and/or modify it under the terms of the GPLv3 License
-
-For more information see the LICENSE file
-*************************************************************************/
-
 #ifndef FORWARDRENDERER_H
 #define FORWARDRENDERER_H
 
 #include <QOpenGLContext>
-#include "../irisglfwd.h"
+#include <QSharedPointer>
 #include "../libovr/Include/OVR_CAPI_GL.h"
 
 class QOpenGLShaderProgram;
@@ -22,6 +11,16 @@ class QOpenGLContext;
 
 namespace iris
 {
+
+class Scene;
+class SceneNode;
+class RenderData;
+class Viewport;
+class Mesh;
+class BillboardMaterial;
+class Billboard;
+class FullScreenQuad;
+class VrDevice;
 
 /**
  * This is a basic forward renderer.
@@ -35,13 +34,13 @@ class ForwardRenderer
     /**
      * The scene to be rendered
      */
-    ScenePtr scene;
+    QSharedPointer<Scene> scene;
 
     /**
      * Sets the selected scene node.
      * This is only relevant to the editor.
      */
-    SceneNodePtr selectedSceneNode;
+    QSharedPointer<SceneNode> selectedSceneNode;
     QOpenGLShaderProgram* lineShader;
 
     VrDevice* vrDevice;
@@ -53,21 +52,23 @@ public:
      * as an overlay
      * @param activeNode
      */
-    void setSelectedSceneNode(SceneNodePtr activeNode)
+    void setSelectedSceneNode(QSharedPointer<SceneNode> activeNode)
     {
         this->selectedSceneNode = activeNode;
     }
 
-    void setScene(ScenePtr scene)
+    void setScene(QSharedPointer<Scene> scene)
     {
         this->scene = scene;
     }
 
     //all scenenodes' transform should be updated before calling this functions
-    void renderScene(QOpenGLContext* ctx,Viewport* vp);
-    void renderSceneVr(QOpenGLContext* ctx,Viewport* vp);
+    void renderScene(QOpenGLContext* ctx, Viewport* vp, QMatrix4x4& vM, QMatrix4x4& pM);
+    void renderSceneVr(QOpenGLContext* ctx, Viewport* vp);
 
-    static ForwardRendererPtr create(QOpenGLFunctions_3_2_Core* gl);
+    QOpenGLFunctions_3_2_Core* GLA;
+
+    static QSharedPointer<ForwardRenderer> create(QOpenGLFunctions_3_2_Core* gl);
 
     bool isVrSupported();
 
@@ -77,12 +78,10 @@ public:
 private:
     ForwardRenderer(QOpenGLFunctions_3_2_Core* gl);
 
-
-
-    void renderNode(RenderData* renderData,SceneNodePtr node);
+    void renderNode(RenderData* renderData,QSharedPointer<SceneNode> node);
     void renderSky(RenderData* renderData);
     void renderBillboardIcons(RenderData* renderData);
-    void renderSelectedNode(RenderData* renderData,SceneNodePtr node);
+    void renderSelectedNode(RenderData* renderData,QSharedPointer<SceneNode> node);
 
 
     void createLineShader();
