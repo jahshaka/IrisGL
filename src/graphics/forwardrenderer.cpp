@@ -1,3 +1,14 @@
+/**************************************************************************
+This file is part of IrisGL
+http://www.irisgl.org
+Copyright (c) 2016  GPLv3 Jahshaka LLC <coders@jahshaka.com>
+
+This is free software: you may copy, redistribute
+and/or modify it under the terms of the GPLv3 License
+
+For more information see the LICENSE file
+*************************************************************************/
+
 #include "forwardrenderer.h"
 #include "../core/scene.h"
 #include "../core/scenenode.h"
@@ -17,6 +28,7 @@
 #include "utils/fullscreenquad.h"
 #include "texture2d.h"
 #include "../vr/vrdevice.h"
+#include "../core/irisutils.h"
 
 #include <QOpenGLContext>
 #include "../libovr/Include/OVR_CAPI_GL.h"
@@ -36,9 +48,38 @@ ForwardRenderer::ForwardRenderer(QOpenGLFunctions_3_2_Core* gl)
     billboard = new Billboard(gl);
     fsQuad = new FullScreenQuad();
     createLineShader();
+    createShadowShader();
+
+    generateShadowBuffer(4096);
 
     vrDevice = new VrDevice(gl);
     vrDevice->initialize();
+}
+
+void ForwardRenderer::generateShadowBuffer(GLuint size)
+{
+    gl->glGenFramebuffers(1, &shadowFBO);
+
+    gl->glGenTextures(1, &shadowDepthMap);
+    gl->glBindTexture(GL_TEXTURE_2D, shadowDepthMap);
+    gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32,
+                     size, size,
+                     0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+    gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowDepthMap, 0);
+
+    gl->glDrawBuffer(GL_NONE);
+    gl->glReadBuffer(GL_NONE);
+
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // check status at end
 }
 
 QSharedPointer<ForwardRenderer> ForwardRenderer::create(QOpenGLFunctions_3_2_Core* gl)
@@ -71,7 +112,20 @@ void ForwardRenderer::renderScene(QOpenGLContext* ctx,
 
     //renderData->gl = gl;
 
-    renderNode(renderData,scene->rootNode);
+    gl->glViewport(0, 0, 4096, 4096);
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+    gl->glClear(GL_DEPTH_BUFFER_BIT);
+    gl->glCullFace(GL_FRONT);
+    renderShadows(renderData, scene->rootNode);
+    gl->glCullFace(GL_BACK);
+
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, ctx->defaultFramebufferObject());
+
+    gl->glViewport(0, 0, vp->width, vp->height);
+    gl->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    renderNode(renderData, scene->rootNode);
 
     // STEP 2: RENDER SKY
     renderSky(renderData);
@@ -83,6 +137,46 @@ void ForwardRenderer::renderScene(QOpenGLContext* ctx,
 
     // STEP 5: RENDER SELECTED OBJECT
     if (!!selectedSceneNode) renderSelectedNode(renderData,selectedSceneNode);
+}
+
+void ForwardRenderer::renderShadows(RenderData* renderData,QSharedPointer<SceneNode> node)
+{
+    if (node->sceneNodeType == SceneNodeType::Mesh && node->isVisible()) {
+
+        shadowShader->bind();
+
+        QMatrix4x4 lightView, lightProjection;
+
+        for (auto light : scene->lights) {
+            if (light->lightType == iris::LightType::Directional && true) { // cast shadows
+                auto meshNode = node.staticCast<MeshNode>();
+
+                lightProjection.ortho(-128.0f, 128.0f, -64.0f, 64.0f, -64.0f, 128.0f);
+
+                lightView.lookAt(QVector3D(0, 0, 0),
+                                 light->getLightDir(),
+                                 QVector3D(0.0f, 1.0f, 0.0f));
+
+                QMatrix4x4 lightSpaceMatrix = lightProjection * lightView;
+
+
+                gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, shadowFBO);
+                gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowDepthMap, 0);
+
+                shadowShader->setUniformValue("u_worldMatrix", node->globalTransform);
+                shadowShader->setUniformValue("u_lightSpaceMatrix", lightSpaceMatrix);
+
+                if(meshNode->mesh != nullptr)
+                    meshNode->mesh->draw(gl, shadowShader);
+            }
+        }
+
+        shadowShader->release();
+    }
+
+    for (auto childNode : node->children) {
+        renderShadows(renderData, childNode);
+    }
 }
 
 void ForwardRenderer::renderSceneVr(QOpenGLContext* ctx,Viewport* vp)
@@ -103,7 +197,6 @@ void ForwardRenderer::renderSceneVr(QOpenGLContext* ctx,Viewport* vp)
 
         auto proj = vrDevice->getEyeProjMatrix(eye,0.1f,1000.0f);
         renderData->projMatrix = proj;
-
 
         //STEP 1: RENDER SCENE
         renderData->scene = scene;
@@ -156,7 +249,7 @@ void ForwardRenderer::renderNode(RenderData* renderData,QSharedPointer<SceneNode
 
         auto program = mat->program;
 
-        mat->begin(gl);
+        mat->begin(gl,scene);
 
         //send transform and light data
         program->setUniformValue("u_worldMatrix",node->globalTransform);
@@ -173,6 +266,26 @@ void ForwardRenderer::renderNode(RenderData* renderData,QSharedPointer<SceneNode
 
         //program->setUniformValue("u_textureScale",1.0f);
 
+        program->setUniformValue("u_shadowMap", 2);
+
+        gl->glActiveTexture(GL_TEXTURE2);
+        gl->glBindTexture(GL_TEXTURE_2D, shadowDepthMap);
+
+        QMatrix4x4 lightView, lightProjection;
+
+        for (auto light : scene->lights) {
+            if (light->lightType == iris::LightType::Directional && true) { // cast shadows
+                lightProjection.ortho(-128.0f, 128.0f, -64.0f, 64.0f, -64.0f, 128.0f);
+
+                lightView.lookAt(QVector3D(0, 0, 0),
+                                 light->getLightDir(),
+                                 QVector3D(0.0f, 1.0f, 0.0f));
+
+                QMatrix4x4 lightSpaceMatrix = lightProjection * lightView;
+                program->setUniformValue("u_lightSpaceMatrix", lightSpaceMatrix);
+            }
+        }
+
         auto lightCount = renderData->scene->lights.size();
         mat->program->setUniformValue("u_lightCount",lightCount);
 
@@ -188,12 +301,13 @@ void ForwardRenderer::renderNode(RenderData* renderData,QSharedPointer<SceneNode
                 continue;
             }
 
-
             mat->setUniformValue(lightPrefix+"type", (int)light->lightType);
             mat->setUniformValue(lightPrefix+"position", light->globalTransform.column(3).toVector3D());
             //mat->setUniformValue(lightPrefix+"direction", light->getDirection());
+            mat->setUniformValue(lightPrefix+"distance", light->distance);
             mat->setUniformValue(lightPrefix+"direction", light->getLightDir());
             mat->setUniformValue(lightPrefix+"cutOffAngle", light->spotCutOff);
+            mat->setUniformValue(lightPrefix+"cutOffSoftness", light->spotCutOffSoftness);
             mat->setUniformValue(lightPrefix+"intensity", light->intensity);
             mat->setUniformValue(lightPrefix+"color", light->color);
 
@@ -202,7 +316,8 @@ void ForwardRenderer::renderNode(RenderData* renderData,QSharedPointer<SceneNode
             mat->setUniformValue(lightPrefix+"quadtraticAtten", 1.0f);
         }
 
-        meshNode->mesh->draw(gl,program);
+        if(meshNode->mesh != nullptr)
+            meshNode->mesh->draw(gl, program);
 
         //mat->program->release();
     }
@@ -213,9 +328,12 @@ void ForwardRenderer::renderNode(RenderData* renderData,QSharedPointer<SceneNode
 
 void ForwardRenderer::renderSky(RenderData* renderData)
 {
+    if(scene->skyMesh != nullptr)
+        return;
+
     gl->glDepthMask(false);
 
-    scene->skyMaterial->begin(gl);
+    scene->skyMaterial->begin(gl,scene);
 
     auto program = scene->skyMaterial->program;
     program->setUniformValue("u_viewMatrix",renderData->viewMatrix);
@@ -225,7 +343,7 @@ void ForwardRenderer::renderSky(RenderData* renderData)
     program->setUniformValue("u_worldMatrix",worldMatrix);
 
     scene->skyMesh->draw(gl,program);
-    scene->skyMaterial->end(gl);
+    scene->skyMaterial->end(gl,scene);
 
     gl->glDepthMask(true);
 }
@@ -238,6 +356,8 @@ void ForwardRenderer::renderBillboardIcons(RenderData* renderData)
     auto program = billboard->program;
     program->bind();
 
+    gl->glEnable(GL_BLEND);
+    gl->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     for(int i=0;i<lightCount;i++)
     {
         auto light = renderData->scene->lights[i];
@@ -259,80 +379,80 @@ void ForwardRenderer::renderBillboardIcons(RenderData* renderData)
 
         billboard->draw(gl);
     }
+    gl->glDisable(GL_BLEND);
 
     gl->glEnable(GL_CULL_FACE);
 }
 
-//http://gamedev.stackexchange.com/questions/59361/opengl-get-the-outline-of-multiple-overlapping-objects
+// http://gamedev.stackexchange.com/questions/59361/opengl-get-the-outline-of-multiple-overlapping-objects
 void ForwardRenderer::renderSelectedNode(RenderData* renderData,QSharedPointer<SceneNode> node)
 {
-    //todo: move these
-#define OUTLINE_STENCIL_CHANNEL 1
-
-    if(node->getSceneNodeType()==iris::SceneNodeType::Mesh)
-    {
+    if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto meshNode = node.staticCast<iris::MeshNode>();
 
-        if(meshNode->mesh!=nullptr)
-        {
+        if (meshNode->mesh != nullptr) {
             lineShader->bind();
-            //lindShader->setUniformValue("",renderData)
-            lineShader->setUniformValue("u_worldMatrix",node->globalTransform);
-            lineShader->setUniformValue("u_viewMatrix",renderData->viewMatrix);
-            lineShader->setUniformValue("u_projMatrix",renderData->projMatrix);
-            lineShader->setUniformValue("u_normalMatrix",node->globalTransform.normalMatrix());
-            lineShader->setUniformValue("color",QColor(200,200,255,255));
+
+            lineShader->setUniformValue("u_worldMatrix",    node->globalTransform);
+            lineShader->setUniformValue("u_viewMatrix",     renderData->viewMatrix);
+            lineShader->setUniformValue("u_projMatrix",     renderData->projMatrix);
+            lineShader->setUniformValue("u_normalMatrix",   node->globalTransform.normalMatrix());
+            lineShader->setUniformValue("color",            scene->outlineColor);
 
 
-            //STEP 1: DRAW STENCIL OF THE FILLED POLYGON
-            gl->glClearStencil(0);//sets default stencil value to 0
-            gl->glClear(GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
-            //gl->glClear(GL_STENCIL_BUFFER_BIT);
-            gl->glPolygonMode(GL_FRONT,GL_FILL);//should be the default
+            // STEP 1: DRAW STENCIL OF THE FILLED POLYGON
+            // sets default stencil value to 0
+            gl->glClearStencil(0);
+            gl->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            // this should be the default
+            gl->glPolygonMode(GL_FRONT, GL_FILL);
 
             gl->glEnable(GL_STENCIL_TEST);
 
-            gl->glStencilMask(1);//works the same as the color and depth mask
-            gl->glStencilFunc(GL_ALWAYS,1,OUTLINE_STENCIL_CHANNEL);//test must always pass
-            gl->glStencilOp(GL_KEEP,GL_KEEP,GL_REPLACE);//GL_REPLACE for all becase a stencil value should always be written
-            gl->glColorMask(0,0,0,0);//disable drawing to color buffer
+            // works the same as the color and depth mask
+            gl->glStencilMask(1);
+            // test must always pass
+            gl->glStencilFunc(GL_ALWAYS, 1, OUTLINE_STENCIL_CHANNEL);
+            // GL_REPLACE for all becase a stencil value should always be written
+            gl->glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            // disable drawing to color buffer
+            gl->glColorMask(0, 0 ,0, 0);
 
             meshNode->mesh->draw(gl,lineShader);
 
-            //STEP 2: DRAW MESH IN LINE MODE WITH A LINE WIDTH > 1 SO THE OUTLINE PASSES THE STENCIL TEST
-            gl->glPolygonMode(GL_FRONT,GL_LINE);
-            //gl->glCullFace(GL_BACK);
-            //gl->glEnable(GL_CULL_FACE);
-            gl->glLineWidth(5);
+            // STEP 2: DRAW MESH IN LINE MODE WITH A LINE WIDTH > 1 SO THE OUTLINE PASSES THE STENCIL TEST
+            gl->glPolygonMode(GL_FRONT, GL_LINE);
+            gl->glLineWidth(scene->outlineWidth);
 
-            //the default stencil value is 0, if the stencil value at a pixel is 1 that means thats where the solid
-            //mesh was rendered. The line version should only be rendered where the stencil value is 0.
-            gl->glStencilFunc(GL_EQUAL,0,OUTLINE_STENCIL_CHANNEL);
-            gl->glStencilOp(GL_KEEP,GL_KEEP,GL_KEEP);
-            gl->glStencilMask(0);//disables writing to stencil buffer
-            gl->glColorMask(1,1,1,1);//enable drawing to color buffer
+            /* the default stencil value is 0, if the stencil value at a pixel is 1 that means
+             * thats where the solid mesh was rendered. The line version should only be rendered
+             * where the stencil value is 0.
+             */
+            gl->glStencilFunc(GL_EQUAL, 0, OUTLINE_STENCIL_CHANNEL);
+            gl->glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            // disables writing to stencil buffer
+            gl->glStencilMask(0);
+            // enable drawing to color buffer
+            gl->glColorMask(1, 1, 1, 1);
 
-            meshNode->mesh->draw(gl,lineShader);
+            meshNode->mesh->draw(gl, lineShader);
 
             gl->glDisable(GL_STENCIL_TEST);
 
             gl->glStencilMask(1);
             gl->glLineWidth(1);
-            gl->glPolygonMode(GL_FRONT,GL_FILL);
-
+            gl->glPolygonMode(GL_FRONT, GL_FILL);
         }
-
     }
-
 }
 
 void ForwardRenderer::createLineShader()
 {
     QOpenGLShader *vshader = new QOpenGLShader(QOpenGLShader::Vertex);
-    vshader->compileSourceFile("app/shaders/color.vert");
+    vshader->compileSourceFile(":assets/shaders/color.vert");
 
     QOpenGLShader *fshader = new QOpenGLShader(QOpenGLShader::Fragment);
-    fshader->compileSourceFile("app/shaders/color.frag");
+    fshader->compileSourceFile(":assets/shaders/color.frag");
 
 
     lineShader = new QOpenGLShaderProgram;
@@ -343,6 +463,23 @@ void ForwardRenderer::createLineShader()
 
     lineShader->bind();
     lineShader->setUniformValue("color",QColor(240,240,255,255));
+}
+
+void ForwardRenderer::createShadowShader()
+{
+    QOpenGLShader *vshader = new QOpenGLShader(QOpenGLShader::Vertex);
+    vshader->compileSourceFile(":assets/shaders/shadow_map.vert");
+
+    QOpenGLShader *fshader = new QOpenGLShader(QOpenGLShader::Fragment);
+    fshader->compileSourceFile(":assets/shaders/shadow_map.frag");
+
+    shadowShader = new QOpenGLShaderProgram;
+    shadowShader->addShader(vshader);
+    shadowShader->addShader(fshader);
+
+    shadowShader->link();
+
+    shadowShader->bind();
 }
 
 ForwardRenderer::~ForwardRenderer()

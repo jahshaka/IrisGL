@@ -1,9 +1,22 @@
+/**************************************************************************
+This file is part of IrisGL
+http://www.irisgl.org
+Copyright (c) 2016  GPLv3 Jahshaka LLC <coders@jahshaka.com>
+
+This is free software: you may copy, redistribute
+and/or modify it under the terms of the GPLv3 License
+
+For more information see the LICENSE file
+*************************************************************************/
+
 #ifndef FORWARDRENDERER_H
 #define FORWARDRENDERER_H
 
 #include <QOpenGLContext>
 #include <QSharedPointer>
 #include "../libovr/Include/OVR_CAPI_GL.h"
+
+#define OUTLINE_STENCIL_CHANNEL 1
 
 class QOpenGLShaderProgram;
 class QOpenGLFunctions_3_2_Core;
@@ -42,6 +55,7 @@ class ForwardRenderer
      */
     QSharedPointer<SceneNode> selectedSceneNode;
     QOpenGLShaderProgram* lineShader;
+    QOpenGLShaderProgram* shadowShader;
 
     VrDevice* vrDevice;
 
@@ -85,6 +99,13 @@ private:
 
 
     void createLineShader();
+
+    GLuint shadowFBO;
+    GLuint shadowDepthMap;
+
+    void createShadowShader();
+    void renderShadows(RenderData* renderData, QSharedPointer<SceneNode> node);
+    void generateShadowBuffer(GLuint size = 1024);
 
     //editor-specific
     iris::Billboard* billboard;

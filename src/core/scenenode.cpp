@@ -11,6 +11,9 @@ For more information see the LICENSE file
 
 #include "scenenode.h"
 #include "scene.h"
+#include "../animation/keyframeset.h"
+#include "../animation/animation.h"
+#include "../animation/keyframeanimation.h"
 
 namespace iris
 {
@@ -29,8 +32,13 @@ SceneNode::SceneNode():
     duplicable = false;
     removable = true;
 
+    pickable = true;
+
     localTransform.setToIdentity();
     globalTransform.setToIdentity();
+
+    //keyFrameSet = KeyFrameSet::create();
+    animation = iris::Animation::create();
 }
 
 SceneNodePtr SceneNode::create()
@@ -84,7 +92,10 @@ void SceneNode::addChild(SceneNodePtr node, bool keepTransform)
         auto data = diff.data();
 
         // extracts the scale from the transform
-        node->scale = QVector3D(data[0], data[5], data[10]);
+        //node->scale = QVector3D(data[0], data[5], data[10]);
+        node->scale.setX(diff.column(0).toVector3D().length());
+        node->scale.setY(diff.column(1).toVector3D().length());
+        node->scale.setZ(diff.column(2).toVector3D().length());
     }
 }
 
@@ -110,6 +121,40 @@ bool SceneNode::isRootNode()
         return true;
 
     return false;
+}
+
+void SceneNode::updateAnimation(float time)
+{
+    //@todo: cache transformation animations for faster lookup
+    auto keyFrameSet = animation->keyFrameSet;
+
+    if(keyFrameSet->hasKeyFrame("Translation X"))
+        pos.setX(keyFrameSet->getKeyFrame("Translation X")->getValueAt(time));
+    if(keyFrameSet->hasKeyFrame("Translation Y"))
+        pos.setY(keyFrameSet->getKeyFrame("Translation Y")->getValueAt(time));
+    if(keyFrameSet->hasKeyFrame("Translation Z"))
+        pos.setZ(keyFrameSet->getKeyFrame("Translation Z")->getValueAt(time));
+
+    auto rotEuler = rot.toEulerAngles();
+    if(keyFrameSet->hasKeyFrame("Rotation X"))
+        rotEuler.setX(keyFrameSet->getKeyFrame("Rotation X")->getValueAt(time));
+    if(keyFrameSet->hasKeyFrame("Rotation Y"))
+        rotEuler.setY(keyFrameSet->getKeyFrame("Rotation Y")->getValueAt(time));
+    if(keyFrameSet->hasKeyFrame("Rotation Z"))
+        rotEuler.setZ(keyFrameSet->getKeyFrame("Rotation Z")->getValueAt(time));
+    rot = QQuaternion::fromEulerAngles(rotEuler);
+
+    if(keyFrameSet->hasKeyFrame("Scale X"))
+        scale.setX(keyFrameSet->getKeyFrame("Scale X")->getValueAt(time));
+    if(keyFrameSet->hasKeyFrame("Scale Y"))
+        scale.setY(keyFrameSet->getKeyFrame("Scale Y")->getValueAt(time));
+    if(keyFrameSet->hasKeyFrame("Scale Z"))
+        scale.setZ(keyFrameSet->getKeyFrame("Scale Z")->getValueAt(time));
+
+    //update children
+    for (auto child : children) {
+        child->updateAnimation(time);
+    }
 }
 
 void SceneNode::update(float dt)
@@ -169,6 +214,17 @@ QMatrix4x4 SceneNode::getGlobalTransform()
     } else {
         return parent->getGlobalTransform() * localTransform;
     }
+}
+
+QMatrix4x4 SceneNode::getLocalTransform()
+{
+    localTransform.setToIdentity();
+
+    localTransform.translate(pos);
+    localTransform.rotate(rot);
+    localTransform.scale(scale);
+
+    return localTransform;
 }
 
 long SceneNode::nextId = 0;

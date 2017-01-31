@@ -1,3 +1,14 @@
+/**************************************************************************
+This file is part of IrisGL
+http://www.irisgl.org
+Copyright (c) 2016  GPLv3 Jahshaka LLC <coders@jahshaka.com>
+
+This is free software: you may copy, redistribute
+and/or modify it under the terms of the GPLv3 License
+
+For more information see the LICENSE file
+*************************************************************************/
+
 #ifndef IRISGLFWD_H
 #define IRISGLFWD_H
 
@@ -5,6 +16,7 @@
  */
 
 #include <QSharedPointer>
+//#include "animation/keyframeanimation.h"
 
 namespace iris
 {
@@ -30,7 +42,13 @@ class Billboard;
 class FullScreenQuad;
 class DefaultMaterial;
 class ForwardRenderer;
+class KeyFrameSet;
+class Animation;
+class FloatKeyFrame;
+template<typename T> class Key;
+typedef Key<float> FloatKey;
 
+typedef QSharedPointer<iris::Animation> AnimationPtr;
 typedef QSharedPointer<Shader> ShaderPtr;
 typedef QSharedPointer<Scene> ScenePtr;
 typedef QSharedPointer<SceneNode> SceneNodePtr;
@@ -43,6 +61,9 @@ typedef QSharedPointer<DefaultSkyMaterial> DefaultSkyMaterialPtr;
 typedef QSharedPointer<Texture2D> Texture2DPtr;
 typedef QSharedPointer<Texture> TexturePtr;
 typedef QSharedPointer<ForwardRenderer> ForwardRendererPtr;
+typedef QSharedPointer<KeyFrameSet> KeyFrameSetPtr;
+typedef QSharedPointer<FloatKeyFrame> FloatKeyFramePtr;
+
 
 
 }

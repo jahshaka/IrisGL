@@ -28,6 +28,9 @@ enum class SceneNodeType
     Camera
 };
 
+class Animation;
+typedef QSharedPointer<Animation> AnimationPtr;
+
 class SceneNode:public QEnableSharedFromThis<SceneNode>
 {
 public:
@@ -48,10 +51,14 @@ public:
     SceneNodePtr parent;
     QList<SceneNodePtr> children;
 
+    AnimationPtr animation;
+
     // editor specific
     bool duplicable;
     bool visible;
     bool removable;
+
+    bool pickable;
 
     friend class Renderer;
     friend class Scene;
@@ -87,6 +94,16 @@ public:
         return removable;
     }
 
+    void setPickable(bool canPick)
+    {
+        pickable = canPick;
+    }
+
+    bool isPickable()
+    {
+        return pickable;
+    }
+
     SceneNodeType getSceneNodeType();
     /**
      * @brief addChild
@@ -101,8 +118,10 @@ public:
 
     QVector3D getGlobalPosition();
     QMatrix4x4 getGlobalTransform();
+    QMatrix4x4 getLocalTransform();
 
     virtual void update(float dt);
+    virtual void updateAnimation(float time);
 
 private:
     void setParent(SceneNodePtr node);

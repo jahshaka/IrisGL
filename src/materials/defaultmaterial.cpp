@@ -13,6 +13,8 @@ For more information see the LICENSE file
 #include "../graphics/texture.h"
 #include "../graphics/texture2d.h"
 #include "../materials/defaultmaterial.h"
+#include "../core/scene.h"
+#include "../core/irisutils.h"
 #include <QFile>
 #include <QTextStream>
 
@@ -31,11 +33,10 @@ DefaultMaterial::DefaultMaterial()
     setTextureCount(4);
 
     QOpenGLShader *vshader = new QOpenGLShader(QOpenGLShader::Vertex);
-    vshader->compileSourceFile("app/shaders/simple.vert");
+    vshader->compileSourceFile(":assets/shaders/default_material.vert");
 
     QOpenGLShader *fshader = new QOpenGLShader(QOpenGLShader::Fragment);
-    fshader->compileSourceFile("app/shaders/simple.frag");
-
+    fshader->compileSourceFile(":assets/shaders/default_material.frag");
 
 
     program = new QOpenGLShaderProgram;
@@ -74,7 +75,7 @@ DefaultMaterial::DefaultMaterial()
 
 }
 
-void DefaultMaterial::begin(QOpenGLFunctions_3_2_Core* gl)
+void DefaultMaterial::begin(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene)
 {
     program->bind();
 
@@ -82,7 +83,12 @@ void DefaultMaterial::begin(QOpenGLFunctions_3_2_Core* gl)
 
     //set params
     program->setUniformValue("u_material.diffuse",QVector3D(diffuseColor.redF(),diffuseColor.greenF(),diffuseColor.blueF()));
-    program->setUniformValue("u_material.ambient",QVector3D(ambientColor.redF(),ambientColor.greenF(),ambientColor.blueF()));
+
+    const QColor& sceneAmbient = scene->ambientColor;
+    auto finalAmbient = QVector3D(ambientColor.redF() + sceneAmbient.redF(),
+                                  ambientColor.greenF() + sceneAmbient.greenF(),
+                                  ambientColor.blueF() + sceneAmbient.blueF());
+    program->setUniformValue("u_material.ambient",finalAmbient);
     program->setUniformValue("u_material.specular",QVector3D(specularColor.redF(),specularColor.greenF(),specularColor.blueF()));
     program->setUniformValue("u_material.shininess",shininess);
 
@@ -98,10 +104,10 @@ void DefaultMaterial::begin(QOpenGLFunctions_3_2_Core* gl)
 
 }
 
-void DefaultMaterial::end(QOpenGLFunctions_3_2_Core* gl)
+void DefaultMaterial::end(QOpenGLFunctions_3_2_Core* gl, ScenePtr scene)
 {
     //unset textures
-    Material::end(gl);
+    Material::end(gl, scene);
 }
 
 void DefaultMaterial::setDiffuseTexture(QSharedPointer<Texture2D> tex)

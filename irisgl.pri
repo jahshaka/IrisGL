@@ -25,7 +25,6 @@ HEADERS += \
     $$PWD/src/graphics/forwardrenderer.h \
     $$PWD/src/materials/defaultmaterial.h \
     $$PWD/src/graphics/vertexlayout.h \
-    $$PWD/src/iris.h \
     $$PWD/src/graphics/viewport.h \
     $$PWD/src/materials/billboardmaterial.h \
     $$PWD/src/graphics/graphicshelper.h \
@@ -38,7 +37,13 @@ HEADERS += \
     $$PWD/src/math/mathhelper.h \
     $$PWD/src/irisglfwd.h \
     $$PWD/src/graphics/shader.h \
-    $$PWD/src/irisgl.h
+    $$PWD/src/irisgl.h \
+    $$PWD/src/math/intersectionhelper.h \
+    $$PWD/src/animation/keyframeset.h \
+    $$PWD/src/math/bezierhelper.h \
+    $$PWD/src/animation/animation.h \
+    $$PWD/src/materials/materialhelper.h \
+    $$PWD/src/core/irisutils.h
 
 include(src/assimp/assimp.pri)
 include(src/libovr/libovr.pri)
@@ -61,4 +66,10 @@ SOURCES += \
     $$PWD/src/geometry/trimesh.cpp \
     $$PWD/src/graphics/vertexlayout.cpp \
     $$PWD/src/graphics/shader.cpp \
-    $$PWD/src/graphics/texture.cpp
+    $$PWD/src/graphics/texture.cpp \
+    $$PWD/src/animation/animation.cpp \
+    $$PWD/src/animation/keyframeset.cpp \
+    $$PWD/src/materials/materialhelper.cpp
+
+RESOURCES += \
+    $$PWD/assets.qrc

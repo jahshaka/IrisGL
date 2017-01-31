@@ -15,7 +15,14 @@ SOURCES += \
     $$PWD/Src/OVR_StereoProjection.cpp \
     $$PWD/Src/OVR_CAPIShim.c
 
-unix:LIBS += -ldl
+!win32 {
+    LIBS += -ldl
+}
+
+gcc{
+    QMAKE_CFLAGS_WARN_ON += -Wattributes
+    QMAKE_CXXFLAGS_WARN_ON = $$QMAKE_CFLAGS_WARN_ON
+}
 
 INCLUDEPATH += $$PWD/Include
 CONFIG += c++14

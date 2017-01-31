@@ -14,18 +14,20 @@ For more information see the LICENSE file
 #include <qopengl.h>
 #include <QOpenGLShader>
 #include <QOpenGLBuffer>
+#include "../core/irisutils.h"
 
 namespace iris
 {
 
-Billboard::Billboard(QOpenGLFunctions_3_2_Core* gl)
+Billboard::Billboard(QOpenGLFunctions_3_2_Core* gl,float size)
 {
+    gl->glGenVertexArrays(1,&vao);
     //todo: write shaders in script
     QOpenGLShader *vshader = new QOpenGLShader(QOpenGLShader::Vertex);
-    vshader->compileSourceFile("app/shaders/billboard.vert");
+    vshader->compileSourceFile(":assets/shaders/billboard.vert");
 
     QOpenGLShader *fshader = new QOpenGLShader(QOpenGLShader::Fragment);
-    fshader->compileSourceFile("app/shaders/billboard.frag");
+    fshader->compileSourceFile(":assets/shaders/billboard.frag");
 
     program = new QOpenGLShaderProgram;
     program->addShader(vshader);
@@ -40,23 +42,23 @@ Billboard::Billboard(QOpenGLFunctions_3_2_Core* gl)
     QVector<float> data;
 
     //TRIANGLE 1
-    data.append(-1);data.append(-1);data.append(0);
+    data.append(-size);data.append(-size);data.append(0);
     data.append(0);data.append(0);
 
-    data.append(1);data.append(-1);data.append(0);
+    data.append(size);data.append(-size);data.append(0);
     data.append(1);data.append(0);
 
-    data.append(-1);data.append(1);data.append(0);
+    data.append(-size);data.append(size);data.append(0);
     data.append(0);data.append(1);
 
     //TRIANGLE 2
-    data.append(-1);data.append(1);data.append(0);
+    data.append(-size);data.append(size);data.append(0);
     data.append(0);data.append(1);
 
-    data.append(1);data.append(-1);data.append(0);
+    data.append(size);data.append(-size);data.append(0);
     data.append(1);data.append(0);
 
-    data.append(1);data.append(1);data.append(0);
+    data.append(size);data.append(size);data.append(0);
     data.append(1);data.append(1);
 
     vbo = new QOpenGLBuffer(QOpenGLBuffer::VertexBuffer);
@@ -68,6 +70,7 @@ Billboard::Billboard(QOpenGLFunctions_3_2_Core* gl)
 
 void Billboard::draw(QOpenGLFunctions_3_2_Core* gl)
 {
+    gl->glBindVertexArray(vao);
     vbo->bind();
 
     auto stride = (3+2) * sizeof(GLfloat);
@@ -78,7 +81,9 @@ void Billboard::draw(QOpenGLFunctions_3_2_Core* gl)
     program->enableAttributeArray(1);
     program->setAttributeBuffer(1, GL_FLOAT, 3 * sizeof(GLfloat), 2, stride);
 
-    gl->glDrawArrays(GL_TRIANGLES,0,6);\
+    gl->glDrawArrays(GL_TRIANGLES,0,6);
+
+    gl->glBindVertexArray(0);
 
 }
 

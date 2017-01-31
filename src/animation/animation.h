@@ -9,31 +9,30 @@ and/or modify it under the terms of the GPLv3 License
 For more information see the LICENSE file
 *************************************************************************/
 
-#ifndef BILLBOARD_H
-#define BILLBOARD_H
+#ifndef ANIMATION_H
+#define ANIMATION_H
 
-#include <qopengl.h>
-
-class QOpenGLFunctions_3_2_Core;
-class QOpenGLBuffer;
-class QOpenGLShaderProgram;
+#include "../irisglfwd.h"
 
 namespace iris
 {
 
-class Billboard
+class Animation
 {
-    friend class ForwardRenderer;
-
-    GLuint vao;
-    QOpenGLBuffer* vbo;
-    QOpenGLShaderProgram* program;
-
 public:
-    Billboard(QOpenGLFunctions_3_2_Core* gl,float size=0.5f);
-    void draw(QOpenGLFunctions_3_2_Core* gl);
+    QString name;
+    bool loop;
+    float length;
+
+    KeyFrameSetPtr keyFrameSet;
+
+    Animation();
+
+    static AnimationPtr create()
+    {
+        return AnimationPtr(new Animation());
+    }
 };
 
 }
-
-#endif // BILLBOARD_H
+#endif // ANIMATION_H

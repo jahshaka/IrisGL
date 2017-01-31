@@ -29,15 +29,15 @@ enum class LightType:int
 class LightNode:public SceneNode
 {
 
-    QVector3D lightDir;
 public:
+    QVector3D lightDir;
 
     LightType lightType;
 
     /**
      * light's radius. This is only used for pointlights.
      */
-    float radius;
+    float distance;
     QColor color;
     float intensity;
 
@@ -46,6 +46,13 @@ public:
      * This parameter is only used if the light is a spotlight
      */
     float spotCutOff;
+
+    /**
+     * Spotlight's softness
+     * This is added to the spotlight's outer radius to give more
+     * smooth cutoff edges
+     */
+    float spotCutOffSoftness;
 
     //editor-specific
     QSharedPointer<Texture2D> icon;
@@ -68,11 +75,12 @@ public:
 
     QVector3D getLightDir()
     {
-        QVector4D defaultDir(0,-1,0,0);
+        QVector4D defaultDir(-1,-1,-1,0);
 
         QVector4D dir = (globalTransform * defaultDir);
 
         return dir.toVector3D();
+//        return lightDir;
 
     }
 
@@ -83,10 +91,11 @@ private:
 
         lightType = LightType::Point;
 
-        radius = 5;
+        distance = 10;
         color = QColor(255,255,255);
-        intensity = 0.2f;
+        intensity = 1.0f;
         spotCutOff = 30.0f;
+        spotCutOffSoftness = 1.0f;
 
         iconSize = 0.5f;
     }

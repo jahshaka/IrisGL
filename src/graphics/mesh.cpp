@@ -32,6 +32,11 @@ namespace iris
 
 Mesh::Mesh(aiMesh* mesh,VertexLayout* vertexLayout)
 {
+    auto gl = new QOpenGLFunctions_3_2_Core();
+    gl->initializeOpenGLFunctions();
+
+    gl->glGenVertexArrays(1,&vao);
+
     triMesh = new TriMesh();
 
     this->vertexLayout = vertexLayout;
@@ -45,17 +50,16 @@ Mesh::Mesh(aiMesh* mesh,VertexLayout* vertexLayout)
 
     //slow, but good enough for now
     QVector<float> data;
-    for(int f =0;f<mesh->mNumFaces;f++)
-    {
+    for (unsigned f = 0; f < mesh->mNumFaces; f++) {
         auto face = mesh->mFaces[f];
 
         //assumes mesh is made completely of triangles
         auto a = mesh->mVertices[face.mIndices[0]];
         auto b = mesh->mVertices[face.mIndices[1]];
         auto c = mesh->mVertices[face.mIndices[2]];
-        triMesh->addTriangle(QVector3D(a.x,a.y,a.z),
-                             QVector3D(b.x,b.y,b.z),
-                             QVector3D(c.x,c.y,c.z));
+        triMesh->addTriangle(QVector3D(a.x, a.y, a.z),
+                             QVector3D(b.x, b.y, b.z),
+                             QVector3D(c.x, c.y, c.z));
 
         for(int v=0;v<3;v++)
         {
@@ -134,6 +138,11 @@ Mesh::Mesh(aiMesh* mesh,VertexLayout* vertexLayout)
 //todo: extract trimesh from data
 Mesh::Mesh(void* data,int dataSize,int numElements,VertexLayout* vertexLayout)
 {
+    auto gl = new QOpenGLFunctions_3_2_Core();
+    gl->initializeOpenGLFunctions();
+
+    gl->glGenVertexArrays(1,&vao);
+
     triMesh = nullptr;
     this->vertexLayout = vertexLayout;
 
@@ -152,25 +161,30 @@ void Mesh::draw(QOpenGLFunctions_3_2_Core* gl,Material* mat)
 
 void Mesh::draw(QOpenGLFunctions_3_2_Core* gl,QOpenGLShaderProgram* program)
 {
+    gl->glBindVertexArray(vao);
     vbo->bind();
 
     vertexLayout->bind(program);
     gl->glDrawArrays(GL_TRIANGLES,0,numVerts);//todo: bad to assume triangles, allow other primitive types
     vertexLayout->unbind(program);
+
+    gl->glBindVertexArray(0);
 }
 
 void Mesh::draw(QOpenGLFunctions_3_2_Core* gl,QOpenGLShaderProgram* program,GLenum primitiveMode)
 {
+    gl->glBindVertexArray(vao);
     vbo->bind();
 
     vertexLayout->bind(program);
     gl->glDrawArrays(primitiveMode,0,numVerts);
     vertexLayout->unbind(program);
+
+    gl->glBindVertexArray(0);
 }
 
 Mesh* Mesh::loadMesh(QString filePath)
 {
-    //QApplicaton
     Assimp::Importer importer;
     const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(),aiProcessPreset_TargetRealtime_Fast);
 

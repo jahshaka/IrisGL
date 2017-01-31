@@ -1,6 +1,6 @@
 /**************************************************************************
-This file is part of IrisGL
-http://www.irisgl.org
+This file is part of JahshakaVR, VR Authoring Toolkit
+http://www.jahshaka.com
 Copyright (c) 2016  GPLv3 Jahshaka LLC <coders@jahshaka.com>
 
 This is free software: you may copy, redistribute
@@ -9,10 +9,15 @@ and/or modify it under the terms of the GPLv3 License
 For more information see the LICENSE file
 *************************************************************************/
 
-#ifndef IRISGL_H
-#define IRISGL_H
+#version 150 core
 
-#include "irisglfwd.h"
+in vec3 a_pos;
+in vec2 a_texCoord;
 
+out vec2 v_texCoord;
 
-#endif // IRISGL_H
+void main()
+{
+        v_texCoord = a_texCoord*vec2(1,-1);
+        gl_Position = vec4(a_pos,1);
+}

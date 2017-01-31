@@ -10,14 +10,15 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "defaultskymaterial.h"
-
+#include "../core/irisutils.h"
 
 namespace iris
 {
 
 DefaultSkyMaterial::DefaultSkyMaterial()
 {
-    createProgramFromShaderSource("app/shaders/defaultsky.vert","app/shaders/defaultsky.frag");
+    createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
+                                  ":assets/shaders/defaultsky.frag");
     setTextureCount(1);
 
     color = QColor(255,255,255,255);
@@ -53,9 +54,9 @@ QColor DefaultSkyMaterial::getSkyColor()
     return color;
 }
 
-void DefaultSkyMaterial::begin(QOpenGLFunctions_3_2_Core* gl)
+void DefaultSkyMaterial::begin(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene)
 {
-    Material::begin(gl);
+    Material::begin(gl,scene);
     this->setUniformValue("color",color);
     if(!!texture)
         this->setUniformValue("useTexture",true);
@@ -64,9 +65,9 @@ void DefaultSkyMaterial::begin(QOpenGLFunctions_3_2_Core* gl)
 
 }
 
-void DefaultSkyMaterial::end(QOpenGLFunctions_3_2_Core* gl)
+void DefaultSkyMaterial::end(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene)
 {
-    Material::end(gl);
+    Material::end(gl,scene);
 }
 
 DefaultSkyMaterialPtr DefaultSkyMaterial::create()
