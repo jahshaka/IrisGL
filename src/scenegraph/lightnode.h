@@ -14,10 +14,13 @@ For more information see the LICENSE file
 
 #include "QColor"
 #include "../irisglfwd.h"
-#include "../core/scenenode.h"
+#include "../scenegraph/scenenode.h"
+#include "../graphics/shadowmap.h"
 
 namespace iris
 {
+
+class ShadowMap;
 
 enum class LightType:int
 {
@@ -33,6 +36,8 @@ public:
     QVector3D lightDir;
 
     LightType lightType;
+
+    ShadowMap* shadowMap;
 
     /**
      * light's radius. This is only used for pointlights.
@@ -75,32 +80,48 @@ public:
 
     QVector3D getLightDir()
     {
-        QVector4D defaultDir(-1,-1,-1,0);
+        // this is the default rotation for directional and spotlights - pointing down
+        QVector4D defaultDir(0, -1, 0, 0);
 
         QVector4D dir = (globalTransform * defaultDir);
 
         return dir.toVector3D();
-//        return lightDir;
-
     }
+
+    virtual QList<Property*> getProperties() override;
+    virtual QVariant getPropertyValue(QString valueName) override;
+
+    void updateAnimation(float time) override;
+
+	ShadowMap* getShadowMap()
+	{
+		return shadowMap;
+	}
+
+	void setShadowMapType(ShadowMapType shadowType)
+	{
+		shadowMap->shadowType = shadowType;
+	}
+
+	ShadowMapType getShadowMapType()
+	{
+		return shadowMap->shadowType;
+	}
+
+	void setShadowMapResolution(int size)
+	{
+		shadowMap->setResolution(size);
+	}
+
+	int getShadowMapResolution()
+	{
+		return shadowMap->resolution;
+	}
+
+	SceneNodePtr createDuplicate() override;
 
 private:
-    LightNode()
-    {
-        this->sceneNodeType = SceneNodeType::Light;
-
-        lightType = LightType::Point;
-
-        distance = 10;
-        color = QColor(255,255,255);
-        intensity = 1.0f;
-        spotCutOff = 30.0f;
-        spotCutOffSoftness = 1.0f;
-
-        iconSize = 0.5f;
-    }
-
-
+    LightNode();
 };
 
 

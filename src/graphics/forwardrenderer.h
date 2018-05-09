@@ -14,7 +14,11 @@ For more information see the LICENSE file
 
 #include <QOpenGLContext>
 #include <QSharedPointer>
-#include "../libovr/Include/OVR_CAPI_GL.h"
+//#include "../libovr/Include/OVR_CAPI_GL.h"
+#include "../irisglfwd.h"
+
+#include "particle.h"
+#include "particlerender.h"
 
 #define OUTLINE_STENCIL_CHANNEL 1
 
@@ -34,6 +38,9 @@ class BillboardMaterial;
 class Billboard;
 class FullScreenQuad;
 class VrDevice;
+class PostProcessManager;
+class PostProcessContext;
+class PerformanceTimer;
 
 /**
  * This is a basic forward renderer.
@@ -42,6 +49,8 @@ class VrDevice;
 class ForwardRenderer
 {
     QOpenGLFunctions_3_2_Core* gl;
+    GraphicsDevicePtr graphics;
+
     RenderData* renderData;
 
     /**
@@ -55,11 +64,29 @@ class ForwardRenderer
      */
     QSharedPointer<SceneNode> selectedSceneNode;
     QOpenGLShaderProgram* lineShader;
+    QOpenGLShaderProgram* skinnedLineShader;
     QOpenGLShaderProgram* shadowShader;
+    QOpenGLShaderProgram* skinnedShadowShader;
+    QOpenGLShaderProgram* particleShader;
+    QOpenGLShaderProgram* emitterShader;
+
+    PostProcessManagerPtr postMan;
+    PostProcessContext* postContext;
 
     VrDevice* vrDevice;
 
+    RenderTargetPtr renderTarget;
+    Texture2DPtr sceneRenderTexture;
+    Texture2DPtr depthRenderTexture;
+    Texture2DPtr finalRenderTexture;
+
+    PerformanceTimer* perfTimer;
+
 public:
+
+    bool renderLightBillboards;
+
+    GraphicsDevicePtr getGraphicsDevice();
 
     /**
      * Sets selected scene node. If this node is a mesh, it is rendered in wireframe mode
@@ -77,40 +104,45 @@ public:
     }
 
     //all scenenodes' transform should be updated before calling this functions
-    void renderScene(QOpenGLContext* ctx, Viewport* vp, QMatrix4x4& vM, QMatrix4x4& pM);
-    void renderSceneVr(QOpenGLContext* ctx, Viewport* vp);
+    void renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePtr cam, bool clearRenderLists = false, bool applyPostProcesses = true);
+    void renderScene(float delta, Viewport* vp);
+    void renderSceneVr(float delta, Viewport* vp, bool useViewer = true);
 
-    QOpenGLFunctions_3_2_Core* GLA;
+    PostProcessManagerPtr getPostProcessManager();
 
-    static QSharedPointer<ForwardRenderer> create(QOpenGLFunctions_3_2_Core* gl);
+    static ForwardRendererPtr create(bool useVr = true);
 
     bool isVrSupported();
-
 
     ~ForwardRenderer();
 
 private:
-    ForwardRenderer(QOpenGLFunctions_3_2_Core* gl);
+    ForwardRenderer(bool supportsVr = true);
 
-    void renderNode(RenderData* renderData,QSharedPointer<SceneNode> node);
+    void renderNode(RenderData* renderData, ScenePtr node);
     void renderSky(RenderData* renderData);
     void renderBillboardIcons(RenderData* renderData);
-    void renderSelectedNode(RenderData* renderData,QSharedPointer<SceneNode> node);
+    void renderSelectedNode(RenderData* renderData, SceneNodePtr node);
 
+    void renderOutlineNode(RenderData* renderData, SceneNodePtr node);
+    void renderOutlineLine(RenderData* renderData, SceneNodePtr node);
 
     void createLineShader();
+    void createParticleShader();
+    void createEmitterShader();
 
     GLuint shadowFBO;
     GLuint shadowDepthMap;
 
     void createShadowShader();
-    void renderShadows(RenderData* renderData, QSharedPointer<SceneNode> node);
+    void renderShadows(ScenePtr node);
+    void renderDirectionalShadow(LightNodePtr lightNode,ScenePtr node);
+    void renderSpotlightShadow(LightNodePtr lightNode,ScenePtr node);
     void generateShadowBuffer(GLuint size = 1024);
 
     //editor-specific
     iris::Billboard* billboard;
     FullScreenQuad* fsQuad;
-
 };
 
 }

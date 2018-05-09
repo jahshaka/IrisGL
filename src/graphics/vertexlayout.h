@@ -13,8 +13,10 @@ For more information see the LICENSE file
 #define VERTEXLAYOUT_H
 
 #include <QList>
-#include <QOpenGLShaderProgram>
 #include "../irisglfwd.h"
+#include "mesh.h"
+
+class QOpenGLFunctions_3_2_Core;
 
 namespace iris
 {
@@ -22,9 +24,7 @@ namespace iris
 //todo: use VAO
 struct VertexAttribute
 {
-    //determined by shader
-    int loc;
-    QString name;
+    VertexAttribUsage usage;
 
     int type;//GL_FLOAT,GL_INT, etc
     int count;//2 for vec2, 3 for vec3, etc
@@ -35,18 +35,19 @@ class VertexLayout
 {
     QList<VertexAttribute> attribs;
     int stride;
+    QOpenGLFunctions_3_2_Core* gl;
 
 public:
     VertexLayout();
 
-    void addAttrib(QString name,int type,int count,int sizeInBytes);
+	QList<VertexAttribute> getAttribs();
+    void addAttrib(VertexAttribUsage usage, int type, int count, int sizeInBytes);
+
+    int getStride();
 
     //todo: make this more efficient
-    void bind(QOpenGLShaderProgram* program);
-    void unbind(QOpenGLShaderProgram* program);
-
-    void bind(ShaderPtr shader);
-    void unbind(ShaderPtr shader);
+    void bind(QOpenGLFunctions_3_2_Core* gl);
+    void unbind(QOpenGLFunctions_3_2_Core* gl);
 
     //default vertex layout for meshes
     static VertexLayout* createMeshDefault();

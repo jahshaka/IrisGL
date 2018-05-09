@@ -15,8 +15,9 @@ For more information see the LICENSE file
 #include <QOpenGLTexture>
 
 #include <QOpenGLContext>
-#include "../libovr/Include/OVR_CAPI_GL.h"
+//#include "../libovr/Include/OVR_CAPI_GL.h"
 #include "../libovr/Include/Extras/OVR_Math.h"
+#include "../core/logger.h"
 
 using namespace OVR;
 
@@ -31,11 +32,75 @@ struct VrFrameData
     double sensorSampleTime;
 };
 
-VrDevice::VrDevice(QOpenGLFunctions_3_2_Core* gl)
+VrTouchController::VrTouchController(int index)
 {
-    this->gl = gl;
+    this->index = index;
+	this->isBeingTracked = false;
+}
+
+bool VrTouchController::isButtonDown(VrTouchInput btn)
+{
+    return isButtonDown(inputState, btn);
+}
+
+bool VrTouchController::isButtonDown(const ovrInputState& state, VrTouchInput btn)
+{
+    return (state.Buttons & (int)btn) != 0;
+}
+
+void VrTouchController::setTrackingState(bool state)
+{
+    isBeingTracked = state;
+}
+
+bool VrTouchController::isButtonUp(VrTouchInput btn)
+{
+    return !isButtonDown(btn);
+}
+
+bool VrTouchController::isButtonPressed(VrTouchInput btn)
+{
+    return !isButtonDown(prevInputState, btn) && isButtonDown(inputState, btn);
+}
+
+bool VrTouchController::isButtonReleased(VrTouchInput btn)
+{
+    return isButtonDown(prevInputState, btn) && !isButtonDown(inputState, btn);
+}
+
+QVector2D VrTouchController::GetThumbstick()
+{
+    auto value = inputState.Thumbstick[index];
+    return QVector2D(value.x, value.y);
+}
+
+bool VrTouchController::isTracking()
+{
+    return isBeingTracked;
+}
+
+float VrTouchController::getIndexTrigger()
+{
+    return inputState.IndexTrigger[index];
+}
+
+float VrTouchController::getHandTrigger()
+{
+    return inputState.HandTrigger[index];
+}
+
+VrDevice::VrDevice()
+{
+    this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
     vrSupported = false;
     frameData = new VrFrameData();
+
+    touchControllers[0] = new VrTouchController(0);
+    touchControllers[1] = new VrTouchController(1);
+
+    mirrorTexture = nullptr;
+
+    initialized = false;
 }
 
 bool VrDevice::isVrSupported()
@@ -45,19 +110,25 @@ bool VrDevice::isVrSupported()
 
 void VrDevice::initialize()
 {
-    ovrResult result = ovr_Initialize(nullptr);
-    if (!OVR_SUCCESS(result)) {
-        qDebug()<<"Failed to initialize libOVR.";
-        return;
-    }
+    // Oculus only gives one session per application it seems
+    // so this part must only be done once
+    // The graphics resources however must be recreated for each new opengl context
+    if (!initialized){
+        ovrResult result = ovr_Initialize(nullptr);
+        if (!OVR_SUCCESS(result)) {
+            Logger::getSingleton()->warn("Failed to initialize libOVR.");
+            return;
+        }
 
-    result = ovr_Create(&session, &luid);
-    if (!OVR_SUCCESS(result)) {
-        qDebug() << "Could not create libOVR session!";
-        return;
-    }
+        result = ovr_Create(&session, &luid);
+        if (!OVR_SUCCESS(result)) {
+            Logger::getSingleton()->warn("Could not create libOVR session!");
+            return;
+        }
 
-    hmdDesc = ovr_GetHmdDesc(session);
+        hmdDesc = ovr_GetHmdDesc(session);
+        initialized = true;
+    }
 
     // intialize framebuffers necessary for rendering to the hmd
     for (int eye = 0; eye < 2; ++eye) {
@@ -75,7 +146,7 @@ void VrDevice::initialize()
 
     createMirrorFbo(800, 600);
 
-    setTrackingOrigin(VrTrackingOrigin::FloorLevel);
+    setTrackingOrigin(VrTrackingOrigin::EyeLevel);
 
     vrSupported = true;
 }
@@ -115,8 +186,6 @@ ovrTextureSwapChain VrDevice::createTextureChain(ovrSession session,
                                                  int width,
                                                  int height)
 {
-    //ovrTextureSwapChain swapChain;
-
     ovrTextureSwapChainDesc desc = {};
     desc.Type = ovrTexture_2D;
     desc.ArraySize = 1;
@@ -129,12 +198,16 @@ ovrTextureSwapChain VrDevice::createTextureChain(ovrSession session,
 
     ovrResult result = ovr_CreateTextureSwapChainGL(session, &desc, &swapChain);
     if (!OVR_SUCCESS(result)) {
-        //qDebug()<<"could not create swap chain!";
+        Logger::getSingleton()->warn("could not create swap chain!");
         return nullptr;
     }
 
     int length = 0;
-    ovr_GetTextureSwapChainLength(session, swapChain, &length);
+    result = ovr_GetTextureSwapChainLength(session, swapChain, &length);
+    if (!OVR_SUCCESS(result)) {
+        Logger::getSingleton()->warn("could not get swapchain length!");
+        return nullptr;
+    }
 
     for (int i = 0; i < length; ++i) {
         GLuint chainTexId;
@@ -152,7 +225,9 @@ ovrTextureSwapChain VrDevice::createTextureChain(ovrSession session,
 
 GLuint VrDevice::createMirrorFbo(int width,int height)
 {
-    ovrMirrorTexture mirrorTexture = nullptr;
+    // delete current mirror texture
+    if (mirrorTexture != nullptr)
+        ovr_DestroyMirrorTexture(session, mirrorTexture);
 
     ovrMirrorTextureDesc desc;
     memset(&desc, 0, sizeof(desc));
@@ -165,7 +240,7 @@ GLuint VrDevice::createMirrorFbo(int width,int height)
     ovrResult result = ovr_CreateMirrorTextureGL(session, &desc, &mirrorTexture);
     if (!OVR_SUCCESS(result))
     {
-        qDebug()<< "Failed to create mirror texture.";
+        Logger::getSingleton()->warn("Failed to create mirror texture.");
         return 0;
     }
 
@@ -192,6 +267,31 @@ void VrDevice::beginFrame()
     frameData->hmdToEyeOffset[1] = frameData->eyeRenderDesc[1].HmdToEyeOffset;
 
     ovr_GetEyePoses(session, frameIndex, ovrTrue, frameData->hmdToEyeOffset, frameData->eyeRenderPose, &frameData->sensorSampleTime);
+
+    double timing = ovr_GetPredictedDisplayTime(session, 0);
+    hmdState = ovr_GetTrackingState(session, timing, ovrTrue);
+
+    for (int i=0; i<2; i++) {
+
+        touchControllers[i]->prevInputState = touchControllers[i]->inputState;
+        if( !OVR_SUCCESS(ovr_GetInputState(session,
+                                           i == 0? ovrControllerType_LTouch : ovrControllerType_RTouch,
+                                           &touchControllers[i]->inputState))) {
+            Logger::getSingleton()->warn(QString("Unable to get input state of controller %1").arg(i));
+        }
+    }
+
+    auto contTypes = ovr_GetConnectedControllerTypes(session);
+
+    if(contTypes & ovrControllerType_LTouch)
+        touchControllers[0]->isBeingTracked = true;
+    else
+        touchControllers[0]->isBeingTracked = false;
+
+    if(contTypes & ovrControllerType_RTouch)
+        touchControllers[1]->isBeingTracked = true;
+    else
+        touchControllers[1]->isBeingTracked = false;
 }
 
 void VrDevice::endFrame()
@@ -214,10 +314,49 @@ void VrDevice::endFrame()
 
     if (!OVR_SUCCESS(result))
     {
-        qDebug()<<"error submitting frame"<<endl;
+        Logger::getSingleton()->warn(QString("Error submitting frame to hmd!"));
     }
 
     frameIndex++;
+}
+
+QVector3D VrDevice::getHandPosition(int handIndex)
+{
+    auto handPos = hmdState.HandPoses[handIndex].ThePose.Position;
+    return QVector3D(handPos.x, handPos.y, handPos.z);
+}
+
+QQuaternion VrDevice::getHandRotation(int handIndex)
+{
+    auto handRot = hmdState.HandPoses[handIndex].ThePose.Orientation;
+    return QQuaternion(handRot.w, handRot.x, handRot.y, handRot.z);
+}
+
+VrTouchController* VrDevice::getTouchController(int index)
+{
+    return touchControllers[index];
+}
+
+QQuaternion VrDevice::getHeadRotation()
+{
+    auto rot = hmdState.HeadPose.ThePose.Orientation;
+    return QQuaternion(rot.w, rot.x, rot.y, rot.z);
+}
+
+QVector3D VrDevice::getHeadPos()
+{
+    auto pos = hmdState.HeadPose.ThePose.Position;
+    return QVector3D(pos.x, pos.y, pos.z);
+}
+
+void VrDevice::bindEyeTexture(int eye)
+{
+	GLuint curTexId;
+	int curIndex;
+
+	ovr_GetTextureSwapChainCurrentIndex(session, vr_textureChain[eye], &curIndex);
+	ovr_GetTextureSwapChainBufferGL(session, vr_textureChain[eye], curIndex, &curTexId);
+	gl->glBindTexture(GL_TEXTURE_2D, curTexId);
 }
 
 void VrDevice::beginEye(int eye)
@@ -242,7 +381,7 @@ void VrDevice::beginEye(int eye)
 
     gl->glViewport(0, 0, eyeWidth, eyeHeight);
     gl->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    gl->glEnable(GL_FRAMEBUFFER_SRGB);
+    //gl->glEnable(GL_FRAMEBUFFER_SRGB);
 }
 
 void VrDevice::endEye(int eye)
@@ -253,23 +392,33 @@ void VrDevice::endEye(int eye)
     ovr_CommitTextureSwapChain(session, vr_textureChain[eye]);
 }
 
-QMatrix4x4 VrDevice::getEyeViewMatrix(int eye,QVector3D pivot)
+bool VrDevice::isHeadMounted()
 {
-    Vector3f origin = Vector3f(pivot.x(),pivot.y(),pivot.z());
+    ovrSessionStatus sessionStatus;
 
-    Matrix4f rollPitchYaw = Matrix4f::RotationY(0);
-    Matrix4f finalRollPitchYaw = rollPitchYaw * Matrix4f(frameData->eyeRenderPose[eye].Orientation);
-    Vector3f finalUp = finalRollPitchYaw.Transform(Vector3f(0, 1, 0));
-    Vector3f finalForward = finalRollPitchYaw.Transform(Vector3f(0, 0, -1));
-    Vector3f shiftedEyePos = origin + rollPitchYaw.Transform(frameData->eyeRenderPose[eye].Position);
+    ovr_GetSessionStatus(session, &sessionStatus);
+    return sessionStatus.HmdMounted;
+}
 
-    Vector3f forward = shiftedEyePos + finalForward;
+QMatrix4x4 VrDevice::getEyeViewMatrix(int eye, QVector3D pivot, QMatrix4x4 transform)
+{
+    auto r = frameData->eyeRenderPose[eye].Orientation;
+    auto finalYawPitchRoll = QMatrix4x4(QQuaternion(r.w, r.x, r.y, r.z).toRotationMatrix());
+    auto finalUp = finalYawPitchRoll * QVector3D(0, 1, 0);
+    auto finalForward = finalYawPitchRoll * QVector3D(0, 0, -1);
+
+    auto fd = frameData->eyeRenderPose[eye].Position;
+    auto framePos = QVector3D(fd.x, fd.y, fd.z);
+    auto shiftedEyePos = framePos;
+    //qDebug() << shiftedEyePos;
+    //auto forward = shiftedEyePos + finalForward;
+    auto forward = shiftedEyePos + finalForward;
 
     QMatrix4x4 view;
     view.setToIdentity();
-    view.lookAt(QVector3D(shiftedEyePos.x,shiftedEyePos.y,shiftedEyePos.z),
-                QVector3D(forward.x,forward.y,forward.z),
-                QVector3D(finalUp.x,finalUp.y,finalUp.z));
+    view.lookAt(transform * shiftedEyePos,
+                transform * forward,
+                QQuaternion::fromRotationMatrix(transform.normalMatrix()) * finalUp);
 
     return view;
 
@@ -278,13 +427,12 @@ QMatrix4x4 VrDevice::getEyeViewMatrix(int eye,QVector3D pivot)
 QMatrix4x4 VrDevice::getEyeProjMatrix(int eye,float nearClip,float farClip)
 {
     QMatrix4x4 proj;
-    proj.setToIdentity();//not needed
+    proj.setToIdentity();
     Matrix4f eyeProj = ovrMatrix4f_Projection(hmdDesc.DefaultEyeFov[eye],
                                               nearClip,
                                               farClip,
                                               ovrProjection_None);
 
-    //todo: put in
     for (int r = 0; r < 4; r++) {
         for (int c = 0;c < 4; c++) {
             proj(r, c) = eyeProj.M[r][c];

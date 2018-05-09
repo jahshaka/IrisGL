@@ -32,7 +32,7 @@ namespace iris
  * if a skyTexture is specified then the final output color is the
  * texture multiplied by the color. Else, only the color is used.
  */
-class DefaultSkyMaterial:public Material
+class DefaultSkyMaterial : public Material
 {
 public:
 
@@ -43,8 +43,10 @@ public:
     void setSkyColor(QColor color);
     QColor getSkyColor();
 
-    void begin(QOpenGLFunctions_3_2_Core* gl, ScenePtr scene) override;
-    void end(QOpenGLFunctions_3_2_Core* gl, ScenePtr scene) override;
+    void begin(GraphicsDevicePtr device, ScenePtr scene) override;
+    void end(GraphicsDevicePtr device, ScenePtr scene) override;
+    void beginCube(GraphicsDevicePtr device, ScenePtr scene) override;
+    void endCube(GraphicsDevicePtr device, ScenePtr scene) override;
 
     static DefaultSkyMaterialPtr create();
 private:

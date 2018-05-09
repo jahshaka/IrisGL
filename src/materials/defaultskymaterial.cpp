@@ -11,6 +11,7 @@ For more information see the LICENSE file
 
 #include "defaultskymaterial.h"
 #include "../core/irisutils.h"
+#include "../graphics/renderitem.h"
 
 namespace iris
 {
@@ -22,21 +23,21 @@ DefaultSkyMaterial::DefaultSkyMaterial()
     setTextureCount(1);
 
     color = QColor(255,255,255,255);
+
+    this->setRenderLayer((int)RenderLayer::Background);
 }
 
 void DefaultSkyMaterial::setSkyTexture(Texture2DPtr tex)
 {
     texture = tex;
-    if(!!tex)
-        this->addTexture("texture",tex);
-    else
-        this->removeTexture("texture");
+    if (!!tex)  this->addTexture("skybox", tex);
+    else        this->removeTexture("skybox");
 }
 
 void DefaultSkyMaterial::clearSkyTexture()
 {
     texture.clear();
-    removeTexture("texture");
+    removeTexture("skybox");
 }
 
 Texture2DPtr DefaultSkyMaterial::getSkyTexture()
@@ -54,20 +55,34 @@ QColor DefaultSkyMaterial::getSkyColor()
     return color;
 }
 
-void DefaultSkyMaterial::begin(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene)
+void DefaultSkyMaterial::begin(GraphicsDevicePtr device,ScenePtr scene)
 {
-    Material::begin(gl,scene);
-    this->setUniformValue("color",color);
-    if(!!texture)
-        this->setUniformValue("useTexture",true);
-    else
-        this->setUniformValue("useTexture",false);
-
+//    Material::begin(gl,scene);
+//    this->setUniformValue("skybox", texture);
+//    if(!!texture)
+//        this->setUniformValue("useTexture", true);
+//    else
+//        this->setUniformValue("useTexture",false);
+    beginCube(device, scene);
 }
 
-void DefaultSkyMaterial::end(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene)
+void DefaultSkyMaterial::beginCube(GraphicsDevicePtr device,ScenePtr scene)
 {
-    Material::end(gl,scene);
+    Material::beginCube(device,scene);
+    this->setUniformValue("color", color);
+    if (!!texture)  this->setUniformValue("useTexture", true);
+    else            this->setUniformValue("useTexture", false);
+}
+
+void DefaultSkyMaterial::end(GraphicsDevicePtr device,ScenePtr scene)
+{
+    Material::end(device, scene);
+}
+
+// not needed
+void DefaultSkyMaterial::endCube(GraphicsDevicePtr device,ScenePtr scene)
+{
+    Material::endCube(device, scene);
 }
 
 DefaultSkyMaterialPtr DefaultSkyMaterial::create()

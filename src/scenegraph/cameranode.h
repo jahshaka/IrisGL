@@ -14,7 +14,7 @@ For more information see the LICENSE file
 
 #include <QMatrix4x4>
 #include "../irisglfwd.h"
-#include "../core/scenenode.h"
+#include "../scenegraph/scenenode.h"
 
 namespace iris
 {
@@ -29,8 +29,20 @@ public:
     float nearClip;
     float farClip;
 
+    float vrViewScale;
+
     QMatrix4x4 viewMatrix;
     QMatrix4x4 projMatrix;
+
+    float getVrViewScale()
+    {
+        return vrViewScale;
+    }
+
+    void setVrViewScale(float viewScale)
+    {
+        vrViewScale = viewScale;
+    }
 
     void setAspectRatio(float aspect)
     {
@@ -48,19 +60,22 @@ public:
         this->fov = fov;
     }
 
+    void lookAt(QVector3D target);
+
     //update view and proj matrices
     void updateCameraMatrices()
     {
         viewMatrix.setToIdentity();
 
         QVector3D pos = globalTransform.column(3).toVector3D();
-        QVector3D dir = (globalTransform*QVector4D(0,0,-1,1)).toVector3D();
-        QVector3D up = (globalTransform*QVector4D(0,1,0,0)).toVector3D();
-        viewMatrix.lookAt(pos,dir,up);
-        //viewMatrix.lookAt(pos,QVector3D(0,0,0),QVector3D(0,1,0));
+        QVector3D dir = (globalTransform * QVector4D(0,0,-1,1)).toVector3D();
+        QVector3D up = (globalTransform * QVector4D(0,1,0,0)).toVector3D();
+        viewMatrix.lookAt(pos, dir, up);
 
         projMatrix.setToIdentity();
-        projMatrix.perspective(angle,aspectRatio,nearClip,farClip);
+        projMatrix.perspective(angle, aspectRatio, nearClip, farClip);
+
+        vrViewScale = 5.0f;
     }
 
     void update(float dt) override
@@ -82,7 +97,9 @@ public:
      * @param pos point in screen space
      * @return
      */
-    QVector3D calculatePickingDirection(int viewPortWidth, int viewPortHeight,QPointF pos);
+    QVector3D calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos);
+
+	SceneNodePtr createDuplicate() override;
 
 private:
     CameraNode()
@@ -91,6 +108,8 @@ private:
         nearClip = 0.1f;
         farClip = 1000.0f;
         aspectRatio = 1.0f;//assumes a square viewport by default
+
+        exportable = false;
 
         updateCameraMatrices();
     }

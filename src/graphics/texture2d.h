@@ -18,6 +18,8 @@ For more information see the LICENSE file
 #include <QImage>
 #include "../irisglfwd.h"
 
+class QOpenGLFunctions_3_2_Core;
+
 namespace iris
 {
 
@@ -49,7 +51,7 @@ public:
      * @param path
      * @return
      */
-    static Texture2DPtr load(QString path,bool flipY);
+    static Texture2DPtr load(QString path, bool flipY);
 
     /**
      * Created texture from QImage
@@ -58,21 +60,38 @@ public:
      */
     static Texture2DPtr create(QImage image);
 
+    static Texture2DPtr create(int width, int height,QOpenGLTexture::TextureFormat texFormat = QOpenGLTexture::RGBAFormat);
+    static Texture2DPtr createDepth(int width, int height);
+    static Texture2DPtr createShadowDepth(int width, int height);
+//    {
+//        return create(width, height, QOpenGLTexture::DepthFormat);
+//    }
+
     /**
      * Returns the path to the source file of the texture
      * @return
      */
-    QString getSource()
-    {
+    QString getSource() {
         return source;
     }
 
+    static Texture2DPtr createCubeMap(QString, QString, QString, QString, QString, QString, QImage *i = nullptr);
+    void resize(int width, int height);
+
+    QPixmap readData();
+
+    int getWidth();
+    int getHeight();
+
+    void setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter);
+    void setWrapMode(QOpenGLTexture::WrapMode wrapS, QOpenGLTexture::WrapMode wrapT);
+
 private:
-    Texture2D(QOpenGLTexture* tex)
-    {
-        this->texture = tex;
-    }
+    Texture2D(QOpenGLTexture* tex);
+
+    QOpenGLFunctions_3_2_Core* gl;
 };
+
 
 }
 

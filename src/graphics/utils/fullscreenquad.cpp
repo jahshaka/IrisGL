@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #include <QVector>
 #include "../mesh.h"
 #include "../graphicshelper.h"
+#include "../graphicsdevice.h"
 #include "../vertexlayout.h"
 #include "../../core/irisutils.h"
 #include <QOpenGLFunctions_3_2_Core>
@@ -45,14 +46,18 @@ FullScreenQuad::FullScreenQuad()
     data.append(1);data.append(1);
 
     auto layout = new VertexLayout();
-    layout->addAttrib("a_pos",GL_FLOAT,3,sizeof(GLfloat)*3);
-    layout->addAttrib("a_texCoord",GL_FLOAT,2,sizeof(GLfloat)*2);
+    layout->addAttrib(VertexAttribUsage::Position, GL_FLOAT, 3, sizeof(GLfloat) * 3);
+    layout->addAttrib(VertexAttribUsage::TexCoord0, GL_FLOAT, 2, sizeof(GLfloat) * 2);
 
     mesh = new iris::Mesh(data.data(),data.size()*sizeof(float),6,layout);
+
+    matrix.setToIdentity();
 
     //todo: inline shader in code
     shader = GraphicsHelper::loadShader(":assets/shaders/fullscreen.vert",
                                         ":assets/shaders/fullscreen.frag");
+
+    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
 }
 
 FullScreenQuad::~FullScreenQuad()
@@ -60,10 +65,18 @@ FullScreenQuad::~FullScreenQuad()
     delete mesh;
 }
 
-void FullScreenQuad::draw(QOpenGLFunctions_3_2_Core* gl)
+void FullScreenQuad::draw(GraphicsDevicePtr device, bool flipY)
+{
+    gl->glUseProgram(shader->programId());
+    gl->glUniform1i(gl->glGetUniformLocation(shader->programId(), "flipY"), flipY);
+    shader->setUniformValue("matrix", matrix);
+    mesh->draw(device);
+}
+
+void FullScreenQuad::draw(GraphicsDevicePtr device, QOpenGLShaderProgram* shader)
 {
     shader->bind();
-    mesh->draw(gl,shader);
+    mesh->draw(device);
 }
 
 }

@@ -13,7 +13,9 @@ For more information see the LICENSE file
 #define MATERIAL_H
 
 #include "../irisglfwd.h"
+//#include "renderitem.h"
 #include <QOpenGLShaderProgram>
+#include "renderstates.h"
 
 class QOpenGLShaderProgram;
 class QOpenGLTexture;
@@ -21,31 +23,45 @@ class QOpenGLFunctions_3_2_Core;
 
 namespace iris
 {
-
-struct MaterialTexture
+struct RenderLayer
 {
+	enum Value {
+		Background = 1000,
+		Opaque = 2000,
+		AlphaTested = 3000,
+		Transparent = 4000,
+		Overlay = 5000,
+		Gizmo = 6000
+	};
+};
+
+struct MaterialTexture {
     Texture2DPtr texture;
     QString name;
 };
 
 class Material
 {
+	friend class ForwardRenderer;
 public:
-    QOpenGLShaderProgram* program;
+    int renderLayer;
+    //QOpenGLShaderProgram* program;
+	ShaderPtr shader;
     QMap<QString, Texture2DPtr> textures;
 
     bool acceptsLighting;
     int numTextures;
+    RenderStates renderStates;
 
-    Material()
-    {
+    Material() {
         acceptsLighting = true;
         numTextures = 0;
     }
 
-    virtual ~Material()
-    {
+    virtual ~Material() {}
 
+    void setRenderLayer(int layer) {
+        this->renderLayer = layer;
     }
 
     /**
@@ -54,13 +70,15 @@ public:
      * bind textures and set states.
      * @param gl
      */
-    virtual void begin(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene);
+    virtual void begin(GraphicsDevicePtr device, ScenePtr scene);
+    virtual void beginCube(GraphicsDevicePtr device, ScenePtr scene);
 
     /**
      * Called after endering a pritimitive.
      * This is used to cleanup after rendering
      */
-    virtual void end(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene);
+    virtual void end(GraphicsDevicePtr device, ScenePtr scene);
+    virtual void endCube(GraphicsDevicePtr device, ScenePtr scene);
 
     /**
      * Adds texture to the material by name
@@ -80,21 +98,25 @@ public:
      * binds all material's textures
      * @param gl
      */
-    void bindTextures(QOpenGLFunctions_3_2_Core* gl);
+    void bindTextures(GraphicsDevicePtr device);
+    void bindCubeTextures(GraphicsDevicePtr device);
 
     /**
      * unbinds all material textures
      * @param gl
      */
-    void unbindTextures(QOpenGLFunctions_3_2_Core* gl);
+    void unbindTextures(GraphicsDevicePtr device);
 
-    void createProgramFromShaderSource(QString vsFile,QString fsFile);
+    void createProgramFromShaderSource(QString vsFile, QString fsFile);
 
     template<typename T>
-    void setUniformValue(QString name,T value)
-    {
-        program->setUniformValue(name.toStdString().c_str(), value);
+    void setUniformValue(QString name,T value) {
+        getProgram()->setUniformValue(name.toStdString().c_str(), value);
     }
+
+	virtual MaterialPtr duplicate() {
+		return MaterialPtr(new Material());
+	}
 
 protected:
     /**
@@ -105,6 +127,8 @@ protected:
      * @param count
      */
     void setTextureCount(int count);
+
+	QOpenGLShaderProgram* getProgram();
 };
 
 }

@@ -14,17 +14,38 @@ For more information see the LICENSE file
 
 #include <QString>
 #include <QList>
+#include "../irisglfwd.h"
+#include "../graphics/mesh.h"
+
+class aiScene;
 
 class QOpenGLShaderProgram;
 
+class AssimpObject {
+public:
+	AssimpObject() = default;
+    AssimpObject(const aiScene *ai, QString g) : scene(ai), GUID(g) {}
+    const aiScene *getSceneData() { return scene; }
+    QString getGUID() { return GUID; }
+    ~AssimpObject() {}
+
+private:
+    const aiScene *scene;
+    QString GUID;
+};
+
+Q_DECLARE_METATYPE(AssimpObject)
+Q_DECLARE_METATYPE(AssimpObject*)
 
 namespace iris
 {
-class Mesh;
+
 class GraphicsHelper
 {
 public:
-    static QOpenGLShaderProgram* loadShader(QString vsPath,QString fsPath);
+    static QOpenGLShaderProgram* loadShader(QString vsPath, QString fsPath);
+
+    static QString loadAndProcessShader(QString shaderPath);
 
     /**
      * Loads all meshes from mesh file
@@ -33,7 +54,34 @@ public:
      * @param filePath
      * @return
      */
-    static QList<Mesh*> loadAllMeshesFromFile(QString filePath);
+    static QList<MeshPtr> loadAllMeshesFromFile(QString filePath);
+
+    static void loadAllMeshesAndAnimationsFromFile(QString filePath,
+                                                   QList<MeshPtr> &meshes,
+                                                   QMap<QString, SkeletalAnimationPtr> &animations);
+
+    template <typename F>
+    static void loadAllMeshesAndAnimationsFromStore(const QVector<F> &store,
+                                                    QString filePath,
+                                                    QList<MeshPtr> &meshes,
+                                                    QMap<QString, SkeletalAnimationPtr> &animations)
+     {
+         for (F ao : store) {
+             if (ao->path == filePath) {
+                const aiScene* scene = qvariant_cast<AssimpObject*>(ao->getValue())->getSceneData();
+
+                if (scene != nullptr) {
+                    meshes = loadAllMeshesFromAssimpScene(scene);
+                    animations = Mesh::extractAnimations(scene, filePath);
+                }
+
+                break;
+             }
+         }
+     }
+
+
+    static QList<MeshPtr> loadAllMeshesFromAssimpScene(const aiScene* scene);
 };
 
 }

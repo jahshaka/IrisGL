@@ -12,8 +12,9 @@ For more information see the LICENSE file
 #include "../graphics/material.h"
 #include "../graphics/texture.h"
 #include "../graphics/texture2d.h"
+#include "../graphics/graphicsdevice.h"
 #include "../materials/defaultmaterial.h"
-#include "../core/scene.h"
+#include "../scenegraph/scene.h"
 #include "../core/irisutils.h"
 #include <QFile>
 #include <QTextStream>
@@ -32,30 +33,15 @@ DefaultMaterial::DefaultMaterial()
 {
     setTextureCount(4);
 
-    QOpenGLShader *vshader = new QOpenGLShader(QOpenGLShader::Vertex);
-    vshader->compileSourceFile(":assets/shaders/default_material.vert");
+    this->createProgramFromShaderSource(":assets/shaders/default_material.vert",
+                                        ":assets/shaders/default_material.frag");
 
-    QOpenGLShader *fshader = new QOpenGLShader(QOpenGLShader::Fragment);
-    fshader->compileSourceFile(":assets/shaders/default_material.frag");
-
-
-    program = new QOpenGLShaderProgram;
-    program->addShader(vshader);
-    program->addShader(fshader);
-
-    program->bindAttributeLocation("a_pos", 0);
-    program->bindAttributeLocation("a_texCoord", 1);
-    program->bindAttributeLocation("a_normal", 2);
-    program->bindAttributeLocation("a_tangent", 3);
-
-    program->link();
-
-    program->bind();
-    program->setUniformValue("u_useDiffuseTex",false);
-    program->setUniformValue("u_useNormalTex",false);
-    program->setUniformValue("u_useReflectionTex",false);
-    program->setUniformValue("u_useSpecularTex",false);
-    program->setUniformValue("u_material.diffuse",QVector3D(1,0,0));
+    //program->bind();
+    //program->setUniformValue("u_useDiffuseTex",false);
+    //program->setUniformValue("u_useNormalTex",false);
+    //program->setUniformValue("u_useReflectionTex",false);
+    //program->setUniformValue("u_useSpecularTex",false);
+    //program->setUniformValue("u_material.diffuse",QVector3D(1,0,0));
 
     textureScale = 1.0f;
     ambientColor = QColor(0,0,0);
@@ -73,41 +59,42 @@ DefaultMaterial::DefaultMaterial()
     reflectionInfluence = 0.0f;
     useReflectionTex = false;
 
+    this->setRenderLayer((int)RenderLayer::Opaque);
 }
 
-void DefaultMaterial::begin(QOpenGLFunctions_3_2_Core* gl,ScenePtr scene)
+void DefaultMaterial::begin(GraphicsDevicePtr device,ScenePtr scene)
 {
-    program->bind();
+	device->setShader(shader);
 
-    bindTextures(gl);
+    bindTextures(device);
 
     //set params
-    program->setUniformValue("u_material.diffuse",QVector3D(diffuseColor.redF(),diffuseColor.greenF(),diffuseColor.blueF()));
+    device->setShaderUniform("u_material.diffuse",QVector3D(diffuseColor.redF(),diffuseColor.greenF(),diffuseColor.blueF()));
 
     const QColor& sceneAmbient = scene->ambientColor;
     auto finalAmbient = QVector3D(ambientColor.redF() + sceneAmbient.redF(),
                                   ambientColor.greenF() + sceneAmbient.greenF(),
                                   ambientColor.blueF() + sceneAmbient.blueF());
-    program->setUniformValue("u_material.ambient",finalAmbient);
-    program->setUniformValue("u_material.specular",QVector3D(specularColor.redF(),specularColor.greenF(),specularColor.blueF()));
-    program->setUniformValue("u_material.shininess",shininess);
+	device->setShaderUniform("u_material.ambient",finalAmbient);
+	device->setShaderUniform("u_material.specular",QVector3D(specularColor.redF(),specularColor.greenF(),specularColor.blueF()));
+	device->setShaderUniform("u_material.shininess",shininess);
 
-    program->setUniformValue("u_textureScale", this->textureScale);
+	device->setShaderUniform("u_textureScale", this->textureScale);
 
-    program->setUniformValue("u_normalIntensity",normalIntensity);
-    program->setUniformValue("u_reflectionInfluence",reflectionInfluence);
+	device->setShaderUniform("u_normalIntensity",normalIntensity);
+	device->setShaderUniform("u_reflectionInfluence",reflectionInfluence);
 
-    program->setUniformValue("u_useDiffuseTex",useDiffuseTex);
-    program->setUniformValue("u_useNormalTex",useNormalTex);
-    program->setUniformValue("u_useSpecularTex",useSpecularTex);
-    program->setUniformValue("u_useReflectionTex",useReflectionTex);
+	device->setShaderUniform("u_useDiffuseTex",useDiffuseTex);
+	device->setShaderUniform("u_useNormalTex",useNormalTex);
+	device->setShaderUniform("u_useSpecularTex",useSpecularTex);
+	device->setShaderUniform("u_useReflectionTex",useReflectionTex);
 
 }
 
-void DefaultMaterial::end(QOpenGLFunctions_3_2_Core* gl, ScenePtr scene)
+void DefaultMaterial::end(GraphicsDevicePtr device, ScenePtr scene)
 {
     //unset textures
-    Material::end(gl, scene);
+    Material::end(device, scene);
 }
 
 void DefaultMaterial::setDiffuseTexture(QSharedPointer<Texture2D> tex)
