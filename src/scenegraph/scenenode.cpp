@@ -10,20 +10,23 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "scenenode.h"
-#include "scene.h"
-#include "../graphics/mesh.h"
-#include "../graphics/skeleton.h"
-#include "../scenegraph/meshnode.h"
-#include "../animation/keyframeset.h"
-#include "../animation/animation.h"
-#include "../animation/propertyanim.h"
-#include "../animation/animableproperty.h"
-#include "../animation/keyframeanimation.h"
-#include "../animation/skeletalanimation.h"
-#include "../core/property.h"
-#include "../math/mathhelper.h"
 
 #include <functional>
+
+#include "animation/animation.h"
+#include "animation/animableproperty.h"
+#include "animation/keyframeanimation.h"
+#include "animation/keyframeset.h"
+#include "animation/propertyanim.h"
+#include "animation/skeletalanimation.h"
+#include "core/property.h"
+#include "graphics/mesh.h"
+#include "graphics/skeleton.h"
+#include "math/mathhelper.h"
+#include "scene.h"
+#include "scenegraph/meshnode.h"
+
+#include <QUuid>
 
 namespace iris
 {
@@ -43,6 +46,7 @@ SceneNode::SceneNode():
     removable = true;
 	exportable = true;
     isBuiltIn = false;
+	isPhysicsBody = false;
 
     pickable = true;
     castShadow = true;
@@ -247,7 +251,7 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 
         auto pos = diff.column(3).toVector3D();
         node->pos = pos;
-        node->rot = QQuaternion::fromRotationMatrix(diff.normalMatrix());
+        node->rot = QQuaternion::fromRotationMatrix(diff.normalMatrix()).normalized();
 
         auto data = diff.data();
 
@@ -496,6 +500,49 @@ QMatrix4x4 SceneNode::getLocalTransform()
     return localTransform;
 }
 
+void SceneNode::setGlobalPos(QVector3D pos)
+{
+	if (!parent) {
+		this->pos = pos;
+		return;
+	}
+
+	auto globInv = this->parent->getGlobalTransform().inverted();
+
+	auto res = globInv * pos;
+
+	this->pos = res;
+	this->setTransformDirty();
+}
+
+void SceneNode::setGlobalRot(QQuaternion rot)
+{
+	if (!parent) {
+		this->rot = rot;
+		return;
+	}
+
+	auto globInv = this->parent->getGlobalRotation().inverted();
+	auto res = globInv * rot;
+
+	this->rot = res;
+	this->setTransformDirty();
+}
+
+void SceneNode::setGlobalTransform(QMatrix4x4 transform)
+{
+	if (!parent) {
+		this->setLocalTransform(transform);
+		return;
+	}
+
+	auto globInv = this->parent->getGlobalTransform().inverted();
+	auto res = globInv * transform;
+	this->setLocalTransform(res);
+
+	this->setTransformDirty();
+}
+
 
 SceneNodePtr SceneNode::duplicate()
 {
@@ -514,6 +561,11 @@ SceneNodePtr SceneNode::duplicate()
 	node->pickable		= this->pickable;
 	node->castShadow	= this->castShadow;
 	node->attached		= this->attached;
+
+    auto id = QUuid::createUuid();
+    auto guid = id.toString().remove(0, 1);
+    guid.chop(1);
+    node->setGUID(guid);
 
     for (auto &child : this->children) {
         if (child->isDuplicable()) {
