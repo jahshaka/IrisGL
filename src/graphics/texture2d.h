@@ -59,6 +59,7 @@ public:
      * @return
      */
     static Texture2DPtr create(QImage image);
+    static Texture2DPtr createFromId(uint textureId);
 
     static Texture2DPtr create(int width, int height,QOpenGLTexture::TextureFormat texFormat = QOpenGLTexture::RGBAFormat);
     static Texture2DPtr createDepth(int width, int height);
@@ -86,12 +87,15 @@ public:
     void setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter);
     void setWrapMode(QOpenGLTexture::WrapMode wrapS, QOpenGLTexture::WrapMode wrapT);
 
+    void bind() override;
+    void bind(int index) override;
+
 private:
     Texture2D(QOpenGLTexture* tex);
+    Texture2D(GLuint texId);
 
     QOpenGLFunctions_3_2_Core* gl;
 };
-
 
 }
 

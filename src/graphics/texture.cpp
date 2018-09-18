@@ -17,6 +17,7 @@ namespace iris
 
 GLuint Texture::getTextureId()
 {
+    if (useCustomId) return customId;
     return texture->textureId();
 }
 

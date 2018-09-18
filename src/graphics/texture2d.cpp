@@ -17,6 +17,13 @@ For more information see the LICENSE file
 namespace iris
 {
 
+Texture2D::Texture2D(GLuint texId)
+{
+    useCustomId = true;
+    customId = texId;
+    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+}
+
 Texture2DPtr Texture2D::load(QString path)
 {
     return load(path,true);
@@ -49,6 +56,12 @@ Texture2DPtr Texture2D::create(QImage image)
 	texture->setMaximumAnisotropy(4); // i think 4 is a good default
 
     return QSharedPointer<Texture2D>(new Texture2D(texture));
+}
+
+Texture2DPtr Texture2D::createFromId(uint textureId)
+{
+    auto tex = new Texture2D(textureId);
+    return Texture2DPtr(tex);
 }
 
 Texture2DPtr Texture2D::createCubeMap(QString negZ, QString posZ,
@@ -220,6 +233,22 @@ void Texture2D::setWrapMode(QOpenGLTexture::WrapMode wrapS, QOpenGLTexture::Wrap
     texture->setWrapMode(QOpenGLTexture::DirectionS, wrapS);
     texture->setWrapMode(QOpenGLTexture::DirectionT, wrapT);
     texture->release();
+}
+
+void Texture2D::bind()
+{
+    if (useCustomId) gl->glBindTexture(GL_TEXTURE_2D, customId);
+    else texture->bind();
+}
+
+void Texture2D::bind(int index)
+{
+    if (useCustomId) {
+        gl->glActiveTexture(GL_TEXTURE0 + index);
+        gl->glBindTexture(GL_TEXTURE_2D, customId);
+    }
+    else
+        texture->bind(index);
 }
 
 }

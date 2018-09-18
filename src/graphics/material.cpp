@@ -79,7 +79,7 @@ void Material::bindTextures(GraphicsDevicePtr device)
         gl->glActiveTexture(GL_TEXTURE0+count);
 
         if (!!tex) {
-            tex->texture->bind();
+            tex->bind();
             shader->program->setUniformValue(it.key().toStdString().c_str(), count);
         } else {
 			device->clearTexture(count);

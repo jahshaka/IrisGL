@@ -22,13 +22,17 @@ namespace iris
 
 class Texture
 {
+protected:
+    GLuint customId;
+    bool useCustomId = false;
+
 public:
     QOpenGLTexture* texture;
     QString source;
 
     GLuint getTextureId();
-    void bind();
-    void bind(int index);
+    virtual void bind();
+    virtual void bind(int index);
 };
 
 }
