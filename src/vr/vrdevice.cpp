@@ -394,6 +394,7 @@ void VrDevice::endEye(int eye)
 
 bool VrDevice::isHeadMounted()
 {
+    if (session == nullptr) return false;
     ovrSessionStatus sessionStatus;
 
     ovr_GetSessionStatus(session, &sessionStatus);
