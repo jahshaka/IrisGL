@@ -71,7 +71,10 @@ public:
 
     bool isTracking();
 
-    float getIndexTrigger();
+	float getIndexTrigger();
+	bool isIndexTriggerPressed();
+	bool isIndexTriggerReleased();
+
     float getHandTrigger();
 private:
     bool isButtonDown(const ovrInputState& state, VrTouchInput btn);
