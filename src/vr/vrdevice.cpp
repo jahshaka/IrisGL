@@ -84,6 +84,16 @@ float VrTouchController::getIndexTrigger()
     return inputState.IndexTrigger[index];
 }
 
+bool VrTouchController::isIndexTriggerPressed()
+{
+	return prevInputState.IndexTrigger[index] < 0.1f && inputState.IndexTrigger[index] > 0.1f;
+}
+
+bool VrTouchController::isIndexTriggerReleased()
+{
+	return prevInputState.IndexTrigger[index] > 0.1f && inputState.IndexTrigger[index] < 0.1f;
+}
+
 float VrTouchController::getHandTrigger()
 {
     return inputState.HandTrigger[index];
