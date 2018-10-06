@@ -132,12 +132,16 @@ public:
 
     void rayCast(const QVector3D& segStart,
                  const QVector3D& segEnd,
-                 QList<PickingResult>& hitList);
+                 QList<PickingResult>& hitList,
+			     uint64_t pickingMask = 0,
+				 bool allowUnpickable = false);
 
     void rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
                  const QVector3D& segStart,
                  const QVector3D& segEnd,
-                 QList<iris::PickingResult>& hitList);
+                 QList<iris::PickingResult>& hitList,
+				 uint64_t pickingMask = 0,
+				 bool allowUnpickable = false);
 
     /**
      * Adds node to scene. If node is a LightNode then it is added to a list of lights.

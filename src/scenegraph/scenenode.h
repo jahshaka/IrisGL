@@ -76,6 +76,7 @@ public:
     PhysicsProperty physicsProperty;
 
     bool pickable;
+	uint64_t pickingGroups;
     bool castShadow;
 
 	mutable QString guid;

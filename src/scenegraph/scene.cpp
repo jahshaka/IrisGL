@@ -162,19 +162,24 @@ void Scene::render()
 
 void Scene::rayCast(const QVector3D& segStart,
                     const QVector3D& segEnd,
-                    QList<PickingResult>& hitList)
+                    QList<PickingResult>& hitList,
+					uint64_t pickingMask,
+					bool allowUnpickable)
 {
-    rayCast(rootNode, segStart, segEnd, hitList);
+    rayCast(rootNode, segStart, segEnd, hitList, pickingMask, allowUnpickable);
 }
 
 void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
                     const QVector3D& segStart,
                     const QVector3D& segEnd,
-                    QList<iris::PickingResult>& hitList)
+                    QList<iris::PickingResult>& hitList,
+					uint64_t pickingMask,
+					bool allowUnpickable)
 {
-    if ((sceneNode->getSceneNodeType() == iris::SceneNodeType::Mesh) &&
-         sceneNode->isPickable())
-    {
+	if ((sceneNode->getSceneNodeType() == iris::SceneNodeType::Mesh) &&
+		(sceneNode->isPickable() || allowUnpickable) &&
+		(sceneNode->pickingGroups & pickingMask) == pickingMask)// check flag
+	{
         auto meshNode = sceneNode.staticCast<iris::MeshNode>();
         auto mesh = meshNode->getMesh();
         if(mesh != nullptr)
@@ -212,7 +217,7 @@ void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
     }
 
     for (auto child : sceneNode->children) {
-        rayCast(child, segStart, segEnd, hitList);
+        rayCast(child, segStart, segEnd, hitList, pickingMask, allowUnpickable);
     }
 }
 

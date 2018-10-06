@@ -49,6 +49,7 @@ SceneNode::SceneNode():
 	isPhysicsBody = false;
 
     pickable = true;
+	pickingGroups = 0;
     castShadow = true;
 
     localTransform.setToIdentity();
