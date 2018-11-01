@@ -43,6 +43,7 @@ else()
 endif()
 
 add_subdirectory(src/bullet3)
+# add_subdirectory(src/zip)
 
 set(SRCS
     src/graphics/mesh.cpp
@@ -109,10 +110,10 @@ set(SRCS
     src/libovr/Src/OVR_CAPI_Util.cpp
     src/libovr/Src/OVR_StereoProjection.cpp
     src/libovr/Src/OVR_CAPIShim.c
-    src/zip/zip.c
     src/physics/environment.cpp
     src/physics/physicshelper.cpp
-	src/scenegraph/grabnode.cpp
+    src/scenegraph/grabnode.cpp
+    src/zip/src/zip.c
 )
 
 set (HEADERS
@@ -212,12 +213,12 @@ set (HEADERS
     src/libovr/Include/Extras/OVR_Math.h
     src/libovr/Include/Extras/OVR_StereoProjection.h
     src/libovr/Src/OVR_CAPI_Prototypes.h
-    src/zip/miniz.h
-    src/zip/zip.h
     src/physics/environment.h
     src/physics/physicshelper.h
     src/physics/physicsproperties.h
-	src/scenegraph/grabnode.h
+    src/scenegraph/grabnode.h
+    src/zip/src/zip.h
+    src/zip/src/miniz.h
 )
 
 qt5_wrap_cpp(HEADERS_moc ${HEADERS})
@@ -237,6 +238,7 @@ add_library(IrisGL SHARED ${SRCS} ${HEADERS_moc} ${QRCS})
 # Note the DIRs that are included, assimp generates a config that we need to find in the build dir. L2
 target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/"
+    "${PROJECT_SOURCE_DIR}/src/zip/src"
     "${PROJECT_BINARY_DIR}/src/assimp/include/"
     "${PROJECT_SOURCE_DIR}/src/assimp/include/"
     "${PROJECT_SOURCE_DIR}/src/libovr/Include"

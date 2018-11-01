@@ -4,3 +4,6 @@
 [submodule "src/bullet3"]
 	path = src/bullet3
 	url = https://github.com/bulletphysics/bullet3.git
+[submodule "src/zip"]
+	path = src/zip
+	url = https://github.com/kuba--/zip.git
