@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #define CAMERANODE_H
 
 #include <QMatrix4x4>
+#include <QtCore/QtMath>
 #include "../irisglfwd.h"
 #include "../scenegraph/scenenode.h"
 
@@ -24,12 +25,11 @@ enum class CameraProjection {
 	Perspective
 };
 
-class CameraNode:public SceneNode
+class CameraNode : public SceneNode
 {
 public:
-    float fov;//radians 
     float aspectRatio;
-    float angle;//in degrees
+    float angle;
     float nearClip;
     float farClip;
     float vrViewScale;
@@ -42,73 +42,18 @@ public:
     QMatrix4x4 projMatrix;
 
 	void setProjection(CameraProjection view);
-	CameraProjection getProjection()
-	{
-		return projMode;
-	}
-
-    float getVrViewScale()
-    {
-        return vrViewScale;
-    }
-
-    void setVrViewScale(float viewScale)
-    {
-		
-			 vrViewScale = viewScale;
-		
-    }
-
-    void setAspectRatio(float aspect)
-    {
-        this->aspectRatio = aspect;
-    }
-
-    //radians
-    void setFieldOfView(float fov)
-    {
-        this->fov = fov;
-    }
-
-    void setFieldOfViewDegrees(float fov)
-    {
-        this->fov = fov;
-    }
-
+    CameraProjection getProjection();
+    float getVrViewScale();
+    void setVrViewScale(float viewScale);
+    void setAspectRatio(float aspect);
+    void setFieldOfViewRadians(float fov);
+    void setFieldOfViewDegrees(float fov);
     void lookAt(QVector3D target);
-
-    //update view and proj matrices
-    void updateCameraMatrices()
-    {
-        viewMatrix.setToIdentity();
-
-        QVector3D pos = globalTransform.column(3).toVector3D();
-        QVector3D dir = (globalTransform * QVector4D(0,0,-1,1)).toVector3D();
-        QVector3D up = (globalTransform * QVector4D(0,1,0,0)).toVector3D();
-
-
-        viewMatrix.lookAt(pos, dir, up);
-
-        projMatrix.setToIdentity();
-
-		if ((projMode == CameraProjection::Perspective))
-			projMatrix.perspective(angle, aspectRatio, nearClip, farClip);
-		else
-			projMatrix.ortho(-orthoSize *aspectRatio, orthoSize*aspectRatio,-orthoSize, orthoSize, -farClip, farClip);
-
-        vrViewScale = 5.0f;
-    }
-
+    void updateCameraMatrices();
 	void setOrthagonalZoom(float size);
+    void update(float dt) override;
 
-    void update(float dt) override
-    {
-        SceneNode::update(dt);
-        updateCameraMatrices();
-    }
-
-    static CameraNodePtr create()
-    {
+    static CameraNodePtr create() {
         return QSharedPointer<CameraNode>(new CameraNode());
     }
 
@@ -127,10 +72,10 @@ public:
 private:
     CameraNode()
     {
-        angle = 45;
+        angle = 45;         // Degrees are always used internally
         nearClip = 0.1f;
         farClip = 500.0f;
-        aspectRatio = 1.0f;//assumes a square viewport by default
+        aspectRatio = 1.0f; // Assumes a square viewport by default
 		orthoSize = 10.0f;
         exportable = false;
 		projMode = CameraProjection::Perspective;
