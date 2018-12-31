@@ -209,6 +209,23 @@ struct Vec3Property : public Property
     }
 };
 
+struct Vec4Property : public Property
+{
+	QVector4D value;
+
+	Vec4Property() {
+		type = PropertyType::Vec4;
+	}
+
+	QVariant getValue() {
+		return value;
+	}
+
+	void setValue(QVariant val) {
+		value = val.value<QVector3D>();
+	}
+};
+
 }
 
 #endif // PROPERTYTYPE_H
