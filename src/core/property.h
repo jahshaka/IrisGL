@@ -5,6 +5,7 @@
 #include <QColor>
 #include <QVector2D>
 #include <QVector3D>
+#include <QVector4D>
 
 namespace iris
 {
@@ -16,7 +17,8 @@ enum class PropertyType
     Int,
     Float,
     Vec2,
-    Vec3,
+	Vec3,
+	Vec4,
     Color,
     Texture,
     File,

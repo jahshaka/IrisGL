@@ -25,7 +25,10 @@ namespace iris
 
 class CustomMaterial : public Material
 {
+	int version = 1;
 public:
+	int getVersion() { return version; }
+	void setVersion(int version) { this->version = version; }
     QList<Property*> properties;
 
     void begin(GraphicsDevicePtr device, ScenePtr scene) override;
@@ -54,7 +57,7 @@ public:
     QString getName();
     QString getGuid();
     QString firstTextureSlot() const;
-    int getCalculatedPropHeight() const;
+    //int getCalculatedPropHeight() const;
 
     static CustomMaterialPtr create();
 	// called when the material's value is changed
@@ -66,7 +69,9 @@ public:
 
 	MaterialPtr duplicate() override;
 
-	CustomMaterialPtr createFromShader(iris::ShaderPtr shader);
+	static CustomMaterialPtr createFromShader(iris::ShaderPtr shader);
+	static CustomMaterialPtr createFromShaderPath(const QString& shaderPath);
+	static CustomMaterialPtr createFromShaderJson(const QJsonObject& shaderObj);
 
     CustomMaterial() = default;
     QString materialName;
@@ -74,7 +79,7 @@ public:
 	QString materialPath;
 
     QJsonObject loadShaderFromDisk(const QString &);
-    void createWidgets(const QJsonArray&);
+    void parseProperties(const QJsonArray&);
 
 	QJsonObject materialDefinitions;
 };
