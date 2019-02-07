@@ -47,6 +47,11 @@ public:
     int renderLayer;
     //QOpenGLShaderProgram* program;
 	ShaderPtr shader;
+
+	// if not null, this will be used to render the shadow instead
+	// of the renderer's default shadow shader
+	ShaderPtr shadowShader;
+
     QMap<QString, Texture2DPtr> textures;
 
     bool acceptsLighting;
@@ -65,6 +70,11 @@ public:
     }
 
 	void setShader(ShaderPtr shader);
+	void setShadowShader(ShaderPtr shader);
+
+	bool isFlagEnabled(QString flag);
+	void enableFlag(QString flag);
+	void disableFlag(QString flag);
 
     /**
      * Called at the beginning of rendering a primitive
@@ -132,7 +142,7 @@ protected:
      */
     void setTextureCount(int count);
 
-	
+	QSet<QString> flags;
 
 	QOpenGLShaderProgram* getProgram();
 };
