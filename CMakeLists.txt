@@ -7,15 +7,36 @@ foreach(p CMP0071) # 3.10: Let AUTOMOC and AUTOUIC process GENERATED files
 endforeach()
 project(IrisGL)
 
+# https://stackoverflow.com/a/45176243/996468
+function(get_all_targets _result _dir)
+    get_property(_subdirs DIRECTORY "${_dir}" PROPERTY SUBDIRECTORIES)
+    foreach(_subdir IN LISTS _subdirs)
+        get_all_targets(${_result} "${_subdir}")
+    endforeach()
+    get_property(_sub_targets DIRECTORY "${_dir}" PROPERTY BUILDSYSTEM_TARGETS)
+    set(${_result} ${${_result}} ${_sub_targets} PARENT_SCOPE)
+endfunction()
+
+function(add_subdirectory_with_folder _folder_name _folder)
+    add_subdirectory(${_folder} ${ARGN})
+    get_all_targets(_targets "${_folder}")
+    foreach(_target IN LISTS _targets)
+        set_target_properties(
+            ${_target}
+            PROPERTIES FOLDER "${_folder_name}"
+        )
+    endforeach()
+endfunction()
+
 find_package(OpenGL REQUIRED) # is this needed?
 find_package(Qt5 REQUIRED COMPONENTS Core OpenGL)
 
-set_property(GLOBAL PROPERTY USE_FOLDERS ON)
-set_property(GLOBAL PROPERTY AUTOGEN_TARGETS_FOLDER AutoMocFolder)
+set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
-set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
+
+set_property(GLOBAL PROPERTY AUTOGEN_TARGETS_FOLDER AutoMocFolder)
 
 option(ASSIMP_BUILD_ASSIMP_TOOLS                "" OFF)
 option(ASSIMP_BUILD_TESTS                       "" OFF)
@@ -26,7 +47,7 @@ option(ASSIMP_BUILD_FBX_IMPORTER                "" ON)
 option(ASSIMP_BUILD_COLLADA_IMPORTER            "" ON)
 option(ASSIMP_BUILD_ZLIB                        "" ON)
 
-add_subdirectory(src/assimp)
+add_subdirectory_with_folder("Dependencies/Assimp" src/assimp)
 
 option(BUILD_BULLET2_DEMOS                      "" OFF)
 option(BUILD_OPENGL3_DEMOS                      "" OFF)
@@ -42,8 +63,8 @@ else()
   set(BUILD_SHARED_LIBS 1)   # shared libs doesn't work with msvc (there aren't any dllexports defined)
 endif()
 
-add_subdirectory(src/bullet3)
-# add_subdirectory(src/zip)
+add_subdirectory_with_folder("Dependencies/Bullet" src/bullet3)
+add_subdirectory_with_folder("Dependencies/Zip" src/zip)
 
 set(SRCS
     src/graphics/mesh.cpp
@@ -112,8 +133,7 @@ set(SRCS
     src/libovr/Src/OVR_CAPIShim.c
     src/physics/environment.cpp
     src/physics/physicshelper.cpp
-    src/scenegraph/grabnode.cpp
-    src/zip/src/zip.c
+	src/scenegraph/grabnode.cpp
 )
 
 set (HEADERS
@@ -216,13 +236,12 @@ set (HEADERS
     src/physics/environment.h
     src/physics/physicshelper.h
     src/physics/physicsproperties.h
-    src/scenegraph/grabnode.h
-    src/zip/src/zip.h
-    src/zip/src/miniz.h
+	src/scenegraph/grabnode.h
 )
 
-qt5_wrap_cpp(HEADERS_moc ${HEADERS})
-qt5_add_resources(QRCS assets.qrc)
+set(QRCS assets.qrc)
+
+source_group("Resources" FILES ${QRCS})
 
 # This will allow a .lib to be built alongside the dll, ((needed)) for MSVC
 if(WIN32 AND MSVC)
@@ -230,21 +249,19 @@ if(WIN32 AND MSVC)
     set(USE_MSVC_RUNTIME_LIBRARY_DLL 1)
 endif()
 
-# https://stackoverflow.com/a/37211780/996468
-source_group(moc FILES ${HEADERS_moc} ${QRCS})
-add_library(IrisGL SHARED ${SRCS} ${HEADERS_moc} ${QRCS})
+add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
 # Note the DIRs that are included, assimp generates a config that we need to find in the build dir. L2
 target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/"
-    "${PROJECT_SOURCE_DIR}/src/zip/src"
     "${PROJECT_BINARY_DIR}/src/assimp/include/"
     "${PROJECT_SOURCE_DIR}/src/assimp/include/"
     "${PROJECT_SOURCE_DIR}/src/libovr/Include"
     "${PROJECT_SOURCE_DIR}/src/bullet3"
     "${PROJECT_SOURCE_DIR}/src/bullet3/src"
+    "${PROJECT_SOURCE_DIR}/src/zip/src"
 )
 
-target_link_libraries (IrisGL assimp BulletDynamics BulletCollision LinearMath Bullet3Common Qt5::Core Qt5::OpenGL)
+target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt5::Core Qt5::OpenGL)
 target_compile_options(IrisGL PUBLIC)
