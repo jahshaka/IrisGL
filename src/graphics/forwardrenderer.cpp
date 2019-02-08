@@ -955,7 +955,7 @@ void ForwardRenderer::generateLightUnformNames()
 
 ForwardRenderer::~ForwardRenderer()
 {
-    delete vrDevice;
+    //delete vrDevice;
 }
 
 }
