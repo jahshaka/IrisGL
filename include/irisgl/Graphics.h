@@ -15,5 +15,6 @@
 #include "../../src/graphics/renderlist.h"
 #include "../../src/graphics/font.h"
 #include "../../src/graphics/graphicshelper.h"
+#include "../../src/graphics/viewport.h"
 
 #include "../../src/widgets/renderwidget.h"
