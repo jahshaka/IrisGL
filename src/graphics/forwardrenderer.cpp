@@ -82,10 +82,12 @@ ForwardRenderer::ForwardRenderer(bool supportsVr, bool physicsEnabled)
     generateShadowBuffer(4096);
 
     if (supportsVr) {
-        vrDevice = VrManager::getDefaultDevice();
+		vrDevice = VrManager::getDefaultDevice();
         vrDevice->initialize();
+		vrSwapChain = vrDevice->createSwapChain();
 	} else {
 		vrDevice = Q_NULLPTR;
+		vrSwapChain = nullptr;
 	}
 
     renderTarget = RenderTarget::create(800, 800);
@@ -486,7 +488,7 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 		graphics->setDepthState(DepthState::Default);
 		graphics->setRasterizerState(RasterizerState::CullCounterClockwise);
 
-        vrDevice->beginEye(eye);
+        vrDevice->beginEye(vrSwapChain, eye);
 
         auto view = vrDevice->getEyeViewMatrix(eye, viewerPos, viewTransform);
         renderData->eyePos = view.column(3).toVector3D();

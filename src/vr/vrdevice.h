@@ -81,6 +81,18 @@ private:
     void setTrackingState(bool state);
 };
 
+/*
+This class doesnt store the swapchain but the FBOs necessar for the
+swap chain to work properly. FBOs arent shared across different OpenGL
+contexts so it's necessary to have seperate FBOs for each context.
+*/
+struct VrSwapChain
+{
+	GLuint eyeFBOs[2];
+	GLuint mirrorFBO;
+	//ovrMirrorTexture mirrorTexture;
+};
+
 struct VrFrameData;
 
 /**
@@ -89,10 +101,15 @@ struct VrFrameData;
 class VrDevice
 {
     friend class VrManager;
-    VrDevice();
+    
 
     bool initialized;
 public:
+
+	VrDevice();
+
+	// Initializes the ovr sdk
+	// An OpenGL context is required for this function to work properly
     void initialize();
     void setTrackingOrigin(VrTrackingOrigin trackingOrigin);
 
@@ -103,7 +120,7 @@ public:
     void beginFrame();
     void endFrame();
 
-    void beginEye(int eye);
+    void beginEye(VrSwapChain* swapChain, int eye);
     void endEye(int eye);
 
 	void bindEyeTexture(int eye);
@@ -126,20 +143,30 @@ public:
     QQuaternion getHeadRotation();
     QVector3D getHeadPos();
 
+	/*
+	Creates per-renderer swapchain resources. An active OpenGL context is required for this to work properly.
+	*/
+	VrSwapChain* createSwapChain();
+
+	/*
+	Cleans up ovr and gl swapchain resources and deletes swapChain object
+	*/
+	void destroySwapChain(VrSwapChain* swapChain);
+
 private:
     GLuint createDepthTexture(int width,int height);
     ovrTextureSwapChain createTextureChain(ovrSession session,ovrTextureSwapChain &swapChain,int width,int height);
 
     GLuint vr_depthTexture[2];
     ovrTextureSwapChain vr_textureChain[2];
-    GLuint vr_Fbo[2];
+    //GLuint vr_Fbo[2];
 
     int eyeWidth;
     int eyeHeight;
     long long frameIndex;
 
     ovrMirrorTexture mirrorTexture;
-    GLuint vr_mirrorFbo;
+    //GLuint vr_mirrorFbo;
     GLuint vr_mirrorTexId;
 
     //quick bool to enable/disable vr rendering

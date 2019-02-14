@@ -41,6 +41,7 @@ class VrDevice;
 class PostProcessManager;
 class PostProcessContext;
 class PerformanceTimer;
+class VrSwapChain;
 
 struct LightUniformNames
 {
@@ -93,6 +94,7 @@ class ForwardRenderer
     PostProcessManagerPtr postMan;
     PostProcessContext* postContext;
 
+	VrSwapChain* vrSwapChain;
     VrDevice* vrDevice;
 
     RenderTargetPtr renderTarget;
@@ -134,6 +136,7 @@ public:
     static ForwardRendererPtr create(bool useVr = true, bool physicsEnabled = false);
 
     bool isVrSupported();
+	VrDevice* getVrDevice() { return vrDevice; }
 
     ~ForwardRenderer();
 
