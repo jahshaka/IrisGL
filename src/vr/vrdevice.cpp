@@ -157,6 +157,8 @@ void VrDevice::initialize()
 
 		vrSupported = true;
 
+		gl->glGenFramebuffers(2, vr_Fbo);
+		createMirrorFbo(800, 600);
 	}
 }
 
@@ -168,6 +170,14 @@ void VrDevice::setTrackingOrigin(VrTrackingOrigin trackingOrigin)
         ovr_SetTrackingOriginType(session, ovrTrackingOrigin_FloorLevel);
     else
         ovr_SetTrackingOriginType(session, ovrTrackingOrigin_EyeLevel);
+}
+
+void VrDevice::destroySwapChain(VrSwapChain* swapChain)
+{
+	gl->glDeleteTextures(2, swapChain->eyeFBOs);
+	gl->glDeleteTextures(1, &swapChain->mirrorFBO);
+
+	delete swapChain;
 }
 
 GLuint VrDevice::createDepthTexture(int width,int height)
@@ -365,6 +375,33 @@ VrSwapChain * VrDevice::createSwapChain()
 	return swapChain;
 }
 
+void VrDevice::regenerateSwapChain()
+{
+	// destroy old swapchain (does old context need to be bound?)
+	ovr_DestroyMirrorTexture(session, mirrorTexture);
+	ovr_DestroyTextureSwapChain(session, vr_textureChain[0]);
+	ovr_DestroyTextureSwapChain(session, vr_textureChain[1]);
+
+	gl->glDeleteTextures(2, vr_Fbo);
+	gl->glDeleteTextures(1, &vr_mirrorTexId);
+
+	// recreate new one
+	for (int eye = 0; eye < 2; ++eye) {
+		ovrSizei texSize = ovr_GetFovTextureSize(session,
+			ovrEyeType(eye),
+			hmdDesc.DefaultEyeFov[eye], 1);
+		createTextureChain(session, vr_textureChain[eye], texSize.w, texSize.h);
+		vr_depthTexture[eye] = createDepthTexture(texSize.w, texSize.h);
+
+		// should be the same for all
+		eyeWidth = texSize.w;
+		eyeHeight = texSize.h;
+	}
+
+	gl->glGenFramebuffers(2, vr_Fbo);
+	createMirrorFbo(800, 600);
+}
+
 void VrDevice::bindEyeTexture(int eye)
 {
 	GLuint curTexId;
@@ -375,7 +412,7 @@ void VrDevice::bindEyeTexture(int eye)
 	gl->glBindTexture(GL_TEXTURE_2D, curTexId);
 }
 
-void VrDevice::beginEye(VrSwapChain* swapChain, int eye)
+void VrDevice::beginEye(int eye)
 {
     GLuint curTexId;
     int curIndex;
@@ -383,7 +420,7 @@ void VrDevice::beginEye(VrSwapChain* swapChain, int eye)
     ovr_GetTextureSwapChainCurrentIndex(session, vr_textureChain[eye], &curIndex);
     ovr_GetTextureSwapChainBufferGL(session, vr_textureChain[eye], curIndex, &curTexId);
 
-    gl->glBindFramebuffer(GL_FRAMEBUFFER, swapChain->eyeFBOs[eye]);
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, vr_Fbo[eye]);
     gl->glFramebufferTexture2D(GL_FRAMEBUFFER,
                                GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_2D,
@@ -406,7 +443,7 @@ void VrDevice::endEye(int eye)
     gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
     ovr_CommitTextureSwapChain(session, vr_textureChain[eye]);
-	//gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 bool VrDevice::isHeadMounted()

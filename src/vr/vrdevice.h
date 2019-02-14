@@ -120,7 +120,7 @@ public:
     void beginFrame();
     void endFrame();
 
-    void beginEye(VrSwapChain* swapChain, int eye);
+    void beginEye(int eye);
     void endEye(int eye);
 
 	void bindEyeTexture(int eye);
@@ -149,6 +149,14 @@ public:
 	VrSwapChain* createSwapChain();
 
 	/*
+	Used to regenerate the swapchain. Swapchains only work properly in the context they were created in.
+	This means that it will not work properly in shared contexts (artifacts show when not rendering from it's original
+	context). Call this after switching between windows (or contexts) to ensure that swapchain is created on the
+	active context.
+	*/
+	void regenerateSwapChain();
+
+	/*
 	Cleans up ovr and gl swapchain resources and deletes swapChain object
 	*/
 	void destroySwapChain(VrSwapChain* swapChain);
@@ -159,14 +167,14 @@ private:
 
     GLuint vr_depthTexture[2];
     ovrTextureSwapChain vr_textureChain[2];
-    //GLuint vr_Fbo[2];
+    GLuint vr_Fbo[2];
 
     int eyeWidth;
     int eyeHeight;
     long long frameIndex;
 
     ovrMirrorTexture mirrorTexture;
-    //GLuint vr_mirrorFbo;
+    GLuint vr_mirrorFbo;
     GLuint vr_mirrorTexId;
 
     //quick bool to enable/disable vr rendering

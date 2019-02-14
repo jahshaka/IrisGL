@@ -94,7 +94,6 @@ class ForwardRenderer
     PostProcessManagerPtr postMan;
     PostProcessContext* postContext;
 
-	VrSwapChain* vrSwapChain;
     VrDevice* vrDevice;
 
     RenderTargetPtr renderTarget;
@@ -137,6 +136,7 @@ public:
 
     bool isVrSupported();
 	VrDevice* getVrDevice() { return vrDevice; }
+	void regenerateSwapChain();
 
     ~ForwardRenderer();
 
