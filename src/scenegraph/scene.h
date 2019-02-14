@@ -143,6 +143,9 @@ public:
 				 uint64_t pickingMask = 0,
 				 bool allowUnpickable = false);
 
+	ViewerNodePtr getActiveVrViewer() { return vrViewer; }
+	ViewerNodePtr setActiveVrViewer(ViewerNodePtr viewer) { this->vrViewer = viewer; }
+
     /**
      * Adds node to scene. If node is a LightNode then it is added to a list of lights.
      * @param node
@@ -160,6 +163,11 @@ public:
      * @param cameraNode
      */
     void setCamera(CameraNodePtr cameraNode);
+
+	/*
+	Return scene's active camera
+	*/
+	iris::CameraNodePtr getCamera() { return camera; }
 
     /**
      * Sets the viewport stencil width
