@@ -1,6 +1,8 @@
 #ifndef PHYSICS_HELPER
 #define PHYSICS_HELPER
 
+#include <QVector3D>
+
 #include "bullet3/src/btBulletDynamicsCommon.h"
 #include "bullet3/src/BulletCollision/CollisionShapes/btConvexHullShape.h"
 #include "bullet3/src/BulletCollision/CollisionShapes/btShapeHull.h"
@@ -26,6 +28,7 @@ public:
     static btTriangleMesh *btTriangleMeshShapeFromMesh(iris::MeshPtr mesh);
     static btConvexHullShape *btConvexHullShapeFromMesh(iris::MeshPtr mesh);
     static btVector3 btVector3FromQVector3D(QVector3D vector);
+	static QVector3D QVector3DFrombtVector3(btVector3 vector);
     static btRigidBody *createPhysicsBody(const iris::SceneNodePtr sceneNode, const iris::PhysicsProperty &props);
     static btTypedConstraint *createConstraintFromProperty(QSharedPointer<Environment> environment, const iris::ConstraintProperty &prop);
 };

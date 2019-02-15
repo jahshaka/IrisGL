@@ -1,5 +1,12 @@
 #include "environment.h"
+
 #include <QDebug>
+
+#include "bullet3/src/btBulletDynamicsCommon.h"
+#include "BulletDynamics/Character/btKinematicCharacterController.h"
+#include "BulletCollision/CollisionDispatch/btGhostObject.h"
+
+#include "charactercontroller.h"
 
 namespace iris
 {
@@ -70,6 +77,45 @@ void Environment::removeConstraintFromWorld(btTypedConstraint *constraint)
     }
 }
 
+void Environment::addCharacterControllerToWorldUsingNode(const iris::SceneNodePtr &node)
+{
+	btTransform startTransform;
+	startTransform.setIdentity();
+	startTransform.setOrigin(PhysicsHelper::btVector3FromQVector3D(node->getGlobalPosition()));
+
+	auto controller = new CharacterController;
+	controller->setSiblingGuid(node->getGUID());
+	controller->getGhostObject()->setWorldTransform(startTransform);
+
+	world->addCollisionObject(controller->getGhostObject(), btBroadphaseProxy::CharacterFilter, btBroadphaseProxy::StaticFilter | btBroadphaseProxy::DefaultFilter);
+	world->addAction(controller->getKinematicController());
+
+	characterControllers.insert(node->getGUID(), controller);
+
+	activeCharacterController = controller;
+}
+
+void Environment::removeCharacterControllerFromWorld(const QString &guid)
+{
+	if (!characterControllers.contains(guid)) return;
+	auto controller = characterControllers.value(guid);
+	characterControllers.remove(guid);
+	delete controller;
+}
+
+CharacterController *Environment::getActiveCharacterController()
+{
+	return activeCharacterController;
+}
+
+void Environment::updateCharacterTransformFromSceneNode(const iris::SceneNodePtr node)
+{
+	btTransform ghostTransform;
+	ghostTransform.setIdentity();
+	ghostTransform.setFromOpenGLMatrix(node->getGlobalTransform().constData());
+	characterControllers.value(node->getGUID())->getKinematicController()->getGhostObject()->setWorldTransform(ghostTransform);
+}
+
 btDynamicsWorld *Environment::getWorld()
 {
     return world;
@@ -104,32 +150,81 @@ void Environment::stepSimulation(float delta)
     iris::LineMeshBuilder builder; // *must* go out of scope...
     debugDrawer->setPublicBuilder(&builder);
 
+	world->debugDrawWorld();
+
+	QMatrix4x4 transform;
+	transform.setToIdentity();
+	debugRenderList->submitMesh(builder.build(), lineMat, transform);
+
     if (simulating) {
-        world->stepSimulation(delta);
+		updateCharacterControllers(delta);
+		world->stepSimulation(delta);
     }
+}
 
-    world->debugDrawWorld();
+void Environment::updateCharacterControllers(float delta)
+{
+	walkDirection = btVector3(0.0, 0.0, 0.0);
+	btScalar walkVelocity = btScalar(1.1) * 5.0; // 4 km/h -> 1.1 m/s
+	btScalar walkSpeed = walkVelocity * delta;
 
-    QMatrix4x4 transform;
-    transform.setToIdentity();
-    debugRenderList->submitMesh(builder.build(), lineMat, transform);
+	for (auto controller : characterControllers) {
+		if (controller->isActive()) {
+			auto character = controller->getKinematicController();
+
+			btTransform transform;
+			transform = character->getGhostObject()->getWorldTransform();
+
+			btVector3 forwardDir = transform.getBasis()[2];
+			btVector3 upDir = transform.getBasis()[1];
+			btVector3 strafeDir = transform.getBasis()[0];
+
+			forwardDir.normalize();
+			upDir.normalize();
+			strafeDir.normalize();
+
+			if (character->onGround() && jump) {
+				character->jump(btVector3(0, 6, 0));
+			}
+
+			if (walkForward) {
+				walkDirection -= forwardDir;
+			}
+
+			if (walkBackward) {
+				walkDirection += forwardDir;
+			}
+
+			if (walkLeft) {
+				walkDirection -= strafeDir;
+			}
+
+			if (walkRight) {
+				walkDirection += strafeDir;
+			}
+
+			character->setWalkDirection(walkDirection * walkSpeed);
+
+			break;
+		}
+	}
 }
 
 void Environment::toggleDebugDrawFlags(bool state)
 {
-    if (!state) {
-        debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
-    }
-    else {
-        debugDrawer->setDebugMode(
-            GLDebugDrawer::DBG_DrawAabb |
-            GLDebugDrawer::DBG_DrawWireframe |
-            GLDebugDrawer::DBG_DrawConstraints |
-            GLDebugDrawer::DBG_DrawContactPoints |
-            GLDebugDrawer::DBG_DrawConstraintLimits |
-            GLDebugDrawer::DBG_DrawFrames
-        );
-    }
+    //if (!state) {
+    //    debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
+    //}
+    //else {
+    //    debugDrawer->setDebugMode(
+    //        GLDebugDrawer::DBG_DrawAabb |
+    //        GLDebugDrawer::DBG_DrawWireframe |
+    //        GLDebugDrawer::DBG_DrawConstraints |
+    //        GLDebugDrawer::DBG_DrawContactPoints |
+    //        GLDebugDrawer::DBG_DrawConstraintLimits |
+//        GLDebugDrawer::DBG_DrawFrames
+//    );
+//}
 }
 
 void Environment::startRigidBodyTeleport(const QString &guid)
@@ -163,31 +258,48 @@ void Environment::endRigidBodyTeleport()
 
 void Environment::restartPhysics()
 {
-    // node transforms are reset inside button caller
-    stopPhysics();
-    stopSimulation();
+	// node transforms are reset inside button caller
+	stopPhysics();
+	stopSimulation();
 
-    destroyPhysicsWorld();
-    createPhysicsWorld();
+	destroyPhysicsWorld();
+	createPhysicsWorld();
 }
 
 void Environment::createPhysicsWorld()
 {
-    collisionConfig = new btDefaultCollisionConfiguration();
-    dispatcher = new btCollisionDispatcher(collisionConfig);
-    broadphase = new btDbvtBroadphase();
-    solver = new btSequentialImpulseConstraintSolver();
-    world = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
 
-    hashBodies.reserve(512);
-    nodeTransforms.reserve(512);
+	btVector3 worldMin(-1000, -1000, -1000);
+	btVector3 worldMax(1000, 1000, 1000);
+	btAxisSweep3* sweepBP = new btAxisSweep3(worldMin, worldMax);
+	sweepBP->getOverlappingPairCache()->setInternalGhostPairCallback(new btGhostPairCallback());
+	broadphase = sweepBP;
 
-    world->setGravity(btVector3(0, -10.f, 0));
+	collisionConfig = new btDefaultCollisionConfiguration();
+	dispatcher = new btCollisionDispatcher(collisionConfig);
+	//broadphase = new btDbvtBroadphase();
+	solver = new btSequentialImpulseConstraintSolver();
+	world = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
 
-    // http://bulletphysics.org/mediawiki-1.5.8/index.php/Bullet_Debug_drawer
-    debugDrawer = new GLDebugDrawer;
-    debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
-    world->setDebugDrawer(debugDrawer);
+	hashBodies.reserve(512);
+	nodeTransforms.reserve(512);
+
+	world->setGravity(btVector3(0, -10.f, 0));
+	world->getDispatchInfo().m_allowedCcdPenetration = 0.0001f;
+
+	// http://bulletphysics.org/mediawiki-1.5.8/index.php/Bullet_Debug_drawer
+	debugDrawer = new GLDebugDrawer;
+	debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
+	world->setDebugDrawer(debugDrawer);
+
+	debugDrawer->setDebugMode(
+		GLDebugDrawer::DBG_DrawAabb |
+		GLDebugDrawer::DBG_DrawWireframe |
+		GLDebugDrawer::DBG_DrawConstraints |
+		GLDebugDrawer::DBG_DrawContactPoints |
+		GLDebugDrawer::DBG_DrawConstraintLimits |
+		GLDebugDrawer::DBG_DrawFrames
+	);
 }
 
 void Environment::createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
@@ -362,55 +474,55 @@ void Environment::createConstraintBetweenNodes(iris::SceneNodePtr node, const QS
 
 void Environment::destroyPhysicsWorld()
 {
-    // this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
-    if (world) {
-        int i;
-        for (i = world->getNumConstraints() - 1; i >= 0; i--) {
-            world->removeConstraint(world->getConstraint(i));
-        }
+	// this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
+	if (world) {
+		int i;
+		for (i = world->getNumConstraints() - 1; i >= 0; i--) {
+			world->removeConstraint(world->getConstraint(i));
+		}
 
-        for (i = world->getNumCollisionObjects() - 1; i >= 0; i--) {
-            btCollisionObject* obj = world->getCollisionObjectArray()[i];
-            btRigidBody* body = btRigidBody::upcast(obj);
-            if (body && body->getMotionState()) {
-                delete body->getMotionState();
-            }
-            world->removeCollisionObject(obj);
-            delete obj;
-        }
+		for (i = world->getNumCollisionObjects() - 1; i >= 0; i--) {
+			btCollisionObject* obj = world->getCollisionObjectArray()[i];
+			btRigidBody* body = btRigidBody::upcast(obj);
+			if (body && body->getMotionState()) {
+				delete body->getMotionState();
+			}
+			world->removeCollisionObject(obj);
+			delete obj;
+		}
 
-        // https://pybullet.org/Bullet/phpBB3/viewtopic.php?t=8148#p28087
-        btOverlappingPairCache* pair_cache = world->getBroadphase()->getOverlappingPairCache();
-        btBroadphasePairArray& pair_array = pair_cache->getOverlappingPairArray();
-        for (int i = 0; i < pair_array.size(); i++)
-            pair_cache->cleanOverlappingPair(pair_array[i], world->getDispatcher());
-    }
+		// https://pybullet.org/Bullet/phpBB3/viewtopic.php?t=8148#p28087
+		btOverlappingPairCache* pair_cache = world->getBroadphase()->getOverlappingPairCache();
+		btBroadphasePairArray& pair_array = pair_cache->getOverlappingPairArray();
+		for (int i = 0; i < pair_array.size(); i++)
+			pair_cache->cleanOverlappingPair(pair_array[i], world->getDispatcher());
+	}
 
-    // delete collision shapes
-    for (int j = 0; j < collisionShapes.size(); j++) {
-        btCollisionShape* shape = collisionShapes[j];
-        delete shape;
-    }
+	// delete collision shapes
+	for (int j = 0; j < collisionShapes.size(); j++) {
+		btCollisionShape* shape = collisionShapes[j];
+		delete shape;
+	}
 
-    collisionShapes.clear();
+	collisionShapes.clear();
 
-    delete world;
-    world = 0;
+	delete world;
+	world = 0;
 
-    delete solver;
-    solver = 0;
+	delete solver;
+	solver = 0;
 
-    delete broadphase;
-    broadphase = 0;
+	delete broadphase;
+	broadphase = 0;
 
-    delete dispatcher;
-    dispatcher = 0;
+	delete dispatcher;
+	dispatcher = 0;
 
-    delete collisionConfig;
-    collisionConfig = 0;
+	delete collisionConfig;
+	collisionConfig = 0;
 
-    hashBodies.squeeze();
-    nodeTransforms.squeeze();
+	hashBodies.squeeze();
+	nodeTransforms.squeeze();
 }
 
 }

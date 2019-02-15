@@ -1,24 +1,41 @@
 #ifndef ENVIRONMENT_H
 #define ENVIRONMENT_H
 
+// This class entails the simulated environment. That is, bullet utilized in iris.
+// DO NOT use bullet specific types or functions in the main application, all objects should live here
+// This includes any constraints, rigid bodies and bullet specific variables.
+// If you need to use btVector3 etc somewhere, consider doing it here and deleting it after
+// For example, all the rigid bodies in the scene are contained inside hashBodies
+
+// See { bullet specific variables, bullet specific constraints }
+
+#include "physics/physicshelper.h"
+
 #include <QVector>
 #include <QHash>
 
-#include "bullet3/src/btBulletDynamicsCommon.h"
 #include "bullet3/src/LinearMath/btIDebugDraw.h"
 
-#include "../irisgl/src/graphics/utils/linemeshbuilder.h"
-#include "../irisgl/src/physics/physicshelper.h"
-#include "../irisgl/src/graphics/utils/linemeshbuilder.h"
-#include "../irisgl/src/graphics/renderlist.h"
-#include "../irisgl/src/graphics/renderitem.h"
-#include "../irisgl/src/materials/linecolormaterial.h"
+#include "graphics/renderlist.h"
+#include "graphics/renderitem.h"
+#include "graphics/utils/linemeshbuilder.h"
+#include "materials/linecolormaterial.h"
 
 class btTypedConstraint;
+class btCollisionShape;
+class btRigidBody;
+class btCollisionConfiguration;
+class btDispatcher;
+class btBroadphaseInterface;
+class btConstraintSolver;
+class btDynamicsWorld;
+
+class CharacterController;
 
 namespace iris
 {
 
+// Implement's bullets debug drawer to provide useful visual information about physics enabled entities
 class GLDebugDrawer : public btIDebugDraw
 {
     int m_debugMode;
@@ -27,14 +44,14 @@ class GLDebugDrawer : public btIDebugDraw
 
 public:
     GLDebugDrawer() {}
-
     virtual ~GLDebugDrawer() {}
 
-    void setPublicBuilder(iris::LineMeshBuilder *builder) {
-        this->builder = builder;
-    }
+	void setPublicBuilder(iris::LineMeshBuilder *builder) { this->builder = builder; }
 
-    virtual void   drawLine(const btVector3& from, const btVector3& to, const btVector3& fromColor, const btVector3& toColor) {
+	virtual void setDebugMode(int debugMode) { m_debugMode = debugMode; }
+	virtual int getDebugMode() const { return m_debugMode; }
+
+    virtual void drawLine(const btVector3& from, const btVector3& to, const btVector3& fromColor, const btVector3& toColor) {
         builder->addLine(
             QVector3D(from.x(), from.y(), from.z()),
             QColor(fromColor.getX() * 255.f, fromColor.getY() * 255.f, fromColor.getZ() * 255.f),
@@ -43,7 +60,7 @@ public:
         );
     }
 
-    virtual void   drawLine(const btVector3& from, const btVector3& to, const btVector3& color)
+    virtual void drawLine(const btVector3& from, const btVector3& to, const btVector3& color)
     {
         builder->addLine(
             QVector3D(from.x(), from.y(), from.z()),
@@ -53,28 +70,29 @@ public:
         );
     }
 
-    virtual void   drawSphere(const btVector3& p, btScalar radius, const btVector3& color) {}
-    virtual void   drawTriangle(const btVector3& a, const btVector3& b, const btVector3& c, const btVector3& color, btScalar alpha)
-    {
-
-    }
-    virtual void   drawContactPoint(const btVector3& PointOnB, const btVector3& normalOnB, btScalar distance, int lifeTime, const btVector3& color) {}
-    virtual void   reportErrorWarning(const char* warningString) {}
-    virtual void   draw3dText(const btVector3& location, const char* textString) {
-
-    }
-    virtual void   setDebugMode(int debugMode) {
-        m_debugMode = debugMode;
-    }
-    virtual int    getDebugMode() const { return m_debugMode; }
+	// Implement these later if needed...
+    virtual void drawSphere(const btVector3& p, btScalar radius, const btVector3& color) {}
+    virtual void drawTriangle(const btVector3& a, const btVector3& b, const btVector3& c, const btVector3& color, btScalar alpha) {}
+    virtual void drawContactPoint(const btVector3& PointOnB, const btVector3& normalOnB, btScalar distance, int lifeTime, const btVector3& color) {}
+    virtual void reportErrorWarning(const char* warningString) {}
+    virtual void draw3dText(const btVector3& location, const char* textString) {}
 };
 
 class Environment
 {
 public:
+
+	bool walkForward = 0;
+	bool walkBackward = 0;
+	bool walkLeft = 0;
+	bool walkRight = 0;
+	bool jump = 0;
+
     Environment(iris::RenderList *renderList);
     ~Environment();
 
+	QHash<QString, CharacterController*> characterControllers;
+	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;
     QHash<QString, QMatrix4x4> nodeTransforms;
 
@@ -87,7 +105,15 @@ public:
     void addConstraintToWorld(btTypedConstraint *constraint, bool disableCollisions = true);
     void removeConstraintFromWorld(btTypedConstraint *constraint);
 
+	void addCharacterControllerToWorldUsingNode(const iris::SceneNodePtr &node);
+	void removeCharacterControllerFromWorld(const QString &guid);
+	CharacterController *getActiveCharacterController();
+
+	void updateCharacterTransformFromSceneNode(const iris::SceneNodePtr node);
+
     btDynamicsWorld *getWorld();
+
+	void updateCharacterControllers(float delta);
 
     // These are special functions used for creating a constraint to drag bodies
 	void simulatePhysics();
@@ -113,6 +139,7 @@ public:
 
 	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
 
+
 private:
     btCollisionConfiguration    *collisionConfig;
     btDispatcher                *dispatcher;
@@ -122,6 +149,10 @@ private:
 
     QVector<btTypedConstraint*> constraints;
     btAlignedObjectArray<btCollisionShape*>	collisionShapes;
+
+	btVector3 walkDirection;
+
+	CharacterController *activeCharacterController;
 
     bool simulating;
     bool simulationStarted;
