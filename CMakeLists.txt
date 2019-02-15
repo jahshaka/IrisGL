@@ -133,7 +133,8 @@ set(SRCS
     src/libovr/Src/OVR_CAPIShim.c
     src/physics/environment.cpp
     src/physics/physicshelper.cpp
-	src/scenegraph/grabnode.cpp
+    src/scenegraph/grabnode.cpp
+    src/physics/charactercontroller.cpp
 )
 
 set (HEADERS
@@ -236,7 +237,8 @@ set (HEADERS
     src/physics/environment.h
     src/physics/physicshelper.h
     src/physics/physicsproperties.h
-	src/scenegraph/grabnode.h
+    src/scenegraph/grabnode.h
+    src/physics/charactercontroller.h
 )
 
 set(QRCS assets.qrc)
