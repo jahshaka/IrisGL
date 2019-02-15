@@ -28,6 +28,7 @@ ViewerNode::ViewerNode()
     this->sceneNodeType = SceneNodeType::Viewer;
 
     this->setViewScale(1.0f);
+	activeCharacterController = false;
     exportable = false;
 }
 
