@@ -121,10 +121,11 @@ void Scene::update(float dt)
 		camera->updateCameraMatrices();
     }
 
-    // advance simulation
-    environment->stepSimulation(dt);
-
     if (environment->isSimulating() && !environment->hashBodies.isEmpty()) {
+
+		// advance simulation
+		environment->stepSimulation(dt);
+
         for (const auto &node : rootNode->children) {
         // Override the mesh's transform if it's a physics body
         // Not the end place since we need to transform empties as well
