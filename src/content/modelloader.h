@@ -2,6 +2,7 @@
 #define MODELLOADER_H
 
 #include "../irisglfwd.h"
+#include "../graphics/model.h"
 
 class aiScene;
 namespace iris
@@ -16,6 +17,7 @@ public:
 
 private:
 	static SkeletonPtr extractSkeletonFromScene(const aiScene* scene);
+	static QVector<ModelMesh> extractMeshesFromScene(const aiScene* scene);
 };
 
 }

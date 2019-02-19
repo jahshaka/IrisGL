@@ -8,19 +8,31 @@
 namespace iris
 {
 
+/*
+A Note on the Bone's matrices:
+In Assimp, Meshes' root transform starts at arbitrary bones in the hierarchy.
+Thus, the inverseMeshSpacePoseMatrix (and the meshSpacePoseMatrix) isnt relative to the root of the skeleton, but the
+bone in the hierarchy that represents the mesh's root.
+*/
 class Bone : public QEnableSharedFromThis<Bone>
 {
     Bone(){}
 public:
     QString name;
-    QMatrix4x4 inversePoseMatrix;// skeleton space
-    QMatrix4x4 poseMatrix;// skeleton space
+    QMatrix4x4 inverseMeshSpacePoseMatrix;// mesh space
+    QMatrix4x4 meshSpacePoseMatrix;// mesh space
     QMatrix4x4 transformMatrix;// skeleton space
 
-    QMatrix4x4 localMatrix;// local space
-	// local
+    QMatrix4x4 localMatrix;// local space (to parent bone)
+
+	// local to bone's parent
 	QVector3D pos, scale;
 	QQuaternion rot;
+
+	// binding local transform of object
+	// these arent changed throughout the lifetime of the bone
+	QVector3D bindingPos, bindingScale;
+	QQuaternion bindingRot;
 
     QMatrix4x4 skinMatrix;// final transform sent to the shader
 
@@ -37,8 +49,8 @@ public:
     {
         auto bone = new Bone();
         bone->name = name;
-        bone->inversePoseMatrix.setToIdentity();
-        bone->poseMatrix.setToIdentity();
+        bone->inverseMeshSpacePoseMatrix.setToIdentity();
+        bone->meshSpacePoseMatrix.setToIdentity();
         bone->transformMatrix.setToIdentity();
         bone->localMatrix.setToIdentity();
         bone->skinMatrix.setToIdentity();

@@ -71,7 +71,9 @@ void DefaultMaterial::begin(GraphicsDevicePtr device,ScenePtr scene)
     //set params
     device->setShaderUniform("u_material.diffuse",QVector3D(diffuseColor.redF(),diffuseColor.greenF(),diffuseColor.blueF()));
 
-    const QColor& sceneAmbient = scene->ambientColor;
+	QColor sceneAmbient;
+	if (!!scene)
+		sceneAmbient = scene->ambientColor;
     auto finalAmbient = QVector3D(ambientColor.redF() + sceneAmbient.redF(),
                                   ambientColor.greenF() + sceneAmbient.greenF(),
                                   ambientColor.blueF() + sceneAmbient.blueF());

@@ -57,6 +57,7 @@ ModelPtr ModelLoader::load(QString filePath)
 		return ModelPtr();
 	}
 
+	/*
 	QList<MeshPtr> meshes;
 	for (int i = 0; i < scene->mNumMeshes; i++) {
 		auto mesh = scene->mMeshes[0];
@@ -68,10 +69,12 @@ ModelPtr ModelLoader::load(QString filePath)
 
 		meshes.append(meshObj);
 	}
+	*/
+	auto modelMeshes = extractMeshesFromScene(scene);
 
 	auto skeleton = ModelLoader::extractSkeletonFromScene(scene);
 	auto anims = Mesh::extractAnimations(scene);
-	auto model = new Model(meshes);
+	auto model = new Model(modelMeshes);
 	model->setSkeleton(skeleton);
 	for (auto animName : anims.keys())
 	{
@@ -89,6 +92,20 @@ SkeletonPtr ModelLoader::extractSkeletonFromScene(const aiScene* scene)
 	evalChildren = [skel, &evalChildren](aiNode* node, BonePtr parentBone) {
 		auto bone = Bone::create(QString(node->mName.C_Str()));
 
+		//extract transform
+		aiVector3D pos, scale;
+		aiQuaternion rot;
+
+		//auto transform = node->mTransformation;
+		node->mTransformation.Decompose(scale, rot, pos);
+		bone->pos = QVector3D(pos.x, pos.y, pos.z);
+		bone->scale = QVector3D(scale.x, scale.y, scale.z);
+		bone->rot = QQuaternion(rot.w, rot.x, rot.y, rot.z);
+
+		bone->bindingPos = bone->pos;
+		bone->bindingScale = bone->scale;
+		bone->bindingRot = bone->rot;
+
 		skel->addBone(bone);
 		if (!!parentBone)
 			parentBone->addChild(bone);
@@ -105,6 +122,38 @@ SkeletonPtr ModelLoader::extractSkeletonFromScene(const aiScene* scene)
 	evalChildren(scene->mRootNode, BonePtr());
 
 	return skel;
+}
+
+QVector<ModelMesh> ModelLoader::extractMeshesFromScene(const aiScene * scene)
+{
+	QVector<ModelMesh> modelMeshes;
+	std::function<void(aiNode*)> evalChildren;
+	evalChildren = [&modelMeshes, &evalChildren, scene](aiNode* node) {
+		for (int i = 0; i < node->mNumMeshes; i++) {
+			auto mesh = scene->mMeshes[node->mMeshes[i]];
+			ModelMesh modelMesh;
+			modelMesh.meshName = QString(node->mName.C_Str());
+
+			auto meshObj = MeshPtr(new Mesh(scene->mMeshes[0]));
+			auto skel = Mesh::extractSkeleton(mesh, scene);
+
+			if (!!skel)
+				meshObj->setSkeleton(skel);
+
+			modelMesh.mesh = meshObj;
+			modelMeshes.append(modelMesh);
+		}
+
+
+		for (unsigned i = 0; i < node->mNumChildren; i++)
+		{
+			auto childNode = node->mChildren[i];
+			evalChildren(childNode);
+		}
+	};
+	evalChildren(scene->mRootNode);
+
+	return modelMeshes;
 }
 
 }

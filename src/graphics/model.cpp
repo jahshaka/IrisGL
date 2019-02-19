@@ -38,15 +38,15 @@ For more information see the LICENSE file
 namespace iris
 {
 
-Model::Model(QList<MeshPtr> meshes)
+Model::Model(QVector<ModelMesh> modelMeshes)
 {
-	this->meshes = meshes;
+	this->modelMeshes = modelMeshes;
 	animTime = 0;
 }
 
-Model::Model(QList<MeshPtr> meshes, QMap<QString, SkeletalAnimationPtr> skeletalAnimations)
+Model::Model(QVector<ModelMesh> modelMeshes, QMap<QString, SkeletalAnimationPtr> skeletalAnimations)
 {
-	this->meshes = meshes;
+	this->modelMeshes = modelMeshes;
 	this->skeletalAnimations = skeletalAnimations;
 }
 
@@ -88,13 +88,23 @@ void Model::updateAnimation(float dt)
 		skeleton->applyAnimation(activeAnimation, time);
 
 		//todo: apply to children nodes
+		QMap<QString, QMatrix4x4> skeletonSpaceMatrices;
+		for (auto boneName : skeleton->boneMap.keys()) {
+			skeletonSpaceMatrices[boneName] = skeleton->bones[skeleton->boneMap[boneName]]->transformMatrix;
+		}
+		for (auto& modelMesh : modelMeshes) {
+			modelMesh.transform = skeletonSpaceMatrices[modelMesh.meshName];
+			auto inverseMeshMatrix = modelMesh.transform.inverted();
+			if (modelMesh.mesh->hasSkeleton())
+				modelMesh.mesh->getSkeleton()->applyAnimation(inverseMeshMatrix, skeletonSpaceMatrices);
+		}
 	}
 }
 
 void Model::draw(GraphicsDevicePtr device)
 {
-	for (auto& mesh : meshes)
-		mesh->draw(device);
+	for (auto& modelMesh : modelMeshes)
+		modelMesh.mesh->draw(device);
 }
 
 Model::~Model()

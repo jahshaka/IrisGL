@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include <QString>
 #include <qopengl.h>
 #include <QColor>
+#include <QMatrix4x4>
 #include "../irisglfwd.h"
 #include "../animation/skeletalanimation.h"
 #include "../geometry/boundingsphere.h"
@@ -25,6 +26,19 @@ For more information see the LICENSE file
 namespace iris
 {
 
+struct ModelMesh
+{
+	iris::MeshPtr mesh;
+	// refers to the parent bone
+	QString meshName;
+	QMatrix4x4 transform;
+
+	ModelMesh()
+	{
+		transform.setToIdentity();
+	}
+};
+
 class Model
 {
 	friend class ModelLoader;
@@ -34,15 +48,18 @@ class Model
 	SkeletalAnimationPtr activeAnimation;
 	float animTime;
 
-	QList<MeshPtr> meshes;
+	
 	GraphicsDevicePtr device;
 
 	BoundingSphere boundingSphere;
 	AABB aabb;
 public:
+	//QList<MeshPtr> meshes;
+	QVector<ModelMesh> modelMeshes;
     bool hasSkeleton();
     SkeletonPtr getSkeleton();
 	void setSkeleton(const SkeletonPtr &value);
+	void setActiveAnimation(SkeletalAnimationPtr animation) { activeAnimation = animation; }
     void addSkeletalAnimation(QString name, SkeletalAnimationPtr anim);
     QMap<QString, SkeletalAnimationPtr> getSkeletalAnimations();
     bool hasSkeletalAnimations();
@@ -55,8 +72,8 @@ public:
 	
     ~Model();
 private:
-	explicit Model(QList<MeshPtr> meshes);
-	Model(QList<MeshPtr> meshes, QMap<QString, SkeletalAnimationPtr> skeletalAnimations);
+	explicit Model(QVector<ModelMesh> modelMeshes);
+	Model(QVector<ModelMesh> modelMeshes, QMap<QString, SkeletalAnimationPtr> skeletalAnimations);
 };
 
 }
