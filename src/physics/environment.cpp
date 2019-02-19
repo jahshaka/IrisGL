@@ -130,6 +130,35 @@ void Environment::toggleDebugDrawFlags(bool state)
     }
 }
 
+void Environment::startRigidBodyTeleport(const QString &guid)
+{
+	if (!hashBodies.contains(guid)) return;
+	activeTeleportedRigidBody = hashBodies.value(guid);
+}
+
+void Environment::updateRigidBodyTeleport(const QString &guid, const QMatrix4x4 &transform)
+{
+	if (activeTeleportedRigidBody) {
+		btTransform rigidBodyTransform;
+		rigidBodyTransform.setIdentity();
+		rigidBodyTransform.setFromOpenGLMatrix(transform.constData());
+
+		activeTeleportedRigidBody->setWorldTransform(rigidBodyTransform);
+		activeTeleportedRigidBody->getMotionState()->setWorldTransform(rigidBodyTransform);
+		activeTeleportedRigidBody->setGravity(btVector3(0, 0, 0));
+		activeTeleportedRigidBody->setLinearVelocity(btVector3(0.0f, 0.0f, 0.0f));
+		activeTeleportedRigidBody->setAngularVelocity(btVector3(0.0f, 0.0f, 0.0f));
+		activeTeleportedRigidBody->clearForces();
+	}
+}
+
+void Environment::endRigidBodyTeleport()
+{
+	activeTeleportedRigidBody->setGravity(world->getGravity());
+	activeTeleportedRigidBody = 0;
+	delete activeTeleportedRigidBody;
+}
+
 void Environment::restartPhysics()
 {
     // node transforms are reset inside button caller

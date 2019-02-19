@@ -97,6 +97,10 @@ public:
 	void stepSimulation(float delta);
     void toggleDebugDrawFlags(bool state = false);
 
+	void startRigidBodyTeleport(const QString &guid);
+	void updateRigidBodyTeleport(const QString &guid, const QMatrix4x4 &transform);
+	void endRigidBodyTeleport();
+
     void restartPhysics();
     void createPhysicsWorld();
     void destroyPhysicsWorld();
@@ -128,6 +132,7 @@ private:
     GLDebugDrawer *debugDrawer;
 
 	btRigidBody *constraintActiveRigidBody;
+	btRigidBody *activeTeleportedRigidBody;
 	btTypedConstraint *activePickingConstraint;
 	int	activeRigidBodySavedState;
 	btVector3 constraintOldPickingPosition;
