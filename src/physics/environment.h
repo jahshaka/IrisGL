@@ -101,6 +101,14 @@ public:
     void createPhysicsWorld();
     void destroyPhysicsWorld();
 
+	// These manage a unique picking constraint that is used to manipulate a rigid body about a scene
+	// Primarily used in the 3D viewport, the constraint can be loosened to behave more interactively
+	void createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd);
+	void updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition);
+	void cleanupPickingConstraint();
+
+	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
+
 private:
     btCollisionConfiguration    *collisionConfig;
     btDispatcher                *dispatcher;
@@ -118,6 +126,13 @@ private:
     iris::RenderList *debugRenderList;
 
     GLDebugDrawer *debugDrawer;
+
+	btRigidBody *constraintActiveRigidBody;
+	btTypedConstraint *activePickingConstraint;
+	int	activeRigidBodySavedState;
+	btVector3 constraintOldPickingPosition;
+	btVector3 constraintHitPosition;
+	btScalar constraintOldPickingDistance;
 };
 
 }

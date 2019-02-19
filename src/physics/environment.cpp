@@ -159,10 +159,178 @@ void Environment::createPhysicsWorld()
     world->setDebugDrawer(debugDrawer);
 }
 
+void Environment::createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
+{
+	// Use a Point2Point Constraint, this makes the body follow the constraint origin loosely
+	// with directional forces effecting its transform
+	//if (pickedNode->isPhysicsBody) {
+	//    activeRigidBody = scene->getPhysicsEnvironment()->hashBodies.value(pickedNode->getGUID());
+
+	//    m_savedState = activeRigidBody->getActivationState();
+	//    activeRigidBody->setActivationState(DISABLE_DEACTIVATION);
+	//    //printf("pickPos=%f,%f,%f\n",pickPos.getX(),pickPos.getY(),pickPos.getZ());
+	//    btVector3 localPivot = activeRigidBody->getCenterOfMassTransform().inverse() * iris::PhysicsHelper::btVector3FromQVector3D(hitList.last().hitPoint);
+	//    btPoint2PointConstraint* p2p = new btPoint2PointConstraint(*activeRigidBody, localPivot);
+	//    scene->getPhysicsEnvironment()->getWorld()->addConstraint(p2p, true);
+	//    m_pickedConstraint = p2p;
+	//    btScalar mousePickClamping = 30.f;
+	//    p2p->m_setting.m_impulseClamp = mousePickClamping;
+	//    //very weak constraint for picking
+	//    p2p->m_setting.m_tau = 0.001f;
+	//}
+
+	//btVector3 rayFromWorld = iris::PhysicsHelper::btVector3FromQVector3D(editorCam->getGlobalPosition());
+	//btVector3 rayToWorld = iris::PhysicsHelper::btVector3FromQVector3D(calculateMouseRay(point) * 1024);
+
+	//m_oldPickingPos = rayToWorld;
+	//m_hitPos = iris::PhysicsHelper::btVector3FromQVector3D(hitList.last().hitPoint);
+	//m_oldPickingDist = (iris::PhysicsHelper::btVector3FromQVector3D(hitList.last().hitPoint) - rayFromWorld).length();
+
+	// Fetch our rigid body from the list stored in the world by guid
+	constraintActiveRigidBody = hashBodies.value(pickedNodeGUID);
+	// prevent the picked object from falling asleep
+	activeRigidBodySavedState = constraintActiveRigidBody->getActivationState();
+	constraintActiveRigidBody->setActivationState(DISABLE_DEACTIVATION);
+	// get the hit position relative to the body we hit 
+	// constraints MUST be defined in local space coords
+	btVector3 localPivot = constraintActiveRigidBody->getCenterOfMassTransform().inverse() * hitPoint;
+
+	// create a transform for the pivot point
+	btTransform pivot;
+	pivot.setIdentity();
+	pivot.setOrigin(localPivot);
+
+	// create our constraint object
+	auto dof6 = new btGeneric6DofConstraint(*constraintActiveRigidBody, pivot, true);
+	bool bLimitAngularMotion = true;
+	if (bLimitAngularMotion) {
+		dof6->setAngularLowerLimit(btVector3(0, 0, 0));
+		dof6->setAngularUpperLimit(btVector3(0, 0, 0));
+	}
+
+	// add the constraint to the world
+	addConstraintToWorld(dof6, false);
+
+	// store a pointer to our constraint
+	activePickingConstraint = dof6;
+
+	// define the 'strength' of our constraint (each axis)
+	float cfm = 0.1f;
+	dof6->setParam(BT_CONSTRAINT_STOP_CFM, cfm, 0);
+	dof6->setParam(BT_CONSTRAINT_STOP_CFM, cfm, 1);
+	dof6->setParam(BT_CONSTRAINT_STOP_CFM, cfm, 2);
+	dof6->setParam(BT_CONSTRAINT_STOP_CFM, cfm, 3);
+	dof6->setParam(BT_CONSTRAINT_STOP_CFM, cfm, 4);
+	dof6->setParam(BT_CONSTRAINT_STOP_CFM, cfm, 5);
+
+	// define the 'error reduction' of our constraint (each axis)
+	float erp = 0.5f;
+	dof6->setParam(BT_CONSTRAINT_STOP_ERP, erp, 0);
+	dof6->setParam(BT_CONSTRAINT_STOP_ERP, erp, 1);
+	dof6->setParam(BT_CONSTRAINT_STOP_ERP, erp, 2);
+	dof6->setParam(BT_CONSTRAINT_STOP_ERP, erp, 3);
+	dof6->setParam(BT_CONSTRAINT_STOP_ERP, erp, 4);
+	dof6->setParam(BT_CONSTRAINT_STOP_ERP, erp, 5);
+
+	// save this data for future reference
+	//btVector3 rayFromWorld = iris::PhysicsHelper::btVector3FromQVector3D(editorCam->getGlobalPosition());
+	//btVector3 rayToWorld = iris::PhysicsHelper::btVector3FromQVector3D(calculateMouseRay(point) * 1024);
+
+	btVector3 rayFromWorld = iris::PhysicsHelper::btVector3FromQVector3D(segStart);
+	btVector3 rayToWorld = iris::PhysicsHelper::btVector3FromQVector3D(segEnd);
+
+	constraintOldPickingPosition = rayToWorld;
+	constraintHitPosition = hitPoint;
+	constraintOldPickingDistance = (hitPoint - rayFromWorld).length();
+}
+
+void Environment::updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition)
+{
+	if (constraintActiveRigidBody && activePickingConstraint) {
+		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(activePickingConstraint);
+		if (pickingConstraint) {
+			// use another picking ray to get the target direction
+			btVector3 dir = rayDirection;
+			//-cameraPosition;
+			dir.normalize();
+			// use the same distance as when we originally picked the object
+			dir *= constraintOldPickingDistance;
+			btVector3 newPivot = cameraPosition + dir;
+			// set the position of the constraint
+			pickingConstraint->getFrameOffsetA().setOrigin(newPivot);
+		}
+	}
+}
+
+void Environment::cleanupPickingConstraint()
+{
+	if (activePickingConstraint) {
+		constraintActiveRigidBody->forceActivationState(activeRigidBodySavedState);
+		constraintActiveRigidBody->activate();
+		removeConstraintFromWorld(activePickingConstraint);
+		activePickingConstraint = 0;
+		constraintActiveRigidBody = 0;
+		delete activePickingConstraint;
+		delete constraintActiveRigidBody;
+	}
+}
+
+// Defunct, since the environment isn't dynamic anymore, properties are added when simulation starts still keep this around (iKlsR)
+void Environment::createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type)
+{
+	// Adds this constraint to two rigid bodies, the first is the currently selected node/body
+	// The second is selected from a menu ... TODO - do an interactive pick for selecting the second node
+	auto bodyA = hashBodies.value(node->getGUID());
+	auto bodyB = hashBodies.value(to);
+
+	// Constraints must be defined in LOCAL SPACE...
+	btVector3 pivotA = bodyA->getCenterOfMassTransform().getOrigin();
+	btVector3 pivotB = bodyB->getCenterOfMassTransform().getOrigin();
+
+	// Prefer a transform instead of a vector ... the majority of constraints use transforms
+	btTransform frameA;
+	frameA.setIdentity();
+	frameA.setOrigin(bodyA->getCenterOfMassTransform().inverse() * pivotA);
+
+	btTransform frameB;
+	frameB.setIdentity();
+	frameB.setOrigin(bodyB->getCenterOfMassTransform().inverse() * pivotA);
+
+	btTypedConstraint *constraint = Q_NULLPTR;
+
+	iris::ConstraintProperty constraintProperty;
+	constraintProperty.constraintFrom = node->getGUID();
+	constraintProperty.constraintTo = to;
+
+	if (type == iris::PhysicsConstraintType::Ball) {
+		constraint = new btPoint2PointConstraint(
+			*bodyA, *bodyB, frameA.getOrigin(), frameB.getOrigin()
+		);
+
+		constraintProperty.constraintType = iris::PhysicsConstraintType::Ball;
+	}
+
+	if (type == iris::PhysicsConstraintType::Dof6) {
+		constraint = new btGeneric6DofConstraint(
+			*bodyA, *bodyB, frameA, frameB, true
+		);
+
+		constraintProperty.constraintType = iris::PhysicsConstraintType::Dof6;
+	}
+
+	node->physicsProperty.constraints.push_back(constraintProperty);
+
+	constraint->setDbgDrawSize(btScalar(6));
+
+	//constraint->m_setting.m_damping = 1.f;
+	//constraint->m_setting.m_impulseClamp = 1.f;
+
+	// Add the constraint to the physics world
+	addConstraintToWorld(constraint);
+}
+
 void Environment::destroyPhysicsWorld()
 {
-    //removePickingConstraint();
-
     // this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
     if (world) {
         int i;
