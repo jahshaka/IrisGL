@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include "../scenegraph/cameranode.h"
 #include "../scenegraph/viewernode.h"
 #include "../scenegraph/meshnode.h"
+#include "../scenegraph/grabnode.h"
 #include "../scenegraph/particlesystemnode.h"
 #include "../graphics/mesh.h"
 #include "../graphics/renderitem.h"
@@ -252,6 +253,11 @@ void Scene::addNode(SceneNodePtr node)
         if ( vrViewer.isNull())
             vrViewer = viewer;
     }
+
+	if (node->sceneNodeType == SceneNodeType::Grab) {
+		auto grabber = node.staticCast<iris::GrabNode>();
+		grabbers.append(grabber);
+	}
 }
 
 void Scene::removeNode(SceneNodePtr node)

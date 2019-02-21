@@ -13,7 +13,8 @@ class GrabNode : public SceneNode
 {
 public:
 	// this class owns the hand pose
-	HandPose * handPose;
+	HandPose* handPose;
+	float poseFactor;
 
 	GrabNode(HandPoseType poseType = HandPoseType::Grab);
 

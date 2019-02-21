@@ -7,6 +7,7 @@ GrabNode::GrabNode(HandPoseType poseType)
 {
 	this->sceneNodeType = SceneNodeType::Grab;
 	handPose = nullptr;
+	poseFactor = 1.0;
 	setPose(poseType);	
 }
 

@@ -127,12 +127,33 @@ SkeletonPtr ModelLoader::extractSkeletonFromScene(const aiScene* scene)
 QVector<ModelMesh> ModelLoader::extractMeshesFromScene(const aiScene * scene)
 {
 	QVector<ModelMesh> modelMeshes;
-	std::function<void(aiNode*)> evalChildren;
-	evalChildren = [&modelMeshes, &evalChildren, scene](aiNode* node) {
+	std::function<void(aiNode*, const aiMatrix4x4&)> evalChildren;
+	evalChildren = [&modelMeshes, &evalChildren, scene](aiNode* node, const aiMatrix4x4& parentTransform) {
+		
+		//extract transform
+		aiVector3D pos, scale;
+		aiQuaternion rot;
+
+		// assimp's matrices are row major so the mult order is child * parent
+		auto globalTransform = node->mTransformation * parentTransform;
+		//auto globalTransform = parentTransform * node->mTransformation;
+		//node->mTransformation.Decompose(scale, rot, pos);
+		globalTransform.Decompose(scale, rot, pos);
+
+		// all meshes under this node will inherit this transform
+		QMatrix4x4 meshTransform;
+		meshTransform.setToIdentity();
+		meshTransform.translate(QVector3D(pos.x, pos.y, pos.z));
+		meshTransform.rotate(QQuaternion(rot.w, rot.x, rot.y, rot.z));
+		meshTransform.scale(QVector3D(scale.x, scale.y, scale.z));
+
 		for (int i = 0; i < node->mNumMeshes; i++) {
 			auto mesh = scene->mMeshes[node->mMeshes[i]];
 			ModelMesh modelMesh;
 			modelMesh.meshName = QString(node->mName.C_Str());
+			
+			modelMesh.transform = meshTransform;
+			
 
 			auto meshObj = MeshPtr(new Mesh(scene->mMeshes[0]));
 			auto skel = Mesh::extractSkeleton(mesh, scene);
@@ -148,10 +169,10 @@ QVector<ModelMesh> ModelLoader::extractMeshesFromScene(const aiScene * scene)
 		for (unsigned i = 0; i < node->mNumChildren; i++)
 		{
 			auto childNode = node->mChildren[i];
-			evalChildren(childNode);
+			evalChildren(childNode, globalTransform);
 		}
 	};
-	evalChildren(scene->mRootNode);
+	evalChildren(scene->mRootNode, aiMatrix4x4());
 
 	return modelMeshes;
 }
