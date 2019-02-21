@@ -31,6 +31,8 @@ struct ModelMesh
 	iris::MeshPtr mesh;
 	// refers to the parent bone
 	QString meshName;
+
+	// from the root of the model's scene
 	QMatrix4x4 transform;
 
 	ModelMesh()
@@ -60,6 +62,7 @@ public:
     SkeletonPtr getSkeleton();
 	void setSkeleton(const SkeletonPtr &value);
 	void setActiveAnimation(SkeletalAnimationPtr animation) { activeAnimation = animation; }
+	void setActiveAnimation(const QString& animationName);
     void addSkeletalAnimation(QString name, SkeletalAnimationPtr anim);
     QMap<QString, SkeletalAnimationPtr> getSkeletalAnimations();
     bool hasSkeletalAnimations();
@@ -67,6 +70,7 @@ public:
 	AABB getAABB() { return aabb; }
 	BoundingSphere getBoundingSphere() { return boundingSphere; }
 
+	void applyAnimation(float time);
 	void updateAnimation(float dt);
     void draw(GraphicsDevicePtr device);
 	

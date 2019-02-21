@@ -65,6 +65,14 @@ SkeletonPtr Model::getSkeleton()
     return skeleton;
 }
 
+void Model::setActiveAnimation(const QString& animationName)
+{
+	if (skeletalAnimations.contains(animationName))
+		this->setActiveAnimation(skeletalAnimations[animationName]);
+	else
+		irisLog("No animation named: " + animationName);
+}
+
 void Model::addSkeletalAnimation(QString name, SkeletalAnimationPtr anim)
 {
     skeletalAnimations.insert(name, anim);
@@ -80,14 +88,11 @@ bool Model::hasSkeletalAnimations()
     return skeletalAnimations.count() != 0;
 }
 
-void Model::updateAnimation(float dt)
+void Model::applyAnimation(float time)
 {
 	if (!!activeAnimation && !!skeleton) {
-		animTime += dt;
-		float time = animTime;
 		skeleton->applyAnimation(activeAnimation, time);
 
-		//todo: apply to children nodes
 		QMap<QString, QMatrix4x4> skeletonSpaceMatrices;
 		for (auto boneName : skeleton->boneMap.keys()) {
 			skeletonSpaceMatrices[boneName] = skeleton->bones[skeleton->boneMap[boneName]]->transformMatrix;
@@ -99,6 +104,12 @@ void Model::updateAnimation(float dt)
 				modelMesh.mesh->getSkeleton()->applyAnimation(inverseMeshMatrix, skeletonSpaceMatrices);
 		}
 	}
+}
+
+void Model::updateAnimation(float dt)
+{
+	animTime += dt;
+	applyAnimation(animTime);
 }
 
 void Model::draw(GraphicsDevicePtr device)
