@@ -13,6 +13,8 @@ Environment::Environment(iris::RenderList *debugList)
     debugRenderList = debugList;
     lineMat = iris::LineColorMaterial::create();
     lineMat.staticCast<iris::LineColorMaterial>()->setDepthBias(10.f);
+
+	activePickingConstraint = 0;
 }
 
 Environment::~Environment()
