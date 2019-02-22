@@ -199,7 +199,7 @@ void Environment::updateCharacterControllers(float delta)
 			break;
 		}
 	}
-=======
+}
 
 void Environment::drawDebugShapes()
 {
@@ -211,7 +211,6 @@ void Environment::drawDebugShapes()
 	QMatrix4x4 transform;
 	transform.setToIdentity();
 	debugRenderList->submitMesh(builder.build(), lineMat, transform);
->>>>>>> Cleanup physics environment
 }
 
 void Environment::toggleDebugDrawFlags(bool state)
