@@ -15,7 +15,6 @@ For more information see the LICENSE file
 #include "../scenegraph/cameranode.h"
 #include "../scenegraph/viewernode.h"
 #include "../scenegraph/meshnode.h"
-#include "../scenegraph/grabnode.h"
 #include "../scenegraph/particlesystemnode.h"
 #include "../graphics/mesh.h"
 #include "../graphics/renderitem.h"
@@ -113,48 +112,47 @@ void Scene::updateSceneAnimation(float time)
 void Scene::update(float dt)
 {
 	time += dt < 0 ? 0 : dt;
-    rootNode->update(dt);
 
-    // cameras aren't always a part of the scene hierarchy, so their matrices are updated here
-    if (!!camera) {
-        camera->update(dt);
+    environment->stepSimulation(dt);
+	environment->drawDebugShapes();
+
+	// Iterate over all rigid bodies and update the corresponding scenenode
+	QHashIterator<QString, btRigidBody*> physicsBodies(environment->hashBodies);
+	while (physicsBodies.hasNext()) {
+		physicsBodies.next();
+		// Override the mesh's transform if it's a physics body
+		// Not the end place since we need to transform empties as well
+		// Iterate through the entire scene and change physics object transforms as per NN
+		btScalar matrix[16];
+		auto trans = physicsBodies.value()->getWorldTransform();
+		trans.getOpenGLMatrix(matrix);
+		// Get the matching scenenode
+		auto mesh = meshes.value(physicsBodies.key());
+		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
+		auto simulatedTransform = QMatrix4x4(matrix).transposed();
+		simulatedTransform.scale(mesh->getLocalScale());
+		// Set our scenenode to the simulated transform
+		mesh->setGlobalTransform(simulatedTransform);
+	}
+
+	// Cameras aren't always a part of the scene hierarchy, so their matrices are updated here
+	if (!!camera) {
+		camera->update(dt);
 		camera->updateCameraMatrices();
-    }
+	}
 
-    if (environment->isSimulating() && !environment->hashBodies.isEmpty()) {
+	rootNode->update(dt);
 
-		// advance simulation
-		environment->stepSimulation(dt);
-
-        for (const auto &node : rootNode->children) {
-        // Override the mesh's transform if it's a physics body
-        // Not the end place since we need to transform empties as well
-        // Iterate through the entire scene and change physics object transforms as per NN
-            if (node->isPhysicsBody) {
-                btTransform trans;
-                float matrix[16];
-                environment->hashBodies.value(node->getGUID())->getMotionState()->getWorldTransform(trans);
-                trans.getOpenGLMatrix(matrix);
-
-                // Since the physics is detached from the engine rendering, this is important to retain object scale
-                auto mat = QMatrix4x4(matrix).transposed();
-                mat.scale(node->getLocalScale());
-
-                node->setGlobalTransform(mat);
-            }
-        }
-    }
-
-    // add items to renderlist
-    for (const auto &mesh : meshes) {
-        mesh->submitRenderItems();
-    }
+	for (const auto &mesh : meshes) {
+		mesh->submitRenderItems();
+	}
 
     for (const auto &particle : particleSystems) {
         particle->submitRenderItems();
     }
 
     if (renderSky) this->geometryRenderList->add(skyRenderItem);
+
 }
 
 void Scene::render()
@@ -225,70 +223,62 @@ void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
 
 void Scene::addNode(SceneNodePtr node)
 {
-    if (!!node->scene)
-    {
+    if (!!node->scene) {
         //qDebug() << "Node already has scene";
         //throw "Node already has scene";
     }
 
     if (node->sceneNodeType == SceneNodeType::Light) {
         auto light = node.staticCast<iris::LightNode>();
-        lights.append(light);
+        lights.insert(light->getGUID(), light);
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
         auto mesh = node.staticCast<iris::MeshNode>();
-        meshes.append(mesh);
+        meshes.insert(node->getGUID(), mesh);
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
         auto particleSystem = node.staticCast<iris::ParticleSystemNode>();
-        particleSystems.append(particleSystem);
+        particleSystems.insert(node->getGUID(), particleSystem);
     }
 
-    if(node->sceneNodeType == SceneNodeType::Viewer)
-    {
+    if (node->sceneNodeType == SceneNodeType::Viewer) {
         auto viewer = node.staticCast<iris::ViewerNode>();
-        viewers.append(viewer);
+        viewers.insert(node->getGUID(), viewer);
 
-        if ( vrViewer.isNull())
-            vrViewer = viewer;
+        if (vrViewer.isNull()) vrViewer = viewer;
     }
-
-	if (node->sceneNodeType == SceneNodeType::Grab) {
-		auto grabber = node.staticCast<iris::GrabNode>();
-		grabbers.append(grabber);
-	}
 }
 
 void Scene::removeNode(SceneNodePtr node)
 {
     if (node->sceneNodeType == SceneNodeType::Light) {
-        lights.removeOne(node.staticCast<iris::LightNode>());
+        lights.remove(lights.key(node.staticCast<iris::LightNode>()));
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
-        meshes.removeOne(node.staticCast<iris::MeshNode>());
+        meshes.remove(meshes.key(node.staticCast<iris::MeshNode>()));
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
-        particleSystems.removeOne(node.staticCast<iris::ParticleSystemNode>());
+        particleSystems.remove(particleSystems.key(node.staticCast<iris::ParticleSystemNode>()));
     }
 
     if (node->sceneNodeType == SceneNodeType::Viewer) {
         auto viewer = node.staticCast<iris::ViewerNode>();
-        viewers.removeOne(viewer);
+        viewers.remove(viewers.key(viewer));
 
-        // remove viewer and replace it if more viewers are available
-        if ( vrViewer == viewer) {
-            if(viewers.count()==0)
-                vrViewer.reset();
-            else
-                vrViewer = viewers[viewers.count()-1];
-        }
+        // Remove viewer and replace it if more viewers are available
+        if (vrViewer == viewer && viewers.count() == 0) vrViewer.reset();
+		else {
+			auto iter = viewers.constBegin();
+			while (iter != viewers.constEnd()) ++iter;
+			vrViewer = iter.value();
+		}
     }
 
-    for (auto& child : node->children) {
+    for (auto &child : node->children) {
         removeNode(child);
     }
 }

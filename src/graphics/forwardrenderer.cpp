@@ -565,8 +565,6 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
         }
     }
 
-    auto lightCount = renderData->scene->lights.size();
-
     scene->geometryRenderList->sort();
 
     for (auto& item : scene->geometryRenderList->getItems()) {
@@ -635,19 +633,23 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
 
             program->setUniformValue("u_lightSpaceMatrix",  lightSpaceMatrix);
             */
-			graphics->setShaderUniform("u_lightCount",        lightCount);
-            int shadowIndex = 8;
-            // only materials get lights passed to it
-            if ( item->renderStates.receiveLighting ) {
-                for (int i=0;i<lightCount;i++)
-                {
-					auto& lightNames = this->lightUniformNames[i];
-                    //QString lightPrefix = QString("u_lights[%0].").arg(i);
+			graphics->setShaderUniform("u_lightCount", renderData->scene->lights.count());
 
-                    auto light = renderData->scene->lights[i];
-                    if(!light->isVisible())
-                    {
-                        //quick hack for now
+            int shadowIndex = 8;
+
+            // Only materials get lights passed to it
+            if ( item->renderStates.receiveLighting ) {
+				int lightUniformIndex = 0;
+				QHashIterator<QString, iris::LightNodePtr> iter(renderData->scene->lights);
+				while (iter.hasNext()) {
+					iter.next();
+
+					auto lightNames = this->lightUniformNames[lightUniformIndex++];
+
+                    auto light = iter.value();
+
+                    if (!light->isVisible()) {
+                        // Lasting hack for now (Nick)
 						graphics->setShaderUniform(lightNames.color.c_str(), QColor(0,0,0));
                         continue;
                     }
@@ -669,31 +671,21 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
 					graphics->setShaderUniform(lightNames.linearAtten.c_str(), 0.0f);
 					graphics->setShaderUniform(lightNames.quadAtten.c_str(), 1.0f);
 
-                    // shadow data
-//                    mat->setUniformValue(lightPrefix+"shadowEnabled",
-//                                         item->renderStates.receiveShadows &&
-//                                         scene->shadowEnabled &&
-//                                         light->lightType != iris::LightType::Point);
 					if (!scene->shadowEnabled) {
-						graphics->setShaderUniform(lightNames.shadowType.c_str(), (int)iris::ShadowMapType::None);
+						graphics->setShaderUniform(lightNames.shadowType.c_str(), static_cast<int>(iris::ShadowMapType::None));
 					}
 					else {
 						graphics->setShaderUniform(lightNames.shadowMap.c_str(), shadowIndex);
-						//mat->setUniformValue(QString("shadowMaps[%0].").arg(i), 8);
 						graphics->setShaderUniform(lightNames.shadowMatrix.c_str(), light->shadowMap->shadowMatrix);
 						if (light->lightType == iris::LightType::Point)
-							graphics->setShaderUniform(lightNames.shadowType.c_str(), (int)iris::ShadowMapType::None);
+							graphics->setShaderUniform(lightNames.shadowType.c_str(), static_cast<int>(iris::ShadowMapType::None));
 						else
-							graphics->setShaderUniform(lightNames.shadowType.c_str(), (int)light->shadowMap->shadowType);
+							graphics->setShaderUniform(lightNames.shadowType.c_str(), static_cast<int>(light->shadowMap->shadowType));
 
 
 						graphics->setTexture(shadowIndex, light->shadowMap->shadowTexture);
 						shadowIndex++;
 					}
-                    //shadowDepthMap
-                    //gl->glActiveTexture(GL_TEXTURE8);
-                    //gl->glBindTexture(GL_TEXTURE_2D, light->shadowMap->shadowTexId);
-                    //gl->glBindTexture(GL_TEXTURE_2D, shadowDepthMap);
                 }
             }
 
@@ -753,33 +745,31 @@ void ForwardRenderer::renderBillboardIcons(RenderData* renderData)
 {
     gl->glDisable(GL_CULL_FACE);
 
-    auto lightCount = renderData->scene->lights.size();
     auto program = billboard->program;
     program->bind();
 
     gl->glEnable(GL_BLEND);
     gl->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    for(int i=0;i<lightCount;i++)
-    {
-        auto light = renderData->scene->lights[i];
 
-        program->setUniformValue("u_worldMatrix",light->globalTransform);
-        program->setUniformValue("u_viewMatrix",renderData->viewMatrix);
-        program->setUniformValue("u_projMatrix",renderData->projMatrix);
+	QHashIterator<QString, iris::LightNodePtr> iter(renderData->scene->lights);
+	while (iter.hasNext()) {
+		iter.next();
+
+        auto light = iter.value();
+
+        program->setUniformValue("u_worldMatrix", light->globalTransform);
+        program->setUniformValue("u_viewMatrix", renderData->viewMatrix);
+        program->setUniformValue("u_projMatrix", renderData->projMatrix);
 
         gl->glActiveTexture(GL_TEXTURE0);
+
         auto icon = light->icon;
-        if(!!icon)
-        {
+        if (!!icon) {
             icon->texture->bind();
             billboard->draw(graphics);
+        } else {
+			gl->glBindTexture(GL_TEXTURE_2D,0);
         }
-        else
-        {
-            gl->glBindTexture(GL_TEXTURE_2D,0);
-        }
-
-
     }
     gl->glDisable(GL_BLEND);
 
