@@ -45,6 +45,11 @@ btVector3 PhysicsHelper::btVector3FromQVector3D(QVector3D vector)
     return btVector3(vector.x(), vector.y(), vector.z());
 }
 
+QVector3D PhysicsHelper::QVector3DFrombtVector3(btVector3 vector)
+{
+	return QVector3D(vector.getX(), vector.getY(), vector.getZ());
+}
+
 btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode, const iris::PhysicsProperty &props)
 {
     btVector3 pos(sceneNode->getLocalPos().x(), sceneNode->getLocalPos().y(), sceneNode->getLocalPos().z());

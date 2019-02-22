@@ -31,6 +31,7 @@ class ViewerNode : public SceneNode
 	bool allowMovement;
 	bool allowPicking;
 	bool showHands;
+	bool activeCharacterController;
 
 public:
 
@@ -62,6 +63,14 @@ public:
 	bool getShowHands()
 	{
 		return this->showHands;
+	}
+
+	void setActiveCharacterController(bool state) {
+		activeCharacterController = state;
+	}
+
+	bool isActiveCharacterController() {
+		return activeCharacterController;
 	}
 
     void setViewScale(float scale);
