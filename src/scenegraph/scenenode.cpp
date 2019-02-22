@@ -62,6 +62,7 @@ SceneNode::SceneNode():
 
     //keyFrameSet = KeyFrameSet::create();
     //animation = iris::Animation::create("");
+	setGUID(IrisUtils::generateGUID());
 }
 
 SceneNodePtr SceneNode::create()
