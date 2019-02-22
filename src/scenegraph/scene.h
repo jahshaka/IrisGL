@@ -56,11 +56,11 @@ public:
      */
     ViewerNodePtr vrViewer;
 
-    QHash<QString, LightNodePtr> lights;
-	QHash<QString, MeshNodePtr> meshes;
-	QHash<QString, ParticleSystemNodePtr> particleSystems;
-	QHash<QString, ViewerNodePtr> viewers;
-	QHash<QString, GrabNodePtr> grabbers;
+    QList<LightNodePtr> lights;
+    QList<MeshNodePtr> meshes;
+    QList<ParticleSystemNodePtr> particleSystems;
+    QList<ViewerNodePtr> viewers;
+	QList<GrabNodePtr> grabbers;
 
     QColor clearColor;
     bool renderSky;
