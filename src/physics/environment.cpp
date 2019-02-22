@@ -214,6 +214,18 @@ void Environment::drawDebugShapes()
 >>>>>>> Cleanup physics environment
 }
 
+void Environment::drawDebugShapes()
+{
+	iris::LineMeshBuilder builder; // *must* go out of scope...
+	debugDrawer->setPublicBuilder(&builder);
+
+	world->debugDrawWorld();
+
+	QMatrix4x4 transform;
+	transform.setToIdentity();
+	debugRenderList->submitMesh(builder.build(), lineMat, transform);
+}
+
 void Environment::toggleDebugDrawFlags(bool state)
 {
     //if (!state) {
