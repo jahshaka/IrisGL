@@ -29,6 +29,8 @@ namespace iris
 struct ModelMesh
 {
 	iris::MeshPtr mesh;
+	iris::MaterialPtr material;
+
 	// refers to the parent bone
 	QString meshName;
 
