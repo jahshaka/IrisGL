@@ -17,6 +17,7 @@ For more information see the LICENSE file
 #include <QDir>
 #include <QJsonObject>
 #include <QVector3D>
+#include <QUuid>
 
 #ifdef Q_OS_WIN32
     #include <Windows.h>
@@ -71,6 +72,13 @@ public:
         QDir dirToRemove(path);
         return dirToRemove.removeRecursively();
     }
+
+	static QString generateGUID() {
+		auto id = QUuid::createUuid();
+		auto guid = id.toString().remove(0, 1);
+		guid.chop(1);
+		return guid;
+	}
 };
 
 #endif // IRISUTILS_H
