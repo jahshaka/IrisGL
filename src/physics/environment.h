@@ -133,6 +133,7 @@ public:
 	// Primarily used in the 3D viewport, the constraint can be loosened to behave more interactively
 	void createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd);
 	void updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition);
+	void updatePickingConstraint(const QMatrix4x4 &handTransformation);
 	void cleanupPickingConstraint();
 
 	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
@@ -160,8 +161,7 @@ private:
 
     GLDebugDrawer *debugDrawer;
 
-	btRigidBody *constraintActiveRigidBody;
-	btRigidBody *activeTeleportedRigidBody;
+	btRigidBody *activeRigidBodyBeingManipulated;
 	btTypedConstraint *activePickingConstraint;
 	int	activeRigidBodySavedState;
 	btVector3 constraintOldPickingPosition;
