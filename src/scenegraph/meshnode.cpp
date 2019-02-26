@@ -101,11 +101,13 @@ void MeshNode::setMaterial(MaterialPtr material)
     renderItem->material = material;
     renderItem->renderStates = material->renderStates;
 
-	if (this->mesh->hasSkeleton()) {
-		material->enableFlag("SKINNING_ENABLED");
-	}
-	else {
-		material->disableFlag("SKINNING_ENABLED");
+	if (!!mesh) {
+		if (this->mesh->hasSkeleton()) {
+			material->enableFlag("SKINNING_ENABLED");
+		}
+		else {
+			material->disableFlag("SKINNING_ENABLED");
+		}
 	}
 }
 
@@ -349,6 +351,7 @@ MeshNode::loadAsSceneFragment(
 {
 	const aiScene *scene = scene_;
 
+	if (scene == nullptr) return QSharedPointer<iris::MeshNode>(nullptr);
 	if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
 	if (scene->mNumMeshes == 1) {
 		auto mesh = scene->mMeshes[0];
