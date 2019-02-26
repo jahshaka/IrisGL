@@ -279,13 +279,13 @@ void Environment::createPhysicsWorld()
 void Environment::createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
 {
 	// Fetch our rigid body from the list stored in the world by guid
-	constraintActiveRigidBody = hashBodies.value(pickedNodeGUID);
+	activeRigidBodyBeingManipulated = hashBodies.value(pickedNodeGUID);
 	// Prevent the picked object from falling asleep while it is being moved
-	activeRigidBodySavedState = constraintActiveRigidBody->getActivationState();
-	constraintActiveRigidBody->setActivationState(DISABLE_DEACTIVATION);
+	activeRigidBodySavedState = activeRigidBodyBeingManipulated->getActivationState();
+	activeRigidBodyBeingManipulated->setActivationState(DISABLE_DEACTIVATION);
 	// Get the hit position relative to the body we hit 
 	// Constraints MUST be defined in local space coords
-	btVector3 localPivot = constraintActiveRigidBody->getCenterOfMassTransform().inverse() * hitPoint;
+	btVector3 localPivot = activeRigidBodyBeingManipulated->getCenterOfMassTransform().inverse() * hitPoint;
 
 	// Create a transform for the pivot point
 	btTransform pivot;
@@ -293,7 +293,7 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 	pivot.setOrigin(localPivot);
 
 	// Create our constraint object
-	auto dof6 = new btGeneric6DofConstraint(*constraintActiveRigidBody, pivot, true);
+	auto dof6 = new btGeneric6DofConstraint(*activeRigidBodyBeingManipulated, pivot, true);
 	bool bLimitAngularMotion = true;
 	if (bLimitAngularMotion) {
 		dof6->setAngularLowerLimit(btVector3(0, 0, 0));
@@ -325,7 +325,7 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 
 void Environment::updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition)
 {
-	if (constraintActiveRigidBody && activePickingConstraint) {
+	if (activeRigidBodyBeingManipulated && activePickingConstraint) {
 		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(activePickingConstraint);
 		if (pickingConstraint) {
 			// use another picking ray to get the target direction
@@ -340,16 +340,27 @@ void Environment::updatePickingConstraint(const btVector3 &rayDirection, const b
 	}
 }
 
+void Environment::updatePickingConstraint(const QMatrix4x4 &handTransformation)
+{
+	if (activeRigidBodyBeingManipulated && activePickingConstraint) {
+		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(activePickingConstraint);
+		if (pickingConstraint) {
+			pickingConstraint->getFrameOffsetA().setIdentity();
+			pickingConstraint->getFrameOffsetA().setFromOpenGLMatrix(handTransformation.constData());
+		}
+	}
+}
+
 void Environment::cleanupPickingConstraint()
 {
 	if (activePickingConstraint) {
-		constraintActiveRigidBody->forceActivationState(activeRigidBodySavedState);
-		constraintActiveRigidBody->activate();
+		activeRigidBodyBeingManipulated->forceActivationState(activeRigidBodySavedState);
+		activeRigidBodyBeingManipulated->activate();
 		removeConstraintFromWorld(activePickingConstraint);
 		activePickingConstraint = 0;
-		constraintActiveRigidBody = 0;
+		activeRigidBodyBeingManipulated = 0;
 		delete activePickingConstraint;
-		delete constraintActiveRigidBody;
+		delete activeRigidBodyBeingManipulated;
 	}
 }
 
