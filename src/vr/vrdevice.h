@@ -131,7 +131,7 @@ public:
      */
     bool isHeadMounted();
 
-    QMatrix4x4 getEyeViewMatrix(int eye,QVector3D pivot,QMatrix4x4 transform = QMatrix4x4());
+    QMatrix4x4 getEyeViewMatrix(int eye,QVector3D pivot,QMatrix4x4 transform = QMatrix4x4(), float vrScale = 1.0f);
     QMatrix4x4 getEyeProjMatrix(int eye,float nearClip,float farClip);
 
     GLuint bindMirrorTextureId();

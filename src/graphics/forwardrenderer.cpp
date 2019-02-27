@@ -462,7 +462,7 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 	//QMatrix4x4 viewTransform = scene->camera->getGlobalTransform();
 	QMatrix4x4 viewTransform = scene->camera->getGlobalTransform();
 	// scale by vrViewScale
-	viewTransform.scale(scene->camera->getVrViewScale());
+	//viewTransform.scale(scene->camera->getVrViewScale());
 
 	/*
     if(!!scene->vrViewer && useViewer) {
@@ -493,7 +493,7 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 
         vrDevice->beginEye(eye);
 
-        auto view = vrDevice->getEyeViewMatrix(eye, viewerPos, viewTransform);
+        auto view = vrDevice->getEyeViewMatrix(eye, viewerPos, viewTransform, scene->camera->getVrViewScale());
         renderData->eyePos = view.column(3).toVector3D();
         renderData->viewMatrix = view;
 

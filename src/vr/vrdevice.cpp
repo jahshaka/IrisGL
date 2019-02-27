@@ -455,7 +455,7 @@ bool VrDevice::isHeadMounted()
     return sessionStatus.HmdMounted;
 }
 
-QMatrix4x4 VrDevice::getEyeViewMatrix(int eye, QVector3D pivot, QMatrix4x4 transform)
+QMatrix4x4 VrDevice::getEyeViewMatrix(int eye, QVector3D pivot, QMatrix4x4 transform, float vrScale)
 {
     auto r = frameData->eyeRenderPose[eye].Orientation;
     auto finalYawPitchRoll = QMatrix4x4(QQuaternion(r.w, r.x, r.y, r.z).toRotationMatrix());
@@ -463,7 +463,7 @@ QMatrix4x4 VrDevice::getEyeViewMatrix(int eye, QVector3D pivot, QMatrix4x4 trans
     auto finalForward = finalYawPitchRoll * QVector3D(0, 0, -1);
 
     auto fd = frameData->eyeRenderPose[eye].Position;
-    auto framePos = QVector3D(fd.x, fd.y, fd.z);
+    auto framePos = QVector3D(fd.x, fd.y, fd.z) * vrScale;
     auto shiftedEyePos = framePos;
     //qDebug() << shiftedEyePos;
     //auto forward = shiftedEyePos + finalForward;
