@@ -79,6 +79,7 @@ private:
 		orthoSize = 10.0f;
         exportable = false;
 		projMode = CameraProjection::Perspective;
+		vrViewScale = 2.0f; // good default
         updateCameraMatrices();
     }
 

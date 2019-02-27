@@ -456,8 +456,13 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
     if(!vrDevice->isVrSupported())
         return;
 
+	//auto vs = scene->camera->getVrViewScale();
+	//scene->camera->setLocalScale(QVector3D(vs, vs, vs));
     QVector3D viewerPos = scene->camera->getGlobalPosition();
-    QMatrix4x4 viewTransform = scene->camera->globalTransform;
+	//QMatrix4x4 viewTransform = scene->camera->getGlobalTransform();
+	QMatrix4x4 viewTransform = scene->camera->getGlobalTransform();
+	// scale by vrViewScale
+	viewTransform.scale(scene->camera->getVrViewScale());
 
 	/*
     if(!!scene->vrViewer && useViewer) {
