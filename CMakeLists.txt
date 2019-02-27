@@ -173,6 +173,7 @@ set (HEADERS
     src/animation/animation.h
     src/materials/materialhelper.h
     src/core/irisutils.h
+    src/core/ziphelper.h
     src/scenegraph/viewernode.h
     src/graphics/particle.h
     src/graphics/particlerender.h
