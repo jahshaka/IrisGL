@@ -235,8 +235,11 @@ void Scene::addNode(SceneNodePtr node)
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
+		//qDebug() <<"Mesh GUID: " << node->getGUID();
         auto mesh = node.staticCast<iris::MeshNode>();
-        meshes.insert(node->getGUID(), mesh);
+		if (meshes.contains(node->getGUID()))
+			mesh->setGUID(IrisUtils::generateGUID());
+		meshes.insert(node->getGUID(), mesh);
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {

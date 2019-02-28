@@ -351,7 +351,8 @@ MeshNode::loadAsSceneFragment(
 {
 	const aiScene *scene = scene_;
 
-	if (scene == nullptr) return QSharedPointer<iris::MeshNode>(nullptr);
+	if (scene == nullptr)
+		return QSharedPointer<iris::MeshNode>(nullptr);
 	if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
 	if (scene->mNumMeshes == 1) {
 		auto mesh = scene->mMeshes[0];
