@@ -16,16 +16,17 @@ typedef QSharedPointer<FxaaPostProcess> FxaaPostProcessPtr;
 class FxaaPostProcess : public PostProcess
 {
 public:
+	iris::GraphicsDevicePtr graphics;
     Texture2DPtr tonemapTex;
     Texture2DPtr fxaaTex;
 
-    QOpenGLShaderProgram* tonemapShader;
-    QOpenGLShaderProgram* fxaaShader;
+    iris::ShaderPtr tonemapShader;
+	iris::ShaderPtr fxaaShader;
 
     // between 1 and 5
     int quality;
 
-    FxaaPostProcess();
+    FxaaPostProcess(iris::GraphicsDevicePtr graphics);
 
     QList<Property *> getProperties();
     void setProperty(Property *prop) override;
@@ -35,7 +36,7 @@ public:
 
     virtual void process(PostProcessContext* ctx) override;
 
-    static FxaaPostProcessPtr create();
+    static FxaaPostProcessPtr create(iris::GraphicsDevicePtr graphics);
 };
 
 }

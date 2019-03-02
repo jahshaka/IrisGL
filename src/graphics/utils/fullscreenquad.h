@@ -15,14 +15,8 @@ For more information see the LICENSE file
 #include <QMatrix4x4>
 #include "../../irisglfwd.h"
 
-class QOpenGLFunctions_3_2_Core;
-class QOpenGLShaderProgram;
-
 namespace iris
 {
-
-class Mesh;
-
 
 class FullScreenQuad
 {
@@ -30,13 +24,14 @@ public:
     FullScreenQuad();
     ~FullScreenQuad();
 
-    void draw(GraphicsDevicePtr device, bool flipY = false);
-    void draw(GraphicsDevicePtr device, QOpenGLShaderProgram* shader);
+	void draw(GraphicsDevicePtr device, bool flipY = false);
+	void draw(GraphicsDevicePtr device, iris::ShaderPtr shader);
+    //void draw(GraphicsDevicePtr device, QOpenGLShaderProgram* shader);
 
-    QOpenGLShaderProgram* shader;
-    Mesh* mesh;
+    iris::ShaderPtr shader;
+    iris::MeshPtr mesh;
+	iris::VertexBufferPtr vb;
     QMatrix4x4 matrix;
-    QOpenGLFunctions_3_2_Core* gl;
 };
 }
 

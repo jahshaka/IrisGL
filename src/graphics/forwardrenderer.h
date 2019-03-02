@@ -101,6 +101,9 @@ class ForwardRenderer
     Texture2DPtr depthRenderTexture;
     Texture2DPtr finalRenderTexture;
 
+	Texture2DPtr vrSceneRenderTexture;
+	Texture2DPtr vrDepthRenderTexture;
+
     PerformanceTimer* perfTimer;
 	QVector<LightUniformNames> lightUniformNames;
 

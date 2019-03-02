@@ -7,7 +7,7 @@
 #include "../graphics/postprocess.h"
 #include "../graphics/graphicshelper.h"
 #include "../graphics/texture2d.h"
-
+/*
 namespace iris
 {
 
@@ -37,4 +37,4 @@ GreyscalePostProcessPtr GreyscalePostProcess::create()
 
 }
 
-
+*/

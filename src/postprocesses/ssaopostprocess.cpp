@@ -7,7 +7,7 @@
 #include "../graphics/graphicshelper.h"
 #include "../graphics/texture2d.h"
 #include "../core/property.h"
-
+/*
 namespace iris
 {
 
@@ -126,3 +126,4 @@ SSAOPostProcessPtr SSAOPostProcess::create()
 }
 
 }
+*/

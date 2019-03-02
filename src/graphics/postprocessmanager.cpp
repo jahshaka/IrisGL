@@ -31,7 +31,7 @@ PostProcessManager::PostProcessManager(GraphicsDevicePtr device)
     //postProcesses.append(new GreyscalePostProcess());
     //postProcesses.append(new SSAOPostProcess());
     //postProcesses.append(FxaaPostProcess::create());
-    postProcesses.append(FxaaPostProcess::create());
+    postProcesses.append(FxaaPostProcess::create(device));
 }
 
 PostProcessManagerPtr PostProcessManager::create(GraphicsDevicePtr device)
@@ -59,7 +59,7 @@ void PostProcessManager::clearPostProcesses()
     postProcesses.clear();
 }
 
-void PostProcessManager::blit(iris::Texture2DPtr source, iris::Texture2DPtr dest, QOpenGLShaderProgram *shader)
+void PostProcessManager::blit(iris::Texture2DPtr source, iris::Texture2DPtr dest, iris::ShaderPtr shader)
 {
     initRenderTarget();
 
@@ -75,7 +75,7 @@ void PostProcessManager::blit(iris::Texture2DPtr source, iris::Texture2DPtr dest
     if (!!source)
         source->bind(0);
 
-    if (shader)
+    if (!!shader)
         fsQuad->draw(device, shader);
     else
         fsQuad->draw(device);

@@ -39,7 +39,7 @@ public:
     QList<PostProcessPtr> getPostProcesses();
     void clearPostProcesses();
 
-    void blit(Texture2DPtr source, Texture2DPtr dest, QOpenGLShaderProgram* program = nullptr);
+    void blit(Texture2DPtr source, Texture2DPtr dest, iris::ShaderPtr shader = iris::ShaderPtr());
 
     void process(PostProcessContext* context);
 

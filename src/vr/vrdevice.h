@@ -103,8 +103,11 @@ class VrDevice
     friend class VrManager;
     
 
-    bool initialized;
+    
 public:
+	bool initialized;
+	int eyeWidth;
+	int eyeHeight;
 
 	VrDevice();
 
@@ -169,8 +172,7 @@ private:
     ovrTextureSwapChain vr_textureChain[2];
     GLuint vr_Fbo[2];
 
-    int eyeWidth;
-    int eyeHeight;
+    
     long long frameIndex;
 
     ovrMirrorTexture mirrorTexture;

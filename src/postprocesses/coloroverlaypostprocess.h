@@ -5,7 +5,7 @@
 #include <QVector3D>
 
 class QOpenGLShaderProgram;
-
+/*
 namespace  iris {
 
 class ColorOverlayPostProcess;
@@ -15,7 +15,7 @@ class ColorOverlayPostProcess : public PostProcess
 {
     QColor overlayColor;
     QVector3D col;
-    QOpenGLShaderProgram* shader;
+    iris::ShaderPtr shader;
     Texture2DPtr final;
 public:
     ColorOverlayPostProcess();
@@ -32,5 +32,5 @@ public:
 };
 
 }
-
+*/
 #endif // COLOROVERLAYPOSTPROCESS_H

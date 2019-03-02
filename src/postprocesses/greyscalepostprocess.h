@@ -5,7 +5,7 @@
 #include <QVector3D>
 
 class QOpenGLShaderProgram;
-
+/*
 namespace  iris {
 
 class GreyscalePostProcess;
@@ -24,5 +24,5 @@ public:
 };
 
 }
-
+*/
 #endif // GREYSCALEPOSTPROCESS_H
