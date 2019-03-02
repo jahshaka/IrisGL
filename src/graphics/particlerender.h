@@ -31,6 +31,7 @@ private:
     GLuint quadVAO, quadVBO;
     QOpenGLFunctions_3_2_Core* gl;
 	DepthState depthState;
+	iris::VertexBufferPtr vertexBuffer;
 
 public:
     bool useAdditive;
@@ -46,6 +47,14 @@ public:
              1.f, -1.f, 0.f,    1.0f, 0.0f,
         };
 
+		VertexLayout layout;
+		layout.addAttrib(iris::VertexAttribUsage::Position, GL_FLOAT, 3, sizeof(float) * 3);
+		layout.addAttrib(iris::VertexAttribUsage::TexCoord0, GL_FLOAT, 2, sizeof(float) * 2);
+
+		vertexBuffer = iris::VertexBuffer::create(layout);
+		vertexBuffer->setData(quadVertices, sizeof(float) * 4 * 5);
+
+		/*
         gl->glGenVertexArrays(1, &quadVAO);
         gl->glGenBuffers(1, &quadVBO);
         gl->glBindVertexArray(quadVAO);
@@ -58,7 +67,7 @@ public:
                                   5 * sizeof(GLfloat),
                                   (GLvoid*) (3 * sizeof(GLfloat)));
         gl->glBindVertexArray(0);
-
+		*/
         useAdditive = true;
 		depthState = DepthState(true, false);
     }
@@ -107,7 +116,7 @@ public:
 		device->setShaderUniform("projectionMatrix", renderData->projMatrix);
         QMatrix4x4 viewMatrix = renderData->viewMatrix;
 
-        gl->glBindVertexArray(quadVAO);
+        //gl->glBindVertexArray(quadVAO);
 		
 
         if (useAdditive) {
@@ -117,6 +126,7 @@ public:
         }
 
 		device->setDepthState(depthState, true);
+		device->setVertexBuffer(vertexBuffer);
 
         for (auto particle : particles) {
             updateModelViewMatrix(
@@ -132,10 +142,12 @@ public:
                 gl->glActiveTexture(GL_TEXTURE0);
                 icon->texture->bind();
             }
-            gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            //gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+			
+			device->drawPrimitives(GL_TRIANGLE_STRIP, 0, 4);
         }
 
-        gl->glBindVertexArray(0);
+        //gl->glBindVertexArray(0);
 
     }
 };
