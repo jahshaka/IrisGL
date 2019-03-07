@@ -40,15 +40,15 @@ public:
     void clearSkyTexture();
     Texture2DPtr getSkyTexture();
 
-    void setSkyColor(QColor color);
-    QColor getSkyColor();
-
     void begin(GraphicsDevicePtr device, ScenePtr scene) override;
     void end(GraphicsDevicePtr device, ScenePtr scene) override;
     void beginCube(GraphicsDevicePtr device, ScenePtr scene) override;
     void endCube(GraphicsDevicePtr device, ScenePtr scene) override;
 
     static DefaultSkyMaterialPtr create();
+
+    void switchSkyShader(const QString &vertexShader, const QString &fragmentShader);
+
 private:
     DefaultSkyMaterial();
 
