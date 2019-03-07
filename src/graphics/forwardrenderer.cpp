@@ -225,13 +225,14 @@ void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePt
     graphics->setRasterizerState(RasterizerState::CullNone, true);
 
 	//applyPostProcesses = false;
-    if (applyPostProcesses)
-        postContext->finalTexture->bind();
+	graphics->setShader(fsQuad->shader);
+	if (applyPostProcesses)
+		graphics->setTexture(0, postContext->finalTexture);
     else
-        sceneRenderTexture->bind();
+		graphics->setTexture(0, sceneRenderTexture);
         
     fsQuad->draw(graphics);
-    gl->glBindTexture(GL_TEXTURE_2D, 0);
+	graphics->setTexture(0, iris::Texture2DPtr());
     rt->unbind();
 
     //clear lists
