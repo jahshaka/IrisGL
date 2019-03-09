@@ -113,6 +113,7 @@ void Environment::updateCharacterTransformFromSceneNode(const iris::SceneNodePtr
 	btTransform ghostTransform;
 	ghostTransform.setIdentity();
 	ghostTransform.setFromOpenGLMatrix(node->getGlobalTransform().constData());
+	if (!characterControllers.contains(node->getGUID())) return;
 	characterControllers.value(node->getGUID())->getKinematicController()->getGhostObject()->setWorldTransform(ghostTransform);
 }
 
@@ -151,6 +152,8 @@ void Environment::stepSimulation(float delta)
 		updateCharacterControllers(delta);
 		world->stepSimulation(delta);
     }
+
+	drawDebugShapes();
 }
 
 void Environment::updateCharacterControllers(float delta)

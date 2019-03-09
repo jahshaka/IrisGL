@@ -115,7 +115,6 @@ void Scene::update(float dt)
 	time += dt < 0 ? 0 : dt;
 
     environment->stepSimulation(dt);
-	environment->drawDebugShapes();
 
 	// Iterate over all rigid bodies and update the corresponding scenenode
 	QHashIterator<QString, btRigidBody*> physicsBodies(environment->hashBodies);
