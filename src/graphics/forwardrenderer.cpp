@@ -475,12 +475,12 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 	// scale by vrViewScale
 	//viewTransform.scale(scene->camera->getVrViewScale());
 
-	/*
-    if(!!scene->vrViewer && useViewer) {
+	
+    if(!!scene->getActiveVrViewer()) {
         viewerPos = scene->vrViewer->getGlobalPosition();
         viewTransform = scene->vrViewer->globalTransform;
     }
-	*/
+	
 
     // reset states
     graphics->setBlendState(BlendState::Opaque);

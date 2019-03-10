@@ -250,7 +250,8 @@ void Scene::addNode(SceneNodePtr node)
         auto viewer = node.staticCast<iris::ViewerNode>();
         viewers.insert(node->getGUID(), viewer);
 
-        if (vrViewer.isNull()) vrViewer = viewer;
+        if (!vrViewer) 
+			vrViewer = viewer;
     }
 
 	if (node->sceneNodeType == SceneNodeType::Grab) {
