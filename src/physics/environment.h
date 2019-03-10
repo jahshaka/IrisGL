@@ -87,6 +87,7 @@ public:
 	bool walkBackward = 0;
 	bool walkLeft = 0;
 	bool walkRight = 0;
+	QVector2D walkDir;
 	bool jump = 0;
 
     Environment(iris::RenderList *renderList);
@@ -96,6 +97,8 @@ public:
 	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;
     QHash<QString, QMatrix4x4> nodeTransforms;
+
+	void setDirection(QVector2D dir);
 
 	void addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node);
 	void removeBodyFromWorld(btRigidBody *body);

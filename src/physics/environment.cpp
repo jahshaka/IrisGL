@@ -29,7 +29,13 @@ Environment::~Environment()
     destroyPhysicsWorld();
 }
 
-void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node) 
+void Environment::setDirection(QVector2D dir)
+{
+	//walkDirection = btVector3(0.0, 0.0, 0.0);
+	walkDir = dir;
+}
+
+void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node)
 { 
     world->addRigidBody(body); 
 
@@ -180,6 +186,9 @@ void Environment::updateCharacterControllers(float delta)
 			if (character->onGround() && jump) {
 				character->jump(btVector3(0, 6, 0));
 			}
+
+			walkDirection += strafeDir * walkDir.x();
+			walkDirection += forwardDir * walkDir.y();
 
 			if (walkForward) {
 				walkDirection -= forwardDir;
