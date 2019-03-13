@@ -61,6 +61,7 @@ public:
 	QHash<QString, ParticleSystemNodePtr> particleSystems;
 	QHash<QString, ViewerNodePtr> viewers;
 	QHash<QString, GrabNodePtr> grabbers;
+	QHash<QString, SceneNodePtr> nodes;
 
     QColor clearColor;
     bool renderSky;
@@ -83,6 +84,8 @@ public:
     RenderList* geometryRenderList;
     RenderList* shadowRenderList;
     RenderList* gizmoRenderList;// for gizmos and lines
+
+	void setWorldGravity(float gravity);
 
     QString skyBoxTextures[6];
 

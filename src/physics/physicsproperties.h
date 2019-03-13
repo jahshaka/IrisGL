@@ -18,7 +18,8 @@ enum class PhysicsCollisionShape : int
     Sphere,
     Cube,
     ConvexHull,
-    TriangleMesh
+    TriangleMesh,
+	Compound
 };
 
 enum class PhysicsConstraintType : int

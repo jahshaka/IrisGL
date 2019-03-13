@@ -30,7 +30,7 @@ public:
     static btVector3 btVector3FromQVector3D(QVector3D vector);
 	static QVector3D QVector3DFrombtVector3(btVector3 vector);
     static btRigidBody *createPhysicsBody(const iris::SceneNodePtr sceneNode, const iris::PhysicsProperty &props);
-    static btTypedConstraint *createConstraintFromProperty(QSharedPointer<Environment> environment, const iris::ConstraintProperty &prop);
+    static btTypedConstraint *createConstraintFromProperty(Environment *environment, const iris::ConstraintProperty &prop);
 };
 
 }

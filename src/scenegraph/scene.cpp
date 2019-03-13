@@ -34,23 +34,13 @@ Scene::Scene()
 {
     rootNode = SceneNode::create();
     rootNode->setName("World");
-    // rootNode->setScene(this->sharedFromThis());
 
     // todo: move this to ui code
     skyMesh = Mesh::loadMesh(":assets/models/sky.obj");
 
-//    QString x1 = IrisUtils::getAbsoluteAssetPath("app/content/textures/left.jpg");
-//    QString x2 = IrisUtils::getAbsoluteAssetPath("app/content/textures/right.jpg");
-//    QString y1 = IrisUtils::getAbsoluteAssetPath("app/content/textures/top.jpg");
-//    QString y2 = IrisUtils::getAbsoluteAssetPath("app/content/textures/bottom.jpg");
-//    QString z1 = IrisUtils::getAbsoluteAssetPath("app/content/textures/front.jpg");
-//    QString z2 = IrisUtils::getAbsoluteAssetPath("app/content/textures/back.jpg");
-
     clearColor = QColor(0,0,0,0);
     renderSky = true;
-//    skyTexture = Texture2D::createCubeMap(x1, x2, y1, y2, z1, z2);
     skyMaterial = DefaultSkyMaterial::create();
-//    skyMaterial->setSkyTexture(skyTexture);
     skyColor = QColor(255, 255, 255, 255);
     skyRenderItem = new RenderItem();
     skyRenderItem->mesh = skyMesh;
@@ -68,6 +58,8 @@ Scene::Scene()
     meshes.reserve(100);
     particleSystems.reserve(100);
 
+	gravity = 10.f;
+
     geometryRenderList = new RenderList();
     shadowRenderList = new RenderList();
     gizmoRenderList = new RenderList();
@@ -81,6 +73,11 @@ void Scene::setSkyTexture(Texture2DPtr tex)
 {
     skyTexture = tex;
     skyMaterial->setSkyTexture(tex);
+}
+
+void Scene::setWorldGravity(float gravity)
+{
+	environment->setGravityFromWorld(this->gravity = gravity);
 }
 
 QString Scene::getSkyTextureSource()
@@ -120,14 +117,14 @@ void Scene::update(float dt)
 	QHashIterator<QString, btRigidBody*> physicsBodies(environment->hashBodies);
 	while (physicsBodies.hasNext()) {
 		physicsBodies.next();
+		// Get the matching scenenode
+		auto mesh = nodes.value(physicsBodies.key());
 		// Override the mesh's transform if it's a physics body
 		// Not the end place since we need to transform empties as well
 		// Iterate through the entire scene and change physics object transforms as per NN
 		btScalar matrix[16];
 		auto trans = physicsBodies.value()->getWorldTransform();
 		trans.getOpenGLMatrix(matrix);
-		// Get the matching scenenode
-		auto mesh = meshes.value(physicsBodies.key());
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
 		auto simulatedTransform = QMatrix4x4(matrix).transposed();
 		simulatedTransform.scale(mesh->getLocalScale());
@@ -258,6 +255,8 @@ void Scene::addNode(SceneNodePtr node)
 		auto grab = node.staticCast<iris::GrabNode>();
 		grabbers.insert(node->getGUID(), grab);
 	}
+
+	nodes.insert(node->getGUID(), node);
 }
 
 void Scene::removeNode(SceneNodePtr node)
@@ -291,6 +290,8 @@ void Scene::removeNode(SceneNodePtr node)
 		auto grab = node.staticCast<iris::GrabNode>();
 		grabbers.remove(grab->getGUID());
 	}
+
+	nodes.remove(node->getGUID());
 
     for (auto &child : node->children) {
         removeNode(child);

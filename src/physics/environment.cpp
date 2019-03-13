@@ -1,6 +1,6 @@
 #include "environment.h"
 
-#include <QDebug>
+#include "src/scenegraph/viewernode.h"
 
 #include "bullet3/src/btBulletDynamicsCommon.h"
 #include "BulletDynamics/Character/btKinematicCharacterController.h"
@@ -13,6 +13,8 @@ namespace iris
 
 Environment::Environment(iris::RenderList *debugList)
 {
+	worldYGravity = 10.f;
+
     createPhysicsWorld();
  
     simulating = false;
@@ -39,8 +41,19 @@ void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &no
 { 
     world->addRigidBody(body); 
 
-    hashBodies.insert(node->getGUID(), body);
-    nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
+	if (node->getSceneNodeType() == iris::SceneNodeType::Empty) {
+		for (auto child : node->children) {
+			auto childMeshNode = child.staticCast<iris::MeshNode>();
+			hashBodies.insert(child->getGUID(), body);
+		}
+
+		hashBodies.insert(node->getGUID(), body);
+		nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
+	}
+	else {
+		hashBodies.insert(node->getGUID(), body);
+		nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
+	}
 } 
 
 void Environment::removeBodyFromWorld(btRigidBody *body)
@@ -114,6 +127,36 @@ CharacterController *Environment::getActiveCharacterController()
 	return activeCharacterController;
 }
 
+void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode)
+{
+	// add bodies to world first
+	for (const auto &node : rootNode->children) {
+		if (node->isPhysicsBody) {
+			auto body = PhysicsHelper::createPhysicsBody(node, node->physicsProperty);
+			if (body) addBodyToWorld(body, node);
+		}
+
+		if (node.staticCast<iris::ViewerNode>()->isActiveCharacterController()) {
+			addCharacterControllerToWorldUsingNode(node);
+		}
+	}
+
+	// now add constraints
+	// TODO - avoid looping like this, get constraint list -- list and then use that
+	// TODO - handle children of children?
+	for (const auto &node : rootNode->children) {
+		if (node->isPhysicsBody) {
+			for (const auto &constraintProperties : node->physicsProperty.constraints) {
+				auto constraint = PhysicsHelper::createConstraintFromProperty(this, constraintProperties);
+				addConstraintToWorld(constraint);
+			}
+		}
+	}
+
+	// notice the - sign for the gravity, show it as positive in the interface but flip it here
+	world->setGravity(btVector3(0, -worldYGravity, 0));
+}
+
 void Environment::updateCharacterTransformFromSceneNode(const iris::SceneNodePtr node)
 {
 	btTransform ghostTransform;
@@ -157,9 +200,8 @@ void Environment::stepSimulation(float delta)
     if (simulating) {
 		updateCharacterControllers(delta);
 		world->stepSimulation(delta);
+		drawDebugShapes();
     }
-
-	drawDebugShapes();
 }
 
 void Environment::updateCharacterControllers(float delta)
@@ -218,7 +260,7 @@ void Environment::drawDebugShapes()
 	iris::LineMeshBuilder builder; // *must* go out of scope...
 	debugDrawer->setPublicBuilder(&builder);
 
-	world->debugDrawWorld();
+	if (world) world->debugDrawWorld();
 
 	QMatrix4x4 transform;
 	transform.setToIdentity();
@@ -227,19 +269,30 @@ void Environment::drawDebugShapes()
 
 void Environment::toggleDebugDrawFlags(bool state)
 {
-    //if (!state) {
-    //    debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
-    //}
-    //else {
-    //    debugDrawer->setDebugMode(
-    //        GLDebugDrawer::DBG_DrawAabb |
-    //        GLDebugDrawer::DBG_DrawWireframe |
-    //        GLDebugDrawer::DBG_DrawConstraints |
-    //        GLDebugDrawer::DBG_DrawContactPoints |
-    //        GLDebugDrawer::DBG_DrawConstraintLimits |
-//        GLDebugDrawer::DBG_DrawFrames
-//    );
-//}
+	if (!state) {
+		debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
+	}
+	else {
+		debugDrawer->setDebugMode(
+			GLDebugDrawer::DBG_DrawAabb |
+			GLDebugDrawer::DBG_DrawWireframe |
+			GLDebugDrawer::DBG_DrawConstraints |
+			GLDebugDrawer::DBG_DrawContactPoints |
+			GLDebugDrawer::DBG_DrawConstraintLimits |
+			GLDebugDrawer::DBG_DrawFrames);
+	}
+}
+
+void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
+{
+	for (auto &node : rootNode->children) {
+		if (node->isPhysicsBody) {
+			node->setGlobalTransform(nodeTransforms.value(node->getGUID()));
+		}
+	}
+
+	nodeTransforms.clear();
+	nodeTransforms.squeeze();
 }
 
 void Environment::restartPhysics()
@@ -254,7 +307,6 @@ void Environment::restartPhysics()
 
 void Environment::createPhysicsWorld()
 {
-
 	btVector3 worldMin(-1000, -1000, -1000);
 	btVector3 worldMax(1000, 1000, 1000);
 	btAxisSweep3* sweepBP = new btAxisSweep3(worldMin, worldMax);
@@ -263,7 +315,6 @@ void Environment::createPhysicsWorld()
 
 	collisionConfig = new btDefaultCollisionConfiguration();
 	dispatcher = new btCollisionDispatcher(collisionConfig);
-	//broadphase = new btDbvtBroadphase();
 	solver = new btSequentialImpulseConstraintSolver();
 	world = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
 
@@ -275,17 +326,7 @@ void Environment::createPhysicsWorld()
 
 	// http://bulletphysics.org/mediawiki-1.5.8/index.php/Bullet_Debug_drawer
 	debugDrawer = new GLDebugDrawer;
-	debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
 	world->setDebugDrawer(debugDrawer);
-
-	debugDrawer->setDebugMode(
-		GLDebugDrawer::DBG_DrawAabb |
-		GLDebugDrawer::DBG_DrawWireframe |
-		GLDebugDrawer::DBG_DrawConstraints |
-		GLDebugDrawer::DBG_DrawContactPoints |
-		GLDebugDrawer::DBG_DrawConstraintLimits |
-		GLDebugDrawer::DBG_DrawFrames
-	);
 }
 
 void Environment::createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
@@ -430,6 +471,11 @@ void Environment::createConstraintBetweenNodes(iris::SceneNodePtr node, const QS
 	addConstraintToWorld(constraint);
 }
 
+void Environment::setGravityFromWorld(btScalar gravity)
+{
+	worldYGravity = gravity;
+}
+
 void Environment::destroyPhysicsWorld()
 {
 	// this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
@@ -479,8 +525,8 @@ void Environment::destroyPhysicsWorld()
 	delete collisionConfig;
 	collisionConfig = 0;
 
+	hashBodies.clear();
 	hashBodies.squeeze();
-	nodeTransforms.squeeze();
 }
 
 }

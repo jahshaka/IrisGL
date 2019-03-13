@@ -224,13 +224,67 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
             break;
         }
 
+		case static_cast<int>(PhysicsCollisionShape::Compound) : {
+
+			transform.setOrigin(pos);
+			transform.setRotation(quat);
+
+			shape = new btCompoundShape();
+
+			// Create child shapes
+
+			for (auto child : meshNode->children) {
+				auto childMeshNode = child.staticCast<iris::MeshNode>();
+				auto triMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh());
+				auto childShape = new btConvexTriangleMeshShape(triMesh, true);
+				childShape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(childMeshNode->getLocalScale()));
+				childShape->setMargin(margin);
+
+				btTransform childTransform;
+				childTransform.setIdentity();
+
+				btVector3 childPos(childMeshNode->getLocalPos().x(), childMeshNode->getLocalPos().y(), childMeshNode->getLocalPos().z());
+				auto childRot = childMeshNode->getGlobalRotation().toVector4D();
+
+				btQuaternion childQuat;
+				childQuat.setX(childRot.x());
+				childQuat.setY(childRot.y());
+				childQuat.setZ(childRot.z());
+				childQuat.setW(childRot.w());
+
+				childTransform.setFromOpenGLMatrix(childMeshNode->getLocalTransform().constData());
+				childTransform.setOrigin(childPos);
+				childTransform.setRotation(childQuat);
+
+				static_cast<btCompoundShape*>(shape)->addChildShape(childTransform, childShape);
+			}
+
+			shape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(meshNode->getLocalScale()));
+			shape->setMargin(margin);
+
+			motionState = new btDefaultMotionState(transform);
+
+			if (mass != 0.0) shape->calculateLocalInertia(mass, inertia);
+
+			//btScalar masses[2] = { mass, mass / meshNode->children.count() };
+			//static_cast<btCompoundShape*>(shape)->calculatePrincipalAxisTransform(masses, transform, inertia);
+
+			btRigidBody::btRigidBodyConstructionInfo info(mass, motionState, shape, inertia);
+
+			body = new btRigidBody(info);
+			body->setRestitution(bounciness);
+			body->setCenterOfMassTransform(transform);
+
+			break;
+		}
+
         default: break;
     }
 
     return body;
 }
 
-btTypedConstraint * PhysicsHelper::createConstraintFromProperty(QSharedPointer<Environment> environment, const iris::ConstraintProperty & prop)
+btTypedConstraint * PhysicsHelper::createConstraintFromProperty(Environment *environment, const iris::ConstraintProperty & prop)
 {
     btTypedConstraint *constraint = Q_NULLPTR;
 

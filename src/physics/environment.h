@@ -113,7 +113,8 @@ public:
 	void removeCharacterControllerFromWorld(const QString &guid);
 	CharacterController *getActiveCharacterController();
 
-	void updateCharacterTransformFromSceneNode(const iris::SceneNodePtr node);
+	void initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode);
+	void updateCharacterTransformFromSceneNode(const iris::SceneNodePtr rootNode);
 
     btDynamicsWorld *getWorld();
 
@@ -128,6 +129,8 @@ public:
 	void drawDebugShapes();
     void toggleDebugDrawFlags(bool state = false);
 
+	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
+
     void restartPhysics();
     void createPhysicsWorld();
     void destroyPhysicsWorld();
@@ -140,7 +143,7 @@ public:
 	void cleanupPickingConstraint();
 
 	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
-
+	void setGravityFromWorld(float gravity);
 
 private:
     btCollisionConfiguration    *collisionConfig;
@@ -153,6 +156,7 @@ private:
     btAlignedObjectArray<btCollisionShape*>	collisionShapes;
 
 	btVector3 walkDirection;
+	btScalar worldYGravity;
 
 	CharacterController *activeCharacterController;
 
