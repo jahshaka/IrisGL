@@ -47,7 +47,8 @@ struct PhysicsProperty
         objectMass = 1.f;
         objectRestitution = .1f;
         objectDamping = .1f;
-        objectCollisionMargin = .1f;
+        objectCollisionMargin = .01f;
+		objectFriction = .5f;
         isVisible = true;
         isStatic = false;
         shape = PhysicsCollisionShape::None;
@@ -58,6 +59,7 @@ struct PhysicsProperty
     float objectRestitution;
     float objectDamping;
     float objectCollisionMargin;
+    float objectFriction;
     bool isVisible;
     bool isStatic;
     PhysicsCollisionShape shape;

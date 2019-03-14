@@ -127,7 +127,7 @@ public:
 	void stopSimulation();
 	void stepSimulation(float delta);
 	void drawDebugShapes();
-    void toggleDebugDrawFlags(bool state = false);
+    void setDebugDrawFlags(bool state);
 
 	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
 
@@ -143,7 +143,8 @@ public:
 	void cleanupPickingConstraint();
 
 	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
-	void setGravityFromWorld(float gravity);
+	void setWorldGravity(float gravity);
+	float getWorldGravity();
 
 private:
     btCollisionConfiguration    *collisionConfig;

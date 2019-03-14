@@ -13,7 +13,7 @@ namespace iris
 
 Environment::Environment(iris::RenderList *debugList)
 {
-	worldYGravity = 10.f;
+	worldYGravity = 15.f;
 
     createPhysicsWorld();
  
@@ -118,17 +118,22 @@ CharacterController *Environment::getActiveCharacterController()
 
 void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode)
 {
-	// add bodies to world first
-	for (const auto &node : rootNode->children) {
-		if (node->isPhysicsBody) {
-			auto body = PhysicsHelper::createPhysicsBody(node, node->physicsProperty);
-			if (body) addBodyToWorld(body, node);
-		}
+	std::function<void(const SceneNodePtr)> createPhysicsBodiesFromNode = [&](const SceneNodePtr node) {
+		for (const auto child : node->children) {
+			if (child->isPhysicsBody) {
+				auto body = PhysicsHelper::createPhysicsBody(child, child->physicsProperty);
+				if (body) addBodyToWorld(body, child);
+			}
 
-		if (node.staticCast<iris::ViewerNode>()->isActiveCharacterController()) {
-			addCharacterControllerToWorldUsingNode(node);
+			if (child.staticCast<iris::ViewerNode>()->isActiveCharacterController()) {
+				addCharacterControllerToWorldUsingNode(child);
+			}
+
+			createPhysicsBodiesFromNode(child);
 		}
-	}
+	};
+
+	createPhysicsBodiesFromNode(rootNode);
 
 	// now add constraints
 	// TODO - avoid looping like this, get constraint list -- list and then use that
@@ -187,8 +192,8 @@ void Environment::stopSimulation()
 void Environment::stepSimulation(float delta)
 {
     if (simulating) {
-		updateCharacterControllers(delta);
 		world->stepSimulation(delta);
+		updateCharacterControllers(delta);
 		drawDebugShapes();
     }
 }
@@ -249,19 +254,16 @@ void Environment::drawDebugShapes()
 	iris::LineMeshBuilder builder; // *must* go out of scope...
 	debugDrawer->setPublicBuilder(&builder);
 
-	if (world) world->debugDrawWorld();
+	world->debugDrawWorld();
 
 	QMatrix4x4 transform;
 	transform.setToIdentity();
 	debugRenderList->submitMesh(builder.build(), lineMat, transform);
 }
 
-void Environment::toggleDebugDrawFlags(bool state)
+void Environment::setDebugDrawFlags(bool state)
 {
-	if (!state) {
-		debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
-	}
-	else {
+	if (state) {
 		debugDrawer->setDebugMode(
 			GLDebugDrawer::DBG_DrawAabb |
 			GLDebugDrawer::DBG_DrawWireframe |
@@ -269,6 +271,9 @@ void Environment::toggleDebugDrawFlags(bool state)
 			GLDebugDrawer::DBG_DrawContactPoints |
 			GLDebugDrawer::DBG_DrawConstraintLimits |
 			GLDebugDrawer::DBG_DrawFrames);
+	}
+	else {
+		debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
 	}
 }
 
@@ -310,7 +315,7 @@ void Environment::createPhysicsWorld()
 	hashBodies.reserve(512);
 	nodeTransforms.reserve(512);
 
-	world->setGravity(btVector3(0, -10.f, 0));
+	world->setGravity(btVector3(0, -worldYGravity, 0));
 	world->getDispatchInfo().m_allowedCcdPenetration = 0.0001f;
 
 	// http://bulletphysics.org/mediawiki-1.5.8/index.php/Bullet_Debug_drawer
@@ -460,9 +465,14 @@ void Environment::createConstraintBetweenNodes(iris::SceneNodePtr node, const QS
 	addConstraintToWorld(constraint);
 }
 
-void Environment::setGravityFromWorld(btScalar gravity)
+void Environment::setWorldGravity(btScalar gravity)
 {
 	worldYGravity = gravity;
+}
+
+float Environment::getWorldGravity()
+{
+	return worldYGravity;
 }
 
 void Environment::destroyPhysicsWorld()

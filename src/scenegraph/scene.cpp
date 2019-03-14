@@ -58,8 +58,6 @@ Scene::Scene()
     meshes.reserve(100);
     particleSystems.reserve(100);
 
-	gravity = 10.f;
-
     geometryRenderList = new RenderList();
     shadowRenderList = new RenderList();
     gizmoRenderList = new RenderList();
@@ -67,6 +65,7 @@ Scene::Scene()
 	time = 0;
 
     environment = QSharedPointer<Environment>(new Environment(geometryRenderList));
+	gravity = environment->getWorldGravity();
 }
 
 void Scene::setSkyTexture(Texture2DPtr tex)
@@ -77,7 +76,7 @@ void Scene::setSkyTexture(Texture2DPtr tex)
 
 void Scene::setWorldGravity(float gravity)
 {
-	environment->setGravityFromWorld(this->gravity = gravity);
+	environment->setWorldGravity(this->gravity = gravity);
 }
 
 QString Scene::getSkyTextureSource()
@@ -117,18 +116,17 @@ void Scene::update(float dt)
 	QHashIterator<QString, btRigidBody*> physicsBodies(environment->hashBodies);
 	while (physicsBodies.hasNext()) {
 		physicsBodies.next();
+		// Match the bodies' hash to the scenenode's and override the mesh's transform if it's a known physics body
+		btScalar matrix[16];
+		auto rigidBodyWorldTransform = physicsBodies.value()->getWorldTransform();
+		// Put the transform matrix's float data into our array
+		rigidBodyWorldTransform.getOpenGLMatrix(matrix);
 		// Get the matching scenenode
 		auto mesh = nodes.value(physicsBodies.key());
-		// Override the mesh's transform if it's a physics body
-		// Not the end place since we need to transform empties as well
-		// Iterate through the entire scene and change physics object transforms as per NN
-		btScalar matrix[16];
-		auto trans = physicsBodies.value()->getWorldTransform();
-		trans.getOpenGLMatrix(matrix);
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
 		auto simulatedTransform = QMatrix4x4(matrix).transposed();
 		simulatedTransform.scale(mesh->getLocalScale());
-		// Set our scenenode to the simulated transform
+		// Set our scenenode to the simulated transform for the duration of the sim
 		mesh->setGlobalTransform(simulatedTransform);
 	}
 
@@ -149,7 +147,6 @@ void Scene::update(float dt)
     }
 
     if (renderSky) this->geometryRenderList->add(skyRenderItem);
-
 }
 
 void Scene::render()
