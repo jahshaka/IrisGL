@@ -234,6 +234,8 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
 			// Create child shapes
 
 			for (auto child : meshNode->children) {
+				if (child->sceneNodeType != SceneNodeType::Mesh)
+					continue;
 				auto childMeshNode = child.staticCast<iris::MeshNode>();
 				auto triMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh());
 				auto childShape = new btConvexTriangleMeshShape(triMesh, true);

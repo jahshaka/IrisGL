@@ -41,19 +41,8 @@ void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &no
 { 
     world->addRigidBody(body); 
 
-	if (node->getSceneNodeType() == iris::SceneNodeType::Empty) {
-		for (auto child : node->children) {
-			auto childMeshNode = child.staticCast<iris::MeshNode>();
-			hashBodies.insert(child->getGUID(), body);
-		}
-
-		hashBodies.insert(node->getGUID(), body);
-		nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
-	}
-	else {
-		hashBodies.insert(node->getGUID(), body);
-		nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
-	}
+	hashBodies.insert(node->getGUID(), body);
+	nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
 } 
 
 void Environment::removeBodyFromWorld(btRigidBody *body)
