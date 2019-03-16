@@ -79,6 +79,25 @@ public:
     virtual void draw3dText(const btVector3& location, const char* textString) {}
 };
 
+enum class PickingHandleType : int
+{
+	None,
+	LeftHand,
+	RightHand,
+	MouseButton
+};
+
+struct PickingHandle
+{
+	btRigidBody *activeRigidBodyBeingManipulated = nullptr;
+	btTypedConstraint *activePickingConstraint = nullptr;
+	int	activeRigidBodySavedState;
+	btVector3 constraintOldPickingPosition;
+	btVector3 constraintHitPosition;
+	btScalar constraintOldPickingDistance;
+	PickingHandleType pickHandleType = PickingHandleType::None;
+};
+
 class Environment
 {
 public:
@@ -137,10 +156,10 @@ public:
 
 	// These manage a unique picking constraint that is used to manipulate a rigid body about a scene
 	// Primarily used in the 3D viewport, the constraint can be loosened to behave more interactively
-	void createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd);
-	void updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition);
-	void updatePickingConstraint(const QMatrix4x4 &handTransformation);
-	void cleanupPickingConstraint();
+	void createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd);
+	void updatePickingConstraint(PickingHandleType handleType, const btVector3 &rayDirection, const btVector3 &cameraPosition);
+	void updatePickingConstraint(PickingHandleType handleType, const QMatrix4x4 &handTransformation);
+	void cleanupPickingConstraint(PickingHandleType handleType);
 
 	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
 	void setWorldGravity(float gravity);
@@ -152,6 +171,8 @@ private:
     btBroadphaseInterface       *broadphase;
     btConstraintSolver          *solver;
     btDynamicsWorld             *world;
+	
+	QHash<int, PickingHandle> pickingHandles;
 
     QVector<btTypedConstraint*> constraints;
     btAlignedObjectArray<btCollisionShape*>	collisionShapes;
@@ -168,13 +189,14 @@ private:
     iris::RenderList *debugRenderList;
 
     GLDebugDrawer *debugDrawer;
-
+	/*
 	btRigidBody *activeRigidBodyBeingManipulated;
 	btTypedConstraint *activePickingConstraint;
 	int	activeRigidBodySavedState;
 	btVector3 constraintOldPickingPosition;
 	btVector3 constraintHitPosition;
 	btScalar constraintOldPickingDistance;
+	*/
 };
 
 }

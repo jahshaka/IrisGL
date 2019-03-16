@@ -23,7 +23,10 @@ Environment::Environment(iris::RenderList *debugList)
     lineMat = iris::LineColorMaterial::create();
     lineMat.staticCast<iris::LineColorMaterial>()->setDepthBias(10.f);
 
-	activePickingConstraint = 0;
+	//activePickingConstraint = 0;
+	pickingHandles[(int)PickingHandleType::LeftHand] = PickingHandle();
+	pickingHandles[(int)PickingHandleType::RightHand] = PickingHandle();
+	pickingHandles[(int)PickingHandleType::MouseButton] = PickingHandle();
 }
 
 Environment::~Environment()
@@ -323,16 +326,18 @@ void Environment::createPhysicsWorld()
 	world->setDebugDrawer(debugDrawer);
 }
 
-void Environment::createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
+void Environment::createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
 {
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
 	// Fetch our rigid body from the list stored in the world by guid
-	activeRigidBodyBeingManipulated = hashBodies.value(pickedNodeGUID);
+	handle.activeRigidBodyBeingManipulated = hashBodies.value(pickedNodeGUID);
 	// Prevent the picked object from falling asleep while it is being moved
-	activeRigidBodySavedState = activeRigidBodyBeingManipulated->getActivationState();
-	activeRigidBodyBeingManipulated->setActivationState(DISABLE_DEACTIVATION);
+	handle.activeRigidBodySavedState = handle.activeRigidBodyBeingManipulated->getActivationState();
+	handle.activeRigidBodyBeingManipulated->setActivationState(DISABLE_DEACTIVATION);
 	// Get the hit position relative to the body we hit 
 	// Constraints MUST be defined in local space coords
-	btVector3 localPivot = activeRigidBodyBeingManipulated->getCenterOfMassTransform().inverse() * hitPoint;
+	btVector3 localPivot = handle.activeRigidBodyBeingManipulated->getCenterOfMassTransform().inverse() * hitPoint;
 
 	// Create a transform for the pivot point
 	btTransform pivot;
@@ -340,7 +345,7 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 	pivot.setOrigin(localPivot);
 
 	// Create our constraint object
-	auto dof6 = new btGeneric6DofConstraint(*activeRigidBodyBeingManipulated, pivot, true);
+	auto dof6 = new btGeneric6DofConstraint(*handle.activeRigidBodyBeingManipulated, pivot, true);
 	bool bLimitAngularMotion = true;
 	if (bLimitAngularMotion) {
 		dof6->setAngularLowerLimit(btVector3(0, 0, 0));
@@ -350,7 +355,7 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 	// Add the constraint to the world
 	addConstraintToWorld(dof6, false);
 	// Store a pointer to our constraint
-	activePickingConstraint = dof6;
+	handle.activePickingConstraint = dof6;
 
 	// Define the 'strength' of our constraint (each axis)
 	float cfm = 0.0f;
@@ -365,21 +370,23 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 	btVector3 rayFromWorld = iris::PhysicsHelper::btVector3FromQVector3D(segStart);
 	btVector3 rayToWorld = iris::PhysicsHelper::btVector3FromQVector3D(segEnd);
 
-	constraintOldPickingPosition = rayToWorld;
-	constraintHitPosition = hitPoint;
-	constraintOldPickingDistance = (hitPoint - rayFromWorld).length();
+	handle.constraintOldPickingPosition = rayToWorld;
+	handle.constraintHitPosition = hitPoint;
+	handle.constraintOldPickingDistance = (hitPoint - rayFromWorld).length();
 }
 
-void Environment::updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition)
+void Environment::updatePickingConstraint(PickingHandleType handleType, const btVector3 &rayDirection, const btVector3 &cameraPosition)
 {
-	if (activeRigidBodyBeingManipulated && activePickingConstraint) {
-		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(activePickingConstraint);
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
+	if (handle.activeRigidBodyBeingManipulated && handle.activePickingConstraint) {
+		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(handle.activePickingConstraint);
 		if (pickingConstraint) {
 			// use another picking ray to get the target direction
 			btVector3 dir = rayDirection;
 			dir.normalize();
 			// use the same distance as when we originally picked the object
-			dir *= constraintOldPickingDistance;
+			dir *= handle.constraintOldPickingDistance;
 			btVector3 newPivot = cameraPosition + dir;
 			// set the position of the constraint
 			pickingConstraint->getFrameOffsetA().setOrigin(newPivot);
@@ -387,10 +394,12 @@ void Environment::updatePickingConstraint(const btVector3 &rayDirection, const b
 	}
 }
 
-void Environment::updatePickingConstraint(const QMatrix4x4 &handTransformation)
+void Environment::updatePickingConstraint(PickingHandleType handleType, const QMatrix4x4 &handTransformation)
 {
-	if (activeRigidBodyBeingManipulated && activePickingConstraint) {
-		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(activePickingConstraint);
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
+	if (handle.activeRigidBodyBeingManipulated && handle.activePickingConstraint) {
+		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(handle.activePickingConstraint);
 		if (pickingConstraint) {
 			pickingConstraint->getFrameOffsetA().setIdentity();
 			pickingConstraint->getFrameOffsetA().setFromOpenGLMatrix(handTransformation.constData());
@@ -398,16 +407,18 @@ void Environment::updatePickingConstraint(const QMatrix4x4 &handTransformation)
 	}
 }
 
-void Environment::cleanupPickingConstraint()
+void Environment::cleanupPickingConstraint(PickingHandleType handleType)
 {
-	if (activePickingConstraint) {
-		activeRigidBodyBeingManipulated->forceActivationState(activeRigidBodySavedState);
-		activeRigidBodyBeingManipulated->activate();
-		removeConstraintFromWorld(activePickingConstraint);
-		activePickingConstraint = 0;
-		activeRigidBodyBeingManipulated = 0;
-		delete activePickingConstraint;
-		delete activeRigidBodyBeingManipulated;
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
+	if (handle.activePickingConstraint) {
+		handle.activeRigidBodyBeingManipulated->forceActivationState(handle.activeRigidBodySavedState);
+		handle.activeRigidBodyBeingManipulated->activate();
+		removeConstraintFromWorld(handle.activePickingConstraint);
+		handle.activePickingConstraint = 0;
+		handle.activeRigidBodyBeingManipulated = 0;
+		delete handle.activePickingConstraint;
+		delete handle.activeRigidBodyBeingManipulated;
 	}
 }
 
