@@ -41,6 +41,7 @@ class VrDevice;
 class PostProcessManager;
 class PostProcessContext;
 class PerformanceTimer;
+class VrSwapChain;
 
 struct LightUniformNames
 {
@@ -100,6 +101,9 @@ class ForwardRenderer
     Texture2DPtr depthRenderTexture;
     Texture2DPtr finalRenderTexture;
 
+	Texture2DPtr vrSceneRenderTexture;
+	Texture2DPtr vrDepthRenderTexture;
+
     PerformanceTimer* perfTimer;
 	QVector<LightUniformNames> lightUniformNames;
 
@@ -134,6 +138,8 @@ public:
     static ForwardRendererPtr create(bool useVr = true, bool physicsEnabled = false);
 
     bool isVrSupported();
+	VrDevice* getVrDevice() { return vrDevice; }
+	void regenerateSwapChain();
 
     ~ForwardRenderer();
 

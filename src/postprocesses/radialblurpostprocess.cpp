@@ -8,7 +8,8 @@
 #include "../graphics/graphicshelper.h"
 #include "../core/property.h"
 #include "../graphics/texture2d.h"
-
+#include "../graphics/shader.h"
+/*
 namespace iris
 {
 
@@ -17,7 +18,7 @@ RadialBlurPostProcess::RadialBlurPostProcess()
     name = "radial_blur";
     displayName = "Radial Blur";
 
-    shader = GraphicsHelper::loadShader(":assets/shaders/postprocesses/default.vs",
+    shader = iris::Shader::load(":assets/shaders/postprocesses/default.vs",
                                         ":assets/shaders/postprocesses/radial_blur.fs");
     blurSize = 1.0f;
 
@@ -69,3 +70,4 @@ RadialBlurPostProcessPtr RadialBlurPostProcess::create()
 }
 
 }
+*/

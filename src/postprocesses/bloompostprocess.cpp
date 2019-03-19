@@ -7,11 +7,12 @@
 #include "../graphics/postprocess.h"
 #include "../graphics/graphicshelper.h"
 #include "../graphics/texture2d.h"
+#include "../graphics/shader.h"
 #include "../core/property.h"
 
 #define BLUR_HORIZONTAL 0
 #define BLUR_VERTICAL 1
-
+/*
 // https://learnopengl.com/#!Advanced-Lighting/Bloom
 namespace iris
 {
@@ -21,13 +22,13 @@ BloomPostProcess::BloomPostProcess()
     name = "bloom";
     displayName = "Bloom";
 
-    thresholdShader = GraphicsHelper::loadShader(":assets/shaders/postprocesses/default.vs",
+    thresholdShader = iris::Shader::load(":assets/shaders/postprocesses/default.vs",
                                         ":assets/shaders/postprocesses/bloom_threshold.fs");
 
-    blurShader = GraphicsHelper::loadShader(":assets/shaders/postprocesses/default.vs",
+    blurShader = iris::Shader::load(":assets/shaders/postprocesses/default.vs",
                                         ":assets/shaders/postprocesses/bloom_blur.fs");
 
-    combineShader = GraphicsHelper::loadShader(":assets/shaders/postprocesses/default.vs",
+    combineShader = iris::Shader::load(":assets/shaders/postprocesses/default.vs",
                                         ":assets/shaders/postprocesses/bloom_combine.fs");
 
     threshold = Texture2D::create(100, 100);
@@ -179,3 +180,4 @@ BloomPostProcessPtr BloomPostProcess::create()
 }
 
 }
+*/

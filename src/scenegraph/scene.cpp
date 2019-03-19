@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include "../scenegraph/viewernode.h"
 #include "../scenegraph/meshnode.h"
 #include "../scenegraph/particlesystemnode.h"
+#include "../scenegraph/grabnode.h"
 #include "../graphics/mesh.h"
 #include "../graphics/renderitem.h"
 #include "../materials/defaultskymaterial.h"
@@ -33,23 +34,13 @@ Scene::Scene()
 {
     rootNode = SceneNode::create();
     rootNode->setName("World");
-    // rootNode->setScene(this->sharedFromThis());
 
     // todo: move this to ui code
     skyMesh = Mesh::loadMesh(":assets/models/sky.obj");
 
-//    QString x1 = IrisUtils::getAbsoluteAssetPath("app/content/textures/left.jpg");
-//    QString x2 = IrisUtils::getAbsoluteAssetPath("app/content/textures/right.jpg");
-//    QString y1 = IrisUtils::getAbsoluteAssetPath("app/content/textures/top.jpg");
-//    QString y2 = IrisUtils::getAbsoluteAssetPath("app/content/textures/bottom.jpg");
-//    QString z1 = IrisUtils::getAbsoluteAssetPath("app/content/textures/front.jpg");
-//    QString z2 = IrisUtils::getAbsoluteAssetPath("app/content/textures/back.jpg");
-
     clearColor = QColor(0,0,0,0);
     renderSky = true;
-//    skyTexture = Texture2D::createCubeMap(x1, x2, y1, y2, z1, z2);
     skyMaterial = DefaultSkyMaterial::create();
-//    skyMaterial->setSkyTexture(skyTexture);
     skyColor = QColor(255, 255, 255, 255);
     skyRenderItem = new RenderItem();
     skyRenderItem->mesh = skyMesh;
@@ -74,12 +65,18 @@ Scene::Scene()
 	time = 0;
 
     environment = QSharedPointer<Environment>(new Environment(geometryRenderList));
+	gravity = environment->getWorldGravity();
 }
 
 void Scene::setSkyTexture(Texture2DPtr tex)
 {
     skyTexture = tex;
     skyMaterial->setSkyTexture(tex);
+}
+
+void Scene::setWorldGravity(float gravity)
+{
+	environment->setWorldGravity(this->gravity = gravity);
 }
 
 QString Scene::getSkyTextureSource()
@@ -114,24 +111,22 @@ void Scene::update(float dt)
 	time += dt < 0 ? 0 : dt;
 
     environment->stepSimulation(dt);
-	environment->drawDebugShapes();
 
 	// Iterate over all rigid bodies and update the corresponding scenenode
 	QHashIterator<QString, btRigidBody*> physicsBodies(environment->hashBodies);
 	while (physicsBodies.hasNext()) {
 		physicsBodies.next();
-		// Override the mesh's transform if it's a physics body
-		// Not the end place since we need to transform empties as well
-		// Iterate through the entire scene and change physics object transforms as per NN
+		// Match the bodies' hash to the scenenode's and override the mesh's transform if it's a known physics body
 		btScalar matrix[16];
-		auto trans = physicsBodies.value()->getWorldTransform();
-		trans.getOpenGLMatrix(matrix);
+		auto rigidBodyWorldTransform = physicsBodies.value()->getWorldTransform();
+		// Put the transform matrix's float data into our array
+		rigidBodyWorldTransform.getOpenGLMatrix(matrix);
 		// Get the matching scenenode
-		auto mesh = meshes.value(physicsBodies.key());
+		auto mesh = nodes.value(physicsBodies.key());
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
 		auto simulatedTransform = QMatrix4x4(matrix).transposed();
 		simulatedTransform.scale(mesh->getLocalScale());
-		// Set our scenenode to the simulated transform
+		// Set our scenenode to the simulated transform for the duration of the sim
 		mesh->setGlobalTransform(simulatedTransform);
 	}
 
@@ -152,7 +147,6 @@ void Scene::update(float dt)
     }
 
     if (renderSky) this->geometryRenderList->add(skyRenderItem);
-
 }
 
 void Scene::render()
@@ -234,8 +228,11 @@ void Scene::addNode(SceneNodePtr node)
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
+		//qDebug() <<"Mesh GUID: " << node->getGUID();
         auto mesh = node.staticCast<iris::MeshNode>();
-        meshes.insert(node->getGUID(), mesh);
+		if (meshes.contains(node->getGUID()))
+			mesh->setGUID(IrisUtils::generateGUID());
+		meshes.insert(node->getGUID(), mesh);
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
@@ -247,8 +244,16 @@ void Scene::addNode(SceneNodePtr node)
         auto viewer = node.staticCast<iris::ViewerNode>();
         viewers.insert(node->getGUID(), viewer);
 
-        if (vrViewer.isNull()) vrViewer = viewer;
+        if (!vrViewer) 
+			vrViewer = viewer;
     }
+
+	if (node->sceneNodeType == SceneNodeType::Grab) {
+		auto grab = node.staticCast<iris::GrabNode>();
+		grabbers.insert(node->getGUID(), grab);
+	}
+
+	nodes.insert(node->getGUID(), node);
 }
 
 void Scene::removeNode(SceneNodePtr node)
@@ -277,6 +282,13 @@ void Scene::removeNode(SceneNodePtr node)
 			vrViewer = iter.value();
 		}
     }
+
+	if (node->sceneNodeType == SceneNodeType::Grab) {
+		auto grab = node.staticCast<iris::GrabNode>();
+		grabbers.remove(grab->getGUID());
+	}
+
+	nodes.remove(node->getGUID());
 
     for (auto &child : node->children) {
         removeNode(child);

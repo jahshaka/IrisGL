@@ -62,7 +62,7 @@ void CameraNode::updateCameraMatrices()
         projMatrix.ortho(-orthoSize * aspectRatio, orthoSize * aspectRatio, -orthoSize, orthoSize, -farClip, farClip);
     }
 
-    vrViewScale = 5.0f;
+    //vrViewScale = 5.0f;
 }
 
 void CameraNode::setFieldOfViewRadians(float fov)

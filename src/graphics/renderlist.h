@@ -28,6 +28,10 @@ public:
 
     RenderItem* submitMesh(MeshPtr mesh, QOpenGLShaderProgram* shader, QMatrix4x4 worldTransform, int renderLayer = (int)RenderLayer::Opaque);
 
+	void submitModel(ModelPtr model, MaterialPtr mat, QMatrix4x4 worldMatrix);
+
+	void submitModel(ModelPtr model, QMatrix4x4 worldMatrix);
+
     void clear();
 
     void sort();

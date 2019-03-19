@@ -76,6 +76,7 @@ class IndexBuffer;
 class GraphicsDevice;
 class ContentManager;
 class SpriteBatch;
+class RenderList;
 class Font;
 
 typedef QSharedPointer<iris::Animation> AnimationPtr;

@@ -5,7 +5,7 @@
 #include <QVector3D>
 
 class QOpenGLShaderProgram;
-
+/*
 namespace iris
 {
 
@@ -14,7 +14,7 @@ typedef QSharedPointer<RadialBlurPostProcess> RadialBlurPostProcessPtr;
 
 class RadialBlurPostProcess : public PostProcess
 {
-    QOpenGLShaderProgram* shader;
+    iris::ShaderPtr shader;
 
     float blurSize;
     Texture2DPtr final;
@@ -31,5 +31,5 @@ public:
 
 }
 
-
+*/
 #endif // RADIALBLURPOSTPROCESS_H

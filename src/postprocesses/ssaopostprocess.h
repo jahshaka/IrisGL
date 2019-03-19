@@ -5,7 +5,7 @@
 #include <QVector3D>
 
 class QOpenGLShaderProgram;
-
+/*
 namespace iris {
 
 class SSAOPostProcess;
@@ -35,6 +35,6 @@ public:
 };
 
 }
-
+*/
 
 #endif // SSAOPOSTPROCESS_H

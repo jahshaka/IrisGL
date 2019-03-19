@@ -6,22 +6,25 @@
 #include "../graphics/postprocessmanager.h"
 #include "../graphics/postprocess.h"
 #include "../graphics/graphicshelper.h"
+#include "../graphics/graphicsdevice.h"
 #include "../graphics/texture2d.h"
+#include "../graphics/shader.h"
 #include "../core/property.h"
 
 
 namespace iris
 {
 
-FxaaPostProcess::FxaaPostProcess()
+FxaaPostProcess::FxaaPostProcess(iris::GraphicsDevicePtr graphics)
 {
+	this->graphics = graphics;
     name = "fxaa";
     displayName = "Fxaa Post Processing";
 
-    tonemapShader = GraphicsHelper::loadShader(":assets/shaders/postprocesses/default.vs",
+    tonemapShader = iris::Shader::load(":assets/shaders/postprocesses/default.vs",
                                         ":assets/shaders/postprocesses/tonemapping.fs");
 
-    fxaaShader = GraphicsHelper::loadShader(":assets/shaders/postprocesses/default.vs",
+    fxaaShader = iris::Shader::load(":assets/shaders/postprocesses/default.vs",
                                         ":assets/shaders/postprocesses/aa.fs");
 
     tonemapTex = Texture2D::create(100, 100);
@@ -66,26 +69,26 @@ void FxaaPostProcess::process(PostProcessContext *ctx)
     tonemapTex->resize(screenWidth, screenHeight);
     fxaaTex->resize(screenWidth, screenHeight);
 
-    tonemapShader->bind();
-    tonemapShader->setUniformValue("u_screenTex", 0);
+	graphics->setShader(tonemapShader);
+	graphics->setShaderUniform("u_screenTex", 0);
     ctx->manager->blit(ctx->sceneTexture, tonemapTex, tonemapShader);
-    tonemapShader->release();
+	graphics->setShader(iris::ShaderPtr());
 
     tonemapTex->texture->generateMipMaps();
 
 
-    fxaaShader->bind();
-    fxaaShader->setUniformValue("u_screenTex", 0);
-    fxaaShader->setUniformValue("u_screenSize", QVector2D(1.0f/screenWidth, 1.0/screenHeight));
+	graphics->setShader(fxaaShader);
+	graphics->setShaderUniform("u_screenTex", 0);
+    graphics->setShaderUniform("u_screenSize", QVector2D(1.0f/screenWidth, 1.0/screenHeight));
     ctx->manager->blit(tonemapTex, fxaaTex, fxaaShader);
-    fxaaShader->release();
+	graphics->setShader(iris::ShaderPtr());
 
     ctx->manager->blit(fxaaTex, ctx->finalTexture);
 }
 
-FxaaPostProcessPtr FxaaPostProcess::create()
+FxaaPostProcessPtr FxaaPostProcess::create(iris::GraphicsDevicePtr graphics)
 {
-    return FxaaPostProcessPtr(new FxaaPostProcess());
+    return FxaaPostProcessPtr(new FxaaPostProcess(graphics));
 }
 
 

@@ -82,8 +82,13 @@ ForwardRenderer::ForwardRenderer(bool supportsVr, bool physicsEnabled)
     generateShadowBuffer(4096);
 
     if (supportsVr) {
-        vrDevice = VrManager::getDefaultDevice();
+		vrDevice = VrManager::getDefaultDevice();
         vrDevice->initialize();
+		if (vrDevice->initialized) {
+			vrSceneRenderTexture = Texture2D::create(vrDevice->eyeWidth, vrDevice->eyeHeight);
+			vrDepthRenderTexture = Texture2D::createDepth(vrDevice->eyeWidth, vrDevice->eyeHeight);
+		}
+
 	} else {
 		vrDevice = Q_NULLPTR;
 	}
@@ -94,6 +99,8 @@ ForwardRenderer::ForwardRenderer(bool supportsVr, bool physicsEnabled)
     finalRenderTexture = Texture2D::create(800, 800);
     renderTarget->addTexture(sceneRenderTexture);
     renderTarget->setDepthTexture(depthRenderTexture);
+
+	
 
     postMan = PostProcessManager::create(graphics);
     postContext = new PostProcessContext();
@@ -218,13 +225,14 @@ void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePt
     graphics->setRasterizerState(RasterizerState::CullNone, true);
 
 	//applyPostProcesses = false;
-    if (applyPostProcesses)
-        postContext->finalTexture->bind();
+	graphics->setShader(fsQuad->shader);
+	if (applyPostProcesses)
+		graphics->setTexture(0, postContext->finalTexture);
     else
-        sceneRenderTexture->bind();
+		graphics->setTexture(0, sceneRenderTexture);
         
     fsQuad->draw(graphics);
-    gl->glBindTexture(GL_TEXTURE_2D, 0);
+	graphics->setTexture(0, iris::Texture2DPtr());
     rt->unbind();
 
     //clear lists
@@ -314,10 +322,13 @@ void ForwardRenderer::renderScene(float delta, Viewport* vp)
     graphics->setDepthState(DepthState::Default, true);
     graphics->setRasterizerState(RasterizerState::CullNone, true);
 
-    gl->glActiveTexture(GL_TEXTURE0);
-    postContext->finalTexture->bind();
+    //gl->glActiveTexture(GL_TEXTURE0);
+    //postContext->finalTexture->bind();
+
+	graphics->setShader(fsQuad->shader); // hack to fix shaders clearing textures (nick)
+	graphics->setTexture(0, postContext->finalTexture);
     fsQuad->draw(graphics);
-    gl->glBindTexture(GL_TEXTURE_2D, 0);
+    //gl->glBindTexture(GL_TEXTURE_2D, 0);
 
     graphics->clear(GL_DEPTH_BUFFER_BIT);
     // STEP 5: RENDER SELECTED OBJECT
@@ -456,15 +467,20 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
     if(!vrDevice->isVrSupported())
         return;
 
+	//auto vs = scene->camera->getVrViewScale();
+	//scene->camera->setLocalScale(QVector3D(vs, vs, vs));
     QVector3D viewerPos = scene->camera->getGlobalPosition();
-    QMatrix4x4 viewTransform = scene->camera->globalTransform;
+	//QMatrix4x4 viewTransform = scene->camera->getGlobalTransform();
+	QMatrix4x4 viewTransform = scene->camera->getGlobalTransform();
+	// scale by vrViewScale
+	//viewTransform.scale(scene->camera->getVrViewScale());
 
-	/*
-    if(!!scene->vrViewer && useViewer) {
+	
+    if(!!scene->getActiveVrViewer()) {
         viewerPos = scene->vrViewer->getGlobalPosition();
         viewTransform = scene->vrViewer->globalTransform;
     }
-	*/
+	
 
     // reset states
     graphics->setBlendState(BlendState::Opaque);
@@ -486,9 +502,11 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 		graphics->setDepthState(DepthState::Default);
 		graphics->setRasterizerState(RasterizerState::CullCounterClockwise);
 
-        vrDevice->beginEye(eye);
+		graphics->setRenderTarget({vrSceneRenderTexture}, vrDepthRenderTexture);
+		graphics->setViewport(QRect(0, 0, vrDevice->eyeWidth, vrDevice->eyeHeight));
+		graphics->clear(QColor());
 
-        auto view = vrDevice->getEyeViewMatrix(eye, viewerPos, viewTransform);
+        auto view = vrDevice->getEyeViewMatrix(eye, viewerPos, viewTransform, scene->camera->getVrViewScale());
         renderData->eyePos = view.column(3).toVector3D();
         renderData->viewMatrix = view;
 
@@ -499,7 +517,7 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
         renderData->scene = scene;
         renderData->eyePos = viewerPos;
 
-        renderData->fogColor = scene->fogColor;
+		renderData->fogColor = scene->fogColor;
         renderData->fogStart = scene->fogStart;
         renderData->fogEnd = scene->fogEnd;
         renderData->fogEnabled = scene->fogEnabled;
@@ -513,7 +531,13 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 
 		//if (renderLightBillboards)
 		//	renderBillboardIcons(renderData);
+		graphics->clearRenderTarget();
+		
 
+		vrDevice->beginEye(eye);
+		graphics->setShader(fsQuad->shader);
+		graphics->setTexture(0, vrSceneRenderTexture);
+		fsQuad->draw(graphics);
         vrDevice->endEye(eye);
     }
 
@@ -524,15 +548,19 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 
    gl->glViewport(0, 0, vp->width * vp->pixelRatioScale,vp->height * vp->pixelRatioScale);
    gl->glActiveTexture(GL_TEXTURE0);
+   graphics->clear(QColor());
 
    graphics->setBlendState(BlendState::Opaque);
    graphics->setDepthState(DepthState::Default);
    graphics->setRasterizerState(RasterizerState::CullNone);
 
-   vrDevice->bindMirrorTextureId();
+   //vrDevice->bindMirrorTextureId();
    //vrDevice->bindEyeTexture(0);
-   fsQuad->draw(graphics, true);
-   gl->glBindTexture(GL_TEXTURE_2D,0);
+   graphics->setShader(fsQuad->shader);
+   graphics->setTexture(0, vrSceneRenderTexture);
+   //graphics->setTexture(0, vrDepthRenderTexture);
+   fsQuad->draw(graphics);
+   //gl->glBindTexture(GL_TEXTURE_2D,0);
 
    scene->geometryRenderList->clear();
    scene->shadowRenderList->clear();
@@ -547,6 +575,16 @@ PostProcessManagerPtr ForwardRenderer::getPostProcessManager()
 bool ForwardRenderer::isVrSupported()
 {
     return vrDevice->isVrSupported();
+}
+
+void ForwardRenderer::regenerateSwapChain()
+{
+	if (vrDevice->isVrSupported()) {
+		//if (vrSwapChain != nullptr)
+		//	vrDevice->destroySwapChain(vrSwapChain);
+
+		vrDevice->regenerateSwapChain();
+	}
 }
 
 void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)

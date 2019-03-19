@@ -1,2 +1,6 @@
 #include "Graphics.h"
 #include "SceneGraph.h"
+#include "Content.h"
+#include "Animation.h"
+#include "Physics.h"
+#include "Vr.h"

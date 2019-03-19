@@ -7,8 +7,9 @@
 #include "../graphics/postprocess.h"
 #include "../graphics/graphicshelper.h"
 #include "../graphics/texture2d.h"
+#include "../graphics/shader.h"
 #include "../core/property.h"
-
+/*
 namespace iris
 {
 
@@ -33,7 +34,7 @@ ColorOverlayPostProcess::ColorOverlayPostProcess()
     name = "color_overlay";
     displayName = "Color Overlay";
 
-    shader = GraphicsHelper::loadShader(":assets/shaders/postprocesses/default.vs",
+    shader = iris::Shader::load(":assets/shaders/postprocesses/default.vs",
                                         ":assets/shaders/postprocesses/coloroverlay.fs");
 
     //setOverlayColor(QColor(255,200,200));
@@ -79,4 +80,4 @@ void ColorOverlayPostProcess::setProperty(Property *prop)
 
 }
 
-
+*/

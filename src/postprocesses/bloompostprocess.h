@@ -5,7 +5,7 @@
 #include <QVector3D>
 
 class QOpenGLShaderProgram;
-
+/*
 namespace iris
 {
 
@@ -16,9 +16,9 @@ class PostProcessContext;
 class BloomPostProcess : public PostProcess
 {
 public:
-    QOpenGLShaderProgram* thresholdShader;
-    QOpenGLShaderProgram* blurShader;
-    QOpenGLShaderProgram* combineShader;
+    iris::ShaderPtr thresholdShader;
+	iris::ShaderPtr blurShader;
+	iris::ShaderPtr combineShader;
 
     Texture2DPtr threshold;
     Texture2DPtr hBlur;
@@ -42,5 +42,5 @@ public:
 };
 
 }
-
+*/
 #endif // BLOOMPOSTPROCESS_H

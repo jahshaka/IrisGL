@@ -79,6 +79,25 @@ public:
     virtual void draw3dText(const btVector3& location, const char* textString) {}
 };
 
+enum class PickingHandleType : int
+{
+	None,
+	LeftHand,
+	RightHand,
+	MouseButton
+};
+
+struct PickingHandle
+{
+	btRigidBody *activeRigidBodyBeingManipulated = nullptr;
+	btTypedConstraint *activePickingConstraint = nullptr;
+	int	activeRigidBodySavedState;
+	btVector3 constraintOldPickingPosition;
+	btVector3 constraintHitPosition;
+	btScalar constraintOldPickingDistance;
+	PickingHandleType pickHandleType = PickingHandleType::None;
+};
+
 class Environment
 {
 public:
@@ -87,6 +106,7 @@ public:
 	bool walkBackward = 0;
 	bool walkLeft = 0;
 	bool walkRight = 0;
+	QVector2D walkDir;
 	bool jump = 0;
 
     Environment(iris::RenderList *renderList);
@@ -96,6 +116,8 @@ public:
 	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;
     QHash<QString, QMatrix4x4> nodeTransforms;
+
+	void setDirection(QVector2D dir);
 
 	void addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node);
 	void removeBodyFromWorld(btRigidBody *body);
@@ -110,7 +132,8 @@ public:
 	void removeCharacterControllerFromWorld(const QString &guid);
 	CharacterController *getActiveCharacterController();
 
-	void updateCharacterTransformFromSceneNode(const iris::SceneNodePtr node);
+	void initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode);
+	void updateCharacterTransformFromSceneNode(const iris::SceneNodePtr rootNode);
 
     btDynamicsWorld *getWorld();
 
@@ -123,7 +146,9 @@ public:
 	void stopSimulation();
 	void stepSimulation(float delta);
 	void drawDebugShapes();
-    void toggleDebugDrawFlags(bool state = false);
+    void setDebugDrawFlags(bool state);
+
+	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
 
     void restartPhysics();
     void createPhysicsWorld();
@@ -131,13 +156,14 @@ public:
 
 	// These manage a unique picking constraint that is used to manipulate a rigid body about a scene
 	// Primarily used in the 3D viewport, the constraint can be loosened to behave more interactively
-	void createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd);
-	void updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition);
-	void updatePickingConstraint(const QMatrix4x4 &handTransformation);
-	void cleanupPickingConstraint();
+	void createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd);
+	void updatePickingConstraint(PickingHandleType handleType, const btVector3 &rayDirection, const btVector3 &cameraPosition);
+	void updatePickingConstraint(PickingHandleType handleType, const QMatrix4x4 &handTransformation);
+	void cleanupPickingConstraint(PickingHandleType handleType);
 
 	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
-
+	void setWorldGravity(float gravity);
+	float getWorldGravity();
 
 private:
     btCollisionConfiguration    *collisionConfig;
@@ -145,11 +171,14 @@ private:
     btBroadphaseInterface       *broadphase;
     btConstraintSolver          *solver;
     btDynamicsWorld             *world;
+	
+	QHash<int, PickingHandle> pickingHandles;
 
     QVector<btTypedConstraint*> constraints;
     btAlignedObjectArray<btCollisionShape*>	collisionShapes;
 
 	btVector3 walkDirection;
+	btScalar worldYGravity;
 
 	CharacterController *activeCharacterController;
 
@@ -160,13 +189,14 @@ private:
     iris::RenderList *debugRenderList;
 
     GLDebugDrawer *debugDrawer;
-
+	/*
 	btRigidBody *activeRigidBodyBeingManipulated;
 	btTypedConstraint *activePickingConstraint;
 	int	activeRigidBodySavedState;
 	btVector3 constraintOldPickingPosition;
 	btVector3 constraintHitPosition;
 	btScalar constraintOldPickingDistance;
+	*/
 };
 
 }

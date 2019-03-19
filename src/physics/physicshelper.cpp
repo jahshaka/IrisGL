@@ -57,6 +57,7 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
 
     btTransform transform;
     transform.setIdentity();
+	transform.setFromOpenGLMatrix(sceneNode->getGlobalTransform().constData());
 
     auto meshNode = sceneNode.staticCast<iris::MeshNode>();
     auto rot = meshNode->getGlobalRotation().toVector4D();
@@ -67,9 +68,10 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
     quat.setZ(rot.z());
     quat.setW(rot.w());
 
-    auto mass = props.objectMass;
-    auto bounciness = props.objectRestitution;
-    auto margin = props.objectCollisionMargin;
+    btScalar mass = props.objectMass;
+	btScalar bounciness = props.objectRestitution;
+	btScalar margin = props.objectCollisionMargin;
+	btScalar friction = props.objectFriction;
 
     btCollisionShape *shape = nullptr;
     btVector3 inertia(0, 0, 0);
@@ -110,6 +112,7 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
             btRigidBody::btRigidBodyConstructionInfo info(mass, motionState, shape, inertia);
             body = new btRigidBody(info);
             body->setRestitution(bounciness);
+			body->setFriction(friction);
             body->setCenterOfMassTransform(transform);
 
             break;
@@ -131,6 +134,7 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
 
             body = new btRigidBody(info);
             body->setRestitution(bounciness);
+			body->setFriction(friction);
             body->setCenterOfMassTransform(transform);
 
             break;
@@ -152,6 +156,7 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
 
             body = new btRigidBody(info);
             body->setRestitution(bounciness);
+			body->setFriction(friction);
             body->setCenterOfMassTransform(transform);
 
             break;
@@ -194,6 +199,7 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
 
             body = new btRigidBody(info);
             body->setRestitution(bounciness);
+			body->setFriction(friction);
             body->setCenterOfMassTransform(transform);
 
             break;
@@ -219,10 +225,68 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
 
             body = new btRigidBody(info);
             body->setRestitution(bounciness);
+			body->setFriction(friction);
             body->setCenterOfMassTransform(transform);
 
             break;
         }
+
+		case static_cast<int>(PhysicsCollisionShape::Compound) : {
+
+			auto rootTransformInverse = meshNode->getGlobalTransform().inverted();
+
+			std::function<void(btCollisionShape*, const SceneNodePtr)> createTriangleMeshAndAddToShape =
+				[&](btCollisionShape *baseShape, const SceneNodePtr node)
+			{
+				auto childMeshNode = node.staticCast<iris::MeshNode>();
+				auto childShape = new btConvexTriangleMeshShape(iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh()), true);
+				childShape->setMargin(margin);
+
+				auto shapeTransform = rootTransformInverse * childMeshNode->getGlobalTransform();
+
+				btTransform childTransform;
+				childTransform.setIdentity();
+				childTransform.setFromOpenGLMatrix(shapeTransform.constData());
+
+				static_cast<btCompoundShape*>(baseShape)->addChildShape(childTransform, childShape);
+			};
+
+			std::function<void(btCollisionShape*, const SceneNodePtr)> buildCompoundShape =
+				[&](btCollisionShape *rootShape, const SceneNodePtr node)
+			{
+				if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) createTriangleMeshAndAddToShape(rootShape, node);
+				
+				for (auto child : node->children) {
+					if (child->getSceneNodeType() == iris::SceneNodeType::Mesh ||
+						child->getSceneNodeType() == iris::SceneNodeType::Empty)
+					{
+						buildCompoundShape(rootShape, child);
+					}
+				}
+			};
+
+			shape = new btCompoundShape();
+			buildCompoundShape(shape, sceneNode);
+			shape->setMargin(margin);
+
+			transform.setFromOpenGLMatrix(sceneNode->getGlobalTransform().constData());
+
+			motionState = new btDefaultMotionState(transform);
+
+			if (mass != 0.0) shape->calculateLocalInertia(mass, inertia);
+
+			//btScalar masses[2] = { mass, mass / meshNode->children.count() };
+			//static_cast<btCompoundShape*>(shape)->calculatePrincipalAxisTransform(masses, transform, inertia);
+
+			btRigidBody::btRigidBodyConstructionInfo info(mass, motionState, shape, inertia);
+
+			body = new btRigidBody(info);
+			body->setRestitution(bounciness);
+			body->setFriction(friction);
+			body->setCenterOfMassTransform(transform);
+
+			break;
+		}
 
         default: break;
     }
@@ -230,7 +294,7 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
     return body;
 }
 
-btTypedConstraint * PhysicsHelper::createConstraintFromProperty(QSharedPointer<Environment> environment, const iris::ConstraintProperty & prop)
+btTypedConstraint * PhysicsHelper::createConstraintFromProperty(Environment *environment, const iris::ConstraintProperty & prop)
 {
     btTypedConstraint *constraint = Q_NULLPTR;
 

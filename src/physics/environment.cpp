@@ -1,6 +1,6 @@
 #include "environment.h"
 
-#include <QDebug>
+#include "src/scenegraph/viewernode.h"
 
 #include "bullet3/src/btBulletDynamicsCommon.h"
 #include "BulletDynamics/Character/btKinematicCharacterController.h"
@@ -13,6 +13,8 @@ namespace iris
 
 Environment::Environment(iris::RenderList *debugList)
 {
+	worldYGravity = 15.f;
+
     createPhysicsWorld();
  
     simulating = false;
@@ -21,7 +23,10 @@ Environment::Environment(iris::RenderList *debugList)
     lineMat = iris::LineColorMaterial::create();
     lineMat.staticCast<iris::LineColorMaterial>()->setDepthBias(10.f);
 
-	activePickingConstraint = 0;
+	//activePickingConstraint = 0;
+	pickingHandles[(int)PickingHandleType::LeftHand] = PickingHandle();
+	pickingHandles[(int)PickingHandleType::RightHand] = PickingHandle();
+	pickingHandles[(int)PickingHandleType::MouseButton] = PickingHandle();
 }
 
 Environment::~Environment()
@@ -29,12 +34,18 @@ Environment::~Environment()
     destroyPhysicsWorld();
 }
 
-void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node) 
+void Environment::setDirection(QVector2D dir)
+{
+	//walkDirection = btVector3(0.0, 0.0, 0.0);
+	walkDir = dir;
+}
+
+void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node)
 { 
     world->addRigidBody(body); 
 
-    hashBodies.insert(node->getGUID(), body);
-    nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
+	hashBodies.insert(node->getGUID(), body);
+	nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
 } 
 
 void Environment::removeBodyFromWorld(btRigidBody *body)
@@ -108,11 +119,47 @@ CharacterController *Environment::getActiveCharacterController()
 	return activeCharacterController;
 }
 
+void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode)
+{
+	std::function<void(const SceneNodePtr)> createPhysicsBodiesFromNode = [&](const SceneNodePtr node) {
+		for (const auto child : node->children) {
+			if (child->isPhysicsBody) {
+				auto body = PhysicsHelper::createPhysicsBody(child, child->physicsProperty);
+				if (body) addBodyToWorld(body, child);
+			}
+
+			if (child.staticCast<iris::ViewerNode>()->isActiveCharacterController()) {
+				addCharacterControllerToWorldUsingNode(child);
+			}
+
+			createPhysicsBodiesFromNode(child);
+		}
+	};
+
+	createPhysicsBodiesFromNode(rootNode);
+
+	// now add constraints
+	// TODO - avoid looping like this, get constraint list -- list and then use that
+	// TODO - handle children of children?
+	for (const auto &node : rootNode->children) {
+		if (node->isPhysicsBody) {
+			for (const auto &constraintProperties : node->physicsProperty.constraints) {
+				auto constraint = PhysicsHelper::createConstraintFromProperty(this, constraintProperties);
+				addConstraintToWorld(constraint);
+			}
+		}
+	}
+
+	// notice the - sign for the gravity, show it as positive in the interface but flip it here
+	world->setGravity(btVector3(0, -worldYGravity, 0));
+}
+
 void Environment::updateCharacterTransformFromSceneNode(const iris::SceneNodePtr node)
 {
 	btTransform ghostTransform;
 	ghostTransform.setIdentity();
 	ghostTransform.setFromOpenGLMatrix(node->getGlobalTransform().constData());
+	if (!characterControllers.contains(node->getGUID())) return;
 	characterControllers.value(node->getGUID())->getKinematicController()->getGhostObject()->setWorldTransform(ghostTransform);
 }
 
@@ -148,8 +195,9 @@ void Environment::stopSimulation()
 void Environment::stepSimulation(float delta)
 {
     if (simulating) {
-		updateCharacterControllers(delta);
 		world->stepSimulation(delta);
+		updateCharacterControllers(delta);
+		drawDebugShapes();
     }
 }
 
@@ -177,6 +225,9 @@ void Environment::updateCharacterControllers(float delta)
 			if (character->onGround() && jump) {
 				character->jump(btVector3(0, 6, 0));
 			}
+
+			walkDirection += strafeDir * walkDir.x();
+			walkDirection += forwardDir * walkDir.y();
 
 			if (walkForward) {
 				walkDirection -= forwardDir;
@@ -213,21 +264,32 @@ void Environment::drawDebugShapes()
 	debugRenderList->submitMesh(builder.build(), lineMat, transform);
 }
 
-void Environment::toggleDebugDrawFlags(bool state)
+void Environment::setDebugDrawFlags(bool state)
 {
-    //if (!state) {
-    //    debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
-    //}
-    //else {
-    //    debugDrawer->setDebugMode(
-    //        GLDebugDrawer::DBG_DrawAabb |
-    //        GLDebugDrawer::DBG_DrawWireframe |
-    //        GLDebugDrawer::DBG_DrawConstraints |
-    //        GLDebugDrawer::DBG_DrawContactPoints |
-    //        GLDebugDrawer::DBG_DrawConstraintLimits |
-//        GLDebugDrawer::DBG_DrawFrames
-//    );
-//}
+	if (state) {
+		debugDrawer->setDebugMode(
+			GLDebugDrawer::DBG_DrawAabb |
+			GLDebugDrawer::DBG_DrawWireframe |
+			GLDebugDrawer::DBG_DrawConstraints |
+			GLDebugDrawer::DBG_DrawContactPoints |
+			GLDebugDrawer::DBG_DrawConstraintLimits |
+			GLDebugDrawer::DBG_DrawFrames);
+	}
+	else {
+		debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
+	}
+}
+
+void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
+{
+	for (auto &node : rootNode->children) {
+		if (node->isPhysicsBody) {
+			node->setGlobalTransform(nodeTransforms.value(node->getGUID()));
+		}
+	}
+
+	nodeTransforms.clear();
+	nodeTransforms.squeeze();
 }
 
 void Environment::restartPhysics()
@@ -242,7 +304,6 @@ void Environment::restartPhysics()
 
 void Environment::createPhysicsWorld()
 {
-
 	btVector3 worldMin(-1000, -1000, -1000);
 	btVector3 worldMax(1000, 1000, 1000);
 	btAxisSweep3* sweepBP = new btAxisSweep3(worldMin, worldMax);
@@ -251,41 +312,32 @@ void Environment::createPhysicsWorld()
 
 	collisionConfig = new btDefaultCollisionConfiguration();
 	dispatcher = new btCollisionDispatcher(collisionConfig);
-	//broadphase = new btDbvtBroadphase();
 	solver = new btSequentialImpulseConstraintSolver();
 	world = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfig);
 
 	hashBodies.reserve(512);
 	nodeTransforms.reserve(512);
 
-	world->setGravity(btVector3(0, -10.f, 0));
+	world->setGravity(btVector3(0, -worldYGravity, 0));
 	world->getDispatchInfo().m_allowedCcdPenetration = 0.0001f;
 
 	// http://bulletphysics.org/mediawiki-1.5.8/index.php/Bullet_Debug_drawer
 	debugDrawer = new GLDebugDrawer;
-	debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
 	world->setDebugDrawer(debugDrawer);
-
-	debugDrawer->setDebugMode(
-		GLDebugDrawer::DBG_DrawAabb |
-		GLDebugDrawer::DBG_DrawWireframe |
-		GLDebugDrawer::DBG_DrawConstraints |
-		GLDebugDrawer::DBG_DrawContactPoints |
-		GLDebugDrawer::DBG_DrawConstraintLimits |
-		GLDebugDrawer::DBG_DrawFrames
-	);
 }
 
-void Environment::createPickingConstraint(const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
+void Environment::createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
 {
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
 	// Fetch our rigid body from the list stored in the world by guid
-	activeRigidBodyBeingManipulated = hashBodies.value(pickedNodeGUID);
+	handle.activeRigidBodyBeingManipulated = hashBodies.value(pickedNodeGUID);
 	// Prevent the picked object from falling asleep while it is being moved
-	activeRigidBodySavedState = activeRigidBodyBeingManipulated->getActivationState();
-	activeRigidBodyBeingManipulated->setActivationState(DISABLE_DEACTIVATION);
+	handle.activeRigidBodySavedState = handle.activeRigidBodyBeingManipulated->getActivationState();
+	handle.activeRigidBodyBeingManipulated->setActivationState(DISABLE_DEACTIVATION);
 	// Get the hit position relative to the body we hit 
 	// Constraints MUST be defined in local space coords
-	btVector3 localPivot = activeRigidBodyBeingManipulated->getCenterOfMassTransform().inverse() * hitPoint;
+	btVector3 localPivot = handle.activeRigidBodyBeingManipulated->getCenterOfMassTransform().inverse() * hitPoint;
 
 	// Create a transform for the pivot point
 	btTransform pivot;
@@ -293,7 +345,7 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 	pivot.setOrigin(localPivot);
 
 	// Create our constraint object
-	auto dof6 = new btGeneric6DofConstraint(*activeRigidBodyBeingManipulated, pivot, true);
+	auto dof6 = new btGeneric6DofConstraint(*handle.activeRigidBodyBeingManipulated, pivot, true);
 	bool bLimitAngularMotion = true;
 	if (bLimitAngularMotion) {
 		dof6->setAngularLowerLimit(btVector3(0, 0, 0));
@@ -303,7 +355,7 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 	// Add the constraint to the world
 	addConstraintToWorld(dof6, false);
 	// Store a pointer to our constraint
-	activePickingConstraint = dof6;
+	handle.activePickingConstraint = dof6;
 
 	// Define the 'strength' of our constraint (each axis)
 	float cfm = 0.0f;
@@ -318,21 +370,23 @@ void Environment::createPickingConstraint(const QString &pickedNodeGUID, const b
 	btVector3 rayFromWorld = iris::PhysicsHelper::btVector3FromQVector3D(segStart);
 	btVector3 rayToWorld = iris::PhysicsHelper::btVector3FromQVector3D(segEnd);
 
-	constraintOldPickingPosition = rayToWorld;
-	constraintHitPosition = hitPoint;
-	constraintOldPickingDistance = (hitPoint - rayFromWorld).length();
+	handle.constraintOldPickingPosition = rayToWorld;
+	handle.constraintHitPosition = hitPoint;
+	handle.constraintOldPickingDistance = (hitPoint - rayFromWorld).length();
 }
 
-void Environment::updatePickingConstraint(const btVector3 &rayDirection, const btVector3 &cameraPosition)
+void Environment::updatePickingConstraint(PickingHandleType handleType, const btVector3 &rayDirection, const btVector3 &cameraPosition)
 {
-	if (activeRigidBodyBeingManipulated && activePickingConstraint) {
-		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(activePickingConstraint);
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
+	if (handle.activeRigidBodyBeingManipulated && handle.activePickingConstraint) {
+		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(handle.activePickingConstraint);
 		if (pickingConstraint) {
 			// use another picking ray to get the target direction
 			btVector3 dir = rayDirection;
 			dir.normalize();
 			// use the same distance as when we originally picked the object
-			dir *= constraintOldPickingDistance;
+			dir *= handle.constraintOldPickingDistance;
 			btVector3 newPivot = cameraPosition + dir;
 			// set the position of the constraint
 			pickingConstraint->getFrameOffsetA().setOrigin(newPivot);
@@ -340,10 +394,12 @@ void Environment::updatePickingConstraint(const btVector3 &rayDirection, const b
 	}
 }
 
-void Environment::updatePickingConstraint(const QMatrix4x4 &handTransformation)
+void Environment::updatePickingConstraint(PickingHandleType handleType, const QMatrix4x4 &handTransformation)
 {
-	if (activeRigidBodyBeingManipulated && activePickingConstraint) {
-		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(activePickingConstraint);
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
+	if (handle.activeRigidBodyBeingManipulated && handle.activePickingConstraint) {
+		btGeneric6DofConstraint* pickingConstraint = static_cast<btGeneric6DofConstraint*>(handle.activePickingConstraint);
 		if (pickingConstraint) {
 			pickingConstraint->getFrameOffsetA().setIdentity();
 			pickingConstraint->getFrameOffsetA().setFromOpenGLMatrix(handTransformation.constData());
@@ -351,16 +407,18 @@ void Environment::updatePickingConstraint(const QMatrix4x4 &handTransformation)
 	}
 }
 
-void Environment::cleanupPickingConstraint()
+void Environment::cleanupPickingConstraint(PickingHandleType handleType)
 {
-	if (activePickingConstraint) {
-		activeRigidBodyBeingManipulated->forceActivationState(activeRigidBodySavedState);
-		activeRigidBodyBeingManipulated->activate();
-		removeConstraintFromWorld(activePickingConstraint);
-		activePickingConstraint = 0;
-		activeRigidBodyBeingManipulated = 0;
-		delete activePickingConstraint;
-		delete activeRigidBodyBeingManipulated;
+	PickingHandle& handle = pickingHandles[(int)handleType];
+
+	if (handle.activePickingConstraint) {
+		handle.activeRigidBodyBeingManipulated->forceActivationState(handle.activeRigidBodySavedState);
+		handle.activeRigidBodyBeingManipulated->activate();
+		removeConstraintFromWorld(handle.activePickingConstraint);
+		handle.activePickingConstraint = 0;
+		handle.activeRigidBodyBeingManipulated = 0;
+		delete handle.activePickingConstraint;
+		delete handle.activeRigidBodyBeingManipulated;
 	}
 }
 
@@ -418,6 +476,16 @@ void Environment::createConstraintBetweenNodes(iris::SceneNodePtr node, const QS
 	addConstraintToWorld(constraint);
 }
 
+void Environment::setWorldGravity(btScalar gravity)
+{
+	worldYGravity = gravity;
+}
+
+float Environment::getWorldGravity()
+{
+	return worldYGravity;
+}
+
 void Environment::destroyPhysicsWorld()
 {
 	// this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
@@ -467,8 +535,8 @@ void Environment::destroyPhysicsWorld()
 	delete collisionConfig;
 	collisionConfig = 0;
 
+	hashBodies.clear();
 	hashBodies.squeeze();
-	nodeTransforms.squeeze();
 }
 
 }

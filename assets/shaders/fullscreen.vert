@@ -22,7 +22,7 @@ uniform mat4 matrix;
 void main()
 {
     if(flipY)
-        v_texCoord = a_texCoord * vec2(1,-1);
+        v_texCoord = vec2(a_texCoord.x, 1.0 - a_texCoord.y);
     else
         v_texCoord = a_texCoord;
 

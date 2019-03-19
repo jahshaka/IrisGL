@@ -81,6 +81,18 @@ private:
     void setTrackingState(bool state);
 };
 
+/*
+This class doesnt store the swapchain but the FBOs necessar for the
+swap chain to work properly. FBOs arent shared across different OpenGL
+contexts so it's necessary to have seperate FBOs for each context.
+*/
+struct VrSwapChain
+{
+	GLuint eyeFBOs[2];
+	GLuint mirrorFBO;
+	//ovrMirrorTexture mirrorTexture;
+};
+
 struct VrFrameData;
 
 /**
@@ -89,10 +101,18 @@ struct VrFrameData;
 class VrDevice
 {
     friend class VrManager;
-    VrDevice();
+    
 
-    bool initialized;
+    
 public:
+	bool initialized;
+	int eyeWidth;
+	int eyeHeight;
+
+	VrDevice();
+
+	// Initializes the ovr sdk
+	// An OpenGL context is required for this function to work properly
     void initialize();
     void setTrackingOrigin(VrTrackingOrigin trackingOrigin);
 
@@ -114,7 +134,7 @@ public:
      */
     bool isHeadMounted();
 
-    QMatrix4x4 getEyeViewMatrix(int eye,QVector3D pivot,QMatrix4x4 transform = QMatrix4x4());
+    QMatrix4x4 getEyeViewMatrix(int eye,QVector3D pivot,QMatrix4x4 transform = QMatrix4x4(), float vrScale = 1.0f);
     QMatrix4x4 getEyeProjMatrix(int eye,float nearClip,float farClip);
 
     GLuint bindMirrorTextureId();
@@ -126,6 +146,24 @@ public:
     QQuaternion getHeadRotation();
     QVector3D getHeadPos();
 
+	/*
+	Creates per-renderer swapchain resources. An active OpenGL context is required for this to work properly.
+	*/
+	VrSwapChain* createSwapChain();
+
+	/*
+	Used to regenerate the swapchain. Swapchains only work properly in the context they were created in.
+	This means that it will not work properly in shared contexts (artifacts show when not rendering from it's original
+	context). Call this after switching between windows (or contexts) to ensure that swapchain is created on the
+	active context.
+	*/
+	void regenerateSwapChain();
+
+	/*
+	Cleans up ovr and gl swapchain resources and deletes swapChain object
+	*/
+	void destroySwapChain(VrSwapChain* swapChain);
+
 private:
     GLuint createDepthTexture(int width,int height);
     ovrTextureSwapChain createTextureChain(ovrSession session,ovrTextureSwapChain &swapChain,int width,int height);
@@ -134,8 +172,7 @@ private:
     ovrTextureSwapChain vr_textureChain[2];
     GLuint vr_Fbo[2];
 
-    int eyeWidth;
-    int eyeHeight;
+    
     long long frameIndex;
 
     ovrMirrorTexture mirrorTexture;

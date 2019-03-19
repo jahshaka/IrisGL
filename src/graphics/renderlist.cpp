@@ -1,5 +1,6 @@
 #include "renderlist.h"
 #include "renderitem.h"
+#include "model.h"
 
 namespace iris {
 
@@ -57,6 +58,20 @@ RenderItem *RenderList::submitMesh(MeshPtr mesh, QOpenGLShaderProgram *shader, Q
 
     renderList.append(item);
 	return item;
+}
+
+void RenderList::submitModel(ModelPtr model, MaterialPtr mat, QMatrix4x4 worldMatrix)
+{
+	for (auto modelMesh : model->modelMeshes) {
+		submitMesh(modelMesh.mesh, mat, worldMatrix);
+	}
+}
+
+void RenderList::submitModel(ModelPtr model, QMatrix4x4 worldMatrix)
+{
+	for (auto modelMesh : model->modelMeshes) {
+		submitMesh(modelMesh.mesh, modelMesh.material, worldMatrix);
+	}
 }
 
 void RenderList::clear()
