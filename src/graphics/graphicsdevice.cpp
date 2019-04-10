@@ -413,11 +413,12 @@ QString GraphicsDevice::addShaderFlagsToShaderSource(QString shaderSource, QSet<
 	return code;
 }
 
-void GraphicsDevice::setTexture(int target, Texture2DPtr texture)
+void GraphicsDevice::setTexture(int target, TexturePtr texture)
 {
     gl->glActiveTexture(GL_TEXTURE0+target);
     if (!!texture)
-        gl->glBindTexture(GL_TEXTURE_2D, texture->getTextureId());
+        //gl->glBindTexture(GL_TEXTURE_2D, texture->getTextureId());
+        texture->bind();
     else
         gl->glBindTexture(GL_TEXTURE_2D, 0);
     gl->glActiveTexture(GL_TEXTURE0);

@@ -76,6 +76,7 @@ set(SRCS
     src/graphics/utils/billboard.cpp
     src/scenegraph/cameranode.cpp
     src/graphics/texture2d.cpp
+    src/graphics/texturecube.cpp
     src/materials/defaultskymaterial.cpp
     src/graphics/material.cpp
     src/graphics/utils/fullscreenquad.cpp
@@ -143,6 +144,7 @@ set (HEADERS
     src/scenegraph/lightnode.h
     src/graphics/texture2d.h
     src/graphics/texture.h
+    src/graphics/texturecube.h
     src/graphics/shadowmap.h
     src/graphics/mesh.h
     src/graphics/model.h

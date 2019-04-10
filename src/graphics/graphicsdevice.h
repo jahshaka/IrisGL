@@ -163,7 +163,7 @@ public:
 			activeProgram->setUniformValueArray(name, value, count);
 	}
 
-    void setTexture(int target, Texture2DPtr texture);
+    void setTexture(int target, TexturePtr texture);
     void clearTexture(int target);
 	void compileShader(iris::ShaderPtr shader);
 	QString addShaderFlagsToShaderSource(QString shaderSource, QSet<QString> shaderFlags);
