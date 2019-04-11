@@ -41,7 +41,7 @@ Scene::Scene()
     clearColor = QColor(0,0,0,0);
     renderSky = true;
     skyMaterial = DefaultSkyMaterial::create();
-    skyColor = QColor(255, 255, 255, 255);
+    skyColor = QColor(72, 72, 72);
     skyRenderItem = new RenderItem();
     skyRenderItem->mesh = skyMesh;
     skyRenderItem->material = skyMaterial;
@@ -54,7 +54,7 @@ Scene::Scene()
     fogEnabled = true;
 
     // temp
-    skyType = SkyType::REALISTIC;
+    skyType = SkyType::SINGLE_COLOR;
 
     skyRealistic.luminance = 1.0;
     skyRealistic.reileigh = 2.5;
@@ -64,6 +64,11 @@ Scene::Scene()
     skyRealistic.sunPosX = 10;
     skyRealistic.sunPosY = 7;
     skyRealistic.sunPosZ = 10;
+
+	gradientTop = QColor(255, 0, 0);
+	gradientMid = QColor(0, 255, 0);
+	gradientBot = QColor(0, 0, 255);
+	gradientOffset = .5f;
 
     // end temp
 
@@ -102,12 +107,6 @@ void Scene::switchSkyTexture(iris::SkyType skyType)
         case static_cast<int>(iris::SkyType::GRADIENT): {
             skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
                                                        ":assets/shaders/gradientsky.frag");
-            break;
-        }
-
-        case static_cast<int>(iris::SkyType::MATERIAL): {
-   /*         skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
-                                                       ":assets/shaders/defaultsky.frag");*/
             break;
         }
 

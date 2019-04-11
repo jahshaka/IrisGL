@@ -22,7 +22,9 @@ TextureCubePtr TextureCube::load(QString negZ, QString posZ,
                                       QString negX, QString posX,
                                       QImage *info)
 {
-    int width, height, depth;
+    int width = 0;
+    int height = 0;
+    int depth = 0;
 
     const QImage pos_x = QImage(posX).convertToFormat(QImage::Format_RGBA8888);
     const QImage neg_x = QImage(negX).convertToFormat(QImage::Format_RGBA8888);
@@ -83,7 +85,7 @@ TextureCubePtr TextureCube::load(QString negZ, QString posZ,
     texture->setMinificationFilter(QOpenGLTexture::Linear);
     texture->setMagnificationFilter(QOpenGLTexture::Linear);
 
-    return QSharedPointer<TextureCube>(new TextureCube(texture));
+    return TextureCubePtr(new TextureCube(texture));
 }
 
 TextureCube::TextureCube(QOpenGLTexture *tex)

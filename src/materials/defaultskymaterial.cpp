@@ -22,7 +22,7 @@ DefaultSkyMaterial::DefaultSkyMaterial()
     createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
                                   ":assets/shaders/flatsky.frag");
     setTextureCount(1);
-    color = QColor(255,255,255,255);
+    color = QColor("purple"); // If you see this, there's an issue
     setRenderLayer(static_cast<int>(RenderLayer::Background));
 }
 
@@ -46,60 +46,38 @@ Texture2DPtr DefaultSkyMaterial::getSkyTexture()
 
 void DefaultSkyMaterial::begin(GraphicsDevicePtr device,ScenePtr scene)
 {
-    beginCube(device, scene);
-}
-
-void DefaultSkyMaterial::beginCube(GraphicsDevicePtr device, ScenePtr scene)
-{
     Material::beginCube(device, scene);
 
     switch (static_cast<int>(scene->skyType)) {
         case static_cast<int>(SkyType::REALISTIC): {
-            setUniformValue("reileigh", scene->skyRealistic.reileigh);
-            setUniformValue("luminance", scene->skyRealistic.luminance);
-            setUniformValue("mieCoefficient", scene->skyRealistic.mieCoefficient);
-            setUniformValue("mieDirectionalG", scene->skyRealistic.mieDirectionalG);
-            setUniformValue("turbidity", scene->skyRealistic.turbidity);
-            setUniformValue("sunPosition", QVector3D(scene->skyRealistic.sunPosX,
-                                                    scene->skyRealistic.sunPosY,
-                                                    scene->skyRealistic.sunPosZ));
-        }
-
-        case static_cast<int>(SkyType::SINGLE_COLOR): {
-            setUniformValue("color", scene->skyColor);
-        }
-
-        case static_cast<int>(SkyType::CUBEMAP): {
-            setUniformValue("color", scene->skyColor);
+            setUniformValue("reileigh",         scene->skyRealistic.reileigh);
+            setUniformValue("luminance",        scene->skyRealistic.luminance);
+            setUniformValue("mieCoefficient",   scene->skyRealistic.mieCoefficient);
+            setUniformValue("mieDirectionalG",  scene->skyRealistic.mieDirectionalG);
+            setUniformValue("turbidity",        scene->skyRealistic.turbidity);
+            setUniformValue("sunPosition",      QVector3D(scene->skyRealistic.sunPosX,
+                                                          scene->skyRealistic.sunPosY,
+                                                          scene->skyRealistic.sunPosZ));
         }
 
         case static_cast<int>(SkyType::GRADIENT): {
-            setUniformValue("color0", scene->skyColor);
-            setUniformValue("color1", scene->skyColor);
-            setUniformValue("scale", scene->skyColor);
-            setUniformValue("angle", scene->skyColor);
-            setUniformValue("type", scene->skyColor);
+            setUniformValue("color_top", scene->gradientTop);
+            setUniformValue("color_mid", scene->gradientMid);
+            setUniformValue("color_bot", scene->gradientBot);
+            setUniformValue("middle_offset", scene->gradientOffset);
+			break;
         }
 
-        default: {
-            // should be cubemap eventually
-            this->setUniformValue("color", scene->skyColor);
-            /*        if (!!texture)  this->setUniformValue("useTexture", true);
-                else            this->setUniformValue("useTexture", false);*/
-            break;
-        }
+        case static_cast<int>(SkyType::SINGLE_COLOR):
+        default: this->setUniformValue("color", scene->skyColor);
     }
+
+    Material::endCube(device, scene);
 }
 
 void DefaultSkyMaterial::end(GraphicsDevicePtr device,ScenePtr scene)
 {
     Material::end(device, scene);
-}
-
-// not needed
-void DefaultSkyMaterial::endCube(GraphicsDevicePtr device,ScenePtr scene)
-{
-    Material::endCube(device, scene);
 }
 
 DefaultSkyMaterialPtr DefaultSkyMaterial::create()
