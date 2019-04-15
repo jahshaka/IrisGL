@@ -73,6 +73,15 @@ public:
     bool isBuiltIn;
 	bool isPhysicsBody;
 
+	// Prevents physics body from updating the transform of
+	// the node.
+	bool disablePhysicsTransform = false;
+
+	// Bullet interpolates the transform of physics bodies
+	// to give them a smooth movement. This bool disables that
+	// and uses the actual transform of the body.
+	bool useInterpolatedPhysicsTransform = true;
+
     PhysicsProperty physicsProperty;
 
     bool pickable;

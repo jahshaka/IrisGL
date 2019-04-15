@@ -180,6 +180,10 @@ void Scene::update(float dt)
 		rigidBodyWorldTransform.getOpenGLMatrix(matrix);
 		// Get the matching scenenode
 		auto mesh = nodes.value(physicsBodies.key());
+
+		if (mesh->disablePhysicsTransform)
+			continue;
+
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
 		auto simulatedTransform = QMatrix4x4(matrix).transposed();
 		simulatedTransform.scale(mesh->getLocalScale());
