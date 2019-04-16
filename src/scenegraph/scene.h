@@ -93,6 +93,10 @@ public:
     QColor ambientColor;
     DefaultSkyMaterialPtr skyMaterial;
     RenderItem* skyRenderItem;
+	QColor gradientTop;
+	QColor gradientMid;
+	QColor gradientBot;
+	float gradientOffset;
 
     // fog properties
     QColor fogColor;
@@ -103,13 +107,9 @@ public:
     float gravity;
     bool shadowEnabled;
 
-	// temp
 	SkyType skyType;
 	SkyRealistic skyRealistic;
-    QString cubeMapGuid;
-    QString materialGuid;
-    QString equiTextureGuid;
-    // end temp
+    QString skyGuid;
 
     RenderList* geometryRenderList;
     RenderList* shadowRenderList;

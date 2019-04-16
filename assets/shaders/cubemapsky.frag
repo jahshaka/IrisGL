@@ -11,7 +11,7 @@ For more information see the LICENSE file
 
 #version 150 core
 
-uniform samplerCube cubemap;
+uniform samplerCube skybox;
 
 in vec3 v_worldNormal;
 
@@ -19,5 +19,5 @@ out vec4 fragColor;
 
 void main()
 {
-    fragColor = texture(cubemap, v_worldNormal);
+    fragColor = texture(skybox, v_worldNormal);
 }

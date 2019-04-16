@@ -42,8 +42,6 @@ public:
 
     void begin(GraphicsDevicePtr device, ScenePtr scene) override;
     void end(GraphicsDevicePtr device, ScenePtr scene) override;
-    void beginCube(GraphicsDevicePtr device, ScenePtr scene) override;
-    void endCube(GraphicsDevicePtr device, ScenePtr scene) override;
 
     static DefaultSkyMaterialPtr create();
 
