@@ -110,6 +110,7 @@ public:
 	SkyType skyType;
 	SkyRealistic skyRealistic;
     QString skyGuid;
+    QString ambientMusicGuid;
 
     RenderList* geometryRenderList;
     RenderList* shadowRenderList;
