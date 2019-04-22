@@ -164,6 +164,9 @@ void Scene::updateSceneAnimation(float time)
 
 void Scene::update(float dt)
 {
+	if (!rootNode)
+		return;
+
 	time += dt < 0 ? 0 : dt;
 
     environment->stepSimulation(dt);

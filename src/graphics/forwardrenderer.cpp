@@ -245,6 +245,9 @@ void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePt
 
 void ForwardRenderer::renderScene(float delta, Viewport* vp)
 {
+	if (!scene->rootNode)
+		return;
+
     //perfTimer->start("total");
     auto ctx = QOpenGLContext::currentContext();
     auto cam = scene->camera;
