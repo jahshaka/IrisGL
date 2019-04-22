@@ -27,6 +27,9 @@ For more information see the LICENSE file
 #include "physics/environment.h"
 #include "math/intersectionhelper.h"
 
+#include <QtMultimedia/QMediaPlayer>
+#include <QtMultimedia/QMediaPlaylist>
+
 namespace iris
 {
 
@@ -87,6 +90,12 @@ Scene::Scene()
 
     environment = QSharedPointer<Environment>(new Environment(geometryRenderList));
 	gravity = environment->getWorldGravity();
+
+	ambientMusicVolume = 50;
+	mediaPlayer = new QMediaPlayer();
+	mediaPlayer->setVolume(ambientMusicVolume);
+	playList = new QMediaPlaylist();
+	playList->setPlaybackMode(QMediaPlaylist::Loop);
 }
 
 void Scene::switchSkyTexture(iris::SkyType skyType)
@@ -155,6 +164,35 @@ void Scene::setSkyColor(QColor color)
 void Scene::setAmbientColor(QColor color)
 {
     this->ambientColor = color;
+}
+
+void Scene::setAmbientMusic(QString path)
+{
+
+	ambientMusicPath = path;
+	
+}
+
+void Scene::stopPlayingAmbientMusic()
+{
+	mediaPlayer->stop();
+}
+
+void Scene::startPlayingAmbientMusic()
+{
+	mediaPlayer->stop();
+	//mediaPlayer = new QMediaPlayer();
+	playList->removeMedia(0);
+	//playList = new QMediaPlaylist();
+	playList->addMedia(QUrl::fromLocalFile(ambientMusicPath));
+	mediaPlayer->setPlaylist(playList);
+	mediaPlayer->play();
+}
+
+void Scene::setAmbientMusicVolume(float volume)
+{
+	ambientMusicVolume = volume;
+	mediaPlayer->setVolume(volume);
 }
 
 void Scene::updateSceneAnimation(float time)

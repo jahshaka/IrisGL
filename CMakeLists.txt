@@ -29,7 +29,7 @@ function(add_subdirectory_with_folder _folder_name _folder)
 endfunction()
 
 find_package(OpenGL REQUIRED) # is this needed?
-find_package(Qt5 REQUIRED COMPONENTS Core OpenGL)
+find_package(Qt5 REQUIRED COMPONENTS Core OpenGL Multimedia)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
@@ -268,5 +268,5 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/zip/src"
 )
 
-target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt5::Core Qt5::OpenGL)
+target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt5::Core Qt5::OpenGL Qt5::Multimedia)
 target_compile_options(IrisGL PUBLIC)

@@ -18,6 +18,9 @@ For more information see the LICENSE file
 #include "../materials/defaultskymaterial.h"
 #include "../geometry/frustum.h"
 
+class QMediaPlayer;
+class QMediaPlaylist;
+
 namespace iris
 {
 
@@ -110,6 +113,7 @@ public:
 	SkyType skyType;
 	SkyRealistic skyRealistic;
     QString skyGuid;
+    QString ambientMusicGuid;
 
     RenderList* geometryRenderList;
     RenderList* shadowRenderList;
@@ -130,6 +134,13 @@ public:
 
 	// time counter to pass to shaders that do time-based animation
 	float time;
+
+	// needed for playing music
+	QMediaPlayer* mediaPlayer;
+	// a playlist is needed to play looping sounds
+	QMediaPlaylist* playList;
+	QString ambientMusicPath;
+	float ambientMusicVolume;
 
     Scene();
 public:
@@ -160,6 +171,11 @@ public:
     void clearSkyTexture();
     void setSkyColor(QColor color);
     void setAmbientColor(QColor color);
+
+	void setAmbientMusic(QString path);
+	void stopPlayingAmbientMusic();
+	void startPlayingAmbientMusic();
+	void setAmbientMusicVolume(float volume);
 
     void updateSceneAnimation(float time);
     void update(float dt);
