@@ -102,7 +102,24 @@ void AABB::merge(const AABB& aabb)
 
 BoundingSphere AABB::getMinimalEnclosingSphere() const
 {
-	return { getCenter(), getSize().length() * 0.5f };
+	auto halfSize = getHalfSize();
+	auto radius = qMax(halfSize.x(), qMax(halfSize.y(), halfSize.z()));
+	return { getCenter(), radius };
+}
+
+bool AABB::intersects(const AABB &other)
+{
+	// 6 separating axes
+	if (maxPos.x() < other.minPos.x()) return false;
+	if (maxPos.y() < other.minPos.y()) return false;
+	if (maxPos.z() < other.minPos.z()) return false;
+
+	if (minPos.x() > other.maxPos.x()) return false;
+	if (minPos.y() > other.maxPos.y()) return false;
+	if (minPos.z() > other.maxPos.z()) return false;
+
+	// must be intersecting at this point
+	return true;
 }
 
 }

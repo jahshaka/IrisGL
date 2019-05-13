@@ -36,6 +36,7 @@ public:
 	void merge(const AABB& aabb);
 
 	BoundingSphere getMinimalEnclosingSphere() const;
+	bool intersects(const AABB &other);
 
 	static AABB fromPoints(const QVector<QVector3D>& points);
 
