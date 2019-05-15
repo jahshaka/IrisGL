@@ -185,6 +185,12 @@ void CustomMaterial::generate(const QJsonObject &object)
 		fragPath = object["fragmentShaderSource"].toString();
 	}
 
+	if (!vertPath.startsWith(":") && !QFileInfo(vertPath).exists())
+		vertPath = IrisUtils::getAbsoluteAssetPath(vertPath);
+	if (!fragPath.startsWith(":") && !QFileInfo(fragPath).exists())
+		fragPath = IrisUtils::getAbsoluteAssetPath(fragPath);
+
+
     setBaseMaterialProperties(object);
 
     createProgramFromShaderSource(vertPath, fragPath);
