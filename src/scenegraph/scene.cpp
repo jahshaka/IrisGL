@@ -56,7 +56,7 @@ Scene::Scene()
     fogEnd = 180;
     fogEnabled = true;
 
-    // temp
+    // sky init
     skyType = SkyType::SINGLE_COLOR;
 
     skyRealistic.luminance = 1.0;
@@ -73,9 +73,63 @@ Scene::Scene()
 	gradientBot = QColor(0, 0, 255);
 	gradientOffset = .5f;
 
-    // end temp
+	skyGuid = IrisUtils::generateGUID();
 
-    ambientColor = QColor(64, 64, 64);
+	QJsonObject colObj;
+	colObj["r"] = skyColor.red();
+	colObj["g"] = skyColor.green();
+	colObj["b"] = skyColor.blue();
+	colObj["a"] = skyColor.alpha();
+
+	skyDataSingleColor = QJsonObject();
+	skyDataSingleColor.insert("skyColor", colObj);
+
+	skyDataRealistic = QJsonObject();
+	skyDataRealistic.insert("luminance", skyRealistic.luminance);
+	skyDataRealistic.insert("reileigh", skyRealistic.reileigh);
+	skyDataRealistic.insert("mieCoefficient", skyRealistic.mieCoefficient);
+	skyDataRealistic.insert("mieDirectionalG", skyRealistic.mieDirectionalG);
+	skyDataRealistic.insert("turbidity", skyRealistic.turbidity);
+	skyDataRealistic.insert("sunPosX", skyRealistic.sunPosX);
+	skyDataRealistic.insert("sunPosY", skyRealistic.sunPosY);
+	skyDataRealistic.insert("sunPosZ", skyRealistic.sunPosZ);
+
+	QJsonObject colTop;
+	QColor top(255, 146, 138);
+	colTop["r"] = top.red();
+	colTop["g"] = top.green();
+	colTop["b"] = top.blue();
+	colTop["a"] = top.alpha();
+
+	QJsonObject colMid;
+	QColor mid("white");
+	colMid["r"] = mid.red();
+	colMid["g"] = mid.green();
+	colMid["b"] = mid.blue();
+	colMid["a"] = mid.alpha();
+
+	QJsonObject colBot;
+	QColor bot(64, 128, 255);
+	colBot["r"] = bot.red();
+	colBot["g"] = bot.green();
+	colBot["b"] = bot.blue();
+	colBot["a"] = bot.alpha();
+
+	skyDataGradient = QJsonObject();
+	skyDataGradient.insert("gradientTop", colTop);
+	skyDataGradient.insert("gradientMid", colMid);
+	skyDataGradient.insert("gradientBot", colBot);
+	skyDataGradient.insert("gradientOffset", .73f);
+
+	skyData.insert("SingleColor", skyDataSingleColor);
+	skyData.insert("Realistic", skyDataRealistic);
+	skyData.insert("Gradient", skyDataGradient);
+	skyData.insert("Equirectangular", QJsonObject());
+	skyData.insert("Cubemap", QJsonObject());
+
+    // end sky init
+
+    ambientColor = QColor(96, 96, 96);
 
     meshes.reserve(100);
     particleSystems.reserve(100);
@@ -85,8 +139,6 @@ Scene::Scene()
     gizmoRenderList = new RenderList();
 
 	time = 0;
-
-    // switchSkyTexture(skyType);
 
     environment = QSharedPointer<Environment>(new Environment(geometryRenderList));
 	gravity = environment->getWorldGravity();
@@ -100,32 +152,32 @@ Scene::Scene()
 
 void Scene::switchSkyTexture(iris::SkyType skyType)
 {
-    switch (static_cast<int>(skyType)) {
-        case static_cast<int>(iris::SkyType::CUBEMAP): {
+    switch (skyType) {
+        case iris::SkyType::CUBEMAP: {
             skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
                                                        ":assets/shaders/cubemapsky.frag");
             break;
         }
 
-        case static_cast<int>(iris::SkyType::EQUIRECTANGULAR): {
+        case iris::SkyType::EQUIRECTANGULAR: {
             skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
                                                        ":assets/shaders/equirectangularsky.frag");
             break;
         }
 
-        case static_cast<int>(iris::SkyType::GRADIENT): {
+        case iris::SkyType::GRADIENT: {
             skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
                                                        ":assets/shaders/gradientsky.frag");
             break;
         }
 
-        case static_cast<int>(iris::SkyType::REALISTIC): {
+        case iris::SkyType::REALISTIC: {
             skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
                                                        ":assets/shaders/realisticsky.frag");
             break;
         }
 
-        case static_cast<int>(iris::SkyType::SINGLE_COLOR): {
+        case iris::SkyType::SINGLE_COLOR: {
             skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
                                                        ":assets/shaders/flatsky.frag");
         }
