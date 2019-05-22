@@ -18,6 +18,9 @@ For more information see the LICENSE file
 #include "../materials/defaultskymaterial.h"
 #include "../geometry/frustum.h"
 
+// temp
+#include <QJsonObject>
+
 class QMediaPlayer;
 class QMediaPlaylist;
 
@@ -115,6 +118,15 @@ public:
     QString skyGuid;
     QString ambientMusicGuid;
 
+	QJsonObject skyDataSingleColor;
+	QJsonObject skyDataRealistic;
+	QJsonObject skyDataGradient;
+	QJsonObject skyDataEqui;
+	QJsonObject skyDataCubemap;
+	QJsonObject skyDataMaterial;
+
+	QMap<QString, QJsonObject> skyData;
+
     RenderList* geometryRenderList;
     RenderList* shadowRenderList;
     RenderList* gizmoRenderList;// for gizmos and lines
@@ -154,6 +166,15 @@ public:
     SceneNodePtr getRootNode() {
         return rootNode;
     }
+
+	QStringList skyTypeToStr = {
+		"SingleColor",
+		"Cubemap",
+		"Equirectangular",
+		"Gradient",
+		"Material",
+		"Realistic"
+	};
 
 	void switchSkyTexture(iris::SkyType skyType);
 
