@@ -182,9 +182,9 @@ Texture2DPtr Texture2D::createShadowDepth(int width, int height)
     return Texture2DPtr(new Texture2D(texture));
 }
 
-void Texture2D::resize(int width, int height)
+void Texture2D::resize(int width, int height, bool force)
 {
-    if(texture->width() == width && texture->height() == height)
+    if((texture->width() == width && texture->height() == height) && !force)
         return;
 
     auto texFormat = texture->format();

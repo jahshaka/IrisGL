@@ -30,7 +30,7 @@ ShadowMap::ShadowMap()
 void ShadowMap::setResolution(int size)
 {
     resolution = size;
-    shadowTexture->resize(size, size);
+    shadowTexture->resize(size, size, true);
 }
 
 

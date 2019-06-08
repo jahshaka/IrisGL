@@ -77,7 +77,7 @@ public:
     }
 
     static Texture2DPtr createCubeMap(QString, QString, QString, QString, QString, QString, QImage *i = nullptr);
-    void resize(int width, int height);
+    void resize(int width, int height, bool force = false);
 
     QPixmap readData();
 

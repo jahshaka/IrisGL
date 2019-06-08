@@ -389,17 +389,15 @@ void ForwardRenderer::renderDirectionalShadow(LightNodePtr light, ScenePtr node)
         if (item->type == iris::RenderItemType::Mesh && !!item->mesh) {
             if  (item->mesh->hasSkeleton()) {
                 auto boneTransforms = item->mesh->getSkeleton()->boneTransforms;
-                skinnedShadowShader->bind();
-                skinnedShadowShader->setUniformValue("u_lightSpaceMatrix", lightSpaceMatrix);
-                skinnedShadowShader->setUniformValue("u_worldMatrix", item->worldMatrix);
-                skinnedShadowShader->setUniformValueArray("u_bones", boneTransforms.data(), boneTransforms.size());
-                shader = skinnedShadowShader;
+				graphics->setShader(skinnedShadowShader, true);
+				graphics->setShaderUniform("u_lightSpaceMatrix", lightSpaceMatrix);
+				graphics->setShaderUniform("u_worldMatrix", item->worldMatrix);
+				graphics->setShaderUniformArray("u_bones", boneTransforms.data(), boneTransforms.size());
 
             } else {
-                shadowShader->bind();
-                shadowShader->setUniformValue("u_lightSpaceMatrix", lightSpaceMatrix);
-                shadowShader->setUniformValue("u_worldMatrix", item->worldMatrix);
-                shader = shadowShader;
+				graphics->setShader(shadowShader, true);
+				graphics->setShaderUniform("u_lightSpaceMatrix", lightSpaceMatrix);
+				graphics->setShaderUniform("u_worldMatrix", item->worldMatrix);
             }
 
 
@@ -442,17 +440,15 @@ void ForwardRenderer::renderSpotlightShadow(LightNodePtr light, ScenePtr node)
         if (item->type == iris::RenderItemType::Mesh && !!item->mesh) {
             if  (item->mesh->hasSkeleton()) {
                 auto boneTransforms = item->mesh->getSkeleton()->boneTransforms;
-                skinnedShadowShader->bind();
-                skinnedShadowShader->setUniformValue("u_lightSpaceMatrix", lightSpaceMatrix);
-                skinnedShadowShader->setUniformValue("u_worldMatrix", item->worldMatrix);
-                skinnedShadowShader->setUniformValueArray("u_bones", boneTransforms.data(), boneTransforms.size());
-                shader = skinnedShadowShader;
+				graphics->setShader(skinnedShadowShader);
+				graphics->setShaderUniform("u_lightSpaceMatrix", lightSpaceMatrix);
+				graphics->setShaderUniform("u_worldMatrix", item->worldMatrix);
+				graphics->setShaderUniformArray("u_bones", boneTransforms.data(), boneTransforms.size());
 
             } else {
-                shadowShader->bind();
-                shadowShader->setUniformValue("u_lightSpaceMatrix", lightSpaceMatrix);
-                shadowShader->setUniformValue("u_worldMatrix", item->worldMatrix);
-                shader = shadowShader;
+				graphics->setShader(shadowShader);
+				graphics->setShaderUniform("u_lightSpaceMatrix", lightSpaceMatrix);
+				graphics->setShaderUniform("u_worldMatrix", item->worldMatrix);
             }
 
             //item->mesh->draw(gl, shader);
@@ -925,13 +921,19 @@ void ForwardRenderer::createLineShader()
 
 void ForwardRenderer::createShadowShader()
 {
-    skinnedShadowShader = GraphicsHelper::loadShader(":assets/shaders/skinned_shadow_map.vert",
-                                                    ":assets/shaders/shadow_map.frag");
+    //skinnedShadowShader = GraphicsHelper::loadShader(":assets/shaders/skinned_shadow_map.vert",
+    //                                                ":assets/shaders/shadow_map.frag");
 
-    shadowShader = GraphicsHelper::loadShader(":assets/shaders/shadow_map.vert",
-                                              ":assets/shaders/shadow_map.frag");
+    //shadowShader = GraphicsHelper::loadShader(":assets/shaders/shadow_map.vert",
+    //                                          ":assets/shaders/shadow_map.frag");
 
-    shadowShader->bind();
+    //shadowShader->bind();
+
+	skinnedShadowShader = iris::Shader::load(":assets/shaders/skinned_shadow_map.vert",
+											 ":assets/shaders/shadow_map.frag");
+
+	shadowShader = iris::Shader::load(":assets/shaders/shadow_map.vert",
+									  ":assets/shaders/shadow_map.frag");
 }
 
 void ForwardRenderer::createParticleShader()
