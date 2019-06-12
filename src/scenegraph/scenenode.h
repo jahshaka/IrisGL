@@ -23,6 +23,35 @@ For more information see the LICENSE file
 namespace iris
 {
 
+enum class ActionTrigger : int
+{
+	None,
+	Intersector,
+	IntersectionEnter,
+	IntersectionLeave,
+	Remove,
+	Spawn,
+	SpawnWithProperties
+};
+
+enum class ActionReceiver : int
+{
+	None,
+	OpenScene
+};
+
+struct ActionTriggeredEvent
+{
+	ActionTrigger trigger;
+	QVariant payload;
+};
+
+struct ActionReceivedEvent
+{
+	ActionReceiver receiver;
+	QVariant payload;
+};
+
 enum class SceneNodeType {
     Empty,
     ParticleSystem,
@@ -51,6 +80,7 @@ protected:
 
     bool transformDirty;
     bool hasDirtyChildren;
+
 public:
     // cached local and global transform
     QMatrix4x4 localTransform;
@@ -64,6 +94,9 @@ public:
     ScenePtr scene;
     SceneNodePtr parent;
     QList<SceneNodePtr> children;
+
+	ActionTriggeredEvent actionTriggeredEvent;
+	ActionReceivedEvent actionReceivedEvent;
 
     // editor specific
     bool duplicable;
