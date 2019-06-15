@@ -150,7 +150,7 @@ GraphicsDevicePtr ForwardRenderer::getGraphicsDevice()
 
 void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePtr cam, bool clearRenderLists, bool applyPostProcesses)
 {
-    auto ctx = QOpenGLContext::currentContext();
+    //auto ctx = QOpenGLContext::currentContext();
 
     // reset states
     graphics->setBlendState(BlendState::Opaque, true);
@@ -184,7 +184,8 @@ void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePt
     renderTarget->resize(rt->getWidth(), rt->getHeight(), true);
     finalRenderTexture->resize(rt->getWidth(), rt->getHeight());
 
-    renderTarget->bind();
+    //renderTarget->bind();
+    graphics->setRenderTarget(renderTarget);
 	graphics->setViewport(QRect(0, 0, rt->getWidth(), rt->getHeight()));
 	graphics->clear(QColor(0, 0, 0, 0));
 
@@ -198,7 +199,8 @@ void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePt
     if (renderLightBillboards)
         renderBillboardIcons(renderData);
 
-    renderTarget->unbind();
+    graphics->clearRenderTarget();
+    //renderTarget->unbind();
 
 	// reset states for post processing
 	graphics->setBlendState(BlendState::Opaque, true);
