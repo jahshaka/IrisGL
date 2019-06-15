@@ -222,10 +222,10 @@ void GraphicsDevice::setShader(ShaderPtr shader, bool force)
 			// reset textures to 0
 			// this step might not be needed if all textures units are set to null
 			// when setting a shader
-			for (auto& sampler : samplers)
-			{
-				clearTexture(index++);
-			}
+            //for (auto& sampler : samplers)
+            //{
+            //	clearTexture(index++);
+            //}
 		}
 	}
 
