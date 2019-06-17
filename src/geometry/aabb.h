@@ -25,6 +25,12 @@ public:
 
 	void offset(QVector3D offset);
 
+    // scale from center
+    void scale(float scale);
+
+    // scale from arbitrary pivot
+    void scale(float scale, QVector3D pivot);
+
 	void merge(const QVector3D& point);
 	void merge(const QVector<QVector3D>& points);
 	void merge(const AABB& aabb);

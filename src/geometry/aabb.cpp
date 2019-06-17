@@ -64,7 +64,21 @@ QVector3D AABB::getHalfSize() const
 void AABB::offset(QVector3D offset)
 {
 	minPos += offset;
-	maxPos += offset;
+    maxPos += offset;
+}
+
+void AABB::scale(float scale)
+{
+    this->scale(scale, this->getCenter());
+}
+
+void AABB::scale(float scale, QVector3D pivot)
+{
+    auto diff = minPos - pivot;
+    minPos += diff * scale;
+
+    diff = maxPos - pivot;
+    maxPos += diff * scale;
 }
 
 void AABB::merge(const QVector3D& point)
