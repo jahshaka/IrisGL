@@ -114,4 +114,38 @@ MeshPtr ShapeHelper::createWireCone(float baseRadius)
     return builder.build();
 }
 
+MeshPtr ShapeHelper::createWireCube(const QVector3D& min, const QVector3D& max)
+{
+	LineMeshBuilder builder;
+
+	auto halfSize = (max - min) * 0.5f;
+	auto offset = (max + min) * 0.5f;
+
+	// build 4 columns
+	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), halfSize.z()));
+	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), halfSize.z()));
+
+	// top
+	builder.addLine(offset + QVector3D(-halfSize.x(), halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + QVector3D(-halfSize.x(), halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + QVector3D(halfSize.x(), halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), halfSize.z()));
+	builder.addLine(offset + QVector3D(halfSize.x(), halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), halfSize.z()));
+
+	// bottom
+	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), -halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), -halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), -halfSize.y(), halfSize.z()));
+	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), -halfSize.y(), halfSize.z()));
+
+
+	return builder.build();
+}
+
+MeshPtr ShapeHelper::createWireCube(const AABB& aabb)
+{
+	return createWireCube(aabb.getMin(), aabb.getMax());
+}
+
 }
