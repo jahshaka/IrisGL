@@ -79,6 +79,7 @@ class ContentManager;
 class SpriteBatch;
 class RenderList;
 class Font;
+class AABB;
 
 typedef QSharedPointer<iris::Animation> AnimationPtr;
 typedef QSharedPointer<Shader> ShaderPtr;
