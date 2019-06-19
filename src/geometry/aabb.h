@@ -16,20 +16,20 @@ public:
 
 	void setNegativeInfinity();
 
-	QVector3D getMin() { return minPos; }
-	QVector3D getMax() { return maxPos; }
+	QVector3D getMin() const { return minPos; }
+	QVector3D getMax() const { return maxPos; }
 
 	QVector3D getCenter() const;
 	QVector3D getSize() const;
 	QVector3D getHalfSize() const;
 
-	void offset(QVector3D offset);
+	void offset(const QVector3D& offset);
 
     // scale from center
     void scale(float scale);
 
     // scale from arbitrary pivot
-    void scale(float scale, QVector3D pivot);
+    void scale(float scale, const QVector3D& pivot);
 
 	void merge(const QVector3D& point);
 	void merge(const QVector<QVector3D>& points);
