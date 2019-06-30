@@ -197,7 +197,7 @@ void Environment::stepSimulation(float delta)
     if (simulating) {
 		world->stepSimulation(delta);
 		updateCharacterControllers(delta);
-		drawDebugShapes();
+		//drawDebugShapes();
     }
 }
 
