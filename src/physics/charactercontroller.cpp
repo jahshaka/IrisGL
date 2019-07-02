@@ -50,7 +50,7 @@ const QMatrix4x4 CharacterController::getTransform()
 void CharacterController::createController()
 {
 	// Make these configurable in the future
-	btScalar characterHeight = 1.75;
+	btScalar characterHeight = 5.75;
 	btScalar characterWidth = 1.75;
 	btScalar stepHeight = btScalar(1.f);
 
