@@ -9,6 +9,9 @@
 class QFile;
 class QTextStream;
 
+#define irisDebug() \
+	qDebug()<<"["<<__FILE__<<":"<<__LINE__<<"]"; \
+	qDebug()
 
 void irisLog(const QString &text);
 
