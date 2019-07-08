@@ -484,9 +484,9 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 	
 
     // reset states
-    graphics->setBlendState(BlendState::Opaque);
-    graphics->setDepthState(DepthState::Default);
-    graphics->setRasterizerState(RasterizerState::CullCounterClockwise);
+    graphics->setBlendState(BlendState::Opaque, true);
+    graphics->setDepthState(DepthState::Default, true);
+    graphics->setRasterizerState(RasterizerState::CullCounterClockwise, true);
 
     if (scene->shadowEnabled) {
         renderShadows(scene);
@@ -499,9 +499,9 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 		// states need to be reset before the framebuffer it set and cleared
 		// glClear adheres to states that prevent writing to certain buffers
 		// like glDepthMask or glColorMask
-		graphics->setBlendState(BlendState::Opaque);
-		graphics->setDepthState(DepthState::Default);
-		graphics->setRasterizerState(RasterizerState::CullCounterClockwise);
+		graphics->setBlendState(BlendState::Opaque, true);
+		graphics->setDepthState(DepthState::Default, true);
+		graphics->setRasterizerState(RasterizerState::CullCounterClockwise, true);
 
 		graphics->setRenderTarget({vrSceneRenderTexture}, vrDepthRenderTexture);
 		graphics->setViewport(QRect(0, 0, vrDevice->eyeWidth, vrDevice->eyeHeight));
@@ -524,9 +524,9 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
         renderData->fogEnabled = scene->fogEnabled;
 
         // reset states
-        graphics->setBlendState(BlendState::Opaque);
-        graphics->setDepthState(DepthState::Default);
-        graphics->setRasterizerState(RasterizerState::CullCounterClockwise);
+        graphics->setBlendState(BlendState::Opaque, true);
+        graphics->setDepthState(DepthState::Default, true);
+        graphics->setRasterizerState(RasterizerState::CullCounterClockwise, true);
 
         renderNode(renderData,scene);
 
@@ -534,6 +534,10 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
 		//	renderBillboardIcons(renderData);
 		graphics->clearRenderTarget();
 		
+		// reset states
+		graphics->setBlendState(BlendState::Opaque, true);
+		graphics->setDepthState(DepthState::Default, true);
+		graphics->setRasterizerState(RasterizerState::CullCounterClockwise, true);
 
 		vrDevice->beginEye(eye);
 		graphics->setShader(fsQuad->shader);
@@ -545,15 +549,16 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
     vrDevice->endFrame();
 
    //rendering to the window
+   graphics->setBlendState(BlendState::Opaque);
+   graphics->setDepthState(DepthState::Default);
+   graphics->setRasterizerState(RasterizerState::CullNone);
+
    gl->glBindFramebuffer(GL_FRAMEBUFFER, ctx->defaultFramebufferObject());
 
    gl->glViewport(0, 0, vp->width * vp->pixelRatioScale,vp->height * vp->pixelRatioScale);
    gl->glActiveTexture(GL_TEXTURE0);
    graphics->clear(QColor());
 
-   graphics->setBlendState(BlendState::Opaque);
-   graphics->setDepthState(DepthState::Default);
-   graphics->setRasterizerState(RasterizerState::CullNone);
 
    //vrDevice->bindMirrorTextureId();
    //vrDevice->bindEyeTexture(0);
