@@ -5,6 +5,18 @@
 
 namespace iris
 {
+// nice hack to emulate strongly typed enum bit flags
+struct ColorMask
+{
+	enum Enum
+	{
+		Red		= 1 << 0,
+		Green	= 1 << 1,
+		Blue	= 1 << 2,
+		Alpha	= 1 << 3
+	};
+};
+	
 
 struct BlendState
 {
@@ -17,16 +29,28 @@ struct BlendState
     GLenum colorBlendEquation;
     GLenum alphaBlendEquation;
 
-    BlendState()
-    {
-        colorSourceBlend = GL_ONE;
-        alphaSourceBlend = GL_ONE;
-        colorDestBlend = GL_ZERO;
-        alphaDestBlend = GL_ZERO;
+	int colorMask;
 
-        colorBlendEquation = GL_FUNC_ADD;
-        alphaBlendEquation = GL_FUNC_ADD;
+	BlendState()
+	{
+		colorSourceBlend = GL_ONE;
+		alphaSourceBlend = GL_ONE;
+		colorDestBlend = GL_ZERO;
+		alphaDestBlend = GL_ZERO;
+
+		colorBlendEquation = GL_FUNC_ADD;
+		alphaBlendEquation = GL_FUNC_ADD;
+
+		colorMask = ColorMask::Red | ColorMask::Green | ColorMask::Blue | ColorMask::Alpha;
     }
+
+	void setColorMask(bool red, bool green, bool blue, bool alpha)
+	{
+		colorMask = (red ? ColorMask::Red : 0) |
+					(green ? ColorMask::Green : 0) |
+					(blue ? ColorMask::Blue : 0) |
+					(alpha ? ColorMask::Alpha : 0);
+	}
 
     BlendState(GLenum sourceBlend, GLenum destBlend):
         BlendState()
@@ -35,6 +59,8 @@ struct BlendState
         alphaSourceBlend = sourceBlend;
         colorDestBlend = destBlend;
         alphaDestBlend = destBlend;
+
+		//colorMask = ColorMask::Red | ColorMask::Green | ColorMask::Blue | ColorMask::Alpha;
     }
 
 	static BlendState createAlphaBlend();

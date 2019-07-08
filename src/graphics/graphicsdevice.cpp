@@ -509,6 +509,15 @@ void GraphicsDevice::setBlendState(const BlendState &blendState, bool force)
         lastBlendState.alphaSourceBlend = blendState.alphaSourceBlend;
         lastBlendState.alphaDestBlend = blendState.alphaDestBlend;
     }
+
+	if (force || (lastBlendState.colorMask != blendState.colorMask)) {
+		const auto mask = blendState.colorMask;
+		gl->glColorMask((mask & ColorMask::Red == ColorMask::Red),
+			(mask & ColorMask::Green == ColorMask::Green),
+			(mask & ColorMask::Blue == ColorMask::Blue),
+			(mask & ColorMask::Alpha == ColorMask::Alpha));
+		lastBlendState.colorMask = blendState.colorMask;
+	 }
 }
 
 void GraphicsDevice::setDepthState(const DepthState &depthStencil, bool force)
