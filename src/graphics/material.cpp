@@ -172,6 +172,20 @@ void Material::setTextureCount(int count)
     numTextures = count;
 }
 
+void Material::setBlendState(const iris::BlendState& blendState) {
+	this->renderStates.blendState = blendState;
+}
+
+void Material::setRasterizerState(const iris::RasterizerState& rasterState)
+{
+	this->renderStates.rasterState = rasterState;
+}
+
+void Material::setDepthState(const iris::DepthState& depthState)
+{
+	this->renderStates.depthState = depthState;
+}
+
 void Material::setShader(ShaderPtr shader)
 {
 	this->shader = shader;

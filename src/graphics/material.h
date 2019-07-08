@@ -69,6 +69,12 @@ public:
         this->renderLayer = layer;
     }
 
+	// setter for render states
+	void setBlendState(const iris::BlendState& blendState);
+	void setRasterizerState(const iris::RasterizerState& rasterState);
+	void setDepthState(const iris::DepthState& depthState);
+	iris::RenderStates getRenderState() { return renderStates; }
+
 	void setShader(ShaderPtr shader);
 	void setShadowShader(ShaderPtr shader);
 
