@@ -315,7 +315,7 @@ void CustomMaterial::setBaseMaterialProperties(const QJsonObject &jahShader)
         renderStates.blendState = BlendState::Opaque;
     } else if (blendType == "add" || blendType == "additive") {
         renderStates.blendState = BlendState::Additive;
-    } else if (blendType == "blend") {
+    } else if (blendType == "blend" || blendType == "alphablend") {
         renderStates.blendState = BlendState::AlphaBlend;
     } else {
         renderStates.blendState = BlendState::Opaque;
