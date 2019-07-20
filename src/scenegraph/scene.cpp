@@ -129,6 +129,9 @@ Scene::Scene()
 
     // end sky init
 
+	skyCaptured = false;
+	shouldCaptureSky = true;
+
     ambientColor = QColor(96, 96, 96);
 
     meshes.reserve(100);
@@ -216,6 +219,11 @@ void Scene::setSkyColor(QColor color)
 void Scene::setAmbientColor(QColor color)
 {
     this->ambientColor = color;
+}
+
+void Scene::queueSkyCapture()
+{
+	this->shouldCaptureSky = true;
 }
 
 void Scene::setAmbientMusic(QString path)
