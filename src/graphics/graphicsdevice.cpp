@@ -3,6 +3,7 @@
 #include "graphicsdevice.h"
 #include "rendertarget.h"
 #include "texture2d.h"
+#include "texturecube.h"
 #include "vertexlayout.h"
 #include "shader.h"
 
@@ -148,6 +149,17 @@ void GraphicsDevice::setRenderTarget(RenderTargetPtr renderTarget)
 void GraphicsDevice::setRenderTarget(Texture2DPtr colorTarget)
 {
 	setRenderTarget({ colorTarget }, iris::Texture2DPtr());
+}
+
+void GraphicsDevice::setRenderTarget(TextureCubePtr cubeTex, int cubeFaceIndex)
+{
+	clearRenderTarget();
+
+	_internalRT->resize(cubeTex->getWidth(), cubeTex->getHeight(), false);
+	_internalRT->addTexture(cubeTex, cubeFaceIndex);
+
+	activeRT = _internalRT;
+	activeRT->bind();
 }
 
 // the size of all the textures should be the same
