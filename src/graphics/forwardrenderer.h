@@ -151,6 +151,8 @@ private:
     void renderBillboardIcons(RenderData* renderData);
     void renderSelectedNode(RenderData* renderData, SceneNodePtr node);
 
+	void captureSky(iris::ScenePtr scene);
+
     void renderOutlineNode(RenderData* renderData, SceneNodePtr node);
     void renderOutlineLine(RenderData* renderData, SceneNodePtr node);
 
