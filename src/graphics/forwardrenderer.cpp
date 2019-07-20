@@ -35,6 +35,7 @@ For more information see the LICENSE file
 #include "viewport.h"
 #include "utils/billboard.h"
 #include "utils/fullscreenquad.h"
+#include "texture.h"
 #include "texture2d.h"
 #include "texturecube.h"
 #include "rendertarget.h"
@@ -884,8 +885,16 @@ void ForwardRenderer::renderSelectedNode(RenderData* renderData, SceneNodePtr no
 
 void ForwardRenderer::captureSky(iris::ScenePtr scene)
 {
+	if (!scene->shouldCaptureSky)
+		return;
+
 	if (!scene->skyCapture) {
-		scene->skyCapture = iris::TextureCube::create(1024, 1024);
+		scene->skyCapture = iris::TextureCube::create(scene->skyCaptureSize, scene->skyCaptureSize);
+	}
+
+	if (scene->shouldResizeSky) {
+		scene->skyCapture->resize(scene->skyCaptureSize, scene->skyCaptureSize);
+		scene->shouldResizeSky = false;
 	}
 	// initial matrices needed
 	RenderData renderData;
@@ -893,14 +902,11 @@ void ForwardRenderer::captureSky(iris::ScenePtr scene)
 	QMatrix4x4 proj;
 	proj.setToIdentity();
 	proj.perspective(90, 1, 1, 1000);
-	renderData.projMatrix = proj;//
-	//renderData.
+	renderData.projMatrix = proj;
 
 
 	for (int i = 0; i < 6; i++) {
 		// calc view matrix based on eye
-		//renderData.viewMatrix = ;//
-
 		QMatrix4x4 view;
 		view.setToIdentity();
 
@@ -936,8 +942,7 @@ void ForwardRenderer::captureSky(iris::ScenePtr scene)
 
 		graphics->setRenderTarget(scene->skyCapture, i);
 
-
-		graphics->setViewport(QRect(0, 0, 1024, 1024));
+		graphics->setViewport(QRect(0, 0, scene->skyCaptureSize, scene->skyCaptureSize));
 
 		// clear
 		graphics->clear(QColor(0, 0, 0));
@@ -946,6 +951,8 @@ void ForwardRenderer::captureSky(iris::ScenePtr scene)
 	}
 
 	graphics->clearRenderTarget();
+
+	scene->shouldCaptureSky = false;
 }
 
 void ForwardRenderer::renderOutlineNode(RenderData *renderData, SceneNodePtr node)

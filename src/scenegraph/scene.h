@@ -107,8 +107,10 @@ public:
 	float gradientOffset;
 
 	TextureCubePtr skyCapture;
-	bool skyCaptured; // has the sky been captured?
-	bool shouldCaptureSky; // should the sky be captured on the next frame?
+	bool skyCaptured = false; // has the sky been captured?
+	bool shouldCaptureSky = true; // should the sky be captured on the next frame?
+	int skyCaptureSize = 1024;
+	bool shouldResizeSky = false;
 
     // fog properties
     QColor fogColor;
