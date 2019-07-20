@@ -67,6 +67,9 @@ using namespace OVR;
 namespace iris
 {
 
+#define SHADOW_TEXTURE_SLOT_START 16
+#define SKY_CUBEMAP_TEXTURE_SLOT 15
+
 ForwardRenderer::ForwardRenderer(bool supportsVr, bool physicsEnabled)
 {
     this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
@@ -179,6 +182,9 @@ void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePt
     if (scene->shadowEnabled) {
         renderShadows(scene);
     }
+
+	if (scene->shouldCaptureSky)
+		captureSky(scene);
 
     gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -498,6 +504,9 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
         renderShadows(scene);
     }
 
+	if (scene->shouldCaptureSky)
+		captureSky(scene);
+
     vrDevice->beginFrame();
 
     for (int eye = 0; eye < 2; ++eye)
@@ -688,7 +697,7 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
 			// index at which shadow maps starts
 			// we're assuming that the gpu supports 32 texture units per shader
 			// gl 3.x spec dictates 16 minimum
-            int shadowIndex = 16;
+            int shadowIndex = SHADOW_TEXTURE_SLOT_START;
 
             // Only materials get lights passed to it
             if ( item->renderStates.receiveLighting ) {
@@ -743,8 +752,8 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
             }
 
 			// pass reflection shader
-			graphics->setTexture(15, scene->skyCapture);
-			graphics->setShaderUniform("skybox", 15);
+			graphics->setTexture(SKY_CUBEMAP_TEXTURE_SLOT, scene->skyCapture);
+			graphics->setShaderUniform("skybox", SKY_CUBEMAP_TEXTURE_SLOT);
 
             // set render states
             graphics->setRasterizerState(item->renderStates.rasterState);
