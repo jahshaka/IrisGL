@@ -33,6 +33,12 @@ public:
     GLuint getTextureId();
     virtual void bind();
     virtual void bind(int index);
+
+    virtual int getWidth();
+    virtual int getHeight();
+    virtual void resize(int width, int height, bool force = false);
+
+    virtual ~Texture(){}
 };
 
 }

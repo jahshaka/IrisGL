@@ -182,42 +182,11 @@ Texture2DPtr Texture2D::createShadowDepth(int width, int height)
     return Texture2DPtr(new Texture2D(texture));
 }
 
-void Texture2D::resize(int width, int height, bool force)
-{
-    if((texture->width() == width && texture->height() == height) && !force)
-        return;
-
-    auto texFormat = texture->format();
-    auto minFilter = texture->minificationFilter();
-    auto magFilter = texture->magnificationFilter();
-    auto wrapModeS = texture->wrapMode(QOpenGLTexture::DirectionS);
-    auto wrapModeT = texture->wrapMode(QOpenGLTexture::DirectionT);
-
-    //return;
-    texture->destroy();
-    texture->setFormat(texFormat);
-    texture->setMinMagFilters(minFilter, magFilter);
-    texture->setWrapMode(QOpenGLTexture::DirectionS, wrapModeS);
-    texture->setWrapMode(QOpenGLTexture::DirectionT, wrapModeT);
-    texture->setSize(width, height);
-    texture->create();
-    texture->allocateStorage();
-}
 
 Texture2D::Texture2D(QOpenGLTexture *tex)
 {
     this->texture = tex;
     gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
-}
-
-int Texture2D::getWidth()
-{
-    return texture->width();
-}
-
-int Texture2D::getHeight()
-{
-    return texture->height();
 }
 
 void Texture2D::setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter)

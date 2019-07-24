@@ -76,13 +76,12 @@ public:
         return source;
     }
 
+    // todo: REMOVE!! (nick)
     static Texture2DPtr createCubeMap(QString, QString, QString, QString, QString, QString, QImage *i = nullptr);
-    void resize(int width, int height, bool force = false);
+
+    //void resize(int width, int height, bool force = false) override;
 
     QPixmap readData();
-
-    int getWidth();
-    int getHeight();
 
     void setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter);
     void setWrapMode(QOpenGLTexture::WrapMode wrapS, QOpenGLTexture::WrapMode wrapT);

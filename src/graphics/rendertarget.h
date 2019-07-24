@@ -3,11 +3,18 @@
 
 #include "../irisglfwd.h"
 #include "qopengl.h"
-
+#include <QVector>
 
 class QOpenGLFunctions_3_2_Core;
 namespace iris
 {
+
+struct RenderTargetTexture
+{
+    TexturePtr texture;
+    int cubeFace = 0;
+	bool isCubeMap = false;
+};
 
 //todo: clear fbo bindings, textures are still left bound
 // to fbo even tho they're removed from the texture list
@@ -22,7 +29,8 @@ class RenderTarget
     int width;
     int height;
 
-    QList<Texture2DPtr> textures;
+    //QList<Texture2DPtr> textures;
+    QVector<RenderTargetTexture> textures;
     Texture2DPtr depthTexture;
 
     RenderTarget(int width, int height);
@@ -33,6 +41,7 @@ public:
     // if resizeTextures is true, all attached textures will be resized
     void resize(int width, int height, bool resizeTextures);
 
+    void addTexture(TextureCubePtr tex, int index = 0);
     void addTexture(Texture2DPtr tex);
     void setDepthTexture(Texture2DPtr depthTex);
 

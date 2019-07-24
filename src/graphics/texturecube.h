@@ -47,14 +47,15 @@ public:
 
     static TextureCubePtr load(QString, QString, QString, QString, QString, QString, QImage *i = nullptr);
 
-    int getWidth();
-    int getHeight();
+	static TextureCubePtr create(int width, int height);
 
     void setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter);
     void setWrapMode(QOpenGLTexture::WrapMode wrapS, QOpenGLTexture::WrapMode wrapT);
 
     void bind() override;
     void bind(int index) override;
+
+    ~TextureCube() override {}
 
 private:
     QOpenGLFunctions_3_2_Core* gl;

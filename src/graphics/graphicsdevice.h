@@ -131,6 +131,7 @@ public:
 
     void setRenderTarget(RenderTargetPtr renderTarget);
 	void setRenderTarget(Texture2DPtr renderTarget);
+	void setRenderTarget(TextureCubePtr cubeTex, int cubeFaceIndex);
     void setRenderTarget(QList<Texture2DPtr> colorTargets, Texture2DPtr depthTarget);
     void clearRenderTarget();
 

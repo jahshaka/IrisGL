@@ -70,6 +70,8 @@ class Scene: public QEnableSharedFromThis<Scene>
 {
     QSharedPointer<Environment> environment;
 
+	friend class ForwardRenderer;
+
 public:
     CameraNodePtr camera;
     SceneNodePtr rootNode;
@@ -103,6 +105,12 @@ public:
 	QColor gradientMid;
 	QColor gradientBot;
 	float gradientOffset;
+
+	TextureCubePtr skyCapture;
+	bool skyCaptured = false; // has the sky been captured?
+	bool shouldCaptureSky = true; // should the sky be captured on the next frame?
+	int skyCaptureSize = 1024;
+	bool shouldResizeSky = false;
 
     // fog properties
     QColor fogColor;
@@ -192,6 +200,9 @@ public:
     void clearSkyTexture();
     void setSkyColor(QColor color);
     void setAmbientColor(QColor color);
+
+	// causes the sky to be recaptured each frame
+	void queueSkyCapture();
 
 	void setAmbientMusic(QString path);
 	void stopPlayingAmbientMusic();

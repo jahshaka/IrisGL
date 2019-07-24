@@ -88,20 +88,25 @@ TextureCubePtr TextureCube::load(QString negZ, QString posZ,
     return TextureCubePtr(new TextureCube(texture));
 }
 
+TextureCubePtr TextureCube::create(int width, int height)
+{
+	auto texture = new QOpenGLTexture(QOpenGLTexture::TargetCubeMap);
+	texture->create();
+	texture->setSize(width, height, 1);
+	texture->setFormat(QOpenGLTexture::RGBA8_UNorm);
+	texture->allocateStorage();
+
+	texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+	texture->setMinificationFilter(QOpenGLTexture::Linear);
+	texture->setMagnificationFilter(QOpenGLTexture::Linear);
+
+    return TextureCubePtr(new TextureCube(texture));
+}
+
 TextureCube::TextureCube(QOpenGLTexture *tex)
 {
     this->texture = tex;
     gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
-}
-
-int TextureCube::getWidth()
-{
-    return texture->width();
-}
-
-int TextureCube::getHeight()
-{
-    return texture->height();
 }
 
 void TextureCube::setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter)

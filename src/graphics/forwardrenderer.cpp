@@ -35,7 +35,9 @@ For more information see the LICENSE file
 #include "viewport.h"
 #include "utils/billboard.h"
 #include "utils/fullscreenquad.h"
+#include "texture.h"
 #include "texture2d.h"
+#include "texturecube.h"
 #include "rendertarget.h"
 #include "renderlist.h"
 #include "graphicsdevice.h"
@@ -64,6 +66,9 @@ using namespace OVR;
 
 namespace iris
 {
+
+#define SHADOW_TEXTURE_SLOT_START 16
+#define SKY_CUBEMAP_TEXTURE_SLOT 15
 
 ForwardRenderer::ForwardRenderer(bool supportsVr, bool physicsEnabled)
 {
@@ -178,6 +183,9 @@ void ForwardRenderer::renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePt
         renderShadows(scene);
     }
 
+	if (scene->shouldCaptureSky)
+		captureSky(scene);
+
     gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     //todo: remember to remove this!
@@ -280,6 +288,10 @@ void ForwardRenderer::renderScene(float delta, Viewport* vp)
     if (scene->shadowEnabled) {
         renderShadows(scene);
     }
+
+	// render sky if necessary
+	if (scene->shouldCaptureSky)
+		captureSky(scene);
 
     gl->glViewport(0, 0, vp->width * vp->pixelRatioScale, vp->height * vp->pixelRatioScale);
 
@@ -492,6 +504,9 @@ void ForwardRenderer::renderSceneVr(float delta, Viewport* vp, bool useViewer)
         renderShadows(scene);
     }
 
+	if (scene->shouldCaptureSky)
+		captureSky(scene);
+
     vrDevice->beginFrame();
 
     for (int eye = 0; eye < 2; ++eye)
@@ -679,7 +694,10 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
             */
 			graphics->setShaderUniform("u_lightCount", renderData->scene->lights.count());
 
-            int shadowIndex = 8;
+			// index at which shadow maps starts
+			// we're assuming that the gpu supports 32 texture units per shader
+			// gl 3.x spec dictates 16 minimum
+            int shadowIndex = SHADOW_TEXTURE_SLOT_START;
 
             // Only materials get lights passed to it
             if ( item->renderStates.receiveLighting ) {
@@ -732,6 +750,10 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
 					}
                 }
             }
+
+			// pass reflection shader
+			graphics->setTexture(SKY_CUBEMAP_TEXTURE_SLOT, scene->skyCapture);
+			graphics->setShaderUniform("skybox", SKY_CUBEMAP_TEXTURE_SLOT);
 
             // set render states
             graphics->setRasterizerState(item->renderStates.rasterState);
@@ -868,6 +890,78 @@ void ForwardRenderer::renderSelectedNode(RenderData* renderData, SceneNodePtr no
     gl->glStencilMask(1);
     gl->glLineWidth(1);
     gl->glPolygonMode(GL_FRONT, GL_FILL);
+}
+
+void ForwardRenderer::captureSky(iris::ScenePtr scene)
+{
+	if (!scene->shouldCaptureSky)
+		return;
+
+	if (!scene->skyCapture) {
+		scene->skyCapture = iris::TextureCube::create(scene->skyCaptureSize, scene->skyCaptureSize);
+	}
+
+	if (scene->shouldResizeSky) {
+		scene->skyCapture->resize(scene->skyCaptureSize, scene->skyCaptureSize);
+		scene->shouldResizeSky = false;
+	}
+	// initial matrices needed
+	RenderData renderData;
+	renderData.eyePos = QVector3D(0, 0, 0);
+	QMatrix4x4 proj;
+	proj.setToIdentity();
+	proj.perspective(90, 1, 1, 1000);
+	renderData.projMatrix = proj;
+
+
+	for (int i = 0; i < 6; i++) {
+		// calc view matrix based on eye
+		QMatrix4x4 view;
+		view.setToIdentity();
+
+		switch (i) {
+		case 0: // POSITIVE X
+			view.lookAt(QVector3D(0, 0, 0), QVector3D(1, 0, 0), QVector3D(0, -1, 0));
+			break;
+
+		case 1: // NEGATIVE X
+			view.lookAt(QVector3D(0, 0, 0), QVector3D(-1, 0, 0), QVector3D(0, -1, 0));
+			break;
+
+		case 2: // POSITIVE Y
+			view.lookAt(QVector3D(0, 0, 0), QVector3D(0, 1, 0), QVector3D(0, 0, 1));
+			break;
+
+		case 3: // NEGATIVE Y
+			view.lookAt(QVector3D(0, 0, 0), QVector3D(0, -1, 0), QVector3D(0, 0, -1));
+			break;
+
+		case 4: // POSITIVE Z
+			view.lookAt(QVector3D(0, 0, 0), QVector3D(0, 0, 1), QVector3D(0, -1.0001, 0));
+			break;
+
+		case 5: // NEGATIVE Z
+			view.lookAt(QVector3D(0, 0, 0), QVector3D(0, 0, -1), QVector3D(0, -1.0001, 0));
+			break;
+
+		default:
+			break;
+		}
+		renderData.viewMatrix = view;
+
+		graphics->setRenderTarget(scene->skyCapture, i);
+
+		graphics->setViewport(QRect(0, 0, scene->skyCaptureSize, scene->skyCaptureSize));
+
+		// clear
+		graphics->clear(QColor(0, 0, 0));
+
+		this->renderSky(&renderData);
+	}
+
+	graphics->clearRenderTarget();
+
+	scene->shouldCaptureSky = false;
 }
 
 void ForwardRenderer::renderOutlineNode(RenderData *renderData, SceneNodePtr node)

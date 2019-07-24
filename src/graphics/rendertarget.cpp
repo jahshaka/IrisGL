@@ -1,6 +1,7 @@
 #include "rendertarget.h"
 #include <QOpenGLFunctions_3_2_Core>
 #include "texture2d.h"
+#include "texturecube.h"
 #include <QDebug>
 
 namespace iris
@@ -106,13 +107,29 @@ void RenderTarget::resize(int width, int height, bool resizeTextures)
     gl->glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
     if(resizeTextures) {
-        for( auto texture : textures) {
-            texture->resize(width, height);
+        for( const auto& texture : textures) {
+            texture.texture->resize(width, height);
         }
 
         if (!!depthTexture)
             depthTexture->resize(width, height);
     }
+}
+
+void RenderTarget::addTexture(TextureCubePtr tex, int index)
+{
+    if (textures.count()==0) {
+        width = tex->getWidth();
+        height = tex->getHeight();
+    }
+    else {
+        // this assertion should only hold true if this isnt the first texture
+        Q_ASSERT_X(width==tex->getWidth() && height==tex->getHeight(),
+               "RenderTarget",
+               "Size of attached texture should be the same as size of render target");
+    }
+
+    textures.append({tex, index, true});
 }
 
 void RenderTarget::addTexture(Texture2DPtr tex)
@@ -128,7 +145,7 @@ void RenderTarget::addTexture(Texture2DPtr tex)
                "Size of attached texture should be the same as size of render target");
     }
 
-    textures.append(tex);
+    textures.append({tex});
 }
 
 void RenderTarget::setDepthTexture(Texture2DPtr depthTex)
@@ -166,9 +183,14 @@ void RenderTarget::bind()
     gl->glBindFramebuffer(GL_FRAMEBUFFER, fboId);
 
     auto i = 0;
-    for(auto texture : textures)
+    for(const auto& texture : textures)
     {
-        gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0+i, GL_TEXTURE_2D, texture->getTextureId(), 0);
+		if (texture.isCubeMap) {
+			gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_CUBE_MAP_POSITIVE_X+texture.cubeFace, texture.texture->getTextureId(), 0);
+		}
+		else {
+			gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, texture.texture->getTextureId(), 0);
+		}
         i++;
     }
 
