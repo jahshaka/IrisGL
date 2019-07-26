@@ -14,6 +14,13 @@ struct RenderTargetTexture
     TexturePtr texture;
     int cubeFace = 0;
 	bool isCubeMap = false;
+
+    RenderTargetTexture(TexturePtr texture, int cubeFace = 0, bool isCubeMap = false):
+        texture(texture), cubeFace(cubeFace), isCubeMap(isCubeMap)
+    {
+
+    }
+
 };
 
 //todo: clear fbo bindings, textures are still left bound

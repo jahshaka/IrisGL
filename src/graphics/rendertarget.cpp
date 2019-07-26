@@ -129,7 +129,7 @@ void RenderTarget::addTexture(TextureCubePtr tex, int index)
                "Size of attached texture should be the same as size of render target");
     }
 
-    textures.append({tex, index, true});
+    textures.append(RenderTargetTexture(tex, index, true));
 }
 
 void RenderTarget::addTexture(Texture2DPtr tex)
@@ -145,7 +145,7 @@ void RenderTarget::addTexture(Texture2DPtr tex)
                "Size of attached texture should be the same as size of render target");
     }
 
-    textures.append({tex});
+    textures.append(RenderTargetTexture(tex));
 }
 
 void RenderTarget::setDepthTexture(Texture2DPtr depthTex)
