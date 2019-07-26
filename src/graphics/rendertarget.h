@@ -15,6 +15,11 @@ struct RenderTargetTexture
     int cubeFace = 0;
 	bool isCubeMap = false;
 
+	RenderTargetTexture()
+	{
+
+	}
+
     RenderTargetTexture(TexturePtr texture, int cubeFace = 0, bool isCubeMap = false):
         texture(texture), cubeFace(cubeFace), isCubeMap(isCubeMap)
     {
