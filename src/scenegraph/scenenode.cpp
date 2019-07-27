@@ -470,7 +470,7 @@ QQuaternion SceneNode::getGlobalRotation()
 
 QVector3D SceneNode::getGlobalPosition()
 {
-    return globalTransform.column(3).toVector3D();
+    return getGlobalTransform().column(3).toVector3D();
 }
 
 QMatrix4x4 SceneNode::getGlobalTransform()
