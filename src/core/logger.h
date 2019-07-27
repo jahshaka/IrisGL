@@ -2,6 +2,7 @@
 #define LOGGER_H
 
 #include <QString>
+#include <QDebug>
 
 
 #define LOG_FILE_NAME "log.txt"
