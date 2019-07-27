@@ -52,7 +52,8 @@ QVector3D PhysicsHelper::QVector3DFrombtVector3(btVector3 vector)
 
 btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode, const iris::PhysicsProperty &props)
 {
-    btVector3 pos(sceneNode->getLocalPos().x(), sceneNode->getLocalPos().y(), sceneNode->getLocalPos().z());
+	QVector3D globalPos = sceneNode->getGlobalPosition();
+    btVector3 pos(globalPos.x(), globalPos.y(), globalPos.z());
     btRigidBody *body = nullptr;
 
     btTransform transform;
