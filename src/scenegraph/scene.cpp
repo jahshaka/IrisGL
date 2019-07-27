@@ -285,10 +285,14 @@ void Scene::update(float dt)
 			continue;
 
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
-		auto simulatedTransform = QMatrix4x4(matrix).transposed();
-		simulatedTransform.scale(mesh->getLocalScale());
+		//auto simulatedTransform = QMatrix4x4(matrix).transposed();
+		//simulatedTransform.scale(mesh->getLocalScale());
 		// Set our scenenode to the simulated transform for the duration of the sim
-		mesh->setGlobalTransform(simulatedTransform);
+		//mesh->setGlobalTransform(simulatedTransform);
+		auto pos = rigidBodyWorldTransform.getOrigin();
+		mesh->setGlobalPos(QVector3D(pos.x(), pos.y(), pos.z()));
+		auto rot = rigidBodyWorldTransform.getRotation();
+		mesh->setGlobalRot(QQuaternion(rot.w(), rot.x(), rot.y(), rot.z()));
 	}
 
 	// Cameras aren't always a part of the scene hierarchy, so their matrices are updated here
