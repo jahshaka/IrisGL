@@ -274,11 +274,11 @@ void CustomMaterial::setGuid(const QString &guid)
 
 void CustomMaterial::setBaseMaterialProperties(const QJsonObject &jahShader)
 {
-    auto renderLayer    = jahShader["renderLayer"].toString("opaque");
-    auto blendType      = jahShader["blendMode"].toString();
+    auto renderLayer    = jahShader["renderLayer"].toString("opaque").toLower();
+    auto blendType      = jahShader["blendMode"].toString("opaque").toLower();
     auto zwrite         = jahShader["zWrite"].toBool(true);
     auto depthTest      = jahShader["depthTest"].toBool(true);
-    auto cullMode       = jahShader["cullMode"].toString("back");
+    auto cullMode       = jahShader["cullMode"].toString("back").toLower();
     auto fog            = jahShader["fog"].toBool(true);
     auto castShadows    = jahShader["castShadows"].toBool(true);
     auto receiveShadows = jahShader["receiveShadows"].toBool(true);
@@ -289,7 +289,7 @@ void CustomMaterial::setBaseMaterialProperties(const QJsonObject &jahShader)
     renderStates.receiveShadows     = receiveShadows;
     renderStates.receiveLighting    = lighting;
 
-    if (renderLayer == "alphaTested") {
+    if (renderLayer == "alphatested") {
         setRenderLayer(RenderLayer::AlphaTested);
     } else if (renderLayer == "opaque") {
         setRenderLayer(RenderLayer::Background);
