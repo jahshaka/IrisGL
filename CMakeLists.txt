@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.3 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.28)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
 foreach(p CMP0071) # 3.10: Let AUTOMOC and AUTOUIC process GENERATED files
     if(POLICY ${p})
@@ -29,7 +29,7 @@ function(add_subdirectory_with_folder _folder_name _folder)
 endfunction()
 
 find_package(OpenGL REQUIRED) # is this needed?
-find_package(Qt5 REQUIRED COMPONENTS Core OpenGL Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core OpenGL Multimedia)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
@@ -268,5 +268,5 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/zip/src"
 )
 
-target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt5::Core Qt5::OpenGL Qt5::Multimedia)
+target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::OpenGL Qt6::Multimedia)
 target_compile_options(IrisGL PUBLIC)
