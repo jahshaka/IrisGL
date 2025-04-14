@@ -110,7 +110,8 @@ GraphicsDevicePtr GraphicsDevice::create()
 GraphicsDevice::GraphicsDevice()
 {
     context = QOpenGLContext::currentContext();
-    gl = context->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    this->gl = new QOpenGLFunctions_3_2_Core();
+    this->gl->initializeOpenGLFunctions();
 
     // 8 texture units by default
     for(int i =0;i<8;i++)

@@ -21,7 +21,8 @@ Texture2D::Texture2D(GLuint texId)
 {
     useCustomId = true;
     customId = texId;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    this->gl = new QOpenGLFunctions_3_2_Core();
+    this->gl->initializeOpenGLFunctions();
 }
 
 Texture2DPtr Texture2D::load(QString path)
@@ -186,7 +187,8 @@ Texture2DPtr Texture2D::createShadowDepth(int width, int height)
 Texture2D::Texture2D(QOpenGLTexture *tex)
 {
     this->texture = tex;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    this->gl = new QOpenGLFunctions_3_2_Core();
+    this->gl->initializeOpenGLFunctions();
 }
 
 void Texture2D::setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter)

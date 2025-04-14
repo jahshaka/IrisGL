@@ -37,8 +37,10 @@ public:
     bool useAdditive;
 
     QSharedPointer<iris::Texture2D> icon;
-    ParticleRenderer() {
-        this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    ParticleRenderer() : gl(nullptr) {
+        this->gl = new QOpenGLFunctions_3_2_Core();
+        this->gl->initializeOpenGLFunctions();
+        //this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
 
         GLfloat quadVertices[] = {
             -1.f,  1.f, 0.f,    0.0f, 1.0f,

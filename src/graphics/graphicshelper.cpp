@@ -9,6 +9,7 @@ and/or modify it under the terms of the GPLv3 License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include <QRegularExpression>
 #include "graphicshelper.h"
 #include <QOpenGLShaderProgram>
 
@@ -60,8 +61,8 @@ QOpenGLShaderProgram* GraphicsHelper::loadShader(QString vsPath,QString fsPath)
 
 QString GraphicsHelper::loadAndProcessShader(QString shaderPath)
 {
-    QRegExp internalFileInclude("\\<(.+\\\\)*((.+)\\.(.+))\\>");
-    QRegExp externalFileInclude("\\\"(.+\\\\)*((.+)\\.(.+))\\\"");
+    QRegularExpression internalFileInclude("\\<(.+\\\\)*((.+)\\.(.+))\\>");
+    QRegularExpression externalFileInclude("\\\"(.+\\\\)*((.+)\\.(.+))\\\"");
 
     QFile file(shaderPath);
     file.open(QIODevice::ReadOnly | QIODevice::Text);
@@ -72,12 +73,12 @@ QString GraphicsHelper::loadAndProcessShader(QString shaderPath)
     for (int i = 0; i < lines.count(); ++i) {
         if (lines[i].startsWith("#pragma include")) {
             QString includeFile = "";
-            int pos = 0;
-            if( (pos = internalFileInclude.indexIn(lines[i], 0)) != -1) {
-                auto filename = internalFileInclude.cap(2);
-                includeFile = ":assets/shaders/"+filename;
-            } else if( (pos = externalFileInclude.indexIn(lines[i], 0)) != -1) {
-                auto filename = externalFileInclude.cap(2);
+            QRegularExpressionMatch match;
+            if ((match = internalFileInclude.match(lines[i])) .hasMatch()) {
+                auto filename = match.captured(2);
+                includeFile = ":assets/shaders/" + filename;
+            } else if ((match = externalFileInclude.match(lines[i])).hasMatch()) {
+                auto filename = match.captured(2);
                 includeFile = QFileInfo(shaderPath).absolutePath() + "/" + filename;
             }
 

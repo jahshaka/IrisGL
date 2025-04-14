@@ -1,7 +1,7 @@
 #include "font.h"
 #include "../irisglfwd.h"
 #include "texture2d.h"
-#include <QApplication>
+#include <QtWidgets/QApplication>
 #include <QFont>
 #include <QFontMetrics>
 #include <QPixmap>
@@ -36,7 +36,7 @@ void Font::createGlyph(QChar chr, Glyph &glyph)
     dummyPainter.setFont(font);
     auto metrics = dummyPainter.fontMetrics();
 
-    int charWidth = metrics.width(chr);
+    int charWidth = metrics.horizontalAdvance(chr);
     int charHeight = metrics.height();
     // This adjustment has to be made for high dpi devices
     // where qt automatically adds extra padding around the text

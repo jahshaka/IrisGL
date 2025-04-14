@@ -64,20 +64,20 @@ DefaultMaterial::DefaultMaterial()
 
 void DefaultMaterial::begin(GraphicsDevicePtr device,ScenePtr scene)
 {
-	device->setShader(shader);
+    device->setShader(shader);
 
     bindTextures(device);
 
     //set params
     device->setShaderUniform("u_material.diffuse",QVector3D(diffuseColor.redF(),diffuseColor.greenF(),diffuseColor.blueF()));
 
-	QColor sceneAmbient;
-	if (!!scene)
-		sceneAmbient = scene->ambientColor;
+    QColor sceneAmbient;
+    if (!!scene)
+        sceneAmbient = scene->ambientColor;
     auto finalAmbient = QVector3D(ambientColor.redF() + sceneAmbient.redF(),
                                   ambientColor.greenF() + sceneAmbient.greenF(),
                                   ambientColor.blueF() + sceneAmbient.blueF());
-	device->setShaderUniform("u_material.ambient",finalAmbient);
+    device->setShaderUniform("u_material.ambient",finalAmbient);
 	device->setShaderUniform("u_material.specular",QVector3D(specularColor.redF(),specularColor.greenF(),specularColor.blueF()));
 	device->setShaderUniform("u_material.shininess",shininess);
 
@@ -122,7 +122,7 @@ QString DefaultMaterial::getDiffuseTextureSource()
         return diffuseTexture->source;
     }
 
-    return QString::null;
+    return QString();
 }
 
 void DefaultMaterial::setAmbientColor(QColor col)
@@ -163,7 +163,7 @@ QString DefaultMaterial::getNormalTextureSource()
         return normalTexture->source;
     }
 
-    return QString::null;
+    return QString();
 }
 
 void DefaultMaterial::setNormalIntensity(float intensity)
@@ -200,7 +200,7 @@ QString DefaultMaterial::getSpecularTextureSource()
         return specularTexture->source;
     }
 
-    return QString::null;
+    return QString();
 }
 
 void DefaultMaterial::setSpecularColor(QColor col)
@@ -248,7 +248,7 @@ QString DefaultMaterial::getReflectionTextureSource()
         return reflectionTexture->source;
     }
 
-    return QString::null;
+    return QString();
 }
 
 void DefaultMaterial::setReflectionInfluence(float intensity)

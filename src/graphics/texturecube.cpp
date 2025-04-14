@@ -106,7 +106,8 @@ TextureCubePtr TextureCube::create(int width, int height)
 TextureCube::TextureCube(QOpenGLTexture *tex)
 {
     this->texture = tex;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    this->gl = new QOpenGLFunctions_3_2_Core();
+    this->gl->initializeOpenGLFunctions();
 }
 
 void TextureCube::setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter)

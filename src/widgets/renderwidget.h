@@ -1,7 +1,7 @@
 #ifndef RENDERVIEW_H
 #define RENDERVIEW_H
 
-#include <QOpenGLWidget>
+#include <QtOpenGLWidgets/QOpenGLWidget>
 #include <QOpenGLFunctions_3_2_Core>
 
 #include "../irisglfwd.h"

@@ -29,7 +29,9 @@ function(add_subdirectory_with_folder _folder_name _folder)
 endfunction()
 
 find_package(OpenGL REQUIRED) # is this needed?
-find_package(Qt6 REQUIRED COMPONENTS Core OpenGL Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core OpenGL OpenGLWidgets Multimedia Network)
+message(STATUS "Qt6_VERSION: ${Qt6_VERSION}")
+message(STATUS "Qt6_INSTALL_PREFIX: ${Qt6_INSTALL_PREFIX}")
 
 set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
@@ -268,5 +270,5 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/zip/src"
 )
 
-target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::OpenGL Qt6::Multimedia)
+target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network)
 target_compile_options(IrisGL PUBLIC)

@@ -21,7 +21,8 @@ namespace iris
 PostProcessManager::PostProcessManager(GraphicsDevicePtr device)
 {
     this->device = device;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    this->gl = new QOpenGLFunctions_3_2_Core();
+    this->gl->initializeOpenGLFunctions();
     rtInitialized = false;
     fsQuad = new FullScreenQuad();
 

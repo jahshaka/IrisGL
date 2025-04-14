@@ -72,7 +72,9 @@ namespace iris
 
 ForwardRenderer::ForwardRenderer(bool supportsVr, bool physicsEnabled)
 {
-    this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    //this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    this->gl = new QOpenGLFunctions_3_2_Core();
+    this->gl->initializeOpenGLFunctions();
     graphics = GraphicsDevice::create();
 
     renderData = new RenderData();
@@ -692,7 +694,7 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
 
             program->setUniformValue("u_lightSpaceMatrix",  lightSpaceMatrix);
             */
-			graphics->setShaderUniform("u_lightCount", renderData->scene->lights.count());
+            graphics->setShaderUniform("u_lightCount", static_cast<int>(renderData->scene->lights.count()));
 
 			// index at which shadow maps starts
 			// we're assuming that the gpu supports 32 texture units per shader

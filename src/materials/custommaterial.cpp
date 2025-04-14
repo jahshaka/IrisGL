@@ -82,8 +82,6 @@ void CustomMaterial::setUniformValues(GraphicsDevicePtr device, Property *prop)
     if (prop->type == PropertyType::Color) {
 		auto propVal = static_cast<ColorProperty*>(prop)->value;
 		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
                                  QVector3D(propVal.redF(),
                                            propVal.greenF(),
                                            propVal.blueF()));
