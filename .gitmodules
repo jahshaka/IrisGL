@@ -1,12 +1,9 @@
 [submodule "src/assimp"]
 	path = src/assimp
 	url = https://github.com/assimp/assimp.git
-	update = merge
 [submodule "src/bullet3"]
 	path = src/bullet3
 	url = https://github.com/bulletphysics/bullet3.git
-	update = merge
 [submodule "src/zip"]
 	path = src/zip
 	url = https://github.com/kuba--/zip.git
-	update = merge
