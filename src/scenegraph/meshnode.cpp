@@ -8,6 +8,7 @@ and/or modify it under the terms of the GPLv3 License
 
 For more information see the LICENSE file
 *************************************************************************/
+#include "meshnode.h"
 
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -16,7 +17,6 @@ For more information see the LICENSE file
 #include <QDir>
 
 #include "../irisglfwd.h"
-#include "meshnode.h"
 #include "../graphics/mesh.h"
 #include "assimp/postprocess.h"
 #include "assimp/Importer.hpp"
@@ -220,7 +220,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(m, dir, meshMat);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -252,7 +252,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(m, dir, meshMat);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -319,7 +319,7 @@ MeshNode::loadAsSceneFragment(QString filePath,
         auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
         MeshMaterialData meshMat;
-        MaterialHelper::extractMaterialData(m, dir, meshMat);
+        MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
         auto mat = createMaterialFunc(meshObj, meshMat);
         if (!!mat) node->setMaterial(mat);
 
@@ -380,7 +380,7 @@ MeshNode::loadAsSceneFragment(
 		auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
 		MeshMaterialData meshMat;
-		MaterialHelper::extractMaterialData(m, dir, meshMat);
+        MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
 		auto mat = createMaterialFunc(meshObj, meshMat);
 		if (!!mat) node->setMaterial(mat);
 

@@ -20,7 +20,6 @@ void Logger::init(QString logFilePath)
     file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
     if (file->isOpen()) {
         out = new QTextStream(file);
-        out->setCodec("UTF-8");
     }
 }
 

@@ -9,14 +9,7 @@ and/or modify it under the terms of the GPLv3 License
 For more information see the LICENSE file
 *************************************************************************/
 
-#include "../irisglfwd.h"
 #include "model.h"
-#include "material.h"
-
-#include "assimp/postprocess.h"
-#include "assimp/Importer.hpp"
-#include "assimp/scene.h"
-#include "assimp/mesh.h"
 
 #include <QString>
 #include <QFile>
@@ -24,6 +17,15 @@ For more information see the LICENSE file
 #include <QOpenGLFunctions_3_2_Core>
 #include <QOpenGLTexture>
 #include <QtMath>
+
+#include "../irisglfwd.h"
+#include "core/logger.h"
+#include "material.h"
+
+#include "assimp/postprocess.h"
+#include "assimp/Importer.hpp"
+#include "assimp/scene.h"
+#include "assimp/mesh.h"
 
 #include "graphicsdevice.h"
 #include "vertexlayout.h"

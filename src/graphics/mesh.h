@@ -15,7 +15,8 @@ For more information see the LICENSE file
 #include <QString>
 #include <qopengl.h>
 #include <QColor>
-#include "../irisglfwd.h"
+
+//#include "../irisglfwd.h"
 #include "../animation/skeletalanimation.h"
 #include "../geometry/boundingsphere.h"
 #include "../geometry/aabb.h"
@@ -60,8 +61,14 @@ struct MeshMaterialData
     QString diffuseTexture;
     QString specularTexture;
     QString normalTexture;
+    QString hightTexture;
 
 	QString nodeName;
+
+    bool hasEmbeddedDiffTexture = false;
+    bool hasEmbeddedSpecularTexture = false;
+    bool hasEmbeddedNormalTexture = false;
+    bool hasEmbeddedHightTexture = false;
 };
 
 class VertexArrayData

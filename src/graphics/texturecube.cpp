@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #include "texturecube.h"
 #include <QDebug>
 #include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include "../core/logger.h"
 
 namespace iris
@@ -106,7 +107,13 @@ TextureCubePtr TextureCube::create(int width, int height)
 TextureCube::TextureCube(QOpenGLTexture *tex)
 {
     this->texture = tex;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+// adapted Qt6
+//    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
+    if (!gl) {
+        qFatal("Failed to get QOpenGLFunctions_3_2_Core");
+    }
 }
 
 void TextureCube::setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter)

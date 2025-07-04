@@ -224,7 +224,7 @@ struct Vec4Property : public Property
 	}
 
 	void setValue(QVariant val) {
-		value = val.value<QVector3D>();
+        value = val.value<QVector3D>().toVector4D();
 	}
 };
 

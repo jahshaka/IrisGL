@@ -1,5 +1,6 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include <QSharedPointer>
 
 #include "postprocessmanager.h"
@@ -21,7 +22,9 @@ namespace iris
 PostProcessManager::PostProcessManager(GraphicsDevicePtr device)
 {
     this->device = device;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+//    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
     rtInitialized = false;
     fsQuad = new FullScreenQuad();
 

@@ -9,6 +9,7 @@
 
 #include <QOpenGLShaderProgram>
 #include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include <QOpenGLFunctions>
 
 namespace iris
@@ -110,7 +111,9 @@ GraphicsDevicePtr GraphicsDevice::create()
 GraphicsDevice::GraphicsDevice()
 {
     context = QOpenGLContext::currentContext();
-    gl = context->versionFunctions<QOpenGLFunctions_3_2_Core>();
+//    gl = context->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
 
     // 8 texture units by default
     for(int i =0;i<8;i++)

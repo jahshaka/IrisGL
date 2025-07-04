@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include <QMatrix4x4>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include <QOpenGLContext>
 #include "particle.h"
 #include "renderdata.h"
@@ -38,8 +39,12 @@ public:
 
     QSharedPointer<iris::Texture2D> icon;
     ParticleRenderer() {
-        this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
-
+        //    this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+        QOpenGLContext* context = QOpenGLContext::currentContext();
+        gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
+        if (!gl) {
+            qFatal("Failed to get QOpenGLFunctions_3_2_Core");
+        }
         GLfloat quadVertices[] = {
             -1.f,  1.f, 0.f,    0.0f, 1.0f,
             -1.f, -1.f, 0.f,    0.0f, 0.0f,

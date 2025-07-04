@@ -1,6 +1,7 @@
 #include "renderlist.h"
 #include "renderitem.h"
 #include "model.h"
+#include <algorithm>
 
 namespace iris {
 
@@ -86,7 +87,8 @@ void RenderList::clear()
 
 void RenderList::sort()
 {
-    qSort(renderList.begin(), renderList.end(), [](const RenderItem* a, const RenderItem* b) {
+
+    std::sort(renderList.begin(), renderList.end(), [](const RenderItem* a, const RenderItem* b) {
         return a->renderLayer < b->renderLayer;
     });
 }

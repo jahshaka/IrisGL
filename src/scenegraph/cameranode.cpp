@@ -10,8 +10,10 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "cameranode.h"
+
 #include <QVector3D>
 #include <QPoint>
+
 #include "../math/mathhelper.h"
 
 namespace iris

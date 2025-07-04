@@ -14,6 +14,7 @@ For more information see the LICENSE file
 
 #include <QOpenGLContext>
 #include <QSharedPointer>
+
 //#include "../libovr/Include/OVR_CAPI_GL.h"
 #include "../irisglfwd.h"
 

@@ -14,6 +14,7 @@ For more information see the LICENSE file
 
 #include <QString>
 #include <QList>
+
 #include "../irisglfwd.h"
 #include "../graphics/mesh.h"
 
@@ -68,7 +69,8 @@ public:
      {
          for (F ao : store) {
              if (ao->path == filePath) {
-                const aiScene* scene = qvariant_cast<AssimpObject*>(ao->getValue())->getSceneData();
+                //const aiScene* scene = qvariant_cast<AssimpObject*>(ao->getValue())->getSceneData();
+                const aiScene* scene = ao->getValue().template value<AssimpObject*>()->getSceneData();
 
                 if (scene != nullptr) {
                     meshes = loadAllMeshesFromAssimpScene(scene);

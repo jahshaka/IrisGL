@@ -1,5 +1,6 @@
 #include "rendertarget.h"
 #include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include "texture2d.h"
 #include "texturecube.h"
 #include <QDebug>
@@ -37,8 +38,9 @@ RenderTarget::RenderTarget(int width, int height):
     width(width),
     height(height)
 {
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
-    gl->glGenFramebuffers(1, &fboId);
+    //    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);    gl->glGenFramebuffers(1, &fboId);
     gl->glBindFramebuffer(GL_FRAMEBUFFER, fboId);
 
     gl->glGenRenderbuffers(1, &renderBufferId);

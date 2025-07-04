@@ -13,9 +13,10 @@ For more information see the LICENSE file
 #define TEXTURECUBE_H
 
 #include <QSharedPointer>
-#include "texture.h"
 #include <QOpenGLTexture>
 #include <QImage>
+
+#include "texture.h"
 #include "../irisglfwd.h"
 
 class QOpenGLFunctions_3_2_Core;

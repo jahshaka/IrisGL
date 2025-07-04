@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #include "vrdevice.h"
 #include <QOpenGLShaderProgram>
 #include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include <QOpenGLTexture>
 
 #include <QOpenGLContext>
@@ -101,7 +102,13 @@ float VrTouchController::getHandTrigger()
 
 VrDevice::VrDevice()
 {
-    this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+//    this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
+    if (!gl) {
+        qFatal("Failed to get QOpenGLFunctions_3_2_Core");
+    }
+
     vrSupported = false;
     frameData = new VrFrameData();
 

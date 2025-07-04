@@ -28,8 +28,11 @@ function(add_subdirectory_with_folder _folder_name _folder)
     endforeach()
 endfunction()
 
-find_package(OpenGL REQUIRED) # is this needed?
-find_package(Qt5 REQUIRED COMPONENTS Core OpenGL Multimedia)
+#find_package(Qt6 COMPONENTS Core)
+
+find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Multimedia Network)
+message(STATUS "Qt6_VERSION: ${Qt6_VERSION}")
+message(STATUS "Qt6_INSTALL_PREFIX: ${Qt6_INSTALL_PREFIX}")
 
 set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
@@ -42,8 +45,10 @@ option(ASSIMP_BUILD_ASSIMP_TOOLS                "" OFF)
 option(ASSIMP_BUILD_TESTS                       "" OFF)
 option(ASSIMP_NO_EXPORT                         "" ON)
 option(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT    "" OFF)
+
 option(ASSIMP_BUILD_OBJ_IMPORTER                "" ON)
 option(ASSIMP_BUILD_FBX_IMPORTER                "" ON)
+option(ASSIMP_BUILD_GLTF_IMPORTER               "" ON)
 option(ASSIMP_BUILD_COLLADA_IMPORTER            "" ON)
 option(ASSIMP_BUILD_ZLIB                        "" ON)
 
@@ -263,10 +268,9 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_BINARY_DIR}/src/assimp/include/"
     "${PROJECT_SOURCE_DIR}/src/assimp/include/"
     "${PROJECT_SOURCE_DIR}/src/libovr/Include"
-    "${PROJECT_SOURCE_DIR}/src/bullet3"
     "${PROJECT_SOURCE_DIR}/src/bullet3/src"
     "${PROJECT_SOURCE_DIR}/src/zip/src"
 )
 
-target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt5::Core Qt5::OpenGL Qt5::Multimedia)
+target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network)
 target_compile_options(IrisGL PUBLIC)

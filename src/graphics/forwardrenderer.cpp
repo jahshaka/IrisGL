@@ -10,6 +10,16 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "forwardrenderer.h"
+
+#include <QOpenGLContext>
+#include <QOpenGLShaderProgram>
+#include <QOpenGLFunctions>
+#include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
+#include <QSharedPointer>
+#include <QOpenGLTexture>
+#include <QMatrix4x4>
+
 #include "../scenegraph/scene.h"
 #include "../scenegraph/scenenode.h"
 #include "../scenegraph/cameranode.h"
@@ -25,13 +35,6 @@ For more information see the LICENSE file
 #include "material.h"
 #include "renderitem.h"
 #include "shadowmap.h"
-#include <QOpenGLContext>
-#include <QOpenGLShaderProgram>
-#include <QOpenGLFunctions>
-#include <QOpenGLFunctions_3_2_Core>
-#include <QSharedPointer>
-#include <QOpenGLTexture>
-#include <QMatrix4x4>
 #include "viewport.h"
 #include "utils/billboard.h"
 #include "utils/fullscreenquad.h"
@@ -72,8 +75,9 @@ namespace iris
 
 ForwardRenderer::ForwardRenderer(bool supportsVr, bool physicsEnabled)
 {
-    this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
-    graphics = GraphicsDevice::create();
+    //    this->gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);    graphics = GraphicsDevice::create();
 
     renderData = new RenderData();
 
@@ -692,7 +696,7 @@ void ForwardRenderer::renderNode(RenderData* renderData, ScenePtr scene)
 
             program->setUniformValue("u_lightSpaceMatrix",  lightSpaceMatrix);
             */
-			graphics->setShaderUniform("u_lightCount", renderData->scene->lights.count());
+            graphics->setShaderUniform("u_lightCount", static_cast<int>(renderData->scene->lights.count()));
 
 			// index at which shadow maps starts
 			// we're assuming that the gpu supports 32 texture units per shader

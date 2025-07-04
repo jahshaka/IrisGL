@@ -12,10 +12,11 @@ For more information see the LICENSE file
 #ifndef DEFAULTMATERIAL_H
 #define DEFAULTMATERIAL_H
 
-#include "../irisglfwd.h"
-#include "../graphics/material.h"
 #include <QOpenGLShaderProgram>
 #include <QColor>
+
+//#include "../irisglfwd.h"
+#include "../graphics/material.h"
 
 class QOpenGLFunctions_3_2_Core;
 

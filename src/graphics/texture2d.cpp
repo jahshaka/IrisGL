@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #include "texture2d.h"
 #include <QDebug>
 #include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include "../core/logger.h"
 
 namespace iris
@@ -21,7 +22,14 @@ Texture2D::Texture2D(GLuint texId)
 {
     useCustomId = true;
     customId = texId;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+
+    // adapted Qt6
+    //    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
+    if (!gl) {
+        qFatal("Failed to get QOpenGLFunctions_3_2_Core");
+    }
 }
 
 Texture2DPtr Texture2D::load(QString path)
@@ -186,7 +194,13 @@ Texture2DPtr Texture2D::createShadowDepth(int width, int height)
 Texture2D::Texture2D(QOpenGLTexture *tex)
 {
     this->texture = tex;
-    gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+
+    //gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
+    if (!gl) {
+        qFatal("Failed to get QOpenGLFunctions_3_2_Core");
+    }
 }
 
 void Texture2D::setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter)

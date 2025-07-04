@@ -13,9 +13,10 @@ For more information see the LICENSE file
 #define CAMERANODE_H
 
 #include <QMatrix4x4>
-#include <QtCore/QtMath>
+
 #include "../irisglfwd.h"
 #include "../scenegraph/scenenode.h"
+
 
 namespace iris
 {

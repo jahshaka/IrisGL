@@ -12,11 +12,13 @@ For more information see the LICENSE file
 #ifndef SKYMATERIAL_H
 #define SKYMATERIAL_H
 
+#include <QOpenGLShaderProgram>
+#include <QColor>
+#include <QtGlobal>
 
 #include "../graphics/material.h"
 #include "../irisglfwd.h"
-#include <QOpenGLShaderProgram>
-#include <QColor>
+
 
 class QOpenGLFunctions_3_2_Core;
 
