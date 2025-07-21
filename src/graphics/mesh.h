@@ -156,6 +156,10 @@ public:
         for (unsigned i = 0; i<scene->mNumAnimations; i++) {
             auto anim = scene->mAnimations[i];
             auto animName = QString(anim->mName.C_Str());
+            if (!anim || animName == anim->mChannels[0]->mNodeName.C_Str()) {
+                animName = "";
+            }
+
             //qDebug() << "Animation: " << animName;
             auto skelAnim = SkeletalAnimation::create();
             skelAnim->name = animName;
