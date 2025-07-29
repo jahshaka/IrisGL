@@ -289,6 +289,10 @@ void SceneNode::updateAnimation(float time)
 {
     if (!!animation) {
 
+        if (animation->getLength() > 60.0f) {
+            time = time * 1000.0f;
+        }
+
         time = animation->getSampleTime(time);
         if (animation->hasPropertyAnim("position")) {
             pos = animation->getVector3PropertyAnim("position")->getValue(time);
