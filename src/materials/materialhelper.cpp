@@ -1,35 +1,18 @@
-/**************************************************************************
-This file is part of IrisGL
-http://www.irisgl.org
-Copyright (c) 2016  GPLv3 Jahshaka LLC <coders@jahshaka.com>
-
-This is free software: you may copy, redistribute
-and/or modify it under the terms of the GPLv3 License
-
-For more information see the LICENSE file
-*************************************************************************/
-
-#include <QDir>
-#include <QJsonObject>
-#include <Qt3DRender/Qt3DRender>
-#include <QUuid>
-
 #include "materialhelper.h"
-#include "../irisglfwd.h"
-#include "assimp/scene.h"
-#include "assimp/mesh.h"
-#include "assimp/material.h"
-#include "assimp/matrix4x4.h"
-#include "assimp/vector3.h"
-#include "assimp/quaternion.h"
-#include "assimp/cimport.h"
+#include <QDir>
+#include <QUuid>
+#include <QFileInfo>
+#include <QDebug>
+#include <QImageWriter>
+#include <QtConcurrent>
 #include "defaultmaterial.h"
 #include "../graphics/texture2d.h"
-#include "../graphics/mesh.h"
 
-namespace iris
-{
+namespace iris {
 
+QVector<MaterialHelper::SaveTask> MaterialHelper::g_textureSaveTasks;
+QMutex MaterialHelper::g_saveMutex;
+QSet<QString> MaterialHelper::g_savedPaths;
 
 static QString generateTexGUID() {
     auto id = QUuid::createUuid();
@@ -38,15 +21,11 @@ static QString generateTexGUID() {
     return guid;
 }
 
-QColor getAiMaterialColor(aiMaterial* aiMat, const char* pKey, unsigned int type,
-                          unsigned int idx)
+QColor getAiMaterialColor(aiMaterial* aiMat, const char* pKey, unsigned int type = 0, unsigned int idx = 0)
 {
     aiColor3D col;
     aiMat->Get(pKey, type, idx, col);
-    auto color = QColor(col.r * 255, col.g * 255, col.b * 255, 255);
-
-    return color;
-
+    return QColor(col.r * 255, col.g * 255, col.b * 255, 255);
 }
 
 QString getAiMaterialTexture(aiMaterial* aiMat, aiTextureType texType)
@@ -54,41 +33,124 @@ QString getAiMaterialTexture(aiMaterial* aiMat, aiTextureType texType)
     if (aiMat->GetTextureCount(texType) > 0) {
         aiString tex;
         aiMat->GetTexture(texType, 0, &tex);
-
         return QString(tex.C_Str());
     }
-
     return QString();
 }
 
-float getAiMaterialFloat(aiMaterial* aiMat, const char* pKey, unsigned int type,
-                         unsigned int idx)
+float getAiMaterialFloat(aiMaterial* aiMat, const char* pKey, unsigned int type = 0, unsigned int idx = 0)
 {
-    float floatVal;
-    aiMat->Get(pKey, type, idx, floatVal);
-    return floatVal;
+    float val = 0.0f;
+    aiMat->Get(pKey, type, idx, val);
+    return val;
 }
 
-// http://www.assimp.org/lib_html/materials.html
-DefaultMaterialPtr MaterialHelper::createMaterial(aiMaterial* aiMat,QString assetPath)
+QImage MaterialHelper::convertAiTextureToImage(const aiTexture *at)
 {
-    auto mat =  DefaultMaterial::create();
+    if (!at) return QImage();
+
+    if (at->mHeight == 0) {
+        QImage image;
+        QByteArray data(reinterpret_cast<const char*>(at->pcData), at->mWidth);
+        image.loadFromData(data);
+        return image;
+    }
+
+    int width = at->mWidth;
+    int height = at->mHeight;
+    const aiTexel* texelData = reinterpret_cast<const aiTexel*>(at->pcData);
+    QImage image(reinterpret_cast<const uchar*>(texelData), width, height, QImage::Format_RGBA8888);
+    return image.copy();
+}
+
+DefaultMaterialPtr MaterialHelper::createMaterial(aiMaterial* aiMat, QString assetPath)
+{
+    auto mat = DefaultMaterial::create();
     mat->setDiffuseColor(getAiMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE));
     mat->setSpecularColor(getAiMaterialColor(aiMat, AI_MATKEY_COLOR_SPECULAR));
     mat->setAmbientColor(getAiMaterialColor(aiMat, AI_MATKEY_COLOR_AMBIENT));
-    //mat->setEmissiveColor(getAiMaterialColor(aiMat,AI_MATKEY_COLOR_EMISSIVE));
-
     mat->setShininess(getAiMaterialFloat(aiMat, AI_MATKEY_SHININESS));
 
-    if(!assetPath.isEmpty())
-    {
-        auto diffuseTex = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE);
-        mat->setDiffuseTexture(Texture2D::load(
-                                   QDir::cleanPath(assetPath + QDir::separator() + diffuseTex)));
+    if (!assetPath.isEmpty()) {
+        QString diffuseTex = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE);
+        if (!diffuseTex.isEmpty()) {
+            mat->setDiffuseTexture(Texture2D::load(QDir::cleanPath(assetPath + QDir::separator() + diffuseTex)));
+        }
     }
-
     return mat;
 }
+
+void MaterialHelper::saveTextureAsync(const QImage &image, const QString &path)
+{
+    if (image.isNull() || path.isEmpty()) return;
+
+    QMutexLocker locker(&g_saveMutex);
+    if (g_savedPaths.contains(path)) return;
+    g_savedPaths.insert(path);
+    locker.unlock();
+
+    QDir().mkpath(QFileInfo(path).absolutePath());
+
+    SaveTask task;
+    task.path = path;
+    task.future = QtConcurrent::run([image, path]() {
+        QImageWriter writer(path, "PNG");
+        writer.setCompression(1); // 压缩等级 1，加快写盘
+        if (!writer.write(image)) {
+            qWarning() << "Failed to save texture:" << path;
+        }
+    });
+
+    locker.relock();
+    g_textureSaveTasks.append(task);
+}
+
+void MaterialHelper::waitForAllTextureSaves()
+{
+    QVector<QFuture<void>> futures;
+    {
+        QMutexLocker locker(&g_saveMutex);
+        for (auto &task : g_textureSaveTasks) {
+            futures.append(task.future);
+        }
+        g_textureSaveTasks.clear();
+    }
+
+    for (auto &f : futures) {
+        if (f.isRunning() || f.isStarted()) f.waitForFinished();
+    }
+}
+
+void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
+                                         const QString& texName,
+                                         const QString& assetPath,
+                                         QString& texPath,
+                                         bool& hasEmbedded)
+{
+    if (texPath.isEmpty() || (QFileInfo::exists(texPath) && !QFileInfo(texPath).isDir())) {
+        return;
+    }
+
+    QString fileName("");
+    QImage image;
+    if (texName.startsWith("*")) {
+        image = loadGLBEmbeddedTexture(scene, texName, fileName);
+    } else {
+        image = loadOMEmbeddedTexture(scene, texPath, fileName);
+    }
+
+
+    hasEmbedded = false;
+    texPath.clear();
+
+    if (!image.isNull()) {
+        QString imagePath = QDir(assetPath).filePath(fileName);
+        texPath = imagePath;
+        hasEmbedded = true;
+        saveTextureAsync(image, imagePath);
+    }
+}
+
 
 QImage MaterialHelper::loadOMEmbeddedTexture(const aiScene* scene, const QString& texPath, QString& fileName)
 {
@@ -100,7 +162,7 @@ QImage MaterialHelper::loadOMEmbeddedTexture(const aiScene* scene, const QString
 
     fileName = QFileInfo(texPath).fileName();
 
-    QImage image = covertAiTextureToImage(tex);
+    QImage image = convertAiTextureToImage(tex);
 
     return image;
 }
@@ -123,105 +185,70 @@ QImage MaterialHelper::loadGLBEmbeddedTexture(const aiScene *scene,
         }
         fileName = name + "." + QString(embeddedTex->achFormatHint);
 
-        image = covertAiTextureToImage(embeddedTex);
+        image = convertAiTextureToImage(embeddedTex);
     }
 
     return image;
 }
 
-QImage MaterialHelper::covertAiTextureToImage(const aiTexture *at)
+
+void MaterialHelper::extractMaterialData(const aiScene *scene,
+                    aiMaterial *aiMat,
+                    QString assetPath,
+                    MeshMaterialData& mat)
 {
-    QImage image;
-    if (at->mHeight == 0) {
-        QByteArray imageData(reinterpret_cast<const char*>(at->pcData), at->mWidth);
-        image.loadFromData(imageData);
-    } else {
-        int width = at->mWidth;
-        int height = at->mHeight;
-        image = QImage(width, height, QImage::Format_RGBA8888);
+    mat.diffuseColor  = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE);
+    mat.specularColor = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_SPECULAR);
+    mat.ambientColor  = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_AMBIENT);
+    mat.emissionColor = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_EMISSIVE);
+    mat.shininess     = getAiMaterialFloat(aiMat, AI_MATKEY_SHININESS);
 
-        const quint32* pixelData = reinterpret_cast<const quint32*>(at->pcData);
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                image.setPixel(x, y, pixelData[y * width + x]);
-            }
-        }
+    if (assetPath.isEmpty()) return;
+
+    // ------------------------
+    // Diffuse
+    // ------------------------
+    QString diffuseTex = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE);
+    mat.diffuseTexture = QFileInfo(diffuseTex).isRelative()
+                             ? QDir::cleanPath(QDir(assetPath).filePath(diffuseTex))
+                             : QDir::cleanPath(diffuseTex);
+
+    loadEmbeddedTexture(scene, diffuseTex, assetPath, mat.diffuseTexture, mat.hasEmbeddedDiffTexture);
+
+    // ------------------------
+    // Specular
+    // ------------------------
+    QString specularTex = getAiMaterialTexture(aiMat, aiTextureType_SPECULAR);
+    mat.specularTexture = QFileInfo(specularTex).isRelative()
+                              ? QDir::cleanPath(QDir(assetPath).filePath(specularTex))
+                              : QDir::cleanPath(specularTex);
+
+    loadEmbeddedTexture(scene, specularTex, assetPath, mat.specularTexture, mat.hasEmbeddedSpecularTexture);
+
+    // ------------------------
+    // Normals
+    // ------------------------
+    QString normalsTex = getAiMaterialTexture(aiMat, aiTextureType_NORMALS);
+    mat.normalTexture = QFileInfo(normalsTex).isRelative()
+                            ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
+                            : QDir::cleanPath(normalsTex);
+
+    loadEmbeddedTexture(scene, normalsTex, assetPath, mat.normalTexture, mat.hasEmbeddedNormalTexture);
+
+    // ------------------------
+    // Fallback for height maps if normal map missing
+    // ------------------------
+    if (normalsTex.isEmpty()) {
+        normalsTex = getAiMaterialTexture(aiMat, aiTextureType_HEIGHT);
+        mat.hightTexture = QFileInfo(normalsTex).isRelative()
+                               ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
+                               : QDir::cleanPath(normalsTex);
+
+        loadEmbeddedTexture(scene, normalsTex, assetPath, mat.hightTexture, mat.hasEmbeddedHightTexture);
     }
 
-    return image;
+    waitForAllTextureSaves();
 }
 
-void MaterialHelper::extractMaterialData(const aiScene *scene, aiMaterial *aiMat, QString assetPath, MeshMaterialData& mat)
-{
-    mat.diffuseColor    = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE);
-    mat.specularColor   = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_SPECULAR);
-    mat.ambientColor    = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_AMBIENT);
-    mat.emissionColor   = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_EMISSIVE);
-    mat.shininess       = getAiMaterialFloat(aiMat, AI_MATKEY_SHININESS);
 
-    if (!assetPath.isEmpty()) {
-        QString diffuseTex = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE);
-        mat.diffuseTexture = QFileInfo(diffuseTex).isRelative()
-                                 ? QDir::cleanPath(QDir(assetPath).filePath(diffuseTex))
-                                 : QDir::cleanPath(diffuseTex);
-
-        loadEmbeddedTexture(scene, diffuseTex, assetPath, mat.diffuseTexture, mat.hasEmbeddedDiffTexture);
-
-
-        QString specularTex = getAiMaterialTexture(aiMat, aiTextureType_SPECULAR);
-        mat.specularTexture = QFileInfo(specularTex).isRelative()
-                                ? QDir::cleanPath(QDir(assetPath).filePath(specularTex))
-                                : QDir::cleanPath(specularTex);
-
-        loadEmbeddedTexture(scene, specularTex, assetPath, mat.specularTexture, mat.hasEmbeddedSpecularTexture);
-
-
-        QString normalsTex = getAiMaterialTexture(aiMat, aiTextureType_NORMALS);
-        mat.normalTexture = QFileInfo(normalsTex).isRelative()
-                                ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
-                                : QDir::cleanPath(normalsTex);
-
-        loadEmbeddedTexture(scene, normalsTex, assetPath, mat.normalTexture, mat.hasEmbeddedNormalTexture);
-
-        // reading normals for some obj's won't always work with aiTextureType_NORMALS, use this as fallback alt.
-        if (normalsTex.isEmpty()) {
-            normalsTex = getAiMaterialTexture(aiMat, aiTextureType_HEIGHT);
-            mat.normalTexture = QFileInfo(normalsTex).isRelative()
-                ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
-                : QDir::cleanPath(normalsTex);
-
-            loadEmbeddedTexture(scene, normalsTex, assetPath, mat.hightTexture, mat.hasEmbeddedHightTexture);
-        }
-    }
-}
-
-void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
-                                         const QString& texName,
-                                         const QString& assetPath,
-                                         QString& texPath,
-                                         bool& hasEmbedded)
-{
-    if (texPath.isEmpty() || (QFileInfo::exists(texPath) && !QFileInfo(texPath).isDir())) {
-        return;
-    }
-
-    QString fileName("");
-    QImage image;
-    if (texName.startsWith("*")) {
-        image = loadGLBEmbeddedTexture(scene, texName, fileName);
-    } else {
-        image = loadOMEmbeddedTexture(scene, texPath, fileName);
-    }
-
-    hasEmbedded = false;
-    texPath = "";
-    if (!image.isNull()) {
-        QString imagePath = QDir(assetPath).filePath(fileName);
-        image.save(imagePath);
-
-        texPath = imagePath;
-        hasEmbedded = true;
-    }
-}
-
-}
+} // namespace iris

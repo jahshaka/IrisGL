@@ -30,7 +30,7 @@ endfunction()
 
 #find_package(Qt6 COMPONENTS Core)
 
-find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Multimedia Network)
+find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Multimedia Network Concurrent)
 message(STATUS "Qt6_VERSION: ${Qt6_VERSION}")
 message(STATUS "Qt6_INSTALL_PREFIX: ${Qt6_INSTALL_PREFIX}")
 
@@ -272,5 +272,5 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/zip/src"
 )
 
-target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network)
+target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent)
 target_compile_options(IrisGL PUBLIC)

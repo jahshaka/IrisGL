@@ -14,6 +14,7 @@ For more information see the LICENSE file
 
 #include <QColor>
 #include <Qt3DRender/Qt3DRender>
+#include <QFuture>
 
 #include "../irisglfwd.h"
 #include "../graphics/mesh.h"
@@ -23,35 +24,17 @@ class aiMaterial;
 namespace iris
 {
 
-class PaintedTextureImage : public Qt3DRender::QPaintedTextureImage
-{
-public:
-    void setImage(QImage &i) {
-        image_ = i;
-        setSize(i.size());
-    }
-
-    virtual void paint(QPainter *painter) override {
-        painter->drawImage(0, 0, image_);
-    }
-
-private:
-    QImage image_;
-};
-
 class MaterialHelper
 {
 public:
     static DefaultMaterialPtr createMaterial(aiMaterial* aiMat, QString assetPath);
-    static void extractMaterialData(const aiScene *scene, aiMaterial* aiMat, QString assetPath, MeshMaterialData& data);
 
+
+    static void extractMaterialData(const aiScene *scene,
+                                    aiMaterial *aiMat,
+                                    QString assetPath,
+                                    MeshMaterialData& mat);
 private:
-    static void loadEmbeddedTexture(const aiScene* scene,
-                                    const QString& texName,
-                                    const QString& assetPath,
-                                    QString& texPath,
-                                    bool& hasEmbedded);
-
     static QImage loadOMEmbeddedTexture(const aiScene* scene,
                                         const QString& texPath,
                                         QString& fileName);
@@ -60,8 +43,29 @@ private:
                                          const QString& texName,
                                          QString& fileName);
 
-    static QImage covertAiTextureToImage(const aiTexture* at);
-//    static void updateTexure(const QString& assetPath, const QString& fileName, const QImage& image);
+    static QImage convertAiTextureToImage(const aiTexture *at);
+
+    static void loadEmbeddedTexture(const aiScene* scene,
+                                    const QString& texName,
+                                    const QString& assetPath,
+                                    QString& texPath,
+                                    bool& hasEmbedded);
+
+    static void waitForTextureSave(const QString& path);
+    static void waitForAllTextureSaves();
+
+    struct SaveTask {
+        QFuture<void> future;
+        QString path;
+    };
+
+    static void saveTextureAsync(const QImage& image, const QString& path);
+
+    static QVector<SaveTask> g_textureSaveTasks;
+    static QSet<QString> g_savedPaths;
+    static QMutex g_saveMutex;
+    static QThreadPool* g_threadPool;
+
 };
 
 }
