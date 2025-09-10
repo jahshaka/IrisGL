@@ -343,8 +343,7 @@ void VrDevice::endFrame()
     ovrLayerHeader* layers = &ld.Header;
     ovrResult result = ovr_SubmitFrame(session, frameIndex, nullptr, &layers, 1);
 
-    if (!OVR_SUCCESS(result))
-    {
+    if (!OVR_SUCCESS(result)) {
         Logger::getSingleton()->warn(QString("Error submitting frame to hmd!"));
     }
 
@@ -408,16 +407,6 @@ void VrDevice::regenerateSwapChain()
         mirrorTexture = nullptr;
     }
 
-    if (vr_textureChain[0]) {
-        ovr_DestroyTextureSwapChain(session, vr_textureChain[0]);
-        vr_textureChain[0] = nullptr;
-    }
-    if (vr_textureChain[1]) {
-        ovr_DestroyTextureSwapChain(session, vr_textureChain[1]);
-        vr_textureChain[1] = nullptr;
-    }
-
-    gl->glDeleteFramebuffers(2, vr_Fbo);
     if (vr_mirrorTexId != 0) {
         gl->glDeleteTextures(1, &vr_mirrorTexId);
         vr_mirrorTexId = 0;
