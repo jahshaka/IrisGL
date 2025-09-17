@@ -72,66 +72,55 @@ Texture2DPtr Texture2D::createFromId(uint textureId)
     return Texture2DPtr(tex);
 }
 
-Texture2DPtr Texture2D::createCubeMap(QString negZ, QString posZ,
-                                      QString posY, QString negY,
-                                      QString negX, QString posX,
-                                      QImage *info)
+QSharedPointer<Texture2D> Texture2D::createCubeMap(QString negZ, QString posZ,
+                                                   QString posY, QString negY,
+                                                   QString negX, QString posX,
+                                                   QImage *info)
 {
-    int width, height, depth;
+    QImage faces[6] = {
+        QImage(posX).convertToFormat(QImage::Format_RGBA8888),
+        QImage(negX).convertToFormat(QImage::Format_RGBA8888),
+        QImage(posY).convertToFormat(QImage::Format_RGBA8888),
+        QImage(negY).convertToFormat(QImage::Format_RGBA8888),
+        QImage(posZ).convertToFormat(QImage::Format_RGBA8888),
+        QImage(negZ).convertToFormat(QImage::Format_RGBA8888)
+    };
 
-    const QImage pos_x = QImage(posX).convertToFormat(QImage::Format_RGBA8888);
-    const QImage neg_x = QImage(negX).convertToFormat(QImage::Format_RGBA8888);
-    const QImage pos_y = QImage(posY).convertToFormat(QImage::Format_RGBA8888);
-    const QImage neg_y = QImage(negY).convertToFormat(QImage::Format_RGBA8888);
-    const QImage pos_z = QImage(posZ).convertToFormat(QImage::Format_RGBA8888);
-    const QImage neg_z = QImage(negZ).convertToFormat(QImage::Format_RGBA8888);
-
-    if (info) {
-        width = info->width();
-        height = info->height();
-        depth = info->depth();
+    for (auto &face : faces) {
+        if (face.isNull()) {
+            return nullptr;
+        }
     }
 
-    auto texture = new QOpenGLTexture(QOpenGLTexture::TargetCubeMap);
-    texture->create();
-    texture->setSize(width, height, depth);
+    int size = faces[0].width();
+    for (auto &face : faces) {
+        if (face.width() != size || face.height() != size) {
+            face = face.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+    }
+
+    if (!QOpenGLContext::currentContext()) {
+        return nullptr;
+    }
+
+    QOpenGLTexture *texture = new QOpenGLTexture(QOpenGLTexture::TargetCubeMap);
     texture->setFormat(QOpenGLTexture::RGBA8_UNorm);
+    texture->setSize(size, size, 1);
     texture->allocateStorage();
 
-    if (!pos_x.isNull()) {
-        texture->setData(0, 0, QOpenGLTexture::CubeMapPositiveX,
-                         QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                         (const void*) pos_x.constBits(), 0);
-    }
+    QOpenGLTexture::CubeMapFace cubeFaces[6] = {
+        QOpenGLTexture::CubeMapPositiveX,
+        QOpenGLTexture::CubeMapNegativeX,
+        QOpenGLTexture::CubeMapPositiveY,
+        QOpenGLTexture::CubeMapNegativeY,
+        QOpenGLTexture::CubeMapPositiveZ,
+        QOpenGLTexture::CubeMapNegativeZ
+    };
 
-    if (!pos_y.isNull()) {
-        texture->setData(0, 0, QOpenGLTexture::CubeMapPositiveY,
+    for (int i = 0; i < 6; ++i) {
+        texture->setData(0, 0, cubeFaces[i],
                          QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                         (const void*) pos_y.constBits(), 0);
-    }
-
-    if (!pos_z.isNull()) {
-        texture->setData(0, 0, QOpenGLTexture::CubeMapPositiveZ,
-                         QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                         (const void*) pos_z.constBits(), 0);
-    }
-
-    if (!neg_x.isNull()) {
-        texture->setData(0, 0, QOpenGLTexture::CubeMapNegativeX,
-                         QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                         (const void*) neg_x.constBits(), 0);
-    }
-
-    if (!neg_y.isNull()) {
-        texture->setData(0, 0, QOpenGLTexture::CubeMapNegativeY,
-                         QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                         (const void*) neg_y.constBits(), 0);
-    }
-
-    if (!neg_z.isNull()) {
-        texture->setData(0, 0, QOpenGLTexture::CubeMapNegativeZ,
-                         QOpenGLTexture::RGBA, QOpenGLTexture::UInt8,
-                         (const void*) neg_z.constBits(), 0);
+                         faces[i].constBits());
     }
 
     texture->setWrapMode(QOpenGLTexture::ClampToEdge);
