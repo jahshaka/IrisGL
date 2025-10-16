@@ -13,7 +13,6 @@ For more information see the LICENSE file
 #define MATERIALHELPER_H
 
 #include <QColor>
-#include <Qt3DRender/Qt3DRender>
 #include <QFuture>
 
 #include "../irisglfwd.h"
