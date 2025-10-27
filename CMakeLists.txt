@@ -34,6 +34,19 @@ find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Multimedia Network Con
 message(STATUS "Qt6_VERSION: ${Qt6_VERSION}")
 message(STATUS "Qt6_INSTALL_PREFIX: ${Qt6_INSTALL_PREFIX}")
 
+find_package(VTK
+  COMPONENTS
+    CommonCore
+    GUISupportQt
+    InfovisCore
+    RenderingFreeType
+    ViewsQt
+    InteractionStyle)
+if (NOT VTK_FOUND)
+  message("Skipping example: ${VTK_NOT_FOUND_MESSAGE}")
+  return ()
+endif ()
+
 set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -141,6 +154,11 @@ set(SRCS
     src/physics/physicshelper.cpp
     src/scenegraph/grabnode.cpp
     src/physics/charactercontroller.cpp
+
+    src/vtkmeta/Node.cpp
+    src/vtkmeta/Mesh.cpp
+    src/vtkmeta/Material.cpp
+    src/vtkmeta/Scene.cpp
 )
 
 set (HEADERS
@@ -247,6 +265,10 @@ set (HEADERS
     src/physics/physicsproperties.h
     src/scenegraph/grabnode.h
     src/physics/charactercontroller.h
+    src/vtkmeta/Node.h
+    src/vtkmeta/Mesh.h
+    src/vtkmeta/Material.h
+    src/vtkmeta/Scene.h
 )
 
 set(QRCS assets.qrc)
@@ -259,7 +281,8 @@ if(WIN32 AND MSVC)
     set(USE_MSVC_RUNTIME_LIBRARY_DLL 1)
 endif()
 
-add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
+add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS}
+  src/vtkmeta/assimpmodelloader.cpp src/vtkmeta/assimpmodelloader.h)
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
 # Note the DIRs that are included, assimp generates a config that we need to find in the build dir. L2
@@ -270,7 +293,8 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/libovr/Include"
     "${PROJECT_SOURCE_DIR}/src/bullet3/src"
     "${PROJECT_SOURCE_DIR}/src/zip/src"
+    "${VTK_INCLUDE_DIRS}"
 )
 
-target_link_libraries (IrisGL assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL  ${VTK_LIBRARIES} assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent)
 target_compile_options(IrisGL PUBLIC)

@@ -292,6 +292,8 @@ MeshNode::loadAsSceneFragment(QString filePath,
     scene_->importer.SetProgressHandler(handle);
     const aiScene *scene = scene_->importer.ReadFile(filePath.toStdString().c_str(), aiProcessPreset_TargetRealtime_Quality);
 
+    // vtkNew<vtkOBJReader> reader;
+    // reader.
     if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
     if (scene->mNumMeshes == 1) {
         auto mesh = scene->mMeshes[0];
