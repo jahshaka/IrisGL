@@ -147,7 +147,10 @@ void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
         QString imagePath = QDir(assetPath).filePath(fileName);
         texPath = imagePath;
         hasEmbedded = true;
-        saveTextureAsync(image, imagePath);
+
+        if (!QFileInfo::exists(texPath)) {
+            saveTextureAsync(image, imagePath);
+        }
     }
 }
 
@@ -181,7 +184,7 @@ QImage MaterialHelper::loadGLBEmbeddedTexture(const aiScene *scene,
         aiTexture* embeddedTex = scene->mTextures[texIndex];
         QString name = QString(embeddedTex->mFilename.C_Str());
         if (name.isEmpty()) {
-            name = generateTexGUID() + QString::number(texIndex);
+            name = /*generateTexGUID()*/ QString("_") + QString::number(texIndex);
         }
         fileName = name + "." + QString(embeddedTex->achFormatHint);
 
