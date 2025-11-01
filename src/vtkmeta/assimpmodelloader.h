@@ -67,10 +67,21 @@ private:
                                                         const QString& outputFolder,
                                                         QString* outSavedPath = nullptr) const;
 
+    vtkSmartPointer<vtkTexture> LoadTextureToVtk(const QString& path, bool isSRGB);
+
+    QString resolveTexturePath(
+        const QString& texStr,
+        const aiScene* scene,
+        const QString& baseName,
+        const QString& outputFolder,
+        const QString& modelFilePath) const;
+
     vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh* mesh) const;
     void applyPBRToActor(vtkActor* actor, vtkTexture* albedo, vtkTexture* normal, vtkTexture* orm,
                          double metallic, double roughness) const;
     QString generateGUIDFileName(const QString& base = QString()) const;
+
+    vtkSmartPointer<vtkImageData> QImageToVtkImageData(const QImage& img) const;
 
     Assimp::Importer importer_;
 };
