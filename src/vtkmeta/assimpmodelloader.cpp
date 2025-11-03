@@ -24,6 +24,8 @@
 #include <vtkNew.h>
 #include <vtkSmartPointer.h>
 #include <vtkCamera.h>
+#include <vtkTransform.h>
+#include <vtkTransformPolyDataFilter.h>
 
 #include <QImage>
 #include <QFileInfo>
@@ -247,7 +249,8 @@ QString AssimpModelLoader::resolveTexturePath(const QString& texStr, const aiSce
     return QString();
 }
 
-// ------------------------- loadModel (final consolidated version) -------------------------
+
+// ------------------------- loadModel (recursive node transform version) -------------------------
 QVector<LoadedMesh> AssimpModelLoader::loadModel(
     const QString& filePath,
     const QString& outputFolder,
@@ -260,7 +263,6 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
         return results;
     }
 
-    // Assimp flags (same defaults you've been using)
     unsigned int flags = aiProcess_Triangulate
                          | aiProcess_GenSmoothNormals
                          | aiProcess_JoinIdenticalVertices
@@ -283,17 +285,9 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
     qDebug() << "AssimpModelLoader: model loaded. meshes =" << scene->mNumMeshes
              << "materials =" << scene->mNumMaterials << "textures(embedded) =" << scene->mNumTextures;
 
-    // texture cache: key = resolved path; value = vtkTexture
     QHash<QString, vtkSmartPointer<vtkTexture>> textureCache;
 
-    // lambda helpers
-    auto srgbToLinear = [](uchar v) -> uchar {
-        double normalized = v / 255.0;
-        double linear = pow(normalized, 2.2);
-        return static_cast<uchar>(std::clamp(linear * 255.0, 0.0, 255.0));
-    };
-
-    auto loadTextureCached = [&](const QString& path, bool srgb)->vtkSmartPointer<vtkTexture> {
+    auto loadTextureCached = [&](const QString& path, bool srgb) -> vtkSmartPointer<vtkTexture> {
         if (path.isEmpty()) return nullptr;
         if (textureCache.contains(path)) return textureCache.value(path);
         QImage qimg(path);
@@ -301,9 +295,7 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
             qWarning() << "AssimpModelLoader: loadTextureCached failed to load" << path;
             return nullptr;
         }
-        // Optionally gamma-correct on CPU only if VTK build lacks sRGB handling (we still mark texture accordingly).
         QImage imgRGBA = qimg.convertToFormat(QImage::Format_RGBA8888);
-
         vtkSmartPointer<vtkTexture> tex = CreateVTKTextureFromQImage(imgRGBA, srgb);
         if (tex) {
             textureCache.insert(path, tex);
@@ -312,161 +304,167 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
         return tex;
     };
 
-    // iterate meshes
-    for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
-        const aiMesh* aimesh = scene->mMeshes[mi];
-        if (!aimesh) continue;
+    // aiMatrix4x4 -> vtkMatrix4x4
+    auto aiToVtkMatrix = [](const aiMatrix4x4& aimat) -> vtkSmartPointer<vtkMatrix4x4> {
+        vtkSmartPointer<vtkMatrix4x4> m = vtkSmartPointer<vtkMatrix4x4>::New();
+        m->SetElement(0, 0, aimat.a1); m->SetElement(0, 1, aimat.a2); m->SetElement(0, 2, aimat.a3); m->SetElement(0, 3, aimat.a4);
+        m->SetElement(1, 0, aimat.b1); m->SetElement(1, 1, aimat.b2); m->SetElement(1, 2, aimat.b3); m->SetElement(1, 3, aimat.b4);
+        m->SetElement(2, 0, aimat.c1); m->SetElement(2, 1, aimat.c2); m->SetElement(2, 2, aimat.c3); m->SetElement(2, 3, aimat.c4);
+        m->SetElement(3, 0, aimat.d1); m->SetElement(3, 1, aimat.d2); m->SetElement(3, 2, aimat.d3); m->SetElement(3, 3, aimat.d4);
+        return m;
+    };
 
-        QString meshName = (aimesh->mName.length > 0)
-                               ? QString::fromUtf8(aimesh->mName.C_Str())
-                               : QString("%1_mesh%2").arg(baseName).arg(mi);
+    std::function<void(const aiNode*, const aiMatrix4x4&)> processNode;
+    processNode = [&](const aiNode* node, const aiMatrix4x4& parentTransform)
+    {
+        aiMatrix4x4 currentTransform = parentTransform * node->mTransformation;
 
-        qDebug() << "Processing mesh[" << mi << "] name=" << meshName << " vertices=" << aimesh->mNumVertices;
+        for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+            unsigned int meshIdx = node->mMeshes[i];
+            const aiMesh* aimesh = scene->mMeshes[meshIdx];
+            if (!aimesh) continue;
 
-        vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
-        if (!poly || poly->GetNumberOfPoints() == 0) {
-            qWarning() << "AssimpModelLoader: skipping mesh because convert returned null or empty:" << meshName;
-            continue;
+            QString meshName = (aimesh->mName.length > 0)
+                                   ? QString::fromUtf8(aimesh->mName.C_Str())
+                                   : QString("%1_mesh%2").arg(baseName).arg(meshIdx);
+
+            qDebug() << "Processing mesh[" << meshIdx << "] name=" << meshName
+                     << " vertices=" << aimesh->mNumVertices;
+
+            vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
+            if (!poly || poly->GetNumberOfPoints() == 0) {
+                qWarning() << "AssimpModelLoader: skipping empty mesh:" << meshName;
+                continue;
+            }
+
+            //Apply node transformation
+            vtkSmartPointer<vtkTransform> transform = vtkSmartPointer<vtkTransform>::New();
+            transform->SetMatrix(aiToVtkMatrix(currentTransform));
+            vtkSmartPointer<vtkTransformPolyDataFilter> tfilter = vtkSmartPointer<vtkTransformPolyDataFilter>::New();
+            tfilter->SetInputData(poly);
+            tfilter->SetTransform(transform);
+            tfilter->Update();
+            poly = tfilter->GetOutput();
+
+            vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+            mapper->SetInputData(poly);
+
+            vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+            actor->SetMapper(mapper);
+
+            LoadedMesh mr;
+            mr.polyData = poly;
+            mr.actor = actor;
+            mr.name = meshName;
+            mr.aiMeshPtr = aimesh;
+            mr.texturePath.clear();
+
+            vtkProperty* prop = actor->GetProperty();
+            if (!prop) prop = vtkProperty::New();
+
+            // ------------- Material handling (your original logic) -------------
+            if (scene->mNumMaterials > 0 && aimesh->mMaterialIndex < scene->mNumMaterials) {
+                const aiMaterial* mat = scene->mMaterials[aimesh->mMaterialIndex];
+                qDebug() << "Mesh" << meshName << "material index" << aimesh->mMaterialIndex;
+
+                aiColor3D diffc(1.0f, 1.0f, 1.0f);
+                if (AI_SUCCESS == mat->Get(AI_MATKEY_COLOR_DIFFUSE, diffc)) {
+                    prop->SetColor(diffc.r, diffc.g, diffc.b);
+                    qDebug() << "Diffuse color set to:" << diffc.r << diffc.g << diffc.b;
+                }
+
+                float matOpacity = 1.0f;
+                if (AI_SUCCESS == mat->Get(AI_MATKEY_OPACITY, matOpacity)) {
+                    if (matOpacity >= 0.995f) {
+                        actor->SetForceOpaque(true);
+                        prop->SetOpacity(1.0);
+                    } else {
+                        actor->SetForceOpaque(false);
+                        prop->SetOpacity(matOpacity);
+                        actor->SetForceTranslucent(true);
+                    }
+                    qDebug() << "Material opacity:" << matOpacity;
+                }
+
+                prop->SetInterpolationToPBR();
+                prop->BackfaceCullingOn();
+                prop->SetRoughness(prop->GetRoughness() <= 0.0 ? 0.45 : prop->GetRoughness());
+                prop->SetMetallic(prop->GetMetallic() <= 0.0 ? 0.05 : prop->GetMetallic());
+
+                // --- BaseColor / Diffuse texture ---
+                if (mat->GetTextureCount(aiTextureType_BASE_COLOR) > 0 ||
+                    mat->GetTextureCount(aiTextureType_DIFFUSE) > 0)
+                {
+                    aiString texPath;
+                    aiReturn ret = aiReturn_FAILURE;
+                    if (mat->GetTextureCount(aiTextureType_BASE_COLOR) > 0)
+                        ret = mat->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath);
+                    else
+                        ret = mat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath);
+
+                    if (ret == aiReturn_SUCCESS) {
+                        QString texStr = QString::fromUtf8(texPath.C_Str());
+                        QString savedPath = resolveTexturePath(texStr, scene, baseName, outputFolder, filePath);
+                        if (!savedPath.isEmpty()) {
+                            mr.texturePath = savedPath;
+                            vtkSmartPointer<vtkTexture> tex = loadTextureCached(savedPath, true);
+                            if (tex) {
+                                actor->SetTexture(tex);
+                                prop->SetBaseColorTexture(tex);
+                                qDebug() << "BaseColor texture applied to mesh:" << meshName;
+                            }
+                        }
+                    }
+                }
+
+                // --- Normal map ---
+                if (mat->GetTextureCount(aiTextureType_NORMALS) > 0) {
+                    aiString ntex;
+                    if (mat->GetTexture(aiTextureType_NORMALS, 0, &ntex) == aiReturn_SUCCESS) {
+                        QString resolvedNormal = resolveTexturePath(QString::fromUtf8(ntex.C_Str()), scene, baseName, outputFolder, filePath);
+                        if (!resolvedNormal.isEmpty()) {
+                            vtkSmartPointer<vtkTexture> normalTex = loadTextureCached(resolvedNormal, false);
+                            if (normalTex) {
+                                prop->SetNormalTexture(normalTex);
+                                qDebug() << "Normal texture applied to mesh:" << meshName;
+                            }
+                        }
+                    }
+                }
+
+                // --- ORM / Metallic-Roughness ---
+                QString ormPath;
+                if (mat->GetTextureCount(aiTextureType_GLTF_METALLIC_ROUGHNESS) > 0) {
+                    aiString orm;
+                    if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &orm) == aiReturn_SUCCESS)
+                        ormPath = resolveTexturePath(QString::fromUtf8(orm.C_Str()), scene, baseName, outputFolder, filePath);
+                }
+                if (!ormPath.isEmpty()) {
+                    vtkSmartPointer<vtkTexture> ormTex = loadTextureCached(ormPath, false);
+                    if (ormTex) {
+                        prop->SetORMTexture(ormTex);
+                        qDebug() << "ORM texture applied to mesh:" << meshName;
+                    }
+                }
+            }
+
+            results.append(mr);
+            qDebug() << "Mesh:" << mr.name << "PolyData ok Actor ok TexPath" << mr.texturePath;
         }
 
-        vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-        mapper->SetInputData(poly);
+        // 递归处理子节点
+        for (unsigned int c = 0; c < node->mNumChildren; ++c)
+            processNode(node->mChildren[c], currentTransform);
+    };
 
-        vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
-        actor->SetMapper(mapper);
+    aiMatrix4x4 identity(
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+        );
 
-        LoadedMesh mr;
-        mr.polyData = poly;
-        mr.actor = actor;
-        mr.name = meshName;
-        mr.aiMeshPtr = aimesh;
-        mr.texturePath.clear();
-
-        vtkProperty* prop = actor->GetProperty();
-        if (!prop) prop = vtkProperty::New(); // defensive
-
-        // ----------------- Material handling -----------------
-        if (scene->mNumMaterials > 0 && aimesh->mMaterialIndex < scene->mNumMaterials) {
-            const aiMaterial* mat = scene->mMaterials[aimesh->mMaterialIndex];
-            qDebug() << "Mesh" << meshName << "material index" << aimesh->mMaterialIndex;
-
-            // Diffuse (base) color
-            aiColor3D diffc(1.0f, 1.0f, 1.0f);
-            if (AI_SUCCESS == mat->Get(AI_MATKEY_COLOR_DIFFUSE, diffc)) {
-                prop->SetColor(diffc.r, diffc.g, diffc.b);
-                qDebug() << "Diffuse color set to:" << diffc.r << diffc.g << diffc.b;
-            }
-
-            // Opacity (material)
-            float matOpacity = 1.0f;
-            if (AI_SUCCESS == mat->Get(AI_MATKEY_OPACITY, matOpacity)) {
-                if (matOpacity >= 0.995f) {
-                    actor->SetForceOpaque(true);
-                    prop->SetOpacity(1.0);
-                } else {
-                    actor->SetForceOpaque(false);
-                    prop->SetOpacity(matOpacity);
-                    actor->SetForceTranslucent(true);
-                }
-                qDebug() << "Material opacity:" << matOpacity;
-            }
-
-            // try set PBR mode
-            prop->SetInterpolationToPBR();
-
-            // sensible defaults that preserve color & shine
-            prop->BackfaceCullingOn();    // prevent double-sided additive brightening
-            // set roughness/metallic when possible (fallback fine)
-            // NOTE: these are safe calls if compiled with VTK supporting these properties
-            prop->SetRoughness(prop->GetRoughness() <= 0.0 ? 0.45 : prop->GetRoughness());
-            prop->SetMetallic(prop->GetMetallic() <= 0.0 ? 0.05 : prop->GetMetallic());
-
-            // ----------------- BaseColor / Diffuse texture -----------------
-            if (mat->GetTextureCount(aiTextureType_BASE_COLOR) > 0 ||
-                mat->GetTextureCount(aiTextureType_DIFFUSE) > 0) {
-                aiString texPath;
-                aiReturn ret = aiReturn_FAILURE;
-                if (mat->GetTextureCount(aiTextureType_BASE_COLOR) > 0) {
-                    ret = mat->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath);
-                } else {
-                    ret = mat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath);
-                }
-                if (ret == aiReturn_SUCCESS) {
-                    QString texStr = QString::fromUtf8(texPath.C_Str());
-                    QString savedPath = resolveTexturePath(texStr, scene, baseName, outputFolder, filePath);
-                    if (!savedPath.isEmpty()) {
-                        // keep mr.texturePath for debugging
-                        mr.texturePath = savedPath;
-                        vtkSmartPointer<vtkTexture> tex = loadTextureCached(savedPath, true);
-                        if (tex) {
-                            // assign texture both ways: actor->SetTexture (older path) and property->SetBaseColorTexture (PBR-aware)
-                            actor->SetTexture(tex);
-                            // if vtkProperty exposes SetBaseColorTexture (alias for albedoTex), call it:
-                            // use function pointer lookup to be safer if method not present at compile? but we included vtkProperty, so call directly.
-                            prop->SetBaseColorTexture(tex); // prefer PBR path
-                            qDebug() << "BaseColor texture applied to mesh:" << meshName;
-                        } else {
-                            qWarning() << "AssimpModelLoader: failed to create VTK texture for" << savedPath;
-                        }
-                    } else {
-                        qWarning() << "AssimpModelLoader: basecolor/diffuse texture not resolved:" << texStr;
-                    }
-                }
-            }
-
-            // ----------------- Normal map -----------------
-            QString resolvedNormal;
-            if (mat->GetTextureCount(aiTextureType_NORMALS) > 0) {
-                aiString ntex;
-                if (mat->GetTexture(aiTextureType_NORMALS, 0, &ntex) == aiReturn_SUCCESS) {
-                    resolvedNormal = resolveTexturePath(QString::fromUtf8(ntex.C_Str()), scene, baseName, outputFolder, filePath);
-                    if (!resolvedNormal.isEmpty()) {
-                        vtkSmartPointer<vtkTexture> normalTex = loadTextureCached(resolvedNormal, false);
-                        if (normalTex) {
-                            // prefer property binding if available:
-                            prop->SetNormalTexture(normalTex);
-                            qDebug() << "Normal texture applied to mesh:" << meshName;
-                        } else {
-                            qDebug() << "AssimpModelLoader: normal texture loaded but not applied:" << resolvedNormal;
-                        }
-                    }
-                }
-            }
-
-            // ----------------- ORM / Metallic/Roughness/Occlusion -----------------
-            // Try KHR/glTF style packing first: METALNESS + DIFFUSE_ROUGHNESS etc.
-            QString ormPath;
-            if (mat->GetTextureCount(aiTextureType_GLTF_METALLIC_ROUGHNESS) > 0) {
-                aiString orm;
-                if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &orm) == aiReturn_SUCCESS) {
-                    ormPath = resolveTexturePath(QString::fromUtf8(orm.C_Str()), scene, baseName, outputFolder, filePath);
-                }
-            } else {
-                // fallback: try separate channels if present (METALNESS / DIFFUSE_ROUGHNESS / AMBIENT_OCCLUSION)
-                if (mat->GetTextureCount(aiTextureType_METALNESS) > 0 ||
-                    mat->GetTextureCount(aiTextureType_DIFFUSE_ROUGHNESS) > 0 ||
-                    mat->GetTextureCount(aiTextureType_AMBIENT_OCCLUSION) > 0) {
-                    // If we find a combined ORM path use it; otherwise we won't synthesize here (complex).
-                    aiString tmp;
-                    if (mat->GetTextureCount(aiTextureType_METALNESS) > 0) {
-                        mat->GetTexture(aiTextureType_METALNESS, 0, &tmp);
-                        ormPath = resolveTexturePath(QString::fromUtf8(tmp.C_Str()), scene, baseName, outputFolder, filePath);
-                    }
-                }
-            }
-            if (!ormPath.isEmpty()) {
-                vtkSmartPointer<vtkTexture> ormTex = loadTextureCached(ormPath, false); // linear
-                if (ormTex) {
-                    prop->SetORMTexture(ormTex);
-                    qDebug() << "ORM texture applied to mesh:" << meshName;
-                }
-            }
-
-        } // end material handling
-
-        results.append(mr);
-        qDebug() << "Mesh:" << mr.name << "PolyData ok Actor ok TexPath" << mr.texturePath;
-    } // end meshes loop
+    processNode(scene->mRootNode, identity);
 
     qDebug() << "AssimpModelLoader: finished processing. meshes output =" << results.size();
     return results;
