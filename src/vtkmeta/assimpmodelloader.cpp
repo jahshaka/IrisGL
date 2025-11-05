@@ -92,10 +92,10 @@ QString AssimpModelLoader::saveEmbeddedTexture(const QImage& img, const QString&
     QString fullPath = d.filePath(fileName);
     if (QFileInfo::exists(fullPath)) return fullPath;
     if (!img.save(fullPath, "PNG")) {
-        qWarning() << "AssimpModelLoader: Failed to save embedded texture to" << fullPath;
+//        qWarning() << "AssimpModelLoader: Failed to save embedded texture to" << fullPath;
         return QString();
     }
-    qDebug() << "AssimpModelLoader: Saved embedded texture:" << fullPath << "size=" << img.width() << "x" << img.height();
+//    qDebug() << "AssimpModelLoader: Saved embedded texture:" << fullPath << "size=" << img.width() << "x" << img.height();
     return fullPath;
 }
 
@@ -177,22 +177,13 @@ vtkSmartPointer<vtkTexture> AssimpModelLoader::CreateVTKTextureFromQImage(const 
     }
 
     vtkSmartPointer<vtkTexture> tex = vtkSmartPointer<vtkTexture>::New();
-    tex->SetColorModeToDirectScalars(); // 保留原像素
+    tex->SetColorModeToDirectScalars();
     tex->MipmapOn();
     tex->RepeatOn();
     tex->SetInputData(imageData);
     tex->InterpolateOn();
     tex->EdgeClampOn();
     tex->SetUseSRGBColorSpace(srgb);
-
-#if VTK_MAJOR_VERSION >= 9
-#ifdef VTK_HAS_USE_SRGB
-    if (srgb) {
-        tex->UseSRGBColorSpaceOn();
-        qDebug() << "AssimpModelLoader: CreateVTKTextureFromQImage -> UseSRGBColorSpaceOn()";
-    }
-#endif
-#endif
 
     // help with blending/alpha
     tex->SetPremultipliedAlpha(true);
@@ -238,7 +229,7 @@ QString AssimpModelLoader::resolveTexturePath(const QString& texStr, const aiSce
             // read and save to output folder (so that later loads use the saved stable path)
             QImage img(candidate);
             if (!img.isNull()) {
-                qDebug() << "AssimpModelLoader: resolveTexturePath saved external texture to output:" << candidate;
+                // qDebug() << "AssimpModelLoader: resolveTexturePath saved external texture to output:" << candidate;
                 return saveEmbeddedTexture(img, fi.fileName(), outputFolder);
             }
             return candidate;
@@ -292,14 +283,14 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
         if (textureCache.contains(path)) return textureCache.value(path);
         QImage qimg(path);
         if (qimg.isNull()) {
-            qWarning() << "AssimpModelLoader: loadTextureCached failed to load" << path;
+            //qWarning() << "AssimpModelLoader: loadTextureCached failed to load" << path;
             return nullptr;
         }
         QImage imgRGBA = qimg.convertToFormat(QImage::Format_RGBA8888);
         vtkSmartPointer<vtkTexture> tex = CreateVTKTextureFromQImage(imgRGBA, srgb);
         if (tex) {
             textureCache.insert(path, tex);
-            qDebug() << "AssimpModelLoader: Loaded and cached texture:" << path;
+            //qDebug() << "AssimpModelLoader: Loaded and cached texture:" << path;
         }
         return tex;
     };
@@ -328,8 +319,8 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
                                    ? QString::fromUtf8(aimesh->mName.C_Str())
                                    : QString("%1_mesh%2").arg(baseName).arg(meshIdx);
 
-            qDebug() << "Processing mesh[" << meshIdx << "] name=" << meshName
-                     << " vertices=" << aimesh->mNumVertices;
+            // qDebug() << "Processing mesh[" << meshIdx << "] name=" << meshName
+            //          << " vertices=" << aimesh->mNumVertices;
 
             vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
             if (!poly || poly->GetNumberOfPoints() == 0) {
@@ -362,15 +353,19 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
             vtkProperty* prop = actor->GetProperty();
             if (!prop) prop = vtkProperty::New();
 
+            prop->SetInterpolationToGouraud();
+            prop->SetInterpolationToPBR();
+            prop->BackfaceCullingOn();
+
             // ------------- Material handling (your original logic) -------------
             if (scene->mNumMaterials > 0 && aimesh->mMaterialIndex < scene->mNumMaterials) {
                 const aiMaterial* mat = scene->mMaterials[aimesh->mMaterialIndex];
-                qDebug() << "Mesh" << meshName << "material index" << aimesh->mMaterialIndex;
+                // qDebug() << "Mesh" << meshName << "material index" << aimesh->mMaterialIndex;
 
                 aiColor3D diffc(1.0f, 1.0f, 1.0f);
                 if (AI_SUCCESS == mat->Get(AI_MATKEY_COLOR_DIFFUSE, diffc)) {
                     prop->SetColor(diffc.r, diffc.g, diffc.b);
-                    qDebug() << "Diffuse color set to:" << diffc.r << diffc.g << diffc.b;
+                    // qDebug() << "Diffuse color set to:" << diffc.r << diffc.g << diffc.b;
                 }
 
                 float matOpacity = 1.0f;
@@ -383,13 +378,17 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
                         prop->SetOpacity(matOpacity);
                         actor->SetForceTranslucent(true);
                     }
-                    qDebug() << "Material opacity:" << matOpacity;
                 }
 
-                prop->SetInterpolationToPBR();
-                prop->BackfaceCullingOn();
-                prop->SetRoughness(prop->GetRoughness() <= 0.0 ? 0.45 : prop->GetRoughness());
-                prop->SetMetallic(prop->GetMetallic() <= 0.0 ? 0.05 : prop->GetMetallic());
+                float metallic = -1.0f, roughness = -1.0f;
+                if (AI_SUCCESS == mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic)) {
+                    prop->SetMetallic(metallic);
+                }
+
+                if (AI_SUCCESS == mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness)) {
+                    prop->SetRoughness(std::max(roughness, 0.55f));
+                    //prop->SetRoughness(roughness);
+                }
 
                 // --- BaseColor / Diffuse texture ---
                 if (mat->GetTextureCount(aiTextureType_BASE_COLOR) > 0 ||
@@ -409,9 +408,10 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
                             mr.texturePath = savedPath;
                             vtkSmartPointer<vtkTexture> tex = loadTextureCached(savedPath, true);
                             if (tex) {
-                                actor->SetTexture(tex);
+                                // actor->SetTexture(tex);
                                 prop->SetBaseColorTexture(tex);
-                                qDebug() << "BaseColor texture applied to mesh:" << meshName;
+                                prop->SetColor(1.0, 1.0, 1.0); // 避免暗淡
+                                // qDebug() << "BaseColor texture applied to mesh:" << meshName;
                             }
                         }
                     }
@@ -426,7 +426,7 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
                             vtkSmartPointer<vtkTexture> normalTex = loadTextureCached(resolvedNormal, false);
                             if (normalTex) {
                                 prop->SetNormalTexture(normalTex);
-                                qDebug() << "Normal texture applied to mesh:" << meshName;
+                                // qDebug() << "Normal texture applied to mesh:" << meshName;
                             }
                         }
                     }
@@ -443,30 +443,22 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
                     vtkSmartPointer<vtkTexture> ormTex = loadTextureCached(ormPath, false);
                     if (ormTex) {
                         prop->SetORMTexture(ormTex);
-                        qDebug() << "ORM texture applied to mesh:" << meshName;
+                        // qDebug() << "ORM texture applied to mesh:" << meshName;
                     }
                 }
             }
 
             results.append(mr);
-            qDebug() << "Mesh:" << mr.name << "PolyData ok Actor ok TexPath" << mr.texturePath;
+            // qDebug() << "Mesh:" << mr.name << "PolyData ok Actor ok TexPath" << mr.texturePath;
         }
 
-        // 递归处理子节点
         for (unsigned int c = 0; c < node->mNumChildren; ++c)
             processNode(node->mChildren[c], currentTransform);
     };
 
-    aiMatrix4x4 identity(
-        1, 0, 0, 0,
-        0, 1, 0, 0,
-        0, 0, 1, 0,
-        0, 0, 0, 1
-        );
+    processNode(scene->mRootNode, aiMatrix4x4());
 
-    processNode(scene->mRootNode, identity);
-
-    qDebug() << "AssimpModelLoader: finished processing. meshes output =" << results.size();
+    // qDebug() << "AssimpModelLoader: finished processing. meshes output =" << results.size();
     return results;
 }
 
