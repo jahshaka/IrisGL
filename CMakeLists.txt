@@ -282,7 +282,10 @@ if(WIN32 AND MSVC)
 endif()
 
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS}
-  src/vtkmeta/assimpmodelloader.cpp src/vtkmeta/assimpmodelloader.h)
+  src/vtkmeta/assetloader.cpp src/vtkmeta/assetloader.h
+  src/vtkmeta/assetimporter.h src/vtkmeta/assetimporter.cpp
+  src/vtkmeta/importerhelper.h src/vtkmeta/importerhelper.cpp
+  src/vtkmeta/assettypes.h src/vtkmeta/assettypes.cpp)
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
 # Note the DIRs that are included, assimp generates a config that we need to find in the build dir. L2

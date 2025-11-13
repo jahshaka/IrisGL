@@ -1,5 +1,5 @@
 // assimpmodelloader.cpp
-#include "assimpmodelloader.h"
+#include "assetloader.h"
 
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
@@ -42,7 +42,7 @@ static QString guessFileNameFromAiString(const aiString& s) {
     return QFileInfo(name).fileName();
 }
 
-QString AssimpModelLoader::generateGUIDFileName(const QString& base) const {
+QString AssetLoader::generateGUIDFileName(const QString& base) const {
     QString bn = QUuid::createUuid().toString();
     if (!base.isEmpty()) {
         bn = QFileInfo(base).completeBaseName() + "_" + bn;
@@ -52,7 +52,7 @@ QString AssimpModelLoader::generateGUIDFileName(const QString& base) const {
 }
 
 // convert Assimp embedded texture -> QImage
-QImage AssimpModelLoader::convertAiTextureToQImage(const aiTexture* at) const
+QImage AssetLoader::convertAiTextureToQImage(const aiTexture* at) const
 {
     if (!at) return QImage();
     if (at->mHeight == 0) { // compressed (e.g. PNG/JPEG in memory)
@@ -73,7 +73,7 @@ QImage AssimpModelLoader::convertAiTextureToQImage(const aiTexture* at) const
     return img.copy();
 }
 
-QString AssimpModelLoader::saveEmbeddedTexture(const QImage& img, const QString& suggestedName, const QString& outputFolder) const
+QString AssetLoader::saveEmbeddedTexture(const QImage& img, const QString& suggestedName, const QString& outputFolder) const
 {
     if (img.isNull()) return QString();
     QDir d(outputFolder);
@@ -100,7 +100,7 @@ QString AssimpModelLoader::saveEmbeddedTexture(const QImage& img, const QString&
 }
 
 // ------------------------- convert aiMesh -> vtkPolyData -------------------------
-vtkSmartPointer<vtkPolyData> AssimpModelLoader::convertAiMeshToVtkPolyData(const aiMesh* mesh) const
+vtkSmartPointer<vtkPolyData> AssetLoader::convertAiMeshToVtkPolyData(const aiMesh* mesh) const
 {
     if (!mesh) return nullptr;
     vtkSmartPointer<vtkPolyData> poly = vtkSmartPointer<vtkPolyData>::New();
@@ -150,13 +150,15 @@ vtkSmartPointer<vtkPolyData> AssimpModelLoader::convertAiMeshToVtkPolyData(const
             polys->InsertNextCell(tri);
         }
     }
+
     poly->SetPolys(polys);
     poly->Modified();
+
     return poly;
 }
 
 // ------------------------- Create VTK texture from QImage -------------------------
-vtkSmartPointer<vtkTexture> AssimpModelLoader::CreateVTKTextureFromQImage(const QImage& img, bool srgb) const
+vtkSmartPointer<vtkTexture> AssetLoader::CreateVTKTextureFromQImage(const QImage& img, bool srgb) const
 {
     if (img.isNull()) return nullptr;
     QImage imgRGBA = img.convertToFormat(QImage::Format_RGBA8888);
@@ -193,7 +195,7 @@ vtkSmartPointer<vtkTexture> AssimpModelLoader::CreateVTKTextureFromQImage(const 
 }
 
 // ------------------------- resolve texture path (DO NOT CHANGE PATH LOGIC) -------------------------
-QString AssimpModelLoader::resolveTexturePath(const QString& texStr, const aiScene* scene, const QString& baseName,
+QString AssetLoader::resolveTexturePath(const QString& texStr, const aiScene* scene, const QString& baseName,
                                               const QString& outputFolder, const QString& modelFilePath) const
 {
     // Keep the same behavior you used previously:
@@ -202,47 +204,32 @@ QString AssimpModelLoader::resolveTexturePath(const QString& texStr, const aiSce
     // - else return candidate path (don't modify user-supplied semantics)
     if (texStr.isEmpty()) return QString();
 
-    // embedded
+    QString texture_name("");
+
     if (texStr.startsWith("*")) {
         bool ok = false;
         int idx = texStr.mid(1).toInt(&ok);
         if (ok && idx >= 0 && idx < int(scene->mNumTextures)) {
-            aiTexture* at = scene->mTextures[idx];
-            QImage img = convertAiTextureToQImage(at);
-            QString suggested = guessFileNameFromAiString(at->mFilename);
-            if (suggested.isEmpty()) {
-                suggested = baseName + QString("_%1").arg(idx);
-            }
-            return saveEmbeddedTexture(img, suggested, outputFolder);
+            texture_name = QString("tex_%1.png").arg(idx);
         }
     } else {
         // keep original path: do NOT modify string composition, just attempt to find relative file next to model
         QFileInfo fi(texStr);
-        // try raw path first
-        if (fi.exists()) {
-            // good, use as-is (we will not rewrite absolute/relative paths)
-            return texStr;
-        }
-        // try model directory + file name (do NOT rewrite original semantic, just a local candidate)
-        QString candidate = QDir(QFileInfo(modelFilePath).absolutePath()).filePath(fi.fileName());
-        if (QFileInfo::exists(candidate)) {
-            // read and save to output folder (so that later loads use the saved stable path)
-            QImage img(candidate);
-            if (!img.isNull()) {
-                // qDebug() << "AssimpModelLoader: resolveTexturePath saved external texture to output:" << candidate;
-                return saveEmbeddedTexture(img, fi.fileName(), outputFolder);
-            }
-            return candidate;
-        }
-        // fallback: return texStr unchanged (caller will try to load and fail if necessary)
-        return texStr;
+
+        texture_name = fi.fileName();
     }
-    return QString();
+
+
+    if (texture_name.isEmpty()) {
+        return QString();
+    }
+
+    return QDir(QFileInfo(modelFilePath).absolutePath()).filePath(texture_name);
 }
 
 
 // ------------------------- loadModel (recursive node transform version) -------------------------
-QVector<LoadedMesh> AssimpModelLoader::loadModel(
+QVector<LoadedMesh> AssetLoader::loadModel(
     const QString& filePath,
     const QString& outputFolder,
     vtkRenderer* renderer)
@@ -386,7 +373,7 @@ QVector<LoadedMesh> AssimpModelLoader::loadModel(
                 }
 
                 if (AI_SUCCESS == mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness)) {
-                    prop->SetRoughness(std::max(roughness, 0.55f));
+                    prop->SetRoughness(roughness);//std::max(roughness, 0.55f));
                     //prop->SetRoughness(roughness);
                 }
 

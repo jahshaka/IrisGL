@@ -1,5 +1,5 @@
-#ifndef ASSIMPMODELLOADER_H
-#define ASSIMPMODELLOADER_H
+#ifndef ASSETLOADER_H
+#define ASSETLOADER_H
 
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
@@ -39,10 +39,10 @@ struct LoadedMesh {
     QString texturePath;
 };
 
-class AssimpModelLoader {
+class AssetLoader {
 public:
-    AssimpModelLoader() = default;
-    ~AssimpModelLoader() = default;
+    AssetLoader() = default;
+    ~AssetLoader() = default;
 
     // load model -> returns list of LoadedMesh; renderer optional (lighting/skybox applied)
     QVector<LoadedMesh> loadModel(const QString& filePath,
@@ -89,4 +89,4 @@ private:
 } // namespace vtkmeta
 
 
-#endif // ASSIMPMODELLOADER_H
+#endif // ASSETLOADER_H
