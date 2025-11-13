@@ -1,6 +1,6 @@
 #include "ImporterHelper.h"
 
-#include "assettypes.h"          // 核心结构体定义
+#include "assettypes.h"
 
 #include <QFileInfo>
 #include <QDir>
@@ -24,38 +24,47 @@ QHash<QString, QString> g_textureGuidMap;
 QByteArray ImporterHelper::imageToByteArray(const QImage& img,
                                             const QString& format)
 {
-    if (img.isNull()) return QByteArray();
+    if (img.isNull()) {
+        return QByteArray();
+    }
+
     QByteArray bytes;
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
 
     img.save(&buffer, format.toLatin1().constData());
+
     return bytes;
 }
 
-QByteArray ImporterHelper::getTextureRawData(
-    const aiMaterial* mat,
-    aiTextureType type,
-    const QString& modelFilePath,
-    const aiScene* scene,
-    QString& texture_name)
+QByteArray ImporterHelper::getTextureRawData(const aiTexture* at)
+{
+    QImage img = convertAiTextureToQImage(at);
+    return imageToByteArray(img, "PNG");
+}
+
+const aiTexture *ImporterHelper::getTexture(const aiMaterial *mat,
+                                              aiTextureType type,
+                                              const aiScene *scene,
+                                              QString &texture_name)
 {
     aiString path;
-    if (mat->GetTexture(type, 0, &path) != AI_SUCCESS) return {};
+    if (mat->GetTexture(type, 0, &path) != AI_SUCCESS) {
+        return {};
+    }
 
     QString texStr = QString::fromUtf8(path.C_Str());
 
-    // a) 嵌入式纹理
     if (texStr.startsWith("*")) {
         bool ok = false;
         int idx = texStr.mid(1).toInt(&ok);
+
         if (ok && idx >= 0 && idx < int(scene->mNumTextures)) {
             const aiTexture* at = scene->mTextures[idx];
 
             texture_name = QString("tex_%1.png").arg(idx);
 
-            QImage img = convertAiTextureToQImage(at);
-            return imageToByteArray(img, "PNG");
+            return at;
         }
 
         return {};
@@ -63,17 +72,24 @@ QByteArray ImporterHelper::getTextureRawData(
 
     texture_name = QFileInfo(texStr).fileName();
     const aiTexture* embeddedTex = scene->GetEmbeddedTexture(path.C_Str());
-    if (embeddedTex) {
-        QImage img = convertAiTextureToQImage(embeddedTex);
-        return imageToByteArray(img, "PNG");
-    }
 
-    return {};
+    return embeddedTex;
 }
 
-// ----------------------------------------------------------------
-// 2. Map Function: 并行执行 I/O 和文件名去重
-// ----------------------------------------------------------------
+bool vtkmeta::ImporterHelper::isValidTexture(const aiTexture *ai,
+                                             const QString &texture_name)
+{
+    if (!ai || texture_name.isEmpty()) {
+        return false;
+    }
+
+    {
+        QMutexLocker locker(&g_textureGuidMapMutex);
+    }
+
+    return true;
+}
+
 TextureMapResult ImporterHelper::mapTextureProcess(
     const TextureImportTask& task,
     const QString& outputFolder)
@@ -84,19 +100,27 @@ TextureMapResult ImporterHelper::mapTextureProcess(
     result.is_new_asset = false;
 
     QString texture_name("");
-    QByteArray rawData = getTextureRawData(task.mat,
-                                           task.texture_type,
-                                           task.model_file_path,
-                                           task.scene,
-                                           texture_name);
-    if (rawData.isEmpty()) {
+    const aiTexture* embeddedTex = getTexture(task.mat,
+                                                task.texture_type,
+                                                task.scene,
+                                                texture_name);
+
+    if (!embeddedTex || texture_name.isEmpty()) {
         return result;
     }
 
-    aiString path;
-    task.mat->GetTexture(task.texture_type, 0, &path);
-    QString fullPath = QDir(outputFolder).filePath(texture_name);
+    {
+        QMutexLocker locker(&g_textureGuidMapMutex);
 
+        if (g_textureGuidMap.contains(texture_name)) {
+            result.guid_ = g_textureGuidMap.value(texture_name);
+            result.filename_ = texture_name;
+
+            return result;
+        }
+    }
+
+    QString fullPath = QDir(outputFolder).filePath(texture_name);
     QString assignedGuid;
 
     {
@@ -117,8 +141,15 @@ TextureMapResult ImporterHelper::mapTextureProcess(
     result.filename_ = texture_name;
 
     if (result.is_new_asset) {
-        QDir().mkpath(outputFolder);
         if (QFile outFile(fullPath); outFile.open(QIODevice::WriteOnly)) {
+
+            QByteArray rawData = getTextureRawData(embeddedTex);
+            if (rawData.isEmpty()) {
+                outFile.close();
+                result.is_new_asset = false;
+                return result;
+            }
+
             outFile.write(rawData);
             outFile.close();
         } else {
@@ -141,6 +172,12 @@ QVector<TextureMapResult> ImporterHelper::processTextures(
     const QList<TextureImportTask>& tasks,
     const QString& outputFolder)
 {
+    {
+        QMutexLocker locker(&g_textureGuidMapMutex);
+        g_textureGuidMap.clear();
+
+    }
+
     QFuture<QVector<TextureMapResult>> future = QtConcurrent::mappedReduced(
         tasks,
         [&](const TextureImportTask& task) {

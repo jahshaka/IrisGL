@@ -51,54 +51,6 @@ QString AssetLoader::generateGUIDFileName(const QString& base) const {
     return bn;
 }
 
-// convert Assimp embedded texture -> QImage
-QImage AssetLoader::convertAiTextureToQImage(const aiTexture* at) const
-{
-    if (!at) return QImage();
-    if (at->mHeight == 0) { // compressed (e.g. PNG/JPEG in memory)
-        QByteArray bytes(reinterpret_cast<const char*>(at->pcData), static_cast<int>(at->mWidth));
-        QImage img;
-        if (!img.loadFromData(bytes)) {
-            qWarning() << "AssimpModelLoader: Failed to load compressed embedded texture";
-            return QImage();
-        }
-        return img;
-    }
-    int w = at->mWidth;
-    int h = at->mHeight;
-    const aiTexel* texels = reinterpret_cast<const aiTexel*>(at->pcData);
-    if (!texels) return QImage();
-    // aiTexel is RGBA (4 bytes)
-    QImage img(reinterpret_cast<const uchar*>(texels), w, h, QImage::Format_RGBA8888);
-    return img.copy();
-}
-
-QString AssetLoader::saveEmbeddedTexture(const QImage& img, const QString& suggestedName, const QString& outputFolder) const
-{
-    if (img.isNull()) return QString();
-    QDir d(outputFolder);
-    if (!d.exists() && !d.mkpath(".")) {
-        qWarning() << "AssimpModelLoader: Cannot create output folder" << outputFolder;
-        return QString();
-    }
-    QString fileName = suggestedName;
-    if (!fileName.endsWith(".png", Qt::CaseInsensitive) &&
-        !fileName.endsWith(".jpg", Qt::CaseInsensitive) &&
-        !fileName.endsWith(".jpeg", Qt::CaseInsensitive))
-    {
-        // prefer png
-        fileName += ".png";
-    }
-    QString fullPath = d.filePath(fileName);
-    if (QFileInfo::exists(fullPath)) return fullPath;
-    if (!img.save(fullPath, "PNG")) {
-//        qWarning() << "AssimpModelLoader: Failed to save embedded texture to" << fullPath;
-        return QString();
-    }
-//    qDebug() << "AssimpModelLoader: Saved embedded texture:" << fullPath << "size=" << img.width() << "x" << img.height();
-    return fullPath;
-}
-
 // ------------------------- convert aiMesh -> vtkPolyData -------------------------
 vtkSmartPointer<vtkPolyData> AssetLoader::convertAiMeshToVtkPolyData(const aiMesh* mesh) const
 {

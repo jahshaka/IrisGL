@@ -44,30 +44,12 @@ public:
     AssetLoader() = default;
     ~AssetLoader() = default;
 
-    // load model -> returns list of LoadedMesh; renderer optional (lighting/skybox applied)
     QVector<LoadedMesh> loadModel(const QString& filePath,
                                   const QString& outputFolder,
                                   vtkRenderer* renderer = nullptr);
 
-    // Renderer helpers
-    static void SetupRendererForPBR(vtkRenderer* renderer);
-    static bool EnableEnvironmentHDR(vtkRenderer* renderer, const QString& hdrPath);
-
 private:
-    // helpers
-    QImage convertAiTextureToQImage(const aiTexture* at) const;
-    QString saveEmbeddedTexture(const QImage& img, const QString& suggestedName, const QString& outputFolder) const;
     vtkSmartPointer<vtkTexture> CreateVTKTextureFromQImage(const QImage& img, bool srgb = true) const;
-
-    // Load a texture from material (handles embedded "*n", embedded by name, relative/absolute path)
-    vtkSmartPointer<vtkTexture> loadTextureFromMaterial(const aiMaterial* mat,
-                                                        aiTextureType type,
-                                                        const aiScene* scene,
-                                                        const QString& modelDir,
-                                                        const QString& outputFolder,
-                                                        QString* outSavedPath = nullptr) const;
-
-    vtkSmartPointer<vtkTexture> LoadTextureToVtk(const QString& path, bool isSRGB);
 
     QString resolveTexturePath(
         const QString& texStr,
@@ -77,11 +59,8 @@ private:
         const QString& modelFilePath) const;
 
     vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh* mesh) const;
-    void applyPBRToActor(vtkActor* actor, vtkTexture* albedo, vtkTexture* normal, vtkTexture* orm,
-                         double metallic, double roughness) const;
-    QString generateGUIDFileName(const QString& base = QString()) const;
 
-    vtkSmartPointer<vtkImageData> QImageToVtkImageData(const QImage& img) const;
+    QString generateGUIDFileName(const QString& base = QString()) const;
 
     Assimp::Importer importer_;
 };

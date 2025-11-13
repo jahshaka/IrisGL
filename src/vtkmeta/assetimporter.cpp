@@ -15,9 +15,6 @@
 
 namespace vtkmeta {
 
-// QMutex g_textureGuidMapMutex;
-// QHash<QString, QString> g_textureGuidMap;
-
 ImportResult AssetImporter::importModel(
     const QString& externalFilePath,
     const QString& assetOutputFolder)
@@ -114,21 +111,24 @@ ImportResult AssetImporter::importModel(
         );
 
     qDebug() << "hexxxxxxxxxxxxxxxxxxxxx=--------------------------------------";
-
-    for (ImporedMesh& mesh : loadedMeshes) {
-        for (const TextureMapResult& result : finalTextureResults) {
-            if (result.mesh_name_ == mesh.name_) {
-                if (result.texture_type_ == aiTextureType_BASE_COLOR || result.texture_type_ == aiTextureType_DIFFUSE)
-                    mesh.materialInfo.diffuse_path_ = result.guid_;
-                else if (result.texture_type_ == aiTextureType_NORMALS)
-                    mesh.materialInfo.normal_path_ = result.guid_;
-                else if (result.texture_type_ == aiTextureType_GLTF_METALLIC_ROUGHNESS)
-                    mesh.materialInfo.orm_path_ = result.guid_;
-                else if (result.texture_type_ == aiTextureType_EMISSIVE)
-                    mesh.materialInfo.emissive_path_ = result.guid_;
-            }
-        }
+    for (TextureMapResult& result : finalTextureResults) {
+        qDebug() << result.filename_ << result.guid_;
     }
+
+    // for (ImporedMesh& mesh : loadedMeshes) {
+    //     for (const TextureMapResult& result : finalTextureResults) {
+    //         if (result.mesh_name_ == mesh.name_) {
+    //             if (result.texture_type_ == aiTextureType_BASE_COLOR || result.texture_type_ == aiTextureType_DIFFUSE)
+    //                 mesh.materialInfo.diffuse_path_ = result.guid_;
+    //             else if (result.texture_type_ == aiTextureType_NORMALS)
+    //                 mesh.materialInfo.normal_path_ = result.guid_;
+    //             else if (result.texture_type_ == aiTextureType_GLTF_METALLIC_ROUGHNESS)
+    //                 mesh.materialInfo.orm_path_ = result.guid_;
+    //             else if (result.texture_type_ == aiTextureType_EMISSIVE)
+    //                 mesh.materialInfo.emissive_path_ = result.guid_;
+    //         }
+    //     }
+    // }
 
     finalResult.meshes_ = loadedMeshes;
     finalResult.texture_results_ = std::move(finalTextureResults);

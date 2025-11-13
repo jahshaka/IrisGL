@@ -24,13 +24,17 @@ public:
     static QImage convertAiTextureToQImage(const aiTexture* at);
 
 private:
-    static QByteArray getTextureRawData(
+    static QByteArray getTextureRawData(const aiTexture* at);
+
+    static const aiTexture* getTexture(
         const aiMaterial* mat,
         aiTextureType type,
-        const QString& modelFilePath,
         const aiScene* scene,
         QString& texture_name
         );
+
+    static bool isValidTexture(const aiTexture* ai,
+                               const QString& texture_name);
 
     static TextureMapResult mapTextureProcess(
         const TextureImportTask& task,
