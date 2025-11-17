@@ -102,15 +102,16 @@ ImportResult AssetImporter::importModel(
 
     processNode(scene->mRootNode, aiMatrix4x4());
 
-    qDebug() << "task.....number:---" << textureTasks.count();
-
     ImporterHelper helper;
     QVector<TextureMapResult> finalTextureResults = helper.processTextures(
         textureTasks,
         assetOutputFolder
         );
 
-    qDebug() << "hexxxxxxxxxxxxxxxxxxxxx=--------------------------------------";
+    // std::sort(finalTextureResults.begin(), finalTextureResults.end());
+    // auto it = std::unique(finalTextureResults.begin(), finalTextureResults.end());
+    // finalTextureResults.erase(it, finalTextureResults.end());
+
     for (TextureMapResult& result : finalTextureResults) {
         qDebug() << result.filename_ << result.guid_;
     }

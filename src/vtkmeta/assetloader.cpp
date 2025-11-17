@@ -35,23 +35,6 @@
 
 namespace vtkmeta {
 
-// ------------------------- small helpers -------------------------
-static QString guessFileNameFromAiString(const aiString& s) {
-    QString name = QString::fromUtf8(s.C_Str());
-    if (name.isEmpty()) return QString();
-    return QFileInfo(name).fileName();
-}
-
-QString AssetLoader::generateGUIDFileName(const QString& base) const {
-    QString bn = QUuid::createUuid().toString();
-    if (!base.isEmpty()) {
-        bn = QFileInfo(base).completeBaseName() + "_" + bn;
-    }
-    bn.replace("{", "").replace("}", "").replace("-", "");
-    return bn;
-}
-
-// ------------------------- convert aiMesh -> vtkPolyData -------------------------
 vtkSmartPointer<vtkPolyData> AssetLoader::convertAiMeshToVtkPolyData(const aiMesh* mesh) const
 {
     if (!mesh) return nullptr;
@@ -150,11 +133,9 @@ vtkSmartPointer<vtkTexture> AssetLoader::CreateVTKTextureFromQImage(const QImage
 QString AssetLoader::resolveTexturePath(const QString& texStr, const aiScene* scene, const QString& baseName,
                                               const QString& outputFolder, const QString& modelFilePath) const
 {
-    // Keep the same behavior you used previously:
-    // - embedded (*0 style) -> saved to outputFolder via saveEmbeddedTexture
-    // - else try relative to modelFilePath directory; if exists save a temp copy (so QImage load later is stable)
-    // - else return candidate path (don't modify user-supplied semantics)
-    if (texStr.isEmpty()) return QString();
+    if (texStr.isEmpty()) {
+        return QString();
+    }
 
     QString texture_name("");
 
@@ -212,9 +193,6 @@ QVector<LoadedMesh> AssetLoader::loadModel(
     }
 
     QString baseName = QFileInfo(filePath).baseName();
-    qDebug() << "AssimpModelLoader: model loaded. meshes =" << scene->mNumMeshes
-             << "materials =" << scene->mNumMaterials << "textures(embedded) =" << scene->mNumTextures;
-
     QHash<QString, vtkSmartPointer<vtkTexture>> textureCache;
 
     auto loadTextureCached = [&](const QString& path, bool srgb) -> vtkSmartPointer<vtkTexture> {
@@ -325,8 +303,8 @@ QVector<LoadedMesh> AssetLoader::loadModel(
                 }
 
                 if (AI_SUCCESS == mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness)) {
-                    prop->SetRoughness(roughness);//std::max(roughness, 0.55f));
-                    //prop->SetRoughness(roughness);
+                    // prop->SetRoughness(roughness);
+                    prop->SetRoughness(std::max(roughness, 0.55f));
                 }
 
                 // --- BaseColor / Diffuse texture ---
@@ -347,10 +325,8 @@ QVector<LoadedMesh> AssetLoader::loadModel(
                             mr.texturePath = savedPath;
                             vtkSmartPointer<vtkTexture> tex = loadTextureCached(savedPath, true);
                             if (tex) {
-                                // actor->SetTexture(tex);
                                 prop->SetBaseColorTexture(tex);
-                                prop->SetColor(1.0, 1.0, 1.0); // 避免暗淡
-                                // qDebug() << "BaseColor texture applied to mesh:" << meshName;
+                                prop->SetColor(1.0, 1.0, 1.0);
                             }
                         }
                     }

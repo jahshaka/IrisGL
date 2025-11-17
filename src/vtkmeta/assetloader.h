@@ -60,8 +60,6 @@ private:
 
     vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh* mesh) const;
 
-    QString generateGUIDFileName(const QString& base = QString()) const;
-
     Assimp::Importer importer_;
 };
 

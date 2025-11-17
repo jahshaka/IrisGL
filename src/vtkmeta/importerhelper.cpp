@@ -1,4 +1,4 @@
-#include "ImporterHelper.h"
+#include "importerHelper.h"
 
 #include "assettypes.h"
 
@@ -109,18 +109,21 @@ TextureMapResult ImporterHelper::mapTextureProcess(
         return result;
     }
 
+
+    QString fullPath = QDir(outputFolder).filePath(texture_name);
+
     {
         QMutexLocker locker(&g_textureGuidMapMutex);
 
         if (g_textureGuidMap.contains(texture_name)) {
             result.guid_ = g_textureGuidMap.value(texture_name);
             result.filename_ = texture_name;
+            result.file_path_ = fullPath;
 
             return result;
         }
     }
 
-    QString fullPath = QDir(outputFolder).filePath(texture_name);
     QString assignedGuid;
 
     {
@@ -128,10 +131,10 @@ TextureMapResult ImporterHelper::mapTextureProcess(
         if (g_textureGuidMap.contains(texture_name)) {
             assignedGuid = g_textureGuidMap.value(texture_name);
         } else if (QFileInfo::exists(fullPath)) {
-            assignedGuid = QUuid::createUuid().toString().remove('{', '}').remove('-');
+            assignedGuid = QUuid::createUuid().toString();
             g_textureGuidMap.insert(texture_name, assignedGuid);
         } else {
-            assignedGuid = QUuid::createUuid().toString().remove('{', '}').remove('-');
+            assignedGuid = QUuid::createUuid().toString();
             g_textureGuidMap.insert(texture_name, assignedGuid);
             result.is_new_asset = true;
         }
@@ -139,6 +142,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
 
     result.guid_ = assignedGuid;
     result.filename_ = texture_name;
+    result.file_path_ = fullPath;
 
     if (result.is_new_asset) {
         if (QFile outFile(fullPath); outFile.open(QIODevice::WriteOnly)) {

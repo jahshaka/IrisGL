@@ -47,6 +47,7 @@ struct TextureMapResult {
     aiTextureType texture_type_;
     QString guid_;
     QString filename_;
+    QString file_path_;
     bool is_new_asset = false;
 };
 
