@@ -7,6 +7,9 @@
 #include <QList>
 #include <QByteArray>
 #include <QImage>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
 
 #include <assimp/scene.h>
 #include <assimp/material.h>
@@ -24,32 +27,35 @@ public:
     static QImage convertAiTextureToQImage(const aiTexture* at);
 
 private:
-    static QByteArray getTextureRawData(const aiTexture* at);
+    QByteArray getTextureRawData(const aiTexture* at);
 
-    static const aiTexture* getTexture(
+    const aiTexture* getTexture(
         const aiMaterial* mat,
         aiTextureType type,
         const aiScene* scene,
         QString& texture_name
         );
 
-    static bool isValidTexture(const aiTexture* ai,
+    bool isValidTexture(const aiTexture* ai,
                                const QString& texture_name);
 
-    static TextureMapResult mapTextureProcess(
+    TextureMapResult mapTextureProcess(
         const TextureImportTask& task,
         const QString& outputFolder
         );
 
-    static void reduceTextureResults(
+    void reduceTextureResults(
         QVector<TextureMapResult>& allResults,
         const TextureMapResult& currentResult
         );
 
-    static QByteArray imageToByteArray(
+    QByteArray imageToByteArray(
         const QImage& img,
         const QString& format = "PNG"
         );
+
+    QMutex texture_mutex_;
+    QHash<QString, QString> texture_lists_;
 };
 
 } // namespace vtkmeta

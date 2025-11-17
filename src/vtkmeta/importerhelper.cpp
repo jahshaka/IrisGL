@@ -9,17 +9,11 @@
 #include <QUuid>
 #include <QDebug>
 #include <QImage>
-#include <QMutex>
-#include <QMutexLocker>
 
 #include <QtConcurrent/QtConcurrent>
 #include <assimp/texture.h>
 
 namespace vtkmeta {
-
-QMutex g_textureGuidMapMutex;
-QHash<QString, QString> g_textureGuidMap;
-
 
 QByteArray ImporterHelper::imageToByteArray(const QImage& img,
                                             const QString& format)
@@ -84,7 +78,7 @@ bool vtkmeta::ImporterHelper::isValidTexture(const aiTexture *ai,
     }
 
     {
-        QMutexLocker locker(&g_textureGuidMapMutex);
+        QMutexLocker locker(&texture_mutex_);
     }
 
     return true;
@@ -113,10 +107,10 @@ TextureMapResult ImporterHelper::mapTextureProcess(
     QString fullPath = QDir(outputFolder).filePath(texture_name);
 
     {
-        QMutexLocker locker(&g_textureGuidMapMutex);
+        QMutexLocker locker(&texture_mutex_);
 
-        if (g_textureGuidMap.contains(texture_name)) {
-            result.guid_ = g_textureGuidMap.value(texture_name);
+        if (texture_lists_.contains(texture_name)) {
+            result.guid_ = texture_lists_.value(texture_name);
             result.filename_ = texture_name;
             result.file_path_ = fullPath;
 
@@ -127,15 +121,15 @@ TextureMapResult ImporterHelper::mapTextureProcess(
     QString assignedGuid;
 
     {
-        QMutexLocker locker(&g_textureGuidMapMutex);
-        if (g_textureGuidMap.contains(texture_name)) {
-            assignedGuid = g_textureGuidMap.value(texture_name);
+        QMutexLocker locker(&texture_mutex_);
+        if (texture_lists_.contains(texture_name)) {
+            assignedGuid = texture_lists_.value(texture_name);
         } else if (QFileInfo::exists(fullPath)) {
             assignedGuid = QUuid::createUuid().toString();
-            g_textureGuidMap.insert(texture_name, assignedGuid);
+            texture_lists_.insert(texture_name, assignedGuid);
         } else {
             assignedGuid = QUuid::createUuid().toString();
-            g_textureGuidMap.insert(texture_name, assignedGuid);
+            texture_lists_.insert(texture_name, assignedGuid);
             result.is_new_asset = true;
         }
     }
@@ -177,8 +171,8 @@ QVector<TextureMapResult> ImporterHelper::processTextures(
     const QString& outputFolder)
 {
     {
-        QMutexLocker locker(&g_textureGuidMapMutex);
-        g_textureGuidMap.clear();
+        QMutexLocker locker(&texture_mutex_);
+        texture_lists_.clear();
 
     }
 
