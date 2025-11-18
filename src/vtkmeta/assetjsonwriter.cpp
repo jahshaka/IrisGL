@@ -28,17 +28,17 @@ QJsonObject AssetJsonWriter::materialInfoToJson(const MaterialInfo& info)
     json["opacity"] = info.opacity_;
     json["aoFactor"] = info.aoFactor_;
 
-    json["diffuseGuid"] = info.diffuse_path_;
-    json["normalGuid"] = info.normal_path_;
+    json["diffuseGuid"] = info.diffuse_guid_;
+    json["normalGuid"] = info.normal_guid_;
 
-    json["ormGuid"] = info.orm_path_;
-    json["emissiveGuid"] = info.emissive_path_;
-    json["opacityGuid"] = info.opacity_path_;
+    json["ormGuid"] = info.orm_guid_;
+    json["emissiveGuid"] = info.emissive_guid_;
+    json["opacityGuid"] = info.opacity_guid_;
 
     return json;
 }
 
-QJsonObject AssetJsonWriter::loadedMeshToJson(const ImporedMesh& mesh)
+QJsonObject AssetJsonWriter::loadedMeshToJson(const ImportedMesh& mesh)
 {
     QJsonObject json;
 

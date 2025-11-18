@@ -4,9 +4,12 @@
 #include <QVector>
 #include <QString>
 #include <QVector3D>
+#include <QJsonObject>
+
 #include <vtkSmartPointer.h>
 #include <vtkPolyData.h>
 #include <vtkMatrix4x4.h>
+
 #include <assimp/scene.h>
 #include <assimp/material.h>
 
@@ -20,14 +23,15 @@ struct MaterialInfo {
     float opacity_ = 1.0f;
     float aoFactor_ = 1.0f;
 
-    QString diffuse_path_;  // GUID
-    QString normal_path_;   // GUID
-    QString orm_path_;      // GUID
-    QString emissive_path_; // GUID
-    QString opacity_path_;  // GUID
+    QString diffuse_guid_;  // GUID
+    QString normal_guid_;   // GUID
+    QString orm_guid_;      // GUID
+    QString emissive_guid_; // GUID
+    QString opacity_guid_;  // GUID
+    QString name_;
 };
 
-struct ImporedMesh {
+struct ImportedMesh {
     vtkSmartPointer<vtkPolyData> polyData_;
     QString name_;
     int mesh_index_ = -1;
@@ -38,8 +42,8 @@ struct TextureImportTask {
     const aiMaterial* mat;
     aiTextureType texture_type;
     QString model_file_path;
-    QString mesh_name;
-    const aiScene* scene;
+    QString mesh_name_;
+    const aiScene* scene_;
 };
 
 struct TextureMapResult {
@@ -52,8 +56,9 @@ struct TextureMapResult {
 };
 
 struct ImportResult {
-    QVector<ImporedMesh> meshes_;
+    QVector<ImportedMesh> meshes_;
     QVector<TextureMapResult> texture_results_;
+    QJsonObject json_;
 };
 
 } // namespace vtkmeta

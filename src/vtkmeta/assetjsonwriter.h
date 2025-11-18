@@ -21,7 +21,7 @@ public:
 
 private:
     QJsonObject materialInfoToJson(const MaterialInfo& info);
-    QJsonObject loadedMeshToJson(const ImporedMesh& mesh);
+    QJsonObject loadedMeshToJson(const ImportedMesh& mesh);
 };
 
 } // namespace vtkmeta

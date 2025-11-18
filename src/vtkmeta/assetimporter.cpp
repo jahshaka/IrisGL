@@ -6,6 +6,8 @@
 #include <QMutex>
 #include <QBuffer>
 #include <QImage>
+#include <QJsonObject>
+#include <QJsonArray>
 
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
@@ -26,9 +28,13 @@ ImportResult AssetImporter::importModel(
         return finalResult;
     }
 
-    unsigned int flags = aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_JoinIdenticalVertices
-                         | aiProcess_RemoveRedundantMaterials | aiProcess_GenUVCoords
-                         | aiProcess_OptimizeMeshes | aiProcess_FlipUVs;
+    unsigned int flags = aiProcess_Triangulate |
+                         aiProcess_GenSmoothNormals |
+                         aiProcess_JoinIdenticalVertices |
+                         aiProcess_RemoveRedundantMaterials |
+                         aiProcess_GenUVCoords |
+                         aiProcess_OptimizeMeshes |
+                         aiProcess_FlipUVs;
 
     const aiScene* scene = importer_.ReadFile(externalFilePath.toStdString(), flags);
     if (!scene) {
@@ -38,7 +44,9 @@ ImportResult AssetImporter::importModel(
 
     QString baseName = QFileInfo(externalFilePath).baseName();
     QList<TextureImportTask> textureTasks;
-    QVector<ImporedMesh> loadedMeshes;
+    QVector<ImportedMesh> loadedMeshes;
+
+    QJsonArray nodesArray;
 
     std::function<void(const aiNode*, const aiMatrix4x4&)> processNode;
     processNode = [&](const aiNode* node, const aiMatrix4x4& parentTransform)
@@ -60,7 +68,7 @@ ImportResult AssetImporter::importModel(
             vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
             if (!poly || poly->GetNumberOfPoints() == 0) continue;
 
-            ImporedMesh mr;
+            ImportedMesh mr;
             mr.polyData_ = poly;
             mr.name_ = meshName;
             mr.mesh_index_ = meshIdx;
@@ -93,6 +101,39 @@ ImportResult AssetImporter::importModel(
                 createTextureTask(aiTextureType_EMISSIVE);
             }
 
+            QJsonObject nodeObj;
+            nodeObj["name"] = mr.name_;
+            nodeObj["type"] = "mesh";
+            nodeObj["guid"] = "";
+            // transform
+            aiVector3D pos, scale;
+            aiQuaternion rot;
+            currentTransform.Decompose(scale, rot, pos);
+
+            QJsonObject transformObj;
+            transformObj["pos"] = QJsonArray{pos.x, pos.y, pos.z};
+            transformObj["rot"] = QJsonArray{rot.x, rot.y, rot.z, rot.w};
+            transformObj["scale"] = QJsonArray{scale.x, scale.y, scale.z};
+            nodeObj["transform"] = transformObj;
+
+            // mesh reference
+            nodeObj["mesh"] = mr.name_;
+
+            // material JSON basic info
+            QJsonObject matObj;
+            matObj["base_color"] = QJsonArray{
+                mr.materialInfo.base_color_.x(),
+                mr.materialInfo.base_color_.y(),
+                mr.materialInfo.base_color_.z()
+            };
+            matObj["metallic"] = mr.materialInfo.metallic_;
+            matObj["roughness"] = mr.materialInfo.roughness_;
+            matObj["opacity"] = mr.materialInfo.opacity_;
+
+            nodeObj["material"] = matObj;
+
+            nodesArray.append(nodeObj);
+
             loadedMeshes.append(std::move(mr));
         }
 
@@ -108,31 +149,92 @@ ImportResult AssetImporter::importModel(
         assetOutputFolder
         );
 
-    // std::sort(finalTextureResults.begin(), finalTextureResults.end());
-    // auto it = std::unique(finalTextureResults.begin(), finalTextureResults.end());
-    // finalTextureResults.erase(it, finalTextureResults.end());
+    finalResult.meshes_ = loadedMeshes;
+    finalResult.texture_results_ = std::move(finalTextureResults);
 
-    for (TextureMapResult& result : finalTextureResults) {
-        qDebug() << result.filename_ << result.guid_;
+    for (int i = 0; i < nodesArray.size(); ++i)
+    {
+        QJsonObject nodeObj = nodesArray[i].toObject();
+        QString meshName = nodeObj["mesh"].toString();
+
+        QJsonObject matObj = nodeObj["material"].toObject();
+        QJsonObject texObj;
+
+        for (const auto& tr : finalResult.texture_results_)
+        {
+            if (tr.mesh_name_ == meshName)
+            {
+                QString key;
+                switch (tr.texture_type_)
+                {
+                case aiTextureType_DIFFUSE:
+                case aiTextureType_BASE_COLOR:
+                    key = "diffuse";
+                    break;
+
+                case aiTextureType_NORMALS:
+                    key = "normal";
+                    break;
+
+                case aiTextureType_GLTF_METALLIC_ROUGHNESS:
+                    key = "orm";
+                    break;
+
+                case aiTextureType_EMISSIVE:
+                    key = "emissive";
+                    break;
+                }
+
+                if (!key.isEmpty())
+                {
+                    texObj[key] = QJsonObject {
+                        {"guid", tr.guid_},
+                        {"file", tr.filename_},
+                        {"path", tr.file_path_}
+                    };
+                }
+            }
+        }
+
+        matObj["textures"] = texObj;
+        nodeObj["material"] = matObj;
+
+        nodesArray[i] = nodeObj;
     }
 
-    // for (ImporedMesh& mesh : loadedMeshes) {
-    //     for (const TextureMapResult& result : finalTextureResults) {
-    //         if (result.mesh_name_ == mesh.name_) {
-    //             if (result.texture_type_ == aiTextureType_BASE_COLOR || result.texture_type_ == aiTextureType_DIFFUSE)
-    //                 mesh.materialInfo.diffuse_path_ = result.guid_;
-    //             else if (result.texture_type_ == aiTextureType_NORMALS)
-    //                 mesh.materialInfo.normal_path_ = result.guid_;
-    //             else if (result.texture_type_ == aiTextureType_GLTF_METALLIC_ROUGHNESS)
-    //                 mesh.materialInfo.orm_path_ = result.guid_;
-    //             else if (result.texture_type_ == aiTextureType_EMISSIVE)
-    //                 mesh.materialInfo.emissive_path_ = result.guid_;
-    //         }
+    // for (auto& mesh : finalResult.meshes_) {
+    //     for (const auto& t : finalResult.texture_results_)
+    //     {
+    //         if (t.mesh_name_ != mesh.name_) continue;
+
+    //         if (t.texture_type_ == aiTextureType_BASE_COLOR ||
+    //             t.texture_type_ == aiTextureType_DIFFUSE)
+    //             mesh.materialInfo.diffuse_guid_ = t.guid_;
+
+    //         else if (t.texture_type_ == aiTextureType_NORMALS)
+    //             mesh.materialInfo.normal_guid_ = t.guid_;
+
+    //         else if (t.texture_type_ == aiTextureType_GLTF_METALLIC_ROUGHNESS)
+    //             mesh.materialInfo.orm_guid_ = t.guid_;
+
+    //         else if (t.texture_type_ == aiTextureType_EMISSIVE)
+    //             mesh.materialInfo.emissive_guid_ = t.guid_;
     //     }
     // }
 
-    finalResult.meshes_ = loadedMeshes;
-    finalResult.texture_results_ = std::move(finalTextureResults);
+    // finalResult.json_ =  buildSceneJson(finalResult.meshes_,
+    //                                    finalTextureResults,
+    //                                    externalFilePath,
+    //                                    "");
+
+    QJsonObject rootObj;
+    rootObj["guid"] = //QUuid::createUuid().toString();
+    rootObj["model_file"] = QFileInfo(externalFilePath).fileName();
+    rootObj["nodes"] = nodesArray;
+
+    finalResult.json_ = rootObj;
+
+//    qDebug() << rootObj;
 
     return finalResult;
 }
@@ -207,5 +309,57 @@ vtkSmartPointer<vtkPolyData> AssetImporter::convertAiMeshToVtkPolyData(const aiM
 
     return poly;
 }
+
+QJsonObject AssetImporter::buildSceneJson(
+    const QVector<ImportedMesh>& loadedMeshes,
+    const QVector<TextureMapResult>& textures,
+    const QString& modelFile,
+    const QString& assetGuid)
+{
+    QJsonObject root;
+
+    // meta
+    QJsonObject meta;
+    meta["assetGuid"] = assetGuid;
+    meta["modelFile"] = modelFile;
+    root["meta"] = meta;
+
+    // meshes
+    QJsonArray arr;
+    for (const auto& m : loadedMeshes)
+    {
+        QJsonObject mo;
+        mo["name"] = m.name_;
+        mo["type"] = "Mesh";
+
+        QJsonObject mat;
+        mat["name"] = m.materialInfo.name_;
+
+        QJsonObject tex;
+        if (!m.materialInfo.diffuse_guid_.isEmpty())
+            tex["albedo"] = m.materialInfo.diffuse_guid_;
+
+        if (!m.materialInfo.normal_guid_.isEmpty())
+            tex["normal"] = m.materialInfo.normal_guid_;
+
+        if (!m.materialInfo.orm_guid_.isEmpty())
+            tex["orm"] = m.materialInfo.orm_guid_;
+
+        if (!m.materialInfo.emissive_guid_.isEmpty())
+            tex["emissive"] = m.materialInfo.emissive_guid_;
+
+        mat["textures"] = tex;
+        mo["material"] = mat;
+
+        arr.append(mo);
+    }
+
+    QJsonObject rootNode;
+    rootNode["children"] = arr;
+    root["rootNode"] = rootNode;
+
+    return root;
+}
+
 
 } // namespace vtkmeta

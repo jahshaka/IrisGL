@@ -9,6 +9,7 @@
 #include <QVector>
 #include <QString>
 #include <QVector3D>
+#include <QJsonObject>
 
 #include <vtkSmartPointer.h>
 #include <vtkPolyData.h>
@@ -31,16 +32,21 @@ public:
     AssetImporter() = default;
     ~AssetImporter() = default;
 
-    ImportResult importModel(
-        const QString& externalFilePath,
-        const QString& assetOutputFolder
-        );
+    ImportResult importModel(const QString& externalFilePath,
+                             const QString& assetOutputFolder
+                             );
 
 private:
     QByteArray imageToByteArray(const QImage& img,
                                 const QString& format = "PNG") const;
 
     vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh* mesh) const;
+
+    QJsonObject buildSceneJson(const QVector<ImportedMesh>& loadedMeshes,
+                               const QVector<TextureMapResult>& textures,
+                               const QString& modelFile,
+                               const QString& assetGuid
+                               );
 
     Assimp::Importer importer_;
 

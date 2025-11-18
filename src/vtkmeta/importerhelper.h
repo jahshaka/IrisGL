@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QAtomicInt>
 
 #include <assimp/scene.h>
 #include <assimp/material.h>
@@ -19,6 +20,12 @@ namespace vtkmeta {
 class ImporterHelper
 {
 public:
+    ImporterHelper() = default;
+    ~ImporterHelper() = default;
+
+    void beginTextureSession();
+    void endTextureSession();
+
     QVector<TextureMapResult> processTextures(
         const QList<TextureImportTask>& tasks,
         const QString& outputFolder
@@ -56,6 +63,8 @@ private:
 
     QMutex texture_mutex_;
     QHash<QString, QString> texture_lists_;
+
+    QAtomicInt session_refcount_;
 };
 
 } // namespace vtkmeta

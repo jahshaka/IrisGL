@@ -1,6 +1,12 @@
 // assimpmodelloader.cpp
 #include "assetloader.h"
 
+#include <QImage>
+#include <QFileInfo>
+#include <QDir>
+#include <QUuid>
+#include <QJsonArray>
+
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
@@ -26,11 +32,8 @@
 #include <vtkCamera.h>
 #include <vtkTransform.h>
 #include <vtkTransformPolyDataFilter.h>
+#include <vtkPNGReader.h>
 
-#include <QImage>
-#include <QFileInfo>
-#include <QDir>
-#include <QUuid>
 #include <QDebug>
 
 namespace vtkmeta {
@@ -90,6 +93,231 @@ vtkSmartPointer<vtkPolyData> AssetLoader::convertAiMeshToVtkPolyData(const aiMes
     poly->Modified();
 
     return poly;
+}
+
+void AssetLoader::loadNodeRecursive(const QJsonObject &obj,
+                                    LoadedMeshNode &node,
+                                    const aiScene *scene,
+                                    const QString &modelPath,
+                                    const QString &assetFolder,
+                                    vtkRenderer *renderer)
+{
+    node.name = obj["name"].toString();
+    node.guid = obj["guid"].toString();
+    node.modelFile = obj["modelFile"].toString();
+    node.meshIndex = obj["meshIndex"].toInt(-1);
+    node.localTransform = readTransform(obj["transform"].toObject());
+
+    // Load material
+    if (obj.contains("material"))
+        node.material = readMaterial(obj["material"].toObject(), assetFolder);
+
+    // Load mesh & actor
+    if (node.meshIndex >= 0)
+    {
+        vtkSmartPointer<vtkPolyData> poly = loadMeshPolyData(scene, node.meshIndex);
+        if (poly)
+        {
+            node.actor = createActor(poly, node.material, assetFolder);
+
+            vtkSmartPointer<vtkTransform> t = vtkSmartPointer<vtkTransform>::New();
+            QMatrix4x4 m = node.localTransform;
+
+            vtkSmartPointer<vtkMatrix4x4> vm = vtkSmartPointer<vtkMatrix4x4>::New();
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c)
+                    vm->SetElement(r, c, m(r, c));
+            t->SetMatrix(vm);
+
+            node.actor->SetUserTransform(t);
+            renderer->AddActor(node.actor);
+        }
+    }
+
+    // children
+    if (obj.contains("children") && obj["children"].isArray())
+    {
+        QJsonArray arr = obj["children"].toArray();
+        for (auto c : arr)
+        {
+            LoadedMeshNode child;
+            loadNodeRecursive(c.toObject(), child, scene,
+                              modelPath, assetFolder, renderer);
+            node.children.append(child);
+        }
+    }
+}
+
+vtkSmartPointer<vtkPolyData> AssetLoader::loadMeshPolyData(const aiScene *scene, int meshIndex)
+{
+
+    if (meshIndex < 0 || meshIndex >= (int)scene->mNumMeshes)
+        return nullptr;
+
+    const aiMesh *aimesh = scene->mMeshes[meshIndex];
+    if (!aimesh || !aimesh->HasFaces() || !aimesh->HasPositions())
+        return nullptr;
+
+    vtkSmartPointer<vtkPolyData> poly = vtkSmartPointer<vtkPolyData>::New();
+    vtkSmartPointer<vtkPoints> pts = vtkSmartPointer<vtkPoints>::New();
+    vtkSmartPointer<vtkCellArray> cells = vtkSmartPointer<vtkCellArray>::New();
+
+    // vertices
+    for (unsigned int i = 0; i < aimesh->mNumVertices; ++i)
+    {
+        pts->InsertNextPoint(aimesh->mVertices[i].x,
+                             aimesh->mVertices[i].y,
+                             aimesh->mVertices[i].z);
+    }
+
+    // faces
+    for (unsigned int i = 0; i < aimesh->mNumFaces; ++i)
+    {
+        const aiFace &face = aimesh->mFaces[i];
+        if (face.mNumIndices != 3)
+            continue;
+
+        vtkIdType tri[3] =
+            {
+                (vtkIdType)face.mIndices[0],
+                (vtkIdType)face.mIndices[1],
+                (vtkIdType)face.mIndices[2]
+            };
+        cells->InsertNextCell(3, tri);
+    }
+
+    poly->SetPoints(pts);
+    poly->SetPolys(cells);
+
+    return poly;
+}
+
+vtkSmartPointer<vtkActor> AssetLoader::createActor(vtkPolyData *poly,
+                                                   const LoadedMaterialInfo &mat,
+                                                   const QString &assetFolder)
+{
+
+    vtkSmartPointer<vtkPolyDataMapper> mapper =
+        vtkSmartPointer<vtkPolyDataMapper>::New();
+    mapper->SetInputData(poly);
+
+    vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+    actor->SetMapper(mapper);
+
+    vtkProperty *p = actor->GetProperty();
+    p->SetColor(mat.baseColor.x(), mat.baseColor.y(), mat.baseColor.z());
+    p->SetOpacity(mat.opacity);
+
+    auto loadTexture = [&](const LoadedTextureInfo &tinfo) -> vtkSmartPointer<vtkTexture>
+    {
+        if (tinfo.file.isEmpty())
+            return vtkSmartPointer<vtkTexture>(); // 空智能指针
+
+        QString full = QDir(assetFolder).filePath(tinfo.file);
+
+        vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
+        if (!reader->CanReadFile(full.toUtf8().constData()))
+            return vtkSmartPointer<vtkTexture>();
+
+        reader->SetFileName(full.toUtf8().constData());
+        reader->Update();
+
+        vtkSmartPointer<vtkTexture> tex = vtkSmartPointer<vtkTexture>::New();
+        tex->SetInputConnection(reader->GetOutputPort());
+        tex->InterpolateOn();
+
+        return tex; // 返回智能指针
+    };
+
+    // 使用时先接收智能指针，再传入 actor（使用 Get() 取原始指针）
+    if (!mat.diffuse.file.isEmpty())
+    {
+        vtkSmartPointer<vtkTexture> t = loadTexture(mat.diffuse);
+        if (t) {
+            // actor->SetTexture() 接受 vtkTexture*，所以取原始指针
+            actor->SetTexture(t.GetPointer()); // 或 t.Get()
+        }
+    }
+
+    return actor;
+}
+
+QMatrix4x4 AssetLoader::readTransform(const QJsonObject &obj)
+{
+    QMatrix4x4 m;
+    m.setToIdentity();
+
+    if (obj.isEmpty())
+        return m;
+
+    QVector3D pos(0, 0, 0);
+    QVector3D rot(0, 0, 0);
+    QVector3D scale(1, 1, 1);
+
+    auto readVec3 = [&](const QJsonValue &v, QVector3D &out)
+    {
+        if (!v.isArray()) return;
+        QJsonArray a = v.toArray();
+        if (a.size() != 3) return;
+        out.setX(a[0].toDouble());
+        out.setY(a[1].toDouble());
+        out.setZ(a[2].toDouble());
+    };
+
+    readVec3(obj["pos"], pos);
+    readVec3(obj["rot"], rot);
+    readVec3(obj["scale"], scale);
+
+    m.translate(pos);
+    m.rotate(rot.x(), 1, 0, 0);
+    m.rotate(rot.y(), 0, 1, 0);
+    m.rotate(rot.z(), 0, 0, 1);
+    m.scale(scale);
+
+    return m;
+}
+
+LoadedMaterialInfo AssetLoader::readMaterial(const QJsonObject &matObj, const QString &assetFolder)
+{
+    LoadedMaterialInfo mat;
+
+    mat.name = matObj["name"].toString();
+
+    auto readVec3 = [&](const QJsonValue &v, QVector3D &out)
+    {
+        if (!v.isArray()) return;
+        QJsonArray a = v.toArray();
+        if (a.size() != 3) return;
+        out.setX(a[0].toDouble());
+        out.setY(a[1].toDouble());
+        out.setZ(a[2].toDouble());
+    };
+
+    readVec3(matObj["baseColor"], mat.baseColor);
+    mat.metallic  = matObj["metallic"].toDouble();
+    mat.roughness = matObj["roughness"].toDouble();
+    mat.opacity   = matObj["opacity"].toDouble();
+
+    if (matObj.contains("textures"))
+    {
+        QJsonObject t = matObj["textures"].toObject();
+
+        auto readTex = [&](const QString &key, LoadedTextureInfo &out)
+        {
+            if (!t.contains(key)) return;
+            QJsonObject o = t[key].toObject();
+            out.guid = o["guid"].toString();
+            out.file = o["file"].toString();
+            out.fullPath = QDir(assetFolder).filePath(out.file);
+        };
+
+        readTex("diffuse",  mat.diffuse);
+        readTex("normal",   mat.normal);
+        readTex("orm",      mat.orm);
+        readTex("emissive", mat.emissive);
+    }
+
+    return mat;
 }
 
 // ------------------------- Create VTK texture from QImage -------------------------
@@ -325,6 +553,7 @@ QVector<LoadedMesh> AssetLoader::loadModel(
                             mr.texturePath = savedPath;
                             vtkSmartPointer<vtkTexture> tex = loadTextureCached(savedPath, true);
                             if (tex) {
+                                qDebug() << "----------------------------------------------aiTextureType_DIFFUSE/aiTextureType_BASE_COLOR" << savedPath;
                                 prop->SetBaseColorTexture(tex);
                                 prop->SetColor(1.0, 1.0, 1.0);
                             }
@@ -338,8 +567,10 @@ QVector<LoadedMesh> AssetLoader::loadModel(
                     if (mat->GetTexture(aiTextureType_NORMALS, 0, &ntex) == aiReturn_SUCCESS) {
                         QString resolvedNormal = resolveTexturePath(QString::fromUtf8(ntex.C_Str()), scene, baseName, outputFolder, filePath);
                         if (!resolvedNormal.isEmpty()) {
+
                             vtkSmartPointer<vtkTexture> normalTex = loadTextureCached(resolvedNormal, false);
                             if (normalTex) {
+                                qDebug() << "----------------------------------------------aiTextureType_NORMALS" << resolvedNormal;
                                 prop->SetNormalTexture(normalTex);
                                 // qDebug() << "Normal texture applied to mesh:" << meshName;
                             }
@@ -351,12 +582,16 @@ QVector<LoadedMesh> AssetLoader::loadModel(
                 QString ormPath;
                 if (mat->GetTextureCount(aiTextureType_GLTF_METALLIC_ROUGHNESS) > 0) {
                     aiString orm;
-                    if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &orm) == aiReturn_SUCCESS)
+                    if (mat->GetTexture(aiTextureType_GLTF_METALLIC_ROUGHNESS, 0, &orm) == aiReturn_SUCCESS) {
                         ormPath = resolveTexturePath(QString::fromUtf8(orm.C_Str()), scene, baseName, outputFolder, filePath);
+
+                    }
                 }
+
                 if (!ormPath.isEmpty()) {
                     vtkSmartPointer<vtkTexture> ormTex = loadTextureCached(ormPath, false);
                     if (ormTex) {
+                        qDebug() << "----------------------------------------------aiTextureType_GLTF_METALLIC_ROUGHNESS" << ormPath;
                         prop->SetORMTexture(ormTex);
                         // qDebug() << "ORM texture applied to mesh:" << meshName;
                     }
@@ -376,5 +611,238 @@ QVector<LoadedMesh> AssetLoader::loadModel(
     // qDebug() << "AssimpModelLoader: finished processing. meshes output =" << results.size();
     return results;
 }
+
+
+QHash<QString, vtkSmartPointer<vtkPolyData>> AssetLoader::loadAllMeshesFromFile(
+    const QString& modelFilePath, const aiScene* scene) const
+{
+    QHash<QString, vtkSmartPointer<vtkPolyData>> meshMap;
+    QString baseName = QFileInfo(modelFilePath).baseName();
+
+    for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
+        const aiMesh* aimesh = scene->mMeshes[i];
+        if (!aimesh) continue;
+
+        // 必须与 AssetImporter::importModel 中的命名逻辑保持一致！
+        QString meshName = (aimesh->mName.length > 0)
+                               ? QString::fromUtf8(aimesh->mName.C_Str())
+                               : QString("%1_mesh%2").arg(baseName).arg(i);
+
+        // 使用您 Importer 中已有的转换函数
+        vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
+        if (poly) {
+            meshMap.insert(meshName, poly);
+        }
+    }
+    return meshMap;
+}
+
+SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
+                                               const QJsonObject &obj,
+                                               vtkRenderer *renderer)
+{
+    SceneLoadResult result;
+
+    QFileInfo fi(filePath);
+    QString assetFolder = fi.absolutePath();
+
+    QJsonObject rootObj = obj;
+    QJsonArray meshesArray = rootObj["nodes"].toArray();
+
+    unsigned int flags = aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs; // 简化 flags
+    const aiScene* scene = importer_.ReadFile(filePath.toStdString(), flags);
+    if (!scene) {
+        qWarning() << "loadModelFromJson: Assimp failed to load model" << filePath << ":" << importer_.GetErrorString();
+        return result;
+    }
+
+    // 预加载所有网格 PolyData 并存储到映射中，用于按名称查找
+    // 注意：loadAllMeshesFromFile 必须使用和 Importer::processNode 中**完全相同**的命名规则
+    QHash<QString, vtkSmartPointer<vtkPolyData>> meshPolyDataMap =
+        loadAllMeshesFromFile(filePath, scene); // 见下文的实现
+
+    qDebug() << meshPolyDataMap;
+
+    for (auto meshVal : meshesArray) {
+        QJsonObject meshObj = meshVal.toObject();
+        LoadedMesh mesh;
+        mesh.name = meshObj["name"].toString();
+
+        QString meshNameRef = meshObj["mesh"].toString();
+
+        if (meshPolyDataMap.contains(meshNameRef)) {
+            mesh.polyData = meshPolyDataMap.value(meshNameRef);
+        } else {
+            qWarning() << "Loader: Mesh reference not found for:" << meshNameRef;
+            continue;
+        }
+
+        // transform
+        if (meshObj.contains("transform")) {
+            QJsonObject tObj = meshObj["transform"].toObject();
+            if (tObj.contains("pos")) mesh.position = QVector3D(
+                    tObj["pos"].toArray()[0].toDouble(),
+                    tObj["pos"].toArray()[1].toDouble(),
+                    tObj["pos"].toArray()[2].toDouble()
+                    );
+            if (tObj.contains("rot")) mesh.rotation = QVector3D(
+                    tObj["rot"].toArray()[0].toDouble(),
+                    tObj["rot"].toArray()[1].toDouble(),
+                    tObj["rot"].toArray()[2].toDouble()
+                    );
+            if (tObj.contains("scale")) mesh.scale = QVector3D(
+                    tObj["scale"].toArray()[0].toDouble(),
+                    tObj["scale"].toArray()[1].toDouble(),
+                    tObj["scale"].toArray()[2].toDouble()
+                    );
+        }
+
+        //int meshIndex = mesh
+        // create actor
+        vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+        QJsonObject matObj = meshObj["material"].toObject();
+        if (!matObj.isEmpty()) {
+            // QJsonObject matObj = materialsArray[0].toObject();
+            // mesh.materialInfo.name = matObj["name"].toString();
+
+            QJsonArray baseColorArr = matObj["base_color"].toArray();
+
+            if (baseColorArr.size() >= 3) {
+                double r = baseColorArr[0].toDouble();
+                double g = baseColorArr[1].toDouble();
+                double b = baseColorArr[2].toDouble();
+
+                vtkSmartPointer<vtkProperty> prop = actor->GetProperty();
+                prop->SetDiffuseColor(r, g, b);
+                // prop->SetInterpolationToGouraud();
+                // prop->SetInterpolationToPBR();
+
+
+                float matOpacity = matObj["opacity"].toDouble(1.0);
+                if (matOpacity >= 0.995f) {
+                    actor->SetForceOpaque(true);
+                    prop->SetOpacity(1.0);
+                } else {
+                    actor->SetForceOpaque(false);
+                    prop->SetOpacity(matOpacity);
+                    actor->SetForceTranslucent(true);
+                }
+
+                prop->SetMetallic(matObj["metallic"].toDouble(0.0));
+                prop->SetRoughness(matObj["roughness"].toDouble(0.5));
+            }
+
+            if (matObj.contains("textures")) {
+                QJsonObject texObj = matObj["textures"].toObject();
+                if (texObj.contains("diffuse")) {
+                    auto t = texObj["diffuse"].toObject();
+                    mesh.materialInfo.diffuse.guid = t["guid"].toString();
+                    mesh.materialInfo.diffuse.file = t["file"].toString();
+                }
+                if (texObj.contains("normal")) {
+                    auto t = texObj["normal"].toObject();
+                    mesh.materialInfo.normal.guid = t["guid"].toString();
+                    mesh.materialInfo.normal.file = t["file"].toString();
+                }
+                if (texObj.contains("orm")) {
+                    auto t = texObj["orm"].toObject();
+                    mesh.materialInfo.orm.guid = t["guid"].toString();
+                    mesh.materialInfo.orm.file = t["file"].toString();
+                }
+                if (texObj.contains("emissive")) {
+                    auto t = texObj["emissive"].toObject();
+                    mesh.materialInfo.emissive.guid = t["guid"].toString();
+                    mesh.materialInfo.emissive.file = t["file"].toString();
+                }
+            }
+        }
+
+        vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        if (mesh.polyData)
+            mapper->SetInputData(mesh.polyData);
+        actor->SetMapper(mapper);
+
+        vtkSmartPointer<vtkTransform> trans = vtkSmartPointer<vtkTransform>::New();
+        trans->Translate(mesh.position.x(), mesh.position.y(), mesh.position.z());
+        trans->RotateX(mesh.rotation.x());
+        trans->RotateY(mesh.rotation.y());
+        trans->RotateZ(mesh.rotation.z());
+        trans->Scale(mesh.scale.x(), mesh.scale.y(), mesh.scale.z());
+        actor->SetUserTransform(trans);
+
+        auto prop = actor->GetProperty();
+        prop->SetInterpolationToPBR();
+        prop->BackfaceCullingOn();
+
+        // diffuse / base color
+        if (!mesh.materialInfo.diffuse.file.isEmpty()) {
+            auto tex = loadTexture(mesh.materialInfo.diffuse, assetFolder);
+            if (tex) {
+                tex->SetUseSRGBColorSpace(true);
+                prop->SetBaseColorTexture(tex);
+                prop->SetColor(1.0, 1.0, 1.0);
+
+            }
+        }
+
+        // normal
+        if (!mesh.materialInfo.normal.file.isEmpty()) {
+            auto normalTex = loadTexture(mesh.materialInfo.normal, assetFolder);
+            if (normalTex) {
+                normalTex->SetUseSRGBColorSpace(false);
+                prop->SetNormalTexture(normalTex);
+            }
+        }
+
+        // ORM
+        if (!mesh.materialInfo.orm.file.isEmpty()) {
+            auto ormTex = loadTexture(mesh.materialInfo.orm, assetFolder);
+            if (ormTex) {
+                ormTex->SetUseSRGBColorSpace(false);
+                prop->SetORMTexture(ormTex);
+            }
+        }
+
+
+        if (renderer)
+            renderer->AddActor(actor);
+
+        result.meshes.append(mesh);
+    }
+
+    return result;
+}
+
+
+
+vtkSmartPointer<vtkTexture> AssetLoader::loadTexture(const LoadedTextureInfo &tinfo, const QString &assetFolder)
+{
+    if (tinfo.file.isEmpty()) return nullptr;
+
+    QString fullPath = QDir(assetFolder).filePath(tinfo.file);
+
+    vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
+    if (!reader->CanReadFile(fullPath.toUtf8().data()))
+        return nullptr;
+
+    reader->SetFileName(fullPath.toUtf8().data());
+    reader->Update();
+
+    vtkSmartPointer<vtkTexture> tex = vtkSmartPointer<vtkTexture>::New();
+    tex->SetInputConnection(reader->GetOutputPort());
+
+    tex->MipmapOn();
+    tex->RepeatOn();
+    tex->InterpolateOn();
+    tex->EdgeClampOn();
+    tex->SetUseSRGBColorSpace(true);
+
+    // help with blending/alpha
+    tex->SetPremultipliedAlpha(true);
+    tex->SetBlendingMode(vtkTexture::VTK_TEXTURE_BLENDING_MODE_REPLACE);
+
+    return tex;
+}
+
 
 } // namespace vtkmeta

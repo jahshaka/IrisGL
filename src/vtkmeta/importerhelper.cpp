@@ -34,7 +34,16 @@ QByteArray ImporterHelper::imageToByteArray(const QImage& img,
 QByteArray ImporterHelper::getTextureRawData(const aiTexture* at)
 {
     QImage img = convertAiTextureToQImage(at);
-    return imageToByteArray(img, "PNG");
+
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+
+    img.save(&buffer, "PNG");
+
+    buffer.close();
+
+    return bytes;
 }
 
 const aiTexture *ImporterHelper::getTexture(const aiMaterial *mat,
@@ -70,8 +79,8 @@ const aiTexture *ImporterHelper::getTexture(const aiMaterial *mat,
     return embeddedTex;
 }
 
-bool vtkmeta::ImporterHelper::isValidTexture(const aiTexture *ai,
-                                             const QString &texture_name)
+bool ImporterHelper::isValidTexture(const aiTexture *ai,
+                                    const QString &texture_name)
 {
     if (!ai || texture_name.isEmpty()) {
         return false;
@@ -89,15 +98,15 @@ TextureMapResult ImporterHelper::mapTextureProcess(
     const QString& outputFolder)
 {
     TextureMapResult result;
-    result.mesh_name_ = task.mesh_name;
+    result.mesh_name_ = task.mesh_name_;
     result.texture_type_ = task.texture_type;
     result.is_new_asset = false;
 
     QString texture_name("");
     const aiTexture* embeddedTex = getTexture(task.mat,
-                                                task.texture_type,
-                                                task.scene,
-                                                texture_name);
+                                              task.texture_type,
+                                              task.scene_,
+                                              texture_name);
 
     if (!embeddedTex || texture_name.isEmpty()) {
         return result;
@@ -124,12 +133,28 @@ TextureMapResult ImporterHelper::mapTextureProcess(
         QMutexLocker locker(&texture_mutex_);
         if (texture_lists_.contains(texture_name)) {
             assignedGuid = texture_lists_.value(texture_name);
+            result.guid_ = assignedGuid;
+            result.filename_ = texture_name;
+            result.file_path_ = fullPath;
+            result.is_new_asset = false;
+
         } else if (QFileInfo::exists(fullPath)) {
+
             assignedGuid = QUuid::createUuid().toString();
             texture_lists_.insert(texture_name, assignedGuid);
+            result.guid_ = assignedGuid;
+            result.filename_ = texture_name;
+            result.file_path_ = fullPath;
+            result.is_new_asset = false;
+
+            return result;
+
         } else {
             assignedGuid = QUuid::createUuid().toString();
             texture_lists_.insert(texture_name, assignedGuid);
+            result.guid_ = assignedGuid;
+            result.filename_ = texture_name;
+            result.file_path_ = fullPath;
             result.is_new_asset = true;
         }
     }
@@ -166,14 +191,30 @@ void ImporterHelper::reduceTextureResults(
     allResults.append(currentResult);
 }
 
+void vtkmeta::ImporterHelper::beginTextureSession()
+{
+    int prev = session_refcount_.fetchAndAddRelaxed(1);
+    if (prev == 0) {
+        QMutexLocker locker(&texture_mutex_);
+    }
+}
+
+void ImporterHelper::endTextureSession()
+{
+    int prev = session_refcount_.fetchAndAddRelaxed(-1);
+    if (prev <= 1) {
+        QMutexLocker locker(&texture_mutex_);
+        texture_lists_.clear();
+    }
+}
+
 QVector<TextureMapResult> ImporterHelper::processTextures(
     const QList<TextureImportTask>& tasks,
     const QString& outputFolder)
 {
-    {
+    if (session_refcount_.loadRelaxed() == 0) {
         QMutexLocker locker(&texture_mutex_);
         texture_lists_.clear();
-
     }
 
     QFuture<QVector<TextureMapResult>> future = QtConcurrent::mappedReduced(
@@ -192,7 +233,7 @@ QVector<TextureMapResult> ImporterHelper::processTextures(
     return future.result();
 }
 
-QImage vtkmeta::ImporterHelper::convertAiTextureToQImage(const aiTexture *at)
+QImage ImporterHelper::convertAiTextureToQImage(const aiTexture *at)
 {
     if (!at) {
         return QImage();
@@ -202,7 +243,7 @@ QImage vtkmeta::ImporterHelper::convertAiTextureToQImage(const aiTexture *at)
         QByteArray bytes(reinterpret_cast<const char*>(at->pcData), static_cast<int>(at->mWidth));
         QImage img;
         if (!img.loadFromData(bytes)) {
-            qWarning() << "AssimpModelLoader: Failed to load compressed embedded texture";
+            qWarning() << "ImporterHelper: Failed to load compressed embedded texture";
             return QImage();
         }
 
@@ -213,7 +254,7 @@ QImage vtkmeta::ImporterHelper::convertAiTextureToQImage(const aiTexture *at)
     int h = at->mHeight;
     const aiTexel* texels = reinterpret_cast<const aiTexel*>(at->pcData);
 
-    if (!texels) {
+    if (!texels || w <= 0 || h <= 0) {
         return QImage();
     }
 
