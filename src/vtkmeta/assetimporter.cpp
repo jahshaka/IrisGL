@@ -90,12 +90,17 @@ ImportResult AssetImporter::importModel(
                 mr.materialInfo.opacity_ = opacity;
 
                 auto createTextureTask = [&](aiTextureType type) {
-                    if (mat->GetTextureCount(type) > 0)
+                    if (mat->GetTextureCount(type) > 0) {
+                        qDebug() << "texture task..........................." << type << mr.name_;
+
                         textureTasks.append({mat, type, externalFilePath, mr.name_, scene});
+                    }
                 };
 
                 createTextureTask(aiTextureType_BASE_COLOR);
                 createTextureTask(aiTextureType_DIFFUSE);
+                createTextureTask(aiTextureType_UNKNOWN);
+
                 createTextureTask(aiTextureType_NORMALS);
                 createTextureTask(aiTextureType_GLTF_METALLIC_ROUGHNESS);
                 createTextureTask(aiTextureType_EMISSIVE);
@@ -152,6 +157,11 @@ ImportResult AssetImporter::importModel(
     finalResult.meshes_ = loadedMeshes;
     finalResult.texture_results_ = std::move(finalTextureResults);
 
+    int x=0;
+    for (auto texture : finalResult.texture_results_) {
+        qDebug() <<  ++x << "******************************" << texture.texture_type_ << texture.file_path_ << texture.filename_ << texture.mesh_name_;
+    }
+
     for (int i = 0; i < nodesArray.size(); ++i)
     {
         QJsonObject nodeObj = nodesArray[i].toObject();
@@ -169,6 +179,7 @@ ImportResult AssetImporter::importModel(
                 {
                 case aiTextureType_DIFFUSE:
                 case aiTextureType_BASE_COLOR:
+                case aiTextureType_UNKNOWN:
                     key = "diffuse";
                     break;
 
@@ -360,6 +371,5 @@ QJsonObject AssetImporter::buildSceneJson(
 
     return root;
 }
-
 
 } // namespace vtkmeta

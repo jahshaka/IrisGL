@@ -62,7 +62,7 @@ struct LoadedMesh {
     QString texturePath;
 
     QVector3D position;
-    QVector3D rotation;
+    QVector4D rotation;
     QVector3D scale;
 
     LoadedMaterialInfo materialInfo;

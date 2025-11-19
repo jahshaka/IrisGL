@@ -612,28 +612,31 @@ QVector<LoadedMesh> AssetLoader::loadModel(
     return results;
 }
 
-
 QHash<QString, vtkSmartPointer<vtkPolyData>> AssetLoader::loadAllMeshesFromFile(
     const QString& modelFilePath, const aiScene* scene) const
 {
     QHash<QString, vtkSmartPointer<vtkPolyData>> meshMap;
     QString baseName = QFileInfo(modelFilePath).baseName();
 
+    // 🚫 不再递归 node transform
+    //    因为 Importer 中已经处理过 transform（包括缩放、旋转、坐标系变换等）
+    //    Loader 再做一次会造成模型缩小 100 倍、难以移动、错位
+
     for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
         const aiMesh* aimesh = scene->mMeshes[i];
         if (!aimesh) continue;
 
-        // 必须与 AssetImporter::importModel 中的命名逻辑保持一致！
-        QString meshName = (aimesh->mName.length > 0)
-                               ? QString::fromUtf8(aimesh->mName.C_Str())
-                               : QString("%1_mesh%2").arg(baseName).arg(i);
+        QString meshName =
+            (aimesh->mName.length > 0)
+                ? QString::fromUtf8(aimesh->mName.C_Str())
+                : QString("%1_mesh%2").arg(baseName).arg(i);
 
-        // 使用您 Importer 中已有的转换函数
         vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
         if (poly) {
-            meshMap.insert(meshName, poly);
+            meshMap.insert(meshName, poly); // 不加 transform
         }
     }
+
     return meshMap;
 }
 
@@ -677,24 +680,50 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
             continue;
         }
 
-        // transform
+        // // transform
+        // if (meshObj.contains("transform")) {
+        //     QJsonObject tObj = meshObj["transform"].toObject();
+        //     if (tObj.contains("pos")) mesh.position = QVector3D(
+        //             tObj["pos"].toArray()[0].toDouble(),
+        //             tObj["pos"].toArray()[1].toDouble(),
+        //             tObj["pos"].toArray()[2].toDouble()
+        //             );
+        //     if (tObj.contains("rot")) mesh.rotation = QVector3D(
+        //             tObj["rot"].toArray()[0].toDouble(),
+        //             tObj["rot"].toArray()[1].toDouble(),
+        //             tObj["rot"].toArray()[2].toDouble()
+        //             );
+        //     if (tObj.contains("scale")) mesh.scale = QVector3D(
+        //             tObj["scale"].toArray()[0].toDouble(),
+        //             tObj["scale"].toArray()[1].toDouble(),
+        //             tObj["scale"].toArray()[2].toDouble()
+        //             );
+        // }
+
+
         if (meshObj.contains("transform")) {
             QJsonObject tObj = meshObj["transform"].toObject();
-            if (tObj.contains("pos")) mesh.position = QVector3D(
-                    tObj["pos"].toArray()[0].toDouble(),
-                    tObj["pos"].toArray()[1].toDouble(),
-                    tObj["pos"].toArray()[2].toDouble()
-                    );
-            if (tObj.contains("rot")) mesh.rotation = QVector3D(
-                    tObj["rot"].toArray()[0].toDouble(),
-                    tObj["rot"].toArray()[1].toDouble(),
-                    tObj["rot"].toArray()[2].toDouble()
-                    );
-            if (tObj.contains("scale")) mesh.scale = QVector3D(
-                    tObj["scale"].toArray()[0].toDouble(),
-                    tObj["scale"].toArray()[1].toDouble(),
-                    tObj["scale"].toArray()[2].toDouble()
-                    );
+            if (tObj.contains("pos")) {
+                QJsonArray a = tObj["pos"].toArray();
+                if (a.size() >= 3)
+                    mesh.position = QVector3D(a[0].toDouble(), a[1].toDouble(), a[2].toDouble());
+            }
+            if (tObj.contains("rot")) {
+                QJsonArray a = tObj["rot"].toArray();
+                if (a.size() == 4) {
+                    // importer saved quaternion [x,y,z,w]
+                    mesh.rotation = QVector4D(a[0].toDouble(), a[1].toDouble(), a[2].toDouble(), a[3].toDouble());
+                } else if (a.size() == 3) {
+                    // legacy euler degrees
+                    // store as (x,y,z,0) to indicate euler
+                    mesh.rotation = QVector4D(a[0].toDouble(), a[1].toDouble(), a[2].toDouble(), 0.0);
+                }
+            }
+            if (tObj.contains("scale")) {
+                QJsonArray a = tObj["scale"].toArray();
+                if (a.size() >= 3)
+                    mesh.scale = QVector3D(a[0].toDouble(1.0), a[1].toDouble(1.0), a[2].toDouble(1.0));
+            }
         }
 
         //int meshIndex = mesh
@@ -764,10 +793,44 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
 
         vtkSmartPointer<vtkTransform> trans = vtkSmartPointer<vtkTransform>::New();
         trans->Translate(mesh.position.x(), mesh.position.y(), mesh.position.z());
-        trans->RotateX(mesh.rotation.x());
-        trans->RotateY(mesh.rotation.y());
-        trans->RotateZ(mesh.rotation.z());
+        // trans->RotateX(mesh.rotation.x());
+        // trans->RotateY(mesh.rotation.y());
+        // trans->RotateZ(mesh.rotation.z());
+        // trans->Scale(mesh.scale.x(), mesh.scale.y(), mesh.scale.z());
+        // actor->SetUserTransform(trans);
+
+        if (mesh.rotation.w() != 0.0) {
+            // quaternion case: x,y,z,w
+            double qx = mesh.rotation.x();
+            double qy = mesh.rotation.y();
+            double qz = mesh.rotation.z();
+            double qw = mesh.rotation.w();
+
+            // convert to QQuaternion -> QMatrix4x4 -> vtkMatrix4x4
+            QQuaternion q((float)qw, (float)qx, (float)qy, (float)qz); // QQuaternion(w,x,y,z)
+            QMatrix4x4 qm;
+            qm.setToIdentity();
+            qm.rotate(q);
+
+            // convert QMatrix4x4 to vtkMatrix4x4
+            vtkSmartPointer<vtkMatrix4x4> vm = vtkSmartPointer<vtkMatrix4x4>::New();
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c)
+                    vm->SetElement(r, c, qm(r,c));
+
+            vtkSmartPointer<vtkTransform> rtrans = vtkSmartPointer<vtkTransform>::New();
+            rtrans->SetMatrix(vm);
+            trans->Concatenate(rtrans->GetMatrix());
+        } else {
+            // euler (deg assumed)
+            trans->RotateX(mesh.rotation.x());
+            trans->RotateY(mesh.rotation.y());
+            trans->RotateZ(mesh.rotation.z());
+        }
+
+        // scale (apply last)
         trans->Scale(mesh.scale.x(), mesh.scale.y(), mesh.scale.z());
+
         actor->SetUserTransform(trans);
 
         auto prop = actor->GetProperty();
@@ -820,6 +883,13 @@ vtkSmartPointer<vtkTexture> AssetLoader::loadTexture(const LoadedTextureInfo &ti
     if (tinfo.file.isEmpty()) return nullptr;
 
     QString fullPath = QDir(assetFolder).filePath(tinfo.file);
+
+
+    qDebug() << tinfo.guid << "xxxxxxxxxxxx-----------------" << fullPath;
+
+    // if (fullPath.endsWith("MAYC_Clothes_M1BaycTRed_MAT_BaseColor.png")) {
+    //     qDebug() << tinfo.guid << "xxxxxxxxxxxx-----------------";
+    // }
 
     vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
     if (!reader->CanReadFile(fullPath.toUtf8().data()))
