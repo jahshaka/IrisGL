@@ -91,9 +91,7 @@ ImportResult AssetImporter::importModel(
 
                 auto createTextureTask = [&](aiTextureType type) {
                     if (mat->GetTextureCount(type) > 0) {
-                        qDebug() << "texture task..........................." << type << mr.name_;
-
-                        textureTasks.append({mat, type, externalFilePath, mr.name_, scene});
+                        textureTasks.append({mat, type, externalFilePath, mr.name_, scene, mr.mesh_index_});
                     }
                 };
 
@@ -110,6 +108,7 @@ ImportResult AssetImporter::importModel(
             nodeObj["name"] = mr.name_;
             nodeObj["type"] = "mesh";
             nodeObj["guid"] = "";
+            nodeObj["meshIndex"] = mr.mesh_index_;
             // transform
             aiVector3D pos, scale;
             aiQuaternion rot;
@@ -157,22 +156,17 @@ ImportResult AssetImporter::importModel(
     finalResult.meshes_ = loadedMeshes;
     finalResult.texture_results_ = std::move(finalTextureResults);
 
-    int x=0;
-    for (auto texture : finalResult.texture_results_) {
-        qDebug() <<  ++x << "******************************" << texture.texture_type_ << texture.file_path_ << texture.filename_ << texture.mesh_name_;
-    }
-
     for (int i = 0; i < nodesArray.size(); ++i)
     {
         QJsonObject nodeObj = nodesArray[i].toObject();
-        QString meshName = nodeObj["mesh"].toString();
+        int meshIdx = nodeObj["meshIndex"].toInt();
 
         QJsonObject matObj = nodeObj["material"].toObject();
         QJsonObject texObj;
 
         for (const auto& tr : finalResult.texture_results_)
         {
-            if (tr.mesh_name_ == meshName)
+            if (tr.mesh_index_ == meshIdx)
             {
                 QString key;
                 switch (tr.texture_type_)
@@ -212,31 +206,6 @@ ImportResult AssetImporter::importModel(
 
         nodesArray[i] = nodeObj;
     }
-
-    // for (auto& mesh : finalResult.meshes_) {
-    //     for (const auto& t : finalResult.texture_results_)
-    //     {
-    //         if (t.mesh_name_ != mesh.name_) continue;
-
-    //         if (t.texture_type_ == aiTextureType_BASE_COLOR ||
-    //             t.texture_type_ == aiTextureType_DIFFUSE)
-    //             mesh.materialInfo.diffuse_guid_ = t.guid_;
-
-    //         else if (t.texture_type_ == aiTextureType_NORMALS)
-    //             mesh.materialInfo.normal_guid_ = t.guid_;
-
-    //         else if (t.texture_type_ == aiTextureType_GLTF_METALLIC_ROUGHNESS)
-    //             mesh.materialInfo.orm_guid_ = t.guid_;
-
-    //         else if (t.texture_type_ == aiTextureType_EMISSIVE)
-    //             mesh.materialInfo.emissive_guid_ = t.guid_;
-    //     }
-    // }
-
-    // finalResult.json_ =  buildSceneJson(finalResult.meshes_,
-    //                                    finalTextureResults,
-    //                                    externalFilePath,
-    //                                    "");
 
     QJsonObject rootObj;
     rootObj["guid"] = //QUuid::createUuid().toString();

@@ -111,7 +111,7 @@ public:
 private:
     vtkSmartPointer<vtkTexture> CreateVTKTextureFromQImage(const QImage& img, bool srgb = true) const;
     vtkSmartPointer<vtkTexture> loadTexture(const LoadedTextureInfo &tinfo, const QString &assetFolder);
-    QHash<QString, vtkSmartPointer<vtkPolyData>> loadAllMeshesFromFile(
+    QHash<int, vtkSmartPointer<vtkPolyData>> loadAllMeshesFromFile(
         const QString& modelFilePath, const aiScene* scene) const;
 
     QString resolveTexturePath(

@@ -44,6 +44,7 @@ struct TextureImportTask {
     QString model_file_path;
     QString mesh_name_;
     const aiScene* scene_;
+    int mesh_index_;
 };
 
 struct TextureMapResult {
@@ -52,6 +53,7 @@ struct TextureMapResult {
     QString guid_;
     QString filename_;
     QString file_path_;
+    int mesh_index_;
     bool is_new_asset = false;
 };
 

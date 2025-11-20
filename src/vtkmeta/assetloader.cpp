@@ -591,7 +591,6 @@ QVector<LoadedMesh> AssetLoader::loadModel(
                 if (!ormPath.isEmpty()) {
                     vtkSmartPointer<vtkTexture> ormTex = loadTextureCached(ormPath, false);
                     if (ormTex) {
-                        qDebug() << "----------------------------------------------aiTextureType_GLTF_METALLIC_ROUGHNESS" << ormPath;
                         prop->SetORMTexture(ormTex);
                         // qDebug() << "ORM texture applied to mesh:" << meshName;
                     }
@@ -612,30 +611,39 @@ QVector<LoadedMesh> AssetLoader::loadModel(
     return results;
 }
 
-QHash<QString, vtkSmartPointer<vtkPolyData>> AssetLoader::loadAllMeshesFromFile(
-    const QString& modelFilePath, const aiScene* scene) const
+QHash<int, vtkSmartPointer<vtkPolyData>> AssetLoader::loadAllMeshesFromFile(
+    const QString& /*modelFilePath*/, const aiScene* scene) const
 {
-    QHash<QString, vtkSmartPointer<vtkPolyData>> meshMap;
-    QString baseName = QFileInfo(modelFilePath).baseName();
+    QHash<int, vtkSmartPointer<vtkPolyData>> meshMap;
+ //   QString baseName = QFileInfo(modelFilePath).baseName();
 
-    // 🚫 不再递归 node transform
-    //    因为 Importer 中已经处理过 transform（包括缩放、旋转、坐标系变换等）
-    //    Loader 再做一次会造成模型缩小 100 倍、难以移动、错位
 
-    for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
-        const aiMesh* aimesh = scene->mMeshes[i];
-        if (!aimesh) continue;
+    std::function<void(const aiNode*, const aiMatrix4x4&)> processNode;
+    processNode = [&](const aiNode* node, const aiMatrix4x4& parentTransform)
+    {
+        aiMatrix4x4 currentTransform = parentTransform * node->mTransformation;
 
-        QString meshName =
-            (aimesh->mName.length > 0)
-                ? QString::fromUtf8(aimesh->mName.C_Str())
-                : QString("%1_mesh%2").arg(baseName).arg(i);
+        for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+            unsigned int meshIdx = node->mMeshes[i];
+            const aiMesh* aimesh = scene->mMeshes[meshIdx];
 
-        vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
-        if (poly) {
-            meshMap.insert(meshName, poly); // 不加 transform
+            if (!aimesh) {
+                continue;
+            }
+
+
+            vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
+            if (poly) {
+                //meshMap[meshIdx] = poly;
+                meshMap.insert(meshIdx, poly); // 不加 transform
+            }
         }
-    }
+
+        for (unsigned int c = 0; c < node->mNumChildren; ++c)
+            processNode(node->mChildren[c], currentTransform);
+    };
+
+    processNode(scene->mRootNode, aiMatrix4x4());
 
     return meshMap;
 }
@@ -661,7 +669,7 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
 
     // 预加载所有网格 PolyData 并存储到映射中，用于按名称查找
     // 注意：loadAllMeshesFromFile 必须使用和 Importer::processNode 中**完全相同**的命名规则
-    QHash<QString, vtkSmartPointer<vtkPolyData>> meshPolyDataMap =
+    QHash<int, vtkSmartPointer<vtkPolyData>> meshPolyDataMap =
         loadAllMeshesFromFile(filePath, scene); // 见下文的实现
 
     qDebug() << meshPolyDataMap;
@@ -671,7 +679,7 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
         LoadedMesh mesh;
         mesh.name = meshObj["name"].toString();
 
-        QString meshNameRef = meshObj["mesh"].toString();
+        int meshNameRef = meshObj["meshIndex"].toInt();
 
         if (meshPolyDataMap.contains(meshNameRef)) {
             mesh.polyData = meshPolyDataMap.value(meshNameRef);
@@ -679,27 +687,6 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
             qWarning() << "Loader: Mesh reference not found for:" << meshNameRef;
             continue;
         }
-
-        // // transform
-        // if (meshObj.contains("transform")) {
-        //     QJsonObject tObj = meshObj["transform"].toObject();
-        //     if (tObj.contains("pos")) mesh.position = QVector3D(
-        //             tObj["pos"].toArray()[0].toDouble(),
-        //             tObj["pos"].toArray()[1].toDouble(),
-        //             tObj["pos"].toArray()[2].toDouble()
-        //             );
-        //     if (tObj.contains("rot")) mesh.rotation = QVector3D(
-        //             tObj["rot"].toArray()[0].toDouble(),
-        //             tObj["rot"].toArray()[1].toDouble(),
-        //             tObj["rot"].toArray()[2].toDouble()
-        //             );
-        //     if (tObj.contains("scale")) mesh.scale = QVector3D(
-        //             tObj["scale"].toArray()[0].toDouble(),
-        //             tObj["scale"].toArray()[1].toDouble(),
-        //             tObj["scale"].toArray()[2].toDouble()
-        //             );
-        // }
-
 
         if (meshObj.contains("transform")) {
             QJsonObject tObj = meshObj["transform"].toObject();
@@ -731,9 +718,6 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
         vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
         QJsonObject matObj = meshObj["material"].toObject();
         if (!matObj.isEmpty()) {
-            // QJsonObject matObj = materialsArray[0].toObject();
-            // mesh.materialInfo.name = matObj["name"].toString();
-
             QJsonArray baseColorArr = matObj["base_color"].toArray();
 
             if (baseColorArr.size() >= 3) {
@@ -743,9 +727,6 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
 
                 vtkSmartPointer<vtkProperty> prop = actor->GetProperty();
                 prop->SetDiffuseColor(r, g, b);
-                // prop->SetInterpolationToGouraud();
-                // prop->SetInterpolationToPBR();
-
 
                 float matOpacity = matObj["opacity"].toDouble(1.0);
                 if (matOpacity >= 0.995f) {
@@ -793,11 +774,6 @@ SceneLoadResult AssetLoader::loadModelFromJson(const QString& filePath,
 
         vtkSmartPointer<vtkTransform> trans = vtkSmartPointer<vtkTransform>::New();
         trans->Translate(mesh.position.x(), mesh.position.y(), mesh.position.z());
-        // trans->RotateX(mesh.rotation.x());
-        // trans->RotateY(mesh.rotation.y());
-        // trans->RotateZ(mesh.rotation.z());
-        // trans->Scale(mesh.scale.x(), mesh.scale.y(), mesh.scale.z());
-        // actor->SetUserTransform(trans);
 
         if (mesh.rotation.w() != 0.0) {
             // quaternion case: x,y,z,w
@@ -884,13 +860,6 @@ vtkSmartPointer<vtkTexture> AssetLoader::loadTexture(const LoadedTextureInfo &ti
 
     QString fullPath = QDir(assetFolder).filePath(tinfo.file);
 
-
-    qDebug() << tinfo.guid << "xxxxxxxxxxxx-----------------" << fullPath;
-
-    // if (fullPath.endsWith("MAYC_Clothes_M1BaycTRed_MAT_BaseColor.png")) {
-    //     qDebug() << tinfo.guid << "xxxxxxxxxxxx-----------------";
-    // }
-
     vtkSmartPointer<vtkPNGReader> reader = vtkSmartPointer<vtkPNGReader>::New();
     if (!reader->CanReadFile(fullPath.toUtf8().data()))
         return nullptr;
@@ -905,7 +874,6 @@ vtkSmartPointer<vtkTexture> AssetLoader::loadTexture(const LoadedTextureInfo &ti
     tex->RepeatOn();
     tex->InterpolateOn();
     tex->EdgeClampOn();
-    tex->SetUseSRGBColorSpace(true);
 
     // help with blending/alpha
     tex->SetPremultipliedAlpha(true);

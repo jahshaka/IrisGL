@@ -101,6 +101,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
     result.mesh_name_ = task.mesh_name_;
     result.texture_type_ = task.texture_type;
     result.is_new_asset = false;
+    result.mesh_index_ = task.mesh_index_;
 
     QString texture_name("");
     const aiTexture* embeddedTex = getTexture(task.mat,
@@ -122,6 +123,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
             result.guid_ = texture_lists_.value(texture_name);
             result.filename_ = texture_name;
             result.file_path_ = fullPath;
+            result.mesh_index_ = task.mesh_index_;
 
             return result;
         }
@@ -137,6 +139,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
             result.filename_ = texture_name;
             result.file_path_ = fullPath;
             result.is_new_asset = false;
+            result.mesh_index_ = task.mesh_index_;
 
         } else if (QFileInfo::exists(fullPath)) {
 
@@ -146,6 +149,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
             result.filename_ = texture_name;
             result.file_path_ = fullPath;
             result.is_new_asset = false;
+            result.mesh_index_ = task.mesh_index_;
 
             return result;
 
@@ -156,6 +160,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
             result.filename_ = texture_name;
             result.file_path_ = fullPath;
             result.is_new_asset = true;
+            result.mesh_index_ = task.mesh_index_;
         }
     }
 
