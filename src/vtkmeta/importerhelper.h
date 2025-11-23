@@ -36,15 +36,9 @@ public:
 private:
     QByteArray getTextureRawData(const aiTexture* at);
 
-    const aiTexture* getTexture(
-        const aiMaterial* mat,
-        aiTextureType type,
-        const aiScene* scene,
-        QString& texture_name
-        );
-
-    bool isValidTexture(const aiTexture* ai,
-                               const QString& texture_name);
+    const aiTexture* getTexture(const TextureImportTask& task,
+                                const QString& assetFolder,
+                                QString& texture_name);
 
     TextureMapResult mapTextureProcess(
         const TextureImportTask& task,

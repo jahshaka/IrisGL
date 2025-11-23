@@ -46,13 +46,12 @@ QByteArray ImporterHelper::getTextureRawData(const aiTexture* at)
     return bytes;
 }
 
-const aiTexture *ImporterHelper::getTexture(const aiMaterial *mat,
-                                              aiTextureType type,
-                                              const aiScene *scene,
-                                              QString &texture_name)
+const aiTexture *vtkmeta::ImporterHelper::getTexture(const TextureImportTask &task,
+                                                     const QString& assetFolder,
+                                                     QString& texture_name)
 {
     aiString path;
-    if (mat->GetTexture(type, 0, &path) != AI_SUCCESS) {
+    if (task.mat_->GetTexture(task.texture_type, 0, &path) != AI_SUCCESS) {
         return {};
     }
 
@@ -62,8 +61,8 @@ const aiTexture *ImporterHelper::getTexture(const aiMaterial *mat,
         bool ok = false;
         int idx = texStr.mid(1).toInt(&ok);
 
-        if (ok && idx >= 0 && idx < int(scene->mNumTextures)) {
-            const aiTexture* at = scene->mTextures[idx];
+        if (ok && idx >= 0 && idx < int(task.scene_->mNumTextures)) {
+            const aiTexture* at = task.scene_->mTextures[idx];
 
             texture_name = QString("tex_%1.png").arg(idx);
 
@@ -74,23 +73,45 @@ const aiTexture *ImporterHelper::getTexture(const aiMaterial *mat,
     }
 
     texture_name = QFileInfo(texStr).fileName();
-    const aiTexture* embeddedTex = scene->GetEmbeddedTexture(path.C_Str());
 
-    return embeddedTex;
-}
+    const aiTexture* embeddedTex = task.scene_->GetEmbeddedTexture(path.C_Str());
+    if (embeddedTex) {
+        return embeddedTex;
+    } else {
+        // external, keep original relative path
+        texture_name = texStr;
 
-bool ImporterHelper::isValidTexture(const aiTexture *ai,
-                                    const QString &texture_name)
-{
-    if (!ai || texture_name.isEmpty()) {
-        return false;
+        QFileInfo fi_external(texStr);
+        qDebug() << 1 <<fi_external.absolutePath() << fi_external.canonicalFilePath() << fi_external.filePath();
+
+        QFileInfo omfi(task.model_file_path_);
+        QString original_texture = QDir(omfi.absolutePath()).absoluteFilePath(texStr);
+        QString new_texture_path = QDir(assetFolder).absoluteFilePath(texStr);
+
+
+        qDebug() << 2 << original_texture << 3 << new_texture_path;
+        QFileInfo otfi(original_texture);
+        if (!otfi.exists()) {
+            return {};
+        }
+
+        QFileInfo ntfi(new_texture_path);
+        QDir dir(ntfi.absolutePath());
+        if (!dir.exists()) {
+            QDir().mkpath(ntfi.absolutePath());
+        }
+
+
+        // relative path
+
+        QFile::copy(original_texture, new_texture_path);
+
+
+        qDebug() << "It's a external texture" << texStr ;
     }
 
-    {
-        QMutexLocker locker(&texture_mutex_);
-    }
+    return {};
 
-    return true;
 }
 
 TextureMapResult ImporterHelper::mapTextureProcess(
@@ -98,75 +119,49 @@ TextureMapResult ImporterHelper::mapTextureProcess(
     const QString& outputFolder)
 {
     TextureMapResult result;
+
     result.mesh_name_ = task.mesh_name_;
     result.texture_type_ = task.texture_type;
     result.is_new_asset = false;
     result.mesh_index_ = task.mesh_index_;
 
     QString texture_name("");
-    const aiTexture* embeddedTex = getTexture(task.mat,
-                                              task.texture_type,
-                                              task.scene_,
+    const aiTexture* embeddedTex = getTexture(task,
+                                              outputFolder,
                                               texture_name);
 
-    if (!embeddedTex || texture_name.isEmpty()) {
+    if (!embeddedTex && texture_name.isEmpty()) {
         return result;
     }
 
-
     QString fullPath = QDir(outputFolder).filePath(texture_name);
-
-    {
-        QMutexLocker locker(&texture_mutex_);
-
-        if (texture_lists_.contains(texture_name)) {
-            result.guid_ = texture_lists_.value(texture_name);
-            result.filename_ = texture_name;
-            result.file_path_ = fullPath;
-            result.mesh_index_ = task.mesh_index_;
-
-            return result;
-        }
-    }
+    result.file_path_ = fullPath;
+    result.filename_ = texture_name;
 
     QString assignedGuid;
 
     {
         QMutexLocker locker(&texture_mutex_);
         if (texture_lists_.contains(texture_name)) {
-            assignedGuid = texture_lists_.value(texture_name);
-            result.guid_ = assignedGuid;
-            result.filename_ = texture_name;
-            result.file_path_ = fullPath;
-            result.is_new_asset = false;
-            result.mesh_index_ = task.mesh_index_;
-
-        } else if (QFileInfo::exists(fullPath)) {
-
-            assignedGuid = QUuid::createUuid().toString();
-            texture_lists_.insert(texture_name, assignedGuid);
-            result.guid_ = assignedGuid;
-            result.filename_ = texture_name;
-            result.file_path_ = fullPath;
-            result.is_new_asset = false;
-            result.mesh_index_ = task.mesh_index_;
+            result.guid_ = texture_lists_.value(texture_name);
 
             return result;
+        }
 
-        } else {
+        if (QFileInfo::exists(fullPath)) {
             assignedGuid = QUuid::createUuid().toString();
             texture_lists_.insert(texture_name, assignedGuid);
             result.guid_ = assignedGuid;
-            result.filename_ = texture_name;
-            result.file_path_ = fullPath;
-            result.is_new_asset = true;
-            result.mesh_index_ = task.mesh_index_;
-        }
-    }
 
-    result.guid_ = assignedGuid;
-    result.filename_ = texture_name;
-    result.file_path_ = fullPath;
+            return result;
+        }
+
+
+        assignedGuid = QUuid::createUuid().toString();
+        texture_lists_.insert(texture_name, assignedGuid);
+        result.guid_ = assignedGuid;
+        result.is_new_asset = true;
+    }
 
     if (result.is_new_asset) {
         if (QFile outFile(fullPath); outFile.open(QIODevice::WriteOnly)) {

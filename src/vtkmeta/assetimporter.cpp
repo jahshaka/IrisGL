@@ -24,7 +24,7 @@ ImportResult AssetImporter::importModel(
     ImportResult finalResult;
 
     if (externalFilePath.isEmpty()) {
-        qWarning() << "AssimpModelImporter: empty file path";
+        qWarning() << "AssetImporter: empty file path";
         return finalResult;
     }
 
@@ -38,7 +38,7 @@ ImportResult AssetImporter::importModel(
 
     const aiScene* scene = importer_.ReadFile(externalFilePath.toStdString(), flags);
     if (!scene) {
-        qWarning() << "AssimpModelImporter: failed to load" << externalFilePath << ":" << importer_.GetErrorString();
+        qWarning() << "AssetImporter: failed to load" << externalFilePath << ":" << importer_.GetErrorString();
         return finalResult;
     }
 

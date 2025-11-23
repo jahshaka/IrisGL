@@ -39,9 +39,9 @@ struct ImportedMesh {
 };
 
 struct TextureImportTask {
-    const aiMaterial* mat;
+    const aiMaterial* mat_;
     aiTextureType texture_type;
-    QString model_file_path;
+    QString model_file_path_;
     QString mesh_name_;
     const aiScene* scene_;
     int mesh_index_;
