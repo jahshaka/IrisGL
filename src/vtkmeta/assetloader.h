@@ -100,16 +100,11 @@ public:
     AssetLoader() = default;
     ~AssetLoader() = default;
 
-    QVector<LoadedMesh> loadModel(const QString& filePath,
-                                  const QString& outputFolder,
-                                  vtkRenderer* renderer = nullptr);
-
     SceneLoadResult loadModelFromJson(const QString& filePath,
                                       const QJsonObject& obj,
                                       vtkRenderer* renderer);
 
 private:
-    vtkSmartPointer<vtkTexture> CreateVTKTextureFromQImage(const QImage& img, bool srgb = true) const;
     vtkSmartPointer<vtkTexture> loadTexture(const LoadedTextureInfo &tinfo, const QString &assetFolder);
     QHash<int, vtkSmartPointer<vtkPolyData>> loadAllMeshesFromFile(
         const QString& modelFilePath, const aiScene* scene) const;
@@ -141,6 +136,8 @@ private:
                                     const QString &assetFolder);
 
     Assimp::Importer importer_;
+
+    QHash<QString, vtkSmartPointer<vtkTexture>> textureCache_;
 };
 
 } // namespace vtkmeta
