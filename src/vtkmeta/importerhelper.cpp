@@ -48,23 +48,23 @@ QByteArray ImporterHelper::getTextureRawData(const aiTexture* at)
 
 const aiTexture *vtkmeta::ImporterHelper::getTexture(const TextureImportTask &task,
                                                      const QString& assetFolder,
-                                                     QString& texture_name)
+                                                     QString& refineTextureName)
 {
     aiString path;
     if (task.mat_->GetTexture(task.texture_type, 0, &path) != AI_SUCCESS) {
         return {};
     }
 
-    QString texStr = QString::fromUtf8(path.C_Str());
+    QString originalTextureName = QString::fromUtf8(path.C_Str());
 
-    if (texStr.startsWith("*")) {
+    if (originalTextureName.startsWith("*")) {
         bool ok = false;
-        int idx = texStr.mid(1).toInt(&ok);
+        int idx = originalTextureName.mid(1).toInt(&ok);
 
         if (ok && idx >= 0 && idx < int(task.scene_->mNumTextures)) {
             const aiTexture* at = task.scene_->mTextures[idx];
 
-            texture_name = QString("tex_%1.png").arg(idx);
+            refineTextureName = QString("tex_%1.png").arg(idx);
 
             return at;
         }
@@ -72,42 +72,31 @@ const aiTexture *vtkmeta::ImporterHelper::getTexture(const TextureImportTask &ta
         return {};
     }
 
-    texture_name = QFileInfo(texStr).fileName();
+    refineTextureName = QFileInfo(originalTextureName).fileName();
 
     const aiTexture* embeddedTex = task.scene_->GetEmbeddedTexture(path.C_Str());
     if (embeddedTex) {
         return embeddedTex;
     } else {
         // external, keep original relative path
-        texture_name = texStr;
+        refineTextureName = originalTextureName;
 
-        QFileInfo fi_external(texStr);
-        qDebug() << 1 <<fi_external.absolutePath() << fi_external.canonicalFilePath() << fi_external.filePath();
-
-        QFileInfo omfi(task.model_file_path_);
-        QString original_texture = QDir(omfi.absolutePath()).absoluteFilePath(texStr);
-        QString new_texture_path = QDir(assetFolder).absoluteFilePath(texStr);
-
-
-        qDebug() << 2 << original_texture << 3 << new_texture_path;
-        QFileInfo otfi(original_texture);
-        if (!otfi.exists()) {
+        QFileInfo modelFileInfo(task.model_file_path_);
+        QString originalTexFilePath = QDir(modelFileInfo.absolutePath()).absoluteFilePath(originalTextureName);
+        QFileInfo originalTexFileInfo(originalTexFilePath);
+        if (!originalTexFileInfo.exists()) {
             return {};
         }
 
-        QFileInfo ntfi(new_texture_path);
-        QDir dir(ntfi.absolutePath());
+        QString newTextureFilePath = QDir(assetFolder).absoluteFilePath(originalTextureName);
+        QFileInfo newTexFileInfo(newTextureFilePath);
+        QDir dir(newTexFileInfo.absolutePath());
+
         if (!dir.exists()) {
-            QDir().mkpath(ntfi.absolutePath());
+            QDir().mkpath(newTexFileInfo.absolutePath());
         }
 
-
-        // relative path
-
-        QFile::copy(original_texture, new_texture_path);
-
-
-        qDebug() << "It's a external texture" << texStr ;
+        QFile::copy(originalTexFilePath, newTextureFilePath);
     }
 
     return {};
