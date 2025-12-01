@@ -1,21 +1,31 @@
 #include "assetimporter.h"
 
-
 #include <QFileInfo>
 #include <QDir>
-#include <QMutex>
 #include <QBuffer>
 #include <QImage>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QUuid>
+#include <QDebug>
+
+#include <assimp/scene.h>
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
 
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
 #include <vtkTriangle.h>
 
+#include "modeldocumentserializer.h"
 #include "importerhelper.h"
+#include "assetdatatypes.h"
 
 namespace vtkmeta {
+
+static QString makeId() {
+    return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
 
 ImportResult AssetImporter::importModel(
     const QString& externalFilePath,
@@ -42,190 +52,249 @@ ImportResult AssetImporter::importModel(
         return finalResult;
     }
 
-    QString baseName = QFileInfo(externalFilePath).baseName();
-    QList<TextureImportTask> textureTasks;
-    QVector<ImportedMesh> loadedMeshes;
+    QFileInfo srcInfo(externalFilePath);
+    QString baseName = srcInfo.baseName();
 
-    QJsonArray nodesArray;
+    // create model doc
+    ModelDocument doc;
+    doc.id_ = makeId();
+    doc.name_ = baseName;
+    doc.source_file_ = srcInfo.fileName(); // store original
+    // ensure output folder exists: assetOutputFolder/<doc.id_>/
+    // QDir rootDir(assetOutputFolder);
+    // rootDir.mkpath(".");
+    // QString modelDirPath = QDir(assetOutputFolder).filePath(doc.id_);
+    // QDir modelDir(modelDirPath);
+    // modelDir.mkpath(".");
 
-    std::function<void(const aiNode*, const aiMatrix4x4&)> processNode;
-    processNode = [&](const aiNode* node, const aiMatrix4x4& parentTransform)
-    {
-        aiMatrix4x4 currentTransform = parentTransform * node->mTransformation;
+    // // copy original file into modelDir (preserve extension)
+    // QString destModelFileName = QString("model.%1").arg(srcInfo.suffix());
+    // QString destModelFilePath = modelDir.filePath(destModelFileName);
+    // if (!QFile::copy(externalFilePath, destModelFilePath)) {
+    //     // fallback: try to read/write
+    //     QFile::remove(destModelFilePath);
+    //     if (!QFile::copy(externalFilePath, destModelFilePath)) {
+    //         qWarning() << "AssetImporter: failed to copy model file to" << destModelFilePath;
+    //         return finalResult;
+    //     }
+    // }
+    // doc.source_file_ = destModelFileName;
 
-        for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
-            unsigned int meshIdx = node->mMeshes[i];
-            const aiMesh* aimesh = scene->mMeshes[meshIdx];
+    // keep a mapping from assimp mesh index -> mesh id
+    QMap<int, QString> meshIndexToId;
+    QMap<int, QString> meshIndexToMaterialId;
 
-            if (!aimesh) {
-                continue;
-            }
+    // process materials first: create MaterialDef per assimp material encountered
+    for (unsigned int m = 0; m < scene->mNumMaterials; ++m) {
+        const aiMaterial* aimat = scene->mMaterials[m];
+        MaterialDef mat;
+        mat.id_ = makeId();
+        // try to get name
+        aiString name;
+        if (AI_SUCCESS == aimat->Get(AI_MATKEY_NAME, name)) mat.name_ = QString::fromUtf8(name.C_Str());
+        else mat.name_ = QString("material_%1").arg(m);
 
-            QString meshName = (aimesh->mName.length > 0)
-                                   ? QString::fromUtf8(aimesh->mName.C_Str())
-                                   : QString("%1_mesh%2").arg(baseName).arg(meshIdx);
-
-            vtkSmartPointer<vtkPolyData> poly = convertAiMeshToVtkPolyData(aimesh);
-            if (!poly || poly->GetNumberOfPoints() == 0) continue;
-
-            ImportedMesh mr;
-            mr.polyData_ = poly;
-            mr.name_ = meshName;
-            mr.mesh_index_ = meshIdx;
-
-            if (scene->mNumMaterials > 0 && aimesh->mMaterialIndex < scene->mNumMaterials) {
-                const aiMaterial* mat = scene->mMaterials[aimesh->mMaterialIndex];
-
-                aiColor3D diffc(1.0f, 1.0f, 1.0f);
-                mat->Get(AI_MATKEY_COLOR_DIFFUSE, diffc);
-                mr.materialInfo.base_color_ = QVector3D(diffc.r, diffc.g, diffc.b);
-
-                float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
-                mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic);
-                mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness);
-                mat->Get(AI_MATKEY_OPACITY, opacity);
-
-                mr.materialInfo.metallic_ = metallic;
-                mr.materialInfo.roughness_ = roughness;
-                mr.materialInfo.opacity_ = opacity;
-
-                auto createTextureTask = [&](aiTextureType type) {
-                    if (mat->GetTextureCount(type) > 0) {
-                        textureTasks.append({mat, type, externalFilePath, mr.name_, scene, mr.mesh_index_});
-                    }
-                };
-
-                createTextureTask(aiTextureType_BASE_COLOR);
-                createTextureTask(aiTextureType_DIFFUSE);
-                createTextureTask(aiTextureType_UNKNOWN);
-
-                createTextureTask(aiTextureType_NORMALS);
-                createTextureTask(aiTextureType_GLTF_METALLIC_ROUGHNESS);
-                createTextureTask(aiTextureType_EMISSIVE);
-            }
-
-            QJsonObject nodeObj;
-            nodeObj["name"] = mr.name_;
-            nodeObj["type"] = "mesh";
-            nodeObj["guid"] = "";
-            nodeObj["meshIndex"] = mr.mesh_index_;
-            // transform
-            aiVector3D pos, scale;
-            aiQuaternion rot;
-            currentTransform.Decompose(scale, rot, pos);
-
-            QJsonObject transformObj;
-            transformObj["pos"] = QJsonArray{pos.x, pos.y, pos.z};
-            transformObj["rot"] = QJsonArray{rot.x, rot.y, rot.z, rot.w};
-            transformObj["scale"] = QJsonArray{scale.x, scale.y, scale.z};
-            nodeObj["transform"] = transformObj;
-
-            // mesh reference
-            nodeObj["mesh"] = mr.name_;
-
-            // material JSON basic info
-            QJsonObject matObj;
-            matObj["base_color"] = QJsonArray{
-                mr.materialInfo.base_color_.x(),
-                mr.materialInfo.base_color_.y(),
-                mr.materialInfo.base_color_.z()
-            };
-            matObj["metallic"] = mr.materialInfo.metallic_;
-            matObj["roughness"] = mr.materialInfo.roughness_;
-            matObj["opacity"] = mr.materialInfo.opacity_;
-
-            nodeObj["material"] = matObj;
-
-            nodesArray.append(nodeObj);
-
-            loadedMeshes.append(std::move(mr));
+        aiColor3D diff(1.0f,1.0f,1.0f);
+        if (AI_SUCCESS == aimat->Get(AI_MATKEY_COLOR_DIFFUSE, diff)) {
+            mat.base_color_ = QVector3D(diff.r, diff.g, diff.b);
         }
 
-        for (unsigned int c = 0; c < node->mNumChildren; ++c)
-            processNode(node->mChildren[c], currentTransform);
-    };
+        float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
+        aimat->Get(AI_MATKEY_METALLIC_FACTOR, metallic);
+        aimat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness);
+        aimat->Get(AI_MATKEY_OPACITY, opacity);
+        mat.metallic_ = metallic;
+        mat.roughness_ = roughness;
+        mat.opacity_ = opacity;
 
-    processNode(scene->mRootNode, aiMatrix4x4());
-
-    ImporterHelper helper;
-    QVector<TextureMapResult> finalTextureResults = helper.processTextures(
-        textureTasks,
-        assetOutputFolder
-        );
-
-    finalResult.meshes_ = loadedMeshes;
-    finalResult.texture_results_ = std::move(finalTextureResults);
-
-    for (int i = 0; i < nodesArray.size(); ++i)
-    {
-        QJsonObject nodeObj = nodesArray[i].toObject();
-        int meshIdx = nodeObj["meshIndex"].toInt();
-
-        QJsonObject matObj = nodeObj["material"].toObject();
-        QJsonObject texObj;
-
-        for (const auto& tr : finalResult.texture_results_)
-        {
-            if (tr.mesh_index_ == meshIdx)
-            {
-                QString key;
-                switch (tr.texture_type_)
-                {
-                case aiTextureType_DIFFUSE:
-                case aiTextureType_BASE_COLOR:
-                case aiTextureType_UNKNOWN:
-                    key = "diffuse";
-                    break;
-
-                case aiTextureType_NORMALS:
-                    key = "normal";
-                    break;
-
-                case aiTextureType_GLTF_METALLIC_ROUGHNESS:
-                    key = "orm";
-                    break;
-
-                case aiTextureType_EMISSIVE:
-                    key = "emissive";
-                    break;
-                }
-
-                if (!key.isEmpty())
-                {
-                    texObj[key] = QJsonObject {
-                        {"guid", tr.guid_},
-                        {"file", tr.filename_},
-                        {"path", tr.file_path_}
-                    };
-                }
-            }
-        }
-
-        matObj["textures"] = texObj;
-        nodeObj["material"] = matObj;
-
-        nodesArray[i] = nodeObj;
+        // textures will be filled later after importerhelper processing
+        doc.materials_.append(mat);
     }
 
-    QJsonObject rootObj;
-    rootObj["guid"] = //QUuid::createUuid().toString();
-    rootObj["model_file"] = QFileInfo(externalFilePath).fileName();
-    rootObj["nodes"] = nodesArray;
+    // process meshes: convert to MeshDef (and also keep vtk polydata if needed)
+    QVector<ImportedMesh> loadedMeshes;
+    for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
+        const aiMesh* aimesh = scene->mMeshes[mi];
+        if (!aimesh) continue;
 
-    finalResult.json_ = rootObj;
+        ImportedMesh im;
+        im.polyData_ = convertAiMeshToVtkPolyData(aimesh);
+        im.name_ = (aimesh->mName.length > 0) ? QString::fromUtf8(aimesh->mName.C_Str()) : QString("%1_mesh%2").arg(baseName).arg(mi);
+        im.mesh_index_ = static_cast<int>(mi);
+        loadedMeshes.append(im);
 
-//    qDebug() << rootObj;
+        MeshDef md;
+        md.id_ = makeId();
+        md.name_ = im.name_;
+        md.vertex_count_ = (im.polyData_) ? im.polyData_->GetNumberOfPoints() : 0;
+        md.primitive_count_ = (im.polyData_) ? im.polyData_->GetNumberOfCells() : 0;
+        if (aimesh->mMaterialIndex >= 0 && aimesh->mMaterialIndex < static_cast<int>(doc.materials_.size())) {
+            md.material_id_ = doc.materials_[aimesh->mMaterialIndex].id_;
+            meshIndexToMaterialId[mi] = md.material_id_;
+        }
+        // bones
+        if (aimesh->mNumBones > 0) {
+            md.skinned_ = true;
+            for (unsigned int b = 0; b < aimesh->mNumBones; ++b) {
+                md.bone_names_.append(QString::fromUtf8(aimesh->mBones[b]->mName.C_Str()));
+            }
+        }
+        doc.meshes_.append(md);
+        meshIndexToId[mi] = md.id_;
+    }
+
+    // process nodes (scene hierarchy), create NodeDef for each node that contains a mesh
+    std::function<void(const aiNode*, const QString& parentId)> processNode;
+    processNode = [&](const aiNode* node, const QString& parentId)
+    {
+        // create an id
+        QString nodeId = makeId();
+        // if node contains meshes, create node entries for each mesh instance (separate Node per mesh)
+        if (node->mNumMeshes > 0) {
+            for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+                int meshIndex = node->mMeshes[i];
+                NodeDef nd;
+                nd.id_ = makeId();
+                nd.name_ = (node->mName.length > 0) ? QString::fromUtf8(node->mName.C_Str()) : QString("%1_node").arg(baseName);
+                nd.parent_id_ = parentId;
+                // decompose transform
+                aiVector3D pos, scale;
+                aiQuaternion rot;
+                node->mTransformation.Decompose(scale, rot, pos);
+                nd.translation_ = QVector3D(pos.x, pos.y, pos.z);
+                nd.rotation_ = QVector4D(rot.x, rot.y, rot.z, rot.w);
+                nd.scale_ = QVector3D(scale.x, scale.y, scale.z);
+                // link mesh id
+                if (meshIndexToId.contains(meshIndex)) nd.mesh_id_ = meshIndexToId.value(meshIndex);
+                // assign material override if present
+                if (meshIndexToMaterialId.contains(meshIndex)) nd.material_override_id_ = meshIndexToMaterialId.value(meshIndex);
+                nd.type_ = "Mesh";
+                doc.nodes_.append(nd);
+            }
+        } else {
+            // empty/group node: create a group node so scene graph can be reconstructed
+            NodeDef nd;
+            nd.id_ = makeId();
+            nd.name_ = (node->mName.length > 0) ? QString::fromUtf8(node->mName.C_Str()) : QString("%1_group").arg(baseName);
+            nd.parent_id_ = parentId;
+            aiVector3D pos, scale;
+            aiQuaternion rot;
+            node->mTransformation.Decompose(scale, rot, pos);
+            nd.translation_ = QVector3D(pos.x, pos.y, pos.z);
+            nd.rotation_ = QVector4D(rot.x, rot.y, rot.z, rot.w);
+            nd.scale_ = QVector3D(scale.x, scale.y, scale.z);
+            nd.type_ = "Node";
+            doc.nodes_.append(nd);
+            // set new parentId to this node for children
+            // NOTE: for group nodes we set parentId so children attach under this group
+            // replace parentId variable in lambda scope:
+            // but we cannot reassign parentId (const), so pass this nd.id_ to children
+            // we do that by calling children with nd.id_
+            for (unsigned int c = 0; c < node->mNumChildren; ++c) {
+                processNode(node->mChildren[c], nd.id_);
+            }
+            return;
+        }
+
+        // children
+        for (unsigned int c = 0; c < node->mNumChildren; ++c) {
+            processNode(node->mChildren[c], parentId);
+        }
+    };
+
+    // start processing root node
+    processNode(scene->mRootNode, QString()); // root has empty parent id
+
+    // textures: use existing helper to extract textures from materials & map to files
+    ImporterHelper helper;
+    // build texture tasks like before: iterate materials & request base/normal/orm/emissive
+    QVector<TextureImportTask> textureTasks;
+    for (unsigned int m = 0; m < scene->mNumMaterials; ++m) {
+        const aiMaterial* aimat = scene->mMaterials[m];
+        auto createTextureTask = [&](aiTextureType type, const QString &texTypeName) {
+            if (aimat->GetTextureCount(type) > 0) {
+                // you may want to pass material index & dest folder
+                textureTasks.append({ aimat, type, externalFilePath, QString(), scene, (int)m });
+            }
+        };
+        createTextureTask(aiTextureType_BASE_COLOR, "albedo");
+        createTextureTask(aiTextureType_DIFFUSE, "albedo");
+        createTextureTask(aiTextureType_UNKNOWN, "albedo");
+        createTextureTask(aiTextureType_NORMALS, "normal");
+        createTextureTask(aiTextureType_EMISSIVE, "emissive");
+        createTextureTask(aiTextureType_GLTF_METALLIC_ROUGHNESS, "orm");
+    }
+
+    QVector<TextureMapResult> textureResults = helper.processTextures(textureTasks, assetOutputFolder);
+    finalResult.texture_results_ = textureResults;
+
+    // convert textureResults -> TextureDef and hook them into materials by GUID references
+    for (const TextureMapResult &tr : textureResults) {
+        TextureDef td;
+        td.id_ = tr.guid_;
+        td.path_ = tr.file_path_;
+        // map ai type to our type string (use same mapping as before)
+        switch (tr.texture_type_) {
+        case aiTextureType_DIFFUSE:
+        case aiTextureType_BASE_COLOR:
+        case aiTextureType_UNKNOWN:
+            td.type_ = "albedo"; break;
+        case aiTextureType_NORMALS:
+            td.type_ = "normal"; break;
+        case aiTextureType_GLTF_METALLIC_ROUGHNESS:
+            td.type_ = "orm"; break;
+        case aiTextureType_EMISSIVE:
+            td.type_ = "emissive"; break;
+        default:
+            td.type_ = "unknown"; break;
+        }
+        doc.textures_.append(td);
+
+        // assign texture id to corresponding material(s) using mesh_index info
+        if (tr.mesh_index_ >= 0 && tr.mesh_index_ < doc.meshes_.size()) {
+            QString matId = doc.meshes_[tr.mesh_index_].material_id_;
+            if (!matId.isEmpty()) {
+                for (MaterialDef &md : doc.materials_) {
+                    if (md.id_ == matId) {
+                        if (td.type_ == "albedo") md.base_color_texture_ = td.id_;
+                        else if (td.type_ == "normal") md.normal_texture_ = td.id_;
+                        else if (td.type_ == "orm") md.metallic_texture_ = td.id_;
+                        else if (td.type_ == "emissive") md.emissive_texture_ = td.id_;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // === 不再把 metadata 写到文件系统，而是把 JSON 放入 finalResult.json_ ===
+    // qWarning/commented out: if (!ModelDocumentSerializer::saveToFile(doc, metaPath)) { ... }
+    // 将 ModelDocument 序列化为 QJsonObject 并放入 finalResult.json_
+    QJsonObject serialized = ModelDocumentSerializer::toJson(doc);
+    //finalResult.doc_ = doc;
+    finalResult.json_ = serialized;
+
+    // set result meshes for preview/backwards compat
+    finalResult.meshes_.clear();
+    for (const ImportedMesh &im : loadedMeshes) finalResult.meshes_.append(im);
+
+    // // Optionally fill raw_json_ for backwards compatibility (small summary)
+    // QJsonObject root;
+    // root["id"] = doc.id_;
+    // root["name"] = doc.name_;
+    // root["model_file"] = doc.source_file_;
+    // finalResult.json_ = root;
 
     return finalResult;
 }
 
+// image helper and convertAiMeshToVtkPolyData can be kept from your previous implementation
 QByteArray AssetImporter::imageToByteArray(const QImage &img, const QString &format) const
 {
     if (img.isNull()) return QByteArray();
     QByteArray bytes;
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
-
     img.save(&buffer, format.toLatin1().constData());
     return bytes;
 }
@@ -264,7 +333,6 @@ vtkSmartPointer<vtkPolyData> AssetImporter::convertAiMeshToVtkPolyData(const aiM
         tcoords->SetName("TextureCoordinates");
         for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
             const aiVector3D& uv = mesh->mTextureCoords[0][i];
-            // flip v
             tcoords->SetTuple2(i, uv.x, 1.0f - uv.y);
         }
         poly->GetPointData()->SetTCoords(tcoords);
@@ -274,7 +342,6 @@ vtkSmartPointer<vtkPolyData> AssetImporter::convertAiMeshToVtkPolyData(const aiM
     for (unsigned int fi = 0; fi < mesh->mNumFaces; ++fi) {
         const aiFace& face = mesh->mFaces[fi];
         if (face.mNumIndices < 3) continue;
-        // triangulate face (fan)
         for (unsigned int k = 1; k + 1 < face.mNumIndices; ++k) {
             vtkSmartPointer<vtkTriangle> tri = vtkSmartPointer<vtkTriangle>::New();
             tri->GetPointIds()->SetId(0, face.mIndices[0]);
@@ -289,56 +356,4 @@ vtkSmartPointer<vtkPolyData> AssetImporter::convertAiMeshToVtkPolyData(const aiM
 
     return poly;
 }
-
-QJsonObject AssetImporter::buildSceneJson(
-    const QVector<ImportedMesh>& loadedMeshes,
-    const QVector<TextureMapResult>& textures,
-    const QString& modelFile,
-    const QString& assetGuid)
-{
-    QJsonObject root;
-
-    // meta
-    QJsonObject meta;
-    meta["assetGuid"] = assetGuid;
-    meta["modelFile"] = modelFile;
-    root["meta"] = meta;
-
-    // meshes
-    QJsonArray arr;
-    for (const auto& m : loadedMeshes)
-    {
-        QJsonObject mo;
-        mo["name"] = m.name_;
-        mo["type"] = "Mesh";
-
-        QJsonObject mat;
-        mat["name"] = m.materialInfo.name_;
-
-        QJsonObject tex;
-        if (!m.materialInfo.diffuse_guid_.isEmpty())
-            tex["albedo"] = m.materialInfo.diffuse_guid_;
-
-        if (!m.materialInfo.normal_guid_.isEmpty())
-            tex["normal"] = m.materialInfo.normal_guid_;
-
-        if (!m.materialInfo.orm_guid_.isEmpty())
-            tex["orm"] = m.materialInfo.orm_guid_;
-
-        if (!m.materialInfo.emissive_guid_.isEmpty())
-            tex["emissive"] = m.materialInfo.emissive_guid_;
-
-        mat["textures"] = tex;
-        mo["material"] = mat;
-
-        arr.append(mo);
-    }
-
-    QJsonObject rootNode;
-    rootNode["children"] = arr;
-    root["rootNode"] = rootNode;
-
-    return root;
-}
-
 } // namespace vtkmeta

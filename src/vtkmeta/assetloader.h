@@ -85,58 +85,70 @@ struct LoadedMeshNode
     QVector<LoadedMeshNode> children;
 };
 
-struct SceneLoadResult
-{
-    QString guid;
-    QString assetFolder;
-    QString modelFile;
-    LoadedMeshNode rootNode;
+// struct SceneLoadResult
+// {
+//     QString guid;
+//     QString assetFolder;
+//     QString modelFile;
+//     LoadedMeshNode rootNode;
 
-        QVector<LoadedMesh> meshes;
+//     QVector<LoadedMesh> meshes;
+// };
+
+// class vtkPolyData;
+// class vtkActor;
+// class vtkRenderer;
+// class vtkTexture;
+// class vtkPolyDataMapper;
+
+struct ModelDocument;
+struct NodeDef;
+struct MeshDef;
+struct MaterialDef;
+struct TextureDef;
+
+struct LoadedNode {
+    QString id;
+    QString name;
+    QString mesh_id;
+    QString material_id;
+    vtkSmartPointer<vtkActor> actor;
 };
 
-class AssetLoader {
+struct SceneLoadResult {
+    QVector<LoadedNode> nodes;          // each node that produced an actor
+    QMap<QString, vtkSmartPointer<vtkPolyDataMapper>> meshMappers; // meshId->mapper
+    QMap<QString, QString> materialToAlbedoPath; // materialId->albedo texture path (abs)
+    QStringList errors;
+};
+
+class AssetLoader
+{
 public:
-    AssetLoader() = default;
-    ~AssetLoader() = default;
+    AssetLoader();
+    ~AssetLoader();
 
-    SceneLoadResult loadModelFromJson(const QString& filePath,
-                                      const QJsonObject& obj,
-                                      vtkRenderer* renderer);
-
-private:
-    vtkSmartPointer<vtkTexture> loadTexture(const LoadedTextureInfo &tinfo, const QString &assetFolder);
-    QHash<int, vtkSmartPointer<vtkPolyData>> loadAllMeshesFromFile(
-        const QString& modelFilePath, const aiScene* scene) const;
-
-    QString resolveTexturePath(
-        const QString& texStr,
-        const aiScene* scene,
-        const QString& baseName,
-        const QString& outputFolder,
-        const QString& modelFilePath) const;
-
+    // Convert Assimp aiMesh -> vtkPolyData (you had an implementation before)
     vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh* mesh) const;
 
-    void loadNodeRecursive(const QJsonObject &obj,
-                           LoadedMeshNode &node,
-                           const aiScene *scene,
-                           const QString &modelPath,
-                           const QString &assetFolder,
-                           vtkRenderer *renderer);
+    // New main loader: load model file + metadata document and populate renderer
+    // modelDir: path to the asset folder that contains metadata.json and model.<ext> and textures
+    // doc: already-loaded ModelDocument (from metadata.json)
+    SceneLoadResult loadModelFromDocument(const QString &modelDir,
+                                          const QJsonDocument& d,
+                                          vtkRenderer *renderer);
 
-    vtkSmartPointer<vtkPolyData> loadMeshPolyData(const aiScene *scene, int meshIndex);
+    // helper: clear texture cache
+    void clearTextureCache();
 
-    vtkSmartPointer<vtkActor> createActor(vtkPolyData *poly,
-                                          const LoadedMaterialInfo &mat,
-                                          const QString &assetFolder);
+private:
+    // load all meshes in Assimp scene -> mapping meshIndex -> vtkPolyData
+    QHash<int, vtkSmartPointer<vtkPolyData>> loadAllMeshesFromScene(const aiScene* scene) const;
 
-    QMatrix4x4 readTransform(const QJsonObject &obj);
-    LoadedMaterialInfo readMaterial(const QJsonObject &matObj,
-                                    const QString &assetFolder);
+    // load texture by absolute path (or relative -> resolved before calling). caches textures.
+    vtkSmartPointer<vtkTexture> loadTextureByFile(const QString &fullPath);
 
-    Assimp::Importer importer_;
-
+    // internal texture cache
     QHash<QString, vtkSmartPointer<vtkTexture>> textureCache_;
 };
 

@@ -32,24 +32,17 @@ public:
     AssetImporter() = default;
     ~AssetImporter() = default;
 
-    ImportResult importModel(const QString& externalFilePath,
-                             const QString& assetOutputFolder
-                             );
+    // import a model file -> write model file copy + metadata.json under assetOutputFolder/<id>/
+    // returns ImportResult.doc_ populated if success, empty doc_.id_ on failure
+    ImportResult importModel(const QString& externalFilePath, const QString& assetOutputFolder);
 
 private:
-    QByteArray imageToByteArray(const QImage& img,
-                                const QString& format = "PNG") const;
+    // helper
+    QByteArray imageToByteArray(const QImage &img, const QString &format) const;
+    vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh *mesh) const;
 
-    vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh* mesh) const;
-
-    QJsonObject buildSceneJson(const QVector<ImportedMesh>& loadedMeshes,
-                               const QVector<TextureMapResult>& textures,
-                               const QString& modelFile,
-                               const QString& assetGuid
-                               );
-
+    // existing Assimp importer instance
     Assimp::Importer importer_;
-
 };
 
 } // namespace vtkmeta
