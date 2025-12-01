@@ -23,7 +23,6 @@ struct MaterialDef {
     QString id_;
     QString name_;
 
-
     QVector3D base_color_{1.0f, 1.0f, 1.0f};
     float opacity_ = 1.0f;
     float metallic_ = 0.0f;
@@ -31,14 +30,12 @@ struct MaterialDef {
     QVector3D emissive_color_{0.0f, 0.0f, 0.0f};
     float emissive_strength_ = 0.0f;
 
-
     // texture ids referencing TextureDef.id_
     QString base_color_texture_;
     QString normal_texture_;
     QString metallic_texture_;
     QString roughness_texture_;
     QString emissive_texture_;
-
 
     bool double_sided_ = false;
     bool alpha_blend_ = false; // if true, use alpha blending
@@ -63,6 +60,9 @@ struct MeshDef {
     bool skinned_ = false; // has bones/weights
     // bone list optional; importer fills if skinned
     QVector<QString> bone_names_;
+
+    // NEW: original model mesh index (Assimp mesh index). Importer MUST fill if possible.
+    int original_index_ = -1;
 };
 
 // -----------------------------
@@ -74,27 +74,18 @@ struct NodeDef {
     QString parent_id_; // empty if root
     QVector<QString> children_ids_;
 
-
     QVector3D translation_{0.0f, 0.0f, 0.0f};
     QVector4D rotation_{0.0f, 0.0f, 0.0f, 1.0f}; // quaternion
     QVector3D scale_{1.0f, 1.0f, 1.0f};
 
-
     QString mesh_id_; // optional, reference to MeshDef.id_
     QString material_override_id_; // optional
-
 
     bool visible_ = true;
     bool cast_shadow_ = true;
     bool receive_shadow_ = true;
 
-
     QString type_ = "Node"; // "Mesh", "SkinnedMesh", "Bone", etc.
-
-
-    // optional per-node opacity override (if set, use instead of material.opacity_)
-    bool has_opacity_override_ = false;
-    float override_opacity_ = 1.0f;
 };
 
 // Texture metadata
@@ -141,7 +132,6 @@ struct MeshInfo {
     int primitive_count = 0;
     QString material_id;
     QVector<Bone> bones; // if skinned
-    // optional metadata e.g., vertex count
     int vertex_count = 0;
 };
 
@@ -156,7 +146,6 @@ struct NodeInfo {
     QString type;                      // "Node", "Mesh", "SkinnedMesh", "Bone"
     bool visible = true;
 };
-
 
 struct BoneKeyframe
 {
@@ -178,8 +167,6 @@ struct AnimationClip
     std::unordered_map<QString, std::vector<BoneKeyframe>> tracks_;
 };
 
-
-// Animation structures
 struct Keyframe {
     float time = 0.0f;
     QVector3D translation{0.0f,0.0f,0.0f};
@@ -207,13 +194,11 @@ public:
     QString name_;
     QString source_file_; // original model path (if any)
 
-
     QVector<NodeDef> nodes_;
     QVector<MeshDef> meshes_;
     QVector<MaterialDef> materials_;
     QVector<TextureDef> textures_;
     QVector<AnimationClip> animations_;
-
 
     // Utility lookups (not serialized)
     QMap<QString, int> NodeIdToIndex() const {
@@ -238,6 +223,6 @@ public:
     }
 };
 
-}
+} // namespace vtkmeta
 
 #endif // ASSETDATATYPES_H

@@ -125,8 +125,8 @@ struct SceneLoadResult {
 class AssetLoader
 {
 public:
-    AssetLoader();
-    ~AssetLoader();
+    AssetLoader() = default;
+    ~AssetLoader() = default;
 
     // Convert Assimp aiMesh -> vtkPolyData (you had an implementation before)
     vtkSmartPointer<vtkPolyData> convertAiMeshToVtkPolyData(const aiMesh* mesh) const;

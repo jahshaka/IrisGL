@@ -117,10 +117,10 @@ inline void ModelDocumentLoader::ParseNodes(const QJsonArray& arr, ModelDocument
 
         n.type_ = jo.value("type").toString("Node");
 
-        if (jo.contains("overrideOpacity")) {
-            n.has_opacity_override_ = true;
-            n.override_opacity_ = static_cast<float>(jo.value("overrideOpacity").toDouble(1.0));
-        }
+        // if (jo.contains("overrideOpacity")) {
+        //     n.has_opacity_override_ = true;
+        //     n.override_opacity_ = static_cast<float>(jo.value("overrideOpacity").toDouble(1.0));
+        // }
 
         if (jo.contains("children") && jo.value("children").isArray()) {
             for (const QJsonValue& c : jo.value("children").toArray()) {
