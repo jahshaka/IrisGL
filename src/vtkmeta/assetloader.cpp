@@ -21,9 +21,7 @@
 #include <vtkNew.h>
 #include <vtkSmartPointer.h>
 
-#ifdef VTK_MODULE_ENABLE_VTK_FiltersGeneral
 #include <vtkPolyDataTangents.h>
-#endif
 
 #include <QFileInfo>
 #include <QDir>
@@ -336,115 +334,6 @@ static vtkSmartPointer<vtkMatrix4x4> makeVtkMatrixFromNode(const NodeDef &n)
     return mat;
 }
 
-void debugLoadModelDiagnostics(const QString &modelDir, const vtkmeta::ModelDocument &doc, vtkRenderer *renderer) {
-    qDebug() << "---- debugLoadModelDiagnostics ----";
-    qDebug() << "modelDir:" << modelDir;
-    qDebug() << "doc.source_file_:" << doc.source_file_;
-    QString modelPath = QDir(modelDir).filePath(doc.source_file_);
-    qDebug() << "resolved modelPath:" << modelPath << "exists:" << QFileInfo::exists(modelPath);
-
-    // print doc summary
-    qDebug() << "doc.nodes_.size()=" << doc.nodes_.size();
-    for (int i=0;i<doc.nodes_.size();++i) {
-        const auto &n = doc.nodes_[i];
-        qDebug() << " node["<<i<<"] id="<<n.id_<<" name="<<n.name_<<" parent="<<n.parent_id_<<" mesh_id="<<n.mesh_id_;
-    }
-    qDebug() << "doc.meshes_.size()=" << doc.meshes_.size();
-    for (int i=0;i<doc.meshes_.size();++i) {
-        const auto &m = doc.meshes_[i];
-        qDebug() << " mesh["<<i<<"] id="<<m.id_<<" name="<<m.name_<<" original_index="<<m.original_index_<<" material_id="<<m.material_id_;
-    }
-    qDebug() << "doc.materials_.size()="<<doc.materials_.size();
-    for (int i=0;i<doc.materials_.size();++i) {
-        const auto &mat = doc.materials_[i];
-        qDebug() << " material["<<i<<"] id="<<mat.id_<<" name="<<mat.name_<<" base_color_tex="<<mat.base_color_texture_
-                 <<"normal="<<mat.normal_texture_<<"metallic="<<mat.metallic_texture_<<"roughness="<<mat.roughness_texture_;
-    }
-    qDebug() << "doc.textures_.size()="<<doc.textures_.size();
-    for (int i=0;i<doc.textures_.size();++i) {
-        const auto &t = doc.textures_[i];
-        qDebug() << " texture["<<i<<"] id="<<t.id_<<" path="<<t.path_<<" type="<<t.type_;
-    }
-
-    // // Now run loader but capture result
-    // vtkmeta::AssetLoader loader;
-    // vtkmeta::SceneLoadResult res = loader.loadModelFromDocument(modelDir, doc, renderer);
-
-
-}
-
-void inspectLoadedScene(const vtkmeta::SceneLoadResult &res)
-{
-    qDebug() << "=== inspectLoadedScene ===";
-    qDebug() << "nodes count =" << res.nodes.size();
-    for (int i = 0; i < res.nodes.size(); ++i) {
-        const auto &ln = res.nodes[i];
-        qDebug() << "node[" << i << "] id=" << ln.id << " name=" << ln.name << " mesh_id=" << ln.mesh_id;
-        vtkActor *actor = ln.actor.GetPointer();
-        if (!actor) { qDebug() << "  actor: null"; continue; }
-
-        vtkProperty *prop = actor->GetProperty();
-        qDebug() << "  actor pointer:" << actor;
-        vtkPolyDataMapper *mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
-        if (!mapper) {
-            qDebug() << "  mapper: null";
-        } else {
-            // Try to get the input polydata; mapper API differs slightly across versions
-            vtkDataObject *input = nullptr;
-#if VTK_MAJOR_VERSION >= 9
-            input = mapper->GetInputDataObject(0, 0);
-#else
-            input = mapper->GetInput();
-#endif
-            if (input) {
-                vtkPolyData *pd = vtkPolyData::SafeDownCast(input);
-                if (pd) {
-                    qDebug() << "  polydata points:" << (pd->GetNumberOfPoints());
-                    auto tcoords = pd->GetPointData()->GetTCoords();
-                    qDebug() << "  tcoords:" << (tcoords ? QString("present, tuples=%1").arg(tcoords->GetNumberOfTuples()) : "missing");
-                } else {
-                    qDebug() << "  mapper input not polydata";
-                }
-            } else {
-                qDebug() << "  mapper input null";
-            }
-        }
-
-        if (prop) {
-            // Print PBR params
-            double color[3]; prop->GetColor(color);
-            qDebug() << "  color:" << color[0] << color[1] << color[2]
-                     << " opacity:" << prop->GetOpacity()
-                     << " metallic:" << prop->GetMetallic()
-                     << " roughness:" << prop->GetRoughness();
-
-            // actor-level texture (fallback in older VTK versions)
-            vtkTexture *actorTex = actor->GetTexture();
-            qDebug() << "  actor->GetTexture():" << actorTex;
-
-            // Note: vtkProperty PBR texture getters may not exist in VTK 9.5.
-            // We avoid calling prop->GetBaseColorTexture() etc. for compatibility.
-            // If you used prop->SetBaseColorTexture() and your VTK exposes getters,
-            // you can add conditional checks here guarded by compile-time macros.
-        }
-    }
-
-    qDebug() << "materialToAlbedoPath keys:";
-    for (auto it = res.materialToAlbedoPath.begin(); it != res.materialToAlbedoPath.end(); ++it) {
-        qDebug() << " material=" << it.key() << " -> " << it.value() << " exists=" << QFileInfo::exists(it.value());
-    }
-
-    qDebug() << "meshMappers keys:";
-    for (auto it = res.meshMappers.begin(); it != res.meshMappers.end(); ++it) {
-        qDebug() << " meshId=" << it.key() << " mapperPtr=" << it.value().GetPointer();
-    }
-
-    qDebug() << "errors:";
-    for (const auto &e : res.errors) qDebug() << "  " << e;
-    qDebug() << "=== end inspect ===";
-}
-
-
 SceneLoadResult AssetLoader::loadModelFromDocument(const QString &modelDir, const QJsonDocument &d, vtkRenderer *renderer)
 {
     SceneLoadResult result;
@@ -475,9 +364,6 @@ SceneLoadResult AssetLoader::loadModelFromDocument(const QString &modelDir, cons
     QHash<int, vtkSmartPointer<vtkPolyData>> meshPolyDataMap = loadAllMeshesFromScene(scene);
     ModelDocument doc;
     ModelDocumentSerializer::loadFromJson(doc, d);
-
-
-//    debugLoadModelDiagnostics(modelPath, doc, renderer);
 
     // build mapping original_index -> meshId (from doc.meshes_)
     QHash<int, QString> originalIndexToMeshId;
@@ -515,15 +401,11 @@ SceneLoadResult AssetLoader::loadModelFromDocument(const QString &modelDir, cons
 
         vtkSmartPointer<vtkPolyData> polyForMapper = poly;
         if (needTangents) {
-#ifdef VTK_MODULE_ENABLE_VTK_FiltersGeneral
             vtkNew<vtkPolyDataTangents> tangents;
             tangents->SetInputData(poly);
             tangents->Update();
             vtkSmartPointer<vtkPolyData> out = tangents->GetOutput();
             if (out) polyForMapper = out;
-#else
-            qDebug() << "Warning: vtkPolyDataTangents not available; normal maps may appear incorrect.";
-#endif
         }
 
         vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
@@ -698,26 +580,6 @@ SceneLoadResult AssetLoader::loadModelFromDocument(const QString &modelDir, cons
             if (!p.isEmpty()) result.materialToAlbedoPath.insert(m.id_, p);
         }
     }
-
-
-    // qDebug() << "SceneLoadResult nodes count=" << result.nodes.size();
-    // for (int i=0;i<result.nodes.size();++i) {
-    //     qDebug() << " loaded node["<<i<<"] id="<<result.nodes[i].id<<" name="<<result.nodes[i].name<<" mesh_id="<<result.nodes[i].mesh_id;
-    // }
-    // qDebug() << "meshMappers keys:";
-    // for (auto it=result.meshMappers.begin(); it!=result.meshMappers.end(); ++it) {
-    //     qDebug() << "  mapper meshId="<<it.key();
-    // }
-    // qDebug() << "materialToAlbedoPath keys:";
-    // for (auto it = result.materialToAlbedoPath.begin(); it != result.materialToAlbedoPath.end(); ++it) {
-    //     qDebug() << " material="<<it.key()<<" path="<<it.value();
-    // }
-    // qDebug() << "errors:";
-    // for (const QString &e : result.errors) qDebug() << "  " << e;
-    // qDebug() << "---- end debug ----";
-
-
-    inspectLoadedScene(result);
 
     return result;
 }
