@@ -1,7 +1,5 @@
 #include "importerHelper.h"
 
-#include "assettypes.h"
-
 #include <QFileInfo>
 #include <QDir>
 #include <QFile>
@@ -12,6 +10,9 @@
 
 #include <QtConcurrent/QtConcurrent>
 #include <assimp/texture.h>
+
+#include "assettypes.h"
+#include "core/irisutils.h"
 
 namespace vtkmeta {
 
@@ -138,7 +139,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
         }
 
         if (QFileInfo::exists(fullPath)) {
-            assignedGuid = QUuid::createUuid().toString();
+            assignedGuid = IrisUtils::generateGUID();
             texture_lists_.insert(texture_name, assignedGuid);
             result.guid_ = assignedGuid;
 
@@ -146,7 +147,7 @@ TextureMapResult ImporterHelper::mapTextureProcess(
         }
 
 
-        assignedGuid = QUuid::createUuid().toString();
+        assignedGuid = IrisUtils::generateGUID();
         texture_lists_.insert(texture_name, assignedGuid);
         result.guid_ = assignedGuid;
         result.is_new_asset = true;
