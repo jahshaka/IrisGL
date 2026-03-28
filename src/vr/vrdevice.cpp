@@ -16,6 +16,8 @@ For more information see the LICENSE file
 #include <QOpenGLTexture>
 
 #include <QOpenGLContext>
+#include <QQuaternion>
+
 //#include "../libovr/Include/OVR_CAPI_GL.h"
 #include "../libovr/Include/Extras/OVR_Math.h"
 #include "../core/logger.h"

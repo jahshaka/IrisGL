@@ -4,6 +4,7 @@
 #include "../irisglfwd.h"
 #include <Qt>
 #include <QMatrix4x4>
+#include <QQuaternion>
 
 namespace iris
 {
