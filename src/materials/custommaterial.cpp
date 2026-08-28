@@ -166,6 +166,16 @@ void CustomMaterial::generate(const QString &fileName, bool project)
 
     setBaseMaterialProperties(jahShader);
 
+    // Guard: an absent vertex_shader/fragment_shader key yields "", and
+    // getAbsoluteAssetPath("") resolves to the application directory - which then
+    // "loads" as an empty shader and fails to link with "must write to gl_Position".
+    // This was firing ~100x per run and masking real shader errors.
+    if (vertPath.isEmpty() || fragPath.isEmpty()) {
+        qWarning("CustomMaterial::generate: shader path missing (vertex=\"%s\" fragment=\"%s\") - not building a program",
+                 qUtf8Printable(vertPath), qUtf8Printable(fragPath));
+        return;
+    }
+
     if (!vertPath.startsWith(":")) vertPath = IrisUtils::getAbsoluteAssetPath(vertPath);
     if (!fragPath.startsWith(":")) fragPath = IrisUtils::getAbsoluteAssetPath(fragPath);
 

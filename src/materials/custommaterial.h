@@ -29,7 +29,7 @@ class CustomMaterial : public Material
 public:
 	int getVersion() { return version; }
 	void setVersion(int version) { this->version = version; }
-    QList<Property*> properties;
+    // `properties` is inherited from Material
 
     void begin(GraphicsDevicePtr device, ScenePtr scene) override;
     void end(GraphicsDevicePtr device, ScenePtr scene) override;
@@ -37,7 +37,7 @@ public:
     void generate(const QString&, bool project = false);
     void generate(const QJsonObject&);
     void setTextureWithUniform(const QString&, const QString&);
-    void setValue(const QString&, const QVariant&);
+    void setValue(const QString&, const QVariant&) override;
     void setBaseMaterialProperties(const QJsonObject&);
     void setName(const QString&);
     void setGuid(const QString&);

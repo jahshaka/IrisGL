@@ -54,6 +54,15 @@ public:
 
     QMap<QString, Texture2DPtr> textures;
 
+    // Editor-facing parameter list. Declared on the base so any material can be
+    // rendered by the material property panel, not just CustomMaterial.
+    QList<Property*> properties;
+
+    // Applies a value by property name. Virtual so the property panel and the
+    // scene reader can drive any material without knowing its concrete type.
+    // Default is a no-op: materials with no editable parameters ignore it.
+    virtual void setValue(const QString& name, const QVariant& value) { Q_UNUSED(name); Q_UNUSED(value); }
+
     bool acceptsLighting;
     int numTextures;
     RenderStates renderStates;
@@ -61,6 +70,13 @@ public:
     Material() {
         acceptsLighting = true;
         numTextures = 0;
+        // Was left uninitialised. RenderList copies this straight onto the render
+        // item (renderlist.cpp:39), so a material that never called
+        // setRenderLayer() carried a garbage layer into the render list.
+        // CustomMaterial masked it by always setting one; DefaultMaterial and any
+        // new subclass did not. Default to the layer CustomMaterial uses for
+        // "opaque", so an unconfigured material sorts with ordinary geometry.
+        renderLayer = RenderLayer::Background;
     }
 
     virtual ~Material() {}
