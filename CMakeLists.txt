@@ -34,19 +34,6 @@ find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Multimedia Network Con
 message(STATUS "Qt6_VERSION: ${Qt6_VERSION}")
 message(STATUS "Qt6_INSTALL_PREFIX: ${Qt6_INSTALL_PREFIX}")
 
-find_package(VTK
-  COMPONENTS
-    CommonCore
-    GUISupportQt
-    InfovisCore
-    RenderingFreeType
-    ViewsQt
-    InteractionStyle)
-if (NOT VTK_FOUND)
-  message("Skipping example: ${VTK_NOT_FOUND_MESSAGE}")
-  return ()
-endif ()
-
 set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -155,10 +142,6 @@ set(SRCS
     src/scenegraph/grabnode.cpp
     src/physics/charactercontroller.cpp
 
-    src/vtkmeta/Node.cpp
-    src/vtkmeta/Mesh.cpp
-    src/vtkmeta/Material.cpp
-    src/vtkmeta/Scene.cpp
 )
 
 set (HEADERS
@@ -265,10 +248,6 @@ set (HEADERS
     src/physics/physicsproperties.h
     src/scenegraph/grabnode.h
     src/physics/charactercontroller.h
-    src/vtkmeta/Node.h
-    src/vtkmeta/Mesh.h
-    src/vtkmeta/Material.h
-    src/vtkmeta/Scene.h
 )
 
 set(QRCS assets.qrc)
@@ -281,17 +260,7 @@ if(WIN32 AND MSVC)
     set(USE_MSVC_RUNTIME_LIBRARY_DLL 1)
 endif()
 
-add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS}
-  src/vtkmeta/assetloader.cpp src/vtkmeta/assetloader.h
-  src/vtkmeta/assetimporter.h src/vtkmeta/assetimporter.cpp
-  src/vtkmeta/importerhelper.h src/vtkmeta/importerhelper.cpp
-  src/vtkmeta/assettypes.h src/vtkmeta/assettypes.cpp
-  src/vtkmeta/assetjsonwriter.h src/vtkmeta/assetjsonwriter.cpp
-  src/vtkmeta/assetjsonhelper.h src/vtkmeta/assetjsonhelper.cpp
-  src/vtkmeta/assetdatatypes.h src/vtkmeta/assetdatatypes.cpp
-  src/vtkmeta/assetvtkimporter.h src/vtkmeta/assetvtkimporter.cpp
-  src/vtkmeta/assetvtkloader.h src/vtkmeta/assetvtkloader.cpp
-  src/vtkmeta/modeldocumentserializer.h src/vtkmeta/modeldocumentserializer.cpp)
+add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
 # Note the DIRs that are included, assimp generates a config that we need to find in the build dir. L2
@@ -302,8 +271,12 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/libovr/Include"
     "${PROJECT_SOURCE_DIR}/src/bullet3/src"
     "${PROJECT_SOURCE_DIR}/src/zip/src"
-    "${VTK_INCLUDE_DIRS}"
 )
 
-target_link_libraries (IrisGL  ${VTK_LIBRARIES} assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL  assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent)
 target_compile_options(IrisGL PUBLIC)
+
+# A6: these two warning classes are undefined behaviour, not style - keep them fixed.
+if (NOT MSVC)
+    target_compile_options(IrisGL PRIVATE -Werror=return-type -Werror=delete-incomplete)
+endif()

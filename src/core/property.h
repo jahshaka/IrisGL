@@ -35,6 +35,8 @@ struct Property
 
     virtual QVariant    getValue() = 0;
     virtual void        setValue(QVariant val) = 0;
+
+    virtual ~Property() = default;
 };
 
 class PropertyListener
@@ -43,6 +45,8 @@ public:
     virtual void onPropertyChanged(Property*) = 0;
     virtual void onPropertyChangeStart(Property*) = 0;
     virtual void onPropertyChangeEnd(Property*) = 0;
+
+    virtual ~PropertyListener() = default;
 };
 
 struct BoolProperty : public Property

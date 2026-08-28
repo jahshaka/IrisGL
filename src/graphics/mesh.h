@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef MESH_H
 #define MESH_H
 
+#include <QQuaternion>
 #include <QString>
 #include <qopengl.h>
 #include <QColor>

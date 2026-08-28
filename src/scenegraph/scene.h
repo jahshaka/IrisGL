@@ -227,7 +227,7 @@ public:
 				 bool allowUnpickable = false);
 
 	ViewerNodePtr getActiveVrViewer() { return vrViewer; }
-	ViewerNodePtr setActiveVrViewer(ViewerNodePtr viewer) { this->vrViewer = viewer; }
+	void setActiveVrViewer(ViewerNodePtr viewer) { this->vrViewer = viewer; }
 
     /**
      * Adds node to scene. If node is a LightNode then it is added to a list of lights.

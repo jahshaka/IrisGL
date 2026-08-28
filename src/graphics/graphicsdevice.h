@@ -27,7 +27,8 @@ class VertexBuffer
 {
     friend class GraphicsDevice;
 public:
-    void* data;
+    // owns a heap copy of the vertex data; freed with delete[] (allocated with new char[])
+    char* data;
     int dataSize;
 
     GLuint bufferId;
@@ -49,6 +50,12 @@ public:
 
     void setData(void* data, unsigned int sizeinBytes);
 
+    ~VertexBuffer();
+
+    // owns a raw buffer - copying would double-free
+    VertexBuffer(const VertexBuffer&) = delete;
+    VertexBuffer& operator=(const VertexBuffer&) = delete;
+
     bool isDirty()
     {
         return _isDirty;
@@ -65,7 +72,8 @@ class IndexBuffer
     friend class GraphicsDevice;
 public:
     GraphicsDevicePtr device;
-    void* data;
+    // owns a heap copy of the index data; freed with delete[] (allocated with new char[])
+    char* data;
     GLuint bufferId;
     int dataSize;
     bool _isDirty;
@@ -77,6 +85,12 @@ public:
     }
 
     void setData(void* data, unsigned int sizeinBytes);
+
+    ~IndexBuffer();
+
+    // owns a raw buffer - copying would double-free
+    IndexBuffer(const IndexBuffer&) = delete;
+    IndexBuffer& operator=(const IndexBuffer&) = delete;
 
     bool isDirty()
     {

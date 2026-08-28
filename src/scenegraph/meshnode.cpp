@@ -8,6 +8,7 @@ and/or modify it under the terms of the GPLv3 License
 
 For more information see the LICENSE file
 *************************************************************************/
+#include <QQuaternion>
 #include "meshnode.h"
 
 #include <QFileInfo>
@@ -176,7 +177,8 @@ BoundingSphere MeshNode::getTransformedBoundingSphere()
 QJsonObject readJahShader(const QString &filePath)
 {
     QFile file(filePath);
-    file.open(QIODevice::ReadOnly);
+    if (!file.open(QIODevice::ReadOnly))
+        qWarning("readJahShader: failed to open %s", qUtf8Printable(filePath));
 
     auto data = file.readAll();
     file.close();

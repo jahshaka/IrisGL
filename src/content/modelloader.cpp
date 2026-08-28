@@ -1,3 +1,4 @@
+#include <QQuaternion>
 #include "../irisglfwd.h"
 #include "modelloader.h"
 #include "graphics/model.h"
@@ -35,7 +36,8 @@ ModelPtr ModelLoader::load(QString filePath)
 
 	if (filePath.startsWith(":") || filePath.startsWith("qrc:")) {
 		// loads mesh from resource
-		file.open(QIODevice::ReadOnly);
+		if (!file.open(QIODevice::ReadOnly))
+		    qWarning("ModelLoader::load: failed to open %s", qUtf8Printable(filePath));
 		auto data = file.readAll();
 		scene = importer.ReadFileFromMemory((void*)data.data(),
 			data.length(),

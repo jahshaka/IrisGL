@@ -26,8 +26,7 @@ VertexBuffer::VertexBuffer(VertexLayout vertexLayout)
 
 void VertexBuffer::setData(void *bufferData, unsigned int sizeInBytes)
 {
-    if(data)
-        delete data;
+    delete[] data;
 
     data = new char[sizeInBytes];
     memcpy(this->data, bufferData, sizeInBytes);
@@ -38,9 +37,21 @@ void VertexBuffer::setData(void *bufferData, unsigned int sizeInBytes)
 
 void VertexBuffer::destroy()
 {
-    if (data)
-        delete data;
-    // todo: delete gl buffer
+    delete[] data;
+    data = nullptr;
+    dataSize = 0;
+
+    // The GL buffer is deliberately NOT deleted here. Buffers are released via
+    // QSharedPointer, and that can happen on a thread with no current GL context
+    // (see src/editor/thumbnailgenerator.cpp, which renders on RenderThread and
+    // moves its context away before releasing the scene). Deleting GL objects
+    // needs an explicit path that guarantees a live context.
+}
+
+VertexBuffer::~VertexBuffer()
+{
+    delete[] data;
+    data = nullptr;
 }
 
 void VertexBuffer::upload(QOpenGLFunctions_3_2_Core* gl)
@@ -60,7 +71,6 @@ void VertexBuffer::upload(QOpenGLFunctions_3_2_Core* gl)
 
 IndexBuffer::IndexBuffer()
 {
-    this->device = device;
     bufferId = -1;
     data = nullptr;
     dataSize = 0;
@@ -69,8 +79,7 @@ IndexBuffer::IndexBuffer()
 
 void IndexBuffer::setData(void *bufferData, unsigned int sizeInBytes)
 {
-    if(data)
-        delete data;
+    delete[] data;
 
     data = new char[sizeInBytes];
     memcpy(this->data, bufferData, sizeInBytes);
@@ -93,9 +102,17 @@ void IndexBuffer::upload(QOpenGLFunctions_3_2_Core* gl)
 
 void IndexBuffer::destroy()
 {
-    if (data)
-        delete data;
-    // todo: delete gl buffer
+    delete[] data;
+    data = nullptr;
+    dataSize = 0;
+
+    // GL buffer deliberately not deleted here - see VertexBuffer::destroy().
+}
+
+IndexBuffer::~IndexBuffer()
+{
+    delete[] data;
+    data = nullptr;
 }
 
 QOpenGLFunctions_3_2_Core *GraphicsDevice::getGL() const
@@ -114,6 +131,11 @@ GraphicsDevice::GraphicsDevice()
 //    gl = context->versionFunctions<QOpenGLFunctions_3_2_Core>();
     QOpenGLContext* context = QOpenGLContext::currentContext();
     gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_2_Core>(context);
+    if (!gl) {
+        qFatal("GraphicsDevice: no OpenGL 3.2 Core functions for this context. "
+               "The surface format needs setRenderableType(QSurfaceFormat::OpenGL) "
+               "so EGL hands back desktop GL rather than an ES context.");
+    }
 
     // 8 texture units by default
     for(int i =0;i<8;i++)

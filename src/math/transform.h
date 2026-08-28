@@ -1,6 +1,7 @@
 #ifndef TRANSFORM_H
 #define TRANSFORM_H
 
+#include <QQuaternion>
 #include <QVector3D>
 #include <QMatrix4x4>
 

@@ -10,6 +10,7 @@ For more information see the LICENSE file
 *************************************************************************/
 
 
+#include <QQuaternion>
 #include "mesh.h"
 
 #include <QString>
@@ -295,7 +296,8 @@ MeshPtr Mesh::loadMesh(QString filePath)
 
 	if (filePath.startsWith(":") || filePath.startsWith("qrc:")) {
 		// loads mesh from resource
-		file.open(QIODevice::ReadOnly);
+		if (!file.open(QIODevice::ReadOnly))
+		    qWarning("Mesh::loadMesh: failed to open %s", qUtf8Printable(filePath));
 		auto data = file.readAll();
 		scene = importer.ReadFileFromMemory((void*)data.data(),
 			data.length(),
@@ -341,7 +343,8 @@ MeshPtr Mesh::loadAnimatedMesh(QString filePath)
     if (filePath.startsWith(":") || filePath.startsWith("qrc:")) {
         // loads mesh from resource
         QFile file(filePath);
-        file.open(QIODevice::ReadOnly);
+        if (!file.open(QIODevice::ReadOnly))
+            qWarning("Mesh::loadAnimatedMesh: failed to open %s", qUtf8Printable(filePath));
         auto data = file.readAll();
         scene = importer.ReadFileFromMemory((void*)data.data(),
                                             data.length(),

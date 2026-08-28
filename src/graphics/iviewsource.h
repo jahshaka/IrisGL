@@ -24,6 +24,8 @@ public:
     virtual bool supportsVr();
     virtual float getNearClip();
     virtual float getFarClip();
+
+    virtual ~IViewSource() = default;
 };
 
 }

@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef VRDEVICE_H
 #define VRDEVICE_H
 
+#include <QQuaternion>
 #include <QMatrix4x4>
 #include <QOpenGLContext>
 #include "../libovr/Include/OVR_CAPI_GL.h"

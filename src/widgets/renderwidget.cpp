@@ -29,6 +29,7 @@ RenderWidget::RenderWidget(QWidget *parent)
     format.setMajorVersion(3);
     format.setMinorVersion(2);
     format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setRenderableType(QSurfaceFormat::OpenGL);
     format.setSamples(1);
     format.setSwapInterval(0);
 

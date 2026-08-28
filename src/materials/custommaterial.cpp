@@ -128,7 +128,8 @@ QString CustomMaterial::firstTextureSlot() const
 QJsonObject CustomMaterial::loadShaderFromDisk(const QString &filePath)
 {
     QFile file(filePath);
-    file.open(QIODevice::ReadOnly);
+    if (!file.open(QIODevice::ReadOnly))
+        qWarning("CustomMaterial::loadShaderFromDisk: failed to open %s", qUtf8Printable(filePath));
     auto data = file.readAll();
     file.close();
     return QJsonDocument::fromJson(data).object();

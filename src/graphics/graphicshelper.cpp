@@ -66,7 +66,8 @@ QString GraphicsHelper::loadAndProcessShader(QString shaderPath)
     QRegularExpression externalFileInclude("\\\"(.+\\\\)*((.+)\\.(.+))\\\"");
 
     QFile file(shaderPath);
-    file.open(QIODevice::ReadOnly | QIODevice::Text);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        qWarning("GraphicsHelper::loadAndProcessShader: failed to open %s", qUtf8Printable(shaderPath));
 
     auto text = file.readAll();
     auto lines = text.split('\n');
