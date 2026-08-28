@@ -21,6 +21,8 @@ class QOpenGLShaderProgram;
 class QOpenGLFunctions_3_2_Core;
 class QOpenGLTexture;
 
+class QOpenGLContext;
+
 namespace iris
 {
 
@@ -114,6 +116,11 @@ private:
 	Shader();
 
 	bool isDirty;
+
+	// The GL context this shader's program object was built for. A program is
+	// context-bound, so reusing one across contexts silently draws nothing.
+	// GraphicsDevice compares this against its own context and rebuilds on change.
+	QOpenGLContext* compiledContext = nullptr;
 
     static long generateNodeId();
     static long nextId;

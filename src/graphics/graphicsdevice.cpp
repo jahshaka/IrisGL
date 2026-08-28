@@ -268,6 +268,23 @@ void GraphicsDevice::setShader(ShaderPtr shader, bool force)
 
     activeShader = shader;
 	if (!!activeShader) {
+		// A QOpenGLShaderProgram belongs to the context that built it. The editor
+		// viewport, the player view and the thumbnail render thread each have
+		// their own context, so a material shared between them must have its
+		// program rebuilt per context or it silently draws nothing.
+		//
+		// CustomMaterial masked this by calling generate() again on load, which
+		// re-set its shader source and flipped isDirty. Materials that build their
+		// shader once in the constructor (PbrMaterial, DefaultMaterial) did not.
+		if (activeShader->compiledContext != context) {
+			// Deliberately not deleting the old program: it belongs to another
+			// context and destroying it from here would free GL objects without
+			// that context current.
+			activeShader->program    = nullptr;
+			activeShader->hasErrors  = false;
+			activeShader->isDirty    = true;
+		}
+
 		if (activeShader->isDirty)
 			compileShader(activeShader);
 
@@ -360,6 +377,12 @@ void GraphicsDevice::compileShader(iris::ShaderPtr shader)
 
 		qDebug() << "SHADER LINK ERROR";
 		qDebug() << vshader->log();
+		// The driver log alone does not say which shader failed. An empty source
+		// here means a shader path failed to load - see GraphicsHelper::
+		// loadAndProcessShader, which currently receives empty paths and yields
+		// an empty program that fails to link with "must write to gl_Position".
+		qDebug() << "  source lengths - vertex:" << shader->vertexShader.length()
+		         << "fragment:" << shader->fragmentShader.length();
 
 		// prevent shader from being recompiled with same error
 		shader->isDirty = false;
@@ -421,6 +444,7 @@ void GraphicsDevice::compileShader(iris::ShaderPtr shader)
 
 	}
 
+	shader->compiledContext = context;
 	shader->isDirty = false;
 }
 
@@ -549,10 +573,12 @@ void GraphicsDevice::setBlendState(const BlendState &blendState, bool force)
 
 	if (force || (lastBlendState.colorMask != blendState.colorMask)) {
 		const auto mask = blendState.colorMask;
-		gl->glColorMask((mask & ColorMask::Red == ColorMask::Red),
-			(mask & ColorMask::Green == ColorMask::Green),
-			(mask & ColorMask::Blue == ColorMask::Blue),
-			(mask & ColorMask::Alpha == ColorMask::Alpha));
+		// `mask & X == X` parses as `mask & (X == X)` - == binds tighter than &,
+		// so every channel received `mask & 1`. Parenthesised.
+		gl->glColorMask(((mask & ColorMask::Red)   == ColorMask::Red),
+			((mask & ColorMask::Green) == ColorMask::Green),
+			((mask & ColorMask::Blue)  == ColorMask::Blue),
+			((mask & ColorMask::Alpha) == ColorMask::Alpha));
 		lastBlendState.colorMask = blendState.colorMask;
 	 }
 }
