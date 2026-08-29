@@ -18,7 +18,7 @@ namespace iris
 GLuint Texture::getTextureId()
 {
     if (useCustomId) return customId;
-    return texture->textureId();
+    return texture ? texture->textureId() : 0;
 }
 
 void Texture::bind()
@@ -43,6 +43,7 @@ int Texture::getHeight()
 
 void Texture::resize(int width, int height, bool force)
 {
+    if (!texture) return;
     if((texture->width() == width && texture->height() == height) && !force)
         return;
 

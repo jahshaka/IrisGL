@@ -86,15 +86,37 @@ public:
 
     void setFilters(QOpenGLTexture::Filter minFilter, QOpenGLTexture::Filter magFilter);
     void setWrapMode(QOpenGLTexture::WrapMode wrapS, QOpenGLTexture::WrapMode wrapT);
-
     void bind() override;
     void bind(int index) override;
+    GLuint getTextureId() override;
+    int getWidth() override;
+    int getHeight() override;
+
+    /**
+     * Creates the GL texture now if creation was deferred and a GL context is
+     * current. Returns true when the texture is usable.
+     *
+     * Texture2D no longer requires a GL context at construction. When none is
+     * current, the creator stores what it would have uploaded and the upload
+     * happens on first use (bind / getTextureId / setFilters ...). This lets
+     * the scene document (Scene, LightNode, materials) be built with no GL at
+     * all — required for the engine-backed viewport, where IrisGL never draws.
+     */
+    bool ensureCreated();
+    bool isDeferred() const { return deferred != Deferred::None; }
 
 private:
+    Texture2D();                       // deferred: no GL object yet
     Texture2D(QOpenGLTexture* tex);
     Texture2D(GLuint texId);
+    QOpenGLFunctions_3_2_Core* gl = nullptr;
 
-    QOpenGLFunctions_3_2_Core* gl;
+    enum class Deferred { None, Image, Empty, Depth, ShadowDepth, CubeMap };
+    Deferred deferred = Deferred::None;
+    QImage deferredImage;
+    QImage deferredFaces[6];
+    int deferredWidth = 0, deferredHeight = 0;
+    QOpenGLTexture::TextureFormat deferredFormat = QOpenGLTexture::RGBAFormat;
 };
 
 }

@@ -30,7 +30,7 @@ public:
     QOpenGLTexture* texture;
     QString source;
 
-    GLuint getTextureId();
+    virtual GLuint getTextureId();
     virtual void bind();
     virtual void bind(int index);
 
