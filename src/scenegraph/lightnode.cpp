@@ -44,6 +44,18 @@ QList<Property*> LightNode::getProperties()
     prop->value = spotCutOffSoftness;
     props.append(prop);
 
+    prop = new FloatProperty();
+    prop->displayName = "Rect Width";
+    prop->name = "rectWidth";
+    prop->value = rectWidth;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Rect Height";
+    prop->name = "rectHeight";
+    prop->value = rectHeight;
+    props.append(prop);
+
     return props;
 }
 
@@ -59,6 +71,10 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return spotCutOff;
     if(valueName == "spotCutOffSoftness")
         return spotCutOffSoftness;
+    if(valueName == "rectWidth")
+        return rectWidth;
+    if(valueName == "rectHeight")
+        return rectHeight;
 
     return SceneNode::getPropertyValue(valueName);
 }
@@ -76,6 +92,10 @@ void LightNode::updateAnimation(float time)
             spotCutOff = animation->getFloatPropertyAnim("spotCutOff")->getValue(time);
         if(animation->hasPropertyAnim("spotCutOffSoftness"))
             spotCutOffSoftness = animation->getFloatPropertyAnim("spotCutOffSoftness")->getValue(time);
+        if(animation->hasPropertyAnim("rectWidth"))
+            rectWidth = animation->getFloatPropertyAnim("rectWidth")->getValue(time);
+        if(animation->hasPropertyAnim("rectHeight"))
+            rectHeight = animation->getFloatPropertyAnim("rectHeight")->getValue(time);
     }
 
     SceneNode::updateAnimation(time);
@@ -92,6 +112,11 @@ LightNode::LightNode()
     intensity = 1.0f;
     spotCutOff = 30.0f;
     spotCutOffSoftness = 1.0f;
+
+    rectWidth = 1.0f;
+    rectHeight = 1.0f;
+    doubleSided = false;
+    accurate = false;
 
 	shadowAlpha = 1.0f;
 	shadowColor = QColor(0,0,0);
@@ -114,6 +139,10 @@ SceneNodePtr LightNode::createDuplicate()
 	light->distance = this->distance;
 	light->spotCutOff = this->spotCutOff;
 	light->spotCutOffSoftness = this->spotCutOffSoftness;
+	light->rectWidth = this->rectWidth;
+	light->rectHeight = this->rectHeight;
+	light->doubleSided = this->doubleSided;
+	light->accurate = this->accurate;
 	light->shadowAlpha = this->shadowAlpha;
 	light->shadowColor = this->shadowColor;
 	light->shadowMap->bias = this->shadowMap->bias;

@@ -27,6 +27,7 @@ enum class LightType:int
     Point = 0,
     Directional = 1,
     Spot = 2,
+    Area = 3,       // rectangular area light (engine viewport only; legacy ignores it)
 };
 
 class LightNode:public SceneNode
@@ -64,6 +65,23 @@ public:
      * smooth cutoff edges
      */
     float spotCutOffSoftness;
+
+    /**
+     * Area-light rectangle dimensions in world units (LightType::Area only).
+     * The rectangle lies across the light's local X (width) and Z (height)
+     * axes and emits down -Y, like every other light direction here.
+     */
+    float rectWidth;
+    float rectHeight;
+
+    /** Area light: emit from both faces of the rectangle. */
+    bool doubleSided;
+
+    /**
+     * Area light: physically accurate mode (linearly transformed cosines)
+     * instead of the cheaper approximation. Slower; no textured-light support.
+     */
+    bool accurate;
 
     //editor-specific
     QSharedPointer<Texture2D> icon;
