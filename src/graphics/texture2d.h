@@ -104,6 +104,10 @@ public:
      */
     bool ensureCreated();
     bool isDeferred() const { return deferred != Deferred::None; }
+    /// For cubemaps: the six face images (+X, -X, +Y, -Y, +Z, -Z), kept so a renderer
+    /// without GL can rebuild the sky. Empty for other textures.
+    bool isCubeMap() const { return cubeMap; }
+    const QImage *cubeFaces() const { return cubeMap ? cubeFaceImages : nullptr; }
 
 private:
     Texture2D();                       // deferred: no GL object yet
@@ -115,6 +119,8 @@ private:
     Deferred deferred = Deferred::None;
     QImage deferredImage;
     QImage deferredFaces[6];
+    bool cubeMap = false;
+    QImage cubeFaceImages[6];
     int deferredWidth = 0, deferredHeight = 0;
     QOpenGLTexture::TextureFormat deferredFormat = QOpenGLTexture::RGBAFormat;
 };

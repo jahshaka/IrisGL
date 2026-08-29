@@ -227,14 +227,18 @@ QSharedPointer<Texture2D> Texture2D::createCubeMap(QString negZ, QString posZ,
         }
     }
 
-    if (QOpenGLContext::currentContext())
-        return QSharedPointer<Texture2D>(new Texture2D(buildCubeMap(faces)));
-
-    // Previously returned null here, which silently dropped the sky. Defer instead.
-    auto tex = new Texture2D();
-    tex->deferred = Deferred::CubeMap;
-    for (int i = 0; i < 6; ++i) tex->deferredFaces[i] = faces[i];
-    tex->deferredWidth = tex->deferredHeight = size;
+    Texture2D *tex;
+    if (QOpenGLContext::currentContext()) {
+        tex = new Texture2D(buildCubeMap(faces));
+    } else {
+        // Previously returned null here, which silently dropped the sky. Defer instead.
+        tex = new Texture2D();
+        tex->deferred = Deferred::CubeMap;
+        for (int i = 0; i < 6; ++i) tex->deferredFaces[i] = faces[i];
+        tex->deferredWidth = tex->deferredHeight = size;
+    }
+    tex->cubeMap = true;
+    for (int i = 0; i < 6; ++i) tex->cubeFaceImages[i] = faces[i];
     return QSharedPointer<Texture2D>(tex);
 }
 
