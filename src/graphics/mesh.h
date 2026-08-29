@@ -129,6 +129,11 @@ public:
     int numFaces;
 
     TriMesh* triMesh;
+    /// CPU-side geometry, read-only. The engine mirror and importers convert from
+    /// these; the GL upload path is untouched.
+    const QList<VertexBufferPtr>& getVertexBuffers() const { return vertexBuffers; }
+    IndexBufferPtr getIndexBuffer() const { return idxBuffer; }
+
     TriMesh* getTriMesh()
     {
         return triMesh;
