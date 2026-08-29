@@ -41,7 +41,16 @@ public:
     /// cubemap texture. SkyMode::NoSky removes it (the View's background shows).
     virtual bool        setSky(SkyMode, TextureId) = 0;
     /// Cubemap sky from six face textures, in the order +X, -X, +Y, -Y, +Z, -Z.
+    /// Also feeds environment reflections (IBL) from the same faces.
     virtual bool        setSkyCubemap(const TextureId faces[6]) = 0;
+    /// Environment reflections (IBL) WITHOUT touching the sky geometry: six square
+    /// face textures (+X, -X, +Y, -Y, +Z, -Z, all the same size) become the mipped
+    /// reflection cubemap every PBR material samples. This is how equirectangular
+    /// and CPU-baked skies (gradient, realistic) get the reflections cubemap skies
+    /// already have — the host resamples its equirect image into six faces and
+    /// pushes them here. Passing six zero ids clears the reflections. The face
+    /// textures are copied; the caller may destroy them afterwards.
+    virtual bool        setSkyReflection(const TextureId faces[6]) = 0;
     /// Unit cube with a PBR metallic-roughness material. Proves the material path end to end.
     // TEMPORARY — replaced by mesh loading in step 3 of VIEWPORT_MIGRATION_PLAN.md
     virtual NodeId      addTestCube(const Colour &albedo, float metalness, float roughness) = 0;
@@ -235,6 +244,17 @@ public:
     /// Cheap: takes effect next frame, no material rebuild. Default: Soft.
     virtual void setShadowFilter(ShadowFilter) = 0;
     virtual ShadowFilter shadowFilter() const = 0;
+
+    /// Shadow-map resolution for EVERY shadowed light in EVERY scene — global,
+    /// like the filter: the backend renders all shadow maps into one fixed atlas
+    /// (PSSM splits + two focused maps) whose sizes derive from this base value
+    /// (split 0 and the focused maps at `pixels`, further splits at half).
+    /// Callers with per-light document settings push the LARGEST requested size.
+    /// NOT cheap: changing it tears down and rebuilds the shadow node and every
+    /// workspace that references it — call on change only, never per frame.
+    /// Clamped to [256, 8192]. Default: 2048.
+    virtual void setShadowResolution(unsigned pixels) = 0;
+    virtual unsigned shadowResolution() const = 0;
 
     virtual std::string backendName() const = 0;
     /// Reason for the most recent failure; empty if none.

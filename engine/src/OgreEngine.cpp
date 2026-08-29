@@ -284,27 +284,62 @@ public:
             // Environment reflections: the same six faces become a mipped cubemap on
             // every PBR datablock's reflection slot, so metals and glass mirror the
             // sky the way the legacy matcap/refraction shaders faked it.
-            if (tex[0]->getWidth() == tex[1]->getWidth()) {
-                const Ogre::uint32 w = tex[0]->getWidth(), h = tex[0]->getHeight();
-                Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-                Ogre::TextureGpu *cube = tm->createTexture(
-                    processUniqueName("skyrefl"), Ogre::GpuPageOutStrategy::Discard,
-                    Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps,
-                    Ogre::TextureTypes::TypeCube);
-                cube->setResolution(w, h, 6u);
-                cube->setPixelFormat(tex[0]->getPixelFormat());
-                cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
-                cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
-                for (int i = 0; i < 6; ++i) {
-                    Ogre::TextureBox dst = cube->getEmptyBox(0); dst.sliceStart = Ogre::uint32(i); dst.numSlices = 1u;
-                    tex[i]->copyTo(cube, dst, 0, tex[i]->getEmptyBox(0), 0);
-                }
-                cube->_autogenerateMipmaps();
-                mReflectionTex = cube;
-                applyReflectionToAll();
-            }
+            if (tex[0]->getWidth() == tex[1]->getWidth())
+                buildReflectionCubemap(tex);
             return true;
         } JAH_CATCH(mError, false);
+    }
+    /// Environment reflections divorced from the sky geometry: the host pushes six
+    /// resampled faces of its equirect/baked sky image. Six zero ids clear.
+    bool setSkyReflection(const TextureId faces[6]) override {
+        JAH_TRY {
+            bool anySet = false;
+            for (int i = 0; i < 6; ++i) if (faces[i]) anySet = true;
+            if (!anySet) { destroyReflection(); return true; }
+            Ogre::TextureGpu *tex[6];
+            for (int i = 0; i < 6; ++i) {
+                auto it = mTextures.find(faces[i]);
+                if (it == mTextures.end()) { mError = "setSkyReflection: unknown face texture"; return false; }
+                tex[i] = it->second.texture;
+            }
+            for (int i = 0; i < 6; ++i)
+                if (tex[i]->getWidth() != tex[0]->getWidth() || tex[i]->getHeight() != tex[0]->getWidth()) {
+                    mError = "setSkyReflection: the six faces must be square and the same size";
+                    return false;
+                }
+            buildReflectionCubemap(tex);
+            return true;
+        } JAH_CATCH(mError, false);
+    }
+    /// Builds (replacing any previous) the mipped reflection cubemap from six equal
+    /// faces (+X,-X,+Y,-Y,+Z,-Z) and binds it on every PBR datablock.
+    void buildReflectionCubemap(Ogre::TextureGpu *const tex[6]) {
+        destroyReflection();
+        const Ogre::uint32 w = tex[0]->getWidth(), h = tex[0]->getHeight();
+        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        Ogre::TextureGpu *cube = tm->createTexture(
+            processUniqueName("skyrefl"), Ogre::GpuPageOutStrategy::Discard,
+            Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps,
+            Ogre::TextureTypes::TypeCube);
+        cube->setResolution(w, h, 6u);
+        cube->setPixelFormat(tex[0]->getPixelFormat());
+        cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
+        cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+        for (int i = 0; i < 6; ++i) {
+            Ogre::TextureBox dst = cube->getEmptyBox(0); dst.sliceStart = Ogre::uint32(i); dst.numSlices = 1u;
+            tex[i]->copyTo(cube, dst, 0, tex[i]->getEmptyBox(0), 0);
+        }
+        cube->_autogenerateMipmaps();
+        mReflectionTex = cube;
+        applyReflectionToAll();
+    }
+    /// Unbinds and destroys the reflection cubemap (no-op when there is none).
+    void destroyReflection() {
+        if (!mReflectionTex) return;
+        Ogre::TextureGpu *tex = mReflectionTex;
+        mReflectionTex = nullptr;
+        applyReflectionToAll();
+        mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(tex);
     }
     /// Binds (or clears, when mReflectionTex is null) the scene's sky reflection
     /// cubemap on every PBR material's datablock. (Body in complete-class context,
@@ -322,13 +357,8 @@ public:
     std::vector<SkyFace> mSkyFaces;
     Ogre::TextureGpu *mReflectionTex = nullptr;   // sky cubemap on PBSM_REFLECTION
     void destroySky() {
-        if (mReflectionTex) {
-            // Unbind from every datablock before the texture goes away.
-            Ogre::TextureGpu *tex = mReflectionTex;
-            mReflectionTex = nullptr;
-            applyReflectionToAll();
-            mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(tex);
-        }
+        // Unbind the reflection cubemap from every datablock before it goes away.
+        destroyReflection();
         for (SkyFace &f : mSkyFaces) {
             if (f.item) { f.item->detachFromParent(); mSceneMgr->destroyItem(f.item); }
             auto *hlmsUnlit = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT);
@@ -1637,6 +1667,25 @@ public:
         } JAH_CATCH(mError, );
     }
     static constexpr const char *kShadowNodeName = "JahshakaShadowNode";
+    /// Shadow-atlas rebuild support (Engine::setShadowResolution): the shadow node
+    /// DEFINITION cannot be replaced while any workspace instantiates it, so the
+    /// engine first drops every shadowed view's workspace (true = dropped, caller
+    /// re-adds), then swaps the definition, then calls the restore below.
+    bool dropWorkspaceForShadowRebuild() {
+        if (!mShadows || !mWorkspace) return false;
+        JAH_TRY {
+            mRoot->getCompositorManager2()->removeWorkspace(mWorkspace);
+            mWorkspace = nullptr;
+            return true;
+        } JAH_CATCH(mError, false);
+    }
+    void recreateWorkspaceAfterShadowRebuild() {
+        JAH_TRY {
+            if (mWorkspace || !mScene || !mCamera) return;
+            mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
+                mScene->sceneManager(), target(), mCamera, mWorkspaceDef, mEnabled);
+        } JAH_CATCH(mError, );
+    }
     bool isEnabled() const override { return mEnabled; }
     unsigned width()  const override { return mWidth; }
     unsigned height() const override { return mHeight; }
@@ -1925,6 +1974,28 @@ public:
     }
     ShadowFilter shadowFilter() const override { return mShadowFilter; }
 
+    /// GLOBAL like the filter, but NOT cheap: the sizes live in the shadow-node
+    /// DEFINITION, which cannot change while any workspace instantiates it. So:
+    /// drop every shadowed view's workspace, swap the definition, re-add them —
+    /// the same teardown order the engine's destructor honours.
+    void setShadowResolution(unsigned pixels) override {
+        const unsigned res = std::min(8192u, std::max(256u, pixels));
+        if (res == mShadowResolution) return;
+        mShadowResolution = res;
+        if (!mHlmsRegistered) return;   // first createShadowNode() picks it up
+        JAH_TRY {
+            Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+            std::vector<OgreView *> rebuilt;
+            for (auto &v : mViews)
+                if (v->dropWorkspaceForShadowRebuild()) rebuilt.push_back(v.get());
+            if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
+                cm->removeShadowNodeDefinition(OgreView::kShadowNodeName);
+            createShadowNode();
+            for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
+        } JAH_CATCH(mLastError, );
+    }
+    unsigned shadowResolution() const override { return mShadowResolution; }
+
     ~OgreEngine() override {
         // Dependency order, all BEFORE Root: views (workspaces, cameras, windows,
         // textures) -> scenes (items, datablocks, our MeshPtrs, scene managers)
@@ -2017,29 +2088,34 @@ private:
     void createShadowNode() {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
         if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName)) return;
+        // The whole atlas derives from one base size (Engine::setShadowResolution):
+        // PSSM split 0 and the two focused maps at R, further splits at R/2 —
+        // exactly the historical 2048/1024 layout, scaled.
+        const Ogre::uint32 R = mShadowResolution;
+        const Ogre::uint32 H = std::max(128u, R / 2u);
         Ogre::ShadowNodeHelper::ShadowParamVec params;
         Ogre::ShadowNodeHelper::ShadowParam p;
         memset(&p, 0, sizeof(p));
         p.technique = Ogre::SHADOWMAP_PSSM;
         p.numPssmSplits = 3u;
-        p.resolution[0].x = 2048u; p.resolution[0].y = 2048u;
-        for (size_t i = 1u; i < 4u; ++i) { p.resolution[i].x = 1024u; p.resolution[i].y = 1024u; }
-        p.atlasStart[0].x = 0u;    p.atlasStart[0].y = 0u;
-        p.atlasStart[1].x = 0u;    p.atlasStart[1].y = 2048u;
-        p.atlasStart[2].x = 1024u; p.atlasStart[2].y = 2048u;
+        p.resolution[0].x = R; p.resolution[0].y = R;
+        for (size_t i = 1u; i < 4u; ++i) { p.resolution[i].x = H; p.resolution[i].y = H; }
+        p.atlasStart[0].x = 0u; p.atlasStart[0].y = 0u;
+        p.atlasStart[1].x = 0u; p.atlasStart[1].y = R;
+        p.atlasStart[2].x = H;  p.atlasStart[2].y = R;
         p.supportedLightTypes = 0u;
         p.addLightType(Ogre::Light::LT_DIRECTIONAL);
         params.push_back(p);
         // Two focused maps for point/spot lights (dual-paraboloid for point). Needs
         // the 'Ogre/DPSM/CubeToDpsm' material from the staged common scripts.
         p.technique = Ogre::SHADOWMAP_FOCUSED;
-        p.resolution[0].x = 2048u; p.resolution[0].y = 2048u;
-        p.atlasStart[0].x = 0u; p.atlasStart[0].y = 2048u + 1024u;
+        p.resolution[0].x = R; p.resolution[0].y = R;
+        p.atlasStart[0].x = 0u; p.atlasStart[0].y = R + H;
         p.supportedLightTypes = 0u;
         p.addLightType(Ogre::Light::LT_POINT);
         p.addLightType(Ogre::Light::LT_SPOTLIGHT);
         params.push_back(p);
-        p.atlasStart[0].y = 2048u + 1024u + 2048u;
+        p.atlasStart[0].y = R + H + R;
         params.push_back(p);
         Ogre::ShadowNodeHelper::createShadowNodeWithSettings(
             cm, mRoot->getRenderSystem()->getCapabilities(), OgreView::kShadowNodeName, params, false);
@@ -2069,6 +2145,7 @@ private:
     Display        *mDisplay = nullptr;
     bool            mHlmsRegistered = false;
     ShadowFilter    mShadowFilter = ShadowFilter::Soft;
+    unsigned        mShadowResolution = 2048;
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
     std::vector<std::unique_ptr<OgreScene>> mScenes;

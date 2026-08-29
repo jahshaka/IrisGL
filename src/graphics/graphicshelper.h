@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef GRAPHICSHELPER_H
 #define GRAPHICSHELPER_H
 
+#include <QDebug>
 #include <QString>
 #include <QList>
 
@@ -31,7 +32,7 @@ public:
     ~AssimpObject() {}
 
 private:
-    const aiScene *scene;
+    const aiScene *scene = nullptr;
     QString GUID;
 };
 
@@ -69,12 +70,21 @@ public:
      {
          for (F ao : store) {
              if (ao->path == filePath) {
-                //const aiScene* scene = qvariant_cast<AssimpObject*>(ao->getValue())->getSceneData();
-                const aiScene* scene = ao->getValue().template value<AssimpObject*>()->getSceneData();
+                // Not every path-matching asset holds an AssimpObject: add-to-project
+                // registers an AssetNodeObject (value = SceneNodePtr) under the same
+                // ModelTypes::Object, and value<AssimpObject*>() then returns null.
+                // Dereferencing unchecked crashed on scene load after a same-session
+                // add-to-project — fall back to loading the file instead.
+                AssimpObject *assimpObject = ao->getValue().template value<AssimpObject*>();
+                const aiScene *scene = assimpObject ? assimpObject->getSceneData() : nullptr;
 
                 if (scene != nullptr) {
                     meshes = loadAllMeshesFromAssimpScene(scene);
                     animations = Mesh::extractAnimations(scene, filePath);
+                } else {
+                    qWarning() << "loadAllMeshesAndAnimationsFromStore: asset for" << filePath
+                               << "carries no assimp scene (add-to-project node asset?) — loading the file instead";
+                    loadAllMeshesAndAnimationsFromFile(filePath, meshes, animations);
                 }
 
                 break;
