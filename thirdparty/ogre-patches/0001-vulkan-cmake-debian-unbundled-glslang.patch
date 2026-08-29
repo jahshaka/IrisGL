@@ -1,0 +1,38 @@
+diff --git a/RenderSystems/Vulkan/CMakeLists.txt b/RenderSystems/Vulkan/CMakeLists.txt
+index 612fcc5..2e5cfd3 100644
+--- a/RenderSystems/Vulkan/CMakeLists.txt
++++ b/RenderSystems/Vulkan/CMakeLists.txt
+@@ -40,6 +40,33 @@ endif()
+ ogre_add_library(RenderSystem_Vulkan ${OGRE_LIB_TYPE} ${HEADER_FILES} ${SOURCE_FILES})
+ target_link_libraries(RenderSystem_Vulkan ${OGRE_NEXT}Main ${Vulkan_LIBRARIES})
+ 
++# --- Jahshaka local patch -------------------------------------------------
++# Debian/Ubuntu's libshaderc_combined.a is NOT actually combined: it *references*
++# glslang (nm shows 'U glslang::InitializeProcess') instead of bundling it, unlike
++# Google's upstream build. Without these the plugin links "successfully" (shared
++# libs tolerate undefined symbols) and then dies at runtime with
++#   symbol lookup error: ... undefined symbol: _ZN7glslang17InitializeProcessEv
++# Debian also unbundles SPIRV-Tools from shaderc, so those are needed as well
++# (spvtools::Optimizer). Order matters: all of these must come AFTER shaderc_combined.
++if( UNIX AND NOT APPLE AND NOT ANDROID )
++	find_library( JAHSHAKA_GLSLANG_LIB       glslang )
++	find_library( JAHSHAKA_GLSLANG_SPIRV_LIB SPIRV )
++	find_library( JAHSHAKA_GLSLANG_MI_LIB    MachineIndependent )
++	find_library( JAHSHAKA_GLSLANG_GCG_LIB   GenericCodeGen )
++	find_library( JAHSHAKA_GLSLANG_OSD_LIB   OSDependent )
++	find_library( JAHSHAKA_SPIRV_TOOLS_OPT   SPIRV-Tools-opt )
++	find_library( JAHSHAKA_SPIRV_TOOLS       SPIRV-Tools )
++	if( JAHSHAKA_GLSLANG_LIB )
++		target_link_libraries( RenderSystem_Vulkan
++			${JAHSHAKA_GLSLANG_SPIRV_LIB} ${JAHSHAKA_GLSLANG_LIB}
++			${JAHSHAKA_GLSLANG_MI_LIB} ${JAHSHAKA_GLSLANG_GCG_LIB}
++			${JAHSHAKA_GLSLANG_OSD_LIB}
++			${JAHSHAKA_SPIRV_TOOLS_OPT} ${JAHSHAKA_SPIRV_TOOLS} )
++		message( STATUS "Jahshaka patch: linking system glslang into RenderSystem_Vulkan" )
++	endif()
++endif()
++# --- end Jahshaka local patch ---------------------------------------------
++
+ if( OGRE_VULKAN_WINDOW_XCB )
+ 	target_link_libraries(RenderSystem_Vulkan xcb-randr X11-xcb)
+ endif()

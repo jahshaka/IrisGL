@@ -7,3 +7,6 @@
 [submodule "src/zip"]
 	path = src/zip
 	url = https://github.com/kuba--/zip.git
+[submodule "thirdparty/ogre-next"]
+	path = thirdparty/ogre-next
+	url = https://github.com/OGRECave/ogre-next.git

@@ -1,0 +1,13 @@
+diff --git a/Samples/Media/2.0/scripts/materials/Common/Sky.material b/Samples/Media/2.0/scripts/materials/Common/Sky.material
+index 7e11bdc..d2fd880 100644
+--- a/Samples/Media/2.0/scripts/materials/Common/Sky.material
++++ b/Samples/Media/2.0/scripts/materials/Common/Sky.material
+@@ -124,7 +124,7 @@ material Ogre/Sky/Equirectangular
+ 
+ 			fragment_program_ref Ogre/Sky/Equirectangular_ps
+ 			{
+-				param_named	sliceIdx	float 0.0
++				// param_named sliceIdx float 0.0   (Jahshaka: the Vulkan GLSL strips it; setting it throws)
+ 			}
+ 
+ 			texture_unit
