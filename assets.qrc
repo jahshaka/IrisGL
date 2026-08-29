@@ -6,6 +6,8 @@
         <file>assets/shaders/fullscreen.frag</file>
         <file>assets/shaders/default_material.vert</file>
         <file>assets/shaders/default_material.frag</file>
+        <file>assets/shaders/pbr_material.vert</file>
+        <file>assets/shaders/pbr_material.frag</file>
         <file>assets/shaders/defaultsky.vert</file>
         <file>assets/shaders/defaultsky.frag</file>
         <file>assets/shaders/cubemapsky.frag</file>

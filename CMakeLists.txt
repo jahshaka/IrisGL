@@ -100,6 +100,7 @@ set(SRCS
     src/vr/handpose.cpp
     src/math/mathhelper.cpp
     src/materials/custommaterial.cpp
+    src/materials/pbrmaterial.cpp
     src/graphics/rendertarget.cpp
     src/graphics/postprocessmanager.cpp
     src/postprocesses/coloroverlaypostprocess.cpp
@@ -190,6 +191,7 @@ set (HEADERS
     src/vr/vrmanager.h
     src/graphics/iviewsource.h
     src/materials/custommaterial.h
+    src/materials/pbrmaterial.h
     src/graphics/postprocess.h
     src/graphics/postprocessmanager.h
     src/graphics/rendertexture.h
