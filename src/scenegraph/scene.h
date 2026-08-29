@@ -107,7 +107,6 @@ public:
 	QHash<QString, MeshNodePtr> meshes;
 	QHash<QString, ParticleSystemNodePtr> particleSystems;
 	QHash<QString, ViewerNodePtr> viewers;
-	QHash<QString, GrabNodePtr> grabbers;
 	QHash<QString, SceneNodePtr> nodes;
 
     QColor clearColor;

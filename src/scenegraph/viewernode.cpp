@@ -17,8 +17,6 @@ For more information see the LICENSE file
 #include "../graphics/texture2d.h"
 #include "../graphics/renderitem.h"
 #include "../graphics/renderlist.h"
-#include "../vr/vrdevice.h"
-#include "../vr/vrmanager.h"
 
 namespace iris
 {

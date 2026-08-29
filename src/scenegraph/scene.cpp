@@ -17,7 +17,6 @@ For more information see the LICENSE file
 #include "../scenegraph/viewernode.h"
 #include "../scenegraph/meshnode.h"
 #include "../scenegraph/particlesystemnode.h"
-#include "../scenegraph/grabnode.h"
 #include "../graphics/mesh.h"
 #include "../graphics/renderitem.h"
 #include "../materials/defaultskymaterial.h"
@@ -422,11 +421,6 @@ void Scene::addNode(SceneNodePtr node)
 			vrViewer = viewer;
     }
 
-	if (node->sceneNodeType == SceneNodeType::Grab) {
-		auto grab = node.staticCast<iris::GrabNode>();
-		grabbers.insert(node->getGUID(), grab);
-	}
-
 	nodes.insert(node->getGUID(), node);
 }
 
@@ -456,11 +450,6 @@ void Scene::removeNode(SceneNodePtr node)
 			vrViewer = iter.value();
 		}
     }
-
-	if (node->sceneNodeType == SceneNodeType::Grab) {
-		auto grab = node.staticCast<iris::GrabNode>();
-		grabbers.remove(grab->getGUID());
-	}
 
 	nodes.remove(node->getGUID());
 

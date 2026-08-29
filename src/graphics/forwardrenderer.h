@@ -15,7 +15,6 @@ For more information see the LICENSE file
 #include <QOpenGLContext>
 #include <QSharedPointer>
 
-//#include "../libovr/Include/OVR_CAPI_GL.h"
 #include "../irisglfwd.h"
 
 #include "particle.h"
@@ -38,7 +37,6 @@ class Mesh;
 class BillboardMaterial;
 class Billboard;
 class FullScreenQuad;
-class VrDevice;
 class PostProcessManager;
 class PostProcessContext;
 class PerformanceTimer;
@@ -95,15 +93,10 @@ class ForwardRenderer
     PostProcessManagerPtr postMan;
     PostProcessContext* postContext;
 
-    VrDevice* vrDevice;
-
     RenderTargetPtr renderTarget;
     Texture2DPtr sceneRenderTexture;
     Texture2DPtr depthRenderTexture;
     Texture2DPtr finalRenderTexture;
-
-	Texture2DPtr vrSceneRenderTexture;
-	Texture2DPtr vrDepthRenderTexture;
 
     PerformanceTimer* perfTimer;
 	QVector<LightUniformNames> lightUniformNames;
@@ -132,20 +125,15 @@ public:
     //all scenenodes' transform should be updated before calling this functions
     void renderSceneToRenderTarget(RenderTargetPtr rt, CameraNodePtr cam, bool clearRenderLists = false, bool applyPostProcesses = true);
     void renderScene(float delta, Viewport* vp);
-    void renderSceneVr(float delta, Viewport* vp, bool useViewer = true);
 
     PostProcessManagerPtr getPostProcessManager();
 
-    static ForwardRendererPtr create(bool useVr = true, bool physicsEnabled = false);
-
-    bool isVrSupported();
-	VrDevice* getVrDevice() { return vrDevice; }
-	void regenerateSwapChain();
+    static ForwardRendererPtr create(bool physicsEnabled = false);
 
     ~ForwardRenderer();
 
 private:
-    ForwardRenderer(bool supportsVr = true, bool physicsEnabled = false);
+    ForwardRenderer(bool physicsEnabled = false);
 
     void renderNode(RenderData* renderData, ScenePtr node);
     void renderSky(RenderData* renderData);

@@ -85,7 +85,6 @@ set(SRCS
     src/materials/defaultskymaterial.cpp
     src/graphics/material.cpp
     src/graphics/utils/fullscreenquad.cpp
-    src/vr/vrdevice.cpp
     src/geometry/trimesh.cpp
     src/graphics/vertexlayout.cpp
     src/graphics/shader.cpp
@@ -96,8 +95,6 @@ set(SRCS
     src/materials/materialhelper.cpp
     src/scenegraph/viewernode.cpp
     src/scenegraph/particlesystemnode.cpp
-    src/vr/vrmanager.cpp
-    src/vr/handpose.cpp
     src/math/mathhelper.cpp
     src/materials/custommaterial.cpp
     src/materials/pbrmaterial.cpp
@@ -135,12 +132,8 @@ set(SRCS
     src/graphics/rasterizerstate.cpp
     src/content/contentmanager.cpp
     src/content/modelloader.cpp
-    src/libovr/Src/OVR_CAPI_Util.cpp
-    src/libovr/Src/OVR_StereoProjection.cpp
-    src/libovr/Src/OVR_CAPIShim.c
     src/physics/environment.cpp
     src/physics/physicshelper.cpp
-    src/scenegraph/grabnode.cpp
     src/physics/charactercontroller.cpp
 
 )
@@ -170,8 +163,6 @@ set (HEADERS
     src/materials/defaultskymaterial.h
     src/core/meshmanager.h
     src/graphics/utils/fullscreenquad.h
-    src/vr/vrdevice.h
-    src/vr/handpose.h
     src/math/mathhelper.h
     src/irisglfwd.h
     src/graphics/shader.h
@@ -188,7 +179,6 @@ set (HEADERS
     src/graphics/particlerender.h
     src/graphics/renderitem.h
     src/scenegraph/particlesystemnode.h
-    src/vr/vrmanager.h
     src/graphics/iviewsource.h
     src/materials/custommaterial.h
     src/materials/pbrmaterial.h
@@ -234,21 +224,9 @@ set (HEADERS
     src/graphics/rasterizerstate.h
     src/content/contentmanager.h
 	src/content/modelloader.h
-    src/libovr/Include/OVR_CAPI.h
-    src/libovr/Include/OVR_CAPI_Audio.h
-    src/libovr/Include/OVR_CAPI_D3D.h
-    src/libovr/Include/OVR_CAPI_GL.h
-    src/libovr/Include/OVR_CAPI_Keys.h
-    src/libovr/Include/OVR_ErrorCode.h
-    src/libovr/Include/OVR_Version.h
-    src/libovr/Include/Extras/OVR_CAPI_Util.h
-    src/libovr/Include/Extras/OVR_Math.h
-    src/libovr/Include/Extras/OVR_StereoProjection.h
-    src/libovr/Src/OVR_CAPI_Prototypes.h
     src/physics/environment.h
     src/physics/physicshelper.h
     src/physics/physicsproperties.h
-    src/scenegraph/grabnode.h
     src/physics/charactercontroller.h
 )
 
@@ -270,7 +248,6 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/"
     "${PROJECT_BINARY_DIR}/src/assimp/include/"
     "${PROJECT_SOURCE_DIR}/src/assimp/include/"
-    "${PROJECT_SOURCE_DIR}/src/libovr/Include"
     "${PROJECT_SOURCE_DIR}/src/bullet3/src"
     "${PROJECT_SOURCE_DIR}/src/zip/src"
 )

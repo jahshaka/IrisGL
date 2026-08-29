@@ -5,4 +5,3 @@
 #include "../../src/scenegraph/meshnode.h"
 #include "../../src/scenegraph/particlesystemnode.h"
 #include "../../src/scenegraph/viewernode.h"
-#include "../../src/scenegraph/grabnode.h"

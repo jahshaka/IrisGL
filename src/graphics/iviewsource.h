@@ -21,7 +21,6 @@ public:
     virtual QVector3D getPosition() = 0;
     virtual QMatrix4x4 getViewMatrix() = 0;
     virtual QMatrix4x4 getProjMatrix() = 0;
-    virtual bool supportsVr();
     virtual float getNearClip();
     virtual float getFarClip();
 

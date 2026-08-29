@@ -29,8 +29,7 @@ enum class SceneNodeType {
     Mesh,
     Light,
     Camera,
-    Viewer,
-	Grab
+    Viewer
 };
 
 class PhysicsProperty;
