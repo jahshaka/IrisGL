@@ -60,6 +60,10 @@ ParticleSystemNode::ParticleSystemNode() {
     particleScale = 1.0f;
     lifeLength = 1.0f;
 
+    // Unenforced cap (audit: was uninitialized, copied by createDuplicate — latent
+    // UB). 0 means "no explicit cap"; consumers pick their own default.
+    maxParticles = 0;
+
     speedError = lifeError = scaleError = 0;
 
     // Lazy: the renderer needs a current GL context (its ctor qFatals without one),
@@ -170,6 +174,13 @@ QVector3D ParticleSystemNode::generateRandomUnitVector() {
 
 void ParticleSystemNode::update(float delta) {
     SceneNode::update(delta);
+
+    // A zero-delta update must be a pure transform refresh: the dissipate branch
+    // below multiplies particle scale on EVERY call regardless of delta, so
+    // callers that walk the graph with update(0) (the engine viewport's
+    // SceneMirror does, every frame) would otherwise shrink particles twice as
+    // fast as the legacy viewport.
+    if (delta <= 0.0f) return;
 
     generateParticles(delta);
     //std::list<Particle*>::iterator it = particles.begin();
