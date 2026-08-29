@@ -62,7 +62,9 @@ ParticleSystemNode::ParticleSystemNode() {
 
     speedError = lifeError = scaleError = 0;
 
-    renderer = new ParticleRenderer();
+    // Lazy: the renderer needs a current GL context (its ctor qFatals without one),
+    // and in engine-viewport mode scenes load with none. Created on first render.
+    renderer = nullptr;
 
     renderItem = new RenderItem();
     renderItem->type = RenderItemType::ParticleSystem;
@@ -85,7 +87,8 @@ ParticleSystemNode::~ParticleSystemNode()
 
 void ParticleSystemNode::setBlendMode(bool useAddittive)
 {
-    renderer->useAdditive = this->useAdditive = useAddittive;
+    this->useAdditive = useAddittive;
+    if (renderer) renderer->useAdditive = useAddittive;
 }
 
 void ParticleSystemNode::setBillboardScale(float scale)
@@ -200,6 +203,11 @@ void ParticleSystemNode::update(float delta) {
 
 void ParticleSystemNode::renderParticles(GraphicsDevicePtr device, RenderData* renderData, ShaderPtr shader)
 {
+    // Only the legacy GL renderer calls this, with its context current.
+    if (!renderer) {
+        renderer = new ParticleRenderer();
+        renderer->useAdditive = useAdditive;
+    }
     renderer->icon = texture;
     renderer->render(device, shader, renderData, this->particles);
 }
