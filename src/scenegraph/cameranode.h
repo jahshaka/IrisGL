@@ -80,6 +80,11 @@ private:
 		orthoSize = 10.0f;
         exportable = false;
 		projMode = CameraProjection::Perspective;
+		// Was left indeterminate (only setProjection() wrote it): any consumer
+		// of a camera that never called setProjection read garbage — the engine
+		// mirror rendered preview cameras ORTHOGRAPHIC when the garbage came up
+		// false. Keep it in lock-step with projMode.
+		isPerspective = true;
 		vrViewScale = 2.0f; // good default
         updateCameraMatrices();
     }

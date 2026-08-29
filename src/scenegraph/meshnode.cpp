@@ -294,8 +294,15 @@ MeshNode::loadAsSceneFragment(QString filePath,
     scene_->importer.SetProgressHandler(handle);
     const aiScene *scene = scene_->importer.ReadFile(filePath.toStdString().c_str(), aiProcessPreset_TargetRealtime_Quality);
 
-    // vtkNew<vtkOBJReader> reader;
-    // reader.
+    // ReadFile returns null on failure (corrupt file, or an importer feature
+    // that is not compiled in, e.g. KHR_draco_mesh_compression): dereferencing
+    // it segfaulted. Fail like the aiScene overload below does, with the
+    // assimp error on the log so the caller can surface a message.
+    if (scene == nullptr) {
+        qWarning("loadAsSceneFragment: assimp failed to load %s: %s",
+                 qUtf8Printable(filePath), scene_->importer.GetErrorString());
+        return QSharedPointer<iris::MeshNode>(nullptr);
+    }
     if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
     if (scene->mNumMeshes == 1) {
         auto mesh = scene->mMeshes[0];
