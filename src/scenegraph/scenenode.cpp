@@ -216,6 +216,14 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     return QVariant();
 }
 
+bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
+{
+    if (valueName == "position") { setLocalPos(value.value<QVector3D>());   return true; }
+    if (valueName == "rotation") { setLocalRot(QQuaternion::fromEulerAngles(value.value<QVector3D>())); return true; }
+    if (valueName == "scale")    { setLocalScale(value.value<QVector3D>()); return true; }
+    return false;
+}
+
 SceneNodeType SceneNode::getSceneNodeType()
 {
     return sceneNodeType;

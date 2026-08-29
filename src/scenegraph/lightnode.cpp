@@ -79,6 +79,19 @@ QVariant LightNode::getPropertyValue(QString valueName)
     return SceneNode::getPropertyValue(valueName);
 }
 
+bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
+{
+    if (valueName == "intensity")         { intensity = value.toFloat();         return true; }
+    if (valueName == "lightColor")        { color = value.value<QColor>();       return true; }
+    if (valueName == "distance")          { distance = value.toFloat();          return true; }
+    if (valueName == "spotCutOff")        { spotCutOff = value.toFloat();        return true; }
+    if (valueName == "spotCutOffSoftness"){ spotCutOffSoftness = value.toFloat();return true; }
+    if (valueName == "rectWidth")         { rectWidth = value.toFloat();         return true; }
+    if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return true; }
+
+    return SceneNode::setPropertyValue(valueName, value);
+}
+
 void LightNode::updateAnimation(float time)
 {
     if (!!animation) {

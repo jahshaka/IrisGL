@@ -172,6 +172,11 @@ public:
 
     virtual QList<Property*> getProperties();
     virtual QVariant getPropertyValue(QString valueName);
+    /// Mirror of getPropertyValue: applies a value by property name. Returns
+    /// false when the node has no such property (callers report, not crash).
+    /// Base handles position/rotation (euler degrees)/scale; subclasses extend
+    /// exactly the set their getProperties() advertises.
+    virtual bool setPropertyValue(QString valueName, const QVariant &value);
 
     /*
     * This function should return an exact copy of this node
