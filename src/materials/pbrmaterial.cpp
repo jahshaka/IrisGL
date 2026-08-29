@@ -206,6 +206,7 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "roughnessLowerBound") roughnessLowerBound = value.toFloat();
     else if (name == "roughnessUpperBound") roughnessUpperBound = value.toFloat();
     else if (name == "alphaCutoff")       alphaCutoff       = value.toFloat();
+    else if (name == "alphaMode")         alphaMode         = value.toInt();
 
     // Texture properties arrive as a path, matching how CustomMaterial::setValue
     // is driven from the material presets.
@@ -308,6 +309,66 @@ void PbrMaterial::createProperties()
     scaleProp->maxValue    = 10.0f;
     scaleProp->value       = textureScale;
     properties.append(scaleProp);
+
+    // Remap bounds for a sampled roughness map (see the field comment in the
+    // header: lower > upper deliberately inverts a legacy gloss map).
+    auto roughLowerProp         = new FloatProperty;
+    roughLowerProp->id          = id++;
+    roughLowerProp->displayName = "Roughness Lower Bound";
+    roughLowerProp->name        = "roughnessLowerBound";
+    roughLowerProp->minValue    = 0.0f;
+    roughLowerProp->maxValue    = 1.0f;
+    roughLowerProp->value       = roughnessLowerBound;
+    properties.append(roughLowerProp);
+
+    auto roughUpperProp         = new FloatProperty;
+    roughUpperProp->id          = id++;
+    roughUpperProp->displayName = "Roughness Upper Bound";
+    roughUpperProp->name        = "roughnessUpperBound";
+    roughUpperProp->minValue    = 0.0f;
+    roughUpperProp->maxValue    = 1.0f;
+    roughUpperProp->value       = roughnessUpperBound;
+    properties.append(roughUpperProp);
+
+    auto cutoffProp         = new FloatProperty;
+    cutoffProp->id          = id++;
+    cutoffProp->displayName = "Alpha Cutoff";
+    cutoffProp->name        = "alphaCutoff";
+    cutoffProp->minValue    = 0.0f;
+    cutoffProp->maxValue    = 1.0f;
+    cutoffProp->value       = alphaCutoff;
+    properties.append(cutoffProp);
+
+    // 0 opaque, 1 cutout, 2 blend (glTF's OPAQUE/MASK/BLEND).
+    auto alphaModeProp         = new IntProperty;
+    alphaModeProp->id          = id++;
+    alphaModeProp->displayName = "Alpha Mode";
+    alphaModeProp->name        = "alphaMode";
+    alphaModeProp->minValue    = 0;
+    alphaModeProp->maxValue    = 2;
+    alphaModeProp->value       = alphaMode;
+    properties.append(alphaModeProp);
+
+    // The six texture maps. Names match the setValue() cases above (paths, not
+    // the "u_*Map" sampler names used as Material::textures keys). Declaring
+    // them is what makes SceneWriter persist the maps and SceneReader restore
+    // them — without these, PBR texture maps did not survive a scene save/load.
+    struct MapDef { const char *display; const char *name; };
+    static const MapDef kMaps[] = {
+        { "Base Color Map", "baseColorMap" },
+        { "Normal Map",     "normalMap"    },
+        { "Metallic Map",   "metallicMap"  },
+        { "Roughness Map",  "roughnessMap" },
+        { "Occlusion Map",  "occlusionMap" },
+        { "Emissive Map",   "emissiveMap"  },
+    };
+    for (const auto &m : kMaps) {
+        auto texProp         = new TextureProperty;
+        texProp->id          = id++;
+        texProp->displayName = m.display;
+        texProp->name        = m.name;
+        properties.append(texProp);
+    }
 }
 
 }
