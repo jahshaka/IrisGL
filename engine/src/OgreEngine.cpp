@@ -443,10 +443,43 @@ public:
         if (!data.uvs.empty() && data.uvs.size() != nv * 2) { mError = "createMesh: uv count mismatch"; return 0; }
         JAH_TRY {
             MeshRec rec; rec.name = processUniqueName("mesh");
-            rec.mesh = buildMeshV2(rec.name, data);
-            mMeshes[++mNextMeshId] = rec;
+            rec.dynamic = data.dynamic;
+            rec.mesh = buildMeshV2(rec.name, data, data.dynamic ? &rec.interleaved : nullptr);
+            mMeshes[++mNextMeshId] = std::move(rec);
             return mNextMeshId;
         } JAH_CATCH(mError, 0);
+    }
+    bool updateMeshVertices(MeshId id, const std::vector<float> &positions,
+                            const std::vector<float> &normals) override {
+        auto it = mMeshes.find(id);
+        if (it == mMeshes.end()) { mError = "updateMeshVertices: unknown mesh"; return false; }
+        MeshRec &rec = it->second;
+        if (!rec.dynamic) { mError = "updateMeshVertices: mesh was not created with MeshData::dynamic"; return false; }
+        const size_t nv = rec.interleaved.size() / 12;
+        if (positions.size() != nv * 3) { mError = "updateMeshVertices: positions count mismatch"; return false; }
+        if (!normals.empty() && normals.size() != nv * 3) { mError = "updateMeshVertices: normals count mismatch"; return false; }
+        JAH_TRY {
+            Ogre::Vector3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
+            for (size_t v = 0; v < nv; ++v) {
+                float *dst = &rec.interleaved[v * 12];
+                dst[0] = positions[v*3]; dst[1] = positions[v*3+1]; dst[2] = positions[v*3+2];
+                if (!normals.empty()) { dst[3] = normals[v*3]; dst[4] = normals[v*3+1]; dst[5] = normals[v*3+2]; }
+                mn.makeFloor(Ogre::Vector3(dst[0], dst[1], dst[2]));
+                mx.makeCeil(Ogre::Vector3(dst[0], dst[1], dst[2]));
+            }
+            // BT_DEFAULT buffers upload through a staging buffer — correct on Vulkan
+            // (Ogre inserts the transfer + barriers); no mapping, no frame coupling.
+            Ogre::VertexArrayObject *vao = rec.mesh->getSubMesh(0)->mVao[Ogre::VpNormal][0];
+            Ogre::VertexBufferPacked *vbuf = vao->getVertexBuffers()[0];
+            vbuf->upload(rec.interleaved.data(), 0, Ogre::uint32(nv));
+            // Culling reads bounds cached per Item, not the mesh's: refresh both.
+            const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
+            rec.mesh->_setBounds(aabb, false);
+            rec.mesh->_setBoundingSphereRadius(aabb.getRadius());
+            for (auto &kv : mNodes)
+                if (kv.second.meshRef == id && kv.second.item) kv.second.item->setLocalAabb(aabb);
+            return true;
+        } JAH_CATCH(mError, false);
     }
     bool destroyMesh(MeshId id) override {
         auto it = mMeshes.find(id);
@@ -953,7 +986,14 @@ private:
         std::string               billboardDatablockName;
         unsigned                  billboardCapacity = 0;
     };
-    struct MeshRec { Ogre::MeshPtr mesh; std::string name; };
+    struct MeshRec {
+        Ogre::MeshPtr mesh; std::string name;
+        // CPU-skinning support (MeshData::dynamic): the interleaved vertex array
+        // (12 floats: pos3 normal3 tangent4 uv2) is kept so updateMeshVertices can
+        // rewrite positions/normals while preserving tangents and uvs.
+        bool dynamic = false;
+        std::vector<float> interleaved;
+    };
     struct MaterialRec { std::string datablockName; bool unlit = false; bool onTop = false; };
     struct TextureRec { Ogre::TextureGpu *texture = nullptr; std::string path; };
 
@@ -1030,7 +1070,8 @@ private:
     /// 32-bit indices. v1 meshes silently render nothing on Vulkan, so only this path
     /// exists. Every mesh carries tangents: HlmsPbs refuses to render a normal-mapped
     /// datablock on a mesh without them (throws, object falls back to flat grey).
-    Ogre::MeshPtr buildMeshV2(const std::string &name, const MeshData &data) {
+    Ogre::MeshPtr buildMeshV2(const std::string &name, const MeshData &data,
+                              std::vector<float> *interleavedOut = nullptr) {
         const size_t nv = data.vertexCount(), ni = data.indices.size();
         std::vector<float> normals = data.normals;
         if (normals.empty()) {
@@ -1105,13 +1146,24 @@ private:
                          data.uvs.empty() ? 0.0f : data.uvs[v*2], data.uvs.empty() ? 0.0f : data.uvs[v*2+1] };
             mn.makeFloor(Ogre::Vector3(p[0], p[1], p[2])); mx.makeCeil(Ogre::Vector3(p[0], p[1], p[2]));
         }
+        if (interleavedOut) {
+            const float *vf = reinterpret_cast<const float *>(verts);
+            interleavedOut->assign(vf, vf + nv * 12);
+        }
         Ogre::VaoManager *vaoMgr = mRoot->getRenderSystem()->getVaoManager();
         Ogre::VertexElement2Vec decl;
         decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_POSITION));
         decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_NORMAL));
         decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_TANGENT));
         decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT2, Ogre::VES_TEXTURE_COORDINATES));
-        Ogre::VertexBufferPacked *vbuf = vaoMgr->createVertexBuffer(decl, Ogre::uint32(nv), Ogre::BT_IMMUTABLE, verts, true);
+        // Dynamic (CPU-skinned) meshes get BT_DEFAULT: BufferPacked::upload() then
+        // rewrites it through a staging buffer, fully synchronised on Vulkan.
+        // BT_DYNAMIC_* was deliberately NOT used: those buffers cycle through
+        // triple-buffered sections and must be re-mapped and re-filled EVERY frame
+        // or a stale section shows; a mesh whose pose pauses would flicker back
+        // N frames. Index buffer stays immutable either way.
+        Ogre::VertexBufferPacked *vbuf = vaoMgr->createVertexBuffer(
+            decl, Ogre::uint32(nv), data.dynamic ? Ogre::BT_DEFAULT : Ogre::BT_IMMUTABLE, verts, true);
         Ogre::IndexBufferPacked *ibuf = nullptr;
         if (nv <= 65535u) {
             Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * ni, Ogre::MEMCATEGORY_GEOMETRY));

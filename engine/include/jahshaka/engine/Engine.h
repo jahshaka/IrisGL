@@ -68,6 +68,15 @@ public:
     /// Uploads geometry. Returns 0 on invalid data (lastError()).
     virtual MeshId      createMesh(const MeshData &) = 0;
     virtual bool        destroyMesh(MeshId) = 0;
+    /// Rewrites the vertex positions (and, when non-empty, normals) of a mesh
+    /// created with MeshData::dynamic — the CPU-skinning path: the host computes
+    /// skinned vertices per frame and pushes them here. positions is xyz per
+    /// vertex and must match the mesh's vertex count; normals likewise or empty
+    /// to keep the current ones. Tangents and uvs keep their created values.
+    /// Bounds are recomputed so culling stays correct. False (lastError()) for
+    /// unknown or non-dynamic meshes or size mismatches.
+    virtual bool        updateMeshVertices(MeshId, const std::vector<float> &positions,
+                                           const std::vector<float> &normals) = 0;
     virtual MaterialId  createPbrMaterial(const PbrParams &) = 0;
     virtual bool        setPbrMaterial(MaterialId, const PbrParams &) = 0;
     virtual bool        destroyMaterial(MaterialId) = 0;
