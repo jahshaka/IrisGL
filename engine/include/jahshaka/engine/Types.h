@@ -147,6 +147,34 @@ using NativeDisplayHandle = unsigned long long;
 /// monotonic: a removed node's id is NEVER reused, so a stale id is harmless.
 using NodeId = unsigned int;
 
+// ---- Global illumination (scene-level, GI_SPEC.md) ----
+/// Which GI system lights the scene. Off is the default everywhere — GI must
+/// never cost anything unless the author turns it on.
+enum class GiMode {
+    Off,
+    InstantRadiosity,   ///< bounced light as virtual point lights (VPLs)
+    Vct,                ///< voxel cone tracing            (not implemented yet)
+    VctPccHybrid        ///< VCT + parallax-corrected cubemap probes (not implemented yet)
+};
+/// Coarse quality dial; each backend maps it to its own knobs (VPL/ray budget,
+/// voxel resolution, probe grid).
+enum class GiQuality { Low, Medium, High };
+
+/// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
+struct GiParams {
+    GiMode    mode    = GiMode::Off;
+    GiQuality quality = GiQuality::Medium;
+    /// World-space bounds GI operates in (VCT voxel volume; IR area of interest
+    /// for directional lights). min == max means "auto": the backend derives it
+    /// from the scene's lit geometry plus a margin.
+    Vec3      boundsMin, boundsMax;
+    /// Instant Radiosity: the node whose light drives the bounce. 0 means "auto"
+    /// (the backend picks the first directional light, else any light).
+    NodeId    irLight = 0;
+    /// Total light bounces, 1..4 (1 = a single indirect bounce).
+    int       numBounces = 1;
+};
+
 enum class Backend { Vulkan, OpenGL };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at

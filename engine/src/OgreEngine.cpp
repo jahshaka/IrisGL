@@ -52,6 +52,8 @@
 #include <Vao/OgreVertexArrayObject.h>
 #include <ParticleSystem/OgreBillboardSet2.h>
 #include <ParticleSystem/OgreParticleSystemManager2.h>
+#include <OgreForwardPlusBase.h>
+#include <InstantRadiosity/OgreInstantRadiosity.h>
 
 #include <X11/Xlib.h>
 #include <atomic>
@@ -61,6 +63,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -85,6 +88,18 @@ std::string processUniqueName(const char *prefix) {
     catch (std::exception &e)  { (sink) = std::string("engine: ") + e.what(); return ret; }
 
 class OgreEngine;
+
+// ---------------------------------------------------------------------------
+// Visibility-flag bits (user bits; Ogre reserves the top two for layer state).
+// Every object keeps kVisibleBit so default cameras/compositor masks (all ones)
+// draw it. kGiGeometryBit marks items whose surfaces bounce light for GI: PBR
+// items only — never the sky, unlit overlays, line meshes or billboards, which
+// would otherwise occlude rays or raycast as garbage triangles (a non-indexed
+// line VAO reads as a vertex triangle list). kGiLightBit marks exactly the one
+// light Instant Radiosity traces from (InstantRadiosity::mLightMask).
+constexpr Ogre::uint32 kVisibleBit     = 1u;
+constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
+constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
 
 // ---------------------------------------------------------------------------
 // Linear distance fog (media/Hlms/Jahshaka/JahFog_piece_ps.any, attached to every
@@ -208,6 +223,7 @@ public:
                 mSkyItem->setDatablock(db);
                 mSkyItem->setRenderQueueGroup(0);
                 mSkyItem->setCastShadows(false);
+                mSkyItem->setVisibilityFlags(kVisibleBit);   // never GI geometry
                 mSkyNode = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)->createChildSceneNode(Ogre::SCENE_DYNAMIC);
                 mSkyNode->attachObject(mSkyItem);
             }
@@ -261,6 +277,7 @@ public:
                 item->setDatablock(db);
                 item->setRenderQueueGroup(0);
                 item->setCastShadows(false);
+                item->setVisibilityFlags(kVisibleBit);   // never GI geometry
                 mSkyNode->attachObject(item);
                 mSkyFaces.push_back({ item, mesh, meshName, dbName });
             }
@@ -357,6 +374,7 @@ public:
 
             rec.item = mSceneMgr->createItem(rec.mesh, Ogre::SCENE_DYNAMIC);
             rec.item->setDatablock(db);
+            rec.item->setVisibilityFlags(kVisibleBit | kGiGeometryBit);   // PBR: bounces light
             rec.node = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)
                                 ->createChildSceneNode(Ogre::SCENE_DYNAMIC);
             rec.node->attachObject(rec.item);
@@ -542,6 +560,10 @@ public:
             detachItem(n);
             n.item = mSceneMgr->createItem(mit->second.mesh, Ogre::SCENE_DYNAMIC);
             n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
+            // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
+            // line meshes must neither bounce nor occlude the radiosity rays.
+            n.item->setVisibilityFlags(tit->second.unlit ? kVisibleBit
+                                                         : (kVisibleBit | kGiGeometryBit));
             // On-top overlays render after everything else (all RQ groups default to
             // v2 FAST mode, so a high group id is enough); depth test is off in the material.
             if (tit->second.onTop) n.item->setRenderQueueGroup(200);
@@ -910,8 +932,16 @@ public:
             // earlier 'calibration' removed this while the light DIRECTION mapping was
             // broken — the overexposure it fixed was side-lit faces, not the scale.)
             L->setPowerScale(d.intensity * Ogre::Math::PI);
-            if (d.type != LightType::Directional)
+            if (d.type != LightType::Directional) {
                 L->setAttenuationBasedOnRadius(std::max(d.range, 0.01f), 0.01f);
+            } else {
+                // Ogre's default attenuation (const 0.5, quad 0.5) is never used to
+                // SHADE a directional light, but Instant Radiosity attenuates its
+                // rays with it — over the tens of units a ray travels from outside
+                // the scene that quadratic term crushed every bounce to black.
+                // The InstantRadiosity sample sets exactly this: no falloff.
+                L->setAttenuation(std::numeric_limits<Ogre::Real>::max(), 1.0f, 0.0f, 0.0f);
+            }
             if (d.type == LightType::Spot) {
                 const float outer = std::max(1.0f, std::min(d.spotAngleDegrees, 179.0f));
                 const float inner = outer * (1.0f - std::min(std::max(d.spotSoftness, 0.0f), 0.99f));
@@ -933,6 +963,60 @@ public:
         } JAH_CATCH(mError, false);
     }
 
+    // ---- Global illumination (GI_SPEC.md phase 1: Instant Radiosity) ----
+    // IR traces rays from ONE chosen light against the scene's PBR items (their
+    // vertex buffers keep CPU shadow copies, so no GPU readback stalls) and
+    // plants virtual point lights (LT_VPL) where the rays bounce. The VPLs live
+    // in THIS SceneManager and are shaded through its Forward+ clustered list —
+    // nothing binds to the process-wide HlmsPbs, so GI here never leaks into the
+    // player/asset/preview scenes. (The sample's optional IrradianceVolume WOULD
+    // be such a global binding — deliberately not used; see setGlobalIllumination.)
+    bool setGlobalIllumination(const GiParams &p) override {
+        JAH_TRY {
+            if (p.mode != GiMode::InstantRadiosity) {
+                // Off — and the not-yet-implemented VCT modes render as off rather
+                // than faking anything (documents saved with them still load).
+                if ((p.mode == GiMode::Vct || p.mode == GiMode::VctPccHybrid) &&
+                    mGi.mode != p.mode) {
+                    Ogre::LogManager::getSingleton().logMessage(
+                        "Jahshaka: GI mode not implemented yet (VCT); rendering without GI");
+                }
+                teardownGi();
+                mGi = p;
+                return true;
+            }
+            if (!mInstantRadiosity) {
+                // VPLs ride the Forward+ clustered list every scene already has;
+                // this flag merely lets LT_VPL lights into it.
+                mSceneMgr->getForwardPlus()->setEnableVpls(true);
+                mInstantRadiosity = new Ogre::InstantRadiosity(mSceneMgr, mRoot->getHlmsManager());
+                mInstantRadiosity->mVisibilityMask = kGiGeometryBit;   // PBR items only
+                mInstantRadiosity->mLightMask = kGiLightBit;           // the one driving light
+                // NOT setUseIrradianceVolume: the volume binds process-wide to
+                // HlmsPbs (multi-scene caveat); plain VPLs already give the bounce.
+            }
+            // Quality -> ray/VPL budget. Rays are the cost knob (trace time and VPL
+            // count); the cell size clusters VPLs (smaller = more VPLs, softer look).
+            switch (p.quality) {
+            case GiQuality::Low:    mInstantRadiosity->mNumRays = 128;  mInstantRadiosity->mCellSize = 4.0f; break;
+            case GiQuality::Medium: mInstantRadiosity->mNumRays = 512;  mInstantRadiosity->mCellSize = 2.0f; break;
+            case GiQuality::High:   mInstantRadiosity->mNumRays = 2048; mInstantRadiosity->mCellSize = 1.0f; break;
+            }
+            // Document bounces are total (1 = one indirect bounce); IR counts extra
+            // ray bounces beyond the first hit.
+            mInstantRadiosity->mNumRayBounces =
+                size_t(std::min(std::max(p.numBounces, 1), 4) - 1);
+            mGi = p;
+            rebuildGi();
+            return true;
+        } JAH_CATCH(mError, false);
+    }
+    void refreshGlobalIllumination() override {
+        JAH_TRY {
+            if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity) rebuildGi();
+        } JAH_CATCH(mError, );
+    }
+
     Ogre::SceneManager *sceneManager() const { return mSceneMgr; }
 
     /// Releases everything in dependency order. Safe to call twice. Called by
@@ -940,6 +1024,7 @@ public:
     void destroy() {
         if (!mSceneMgr) return;
         JAH_TRY {
+            teardownGi();   // VPL lights die while the SceneManager is still alive
             destroySky();   // also unbinds + destroys the reflection cubemap
             for (auto &kv : mNodes) releaseNode(kv.second);
             mNodes.clear();
@@ -1254,6 +1339,114 @@ private:
         }
     }
 
+    // ---- GI internals ----
+    /// Resolves the driving light — the requested node's light, else the first
+    /// directional, else any light — and marks exactly that light with
+    /// kGiLightBit so InstantRadiosity's light mask selects it alone. Returns
+    /// null when the scene has no light at all. (IR's own LT_VPL lights are not
+    /// in mNodes and are skipped by IR itself.)
+    Ogre::Light *markGiLight(NodeId requested) {
+        Ogre::Light *chosen = nullptr;
+        if (requested) {
+            auto it = mNodes.find(requested);
+            if (it != mNodes.end()) chosen = it->second.light;
+        }
+        if (!chosen)
+            for (auto &kv : mNodes)
+                if (kv.second.light && kv.second.light->getType() == Ogre::Light::LT_DIRECTIONAL) {
+                    chosen = kv.second.light; break;
+                }
+        if (!chosen)
+            for (auto &kv : mNodes)
+                if (kv.second.light) { chosen = kv.second.light; break; }
+        for (auto &kv : mNodes) {
+            if (!kv.second.light) continue;
+            const Ogre::uint32 flags = kv.second.light->getVisibilityFlags();
+            const Ogre::uint32 want = (kv.second.light == chosen) ? (flags | kGiLightBit)
+                                                                  : (flags & ~kGiLightBit);
+            if (want != flags) kv.second.light->setVisibilityFlags(want);
+        }
+        return chosen;
+    }
+    /// The GI working volume: the document's explicit bounds, or (min == max)
+    /// the world AABB of every GI-participating item plus a margin.
+    bool computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
+        const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
+        if (a.x != b.x || a.y != b.y || a.z != b.z) {
+            mn = Ogre::Vector3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
+            mx = Ogre::Vector3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
+            return true;
+        }
+        bool any = false;
+        mn = Ogre::Vector3(1e30f); mx = Ogre::Vector3(-1e30f);
+        for (const auto &kv : mNodes) {
+            const Ogre::Item *item = kv.second.item;
+            if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+            const Ogre::Aabb aabb = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
+            mn.makeFloor(aabb.getMinimum());
+            mx.makeCeil(aabb.getMaximum());
+            any = true;
+        }
+        if (!any) return false;
+        const Ogre::Vector3 margin = (mx - mn) * 0.1f + Ogre::Vector3(0.5f);
+        mn -= margin; mx += margin;
+        return true;
+    }
+    /// Re-traces Instant Radiosity against the scene as it is right now. Cheap
+    /// enough (a few ms at editor quality) to run on every light move.
+    void rebuildGi() {
+        Ogre::Light *driver = markGiLight(mGi.irLight);
+        Ogre::Vector3 mn, mx;
+        if (!driver || !computeGiBounds(mn, mx)) {
+            mInstantRadiosity->clear();   // nothing to bounce (yet); stay armed
+            return;
+        }
+        // One area of interest covering the GI bounds. Directional rays start
+        // outside the sphere so nearby geometry occludes correctly.
+        const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
+        mInstantRadiosity->mAoI.clear();
+        mInstantRadiosity->mAoI.push_back(
+            Ogre::InstantRadiosity::AreaOfInterest(aabb, aabb.getRadius() * 2.0f));
+        mInstantRadiosity->build();
+        // Diagnostic: JAHSHAKA_GI_DEBUG=1 logs how many VPLs the trace planted.
+        if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+            size_t vpls = 0;
+            Ogre::ObjectMemoryManager &mm = mSceneMgr->_getLightMemoryManager();
+            for (size_t rq = 0; rq < mm.getNumRenderQueues(); ++rq) {
+                Ogre::ObjectData objData;
+                const size_t total = mm.getFirstObjectData(objData, rq);
+                for (size_t i = 0; i < total; i += ARRAY_PACKED_REALS) {
+                    for (size_t k = 0; k < ARRAY_PACKED_REALS && i + k < total; ++k) {
+                        const Ogre::Light *l = static_cast<Ogre::Light *>(objData.mOwner[k]);
+                        if (l && l->getType() == Ogre::Light::LT_VPL) {
+                            ++vpls;
+                            if (vpls <= 4) {
+                                const Ogre::ColourValue c = l->getDiffuseColour();
+                                const Ogre::Vector3 pos = l->getParentNode()->_getDerivedPosition();
+                                Ogre::LogManager::getSingleton().logMessage(
+                                    "Jahshaka GI: vpl at " + Ogre::StringConverter::toString(pos) +
+                                    " diffuse " + Ogre::StringConverter::toString(c) +
+                                    " range " + std::to_string(l->getAttenuationRange()));
+                            }
+                        }
+                    }
+                    objData.advancePack();
+                }
+            }
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: instant radiosity planted " + std::to_string(vpls) + " VPLs");
+        }
+    }
+    /// Deletes the radiosity solution and its VPL lights. Safe to call twice;
+    /// must run BEFORE the SceneManager dies (the dtor destroys its lights).
+    void teardownGi() {
+        if (!mInstantRadiosity) return;
+        delete mInstantRadiosity;   // ~InstantRadiosity clears the VPLs
+        mInstantRadiosity = nullptr;
+        if (mSceneMgr && mSceneMgr->getForwardPlus())
+            mSceneMgr->getForwardPlus()->setEnableVpls(false);
+    }
+
     Ogre::SceneNode *node(NodeId id) const {
         auto it = mNodes.find(id);
         return it == mNodes.end() ? nullptr : it->second.node;
@@ -1326,6 +1519,8 @@ private:
     Ogre::Item      *mSkyItem = nullptr;
     Ogre::MeshPtr    mSkyMesh;
     std::string      mSkyMeshName, mSkyDatablockName;
+    Ogre::InstantRadiosity *mInstantRadiosity = nullptr;   // owned; null when GI off
+    GiParams         mGi;                                  // last applied GI state
     TextureId           mNextTextureId = 0;
     NodeId              mNextId = 0;
     MeshId              mNextMeshId = 0;

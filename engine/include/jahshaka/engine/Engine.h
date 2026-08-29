@@ -128,6 +128,18 @@ public:
     // shine down the node's -Y (the document's convention: identity = straight down).
     virtual bool        setLight(NodeId, const LightDesc &) = 0;   // creates or updates
     virtual bool        removeLight(NodeId) = 0;
+
+    // ---- Global illumination (GI_SPEC.md). Scene-level, like fog and sky. ----
+    /// Applies the GI state idempotently, rebuilding whatever changed. Passing the
+    /// same params twice is cheap; GiMode::Off tears everything down. Modes the
+    /// backend has not implemented yet degrade to Off (true is still returned so a
+    /// document saved with a future mode keeps loading). Instant Radiosity is
+    /// per-scene: its virtual point lights live in this scene only.
+    virtual bool        setGlobalIllumination(const GiParams &) = 0;
+    /// Re-runs the active GI solution against the scene's current state (the
+    /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
+    /// in milliseconds at editor quality; callers may invoke this per edit.
+    virtual void        refreshGlobalIllumination() = 0;
 };
 
 /// A view onto a Scene, rendering into a native window supplied by the host or

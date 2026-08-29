@@ -57,6 +57,14 @@ Scene::Scene()
     fogEnd = 180;
     fogEnabled = true;
 
+    // global illumination is opt-in: off by default, everywhere, always
+    giMode = GiMode::OFF;
+    giQuality = GiQuality::MEDIUM;
+    giBoundsMin = QVector3D();          // min == max -> automatic bounds
+    giBoundsMax = QVector3D();
+    giNumBounces = 1;
+    giAutoRefresh = true;
+
     // sky init
     skyType = SkyType::SINGLE_COLOR;
 

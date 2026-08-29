@@ -54,6 +54,23 @@ enum class SkyType : int
 	REALISTIC
 };
 
+// Global illumination (world panel). Values are serialized by ordinal-stable
+// string names in SceneWriter/SceneReader, not by these ints.
+enum class GiMode : int
+{
+	OFF = 0,
+	INSTANT_RADIOSITY,
+	VCT,
+	VCT_PCC_HYBRID
+};
+
+enum class GiQuality : int
+{
+	LOW = 0,
+	MEDIUM,
+	HIGH
+};
+
 struct SkyRealistic
 {
 	float luminance;
@@ -117,6 +134,16 @@ public:
     float fogStart;
     float fogEnd;
     bool fogEnabled;
+
+    // global illumination (world panel; rendered by the engine viewport only).
+    // giBounds min == max means "automatic" (scene bounds + margin).
+    GiMode giMode;
+    GiQuality giQuality;
+    QVector3D giBoundsMin;
+    QVector3D giBoundsMax;
+    QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
+    int giNumBounces;          // 1..4
+    bool giAutoRefresh;        // editor: re-solve automatically on edits
 
     float gravity;
     bool shadowEnabled;
