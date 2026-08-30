@@ -53,8 +53,11 @@ Scene *OgreEngine::createScene(const std::string &name) {
         // HlmsPbs shades point and spot lights ONLY through Forward+ (Forward3D /
         // ForwardClustered); without it only directional lights reach the shader.
         // Values are Ogre's sample defaults: 16x8 grid, 24 slices, 96 lights per
-        // cell, no decals/probes, 2..50 units depth range.
-        sm->setForwardClustered(true, 16, 8, 24, 96, 0, 0, 2.0f, 50.0f);
+        // cell, no decals, 2..50 units depth range. 4 cubemap probes per cell:
+        // per-pixel PCC (the GI hybrid's reflection probes) is culled through
+        // this grid — 0 would silently disable it (costs a slightly larger grid
+        // buffer; zero shader cost until probes exist).
+        sm->setForwardClustered(true, 16, 8, 24, 96, 0, 4, 2.0f, 50.0f);
         // Shadow maps cover nothing until these are set (Ogre's samples set both).
         sm->setShadowDirectionalLightExtrusionDistance(500.0f);
         sm->setShadowFarDistance(500.0f);
@@ -152,7 +155,7 @@ void OgreEngine::destroyView(View *view) {
 
 void OgreEngine::renderOneFrame() {
     JAH_TRY {
-        for (auto &v : mViews) { v->applyPendingResize(); v->updateSky(); v->updateParticles(); }
+        for (auto &v : mViews) { v->applyPendingResize(); v->updateSky(); v->updateParticles(); v->updateGi(); }
         for (auto &s : mScenes) s->applyPendingGi();
         if (mRoot) mRoot->renderOneFrame();
     } JAH_CATCH(mLastError, );
@@ -260,7 +263,18 @@ void OgreEngine::registerCommonMaterials() {
                                "2.0/scripts/materials/Common/GLSL", "2.0/scripts/materials/Common/HLSL",
                                "2.0/scripts/materials/Common/Metal",
                                "Hlms/Common/Any", "Hlms/Common/GLSL", "Hlms/Common/HLSL", "Hlms/Common/Metal",
-                               // Jahshaka's own pieces (fog); resolved by setCustomPieceFile.
+                               // The VCT LightInjection compute job includes PBS pieces (area-light
+                               // LTC) by bare file name through the resource system.
+                               "Hlms/Pbs/Any",
+                               // VCT voxelizer/lighting compute jobs (Voxelizer.material.json —
+                               // it also declares the ImageVoxelizer jobs, whose sources live in
+                               // the subfolder) and the IBL specular integrator the PCC probe
+                               // workspace's ibl_specular pass wants (falls back to mips if absent).
+                               "VCT", "VCT/ImageVoxelizer",
+                               "Compute/Tools", "Compute/Tools/Any", "Compute/Tools/GLSL",
+                               "Compute/Tools/HLSL", "Compute/Tools/Metal",
+                               "Compute/Algorithms/IBL",
+                               // Jahshaka's own pieces (fog) + the PCC probe compositor.
                                "Hlms/Jahshaka" };
         for (const char *d : dirs) rgm.addResourceLocation(mMediaDir + d, "FileSystem", group, false);
         rgm.initialiseAllResourceGroups(true);

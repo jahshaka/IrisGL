@@ -160,6 +160,7 @@ bool OgreScene::removeLight(NodeId id) {
         mSceneMgr->destroyLight(it->second.light);
         it->second.light = nullptr;
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
+        invalidateGiCaches();   // a vanished light must stop bouncing (VCT re-injects)
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -198,6 +199,10 @@ void OgreScene::destroy() {
 
 void OgreScene::detachItem(Node &n) {
     if (n.item && n.meshRef) {
+        // Only GI-participating (lit) geometry invalidates — detaching a selection
+        // outline or wire overlay must not trigger a re-voxelize. BEFORE the
+        // destroy: the voxelizer/IR hold raw pointers into the dying geometry.
+        if (n.item->getVisibilityFlags() & kGiGeometryBit) invalidateGiCaches();
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
     }
     n.meshRef = 0; n.materialRef = 0;
@@ -207,8 +212,11 @@ void OgreScene::releaseNode(Node &n) {
     // Order: renderable off the node -> item (drops the datablock link and one
     // mesh ref) -> datablock -> node -> our mesh ref -> the mesh itself.
     releaseBillboards(n);
+    // Invalidate BEFORE anything dies (IR frees its by-pointer caches inside):
+    // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
+    if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit)))
+        invalidateGiCaches();
     if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
-    if (n.mesh)  invalidateGiCaches();   // node-owned MeshPtr dies below; IR caches its VAO
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
     if (n.light) { n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr; }

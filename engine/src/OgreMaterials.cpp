@@ -108,6 +108,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
     JAH_TRY {
+        invalidateGiCaches();   // VctMaterial caches conversions by raw datablock pointer
         for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.second);
         Ogre::Hlms *hlms = hlmsFor(it->second);
         if (hlms->getDatablock(Ogre::IdString(it->second.datablockName)))
@@ -136,6 +137,9 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         if (tit->second.onTop) n.item->setRenderQueueGroup(200);
         n.node->attachObject(n.item);
         n.meshRef = meshId; n.materialRef = matId;
+        // New lit geometry must join the voxel volume / next trace; unlit
+        // overlays (outlines, wires) never participate in GI.
+        if (!tit->second.unlit) invalidateGiCaches();
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -221,7 +225,14 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         tex->setResolution(w, h);
         tex->setNumMipmaps(1u);
         tex->setPixelFormat(srgb ? Ogre::PFG_RGBA8_UNORM_SRGB : Ogre::PFG_RGBA8_UNORM);
-        tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+        // IMMEDIATE residency (_transitionTo), and NO explicit notifyDataIsReady:
+        // for a ManualTexture _transitionTo(Resident) calls notifyDataIsReady
+        // ITSELF (OgreTextureGpu.cpp:600). A second call underflows the uint8
+        // mDataPreparationsPending to 255, isDataReady() then never turns true,
+        // and anything that waits on the texture — InstantRadiosity's
+        // downloadTexture under GI, Image2::convertFromTexture — spins in
+        // waitForData forever (found by the GI churn test hanging).
+        tex->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
         Ogre::StagingTexture *staging = tm->getStagingTexture(w, h, 1u, 1u, tex->getPixelFormat());
         staging->startMapRegion();
         Ogre::TextureBox box = staging->mapRegion(w, h, 1u, 1u, tex->getPixelFormat());
@@ -229,7 +240,6 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         staging->stopMapRegion();
         staging->upload(box, tex, 0, nullptr, nullptr, true);
         tm->removeStagingTexture(staging);
-        tex->notifyDataIsReady();
         TextureRec rec; rec.texture = tex; rec.path = "";
         mTextures[++mNextTextureId] = rec;
         return mNextTextureId;
@@ -240,10 +250,10 @@ bool OgreScene::destroyTexture(TextureId id) {
     auto it = mTextures.find(id);
     if (it == mTextures.end()) return false;
     JAH_TRY {
+        invalidateGiCaches();   // BEFORE the texture dies: IR caches images by TextureGpu*
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
         tm->destroyTexture(it->second.texture);
         mTextures.erase(it);
-        invalidateGiCaches();   // IR caches downloaded images by TextureGpu*
         return true;
     } JAH_CATCH(mError, false);
 }

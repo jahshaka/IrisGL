@@ -1,0 +1,104 @@
+// Jahshaka's PCC probe-render workspace (GI_SPEC.md phase 3, the VCT+PCC hybrid).
+// ParallaxCorrectedCubemapAuto instantiates this once per reflection probe: six
+// scene renders into the cubemap faces, each followed by PCC/DepthCompressor
+// (packs view depth into the alpha channel — PccPerPixelGridPlacement::buildEnd
+// reads it back to shrink-fit each probe's shape to the geometry around it),
+// and finally the IBL specular mip chain the PBS shader samples by roughness.
+// This is the sample's LocalCubemapsProbeWorkspace minus its shadow node — probe
+// captures are unshadowed in v1 (the blurred IBL result hides it almost
+// entirely; a probe shadow node is a quality follow-up).
+// On-top overlays (selection outlines, gizmo geometry, render queue 200) and
+// PCC's own helper geometry (RQ 250+) are excluded from captures via rq_last.
+
+abstract target jah_pcc_cubemap_face
+{
+	pass render_scene
+	{
+		load
+		{
+			all				clear
+			clear_colour	0 0 0 1
+		}
+		store
+		{
+			// Depth must survive for the compressor pass below.
+			depth			store
+			stencil			dont_care
+		}
+		overlays			off
+		camera_cubemap_reorient true
+
+		rq_first	0
+		rq_last		200
+
+		profiling_id "Jahshaka PCC probe face"
+	}
+}
+
+abstract target jah_pcc_depth_compress
+{
+	pass render_quad
+	{
+		store
+		{
+			depth	dont_care
+			stencil	dont_care
+		}
+
+		quad_normals	camera_far_corners_view_space
+		material		PCC/DepthCompressor
+
+		input			0 depthTexture
+
+		camera_cubemap_reorient true
+
+		profiling_id "Jahshaka PCC depth compress"
+	}
+}
+
+compositor_node JahshakaPccProbeRendererNode
+{
+	in 0 cubemap
+	in 1 ibl_output
+
+	texture depthTexture	target_width target_height PFG_D32_FLOAT
+
+	rtv cubemap_customRtv
+	{
+		colour	cubemap
+		depth	depthTexture
+	}
+	rtv cubemap_noDepth
+	{
+		colour		cubemap
+		depth_pool	0
+	}
+
+	target cubemap_customRtv	+X : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		+X : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-X : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		-X : jah_pcc_depth_compress { }
+	target cubemap_customRtv	+Y : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		+Y : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-Y : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		-Y : jah_pcc_depth_compress { }
+	target cubemap_customRtv	+Z : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		+Z : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-Z : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		-Z : jah_pcc_depth_compress
+	{
+		pass ibl_specular
+		{
+			input cubemap
+			output ibl_output
+
+			profiling_id "Jahshaka PCC IBL specular"
+		}
+	}
+}
+
+workspace JahshakaPccProbeWorkspace
+{
+	connect_external 0 JahshakaPccProbeRendererNode 0
+	connect_external 1 JahshakaPccProbeRendererNode 1
+}

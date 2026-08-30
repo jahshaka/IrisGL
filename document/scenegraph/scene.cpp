@@ -51,6 +51,7 @@ Scene::Scene()
     giBoundsMax = QVector3D();
     giNumBounces = 1;
     giAutoRefresh = true;
+    giPccGrid = QVector3D(3, 2, 3);
 
     // sky init
     skyType = SkyType::SINGLE_COLOR;

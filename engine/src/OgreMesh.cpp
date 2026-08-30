@@ -57,12 +57,12 @@ bool OgreScene::destroyMesh(MeshId id) {
     auto it = mMeshes.find(id);
     if (it == mMeshes.end()) return false;
     JAH_TRY {
+        invalidateGiCaches();   // BEFORE the mesh dies: IR frees its by-VAO caches now
         for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.second);
         it->second.mesh.reset();
         Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
         if (mm.resourceExists(it->second.name)) mm.remove(it->second.name);
         mMeshes.erase(it);
-        invalidateGiCaches();   // IR caches mesh data by raw VAO pointer
         return true;
     } JAH_CATCH(mError, false);
 }

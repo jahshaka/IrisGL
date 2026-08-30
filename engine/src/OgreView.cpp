@@ -196,6 +196,10 @@ void OgreView::updateParticles() {
         mScene->sceneManager()->getParticleSystemManager2()->setCameraPosition(mCamera->getPosition());
 }
 
+void OgreView::updateGi() {
+    if (mEnabled && mScene && mCamera) mScene->updateGiTracking(mCamera->getPosition());
+}
+
 void OgreView::destroy() {
     detachScene();
     JAH_TRY {

@@ -153,8 +153,9 @@ using NodeId = unsigned int;
 enum class GiMode {
     Off,
     InstantRadiosity,   ///< bounced light as virtual point lights (VPLs)
-    Vct,                ///< voxel cone tracing            (not implemented yet)
-    VctPccHybrid        ///< VCT + parallax-corrected cubemap probes (not implemented yet)
+    Vct,                ///< voxel cone tracing over the GI bounds (diffuse + specular GI)
+    VctPccHybrid        ///< VCT plus parallax-corrected cubemap probes: probe reflections
+                        ///< near geometry, cone-traced reflections far from it
 };
 /// Coarse quality dial; each backend maps it to its own knobs (VPL/ray budget,
 /// voxel resolution, probe grid).
@@ -173,6 +174,9 @@ struct GiParams {
     NodeId    irLight = 0;
     /// Total light bounces, 1..4 (1 = a single indirect bounce).
     int       numBounces = 1;
+    /// Hybrid only: reflection-probe counts along each world axis of the GI
+    /// bounds (the parallax-corrected cubemap grid). Clamped to 1..8 per axis.
+    int       pccProbesX = 3, pccProbesY = 2, pccProbesZ = 3;
 };
 
 enum class Backend { Vulkan, OpenGL };

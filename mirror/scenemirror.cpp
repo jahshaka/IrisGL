@@ -917,23 +917,41 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.boundsMin = toVec3(mSource->giBoundsMin);
         gi.boundsMax = toVec3(mSource->giBoundsMax);
         gi.numBounces = mSource->giNumBounces;
+        gi.pccProbesX = qBound(1, qRound(mSource->giPccGrid.x()), 8);
+        gi.pccProbesY = qBound(1, qRound(mSource->giPccGrid.y()), 8);
+        gi.pccProbesZ = qBound(1, qRound(mSource->giPccGrid.z()), 8);
         iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
         gi.irLight = driver ? engineNode(driver) : 0;
         const auto same = [](const GiParams &a, const GiParams &b) {
             return a.mode == b.mode && a.quality == b.quality && a.irLight == b.irLight &&
                    a.numBounces == b.numBounces &&
+                   a.pccProbesX == b.pccProbesX && a.pccProbesY == b.pccProbesY &&
+                   a.pccProbesZ == b.pccProbesZ &&
                    a.boundsMin.x == b.boundsMin.x && a.boundsMin.y == b.boundsMin.y &&
                    a.boundsMin.z == b.boundsMin.z && a.boundsMax.x == b.boundsMax.x &&
                    a.boundsMax.y == b.boundsMax.y && a.boundsMax.z == b.boundsMax.z;
         };
-        const QMatrix4x4 lightWorld = driver ? driver->globalTransform : QMatrix4x4();
+        // What a refresh should track depends on the mode: IR re-traces from
+        // ONE driving light, so only that light's transform matters; VCT
+        // injects EVERY light into the voxel volume, so any light moving (or
+        // appearing/dying) goes stale until a re-voxelize.
+        QMatrix4x4 lightWorld;
+        if (driver) {
+            lightWorld = driver->globalTransform;
+        } else if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
+            for (const auto &l : mSource->lights)
+                if (!l.isNull()) lightWorld *= l->globalTransform;   // cheap combined signature
+        }
         if (!mGiPushed || !same(gi, mLastGi)) {
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
             mGiLightWorld = lightWorld;
             mGiPushed = true;
-        } else if (gi.mode == GiMode::InstantRadiosity && mSource->giAutoRefresh &&
+        } else if (gi.mode != GiMode::Off && mSource->giAutoRefresh &&
                    lightWorld != mGiLightWorld) {
+            // IR re-traces in milliseconds; VCT re-injects + re-voxelizes on the
+            // GPU (a few ms at editor volumes on real hardware). The per-frame
+            // signature compare is the debounce, as for the push above.
             mGiLightWorld = lightWorld;
             mTarget->refreshGlobalIllumination();
         }

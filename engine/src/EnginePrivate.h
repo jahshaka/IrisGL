@@ -57,6 +57,10 @@
 #include <ParticleSystem/OgreParticleSystemManager2.h>
 #include <OgreForwardPlusBase.h>
 #include <InstantRadiosity/OgreInstantRadiosity.h>
+#include <Vct/OgreVctVoxelizer.h>
+#include <Vct/OgreVctLighting.h>
+#include <Cubemaps/OgreParallaxCorrectedCubemapAuto.h>
+#include <Cubemaps/OgrePccPerPixelGridPlacement.h>
 
 #include <X11/Xlib.h>
 #include <atomic>
@@ -226,14 +230,21 @@ public:
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
 
-    // ---- Global illumination (GI_SPEC.md phase 1: Instant Radiosity) ----
-    // IR traces rays from ONE chosen light against the scene's PBR items (their
-    // vertex buffers keep CPU shadow copies, so no GPU readback stalls) and
-    // plants virtual point lights (LT_VPL) where the rays bounce. The VPLs live
-    // in THIS SceneManager and are shaded through its Forward+ clustered list —
-    // nothing binds to the process-wide HlmsPbs, so GI here never leaks into the
+    // ---- Global illumination (GI_SPEC.md phases 1-3) ----
+    // Instant Radiosity traces rays from ONE chosen light against the scene's
+    // PBR items and plants virtual point lights (LT_VPL) where the rays bounce.
+    // The VPLs live in THIS SceneManager and ride its Forward+ clustered list —
+    // nothing binds to the process-wide HlmsPbs, so IR never leaks into the
     // player/asset/preview scenes. (The sample's optional IrradianceVolume WOULD
-    // be such a global binding — deliberately not used; see setGlobalIllumination.)
+    // be such a global binding — deliberately not used.)
+    // VCT voxelizes the scene's PBR items over the GI bounds and cone-traces the
+    // result; the hybrid adds a parallax-corrected cubemap probe grid whose
+    // reflections blend with VCT's by distance (HlmsPbs PccVctMinDistance).
+    // CAVEAT (GI_SPEC.md): setVctLighting/setParallaxCorrectedCubemap bind to the
+    // process-wide HlmsPbs singleton — VCT GI is effectively editor-scene-only
+    // in v1; the last scene to enable a VCT mode owns the binding, and other
+    // scenes' geometry outside the voxel volume samples nothing (cones exit the
+    // volume and add no light), so previews/thumbnails stay sane in practice.
     bool setGlobalIllumination(const GiParams &p) override;
     void refreshGlobalIllumination() override;
 
@@ -315,16 +326,42 @@ private:
     /// downloaded images by TextureGpu* (OgreInstantRadiosity.h:238-244). Destroying
     /// a mesh/texture while IR is live leaves those caches dangling — the owner's
     /// scene-switch crash ("double free or corruption" tearing down a scene with IR
-    /// enabled while the next project's assets churned). Every destroy path flags;
-    /// the flush happens ONCE at frame time (bursty destroys = one rebuild).
+    /// enabled while the next project's assets churned). Ogre::VctVoxelizer has the
+    /// same shape twice over: addItem keeps raw Item* until removeAllItems, and
+    /// VctMaterial caches conversions by raw datablock pointer across builds.
+    /// So every geometry/material/texture destroy path calls this BEFORE the
+    /// object actually dies — IR's caches are freed EAGERLY here, because
+    /// InstantRadiosity::freeMemory dereferences its VertexArrayObject* cache
+    /// keys and calling it after the mesh died is itself the heap corruption.
+    /// The rebuild still happens ONCE at frame time (bursty destroys = one
+    /// rebuild); for VCT the flush tears the whole arm down and re-voxelizes
+    /// from the LIVE scene, so a recycled pointer can never alias.
     void invalidateGiCaches();
 public:
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
+    /// Called by OgreView each frame with its camera position: the PCC probe
+    /// blend tracks the viewer. No-op unless the hybrid mode is live.
+    void updateGiTracking(const Ogre::Vector3 &camPos);
 private:
     void rebuildGi();
+    /// Voxelizes the scene's PBR items over computeGiBounds at quality-mapped
+    /// resolution, (re)builds VctLighting and binds it to HlmsPbs. The voxelizer
+    /// and lighting are recreated from scratch every time (see invalidateGiCaches).
+    /// In hybrid mode also (re)builds the PCC probe grid.
+    void rebuildVct();
+    /// Builds the ParallaxCorrectedCubemapAuto probe grid over the same bounds
+    /// and binds it with distance-blended VCT specular (PccVctMinDistance).
+    void buildPcc(const Ogre::Aabb &aabb);
+    /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
+    /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
+    /// must run BEFORE the SceneManager dies.
+    void teardownVct();
     /// Deletes the radiosity solution and its VPL lights. Safe to call twice;
     /// must run BEFORE the SceneManager dies (the dtor destroys its lights).
+    void teardownIr();
+    /// Deletes every GI object (IR + VCT arms). Safe to call twice; must run
+    /// BEFORE the SceneManager dies (VPL lights, probe workspaces, GI camera).
     void teardownGi();
 
     Ogre::SceneNode *node(NodeId id) const;
@@ -345,8 +382,15 @@ private:
     Ogre::Item      *mSkyItem = nullptr;
     Ogre::MeshPtr    mSkyMesh;
     std::string      mSkyMeshName, mSkyDatablockName;
-    Ogre::InstantRadiosity *mInstantRadiosity = nullptr;   // owned; null when GI off
-    bool mGiCachesDirty = false;   // mesh/texture destroyed while IR live; flush at frame time
+    Ogre::InstantRadiosity *mInstantRadiosity = nullptr;   // owned; null unless IR mode
+    // VCT arm (null unless a VCT mode is live). Teardown order within the arm:
+    // unbind HlmsPbs -> PCC -> VctLighting -> VctVoxelizer, all before the
+    // SceneManager (probe workspaces and the GI camera live in it).
+    Ogre::VctVoxelizer               *mVctVoxelizer = nullptr;
+    Ogre::VctLighting                *mVctLighting  = nullptr;
+    Ogre::ParallaxCorrectedCubemapAuto *mPcc        = nullptr;
+    Ogre::Camera                     *mGiCamera     = nullptr;   // PCC build + tracking
+    bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
     TextureId           mNextTextureId = 0;
     NodeId              mNextId = 0;
@@ -413,6 +457,9 @@ public:
     /// Feeds the camera position to the scene's particle manager: billboard uploads
     /// are depth-sorted against it (matters for alpha-blended sets).
     void updateParticles();
+    /// Feeds the camera position to the scene's GI (PCC probe blending tracks
+    /// the viewer in hybrid mode).
+    void updateGi();
     /// Releases workspace, camera, workspace definitions and the window/texture.
     /// Safe to call twice. Called by Engine::destroyView and by the Engine
     /// destructor BEFORE Root dies.

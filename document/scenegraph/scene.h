@@ -130,6 +130,7 @@ public:
     QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
     int giNumBounces;          // 1..4
     bool giAutoRefresh;        // editor: re-solve automatically on edits
+    QVector3D giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
 
     float gravity;
     bool shadowEnabled;
