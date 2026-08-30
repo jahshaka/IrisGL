@@ -1,8 +1,21 @@
 # The engine abstraction and its Ogre-Next backend.
 # Studio links this; Studio never links Ogre directly.
-add_library(JahshakaEngine STATIC
-    src/OgreEngine.cpp
-)
+# The backend is split across Ogre-private translation units; EnginePrivate.h
+# holds the shared declarations and is never installed. The list is exported so
+# the sanitised copy in tests/engine builds exactly the same sources.
+set(JAHSHAKA_ENGINE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/EnginePrivate.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreEngine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreView.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreScene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreMesh.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreMaterials.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSky.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreParticles.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFog.cpp)
+set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
+add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 target_include_directories(JahshakaEngine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
