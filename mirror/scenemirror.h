@@ -106,6 +106,15 @@ public:
     void setLightWires(bool on);
     bool lightWires() const { return mLightWires; }
 
+    /// Editor ground grid (EDITOR_SHORTCUTS_SPEC §3): an unlit line overlay on
+    /// y=0 — extent ±100 units, a line every `spacing`, every 10th line major
+    /// (brighter). Same never-fogged overlay class as the light wires, depth-
+    /// tested so geometry occludes it. Hidden by default; hosts push visibility
+    /// and spacing per frame (cheap — the mesh only rebuilds when the spacing
+    /// changes). The next sync() applies it.
+    void setGrid(bool visible, float spacing);
+    bool gridVisible() const { return mGridVisible; }
+
     /// The legacy Preetham "realistic" sky, CPU-baked to an equirect image —
     /// exactly realisticsky.frag's math per direction. Public for tests.
     static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height);
@@ -133,6 +142,7 @@ private:
     void syncLightIcon(Entry &e, iris::LightNode *light);
     jahshaka::engine::TextureId iconTextureFor(const QString &path);
     void syncHighlight();
+    void syncGrid();
     jahshaka::engine::MeshId wireMeshFor(int kind);
     void visit(iris::SceneNodePtr node, jahshaka::engine::NodeId parent, QSet<long> &seen);
     void removeMissing(const QSet<long> &seen);
@@ -185,6 +195,14 @@ private:
     // applySky recomputes the signature each frame until it sticks).
     QElapsedTimer mRealisticBakeTimer;
     jahshaka::engine::MeshId mWireMeshes[4] = { 0, 0, 0, 0 };   // directional, point, spot, area
+    // Ground grid: one root node (dropped a hair below y=0 against z-fighting
+    // with floor geometry) carrying a minor- and a major-line child.
+    bool  mGridVisible = false;
+    float mGridSpacing = 1.0f;
+    float mGridBuiltSpacing = -1.0f;                            // what the meshes were built for
+    jahshaka::engine::NodeId mGridNode = 0, mGridMinorNode = 0, mGridMajorNode = 0;
+    jahshaka::engine::MeshId mGridMinorMesh = 0, mGridMajorMesh = 0;
+    jahshaka::engine::MaterialId mGridMinorMaterial = 0, mGridMajorMaterial = 0;
     iris::SceneNodePtr mHighlighted;
     /// One highlight shell per mesh under the highlighted node: selecting an
     /// asset's root outlines the whole subtree. Pooled and reused across frames.

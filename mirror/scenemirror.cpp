@@ -53,6 +53,17 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     }
     mEntries.clear();
     for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
+    if (mGridNode) {                    // removeNode reparents children, so drop them explicitly
+        if (mGridMinorNode) mTarget->removeNode(mGridMinorNode);
+        if (mGridMajorNode) mTarget->removeNode(mGridMajorNode);
+        mTarget->removeNode(mGridNode);
+        mGridNode = mGridMinorNode = mGridMajorNode = 0;
+    }
+    if (mGridMinorMesh) { mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
+    if (mGridMajorMesh) { mTarget->destroyMesh(mGridMajorMesh); mGridMajorMesh = 0; }
+    if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
+    if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
+    mGridBuiltSpacing = -1.0f;
     mHighlighted.clear();
     for (HighlightShell &s : mHighlightShells) if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
@@ -96,6 +107,7 @@ int SceneMirror::sync()
     reclaimUnused();
     syncSkinnedMeshes();
     syncHighlight();
+    syncGrid();
     return seen.size();
 }
 
@@ -221,6 +233,55 @@ void SceneMirror::syncHighlight()
 void SceneMirror::setLightWires(bool on)
 {
     mLightWires = on;
+}
+
+// ---- ground grid (EDITOR_SHORTCUTS_SPEC §3) --------------------------------------
+
+void SceneMirror::setGrid(bool visible, float spacing)
+{
+    mGridVisible = visible;
+    // Sanitise: the spacing is the editor's snap size; refuse degenerate values.
+    mGridSpacing = std::min(std::max(spacing, 0.01f), 100.0f);
+}
+
+void SceneMirror::syncGrid()
+{
+    if (!mGridVisible) {
+        if (mGridNode) mTarget->setNodeVisible(mGridNode, false);
+        return;
+    }
+    if (!mGridNode) {
+        mGridNode = mTarget->createNode();
+        if (!mGridNode) return;
+        mGridMinorNode = mTarget->createNode(mGridNode);
+        mGridMajorNode = mTarget->createNode(mGridNode);
+        // A hair below y=0 so floor geometry sitting on the plane (the default
+        // ground is at +1e-4) occludes the grid cleanly instead of z-fighting.
+        mTarget->setNodeTransform(mGridNode, Vec3(0, -0.01f, 0), Quat(), Vec3(1, 1, 1));
+        // Unlit (never fogged), depth-tested (occluded by geometry), blended.
+        mGridMinorMaterial = mTarget->createUnlitMaterial(Colour(0.46f, 0.48f, 0.52f, 0.28f), true);
+        mGridMajorMaterial = mTarget->createUnlitMaterial(Colour(0.62f, 0.64f, 0.68f, 0.50f), true);
+    }
+    if (mGridBuiltSpacing != mGridSpacing) {
+        if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
+        if (mGridMajorMesh) { mTarget->detachMesh(mGridMajorNode); mTarget->destroyMesh(mGridMajorMesh); mGridMajorMesh = 0; }
+        const float extent = 100.0f;                     // ±100 units of floor
+        int n = int(extent / mGridSpacing);              // lines each side of 0
+        n = std::min(n, 1000);                           // hard cap on line count
+        std::vector<Vec3> minor, major;
+        for (int i = -n; i <= n; ++i) {
+            const float p = float(i) * mGridSpacing;
+            std::vector<Vec3> &dst = (i % 10 == 0) ? major : minor;
+            dst.push_back(Vec3(p, 0, -extent)); dst.push_back(Vec3(p, 0, extent));
+            dst.push_back(Vec3(-extent, 0, p)); dst.push_back(Vec3(extent, 0, p));
+        }
+        mGridMinorMesh = mTarget->createLineMesh(minor, false);
+        mGridMajorMesh = mTarget->createLineMesh(major, false);
+        if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
+        if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
+        mGridBuiltSpacing = mGridSpacing;
+    }
+    mTarget->setNodeVisible(mGridNode, true);
 }
 
 MeshId SceneMirror::wireMeshFor(int kind)
