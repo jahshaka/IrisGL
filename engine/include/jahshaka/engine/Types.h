@@ -84,6 +84,8 @@ struct PbrParams {
     float  alphaCutoff = 0.5f;   ///< Cutout mode threshold
     bool   twoSided    = false;  ///< draw and light both faces (no back-face culling)
     float  normalMapWeight = 1.0f;   ///< strength of the bound normal map
+    float  uvScale         = 1.0f;   ///< tiles every bound texture map (UV *= uvScale);
+                                     ///< the document's PbrMaterial::textureScale
 };
 
 /// One camera-facing textured quad in a node's billboard set (Scene::setBillboards).

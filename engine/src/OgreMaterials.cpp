@@ -32,6 +32,12 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
     db->setRoughness(p.roughness);
     db->setEmissive(Ogre::Vector3(p.emissive.r, p.emissive.g, p.emissive.b));
     db->setNormalMapWeight(p.normalMapWeight);
+    // UV tiling: HlmsPbs has no UV transform for its base maps (only detail maps
+    // have offset/scale), so the scale rides in the datablock's user values and a
+    // custom_ps_uv_modifier_macros piece (JahFog_piece_ps.any) multiplies every
+    // base-map lookup by material.userValue[0].xy. setUserValue only schedules a
+    // const-buffer update — scale edits never recompile shaders.
+    db->setUserValue(0, Ogre::Vector4(p.uvScale, p.uvScale, 1.0f, 1.0f));
     // Manage the macroblock ourselves: setTwoSidedLighting(changeMacroblock=true)
     // swaps culling to CULL_NONE when enabling but never restores it when
     // disabling, and applyPbr must be idempotent in both directions.

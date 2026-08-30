@@ -39,3 +39,28 @@
 @end
 
 @end
+
+// Jahshaka UV tiling — the document's PbrMaterial::textureScale. HlmsPbs has no
+// UV transform for its base maps (detail maps alone get offset/scale), so this
+// redefines Ogre's official UV-modifier macros (UvModifierMacros_piece_ps.any,
+// inserted at the top of every Pbs pixel shader) to multiply each base-map
+// lookup by the per-datablock user value that OgreScene::applyPbr writes with
+// setUserValue(0, ...). userValue lives in the material buffer: scale edits are
+// const-buffer updates, never shader rebuilds. Deliberately OUTSIDE the
+// !hlms_shadowcaster guard above: alpha-tested (Cutout) caster shaders sample
+// the diffuse map through UV_DIFFUSE with `material` in scope too, and must see
+// the same tiling as the colour pass or shadows detach from the silhouette.
+// UV_SPECULAR covers the metalness map (metallic workflow rides the specular
+// texture slot). No AO macro exists — HlmsPbs has no AO input (see Types.h).
+@piece( custom_ps_uv_modifier_macros )
+	#undef UV_DIFFUSE
+	#undef UV_NORMAL
+	#undef UV_SPECULAR
+	#undef UV_ROUGHNESS
+	#undef UV_EMISSIVE
+	#define UV_DIFFUSE(x) ((x) * material.userValue[0].xy)
+	#define UV_NORMAL(x) ((x) * material.userValue[0].xy)
+	#define UV_SPECULAR(x) ((x) * material.userValue[0].xy)
+	#define UV_ROUGHNESS(x) ((x) * material.userValue[0].xy)
+	#define UV_EMISSIVE(x) ((x) * material.userValue[0].xy)
+@end

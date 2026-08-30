@@ -56,6 +56,11 @@ Scene::Scene()
     // anti-aliasing is opt-in like GI: off (1 sample) by default
     antiAliasing = 1;
 
+    // selection outline: width in Preferences units (SceneMirror maps it to the
+    // inverted-hull scale as 1 + width/150); colour stays invalid = "never set",
+    // the mirror then falls back to the historical selection yellow
+    outlineWidth = 3;
+
     // sky init
     skyType = SkyType::SINGLE_COLOR;
 

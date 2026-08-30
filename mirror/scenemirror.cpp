@@ -197,8 +197,15 @@ void SceneMirror::syncHighlight()
         }
         // The outline is the same mesh scaled up slightly around the node's pivot:
         // only the band where the shell pokes out past the original is visible.
+        // Band thickness follows the Preferences "outline width" the same way the
+        // colour does (scene->outlineWidth, pushed by MainWindow): width/150 maps
+        // the historical default 6 to the historical 1.04 hull; today's default 3
+        // gives 1.02 — half the band. <=0 (never pushed) falls back to the default.
         QMatrix4x4 t = meshNode->globalTransform;
-        if (!mHighlightWireframe) t.scale(1.04f);
+        if (!mHighlightWireframe) {
+            const int w = (mSource && mSource->outlineWidth > 0) ? mSource->outlineWidth : 3;
+            t.scale(1.0f + float(w) / 150.0f);
+        }
         pushTransform(mTarget, s.node, t);
         mTarget->setNodeVisible(s.node, true);
     }
@@ -655,6 +662,7 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.alpha           = pbr->alpha;
         out.alphaCutoff     = pbr->alphaCutoff;
         out.normalMapWeight = pbr->normalFactor;
+        out.uvScale         = pbr->textureScale;
         out.twoSided        = pbr->renderStates.rasterState.cullMode == iris::CullMode::None;
         // occlusionMap/occlusionFactor: no engine equivalent (HlmsPbs has no AO
         // slot — see Types.h); intentionally dropped, not faked.
@@ -679,6 +687,8 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
                 out.roughness = v.toFloat();
             } else if (prop->type == iris::PropertyType::Float && (prop->name == "metallic" || prop->name == "metalness")) {
                 out.metalness = v.toFloat();
+            } else if (prop->type == iris::PropertyType::Float && prop->name == "textureScale") {
+                out.uvScale = v.toFloat();
             }
         }
         const float shin = std::max(0.0f, std::min(shininess, 128.0f));
@@ -694,6 +704,7 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         const float shin = std::max(0.0f, std::min(def->getShininess(), 128.0f));
         out.roughness = 1.0f - std::sqrt(shin / 128.0f) * 0.9f;
         out.emissive  = Colour(0, 0, 0);
+        out.uvScale   = def->getTextureScale();
         return true;
     }
     return false;
