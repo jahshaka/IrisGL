@@ -1,1 +1,1 @@
-#include "../../../src/materials/defaultmaterial.h"
+#include "document/materials/defaultmaterial.h"

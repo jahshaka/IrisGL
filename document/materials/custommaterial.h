@@ -1,0 +1,85 @@
+/**************************************************************************
+This file is part of IrisGL
+http://www.irisgl.org
+Copyright (c) 2016-2026 EXEDOS LLC (www.exedos.com)
+
+This is free software: you may copy, redistribute
+and/or modify it under the terms of the MIT License
+
+For more information see the LICENSE file
+*************************************************************************/
+
+#ifndef CUSTOMMATERIAL_H
+#define CUSTOMMATERIAL_H
+
+#include "document/materials/material.h"
+#include "irisglfwd.h"
+#include "core/properties/property.h"
+
+#include <QJsonObject>
+
+namespace iris
+{
+
+class CustomMaterial : public Material
+{
+	int version = 1;
+public:
+	int getVersion() { return version; }
+	void setVersion(int version) { this->version = version; }
+    // `properties` is inherited from Material
+
+    void generate(const QString&, bool project = false);
+    void generate(const QJsonObject&);
+    void setTextureWithUniform(const QString&, const QString&);
+    void setValue(const QString&, const QVariant&) override;
+    void setBaseMaterialProperties(const QJsonObject&);
+    void setName(const QString&);
+    void setGuid(const QString&);
+    void setProperties(QList<Property*> props);
+    QList<Property*> getProperties();
+    void purge();
+
+	void setMaterialDefinition(const QJsonObject &def) {
+		materialDefinitions = def;
+	}
+
+	QJsonObject getMaterialDefinition() {
+		return materialDefinitions;
+	}
+
+    QString getName();
+    QString getGuid();
+    QString firstTextureSlot() const;
+    //int getCalculatedPropHeight() const;
+
+    static CustomMaterialPtr create();
+	// called when the material's value is changed
+	// returning true means the change is accepted and false means the change is rejected
+	virtual bool onValueChange(const QString &name, const QVariant &value)
+	{
+		return true;
+	}
+
+	MaterialPtr duplicate() override;
+
+	static CustomMaterialPtr createFromShader(iris::ShaderPtr shader);
+	static CustomMaterialPtr createFromShaderPath(const QString& shaderPath);
+	static CustomMaterialPtr createFromShaderJson(const QJsonObject& shaderObj);
+
+    CustomMaterial() = default;
+    QString materialName;
+    QString materialGuid;
+	QString materialPath;
+
+    QJsonObject loadShaderFromDisk(const QString &);
+    void parseProperties(const QJsonArray&);
+
+	QJsonObject materialDefinitions;
+};
+
+}
+Q_DECLARE_METATYPE(iris::CustomMaterial)
+Q_DECLARE_METATYPE(iris::CustomMaterialPtr)
+
+#endif // CUSTOMMATERIAL_H

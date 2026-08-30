@@ -52,7 +52,7 @@ option(ASSIMP_BUILD_GLTF_IMPORTER               "" ON)
 option(ASSIMP_BUILD_COLLADA_IMPORTER            "" ON)
 option(ASSIMP_BUILD_ZLIB                        "" ON)
 
-add_subdirectory_with_folder("Dependencies/Assimp" src/assimp)
+add_subdirectory_with_folder("Dependencies/Assimp" thirdparty/assimp)
 
 option(BUILD_BULLET2_DEMOS                      "" OFF)
 option(BUILD_OPENGL3_DEMOS                      "" OFF)
@@ -68,114 +68,114 @@ else()
   set(BUILD_SHARED_LIBS 1)   # shared libs doesn't work with msvc (there aren't any dllexports defined)
 endif()
 
-add_subdirectory_with_folder("Dependencies/Bullet" src/bullet3)
-add_subdirectory_with_folder("Dependencies/Zip" src/zip)
+add_subdirectory_with_folder("Dependencies/Bullet" thirdparty/bullet3)
+add_subdirectory_with_folder("Dependencies/Zip" thirdparty/zip)
 
 set(SRCS
-    src/graphics/mesh.cpp
-    src/graphics/model.cpp
-    src/materials/defaultmaterial.cpp
-    src/scenegraph/meshnode.cpp
-    src/graphics/graphicshelper.cpp
-    src/scenegraph/cameranode.cpp
-    src/graphics/texture2d.cpp
-    src/graphics/material.cpp
-    src/geometry/trimesh.cpp
-    src/graphics/vertexlayout.cpp
-    src/graphics/shader.cpp
-    src/graphics/shadowmap.cpp
-    src/animation/animation.cpp
-    src/animation/keyframeset.cpp
-    src/materials/materialhelper.cpp
-    src/scenegraph/viewernode.cpp
-    src/scenegraph/particlesystemnode.cpp
-    src/math/mathhelper.cpp
-    src/materials/custommaterial.cpp
-    src/materials/pbrmaterial.cpp
-    src/graphics/postprocessmanager.cpp
-    src/animation/propertyanim.cpp
-    src/scenegraph/lightnode.cpp
-    src/animation/skeletalanimation.cpp
-    src/graphics/skeleton.cpp
-    src/scenegraph/scene.cpp
-    src/scenegraph/scenenode.cpp
-    src/geometry/plane.cpp
-    src/geometry/frustum.cpp
-    src/geometry/aabb.cpp
-    src/core/logger.cpp
-    src/graphics/utils/linemeshbuilder.cpp
-    src/graphics/utils/shapehelper.cpp
-    src/postprocesses/fxaapostprocess.cpp
-	src/graphics/renderstates.cpp
-    src/graphics/rasterizerstate.cpp
-    src/content/modelloader.cpp
-    src/physics/environment.cpp
-    src/physics/physicshelper.cpp
-    src/physics/charactercontroller.cpp
+    document/assets/mesh.cpp
+    import/model.cpp
+    document/materials/defaultmaterial.cpp
+    document/scenegraph/meshnode.cpp
+    import/graphicshelper.cpp
+    document/scenegraph/cameranode.cpp
+    document/assets/texture2d.cpp
+    document/materials/material.cpp
+    core/geometry/trimesh.cpp
+    document/assets/vertexlayout.cpp
+    document/assets/shader.cpp
+    document/scenegraph/shadowmap.cpp
+    document/animation/animation.cpp
+    document/animation/keyframeset.cpp
+    import/materialhelper.cpp
+    document/scenegraph/viewernode.cpp
+    document/scenegraph/particlesystemnode.cpp
+    core/math/mathhelper.cpp
+    document/materials/custommaterial.cpp
+    document/materials/pbrmaterial.cpp
+    document/materials/postprocessmanager.cpp
+    document/animation/propertyanim.cpp
+    document/scenegraph/lightnode.cpp
+    document/animation/skeletalanimation.cpp
+    document/assets/skeleton.cpp
+    document/scenegraph/scene.cpp
+    document/scenegraph/scenenode.cpp
+    core/geometry/plane.cpp
+    core/geometry/frustum.cpp
+    core/geometry/aabb.cpp
+    core/logger.cpp
+    document/assets/linemeshbuilder.cpp
+    document/assets/shapehelper.cpp
+    document/materials/postfx/fxaapostprocess.cpp
+	document/materials/renderstates.cpp
+    document/materials/rasterizerstate.cpp
+    import/modelloader.cpp
+    document/physics/environment.cpp
+    document/physics/physicshelper.cpp
+    document/physics/charactercontroller.cpp
 
 )
 
 set (HEADERS
-    src/animation/nodekeyframe.h
-    src/animation/keyframeanimation.h
-    src/scenegraph/lightnode.h
-    src/graphics/texture2d.h
-    src/graphics/texture.h
-    src/graphics/shadowmap.h
-    src/graphics/mesh.h
-    src/graphics/model.h
-    src/graphics/material.h
-    src/scenegraph/cameranode.h
-    src/scenegraph/meshnode.h
-    src/materials/defaultmaterial.h
-    src/graphics/vertexlayout.h
-    src/graphics/vertexbuffer.h
-    src/graphics/viewport.h
-    src/graphics/graphicshelper.h
-    src/geometry/trimesh.h
-    src/math/mathhelper.h
-    src/irisglfwd.h
-    src/graphics/shader.h
-    src/irisgl.h
-    src/math/intersectionhelper.h
-    src/animation/keyframeset.h
-    src/math/bezierhelper.h
-    src/animation/animation.h
-    src/materials/materialhelper.h
-    src/core/irisutils.h
-    src/core/ziphelper.h
-    src/scenegraph/viewernode.h
-    src/graphics/particle.h
-    src/scenegraph/particlesystemnode.h
-    src/graphics/iviewsource.h
-    src/materials/custommaterial.h
-    src/materials/pbrmaterial.h
-    src/graphics/postprocess.h
-    src/graphics/postprocessmanager.h
-    src/animation/propertyanim.h
-    src/animation/animableproperty.h
-    src/graphics/skeleton.h
-    src/animation/skeletalanimation.h
-    src/scenegraph/scene.h
-    src/scenegraph/scenenode.h
-    src/core/property.h
-    src/geometry/boundingsphere.h
-    src/geometry/plane.h
-    src/geometry/frustum.h
-    src/geometry/aabb.h
-    src/math/transform.h
-    src/core/logger.h
-    src/core/performancetimer.h
-    src/graphics/renderstates.h
-    src/graphics/utils/linemeshbuilder.h
-    src/graphics/utils/shapehelper.h
-    src/postprocesses/fxaapostprocess.h
-    src/graphics/rasterizerstate.h
-	src/content/modelloader.h
-    src/physics/environment.h
-    src/physics/physicshelper.h
-    src/physics/physicsproperties.h
-    src/physics/charactercontroller.h
+    document/animation/nodekeyframe.h
+    document/animation/keyframeanimation.h
+    document/scenegraph/lightnode.h
+    document/assets/texture2d.h
+    document/assets/texture.h
+    document/scenegraph/shadowmap.h
+    document/assets/mesh.h
+    import/model.h
+    document/materials/material.h
+    document/scenegraph/cameranode.h
+    document/scenegraph/meshnode.h
+    document/materials/defaultmaterial.h
+    document/assets/vertexlayout.h
+    document/assets/vertexbuffer.h
+    core/viewport.h
+    import/graphicshelper.h
+    core/geometry/trimesh.h
+    core/math/mathhelper.h
+    irisglfwd.h
+    document/assets/shader.h
+    irisgl.h
+    core/math/intersectionhelper.h
+    document/animation/keyframeset.h
+    core/math/bezierhelper.h
+    document/animation/animation.h
+    import/materialhelper.h
+    core/irisutils.h
+    core/ziphelper.h
+    document/scenegraph/viewernode.h
+    document/scenegraph/particle.h
+    document/scenegraph/particlesystemnode.h
+    document/scenegraph/iviewsource.h
+    document/materials/custommaterial.h
+    document/materials/pbrmaterial.h
+    document/materials/postprocess.h
+    document/materials/postprocessmanager.h
+    document/animation/propertyanim.h
+    document/animation/animableproperty.h
+    document/assets/skeleton.h
+    document/animation/skeletalanimation.h
+    document/scenegraph/scene.h
+    document/scenegraph/scenenode.h
+    core/properties/property.h
+    core/geometry/boundingsphere.h
+    core/geometry/plane.h
+    core/geometry/frustum.h
+    core/geometry/aabb.h
+    core/math/transform.h
+    core/logger.h
+    core/performancetimer.h
+    document/materials/renderstates.h
+    document/assets/linemeshbuilder.h
+    document/assets/shapehelper.h
+    document/materials/postfx/fxaapostprocess.h
+    document/materials/rasterizerstate.h
+	import/modelloader.h
+    document/physics/environment.h
+    document/physics/physicshelper.h
+    document/physics/physicsproperties.h
+    document/physics/charactercontroller.h
 )
 
 set(QRCS assets.qrc)
@@ -193,11 +193,11 @@ add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
 # Note the DIRs that are included, assimp generates a config that we need to find in the build dir. L2
 target_include_directories(IrisGL PUBLIC
-    "${PROJECT_SOURCE_DIR}/src/"
-    "${PROJECT_BINARY_DIR}/src/assimp/include/"
-    "${PROJECT_SOURCE_DIR}/src/assimp/include/"
-    "${PROJECT_SOURCE_DIR}/src/bullet3/src"
-    "${PROJECT_SOURCE_DIR}/src/zip/src"
+    "${PROJECT_SOURCE_DIR}/"
+    "${PROJECT_BINARY_DIR}/thirdparty/assimp/include/"
+    "${PROJECT_SOURCE_DIR}/thirdparty/assimp/include/"
+    "${PROJECT_SOURCE_DIR}/thirdparty/bullet3/src"
+    "${PROJECT_SOURCE_DIR}/thirdparty/zip/src"
 )
 
 target_link_libraries (IrisGL  assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
