@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.3 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
 foreach(p CMP0071) # 3.10: Let AUTOMOC and AUTOUIC process GENERATED files
     if(POLICY ${p})
@@ -38,8 +38,21 @@ set_property(GLOBAL PROPERTY USE_FOLDERS TRUE)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_AUTORCC ON)
+# The document library is QObject-free (audit §3.5) and the vendored trees have
+# zero Q_OBJECT - moc has nothing to do anywhere under irisgl/ (audit §5.4.7).
+set(CMAKE_AUTOMOC OFF)
 
 set_property(GLOBAL PROPERTY AUTOGEN_TARGETS_FOLDER AutoMocFolder)
+
+# BUILD_SHARED_LIBS must be decided BEFORE the first vendored add_subdirectory
+# (assimp bakes it at configure time) - audit §5.4.5.
+if (WIN32)
+    set(BUILD_SHARED_LIBS 0)
+    option(USE_MSVC_RUNTIME_LIBRARY_DLL         "" ON)
+    # set(USE_MSVC_RUNTIME_LIBRARY_DLL 1)
+else()
+  set(BUILD_SHARED_LIBS 1)   # shared libs doesn't work with msvc (there aren't any dllexports defined)
+endif()
 
 option(ASSIMP_BUILD_ASSIMP_TOOLS                "" OFF)
 option(ASSIMP_BUILD_TESTS                       "" OFF)
@@ -59,14 +72,6 @@ option(BUILD_OPENGL3_DEMOS                      "" OFF)
 option(BUILD_CPU_DEMOS                          "" OFF)
 option(BUILD_EXTRAS                             "" OFF)
 option(BUILD_UNIT_TESTS                         "" OFF)
-
-if (WIN32)
-    set(BUILD_SHARED_LIBS 0)
-    option(USE_MSVC_RUNTIME_LIBRARY_DLL         "" ON)
-    # set(USE_MSVC_RUNTIME_LIBRARY_DLL 1)
-else()
-  set(BUILD_SHARED_LIBS 1)   # shared libs doesn't work with msvc (there aren't any dllexports defined)
-endif()
 
 add_subdirectory_with_folder("Dependencies/Bullet" thirdparty/bullet3)
 add_subdirectory_with_folder("Dependencies/Zip" thirdparty/zip)
@@ -207,3 +212,14 @@ target_compile_options(IrisGL PUBLIC)
 if (NOT MSVC)
     target_compile_options(IrisGL PRIVATE -Werror=return-type -Werror=delete-incomplete)
 endif()
+
+# --- install (audit §5.4.8: IrisGL used to have no install story at all) ----
+# Minimal but real: the shared document library plus its public headers, laid
+# out exactly as the build consumes them (repo-root-relative includes).
+include(GNUInstallDirs)
+install(TARGETS IrisGL
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY core document import DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/irisgl
+        FILES_MATCHING PATTERN "*.h")
+install(FILES irisgl.h irisglfwd.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/irisgl)

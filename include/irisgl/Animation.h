@@ -1,8 +1,0 @@
-#include "document/animation/animableproperty.h"
-#include "document/animation/animation.h"
-//#include "../../src/animation/floatcurve.h"
-#include "document/animation/keyframeanimation.h"
-//#include "../../src/animation/keyframeset.h"
-//#include "../../src/animation/nodekeyframe.h"
-#include "document/animation/propertyanim.h"
-#include "document/animation/skeletalanimation.h"
