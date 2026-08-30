@@ -204,6 +204,32 @@ QList<Property*> SceneNode::getProperties()
     prop->value = scale;
     props.append(prop);
 
+    // There is no StringProperty in core/properties/property.h; FileProperty is
+    // the QString-valued Property, so the name rides on it.
+    auto nameProp = new FileProperty();
+    nameProp->displayName = "Name";
+    nameProp->name = "name";
+    nameProp->value = name;
+    props.append(nameProp);
+
+    auto boolProp = new BoolProperty();
+    boolProp->displayName = "Visible";
+    boolProp->name = "visible";
+    boolProp->value = visible;
+    props.append(boolProp);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Cast Shadow";
+    boolProp->name = "castShadow";
+    boolProp->value = castShadow;
+    props.append(boolProp);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Pickable";
+    boolProp->name = "pickable";
+    boolProp->value = pickable;
+    props.append(boolProp);
+
     return props;
 }
 
@@ -212,6 +238,10 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     if (valueName == "position") return pos;
     if (valueName == "rotation") return rot.toEulerAngles();
     if (valueName == "scale")	 return scale;
+    if (valueName == "name")       return getName();
+    if (valueName == "visible")    return isVisible();
+    if (valueName == "castShadow") return getShadowCastingEnabled();
+    if (valueName == "pickable")   return isPickable();
 
     return QVariant();
 }
@@ -221,6 +251,12 @@ bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "position") { setLocalPos(value.value<QVector3D>());   return true; }
     if (valueName == "rotation") { setLocalRot(QQuaternion::fromEulerAngles(value.value<QVector3D>())); return true; }
     if (valueName == "scale")    { setLocalScale(value.value<QVector3D>()); return true; }
+    if (valueName == "name")       { setName(value.toString());                  return true; }
+    // setVisible, not show()/hide(): those cascade to children, which is a
+    // different operation from setting this node's own flag.
+    if (valueName == "visible")    { setVisible(value.toBool());                 return true; }
+    if (valueName == "castShadow") { setShadowCastingEnabled(value.toBool());    return true; }
+    if (valueName == "pickable")   { setPickable(value.toBool());                return true; }
     return false;
 }
 

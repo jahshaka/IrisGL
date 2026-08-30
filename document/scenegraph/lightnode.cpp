@@ -56,6 +56,60 @@ QList<Property*> LightNode::getProperties()
     prop->value = rectHeight;
     props.append(prop);
 
+    prop = new FloatProperty();
+    prop->displayName = "Shadow Alpha";
+    prop->name = "shadowAlpha";
+    prop->value = shadowAlpha;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Icon Size";
+    prop->name = "iconSize";
+    prop->value = iconSize;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Shadow Bias";
+    prop->name = "shadowBias";
+    prop->value = shadowMap->bias;
+    props.append(prop);
+
+    auto shadowColorProp = new ColorProperty();
+    shadowColorProp->displayName = "Shadow Color";
+    shadowColorProp->name = "shadowColor";
+    shadowColorProp->value = shadowColor;
+    props.append(shadowColorProp);
+
+    auto intProp = new IntProperty();
+    intProp->displayName = "Light Type";
+    intProp->name = "lightType";
+    intProp->value = static_cast<int>(lightType);
+    props.append(intProp);
+
+    intProp = new IntProperty();
+    intProp->displayName = "Shadow Map Type";
+    intProp->name = "shadowMapType";
+    intProp->value = static_cast<int>(shadowMap->shadowType);
+    props.append(intProp);
+
+    intProp = new IntProperty();
+    intProp->displayName = "Shadow Map Resolution";
+    intProp->name = "shadowMapResolution";
+    intProp->value = shadowMap->resolution;
+    props.append(intProp);
+
+    auto boolProp = new BoolProperty();
+    boolProp->displayName = "Double Sided";
+    boolProp->name = "doubleSided";
+    boolProp->value = doubleSided;
+    props.append(boolProp);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Accurate";
+    boolProp->name = "accurate";
+    boolProp->value = accurate;
+    props.append(boolProp);
+
     return props;
 }
 
@@ -75,6 +129,24 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return rectWidth;
     if(valueName == "rectHeight")
         return rectHeight;
+    if(valueName == "lightType")
+        return static_cast<int>(lightType);
+    if(valueName == "shadowColor")
+        return shadowColor;
+    if(valueName == "shadowAlpha")
+        return shadowAlpha;
+    if(valueName == "shadowMapType")
+        return static_cast<int>(getShadowMapType());
+    if(valueName == "shadowMapResolution")
+        return getShadowMapResolution();
+    if(valueName == "shadowBias")
+        return shadowMap->bias;
+    if(valueName == "doubleSided")
+        return doubleSided;
+    if(valueName == "accurate")
+        return accurate;
+    if(valueName == "iconSize")
+        return iconSize;
 
     return SceneNode::getPropertyValue(valueName);
 }
@@ -88,6 +160,16 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "spotCutOffSoftness"){ spotCutOffSoftness = value.toFloat();return true; }
     if (valueName == "rectWidth")         { rectWidth = value.toFloat();         return true; }
     if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return true; }
+    if (valueName == "lightType")         { setLightType(static_cast<LightType>(value.toInt())); return true; }
+    if (valueName == "shadowColor")       { shadowColor = value.value<QColor>(); return true; }
+    if (valueName == "shadowAlpha")       { shadowAlpha = value.toFloat();       return true; }
+    // The shadow-map fields live on the node's ShadowMap; reflect through it.
+    if (valueName == "shadowMapType")     { setShadowMapType(static_cast<ShadowMapType>(value.toInt())); return true; }
+    if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return true; }
+    if (valueName == "shadowBias")        { shadowMap->bias = value.toFloat();   return true; }
+    if (valueName == "doubleSided")       { doubleSided = value.toBool();        return true; }
+    if (valueName == "accurate")          { accurate = value.toBool();           return true; }
+    if (valueName == "iconSize")          { iconSize = value.toFloat();          return true; }
 
     return SceneNode::setPropertyValue(valueName, value);
 }

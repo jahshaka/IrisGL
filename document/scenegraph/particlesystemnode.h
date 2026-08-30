@@ -151,6 +151,10 @@ public:
 
     void update(float delta) override;
 
+    virtual QList<Property*> getProperties() override;
+    virtual QVariant getPropertyValue(QString valueName) override;
+    virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
+
     void addParticle(Particle *particle) {
         particles.push_back(particle);
     }

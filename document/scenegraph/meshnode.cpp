@@ -18,6 +18,7 @@ For more information see the LICENSE file
 #include <QDir>
 
 #include "irisglfwd.h"
+#include "core/properties/property.h"
 #include "document/assets/mesh.h"
 #include "assimp/postprocess.h"
 #include "assimp/Importer.hpp"
@@ -66,8 +67,55 @@ QList<Property*> MeshNode::getProperties()
 {
     auto props = SceneNode::getProperties();
 
+    // meshPath/meshIndex are READ-ONLY through this reflection: writing them
+    // would have to reload the mesh (and, for meshIndex, re-resolve a submesh
+    // inside a model file), which is an import-time operation with asset-manager
+    // side effects. setPropertyValue therefore refuses them; use setMesh().
+    // There is no StringProperty in core/properties/property.h — FileProperty is
+    // the QString-valued Property.
+    auto pathProp = new FileProperty();
+    pathProp->displayName = "Mesh Path";
+    pathProp->name = "meshPath";
+    pathProp->value = meshPath;
+    props.append(pathProp);
+
+    auto intProp = new IntProperty();
+    intProp->displayName = "Mesh Index";
+    intProp->name = "meshIndex";
+    intProp->value = meshIndex;
+    props.append(intProp);
+
+    intProp = new IntProperty();
+    intProp->displayName = "Face Culling Mode";
+    intProp->name = "faceCullingMode";
+    intProp->value = static_cast<int>(faceCullingMode);
+    props.append(intProp);
+
     // @todo: extract properties from material
     return props;
+}
+
+QVariant MeshNode::getPropertyValue(QString valueName)
+{
+    if (valueName == "meshPath")        return meshPath;
+    if (valueName == "meshIndex")       return meshIndex;
+    if (valueName == "faceCullingMode") return static_cast<int>(faceCullingMode);
+
+    return SceneNode::getPropertyValue(valueName);
+}
+
+bool MeshNode::setPropertyValue(QString valueName, const QVariant &value)
+{
+    // Read-only: see getProperties(). Returning false makes the caller report
+    // "rejected property" instead of silently reloading geometry.
+    if (valueName == "meshPath")  return false;
+    if (valueName == "meshIndex") return false;
+    if (valueName == "faceCullingMode") {
+        setFaceCullingMode(static_cast<FaceCullingMode>(value.toInt()));
+        return true;
+    }
+
+    return SceneNode::setPropertyValue(valueName, value);
 }
 
 void MeshNode::setMesh(QString source)

@@ -36,7 +36,6 @@ public:
     /// Unlit overlays (gizmos, wires, billboards) and the sky are never fogged.
     /// Off by default; cheap to call every frame (no shader recompilation).
     virtual void        setFog(bool enabled, const Colour &colour, float start, float end) = 0;
-    virtual NodeId      addDirectionalLight(const Vec3 &direction, float power) = 0;
     /// Textured sky behind everything: an equirectangular (lat-long) image, or a
     /// cubemap texture. SkyMode::NoSky removes it (the View's background shows).
     virtual bool        setSky(SkyMode, TextureId) = 0;
@@ -51,16 +50,10 @@ public:
     /// pushes them here. Passing six zero ids clears the reflections. The face
     /// textures are copied; the caller may destroy them afterwards.
     virtual bool        setSkyReflection(const TextureId faces[6]) = 0;
-    /// Unit cube with a PBR metallic-roughness material. Proves the material path end to end.
-    // TEMPORARY — replaced by mesh loading in step 3 of VIEWPORT_MIGRATION_PLAN.md
-    virtual NodeId      addTestCube(const Colour &albedo, float metalness, float roughness) = 0;
     /// Removes a node and everything it uniquely owns (mesh, material). Unknown or
     /// already-removed ids are ignored and return false. Children are NOT removed;
     /// they are re-parented to the scene root.
     virtual bool        removeNode(NodeId) = 0;
-    virtual void        setNodePosition(NodeId, const Vec3 &) = 0;
-    virtual void        setNodeScale(NodeId, const Vec3 &) = 0;
-    virtual void        rotateNode(NodeId, float yawRadians, float pitchRadians, float rollRadians) = 0;
 
     // ---- Hierarchy and transforms (VIEWPORT_MIGRATION_PLAN.md step 2) ----
     /// An empty transform node under `parent` (0 = the scene root).
@@ -130,12 +123,16 @@ public:
                                     unsigned capacity) = 0;
     /// Replaces the set's instances each frame; count above capacity is clamped.
     virtual bool setBillboards(NodeId, const BillboardInstance *, size_t count) = 0;
-    /// Removes the node's billboard set (removeNode does this too).
+    /// Removes the node's billboard set (removeNode does this too). KEPT as the
+    /// explicit counterpart of createBillboardSet: the document turns a particle
+    /// system off without destroying its node, and tests/particles pins that.
     virtual bool destroyBillboardSet(NodeId) = 0;
 
     // ---- Lights (step 5): a node may carry one light. Directional and spot lights
     // shine down the node's -Y (the document's convention: identity = straight down).
     virtual bool        setLight(NodeId, const LightDesc &) = 0;   // creates or updates
+    /// KEPT as the explicit counterpart of setLight: a node may stop being a light
+    /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
 
     // ---- Global illumination (GI_SPEC.md). Scene-level, like fog and sky. ----
@@ -162,14 +159,14 @@ public:
     /// while one is attached fails (false, lastError()). Pass null to detach.
     virtual bool setScene(Scene *) = 0;
     virtual Scene *scene() const = 0;
-    virtual void setCameraPosition(const Vec3 &) = 0;
-    virtual void lookAt(const Vec3 &) = 0;
     /// Full camera state in one call (step 5). The document camera is pushed
-    /// through this every frame.
+    /// through this every frame. This is the ONLY way to move a View's camera.
     virtual void setCamera(const CameraDesc &) = 0;
     /// Clear colour behind the scene (the document's flat sky colour). Cheap to
     /// call with the same value; a change rebuilds the view's compositor workspace.
     virtual void setBackground(const Colour &) = 0;
+    /// KEPT: cheap introspection the host needs to avoid redundant (workspace-
+    /// rebuilding) setBackground calls, and pinned by the engine suites.
     virtual Colour background() const = 0;
     /// Shadow maps for this view (PSSM for directional, focused for point/spot;
     /// lights opt in with LightDesc::castShadows). Off by default; toggling rebuilds
@@ -179,10 +176,14 @@ public:
     /// A disabled View is skipped by renderOneFrame(). Hidden viewports MUST be
     /// disabled — the backend otherwise keeps drawing them at full cost.
     virtual void setEnabled(bool) = 0;
+    /// KEPT: cheap introspection — hosts query it before pushing per-frame state
+    /// into a View they may have disabled; pinned by the engine suites.
     virtual bool isEnabled() const = 0;
     virtual void resize(unsigned width, unsigned height) = 0;
     virtual unsigned width() const = 0;
     virtual unsigned height() const = 0;
+    /// KEPT: cheap introspection — readPixels() only works offscreen, so callers
+    /// (thumbnails, tests) branch on this; pinned by the engine suites.
     virtual bool isOffscreen() const = 0;
     /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —
     /// returns false for on-screen windows. This is the thumbnail path, and what
@@ -256,7 +257,6 @@ public:
     virtual void setShadowResolution(unsigned pixels) = 0;
     virtual unsigned shadowResolution() const = 0;
 
-    virtual std::string backendName() const = 0;
     /// Reason for the most recent failure; empty if none.
     virtual const std::string &lastError() const = 0;
 };

@@ -72,6 +72,10 @@ public:
     void setViewScale(float scale);
     float getViewScale();
 
+    virtual QList<Property*> getProperties() override;
+    virtual QVariant getPropertyValue(QString valueName) override;
+    virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
+
     static ViewerNodePtr create();
 
 	SceneNodePtr createDuplicate() override;

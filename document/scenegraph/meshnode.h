@@ -98,6 +98,8 @@ public:
     }
 
     virtual QList<Property*> getProperties() override;
+    virtual QVariant getPropertyValue(QString valueName) override;
+    virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
 
     /**
      * Some model contains multiple meshes with child-parent relationships. This funtion Loads the model as a scene

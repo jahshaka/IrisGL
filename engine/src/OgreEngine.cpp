@@ -180,19 +180,6 @@ public:
         gFogParams[mSceneMgr] = p;   // read by FogHlmsListener::preparePassBuffer
     }
 
-    NodeId addDirectionalLight(const Vec3 &direction, float power) override {
-        JAH_TRY {
-            Ogre::Light *light = mSceneMgr->createLight();
-            Ogre::SceneNode *node = mSceneMgr->getRootSceneNode()->createChildSceneNode();
-            node->attachObject(light);
-            light->setType(Ogre::Light::LT_DIRECTIONAL);
-            light->setPowerScale(power);
-            light->setDirection(toOgre(direction).normalisedCopy());
-            Node rec; rec.node = node; rec.light = light;
-            return track(rec);
-        } JAH_CATCH(mError, 0);
-    }
-
     /// Jahshaka's own sky: a UV sphere around the camera with an unlit textured
     /// material, depth test/write off, drawn first (render queue 0) so the scene
     /// paints over it. Ogre's SceneManager::setSky is not used — on Vulkan its
@@ -382,36 +369,6 @@ public:
             mSkyMeshName.clear();
         }
     }
-    // TEMPORARY — replaced by mesh loading in step 3 of VIEWPORT_MIGRATION_PLAN.md
-    NodeId addTestCube(const Colour &albedo, float metalness, float roughness) override {
-        JAH_TRY {
-            Node rec;
-            rec.meshName = processUniqueName("cube");
-            rec.mesh = buildCubeV2(rec.meshName);
-
-            auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(
-                mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-            rec.datablockName = processUniqueName("mat");
-            auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->createDatablock(
-                Ogre::IdString(rec.datablockName), rec.datablockName,
-                Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
-            // Ogre defaults to SpecularWorkflow; Jahshaka's material model is metallic-roughness.
-            db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
-            attachFogPiece(db);
-            db->setDiffuse(Ogre::Vector3(albedo.r, albedo.g, albedo.b));
-            db->setMetalness(metalness);
-            db->setRoughness(roughness);
-
-            rec.item = mSceneMgr->createItem(rec.mesh, Ogre::SCENE_DYNAMIC);
-            rec.item->setDatablock(db);
-            rec.item->setVisibilityFlags(kVisibleBit | kGiGeometryBit);   // PBR: bounces light
-            rec.node = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC)
-                                ->createChildSceneNode(Ogre::SCENE_DYNAMIC);
-            rec.node->attachObject(rec.item);
-            return track(rec);
-        } JAH_CATCH(mError, 0);
-    }
-
     bool removeNode(NodeId id) override {
         auto it = mNodes.find(id);
         if (it == mNodes.end()) return false;
@@ -420,20 +377,6 @@ public:
             mNodes.erase(it);
             return true;
         } JAH_CATCH(mError, false);
-    }
-
-    void setNodePosition(NodeId id, const Vec3 &p) override {
-        JAH_TRY { if (auto *n = node(id)) n->setPosition(toOgre(p)); } JAH_CATCH(mError, );
-    }
-    void setNodeScale(NodeId id, const Vec3 &s) override {
-        JAH_TRY { if (auto *n = node(id)) n->setScale(toOgre(s)); } JAH_CATCH(mError, );
-    }
-    void rotateNode(NodeId id, float yaw, float pitch, float roll) override {
-        JAH_TRY {
-            if (auto *n = node(id)) {
-                n->yaw(Ogre::Radian(yaw)); n->pitch(Ogre::Radian(pitch)); n->roll(Ogre::Radian(roll));
-            }
-        } JAH_CATCH(mError, );
     }
 
     // ---- Hierarchy and transforms ----
@@ -1091,9 +1034,12 @@ private:
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
         Ogre::SceneNode *lightNode = nullptr;   // internal child: -Y (document) -> -Z (Ogre)
-        Ogre::MeshPtr    mesh;              // uniquely owned (addTestCube); MUST be dropped before Root
+        // Vestigial since the selftest-era addTestCube was pruned (nothing assigns
+        // these any more); releaseNode still clears them so a future node-owned
+        // mesh/datablock keeps the "dropped before Root" teardown guarantee.
+        Ogre::MeshPtr    mesh;              // uniquely owned; MUST be dropped before Root
         std::string      meshName;
-        std::string      datablockName;     // uniquely owned (addTestCube)
+        std::string      datablockName;     // uniquely owned
         MeshId           meshRef     = 0;   // shared, owned by mMeshes
         MaterialId       materialRef = 0;   // shared, owned by mMaterials
         // Billboard set (particles): uniquely owned; freed by releaseBillboards
@@ -1508,57 +1454,6 @@ private:
     /// Ids are monotonic per scene and never reused.
     NodeId track(const Node &n) { mNodes[++mNextId] = n; return mNextId; }
 
-    /// Builds a unit cube as a v2 mesh. v1 meshes silently render nothing on Vulkan,
-    /// so the v1 API is avoided entirely — this is also the shape the assimp importer takes.
-    Ogre::MeshPtr buildCubeV2(const std::string &name) {
-        Ogre::MeshPtr mesh = Ogre::MeshManager::getSingleton().createManual(
-            name, Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);
-        Ogre::SubMesh *sub = mesh->createSubMesh();
-        Ogre::VaoManager *vaoMgr = mRoot->getRenderSystem()->getVaoManager();
-
-        struct V { float px, py, pz, nx, ny, nz; };
-        const float h = 0.5f;
-        const float fn[6][3] = {{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0}};
-        const float fv[6][4][3] = {
-            {{-h,-h, h},{ h,-h, h},{ h, h, h},{-h, h, h}},
-            {{ h,-h,-h},{-h,-h,-h},{-h, h,-h},{ h, h,-h}},
-            {{ h,-h, h},{ h,-h,-h},{ h, h,-h},{ h, h, h}},
-            {{-h,-h,-h},{-h,-h, h},{-h, h, h},{-h, h,-h}},
-            {{-h, h, h},{ h, h, h},{ h, h,-h},{-h, h,-h}},
-            {{-h,-h,-h},{ h,-h,-h},{ h,-h, h},{-h,-h, h}} };
-        const Ogre::uint32 numVerts = 24, numIdx = 36;
-
-        V *verts = reinterpret_cast<V *>(
-            OGRE_MALLOC_SIMD(sizeof(V) * numVerts, Ogre::MEMCATEGORY_GEOMETRY));
-        Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(
-            OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * numIdx, Ogre::MEMCATEGORY_GEOMETRY));
-        for (int f = 0; f < 6; ++f)
-            for (int v = 0; v < 4; ++v)
-                verts[f * 4 + v] = { fv[f][v][0], fv[f][v][1], fv[f][v][2],
-                                     fn[f][0], fn[f][1], fn[f][2] };
-        for (int f = 0; f < 6; ++f) {
-            const Ogre::uint16 b = static_cast<Ogre::uint16>(f * 4);
-            const int o = f * 6;
-            idx[o+0]=b; idx[o+1]=Ogre::uint16(b+1); idx[o+2]=Ogre::uint16(b+2);
-            idx[o+3]=b; idx[o+4]=Ogre::uint16(b+2); idx[o+5]=Ogre::uint16(b+3);
-        }
-
-        Ogre::VertexElement2Vec decl;
-        decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_POSITION));
-        decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_NORMAL));
-        Ogre::VertexBufferPacked *vbuf =
-            vaoMgr->createVertexBuffer(decl, numVerts, Ogre::BT_IMMUTABLE, verts, true);
-        Ogre::VertexBufferPackedVec vbufs; vbufs.push_back(vbuf);
-        Ogre::IndexBufferPacked *ibuf = vaoMgr->createIndexBuffer(
-            Ogre::IndexBufferPacked::IT_16BIT, numIdx, Ogre::BT_IMMUTABLE, idx, true);
-        Ogre::VertexArrayObject *vao =
-            vaoMgr->createVertexArrayObject(vbufs, ibuf, Ogre::OT_TRIANGLE_LIST);
-        sub->mVao[Ogre::VpNormal].push_back(vao);
-        sub->mVao[Ogre::VpShadow].push_back(vao);
-        mesh->_setBounds(Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3(h, h, h)), false);
-        mesh->_setBoundingSphereRadius(h * 1.733f);
-        return mesh;
-    }
 
     Ogre::Root         *mRoot;
     Ogre::SceneManager *mSceneMgr;
@@ -1613,8 +1508,8 @@ public:
             mCamera = s->sceneManager()->createCamera(mName + "/Camera");
             mCamera->setNearClipDistance(0.1f);
             // Ogre's default far plane is 100000; PSSM splits computed over that range
-            // leave no shadow-map resolution for the actual scene (views that only use
-            // setCameraPosition/lookAt never call setCamera to override it).
+            // leave no shadow-map resolution for the actual scene (a View that is
+            // never handed a CameraDesc keeps these defaults).
             mCamera->setFarClipDistance(1000.0f);
             mCamera->setAutoAspectRatio(true);
             mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
@@ -1634,12 +1529,6 @@ public:
         } JAH_CATCH(mError, );
     }
 
-    void setCameraPosition(const Vec3 &p) override {
-        JAH_TRY { if (mCamera) mCamera->setPosition(toOgre(p)); } JAH_CATCH(mError, );
-    }
-    void lookAt(const Vec3 &t) override {
-        JAH_TRY { if (mCamera) mCamera->lookAt(toOgre(t)); } JAH_CATCH(mError, );
-    }
     void setCamera(const CameraDesc &c) override {
         JAH_TRY {
             if (!mCamera) return;
@@ -1986,7 +1875,6 @@ public:
             if (mRoot) mRoot->renderOneFrame();
         } JAH_CATCH(mLastError, );
     }
-    std::string backendName() const override { return mBackendName; }
     const std::string &lastError() const override { return mLastError; }
 
     /// GLOBAL by construction: HlmsPbs keeps ONE ShadowFilter for every shadowed

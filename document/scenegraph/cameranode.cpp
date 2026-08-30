@@ -15,9 +15,87 @@ For more information see the LICENSE file
 #include <QPoint>
 
 #include "core/math/mathhelper.h"
+#include "core/properties/property.h"
 
 namespace iris
 {
+
+QList<Property*> CameraNode::getProperties()
+{
+    auto props = SceneNode::getProperties();
+
+    auto prop = new FloatProperty();
+    prop->displayName = "Aspect Ratio";
+    prop->name = "aspectRatio";
+    prop->value = aspectRatio;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Field of View";
+    prop->name = "angle";
+    prop->value = angle;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Near Clip";
+    prop->name = "nearClip";
+    prop->value = nearClip;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Far Clip";
+    prop->name = "farClip";
+    prop->value = farClip;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Ortho Size";
+    prop->name = "orthoSize";
+    prop->value = orthoSize;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "VR View Scale";
+    prop->name = "vrViewScale";
+    prop->value = vrViewScale;
+    props.append(prop);
+
+    auto intProp = new IntProperty();
+    intProp->displayName = "Projection Mode";
+    intProp->name = "projMode";
+    intProp->value = static_cast<int>(projMode);
+    props.append(intProp);
+
+    return props;
+}
+
+QVariant CameraNode::getPropertyValue(QString valueName)
+{
+    if (valueName == "aspectRatio") return aspectRatio;
+    if (valueName == "angle")       return angle;
+    if (valueName == "nearClip")    return nearClip;
+    if (valueName == "farClip")     return farClip;
+    if (valueName == "orthoSize")   return orthoSize;
+    if (valueName == "vrViewScale") return vrViewScale;
+    if (valueName == "projMode")    return static_cast<int>(projMode);
+
+    return SceneNode::getPropertyValue(valueName);
+}
+
+bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
+{
+    if (valueName == "aspectRatio") { setAspectRatio(value.toFloat());          return true; }
+    if (valueName == "angle")       { setFieldOfViewDegrees(value.toFloat());   return true; }
+    if (valueName == "nearClip")    { nearClip = value.toFloat();               return true; }
+    if (valueName == "farClip")     { farClip = value.toFloat();                return true; }
+    if (valueName == "orthoSize")   { setOrthagonalZoom(value.toFloat());       return true; }
+    if (valueName == "vrViewScale") { setVrViewScale(value.toFloat());          return true; }
+    // setProjection, not a raw assignment: it keeps isPerspective in lock-step
+    // with projMode (an out-of-sync pair renders previews orthographic).
+    if (valueName == "projMode")    { setProjection(static_cast<CameraProjection>(value.toInt())); return true; }
+
+    return SceneNode::setPropertyValue(valueName, value);
+}
 
 void CameraNode::setProjection(CameraProjection projMode)
 {

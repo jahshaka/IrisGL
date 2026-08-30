@@ -68,6 +68,10 @@ public:
      */
     QVector3D calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos);
 
+    virtual QList<Property*> getProperties() override;
+    virtual QVariant getPropertyValue(QString valueName) override;
+    virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
+
 	SceneNodePtr createDuplicate() override;
 
 private:

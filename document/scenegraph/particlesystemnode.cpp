@@ -18,6 +18,7 @@ For more information see the LICENSE file
 #endif
 
 #include "core/math/mathhelper.h"
+#include "core/properties/property.h"
 #include "document/scenegraph/meshnode.h"
 #include "document/scenegraph/particlesystemnode.h"
 #include "document/assets/mesh.h"
@@ -65,6 +66,113 @@ ParticleSystemNode::~ParticleSystemNode()
 {
     for (auto p : particles)
         delete p;
+}
+
+// Reflection covers exactly the field set SceneWriter::writeParticleData
+// serializes, under the same key names it writes ("blendMode" is useAdditive).
+// Two of its keys are handled elsewhere: "guid" is identity (not reflected at
+// all) and "visible" comes from SceneNode.
+QList<Property*> ParticleSystemNode::getProperties()
+{
+    auto props = SceneNode::getProperties();
+
+    auto prop = new FloatProperty();
+    prop->displayName = "Particles Per Second";
+    prop->name = "particlesPerSecond";
+    prop->value = particlesPerSecond;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Particle Scale";
+    prop->name = "particleScale";
+    prop->value = particleScale;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Gravity Complement";
+    prop->name = "gravityComplement";
+    prop->value = gravityComplement;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Life Length";
+    prop->name = "lifeLength";
+    prop->value = lifeLength;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Speed";
+    prop->name = "speed";
+    prop->value = speed;
+    props.append(prop);
+
+    auto boolProp = new BoolProperty();
+    boolProp->displayName = "Dissipate";
+    boolProp->name = "dissipate";
+    boolProp->value = dissipate;
+    props.append(boolProp);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Dissipate Inverted";
+    boolProp->name = "dissipateInv";
+    boolProp->value = dissipateInv;
+    props.append(boolProp);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Random Rotation";
+    boolProp->name = "randomRotation";
+    boolProp->value = randomRotation;
+    props.append(boolProp);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Additive Blending";
+    boolProp->name = "blendMode";
+    boolProp->value = useAdditive;
+    props.append(boolProp);
+
+    // READ-ONLY: the node holds a Texture2DPtr, and binding one needs the asset
+    // manager (guid -> file), which the document layer has no access to. The
+    // texture's source path is exposed for inspection only; setPropertyValue
+    // refuses it. FileProperty is the QString-valued Property here.
+    auto texProp = new FileProperty();
+    texProp->displayName = "Texture";
+    texProp->name = "texture";
+    texProp->value = !!texture ? texture->getSource() : QString();
+    props.append(texProp);
+
+    return props;
+}
+
+QVariant ParticleSystemNode::getPropertyValue(QString valueName)
+{
+    if (valueName == "particlesPerSecond") return particlesPerSecond;
+    if (valueName == "particleScale")      return particleScale;
+    if (valueName == "gravityComplement")  return gravityComplement;
+    if (valueName == "lifeLength")         return lifeLength;
+    if (valueName == "speed")              return speed;
+    if (valueName == "dissipate")          return dissipate;
+    if (valueName == "dissipateInv")       return dissipateInv;
+    if (valueName == "randomRotation")     return randomRotation;
+    if (valueName == "blendMode")          return useAdditive;
+    if (valueName == "texture")            return !!texture ? texture->getSource() : QString();
+
+    return SceneNode::getPropertyValue(valueName);
+}
+
+bool ParticleSystemNode::setPropertyValue(QString valueName, const QVariant &value)
+{
+    if (valueName == "particlesPerSecond") { setPPS(value.toFloat());            return true; }
+    if (valueName == "particleScale")      { setParticleScale(value.toFloat());  return true; }
+    if (valueName == "gravityComplement")  { setGravity(value.toFloat());        return true; }
+    if (valueName == "lifeLength")         { setLife(value.toFloat());           return true; }
+    if (valueName == "speed")              { setSpeed(value.toFloat());          return true; }
+    if (valueName == "dissipate")          { setDissipation(value.toBool());     return true; }
+    if (valueName == "dissipateInv")       { setDissipationInv(value.toBool());  return true; }
+    if (valueName == "randomRotation")     { setRandomRotation(value.toBool());  return true; }
+    if (valueName == "blendMode")          { setBlendMode(value.toBool());       return true; }
+    if (valueName == "texture")            return false;   // read-only, see getProperties()
+
+    return SceneNode::setPropertyValue(valueName, value);
 }
 
 void ParticleSystemNode::setBlendMode(bool useAddittive)
