@@ -538,6 +538,7 @@ public:
             Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
             if (mm.resourceExists(it->second.name)) mm.remove(it->second.name);
             mMeshes.erase(it);
+            invalidateGiCaches();   // IR caches mesh data by raw VAO pointer
             return true;
         } JAH_CATCH(mError, false);
     }
@@ -703,6 +704,7 @@ public:
             Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
             tm->destroyTexture(it->second.texture);
             mTextures.erase(it);
+            invalidateGiCaches();   // IR caches downloaded images by TextureGpu*
             return true;
         } JAH_CATCH(mError, false);
     }
@@ -1343,6 +1345,7 @@ private:
         // mesh ref) -> datablock -> node -> our mesh ref -> the mesh itself.
         releaseBillboards(n);
         if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
+        if (n.mesh)  invalidateGiCaches();   // node-owned MeshPtr dies below; IR caches its VAO
         n.meshRef = 0; n.materialRef = 0;
         // The internal light child must go before the reparent loop below would leak it to root.
         if (n.light) { n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr; }
@@ -1424,6 +1427,27 @@ private:
     }
     /// Re-traces Instant Radiosity against the scene as it is right now. Cheap
     /// enough (a few ms at editor quality) to run on every light move.
+    /// Ogre::InstantRadiosity caches mesh data by raw VertexArrayObject* and
+    /// downloaded images by TextureGpu* (OgreInstantRadiosity.h:238-244). Destroying
+    /// a mesh/texture while IR is live leaves those caches dangling — the owner's
+    /// scene-switch crash ("double free or corruption" tearing down a scene with IR
+    /// enabled while the next project's assets churned). Every destroy path flags;
+    /// the flush happens ONCE at frame time (bursty destroys = one rebuild).
+    void invalidateGiCaches() {
+        if (mInstantRadiosity) mGiCachesDirty = true;
+    }
+public:
+    /// Called by Engine::renderOneFrame before rendering.
+    void applyPendingGi() {
+        if (!mGiCachesDirty) return;
+        mGiCachesDirty = false;
+        if (!mInstantRadiosity) return;
+        JAH_TRY {
+            mInstantRadiosity->freeMemory();   // drops the stale VAO/texture caches
+            rebuildGi();                       // re-downloads from the LIVE scene
+        } JAH_CATCH(mError, );
+    }
+private:
     void rebuildGi() {
         Ogre::Light *driver = markGiLight(mGi.irLight);
         Ogre::Vector3 mn, mx;
@@ -1550,6 +1574,7 @@ private:
     Ogre::MeshPtr    mSkyMesh;
     std::string      mSkyMeshName, mSkyDatablockName;
     Ogre::InstantRadiosity *mInstantRadiosity = nullptr;   // owned; null when GI off
+    bool mGiCachesDirty = false;   // mesh/texture destroyed while IR live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
     TextureId           mNextTextureId = 0;
     NodeId              mNextId = 0;
@@ -1957,6 +1982,7 @@ public:
     void renderOneFrame() override {
         JAH_TRY {
             for (auto &v : mViews) { v->applyPendingResize(); v->updateSky(); v->updateParticles(); }
+            for (auto &s : mScenes) s->applyPendingGi();
             if (mRoot) mRoot->renderOneFrame();
         } JAH_CATCH(mLastError, );
     }
