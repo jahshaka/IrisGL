@@ -12,11 +12,11 @@ For more information see the LICENSE file
 #ifndef IRISGLFWD_H
 #define IRISGLFWD_H
 
-/* This class contains forward declarations of all classes in irisgl
+/* Forward declarations of the document-model classes in irisgl.
+ * The legacy GL renderer's classes were deleted at step 14.
  */
 
 #include <QSharedPointer>
-//#include "animation/keyframeanimation.h"
 #include "core/logger.h"
 
 namespace iris
@@ -34,30 +34,20 @@ class MeshNode;
 class SceneNode;
 class Texture2D;
 class Texture;
-class TextureCube;
-class DefaultSkyMaterial;
 class Scene;
 class Shader;
 class VertexLayout;
 class TriMesh;
-struct RenderData;
 class Viewport;
-class BillboardMaterial;
-class Billboard;
-class FullScreenQuad;
 class DefaultMaterial;
-class ForwardRenderer;
 class KeyFrameSet;
 class Animation;
 class FloatKeyFrame;
 class CustomMaterial;
 class PbrMaterial;
-class RenderItem;
 class PickingResult;
-class RenderTarget;
 class Property;
 class PostProcess;
-class PostProcessContext;
 class PostProcessManager;
 class PropertyAnim;
 class PropertyAnimInfo;
@@ -73,11 +63,6 @@ typedef Key<float> FloatKey;
 class BoundingSphere;
 class VertexBuffer;
 class IndexBuffer;
-class GraphicsDevice;
-class ContentManager;
-class SpriteBatch;
-class RenderList;
-class Font;
 class AABB;
 
 typedef QSharedPointer<iris::Animation> AnimationPtr;
@@ -91,18 +76,14 @@ typedef QSharedPointer<DefaultMaterial> DefaultMaterialPtr;
 typedef QSharedPointer<LightNode> LightNodePtr;
 typedef QSharedPointer<CameraNode> CameraNodePtr;
 typedef QSharedPointer<MeshNode> MeshNodePtr;
-typedef QSharedPointer<DefaultSkyMaterial> DefaultSkyMaterialPtr;
 typedef QSharedPointer<Texture2D> Texture2DPtr;
 typedef QSharedPointer<Texture> TexturePtr;
-typedef QSharedPointer<TextureCube> TextureCubePtr;
-typedef QSharedPointer<ForwardRenderer> ForwardRendererPtr;
 typedef QSharedPointer<KeyFrameSet> KeyFrameSetPtr;
 typedef QSharedPointer<FloatKeyFrame> FloatKeyFramePtr;
 typedef QSharedPointer<CustomMaterial> CustomMaterialPtr;
 typedef QSharedPointer<PbrMaterial> PbrMaterialPtr;
 typedef QSharedPointer<ViewerNode> ViewerNodePtr;
 typedef QSharedPointer<ParticleSystemNode> ParticleSystemNodePtr;
-typedef QSharedPointer<RenderTarget> RenderTargetPtr;
 typedef QSharedPointer<PostProcess> PostProcessPtr;
 typedef QSharedPointer<PostProcessManager> PostProcessManagerPtr;
 typedef QSharedPointer<Bone> BonePtr;
@@ -110,10 +91,6 @@ typedef QSharedPointer<Skeleton> SkeletonPtr;
 typedef QSharedPointer<SkeletalAnimation> SkeletalAnimationPtr;
 typedef QSharedPointer<VertexBuffer> VertexBufferPtr;
 typedef QSharedPointer<IndexBuffer> IndexBufferPtr;
-typedef QSharedPointer<GraphicsDevice> GraphicsDevicePtr;
-typedef QSharedPointer<ContentManager> ContentManagerPtr;
-typedef QSharedPointer<SpriteBatch> SpriteBatchPtr;
-typedef QSharedPointer<Font> FontPtr;
 
 }
 

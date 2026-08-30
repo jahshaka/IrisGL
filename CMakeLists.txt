@@ -30,7 +30,7 @@ endfunction()
 
 #find_package(Qt6 COMPONENTS Core)
 
-find_package(Qt6 COMPONENTS Core Gui OpenGL OpenGLWidgets Multimedia Network Concurrent)
+find_package(Qt6 COMPONENTS Core Gui Multimedia Network Concurrent)
 message(STATUS "Qt6_VERSION: ${Qt6_VERSION}")
 message(STATUS "Qt6_INSTALL_PREFIX: ${Qt6_INSTALL_PREFIX}")
 
@@ -76,19 +76,13 @@ set(SRCS
     src/graphics/model.cpp
     src/materials/defaultmaterial.cpp
     src/scenegraph/meshnode.cpp
-    src/graphics/forwardrenderer.cpp
     src/graphics/graphicshelper.cpp
-    src/graphics/utils/billboard.cpp
     src/scenegraph/cameranode.cpp
     src/graphics/texture2d.cpp
-    src/graphics/texturecube.cpp
-    src/materials/defaultskymaterial.cpp
     src/graphics/material.cpp
-    src/graphics/utils/fullscreenquad.cpp
     src/geometry/trimesh.cpp
     src/graphics/vertexlayout.cpp
     src/graphics/shader.cpp
-    src/graphics/texture.cpp
     src/graphics/shadowmap.cpp
     src/animation/animation.cpp
     src/animation/keyframeset.cpp
@@ -98,13 +92,7 @@ set(SRCS
     src/math/mathhelper.cpp
     src/materials/custommaterial.cpp
     src/materials/pbrmaterial.cpp
-    src/graphics/rendertarget.cpp
     src/graphics/postprocessmanager.cpp
-    src/postprocesses/coloroverlaypostprocess.cpp
-    src/postprocesses/radialblurpostprocess.cpp
-    src/postprocesses/bloompostprocess.cpp
-    src/postprocesses/greyscalepostprocess.cpp
-    src/postprocesses/ssaopostprocess.cpp
     src/animation/propertyanim.cpp
     src/scenegraph/lightnode.cpp
     src/animation/skeletalanimation.cpp
@@ -115,22 +103,11 @@ set(SRCS
     src/geometry/frustum.cpp
     src/geometry/aabb.cpp
     src/core/logger.cpp
-    src/graphics/renderlist.cpp
-    src/graphics/renderitem.cpp
     src/graphics/utils/linemeshbuilder.cpp
     src/graphics/utils/shapehelper.cpp
-    src/materials/colormaterial.cpp
-    src/materials/linecolormaterial.cpp
     src/postprocesses/fxaapostprocess.cpp
-    src/graphics/graphicsdevice.cpp
-    src/widgets/renderwidget.cpp
-    src/graphics/spritebatch.cpp
 	src/graphics/renderstates.cpp
-    src/graphics/font.cpp
-    src/graphics/blendstate.cpp
-    src/graphics/depthstate.cpp
     src/graphics/rasterizerstate.cpp
-    src/content/contentmanager.cpp
     src/content/modelloader.cpp
     src/physics/environment.cpp
     src/physics/physicshelper.cpp
@@ -144,25 +121,18 @@ set (HEADERS
     src/scenegraph/lightnode.h
     src/graphics/texture2d.h
     src/graphics/texture.h
-    src/graphics/texturecube.h
     src/graphics/shadowmap.h
     src/graphics/mesh.h
     src/graphics/model.h
     src/graphics/material.h
     src/scenegraph/cameranode.h
     src/scenegraph/meshnode.h
-    src/graphics/renderdata.h
-    src/graphics/forwardrenderer.h
     src/materials/defaultmaterial.h
     src/graphics/vertexlayout.h
+    src/graphics/vertexbuffer.h
     src/graphics/viewport.h
-    src/materials/billboardmaterial.h
     src/graphics/graphicshelper.h
-    src/graphics/utils/billboard.h
     src/geometry/trimesh.h
-    src/materials/defaultskymaterial.h
-    src/core/meshmanager.h
-    src/graphics/utils/fullscreenquad.h
     src/math/mathhelper.h
     src/irisglfwd.h
     src/graphics/shader.h
@@ -176,28 +146,16 @@ set (HEADERS
     src/core/ziphelper.h
     src/scenegraph/viewernode.h
     src/graphics/particle.h
-    src/graphics/particlerender.h
-    src/graphics/renderitem.h
     src/scenegraph/particlesystemnode.h
     src/graphics/iviewsource.h
     src/materials/custommaterial.h
     src/materials/pbrmaterial.h
     src/graphics/postprocess.h
     src/graphics/postprocessmanager.h
-    src/graphics/rendertexture.h
-    src/graphics/rendertarget.h
-    src/postprocesses/bloompostprocess.h
-    src/postprocesses/coloroverlaypostprocess.h
-    src/postprocesses/radialblurpostprocess.h
-    src/postprocesses/greyscalepostprocess.h
-    src/postprocesses/ssaopostprocess.h
-    src/postprocesses/materialpostprocess.h
     src/animation/propertyanim.h
     src/animation/animableproperty.h
-    src/utils/hashedlist.h
     src/graphics/skeleton.h
     src/animation/skeletalanimation.h
-    src/animation/floatcurve.h
     src/scenegraph/scene.h
     src/scenegraph/scenenode.h
     src/core/property.h
@@ -208,21 +166,11 @@ set (HEADERS
     src/math/transform.h
     src/core/logger.h
     src/core/performancetimer.h
-    src/graphics/renderlist.h
     src/graphics/renderstates.h
     src/graphics/utils/linemeshbuilder.h
     src/graphics/utils/shapehelper.h
-    src/materials/colormaterial.h
-    src/materials/linecolormaterial.h
     src/postprocesses/fxaapostprocess.h
-    src/graphics/graphicsdevice.h
-    src/widgets/renderwidget.h
-    src/graphics/spritebatch.h
-    src/graphics/font.h
-    src/graphics/blendstate.h
-    src/graphics/depthstate.h
     src/graphics/rasterizerstate.h
-    src/content/contentmanager.h
 	src/content/modelloader.h
     src/physics/environment.h
     src/physics/physicshelper.h
@@ -252,7 +200,7 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/src/zip/src"
 )
 
-target_link_libraries (IrisGL  assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL  assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
 target_compile_options(IrisGL PUBLIC)
 
 # A6: these two warning classes are undefined behaviour, not style - keep them fixed.
