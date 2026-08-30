@@ -17,6 +17,7 @@ OgreEngine *gLiveEngine = nullptr;
 
 bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     mDisplay = reinterpret_cast<Display *>(cfg.display);
+    mDefaultSamples = OgreView::sanitizeSamples(cfg.sampleCount);
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
     try {
@@ -98,21 +99,27 @@ View *OgreEngine::createView(const std::string &name,
         }
         params["vsync"]         = "true";
         params["vsyncInterval"] = "1";
+        // MSAA: the FSAA misc param must be passed at EVERY window creation —
+        // here AND in the resize lambda below, or a resize silently resets it.
+        params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
         window->setVSync(true, 1);
         ensureHlms();
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
                                          background, mLastError));
         OgreView *view = mViews.back().get();
+        view->mRequestedSamples = mDefaultSamples;
         const bool vulkan = mBackendName.find("Vulkan") != std::string::npos;
         Display *display = mDisplay;
         Ogre::Root *root = mRoot;
-        view->mCreateWindow = [root, vulkan, display, handle, name](unsigned w, unsigned h) -> Ogre::Window * {
+        view->mCreateWindow = [root, vulkan, display, handle, name](unsigned w, unsigned h,
+                                                                    unsigned samples) -> Ogre::Window * {
             Ogre::NameValuePairList p;
             X11Handle x11{ display, (::Window)handle };
             if (vulkan) p["SDL2x11"] = Ogre::StringConverter::toString((unsigned long)&x11);
             else { p["parentWindowHandle"] = Ogre::StringConverter::toString((unsigned long)handle); p["gamma"] = "true"; }
             p["vsync"] = "true"; p["vsyncInterval"] = "1";
+            p["FSAA"] = Ogre::StringConverter::toString(samples);
             Ogre::Window *win = root->createRenderWindow(name + "/" + processUniqueName("resize"), w, h, false, &p);
             win->setVSync(true, 1);
             return win;

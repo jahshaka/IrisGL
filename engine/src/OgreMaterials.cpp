@@ -72,6 +72,21 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
         db->setTransparency(p.alpha, Ogre::HlmsPbsDatablock::Transparent);
         break;
     }
+    // Alpha-to-coverage on Cutout ONLY, and only when the target is actually
+    // multisampled (A2cEnabledMsaaOnly): MSAA then dithers the hard alpha-test
+    // edge into coverage samples instead of a 1px staircase. Free at 1x; a PSO
+    // rebuild for cutout datablocks only. AFTER the switch: setTransparency
+    // rewrites the blendblock, and applyPbr must stay idempotent both ways.
+    {
+        const Ogre::uint8 want = static_cast<Ogre::uint8>(
+            p.alphaMode == PbrAlphaMode::Cutout ? Ogre::HlmsBlendblock::A2cEnabledMsaaOnly
+                                                : Ogre::HlmsBlendblock::A2cDisabled);
+        if (db->getBlendblock()->mAlphaToCoverage != want) {
+            Ogre::HlmsBlendblock bb = *db->getBlendblock();
+            bb.mAlphaToCoverage = want;
+            db->setBlendblock(bb);
+        }
+    }
 }
 
 // ---- Materials ----

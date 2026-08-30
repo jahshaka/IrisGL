@@ -182,6 +182,15 @@ public:
     virtual void resize(unsigned width, unsigned height) = 0;
     virtual unsigned width() const = 0;
     virtual unsigned height() const = 0;
+    /// Hardware anti-aliasing (MSAA) for this view's render target: 1 = off,
+    /// 2/4/8 typical (values are rounded down to a power of two and clamped).
+    /// NOT cheap on change: the render target is recreated — on-screen at the
+    /// next frame (the resize path), offscreen immediately. Calling again with
+    /// the value already requested is free, so hosts may push it per frame.
+    /// The driver may clamp the request (Vulkan only guarantees 1 and 4);
+    /// sampleCount() reports the ACHIEVED count once the target exists.
+    virtual void setSampleCount(unsigned samples) = 0;
+    virtual unsigned sampleCount() const = 0;
     /// KEPT: cheap introspection — readPixels() only works offscreen, so callers
     /// (thumbnails, tests) branch on this; pinned by the engine suites.
     virtual bool isOffscreen() const = 0;

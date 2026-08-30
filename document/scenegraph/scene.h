@@ -132,6 +132,10 @@ public:
     bool giAutoRefresh;        // editor: re-solve automatically on edits
     QVector3D giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
 
+    // anti-aliasing: MSAA sample count for the scene's viewport — 1 (off), 2, 4
+    // or 8 (rendered by the engine viewport only; the driver may clamp).
+    int antiAliasing;
+
     float gravity;
     bool shadowEnabled;
 

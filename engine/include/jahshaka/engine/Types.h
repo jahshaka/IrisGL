@@ -193,6 +193,11 @@ struct EngineConfig {
     std::string hlmsMediaDir;
     /// Log file path; empty means the backend's default name in the working directory.
     std::string logFile = "jahshaka-ogre.log";
+    /// Initial MSAA sample count for ON-SCREEN views (1 = off; 2/4/8 typical).
+    /// Offscreen views (thumbnails, previews, tests) always start at 1 so their
+    /// pixel readbacks stay exact — raise per view with View::setSampleCount.
+    /// The driver may clamp; View::sampleCount() reports what was achieved.
+    unsigned sampleCount = 1;
     /// Host's display connection; required only for on-screen Views (see above).
     NativeDisplayHandle display = 0;
 };

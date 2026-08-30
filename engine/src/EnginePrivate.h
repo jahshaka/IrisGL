@@ -437,9 +437,21 @@ public:
     bool isOffscreen() const override;
 
     /// Set by the engine for on-screen views: creates a fresh Ogre window on the same
-    /// native handle at the given size.
-    std::function<Ogre::Window *(unsigned, unsigned)> mCreateWindow;
+    /// native handle at the given size and MSAA sample count (the "FSAA" misc param —
+    /// BOTH window-creation sites must pass it or MSAA silently resets on resize).
+    std::function<Ogre::Window *(unsigned, unsigned, unsigned)> mCreateWindow;
     unsigned mPendingW = 0, mPendingH = 0;
+    /// Runtime MSAA change is structurally a resize (Vulkan has no runtime
+    /// setFsaa): non-zero = recreate the target at mRequestedSamples next
+    /// applyPendingResize, even at the same size.
+    unsigned mPendingSamples = 0;
+    /// What the host asked for (sanitized). The engine initialises it for
+    /// on-screen views from EngineConfig::sampleCount; offscreen views start
+    /// at 1 (pixel-asserted readbacks stay exact unless a test opts in).
+    unsigned mRequestedSamples = 1;
+
+    void setSampleCount(unsigned samples) override;
+    unsigned sampleCount() const override;
 
     /// On-screen resize is applied at frame time (applyPendingResize): by then Qt has
     /// resized the native window, and doing it once per frame coalesces layout bursts.
@@ -465,10 +477,20 @@ public:
     /// destructor BEFORE Root dies.
     void destroy();
 
+    /// `samples` > 1 asks for an implicit-resolve MSAA target: the sample
+    /// description MUST be set before scheduleTransitionTo(Resident) (Ogre
+    /// asserts OnStorage); the achieved count is validated at the transition.
     static Ogre::TextureGpu *createRtt(Ogre::Root *root, const std::string &name,
-                                       unsigned w, unsigned h);
+                                       unsigned w, unsigned h, unsigned samples = 1);
+    /// Rounds down to a power of two and clamps to [1, 16] — what the backend
+    /// will even ask the driver for (the driver may still clamp further).
+    static unsigned sanitizeSamples(unsigned samples);
 
 private:
+    /// Offscreen only: replaces the RTT (which cannot change in place) at the
+    /// given size and mRequestedSamples, re-adding the workspace. The shared
+    /// tail of resize() and setSampleCount().
+    void rebuildRtt(unsigned w, unsigned h);
     Ogre::TextureGpu *target() const;
 
     Ogre::Root                *mRoot;
@@ -550,6 +572,7 @@ private:
     bool            mHlmsRegistered = false;
     ShadowFilter    mShadowFilter = ShadowFilter::Soft;
     unsigned        mShadowResolution = 2048;
+    unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
     std::vector<std::unique_ptr<OgreScene>> mScenes;

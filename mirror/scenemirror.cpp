@@ -892,6 +892,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // World-panel Enable Shadows (used to be hardcoded on).
     if (view->shadows() != mSource->shadowEnabled)
         view->setShadows(mSource->shadowEnabled);
+    // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
+    // frame — the engine ignores a repeat of the value already REQUESTED (the
+    // achieved count may be clamped lower by the driver, so comparing against
+    // view->sampleCount() here would rebuild the target every frame).
+    view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
     // Fog panel: linear distance fog on lit surfaces (engine keeps unlit overlays
     // and the sky unfogged, like the legacy renderer). Cheap per-frame push.
     const QColor f = mSource->fogColor;

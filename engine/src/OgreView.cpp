@@ -135,19 +135,57 @@ void OgreView::resize(unsigned w, unsigned h) {
         if (mWindow) {
             mPendingW = w; mPendingH = h;
         } else {
-            // An RTT cannot be resized in place: rebuild it and re-add the workspace.
-            Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-            const bool hadWorkspace = mWorkspace != nullptr;
-            if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
-            Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-            tm->destroyTexture(mTexture);
-            mTexture = createRtt(mRoot, processUniqueName("rtt"), w, h);
-            if (hadWorkspace && mScene)
-                mWorkspace = cm->addWorkspace(mScene->sceneManager(), mTexture, mCamera,
-                                              mWorkspaceDef, mEnabled);
+            rebuildRtt(w, h);   // an RTT cannot be resized in place
         }
         mWidth = w; mHeight = h;
     } JAH_CATCH(mError, );
+}
+
+void OgreView::rebuildRtt(unsigned w, unsigned h) {
+    // Rebuild the RTT (at mRequestedSamples) and re-add the workspace.
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    const bool hadWorkspace = mWorkspace != nullptr;
+    if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    tm->destroyTexture(mTexture);
+    mTexture = createRtt(mRoot, processUniqueName("rtt"), w, h, mRequestedSamples);
+    if (hadWorkspace && mScene)
+        mWorkspace = cm->addWorkspace(mScene->sceneManager(), mTexture, mCamera,
+                                      mWorkspaceDef, mEnabled);
+}
+
+unsigned OgreView::sanitizeSamples(unsigned samples) {
+    if (samples < 1)  samples = 1;
+    if (samples > 16) samples = 16;
+    while (samples & (samples - 1)) samples &= samples - 1;   // round DOWN to a power of two
+    return samples;
+}
+
+void OgreView::setSampleCount(unsigned samples) {
+    samples = sanitizeSamples(samples);
+    if (samples == mRequestedSamples) return;   // hosts may push per frame; same value is free
+    mRequestedSamples = samples;
+    JAH_TRY {
+        if (mWindow) {
+            // Vulkan has no runtime setFsaa: structurally a resize — the window is
+            // recreated (with the FSAA misc param) at frame time, coalesced with
+            // any size change already pending.
+            mPendingSamples = samples;
+            if (!mPendingW || !mPendingH) { mPendingW = mWidth; mPendingH = mHeight; }
+        } else {
+            rebuildRtt(mWidth, mHeight);
+        }
+    } JAH_CATCH(mError, );
+}
+
+unsigned OgreView::sampleCount() const {
+    // The ACHIEVED count: drivers clamp (Vulkan halves unsupported requests), and
+    // the validated description lands on the target at window creation /
+    // Resident transition. Before a target exists, report the request.
+    Ogre::TextureGpu *t = target();
+    if (!t) return mRequestedSamples;
+    const unsigned achieved = t->getSampleDescription().getColourSamples();
+    return achieved ? achieved : 1u;
 }
 
 bool OgreView::readPixels(Image &out) {
@@ -172,15 +210,18 @@ bool OgreView::readPixels(Image &out) {
 void OgreView::applyPendingResize() {
     if (!mWindow || !mPendingW || !mPendingH || !mCreateWindow) return;
     const unsigned w = mPendingW, h = mPendingH;
-    mPendingW = mPendingH = 0;
-    if (w == mWidth && h == mHeight) return;
+    const bool sampleChange = mPendingSamples != 0;
+    mPendingW = mPendingH = mPendingSamples = 0;
+    // A pending MSAA change recreates the window even at the same size (the
+    // sample-count term relaxing the old same-size early-return).
+    if (w == mWidth && h == mHeight && !sampleChange) return;
     JAH_TRY {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
         const bool hadWorkspace = mWorkspace != nullptr;
         if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
         mRoot->getRenderSystem()->destroyRenderWindow(mWindow);
         mWindow = nullptr;
-        mWindow = mCreateWindow(w, h);
+        mWindow = mCreateWindow(w, h, mRequestedSamples);
         mWidth = w; mHeight = h;
         if (hadWorkspace && mScene && mCamera)
             mWorkspace = cm->addWorkspace(mScene->sceneManager(), target(), mCamera, mWorkspaceDef, mEnabled);
@@ -212,13 +253,19 @@ void OgreView::destroy() {
 }
 
 Ogre::TextureGpu *OgreView::createRtt(Ogre::Root *root, const std::string &name,
-                                      unsigned w, unsigned h) {
+                                      unsigned w, unsigned h, unsigned samples) {
     Ogre::TextureGpuManager *tm = root->getRenderSystem()->getTextureGpuManager();
     Ogre::TextureGpu *rtt = tm->createTexture(
         name, Ogre::GpuPageOutStrategy::Discard,
         Ogre::TextureFlags::RenderToTexture, Ogre::TextureTypes::Type2D);
     rtt->setResolution(w, h);
     rtt->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+    // MSAA (implicit resolve — no MsaaExplicitResolve flag, so readPixels sees
+    // the resolved image). MUST precede the Resident transition: Ogre asserts
+    // OnStorage in setSampleDescription, and the transition validates/clamps
+    // the request into getSampleDescription() (the achieved count).
+    if (samples > 1)
+        rtt->setSampleDescription(Ogre::SampleDescription(static_cast<Ogre::uint8>(samples)));
     rtt->scheduleTransitionTo(Ogre::GpuResidency::Resident);
     return rtt;
 }

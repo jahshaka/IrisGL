@@ -53,6 +53,9 @@ Scene::Scene()
     giAutoRefresh = true;
     giPccGrid = QVector3D(3, 2, 3);
 
+    // anti-aliasing is opt-in like GI: off (1 sample) by default
+    antiAliasing = 1;
+
     // sky init
     skyType = SkyType::SINGLE_COLOR;
 
