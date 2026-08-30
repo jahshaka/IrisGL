@@ -15,9 +15,8 @@
 
 namespace iris
 {
-ModelLoader::ModelLoader(GraphicsDevicePtr device)
+ModelLoader::ModelLoader()
 {
-	this->device = device;
 }
 
 // Extracts meshes and skeleton from scene

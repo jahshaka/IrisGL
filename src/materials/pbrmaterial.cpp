@@ -11,9 +11,6 @@ For more information see the LICENSE file
 
 #include "pbrmaterial.h"
 #include "../graphics/texture2d.h"
-#include "../graphics/texturecube.h"
-#include "../graphics/graphicsdevice.h"
-#include "../scenegraph/scene.h"
 #include "../core/property.h"
 
 namespace iris
@@ -21,12 +18,6 @@ namespace iris
 
 PbrMaterial::PbrMaterial()
 {
-    // NB: no setTextureCount() here - Material::setShader() overwrites numTextures
-    // with shader->samplers.count() on the next line, so setting it is dead code.
-
-    createProgramFromShaderSource(":assets/shaders/pbr_material.vert",
-                                  ":assets/shaders/pbr_material.frag");
-
     baseColor           = QColor(255, 255, 255);
     baseColorFactor     = 1.0f;
     useBaseColorMap     = false;
@@ -63,59 +54,6 @@ PbrMaterial::PbrMaterial()
     iblIntensity        = 1.0f;
 
     createProperties();
-}
-
-void PbrMaterial::begin(GraphicsDevicePtr device, ScenePtr scene)
-{
-    device->setShader(shader);
-
-    bindTextures(device);
-
-    device->setShaderUniform("u_material.baseColor",
-                             QVector3D(baseColor.redF(), baseColor.greenF(), baseColor.blueF()));
-    device->setShaderUniform("u_material.baseColorFactor", baseColorFactor);
-
-    device->setShaderUniform("u_material.metallic",       metallicFactor);
-    device->setShaderUniform("u_material.roughness",      roughnessFactor);
-    device->setShaderUniform("u_material.roughnessLower", roughnessLowerBound);
-    device->setShaderUniform("u_material.roughnessUpper", roughnessUpperBound);
-
-    device->setShaderUniform("u_material.normalFactor",    normalFactor);
-    device->setShaderUniform("u_material.occlusionFactor", occlusionFactor);
-
-    device->setShaderUniform("u_material.emissive",
-                             QVector3D(emissiveColor.redF(), emissiveColor.greenF(), emissiveColor.blueF()));
-    device->setShaderUniform("u_material.emissiveIntensity", emissiveIntensity);
-
-    device->setShaderUniform("u_material.alpha",       alpha);
-    device->setShaderUniform("u_material.alphaCutoff", alphaCutoff);
-    device->setShaderUniform("u_material.alphaMode",   alphaMode);
-
-    device->setShaderUniform("u_textureScale", textureScale);
-
-    device->setShaderUniform("u_useBaseColorMap", useBaseColorMap);
-    device->setShaderUniform("u_useMetallicMap",  useMetallicMap);
-    device->setShaderUniform("u_useRoughnessMap", useRoughnessMap);
-    device->setShaderUniform("u_useNormalMap",    useNormalMap);
-    device->setShaderUniform("u_useOcclusionMap", useOcclusionMap);
-    device->setShaderUniform("u_useEmissiveMap",  useEmissiveMap);
-
-    device->setShaderUniform("u_useIbl",       useIbl);
-    device->setShaderUniform("u_iblIntensity", iblIntensity);
-
-    // Units 0-5 belong to the 2D maps (setTextureCount(6)); the cubemaps take
-    // the next two, which bindTextures() leaves alone.
-    if (useIbl) {
-        device->setTexture(6, diffuseEnvMap.staticCast<Texture>());
-        device->setShaderUniform("u_diffuseEnvMap", 6);
-        device->setTexture(7, specularEnvMap.staticCast<Texture>());
-        device->setShaderUniform("u_specularEnvMap", 7);
-    }
-}
-
-void PbrMaterial::end(GraphicsDevicePtr device, ScenePtr scene)
-{
-    Material::end(device, scene);
 }
 
 // ---------------------------------------------------------------- setters
@@ -174,13 +112,6 @@ void PbrMaterial::setAlpha(float a)          { alpha = a; }
 void PbrMaterial::setAlphaCutoff(float c)    { alphaCutoff = c; }
 void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
 void PbrMaterial::setTextureScale(float s)   { textureScale = s; }
-
-void PbrMaterial::setEnvironmentMap(TextureCubePtr diffuseIrradiance, TextureCubePtr specularPrefiltered)
-{
-    diffuseEnvMap  = diffuseIrradiance;
-    specularEnvMap = specularPrefiltered;
-    useIbl         = (!!diffuseIrradiance && !!specularPrefiltered);
-}
 
 void PbrMaterial::setIblIntensity(float intensity) { iblIntensity = intensity; }
 

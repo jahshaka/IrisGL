@@ -1,8 +1,6 @@
 #ifndef RASTERIZERSTATE_H
 #define RASTERIZERSTATE_H
 
-#include <qopengl.h>
-
 namespace iris
 {
 
@@ -13,10 +11,16 @@ enum class CullMode
     CullCounterClockwise
 };
 
+enum class FillMode
+{
+    Solid,
+    Wireframe
+};
+
 struct RasterizerState
 {
     CullMode cullMode;
-    GLenum fillMode;
+    FillMode fillMode;
 
 	float depthScaleBias;
 	float depthBias;
@@ -24,12 +28,12 @@ struct RasterizerState
     RasterizerState()
     {
         cullMode= CullMode::CullCounterClockwise;
-        fillMode = GL_FILL;
+        fillMode = FillMode::Solid;
 		depthScaleBias = 0;
 		depthBias = 0;
     }
 
-    RasterizerState(CullMode cullMode, GLenum fillMode):
+    RasterizerState(CullMode cullMode, FillMode fillMode = FillMode::Solid):
         cullMode(cullMode),
         fillMode(fillMode)
     {

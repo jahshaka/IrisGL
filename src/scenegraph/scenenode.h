@@ -266,13 +266,6 @@ public:
     void applyDefaultPose();
     void applyAnimationPose(SceneNodePtr node, QMap<QString, QMatrix4x4> skeletonSpaceMatrices);
 
-    /*
-     * This is the function used to add render items
-     * to the render queues
-     * Called from inside the update(float) function
-     */
-    virtual void submitRenderItems(){}
-
 private:
     void setParent(SceneNodePtr node);
     void setScene(ScenePtr scene);

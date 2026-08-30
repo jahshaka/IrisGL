@@ -12,13 +12,9 @@ For more information see the LICENSE file
 #ifndef DEFAULTMATERIAL_H
 #define DEFAULTMATERIAL_H
 
-#include <QOpenGLShaderProgram>
 #include <QColor>
 
-//#include "../irisglfwd.h"
 #include "../graphics/material.h"
-
-class QOpenGLFunctions_3_2_Core;
 
 namespace iris
 {
@@ -86,9 +82,6 @@ public:
     void setReflectionInfluence(float intensity);
     float getReflectionInfluence();
 
-
-    void begin(GraphicsDevicePtr device, ScenePtr scene) override;
-    void end(GraphicsDevicePtr device, ScenePtr scene) override;
 
     static DefaultMaterialPtr create()
     {

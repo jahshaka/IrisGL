@@ -13,13 +13,7 @@ For more information see the LICENSE file
 #define MATERIAL_H
 
 #include "../irisglfwd.h"
-//#include "renderitem.h"
-#include <QOpenGLShaderProgram>
 #include "renderstates.h"
-
-class QOpenGLShaderProgram;
-class QOpenGLTexture;
-class QOpenGLFunctions_3_2_Core;
 
 namespace iris
 {
@@ -40,16 +34,16 @@ struct MaterialTexture {
     QString name;
 };
 
+// Document-side material base: a property bag, texture map and render states.
+// The GL half (shader program binding, uniform upload) died with the legacy
+// renderer at step 14 - the engine mirror translates these fields into engine
+// materials.
 class Material
 {
-	friend class ForwardRenderer;
 public:
     int renderLayer;
-    //QOpenGLShaderProgram* program;
+	// Shader source text (shadergraph / .effect files); never compiled here.
 	ShaderPtr shader;
-
-	// if not null, this will be used to render the shadow instead
-	// of the renderer's default shadow shader
 	ShaderPtr shadowShader;
 
     QMap<QString, Texture2DPtr> textures;
@@ -64,12 +58,10 @@ public:
     virtual void setValue(const QString& name, const QVariant& value) { Q_UNUSED(name); Q_UNUSED(value); }
 
     bool acceptsLighting;
-    int numTextures;
     RenderStates renderStates;
 
     Material() {
         acceptsLighting = true;
-        numTextures = 0;
         // Was left uninitialised. RenderList copies this straight onto the render
         // item (renderlist.cpp:39), so a material that never called
         // setRenderLayer() carried a garbage layer into the render list.
@@ -99,22 +91,6 @@ public:
 	void disableFlag(QString flag);
 
     /**
-     * Called at the beginning of rendering a primitive
-     * This function is used by subclasses to bind the shader pass parameters,
-     * bind textures and set states.
-     * @param gl
-     */
-    virtual void begin(GraphicsDevicePtr device, ScenePtr scene);
-    virtual void beginCube(GraphicsDevicePtr device, ScenePtr scene);
-
-    /**
-     * Called after endering a pritimitive.
-     * This is used to cleanup after rendering
-     */
-    virtual void end(GraphicsDevicePtr device, ScenePtr scene);
-    virtual void endCube(GraphicsDevicePtr device, ScenePtr scene);
-
-    /**
      * Adds texture to the material by name
      * If the material already contains the texture, it wil be replaced
      * @param name name of the texture uniform in the shader
@@ -128,25 +104,8 @@ public:
      */
     void removeTexture(QString name);
 
-    /**
-     * binds all material's textures
-     * @param gl
-     */
-    void bindTextures(GraphicsDevicePtr device);
-    void bindCubeTextures(GraphicsDevicePtr device);
-
-    /**
-     * unbinds all material textures
-     * @param gl
-     */
-    void unbindTextures(GraphicsDevicePtr device);
-
+    // Loads the two files as shader source text and stores them on `shader`.
     void createProgramFromShaderSource(QString vsFile, QString fsFile);
-
-    template<typename T>
-    void setUniformValue(QString name,T value) {
-        getProgram()->setUniformValue(name.toStdString().c_str(), value);
-    }
 
 	virtual MaterialPtr duplicate() {
 		return MaterialPtr(new Material());
@@ -155,18 +114,7 @@ public:
 	static MaterialPtr fromShader(ShaderPtr shader);
 
 protected:
-    /**
-     * Sets the amount of textures your shader uses
-     * This is to ensure that no extra textures states are left unset when the material is finishes
-     * Also, this ensures that the material wont end up using a texture from a previously set material
-     * if a texture the shader uses isnt set
-     * @param count
-     */
-    void setTextureCount(int count);
-
 	QSet<QString> flags;
-
-	QOpenGLShaderProgram* getProgram();
 };
 
 }

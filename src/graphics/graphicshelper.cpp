@@ -12,7 +12,6 @@ For more information see the LICENSE file
 #include "graphicshelper.h"
 
 #include <QRegularExpression>
-#include <QOpenGLShaderProgram>
 
 #include "assimp/postprocess.h"
 #include "assimp/Importer.hpp"
@@ -28,37 +27,6 @@ For more information see the LICENSE file
 
 namespace iris
 {
-
-QOpenGLShaderProgram* GraphicsHelper::loadShader(QString vsPath,QString fsPath)
-{
-    QOpenGLShader *vshader = new QOpenGLShader(QOpenGLShader::Vertex);
-    auto vsShader = loadAndProcessShader(vsPath);
-    vshader->compileSourceCode(vsShader);
-
-    QOpenGLShader *fshader = new QOpenGLShader(QOpenGLShader::Fragment);
-    auto fsShader = loadAndProcessShader(fsPath);
-    fshader->compileSourceCode(fsShader);
-
-    auto program = new QOpenGLShaderProgram;
-    program->addShader(vshader);
-    program->addShader(fshader);
-
-    program->bindAttributeLocation("a_pos",(int)VertexAttribUsage::Position);
-    program->bindAttributeLocation("a_color",(int)VertexAttribUsage::Color);
-    program->bindAttributeLocation("a_texCoord",(int)VertexAttribUsage::TexCoord0);
-    program->bindAttributeLocation("a_texCoord1",(int)VertexAttribUsage::TexCoord1);
-    program->bindAttributeLocation("a_texCoord2",(int)VertexAttribUsage::TexCoord2);
-    program->bindAttributeLocation("a_texCoord3",(int)VertexAttribUsage::TexCoord3);
-    program->bindAttributeLocation("a_normal",(int)VertexAttribUsage::Normal);
-    program->bindAttributeLocation("a_tangent",(int)VertexAttribUsage::Tangent);
-    program->bindAttributeLocation("a_boneIndices",(int)VertexAttribUsage::BoneIndices);
-    program->bindAttributeLocation("a_boneWeights",(int)VertexAttribUsage::BoneWeights);
-
-
-    program->link();
-
-    return program;
-}
 
 QString GraphicsHelper::loadAndProcessShader(QString shaderPath)
 {

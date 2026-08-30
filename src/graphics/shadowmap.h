@@ -1,10 +1,6 @@
 #ifndef SHADOWMAP_H
 #define SHADOWMAP_H
 
-#include <qopengl.h>
-#include "../irisglfwd.h"
-#include <QMatrix4x4>
-
 namespace iris
 {
 
@@ -16,13 +12,12 @@ enum class ShadowMapType : int
     VerySoft = 3
 };
 
+// Document-side shadow settings per light. The GL depth texture and shadow
+// matrix died with the legacy renderer; the engine reads type/resolution/bias.
 class ShadowMap
 {
 public:
     ShadowMapType shadowType;
-    Texture2DPtr shadowTexture;
-    //GLuint shadowTexId;
-    QMatrix4x4 shadowMatrix;
     int resolution;
     float bias;
 

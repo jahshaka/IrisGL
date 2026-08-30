@@ -13,20 +13,41 @@ For more information see the LICENSE file
 #define VERTEXLAYOUT_H
 
 #include <QList>
-#include "../irisglfwd.h"
-#include "mesh.h"
-
-class QOpenGLFunctions_3_2_Core;
 
 namespace iris
 {
 
-//todo: use VAO
+enum class VertexAttribUsage : int
+{
+    Position = 0,
+    Color = 1,
+    TexCoord0 = 2,
+    TexCoord1 = 3,
+    TexCoord2 = 4,
+    TexCoord3 = 5,
+    Normal = 6,
+    Tangent = 7,
+    BiTangent = 8,
+    BoneIndices = 9,
+    BoneWeights = 10,
+    Count = 11
+};
+
+// Neutral attribute component types. The numeric values deliberately match the
+// old GLenum values (GL_FLOAT/GL_INT/GL_UNSIGNED_BYTE) so buffers built by older
+// code keep their meaning; no GL headers are involved any more.
+enum AttribType : int
+{
+    AttribTypeFloat        = 0x1406,
+    AttribTypeInt          = 0x1404,
+    AttribTypeUnsignedByte = 0x1401
+};
+
 struct VertexAttribute
 {
     VertexAttribUsage usage;
 
-    int type;//GL_FLOAT,GL_INT, etc
+    int type;// AttribTypeFloat, AttribTypeInt, ...
     int count;//2 for vec2, 3 for vec3, etc
     int sizeInBytes;
 };
@@ -35,22 +56,14 @@ class VertexLayout
 {
     QList<VertexAttribute> attribs;
     int stride;
-    QOpenGLFunctions_3_2_Core* gl;
 
 public:
     VertexLayout();
 
-	QList<VertexAttribute> getAttribs();
+    QList<VertexAttribute> getAttribs();
     void addAttrib(VertexAttribUsage usage, int type, int count, int sizeInBytes);
 
     int getStride();
-
-    //todo: make this more efficient
-    void bind(QOpenGLFunctions_3_2_Core* gl);
-    void unbind(QOpenGLFunctions_3_2_Core* gl);
-
-    //default vertex layout for meshes
-    static VertexLayout* createMeshDefault();
 };
 
 }

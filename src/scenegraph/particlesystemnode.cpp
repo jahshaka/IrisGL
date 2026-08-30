@@ -22,13 +22,7 @@ For more information see the LICENSE file
 #include "particlesystemnode.h"
 #include "../graphics/mesh.h"
 
-#include "../graphics/vertexlayout.h"
-#include "../materials/defaultmaterial.h"
-#include "../materials/materialhelper.h"
-#include "../graphics/renderitem.h"
 #include "../graphics/particle.h"
-#include "../graphics/particlerender.h"
-#include "../graphics/renderlist.h"
 
 #include "../scenegraph/scene.h"
 #include "../scenegraph/scenenode.h"
@@ -65,51 +59,22 @@ ParticleSystemNode::ParticleSystemNode() {
     maxParticles = 0;
 
     speedError = lifeError = scaleError = 0;
-
-    // Lazy: the renderer needs a current GL context (its ctor qFatals without one),
-    // and in engine-viewport mode scenes load with none. Created on first render.
-    renderer = nullptr;
-
-    renderItem = new RenderItem();
-    renderItem->type = RenderItemType::ParticleSystem;
-
-    boundsRenderItem = new RenderItem();
-    boundsRenderItem->mesh = Mesh::loadMesh(":assets/models/cube.obj");
-
-    auto mat = DefaultMaterial::create();
-    mat->setDiffuseColor(QColor(255, 255, 255));
-    mat->setAmbientColor(QColor(255, 255, 255));
-    boundsRenderItem->material = mat;
 }
 
 ParticleSystemNode::~ParticleSystemNode()
 {
-    delete renderItem;
-    delete boundsRenderItem;
-    delete renderer;
+    for (auto p : particles)
+        delete p;
 }
 
 void ParticleSystemNode::setBlendMode(bool useAddittive)
 {
     this->useAdditive = useAddittive;
-    if (renderer) renderer->useAdditive = useAddittive;
 }
 
 void ParticleSystemNode::setBillboardScale(float scale)
 {
 //    billboardScale = scale;
-}
-
-void ParticleSystemNode::submitRenderItems()
-{
-	if (this->visible) {
-		renderItem->sceneNode = sharedFromThis().staticCast<SceneNode>();
-		renderItem->worldMatrix = this->globalTransform;
-		renderItem->renderLayer = (int)RenderLayer::Transparent;
-
-		this->scene->geometryRenderList->add(renderItem);
-		this->scene->geometryRenderList->add(boundsRenderItem);
-	}
 }
 
 void ParticleSystemNode::generateParticles(float delta) {
@@ -210,17 +175,6 @@ void ParticleSystemNode::update(float delta) {
 			i--;
         }
     }
-}
-
-void ParticleSystemNode::renderParticles(GraphicsDevicePtr device, RenderData* renderData, ShaderPtr shader)
-{
-    // Only the legacy GL renderer calls this, with its context current.
-    if (!renderer) {
-        renderer = new ParticleRenderer();
-        renderer->useAdditive = useAdditive;
-    }
-    renderer->icon = texture;
-    renderer->render(device, shader, renderData, this->particles);
 }
 
 SceneNodePtr ParticleSystemNode::createDuplicate()

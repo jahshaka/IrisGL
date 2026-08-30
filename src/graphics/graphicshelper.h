@@ -21,8 +21,6 @@ For more information see the LICENSE file
 
 class aiScene;
 
-class QOpenGLShaderProgram;
-
 class AssimpObject {
 public:
 	AssimpObject() = default;
@@ -45,8 +43,6 @@ namespace iris
 class GraphicsHelper
 {
 public:
-    static QOpenGLShaderProgram* loadShader(QString vsPath, QString fsPath);
-
     static QString loadAndProcessShader(QString shaderPath);
 
     /**

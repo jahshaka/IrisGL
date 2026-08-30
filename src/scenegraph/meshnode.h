@@ -18,7 +18,6 @@ For more information see the LICENSE file
 #include "../core/irisutils.h"
 #include "../graphics/texture2d.h"
 #include "../graphics/mesh.h"
-#include "../graphics/renderitem.h"
 
 #include "assimp/Importer.hpp"
 #include "assimp/ProgressHandler.hpp"
@@ -28,7 +27,6 @@ class aiScene;
 namespace iris
 {
 
-class RenderItem;
 struct MeshMaterialData;
 
 class IModelReadProgress
@@ -91,8 +89,6 @@ public:
 
     FaceCullingMode faceCullingMode;
 
-    RenderItem* renderItem;
-
     // For animated meshes, the rootBone's transform is what will be used as its transform
     // Since all its animations are based at the rootBone
     SceneNodePtr rootBone;
@@ -147,7 +143,6 @@ public:
     }
 
     SceneNodePtr createDuplicate() override;
-    virtual void submitRenderItems() override;
     float getMeshRadius();
     BoundingSphere getTransformedBoundingSphere();
 

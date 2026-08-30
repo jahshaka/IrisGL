@@ -10,9 +10,8 @@ namespace iris
 
 class ModelLoader
 {
-	GraphicsDevicePtr device;
 public:
-	ModelLoader(GraphicsDevicePtr device);
+	ModelLoader();
 	ModelPtr load(QString path);
 
 private:

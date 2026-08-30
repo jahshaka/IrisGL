@@ -18,10 +18,6 @@ For more information see the LICENSE file
 namespace iris
 {
 
-class RenderItem;
-class Mesh;
-class ViewerMaterial;
-
 class ViewerNode : public SceneNode
 {
     float viewScale;
@@ -78,13 +74,7 @@ public:
 
     static ViewerNodePtr create();
 
-    void submitRenderItems() override;
-
 	SceneNodePtr createDuplicate() override;
-
-    RenderItem* renderItem;
-    RenderItem* leftHandenderItem;
-    RenderItem* rightHandRenderItem;
 
     ~ViewerNode();
 };

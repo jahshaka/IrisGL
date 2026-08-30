@@ -12,11 +12,6 @@ For more information see the LICENSE file
 #include "viewernode.h"
 #include "../scenegraph/scene.h"
 #include "../scenegraph/scenenode.h"
-#include "../graphics/mesh.h"
-#include "../materials/defaultmaterial.h"
-#include "../graphics/texture2d.h"
-#include "../graphics/renderitem.h"
-#include "../graphics/renderlist.h"
 
 namespace iris
 {
@@ -32,7 +27,6 @@ ViewerNode::ViewerNode()
 
 ViewerNode::~ViewerNode()
 {
-    delete renderItem;
 }
 
 void ViewerNode::setViewScale(float scale)
@@ -44,12 +38,6 @@ void ViewerNode::setViewScale(float scale)
 float ViewerNode::getViewScale()
 {
     return this->viewScale;
-}
-
-void ViewerNode::submitRenderItems()
-{
-    if( !visible)
-        return;
 }
 
 SceneNodePtr ViewerNode::createDuplicate()

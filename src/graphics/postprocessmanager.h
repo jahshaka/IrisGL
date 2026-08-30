@@ -3,59 +3,23 @@
 
 #include "../irisglfwd.h"
 
-class QOpenGLShaderProgram;
-class QOpenGLFunctions_3_2_Core;
-
 namespace iris {
 
-//class PostProcess;
-//class FullScreenQuad;
-//class PostProcessManager;
-
-//class PostProcessContext;
-
-
+// Holds the scene's post-process settings list (serialized by SceneWriter).
+// The GL blit/render half died with the legacy renderer at step 14.
 class PostProcessManager
 {
-    bool enabled;
     QList<PostProcessPtr> postProcesses;
-    RenderTargetPtr renderTarget;
-    bool rtInitialized;
-
-    QOpenGLFunctions_3_2_Core* gl;
-    FullScreenQuad* fsQuad;
-
-    GraphicsDevicePtr device;
 
 public:
-    PostProcessManager(GraphicsDevicePtr device);
+    PostProcessManager();
 
-
-    static PostProcessManagerPtr create(GraphicsDevicePtr device);
-
+    static PostProcessManagerPtr create();
 
     void addPostProcess(PostProcessPtr process);
     void setPostProcesses(QList<PostProcessPtr> processes);
     QList<PostProcessPtr> getPostProcesses();
     void clearPostProcesses();
-
-    void blit(Texture2DPtr source, Texture2DPtr dest, iris::ShaderPtr shader = iris::ShaderPtr());
-
-    void process(PostProcessContext* context);
-
-private:
-    void initRenderTarget();
-};
-
-class PostProcessContext
-{
-public:
-    Texture2DPtr depthTexture;
-    Texture2DPtr sceneTexture;
-
-    Texture2DPtr finalTexture;
-
-    PostProcessManager* manager;
 };
 
 }

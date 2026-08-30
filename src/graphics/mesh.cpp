@@ -15,9 +15,6 @@ For more information see the LICENSE file
 
 #include <QString>
 #include <QFile>
-#include <QOpenGLBuffer>
-#include <QOpenGLFunctions_3_2_Core>
-#include <QOpenGLTexture>
 #include <QtMath>
 
 #include "../irisglfwd.h"
@@ -29,7 +26,7 @@ For more information see the LICENSE file
 #include "assimp/mesh.h"
 
 
-#include "graphicsdevice.h"
+#include "vertexbuffer.h"
 #include "vertexlayout.h"
 #include "../geometry/trimesh.h"
 #include "skeleton.h"
@@ -61,8 +58,6 @@ QMatrix4x4 aiMatrixToQMatrix(aiMatrix4x4 aiMat) {
 Mesh::Mesh()
 {
 	triMesh = nullptr;
-	_isDirty = 0;
-	lastShaderId = -1;
 	numVerts = 0;
 	usesIndexBuffer = false;
 }
@@ -70,33 +65,27 @@ Mesh::Mesh()
 // http://ogldev.atspace.co.uk/www/tutorial38/tutorial38.html
 Mesh::Mesh(aiMesh* mesh)
 {
-	_isDirty = 0;
-    lastShaderId = -1;
-    //gl = QOpenGLContext::currentContext()->versionFunctions<QOpenGLFunctions_3_2_Core>();
-
     triMesh = new TriMesh();
 
     this->vertexLayout = nullptr;
     numVerts = mesh->mNumFaces*3;
     numFaces = mesh->mNumFaces;
 
-    //gl->glGenVertexArrays(1,&vao);
-
     if(!mesh->HasPositions())
         return;
         //throw QString("Mesh has no positions!!");
 
-    this->addVertexArray(VertexAttribUsage::Position, (void*)mesh->mVertices, sizeof(aiVector3D) * mesh->mNumVertices, GL_FLOAT,3);
+    this->addVertexArray(VertexAttribUsage::Position, (void*)mesh->mVertices, sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
 
 
     if(mesh->HasTextureCoords(0))
-        this->addVertexArray(VertexAttribUsage::TexCoord0, (void*)mesh->mTextureCoords[0], sizeof(aiVector3D) * mesh->mNumVertices, GL_FLOAT,3);
+        this->addVertexArray(VertexAttribUsage::TexCoord0, (void*)mesh->mTextureCoords[0], sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
     if(mesh->HasTextureCoords(1))
-        this->addVertexArray(VertexAttribUsage::TexCoord1, (void*)mesh->mTextureCoords[1], sizeof(aiVector3D) * mesh->mNumVertices, GL_FLOAT,3);
+        this->addVertexArray(VertexAttribUsage::TexCoord1, (void*)mesh->mTextureCoords[1], sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
     if(mesh->HasNormals())
-        this->addVertexArray(VertexAttribUsage::Normal, (void*)mesh->mNormals, sizeof(aiVector3D) * mesh->mNumVertices, GL_FLOAT,3);
+        this->addVertexArray(VertexAttribUsage::Normal, (void*)mesh->mNormals, sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
     if(mesh->HasTangentsAndBitangents())
-        this->addVertexArray(VertexAttribUsage::Tangent, (void*)mesh->mTangents, sizeof(aiVector3D) * mesh->mNumVertices, GL_FLOAT,3);
+        this->addVertexArray(VertexAttribUsage::Tangent, (void*)mesh->mTangents, sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
 
     if (mesh->HasBones()) {
         // bone weights for skeletal animation
@@ -136,9 +125,8 @@ Mesh::Mesh(aiMesh* mesh)
 //            qDebug() << boneIndices[i] << " - " << boneWeights[i];
 //        }
 
-        //this->addVertexArray(VertexAttribUsage::BoneIndices, (void*)boneIndices.data(), sizeof(int) * boneIndices.size(), GL_INT, MAX_BONE_INDICES);
-        this->addVertexArray(VertexAttribUsage::BoneIndices, (void*)boneIndices.data(), sizeof(float) * boneIndices.size(), GL_FLOAT, MAX_BONE_INDICES);
-        this->addVertexArray(VertexAttribUsage::BoneWeights, (void*)boneWeights.data(), sizeof(float) * boneWeights.size(), GL_FLOAT, MAX_BONE_INDICES);
+        this->addVertexArray(VertexAttribUsage::BoneIndices, (void*)boneIndices.data(), sizeof(float) * boneIndices.size(), AttribTypeFloat, MAX_BONE_INDICES);
+        this->addVertexArray(VertexAttribUsage::BoneWeights, (void*)boneWeights.data(), sizeof(float) * boneWeights.size(), AttribTypeFloat, MAX_BONE_INDICES);
     }
 
     // Assimp doesnt give the indices in an array
@@ -181,7 +169,6 @@ Mesh::Mesh(aiMesh* mesh)
 //todo: extract trimesh from data
 Mesh::Mesh(void* data,int dataSize,int numElements,VertexLayout* vertexLayout)
 {
-    lastShaderId = -1;
     triMesh = nullptr;
     numVerts = numElements;
 
@@ -206,24 +193,6 @@ PrimitiveMode Mesh::getPrimitiveMode() const
 void Mesh::setPrimitiveMode(const PrimitiveMode &value)
 {
     primitiveMode = value;
-
-    switch (primitiveMode) {
-    case PrimitiveMode::Triangles:
-        glPrimitive = GL_TRIANGLES;
-        break;
-    case PrimitiveMode::Lines:
-        glPrimitive = GL_LINES;
-        break;
-    case PrimitiveMode::LineLoop:
-        glPrimitive = GL_LINE_LOOP;
-        break;
-	case PrimitiveMode::LineStrip:
-		glPrimitive = GL_LINE_STRIP;
-		break;
-    default:
-        glPrimitive = GL_TRIANGLES;
-        break;
-    }
 }
 
 void Mesh::clearVertexBuffers()
@@ -264,21 +233,6 @@ QMap<QString, SkeletalAnimationPtr> Mesh::getSkeletalAnimations()
 bool Mesh::hasSkeletalAnimations()
 {
     return skeletalAnimations.count() != 0;
-}
-
-void Mesh::draw(GraphicsDevicePtr device)
-{
-	// cant render a mesh that doesnt have any vertices
-	if (numVerts == 0)
-		return;
-
-    device->setVertexBuffers(vertexBuffers);
-    if (!!idxBuffer) {
-        device->setIndexBuffer(idxBuffer);
-        device->drawIndexedPrimitives(glPrimitive, 0, numVerts);
-    } else {
-        device->drawPrimitives(glPrimitive, 0, numVerts);
-    }
 }
 
 MeshPtr Mesh::loadMesh(QString filePath)
@@ -429,24 +383,19 @@ void Mesh::setVertexCount(const unsigned int count)
 	numVerts = count;
 }
 
-void Mesh::addVertexArray(VertexAttribUsage usage,void* dataPtr,int size,GLenum type,int numComponents)
+void Mesh::addVertexArray(VertexAttribUsage usage,void* dataPtr,int size,int type,int numComponents)
 {
     VertexLayout layout;
     int sizeInBytes = 0;
     switch(type) {
-    case GL_FLOAT:
-    case GL_INT:
+    case AttribTypeFloat:
+    case AttribTypeInt:
         sizeInBytes = 4 * numComponents;
     }
     layout.addAttrib(usage, type, numComponents, sizeInBytes);
     auto vb = VertexBuffer::create(layout);
     vb->setData(dataPtr, size);
     vertexBuffers.append(vb);
-}
-
-void Mesh::addIndexArray(void* data,int size,GLenum type)
-{
-
 }
 
 void Mesh::calculateBounds(const aiMesh* mesh)

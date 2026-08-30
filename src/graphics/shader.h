@@ -13,63 +13,20 @@ For more information see the LICENSE file
 #define SHADERPROGRAM_H
 
 #include "../irisglfwd.h"
-#include <QVariant>
-#include <qopengl.h>
+#include <QMap>
 #include <QSet>
-
-class QOpenGLShaderProgram;
-class QOpenGLFunctions_3_2_Core;
-class QOpenGLTexture;
-
-class QOpenGLContext;
+#include <QString>
 
 namespace iris
 {
 
-class ShaderValue
-{
-
-public:
-    ShaderValue()
-    {
-        modified = false;
-        location = -1;
-        //name = nullptr;
-        //value = QVariant();
-        type = -1;
-    }
-
-    template<typename T>
-    void setValue(T val)
-    {
-        value = QVariant(val);
-        modified = true;
-    }
-
-public:
-    int location;
-    std::string name;
-    int type;
-    QVariant value;
-
-private:
-    bool modified;
-};
-
-class ShaderSampler
-{
-public:
-    int location;
-    std::string name;
-    TexturePtr texture;
-};
-
+// Shader source text carrier. The GL program/uniform half died with the legacy
+// renderer at step 14; what remains is the document data: the shadergraph
+// module and CustomMaterial (.effect files) pass GLSL text around through this
+// type, and the flags feed material serialization.
 class Shader
 {
     friend class Material;
-	friend class VertexLayout;
-	friend class GraphicsDevice;
-	friend class SpriteBatch;
 
 public:
     static ShaderPtr load(QString vertexShaderFile, QString fragmentShaderFile);
@@ -81,60 +38,24 @@ public:
 	void setVertexShader(QString vertexShader);
 	void setFragmentShader(QString fragmentShader);
 
+	QString getVertexShader() const { return vertexShader; }
+	QString getFragmentShader() const { return fragmentShader; }
+
 	bool isFlagEnabled(QString flag);
 	void enableFlag(QString flag);
 	void disableFlag(QString flag);
 
-	void _setDirty();
-
 private:
-	QOpenGLShaderProgram * program;
 	long shaderId;
 
-    ShaderValue* getUniform(QString name);
-
-    template <typename T>
-    void setUniformValue(QString name, T value)
-    {
-        if(uniforms.contains(name))
-        {
-            auto uniform = uniforms[name];
-            uniform->value = value;
-            updatedUniforms.append(uniform);
-        }
-    }
-
-    void setTexture(QString name, TexturePtr texture)
-    {
-        if(samplers.contains(name))
-        {
-            auto sampler = samplers[name];
-            sampler->texture = texture;
-        }
-    }
-
 	Shader();
-
-	bool isDirty;
-
-	// The GL context this shader's program object was built for. A program is
-	// context-bound, so reusing one across contexts silently draws nothing.
-	// GraphicsDevice compares this against its own context and rebuilds on change.
-	QOpenGLContext* compiledContext = nullptr;
 
     static long generateNodeId();
     static long nextId;
 
 protected:
-    QMap<QString,ShaderValue*> attribs;
-    QMap<QString,ShaderValue*> uniforms;
-    QMap<QString,ShaderSampler*> samplers;
-
-    QList<ShaderValue*> updatedUniforms;
-
 	QString vertexShader, fragmentShader;
 	QSet<QString> flags;
-	bool hasErrors;
 };
 
 }

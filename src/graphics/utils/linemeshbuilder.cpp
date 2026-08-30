@@ -1,5 +1,6 @@
 #include "linemeshbuilder.h"
 #include "../vertexlayout.h"
+#include "../mesh.h"
 
 
 
@@ -21,8 +22,8 @@ void LineMeshBuilder::addLine(QVector3D a, QColor aCol, QVector3D b, QColor bCol
 MeshPtr LineMeshBuilder::build()
 {
     auto layout = new VertexLayout();
-    layout->addAttrib(VertexAttribUsage::Position, GL_FLOAT, 3, sizeof(float) * 3);
-	layout->addAttrib(VertexAttribUsage::Color, GL_FLOAT, 4, sizeof(float) * 4);
+    layout->addAttrib(VertexAttribUsage::Position, AttribTypeFloat, 3, sizeof(float) * 3);
+	layout->addAttrib(VertexAttribUsage::Color, AttribTypeFloat, 4, sizeof(float) * 4);
 
     auto mesh = Mesh::create(lineData.data(), lineData.size() * sizeof(LineData), lineData.size(), layout);
     mesh->setPrimitiveMode(PrimitiveMode::Lines);

@@ -14,42 +14,23 @@ For more information see the LICENSE file
 
 #include <QQuaternion>
 #include <QString>
-#include <qopengl.h>
 #include <QColor>
 
-//#include "../irisglfwd.h"
+#include "../irisglfwd.h"
 #include "../animation/skeletalanimation.h"
 #include "../geometry/boundingsphere.h"
 #include "../geometry/aabb.h"
+#include "vertexlayout.h"
+#include "vertexbuffer.h"
 
 #include "assimp/scene.h"
 
 class aiMesh;
-class QOpenGLBuffer;
-class QOpenGLFunctions_3_2_Core;
-class QOpenGLShaderProgram;
-
 
 namespace iris
 {
 
 class BoundingSphere;
-
-enum class VertexAttribUsage : int
-{
-    Position = 0,
-    Color = 1,
-    TexCoord0 = 2,
-    TexCoord1 = 3,
-    TexCoord2 = 4,
-    TexCoord3 = 5,
-    Normal = 6,
-    Tangent = 7,
-    BiTangent = 8,
-    BoneIndices = 9,
-    BoneWeights = 10,
-    Count = 11
-};
 
 struct MeshMaterialData
 {
@@ -72,22 +53,6 @@ struct MeshMaterialData
     bool hasEmbeddedHightTexture = false;
 };
 
-class VertexArrayData
-{
-public:
-
-    GLuint bufferId;
-    VertexAttribUsage usage;
-    int numComponents;
-    GLenum type;
-
-    VertexArrayData()
-    {
-        bufferId = 0;
-    }
-
-};
-
 enum class PrimitiveMode
 {
     Triangles,
@@ -96,7 +61,9 @@ enum class PrimitiveMode
 	LineStrip
 };
 
-//todo: switch to using mesh pointer
+// CPU-side mesh: geometry buffers, skeleton, animations, bounds and the picking
+// TriMesh. The GL half (VAO/draw) died with the legacy renderer at step 14; the
+// engine mirror converts these buffers into engine meshes each time one changes.
 class Mesh
 {
     SkeletonPtr skeleton;
@@ -104,25 +71,13 @@ class Mesh
 
 	QList<VertexBufferPtr> vertexBuffers;
 	IndexBufferPtr idxBuffer;
-	GraphicsDevicePtr device;
 
-    GLenum glPrimitive;
 public:
     PrimitiveMode primitiveMode;
-    QOpenGLFunctions_3_2_Core* gl;
-    GLuint vao;
-    GLuint indexBuffer;
     bool usesIndexBuffer;
-	bool _isDirty;
 
     BoundingSphere boundingSphere;
 	AABB aabb;
-
-    // will cause problems if a shader was freed and gl gives the
-    // id to another shader
-    GLuint lastShaderId;
-
-    VertexArrayData vertexArrays[(int)VertexAttribUsage::Count];
 
     VertexLayout* vertexLayout;
     int numVerts;
@@ -130,7 +85,7 @@ public:
 
     TriMesh* triMesh;
     /// CPU-side geometry, read-only. The engine mirror and importers convert from
-    /// these; the GL upload path is untouched.
+    /// these.
     const QList<VertexBufferPtr>& getVertexBuffers() const { return vertexBuffers; }
     IndexBufferPtr getIndexBuffer() const { return idxBuffer; }
 
@@ -147,14 +102,9 @@ public:
     QMap<QString, SkeletalAnimationPtr> getSkeletalAnimations();
     bool hasSkeletalAnimations();
 
-    //void draw(QOpenGLFunctions_3_2_Core* gl, Material* mat);
-    //void draw(QOpenGLFunctions_3_2_Core* gl, QOpenGLShaderProgram* mat);
-    void draw(GraphicsDevicePtr device);
-
     static MeshPtr loadMesh(QString filePath);
     static MeshPtr loadAnimatedMesh(QString filePath);
     static SkeletonPtr extractSkeleton(const aiMesh* mesh, const aiScene* scene);
-//    static QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene* scene, QString source = "");
     static QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QString source = "")
     {
         QMap<QString, SkeletalAnimationPtr> anims;
@@ -166,7 +116,6 @@ public:
                 animName = "";
             }
 
-            //qDebug() << "Animation: " << animName;
             auto skelAnim = SkeletalAnimation::create();
             skelAnim->name = animName;
             skelAnim->source = source;
@@ -237,15 +186,12 @@ public:
 	BoundingSphere getBoundingSphere() { return boundingSphere; }
 
 private:
-    void addVertexArray(VertexAttribUsage usage,void* data,int size,GLenum type,int numComponents);
-    void addIndexArray(void* data,int size,GLenum type);
+    void addVertexArray(VertexAttribUsage usage,void* data,int size,int type,int numComponents);
 
 	void calculateBounds(const aiMesh* mesh);
 
     static BoundingSphere calculateBoundingSphere(const aiMesh* mesh);
 };
-
-//typedef QSharedPointer<Mesh> MeshPtr;
 
 }
 

@@ -2,9 +2,6 @@
 #define FXAAPOSTPROCESS_H
 
 #include "../graphics/postprocess.h"
-#include <QVector3D>
-
-class QOpenGLShaderProgram;
 
 namespace iris
 {
@@ -12,31 +9,23 @@ namespace iris
 class FxaaPostProcess;
 typedef QSharedPointer<FxaaPostProcess> FxaaPostProcessPtr;
 
-// applies and tonemapping and antialiasing
+// Anti-aliasing post-process settings (document half; the GL passes died with
+// the legacy renderer).
 class FxaaPostProcess : public PostProcess
 {
 public:
-	iris::GraphicsDevicePtr graphics;
-    Texture2DPtr tonemapTex;
-    Texture2DPtr fxaaTex;
-
-    iris::ShaderPtr tonemapShader;
-	iris::ShaderPtr fxaaShader;
-
     // between 1 and 5
     int quality;
 
-    FxaaPostProcess(iris::GraphicsDevicePtr graphics);
+    FxaaPostProcess();
 
-    QList<Property *> getProperties();
+    QList<Property *> getProperties() override;
     void setProperty(Property *prop) override;
 
     void setQuality(int quality);
     int getQuality();
 
-    virtual void process(PostProcessContext* ctx) override;
-
-    static FxaaPostProcessPtr create(iris::GraphicsDevicePtr graphics);
+    static FxaaPostProcessPtr create();
 };
 
 }

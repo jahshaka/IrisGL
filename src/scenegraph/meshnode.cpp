@@ -32,7 +32,6 @@ For more information see the LICENSE file
 #include "../materials/defaultmaterial.h"
 #include "../materials/custommaterial.h"
 #include "../materials/materialhelper.h"
-#include "../graphics/renderitem.h"
 #include "../animation/animableproperty.h"
 #include "../animation/animation.h"
 
@@ -42,16 +41,12 @@ For more information see the LICENSE file
 #include "../animation/animableproperty.h"
 
 #include "../graphics/skeleton.h"
-#include "../graphics/renderlist.h"
 
 namespace iris
 {
 
 MeshNode::MeshNode() {
     sceneNodeType = SceneNodeType::Mesh;
-
-    renderItem = new RenderItem();
-    renderItem->type = RenderItemType::Mesh;
 
     faceCullingMode = FaceCullingMode::DefinedInMaterial;
 }
@@ -80,15 +75,12 @@ void MeshNode::setMesh(QString source)
     mesh = Mesh::loadMesh(source);
     meshPath = source;
     meshIndex = 0;
-
-    renderItem->mesh = mesh;
 }
 
 //should not be used on plain scene meshes
 void MeshNode::setMesh(MeshPtr mesh)
 {
     this->mesh = mesh;
-    renderItem->mesh = mesh;
 }
 
 MeshPtr MeshNode::getMesh()
@@ -99,8 +91,6 @@ MeshPtr MeshNode::getMesh()
 void MeshNode::setMaterial(MaterialPtr material)
 {
     this->material = material;
-    renderItem->material = material;
-    renderItem->renderStates = material->renderStates;
 
 	if (!!mesh) {
 		if (this->mesh->hasSkeleton()) {
@@ -110,51 +100,6 @@ void MeshNode::setMaterial(MaterialPtr material)
 			material->disableFlag("SKINNING_ENABLED");
 		}
 	}
-}
-
-void MeshNode::submitRenderItems()
-{
-    if (visible) {
-        QMatrix4x4 transform = this->globalTransform;
-
-		renderItem->cullable = false;
-        renderItem->physicsObject = isPhysicsBody;
-		renderItem->worldMatrix = transform;
-        renderItem->guid = guid;
- 
-        if (!!mesh && renderItem->cullable) {
-            renderItem->boundingSphere.pos = transform * mesh->boundingSphere.pos;
-            renderItem->boundingSphere.radius = mesh->boundingSphere.radius * getMeshRadius();
-        }
-
-        if (!!material) {
-            renderItem->renderLayer = material->renderLayer;
-			renderItem->renderStates = material->renderStates;
-			if (this->faceCullingMode != iris::FaceCullingMode::DefinedInMaterial)
-			{
-				switch (faceCullingMode) {
-				case iris::FaceCullingMode::Front:
-					renderItem->renderStates.rasterState = iris::RasterizerState::CullClockwise;
-					break;
-				case iris::FaceCullingMode::Back:
-					renderItem->renderStates.rasterState = iris::RasterizerState::CullCounterClockwise;
-					break;
-				case iris::FaceCullingMode::None:
-					renderItem->renderStates.rasterState = iris::RasterizerState::CullNone;
-					break;
-				default:
-					renderItem->renderStates.rasterState = iris::RasterizerState::CullNone;
-				}
-				
-			}
-        }
-
-        this->scene->geometryRenderList->add(renderItem);
-
-        if (this->getShadowCastingEnabled() && renderItem->renderStates.castShadows) {
-            this->scene->shadowRenderList->add(renderItem);
-        }
-    }
 }
 
 float MeshNode::getMeshRadius()

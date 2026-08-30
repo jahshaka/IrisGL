@@ -11,17 +11,13 @@
 namespace iris
 {
 
-Environment::Environment(iris::RenderList *debugList)
+Environment::Environment()
 {
 	worldYGravity = 15.f;
 
     createPhysicsWorld();
  
     simulating = false;
-
-    debugRenderList = debugList;
-    lineMat = iris::LineColorMaterial::create();
-    lineMat.staticCast<iris::LineColorMaterial>()->setDepthBias(10.f);
 
 	//activePickingConstraint = 0;
 	pickingHandles[(int)PickingHandleType::LeftHand] = PickingHandle();
@@ -252,34 +248,6 @@ void Environment::updateCharacterControllers(float delta)
 	}
 }
 
-void Environment::drawDebugShapes()
-{
-	iris::LineMeshBuilder builder; // *must* go out of scope...
-	debugDrawer->setPublicBuilder(&builder);
-
-	world->debugDrawWorld();
-
-	QMatrix4x4 transform;
-	transform.setToIdentity();
-	debugRenderList->submitMesh(builder.build(), lineMat, transform);
-}
-
-void Environment::setDebugDrawFlags(bool state)
-{
-	if (state) {
-		debugDrawer->setDebugMode(
-			GLDebugDrawer::DBG_DrawAabb |
-			GLDebugDrawer::DBG_DrawWireframe |
-			GLDebugDrawer::DBG_DrawConstraints |
-			GLDebugDrawer::DBG_DrawContactPoints |
-			GLDebugDrawer::DBG_DrawConstraintLimits |
-			GLDebugDrawer::DBG_DrawFrames);
-	}
-	else {
-		debugDrawer->setDebugMode(GLDebugDrawer::DBG_NoDebug);
-	}
-}
-
 void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
 {
 	for (auto &node : rootNode->children) {
@@ -320,10 +288,6 @@ void Environment::createPhysicsWorld()
 
 	world->setGravity(btVector3(0, -worldYGravity, 0));
 	world->getDispatchInfo().m_allowedCcdPenetration = 0.0001f;
-
-	// http://bulletphysics.org/mediawiki-1.5.8/index.php/Bullet_Debug_drawer
-	debugDrawer = new GLDebugDrawer;
-	world->setDebugDrawer(debugDrawer);
 }
 
 void Environment::createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)

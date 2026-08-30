@@ -4,28 +4,13 @@
 #include "../irisglfwd.h"
 #include <QEnableSharedFromThis>
 
-class QOpenGLShader;
-
 namespace iris
 {
 
 class Property;
 
-class PostProcessPass
-{
-    Texture2DPtr output;
-    QOpenGLShader* shader;
-    QString name;
-
-public:
-    void process()
-    {
-
-    }
-};
-
-class PostProcessContext;
-
+// Document-side post-process settings: a name plus a property bag, serialized
+// by SceneWriter. The GL processing passes died with the legacy renderer.
 class PostProcess : public QEnableSharedFromThis<PostProcess>
 {
 public:
@@ -41,11 +26,6 @@ public:
     QString getDisplayName()
     {
         return displayName;
-    }
-
-    virtual void process(PostProcessContext* ctx)
-    {
-
     }
 
     virtual QList<Property*> getProperties()

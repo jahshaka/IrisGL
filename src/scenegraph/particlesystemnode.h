@@ -16,15 +16,12 @@ For more information see the LICENSE file
 #include "../scenegraph/scenenode.h"
 #include "../core/irisutils.h"
 #include "../graphics/texture2d.h"
-
-class QOpenGLShaderProgram;
+#include "../graphics/particle.h"
 
 namespace iris
 {
 
-class RenderItem;
 class Particle;
-class ParticleRenderer;
 
 class ParticleSystemNode : public SceneNode
 {
@@ -32,8 +29,6 @@ public:
     static ParticleSystemNodePtr create() {
         return ParticleSystemNodePtr(new ParticleSystemNode());
     }
-
-    virtual void submitRenderItems() override;
 
     float particlesPerSecond;
     float speed;
@@ -156,15 +151,11 @@ public:
 
     void update(float delta) override;
 
-    void renderParticles(GraphicsDevicePtr device, RenderData* renderData, ShaderPtr shader);
-
     void addParticle(Particle *particle) {
         particles.push_back(particle);
     }
 
     ~ParticleSystemNode();
-
-    ParticleRenderer* renderer;
 
 	SceneNodePtr createDuplicate() override;
 
@@ -173,9 +164,6 @@ public:
     std::vector<Particle*> particles;
 
     MaterialPtr material;
-    RenderItem* renderItem;
-    Mesh* boundsMesh;
-    RenderItem* boundsRenderItem;
 };
 
 }

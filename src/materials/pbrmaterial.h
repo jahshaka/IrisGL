@@ -40,9 +40,6 @@ public:
         return PbrMaterialPtr(new PbrMaterial());
     }
 
-    void begin(GraphicsDevicePtr device, ScenePtr scene) override;
-    void end(GraphicsDevicePtr device, ScenePtr scene) override;
-
     // --- base colour ---
     void setBaseColor(QColor color);
     void setBaseColorFactor(float factor);
@@ -72,14 +69,6 @@ public:
 
     void setTextureScale(float scale);
 
-    // Image-based lighting, following O3DE Atom's model: a diffuse irradiance
-    // cubemap plus a prefiltered specular cubemap whose mip is chosen by
-    // roughness. Atom needs no BRDF lookup texture - the shader uses its
-    // analytic EnvBRDFApprox instead.
-    //
-    // Without an environment bound, metals fall back to a flat ambient term and
-    // will not look like metal. This is the single highest-value addition.
-    void setEnvironmentMap(TextureCubePtr diffuseIrradiance, TextureCubePtr specularPrefiltered);
     void setIblIntensity(float intensity);
 
     // Applies a value by property name, bridging the editor-facing `properties`
@@ -128,12 +117,6 @@ public:
 
     bool   useIbl;
     float  iblIntensity;
-
-    // Held directly rather than in Material::textures: that map is typed to
-    // Texture2DPtr, and TextureCube is a sibling of Texture2D, not a subclass.
-    // Bound explicitly on dedicated units in begin().
-    TextureCubePtr diffuseEnvMap;
-    TextureCubePtr specularEnvMap;
 
 private:
     PbrMaterial();

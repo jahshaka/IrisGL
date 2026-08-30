@@ -18,8 +18,6 @@ For more information see the LICENSE file
 
 #include <QJsonObject>
 
-class QOpenGLFunctions_3_2_Core;
-
 namespace iris
 {
 
@@ -31,9 +29,6 @@ public:
 	void setVersion(int version) { this->version = version; }
     // `properties` is inherited from Material
 
-    void begin(GraphicsDevicePtr device, ScenePtr scene) override;
-    void end(GraphicsDevicePtr device, ScenePtr scene) override;
-
     void generate(const QString&, bool project = false);
     void generate(const QJsonObject&);
     void setTextureWithUniform(const QString&, const QString&);
@@ -43,7 +38,6 @@ public:
     void setGuid(const QString&);
     void setProperties(QList<Property*> props);
     QList<Property*> getProperties();
-    void setUniformValues(GraphicsDevicePtr device, Property*);
     void purge();
 
 	void setMaterialDefinition(const QJsonObject &def) {

@@ -15,7 +15,7 @@ For more information see the LICENSE file
 #include <QList>
 #include "../irisglfwd.h"
 #include "../graphics/texture2d.h"
-#include "../materials/defaultskymaterial.h"
+#include "../graphics/shadowmap.h"
 #include "../geometry/frustum.h"
 
 // temp
@@ -27,8 +27,6 @@ class QMediaPlaylist;
 namespace iris
 {
 
-class RenderItem;
-class RenderList;
 class Environment;
 
 enum class SceneRenderFlags : int
@@ -87,8 +85,6 @@ class Scene: public QEnableSharedFromThis<Scene>
 {
     QSharedPointer<Environment> environment;
 
-	friend class ForwardRenderer;
-
 public:
     CameraNodePtr camera;
     SceneNodePtr rootNode;
@@ -111,22 +107,13 @@ public:
 
     QColor clearColor;
     bool renderSky;
-    MeshPtr skyMesh;
     Texture2DPtr skyTexture;
     QColor skyColor;
     QColor ambientColor;
-    DefaultSkyMaterialPtr skyMaterial;
-    RenderItem* skyRenderItem;
 	QColor gradientTop;
 	QColor gradientMid;
 	QColor gradientBot;
 	float gradientOffset;
-
-	TextureCubePtr skyCapture;
-	bool skyCaptured = false; // has the sky been captured?
-	bool shouldCaptureSky = true; // should the sky be captured on the next frame?
-	int skyCaptureSize = 1024;
-	bool shouldResizeSky = false;
 
     // fog properties
     QColor fogColor;
@@ -160,10 +147,6 @@ public:
 	QJsonObject skyDataMaterial;
 
 	QMap<QString, QJsonObject> skyData;
-
-    RenderList* geometryRenderList;
-    RenderList* shadowRenderList;
-    RenderList* gizmoRenderList;// for gizmos and lines
 
 	void setWorldGravity(float gravity);
 
@@ -210,8 +193,6 @@ public:
 		"Realistic"
 	};
 
-	void switchSkyTexture(iris::SkyType skyType);
-
     void setSkyTexture(Texture2DPtr tex);
     void setSkyTextureSource(QString src) {
         skyTexture->source = src;
@@ -227,9 +208,6 @@ public:
     void setSkyColor(QColor color);
     void setAmbientColor(QColor color);
 
-	// causes the sky to be recaptured each frame
-	void queueSkyCapture();
-
 	void setAmbientMusic(QString path);
 	void stopPlayingAmbientMusic();
 	void startPlayingAmbientMusic();
@@ -237,7 +215,6 @@ public:
 
     void updateSceneAnimation(float time);
     void update(float dt);
-    void render();
 
     void rayCast(const QVector3D& segStart,
                  const QVector3D& segEnd,

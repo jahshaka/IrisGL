@@ -13,7 +13,6 @@ For more information see the LICENSE file
 #define MODEL_H
 
 #include <QString>
-#include <qopengl.h>
 #include <QColor>
 #include <QMatrix4x4>
 #include "../irisglfwd.h"
@@ -52,9 +51,6 @@ class Model
 	SkeletalAnimationPtr activeAnimation;
 	float animTime;
 
-	
-	GraphicsDevicePtr device;
-
 	BoundingSphere boundingSphere;
 	AABB aabb;
 public:
@@ -74,8 +70,7 @@ public:
 
 	void applyAnimation(float time);
 	void updateAnimation(float dt);
-    void draw(GraphicsDevicePtr device);
-	
+
     ~Model();
 private:
 	explicit Model(QVector<ModelMesh> modelMeshes);

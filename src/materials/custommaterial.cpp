@@ -13,12 +13,9 @@ For more information see the LICENSE file
 #include <QJsonArray>
 #include <QJsonDocument>
 
-#include <QOpenGLShaderProgram>
-
 #include "custommaterial.h"
 #include "../graphics/texture2d.h"
 #include "../graphics/shader.h"
-#include "../graphics/graphicsdevice.h"
 #include "../core/irisutils.h"
 
 namespace iris
@@ -57,63 +54,6 @@ void CustomMaterial::setValue(const QString &name, const QVariant &value)
 	}
 }
 
-void CustomMaterial::setUniformValues(GraphicsDevicePtr device, Property *prop)
-{
-	auto program = getProgram();
-    if (prop->type == PropertyType::Bool) {
-		auto propVal = static_cast<BoolProperty*>(prop)->value;
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-    }
-
-	if (prop->type == PropertyType::Int) {
-		auto propVal = static_cast<IntProperty*>(prop)->value;
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-	}
-
-    if (prop->type == PropertyType::Float) {
-		auto propVal = static_cast<FloatProperty*>(prop)->value;
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-    }
-
-    // TODO, figure out a way for the default material to mix values... the ambient for one
-    if (prop->type == PropertyType::Color) {
-		auto propVal = static_cast<ColorProperty*>(prop)->value;
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-                                 QVector3D(propVal.redF(),
-                                           propVal.greenF(),
-                                           propVal.blueF()));
-    }
-
-    if (prop->type == iris::PropertyType::Texture) {
-        auto tprop = static_cast<TextureProperty*>(prop);
-		device->setShaderUniform(tprop->toggleValue.toStdString().c_str(), tprop->toggle);
-		//device->setShaderUniform(tprop->toggleValue.toStdString().c_str(), true);
-    }
-
-	if (prop->type == PropertyType::Vec2) {
-		auto propVal = static_cast<Vec2Property*>(prop)->value;
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-	}
-
-	if (prop->type == PropertyType::Vec3) {
-		auto propVal = static_cast<Vec3Property*>(prop)->value;
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-	}
-
-	if (prop->type == PropertyType::Vec4) {
-		auto propVal = static_cast<Vec4Property*>(prop)->value;
-		device->setShaderUniform(prop->uniform.toStdString().c_str(),
-			propVal);
-	}
-}
-
 QString CustomMaterial::firstTextureSlot() const
 {
     for (auto prop : properties) {
@@ -134,21 +74,6 @@ QJsonObject CustomMaterial::loadShaderFromDisk(const QString &filePath)
     file.close();
     return QJsonDocument::fromJson(data).object();
 }
-
-void CustomMaterial::begin(GraphicsDevicePtr device, ScenePtr scene)
-{
-    Material::begin(device, scene);
-
-    for (auto prop : this->properties) {
-        setUniformValues(device, prop);
-    }
-}
-
-void CustomMaterial::end(GraphicsDevicePtr device, ScenePtr scene)
-{
-    Material::end(device, scene);
-}
-
 
 void CustomMaterial::generate(const QString &fileName, bool project)
 {

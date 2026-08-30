@@ -13,21 +13,18 @@ For more information see the LICENSE file
 
 #include <QString>
 #include <QFile>
-#include <QOpenGLBuffer>
-#include <QOpenGLFunctions_3_2_Core>
-#include <QOpenGLTexture>
 #include <QtMath>
 
 #include "../irisglfwd.h"
 #include "core/logger.h"
 #include "material.h"
+#include "mesh.h"
 
 #include "assimp/postprocess.h"
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
 
-#include "graphicsdevice.h"
 #include "vertexlayout.h"
 #include "../geometry/trimesh.h"
 #include "skeleton.h"
@@ -112,12 +109,6 @@ void Model::updateAnimation(float dt)
 {
 	animTime += dt;
 	applyAnimation(animTime);
-}
-
-void Model::draw(GraphicsDevicePtr device)
-{
-	for (auto& modelMesh : modelMeshes)
-		modelMesh.mesh->draw(device);
 }
 
 Model::~Model()

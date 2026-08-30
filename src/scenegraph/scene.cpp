@@ -18,11 +18,8 @@ For more information see the LICENSE file
 #include "../scenegraph/meshnode.h"
 #include "../scenegraph/particlesystemnode.h"
 #include "../graphics/mesh.h"
-#include "../graphics/renderitem.h"
-#include "../materials/defaultskymaterial.h"
 #include "../geometry/trimesh.h"
 #include "../core/irisutils.h"
-#include "../graphics/renderlist.h"
 
 #include "physics/environment.h"
 #include "math/intersectionhelper.h"
@@ -38,18 +35,9 @@ Scene::Scene()
     rootNode = SceneNode::create();
     rootNode->setName("World");
 
-    // todo: move this to ui code
-    skyMesh = Mesh::loadMesh(":assets/models/sky.obj");
-
     clearColor = QColor(0,0,0,0);
     renderSky = true;
-    skyMaterial = DefaultSkyMaterial::create();
     skyColor = QColor(72, 72, 72);
-    skyRenderItem = new RenderItem();
-    skyRenderItem->mesh = skyMesh;
-    skyRenderItem->material = skyMaterial;
-    skyRenderItem->type = RenderItemType::Mesh;
-    skyRenderItem->renderLayer = (int)RenderLayer::Background;
 
     fogColor = QColor(250, 250, 250);
     fogStart = 100;
@@ -137,21 +125,14 @@ Scene::Scene()
 
     // end sky init
 
-	skyCaptured = false;
-	shouldCaptureSky = true;
-
     ambientColor = QColor(96, 96, 96);
 
     meshes.reserve(100);
     particleSystems.reserve(100);
 
-    geometryRenderList = new RenderList();
-    shadowRenderList = new RenderList();
-    gizmoRenderList = new RenderList();
-
 	time = 0;
 
-    environment = QSharedPointer<Environment>(new Environment(geometryRenderList));
+    environment = QSharedPointer<Environment>(new Environment());
 	gravity = environment->getWorldGravity();
 
 	ambientMusicVolume = 50;
@@ -161,46 +142,9 @@ Scene::Scene()
     // playList->setPlaybackMode(QMediaPlaylist::Loop);
 }
 
-void Scene::switchSkyTexture(iris::SkyType skyType)
-{
-    switch (skyType) {
-        case iris::SkyType::CUBEMAP: {
-            skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
-                                                       ":assets/shaders/cubemapsky.frag");
-            break;
-        }
-
-        case iris::SkyType::EQUIRECTANGULAR: {
-            skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
-                                                       ":assets/shaders/equirectangularsky.frag");
-            break;
-        }
-
-        case iris::SkyType::GRADIENT: {
-            skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
-                                                       ":assets/shaders/gradientsky.frag");
-            break;
-        }
-
-        case iris::SkyType::REALISTIC: {
-            skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
-                                                       ":assets/shaders/realisticsky.frag");
-            break;
-        }
-
-        case iris::SkyType::SINGLE_COLOR: {
-            skyMaterial->createProgramFromShaderSource(":assets/shaders/defaultsky.vert",
-                                                       ":assets/shaders/flatsky.frag");
-        }
-        default:
-            break;
-    }
-}
-
 void Scene::setSkyTexture(Texture2DPtr tex)
 {
     skyTexture = tex;
-    skyMaterial->setSkyTexture(tex);
 }
 
 void Scene::setWorldGravity(float gravity)
@@ -216,7 +160,6 @@ QString Scene::getSkyTextureSource()
 void Scene::clearSkyTexture()
 {
     skyTexture.clear();
-    skyMaterial->clearSkyTexture();
 }
 
 void Scene::setSkyColor(QColor color)
@@ -227,11 +170,6 @@ void Scene::setSkyColor(QColor color)
 void Scene::setAmbientColor(QColor color)
 {
     this->ambientColor = color;
-}
-
-void Scene::queueSkyCapture()
-{
-	this->shouldCaptureSky = true;
 }
 
 void Scene::setAmbientMusic(QString path)
@@ -310,21 +248,6 @@ void Scene::update(float dt)
 	}
 
 	rootNode->update(dt);
-
-	for (const auto &mesh : meshes) {
-		mesh->submitRenderItems();
-	}
-
-    for (const auto &particle : particleSystems) {
-        particle->submitRenderItems();
-    }
-
-    if (renderSky) this->geometryRenderList->add(skyRenderItem);
-}
-
-void Scene::render()
-{
-
 }
 
 void Scene::rayCast(const QVector3D& segStart,
@@ -487,19 +410,12 @@ void Scene::cleanup()
     rootNode.clear();
     vrViewer.clear();
 
-    skyMesh.clear();
     skyTexture.clear();
-    skyMaterial.clear();
-    delete skyRenderItem;
 
     lights.clear();
     meshes.clear();
     particleSystems.clear();
     viewers.clear();
-
-    delete geometryRenderList;
-    delete shadowRenderList;
-    delete gizmoRenderList;
 }
 
 }

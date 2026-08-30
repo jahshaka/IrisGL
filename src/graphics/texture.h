@@ -13,30 +13,21 @@ For more information see the LICENSE file
 #define TEXTURE_H
 
 #include <QSharedPointer>
-#include <qopengl.h>
-
-class QOpenGLTexture;
+#include <QString>
 
 namespace iris
 {
 
+// Document-side texture asset base: an asset path plus dimensions. The GL
+// object half died with the legacy renderer at step 14; the engine loads
+// textures itself from `source` (or from the kept QImage for generated ones).
 class Texture
 {
-protected:
-    GLuint customId;
-    bool useCustomId = false;
-
 public:
-    QOpenGLTexture* texture;
     QString source;
 
-    virtual GLuint getTextureId();
-    virtual void bind();
-    virtual void bind(int index);
-
-    virtual int getWidth();
-    virtual int getHeight();
-    virtual void resize(int width, int height, bool force = false);
+    virtual int getWidth() { return 0; }
+    virtual int getHeight() { return 0; }
 
     virtual ~Texture(){}
 };

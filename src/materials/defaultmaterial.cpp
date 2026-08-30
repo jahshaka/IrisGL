@@ -15,20 +15,11 @@ For more information see the LICENSE file
 #include <QFile>
 #include <QTextStream>
 #include <QtMinMax>
-
-#include <QOpenGLShader>
-#include <QOpenGLShaderProgram>
-#include <QOpenGLTexture>
 #include <QColor>
-
-#include <QOpenGLFunctions_3_2_Core>
 
 #include "../graphics/material.h"
 #include "../graphics/texture.h"
 #include "../graphics/texture2d.h"
-#include "../graphics/graphicsdevice.h"
-#include "../materials/defaultmaterial.h"
-#include "../scenegraph/scene.h"
 #include "../core/irisutils.h"
 
 
@@ -38,11 +29,6 @@ namespace iris
 
 DefaultMaterial::DefaultMaterial()
 {
-    setTextureCount(4);
-
-    this->createProgramFromShaderSource(":assets/shaders/default_material.vert",
-                                        ":assets/shaders/default_material.frag");
-
     //program->bind();
     //program->setUniformValue("u_useDiffuseTex",false);
     //program->setUniformValue("u_useNormalTex",false);
@@ -67,43 +53,6 @@ DefaultMaterial::DefaultMaterial()
     useReflectionTex = false;
 
     this->setRenderLayer((int)RenderLayer::Opaque);
-}
-
-void DefaultMaterial::begin(GraphicsDevicePtr device,ScenePtr scene)
-{
-	device->setShader(shader);
-
-    bindTextures(device);
-
-    //set params
-    device->setShaderUniform("u_material.diffuse",QVector3D(diffuseColor.redF(),diffuseColor.greenF(),diffuseColor.blueF()));
-
-	QColor sceneAmbient;
-	if (!!scene)
-		sceneAmbient = scene->ambientColor;
-    auto finalAmbient = QVector3D(ambientColor.redF() + sceneAmbient.redF(),
-                                  ambientColor.greenF() + sceneAmbient.greenF(),
-                                  ambientColor.blueF() + sceneAmbient.blueF());
-	device->setShaderUniform("u_material.ambient",finalAmbient);
-	device->setShaderUniform("u_material.specular",QVector3D(specularColor.redF(),specularColor.greenF(),specularColor.blueF()));
-	device->setShaderUniform("u_material.shininess",shininess);
-
-	device->setShaderUniform("u_textureScale", this->textureScale);
-
-	device->setShaderUniform("u_normalIntensity",normalIntensity);
-	device->setShaderUniform("u_reflectionInfluence",reflectionInfluence);
-
-	device->setShaderUniform("u_useDiffuseTex",useDiffuseTex);
-	device->setShaderUniform("u_useNormalTex",useNormalTex);
-	device->setShaderUniform("u_useSpecularTex",useSpecularTex);
-	device->setShaderUniform("u_useReflectionTex",useReflectionTex);
-
-}
-
-void DefaultMaterial::end(GraphicsDevicePtr device, ScenePtr scene)
-{
-    //unset textures
-    Material::end(device, scene);
 }
 
 void DefaultMaterial::setDiffuseTexture(QSharedPointer<Texture2D> tex)
