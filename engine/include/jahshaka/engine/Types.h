@@ -130,7 +130,8 @@ struct CameraDesc {
     float fovDegrees = 45.0f;          // vertical
     float nearClip = 0.1f, farClip = 1000.0f;
     bool  orthographic = false;
-    float orthoSize = 10.0f;           // vertical extent when orthographic
+    float orthoSize = 10.0f;           // HALF the vertical extent when orthographic
+                                       // (the document camera's ortho(-s..+s) convention)
 };
 
 /// Native window handle a View renders into (X11 Window / HWND / NSView).

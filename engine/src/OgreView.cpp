@@ -62,7 +62,12 @@ void OgreView::setCamera(const CameraDesc &c) {
         if (c.orthographic) {
             mCamera->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
             const float aspect = mHeight ? float(mWidth) / float(mHeight) : 1.0f;
-            mCamera->setOrthoWindow(c.orthoSize * aspect, c.orthoSize);
+            // orthoSize is the HALF vertical extent (the document camera's
+            // ortho(-orthoSize..+orthoSize) convention); Ogre's setOrthoWindow
+            // takes FULL extents. Passing orthoSize directly rendered 2x
+            // zoomed relative to the document's pick-ray mapping — off-center
+            // clicks then selected the wrong object in axis views.
+            mCamera->setOrthoWindow(2.0f * c.orthoSize * aspect, 2.0f * c.orthoSize);
         } else {
             mCamera->setProjectionType(Ogre::PT_PERSPECTIVE);
             mCamera->setFOVy(Ogre::Degree(std::max(1.0f, std::min(c.fovDegrees, 179.0f))));
