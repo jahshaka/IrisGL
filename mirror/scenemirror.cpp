@@ -733,7 +733,7 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         // Effects-module materials (Default/Flat/... .shader): read the properties the
         // shader graph exposes. Colour → albedo, shininess → roughness. Textures are
         // bound by syncTextures() from the texture properties.
-        bool haveColour = false; float shininess = 20.0f;
+        bool haveColour = false, haveRoughness = false; float shininess = 20.0f;
         out.albedo = Colour(0.8f, 0.8f, 0.8f); out.metalness = 0.0f; out.emissive = Colour(0, 0, 0);
         for (iris::Property *prop : custom->properties) {
             if (!prop) continue;
@@ -745,15 +745,22 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
             } else if (prop->type == iris::PropertyType::Float && prop->name == "shininess") {
                 shininess = v.toFloat();
             } else if (prop->type == iris::PropertyType::Float && (prop->name == "roughness" || prop->name == "roughnessFactor")) {
-                out.roughness = v.toFloat();
+                out.roughness = v.toFloat(); haveRoughness = true;
             } else if (prop->type == iris::PropertyType::Float && (prop->name == "metallic" || prop->name == "metalness")) {
                 out.metalness = v.toFloat();
             } else if (prop->type == iris::PropertyType::Float && prop->name == "textureScale") {
                 out.uvScale = v.toFloat();
             }
         }
-        const float shin = std::max(0.0f, std::min(shininess, 128.0f));
-        out.roughness = 1.0f - std::sqrt(shin / 128.0f) * 0.9f;
+        if (!haveRoughness) {
+            // Only DERIVE roughness from shininess when the material carries no
+            // real roughness. This line used to run unconditionally, stamping
+            // over any read value — and since assimp encodes glTF roughness as
+            // shininess = (1-r)^2*1000, the 128 clamp turned every reasonably
+            // smooth imported material into a roughness-0.1 near-mirror.
+            const float shin = std::max(0.0f, std::min(shininess, 128.0f));
+            out.roughness = 1.0f - std::sqrt(shin / 128.0f) * 0.9f;
+        }
         (void)haveColour;
         return true;
     }
@@ -800,6 +807,7 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
 {
     if (!mesh) return false;
     out = MeshData();
+    std::vector<float> tan3, bitan3;
     for (const auto &vb : mesh->getVertexBuffers()) {
         if (!vb || !vb->data) continue;
         const QList<iris::VertexAttribute> attribs = vb->vertexLayout.getAttribs();
@@ -812,6 +820,14 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
             out.positions.assign(f, f + floats); break;
         case iris::VertexAttribUsage::Normal:
             out.normals.assign(f, f + floats); break;
+        case iris::VertexAttribUsage::Tangent:
+            // Authored/assimp-computed tangents (float3, from aiMesh::mTangents).
+            // These used to fall into `default:` and be thrown away, so the
+            // engine regenerated tangents for every mesh — wrong for models
+            // that ship authored TANGENTs (mirrored UVs, baked normal maps).
+            tan3.assign(f, f + floats); break;
+        case iris::VertexAttribUsage::BiTangent:
+            bitan3.assign(f, f + floats); break;
         case iris::VertexAttribUsage::TexCoord0: {
             // assimp stores texcoords as 3 floats; the engine wants 2.
             const int comps = attr.count > 0 ? attr.count : 3;
@@ -823,6 +839,27 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     }
     if (out.positions.empty()) return false;
     const size_t nv = out.positions.size() / 3;
+    if (tan3.size() == nv * 3) {
+        // The engine wants float4 tangents (xyz + handedness w). Handedness
+        // comes from the bitangent when the document carries one — the sign of
+        // dot(cross(n, t), b) — and defaults to +1 otherwise.
+        const bool haveN = out.normals.size() == nv * 3;
+        const bool haveB = bitan3.size() == nv * 3;
+        out.tangents.resize(nv * 4);
+        for (size_t i = 0; i < nv; ++i) {
+            const float tx = tan3[i*3], ty = tan3[i*3+1], tz = tan3[i*3+2];
+            float w = 1.0f;
+            if (haveN && haveB) {
+                const float nx = out.normals[i*3], ny = out.normals[i*3+1], nz = out.normals[i*3+2];
+                const float cx = ny * tz - nz * ty;
+                const float cy = nz * tx - nx * tz;
+                const float cz = nx * ty - ny * tx;
+                if (cx * bitan3[i*3] + cy * bitan3[i*3+1] + cz * bitan3[i*3+2] < 0.0f) w = -1.0f;
+            }
+            out.tangents[i*4] = tx; out.tangents[i*4+1] = ty;
+            out.tangents[i*4+2] = tz; out.tangents[i*4+3] = w;
+        }
+    }
     const iris::IndexBufferPtr ib = mesh->getIndexBuffer();
     if (ib && ib->data && ib->dataSize > 0) {
         const unsigned *idx = reinterpret_cast<const unsigned *>(ib->data);

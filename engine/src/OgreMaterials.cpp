@@ -191,8 +191,19 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
             // Grayscale files (single-channel jpg/png) decode to an R8 texture and
             // sample red-only — a black/white checker renders black/red. Expand to
             // RGBA on the CPU and upload with CPU-generated mipmaps instead.
+            //
+            // load2, not load(file, group): load() picks the codec by file
+            // extension alone and THROWS on mislabeled files (the old importer
+            // wrote PNG bytes under .jpg names — GLB embedded textures), which
+            // made every such texture silently render white. load2 validates
+            // the extension's codec against the magic bytes and falls back to
+            // content sniffing — the same tolerant route TextureGpuManager
+            // itself uses for the actual GPU load below.
             Ogre::Image2 probe;
-            probe.load(file, kGroup);
+            {
+                Ogre::DataStreamPtr stream = rgm.openResource(file, kGroup);
+                probe.load2(stream, file);
+            }
             const Ogre::PixelFormatGpu pf = probe.getPixelFormat();
             if (Ogre::PixelFormatGpuUtils::getNumberOfComponents(pf) == 1 &&
                 !Ogre::PixelFormatGpuUtils::isCompressed(pf)) {

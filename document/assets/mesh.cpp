@@ -84,8 +84,13 @@ Mesh::Mesh(aiMesh* mesh)
         this->addVertexArray(VertexAttribUsage::TexCoord1, (void*)mesh->mTextureCoords[1], sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
     if(mesh->HasNormals())
         this->addVertexArray(VertexAttribUsage::Normal, (void*)mesh->mNormals, sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
-    if(mesh->HasTangentsAndBitangents())
+    if(mesh->HasTangentsAndBitangents()) {
         this->addVertexArray(VertexAttribUsage::Tangent, (void*)mesh->mTangents, sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
+        // Bitangents carry the tangent-frame handedness (glTF TANGENT.w).
+        // Without them the mirror cannot tell a mirrored UV island from a
+        // regular one and authored tangent frames flip.
+        this->addVertexArray(VertexAttribUsage::BiTangent, (void*)mesh->mBitangents, sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
+    }
 
     if (mesh->HasBones()) {
         // bone weights for skeletal animation

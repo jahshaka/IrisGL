@@ -332,12 +332,14 @@ bool SceneNode::isRootNode()
 
 void SceneNode::updateAnimation(float time)
 {
+    // Children sample the ORIGINAL scene time (SKELETAL_PLAYBACK_SPEC S5):
+    // this node's loop-remapped time must not leak into sibling/nested clips
+    // of different lengths. (The old `length > 60 → time × 1000` hack is gone:
+    // Mesh::extractAnimations now converts assimp ticks to seconds at the
+    // source, so scene time and key time share one unit.)
+    const float sceneTime = time;
+
     if (!!animation) {
-
-        if (animation->getLength() > 60.0f) {
-            time = time * 1000.0f;
-        }
-
         time = animation->getSampleTime(time);
         if (animation->hasPropertyAnim("position")) {
             pos = animation->getVector3PropertyAnim("position")->getValue(time);
@@ -390,7 +392,7 @@ void SceneNode::updateAnimation(float time)
     }
 
     for (auto child : children) {
-        child->updateAnimation(time);
+        child->updateAnimation(sceneTime);
     }
 }
 

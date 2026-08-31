@@ -51,6 +51,20 @@ struct MeshMaterialData
     bool hasEmbeddedSpecularTexture = false;
     bool hasEmbeddedNormalTexture = false;
     bool hasEmbeddedHightTexture = false;
+
+    // glTF 2.0 metallic-roughness, read at import (GLB importer fix phase 0).
+    // hasPbr is true when the source material carried any pbrMetallicRoughness
+    // data; importers then build an iris::PbrMaterial from these instead of
+    // faking a legacy Blinn-Phong material out of assimp's lossy
+    // shininess back-conversion.
+    bool hasPbr = false;
+    QColor baseColorFactor = QColor(255, 255, 255, 255);
+    float metallicFactor = 1.0f;
+    float roughnessFactor = 1.0f;
+    QString baseColorTexture;
+    QString metallicTexture;    // split from the packed MR map (blue channel)
+    QString roughnessTexture;   // split from the packed MR map (green channel)
+    QString emissiveTexture;
 };
 
 enum class PrimitiveMode
@@ -111,10 +125,26 @@ public:
 
         for (unsigned i = 0; i<scene->mNumAnimations; i++) {
             auto anim = scene->mAnimations[i];
+
+            // Key times are stored in SECONDS (SKELETAL_PLAYBACK_SPEC S2):
+            // assimp gives raw ticks + mTicksPerSecond (1000 for glTF/FBX,
+            // 24/30 for many FBX/Collada exports; 0 means "unknown" — assimp's
+            // documented convention is to assume 25). The old code stored raw
+            // ticks and compensated with a `length > 60 → time × 1000` hack in
+            // SceneNode::updateAnimation, which mis-played any non-ms clip.
+            const double ticksPerSecond =
+                anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 25.0;
+
+            // Clip names are kept and made unique (SKELETAL_PLAYBACK_SPEC S1).
+            // The old code collapsed a clip named after its first channel to ""
+            // — multiple clips then overwrote one QMap key, and saved
+            // {source, name} references could never resolve on reload.
             auto animName = QString(anim->mName.C_Str());
-            if (!anim || animName == anim->mChannels[0]->mNodeName.C_Str()) {
-                animName = "";
-            }
+            if (animName.isEmpty())
+                animName = QString("clip %1").arg(i);
+            const QString baseName = animName;
+            for (int suffix = 2; anims.contains(animName); ++suffix)
+                animName = baseName + QString(" %1").arg(suffix);
 
             auto skelAnim = SkeletalAnimation::create();
             skelAnim->name = animName;
@@ -126,20 +156,20 @@ public:
                 auto nodeName = QString(nodeAnim->mNodeName.C_Str());
                 auto boneAnim = new BoneAnimation();
 
-                // extract tracks
+                // extract tracks (tick → second conversion at the source)
                 for (unsigned k = 0; k<nodeAnim->mNumPositionKeys; k++) {
                     auto key = nodeAnim->mPositionKeys[k];
-                    boneAnim->posKeys->addKey(QVector3D(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime);
+                    boneAnim->posKeys->addKey(QVector3D(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
                 }
 
                 for (unsigned k = 0; k<nodeAnim->mNumRotationKeys; k++) {
                     auto key = nodeAnim->mRotationKeys[k];
-                    boneAnim->rotKeys->addKey(QQuaternion(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z), key.mTime);
+                    boneAnim->rotKeys->addKey(QQuaternion(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
                 }
 
                 for (unsigned k = 0; k<nodeAnim->mNumScalingKeys; k++) {
                     auto key = nodeAnim->mScalingKeys[k];
-                    boneAnim->scaleKeys->addKey(QVector3D(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime);
+                    boneAnim->scaleKeys->addKey(QVector3D(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
                 }
 
                 skelAnim->addBoneAnimation(nodeName, boneAnim);

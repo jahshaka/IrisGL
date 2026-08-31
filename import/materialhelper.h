@@ -33,14 +33,21 @@ public:
                                     aiMaterial *aiMat,
                                     QString assetPath,
                                     MeshMaterialData& mat);
+    /// Image type from the leading magic bytes ("jpg", "png", "dds", "gif",
+    /// "bmp", "webp", "tif", "ktx"), or an empty string when unrecognized.
+    /// Public: importers and tests use it to keep written extensions honest.
+    static QString sniffImageExtension(const unsigned char* data, int len);
+
 private:
     static QImage loadOMEmbeddedTexture(const aiScene* scene,
                                         const QString& texPath,
-                                        QString& fileName);
+                                        QString& fileName,
+                                        QByteArray& rawBytes);
 
     static QImage loadGLBEmbeddedTexture(const aiScene* scene,
                                          const QString& texName,
-                                         QString& fileName);
+                                         QString& fileName,
+                                         QByteArray& rawBytes);
 
     static QImage convertAiTextureToImage(const aiTexture *at);
 
@@ -59,6 +66,9 @@ private:
     };
 
     static void saveTextureAsync(const QImage& image, const QString& path);
+    /// Verbatim byte write for embedded compressed textures — no re-encode,
+    /// so the bytes on disk always match the (sniffed) extension.
+    static void saveTextureBytesAsync(const QByteArray& bytes, const QString& path);
 
     static QVector<SaveTask> g_textureSaveTasks;
     static QSet<QString> g_savedPaths;

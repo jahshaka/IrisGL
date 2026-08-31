@@ -45,6 +45,22 @@ float getAiMaterialFloat(aiMaterial* aiMat, const char* pKey, unsigned int type 
     return val;
 }
 
+QString MaterialHelper::sniffImageExtension(const unsigned char* d, int len)
+{
+    if (!d || len < 4) return QString();
+    if (d[0] == 0xFF && d[1] == 0xD8) return QStringLiteral("jpg");
+    if (d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47) return QStringLiteral("png");
+    if (d[0] == 'D' && d[1] == 'D' && d[2] == 'S' && d[3] == ' ') return QStringLiteral("dds");
+    if (d[0] == 'G' && d[1] == 'I' && d[2] == 'F' && d[3] == '8') return QStringLiteral("gif");
+    if (d[0] == 'B' && d[1] == 'M') return QStringLiteral("bmp");
+    if (len >= 12 && d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F' &&
+        d[8] == 'W' && d[9] == 'E' && d[10] == 'B' && d[11] == 'P') return QStringLiteral("webp");
+    if ((d[0] == 0x49 && d[1] == 0x49 && d[2] == 0x2A && d[3] == 0x00) ||
+        (d[0] == 0x4D && d[1] == 0x4D && d[2] == 0x00 && d[3] == 0x2A)) return QStringLiteral("tif");
+    if (d[0] == 0xAB && d[1] == 'K' && d[2] == 'T' && d[3] == 'X') return QStringLiteral("ktx");
+    return QString();
+}
+
 QImage MaterialHelper::convertAiTextureToImage(const aiTexture *at)
 {
     if (!at) return QImage();
@@ -94,10 +110,39 @@ void MaterialHelper::saveTextureAsync(const QImage &image, const QString &path)
     SaveTask task;
     task.path = path;
     task.future = QtConcurrent::run([image, path]() {
-        QImageWriter writer(path, "PNG");
-        writer.setCompression(1); // 压缩等级 1，加快写盘
+        // The format must FOLLOW the file name. The old writer hardcoded
+        // "PNG" while callers named files after assimp's achFormatHint —
+        // every embedded JPEG landed as PNG bytes in a .jpg file, and the
+        // engine (which picks codecs by extension) rendered it white.
+        QImageWriter writer(path);   // format from the suffix
+        if (path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
+            writer.setCompression(1); // low compression, fast write
         if (!writer.write(image)) {
             qWarning() << "Failed to save texture:" << path;
+        }
+    });
+
+    locker.relock();
+    g_textureSaveTasks.append(task);
+}
+
+void MaterialHelper::saveTextureBytesAsync(const QByteArray &bytes, const QString &path)
+{
+    if (bytes.isEmpty() || path.isEmpty()) return;
+
+    QMutexLocker locker(&g_saveMutex);
+    if (g_savedPaths.contains(path)) return;
+    g_savedPaths.insert(path);
+    locker.unlock();
+
+    QDir().mkpath(QFileInfo(path).absolutePath());
+
+    SaveTask task;
+    task.path = path;
+    task.future = QtConcurrent::run([bytes, path]() {
+        QFile out(path);
+        if (!out.open(QIODevice::WriteOnly) || out.write(bytes) != bytes.size()) {
+            qWarning() << "Failed to save embedded texture:" << path;
         }
     });
 
@@ -133,10 +178,11 @@ void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
 
     QString fileName("");
     QImage image;
+    QByteArray rawBytes;
     if (texName.startsWith("*")) {
-        image = loadGLBEmbeddedTexture(scene, texName, fileName);
+        image = loadGLBEmbeddedTexture(scene, texName, fileName, rawBytes);
     } else {
-        image = loadOMEmbeddedTexture(scene, texPath, fileName);
+        image = loadOMEmbeddedTexture(scene, texPath, fileName, rawBytes);
     }
 
 
@@ -149,13 +195,35 @@ void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
         hasEmbedded = true;
 
         if (!QFileInfo::exists(texPath)) {
-            saveTextureAsync(image, imagePath);
+            // Compressed embedded textures are written VERBATIM: no
+            // re-encode, and the extension was sniffed from these bytes,
+            // so file name and content can never disagree again.
+            if (!rawBytes.isEmpty())
+                saveTextureBytesAsync(rawBytes, imagePath);
+            else
+                saveTextureAsync(image, imagePath);
         }
     }
 }
 
+// Extension for an embedded aiTexture: sniffed from the compressed bytes
+// (assimp's achFormatHint / the source's mimeType routinely LIE — GLBs in the
+// wild declare image/jpeg over PNG bytes and vice versa); uncompressed texel
+// data is PNG-encoded by the save, so it is named .png.
+static QString embeddedTextureExtension(const aiTexture *tex)
+{
+    if (tex->mHeight == 0) {
+        const QString sniffed = MaterialHelper::sniffImageExtension(
+            reinterpret_cast<const unsigned char*>(tex->pcData), int(tex->mWidth));
+        if (!sniffed.isEmpty()) return sniffed;
+        const QString hint = QString::fromLatin1(tex->achFormatHint).toLower();
+        return hint.isEmpty() ? QStringLiteral("png") : hint;
+    }
+    return QStringLiteral("png");
+}
 
-QImage MaterialHelper::loadOMEmbeddedTexture(const aiScene* scene, const QString& texPath, QString& fileName)
+QImage MaterialHelper::loadOMEmbeddedTexture(const aiScene* scene, const QString& texPath,
+                                             QString& fileName, QByteArray& rawBytes)
 {
     const aiTexture* tex = scene->GetEmbeddedTexture(texPath.toStdString().c_str());
     if (!tex) {
@@ -163,7 +231,10 @@ QImage MaterialHelper::loadOMEmbeddedTexture(const aiScene* scene, const QString
         return QImage();
     }
 
-    fileName = QFileInfo(texPath).fileName();
+    const QFileInfo info(texPath);
+    fileName = info.completeBaseName() + "." + embeddedTextureExtension(tex);
+    if (tex->mHeight == 0)
+        rawBytes = QByteArray(reinterpret_cast<const char*>(tex->pcData), int(tex->mWidth));
 
     QImage image = convertAiTextureToImage(tex);
 
@@ -172,7 +243,8 @@ QImage MaterialHelper::loadOMEmbeddedTexture(const aiScene* scene, const QString
 
 QImage MaterialHelper::loadGLBEmbeddedTexture(const aiScene *scene,
                                               const QString &texName,
-                                              QString& fileName)
+                                              QString& fileName,
+                                              QByteArray& rawBytes)
 {
     bool ok = false;
     int texIndex = texName.mid(texName.indexOf("*")+1, texName.length()).toInt(&ok);
@@ -186,7 +258,10 @@ QImage MaterialHelper::loadGLBEmbeddedTexture(const aiScene *scene,
         if (name.isEmpty()) {
             name = /*generateTexGUID()*/ QString("_") + QString::number(texIndex);
         }
-        fileName = name + "." + QString(embeddedTex->achFormatHint);
+        fileName = name + "." + embeddedTextureExtension(embeddedTex);
+        if (embeddedTex->mHeight == 0)
+            rawBytes = QByteArray(reinterpret_cast<const char*>(embeddedTex->pcData),
+                                  int(embeddedTex->mWidth));
 
         image = convertAiTextureToImage(embeddedTex);
     }
@@ -250,7 +325,79 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         loadEmbeddedTexture(scene, normalsTex, assetPath, mat.hightTexture, mat.hasEmbeddedHightTexture);
     }
 
+    // ------------------------
+    // glTF 2.0 metallic-roughness (GLB importer fix phase 0). assimp reads
+    // baseColor/metallic/roughness factors and the texture bindings for glTF;
+    // the old importer discarded ALL of it and kept only the lossy
+    // roughness→shininess back-conversion (every GLB rendered near-mirror).
+    // ------------------------
+    auto resolveTex = [&](const QString& name, QString& outPath) {
+        if (name.isEmpty()) { outPath.clear(); return; }
+        outPath = QFileInfo(name).isRelative()
+                      ? QDir::cleanPath(QDir(assetPath).filePath(name))
+                      : QDir::cleanPath(name);
+        bool embedded = false;
+        loadEmbeddedTexture(scene, name, assetPath, outPath, embedded);
+    };
+
+    aiColor4D baseColor;
+    float metallic = 1.0f, roughness = 1.0f;
+    const bool hasBaseColor = aiMat->Get(AI_MATKEY_BASE_COLOR, baseColor) == AI_SUCCESS;
+    const bool hasMetallic  = aiMat->Get(AI_MATKEY_METALLIC_FACTOR, metallic) == AI_SUCCESS;
+    const bool hasRoughness = aiMat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS;
+
+    const QString baseTexName = getAiMaterialTexture(aiMat, aiTextureType_BASE_COLOR);
+    resolveTex(baseTexName, mat.baseColorTexture);
+    if (mat.baseColorTexture.isEmpty()) mat.baseColorTexture = mat.diffuseTexture;
+
+    resolveTex(getAiMaterialTexture(aiMat, aiTextureType_EMISSIVE), mat.emissiveTexture);
+
+    QString mrName = getAiMaterialTexture(aiMat, aiTextureType_METALNESS);
+    if (mrName.isEmpty()) mrName = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE_ROUGHNESS);
+    QString mrPath;
+    resolveTex(mrName, mrPath);
+
+    mat.hasPbr = hasBaseColor || hasMetallic || hasRoughness ||
+                 !baseTexName.isEmpty() || !mrName.isEmpty();
+    if (hasBaseColor)
+        mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, baseColor.r, 1.0f),
+                                               qBound(0.0f, baseColor.g, 1.0f),
+                                               qBound(0.0f, baseColor.b, 1.0f),
+                                               qBound(0.0f, baseColor.a, 1.0f));
+    if (hasMetallic)  mat.metallicFactor  = metallic;
+    if (hasRoughness) mat.roughnessFactor = roughness;
+
     waitForAllTextureSaves();
+
+    // The packed MR map (metallic = BLUE, roughness = GREEN per glTF) must be
+    // split at import: the engine's HlmsPbs samples metalness and roughness
+    // maps as single-channel textures, so binding the packed image directly
+    // would read the wrong channel for both.
+    if (!mrPath.isEmpty() && QFileInfo(mrPath).isFile()) {
+        const QFileInfo mrInfo(mrPath);
+        const QString metalPath = mrInfo.absolutePath() + "/" + mrInfo.completeBaseName() + "_metallic.png";
+        const QString roughPath = mrInfo.absolutePath() + "/" + mrInfo.completeBaseName() + "_roughness.png";
+        if (!QFileInfo::exists(metalPath) || !QFileInfo::exists(roughPath)) {
+            const QImage mr = QImage(mrPath).convertToFormat(QImage::Format_RGBA8888);
+            if (!mr.isNull()) {
+                QImage metal(mr.size(), QImage::Format_Grayscale8);
+                QImage rough(mr.size(), QImage::Format_Grayscale8);
+                for (int y = 0; y < mr.height(); ++y) {
+                    const uchar* src = mr.constScanLine(y);
+                    uchar* m = metal.scanLine(y);
+                    uchar* r = rough.scanLine(y);
+                    for (int x = 0; x < mr.width(); ++x) {
+                        m[x] = src[x * 4 + 2];   // blue  → metallic
+                        r[x] = src[x * 4 + 1];   // green → roughness
+                    }
+                }
+                metal.save(metalPath, "PNG");
+                rough.save(roughPath, "PNG");
+            }
+        }
+        if (QFileInfo::exists(metalPath)) mat.metallicTexture  = metalPath;
+        if (QFileInfo::exists(roughPath)) mat.roughnessTexture = roughPath;
+    }
 }
 
 
