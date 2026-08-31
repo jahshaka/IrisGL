@@ -830,8 +830,17 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
             bitan3.assign(f, f + floats); break;
         case iris::VertexAttribUsage::TexCoord0: {
             // assimp stores texcoords as 3 floats; the engine wants 2.
+            //
+            // V is FLIPPED here: the document keeps assimp's GL-style
+            // bottom-left UV origin (the legacy renderer compensated by
+            // mirroring every texture image at load — Texture2D::load
+            // flipY). The engine samples top-left-origin images unflipped
+            // (Ogre convention, same as glTF), so document UVs must arrive
+            // as v = 1 - v or every imported model renders its textures
+            // V-flipped ("misplaced textures", 2026-08-31). The tangent
+            // handedness below negates to match.
             const int comps = attr.count > 0 ? attr.count : 3;
-            for (int i = 0; i + comps <= floats; i += comps) { out.uvs.push_back(f[i]); out.uvs.push_back(f[i+1]); }
+            for (int i = 0; i + comps <= floats; i += comps) { out.uvs.push_back(f[i]); out.uvs.push_back(1.0f - f[i+1]); }
             break;
         }
         default: break;
@@ -841,8 +850,13 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     const size_t nv = out.positions.size() / 3;
     if (tan3.size() == nv * 3) {
         // The engine wants float4 tangents (xyz + handedness w). Handedness
-        // comes from the bitangent when the document carries one — the sign of
-        // dot(cross(n, t), b) — and defaults to +1 otherwise.
+        // comes from the bitangent when the document carries one — and is
+        // NEGATED relative to the document frame: the V flip above mirrors
+        // the bitangent direction (dP/dv changes sign), so the engine-facing
+        // w is -sign(dot(cross(n, t), b_document)). Verified against a GLB
+        // with authored TANGENT w=+1: assimp's document frame yields -1 here,
+        // the negation restores the authored +1 (tests/importer section 3b).
+        // Defaults to +1 when the document has no bitangent.
         const bool haveN = out.normals.size() == nv * 3;
         const bool haveB = bitan3.size() == nv * 3;
         out.tangents.resize(nv * 4);
@@ -854,7 +868,7 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
                 const float cx = ny * tz - nz * ty;
                 const float cy = nz * tx - nx * tz;
                 const float cz = nx * ty - ny * tx;
-                if (cx * bitan3[i*3] + cy * bitan3[i*3+1] + cz * bitan3[i*3+2] < 0.0f) w = -1.0f;
+                w = (cx * bitan3[i*3] + cy * bitan3[i*3+1] + cz * bitan3[i*3+2] < 0.0f) ? 1.0f : -1.0f;
             }
             out.tangents[i*4] = tx; out.tangents[i*4+1] = ty;
             out.tangents[i*4+2] = tz; out.tangents[i*4+3] = w;
