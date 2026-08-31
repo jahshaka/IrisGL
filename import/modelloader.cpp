@@ -6,6 +6,7 @@
 #include "document/assets/skeleton.h"
 
 #include "assimp/postprocess.h"
+#include "import/importflags.h"
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
@@ -40,12 +41,12 @@ ModelPtr ModelLoader::load(QString filePath)
 		auto data = file.readAll();
 		scene = importer.ReadFileFromMemory((void*)data.data(),
 			data.length(),
-			aiProcessPreset_TargetRealtime_Fast);
+			iris::ImportFlags::Canonical);
 	}
 	else {
 		// load mesh from file
 		scene = importer.ReadFile(filePath.toStdString().c_str(),
-			aiProcessPreset_TargetRealtime_Fast);
+			iris::ImportFlags::Canonical);
 	}
 
 	if (!scene) {

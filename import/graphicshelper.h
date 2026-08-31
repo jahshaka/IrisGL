@@ -64,28 +64,26 @@ public:
                                                     QList<MeshPtr> &meshes,
                                                     QMap<QString, SkeletalAnimationPtr> &animations)
      {
+         // Prefer the first entry that actually CARRIES an assimp scene. The
+         // old first-match stopped at whichever entry shared the path — often
+         // an add-to-project AssetNodeObject (value = SceneNodePtr, no scene)
+         // registered alongside the import's AssimpObject — and reloaded the
+         // file although the parsed scene sat one element further on. Worse,
+         // when NO entry matched at all it returned silently and the caller
+         // got empty meshes (missing geometry on scene load).
          for (F ao : store) {
-             if (ao->path == filePath) {
-                // Not every path-matching asset holds an AssimpObject: add-to-project
-                // registers an AssetNodeObject (value = SceneNodePtr) under the same
-                // ModelTypes::Object, and value<AssimpObject*>() then returns null.
-                // Dereferencing unchecked crashed on scene load after a same-session
-                // add-to-project — fall back to loading the file instead.
-                AssimpObject *assimpObject = ao->getValue().template value<AssimpObject*>();
-                const aiScene *scene = assimpObject ? assimpObject->getSceneData() : nullptr;
-
-                if (scene != nullptr) {
-                    meshes = loadAllMeshesFromAssimpScene(scene);
-                    animations = Mesh::extractAnimations(scene, filePath);
-                } else {
-                    qWarning() << "loadAllMeshesAndAnimationsFromStore: asset for" << filePath
-                               << "carries no assimp scene (add-to-project node asset?) — loading the file instead";
-                    loadAllMeshesAndAnimationsFromFile(filePath, meshes, animations);
-                }
-
-                break;
+             if (ao->path != filePath) continue;
+             AssimpObject *assimpObject = ao->getValue().template value<AssimpObject*>();
+             const aiScene *scene = assimpObject ? assimpObject->getSceneData() : nullptr;
+             if (scene != nullptr) {
+                 meshes = loadAllMeshesFromAssimpScene(scene);
+                 animations = Mesh::extractAnimations(scene, filePath);
+                 return;
              }
          }
+
+         // No cached scene anywhere in the store: load the file itself.
+         loadAllMeshesAndAnimationsFromFile(filePath, meshes, animations);
      }
 
 

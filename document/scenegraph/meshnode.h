@@ -108,17 +108,25 @@ public:
      * @param path
      * @return
      */
+    /// `scene_` may be null: a local importer is used and the aiScene dies
+    /// with the call (everything returned owns copies). Pass a SceneSource
+    /// only to keep the aiScene alive for follow-up work (metadata counts).
+    /// `extractDir`: where embedded textures and derived maps are WRITTEN
+    /// (import staging). Empty = beside the source file (legacy behavior —
+    /// wrong for read-only sources; the import pipeline always passes one).
     static SceneNodePtr loadAsSceneFragment(
         QString path,
         std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
         SceneSource *scene_ = Q_NULLPTR,
-        IModelReadProgress* progressReader = Q_NULLPTR
+        IModelReadProgress* progressReader = Q_NULLPTR,
+        const QString &extractDir = QString()
     );
 
 	static SceneNodePtr loadAsSceneFragment(
 		const QString &filePath,
 		const aiScene* scene_,
-		std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc
+		std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
+		const QString &extractDir = QString()
 	);
 
     static SceneNodePtr loadAsAnimatedModel(QString path);

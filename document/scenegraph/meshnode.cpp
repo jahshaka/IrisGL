@@ -21,6 +21,7 @@ For more information see the LICENSE file
 #include "core/properties/property.h"
 #include "document/assets/mesh.h"
 #include "assimp/postprocess.h"
+#include "import/importflags.h"
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
@@ -185,11 +186,46 @@ QJsonObject readJahShader(const QString &filePath)
  * @param node
  * @return
  */
+// Accumulated (root -> node) transform of the first aiNode referencing
+// `meshIndex`. assimp's matrices are row-major, so composition is
+// child * parent (same convention as ModelLoader::extractMeshesFromScene).
+static bool _findMeshNodeTransform(const aiNode* node, unsigned meshIndex,
+                                   const aiMatrix4x4& parent, aiMatrix4x4& out)
+{
+    const aiMatrix4x4 global = node->mTransformation * parent;
+    for (unsigned i = 0; i < node->mNumMeshes; ++i) {
+        if (node->mMeshes[i] == meshIndex) { out = global; return true; }
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        if (_findMeshNodeTransform(node->mChildren[i], meshIndex, global, out))
+            return true;
+    }
+    return false;
+}
+
+// The single-mesh shortcut in loadAsSceneFragment used to return a MeshNode
+// at identity, silently DROPPING the authored root/node transform (a glb
+// whose one mesh sits under a scaled root imported at the wrong size while
+// the same file's multi-mesh sibling kept it). Apply the accumulated
+// transform of the node that references the mesh.
+static void _applyMeshNodeTransform(const aiScene* scene, MeshNodePtr node)
+{
+    aiMatrix4x4 xform;
+    if (!_findMeshNodeTransform(scene->mRootNode, 0, aiMatrix4x4(), xform)) return;
+    aiVector3D pos, scale;
+    aiQuaternion rot;
+    xform.Decompose(scale, rot, pos);
+    node->setLocalPos(QVector3D(pos.x, pos.y, pos.z));
+    node->setLocalScale(QVector3D(scale.x, scale.y, scale.z));
+    node->setLocalRot(QQuaternion(rot.w, rot.x, rot.y, rot.z));
+}
+
 QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 											aiNode* node,
 											SceneNodePtr rootBone,
 											QString filePath,
-											std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc)
+											std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
+											const QString& extractDir = QString())
 {
     QSharedPointer<iris::SceneNode> sceneNode;
 
@@ -215,7 +251,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -247,7 +283,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -268,7 +304,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
     if (!rootBone) rootBone = sceneNode;
 
     for (unsigned i = 0 ;i < node->mNumChildren; i++) {
-        auto child = _buildScene(scene, node->mChildren[i], rootBone, filePath, createMaterialFunc);
+        auto child = _buildScene(scene, node->mChildren[i], rootBone, filePath, createMaterialFunc, extractDir);
         sceneNode->addChild(child, false);
     }
 
@@ -279,13 +315,25 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 QSharedPointer<iris::SceneNode>
 MeshNode::loadAsSceneFragment(QString filePath,
                               std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-                              SceneSource *scene_, IModelReadProgress* progressReader)
+                              SceneSource *scene_, IModelReadProgress* progressReader,
+                              const QString &extractDir)
 {
+    // scene_ defaults to null in the declaration but was dereferenced
+    // unconditionally — every caller had to allocate a SceneSource just to
+    // avoid the crash. A local importer serves callers that don't need the
+    // aiScene to outlive the call (the returned graph owns copies of
+    // everything).
+    QScopedPointer<SceneSource> localSource;
+    if (!scene_) {
+        localSource.reset(new SceneSource());
+        scene_ = localSource.data();
+    }
+
     ModelProgressHandler *handle = new ModelProgressHandler();
     handle->setHandler(progressReader);
 
     scene_->importer.SetProgressHandler(handle);
-    const aiScene *scene = scene_->importer.ReadFile(filePath.toStdString().c_str(), aiProcessPreset_TargetRealtime_Quality);
+    const aiScene *scene = scene_->importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
 
     // ReadFile returns null on failure (corrupt file, or an importer feature
     // that is not compiled in, e.g. KHR_draco_mesh_compression): dereferencing
@@ -323,14 +371,16 @@ MeshNode::loadAsSceneFragment(QString filePath,
         auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
         MeshMaterialData meshMat;
-        MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
+        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
         auto mat = createMaterialFunc(meshObj, meshMat);
         if (!!mat) node->setMaterial(mat);
+
+        _applyMeshNodeTransform(scene, node);
 
         return node;
     }
 
-    auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc);
+    auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc, extractDir);
     node->setAttached(false); // root of object shouldnt be attached
 
     // extract animations and add them one by one
@@ -351,7 +401,8 @@ QSharedPointer<iris::SceneNode>
 MeshNode::loadAsSceneFragment(
 	const QString &filePath,
 	const aiScene* scene_,
-	std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc)
+	std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
+	const QString &extractDir)
 {
 	const aiScene *scene = scene_;
 
@@ -384,14 +435,16 @@ MeshNode::loadAsSceneFragment(
 		auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
 		MeshMaterialData meshMat;
-        MaterialHelper::extractMaterialData(scene, m, dir, meshMat);
+        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
 		auto mat = createMaterialFunc(meshObj, meshMat);
 		if (!!mat) node->setMaterial(mat);
+
+		_applyMeshNodeTransform(scene, node);
 
 		return node;
 	}
 
-	auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc);
+	auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc, extractDir);
 	node->setAttached(false); // root of object shouldnt be attached
 
 							  // extract animations and add them one by one

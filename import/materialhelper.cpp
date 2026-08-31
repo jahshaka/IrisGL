@@ -273,8 +273,12 @@ QImage MaterialHelper::loadGLBEmbeddedTexture(const aiScene *scene,
 void MaterialHelper::extractMaterialData(const aiScene *scene,
                     aiMaterial *aiMat,
                     QString assetPath,
-                    MeshMaterialData& mat)
+                    MeshMaterialData& mat,
+                    const QString &writeDir)
 {
+    // Extraction output target: the pipeline's staging dir when given, else
+    // (legacy) the source's own directory.
+    const QString outDir = writeDir.isEmpty() ? assetPath : writeDir;
     mat.diffuseColor  = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE);
     mat.specularColor = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_SPECULAR);
     mat.ambientColor  = getAiMaterialColor(aiMat, AI_MATKEY_COLOR_AMBIENT);
@@ -291,7 +295,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                              ? QDir::cleanPath(QDir(assetPath).filePath(diffuseTex))
                              : QDir::cleanPath(diffuseTex);
 
-    loadEmbeddedTexture(scene, diffuseTex, assetPath, mat.diffuseTexture, mat.hasEmbeddedDiffTexture);
+    loadEmbeddedTexture(scene, diffuseTex, outDir, mat.diffuseTexture, mat.hasEmbeddedDiffTexture);
 
     // ------------------------
     // Specular
@@ -301,7 +305,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                               ? QDir::cleanPath(QDir(assetPath).filePath(specularTex))
                               : QDir::cleanPath(specularTex);
 
-    loadEmbeddedTexture(scene, specularTex, assetPath, mat.specularTexture, mat.hasEmbeddedSpecularTexture);
+    loadEmbeddedTexture(scene, specularTex, outDir, mat.specularTexture, mat.hasEmbeddedSpecularTexture);
 
     // ------------------------
     // Normals
@@ -311,7 +315,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                             ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
                             : QDir::cleanPath(normalsTex);
 
-    loadEmbeddedTexture(scene, normalsTex, assetPath, mat.normalTexture, mat.hasEmbeddedNormalTexture);
+    loadEmbeddedTexture(scene, normalsTex, outDir, mat.normalTexture, mat.hasEmbeddedNormalTexture);
 
     // ------------------------
     // Fallback for height maps if normal map missing
@@ -322,7 +326,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                                ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
                                : QDir::cleanPath(normalsTex);
 
-        loadEmbeddedTexture(scene, normalsTex, assetPath, mat.hightTexture, mat.hasEmbeddedHightTexture);
+        loadEmbeddedTexture(scene, normalsTex, outDir, mat.hightTexture, mat.hasEmbeddedHightTexture);
     }
 
     // ------------------------
@@ -337,7 +341,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                       ? QDir::cleanPath(QDir(assetPath).filePath(name))
                       : QDir::cleanPath(name);
         bool embedded = false;
-        loadEmbeddedTexture(scene, name, assetPath, outPath, embedded);
+        loadEmbeddedTexture(scene, name, outDir, outPath, embedded);
     };
 
     aiColor4D baseColor;
@@ -374,10 +378,13 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     // maps as single-channel textures, so binding the packed image directly
     // would read the wrong channel for both.
     if (!mrPath.isEmpty() && QFileInfo(mrPath).isFile()) {
+        // Split maps land in the extraction target, never beside the packed
+        // source (which may live in a read-only import location).
         const QFileInfo mrInfo(mrPath);
-        const QString metalPath = mrInfo.absolutePath() + "/" + mrInfo.completeBaseName() + "_metallic.png";
-        const QString roughPath = mrInfo.absolutePath() + "/" + mrInfo.completeBaseName() + "_roughness.png";
+        const QString metalPath = outDir + "/" + mrInfo.completeBaseName() + "_metallic.png";
+        const QString roughPath = outDir + "/" + mrInfo.completeBaseName() + "_roughness.png";
         if (!QFileInfo::exists(metalPath) || !QFileInfo::exists(roughPath)) {
+            QDir().mkpath(outDir);
             const QImage mr = QImage(mrPath).convertToFormat(QImage::Format_RGBA8888);
             if (!mr.isNull()) {
                 QImage metal(mr.size(), QImage::Format_Grayscale8);

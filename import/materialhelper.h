@@ -29,10 +29,16 @@ public:
     static DefaultMaterialPtr createMaterial(aiMaterial* aiMat, QString assetPath);
 
 
+    /// `assetPath` resolves the file's RELATIVE texture references (the
+    /// source's directory). `writeDir` is where extraction OUTPUT lands —
+    /// embedded texture files and the split metallic/roughness maps; empty
+    /// means beside the source (legacy behavior — never right for read-only
+    /// sources; the import pipeline always passes a staging dir).
     static void extractMaterialData(const aiScene *scene,
                                     aiMaterial *aiMat,
                                     QString assetPath,
-                                    MeshMaterialData& mat);
+                                    MeshMaterialData& mat,
+                                    const QString &writeDir = QString());
     /// Image type from the leading magic bytes ("jpg", "png", "dds", "gif",
     /// "bmp", "webp", "tif", "ktx"), or an empty string when unrecognized.
     /// Public: importers and tests use it to keep written extensions honest.

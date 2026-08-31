@@ -21,6 +21,7 @@ For more information see the LICENSE file
 #include "core/logger.h"
 
 #include "assimp/postprocess.h"
+#include "import/importflags.h"
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
@@ -260,12 +261,12 @@ MeshPtr Mesh::loadMesh(QString filePath)
 		auto data = file.readAll();
 		scene = importer.ReadFileFromMemory((void*)data.data(),
 			data.length(),
-			aiProcessPreset_TargetRealtime_Fast);
+			iris::ImportFlags::Canonical);
 	}
 	else {
 		// load mesh from file
 		scene = importer.ReadFile(filePath.toStdString().c_str(),
-			aiProcessPreset_TargetRealtime_Fast);
+			iris::ImportFlags::Canonical);
 	}
 
 	if (!scene) {
@@ -307,10 +308,10 @@ MeshPtr Mesh::loadAnimatedMesh(QString filePath)
         auto data = file.readAll();
         scene = importer.ReadFileFromMemory((void*)data.data(),
                                             data.length(),
-                                            aiProcessPreset_TargetRealtime_Fast);
+                                            iris::ImportFlags::Canonical);
     } else {
         scene = importer.ReadFile(filePath.toStdString().c_str(),
-                                  aiProcessPreset_TargetRealtime_Fast);
+                                  iris::ImportFlags::Canonical);
     }
 
     //extract animations from scene

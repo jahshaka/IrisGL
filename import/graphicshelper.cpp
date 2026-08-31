@@ -14,6 +14,7 @@ For more information see the LICENSE file
 #include <QRegularExpression>
 
 #include "assimp/postprocess.h"
+#include "import/importflags.h"
 #include "assimp/Importer.hpp"
 #include "assimp/mesh.h"
 #include "assimp/matrix4x4.h"
@@ -70,7 +71,7 @@ QString GraphicsHelper::loadAndProcessShader(QString shaderPath)
 QList<iris::MeshPtr> GraphicsHelper::loadAllMeshesFromFile(QString filePath)
 {
     Assimp::Importer importer;
-    const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(), aiProcessPreset_TargetRealtime_Fast);
+    const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
     return loadAllMeshesFromAssimpScene(scene);
 }
 
@@ -80,7 +81,7 @@ void GraphicsHelper::loadAllMeshesAndAnimationsFromFile(
     QMap<QString, SkeletalAnimationPtr> &animations)
 {
     Assimp::Importer importer;
-    const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(), aiProcessPreset_TargetRealtime_Fast);
+    const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
 
     if (scene != nullptr) {
         meshes = loadAllMeshesFromAssimpScene(scene);
