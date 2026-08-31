@@ -715,10 +715,12 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.emissive  = Colour(e.redF() * pbr->emissiveIntensity, e.greenF() * pbr->emissiveIntensity,
                                e.blueF() * pbr->emissiveIntensity, 1.0f);
         switch (pbr->alphaMode) {
-        case 1:  out.alphaMode = PbrAlphaMode::Cutout; break;
-        case 2:  out.alphaMode = PbrAlphaMode::Blend;  break;
-        case 3:  out.alphaMode = PbrAlphaMode::Glass;  break;   // fades diffuse, keeps reflections
-        default: out.alphaMode = PbrAlphaMode::Opaque; break;
+        case 1:  out.alphaMode = PbrAlphaMode::Cutout;   break;
+        case 2:  out.alphaMode = PbrAlphaMode::Blend;    break;
+        case 3:  out.alphaMode = PbrAlphaMode::Glass;    break;  // fades diffuse, keeps reflections
+        case 4:  out.alphaMode = PbrAlphaMode::Additive; break;  // Src + Dest (Unreal Additive)
+        case 5:  out.alphaMode = PbrAlphaMode::Modulate; break;  // Src × Dest (Unreal Modulate)
+        default: out.alphaMode = PbrAlphaMode::Opaque;   break;
         }
         out.alpha           = pbr->alpha;
         out.alphaCutoff     = pbr->alphaCutoff;

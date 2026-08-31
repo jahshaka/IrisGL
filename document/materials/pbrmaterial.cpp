@@ -270,13 +270,15 @@ void PbrMaterial::createProperties()
     cutoffProp->value       = alphaCutoff;
     properties.append(cutoffProp);
 
-    // 0 opaque, 1 cutout, 2 blend (glTF's OPAQUE/MASK/BLEND).
+    // 0 opaque, 1 cutout/masked, 2 blend/translucent (glTF's OPAQUE/MASK/BLEND),
+    // 3 glass (engine realistic transparency), 4 additive (Src+Dest),
+    // 5 modulate (Src×Dest) — the last two are the Unreal-parity blend modes.
     auto alphaModeProp         = new IntProperty;
     alphaModeProp->id          = id++;
     alphaModeProp->displayName = "Alpha Mode";
     alphaModeProp->name        = "alphaMode";
     alphaModeProp->minValue    = 0;
-    alphaModeProp->maxValue    = 2;
+    alphaModeProp->maxValue    = 5;
     alphaModeProp->value       = alphaMode;
     properties.append(alphaModeProp);
 

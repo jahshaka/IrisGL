@@ -65,7 +65,8 @@ public:
     // --- opacity ---
     void setAlpha(float alpha);
     void setAlphaCutoff(float cutoff);
-    void setAlphaMode(int mode);          // 0 opaque, 1 cutout, 2 blend
+    void setAlphaMode(int mode);          // 0 opaque, 1 cutout/masked, 2 blend/translucent,
+                                          // 3 glass, 4 additive (Src+Dest), 5 modulate (Src×Dest)
 
     void setTextureScale(float scale);
 

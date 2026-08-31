@@ -65,8 +65,13 @@ enum class PbrAlphaMode {
     Opaque,   ///< alpha ignored
     Cutout,   ///< pixels whose albedo-texture alpha < alphaCutoff are discarded
     Blend,    ///< plain alpha blend ("fade") — glTF BLEND semantics for imports
-    Glass     ///< diffuse fades by alpha but specular/reflections stay full —
+    Glass,    ///< diffuse fades by alpha but specular/reflections stay full —
               ///< the backend's realistic-transparency mode; use for glass/plastic
+    Additive, ///< Final = Src + Dest (Unreal BLEND_Additive: glows, holograms, fx).
+              ///< Contribution scales with alpha; unlit-leaning — lighting response
+              ///< is limited by design, as in Unreal. Depth write is off.
+    Modulate  ///< Final = Src × Dest (Unreal BLEND_Modulate: tinting/darkening).
+              ///< alpha is ignored; fog interaction caveat applies. Depth write off.
 };
 
 /// Metallic-roughness PBR parameters — Jahshaka's material model, sized to what

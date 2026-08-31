@@ -77,6 +77,57 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
         // Fade here was why authored glass looked merely faded.
         db->setTransparency(p.alpha, Ogre::HlmsPbsDatablock::Transparent);
         break;
+    case PbrAlphaMode::Additive:
+        db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
+        // Fade carries alpha into the fragment's output .a (it does NOT scale
+        // the colour in-shader — the blend factor does that), and
+        // changeBlendblock=false keeps SBT_TRANSPARENT_ALPHA out: the
+        // blendblock below is SRC_ALPHA/ONE, so Final = Src·alpha + Dest —
+        // alpha is the glow intensity, exactly three.js AdditiveBlending.
+        db->setTransparency(p.alpha, Ogre::HlmsPbsDatablock::Fade, true, false);
+        break;
+    case PbrAlphaMode::Modulate:
+        db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
+        // No shader-side transparency: Final = Src × Dest via the blendblock
+        // below (SBT_MODULATE). alpha deliberately ignored — scaling the colour
+        // toward black would darken harder, not fade the effect out.
+        db->setTransparency(1.0f, kTransparencyNone, true, false);
+        break;
+    }
+    // Additive/Modulate ride an explicit blendblock preset (setTransparency
+    // only knows alpha blending) and never write depth — like other transparents
+    // they must not occlude what they blend over. Managed idempotently both
+    // ways, the same discipline as the culling macroblock above.
+    {
+        const bool srcDest = p.alphaMode == PbrAlphaMode::Additive ||
+                             p.alphaMode == PbrAlphaMode::Modulate;
+        Ogre::HlmsBlendblock want = *db->getBlendblock();
+        if (p.alphaMode == PbrAlphaMode::Additive) {
+            // SRC_ALPHA/ONE, not SBT_ADD's ONE/ONE: Fade puts alpha in .a and
+            // the source factor scales the contribution by it.
+            want.mSeparateBlend = false;
+            want.mSourceBlendFactor      = Ogre::SBF_SOURCE_ALPHA;
+            want.mDestBlendFactor        = Ogre::SBF_ONE;
+            want.mSourceBlendFactorAlpha = Ogre::SBF_SOURCE_ALPHA;
+            want.mDestBlendFactorAlpha   = Ogre::SBF_ONE;
+        }
+        else if (p.alphaMode == PbrAlphaMode::Modulate)
+            want.setBlendType(Ogre::SBT_MODULATE);
+        else if (p.alphaMode == PbrAlphaMode::Opaque || p.alphaMode == PbrAlphaMode::Cutout)
+            want.setBlendType(Ogre::SBT_REPLACE);   // undo a previous Additive/Modulate
+        const Ogre::HlmsBlendblock &cur = *db->getBlendblock();
+        if (want.mSourceBlendFactor != cur.mSourceBlendFactor ||
+            want.mDestBlendFactor != cur.mDestBlendFactor ||
+            want.mSourceBlendFactorAlpha != cur.mSourceBlendFactorAlpha ||
+            want.mDestBlendFactorAlpha != cur.mDestBlendFactorAlpha ||
+            want.mSeparateBlend != cur.mSeparateBlend)
+            db->setBlendblock(want);
+        Ogre::HlmsMacroblock macro = *db->getMacroblock();
+        const bool wantDepthWrite = !srcDest;
+        if (macro.mDepthWrite != wantDepthWrite) {
+            macro.mDepthWrite = wantDepthWrite;
+            db->setMacroblock(macro);
+        }
     }
     // Alpha-to-coverage on Cutout ONLY, and only when the target is actually
     // multisampled (A2cEnabledMsaaOnly): MSAA then dithers the hard alpha-test
