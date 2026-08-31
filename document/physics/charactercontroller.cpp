@@ -5,6 +5,16 @@ CharacterController::CharacterController()
 	createController();
 }
 
+CharacterController::~CharacterController()
+{
+	delete controller;
+	controller = nullptr;
+	delete ghostObject;
+	ghostObject = nullptr;
+	delete shapeObject;
+	shapeObject = nullptr;
+}
+
 void CharacterController::update()
 {
 

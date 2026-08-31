@@ -13,6 +13,10 @@ class CharacterController
 {
 public:
 	CharacterController();
+	/// Frees the bullet objects createController() allocated. The caller must
+	/// have taken them out of the world first
+	/// (Environment::removeCharacterControllerFromWorld does).
+	~CharacterController();
 
 	void createController();
     void update();

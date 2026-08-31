@@ -372,15 +372,17 @@ void Scene::removeNode(SceneNodePtr node)
 
     if (node->sceneNodeType == SceneNodeType::Viewer) {
         auto viewer = node.staticCast<iris::ViewerNode>();
-        viewers.remove(viewers.key(viewer));
+        viewers.remove(viewer->getGUID());
 
-        // Remove viewer and replace it if more viewers are available
-        if (vrViewer == viewer && viewers.count() == 0) vrViewer.reset();
-		else {
-			auto iter = viewers.constBegin();
-			while (iter != viewers.constEnd()) ++iter;
-			vrViewer = iter.value();
-		}
+        // Removing a viewer only changes the ACTIVE viewer when it WAS the
+        // active one; then any remaining viewer takes over, otherwise there is
+        // no active viewer left. (The old else-branch walked the iterator to
+        // constEnd() and dereferenced it — past-the-end read on every removal
+        // of a non-active viewer.)
+        if (vrViewer == viewer) {
+            if (viewers.isEmpty()) vrViewer.reset();
+            else vrViewer = *viewers.constBegin();
+        }
     }
 
 	nodes.remove(node->getGUID());

@@ -83,6 +83,8 @@ public:
 
 	void addCharacterControllerToWorldUsingNode(const iris::SceneNodePtr &node);
 	void removeCharacterControllerFromWorld(const QString &guid);
+	/// Unregisters and destroys every character controller (teardown path).
+	void removeAllCharacterControllersFromWorld();
 	CharacterController *getActiveCharacterController();
 
 	void initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode);
@@ -132,6 +134,9 @@ private:
 	btScalar worldYGravity;
 
 	CharacterController *activeCharacterController;
+
+	/// Takes `controller` off the world's action list and out of the broadphase.
+	void detachCharacterControllerFromWorld(CharacterController *controller);
 
     bool simulating;
     bool simulationStarted;

@@ -14,6 +14,9 @@ namespace iris
 Environment::Environment()
 {
 	worldYGravity = 15.f;
+	// Was left indeterminate: getActiveCharacterController() returned garbage
+	// before the first character controller was ever created.
+	activeCharacterController = nullptr;
 
     createPhysicsWorld();
  
@@ -102,12 +105,41 @@ void Environment::addCharacterControllerToWorldUsingNode(const iris::SceneNodePt
 	activeCharacterController = controller;
 }
 
+// Exact mirror of addCharacterControllerToWorldUsingNode: the action comes off
+// the world's action list and the ghost off the broadphase BEFORE the objects
+// die. Deleting the controller while bullet still held those pointers left
+// dangling entries that the next stepSimulation walked.
 void Environment::removeCharacterControllerFromWorld(const QString &guid)
 {
 	if (!characterControllers.contains(guid)) return;
 	auto controller = characterControllers.value(guid);
 	characterControllers.remove(guid);
+
+	detachCharacterControllerFromWorld(controller);
+
+	if (activeCharacterController == controller) {
+		activeCharacterController = characterControllers.isEmpty()
+			? nullptr : *characterControllers.constBegin();
+	}
+
 	delete controller;
+}
+
+void Environment::detachCharacterControllerFromWorld(CharacterController *controller)
+{
+	if (!world || !controller) return;
+	world->removeAction(controller->getKinematicController());
+	world->removeCollisionObject(controller->getGhostObject());
+}
+
+void Environment::removeAllCharacterControllersFromWorld()
+{
+	for (auto controller : characterControllers) {
+		detachCharacterControllerFromWorld(controller);
+		delete controller;
+	}
+	characterControllers.clear();
+	activeCharacterController = nullptr;
 }
 
 CharacterController *Environment::getActiveCharacterController()
@@ -124,7 +156,13 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 				if (body) addBodyToWorld(body, child);
 			}
 
-			if (child.staticCast<iris::ViewerNode>()->isActiveCharacterController()) {
+			// ONLY viewers carry the flag. The type test is load-bearing: the
+			// unguarded staticCast used to read isActiveCharacterController out
+			// of every node in the scene (a heap over-read past the end of a
+			// MeshNode/LightNode, and a nonzero pad byte there spawned a bogus
+			// character controller on a mesh or a light).
+			if (child->sceneNodeType == SceneNodeType::Viewer &&
+				child.staticCast<iris::ViewerNode>()->isActiveCharacterController()) {
 				addCharacterControllerToWorldUsingNode(child);
 			}
 
@@ -453,6 +491,13 @@ float Environment::getWorldGravity()
 void Environment::destroyPhysicsWorld()
 {
 	// this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
+
+	// Character controllers first: their ghost objects live in the collision
+	// object array below, so they have to be unregistered and destroyed here or
+	// the loop deletes the ghosts out from under the CharacterControllers the
+	// hash still owns (the next play cycle then stepped dangling pointers).
+	removeAllCharacterControllersFromWorld();
+
 	if (world) {
 		int i;
 		for (i = world->getNumConstraints() - 1; i >= 0; i--) {
