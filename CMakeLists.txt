@@ -63,7 +63,13 @@ option(ASSIMP_BUILD_OBJ_IMPORTER                "" ON)
 option(ASSIMP_BUILD_FBX_IMPORTER                "" ON)
 option(ASSIMP_BUILD_GLTF_IMPORTER               "" ON)
 option(ASSIMP_BUILD_COLLADA_IMPORTER            "" ON)
-option(ASSIMP_BUILD_ZLIB                        "" ON)
+if(APPLE)
+    # assimp's bundled zlib #defines fdopen on Mac (ancient upstream zlib bug),
+    # which breaks the macOS SDK's stdio.h. The SDK always ships zlib: use it.
+    option(ASSIMP_BUILD_ZLIB                    "" OFF)
+else()
+    option(ASSIMP_BUILD_ZLIB                    "" ON)
+endif()
 
 add_subdirectory_with_folder("Dependencies/Assimp" thirdparty/assimp)
 

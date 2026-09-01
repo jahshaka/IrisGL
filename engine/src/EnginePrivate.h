@@ -62,7 +62,12 @@
 #include <Cubemaps/OgreParallaxCorrectedCubemapAuto.h>
 #include <Cubemaps/OgrePccPerPixelGridPlacement.h>
 
-#include <X11/Xlib.h>
+// X11 is the only on-screen window path today (Ogre Vulkan/XCB). Other
+// platforms build headless-only until they grow a native window backend
+// (macOS: CAMetalLayer + VK_EXT_metal_surface — see DOCS/HANDOFF.md §7).
+#ifdef __linux__
+#    include <X11/Xlib.h>
+#endif
 #include <atomic>
 #include <functional>
 #include <algorithm>
@@ -545,7 +550,9 @@ public:
     ~OgreEngine() override;
 
 private:
+#ifdef __linux__
     struct X11Handle { Display *display; ::Window window; };
+#endif
 
     bool viewNameTaken(const std::string &name);
 
@@ -568,7 +575,9 @@ private:
 
     Ogre::Root     *mRoot = nullptr;
     Ogre::Window   *mNullWindow = nullptr;
+#ifdef __linux__
     Display        *mDisplay = nullptr;
+#endif
     bool            mHlmsRegistered = false;
     ShadowFilter    mShadowFilter = ShadowFilter::Soft;
     unsigned        mShadowResolution = 2048;

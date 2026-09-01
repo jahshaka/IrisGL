@@ -16,7 +16,11 @@ OgreEngine *gLiveEngine = nullptr;
 }  // namespace
 
 bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
+#ifdef __linux__
     mDisplay = reinterpret_cast<Display *>(cfg.display);
+#else
+    (void)cfg.display;  // X11-only; 0 on other hosts (Types.h documents the leak)
+#endif
     mDefaultSamples = OgreView::sanitizeSamples(cfg.sampleCount);
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
@@ -84,6 +88,15 @@ View *OgreEngine::createView(const std::string &name,
                              NativeWindowHandle handle, unsigned width, unsigned height,
                              const Colour &background) {
     if (viewNameTaken(name)) return nullptr;
+#ifndef __linux__
+    // On-screen views need a native Vulkan window backend, which only the X11
+    // path has today. Offscreen views and the null window (headless) work
+    // everywhere. macOS on-screen: DOCS/HANDOFF.md §7 milestone 5.
+    (void)handle; (void)width; (void)height; (void)background;
+    mLastError = "createView: on-screen engine views are not yet supported on this platform "
+                 "(headless/offscreen rendering is available)";
+    return nullptr;
+#else
     JAH_TRY {
         Ogre::NameValuePairList params;
         // Ogre consumes the SDL2x11 struct synchronously inside createRenderWindow;
@@ -126,6 +139,7 @@ View *OgreEngine::createView(const std::string &name,
         };
         return view;
     } JAH_CATCH(mLastError, nullptr);
+#endif  // __linux__
 }
 
 View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, unsigned height,
