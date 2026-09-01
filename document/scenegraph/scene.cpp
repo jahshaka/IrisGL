@@ -30,6 +30,55 @@ For more information see the LICENSE file
 namespace iris
 {
 
+static constexpr float kPi = 3.14159265358979f;
+
+// --- SkyRealistic sun angles ------------------------------------------------
+// The analytic sky uses the sun vector twice: normalized (the direction every
+// scattering term takes) and as `sunPosY / 450000` (the sunfade day/night
+// term). Storing it at radius kSunRadius makes both exact, and makes azimuth /
+// elevation a lossless view of the same three floats.
+void SkyRealistic::setSunAngles(float azimuthDegrees, float elevationDegrees)
+{
+    const float deg2rad = kPi / 180.0f;
+    const float az = azimuthDegrees * deg2rad;
+    const float el = qBound(-90.0f, elevationDegrees, 90.0f) * deg2rad;
+    const float cosEl = std::cos(el);
+    sunPosX = kSunRadius * cosEl * std::sin(az);
+    sunPosY = kSunRadius * std::sin(el);
+    sunPosZ = kSunRadius * cosEl * std::cos(az);
+}
+
+float SkyRealistic::sunAzimuth() const
+{
+    if (qFuzzyIsNull(sunPosX) && qFuzzyIsNull(sunPosZ)) return 0.0f;
+    float deg = std::atan2(sunPosX, sunPosZ) * 180.0f / kPi;
+    if (deg < 0.0f) deg += 360.0f;
+    return deg;
+}
+
+float SkyRealistic::sunElevation() const
+{
+    const float len = std::sqrt(sunPosX * sunPosX + sunPosY * sunPosY + sunPosZ * sunPosZ);
+    if (len < 1e-6f) return 0.0f;
+    return std::asin(qBound(-1.0f, sunPosY / len, 1.0f)) * 180.0f / kPi;
+}
+
+// The Preetham model's own working ranges, not the legacy panel's degenerate
+// corner (VISUAL_PARITY_SPEC item 1): the old turbidity .32 sat well below the
+// model's 1..20 band and the old sun vector (10, 7, 10) pinned `sunfade` to a
+// constant. Mid-morning sun, clear air.
+SkyRealistic SkyRealistic::defaults()
+{
+    SkyRealistic s;
+    s.luminance = 1.0f;
+    s.reileigh = 2.0f;
+    s.mieCoefficient = 0.005f;
+    s.mieDirectionalG = 0.8f;
+    s.turbidity = 2.0f;
+    s.setSunAngles(135.0f, 40.0f);
+    return s;
+}
+
 Scene::Scene()
 {
     rootNode = SceneNode::create();
@@ -56,6 +105,10 @@ Scene::Scene()
     // anti-aliasing is opt-in like GI: off (1 sample) by default
     antiAliasing = 1;
 
+    // shadow-map resolution: 0 = Auto, i.e. derive the one global atlas base
+    // from the largest per-light request (the historical behaviour)
+    shadowResolution = 0;
+
     // selection outline: width in Preferences units (SceneMirror maps it to the
     // inverted-hull scale as 1 + width/150); colour stays invalid = "never set",
     // the mirror then falls back to the historical selection yellow
@@ -64,14 +117,13 @@ Scene::Scene()
     // sky init
     skyType = SkyType::SINGLE_COLOR;
 
-    skyRealistic.luminance = 1.0;
-    skyRealistic.reileigh = 2.5;
-    skyRealistic.mieCoefficient = 0.053;
-    skyRealistic.mieDirectionalG = 0.75;
-    skyRealistic.turbidity = .32f;
-    skyRealistic.sunPosX = 10;
-    skyRealistic.sunPosY = 7;
-    skyRealistic.sunPosZ = 10;
+    skyRealistic = SkyRealistic::defaults();
+
+    // 256x128 equirect bake; 512/1024 are the sharper (slower) choices
+    skyBakeResolution = 256;
+
+    // sky-driven ambient: on by default (owner decision, VISUAL_PARITY item 3b)
+    ambientFromSky = true;
 
 	gradientTop = QColor(255, 0, 0);
 	gradientMid = QColor(0, 255, 0);

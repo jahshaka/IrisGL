@@ -79,6 +79,22 @@ struct SkyRealistic
 	float sunPosX;
 	float sunPosY;
 	float sunPosZ;
+
+	// --- sun position, in the terms a user can reason about --------------
+	// sunPos* stays the stored truth (old scenes keep working), but the model
+	// only ever uses two things from it: the NORMALIZED direction, and sunPosY
+	// divided by 450000 (the `sunfade` day/night term). So the vector is kept
+	// at that radius and azimuth/elevation are exact round-trips of it.
+	// Azimuth: degrees clockwise from +Z toward +X. Elevation: degrees above
+	// the horizon (negative = below it, where sunfade finally does something).
+	static constexpr float kSunRadius = 450000.0f;
+	void  setSunAngles(float azimuthDegrees, float elevationDegrees);
+	float sunAzimuth() const;      ///< [0, 360)
+	float sunElevation() const;    ///< [-90, 90]
+
+	/// The ONE set of starting values: iris::Scene's constructor and every
+	/// per-key deserializer default read them from here.
+	static SkyRealistic defaults();
 };
 
 class Scene: public QEnableSharedFromThis<Scene>
@@ -136,11 +152,32 @@ public:
     // or 8 (rendered by the engine viewport only; the driver may clamp).
     int antiAliasing;
 
+    // shadow-map resolution for the WHOLE scene (VISUAL_PARITY_SPEC item 2,
+    // option A). The renderer has ONE shadow atlas whose sizes derive from a
+    // single base value, so the per-light `shadowMap->resolution` is only a
+    // request: SceneMirror pushes the largest one. This field OVERRIDES that
+    // derivation. 0 = "Auto" (derive from the lights, the historical
+    // behaviour); otherwise 256..8192 pixels.
+    int shadowResolution;
+
     float gravity;
     bool shadowEnabled;
 
 	SkyType skyType;
 	SkyRealistic skyRealistic;
+
+	// Equirect width the analytic (realistic) sky is CPU-baked at; the height is
+	// half of it. 256 is the historical value; 512/1024 trade bake time for a
+	// sharper sun disc on big displays (VISUAL_PARITY_SPEC item 1).
+	int skyBakeResolution;
+
+	// Sky-driven ambient/diffuse IBL (VISUAL_PARITY_SPEC item 3b). ON by owner
+	// decision: with a textured/analytic sky the ambient hemisphere colours come
+	// from the sky itself (cosine-weighted upper/lower averages) instead of the
+	// flat `ambientColor` — a red sky reddens what it lights. Single-colour skies
+	// have nothing to integrate and always use `ambientColor`.
+	bool ambientFromSky;
+
     QString skyGuid;
     QString ambientMusicGuid;
 
