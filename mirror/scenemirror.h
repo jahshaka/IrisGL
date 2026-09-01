@@ -119,6 +119,15 @@ public:
     /// exactly realisticsky.frag's math per direction. Public for tests.
     static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height);
 
+    /// Cosine-weighted hemisphere averages of an equirect sky image, in LINEAR
+    /// light (the image bytes are sRGB): what the scene's ambient becomes when
+    /// `Scene::ambientFromSky` is on (VISUAL_PARITY_SPEC item 3b). Row 0 of the
+    /// image is the zenith, matching the engine's sky sphere mapping. Returns
+    /// false for a null image. Public for tests.
+    static bool integrateSkyAmbient(const QImage &equirect,
+                                    jahshaka::engine::Colour &upperOut,
+                                    jahshaka::engine::Colour &lowerOut);
+
 private:
     struct Entry {
         jahshaka::engine::NodeId node = 0;
@@ -157,7 +166,14 @@ private:
     /// Resamples an equirect sky image into six small cubemap faces and pushes
     /// them as the scene's environment reflections (Scene::setSkyReflection) —
     /// how equirect/gradient/realistic skies get the IBL cubemap skies have.
+    /// Also records the sky's ambient integral for applyEnvironment (item 3b).
     void applySkyReflection(const QImage &equirect);
+    /// Cubemap skies do not go through applySkyReflection (the engine takes the
+    /// six faces directly), so their ambient integral is taken from the face
+    /// images: the same cosine-weighted upper/lower split, per face texel.
+    void recordCubeAmbient(const QImage faces[6]);
+    /// Clears the recorded sky ambient (no sky, or a single-colour sky).
+    void clearSkyAmbient();
     jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh);
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
     void syncTextures(Entry &e, iris::Material *material);
@@ -194,6 +210,18 @@ private:
     // every event; re-bake at most every ~150 ms (the last change always lands —
     // applySky recomputes the signature each frame until it sticks).
     QElapsedTimer mRealisticBakeTimer;
+    // Sky-driven ambient (VISUAL_PARITY item 3b): the cosine-weighted hemisphere
+    // integrals of whatever sky is live, in linear light. Recomputed only when
+    // the sky signature changes; applyEnvironment pushes them (or the flat
+    // document colour when there is no sky, or the scene opts out).
+    bool mHasSkyAmbient = false;
+    // Last ambient pair actually pushed. Ogre picks its ambient shader variant
+    // from these (equal => fixed, different => hemisphere), so pushing an
+    // unchanged value every frame is not free.
+    bool mAmbientPushed = false;
+    jahshaka::engine::Colour mLastAmbientUpper, mLastAmbientLower;
+    jahshaka::engine::Colour mSkyAmbientUpper { 0.0f, 0.0f, 0.0f, 1.0f };
+    jahshaka::engine::Colour mSkyAmbientLower { 0.0f, 0.0f, 0.0f, 1.0f };
     jahshaka::engine::MeshId mWireMeshes[4] = { 0, 0, 0, 0 };   // directional, point, spot, area
     // Ground grid: one root node (dropped a hair below y=0 against z-fighting
     // with floor geometry) carrying a minor- and a major-line child.

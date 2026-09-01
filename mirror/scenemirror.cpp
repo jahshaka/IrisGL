@@ -81,6 +81,8 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
     for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
     mSkySignature.clear();
+    clearSkyAmbient();
+    mAmbientPushed = false;
     mSource = scene;
 }
 
@@ -1004,16 +1006,55 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // Nothing casting shadows leaves the engine's current filter untouched.
     if (engine && mAnyShadowCaster && engine->shadowFilter() != mShadowFilter)
         engine->setShadowFilter(mShadowFilter);
-    // Shadow Size: same policy, largest requested size wins. The engine rebuilds
-    // its shadow atlas on change — the compare here is what keeps that rare.
-    if (engine && mAnyShadowCaster && mMaxShadowResolution > 0 &&
-        engine->shadowResolution() != mMaxShadowResolution)
-        engine->setShadowResolution(mMaxShadowResolution);
-    // World-panel Ambient Color: flat, exactly like the legacy uniform (the
-    // engine viewport used to hardcode the hemisphere — the panel no-op'd).
-    const QColor a = mSource->ambientColor;
-    mTarget->setAmbient(Colour(a.redF(), a.greenF(), a.blueF(), 1.0f),
-                        Colour(a.redF(), a.greenF(), a.blueF(), 1.0f));
+    // Shadow Size: one global atlas, so the per-light combo is only a REQUEST
+    // and the largest one wins. World panel "Shadow Quality" (scene->
+    // shadowResolution, VISUAL_PARITY item 2 option A) overrides that
+    // derivation outright when it is non-zero — including for scenes with no
+    // shadow caster yet, so the setting is what the user asked for and not a
+    // function of the light list. The engine rebuilds its shadow atlas on
+    // change; the compare here is what keeps that rare.
+    if (engine) {
+        const unsigned wanted = mSource->shadowResolution > 0
+                                    ? unsigned(qBound(256, mSource->shadowResolution, 8192))
+                                    : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
+        if (wanted > 0 && engine->shadowResolution() != wanted)
+            engine->setShadowResolution(wanted);
+    }
+    // Ambient. Historically the flat World-panel colour, twice (the engine
+    // viewport used to hardcode the hemisphere — the panel no-op'd). With a sky
+    // present and scene->ambientFromSky on (the default, VISUAL_PARITY item
+    // 3b), the two hemisphere colours come from the SKY's own cosine-weighted
+    // integrals instead, so a red sky reddens what it lights.
+    {
+        const QColor a = mSource->ambientColor;
+        Colour upper(a.redF(), a.greenF(), a.blueF(), 1.0f), lower = upper;
+        if (mHasSkyAmbient && mSource->ambientFromSky) {
+            // The World-panel colour becomes a per-channel GAIN on the sky's own
+            // integrals: white = the sky at full physical strength, black = no
+            // ambient at all, and the document default (96,96,96 -> 0.376) lands
+            // in the same brightness band the flat ambient used to occupy.
+            // Pushing the raw integral instead would double the ambient of every
+            // daylight scene — the sky is a full-hemisphere emitter and the flat
+            // grey never was.
+            upper = Colour(mSkyAmbientUpper.r * a.redF(), mSkyAmbientUpper.g * a.greenF(),
+                           mSkyAmbientUpper.b * a.blueF(), 1.0f);
+            lower = Colour(mSkyAmbientLower.r * a.redF(), mSkyAmbientLower.g * a.greenF(),
+                           mSkyAmbientLower.b * a.blueF(), 1.0f);
+        }
+        // Push on CHANGE only. Ogre picks its ambient shader variant from these
+        // two colours (equal => AmbientFixed, different => AmbientHemisphere)
+        // inside preparePassHash, so a per-frame push of an unchanged value was
+        // re-deciding a shader/root-layout question every frame for nothing.
+        const auto same = [](const Colour &x, const Colour &y) {
+            return x.r == y.r && x.g == y.g && x.b == y.b;
+        };
+        if (!mAmbientPushed || !same(upper, mLastAmbientUpper) || !same(lower, mLastAmbientLower)) {
+            mTarget->setAmbient(upper, lower);
+            mLastAmbientUpper = upper;
+            mLastAmbientLower = lower;
+            mAmbientPushed = true;
+        }
+    }
     // World-panel Enable Shadows (used to be hardcoded on).
     if (view->shadows() != mSource->shadowEnabled)
         view->setShadows(mSource->shadowEnabled);
@@ -1119,9 +1160,12 @@ void SceneMirror::applySky(View *view)
                                                         mSource->gradientBot.name()).arg(mSource->gradientOffset);
     else if (mSource->skyType == iris::SkyType::REALISTIC) {
         const iris::SkyRealistic &s = mSource->skyRealistic;
-        signature = QString("realistic:%1/%2/%3/%4/%5/%6/%7/%8")
+        // Sky Detail (the bake width) rides in the signature: changing it must
+        // re-bake exactly like changing a scattering parameter does.
+        signature = QString("realistic:%1/%2/%3/%4/%5/%6/%7/%8@%9")
                         .arg(s.luminance).arg(s.reileigh).arg(s.mieCoefficient).arg(s.mieDirectionalG)
-                        .arg(s.turbidity).arg(s.sunPosX).arg(s.sunPosY).arg(s.sunPosZ);
+                        .arg(s.turbidity).arg(s.sunPosX).arg(s.sunPosY).arg(s.sunPosZ)
+                        .arg(mSource->skyBakeResolution);
     }
     if (signature != mSkySignature) {
         // Debounce the realistic bake: a slider drag changes the 8 parameters on
@@ -1134,6 +1178,9 @@ void SceneMirror::applySky(View *view)
         mSkySignature = signature;
         for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
         for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
+        // The ambient integral belongs to the sky that is about to be built:
+        // drop the old one first so a failed build cannot leave a stale colour.
+        clearSkyAmbient();
         if (signature.startsWith("equirect:")) {
             TextureId t = textureFor(mSource->skyTexture->source, true);
             mTarget->setSky(t ? SkyMode::Equirectangular : SkyMode::NoSky, t);
@@ -1150,7 +1197,15 @@ void SceneMirror::applySky(View *view)
                 mSkyFaceTextures[i] = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()), img.constBits(), true);
                 if (!mSkyFaceTextures[i]) ok = false;
             }
-            if (ok) mTarget->setSkyCubemap(mSkyFaceTextures); else mTarget->setSky(SkyMode::NoSky, 0);
+            if (ok) {
+                mTarget->setSkyCubemap(mSkyFaceTextures);
+                // A cubemap sky never passes through applySkyReflection (the
+                // engine takes the faces straight): integrate them here so it
+                // drives ambient like every other textured sky (item 3b).
+                recordCubeAmbient(faces);
+            } else {
+                mTarget->setSky(SkyMode::NoSky, 0);
+            }
         } else if (signature.startsWith("gradient:")) {
             // Legacy gradientsky.frag is a pure vertical 3-stop ramp: bake it into a
             // narrow equirect strip (row 0 = zenith) and reuse the equirect sky path.
@@ -1182,7 +1237,9 @@ void SceneMirror::applySky(View *view)
         } else if (signature.startsWith("realistic:")) {
             // Legacy realisticsky.frag (Preetham-style scattering), CPU-baked to
             // an equirect image and pushed through the same sky path as gradient.
-            const QImage baked = bakeRealisticSky(mSource->skyRealistic, 256, 128);
+            const int bakeW = mSource->skyBakeResolution >= 1024 ? 1024
+                            : mSource->skyBakeResolution >= 512  ? 512 : 256;
+            const QImage baked = bakeRealisticSky(mSource->skyRealistic, bakeW, bakeW / 2);
             mRealisticBakeTimer.restart();
             if (!baked.isNull()) {
                 mSkyFaceTextures[0] = mTarget->createTexture(unsigned(baked.width()), unsigned(baked.height()),
@@ -1202,10 +1259,146 @@ void SceneMirror::applySky(View *view)
     }
 }
 
+namespace {
+// sRGB <-> linear, the pair the whole sky-ambient integral is done in: the sky
+// image bytes are gamma-encoded, a mean of gamma-encoded values is not the mean
+// of the light they stand for, and Scene::setAmbient wants linear.
+inline float srgbToLinear(float c)
+{
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+// Box-downsample an RGBA8888 image to at most `maxW` wide (halving until it
+// fits, so every step is an exact 2x2 average). The equirect->cubemap resample
+// below point-samples the result: without this a 4K sky is decimated ~30x and
+// small bright features (a sun disc) alias into a crawling speckle as the sky
+// changes (VISUAL_PARITY_SPEC item 3a).
+QImage boxDownscaleTo(const QImage &src, int maxW)
+{
+    QImage img = src;
+    while (img.width() > maxW && img.width() >= 2 && img.height() >= 2) {
+        const int w = img.width() / 2, h = img.height() / 2;
+        QImage out(w, h, QImage::Format_RGBA8888);
+        for (int y = 0; y < h; ++y) {
+            const unsigned char *r0 = img.constScanLine(y * 2);
+            const unsigned char *r1 = img.constScanLine(y * 2 + 1);
+            unsigned char *o = out.scanLine(y);
+            for (int x = 0; x < w; ++x) {
+                const size_t a = size_t(x) * 8u;      // two source texels, 4 bytes each
+                for (int c = 0; c < 4; ++c)
+                    o[size_t(x) * 4u + c] = (unsigned char)((int(r0[a + c]) + int(r0[a + 4 + c]) +
+                                                             int(r1[a + c]) + int(r1[a + 4 + c]) + 2) / 4);
+            }
+        }
+        img = out;
+    }
+    return img;
+}
+} // namespace
+
+void SceneMirror::clearSkyAmbient()
+{
+    mHasSkyAmbient = false;
+    mSkyAmbientUpper = Colour(0.0f, 0.0f, 0.0f, 1.0f);
+    mSkyAmbientLower = Colour(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+bool SceneMirror::integrateSkyAmbient(const QImage &equirect, Colour &upperOut, Colour &lowerOut)
+{
+    if (equirect.isNull()) return false;
+    const QImage src = equirect.convertToFormat(QImage::Format_RGBA8888);
+    const int W = src.width(), H = src.height();
+    if (W <= 0 || H <= 0) return false;
+    // Row 0 is the zenith (phi = 0). Each row covers a band of solid angle
+    // proportional to sin(phi); the cosine factor is what a surface facing the
+    // hemisphere axis actually receives. So: cosine-weighted MEAN RADIANCE per
+    // hemisphere, which is exactly the quantity setAmbient's two colours are.
+    double up[3] = { 0, 0, 0 }, lo[3] = { 0, 0, 0 }, upW = 0, loW = 0;
+    for (int row = 0; row < H; ++row) {
+        const float phi = float(row + 0.5f) / H * 3.14159265f;
+        const float w = std::sin(phi) * std::fabs(std::cos(phi));
+        if (w <= 0.0f) continue;
+        const unsigned char *p = src.constScanLine(row);
+        double r = 0, g = 0, b = 0;
+        for (int col = 0; col < W; ++col) {
+            r += srgbToLinear(p[size_t(col) * 4u + 0] / 255.0f);
+            g += srgbToLinear(p[size_t(col) * 4u + 1] / 255.0f);
+            b += srgbToLinear(p[size_t(col) * 4u + 2] / 255.0f);
+        }
+        r /= W; g /= W; b /= W;
+        double *acc = std::cos(phi) >= 0.0f ? up : lo;
+        double &accW = std::cos(phi) >= 0.0f ? upW : loW;
+        acc[0] += r * w; acc[1] += g * w; acc[2] += b * w;
+        accW += w;
+    }
+    if (upW <= 0.0 && loW <= 0.0) return false;
+    if (upW <= 0.0) { upW = loW; up[0] = lo[0]; up[1] = lo[1]; up[2] = lo[2]; }
+    if (loW <= 0.0) { loW = upW; lo[0] = up[0]; lo[1] = up[1]; lo[2] = up[2]; }
+    upperOut = Colour(float(up[0] / upW), float(up[1] / upW), float(up[2] / upW), 1.0f);
+    lowerOut = Colour(float(lo[0] / loW), float(lo[1] / loW), float(lo[2] / loW), 1.0f);
+    return true;
+}
+
+void SceneMirror::recordCubeAmbient(const QImage faces[6])
+{
+    if (!faces) return;
+    // Face order is +X,-X,+Y,-Y,+Z,-Z. A cube face texel's solid angle is not
+    // uniform, but the cosine weight against +Y is: +Y contributes entirely to
+    // the upper hemisphere, -Y entirely to the lower, and each side face splits
+    // at its own horizon. Weighting each texel by |cos| against +Y (derived from
+    // the same face basis the reflection resample uses) is the same integral the
+    // equirect path does, evaluated on the faces we happen to have.
+    static const float ax[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    static const float rt[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
+    static const float upv[6][3] = {{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
+    double up[3] = { 0, 0, 0 }, lo[3] = { 0, 0, 0 }, upW = 0, loW = 0;
+    for (int f = 0; f < 6; ++f) {
+        // A face is uniform enough at 32x32 for an irradiance integral, and the
+        // downscale is a box filter, so this is cheap and stable.
+        const QImage img = boxDownscaleTo(faces[f].convertToFormat(QImage::Format_RGBA8888), 32);
+        const int N = img.width(), M = img.height();
+        if (N <= 0 || M <= 0) continue;
+        const float *a = ax[f], *r = rt[f], *u = upv[f];
+        for (int py = 0; py < M; ++py) {
+            const float uv = 1.0f - 2.0f * (py + 0.5f) / M;
+            const unsigned char *p = img.constScanLine(py);
+            for (int px = 0; px < N; ++px) {
+                const float ur = 2.0f * (px + 0.5f) / N - 1.0f;
+                float dx = a[0] + r[0] * ur + u[0] * uv;
+                float dy = a[1] + r[1] * ur + u[1] * uv;
+                float dz = a[2] + r[2] * ur + u[2] * uv;
+                const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (len < 1e-6f) continue;
+                const float cosY = dy / len;
+                // 1/len^3 is the cube-face texel's solid-angle factor.
+                const float w = std::fabs(cosY) / (len * len * len);
+                double *acc = cosY >= 0.0f ? up : lo;
+                double &accW = cosY >= 0.0f ? upW : loW;
+                acc[0] += double(srgbToLinear(p[size_t(px) * 4u + 0] / 255.0f)) * w;
+                acc[1] += double(srgbToLinear(p[size_t(px) * 4u + 1] / 255.0f)) * w;
+                acc[2] += double(srgbToLinear(p[size_t(px) * 4u + 2] / 255.0f)) * w;
+                accW += w;
+            }
+        }
+    }
+    if (upW <= 0.0 || loW <= 0.0) return;
+    mSkyAmbientUpper = Colour(float(up[0] / upW), float(up[1] / upW), float(up[2] / upW), 1.0f);
+    mSkyAmbientLower = Colour(float(lo[0] / loW), float(lo[1] / loW), float(lo[2] / loW), 1.0f);
+    mHasSkyAmbient = true;
+}
+
 void SceneMirror::applySkyReflection(const QImage &equirect)
 {
     if (equirect.isNull()) return;
-    const QImage src = equirect.convertToFormat(QImage::Format_RGBA8888);
+    // The ambient integral runs on the FULL-resolution image (it is a mean; the
+    // decimation below would bias it) before anything else touches it.
+    if (integrateSkyAmbient(equirect, mSkyAmbientUpper, mSkyAmbientLower))
+        mHasSkyAmbient = true;
+
+    const int N = 128;   // reflection cube face size; the engine mips it further
+    // Box-filter the source down to ~4 texels per face texel before sampling:
+    // point-sampling a 4K equirect into 128^2 faces throws away 99.9% of it.
+    const QImage src = boxDownscaleTo(equirect.convertToFormat(QImage::Format_RGBA8888), N * 4);
     const int W = src.width(), H = src.height();
     if (W <= 0 || H <= 0) return;
     // Face basis identical to the engine's cubemap sky quads (+X,-X,+Y,-Y,+Z,-Z;
@@ -1215,10 +1408,25 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
     static const float ax[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     static const float rt[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
     static const float up[6][3] = {{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
-    const int N = 64;   // modest: the engine mips it; roughness blurs the rest
     std::vector<unsigned char> face(size_t(N) * N * 4u);
     TextureId ids[6] = { 0, 0, 0, 0, 0, 0 };
     bool ok = true;
+    // Bilinear fetch: wrap in u (the seam is continuous), clamp in v (the poles
+    // are not). Kills the stair-stepping the old nearest fetch left on gradients.
+    const auto fetch = [&](float ut, float vt, unsigned char *out) {
+        float fx = ut * W - 0.5f, fy = vt * H - 0.5f;
+        int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
+        const float tx = fx - x0, ty = fy - y0;
+        int x1 = x0 + 1, y1 = y0 + 1;
+        x0 = ((x0 % W) + W) % W; x1 = ((x1 % W) + W) % W;
+        y0 = std::min(H - 1, std::max(0, y0)); y1 = std::min(H - 1, std::max(0, y1));
+        const unsigned char *r0 = src.constScanLine(y0), *r1 = src.constScanLine(y1);
+        for (int c = 0; c < 4; ++c) {
+            const float top = r0[size_t(x0) * 4u + c] * (1 - tx) + r0[size_t(x1) * 4u + c] * tx;
+            const float bot = r1[size_t(x0) * 4u + c] * (1 - tx) + r1[size_t(x1) * 4u + c] * tx;
+            out[c] = (unsigned char)std::lround(std::min(255.0f, std::max(0.0f, top * (1 - ty) + bot * ty)));
+        }
+    };
     for (int f = 0; f < 6 && ok; ++f) {
         const float *a = ax[f], *r = rt[f], *u = up[f];
         for (int py = 0; py < N; ++py) {
@@ -1233,9 +1441,7 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
                 float ut = 1.0f - std::atan2(dz, dx) / 6.2831853f;
                 ut -= std::floor(ut);
                 const float vt = std::acos(std::min(1.0f, std::max(-1.0f, dy))) / 3.14159265f;
-                const int xi = std::min(W - 1, int(ut * W));
-                const int yi = std::min(H - 1, int(vt * H));
-                std::memcpy(&face[(size_t(py) * N + px) * 4u], src.constScanLine(yi) + size_t(xi) * 4u, 4u);
+                fetch(ut, vt, &face[(size_t(py) * N + px) * 4u]);
             }
         }
         ids[f] = mTarget->createTexture(unsigned(N), unsigned(N), face.data(), true);
