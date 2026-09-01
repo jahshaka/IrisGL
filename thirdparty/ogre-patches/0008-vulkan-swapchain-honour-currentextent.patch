@@ -1,0 +1,33 @@
+--- a/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
+@@ -345,11 +345,25 @@
+                                                                      mSurfaceKHR, &surfaceCaps );
+         checkVkResult( mDevice, result, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" );
+ 
+-        // Swapchain may be smaller/bigger than requested
+-        setFinalResolution( Math::Clamp( getWidth(), surfaceCaps.minImageExtent.width,
+-                                         surfaceCaps.maxImageExtent.width ),
+-                            Math::Clamp( getHeight(), surfaceCaps.minImageExtent.height,
+-                                         surfaceCaps.maxImageExtent.height ) );
++        if( surfaceCaps.currentExtent.width != 0xFFFFFFFFu )
++        {
++            // The window system defines the surface size; the swapchain must match it
++            // exactly. On MoltenVK minImageExtent/maxImageExtent are 1x1 / 16384x16384,
++            // so the clamp below cannot correct a stale size: a swapchain created at any
++            // other size makes every vkAcquireNextImageKHR return VK_ERROR_OUT_OF_DATE_KHR,
++            // and the recreation is then guarded out by mRebuildingSwapchain -> the window
++            // presents nothing, forever, with no error logged.
++            setFinalResolution( surfaceCaps.currentExtent.width, surfaceCaps.currentExtent.height );
++        }
++        else
++        {
++            // Surface size is defined by the swapchain (e.g. Wayland):
++            // it may be smaller/bigger than requested.
++            setFinalResolution( Math::Clamp( getWidth(), surfaceCaps.minImageExtent.width,
++                                             surfaceCaps.maxImageExtent.width ),
++                                Math::Clamp( getHeight(), surfaceCaps.minImageExtent.height,
++                                             surfaceCaps.maxImageExtent.height ) );
++        }
+ 
+         VkBool32 supported;
+         result = vkGetPhysicalDeviceSurfaceSupportKHR(

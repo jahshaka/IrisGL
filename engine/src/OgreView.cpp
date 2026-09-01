@@ -213,10 +213,31 @@ bool OgreView::readPixels(Image &out) {
 }
 
 void OgreView::applyPendingResize() {
-    if (!mWindow || !mPendingW || !mPendingH || !mCreateWindow) return;
+    if (!mWindow || !mPendingW || !mPendingH) return;
     const unsigned w = mPendingW, h = mPendingH;
     const bool sampleChange = mPendingSamples != 0;
     mPendingW = mPendingH = mPendingSamples = 0;
+    if (!mCreateWindow) {
+        // No recreate hook (macOS): the window backend owns its surface and
+        // resizes it in place — requestResolution re-syncs the layer and rebuilds
+        // the swapchain (colour AND depth), setFsaa rebuilds it with new samples.
+        // Sizes are VIEW POINTS on both sides of this call; the window converts.
+        JAH_TRY {
+            if (sampleChange) {
+                // The workspace is dropped around a sample change: its render pass
+                // targets the window's texture, which changes sample count.
+                Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+                const bool hadWorkspace = mWorkspace != nullptr;
+                if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
+                mWindow->setFsaa(std::to_string(mRequestedSamples));
+                if (hadWorkspace && mScene && mCamera)
+                    mWorkspace = cm->addWorkspace(mScene->sceneManager(), target(), mCamera,
+                                                  mWorkspaceDef, mEnabled);
+            }
+            mWindow->requestResolution(w, h);
+        } JAH_CATCH(mError, );
+        return;
+    }
     // A pending MSAA change recreates the window even at the same size (the
     // sample-count term relaxing the old same-size early-return).
     if (w == mWidth && h == mHeight && !sampleChange) return;

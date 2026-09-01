@@ -140,6 +140,12 @@ struct CameraDesc {
 };
 
 /// Native window handle a View renders into (X11 Window / HWND / NSView).
+///
+/// macOS: pass the host's `NSView*` (Qt: `QWidget::winId()`, a QNSView). The
+/// backend adds its OWN CAMetalLayer-backed child view under it and presents
+/// there — it never takes over the host's layer, which Qt refuses anyway. An
+/// `NSWindow*` (its contentView is used) or a ready-made `CAMetalLayer*` (the
+/// host then owns its size and contentsScale) are accepted too.
 using NativeWindowHandle = unsigned long long;
 
 /// Native display connection (X11 Display*). MUST be the host's own connection —

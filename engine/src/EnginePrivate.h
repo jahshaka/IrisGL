@@ -441,9 +441,10 @@ public:
     unsigned height() const override;
     bool isOffscreen() const override;
 
-    /// Set by the engine for on-screen views: creates a fresh Ogre window on the same
-    /// native handle at the given size and MSAA sample count (the "FSAA" misc param —
+    /// Set by the engine for on-screen views ON X11: creates a fresh Ogre window on the
+    /// same native handle at the given size and MSAA sample count (the "FSAA" misc param —
     /// BOTH window-creation sites must pass it or MSAA silently resets on resize).
+    /// EMPTY on macOS: VulkanMetalWindow resizes its own surface (see applyPendingResize).
     std::function<Ogre::Window *(unsigned, unsigned, unsigned)> mCreateWindow;
     unsigned mPendingW = 0, mPendingH = 0;
     /// Runtime MSAA change is structurally a resize (Vulkan has no runtime
@@ -464,10 +465,13 @@ public:
 
     bool readPixels(Image &out) override;
 
-    /// Ogre's Vulkan window does not reallocate its depth buffer on resize (the
-    /// swapchain follows the surface, the depth texture keeps its old size, and the
-    /// mismatched framebuffer faults the GPU — Vulkan validation VUID 04533/04534).
-    /// So a size change recreates the render window on the same native handle.
+    /// The XCB window does not reallocate its depth buffer when the host resizes it
+    /// (the swapchain follows the surface, the depth texture keeps its old size, and
+    /// the mismatched framebuffer faults the GPU — Vulkan validation VUID 04533/04534),
+    /// so on X11 a size change recreates the render window on the same native handle
+    /// (mCreateWindow). Windows that implement requestResolution properly — macOS's
+    /// VulkanMetalWindow does: destroySwapchain (which transitions colour AND depth to
+    /// OnStorage) → setFinalResolution → createSwapchain — are resized in place instead.
     void applyPendingResize();
     /// Keeps the scene's sky sphere centred on this view's camera.
     void updateSky();

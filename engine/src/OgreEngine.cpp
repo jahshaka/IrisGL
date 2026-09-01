@@ -88,10 +88,9 @@ View *OgreEngine::createView(const std::string &name,
                              NativeWindowHandle handle, unsigned width, unsigned height,
                              const Colour &background) {
     if (viewNameTaken(name)) return nullptr;
-#ifndef __linux__
-    // On-screen views need a native Vulkan window backend, which only the X11
-    // path has today. Offscreen views and the null window (headless) work
-    // everywhere. macOS on-screen: DOCS/HANDOFF.md §7 milestone 5.
+#if !defined(__linux__) && !defined(__APPLE__)
+    // On-screen views need a native Vulkan window backend; this platform has
+    // none yet. Offscreen views and the null window (headless) work everywhere.
     (void)handle; (void)width; (void)height; (void)background;
     mLastError = "createView: on-screen engine views are not yet supported on this platform "
                  "(headless/offscreen rendering is available)";
@@ -99,6 +98,15 @@ View *OgreEngine::createView(const std::string &name,
 #else
     JAH_TRY {
         Ogre::NameValuePairList params;
+#ifdef __APPLE__
+        // macOS: the handle is the host's NSView (Types.h). Ogre's Metal window
+        // (ogre-patches 0007) hosts its OWN CAMetalLayer-backed child view inside
+        // it and builds the VkSurfaceKHR from that layer through
+        // VK_EXT_metal_surface — the host's own layer is never replaced, because
+        // toolkits that manage their layer (Qt's QNSView) refuse the replacement.
+        if (!handle) { mLastError = "createView: host must supply its NSView"; return nullptr; }
+        params["externalWindowHandle"] = Ogre::StringConverter::toString((unsigned long long)handle);
+#else
         // Ogre consumes the SDL2x11 struct synchronously inside createRenderWindow;
         // a stack local is correct (the old heap vector was a leak).
         X11Handle x11{ mDisplay, (::Window)handle };
@@ -110,6 +118,7 @@ View *OgreEngine::createView(const std::string &name,
             params["parentWindowHandle"] = Ogre::StringConverter::toString((unsigned long)handle);
             params["gamma"] = "true";
         }
+#endif
         params["vsync"]         = "true";
         params["vsyncInterval"] = "1";
         // MSAA: the FSAA misc param must be passed at EVERY window creation —
@@ -122,6 +131,14 @@ View *OgreEngine::createView(const std::string &name,
                                          background, mLastError));
         OgreView *view = mViews.back().get();
         view->mRequestedSamples = mDefaultSamples;
+#ifdef __APPLE__
+        // No mCreateWindow on macOS (D2): VulkanMetalWindow implements
+        // requestResolution/setFsaa by resizing its layer and rebuilding its own
+        // swapchain (depth buffer included), so the window never has to be
+        // recreated. OgreView::applyPendingResize takes that path when the
+        // recreate hook is absent.
+        return view;
+#else
         const bool vulkan = mBackendName.find("Vulkan") != std::string::npos;
         Display *display = mDisplay;
         Ogre::Root *root = mRoot;
@@ -138,8 +155,9 @@ View *OgreEngine::createView(const std::string &name,
             return win;
         };
         return view;
+#endif  // __APPLE__
     } JAH_CATCH(mLastError, nullptr);
-#endif  // __linux__
+#endif  // !__linux__ && !__APPLE__
 }
 
 View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, unsigned height,

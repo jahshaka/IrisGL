@@ -1,0 +1,839 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -475,6 +475,7 @@
+ cmake_dependent_option(OGRE_VULKAN_WINDOW_WIN32 "Use Win32 (Default / Native window). If more than one OGRE_VULKAN_WINDOW is enabled, interface can be selected at runtime" TRUE "OGRE_BUILD_RENDERSYSTEM_VULKAN;WIN32" FALSE)
+ cmake_dependent_option(OGRE_VULKAN_WINDOW_XCB "Use X11 / xcb (Default / Native window). If more than one OGRE_VULKAN_WINDOW is enabled, interface can be selected at runtime" TRUE "OGRE_BUILD_RENDERSYSTEM_VULKAN;UNIX;NOT ANDROID;NOT OGRE_CONFIG_UNIX_NO_X11" FALSE)
+ cmake_dependent_option(OGRE_VULKAN_WINDOW_ANDROID "Use Android (Default / 'ANative' window). If more than one OGRE_VULKAN_WINDOW is enabled, interface can be selected at runtime" TRUE "OGRE_BUILD_RENDERSYSTEM_VULKAN;ANDROID" FALSE)
++cmake_dependent_option(OGRE_VULKAN_WINDOW_METAL "Use Metal / CAMetalLayer (Default / Native window on Apple, through VK_EXT_metal_surface). If more than one OGRE_VULKAN_WINDOW is enabled, interface can be selected at runtime" TRUE "OGRE_BUILD_RENDERSYSTEM_VULKAN;APPLE" FALSE)
+ if( OGRE_BUILD_RENDERSYSTEM_VULKAN AND OGRE_CONFIG_UNIX_NO_X11 )
+ 	set(OGRE_VULKAN_WINDOW_NULL ON CACHE BOOL "Forced on due to OGRE_CONFIG_UNIX_NO_X11" FORCE)
+ endif()
+--- a/CMake/Templates/OgreVulkanBuildSettings.h.in
++++ b/CMake/Templates/OgreVulkanBuildSettings.h.in
+@@ -8,5 +8,6 @@
+ #cmakedefine OGRE_VULKAN_WINDOW_WIN32
+ #cmakedefine OGRE_VULKAN_WINDOW_XCB
+ #cmakedefine OGRE_VULKAN_WINDOW_ANDROID
++#cmakedefine OGRE_VULKAN_WINDOW_METAL
+ 
+ #endif
+--- a/RenderSystems/Vulkan/CMakeLists.txt
++++ b/RenderSystems/Vulkan/CMakeLists.txt
+@@ -12,18 +12,36 @@
+ file(GLOB HEADER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/include/Vao/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/include/SPIRV-Reflect/*.h")
+ file(GLOB SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/Vao/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/SPIRV-Reflect/*.c")
+ 
++# Each enabled backend APPENDS: more than one can be compiled in (the Interface
++# config option picks at runtime), and a plain file( GLOB ... ) into the same
++# variable would silently drop every earlier backend's sources.
+ if( OGRE_VULKAN_WINDOW_ANDROID )
+-	file( GLOB PLATFORM_SPECIFIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/Windowing/Android/*.h" )
+-	file( GLOB PLATFORM_SPECIFIC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/Windowing/Android/*.cpp" )
++	file( GLOB TMP_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/Windowing/Android/*.h" )
++	file( GLOB TMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/Windowing/Android/*.cpp" )
++	list( APPEND PLATFORM_SPECIFIC_HEADER ${TMP_HEADER} )
++	list( APPEND PLATFORM_SPECIFIC_SRC ${TMP_SRC} )
+ endif()
+ if( OGRE_VULKAN_WINDOW_XCB )
+-	file( GLOB PLATFORM_SPECIFIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/Windowing/X11/*.h" )
+-	file( GLOB PLATFORM_SPECIFIC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/Windowing/X11/*.cpp" )
++	file( GLOB TMP_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/Windowing/X11/*.h" )
++	file( GLOB TMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/Windowing/X11/*.cpp" )
++	list( APPEND PLATFORM_SPECIFIC_HEADER ${TMP_HEADER} )
++	list( APPEND PLATFORM_SPECIFIC_SRC ${TMP_SRC} )
+ endif()
+ if( OGRE_VULKAN_WINDOW_WIN32 )
+-	file( GLOB PLATFORM_SPECIFIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/Windowing/win32/*.h" )
+-	file( GLOB PLATFORM_SPECIFIC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/Windowing/win32/*.cpp" )
++	file( GLOB TMP_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/Windowing/win32/*.h" )
++	file( GLOB TMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/Windowing/win32/*.cpp" )
++	list( APPEND PLATFORM_SPECIFIC_HEADER ${TMP_HEADER} )
++	list( APPEND PLATFORM_SPECIFIC_SRC ${TMP_SRC} )
+ endif()
++if( OGRE_VULKAN_WINDOW_METAL )
++	file( GLOB TMP_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/Windowing/OSX/*.h" )
++	file( GLOB TMP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/Windowing/OSX/*.mm" )
++	list( APPEND PLATFORM_SPECIFIC_HEADER ${TMP_HEADER} )
++	list( APPEND PLATFORM_SPECIFIC_SRC ${TMP_SRC} )
++	set( METAL_SPECIFIC_SRC ${TMP_SRC} )
++endif()
++unset( TMP_HEADER )
++unset( TMP_SRC )
+ 
+ set( HEADER_FILES ${HEADER_FILES} ${PLATFORM_SPECIFIC_HEADER} )
+ set( SOURCE_FILES ${SOURCE_FILES} ${PLATFORM_SPECIFIC_SRC} )
+@@ -71,6 +89,16 @@
+ 	target_link_libraries(RenderSystem_Vulkan xcb-randr X11-xcb)
+ endif()
+ 
++if( OGRE_VULKAN_WINDOW_METAL )
++	# VK_EXT_metal_surface (VkMetalSurfaceCreateInfoEXT, vkCreateMetalSurfaceEXT)
++	# only exists behind this define; the surface is created from a CAMetalLayer,
++	# which OgreVulkanMetalWindow.mm hosts in an NSView. Vulkan itself is MoltenVK.
++	target_compile_definitions(RenderSystem_Vulkan PRIVATE VK_USE_PLATFORM_METAL_EXT)
++	# ARC on the ObjC++ sources only: the rest of the RenderSystem is plain C++.
++	set_source_files_properties(${METAL_SPECIFIC_SRC} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
++	target_link_libraries(RenderSystem_Vulkan "-framework QuartzCore" "-framework AppKit")
++endif()
++
+ if( OGRE_VULKAN_USE_SWAPPY )
+ 	target_link_libraries(RenderSystem_Vulkan ${AndroidSwappy_LIBRARY})
+ endif()
+--- a/RenderSystems/Vulkan/include/OgreVulkanSupport.h
++++ b/RenderSystems/Vulkan/include/OgreVulkanSupport.h
+@@ -86,6 +86,9 @@
+ #    ifdef OGRE_VULKAN_WINDOW_ANDROID
+ #        include "Windowing/Android/OgreVulkanAndroidSupport.h"
+ #    endif
++#    ifdef OGRE_VULKAN_WINDOW_METAL
++#        include "Windowing/OSX/OgreVulkanMetalSupport.h"
++#    endif
+ 
+ namespace Ogre
+ {
+@@ -116,6 +119,12 @@
+                 return new VulkanAndroidSupport();
+         }
+ #    endif
++#    ifdef OGRE_VULKAN_WINDOW_METAL
++        {
++            if( i == currSupport++ )
++                return new VulkanMetalSupport();
++        }
++#    endif
+         return 0;
+     }
+ 
+@@ -134,6 +143,9 @@
+ #    ifdef OGRE_VULKAN_WINDOW_ANDROID
+                + 1
+ #    endif
++#    ifdef OGRE_VULKAN_WINDOW_METAL
++               + 1
++#    endif
+             ;
+     }
+ }  // namespace Ogre
+--- a/RenderSystems/Vulkan/src/OgreVulkanSupport.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanSupport.cpp
+@@ -62,6 +62,12 @@
+ #ifdef OGRE_VULKAN_WINDOW_ANDROID
+         optInterfaces.possibleValues.push_back( "android" );
+ #endif
++#ifdef OGRE_VULKAN_WINDOW_METAL
++        // Must come before "null": the default interface is possibleValues.front()
++        // (VulkanRenderSystem::initConfigOptions), and a "null" default would send
++        // every createRenderWindow to VulkanWindowNull -- i.e. nothing on screen.
++        optInterfaces.possibleValues.push_back( "metal" );
++#endif
+ #ifdef OGRE_VULKAN_WINDOW_NULL
+         optInterfaces.possibleValues.push_back( "null" );
+ #endif
+--- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+@@ -52,6 +52,7 @@
+ #define OGRE_VK_KHR_WIN32_SURFACE_EXTENSION_NAME "VK_KHR_win32_surface"
+ #define OGRE_VK_KHR_XCB_SURFACE_EXTENSION_NAME "VK_KHR_xcb_surface"
+ #define OGRE_VK_KHR_ANDROID_SURFACE_EXTENSION_NAME "VK_KHR_android_surface"
++#define OGRE_VK_EXT_METAL_SURFACE_EXTENSION_NAME "VK_EXT_metal_surface"
+ 
+ #define TODO_findRealPresentQueue
+ 
+@@ -148,6 +149,13 @@
+ #ifdef OGRE_VULKAN_WINDOW_ANDROID
+                 if( extensionName == OGRE_VK_KHR_ANDROID_SURFACE_EXTENSION_NAME )
+                     enabledExtensions.push_back( OGRE_VK_KHR_ANDROID_SURFACE_EXTENSION_NAME );
++#endif
++#ifdef OGRE_VULKAN_WINDOW_METAL
++                // MoltenVK's surface extension (VulkanMetalWindow). Availability-gated
++                // like every other platform surface: the support object is only marked
++                // usable when this made it into the enabled list.
++                if( extensionName == OGRE_VK_EXT_METAL_SURFACE_EXTENSION_NAME )
++                    enabledExtensions.push_back( OGRE_VK_EXT_METAL_SURFACE_EXTENSION_NAME );
+ #endif
+ #if OGRE_DEBUG_MODE >= OGRE_DEBUG_HIGH
+                 if( extensionName == VK_EXT_DEBUG_REPORT_EXTENSION_NAME )
+--- a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
+@@ -82,6 +82,9 @@
+ #endif
+ #ifdef OGRE_VULKAN_WINDOW_ANDROID
+ #    include "Windowing/Android/OgreVulkanAndroidWindow.h"
++#endif
++#ifdef OGRE_VULKAN_WINDOW_METAL
++#    include "Windowing/OSX/OgreVulkanMetalWindow.h"
+ #endif
+ 
+ #include "OgrePixelFormatGpuUtils.h"
+@@ -468,6 +471,10 @@
+         if( VulkanInstance::hasExtension( VulkanAndroidWindow::getRequiredExtensionName() ) )
+             mAvailableVulkanSupports["android"]->setSupported();
+ #endif
++#ifdef OGRE_VULKAN_WINDOW_METAL
++        if( VulkanInstance::hasExtension( VulkanMetalWindow::getRequiredExtensionName() ) )
++            mAvailableVulkanSupports["metal"]->setSupported();
++#endif
+ 
+         if( mInstance->mVkInstanceIsExternal )
+         {
+@@ -1225,15 +1232,36 @@
+         }
+         else
+         {
++            // Dispatch on the SELECTED interface, not on what was compiled in: with
++            // two non-null backends built the old #ifdef stack ran them all, so the
++            // last one won and every earlier OGRE_NEW leaked.
++            const IdString interfaceName = mVulkanSupport->getInterfaceName();
++            (void)interfaceName;
+ #ifdef OGRE_VULKAN_WINDOW_WIN32
+-            win = OGRE_NEW VulkanWin32Window( name, width, height, fullScreen );
++            if( interfaceName == "win32" )
++                win = OGRE_NEW VulkanWin32Window( name, width, height, fullScreen );
+ #endif
+ #ifdef OGRE_VULKAN_WINDOW_XCB
+-            win = OGRE_NEW VulkanXcbWindow( name, width, height, fullScreen );
++            if( interfaceName == "xcb" )
++                win = OGRE_NEW VulkanXcbWindow( name, width, height, fullScreen );
+ #endif
+ #ifdef OGRE_VULKAN_WINDOW_ANDROID
+-            win = OGRE_NEW VulkanAndroidWindow( name, width, height, fullScreen );
++            if( interfaceName == "android" )
++                win = OGRE_NEW VulkanAndroidWindow( name, width, height, fullScreen );
+ #endif
++#ifdef OGRE_VULKAN_WINDOW_METAL
++            if( interfaceName == "metal" )
++                win = OGRE_NEW VulkanMetalWindow( name, width, height, fullScreen );
++#endif
++            if( !win )
++            {
++                OGRE_EXCEPT( Exception::ERR_RENDERINGAPI_ERROR,
++                             "No Vulkan window backend for interface '" +
++                                 mVulkanSupport->getInterfaceNameStr() +
++                                 "' was compiled in. Check the OGRE_VULKAN_WINDOW_* build "
++                                 "settings.",
++                             "VulkanRenderSystem::_createRenderWindow" );
++            }
+         }
+         mWindows.insert( win );
+ 
+--- /dev/null
++++ b/RenderSystems/Vulkan/include/Windowing/OSX/OgreVulkanMetalSupport.h
+@@ -0,0 +1,51 @@
++/*
++-----------------------------------------------------------------------------
++This source file is part of OGRE-Next
++    (Object-oriented Graphics Rendering Engine)
++For the latest info, see http://www.ogre3d.org/
++
++Copyright (c) 2000-present Torus Knot Software Ltd
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
++-----------------------------------------------------------------------------
++*/
++
++#ifndef _OgreVulkanMetalSupport_H_
++#define _OgreVulkanMetalSupport_H_
++
++#define DEFINING_VK_SUPPORT_IMPL
++#include "OgreVulkanSupport.h"
++
++namespace Ogre
++{
++    /** The "metal" interface: VK_EXT_metal_surface windows (VulkanMetalWindow).
++
++        Video modes are not enumerated (unlike xcb's randr query): Ogre never
++        changes the display mode on macOS — fullscreen goes through the window
++        server — so the base config (Device/Interface/FSAA/sRGB) is all there is.
++    */
++    class _OgreVulkanExport VulkanMetalSupport final : public VulkanSupport
++    {
++    public:
++        IdString getInterfaceName() const override { return "metal"; }
++        String getInterfaceNameStr() const override { return "metal"; }
++    };
++}  // namespace Ogre
++
++#endif
+--- /dev/null
++++ b/RenderSystems/Vulkan/include/Windowing/OSX/OgreVulkanMetalWindow.h
+@@ -0,0 +1,114 @@
++/*
++-----------------------------------------------------------------------------
++This source file is part of OGRE-Next
++    (Object-oriented Graphics Rendering Engine)
++For the latest info, see http://www.ogre3d.org/
++
++Copyright (c) 2000-present Torus Knot Software Ltd
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
++-----------------------------------------------------------------------------
++*/
++
++#ifndef _OgreVulkanMetalWindow_H_
++#define _OgreVulkanMetalWindow_H_
++
++#include "OgreVulkanPrerequisites.h"
++
++#include "OgreVulkanWindow.h"
++
++#include "OgreHeaderPrefix.h"
++
++namespace Ogre
++{
++    /** Vulkan window on Apple platforms: the VkSurfaceKHR comes from a
++        CAMetalLayer through VK_EXT_metal_surface (MoltenVK).
++
++        Accepted "externalWindowHandle"/"parentWindowHandle" values mirror what
++        the Metal RenderSystem accepts (see OgreMetalWindow::create):
++          - a CAMetalLayer*  : used as-is, the host owns it and its sizing;
++          - an NSWindow*     : its contentView is used as the parent view;
++          - an NSView*       : the parent view.
++
++        For a parent view the window creates and hosts its OWN CAMetalLayer-backed
++        child NSView, exactly like MetalWindow does for foreign views. Replacing
++        a foreign view's layer is not an option in general: toolkits that manage
++        their own layer (Qt's QNSView overrides -setLayer:/-makeBackingLayer)
++        silently refuse the replacement, and the surface would then be created
++        from a non-Metal layer.
++
++        HiDPI: the hosted layer's contentsScale follows the screen's
++        backingScaleFactor and getViewPointToPixelScale() reports the same value,
++        so callers keep passing view POINTS (as the rest of Ogre's window API
++        expects) while the swapchain is sized in PIXELS.
++
++        Resize: requestResolution() re-syncs the layer with the view and calls
++        windowMovedOrResized(), which rebuilds the swapchain — the surface's
++        currentExtent is authoritative (see VulkanWindowSwapChainBased::createSwapchain).
++        No window recreation is needed.
++    */
++    class _OgreVulkanExport VulkanMetalWindow : public VulkanWindowSwapChainBased
++    {
++        /// Objective-C state (the layer, our hosted view, the host's view). Lives
++        /// in the .mm so this header stays plain C++ and can be included from
++        /// OgreVulkanRenderSystem.cpp.
++        struct Impl;
++        Impl *mImpl;
++
++        bool mVisible;
++        bool mHidden;
++        /// True when the host handed us a CAMetalLayer directly: it owns the
++        /// layer's geometry and scale, we only build a swapchain on it.
++        bool mIsExternalLayer;
++
++        void createSurface() override;
++
++        /// Re-syncs our hosted layer with the view it lives in (frame,
++        /// contentsScale, drawableSize) and returns its size in PIXELS.
++        void syncLayerToView( uint32 &outWidthPx, uint32 &outHeightPx );
++
++    public:
++        VulkanMetalWindow( const String &title, uint32 width, uint32 height, bool fullscreenMode );
++        ~VulkanMetalWindow() override;
++
++        static const char *getRequiredExtensionName();
++
++        void destroy() override;
++        void _initialize( TextureGpuManager *textureGpuManager,
++                          const NameValuePairList *miscParams ) override;
++
++        float getViewPointToPixelScale() const override;
++
++        void reposition( int32 leftPt, int32 topPt ) override;
++        void requestResolution( uint32 widthPt, uint32 heightPt ) override;
++        void windowMovedOrResized() override;
++        void setFsaa( const String &fsaa ) override;
++
++        void _setVisible( bool visible ) override;
++        bool isVisible() const override;
++        void setHidden( bool hidden ) override;
++        bool isHidden() const override;
++
++        void getCustomAttribute( IdString name, void *pData ) override;
++    };
++}  // namespace Ogre
++
++#include "OgreHeaderSuffix.h"
++
++#endif
+--- /dev/null
++++ b/RenderSystems/Vulkan/src/Windowing/OSX/OgreVulkanMetalWindow.mm
+@@ -0,0 +1,447 @@
++/*
++-----------------------------------------------------------------------------
++This source file is part of OGRE-Next
++    (Object-oriented Graphics Rendering Engine)
++For the latest info, see http://www.ogre3d.org/
++
++Copyright (c) 2000-present Torus Knot Software Ltd
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
++-----------------------------------------------------------------------------
++*/
++
++#include "Windowing/OSX/OgreVulkanMetalWindow.h"
++
++#include "OgreVulkanDevice.h"
++#include "OgreVulkanTextureGpu.h"
++#include "OgreVulkanTextureGpuManager.h"
++
++#include "OgreDepthBuffer.h"
++#include "OgreException.h"
++#include "OgreLogManager.h"
++#include "OgrePixelFormatGpuUtils.h"
++#include "OgreString.h"
++#include "OgreStringConverter.h"
++#include "OgreTextureGpuListener.h"
++
++#include "vulkan/vulkan_core.h"
++#include "vulkan/vulkan_metal.h"
++
++#import <AppKit/AppKit.h>
++#import <QuartzCore/CAMetalLayer.h>
++#import <QuartzCore/CATransaction.h>
++
++/** The view we host our CAMetalLayer in.
++
++    Ogre never replaces the layer of a view it was handed: a toolkit that manages
++    its own layer refuses the replacement (Qt 6's QNSView overrides -setLayer: and
++    -makeBackingLayer), and the surface would then be built on the wrong layer
++    class. Instead this view is added as a subview and sized to the host's view,
++    the same arrangement MetalWindow uses for foreign views.
++
++    -hitTest: returns nil so the host keeps receiving every mouse event in the
++    region: this view exists only to own a layer, never to handle input. */
++@interface OgreVulkanMetalView : NSView
++@end
++
++@implementation OgreVulkanMetalView
++
+++ (Class)layerClass
++{
++    return [CAMetalLayer class];
++}
++
++- (instancetype)initWithFrame:(NSRect)frame
++{
++    self = [super initWithFrame:frame];
++    if( self )
++    {
++        // setLayer BEFORE wantsLayer makes the view layer-HOSTING: AppKit then
++        // leaves the layer's contentsScale alone and we drive it ourselves
++        // (which is what makes the HiDPI story explicit rather than accidental).
++        self.layer = [CAMetalLayer layer];
++        self.wantsLayer = YES;
++        self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawNever;
++    }
++    return self;
++}
++
++- (BOOL)isOpaque
++{
++    return YES;
++}
++
++- (NSView *)hitTest:(NSPoint)point
++{
++    return nil;
++}
++
++- (void)viewDidChangeBackingProperties
++{
++    [super viewDidChangeBackingProperties];
++    // Moved between displays of different scale. A layer-hosted CAMetalLayer does
++    // NOT get its contentsScale updated by AppKit, so do it here; MoltenVK derives
++    // the surface's currentExtent from bounds x contentsScale, which makes the next
++    // vkAcquireNextImageKHR report VK_ERROR_OUT_OF_DATE_KHR and the window rebuild
++    // its swapchain at the new pixel size (VulkanMetalWindow::windowMovedOrResized).
++    const CGFloat scale = self.window ? self.window.backingScaleFactor
++                                      : [NSScreen mainScreen].backingScaleFactor;
++    CAMetalLayer *layer = (CAMetalLayer *)self.layer;
++    if( layer && scale > 0.0 )
++    {
++        [CATransaction begin];
++        [CATransaction setDisableActions:YES];
++        layer.contentsScale = scale;
++        layer.drawableSize =
++            CGSizeMake( self.bounds.size.width * scale, self.bounds.size.height * scale );
++        [CATransaction commit];
++    }
++}
++
++@end
++
++namespace Ogre
++{
++    struct VulkanMetalWindow::Impl
++    {
++        /// The layer the swapchain presents to. Ours (hosted by mView) unless the
++        /// caller passed a CAMetalLayer* of its own.
++        CAMetalLayer *layer = nil;
++        /// The view we created and own. nil when the caller passed a layer, or a
++        /// view that is already CAMetalLayer-backed.
++        OgreVulkanMetalView *ownedView = nil;
++        /// The view the layer lives in (ours or the caller's). Weak: the host may
++        /// tear its widget down before Ogre destroys the window.
++        __weak NSView *view = nil;
++    };
++    //-------------------------------------------------------------------------
++    VulkanMetalWindow::VulkanMetalWindow( const String &title, uint32 width, uint32 height,
++                                          bool fullscreenMode ) :
++        VulkanWindowSwapChainBased( title, width, height, fullscreenMode ),
++        mImpl( new Impl() ),
++        mVisible( true ),
++        mHidden( false ),
++        mIsExternalLayer( false )
++    {
++    }
++    //-------------------------------------------------------------------------
++    VulkanMetalWindow::~VulkanMetalWindow()
++    {
++        destroy();
++        delete mImpl;
++        mImpl = 0;
++    }
++    //-------------------------------------------------------------------------
++    const char *VulkanMetalWindow::getRequiredExtensionName()
++    {
++        return VK_EXT_METAL_SURFACE_EXTENSION_NAME;
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::destroy()
++    {
++        VulkanWindowSwapChainBased::destroy();
++
++        if( mClosed )
++            return;
++
++        mClosed = true;
++        mFocused = false;
++
++        // Detach OUR view from the host's hierarchy here, while both are known to
++        // be alive; never in the destructor, where the host may already be gone.
++        if( mImpl->ownedView )
++            [mImpl->ownedView removeFromSuperview];
++        mImpl->ownedView = nil;
++        mImpl->view = nil;
++        mImpl->layer = nil;
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::_initialize( TextureGpuManager *textureGpuManager,
++                                         const NameValuePairList *miscParams )
++    {
++        destroy();
++
++        mFocused = true;
++        mClosed = false;
++        mHidden = false;
++        mHwGamma = false;
++
++        size_t windowHandle = 0u;
++        if( miscParams )
++        {
++            NameValuePairList::const_iterator end = miscParams->end();
++            NameValuePairList::const_iterator opt = miscParams->find( "externalWindowHandle" );
++            if( opt == end )
++                opt = miscParams->find( "parentWindowHandle" );
++            if( opt != end )
++                windowHandle = StringConverter::parseSizeT( opt->second );
++
++            parseSharedParams( miscParams );
++        }
++
++        @autoreleasepool
++        {
++            // Guard against handles that cannot be objects: a Qt platform plugin
++            // that is not cocoa (offscreen, minimal) hands out small synthetic
++            // window ids, and objc_msgSend on one of those is a segfault, not an
++            // exception we could report. Anything below the first page is refused.
++            id handle = windowHandle >= 0x10000u
++                            ? (__bridge id)reinterpret_cast<void *>( windowHandle )
++                            : nil;
++
++            if( [handle isKindOfClass:[CAMetalLayer class]] )
++            {
++                // The host owns the layer, its size and its scale.
++                mImpl->layer = (CAMetalLayer *)handle;
++                mIsExternalLayer = true;
++            }
++            else
++            {
++                NSView *hostView = nil;
++                if( [handle isKindOfClass:[NSWindow class]] )
++                    hostView = ( (NSWindow *)handle ).contentView;
++                else if( [handle isKindOfClass:[NSView class]] )
++                    hostView = (NSView *)handle;
++
++                if( hostView )
++                {
++                    if( [hostView.layer isKindOfClass:[CAMetalLayer class]] )
++                    {
++                        // Already a Metal view (e.g. Ogre's own OgreMetalView).
++                        mImpl->view = hostView;
++                        mImpl->layer = (CAMetalLayer *)hostView.layer;
++                    }
++                    else
++                    {
++                        NSRect frame = hostView.bounds;
++                        if( frame.size.width <= 0.0 || frame.size.height <= 0.0 )
++                            frame = NSMakeRect( 0.0, 0.0, mRequestedWidth, mRequestedHeight );
++                        OgreVulkanMetalView *view =
++                            [[OgreVulkanMetalView alloc] initWithFrame:frame];
++                        view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++                        [hostView addSubview:view];
++                        mImpl->ownedView = view;
++                        mImpl->view = view;
++                        mImpl->layer = (CAMetalLayer *)view.layer;
++                    }
++                }
++            }
++
++            if( !mImpl->layer )
++            {
++                OGRE_EXCEPT( Exception::ERR_RENDERINGAPI_ERROR,
++                             "externalWindowHandle does not resolve to a CAMetalLayer, an NSView "
++                             "or an NSWindow",
++                             "VulkanMetalWindow::_initialize" );
++            }
++
++            mImpl->layer.framebufferOnly = mCanDownloadData ? NO : YES;
++        }
++
++        VulkanTextureGpuManager *textureManager =
++            static_cast<VulkanTextureGpuManager *>( textureGpuManager );
++
++        mTexture = textureManager->createTextureGpuWindow( this );
++        if( DepthBuffer::DefaultDepthBufferFormat != PFG_NULL )
++        {
++            const bool bMemoryLess = requestedMemoryless( miscParams );
++            mDepthBuffer = textureManager->createWindowDepthBuffer( bMemoryLess );
++        }
++        mStencilBuffer = 0;
++
++        uint32 widthPx = 0u, heightPx = 0u;
++        syncLayerToView( widthPx, heightPx );
++        setFinalResolution( widthPx, heightPx );
++
++        createSurface();
++        createSwapchain();
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::createSurface()
++    {
++        if( mDevice->isDeviceLost() )  // notifyDeviceRestored() will call us again
++            return;
++
++        PFN_vkCreateMetalSurfaceEXT createMetalSurface =
++            (PFN_vkCreateMetalSurfaceEXT)vkGetInstanceProcAddr( mDevice->mInstance->mVkInstance,
++                                                                "vkCreateMetalSurfaceEXT" );
++        if( !createMetalSurface )
++        {
++            OGRE_EXCEPT( Exception::ERR_RENDERINGAPI_ERROR,
++                         "vkCreateMetalSurfaceEXT not found. Was " VK_EXT_METAL_SURFACE_EXTENSION_NAME
++                         " enabled on the VkInstance?",
++                         "VulkanMetalWindow::createSurface" );
++        }
++
++        VkMetalSurfaceCreateInfoEXT metalSurfCreateInfo;
++        memset( &metalSurfCreateInfo, 0, sizeof( metalSurfCreateInfo ) );
++        metalSurfCreateInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
++        // pLayer is an Objective-C object pointer in this header (VK_USE_PLATFORM_METAL_EXT):
++        // assign it directly, no bridging cast.
++        metalSurfCreateInfo.pLayer = mImpl->layer;
++        VkResult result = createMetalSurface( mDevice->mInstance->mVkInstance, &metalSurfCreateInfo, 0,
++                                              &mSurfaceKHR );
++        checkVkResult( mDevice, result, "vkCreateMetalSurfaceEXT" );
++    }
++    //-------------------------------------------------------------------------
++    float VulkanMetalWindow::getViewPointToPixelScale() const
++    {
++        @autoreleasepool
++        {
++            if( mImpl->layer && mIsExternalLayer )
++                return (float)mImpl->layer.contentsScale;
++            NSView *view = mImpl->view;
++            NSScreen *screen = view.window.screen ?: [NSScreen mainScreen];
++            const CGFloat scale = screen ? screen.backingScaleFactor : 1.0;
++            return scale > 0.0 ? (float)scale : 1.0f;
++        }
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::syncLayerToView( uint32 &outWidthPx, uint32 &outHeightPx )
++    {
++        outWidthPx = outHeightPx = 0u;
++        if( !mImpl->layer )
++            return;
++
++        @autoreleasepool
++        {
++            NSView *view = mImpl->view;
++            if( mIsExternalLayer || !view )
++            {
++                // The host owns the geometry: read it, never write it.
++                const CGSize sizePt = mImpl->layer.bounds.size;
++                const CGFloat scale = mImpl->layer.contentsScale;
++                outWidthPx = std::max( 1u, (uint32)floor( sizePt.width * scale + 0.5 ) );
++                outHeightPx = std::max( 1u, (uint32)floor( sizePt.height * scale + 0.5 ) );
++                return;
++            }
++
++            const CGFloat scale = (CGFloat)getViewPointToPixelScale();
++            const NSRect bounds = view.bounds;
++            outWidthPx = std::max( 1u, (uint32)floor( bounds.size.width * scale + 0.5 ) );
++            outHeightPx = std::max( 1u, (uint32)floor( bounds.size.height * scale + 0.5 ) );
++
++            // Implicit CALayer animations would lag a resize by a quarter second and
++            // stretch the last frame while they run.
++            [CATransaction begin];
++            [CATransaction setDisableActions:YES];
++            if( mImpl->ownedView )
++            {
++                NSView *parent = mImpl->ownedView.superview;
++                if( parent && !NSEqualRects( mImpl->ownedView.frame, parent.bounds ) )
++                    mImpl->ownedView.frame = parent.bounds;
++                mImpl->layer.frame = mImpl->ownedView.bounds;
++            }
++            mImpl->layer.contentsScale = scale;
++            // MoltenVK takes the surface's currentExtent from bounds x contentsScale,
++            // but the drawables must agree with it or presentation scales the image.
++            mImpl->layer.drawableSize = CGSizeMake( outWidthPx, outHeightPx );
++            [CATransaction commit];
++        }
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::reposition( int32 leftPt, int32 topPt )
++    {
++        // Our view is pinned to the host's view; the host repositions its own window.
++        mLeft = leftPt;
++        mTop = topPt;
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::requestResolution( uint32 widthPt, uint32 heightPt )
++    {
++        if( mClosed )
++            return;
++
++        Window::requestResolution( widthPt, heightPt );
++
++        if( widthPt != 0u && heightPt != 0u )
++            windowMovedOrResized();
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::windowMovedOrResized()
++    {
++        if( mClosed || !mImpl->layer )
++            return;
++
++        uint32 widthPx = 0u, heightPx = 0u;
++        syncLayerToView( widthPx, heightPx );
++
++        if( widthPx == getWidth() && heightPx == getHeight() && !mRebuildingSwapchain )
++            return;
++
++        mDevice->stallIgnoringDeviceLost();
++
++        destroySwapchain();
++        setFinalResolution( widthPx, heightPx );
++        createSwapchain();  // takes the surface's currentExtent as the final word
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::setFsaa( const String &fsaa )
++    {
++        if( mClosed || !mImpl->layer )
++            return;
++
++        SampleDescription requested;
++        requested.parseString( fsaa );
++        if( requested.getColourSamples() == mRequestedSampleDescription.getColourSamples() )
++            return;
++
++        // Vulkan cannot change a swapchain's sample count in place: the MSAA
++        // surfaces are (re)created by createSwapchain from mRequestedSampleDescription.
++        mRequestedSampleDescription = requested;
++
++        mDevice->stallIgnoringDeviceLost();
++
++        destroySwapchain();
++        createSwapchain();
++    }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::_setVisible( bool visible ) { mVisible = visible; }
++    //-------------------------------------------------------------------------
++    bool VulkanMetalWindow::isVisible() const { return mVisible; }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::setHidden( bool hidden )
++    {
++        mHidden = hidden;
++        // Showing/hiding is the host's business (it owns the window); all we can
++        // do is stop occupying the region.
++        if( mImpl->ownedView )
++            mImpl->ownedView.hidden = hidden ? YES : NO;
++    }
++    //-------------------------------------------------------------------------
++    bool VulkanMetalWindow::isHidden() const { return mHidden; }
++    //-------------------------------------------------------------------------
++    void VulkanMetalWindow::getCustomAttribute( IdString name, void *pData )
++    {
++        if( name == "CAMetalLayer" || name == "RENDERDOC_WINDOW" )
++        {
++            *static_cast<void **>( pData ) = (__bridge void *)mImpl->layer;
++            return;
++        }
++        else if( name == "NSView" || name == "UIView" )
++        {
++            *static_cast<void **>( pData ) = (__bridge void *)mImpl->view;
++            return;
++        }
++        else
++        {
++            VulkanWindowSwapChainBased::getCustomAttribute( name, pData );
++        }
++    }
++}  // namespace Ogre
