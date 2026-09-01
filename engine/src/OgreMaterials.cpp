@@ -303,6 +303,12 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
         const std::string name = processUniqueName("pixels");
+        // ManualTexture (non-batched) on purpose: setSkyCubemap copyTo's these
+        // into cubemap faces, which batched pool slices cannot do. KNOWN macOS
+        // DEFECT: non-batched base maps sample the wrong data under MoltenVK
+        // (pbr_texture_scale_tiles_uvs; file-loaded/batched textures are fine) —
+        // fixing it means teaching the cubemap path to copy from pool slices,
+        // then batching these like loadTexture does.
         Ogre::TextureGpu *tex = tm->createTexture(name, Ogre::GpuPageOutStrategy::Discard,
                                                   Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
         tex->setResolution(w, h);
@@ -359,7 +365,13 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         }
         Ogre::HlmsSamplerblock sampler;
         sampler.mU = Ogre::TAM_WRAP; sampler.mV = Ogre::TAM_WRAP;
-        sampler.mMaxAnisotropy = 4; sampler.mMipFilter = Ogre::FO_LINEAR;
+        // Anisotropy must stay 1 while min/mag/mip are FO_LINEAR: Ogre warns, and
+        // NVIDIA ignores the mismatch, but Metal (MoltenVK) applies maxAnisotropy
+        // regardless of filter mode and averages the whole texture into every
+        // texel (caught by pbr_texture_scale_tiles_uvs on the first macOS run).
+        // Real anisotropic filtering = FO_ANISOTROPIC on all three filters plus a
+        // pixel-suite recalibration — a deliberate visual change, not a default.
+        sampler.mMaxAnisotropy = 1; sampler.mMipFilter = Ogre::FO_LINEAR;
         db->setTexture(static_cast<Ogre::uint8>(unit), tex, &sampler);
         return true;
     } JAH_CATCH(mError, false);

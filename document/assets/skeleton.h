@@ -84,6 +84,7 @@ public:
         for(auto bone : bones)
             if(!bone->parentBone)
                 return bone;
+        return BonePtr();  // no parentless bone (empty/cyclic skeleton)
     }
 
     QList<BonePtr> getRootBones()
