@@ -42,6 +42,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
     # /bin/bash and friends, which silently broke plugin dlopen under ctest.
     [ -n "${VULKAN_SDK:-}" ] || { echo "VULKAN_SDK not set — source the LunarG setup-env.sh first" >&2; exit 1; }
     PLATFORM_FLAGS="$PLATFORM_FLAGS -DCMAKE_MACOSX_RPATH=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_INSTALL_RPATH=$VULKAN_SDK/lib;@loader_path"
+    # Deployment floor. Unset, CMake stamps the dylibs with the SDK's own
+    # version (minos 26.0 on an Xcode 17 box) and the redistributable bundle
+    # refuses to launch on anything older. 13.0 is Qt's own floor (the Qt
+    # 6.11.2 kit is built minos 13.0; MoltenVK ships 12.0), so it costs
+    # nothing and is the lowest we can honestly claim.
+    PLATFORM_FLAGS="$PLATFORM_FLAGS -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 else
     JOBS="${JOBS:-$(nproc)}"
     PLATFORM_FLAGS="-DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=ON"
