@@ -101,6 +101,19 @@ public:
 
     void applyAnimation(QMatrix4x4 inverseMeshMatrix, QMap<QString, QMatrix4x4> skeletonSpaceMatrices);
 
+    /// A pose-independent copy of this rig: same bones, same names, same bind
+    /// matrices, same hierarchy — but its OWN Bone objects and its OWN
+    /// boneTransforms vector.
+    ///
+    /// GPU_SKINNING_SPEC §7: the SkeletonPtr on an iris::Mesh is the rig
+    /// TEMPLATE and is shared by every MeshNode that references the mesh asset
+    /// (MeshNode::createDuplicate passes the same MeshPtr). Pose state used to
+    /// live on it, so two duplicates of one character shared one pose and the
+    /// last writer per frame won — multiple avatars of one rig were impossible.
+    /// MeshNode::setMesh clones the template per node; the template is never
+    /// posed.
+    SkeletonPtr clone() const;
+
     static SkeletonPtr create()
     {
         return SkeletonPtr(new Skeleton());

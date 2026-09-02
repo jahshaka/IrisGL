@@ -124,12 +124,28 @@ void MeshNode::setMesh(QString source)
     mesh = Mesh::loadMesh(source);
     meshPath = source;
     meshIndex = 0;
+    adoptSkeletonFromMesh();
 }
 
 //should not be used on plain scene meshes
 void MeshNode::setMesh(MeshPtr mesh)
 {
     this->mesh = mesh;
+    adoptSkeletonFromMesh();
+}
+
+// GPU_SKINNING_SPEC §7. The mesh asset's skeleton is the rig template and is
+// SHARED (createDuplicate hands the duplicate the same MeshPtr); pose state on
+// it means two avatars of one rig fight over one boneTransforms array and the
+// last writer per frame wins. Every MeshNode gets its own clone here — which
+// is also what makes createDuplicate correct for free, since it goes through
+// setMesh.
+void MeshNode::adoptSkeletonFromMesh()
+{
+    if (!!mesh && mesh->hasSkeleton())
+        skeleton = mesh->getSkeleton()->clone();
+    else
+        skeleton.reset();
 }
 
 MeshPtr MeshNode::getMesh()

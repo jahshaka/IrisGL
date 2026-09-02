@@ -155,6 +155,11 @@ private:
         QString iconSignature;                       // icon image path; recreate on change
         bool hasBillboards = false;                  // particle emitter mirrored as billboards
         QString billboardSignature;                  // texture + blend; recreate on change
+        // Skinning (GPU_SKINNING_SPEC §7): the NODE's own skeleton, not the
+        // mesh asset's shared rig template. Pose state is per node, so two
+        // duplicates of one character animate independently.
+        iris::SkeletonPtr skeleton;
+        QVector<QMatrix4x4> lastPose;                // last pose pushed for THIS node
     };
     void syncParticles(Entry &e, iris::ParticleSystemNode *ps);
     void syncLightWires(Entry &e, iris::LightNode *light);
@@ -198,12 +203,12 @@ private:
     iris::ScenePtr           mSource;
     QHash<long, Entry>       mEntries;         // keyed by iris SceneNode::nodeId
     QHash<iris::Mesh *, jahshaka::engine::MeshId> mMeshes;
-    /// CPU-skinning state per skinned document mesh (bind-pose copies + bone data,
-    /// captured once at mesh creation; lastPose skips redundant uploads).
+    /// CPU-skinning state per skinned document MESH ASSET: bind-pose copies +
+    /// bone data, captured once at mesh creation. Immutable after creation —
+    /// the live pose and the redundant-upload gate live per NODE (Entry).
     struct SkinRec {
         std::vector<float> bindPositions, bindNormals;
         std::vector<float> boneIndices, boneWeights;   // 4 of each per vertex
-        QVector<QMatrix4x4> lastPose;
     };
     QHash<iris::Mesh *, SkinRec> mSkins;
     QHash<iris::Material *, jahshaka::engine::MaterialId> mMaterials;

@@ -439,10 +439,14 @@ void SceneNode::applyAnimationPose(SceneNodePtr node, QMap<QString, QMatrix4x4> 
     if (skeletonSpaceMatrices.contains(node->name)) {
         if (node->sceneNodeType == SceneNodeType::Mesh) {
             auto meshNode = node.staticCast<MeshNode>();
-            auto mesh = meshNode->getMesh();
-            if (mesh != nullptr && mesh->hasSkeleton()) {
+            // GPU_SKINNING_SPEC §7: pose the NODE's skeleton, not the mesh
+            // asset's. The asset's is the rig template, shared by every node
+            // that references the mesh — writing it made two duplicates of one
+            // character share one pose (last writer per frame won).
+            auto skel = meshNode->getSkeleton();
+            if (!skel.isNull()) {
                 auto inverseMeshMatrix = skeletonSpaceMatrices[node->name].inverted();
-                mesh->getSkeleton()->applyAnimation(inverseMeshMatrix, skeletonSpaceMatrices);
+                skel->applyAnimation(inverseMeshMatrix, skeletonSpaceMatrices);
             }
         }
     }

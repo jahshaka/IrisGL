@@ -520,6 +520,8 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
         auto meshNode = node.staticCast<iris::MeshNode>();
         iris::Mesh *mesh = meshNode->getMesh().data();
         iris::Material *material = meshNode->getMaterial().data();
+        // The pose authority for this node (null for unskinned meshes).
+        e.skeleton = meshNode->getSkeleton();
         if (mesh && (!e.hasMesh || e.materialPtr != material)) {
             MeshId m = meshFor(mesh);
             MaterialId mat = materialFor(material);
@@ -1007,24 +1009,30 @@ void SceneMirror::skinVertices(const QVector<QMatrix4x4> &boneTransforms,
 
 void SceneMirror::syncSkinnedMeshes()
 {
-    for (auto it = mSkins.begin(); it != mSkins.end();) {
-        iris::Mesh *mesh = it.key();
-        const auto midIt = mMeshes.constFind(mesh);
-        if (midIt == mMeshes.constEnd()) { it = mSkins.erase(it); continue; }
-        iris::SkeletonPtr skel = mesh->getSkeleton();
-        if (skel) {
-            const QVector<QMatrix4x4> &pose = skel->boneTransforms;
-            // Only push when the pose actually changed (paused/edit-mode scenes
-            // pay nothing after the first frame).
-            if (pose != it->lastPose) {
-                std::vector<float> positions, normals;
-                skinVertices(pose, it->bindPositions, it->bindNormals,
-                             it->boneIndices, it->boneWeights, positions, normals);
-                if (mTarget->updateMeshVertices(midIt.value(), positions, normals))
-                    it->lastPose = pose;
-            }
-        }
-        ++it;
+    // Iteration is over NODES, not mesh assets (GPU_SKINNING_SPEC §7): the pose
+    // lives on the MeshNode's own skeleton now, so the redundant-upload gate is
+    // per node too. Bind data still keys on the mesh asset — it is immutable and
+    // genuinely shared.
+    //
+    // KNOWN LIMIT of this CPU path, and the reason phase 3 replaces it: the
+    // engine mesh is shared by every node that references the mesh asset, so N
+    // duplicates of one rig posed differently still fight over ONE vertex
+    // buffer. Per-node poses reach the screen only once skinning is on the GPU,
+    // where each Item carries its own SkeletonInstance.
+    for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
+        Entry &e = *it;
+        if (e.skeleton.isNull() || !e.mesh || !e.meshPtr) continue;
+        const auto sk = mSkins.constFind(e.meshPtr);
+        if (sk == mSkins.constEnd()) continue;
+        const QVector<QMatrix4x4> &pose = e.skeleton->boneTransforms;
+        // Only push when the pose actually changed (paused/edit-mode scenes
+        // pay nothing after the first frame).
+        if (pose == e.lastPose) continue;
+        std::vector<float> positions, normals;
+        skinVertices(pose, sk->bindPositions, sk->bindNormals,
+                     sk->boneIndices, sk->boneWeights, positions, normals);
+        if (mTarget->updateMeshVertices(e.mesh, positions, normals))
+            e.lastPose = pose;
     }
 }
 

@@ -93,6 +93,11 @@ public:
     // Since all its animations are based at the rootBone
     SceneNodePtr rootBone;
 
+    /// Per-node pose (see getSkeleton()). Derived state: cloned from the mesh's
+    /// rig template in setMesh, never serialized (meshes and skeletons are
+    /// written by reference — no file-format change, no migration).
+    SkeletonPtr skeleton;
+
     static MeshNodePtr create() {
         return MeshNodePtr(new MeshNode());
     }
@@ -136,6 +141,15 @@ public:
 
     MeshPtr getMesh();
 
+    /// This NODE's pose (GPU_SKINNING_SPEC §7). The `SkeletonPtr` on the
+    /// iris::Mesh is the rig TEMPLATE — shared by every node that references
+    /// the mesh asset and never posed. setMesh() clones it here, so each
+    /// MeshNode (including every createDuplicate) owns its own bone transforms
+    /// and duplicates of one rig animate independently.
+    /// Null when the mesh has no skeleton.
+    SkeletonPtr getSkeleton() const { return skeleton; }
+    bool hasSkeleton() const { return !skeleton.isNull(); }
+
     void setMaterial(MaterialPtr material);
 
     MaterialPtr getMaterial() {
@@ -161,6 +175,8 @@ public:
 
 private:
     MeshNode();
+    /// Clones the mesh's rig template into this node's `skeleton` (or clears it).
+    void adoptSkeletonFromMesh();
 };
 
 }
