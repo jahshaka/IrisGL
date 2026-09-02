@@ -115,6 +115,16 @@ public:
     void setGrid(bool visible, float spacing);
     bool gridVisible() const { return mGridVisible; }
 
+    /// How far the grid reaches from the origin, in world units (default 100 =
+    /// the editor's ±100 floor). A preview whose subject is a 170-unit-tall
+    /// character needs a bigger one, or the "floor" is smaller than the thing
+    /// standing on it. Changing it rebuilds the grid meshes on the next sync.
+    void setGridExtent(float extent);
+    /// Grid line colours (minor, major). Alpha is the line's opacity. The
+    /// editor keeps its blue-grey default; the avatar preview asks for white.
+    void setGridColours(const jahshaka::engine::Colour &minor,
+                        const jahshaka::engine::Colour &major);
+
     /// The legacy Preetham "realistic" sky, CPU-baked to an equirect image —
     /// exactly realisticsky.frag's math per direction. Public for tests.
     static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height);
@@ -227,7 +237,12 @@ private:
     // with floor geometry) carrying a minor- and a major-line child.
     bool  mGridVisible = false;
     float mGridSpacing = 1.0f;
+    float mGridExtent = 100.0f;
     float mGridBuiltSpacing = -1.0f;                            // what the meshes were built for
+    float mGridBuiltExtent = -1.0f;
+    jahshaka::engine::Colour mGridMinorColour{ 0.46f, 0.48f, 0.52f, 0.28f };
+    jahshaka::engine::Colour mGridMajorColour{ 0.62f, 0.64f, 0.68f, 0.50f };
+    bool  mGridColoursDirty = false;
     jahshaka::engine::NodeId mGridNode = 0, mGridMinorNode = 0, mGridMajorNode = 0;
     jahshaka::engine::MeshId mGridMinorMesh = 0, mGridMajorMesh = 0;
     jahshaka::engine::MaterialId mGridMinorMaterial = 0, mGridMajorMaterial = 0;

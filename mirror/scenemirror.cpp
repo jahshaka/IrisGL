@@ -246,11 +246,41 @@ void SceneMirror::setGrid(bool visible, float spacing)
     mGridSpacing = std::min(std::max(spacing, 0.01f), 100.0f);
 }
 
+void SceneMirror::setGridExtent(float extent)
+{
+    mGridExtent = std::min(std::max(extent, 1.0f), 100000.0f);
+}
+
+void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
+{
+    if (mGridMinorColour.r == minor.r && mGridMinorColour.g == minor.g &&
+        mGridMinorColour.b == minor.b && mGridMinorColour.a == minor.a &&
+        mGridMajorColour.r == major.r && mGridMajorColour.g == major.g &&
+        mGridMajorColour.b == major.b && mGridMajorColour.a == major.a)
+        return;
+    mGridMinorColour = minor;
+    mGridMajorColour = major;
+    // The engine has no "recolour this material" verb, so a change after the
+    // grid exists means new materials on the next sync.
+    mGridColoursDirty = mGridMinorMaterial != 0;
+}
+
 void SceneMirror::syncGrid()
 {
     if (!mGridVisible) {
         if (mGridNode) mTarget->setNodeVisible(mGridNode, false);
         return;
+    }
+    if (mGridColoursDirty) {
+        if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); }
+        if (mGridMajorMesh) { mTarget->detachMesh(mGridMajorNode); }
+        if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
+        if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
+        mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
+        mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
+        if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
+        if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
+        mGridColoursDirty = false;
     }
     if (!mGridNode) {
         mGridNode = mTarget->createNode();
@@ -261,13 +291,13 @@ void SceneMirror::syncGrid()
         // ground is at +1e-4) occludes the grid cleanly instead of z-fighting.
         mTarget->setNodeTransform(mGridNode, Vec3(0, -0.01f, 0), Quat(), Vec3(1, 1, 1));
         // Unlit (never fogged), depth-tested (occluded by geometry), blended.
-        mGridMinorMaterial = mTarget->createUnlitMaterial(Colour(0.46f, 0.48f, 0.52f, 0.28f), true);
-        mGridMajorMaterial = mTarget->createUnlitMaterial(Colour(0.62f, 0.64f, 0.68f, 0.50f), true);
+        mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
+        mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
     }
-    if (mGridBuiltSpacing != mGridSpacing) {
+    if (mGridBuiltSpacing != mGridSpacing || mGridBuiltExtent != mGridExtent) {
         if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
         if (mGridMajorMesh) { mTarget->detachMesh(mGridMajorNode); mTarget->destroyMesh(mGridMajorMesh); mGridMajorMesh = 0; }
-        const float extent = 100.0f;                     // ±100 units of floor
+        const float extent = mGridExtent;                // ±extent units of floor
         int n = int(extent / mGridSpacing);              // lines each side of 0
         n = std::min(n, 1000);                           // hard cap on line count
         std::vector<Vec3> minor, major;
@@ -282,6 +312,7 @@ void SceneMirror::syncGrid()
         if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
         if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
         mGridBuiltSpacing = mGridSpacing;
+        mGridBuiltExtent = mGridExtent;
     }
     mTarget->setNodeVisible(mGridNode, true);
 }
