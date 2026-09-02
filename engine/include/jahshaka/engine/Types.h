@@ -41,13 +41,61 @@ struct MeshData {
     std::vector<float>    tangents;   // optional, xyzw per vertex (w = handedness);
                                       // generated from uvs when empty — needed for normal maps
     std::vector<unsigned> indices;
+    /// GPU skinning: FOUR bone indices and FOUR weights per vertex, in the same
+    /// order as `positions`. Indices name a bone of the SkeletonDesc later passed
+    /// to attachSkinnedMesh; weights should sum to 1 (the vertex shader does a
+    /// plain weighted sum with no renormalisation — weights that miss shrink or
+    /// inflate the character). Both empty for a static mesh; a mesh must carry
+    /// them at CREATION time (the vertex declaration is fixed then) or
+    /// attachSkinnedMesh refuses it.
+    std::vector<unsigned char> blendIndices;
+    std::vector<float>         blendWeights;
     /// True for meshes whose vertices will be rewritten after creation via
     /// Scene::updateMeshVertices — the CPU-skinning path. The engine allocates an
     /// updatable vertex buffer instead of an immutable one. Static meshes leave
-    /// this false and keep the immutable fast path.
+    /// this false and keep the immutable fast path. GPU-skinned meshes are
+    /// IMMUTABLE: the pose reaches the GPU as bone matrices, never as vertices.
     bool dynamic = false;
     size_t vertexCount() const { return positions.size() / 3; }
     size_t triangleCount() const { return indices.size() / 3; }
+    bool hasSkinData() const {
+        return !blendIndices.empty() && blendIndices.size() == vertexCount() * 4 &&
+               blendWeights.size() == vertexCount() * 4;
+    }
+};
+
+// ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
+/// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent
+/// bone; a root bone (parent < 0) is local to the mesh node the rig deforms.
+struct BoneDesc {
+    std::string name;
+    int         parent = -1;      ///< index into SkeletonDesc::bones, -1 = root
+    Vec3        bindPosition;
+    Quat        bindRotation;
+    Vec3        bindScale{1.0f, 1.0f, 1.0f};
+};
+
+/// A rig: bones in the order MeshData::blendIndices names. Order is otherwise
+/// free — a parent may follow its child — but the hierarchy must be acyclic.
+///
+/// `id` must be derived from the STRUCTURE ONLY — the ordered bone names, the
+/// hierarchy and the bind transforms — and never from the source file, the
+/// clip set or anything else. The backend caches the translated rig by this id
+/// for the life of the process, so (a) two loads of the same rig from different
+/// files must resolve to ONE cached rig (which is what lets clips authored in
+/// one file drive a character loaded from another), and (b) a rig that differs
+/// in any bone must get a different id or it silently aliases the cached one.
+struct SkeletonDesc {
+    std::string           id;
+    std::vector<BoneDesc> bones;
+};
+
+/// A posed bone: LOCAL to its parent bone (a root bone: local to the mesh node).
+/// This is absolute local TRS, not a delta from the bind pose.
+struct BonePose {
+    Vec3 position;
+    Quat rotation;
+    Vec3 scale{1.0f, 1.0f, 1.0f};
 };
 
 using TextureId = unsigned int;

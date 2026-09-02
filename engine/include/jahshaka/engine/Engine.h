@@ -88,6 +88,42 @@ public:
     virtual bool        attachMesh(NodeId, MeshId, MaterialId) = 0;
     virtual bool        detachMesh(NodeId) = 0;
 
+    // ---- Rigs: GPU skinning (GPU_SKINNING_SPEC) ----
+    /// Like attachMesh, but the mesh deforms on the GPU: the host pushes bone
+    /// poses (setBonePoses) instead of vertices, and the vertex shader skins
+    /// position, normal AND tangent.
+    ///
+    /// SEPARATE entry point on purpose — the backend must know the mesh is
+    /// skinned BEFORE the renderable exists, so attaching first and skinning
+    /// later would silently produce an unskinned object.
+    ///
+    /// The mesh must have been created with MeshData::hasSkinData(); its blend
+    /// indices name bones of `rig`. Several nodes may attach the same mesh and
+    /// the same rig and still pose independently — one rig instance per node.
+    /// Refuses (lastError()) a mesh with no skin data, a rig whose bones do not
+    /// cover the mesh's blend indices, an empty rig, a rig whose parent indices
+    /// are out of range or cyclic, or a rig with more than 256 bones (which is
+    /// attached UNSKINNED at bind pose, with a warning, rather than crashing).
+    /// Bone ORDER is free — the index is what the vertex data names.
+    virtual bool        attachSkinnedMesh(NodeId, MeshId, MaterialId, const SkeletonDesc &) = 0;
+    /// True when the node carries a GPU-skinned mesh with a live rig.
+    virtual bool        hasSkeleton(NodeId) const = 0;
+    /// The node's bone names, in rig index order. Empty when it has no rig.
+    virtual std::vector<std::string> boneNames(NodeId) const = 0;
+    /// The node's pose: `count` entries, index-parallel to the rig's bones, each
+    /// LOCAL to its parent bone. This is the per-frame call — everything else on
+    /// the rig surface is event-driven. False (lastError()) when the node has no
+    /// rig or `count` does not match the rig's bone count.
+    virtual bool        setBonePoses(NodeId, const BonePose *poses, size_t count) = 0;
+    /// Reads back the bone matrices the vertex shader is actually handed for this
+    /// node: `count` bones in rig order, each a ROW-MAJOR 3x4 (12 floats, so
+    /// `out` holds count*12), WORLD-relative — the node's own transform is folded
+    /// in, because a skinned vertex is never multiplied by a world matrix
+    /// separately. Resolved as of the last rendered frame. False (lastError())
+    /// when the node has no rig or `count` misses the rig's bone count.
+    /// The read-back surface for the pose: what proves GPU and CPU skinning agree.
+    virtual bool        boneMatrices(NodeId, float *out, size_t count) const = 0;
+
     // ---- Textures (step 4b): image files on disk, shared across materials ----
     /// Loads an image file (png/jpg/tga/dds...). `srgb` for colour maps (albedo,
     /// emissive); false for data maps (normal, roughness, metalness). The same path

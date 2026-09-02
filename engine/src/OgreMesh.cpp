@@ -11,9 +11,16 @@ MeshId OgreScene::createMesh(const MeshData &data) {
     for (unsigned i : data.indices) if (i >= nv) { mError = "createMesh: index out of range"; return 0; }
     if (!data.normals.empty() && data.normals.size() != data.positions.size()) { mError = "createMesh: normals count mismatch"; return 0; }
     if (!data.uvs.empty() && data.uvs.size() != nv * 2) { mError = "createMesh: uv count mismatch"; return 0; }
+    if (!data.blendIndices.empty() && !data.hasSkinData()) {
+        mError = "createMesh: blend indices/weights must be 4 per vertex, both present";
+        return 0;
+    }
     JAH_TRY {
         MeshRec rec; rec.name = processUniqueName("mesh");
         rec.dynamic = data.dynamic;
+        rec.hasSkinData = data.hasSkinData();
+        for (unsigned char b : data.blendIndices)
+            rec.maxBlendIndex = std::max(rec.maxBlendIndex, unsigned(b));
         rec.mesh = buildMeshV2(rec.name, data, data.dynamic ? &rec.interleaved : nullptr);
         mMeshes[++mNextMeshId] = std::move(rec);
         return mNextMeshId;
@@ -165,20 +172,56 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
             t[3] = (cx*b[0] + cy*b[1] + cz*b[2]) < 0.0f ? -1.0f : 1.0f;
         }
     }
+    // GPU skinning (GPU_SKINNING_SPEC R8): blend indices and weights are REAL
+    // vertex elements, appended after the uvs exactly where
+    // SubMesh::_compileBoneAssignments would have put them — built once, here,
+    // with no readback and no second buffer. The shader reads
+    // `uvec4 blendIndices` (VET_UBYTE4 maps to R8G8B8A8_UINT on Vulkan, not a
+    // normalized format) and `vec4 blendWeights`; the influence count comes from
+    // the WEIGHTS element's type count (OgreHlms.cpp:3066-3067), so FLOAT4 is
+    // what makes hlms_bones_per_vertex 4.
+    const bool skinned = data.hasSkinData();
+    // Ogre's vertex shader does a plain weighted sum with NO renormalisation
+    // (800.VertexShader_piece_vs.any:97-127), and our importer stores assimp's
+    // weights raw. Weights that don't sum to 1 shrink or inflate the character,
+    // so normalise here, once, at upload.
+    std::vector<float> blendW;
+    if (skinned) {
+        blendW = data.blendWeights;
+        for (size_t v = 0; v < nv; ++v) {
+            float *w = &blendW[v*4];
+            const float sum = w[0] + w[1] + w[2] + w[3];
+            if (sum > 1e-6f) { for (int k = 0; k < 4; ++k) w[k] /= sum; }
+            else { w[0] = 1.0f; w[1] = w[2] = w[3] = 0.0f; }   // unweighted: ride bone 0
+        }
+    }
     struct V { float px, py, pz, nx, ny, nz, tx, ty, tz, tw, u, v; };
-    V *verts = reinterpret_cast<V *>(OGRE_MALLOC_SIMD(sizeof(V) * nv, Ogre::MEMCATEGORY_GEOMETRY));
+    struct VS { V base; unsigned char bi[4]; float bw[4]; };
+    const size_t vertexBytes = skinned ? sizeof(VS) : sizeof(V);
+    unsigned char *raw = reinterpret_cast<unsigned char *>(
+        OGRE_MALLOC_SIMD(vertexBytes * nv, Ogre::MEMCATEGORY_GEOMETRY));
     Ogre::Vector3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
     for (size_t v = 0; v < nv; ++v) {
         const float *p = &data.positions[v*3];
         const float *n = &normals[v*3];
         const float *t = &tangents[v*4];
-        verts[v] = { p[0], p[1], p[2], n[0], n[1], n[2], t[0], t[1], t[2], t[3],
-                     data.uvs.empty() ? 0.0f : data.uvs[v*2], data.uvs.empty() ? 0.0f : data.uvs[v*2+1] };
+        V base = { p[0], p[1], p[2], n[0], n[1], n[2], t[0], t[1], t[2], t[3],
+                   data.uvs.empty() ? 0.0f : data.uvs[v*2], data.uvs.empty() ? 0.0f : data.uvs[v*2+1] };
+        if (skinned) {
+            VS *dst = reinterpret_cast<VS *>(raw + v * sizeof(VS));
+            dst->base = base;
+            for (int k = 0; k < 4; ++k) { dst->bi[k] = data.blendIndices[v*4+k]; dst->bw[k] = blendW[v*4+k]; }
+        } else {
+            *reinterpret_cast<V *>(raw + v * sizeof(V)) = base;
+        }
         mn.makeFloor(Ogre::Vector3(p[0], p[1], p[2])); mx.makeCeil(Ogre::Vector3(p[0], p[1], p[2]));
     }
     if (interleavedOut) {
-        const float *vf = reinterpret_cast<const float *>(verts);
-        interleavedOut->assign(vf, vf + nv * 12);
+        // The CPU-skinning cache only exists for non-skinned dynamic meshes
+        // (updateMeshVertices indexes a 12-float stride).
+        interleavedOut->resize(nv * 12);
+        for (size_t v = 0; v < nv; ++v)
+            std::memcpy(&(*interleavedOut)[v * 12], raw + v * vertexBytes, sizeof(V));
     }
     Ogre::VaoManager *vaoMgr = mRoot->getRenderSystem()->getVaoManager();
     Ogre::VertexElement2Vec decl;
@@ -186,6 +229,10 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_NORMAL));
     decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_TANGENT));
     decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT2, Ogre::VES_TEXTURE_COORDINATES));
+    if (skinned) {
+        decl.push_back(Ogre::VertexElement2(Ogre::VET_UBYTE4, Ogre::VES_BLEND_INDICES));
+        decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_BLEND_WEIGHTS));
+    }
     // Dynamic (CPU-skinned) meshes get BT_DEFAULT: BufferPacked::upload() then
     // rewrites it through a staging buffer, fully synchronised on Vulkan.
     // BT_DYNAMIC_* was deliberately NOT used: those buffers cycle through
@@ -193,7 +240,7 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     // or a stale section shows; a mesh whose pose pauses would flicker back
     // N frames. Index buffer stays immutable either way.
     Ogre::VertexBufferPacked *vbuf = vaoMgr->createVertexBuffer(
-        decl, Ogre::uint32(nv), data.dynamic ? Ogre::BT_DEFAULT : Ogre::BT_IMMUTABLE, verts, true);
+        decl, Ogre::uint32(nv), data.dynamic ? Ogre::BT_DEFAULT : Ogre::BT_IMMUTABLE, raw, true);
     Ogre::IndexBufferPacked *ibuf = nullptr;
     if (nv <= 65535u) {
         Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * ni, Ogre::MEMCATEGORY_GEOMETRY));

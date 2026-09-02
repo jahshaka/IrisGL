@@ -924,6 +924,142 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     return out.indices.size() >= 3;
 }
 
+// ---- Rigs: document skeleton -> engine descriptor (GPU_SKINNING_SPEC) --------------
+
+namespace {
+
+/// Rigid-ish TRS decomposition of an affine 4x4. Returns the worst |cos| between
+/// the (normalized) basis axes so the caller can warn about shear, which a
+/// pos/quat/scale bone cannot represent (R3).
+float decomposeTRS(const QMatrix4x4 &m, QVector3D &pos, QQuaternion &rot, QVector3D &scale)
+{
+    pos = m.column(3).toVector3D();
+    QVector3D c0 = m.column(0).toVector3D();
+    QVector3D c1 = m.column(1).toVector3D();
+    QVector3D c2 = m.column(2).toVector3D();
+    float s0 = c0.length(), s1 = c1.length(), s2 = c2.length();
+    // A negative determinant means the basis is mirrored; a quaternion cannot
+    // express that, so fold the flip into the X scale (the convention assimp and
+    // glTF importers use) rather than producing a silently wrong rotation.
+    if (QVector3D::dotProduct(QVector3D::crossProduct(c0, c1), c2) < 0.0f) { s0 = -s0; c0 = -c0; }
+    const QVector3D n0 = s0 != 0.0f ? c0 / std::fabs(s0) : QVector3D(1, 0, 0);
+    const QVector3D n1 = s1 != 0.0f ? c1 / s1 : QVector3D(0, 1, 0);
+    const QVector3D n2 = s2 != 0.0f ? c2 / s2 : QVector3D(0, 0, 1);
+    scale = QVector3D(s0, s1, s2);
+    QMatrix3x3 basis;
+    basis(0,0)=n0.x(); basis(1,0)=n0.y(); basis(2,0)=n0.z();
+    basis(0,1)=n1.x(); basis(1,1)=n1.y(); basis(2,1)=n1.z();
+    basis(0,2)=n2.x(); basis(1,2)=n2.y(); basis(2,2)=n2.z();
+    rot = QQuaternion::fromRotationMatrix(basis).normalized();
+    return std::max({ std::fabs(QVector3D::dotProduct(n0, n1)),
+                      std::fabs(QVector3D::dotProduct(n0, n2)),
+                      std::fabs(QVector3D::dotProduct(n1, n2)) });
+}
+
+/// FNV-1a over whatever is fed in — the structure hash behind SkeletonDesc::id.
+struct StructureHash {
+    unsigned long long h = 1469598103934665603ull;
+    void bytes(const void *p, size_t n) {
+        const unsigned char *b = static_cast<const unsigned char *>(p);
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    }
+    void operator()(int v)   { bytes(&v, sizeof(v)); }
+    // Quantised so float noise below the tolerance the whole pipeline works to
+    // cannot split one rig into two cache entries.
+    void operator()(float v) { const int q = int(std::lround(double(v) * 4096.0)); bytes(&q, sizeof(q)); }
+    void operator()(const QVector3D &v) { (*this)(v.x()); (*this)(v.y()); (*this)(v.z()); }
+    void operator()(const QQuaternion &q) { (*this)(q.x()); (*this)(q.y()); (*this)(q.z()); (*this)(q.scalar()); }
+    void operator()(const QString &s) { const QByteArray b = s.toUtf8(); bytes(b.constData(), size_t(b.size())); }
+    std::string hex() const { char buf[24]; std::snprintf(buf, sizeof(buf), "%016llx", h); return buf; }
+};
+
+}  // namespace
+
+bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc &out)
+{
+    out = SkeletonDesc();
+    if (skeleton.isNull() || skeleton->bones.isEmpty()) return false;
+
+    const QList<iris::BonePtr> &bones = skeleton->bones;
+    out.bones.resize(size_t(bones.size()));
+    StructureHash hash;
+    bool warnedShear = false;
+
+    for (int i = 0; i < bones.size(); ++i) {
+        const iris::BonePtr &b = bones[i];
+        BoneDesc &bd = out.bones[size_t(i)];
+        bd.name = b->name.toStdString();
+        // The parent comes from Bone::parentBone, which Mesh::extractSkeleton
+        // fills with the NEAREST BONE ANCESTOR in the aiNode tree — skipping the
+        // `$AssimpFbx$` pivot nodes that sit between real bones in every
+        // pivot-preserving FBX. (Before that fix every bone of such a rig was
+        // parentless and this loop would have produced a flat rig.)
+        bd.parent = -1;
+        if (!b->parentBone.isNull()) {
+            const auto it = skeleton->boneMap.constFind(b->parentBone->name);
+            if (it != skeleton->boneMap.constEnd() && it.value() != i) bd.parent = it.value();
+        }
+
+        // R1: the bind LOCAL that makes the engine's derived reverse bind pose
+        // come out equal to assimp's offset matrix. FK over these reproduces
+        // meshSpacePoseMatrix, whose inverse IS the offset matrix.
+        const QMatrix4x4 bindLocal = bd.parent >= 0
+            ? bones[bd.parent]->inverseMeshSpacePoseMatrix * b->meshSpacePoseMatrix
+            : b->meshSpacePoseMatrix;
+        QVector3D p, s; QQuaternion r;
+        const float shear = decomposeTRS(bindLocal, p, r, s);
+        if (shear > 1e-3f && !warnedShear) {
+            warnedShear = true;
+            qWarning("toSkeletonDesc: bone '%s' has a sheared bind pose (|cos| %.4f); "
+                     "bones are TRS-only and the shear is dropped",
+                     qUtf8Printable(b->name), double(shear));
+        }
+        bd.bindPosition = toVec3(p);
+        bd.bindRotation = toQuat(r);
+        bd.bindScale    = toVec3(s);
+
+        hash(b->name); hash(bd.parent); hash(p); hash(r); hash(s);
+    }
+    out.id = hash.hex();
+    return true;
+}
+
+bool SceneMirror::toBonePoses(const iris::SkeletonPtr &skeleton, std::vector<BonePose> &out)
+{
+    out.clear();
+    if (skeleton.isNull() || skeleton->bones.isEmpty()) return false;
+    const QList<iris::BonePtr> &bones = skeleton->bones;
+    if (skeleton->boneTransforms.size() != bones.size()) return false;
+
+    // Two passes. The document's skin matrix already folds in the inverse bind,
+    // so undoing it gives the bone's DERIVED transform relative to the mesh node:
+    //     derived_i = skin_i * meshSpacePose_i
+    // The engine wants each bone LOCAL to its parent, and Ogre re-derives the
+    // chain itself, so:  local_i = inverse(derived_parent) * derived_i.
+    // (Pass one is unordered on purpose — a parent may sit after its child.)
+    std::vector<QMatrix4x4> derived(size_t(bones.size()));
+    for (int i = 0; i < bones.size(); ++i)
+        derived[size_t(i)] = skeleton->boneTransforms[i] * bones[i]->meshSpacePoseMatrix;
+
+    out.resize(size_t(bones.size()));
+    for (int i = 0; i < bones.size(); ++i) {
+        int parent = -1;
+        if (!bones[i]->parentBone.isNull()) {
+            const auto it = skeleton->boneMap.constFind(bones[i]->parentBone->name);
+            if (it != skeleton->boneMap.constEnd() && it.value() != i) parent = it.value();
+        }
+        const QMatrix4x4 local = parent >= 0
+            ? derived[size_t(parent)].inverted() * derived[size_t(i)]
+            : derived[size_t(i)];
+        QVector3D p, s; QQuaternion r;
+        decomposeTRS(local, p, r, s);
+        out[size_t(i)].position = toVec3(p);
+        out[size_t(i)].rotation = toQuat(r);
+        out[size_t(i)].scale    = toVec3(s);
+    }
+    return true;
+}
+
 // ---- CPU skinning -----------------------------------------------------------------
 // The document already computes per-bone skin matrices (Skeleton::boneTransforms,
 // filled by SceneNode::updateAnimation during play). The legacy GL renderer handed

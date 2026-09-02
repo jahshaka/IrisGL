@@ -337,31 +337,35 @@ SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)
         skel->addBone(bone);
     }
 
-    //evaluate the bone heirarchy
-    std::function<void(aiNode*)> evalChildren;
-    evalChildren = [skel, &evalChildren](aiNode* parent){
-        auto bone = skel->getBone(QString(parent->mName.C_Str()));
-        if (!!bone) {
-            //qDebug() << bone->name;
-            for ( unsigned i = 0; i < parent->mNumChildren; i++)
-            {
-                auto childNode = parent->mChildren[i];
-                auto childBone = skel->getBone(QString(childNode->mName.C_Str()));
-                if (!!childBone)
-                    bone->addChild(childBone);
-
-                //evalChildren(childNode);
-            }
-        }
-
-        for ( unsigned i = 0; i < parent->mNumChildren; i++)
-        {
-            auto childNode = parent->mChildren[i];
-            evalChildren(childNode);
-        }
+    // Evaluate the bone hierarchy over the aiNode tree, linking each bone to its
+    // NEAREST BONE ANCESTOR — not to its immediate parent node.
+    //
+    // This used to link a bone only when its aiNode's DIRECT parent was also a
+    // bone, which is empty for every pivot-preserving FBX: assimp defaults
+    // AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS to true (nothing in this tree ever
+    // sets it), so a chain of `$AssimpFbx$_Translation/_Rotation/...` nodes sits
+    // between every pair of real bones and no link was ever made. A 67-bone
+    // Mixamo rig came back with 67 parentless bones (AVATAR_MODULE_SPEC §0.1),
+    // and anything reading the hierarchy — the glTF exporter's joint tree, and
+    // the engine skeleton GPU skinning builds — silently got a flat rig.
+    //
+    // Skipping intermediate non-bone nodes is exactly what the overlay's
+    // "nearest ancestor that is also a bone" walk does, done once at import
+    // instead of per consumer. For a rig with no intermediate nodes the result
+    // is identical to the old behaviour (nearest bone ancestor == parent bone).
+    std::function<void(aiNode*, const BonePtr&)> evalChildren;
+    evalChildren = [&skel, &evalChildren](aiNode *node, const BonePtr &ancestor) {
+        auto bone = skel->getBone(QString(node->mName.C_Str()));
+        // A bone may appear twice in a node tree only if the file is malformed;
+        // don't re-parent one that already has a parent.
+        if (!!bone && !!ancestor && !bone->parentBone && bone != ancestor)
+            ancestor->addChild(bone);
+        const BonePtr &nextAncestor = !!bone ? bone : ancestor;
+        for (unsigned i = 0; i < node->mNumChildren; i++)
+            evalChildren(node->mChildren[i], nextAncestor);
     };
 
-    evalChildren(scene->mRootNode);
+    evalChildren(scene->mRootNode, BonePtr());
 
     return skel;
 }

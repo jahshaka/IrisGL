@@ -207,6 +207,14 @@ public:
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool detachMesh(NodeId id) override;
 
+    // ---- Rigs: GPU skinning (GPU_SKINNING_SPEC; impl in OgreSkeleton.cpp) ----
+    bool attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
+                           const SkeletonDesc &rig) override;
+    bool hasSkeleton(NodeId id) const override;
+    std::vector<std::string> boneNames(NodeId id) const override;
+    bool setBonePoses(NodeId id, const BonePose *poses, size_t count) override;
+    bool boneMatrices(NodeId id, float *out, size_t count) const override;
+
     // ---- Textures ----
     TextureId loadTexture(const std::string &path, bool srgb) override;
     TextureId createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb) override;
@@ -289,6 +297,20 @@ private:
         // rewrite positions/normals while preserving tangents and uvs.
         bool dynamic = false;
         std::vector<float> interleaved;
+        // GPU skinning: the mesh was built with VES_BLEND_INDICES/WEIGHTS in its
+        // vertex declaration, so attachSkinnedMesh may bind a rig to it. A mesh
+        // carries at most ONE rig (Ogre::Mesh holds one SkeletonDef); `rigId` is
+        // the SkeletonDesc::id that was bound, empty until one is.
+        bool hasSkinData = false;
+        unsigned maxBlendIndex = 0;
+        std::string rigId;
+    };
+    /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
+    /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
+    /// which is why SkeletonDesc::id must be derived from the bone structure
+    /// alone: two files of the same rig must resolve to one def.
+    struct RigRec {
+        std::vector<std::string> boneNames;
     };
     struct MaterialRec { std::string datablockName; bool unlit = false; bool onTop = false; };
     struct TextureRec { Ogre::TextureGpu *texture = nullptr; std::string path; };
@@ -302,6 +324,14 @@ private:
     // file includes Xlib.h for window handles) eats the identifier.
     static constexpr auto kTransparencyNone = static_cast<Ogre::HlmsPbsDatablock::TransparencyModes>(0);
     static void applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p);
+    /// Builds (or finds) the in-memory v1 skeleton `rig` translates to and hands
+    /// the resulting SkeletonDef to `mesh`. v1 is a BUILD-TIME SCAFFOLD ONLY —
+    /// SkeletonDef has exactly one constructor and it takes a v1::Skeleton
+    /// (OgreSkeletonDef.h:145); nothing v1 reaches the render path (v1 meshes
+    /// render NOTHING on Vulkan, and geometry stays in our v2 buffers).
+    bool bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig);
+    /// The node's live rig, or null.
+    Ogre::SkeletonInstance *skeletonOf(NodeId id) const;
     /// Uploads MeshData as a v2 mesh: interleaved position/normal/tangent/uv, 16- or
     /// 32-bit indices. v1 meshes silently render nothing on Vulkan, so only this path
     /// exists. Every mesh carries tangents: HlmsPbs refuses to render a normal-mapped
@@ -380,6 +410,7 @@ private:
     std::string        &mError;
     std::map<NodeId, Node> mNodes;
     std::map<MeshId, MeshRec> mMeshes;
+    std::map<std::string, RigRec> mRigs;
     std::map<MaterialId, MaterialRec> mMaterials;
     std::map<TextureId, TextureRec> mTextures;
     std::set<std::string> mTextureDirs;

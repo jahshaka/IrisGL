@@ -75,6 +75,25 @@ public:
     /// the mesh carries no bone buffers. Public for tests.
     static bool toSkinData(iris::Mesh *mesh, std::vector<float> &boneIndices,
                            std::vector<float> &boneWeights);
+    /// Translates a document skeleton into the engine's rig descriptor
+    /// (GPU_SKINNING_SPEC §5 + R1). Bone ORDER is preserved — the index is what
+    /// the mesh's per-vertex blend indices name — and each bone's bind transform
+    /// is authored so that the engine's derived reverse bind pose comes out
+    /// EXACTLY equal to assimp's offset matrix, which is what makes the engine's
+    /// world-relative skinning and the document's mesh-node-relative skin
+    /// matrices the same maths. `id` is a hash of the bone STRUCTURE only (names,
+    /// hierarchy, bind transforms) — never the source file, never the clip set:
+    /// the engine's rig cache is process-wide and keyed on it, so two files of
+    /// one rig must resolve to one entry. False for a null or empty skeleton.
+    /// Static and public for tests.
+    static bool toSkeletonDesc(const iris::SkeletonPtr &skeleton,
+                               jahshaka::engine::SkeletonDesc &out);
+    /// The live pose as engine bone poses, index-parallel to toSkeletonDesc's
+    /// bones: each bone's transform LOCAL to its parent, decomposed to TRS from
+    /// the document's skin matrices. False when the skeleton is null/empty or its
+    /// boneTransforms are the wrong size.
+    static bool toBonePoses(const iris::SkeletonPtr &skeleton,
+                            std::vector<jahshaka::engine::BonePose> &out);
     /// CPU-skins bind-pose vertices with the skeleton's live boneTransforms —
     /// exactly the legacy GL shader's math (weighted sum of bone matrices).
     /// bindNormals/outNormals may be empty. Static and public for tests.
