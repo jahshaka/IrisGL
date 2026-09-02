@@ -345,7 +345,26 @@ MeshNode::loadAsSceneFragment(QString filePath,
         return QSharedPointer<iris::MeshNode>(nullptr);
     }
     if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
-    if (scene->mNumMeshes == 1) {
+    // AVATAR_MODULE_SPEC "ITEM ZERO" (fix A): the single-mesh shortcut below
+    // builds ONE MeshNode and no child SceneNodes at all. Pose evaluation is
+    // name-matched over the scene-node hierarchy (SceneNode::updateAnimation
+    // fills skeletonSpaceMatrices per visited node; Skeleton::applyAnimation
+    // sets skinMatrix only for bones whose name is a key there and
+    // setToIdentity() for the rest), so a skinned file taking the shortcut has
+    // exactly one entry in that map and EVERY bone stays identity: the clip
+    // clock advances and the character never moves. Silently. Every Mixamo
+    // export is single-mesh, so "no single-mesh rig can animate" was the whole
+    // of it.
+    //
+    // The multi-mesh path already builds the aiNode tree (that tree IS the bone
+    // hierarchy — including the `$AssimpFbx$` pivot nodes most FBX channels are
+    // named after), so a skinned single-mesh file just takes that path too. The
+    // guard keeps the blast radius at files that animate not at all today:
+    // unskinned single-mesh models (props, thumbnails, the sample scenes) keep
+    // the shortcut, its transform fix and their exact node shape.
+    const bool singleMeshShortcut =
+        scene->mNumMeshes == 1 && scene->mMeshes[0]->mNumBones == 0;
+    if (singleMeshShortcut) {
         auto mesh = scene->mMeshes[0];
         auto node = iris::MeshNode::create();
 
