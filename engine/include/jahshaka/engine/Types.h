@@ -495,7 +495,8 @@ struct PostFxDesc {
     /// Render the scene into a floating-point target and tonemap it (filmic,
     /// Hable/Uncharted2) with automatic exposure. The prerequisite for bloom.
     bool  hdr = false;
-    /// Auto-exposure midpoint, in stops, and the window it may adapt within.
+    /// Auto-exposure midpoint and the window it may adapt within. NOT stops:
+    /// the value is used as e^(exposure - 2), so +0.69 is one doubling.
     float exposure = 0.0f;
     float exposureMin = -2.5f;
     float exposureMax = 2.5f;
@@ -516,6 +517,9 @@ struct PostFxDesc {
     /// SMAA: -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra. Runs AFTER tonemapping.
     int   smaaPreset = -1;
     /// Screen-space reflections: 0 off, 1 half-resolution rays, 2 full.
+    /// NOT IMPLEMENTED YET — the field and the chain's plumbing exist, but the
+    /// backend builds no SSR passes, so a non-zero value renders as if it were
+    /// zero. World Modes declares the row unavailable for the same reason.
     int   ssr = 0;
     /// Re-render refractive materials (alphaMode Refractive) in a second pass
     /// that samples the opaque result. Costs nothing when no material is.

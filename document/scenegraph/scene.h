@@ -201,7 +201,8 @@ public:
     // (thumbnails, previews, every pixel suite) ignore all of it by
     // construction, which is what keeps their colours exact.
     bool  hdrEnabled;        ///< float scene target + filmic tonemap + auto exposure
-    float exposure;          ///< stops; the auto-exposure midpoint
+    float exposure;          ///< auto-exposure midpoint; used as e^(exposure-2),
+                             ///< so +0.69 is one doubling (NOT stops)
     bool  bloomEnabled;      ///< highlight bloom; rides the HDR node, needs hdrEnabled
     float bloomThreshold;    ///< where the bright pass starts, in tonemapper units
     bool  ssaoEnabled;
