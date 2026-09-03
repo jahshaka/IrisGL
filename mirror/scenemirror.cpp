@@ -1595,12 +1595,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // Pushing the raw integral instead would double the ambient of every
             // daylight scene — the sky is a full-hemisphere emitter and the flat
             // grey never was.
-            // x2: the owner's look call (2026-09-03) after living with the
-            // physically-honest level — "default lighting needs to be 2x
-            // brighter". The default (96,96,96) now lands at 0.75 of the sky's
-            // full integral; Ambient Color remains the artistic dial and
-            // saturates to 2.0 at white.
-            const float kAmbientLift = 2.0f;
+            // Owner-tuned (2026-09-03, two passes): 1.0 read too dark, 2.0
+            // blew out once the same-day SSAO sky-darkening fix landed — 1.4
+            // is the called midpoint. Ambient Color stays the artistic dial.
+            const float kAmbientLift = 1.4f;
             const float gain[3] = { float(a.redF()) * kAmbientLift,
                                     float(a.greenF()) * kAmbientLift,
                                     float(a.blueF()) * kAmbientLift };
