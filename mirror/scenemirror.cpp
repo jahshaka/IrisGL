@@ -70,7 +70,6 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     if (mHighlightMaterial) { mTarget->destroyMaterial(mHighlightMaterial); mHighlightMaterial = 0; }
     for (MeshId m : mMeshes) mTarget->destroyMesh(m);
     mMeshes.clear();
-    mSkins.clear();
     for (MaterialId m : mMaterials) mTarget->destroyMaterial(m);
     mMaterials.clear();
     for (TextureId t : mTextures) mTarget->destroyTexture(t);
@@ -107,7 +106,7 @@ int SceneMirror::sync()
         visit(child, 0, seen);
     removeMissing(seen);
     reclaimUnused();
-    syncSkinnedMeshes();
+    syncBonePoses();
     syncHighlight();
     syncGrid();
     return seen.size();
@@ -525,7 +524,28 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
         if (mesh && (!e.hasMesh || e.materialPtr != material)) {
             MeshId m = meshFor(mesh);
             MaterialId mat = materialFor(material);
-            if (m && mat && mTarget->attachMesh(e.node, m, mat)) {
+            bool attached = false;
+            e.gpuSkinned = false;
+            e.boneCount = 0;
+            if (m && mat && !e.skeleton.isNull()) {
+                // GPU skinning: a SEPARATE entry point, because the engine has to
+                // know the mesh is skinned before the renderable exists —
+                // attaching first and rigging later yields a silently unskinned
+                // character.
+                SkeletonDesc rig;
+                if (toSkeletonDesc(e.skeleton, rig) &&
+                    mTarget->attachSkinnedMesh(e.node, m, mat, rig)) {
+                    attached = true;
+                    e.gpuSkinned = true;
+                    e.boneCount = rig.bones.size();
+                    e.lastPose.clear();          // force the first pose push
+                }
+            }
+            // Anything the engine would not rig (an over-limit rig, a mesh whose
+            // bone buffers went missing) still renders — at bind pose, unskinned.
+            // One renderer, never two.
+            if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
+            if (attached) {
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
                 e.textureSignature.clear();
                 syncTextures(e, material);
@@ -609,7 +629,6 @@ void SceneMirror::reclaimUnused()
     for (const HighlightShell &s : mHighlightShells) if (s.mesh) usedMeshes.insert(s.mesh);
     for (auto it = mMeshes.begin(); it != mMeshes.end();) {
         if (usedMeshes.contains(it.value())) { ++it; continue; }
-        mSkins.remove(it.key());
         mTarget->destroyMesh(it.value()); it = mMeshes.erase(it);
     }
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
@@ -635,23 +654,28 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh)
     if (it != mMeshes.constEnd()) return it.value();
     MeshData data;
     if (!toMeshData(mesh, data)) return 0;
-    // A mesh with a skeleton AND bone vertex data is CPU-skinned: the engine mesh
-    // is created updatable and syncSkinnedMeshes pushes posed vertices each time
-    // the document's boneTransforms change. Static meshes keep the immutable path.
-    SkinRec skin;
-    const bool skinned = mesh->hasSkeleton() &&
-                         toSkinData(mesh, skin.boneIndices, skin.boneWeights) &&
-                         skin.boneIndices.size() == data.vertexCount() * 4;
-    data.dynamic = skinned;
-    MeshId id = mTarget->createMesh(data);
-    if (id) {
-        mMeshes.insert(mesh, id);
-        if (skinned) {
-            skin.bindPositions = data.positions;
-            skin.bindNormals   = data.normals;
-            mSkins.insert(mesh, std::move(skin));
+    // A mesh with a skeleton AND bone vertex data is GPU-skinned: the blend
+    // indices and weights ride in the vertex buffer and the pose reaches the GPU
+    // as bone matrices, so the mesh is IMMUTABLE — uploaded once, ever. (It used
+    // to be `dynamic`, and the mirror rewrote and re-uploaded every vertex every
+    // time the pose changed: ~2.4 MB per character per frame at 50k vertices,
+    // which is the wall "many avatars" hit long before the arithmetic did.)
+    std::vector<float> bi, bw;
+    if (mesh->hasSkeleton() && toSkinData(mesh, bi, bw) &&
+        bi.size() == data.vertexCount() * 4) {
+        data.blendIndices.resize(bi.size());
+        for (size_t i = 0; i < bi.size(); ++i) {
+            // Document indices are floats (the legacy GL shader cast them back
+            // with int()); the engine wants uint8. Out-of-range means the mesh
+            // and its skeleton disagree — clamp rather than write a wild index
+            // into the vertex buffer; attachSkinnedMesh validates the range.
+            const int v = int(bi[i]);
+            data.blendIndices[i] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v));
         }
+        data.blendWeights = bw;
     }
+    MeshId id = mTarget->createMesh(data);
+    if (id) mMeshes.insert(mesh, id);
     return id;
 }
 
@@ -1143,31 +1167,23 @@ void SceneMirror::skinVertices(const QVector<QMatrix4x4> &boneTransforms,
     }
 }
 
-void SceneMirror::syncSkinnedMeshes()
+void SceneMirror::syncBonePoses()
 {
-    // Iteration is over NODES, not mesh assets (GPU_SKINNING_SPEC §7): the pose
-    // lives on the MeshNode's own skeleton now, so the redundant-upload gate is
-    // per node too. Bind data still keys on the mesh asset — it is immutable and
-    // genuinely shared.
+    // The per-frame skinning cost, all of it: for each GPU-skinned node whose
+    // pose changed, O(bones) matrix decompositions and one small bone-matrix
+    // push. No vertices are touched and nothing is uploaded — the character's
+    // geometry was uploaded once, at creation.
     //
-    // KNOWN LIMIT of this CPU path, and the reason phase 3 replaces it: the
-    // engine mesh is shared by every node that references the mesh asset, so N
-    // duplicates of one rig posed differently still fight over ONE vertex
-    // buffer. Per-node poses reach the screen only once skinning is on the GPU,
-    // where each Item carries its own SkeletonInstance.
+    // The gate is per NODE, so N avatars of one rig each pay for their own pose
+    // and an idle one pays a vector compare.
     for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
         Entry &e = *it;
-        if (e.skeleton.isNull() || !e.mesh || !e.meshPtr) continue;
-        const auto sk = mSkins.constFind(e.meshPtr);
-        if (sk == mSkins.constEnd()) continue;
+        if (!e.gpuSkinned || e.skeleton.isNull()) continue;
         const QVector<QMatrix4x4> &pose = e.skeleton->boneTransforms;
-        // Only push when the pose actually changed (paused/edit-mode scenes
-        // pay nothing after the first frame).
         if (pose == e.lastPose) continue;
-        std::vector<float> positions, normals;
-        skinVertices(pose, sk->bindPositions, sk->bindNormals,
-                     sk->boneIndices, sk->boneWeights, positions, normals);
-        if (mTarget->updateMeshVertices(e.mesh, positions, normals))
+        if (!toBonePoses(e.skeleton, mPoseScratch)) continue;
+        if (mPoseScratch.size() != e.boneCount) continue;
+        if (mTarget->setBonePoses(e.node, mPoseScratch.data(), mPoseScratch.size()))
             e.lastPose = pose;
     }
 }

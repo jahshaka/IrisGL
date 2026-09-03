@@ -97,6 +97,13 @@ public:
     /// CPU-skins bind-pose vertices with the skeleton's live boneTransforms —
     /// exactly the legacy GL shader's math (weighted sum of bone matrices).
     /// bindNormals/outNormals may be empty. Static and public for tests.
+    ///
+    /// NOT PART OF RENDERING any more (GPU_SKINNING_SPEC §6): skinning happens in
+    /// the vertex shader, and sync() never calls this. It survives as the ORACLE
+    /// the GPU path is checked against (skeletal.gpu_parity) and for document-only
+    /// contexts that need posed vertices with no GPU. Note it skins position and
+    /// normal only — the shader also skins the TANGENT, so a normal-mapped
+    /// character lights correctly on the GPU path and did not on this one.
     static void skinVertices(const QVector<QMatrix4x4> &boneTransforms,
                              const std::vector<float> &bindPositions,
                              const std::vector<float> &bindNormals,
@@ -174,10 +181,13 @@ private:
         QString iconSignature;                       // icon image path; recreate on change
         bool hasBillboards = false;                  // particle emitter mirrored as billboards
         QString billboardSignature;                  // texture + blend; recreate on change
-        // Skinning (GPU_SKINNING_SPEC §7): the NODE's own skeleton, not the
-        // mesh asset's shared rig template. Pose state is per node, so two
-        // duplicates of one character animate independently.
+        // Skinning (GPU_SKINNING_SPEC): the NODE's own skeleton, not the mesh
+        // asset's shared rig template. Pose state is per node, so two duplicates
+        // of one character animate independently — on the GPU each node's Item
+        // carries its own SkeletonInstance, so they also LOOK different.
         iris::SkeletonPtr skeleton;
+        bool gpuSkinned = false;                     // the engine accepted the rig
+        size_t boneCount = 0;
         QVector<QMatrix4x4> lastPose;                // last pose pushed for THIS node
     };
     void syncParticles(Entry &e, iris::ParticleSystemNode *ps);
@@ -192,11 +202,11 @@ private:
     /// Frees engine meshes/materials no live entry references (asset browsing would
     /// otherwise grow them for the life of the process; pointer keys could alias).
     void reclaimUnused();
-    /// Per-frame CPU skinning: for every mirrored mesh with a skeleton, when the
-    /// document's boneTransforms changed since the last push, recompute skinned
-    /// positions/normals and upload them via Scene::updateMeshVertices. Meshes
-    /// without a skeleton never enter this path (they stay immutable).
-    void syncSkinnedMeshes();
+    /// Per-frame skinning, all of it (GPU_SKINNING_SPEC phase 3): for every
+    /// GPU-skinned NODE whose pose changed since the last push, decompose the
+    /// document's skin matrices to per-bone local TRS and push them with
+    /// Scene::setBonePoses. O(bones), not O(vertices); nothing is uploaded.
+    void syncBonePoses();
     /// Resamples an equirect sky image into six small cubemap faces and pushes
     /// them as the scene's environment reflections (Scene::setSkyReflection) —
     /// how equirect/gradient/realistic skies get the IBL cubemap skies have.
@@ -222,14 +232,8 @@ private:
     iris::ScenePtr           mSource;
     QHash<long, Entry>       mEntries;         // keyed by iris SceneNode::nodeId
     QHash<iris::Mesh *, jahshaka::engine::MeshId> mMeshes;
-    /// CPU-skinning state per skinned document MESH ASSET: bind-pose copies +
-    /// bone data, captured once at mesh creation. Immutable after creation —
-    /// the live pose and the redundant-upload gate live per NODE (Entry).
-    struct SkinRec {
-        std::vector<float> bindPositions, bindNormals;
-        std::vector<float> boneIndices, boneWeights;   // 4 of each per vertex
-    };
-    QHash<iris::Mesh *, SkinRec> mSkins;
+    /// Reused across frames so a per-frame pose push allocates nothing.
+    std::vector<jahshaka::engine::BonePose> mPoseScratch;
     QHash<iris::Material *, jahshaka::engine::MaterialId> mMaterials;
     QHash<QString, jahshaka::engine::TextureId> mTextures;
     QHash<QString, jahshaka::engine::TextureId> mIconTextures;   // light icon glyphs (Qt resources)
