@@ -527,7 +527,20 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
             p->setAllLoadActions(Ogre::LoadAction::Load);
             p->mStoreActionColour[0] = Ogre::StoreAction::StoreOrResolve;
-            p->mStoreActionDepth = Ogre::StoreAction::DontCare;
+            // DEPTH MUST SURVIVE THIS PASS whenever a LATER pass reads it.
+            // Upstream's Refractions.compositor ends the frame here, so it says
+            // `depth dont_care` — and DontCare is not "keep it, we just don't
+            // promise": Vulkan's VK_ATTACHMENT_STORE_OP_DONT_CARE makes the
+            // attachment's contents UNDEFINED, and the driver is free to hand
+            // back recycled tiles. Our chain runs SSAO AFTER refraction (the AO
+            // multiply belongs in linear HDR space), so with refractions on the
+            // AO march was sampling an undefined depth buffer: garbage
+            // occlusion, worst where the depth was uniform and the geometry test
+            // is a knife edge — i.e. the SKY, which came out as blocks of
+            // recycled-VRAM noise under the Epic chain (2026-09-03 defect lane;
+            // sky_stays_smooth_under_the_post_chain is the pixel gate).
+            p->mStoreActionDepth = (desc.ssao || desc.ssr) ? Ogre::StoreAction::Store
+                                                           : Ogre::StoreAction::DontCare;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             // The shadow node was already computed for this camera by the opaque
             // pass; recomputing it would render every shadow map a second time.

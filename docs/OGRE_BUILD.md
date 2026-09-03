@@ -176,5 +176,18 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
    throws on Vulkan AFTER the sky renderable is attached (null-datablock crash in
    the render queue). Jahshaka uses its own sky geometry; the line is commented out.
 
+   (0004-0010 landed with the macOS and refraction lanes — CMake/FreeImage, MoltenVK
+   portability, the Metal window, swapchain currentExtent, the equirect sky's
+   sliceIdx sample and HlmsPbs' refraction max3. Each patch file documents itself.)
+
+11. **0011-ssao-reject-far-plane-sky** — the Tutorial_SSAO march has no far-plane
+    rejection: on sky pixels there is no geometry to occlude AND the normals
+    G-buffer was never written (the sky quad writes colour only), so the 64 taps
+    compare a uniform depth against itself and return ~half occlusion modulated by
+    the rotation noise — a dithered sky, ~45% too dark, under any chain with SSAO.
+    Ogre's own tutorial scene has no sky, which is why upstream never saw it.
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
-no longer applies is the signal to review upstream's change and adapt.
+no longer applies is the signal to review upstream's change and adapt. Media-only
+patches (0003/0009/0011) need no Ogre rebuild — the Studio build stages the media
+straight from the submodule — but the patch loop must have run in that tree.
