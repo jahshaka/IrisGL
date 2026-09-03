@@ -209,8 +209,15 @@ void OgreEngine::destroyView(View *view) {
 
 void OgreEngine::renderOneFrame() {
     JAH_TRY {
-        for (auto &v : mViews) { v->applyPendingResize(); v->updateParticles(); v->updateGi(); }
-        for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); }
+        for (auto &v : mViews) {
+            v->applyPendingResize(); v->updateParticles(); v->updateGi();
+            // Both ends of the planar-reflection wiring move between frames (the
+            // scene rebuilds its arm on a parameter change, the view recreates
+            // its camera on setScene), so the listener is re-synced rather than
+            // hooked up once. Idempotent and cheap when nothing changed.
+            v->syncPlanarListener();
+        }
+        for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar(); }
         if (mRoot) mRoot->renderOneFrame();
     } JAH_CATCH(mLastError, );
 }
@@ -235,10 +242,20 @@ void OgreEngine::setShadowResolution(unsigned pixels) {
         std::vector<OgreView *> rebuilt;
         for (auto &v : mViews)
             if (v->dropWorkspaceForShadowRebuild()) rebuilt.push_back(v.get());
+        // The planar-reflection arm instantiates the HALF-resolution shadow node
+        // in each of its private workspaces, so it holds the same kind of
+        // reference a view's workspace does and must be dropped for the same
+        // reason. Scenes whose reflections do not use shadows report false.
+        std::vector<OgreScene *> planarRebuilt;
+        for (auto &s : mScenes)
+            if (s->dropPlanarForShadowRebuild()) planarRebuilt.push_back(s.get());
         if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
             cm->removeShadowNodeDefinition(OgreView::kShadowNodeName);
+        if (cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
+            cm->removeShadowNodeDefinition(OgreView::kReflectShadowNodeName);
         createShadowNode();
         for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
+        for (OgreScene *s : planarRebuilt) s->recreatePlanarAfterShadowRebuild();
     } JAH_CATCH(mLastError, );
 }
 
@@ -371,11 +388,23 @@ void OgreEngine::registerCommonMaterials() {
 
 void OgreEngine::createShadowNode() {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-    if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName)) return;
+    if (!cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
+        buildShadowNode(OgreView::kShadowNodeName, mShadowResolution);
+    // The planar-reflection pass's own atlas, at HALF resolution. Definitions
+    // are free — the VRAM is only allocated where a workspace instantiates one,
+    // which for reflections is one atlas PER BUDGET SLOT. At the default 2048 a
+    // shared full-resolution node would cost ~56 MB per slot; half is ~14 MB,
+    // and nobody has ever measured shadow-map resolution inside a mirror.
+    if (!cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
+        buildShadowNode(OgreView::kReflectShadowNodeName, std::max(256u, mShadowResolution / 2u));
+}
+
+void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution) {
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     // The whole atlas derives from one base size (Engine::setShadowResolution):
     // PSSM split 0 and the two focused maps at R, further splits at R/2 —
     // exactly the historical 2048/1024 layout, scaled.
-    const Ogre::uint32 R = mShadowResolution;
+    const Ogre::uint32 R = baseResolution;
     const Ogre::uint32 H = std::max(128u, R / 2u);
     Ogre::ShadowNodeHelper::ShadowParamVec params;
     Ogre::ShadowNodeHelper::ShadowParam p;
@@ -402,7 +431,7 @@ void OgreEngine::createShadowNode() {
     p.atlasStart[0].y = R + H + R;
     params.push_back(p);
     Ogre::ShadowNodeHelper::createShadowNodeWithSettings(
-        cm, mRoot->getRenderSystem()->getCapabilities(), OgreView::kShadowNodeName, params, false);
+        cm, mRoot->getRenderSystem()->getCapabilities(), name, params, false);
 }
 
 void OgreEngine::applyShadowFilter() {

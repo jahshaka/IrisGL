@@ -224,6 +224,15 @@ QList<Property*> SceneNode::getProperties()
     boolProp->value = castShadow;
     props.append(boolProp);
 
+    // A TOP-LEVEL row beside Cast Shadow, not a buried Reflections section
+    // (PLANAR_REFLECTIONS_SPEC.md §7): the flag is the only way a user gets a
+    // mirror, and an author cannot be expected to hunt for it.
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Planar Reflector";
+    boolProp->name = "planarReflector";
+    boolProp->value = planarReflector;
+    props.append(boolProp);
+
     boolProp = new BoolProperty();
     boolProp->displayName = "Pickable";
     boolProp->name = "pickable";
@@ -241,6 +250,7 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     if (valueName == "name")       return getName();
     if (valueName == "visible")    return isVisible();
     if (valueName == "castShadow") return getShadowCastingEnabled();
+    if (valueName == "planarReflector") return getPlanarReflector();
     if (valueName == "pickable")   return isPickable();
 
     return QVariant();
@@ -256,6 +266,7 @@ bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
     // different operation from setting this node's own flag.
     if (valueName == "visible")    { setVisible(value.toBool());                 return true; }
     if (valueName == "castShadow") { setShadowCastingEnabled(value.toBool());    return true; }
+    if (valueName == "planarReflector") { setPlanarReflector(value.toBool());     return true; }
     if (valueName == "pickable")   { setPickable(value.toBool());                return true; }
     return false;
 }
@@ -554,6 +565,7 @@ SceneNodePtr SceneNode::duplicate()
 	node->removable		= this->removable;
 	node->pickable		= this->pickable;
 	node->castShadow	= this->castShadow;
+	node->planarReflector = this->planarReflector;
 	node->attached		= this->attached;
 
     auto id = QUuid::createUuid();

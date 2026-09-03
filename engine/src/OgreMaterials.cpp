@@ -163,7 +163,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     if (it == mMaterials.end()) return false;
     JAH_TRY {
         invalidateGiCaches();   // VctMaterial caches conversions by raw datablock pointer
-        for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.second);
+        for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.first, kv.second);
         Ogre::Hlms *hlms = hlmsFor(it->second);
         if (hlms->getDatablock(Ogre::IdString(it->second.datablockName)))
             hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
@@ -179,7 +179,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
     if (tit == mMaterials.end()) { mError = "attachMesh: unknown material"; return false; }
     JAH_TRY {
         Node &n = nit->second;
-        detachItem(n);
+        detachItem(id, n);
         n.item = mSceneMgr->createItem(mit->second.mesh, Ogre::SCENE_DYNAMIC);
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
@@ -195,6 +195,11 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // New lit geometry must join the voxel volume / next trace; unlit
         // overlays (outlines, wires) never participate in GI.
         if (!tit->second.unlit) invalidateGiCaches();
+        // A reflector node whose mesh was swapped keeps its flag (detachItem
+        // above only disarmed the dead Item) — re-derive the plane from the new
+        // geometry. A failure here is not fatal to attachMesh: the node simply
+        // stops reflecting and lastError() says why.
+        if (mReflectors.count(id)) armReflector(id, n);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -202,7 +207,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
 bool OgreScene::detachMesh(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return false;
-    JAH_TRY { detachItem(it->second); return true; } JAH_CATCH(mError, false);
+    JAH_TRY { detachItem(id, it->second); return true; } JAH_CATCH(mError, false);
 }
 
 // ---- Textures ----

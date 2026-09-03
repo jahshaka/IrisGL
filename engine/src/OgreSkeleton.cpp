@@ -242,7 +242,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         if (!bindRigToMesh(mit->second, rig)) return false;
 
         Node &n = nit->second;
-        detachItem(n);
+        detachItem(id, n);
         // Order is load-bearing: the SubMesh's blend index map must be non-empty
         // BEFORE the Item exists. Item::_initialise creates the SkeletonInstance
         // (OgreItem.cpp:104-107) and buildSubItems calls SubItem::setupSkeleton

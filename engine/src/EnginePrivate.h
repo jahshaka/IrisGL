@@ -70,6 +70,8 @@
 // Fog rides Ogre's Atmosphere component: we take its exponential fog + brightness
 // breakthrough and leave its sky and its sun/ambient coupling alone (OgreFog.cpp).
 #include <Atmosphere/OgreAtmosphereNpr.h>
+#include <OgrePlanarReflections.h>
+#include <Compositor/OgreCompositorWorkspaceListener.h>
 
 // X11 is the only on-screen window path today (Ogre Vulkan/XCB). Other
 // platforms build headless-only until they grow a native window backend
@@ -123,9 +125,21 @@ class OgreEngine;
 // would otherwise occlude rays or raycast as garbage triangles (a non-indexed
 // line VAO reads as a vertex triangle list). kGiLightBit marks exactly the one
 // light Instant Radiosity traces from (InstantRadiosity::mLightMask).
+// kNoReflectBit marks objects that must NOT appear inside a planar reflection —
+// today exactly the reflector planes themselves (a mirror containing itself is
+// a feedback artefact, and Ogre's own sample excludes them the same way).
+//
+// THE TRAP, and why this bit is INVERTED relative to the other three: Ogre's
+// PlanarReflections sample uses `visibility_mask 0xfffffffe` and tags mirrors
+// `setVisibilityFlags(1u)` — i.e. in the sample, bit 0 means "not in
+// reflections". Bit 0 here is kVisibleBit and EVERY object carries it, so
+// copying the sample's mask renders a perfectly empty reflection. Ours is a new
+// bit with the opposite polarity: the reflective pass masks with
+// ~kNoReflectBit, so an object is in reflections unless it says otherwise.
 constexpr Ogre::uint32 kVisibleBit     = 1u;
 constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
+constexpr Ogre::uint32 kNoReflectBit   = 1u << 3;
 
 // Forward+ clustered decal budget PER CELL (DECALS_SPEC D5). Not a scene-wide
 // cap: decals beyond this in one cluster cell are dropped farthest-first.
@@ -216,6 +230,78 @@ private:
     static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
 };
 extern FogHlmsListener gFogListener;
+
+// ---------------------------------------------------------------------------
+// Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl in OgrePlanar.cpp).
+//
+// SHAPE, in one paragraph, because the moving parts are spread over three
+// classes: OgreScene owns ONE Ogre::PlanarReflections (Ogre allows one per
+// SceneManager) plus one actor per reflector node; OgreView owns the compositor
+// listener that drives it (the call must ride the MAIN workspace's per-frame
+// update, and only the view knows its own workspace and camera); OgreEngine owns
+// the half-resolution shadow-node DEFINITION the reflective pass may reference
+// and re-syncs the view listeners once a frame.
+namespace planar {
+
+/// The reflective pass renders render queues [0, kReflectLastRQ) — the same
+/// opaque range the main chain draws, deliberately stopping before the
+/// on-top overlay queue. Gizmos, selection outlines and wire helpers must
+/// never appear inside a mirror; excluding them by RENDER QUEUE rather than by
+/// visibility bit means an overlay does not have to remember to tag itself,
+/// and it composes with the chain's own RQ policy (OgreChain.cpp).
+constexpr Ogre::uint8 kReflectLastRQ = 199u;
+
+/// Builds the private workspace definition the reflection cameras render
+/// through, under `workspaceDef` (node definitions appended to `nodeDefsOut`).
+/// Deliberately NOT a copy of Samples/.../PlanarReflections.compositor: that
+/// script hard-codes a 2048x7168 shadow atlas that would fight
+/// Engine::setShadowResolution, and copying sample scripts is how the
+/// patches-only law gets broken by the back door.
+void buildWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+                    const PlanarReflectionParams &p, const std::string &shadowNodeName,
+                    std::vector<std::string> &nodeDefsOut);
+void destroyWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+                      std::vector<std::string> &nodeDefs);
+
+/// A reflection plane derived from a node's own geometry.
+struct Plane {
+    Ogre::Vector3    centre;        ///< world space
+    Ogre::Vector2    halfSize;      ///< actor-local X/Y half extents
+    Ogre::Quaternion orientation;   ///< zAxis() IS the plane normal
+    Ogre::Vector3    localNormal;   ///< the mesh-local unit axis the normal came from
+    Ogre::Vector3    localCentre;   ///< the mesh-local AABB centre
+};
+
+/// Derives the plane from `item`'s local bounds and `node`'s world transform.
+/// Returns false (with `error` filled) when the mesh is not plate-like: the
+/// thinnest extent must be at most `kPlateRatio` of the next thinnest, or the
+/// 20-degree matching rule makes the result look broken rather than merely
+/// approximate.
+constexpr float kPlateRatio = 0.1f;
+bool derivePlane(Ogre::SceneNode *node, const Ogre::Item *item, Plane &out,
+                 std::string &error);
+
+/// Drives one Ogre::PlanarReflections from one view's workspace.
+///
+/// It must be a per-VIEW object even though PlanarReflections is per-SCENE:
+/// `update()` takes the camera being rendered, and it does not merely book-keep
+/// — it synchronously runs every active reflection workspace inside the
+/// callback. Matching on the view's own camera pointer is also what keeps the
+/// callback from firing for the reflection passes themselves. (Ogre's sample
+/// discriminates with the magic pass identifier 25001; we do not adopt magic
+/// numbers into our programmatic chain.)
+class WorkspaceListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    /// Both may be re-pointed at any time: the scene's arm is rebuilt on every
+    /// parameter change and the view's camera is recreated on every setScene.
+    Ogre::PlanarReflections *mReflections = nullptr;
+    Ogre::Camera            *mCamera      = nullptr;
+
+    void workspacePreUpdate(Ogre::CompositorWorkspace *) override;
+    void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
+};
+
+}   // namespace planar
 
 // ---------------------------------------------------------------------------
 // Photometric (IES) light profiles and area-light mask textures — OgreLights.cpp.
@@ -430,6 +516,26 @@ public:
     bool setGlobalIllumination(const GiParams &p) override;
     void refreshGlobalIllumination() override;
 
+    // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
+    bool setPlanarReflections(const PlanarReflectionParams &p) override;
+    bool setNodePlanarReflector(NodeId id, bool on) override;
+    bool nodePlanarReflector(NodeId id) const override;
+    int  activePlanarReflectors() const override;
+    /// The scene's live PlanarReflections, or null when the budget is 0. Views
+    /// read this once a frame to decide whether to arm their listener.
+    Ogre::PlanarReflections *planarReflections() const { return mPlanar; }
+    /// Re-derives every actor's world plane from its node's CURRENT transform.
+    /// Actors are world-space objects that do NOT follow a SceneNode, so this
+    /// has to happen after the host has pushed transforms and before the frame
+    /// renders. Called once per frame by the engine, like applyPendingGi.
+    void applyPendingPlanar();
+    /// Shadow-atlas rebuild support, the OgreView::dropWorkspaceForShadowRebuild
+    /// shape: the reflective workspaces instantiate the half-resolution shadow
+    /// node, whose DEFINITION cannot be replaced while anything references it.
+    /// Returns true when the arm was actually dropped (caller re-adds).
+    bool dropPlanarForShadowRebuild();
+    void recreatePlanarAfterShadowRebuild();
+
     Ogre::SceneManager *sceneManager() const;
 
     /// Releases everything in dependency order. Safe to call twice. Called by
@@ -541,7 +647,7 @@ private:
 
     Ogre::Hlms *hlmsFor(const MaterialRec &m) const;
     /// Removes the renderable from a node that references a SHARED mesh/material.
-    void detachItem(Node &n);
+    void detachItem(NodeId id, Node &n);
     // Ogre::HlmsPbsDatablock::None is unspellable here: X11's `None` macro (this
     // file includes Xlib.h for window handles) eats the identifier.
     static constexpr auto kTransparencyNone = static_cast<Ogre::HlmsPbsDatablock::TransparencyModes>(0);
@@ -602,7 +708,7 @@ private:
     /// non-null SceneManager decal texture, so clearing it drops the decal
     /// code out of every PBS shader again.
     void refreshDecalBindings();
-    void releaseNode(Node &n);
+    void releaseNode(NodeId id, Node &n);
 
     // ---- GI internals ----
     /// Resolves the driving light — the requested node's light, else the first
@@ -658,6 +764,30 @@ private:
     /// BEFORE the SceneManager dies (VPL lights, probe workspaces, GI camera).
     void teardownGi();
 
+    // ---- Planar-reflection internals (OgrePlanar.cpp) ----
+    /// Builds the PlanarReflections arm at mPlanarParams (private workspace
+    /// definition, cameras, RTTs) and re-adds every reflector's actor. Always
+    /// from scratch: the VCT lesson — Ogre caches by raw pointer inside these
+    /// objects, and setMaxActiveActors can only grow, never re-specify.
+    void rebuildPlanar();
+    /// Unbinds from HlmsPbs (when this scene owns the binding), deletes the
+    /// PlanarReflections and removes the private workspace definitions. Safe to
+    /// call twice; MUST run before the SceneManager dies (it owns the
+    /// reflection cameras and workspaces).
+    void teardownPlanar();
+    /// Registers `n` with the live arm: adds its actor, adds its item as a PBS
+    /// receiver, and tags the item kNoReflectBit so the mirror stays out of its
+    /// own reflection. No-op when the arm is down. Returns false + mError when
+    /// the node's mesh is not plate-like.
+    bool armReflector(NodeId id, Node &n);
+    /// Removes `n` from the live arm and restores its visibility flags. MUST be
+    /// called before the node's Item is destroyed: PlanarReflections keeps raw
+    /// Renderable pointers and its own header says so in as many words.
+    void disarmReflector(NodeId id, Node &n);
+    /// disarmReflector for every reflector, keeping the flags — used when the
+    /// arm itself is being torn down and rebuilt.
+    void disarmAllReflectors();
+
     Ogre::SceneNode *node(NodeId id) const;
     /// Ids are monotonic per scene and never reused.
     NodeId track(const Node &n);
@@ -701,6 +831,15 @@ private:
     /// Live decals in THIS scene. The SceneManager-level atlas binding is
     /// driven off the count (see refreshDecalBindings).
     unsigned            mDecalCount = 0;
+    // Planar-reflection arm. mPlanar is null unless mPlanarParams.budget > 0.
+    // mReflectors is the DOCUMENT's set of reflector nodes and survives the arm
+    // going up and down; mActors only exists while the arm is up.
+    Ogre::PlanarReflections *mPlanar = nullptr;
+    PlanarReflectionParams   mPlanarParams;
+    std::string              mPlanarWorkspaceDef;
+    std::vector<std::string> mPlanarNodeDefs;
+    std::set<NodeId>         mReflectors;
+    std::map<NodeId, Ogre::PlanarReflectionActor *> mActors;
     TextureId           mNextTextureId = 0;
     NodeId              mNextId = 0;
     MeshId              mNextMeshId = 0;
@@ -734,6 +873,14 @@ public:
     /// rebuild definitions + workspace, keeping scene, camera and enabled state.
     void rebuildWorkspaceDef();
     static constexpr const char *kShadowNodeName = "JahshakaShadowNode";
+    /// The SECOND shadow node, at half the base resolution, used ONLY by the
+    /// planar-reflection pass. CompositorShadowNodes are per-workspace and are
+    /// constructed eagerly in CompositorPassScene's constructor, so every
+    /// reflection slot allocates its own atlas the moment the arm is built:
+    /// sharing kShadowNodeName would cost ~56 MB PER SLOT at the default 2048.
+    /// Half resolution makes that ~14 MB, and a shadow seen in a mirror is the
+    /// last place anyone measures shadow-map resolution.
+    static constexpr const char *kReflectShadowNodeName = "JahshakaReflectShadowNode";
 
     // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane
     //      depends on it) ---------------------------------------------------
@@ -808,6 +955,14 @@ public:
     /// Feeds the camera position to the scene's GI (PCC probe blending tracks
     /// the viewer in hybrid mode).
     void updateGi();
+    /// Arms or disarms this view's planar-reflection compositor listener to
+    /// match the bound scene's current state, and re-points it at the current
+    /// camera and PlanarReflections instance. Cheap and idempotent; called once
+    /// a frame, because BOTH ends move (the scene rebuilds its arm on any
+    /// parameter change, the view recreates its camera on every setScene).
+    /// Registration itself rides addWorkspaceListener, so the listener survives
+    /// every workspace rebuild — that is the seam this feature was waiting for.
+    void syncPlanarListener();
     /// Releases workspace, camera, workspace definitions and the window/texture.
     /// Safe to call twice. Called by Engine::destroyView and by the Engine
     /// destructor BEFORE Root dies.
@@ -842,6 +997,9 @@ private:
     /// recreation (test_engine_recreate is where that shows up).
     std::vector<std::string>   mNodeDefs;
     std::vector<Ogre::CompositorWorkspaceListener *> mWorkspaceListeners;
+    /// Owned; registered through addWorkspaceListener while the bound scene has
+    /// planar reflections armed. Null until the first frame that needs it.
+    std::unique_ptr<planar::WorkspaceListener> mPlanarListener;
     unsigned                   mWorkspaceGeneration = 0;
     unsigned                   mWidth, mHeight;
     Colour                     mBackground;
@@ -908,7 +1066,11 @@ private:
     /// One shadow node for the process: PSSM (3 splits) for the first directional
     /// light and focused maps for the next two point/spot lights, in one atlas.
     /// Mirrors Ogre's ShadowMapFromCode sample. Views opt in with setShadows(true).
+    /// Also creates the half-resolution twin the planar-reflection pass uses.
     void createShadowNode();
+    /// The shared body: one PSSM + two focused maps in one atlas derived from
+    /// `baseResolution`, registered under `name`.
+    void buildShadowNode(const char *name, unsigned baseResolution);
 
     /// Maps the neutral enum onto HlmsPbs. PCF only: ExponentialShadowMaps is
     /// deliberately NOT used for VerySoft — ESM needs an ESM-compatible shadow

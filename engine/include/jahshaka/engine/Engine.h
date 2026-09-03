@@ -288,6 +288,37 @@ public:
     /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
     /// in milliseconds at editor quality; callers may invoke this per edit.
     virtual void        refreshGlobalIllumination() = 0;
+
+    // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
+    /// Applies the reflection state idempotently. Pushing the same params twice is
+    /// free; a CHANGE rebuilds the whole arm (render targets, cameras, private
+    /// workspaces) and a budget change additionally recompiles PBS shaders, so
+    /// hosts may call this every frame but must not animate the values.
+    /// `budget == 0` tears everything down and costs nothing.
+    ///
+    /// Only ONE scene per process can have reflections at a time: the receiving
+    /// half lives on the process-wide HlmsPbs, exactly like VCT/PCC. The last
+    /// scene to enable owns the binding; enabling on a second scene disables the
+    /// first (which is why the host arms this on the editor scene only).
+    virtual bool        setPlanarReflections(const PlanarReflectionParams &) = 0;
+    /// Makes (or un-makes) a node a reflection plane. The node must already have
+    /// a mesh attached, and that mesh must be PLATE-LIKE — its thinnest local
+    /// extent no more than a tenth of the next — because the plane, its size and
+    /// its normal are all derived from the mesh's own bounds. A sphere or a cube
+    /// is refused (false, lastError()); the 20-degree matching rule would make it
+    /// look broken rather than merely wrong.
+    ///
+    /// The plane's normal is the node's thin axis in the POSITIVE direction: the
+    /// top of a floor reflects, the underside does not. The reflector is excluded
+    /// from its own reflection render, so a mirror never contains itself.
+    /// Reflectors survive `setPlanarReflections` changes; the flag is remembered
+    /// even while the budget is 0.
+    virtual bool        setNodePlanarReflector(NodeId, bool) = 0;
+    virtual bool        nodePlanarReflector(NodeId) const = 0;
+    /// How many reflection planes actually rendered last frame — the "achieved"
+    /// number against the requested budget (planes off screen do not render).
+    /// 0 when reflections are off or nothing has rendered yet.
+    virtual int         activePlanarReflectors() const = 0;
 };
 
 /// A view onto a Scene, rendering into a native window supplied by the host or

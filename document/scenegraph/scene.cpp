@@ -122,6 +122,15 @@ Scene::Scene()
     // light asked for (the historical derivation)
     shadowFilterTier = -1;
 
+    // Planar reflections: -1/0/-1 = "follow the world mode" on all three. A
+    // fresh scene in Custom mode therefore reflects nothing until a mode is
+    // applied or the user marks a reflector — the feature is scene-capable by
+    // default (owner's "maximum realness") but never costs a whole extra scene
+    // render before there is something to reflect.
+    planarReflectionBudget = -1;
+    planarReflectionResolution = 0;
+    planarReflectionShadows = -1;
+
     // World Mode: -1 = Custom. A new scene starts with the field values above
     // and no tier applied; picking a mode (World panel or world.mode) is what
     // writes a tier through. POST_CHAIN_SPEC §12 decision 8 proposed defaulting

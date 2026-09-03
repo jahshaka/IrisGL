@@ -399,6 +399,44 @@ struct FogDesc {
     float  breakFalloff       = 0.1f;
 };
 
+// ---- Planar reflections (scene-level, PLANAR_REFLECTIONS_SPEC.md) ----
+/// Mirrors and glossy floors. A node marked a *reflector* (Scene::setNodePlanarReflector)
+/// contributes a world-space reflection PLANE derived from its own flat geometry;
+/// surfaces lying on such a plane, and within 20 degrees of its normal, sample a
+/// re-render of the scene from the mirrored camera.
+///
+/// THE COST IS A WHOLE EXTRA SCENE RENDER PER ACTIVE PLANE, every frame — plus a
+/// private shadow atlas render when `shadows` is on. A scene may hold any number of
+/// reflectors; only `budget` of them (the ones on screen, nearest first) render.
+/// budget == 0 disables the feature completely and costs nothing at all.
+struct PlanarReflectionParams {
+    /// Active reflection planes, 0..8 (0 = off). CHANGING THIS RECOMPILES SHADERS:
+    /// the count is baked into the PBS shader as a property, not passed as a
+    /// uniform. Pushing the same value again is free.
+    int      budget = 0;
+    /// Edge of each plane's square render target, 256..2048 (rounded to a power
+    /// of two). Memory is budget x resolution^2 x 4 bytes x 4/3 (the mip chain),
+    /// allocated whether or not the planes are visible.
+    unsigned resolution = 512;
+    /// Mip chain on the reflection targets. Mips ARE how glossiness works — the
+    /// shader samples at roughness * numMips. Without them a rough floor
+    /// reflects as sharply as a mirror. Free to leave on.
+    bool     mipmaps = true;
+    /// Shadows inside the reflections. Costs a private shadow atlas per plane,
+    /// at HALF the scene's shadow resolution, allocated up front.
+    bool     shadows = false;
+    /// Full lighting update for each reflection camera. Off is faster and rarely
+    /// visibly different (Ogre's own words); on is what "maximum realness" means.
+    bool     accurateLighting = true;
+    /// World-space distance over which a surface's reflection fades out as it
+    /// leaves the plane, and the radius within which a surface may be matched to
+    /// a plane at all. Small values keep a floor's reflection on the floor.
+    float    maxDistance = 2.0f;
+    /// Clear colour of the reflection render (what shows where the scene has no
+    /// geometry and no sky). Normally the view's background.
+    Colour   background = Colour(0.0f, 0.0f, 0.0f, 1.0f);
+};
+
 enum class Backend { Vulkan, OpenGL };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at

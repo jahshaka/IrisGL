@@ -65,7 +65,7 @@ bool OgreScene::destroyMesh(MeshId id) {
     if (it == mMeshes.end()) return false;
     JAH_TRY {
         invalidateGiCaches();   // BEFORE the mesh dies: IR frees its by-VAO caches now
-        for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.second);
+        for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.first, kv.second);
         it->second.mesh.reset();
         Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
         if (mm.resourceExists(it->second.name)) mm.remove(it->second.name);

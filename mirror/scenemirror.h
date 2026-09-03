@@ -203,6 +203,11 @@ private:
         int wireKind = -1;                           // which shape is attached
         bool hasIcon = false;                        // light icon billboard on wireNode
         QString iconSignature;                       // icon image path; recreate on change
+        // Planar reflections: the last flag pushed to the engine, so the
+        // per-frame visit does nothing when nothing changed. -1 = never pushed.
+        // Arming a reflector derives a world plane and registers a PBS
+        // receiver; it is not the kind of call to repeat 60 times a second.
+        int planarReflector = -1;
         bool hasBillboards = false;                  // particle emitter mirrored as billboards
         QString billboardSignature;                  // texture + blend; recreate on change
         // Skinning (GPU_SKINNING_SPEC): the NODE's own skeleton, not the mesh

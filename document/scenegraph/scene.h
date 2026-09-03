@@ -196,6 +196,28 @@ public:
     // 0 = Hard (PCF 2x2), 1 = Soft (4x4), 2 = VerySoft (6x6).
     int shadowFilterTier;
 
+    // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6) -----------------
+    // How many mirror planes may re-render the scene. THE most expensive dial
+    // in the world: each active plane is a whole extra scene render every
+    // frame. 0 = off.
+    //
+    // -1 = "follow the world mode" and is the only negative value: it is the
+    // state of a scene that has never had a mode applied and never had the row
+    // pinned. Everything that applies a mode writes a concrete 0..8 here (the
+    // write-through invariant in services/worldmodes.h), so -1 never survives a
+    // mode switch. SceneMirror — which is IrisGL and cannot see the tier table —
+    // reads any negative value as OFF, which is what "never set" means anyway.
+    int planarReflectionBudget;
+    // Edge of each plane's reflection target in pixels; 256..2048. 0 = derive
+    // it from the resolved BUDGET, which is how the world-mode tiers reach it
+    // without needing rows of their own: budget >= 2 (Epic) means 1024, budget
+    // 1 (High) means 512. SceneMirror owns that derivation.
+    int planarReflectionResolution;
+    // Shadows INSIDE the reflections, which cost a private half-resolution
+    // shadow atlas per plane. 0 = off, 1 = on, -1 = derive from the budget the
+    // same way (Epic's 2 planes get shadows, High's 1 does not).
+    int planarReflectionShadows;
+
     // ---- World Modes (POST_CHAIN_SPEC.md §9) --------------------------------
     // A scalability tier for the whole scene. -1 = Custom (no tier: the fields
     // below are whatever the user/document set them to), 0 = Low, 1 = Medium,

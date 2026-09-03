@@ -576,6 +576,21 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
         }
     }
 
+    // Planar reflector flag (PLANAR_REFLECTIONS_SPEC.md §7). Pushed only on a
+    // CHANGE: arming derives a world plane from the mesh's bounds and registers
+    // the item as a PBS reflection receiver, which is not a per-frame call. The
+    // engine refuses geometry that is not plate-like — a refusal is remembered
+    // as "pushed" so the mirror does not retry (and re-set lastError) every
+    // frame; the document keeps the user's flag either way, and the next real
+    // change (a new mesh, a mode switch) tries again.
+    {
+        const int want = node->getPlanarReflector() ? 1 : 0;
+        if (e.planarReflector != want) {
+            mTarget->setNodePlanarReflector(e.node, want != 0);
+            e.planarReflector = want;
+        }
+    }
+
     if (node->getSceneNodeType() == iris::SceneNodeType::ParticleSystem)
         syncParticles(e, static_cast<iris::ParticleSystemNode *>(node.data()));
 
@@ -1689,6 +1704,39 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mGiLightWorld = lightWorld;
             mTarget->refreshGlobalIllumination();
         }
+    }
+    // Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6). Same discipline as GI:
+    // the engine's setter is idempotent, but a CHANGE rebuilds render targets
+    // and recompiles PBR shaders, so it is pushed every frame only because
+    // pushing an unchanged value is free.
+    {
+        PlanarReflectionParams pr;
+        // A negative budget is "never set" (a Custom-mode scene, or a document
+        // written before the feature): off. Every path that applies a world mode
+        // writes a concrete number here first — this file is IrisGL and cannot
+        // see the mode table, which is exactly why the invariant exists.
+        pr.budget = mSource->planarReflectionBudget < 0 ? 0
+                                                        : qBound(0, mSource->planarReflectionBudget, 8);
+        // Resolution and shadows follow the budget unless the scene pins them.
+        // This IS the mode table's reflection row, expressed where the mirror
+        // can reach it: Epic's budget of 2 gets 1024 + shadows, High's 1 gets
+        // 512 and no shadows. Two extra world-mode rows would say the same
+        // thing and give the user two more dials to get wrong.
+        const int autoRes = pr.budget >= 2 ? 1024 : 512;
+        pr.resolution = mSource->planarReflectionResolution > 0
+                            ? unsigned(qBound(256, mSource->planarReflectionResolution, 2048))
+                            : unsigned(autoRes);
+        pr.shadows = mSource->planarReflectionShadows >= 0
+                         ? mSource->planarReflectionShadows != 0
+                         : pr.budget >= 2;
+        // Glossy floors need the mip chain (the shader samples at
+        // roughness * numMips); without it every reflector is a perfect mirror.
+        pr.mipmaps = true;
+        pr.accurateLighting = true;
+        // The reflection's clear colour is the view's, so a mirror showing
+        // "nothing" shows the same nothing the viewport does.
+        pr.background = view->background();
+        mTarget->setPlanarReflections(pr);
     }
 }
 

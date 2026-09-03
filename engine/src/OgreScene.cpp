@@ -89,7 +89,7 @@ bool OgreScene::removeNode(NodeId id) {
     if (it == mNodes.end()) return false;
     JAH_TRY {
         const bool hadDecal = it->second.decal != nullptr;
-        releaseNode(it->second);
+        releaseNode(it->first, it->second);
         mNodes.erase(it);
         // The last decal leaving must clear the SceneManager's atlas bindings,
         // which is what drops the decal code back out of every PBS shader.
@@ -292,8 +292,13 @@ void OgreScene::destroy() {
         // has to go while that is still alive (teardown law: components, then the
         // manager).
         destroyAtmosphere();
+        // Before the nodes: PlanarReflections holds raw Renderable pointers, and
+        // it destroys its own cameras through the SceneManager. It also has to
+        // unbind itself from the process-wide HlmsPbs, which its destructor
+        // (like VctLighting's) does not do.
+        teardownPlanar();
         destroySky();   // also unbinds + destroys the reflection cubemap
-        for (auto &kv : mNodes) releaseNode(kv.second);
+        for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         mNodes.clear();
         for (auto &kv : mMaterials) {
             Ogre::Hlms *hlms = hlmsFor(kv.second);
@@ -315,7 +320,12 @@ void OgreScene::destroy() {
     mSceneMgr = nullptr;
 }
 
-void OgreScene::detachItem(Node &n) {
+void OgreScene::detachItem(NodeId id, Node &n) {
+    // BEFORE the Item dies: PlanarReflections keeps a raw Renderable* and its
+    // header says "You must call removeRenderable before destroying the
+    // Renderable". The reflector FLAG survives in mReflectors, so a node that is
+    // given a new mesh re-arms in attachMesh.
+    if (n.item) disarmReflector(id, n);
     if (n.item && n.meshRef) {
         // Only GI-participating (lit) geometry invalidates — detaching a selection
         // outline or wire overlay must not trigger a re-voxelize. BEFORE the
@@ -326,10 +336,15 @@ void OgreScene::detachItem(Node &n) {
     n.meshRef = 0; n.materialRef = 0;
 }
 
-void OgreScene::releaseNode(Node &n) {
+void OgreScene::releaseNode(NodeId id, Node &n) {
     // Order: renderable off the node -> item (drops the datablock link and one
     // mesh ref) -> datablock -> node -> our mesh ref -> the mesh itself.
     releaseBillboards(n);
+    // A destroyed node stops being a reflector for good (unlike detachItem,
+    // which only swaps the mesh) — drop the actor AND the flag, before the Item
+    // the component tracks by raw pointer dies.
+    disarmReflector(id, n);
+    mReflectors.erase(id);
     // Invalidate BEFORE anything dies (IR frees its by-pointer caches inside):
     // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
     if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit)))
