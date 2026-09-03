@@ -84,6 +84,9 @@ public:
 private:
     Texture2D();
 
+    /// The decoded pixels — populated ONLY by create(QImage) (skies, decals,
+    /// light masks, thumbnails build from memory). load(path) deliberately
+    /// leaves this null: see the note there.
     QImage image;
     bool cubeMap = false;
     QImage cubeFaceImages[6];

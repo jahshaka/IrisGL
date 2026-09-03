@@ -21,8 +21,13 @@ For more information see the LICENSE file
 #include "assimp/vector3.h"
 #include "assimp/quaternion.h"
 
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QPair>
 
 #include "document/assets/vertexlayout.h"
 
@@ -31,6 +36,24 @@ namespace iris
 
 QString GraphicsHelper::loadAndProcessShader(QString shaderPath)
 {
+    // MEMOIZED (lane-openasync, 2026-09-03). Every built-in material preset
+    // regenerates its program when the asset panel is (re)built — 31 presets
+    // per scene open, each pulling two shader files through the per-line
+    // include-expansion regex below. Measured cost: 1.11 SECONDS of every
+    // scene open, for files that are read-only app content and identical
+    // every time. Keyed on path + mtime, so an edited shader still
+    // re-processes; Qt resource paths report an invalid mtime, which is
+    // stable and therefore cached for the process lifetime (they cannot
+    // change).
+    static QHash<QString, QPair<qint64, QString>> cache;
+    static QMutex cacheLock;
+    const qint64 stamp = QFileInfo(shaderPath).lastModified().toMSecsSinceEpoch();
+    {
+        QMutexLocker locked(&cacheLock);
+        const auto it = cache.constFind(shaderPath);
+        if (it != cache.constEnd() && it->first == stamp) return it->second;
+    }
+
     QRegularExpression internalFileInclude("\\<(.+\\\\)*((.+)\\.(.+))\\>");
     QRegularExpression externalFileInclude("\\\"(.+\\\\)*((.+)\\.(.+))\\\"");
 
@@ -65,7 +88,12 @@ QString GraphicsHelper::loadAndProcessShader(QString shaderPath)
         }
     }
 
-    return lines.join('\n');
+    const QString processed = lines.join('\n');
+    {
+        QMutexLocker locked(&cacheLock);
+        cache.insert(shaderPath, qMakePair(stamp, processed));
+    }
+    return processed;
 }
 
 QList<iris::MeshPtr> GraphicsHelper::loadAllMeshesFromFile(QString filePath)

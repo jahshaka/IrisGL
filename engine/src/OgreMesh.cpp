@@ -1,6 +1,8 @@
 // Mesh creation, update and destruction, plus the v2 geometry builder.
 #include "EnginePrivate.h"
 
+#include <unordered_map>
+
 namespace jahshaka { namespace engine { namespace detail {
 
 // ---- Meshes ----
@@ -106,6 +108,114 @@ MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip) {
         return mNextMeshId;
     } JAH_CATCH(mError, 0);
 }
+
+namespace {
+
+/// The shadow-caster VAO (POST_CHAIN_SPEC §11), built in O(n).
+///
+/// Ogre's own VertexShadowMapHelper does this by reading the finished vertex and
+/// index buffers back from the GPU and comparing EVERY vertex against every other
+/// one (OgreVertexShadowMapHelper.cpp:302-315). We still hold the source arrays,
+/// so the same job is a hash pass: build the position-only (plus blend
+/// indices/weights) vertex, look it up, keep the first occurrence, remap the
+/// indices. Same output, no readback, linear.
+///
+/// Returns null when there is nothing to gain (the caller then aliases the main
+/// VAO, which is Ogre's "useSameVaos" fallback).
+Ogre::VertexArrayObject *buildShadowVao(Ogre::VaoManager *vaoMgr, const MeshData &data,
+                                        const std::vector<float> &blendW, bool skinned) {
+    const size_t nv = data.vertexCount(), ni = data.indices.size();
+    if (nv == 0 || ni == 0) return nullptr;
+
+    // Element ORDER matches Ogre's: POSITION, BLEND_INDICES, BLEND_WEIGHTS.
+    Ogre::VertexElement2Vec decl;
+    decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT3, Ogre::VES_POSITION));
+    if (skinned) {
+        decl.push_back(Ogre::VertexElement2(Ogre::VET_UBYTE4, Ogre::VES_BLEND_INDICES));
+        decl.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_BLEND_WEIGHTS));
+    }
+    const size_t stride = Ogre::VaoManager::calculateVertexSize(decl);
+
+    // One scratch vertex, then the compacted buffer. Both are plain bytes: the
+    // dedup key IS the byte pattern, exactly as Ogre's memcmp compares it.
+    std::vector<unsigned char> packed(stride * nv);
+    for (size_t v = 0; v < nv; ++v) {
+        unsigned char *dst = &packed[v * stride];
+        std::memcpy(dst, &data.positions[v * 3], sizeof(float) * 3);
+        if (skinned) {
+            std::memcpy(dst + 12, &data.blendIndices[v * 4], 4);
+            std::memcpy(dst + 16, &blendW[v * 4], sizeof(float) * 4);
+        }
+    }
+
+    // hash -> candidate vertex indices (collisions resolved by memcmp).
+    std::unordered_multimap<size_t, unsigned> seen;
+    seen.reserve(nv);
+    std::vector<unsigned> remap(nv, 0);
+    std::vector<unsigned char> unique;
+    unique.reserve(stride * nv);
+    unsigned uniqueCount = 0;
+    for (size_t v = 0; v < nv; ++v) {
+        const unsigned char *src = &packed[v * stride];
+        size_t h = 1469598103934665603ull;                    // FNV-1a
+        for (size_t b = 0; b < stride; ++b) { h ^= src[b]; h *= 1099511628211ull; }
+        unsigned hit = 0xFFFFFFFFu;
+        auto range = seen.equal_range(h);
+        for (auto it = range.first; it != range.second; ++it) {
+            if (std::memcmp(&unique[size_t(it->second) * stride], src, stride) == 0) {
+                hit = it->second;
+                break;
+            }
+        }
+        if (hit == 0xFFFFFFFFu) {
+            hit = uniqueCount++;
+            unique.insert(unique.end(), src, src + stride);
+            seen.emplace(h, hit);
+        }
+        remap[v] = hit;
+    }
+
+    // Nothing merged AND nothing narrower to stream: only true when the mesh is
+    // already position-only, which our layout never is — keep the guard anyway.
+    if (uniqueCount == 0) return nullptr;
+
+    unsigned char *vertexData = reinterpret_cast<unsigned char *>(
+        OGRE_MALLOC_SIMD(stride * uniqueCount, Ogre::MEMCATEGORY_GEOMETRY));
+    std::memcpy(vertexData, unique.data(), stride * uniqueCount);
+
+    Ogre::VertexBufferPacked *vbuf = nullptr;
+    Ogre::IndexBufferPacked *ibuf = nullptr;
+    try {
+        vbuf = vaoMgr->createVertexBuffer(decl, Ogre::uint32(uniqueCount), Ogre::BT_IMMUTABLE,
+                                          vertexData, true);
+    } catch (...) {
+        // On failure the buffer never took ownership — free it and fall back to
+        // the aliased VAO rather than losing the mesh.
+        OGRE_FREE_SIMD(vertexData, Ogre::MEMCATEGORY_GEOMETRY);
+        return nullptr;
+    }
+
+    // The index type follows the SHADOW vertex count, which can only shrink.
+    if (uniqueCount <= 65535u) {
+        Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(
+            OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * ni, Ogre::MEMCATEGORY_GEOMETRY));
+        for (size_t i = 0; i < ni; ++i) idx[i] = Ogre::uint16(remap[data.indices[i]]);
+        ibuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_16BIT, Ogre::uint32(ni),
+                                         Ogre::BT_IMMUTABLE, idx, true);
+    } else {
+        Ogre::uint32 *idx = reinterpret_cast<Ogre::uint32 *>(
+            OGRE_MALLOC_SIMD(sizeof(Ogre::uint32) * ni, Ogre::MEMCATEGORY_GEOMETRY));
+        for (size_t i = 0; i < ni; ++i) idx[i] = remap[data.indices[i]];
+        ibuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_32BIT, Ogre::uint32(ni),
+                                         Ogre::BT_IMMUTABLE, idx, true);
+    }
+
+    Ogre::VertexBufferPackedVec vbufs;
+    vbufs.push_back(vbuf);
+    return vaoMgr->createVertexArrayObject(vbufs, ibuf, Ogre::OT_TRIANGLE_LIST);
+}
+
+}   // namespace
 
 Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &data,
                                      std::vector<float> *interleavedOut) {
@@ -256,13 +366,21 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     Ogre::VertexBufferPackedVec vbufs; vbufs.push_back(vbuf);
     Ogre::VertexArrayObject *vao = vaoMgr->createVertexArrayObject(vbufs, ibuf, Ogre::OT_TRIANGLE_LIST);
     sub->mVao[Ogre::VpNormal].push_back(vao);
-    sub->mVao[Ogre::VpShadow].push_back(vao);
-    // Shadow-caster VAO optimization (POST_CHAIN_SPEC.md §11). Pushing the SAME
+    // Shadow-caster VAO optimization (POST_CHAIN_SPEC.md §11). Aliasing the SAME
     // vao into both slots is what Ogre calls "useSameVaos": shadow passes then
-    // stream the full 48-byte vertex (68 skinned) when they need 12 (+8).
-    // prepareForShadowMapping(false) builds a position-only (plus blend
-    // indices/weights) buffer with duplicate vertices merged instead — costing
-    // extra VRAM and a GPU->CPU readback at build time.
+    // stream the full 48-byte vertex (68 skinned) when they need 12 (+8). The
+    // optimized form is a position-only (plus blend indices/weights) buffer with
+    // duplicate vertices merged — extra VRAM per mesh, cheaper shadow passes.
+    //
+    // WE BUILD IT OURSELVES instead of calling Mesh::prepareForShadowMapping():
+    // Ogre's VertexShadowMapHelper::shrinkVertexBuffer finds duplicates with a
+    // NESTED LOOP over every vertex pair (OgreVertexShadowMapHelper.cpp:302-315,
+    // O(n^2) memcmp), and it reads the vertex and index buffers back from the GPU
+    // through AsyncTickets to do it. Measured on the Matcaps sample's 89k-vertex
+    // Stanford Dragon: 10.2 SECONDS inside one createMesh — 82% of a 12.5 s scene
+    // open, and the reason "opening a scene takes forever" (lane-openasync,
+    // 2026-09-03). The same de-duplication with a hash is linear and needs no
+    // readback: we still hold the source data. ~10.2 s -> ~40 ms for that mesh.
     //
     // NEVER for `data.dynamic` (CPU-skinned) meshes: updateMeshVertices uploads
     // the new pose into mVao[VpNormal][0]'s buffer ONLY. While VpShadow aliases
@@ -271,8 +389,10 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     // the mesh was built with — silent and visually confusing. GPU-skinned
     // meshes are fine: they deform in the vertex shader, which the optimized
     // buffer keeps the blend indices/weights for.
+    Ogre::VertexArrayObject *shadowVao = nullptr;
     if (Ogre::Mesh::msOptimizeForShadowMapping && !data.dynamic)
-        mesh->prepareForShadowMapping(false);
+        shadowVao = buildShadowVao(vaoMgr, data, blendW, skinned);
+    sub->mVao[Ogre::VpShadow].push_back(shadowVao ? shadowVao : vao);
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
     mesh->_setBounds(aabb, false);
     mesh->_setBoundingSphereRadius(aabb.getRadius());

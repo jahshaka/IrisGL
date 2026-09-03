@@ -9,6 +9,12 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include <QDateTime>
+#include <QFileInfo>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QPair>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -67,12 +73,30 @@ QString CustomMaterial::firstTextureSlot() const
 
 QJsonObject CustomMaterial::loadShaderFromDisk(const QString &filePath)
 {
+    // MEMOIZED for the same reason as GraphicsHelper::loadAndProcessShader
+    // (lane-openasync, 2026-09-03): the built-in material presets each
+    // generate() the SAME shader definition, so this parsed the identical
+    // JSON 31 times per scene open. Keyed on path + mtime.
+    static QHash<QString, QPair<qint64, QJsonObject>> cache;
+    static QMutex cacheLock;
+    const qint64 stamp = QFileInfo(filePath).lastModified().toMSecsSinceEpoch();
+    {
+        QMutexLocker locked(&cacheLock);
+        const auto it = cache.constFind(filePath);
+        if (it != cache.constEnd() && it->first == stamp) return it->second;
+    }
+
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly))
         qWarning("CustomMaterial::loadShaderFromDisk: failed to open %s", qUtf8Printable(filePath));
     auto data = file.readAll();
     file.close();
-    return QJsonDocument::fromJson(data).object();
+    const QJsonObject parsed = QJsonDocument::fromJson(data).object();
+    {
+        QMutexLocker locked(&cacheLock);
+        cache.insert(filePath, qMakePair(stamp, parsed));
+    }
+    return parsed;
 }
 
 void CustomMaterial::generate(const QString &fileName, bool project)

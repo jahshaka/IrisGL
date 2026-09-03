@@ -125,6 +125,7 @@ set(SRCS
     document/materials/defaultmaterial.cpp
     document/scenegraph/meshnode.cpp
     import/graphicshelper.cpp
+    import/meshprewarm.cpp
     document/scenegraph/cameranode.cpp
     document/assets/texture2d.cpp
     document/materials/material.cpp
@@ -183,6 +184,7 @@ set (HEADERS
     document/assets/vertexbuffer.h
     core/viewport.h
     import/graphicshelper.h
+    import/meshprewarm.h
     core/geometry/trimesh.h
     core/math/mathhelper.h
     irisglfwd.h

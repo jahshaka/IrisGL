@@ -10,6 +10,8 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "document/assets/texture2d.h"
+
+#include <QImageReader>
 #include <QDebug>
 #include "core/logger.h"
 
@@ -27,17 +29,34 @@ Texture2DPtr Texture2D::load(QString path)
 
 Texture2DPtr Texture2D::load(QString path,bool flipY)
 {
-    auto image = QImage(path);
-    if(image.isNull())
-    {
+    // NO PIXEL DECODE (lane-openasync, 2026-09-03). This used to decode the
+    // whole image and then MIRROR it vertically — the legacy GL renderer's
+    // flipY convention. Nothing reads those pixels any more: since the
+    // rendering half of IrisGL was deleted, every consumer of a loaded
+    // Texture2D reads `source` (the path) and hands it to the engine, which
+    // decodes and uploads it itself (SceneMirror::textureFor, the sky's
+    // QImage(source), the export walkers). `image` was write-only.
+    //
+    // Measured: 31 built-in material presets each set up to four textures,
+    // and AssetWidget::trigger() rebuilds them on EVERY scene open —
+    // 1.11 SECONDS per open of decode-then-mirror whose result was thrown
+    // away. A header probe keeps the ONE contract callers depend on (a null
+    // return means "not a readable image", which is how
+    // CustomMaterial::setTextureWithUniform decides to remove the slot) at
+    // roughly zero cost.
+    //
+    // flipY is therefore now a no-op for the file path. It stays in the
+    // signature because create(QImage) callers still express the convention,
+    // and because the sky/decal/mask paths that DO need pixels build their
+    // QImage themselves.
+    Q_UNUSED(flipY);
+    QImageReader probe(path);
+    if (!probe.canRead()) {
         irisLog("error loading image: "+path);
         return Texture2DPtr(nullptr);
     }
 
-    if(flipY)
-        image = image.mirrored(false,true);
-
-    auto tex = create(image);
+    auto tex = create(QImage());
     tex->source = path;
 
     return tex;
