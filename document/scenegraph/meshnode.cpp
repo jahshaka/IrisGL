@@ -362,13 +362,13 @@ MeshNode::loadAsSceneFragment(QString filePath,
     }
     if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
     // AVATAR_MODULE_SPEC "ITEM ZERO" (fix A): the single-mesh shortcut below
-    // builds ONE MeshNode and no child SceneNodes at all. Pose evaluation is
-    // name-matched over the scene-node hierarchy (SceneNode::updateAnimation
-    // fills skeletonSpaceMatrices per visited node; Skeleton::applyAnimation
-    // sets skinMatrix only for bones whose name is a key there and
-    // setToIdentity() for the rest), so a skinned file taking the shortcut has
-    // exactly one entry in that map and EVERY bone stays identity: the clip
-    // clock advances and the character never moves. Silently. Every Mixamo
+    // builds ONE MeshNode and no child SceneNodes at all. A clip's channels are
+    // matched to SCENE NODES by name — that was true of the document evaluator
+    // and it is still true of clip translation (iris::ClipExtractor composes a
+    // bone's chain out of the scene nodes between it and its parent bone) — so
+    // a skinned file taking the shortcut has no node for any channel to land
+    // on and EVERY bone stays at bind: the clip clock advances and the
+    // character never moves. Silently. Every Mixamo
     // export is single-mesh, so "no single-mesh rig can animate" was the whole
     // of it.
     //
