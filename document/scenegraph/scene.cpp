@@ -264,6 +264,7 @@ void Scene::setAmbientMusicVolume(float volume)
 
 void Scene::updateSceneAnimation(float time)
 {
+    animTime = time;
     rootNode->updateAnimation(time);
 }
 

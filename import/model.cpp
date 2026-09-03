@@ -87,29 +87,13 @@ bool Model::hasSkeletalAnimations()
     return skeletalAnimations.count() != 0;
 }
 
-void Model::applyAnimation(float time)
-{
-	if (!!activeAnimation && !!skeleton) {
-		skeleton->applyAnimation(activeAnimation, time);
-
-		QMap<QString, QMatrix4x4> skeletonSpaceMatrices;
-		for (auto boneName : skeleton->boneMap.keys()) {
-			skeletonSpaceMatrices[boneName] = skeleton->bones[skeleton->boneMap[boneName]]->transformMatrix;
-		}
-		for (auto& modelMesh : modelMeshes) {
-			modelMesh.transform = skeletonSpaceMatrices[modelMesh.meshName];
-			auto inverseMeshMatrix = modelMesh.transform.inverted();
-			if (modelMesh.mesh->hasSkeleton())
-				modelMesh.mesh->getSkeleton()->applyAnimation(inverseMeshMatrix, skeletonSpaceMatrices);
-		}
-	}
-}
-
-void Model::updateAnimation(float dt)
-{
-	animTime += dt;
-	applyAnimation(animTime);
-}
+// Model::applyAnimation / updateAnimation are GONE with the document's clip
+// evaluator (ANIMATION_ENGINE_MIGRATION_SPEC, full retirement). They were the
+// ModelLoader-era twin of SceneNode::updateAnimation's skeletal branch and the
+// only callers of Skeleton::applyAnimation's bone-local overload — the one that
+// read Bone::bindingPos/Rot/Scale, which nothing on the editor's import route
+// ever wrote (§1.5 F1). ModelLoader is not on that route and nothing called
+// either function.
 
 Model::~Model()
 {

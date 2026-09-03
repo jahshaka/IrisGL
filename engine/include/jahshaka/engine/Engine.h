@@ -145,6 +145,56 @@ public:
     /// The read-back surface for the pose: what proves GPU and CPU skinning agree.
     virtual bool        boneMatrices(NodeId, float *out, size_t count) const = 0;
 
+    // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC) ----
+    /// Attaches clips to a node that already carries a rig. IDEMPOTENT per clip
+    /// id: attaching a clip whose id is already on the node is a no-op.
+    ///
+    /// EVERY clip a node will use must be attached BEFORE any of them is
+    /// enabled. This is not a style preference: the engine's own
+    /// addAnimationsFromSkeleton push_backs into the vector its list of ACTIVE
+    /// animations holds raw pointers into, and it does not fix that list up —
+    /// so attaching while something plays dangles every active clip. The call
+    /// therefore REFUSES (lastError()) while any clip on the node is enabled.
+    ///
+    /// Attaching the first clip also takes the node OUT of manual-bone mode:
+    /// a manual bone is not reset to the bind pose before a clip accumulates,
+    /// so an enabled clip would ADD to whatever setBonePoses last wrote. Bones
+    /// explicitly marked by setBoneManual keep their override.
+    ///
+    /// Refuses: a node with no rig; a track naming a bone the rig does not
+    /// have; unsorted, duplicated or empty key times; a clip with no tracks.
+    /// A clip whose length is <= 0 is PADDED to a minimum length and reported
+    /// in the log, never refused.
+    virtual bool attachClips(NodeId, const ClipDesc *clips, size_t count) = 0;
+    /// The node's clip names, in attach order — including any uniquifying
+    /// suffix the backend added for a collision. Empty when it has no rig.
+    virtual std::vector<std::string> clipNames(NodeId) const = 0;
+
+    /// THE per-frame clip call. Absolute times only. Clips the array does not
+    /// name are disabled. Weights are raw intent; the backend normalizes them
+    /// PER BONE and honours manual-bone overrides (a manual bone gets zero
+    /// weight from every clip, so the override really overrides).
+    ///
+    /// NOTE, and it must be designed for rather than discovered: with NO clip
+    /// enabled the engine does not reset to the bind pose at all — the pose
+    /// FREEZES wherever it was. "Stop" means one clip enabled at t = 0, or a
+    /// setBonePoses write, never an empty state array.
+    virtual bool setClipStates(NodeId, const ClipState *states, size_t count) = 0;
+
+    /// Per-bone override channel. A manual bone keeps whatever setBonePoses
+    /// wrote and is excluded from every clip's weighting.
+    virtual bool setBoneManual(NodeId, const std::string &bone, bool manual) = 0;
+
+    /// Reads back the EVALUATED pose: `count` bones in rig order, each LOCAL to
+    /// its parent bone (a root bone: local to the mesh node) — the same frame
+    /// setBonePoses writes in. Resolved as of the last rendered frame.
+    virtual bool bonePoses(NodeId, BonePose *out, size_t count) const = 0;
+
+    /// The effective per-bone weight the backend applied for `clip`, in rig
+    /// bone order (0 for a bone the clip does not animate). The test and
+    /// diagnostic surface for the normalization rule; empty on any error.
+    virtual std::vector<float> clipBoneWeights(NodeId, const std::string &clip) const = 0;
+
     // ---- Textures (step 4b): image files on disk, shared across materials ----
     /// Loads an image file (png/jpg/tga/dds...). `srgb` for colour maps (albedo,
     /// emissive); false for data maps (normal, roughness, metalness). The same path

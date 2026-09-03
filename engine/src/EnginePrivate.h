@@ -43,6 +43,10 @@
 #include <OgreAsyncTextureTicket.h>
 #include <OgreLogManager.h>
 #include <OgreResourceGroupManager.h>
+// v1 skeletons are a BUILD-TIME scaffold only (SkeletonDef has exactly one
+// constructor and it takes a v1::Skeleton) — the prerequisites header is what
+// lets this file name v1::SkeletonPtr / v1::OldBone without pulling v1 in.
+#include <OgrePrerequisites.h>
 #include <OgreHlmsSamplerblock.h>
 #include <OgreRectangle2D2.h>
 #include <set>
@@ -222,6 +226,14 @@ public:
     bool setBonePoses(NodeId id, const BonePose *poses, size_t count) override;
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
 
+    // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC; impl in OgreClips.cpp) ----
+    bool attachClips(NodeId id, const ClipDesc *clips, size_t count) override;
+    std::vector<std::string> clipNames(NodeId id) const override;
+    bool setClipStates(NodeId id, const ClipState *states, size_t count) override;
+    bool setBoneManual(NodeId id, const std::string &bone, bool manual) override;
+    bool bonePoses(NodeId id, BonePose *out, size_t count) const override;
+    std::vector<float> clipBoneWeights(NodeId id, const std::string &clip) const override;
+
     // ---- Textures ----
     TextureId loadTexture(const std::string &path, bool srgb) override;
     TextureId createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb) override;
@@ -318,6 +330,35 @@ private:
     /// alone: two files of the same rig must resolve to one def.
     struct RigRec {
         std::vector<std::string> boneNames;
+        /// The DESC the rig was built from, kept whole. A clip def must be
+        /// built from the SAME bone structure the rig def was — Ogre's own
+        /// addAnimationsFromSkeleton indexes the other def's block layout, and
+        /// a mismatch is undefined behaviour rather than a no-op.
+        SkeletonDesc desc;
+    };
+    /// One clip attached to one node.
+    struct ClipRec {
+        std::string id;             ///< content hash; the def-cache key
+        std::string name;           ///< uniquified per node
+        std::string defName;        ///< the SkeletonDef / v1 resource name
+        float       length = 0.0f;  ///< seconds, after zero-length padding
+        /// Bones this clip animates, and the cached weight slot for each (§4.2:
+        /// per-bone renormalization is one float store per bone per frame, and
+        /// only through a pointer we cached at attach time).
+        std::vector<int>    coverage;
+        std::vector<float*> weightPtr;   // parallel to coverage
+        size_t index = 0;   ///< slot in SkeletonInstance::getAnimations()
+    };
+    /// A node's clip set. Absent until attachClips is called, which is also
+    /// what takes the node out of manual-bone mode.
+    struct NodeClips {
+        std::vector<ClipRec>  clips;
+        std::set<std::string> manualBones;   ///< explicit setBoneManual overrides
+        /// attachSkinnedMesh marks EVERY bone manual (setBonePoses' values must
+        /// survive resetToPose). The first attachClips clears that, because a
+        /// manual bone is not reset to bind and a clip would ADD to the last
+        /// pushed pose rather than replace it.
+        bool clipModeEntered = false;
     };
     struct MaterialRec { std::string datablockName; bool unlit = false; bool onTop = false; };
     struct TextureRec { Ogre::TextureGpu *texture = nullptr; std::string path; };
@@ -337,6 +378,15 @@ private:
     /// (OgreSkeletonDef.h:145); nothing v1 reaches the render path (v1 meshes
     /// render NOTHING on Vulkan, and geometry stays in our v2 buffers).
     bool bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig);
+    /// Assembles the in-memory v1 skeleton a SkeletonDesc translates to, under
+    /// `resName`. Shared by the rig def and every CLIP def, because a clip def
+    /// built from anything but the node's own rig indexes the wrong blocks in
+    /// addAnimationsFromSkeleton — undefined behaviour, not a no-op.
+    /// `madeOut`, when given, receives the bones in DESC ORDER.
+    Ogre::v1::SkeletonPtr buildV1Skeleton(const std::string &resName, const SkeletonDesc &rig,
+                                          std::vector<Ogre::v1::OldBone *> *madeOut = nullptr);
+    /// The rig a node's mesh is bound to, or null.
+    const RigRec *rigOf(NodeId id) const;
     /// The node's live rig, or null.
     Ogre::SkeletonInstance *skeletonOf(NodeId id) const;
     /// Uploads MeshData as a v2 mesh: interleaved position/normal/tangent/uv, 16- or
@@ -437,6 +487,7 @@ private:
     std::map<NodeId, Node> mNodes;
     std::map<MeshId, MeshRec> mMeshes;
     std::map<std::string, RigRec> mRigs;
+    std::map<NodeId, NodeClips> mClips;
     std::map<MaterialId, MaterialRec> mMaterials;
     std::map<TextureId, TextureRec> mTextures;
     std::set<std::string> mTextureDirs;

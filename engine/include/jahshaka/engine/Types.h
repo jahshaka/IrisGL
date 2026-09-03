@@ -98,6 +98,64 @@ struct BonePose {
     Vec3 scale{1.0f, 1.0f, 1.0f};
 };
 
+// ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC) --------------------------------
+/// One key of one bone track. The TRS is ABSOLUTE and LOCAL TO THE PARENT BONE
+/// — the host has already composed away any pivot chain the source file had
+/// (iris::ClipExtractor). Times in SECONDS, strictly increasing.
+///
+/// NOT a delta from the bind pose: the backend converts to the bind-relative
+/// form the engine accumulates in, because that conversion needs the rig's bind
+/// pose and the boundary should not make the host carry it twice.
+struct BoneKey {
+    float time = 0.0f;
+    Vec3  position;
+    Quat  rotation;
+    Vec3  scale{1.0f, 1.0f, 1.0f};
+};
+
+/// One bone's track. `bone` indexes SkeletonDesc::bones.
+struct BoneTrack {
+    int                  bone = -1;
+    std::vector<BoneKey> keys;
+};
+
+/// A clip, ready to attach to a node's rig.
+///
+/// `id` MUST be a content hash of the rig id and every track. The backend
+/// caches the translated clip under it for the LIFE OF THE PROCESS and the
+/// cache is by name, so an id derived from anything else (a file path, a clip
+/// name, an asset guid) makes a re-imported clip alias the old one forever —
+/// the same failure mode as the VCT datablock-pointer cache.
+///
+/// `name` is what setClipStates and clipNames speak. It is uniquified per node
+/// at attach time if it collides, and the mapping is reported by clipNames.
+///
+/// `length` in seconds. A length <= 0 is PADDED to a minimum, not refused:
+/// every Mixamo character download ships a single-frame T-pose clip and it is
+/// the one the UI selects by default. Engine-side a zero length is fmod(t, 0)
+/// = NaN, so the padding is not cosmetic.
+struct ClipDesc {
+    std::string            id;
+    std::string            name;
+    float                  length = 0.0f;
+    std::vector<BoneTrack> tracks;
+};
+
+/// What the host asserts about one clip, this frame. ABSOLUTE time only —
+/// there is deliberately no addTime on this boundary, because a relative clock
+/// makes every pose assertion order-dependent.
+///
+/// `weight` is raw INTENT. The backend normalizes PER BONE from the clips'
+/// coverage (a bone only clip A animates gets all of A at any weight split,
+/// never half of it) and reports the result through clipBoneWeights.
+struct ClipState {
+    std::string name;
+    bool        enabled = true;
+    float       time    = 0.0f;
+    float       weight  = 1.0f;
+    bool        looping = true;
+};
+
 using TextureId = unsigned int;
 enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides with X11's macro
 

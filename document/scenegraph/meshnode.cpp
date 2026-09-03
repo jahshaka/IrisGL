@@ -362,13 +362,13 @@ MeshNode::loadAsSceneFragment(QString filePath,
     }
     if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
     // AVATAR_MODULE_SPEC "ITEM ZERO" (fix A): the single-mesh shortcut below
-    // builds ONE MeshNode and no child SceneNodes at all. Pose evaluation is
-    // name-matched over the scene-node hierarchy (SceneNode::updateAnimation
-    // fills skeletonSpaceMatrices per visited node; Skeleton::applyAnimation
-    // sets skinMatrix only for bones whose name is a key there and
-    // setToIdentity() for the rest), so a skinned file taking the shortcut has
-    // exactly one entry in that map and EVERY bone stays identity: the clip
-    // clock advances and the character never moves. Silently. Every Mixamo
+    // builds ONE MeshNode and no child SceneNodes at all. A clip's channels are
+    // matched to SCENE NODES by name — that was true of the document evaluator
+    // and it is still true of clip translation (iris::ClipExtractor composes a
+    // bone's chain out of the scene nodes between it and its parent bone) — so
+    // a skinned file taking the shortcut has no node for any channel to land
+    // on and EVERY bone stays at bind: the clip clock advances and the
+    // character never moves. Silently. Every Mixamo
     // export is single-mesh, so "no single-mesh rig can animate" was the whole
     // of it.
     //
@@ -392,7 +392,15 @@ MeshNode::loadAsSceneFragment(QString filePath,
             // meshObj->addSkeletalAnimation(animName, anims[animName]);
             auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
             node->addAnimation(anim);
-            node->setAnimation(anim);
+            // The FIRST clip becomes the active one, not the last. This loop
+            // used to call setAnimation on every iteration, so the clip a
+            // freshly imported model played was whichever name sorted LAST
+            // (anims is a QMap) — and for a Mixamo character download that is
+            // "mixamo.com", the single-frame T-POSE. Every such character
+            // therefore stood still in the editor by default, with a real clip
+            // sitting unused in the list. The Avatar page already worked around
+            // this on its own load path.
+            if (node->getAnimations().size() == 1) node->setAnimation(anim);
         }
 
         auto skel = Mesh::extractSkeleton(mesh, scene);
@@ -424,7 +432,8 @@ MeshNode::loadAsSceneFragment(QString filePath,
     for (auto animName : anims.keys()) {
         auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
         node->addAnimation(anim);
-        node->setAnimation(anim);
+        // The FIRST clip, not the alphabetically last one — see above.
+        if (node->getAnimations().size() == 1) node->setAnimation(anim);
     }
 
     node->applyDefaultPose();
@@ -473,7 +482,8 @@ MeshNode::loadAsSceneFragment(
 			// meshObj->addSkeletalAnimation(animName, anims[animName]);
 			auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
 			node->addAnimation(anim);
-			node->setAnimation(anim);
+			// The FIRST clip, not the alphabetically last one — see above.
+			if (node->getAnimations().size() == 1) node->setAnimation(anim);
 		}
 
 		auto skel = Mesh::extractSkeleton(mesh, scene);
@@ -505,7 +515,8 @@ MeshNode::loadAsSceneFragment(
 	for (auto animName : anims.keys()) {
 		auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
 		node->addAnimation(anim);
-		node->setAnimation(anim);
+		// The FIRST clip, not the alphabetically last one — see above.
+		if (node->getAnimations().size() == 1) node->setAnimation(anim);
 	}
 
 	node->applyDefaultPose();

@@ -14,7 +14,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreParticles.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFog.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSkeleton.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSkeleton.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 target_include_directories(JahshakaEngine
