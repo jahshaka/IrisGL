@@ -1064,6 +1064,44 @@ bool SceneMirror::toBonePoses(const iris::SkeletonPtr &skeleton, std::vector<Bon
     return true;
 }
 
+bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string &rigId,
+                             ClipDesc &out)
+{
+    out = ClipDesc();
+    if (clip.tracks.isEmpty()) return false;
+    out.name = clip.name.toStdString();
+    out.length = clip.length;
+
+    // R7 again, from the other side: the engine's clip-def cache is
+    // process-lifetime and keyed by NAME, so the id must be content-derived or a
+    // re-imported clip aliases the stale def forever — the same failure class as
+    // the VCT datablock-pointer cache. Everything that can change the sampled
+    // pose goes into the hash: the rig, the name, and every key of every track.
+    StructureHash hash;
+    hash(QString::fromStdString(rigId));
+    hash(clip.name);
+    hash(clip.length);
+    out.tracks.reserve(size_t(clip.tracks.size()));
+    for (const iris::ClipBoneTrack &track : clip.tracks) {
+        BoneTrack bt;
+        bt.bone = track.bone;
+        bt.keys.reserve(size_t(track.keys.size()));
+        hash(track.bone);
+        for (const iris::ClipBoneKey &key : track.keys) {
+            BoneKey bk;
+            bk.time = key.time;
+            bk.position = toVec3(key.position);
+            bk.rotation = toQuat(key.rotation);
+            bk.scale = toVec3(key.scale);
+            bt.keys.push_back(bk);
+            hash(key.time); hash(key.position); hash(key.rotation); hash(key.scale);
+        }
+        out.tracks.push_back(std::move(bt));
+    }
+    out.id = hash.hex();
+    return true;
+}
+
 // ---- CPU skinning -----------------------------------------------------------------
 // The document already computes per-bone skin matrices (Skeleton::boneTransforms,
 // filled by SceneNode::updateAnimation during play). The legacy GL renderer handed

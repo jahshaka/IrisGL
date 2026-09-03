@@ -85,6 +85,57 @@ bool rigHierarchyIsSane(const SkeletonDesc &rig) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+Ogre::v1::SkeletonPtr OgreScene::buildV1Skeleton(const std::string &resName,
+                                                 const SkeletonDesc &rig,
+                                                 std::vector<Ogre::v1::OldBone *> *madeOut) {
+    Ogre::v1::OldSkeletonManager &oldMgr = Ogre::v1::OldSkeletonManager::getSingleton();
+    // Manual resource, no loader: Resource::load() takes the manual branch,
+    // finds no loader, logs one LML_TRIVIAL line and marks it LOADED without
+    // ever entering loadImpl() (the file/serializer path).
+    Ogre::v1::SkeletonPtr v1skel = std::static_pointer_cast<Ogre::v1::Skeleton>(oldMgr.create(
+        resName, Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
+        /*isManual=*/true, /*loader=*/nullptr));
+    if (!v1skel) return v1skel;
+
+    // Bones in DESC ORDER: createBone auto-assigns handles 0,1,2..., and the
+    // def's bone index is that handle (SkeletonDef.cpp:50-74 iterates
+    // mBoneList, which is handle-indexed). So desc index == def index ==
+    // the blend index in our vertex data. Names must be unique — Ogre asserts
+    // on a duplicate — so collisions get an index suffix; nothing reads these
+    // names back except boneNames(), which serves the DESC's names.
+    //
+    // CLIP DEFS COME THROUGH HERE TOO, with the same desc, which is what makes
+    // addAnimationsFromSkeleton legal: same bone count, same hierarchy, same
+    // creation order, so the same block layout.
+    std::vector<Ogre::v1::OldBone *> made;
+    made.reserve(rig.bones.size());
+    for (size_t i = 0; i < rig.bones.size(); ++i) {
+        const BoneDesc &bd = rig.bones[i];
+        std::string name = bd.name.empty() ? ("bone" + std::to_string(i)) : bd.name;
+        if (v1skel->hasBone(name)) name += "#" + std::to_string(i);
+        Ogre::v1::OldBone *b = v1skel->createBone(name);
+        // THE BIND POSE (R1). These locals are authored so that FK over them
+        // reproduces the mesh-space bind pose, i.e. the inverse of assimp's
+        // offset matrix — which makes SkeletonDef's derived reverseBindPose
+        // exactly that offset matrix, and the two skinning formulations
+        // coincide. The caller owns that algebra; this just stores it.
+        b->setPosition(toOgre(bd.bindPosition));
+        b->setOrientation(Ogre::Quaternion(bd.bindRotation.w, bd.bindRotation.x,
+                                           bd.bindRotation.y, bd.bindRotation.z));
+        b->setScale(toOgre(bd.bindScale));
+        made.push_back(b);
+    }
+    // Hierarchy in a SECOND pass, so bone order is free (a parent may follow
+    // its child in the array; the index is fixed by the vertex data).
+    for (size_t i = 0; i < rig.bones.size(); ++i)
+        if (rig.bones[i].parent >= 0)
+            made[size_t(rig.bones[i].parent)]->addChild(made[i]);
+    v1skel->setBindingPose();
+    if (madeOut) *madeOut = made;
+    return v1skel;
+}
+
+// ---------------------------------------------------------------------------
 bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
     if (!meshRec.rigId.empty()) {
         // A mesh holds exactly one SkeletonDef. Re-binding the same rig is a
@@ -106,44 +157,8 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
         std::static_pointer_cast<Ogre::v1::Skeleton>(oldMgr.getByName(resName));
 
     if (!v1skel) {
-        // Manual resource, no loader: Resource::load() takes the manual branch,
-        // finds no loader, logs one LML_TRIVIAL line and marks it LOADED without
-        // ever entering loadImpl() (the file/serializer path).
-        v1skel = std::static_pointer_cast<Ogre::v1::Skeleton>(oldMgr.create(
-            resName, Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
-            /*isManual=*/true, /*loader=*/nullptr));
+        v1skel = buildV1Skeleton(resName, rig);
         if (!v1skel) { mError = "attachSkinnedMesh: could not create the rig resource"; return false; }
-
-        // Bones in DESC ORDER: createBone auto-assigns handles 0,1,2..., and the
-        // def's bone index is that handle (SkeletonDef.cpp:50-74 iterates
-        // mBoneList, which is handle-indexed). So desc index == def index ==
-        // the blend index in our vertex data. Names must be unique — Ogre asserts
-        // on a duplicate — so collisions get an index suffix; nothing reads these
-        // names back except boneNames(), which serves the DESC's names.
-        std::vector<Ogre::v1::OldBone *> made;
-        made.reserve(rig.bones.size());
-        for (size_t i = 0; i < rig.bones.size(); ++i) {
-            const BoneDesc &bd = rig.bones[i];
-            std::string name = bd.name.empty() ? ("bone" + std::to_string(i)) : bd.name;
-            if (v1skel->hasBone(name)) name += "#" + std::to_string(i);
-            Ogre::v1::OldBone *b = v1skel->createBone(name);
-            // THE BIND POSE (R1). These locals are authored so that FK over them
-            // reproduces the mesh-space bind pose, i.e. the inverse of assimp's
-            // offset matrix — which makes SkeletonDef's derived reverseBindPose
-            // exactly that offset matrix, and the two skinning formulations
-            // coincide. The caller owns that algebra; this just stores it.
-            b->setPosition(toOgre(bd.bindPosition));
-            b->setOrientation(Ogre::Quaternion(bd.bindRotation.w, bd.bindRotation.x,
-                                               bd.bindRotation.y, bd.bindRotation.z));
-            b->setScale(toOgre(bd.bindScale));
-            made.push_back(b);
-        }
-        // Hierarchy in a SECOND pass, so bone order is free (a parent may follow
-        // its child in the array; the index is fixed by the vertex data).
-        for (size_t i = 0; i < rig.bones.size(); ++i)
-            if (rig.bones[i].parent >= 0)
-                made[size_t(rig.bones[i].parent)]->addChild(made[i]);
-        v1skel->setBindingPose();
     }
 
     // Two lines inside Ogre: stores the name and calls
@@ -174,6 +189,10 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
     if (rec.boneNames.empty()) {
         rec.boneNames.reserve(rig.bones.size());
         for (const BoneDesc &bd : rig.bones) rec.boneNames.push_back(bd.name);
+        // The whole desc is kept: every CLIP def must be built from it (a clip
+        // def with any other bone layout is undefined behaviour in
+        // addAnimationsFromSkeleton), and bonePoses needs the parent indices.
+        rec.desc = rig;
     }
     return true;
 }
@@ -281,12 +300,8 @@ Ogre::SkeletonInstance *OgreScene::skeletonOf(NodeId id) const {
 bool OgreScene::hasSkeleton(NodeId id) const { return skeletonOf(id) != nullptr; }
 
 std::vector<std::string> OgreScene::boneNames(NodeId id) const {
-    auto it = mNodes.find(id);
-    if (it == mNodes.end() || !it->second.meshRef) return {};
-    auto mit = mMeshes.find(it->second.meshRef);
-    if (mit == mMeshes.end() || mit->second.rigId.empty()) return {};
-    auto rit = mRigs.find(mit->second.rigId);
-    return rit == mRigs.end() ? std::vector<std::string>() : rit->second.boneNames;
+    const RigRec *rig = rigOf(id);
+    return rig ? rig->boneNames : std::vector<std::string>();
 }
 
 bool OgreScene::setBonePoses(NodeId id, const BonePose *poses, size_t count) {

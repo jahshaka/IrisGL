@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 #include "irisgl/irisglfwd.h"
+#include "irisgl/document/animation/clipextractor.h"
 #include "jahshaka/engine/Engine.h"
 
 namespace iris { class Mesh; class Material; struct SkyRealistic; }
@@ -94,6 +95,15 @@ public:
     /// boneTransforms are the wrong size.
     static bool toBonePoses(const iris::SkeletonPtr &skeleton,
                             std::vector<jahshaka::engine::BonePose> &out);
+    /// An extracted clip (iris::ClipExtractor) as an engine ClipDesc.
+    ///
+    /// The `id` is a CONTENT hash of the rig id and every key of every track,
+    /// and it has to be: the backend caches the translated clip under it for the
+    /// life of the process, keyed by name, so an id derived from a file path or
+    /// an asset guid makes a re-imported clip alias the old one forever.
+    /// Static and public for tests.
+    static bool toClipDesc(const iris::ExtractedClip &clip, const std::string &rigId,
+                           jahshaka::engine::ClipDesc &out);
     /// CPU-skins bind-pose vertices with the skeleton's live boneTransforms —
     /// exactly the legacy GL shader's math (weighted sum of bone matrices).
     /// bindNormals/outNormals may be empty. Static and public for tests.
