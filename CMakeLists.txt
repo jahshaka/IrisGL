@@ -196,7 +196,6 @@ set (HEADERS
     core/irisutils.h
     core/ziphelper.h
     document/scenegraph/viewernode.h
-    document/scenegraph/particle.h
     document/scenegraph/particlesystemnode.h
     document/scenegraph/iviewsource.h
     document/materials/custommaterial.h
