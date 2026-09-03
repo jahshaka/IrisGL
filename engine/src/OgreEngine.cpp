@@ -249,6 +249,10 @@ void OgreEngine::renderOneFrame() {
             s->setRefractionsActive(anyView && allHaveRefraction);
         }
         if (mRoot) mRoot->renderOneFrame();
+        // The frame is drawn and (for window views) presented: every view that
+        // took part in it now has its OWN pixels on its target. This is the
+        // signal hosts gate a loading cover on (View::framesPresented).
+        for (auto &v : mViews) v->notePresented();
     } JAH_CATCH(mLastError, );
 }
 

@@ -981,6 +981,12 @@ public:
     /// so this is exactly the number of times it ran.
     unsigned workspaceGeneration() const override;
 
+    unsigned long long framesPresented() const override;
+    /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts
+    /// this frame if the view was actually part of it (enabled + workspace +
+    /// scene). The one place mFramesPresented moves up.
+    void notePresented();
+
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
     /// The camera the chain's per-frame globals are computed from.
@@ -1080,6 +1086,10 @@ private:
     /// planar reflections armed. Null until the first frame that needs it.
     std::unique_ptr<planar::WorkspaceListener> mPlanarListener;
     unsigned                   mWorkspaceGeneration = 0;
+    /// Frames drawn+presented since the current scene was bound (see
+    /// View::framesPresented). Reset by setScene/detachScene, NOT by a
+    /// workspace rebuild.
+    unsigned long long         mFramesPresented = 0;
     /// What the host asked for. Offscreen views keep it and ignore it.
     PostFxDesc                 mPostFx;
     unsigned                   mWidth, mHeight;

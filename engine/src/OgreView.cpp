@@ -87,6 +87,11 @@ bool OgreView::setScene(Scene *scene) {
         mCamera->setFarClipDistance(1000.0f);
         mCamera->setAutoAspectRatio(true);
         mScene = s;
+        // A new scene means nothing of it has been drawn yet: whatever is in
+        // the window belongs to the previous scene (or to whoever owned those
+        // pixels before this view existed). Hosts gate their loading cover on
+        // this being 0.
+        mFramesPresented = 0;
         return attachWorkspace();
     } JAH_CATCH(mError, false);
 }
@@ -139,12 +144,22 @@ void OgreView::removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
 
 unsigned OgreView::workspaceGeneration() const { return mWorkspaceGeneration; }
 
+unsigned long long OgreView::framesPresented() const { return mFramesPresented; }
+
+void OgreView::notePresented() {
+    // Deliberately conservative: a disabled view's workspace is skipped by the
+    // compositor, and a view with no scene or no workspace draws nothing. Only
+    // frames that really put this view's pixels on the target count.
+    if (mEnabled && mWorkspace && mScene) ++mFramesPresented;
+}
+
 void OgreView::detachScene() {
     JAH_TRY {
         detachWorkspace();
         if (mCamera && mScene && mScene->sceneManager()) mScene->sceneManager()->destroyCamera(mCamera);
         mCamera = nullptr;
         mScene  = nullptr;
+        mFramesPresented = 0;
     } JAH_CATCH(mError, );
 }
 

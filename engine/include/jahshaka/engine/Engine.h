@@ -387,6 +387,18 @@ public:
     /// that a per-frame push really was free; tests use it to pin the fact that
     /// there is exactly ONE place a workspace is created (POST_CHAIN_SPEC.md).
     virtual unsigned workspaceGeneration() const = 0;
+    /// How many frames this View has actually drawn AND presented since its
+    /// current Scene was bound — the honest "are there real pixels in that
+    /// window yet?" signal. A frame counts only when the View was enabled, had
+    /// a live workspace and a bound Scene while Engine::renderOneFrame ran, so
+    /// a hidden, scene-less or workspace-less View never inflates it. Binding a
+    /// Scene (or detaching one) resets it to 0; a workspace REBUILD does not —
+    /// the pixels of the previous frame are still on screen.
+    ///
+    /// Hosts use it to know when the window stopped showing stale pixels: the
+    /// editor's loading cover (src/viewport/viewportcover.h) is on screen until
+    /// this passes its threshold.
+    virtual unsigned long long framesPresented() const = 0;
     /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.
