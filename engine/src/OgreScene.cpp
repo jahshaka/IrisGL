@@ -14,8 +14,73 @@ OgreScene::~OgreScene() { destroy(); }
 const std::string &OgreScene::name() const { return mName; }
 
 void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
+    // The hemisphere pair, expressed EXACTLY in the SH basis the backend now
+    // runs on: f(n) = lerp(lower, upper, n.y * 0.5 + 0.5)
+    //              = (upper + lower)/2  +  (upper - lower)/2 * n.y,
+    // i.e. the constant band and the y term, nothing else. No approximation.
+    //
+    // The 1/pi on the EQUAL-colour case, and only there. HlmsPbs' two ambient
+    // paths do not agree with each other by a factor of pi, and which one a
+    // caller got used to depend on exactly this test:
+    //   * upper != lower selected AmbientHemisphere, whose colours feed
+    //     envColourD and are multiplied by pi against a kD that already carries
+    //     1/pi (200.BRDFs_piece_ps.any:305) — i.e. a mean RADIANCE;
+    //   * upper == lower selected AmbientFixed, which does
+    //     `finalColour += ambient * kD` with no pi — i.e. pi times darker for the
+    //     same numbers.
+    // (OgreHlmsPbs.cpp:1698, the AmbientAutoNormal branch.) Every caller in the
+    // tree was written against whichever of the two it happened to hit, so the
+    // conversion reproduces the split rather than picking a side: a flat ambient
+    // keeps its old (dark) meaning, a hemisphere pair keeps its old (radiance)
+    // one. Sky-driven ambient never comes through here — the mirror pushes
+    // radiance-unit SH straight to setAmbientSh.
+    // FINDING for the lead: that pi cliff at upper == lower is Ogre's, not ours,
+    // and it is now the only reason this scale factor exists.
+    const bool flat = upper.r == lower.r && upper.g == lower.g && upper.b == lower.b;
+    const float kFlat = flat ? 1.0f / 3.14159265358979f : 1.0f;
+    const float c0[3] = { (upper.r + lower.r) * 0.5f * kFlat,
+                          (upper.g + lower.g) * 0.5f * kFlat,
+                          (upper.b + lower.b) * 0.5f * kFlat };
+    const float c1[3] = { (upper.r - lower.r) * 0.5f * kFlat,
+                          (upper.g - lower.g) * 0.5f * kFlat,
+                          (upper.b - lower.b) * 0.5f * kFlat };
+    float sh[27] = { 0 };
+    for (int c = 0; c < 3; ++c) { sh[c] = c0[c]; sh[3 + c] = c1[c]; }
+    setAmbientSh(sh);
+}
+
+void OgreScene::setAmbientSh(const float sh[27]) {
     JAH_TRY {
-        mSceneMgr->setAmbientLight(toOgre(upper), toOgre(lower), Ogre::Vector3::UNIT_Y);
+        // HlmsPbs does NOT evaluate the SH basis on the world normal. It uses
+        //     wsNormal = mul( passBuf.invViewMatCubemap, normal ); wsNormal.x = -wsNormal.x;
+        // (AmbientLighting_piece_ps.any) — the left-handed cubemap frame with X
+        // flipped on top, which works out to the world frame rotated 180 degrees
+        // about Y: (x, y, z) -> (-x, y, -z). Under that rotation the basis terms
+        // {1, y, z, x, xy, yz, 3z^2-1, zx, x^2-y^2} pick up the signs below, so
+        // the coefficients a caller gives in WORLD axes are multiplied by them to
+        // land where the caller meant. VERIFIED by ambient_sh_lights_world_axes
+        // (tests/engine): each band lights the face of a cube it names.
+        static const float kAxisSign[9] = { 1, 1, -1, -1, -1, -1, 1, 1, 1 };
+        Ogre::Vector3 coeffs[9];
+        for (int i = 0; i < 9; ++i)
+            coeffs[i] = Ogre::Vector3(sh[i * 3 + 0], sh[i * 3 + 1], sh[i * 3 + 2]) * kAxisSign[i];
+        mSceneMgr->setSphericalHarmonics(coeffs);
+        // The two-colour ambient still drives envmapScale (it rides
+        // ambientUpperHemi.w) and is what a non-SH Hlms would read; keep it at
+        // the SH constant band so nothing reads stale colours.
+        //
+        // envFeatures = 0, NOT the 0xffffffff default: that default turns on
+        // EnvFeatures_DiffuseGiFromReflectionProbe, which adds the reflection
+        // cubemap's roughest mip to envColourD as an approximate diffuse GI. We
+        // now have the real thing in SH, and the reflection cube is a genuine
+        // GGX convolution rather than the face-local box mips it used to be — so
+        // leaving the flag on both DOUBLE-COUNTS the ambient and undoes the
+        // hemisphere split (a sky lit only below its horizon was lighting
+        // upward-facing surfaces at 0.69 instead of 0.04). Ogre's own doc says
+        // exactly this: "do not set this flag ... because the diffuse GI is
+        // already gathered from another source of information".
+        const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
+        mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, 1.0f, 0u);
     } JAH_CATCH(mError, );
 }
 

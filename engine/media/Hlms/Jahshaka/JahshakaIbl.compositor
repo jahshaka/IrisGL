@@ -1,0 +1,41 @@
+// Jahshaka's sky-IBL specular convolution (Ogre adoption wave, item 4).
+//
+// One pass, run ONCE per sky change (OgreScene::applyPendingIbl), never per
+// frame: PASS_IBL_SPECULAR takes the sky cubemap and writes a roughness mip
+// chain into the cubemap every PBR datablock samples on PBSM_REFLECTION. Each
+// output mip is a GGX importance-sampled convolution of the WHOLE input
+// hemisphere at that mip's roughness, which is what a box mip chain
+// (_autogenerateMipmaps, what this engine used before) cannot be: box mips
+// average inside one cube face, so a rough metal facing a face boundary sees a
+// hard seam and no light from the face next door.
+//
+// The compute job it clones is "IblSpecular/Integrate", from Ogre's
+// Samples/Media/Compute/Algorithms/IBL — already staged and registered by
+// OgreEngine::registerCommonMaterials for the PCC probe workspace.
+//
+// external 0 = the sky cube (input, needs AllowAutomipmaps: the pass generates
+//              its mip chain itself before integrating)
+// external 1 = the reflection cube (output, needs Uav + mipmaps)
+
+compositor_node JahshakaIblSpecularNode
+{
+	in 0 iblSource
+	in 1 iblOutput
+
+	target iblOutput
+	{
+		pass ibl_specular
+		{
+			input	iblSource
+			output	iblOutput
+
+			profiling_id "Jahshaka sky IBL specular"
+		}
+	}
+}
+
+workspace JahshakaIblSpecularWorkspace
+{
+	connect_external 0 JahshakaIblSpecularNode 0
+	connect_external 1 JahshakaIblSpecularNode 1
+}
