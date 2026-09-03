@@ -1396,8 +1396,21 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // per-light ShadowMapType. Policy: the strongest (softest) quality any
     // shadow-casting light asked for wins, as accumulated by the last sync().
     // Nothing casting shadows leaves the engine's current filter untouched.
-    if (engine && mAnyShadowCaster && engine->shadowFilter() != mShadowFilter)
-        engine->setShadowFilter(mShadowFilter);
+    // World panel "Shadow Softness" (scene->shadowFilterTier, POST_CHAIN_SPEC
+    // §9.3) OVERRIDES that derivation outright when it is >= 0 — including for
+    // scenes with no shadow caster yet, exactly the way shadowResolution's
+    // override below works.
+    if (engine) {
+        const int tier = mSource->shadowFilterTier;
+        if (tier >= 0) {
+            const ShadowFilter wanted = tier >= 2 ? ShadowFilter::VerySoft
+                                      : tier == 1 ? ShadowFilter::Soft
+                                                  : ShadowFilter::Hard;
+            if (engine->shadowFilter() != wanted) engine->setShadowFilter(wanted);
+        } else if (mAnyShadowCaster && engine->shadowFilter() != mShadowFilter) {
+            engine->setShadowFilter(mShadowFilter);
+        }
+    }
     // Shadow Size: one global atlas, so the per-light combo is only a REQUEST
     // and the largest one wins. World panel "Shadow Quality" (scene->
     // shadowResolution, VISUAL_PARITY item 2 option A) overrides that

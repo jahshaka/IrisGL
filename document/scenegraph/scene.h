@@ -160,6 +160,29 @@ public:
     // behaviour); otherwise 256..8192 pixels.
     int shadowResolution;
 
+    // Shadow FILTER quality for the whole scene (POST_CHAIN_SPEC.md §9.3).
+    // The renderer has ONE global PCF filter, so the per-light ShadowMapType is
+    // only a request and SceneMirror pushes the softest one; this field
+    // OVERRIDES that derivation exactly the way shadowResolution overrides its
+    // own. -1 = Auto (derive from the lights, the historical behaviour);
+    // 0 = Hard (PCF 2x2), 1 = Soft (4x4), 2 = VerySoft (6x6).
+    int shadowFilterTier;
+
+    // ---- World Modes (POST_CHAIN_SPEC.md §9) --------------------------------
+    // A scalability tier for the whole scene. -1 = Custom (no tier: the fields
+    // below are whatever the user/document set them to), 0 = Low, 1 = Medium,
+    // 2 = High, 3 = Epic. Resolution is WRITE-THROUGH: setting a mode writes the
+    // tier value into each backing field (antiAliasing, shadowResolution,
+    // shadowFilterTier, giMode, giQuality, skyBakeResolution, ambientFromSky,
+    // ...) EXCEPT rows listed in worldOverrides, so every existing consumer —
+    // the mirror, the serializer, the panels, the verbs — keeps reading the one
+    // field it always read. The invariant: a backing field is always the
+    // RESOLVED value.
+    int worldMode;
+    // { rowId: value } — the rows the user pinned. Overrides survive mode
+    // switches by design (owner requirement).
+    QJsonObject worldOverrides;
+
     float gravity;
     bool shadowEnabled;
 
