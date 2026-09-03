@@ -173,6 +173,12 @@ Ogre::TextureGpu *OgreScene::makeSkyArrayTexture(Ogre::TextureGpu *src) {
     // it itself for a ManualTexture, and a second call underflows the pending
     // counter so isDataReady() never turns true (see createTexture).
     dst->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // The src's staging upload may only be RECORDED, not submitted — a copy
+    // issued now reads recycled VRAM (garbage sky, seen under scripted
+    // fixed-dt rendering where no frame flushed in between). Submit first
+    // (the AsyncTextureTicket rule from the sky/IBL adoption applies to any
+    // dependent GPU read, copies included).
+    mRoot->getRenderSystem()->flushCommands();
     src->copyTo(dst, dst->getEmptyBox(0), 0, src->getEmptyBox(0), 0);
     return dst;
 }
