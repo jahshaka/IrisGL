@@ -257,6 +257,22 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     Ogre::VertexArrayObject *vao = vaoMgr->createVertexArrayObject(vbufs, ibuf, Ogre::OT_TRIANGLE_LIST);
     sub->mVao[Ogre::VpNormal].push_back(vao);
     sub->mVao[Ogre::VpShadow].push_back(vao);
+    // Shadow-caster VAO optimization (POST_CHAIN_SPEC.md §11). Pushing the SAME
+    // vao into both slots is what Ogre calls "useSameVaos": shadow passes then
+    // stream the full 48-byte vertex (68 skinned) when they need 12 (+8).
+    // prepareForShadowMapping(false) builds a position-only (plus blend
+    // indices/weights) buffer with duplicate vertices merged instead — costing
+    // extra VRAM and a GPU->CPU readback at build time.
+    //
+    // NEVER for `data.dynamic` (CPU-skinned) meshes: updateMeshVertices uploads
+    // the new pose into mVao[VpNormal][0]'s buffer ONLY. While VpShadow aliases
+    // it, CPU-skinned shadows follow the deformation for free; give those meshes
+    // an independent optimized shadow VAO and their shadows freeze at the pose
+    // the mesh was built with — silent and visually confusing. GPU-skinned
+    // meshes are fine: they deform in the vertex shader, which the optimized
+    // buffer keeps the blend indices/weights for.
+    if (Ogre::Mesh::msOptimizeForShadowMapping && !data.dynamic)
+        mesh->prepareForShadowMapping(false);
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
     mesh->_setBounds(aabb, false);
     mesh->_setBoundingSphereRadius(aabb.getRadius());

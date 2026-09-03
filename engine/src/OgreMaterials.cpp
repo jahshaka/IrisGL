@@ -204,9 +204,10 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // line meshes must neither bounce nor occlude the radiosity rays.
         n.item->setVisibilityFlags(tit->second.unlit ? kVisibleBit
                                                      : (kVisibleBit | kGiGeometryBit));
-        // On-top overlays render after everything else (all RQ groups default to
-        // v2 FAST mode, so a high group id is enough); depth test is off in the material.
-        if (tit->second.onTop) n.item->setRenderQueueGroup(200);
+        // On-top overlays render after everything else, in the compositor
+        // chain's dedicated overlay pass (POST_CHAIN_SPEC.md §6 — RQ 200 is now
+        // reserved for refractive items); depth test is off in the material.
+        if (tit->second.onTop) n.item->setRenderQueueGroup(kOverlayRenderQueue);
         n.node->attachObject(n.item);
         n.meshRef = meshId; n.materialRef = matId;
         // New lit geometry must join the voxel volume / next trace; unlit

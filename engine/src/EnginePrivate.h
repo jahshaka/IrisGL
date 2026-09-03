@@ -124,6 +124,54 @@ constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
 
 // ---------------------------------------------------------------------------
+// Render-queue policy (POST_CHAIN_SPEC.md §6). Ogre fixes the queue MODES in
+// RenderQueue's constructor: [0,100) and [200,225) are v2 FAST, [100,200) and
+// [225,256) are V1_FAST, 15 is PARTICLE_SYSTEM. Our v2 items can therefore only
+// live in 0-99 and 200-224.
+//   0     sky rectangle          (OgreSky)
+//   10    normal items           (Ogre's default)
+//   15    PFX2 billboards
+//   200   refractive items       (reserved; phase 7)
+//   210   on-top overlays        (gizmos, wires, selection outlines)
+// The compositor chain renders [0, kRefractiveRenderQueue) in the opaque pass
+// and [kOverlayRenderQueue, 255) in a second pass, so overlays stay out of the
+// G-buffers, luminance averages and edge-detection passes the later phases add.
+// (Overlays used to sit at 200; the move is pixel-neutral — both values are
+// inside the single range the old one-pass workspace drew.)
+constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
+constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
+
+// ---------------------------------------------------------------------------
+// What shape of compositor chain a view wants. Phase 1 carries only what every
+// view has always had; the effect switches (HDR + tonemap, bloom, SSAO, SMAA,
+// SSR, refraction) become extra fields here and extra nodes in OgreChain.cpp,
+// and nothing outside those two places has to learn about them.
+struct ChainDesc {
+    Colour background;
+    bool   shadows = false;   ///< instantiate the process-wide shadow node
+};
+
+class OgreView;
+
+/// The chain builder (OgreChain.cpp). Not a class: it has no state — the state
+/// is the ChainDesc the view owns and the definition names it hands back.
+namespace chain {
+/// Creates the node definitions and the workspace definition `desc` describes,
+/// under `workspaceDef`. EVERY node definition created is appended to
+/// `nodeDefsOut`, in creation order: a multi-node chain whose owner cleans up
+/// only one definition leaks the rest across view recreation.
+void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+           const ChainDesc &desc, std::vector<std::string> &nodeDefsOut);
+/// Removes the workspace definition and every node definition in `nodeDefs`
+/// (which is cleared). Safe when nothing was built.
+void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+             std::vector<std::string> &nodeDefs);
+/// The name of the scene node definition for a workspace — the anchor later
+/// phases (and the planar-reflection lane) need to find the main scene pass.
+std::string sceneNodeDefName(const std::string &workspaceDef);
+}   // namespace chain
+
+// ---------------------------------------------------------------------------
 // Linear distance fog (media/Hlms/Jahshaka/JahFog_piece_ps.any, attached to every
 // lit PBS datablock). Parameters are per-scene, keyed by SceneManager: the listener
 // is global to HlmsPbs, but preparePassBuffer receives the SceneManager of the pass
@@ -610,10 +658,35 @@ public:
     bool shadows() const override;
     void setShadows(bool on) override;
     void setBackground(const Colour &c) override;
-    /// The clear colour and the shadow node live in the workspace definition:
-    /// rebuild definition + workspace, keeping scene, camera and enabled state.
+    /// The clear colour and the shadow node live in the chain's definitions:
+    /// rebuild definitions + workspace, keeping scene, camera and enabled state.
     void rebuildWorkspaceDef();
     static constexpr const char *kShadowNodeName = "JahshakaShadowNode";
+
+    // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane
+    //      depends on it) ---------------------------------------------------
+    /// THE one place a CompositorWorkspace is created for this view. Six call
+    /// sites used to do it inline (setScene, definition rebuild, shadow-atlas
+    /// rebuild, RTT rebuild, window recreate, MSAA change); anything that must
+    /// ride a LIVE workspace — a compositor listener, per-view effect state —
+    /// would have had to be re-attached in all six. Now it is re-attached here.
+    /// Returns true when a workspace exists afterwards.
+    bool attachWorkspace();
+    /// This view's current chain shape — what the builder is asked for.
+    ChainDesc chainDesc() const;
+    /// Drops the live workspace (detaching its listeners first). Safe when
+    /// there is none; returns whether one was actually dropped.
+    bool detachWorkspace();
+    /// Compositor listeners this view re-attaches to every workspace it builds.
+    /// The view does NOT own them: register at setup, unregister before the
+    /// listener dies. Registering twice is a no-op.
+    void addWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
+    void removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
+    /// Counts completed workspace attachments. Neutral introspection (no Ogre
+    /// type crosses the boundary) that lets hosts and tests see that a call was
+    /// or was not structurally expensive — every rebuild goes through the seam,
+    /// so this is exactly the number of times it ran.
+    unsigned workspaceGeneration() const override;
     /// Shadow-atlas rebuild support (Engine::setShadowResolution): the shadow node
     /// DEFINITION cannot be replaced while any workspace instantiates it, so the
     /// engine first drops every shadowed view's workspace (true = dropped, caller
@@ -690,7 +763,14 @@ private:
     Ogre::Camera              *mCamera    = nullptr;
     Ogre::CompositorWorkspace *mWorkspace = nullptr;
     OgreScene                 *mScene     = nullptr;
-    std::string                mName, mWorkspaceDef, mNodeDef;
+    std::string                mName, mWorkspaceDef;
+    /// Every node definition the chain builder made for this view, in creation
+    /// order. Was a single std::string while the chain was one node — a
+    /// multi-node chain that removes one definition leaks the rest across view
+    /// recreation (test_engine_recreate is where that shows up).
+    std::vector<std::string>   mNodeDefs;
+    std::vector<Ogre::CompositorWorkspaceListener *> mWorkspaceListeners;
+    unsigned                   mWorkspaceGeneration = 0;
     unsigned                   mWidth, mHeight;
     Colour                     mBackground;
     bool                       mEnabled = true;
@@ -732,6 +812,12 @@ public:
     /// the same teardown order the engine's destructor honours.
     void setShadowResolution(unsigned pixels) override;
     unsigned shadowResolution() const override;
+
+    /// Ogre::Mesh::msOptimizeForShadowMapping — a plain process-wide static,
+    /// read by buildMeshV2 when it decides whether to give a mesh its own
+    /// position-only shadow VAOs (POST_CHAIN_SPEC.md §11).
+    void setShadowMeshOptimization(bool on) override;
+    bool shadowMeshOptimization() const override;
 
     ~OgreEngine() override;
 

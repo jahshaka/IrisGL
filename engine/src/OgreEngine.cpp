@@ -22,6 +22,10 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     (void)cfg.display;  // X11-only; 0 on other hosts (Types.h documents the leak)
 #endif
     mDefaultSamples = OgreView::sanitizeSamples(cfg.sampleCount);
+    // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
+    // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
+    // is a plain static, not engine state.
+    Ogre::Mesh::msOptimizeForShadowMapping = cfg.optimizeShadowMeshes;
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
     try {
@@ -228,6 +232,9 @@ void OgreEngine::setShadowResolution(unsigned pixels) {
 }
 
 unsigned OgreEngine::shadowResolution() const { return mShadowResolution; }
+
+void OgreEngine::setShadowMeshOptimization(bool on) { Ogre::Mesh::msOptimizeForShadowMapping = on; }
+bool OgreEngine::shadowMeshOptimization() const { return Ogre::Mesh::msOptimizeForShadowMapping; }
 
 OgreEngine::~OgreEngine() {
     // Dependency order, all BEFORE Root: views (workspaces, cameras, windows,

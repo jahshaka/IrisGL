@@ -109,6 +109,18 @@ Scene::Scene()
     // from the largest per-light request (the historical behaviour)
     shadowResolution = 0;
 
+    // shadow filter: -1 = Auto, i.e. the softest quality any shadow-casting
+    // light asked for (the historical derivation)
+    shadowFilterTier = -1;
+
+    // World Mode: -1 = Custom. A new scene starts with the field values above
+    // and no tier applied; picking a mode (World panel or world.mode) is what
+    // writes a tier through. POST_CHAIN_SPEC §12 decision 8 proposed defaulting
+    // new scenes to Epic — that would turn VCT GI, 4x MSAA and a 4096 shadow
+    // atlas on for every scene and every test, so it is left to the owner.
+    worldMode = -1;
+    worldOverrides = QJsonObject();
+
     // selection outline: width in Preferences units (SceneMirror maps it to the
     // inverted-hull scale as 1 + width/150); colour stays invalid = "never set",
     // the mirror then falls back to the historical selection yellow
