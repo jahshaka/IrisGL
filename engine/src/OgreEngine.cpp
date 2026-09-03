@@ -62,11 +62,22 @@ Scene *OgreEngine::createScene(const std::string &name) {
         // HlmsPbs shades point and spot lights ONLY through Forward+ (Forward3D /
         // ForwardClustered); without it only directional lights reach the shader.
         // Values are Ogre's sample defaults: 16x8 grid, 24 slices, 96 lights per
-        // cell, no decals, 2..50 units depth range. 4 cubemap probes per cell:
+        // cell, 2..50 units depth range. 4 cubemap probes per cell:
         // per-pixel PCC (the GI hybrid's reflection probes) is culled through
         // this grid — 0 would silently disable it (costs a slightly larger grid
         // buffer; zero shader cost until probes exist).
-        sm->setForwardClustered(true, 16, 8, 24, 96, 0, 4, 2.0f, 50.0f);
+        //
+        // 8 DECALS PER CELL (DECALS_SPEC D5), always on. This is a per-CELL cap,
+        // not a scene-wide one: more than 8 decals overlapping one cluster cell
+        // drop the farthest. Turning it on costs ~54 KiB more per cached grid
+        // buffer and NOTHING in the shader until a scene actually binds a decal
+        // atlas (the decal code is gated on a non-null SceneManager decal
+        // texture, OgreForwardClustered.cpp:1095-1120). It does shift
+        // hlms_forwardplus_lights_per_cell and the cubemap slot offset, so every
+        // PBS shader recompiles ONCE — CPU fill and shader read use the same
+        // offsets, and the phase-0 gate proved the rendered pixels are
+        // byte-identical either way.
+        sm->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, 4, 2.0f, 50.0f);
         // Shadow maps cover nothing until these are set (Ogre's samples set both).
         sm->setShadowDirectionalLightExtrusionDistance(500.0f);
         sm->setShadowFarDistance(500.0f);
@@ -254,6 +265,10 @@ OgreEngine::~OgreEngine() {
         if (mRoot && Ogre::MeshManager::getSingletonPtr())
             Ogre::MeshManager::getSingleton().removeAll();
     } catch (...) {}
+    // The decal atlases are process-wide but their TextureGpu pointers belong to
+    // THIS Root; a second Engine in the same process (test_engine_recreate)
+    // would otherwise inherit dangling masters and slice textures.
+    detail::resetDecalAtlases();
     delete mRoot;
     mRoot = nullptr;
     gLiveEngine = nullptr;

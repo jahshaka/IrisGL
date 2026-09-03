@@ -225,7 +225,13 @@ bool OgreScene::detachMesh(NodeId id) {
 
 // ---- Textures ----
 TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
-    for (auto &kv : mTextures) if (kv.second.path == path) return kv.first;
+    // Path dedup, but NEVER across the decal atlases: the same image file can be
+    // both an ordinary PBR map and a decal image, and they live in different
+    // pools with different formats. Handing a decal slice back from here would
+    // bind a pooled slice as a base map AND let the caller destroyTexture() a
+    // texture other scenes' decals are still sampling.
+    for (auto &kv : mTextures)
+        if (!kv.second.decal && kv.second.path == path) return kv.first;
     const size_t slash = path.find_last_of("/\\");
     const std::string dir  = slash == std::string::npos ? "." : path.substr(0, slash);
     const std::string file = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -336,13 +342,21 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
     } JAH_CATCH(mError, 0);
 }
 
+void OgreScene::releaseTextureRec(const TextureRec &rec) {
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    // A decal-atlas slice is shared across every scene in the process: only the
+    // last user's release frees it (OgreDecals.cpp). Destroying it outright here
+    // would leave the other scenes' Decals pointing at a dead TextureGpu.
+    if (rec.decal) { detail::releaseDecalTexture(tm, rec.decalKind, rec.texture); return; }
+    tm->destroyTexture(rec.texture);
+}
+
 bool OgreScene::destroyTexture(TextureId id) {
     auto it = mTextures.find(id);
     if (it == mTextures.end()) return false;
     JAH_TRY {
         invalidateGiCaches();   // BEFORE the texture dies: IR caches images by TextureGpu*
-        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-        tm->destroyTexture(it->second.texture);
+        releaseTextureRec(it->second);
         mTextures.erase(it);
         return true;
     } JAH_CATCH(mError, false);

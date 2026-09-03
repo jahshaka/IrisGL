@@ -61,6 +61,7 @@
 #include <ParticleSystem/OgreBillboardSet2.h>
 #include <ParticleSystem/OgreParticleSystemManager2.h>
 #include <OgreForwardPlusBase.h>
+#include <OgreDecal.h>
 #include <InstantRadiosity/OgreInstantRadiosity.h>
 #include <Vct/OgreVctVoxelizer.h>
 #include <Vct/OgreVctLighting.h>
@@ -122,6 +123,10 @@ class OgreEngine;
 constexpr Ogre::uint32 kVisibleBit     = 1u;
 constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
+
+// Forward+ clustered decal budget PER CELL (DECALS_SPEC D5). Not a scene-wide
+// cap: decals beyond this in one cluster cell are dropped farthest-first.
+constexpr Ogre::uint32 kDecalsPerCell = 8u;
 
 // ---------------------------------------------------------------------------
 // Render-queue policy (POST_CHAIN_SPEC.md §6). Ogre fixes the queue MODES in
@@ -263,6 +268,17 @@ void shutdown();
 }  // namespace lightextras
 
 // ---------------------------------------------------------------------------
+// Decal atlases (OgreDecals.cpp). PROCESS-WIDE, like the TextureGpuManager pools
+// they wrap: one image loaded by two scenes costs one slice. resetDecalAtlases()
+// MUST run when Ogre::Root dies, or the next Engine in the process inherits
+// dangling TextureGpu pointers (test_engine_recreate creates a second one).
+struct DecalAtlas;
+DecalAtlas &decalAtlas(DecalMap kind);
+void        resetDecalAtlases();
+unsigned    decalAtlasCapacity();
+bool        releaseDecalTexture(Ogre::TextureGpuManager *tm, DecalMap kind, Ogre::TextureGpu *tex);
+
+// ---------------------------------------------------------------------------
 class OgreScene final : public Scene {
 public:
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
@@ -370,6 +386,13 @@ public:
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
 
+    // ---- Decals (DECALS_SPEC.md; impl in OgreDecals.cpp) ----
+    bool setDecal(NodeId id, const DecalDesc &d) override;
+    bool removeDecal(NodeId id) override;
+    TextureId loadDecalTexture(const std::string &path, DecalMap kind) override;
+    unsigned decalAtlasCapacity(DecalMap kind) const override;
+    unsigned decalAtlasUsed(DecalMap kind) const override;
+
     // ---- Global illumination (GI_SPEC.md phases 1-3) ----
     // Instant Radiosity traces rays from ONE chosen light against the scene's
     // PBR items and plants virtual point lights (LT_VPL) where the rays bounce.
@@ -418,6 +441,12 @@ private:
         MaterialId       materialRef = 0;   // shared, owned by mMaterials
         // Billboard set (particles): uniquely owned; freed by releaseBillboards
         // BEFORE the scene manager dies (its _destroy needs the live VaoManager).
+        // Decal (DECALS_SPEC): the Decal rides an internal child node whose
+        // scale IS the projector box (Ogre's culler reads the derived scale as
+        // the box half-extents), so the document node's own scale composes with
+        // the numeric width/height/depth.
+        Ogre::Decal              *decal = nullptr;
+        Ogre::SceneNode          *decalNode = nullptr;
         Ogre::BillboardSet       *billboards = nullptr;
         std::vector<Ogre::uint32> billboardHandles;   // live handles, dense, in order
         std::string               billboardDatablockName;
@@ -475,9 +504,21 @@ private:
         bool clipModeEntered = false;
     };
     struct MaterialRec { std::string datablockName; bool unlit = false; bool onTop = false; };
-    struct TextureRec { Ogre::TextureGpu *texture = nullptr; std::string path; };
+    struct TextureRec {
+        Ogre::TextureGpu *texture = nullptr;
+        std::string path;
+        /// Decal-atlas slice (loadDecalTexture): SHARED process-wide and
+        /// refcounted, so it must never go through the plain
+        /// TextureGpuManager::destroyTexture path.
+        bool     decal = false;
+        DecalMap decalKind = DecalMap::Diffuse;
+    };
 
     void applyReflectionToAllImpl();
+
+    /// Releases one texture record: a pooled decal slice drops a reference (and
+    /// dies with the last one), anything else is destroyed outright.
+    void releaseTextureRec(const TextureRec &rec);
 
     Ogre::Hlms *hlmsFor(const MaterialRec &m) const;
     /// Removes the renderable from a node that references a SHARED mesh/material.
@@ -533,6 +574,15 @@ private:
     /// Frees a node's billboard set and its datablock, in that order (the set
     /// references the datablock until it is destroyed). Safe to call twice.
     void releaseBillboards(Node &n);
+    /// Destroys the node's decal and its internal child node, and re-points the
+    /// SceneManager's decal atlases (clearing them when the last decal goes).
+    /// Safe to call twice; must run before the SceneManager dies.
+    void releaseDecal(Node &n);
+    /// Points this SceneManager at the atlas master textures iff the scene
+    /// still has at least one decal — the shader permutation is gated on a
+    /// non-null SceneManager decal texture, so clearing it drops the decal
+    /// code out of every PBS shader again.
+    void refreshDecalBindings();
     void releaseNode(Node &n);
 
     // ---- GI internals ----
@@ -629,6 +679,9 @@ private:
     Ogre::Camera                     *mGiCamera     = nullptr;   // PCC build + tracking
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
+    /// Live decals in THIS scene. The SceneManager-level atlas binding is
+    /// driven off the count (see refreshDecalBindings).
+    unsigned            mDecalCount = 0;
     TextureId           mNextTextureId = 0;
     NodeId              mNextId = 0;
     MeshId              mNextMeshId = 0;

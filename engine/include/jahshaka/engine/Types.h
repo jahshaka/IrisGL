@@ -259,6 +259,46 @@ struct LightDesc {
     std::string texturePath;
 };
 
+/// A projected-texture decal attached to a node (DECALS_SPEC.md §5.2).
+///
+/// The decal is an ORIENTED BOX that overwrites base colour, roughness and
+/// metalness on every surface inside it. Two conventions, both fixed by the
+/// backend's shader and neither cheap to change:
+///
+///  - it projects down the node's LOCAL -Y (identical to LightDesc's
+///    direction convention), and only affects surfaces whose normal points
+///    back at it;
+///  - the image's U axis is local X and its V axis is local Z, so `width`
+///    is the local-X extent and `height` the local-Z extent. `depth` is the
+///    local-Y thickness of the projector box.
+///
+/// `diffuse` MUST come from Scene::loadDecalTexture(): decal images live in a
+/// dedicated fixed-geometry texture pool and a plain loadTexture() id is either
+/// non-batched (the backend asserts) or in the wrong pool (it would silently
+/// sample another decal's image).
+///
+/// THERE IS NO PER-DECAL OPACITY OR COLOUR TINT. The backend packs exactly four
+/// floats per decal (3 rows of the inverse world matrix + one float4 of
+/// indices/metalness/roughness); adding either would mean forking the shader
+/// template, which this project does not do.
+struct DecalDesc {
+    TextureId diffuse  = 0;   ///< base colour + alpha mask; from loadDecalTexture()
+    TextureId normal   = 0;   ///< optional; from loadDecalTexture(kind Normal)
+    TextureId emissive = 0;   ///< optional; from loadDecalTexture(kind Emissive)
+    float width  = 1.0f;      ///< local X extent
+    float height = 1.0f;      ///< local Z extent
+    float depth  = 0.5f;      ///< local Y extent (projection thickness)
+    float metalness = 0.0f;
+    float roughness = 1.0f;
+    /// Diffuse alpha masks the base colour only, not the normal/emissive maps.
+    bool  ignoreAlphaDiffuse = false;
+};
+
+/// Which pooled decal atlas a decal image is loaded into. The three atlases
+/// have different pixel formats and filters (a normal map is neither sRGB nor
+/// the same channel layout), so the caller must say which one it wants.
+enum class DecalMap { Diffuse, Normal, Emissive };
+
 /// A View's camera. Position/orientation are absolute (the document composes them).
 struct CameraDesc {
     Vec3  position;

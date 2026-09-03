@@ -29,7 +29,11 @@ enum class SceneNodeType {
     Mesh,
     Light,
     Camera,
-    Viewer
+    Viewer,
+    // A projected-texture decal (DECALS_SPEC). Unlike CameraNode — which never
+    // assigns its own type and therefore reads as Empty forever — DecalNode's
+    // constructor SETS this; every type switch below depends on it.
+    Decal
 };
 
 class PhysicsProperty;

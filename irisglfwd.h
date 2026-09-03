@@ -24,6 +24,7 @@ namespace iris
 
 class CameraNode;
 class LightNode;
+class DecalNode;
 class ViewerNode;
 class ParticleSystemNode;
 class Mesh;
@@ -74,6 +75,7 @@ typedef QSharedPointer<Model> ModelPtr;
 typedef QSharedPointer<Material> MaterialPtr;
 typedef QSharedPointer<DefaultMaterial> DefaultMaterialPtr;
 typedef QSharedPointer<LightNode> LightNodePtr;
+typedef QSharedPointer<DecalNode> DecalNodePtr;
 typedef QSharedPointer<CameraNode> CameraNodePtr;
 typedef QSharedPointer<MeshNode> MeshNodePtr;
 typedef QSharedPointer<Texture2D> Texture2DPtr;
