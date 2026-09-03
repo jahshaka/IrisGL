@@ -3,24 +3,6 @@
 #include "EnginePrivate.h"
 
 namespace jahshaka { namespace engine { namespace detail {
-namespace {
-
-/// Every lit PBS datablock carries the fog piece (Unlit and the sky do not — they
-/// must stay unfogged). A missing piece file degrades to "no fog", logged, instead
-/// of failing material creation.
-void attachFogPiece(Ogre::HlmsPbsDatablock *db) {
-    try {
-        db->setCustomPieceFile("JahFog_piece_ps.any",
-                               Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
-                               Ogre::CustomPieceStage::PixelShader);
-    } catch (Ogre::Exception &e) {
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: fog piece not attached (materials render unfogged): " +
-            e.getFullDescription());
-    }
-}
-
-}  // namespace
 
 Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
     if (m.onTop)      return kOverlayRenderQueue;      // gizmos, wires, always-on-top
@@ -65,7 +47,8 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     db->setNormalMapWeight(p.normalMapWeight);
     // UV tiling: HlmsPbs has no UV transform for its base maps (only detail maps
     // have offset/scale), so the scale rides in the datablock's user values and a
-    // custom_ps_uv_modifier_macros piece (JahFog_piece_ps.any) multiplies every
+    // custom_ps_uv_modifier_macros piece (JahFog_piece_vs_piece_ps.any, a library
+    // folder of HlmsPbs — no longer attached per datablock) multiplies every
     // base-map lookup by material.userValue[0].xy. setUserValue only schedules a
     // const-buffer update — scale edits never recompile shaders.
     db->setUserValue(0, Ogre::Vector4(p.uvScale, p.uvScale, 1.0f, 1.0f));
@@ -201,7 +184,6 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
             Ogre::IdString(rec.datablockName), rec.datablockName,
             Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
         db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
-        attachFogPiece(db);
         applyPbr(db, p, mRefractionsActive);
         if (mReflectionTex) db->setTexture(Ogre::PBSM_REFLECTION, mReflectionTex);
         mMaterials[++mNextMaterialId] = rec;
@@ -234,7 +216,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     if (it == mMaterials.end()) return false;
     JAH_TRY {
         invalidateGiCaches();   // VctMaterial caches conversions by raw datablock pointer
-        for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.second);
+        for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.first, kv.second);
         Ogre::Hlms *hlms = hlmsFor(it->second);
         if (hlms->getDatablock(Ogre::IdString(it->second.datablockName)))
             hlms->destroyDatablock(Ogre::IdString(it->second.datablockName));
@@ -250,7 +232,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
     if (tit == mMaterials.end()) { mError = "attachMesh: unknown material"; return false; }
     JAH_TRY {
         Node &n = nit->second;
-        detachItem(n);
+        detachItem(id, n);
         n.item = mSceneMgr->createItem(mit->second.mesh, Ogre::SCENE_DYNAMIC);
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
@@ -266,6 +248,11 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // New lit geometry must join the voxel volume / next trace; unlit
         // overlays (outlines, wires) never participate in GI.
         if (!tit->second.unlit) invalidateGiCaches();
+        // A reflector node whose mesh was swapped keeps its flag (detachItem
+        // above only disarmed the dead Item) — re-derive the plane from the new
+        // geometry. A failure here is not fatal to attachMesh: the node simply
+        // stops reflecting and lastError() says why.
+        if (mReflectors.count(id)) armReflector(id, n);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -273,12 +260,18 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
 bool OgreScene::detachMesh(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return false;
-    JAH_TRY { detachItem(it->second); return true; } JAH_CATCH(mError, false);
+    JAH_TRY { detachItem(id, it->second); return true; } JAH_CATCH(mError, false);
 }
 
 // ---- Textures ----
 TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
-    for (auto &kv : mTextures) if (kv.second.path == path) return kv.first;
+    // Path dedup, but NEVER across the decal atlases: the same image file can be
+    // both an ordinary PBR map and a decal image, and they live in different
+    // pools with different formats. Handing a decal slice back from here would
+    // bind a pooled slice as a base map AND let the caller destroyTexture() a
+    // texture other scenes' decals are still sampling.
+    for (auto &kv : mTextures)
+        if (!kv.second.decal && kv.second.path == path) return kv.first;
     const size_t slash = path.find_last_of("/\\");
     const std::string dir  = slash == std::string::npos ? "." : path.substr(0, slash);
     const std::string file = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -389,13 +382,21 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
     } JAH_CATCH(mError, 0);
 }
 
+void OgreScene::releaseTextureRec(const TextureRec &rec) {
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    // A decal-atlas slice is shared across every scene in the process: only the
+    // last user's release frees it (OgreDecals.cpp). Destroying it outright here
+    // would leave the other scenes' Decals pointing at a dead TextureGpu.
+    if (rec.decal) { detail::releaseDecalTexture(tm, rec.decalKind, rec.texture); return; }
+    tm->destroyTexture(rec.texture);
+}
+
 bool OgreScene::destroyTexture(TextureId id) {
     auto it = mTextures.find(id);
     if (it == mTextures.end()) return false;
     JAH_TRY {
         invalidateGiCaches();   // BEFORE the texture dies: IR caches images by TextureGpu*
-        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-        tm->destroyTexture(it->second.texture);
+        releaseTextureRec(it->second);
         mTextures.erase(it);
         return true;
     } JAH_CATCH(mError, false);

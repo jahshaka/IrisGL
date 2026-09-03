@@ -50,7 +50,27 @@ if [ "$(uname -s)" = "Darwin" ]; then
     PLATFORM_FLAGS="$PLATFORM_FLAGS -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 else
     JOBS="${JOBS:-$(nproc)}"
+    # $ORIGIN so the INSTALLED Ogre libraries find their siblings beside
+    # themselves, with no LD_LIBRARY_PATH and no help from the consumer.
+    #
+    # WHY THIS IS NOT OPTIONAL (found 2026-09-03): DT_RUNPATH is NOT transitive.
+    # A consumer's RUNPATH resolves the libraries the CONSUMER names, not the
+    # ones those libraries name in turn. libOgreNextHlmsPbs has always NEEDED
+    # libOgreNextMain and could never resolve it on its own — it only ever
+    # worked because Jahshaka links Main directly too, so it was already in the
+    # loaded set by SONAME. That accident broke the moment HlmsPbs gained a
+    # NEEDED on libOgreNextPlanarReflections (the component pin below): every
+    # already-built binary that did not also link the new library failed at
+    # startup with "cannot open shared object file". $ORIGIN removes the whole
+    # class of problem instead of the one instance of it.
+    #
+    # $ORIGIN/.. is for lib/OGRE-Next/*.so (RenderSystem_Vulkan and friends),
+    # which are dlopen'd from a subdirectory and need to reach lib/ above them.
+    # Single quotes: $ORIGIN must reach the linker literally, not be expanded
+    # by this shell. CMake applies it at INSTALL time, so the build tree is
+    # unaffected.
     PLATFORM_FLAGS="-DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=ON"
+    PLATFORM_FLAGS="$PLATFORM_FLAGS -DCMAKE_INSTALL_RPATH=\$ORIGIN;\$ORIGIN/.."
 fi
 
 [ -f "$SRC/CMakeLists.txt" ] || {
@@ -76,6 +96,18 @@ for p in "$PATCHES"/*.patch; do
 done
 
 # --- Configure + build + install --------------------------------------------
+# The component set is pinned EXPLICITLY (every OGRE_BUILD_COMPONENT_* that the
+# pin defines) so the install is reproducible on every box. It used to name only
+# three, and the rest rode upstream defaults -- two of which are machine
+# dependent: OVERLAY is a cmake_dependent_option on FREETYPE_FOUND and DEAR_IMGUI
+# on DearImgui_FOUND, so a box without libfreetype-dev silently produced a
+# different install. OVERLAY is OFF by decision: we link neither the library nor
+# any Overlay header, and turning it off removes the hidden freetype dependency.
+# PLANAR_REFLECTIONS is ours (mirrors / glossy floors); note it is #ifdef-ed
+# INSIDE OgreHlmsPbs.h, so it changes HlmsPbs's member layout -- consumers MUST
+# recompile after a flip. generateAbiCookie() does not hash component defines,
+# so nothing catches a stale consumer at runtime; we rely on CMake's -MD depfiles
+# tracking the installed OgreBuildSettings.h (do not make those includes SYSTEM).
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -84,6 +116,11 @@ cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DOGRE_VULKAN_WINDOW_NULL=ON \
   -DOGRE_BUILD_COMPONENT_HLMS_PBS=ON -DOGRE_BUILD_COMPONENT_HLMS_UNLIT=ON \
   -DOGRE_BUILD_COMPONENT_SCENE_FORMAT=ON \
+  -DOGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS=ON \
+  -DOGRE_BUILD_COMPONENT_ATMOSPHERE=ON -DOGRE_BUILD_COMPONENT_MESHLODGENERATOR=ON \
+  -DOGRE_BUILD_COMPONENT_PROPERTY=ON -DOGRE_BUILD_COMPONENT_OVERLAY=OFF \
+  -DOGRE_BUILD_COMPONENT_PAGING=OFF -DOGRE_BUILD_COMPONENT_VOLUME=OFF \
+  -DOGRE_BUILD_COMPONENT_DEAR_IMGUI=OFF \
   -DOGRE_BUILD_SAMPLES2=OFF -DOGRE_BUILD_TESTS=OFF -DOGRE_BUILD_TOOLS=ON
 
 # libshaderc gotcha: a missing dep silently drops the Vulkan RenderSystem while
@@ -93,6 +130,41 @@ grep -q "RenderSystem_Vulkan" "$SRC/build/build.ninja" || {
     exit 1
 }
 
+# Same class of silent-drop guard for the PlanarReflections component: it is
+# OFF by default upstream, and without it HlmsPbs compiles a different layout
+# and OgrePlanarReflections.cpp will not build.
+grep -q "OgreNextPlanarReflections" "$SRC/build/build.ninja" || {
+    echo "PlanarReflections component was NOT configured — the explicit component pin above did not take." >&2
+    exit 1
+}
+
 cmake --build "$SRC/build" -j"$JOBS"
+# `cmake --install` overwrites, it never REMOVES: a component switched off (or
+# a rename upstream) leaves its old .so behind for ever, and an orphan that no
+# longer has its dependencies installed beside it fails the gate below with a
+# problem nobody has. The build has succeeded by this point, so the shared
+# prefix is safe to prune — this script owns it.
+rm -f "$PREFIX"/lib/libOgreNext*.so* "$PREFIX"/lib/OGRE-Next/*.so*
 cmake --install "$SRC/build" > /dev/null
+
+# Self-containment gate. Every installed Ogre library must resolve its OWN
+# dependencies in a clean environment (see the $ORIGIN note above): if this
+# fails, binaries built against the install start failing at load time in ways
+# that look like anything but a linker problem.
+if [ "$(uname -s)" != "Darwin" ] && command -v ldd > /dev/null 2>&1; then
+    missing=0
+    for so in "$PREFIX"/lib/libOgreNext*.so.* "$PREFIX"/lib/OGRE-Next/*.so.*; do
+        [ -f "$so" ] || continue
+        n=$(env -u LD_LIBRARY_PATH ldd "$so" 2>/dev/null | grep -c "not found" || true)
+        [ "$n" = "0" ] || { echo "UNRESOLVED deps in $(basename "$so"):" >&2
+                            env -u LD_LIBRARY_PATH ldd "$so" | grep "not found" >&2
+                            missing=$((missing + n)); }
+    done
+    [ "$missing" = "0" ] || {
+        echo "Installed Ogre libraries do not resolve without LD_LIBRARY_PATH — the \$ORIGIN" >&2
+        echo "install RPATH did not take. Do NOT paper over this with LD_LIBRARY_PATH." >&2
+        exit 1
+    }
+fi
+
 echo "Ogre-Next installed to $PREFIX"

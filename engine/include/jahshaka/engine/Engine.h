@@ -46,11 +46,13 @@ public:
     /// radiance L is sh[0..2] = L and the rest zero.
     /// This is the only ambient path the backend has: setAmbient() converts.
     virtual void        setAmbientSh(const float sh[27]) = 0;
-    /// Linear distance fog on lit (PBR) surfaces, matching the legacy renderer:
-    /// mix(surface, colour, clamp((eyeDistance - start) / (end - start), 0, 1)).
-    /// Unlit overlays (gizmos, wires, billboards) and the sky are never fogged.
-    /// Off by default; cheap to call every frame (no shader recompilation).
-    virtual void        setFog(bool enabled, const Colour &colour, float start, float end) = 0;
+    /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
+    /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
+    /// the sky are never fogged. Off by default, and OFF IS EXACT: a disabled
+    /// FogDesc leaves the scene rendering the very same pixels it did before fog
+    /// was ever mentioned. Cheap to call every frame while enabled; the enabled
+    /// EDGE costs a shader rebuild (fog is a shader variant, not a uniform).
+    virtual void        setFog(const FogDesc &) = 0;
     /// Textured sky behind everything: an equirectangular (lat-long) image.
     /// SkyMode::NoSky removes it (the View's background shows). Cubemap skies go
     /// through setSkyCubemap() — this call rejects SkyMode::Cubemap.
@@ -242,6 +244,39 @@ public:
     /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
 
+    // ---- Decals (DECALS_SPEC.md): a node may carry one projected-texture decal.
+    // A decal is an oriented box that overwrites base colour / roughness /
+    // metalness on the surfaces inside it, projecting down the node's -Y (the
+    // same convention as lights). It draws nothing itself: the PBR shader
+    // consumes it through the Forward+ clustered list.
+    /// Creates or updates the node's decal. False (lastError()) when the desc
+    /// carries no diffuse texture, or one that did not come from
+    /// loadDecalTexture().
+    virtual bool        setDecal(NodeId, const DecalDesc &) = 0;
+    /// KEPT as the explicit counterpart of setDecal: a node may stop being a
+    /// decal without being removed (the document changes a node's type, or the
+    /// user clears the image).
+    virtual bool        removeDecal(NodeId) = 0;
+    /// Loads an image into the DEDICATED, fixed-geometry decal atlas for `kind`
+    /// and returns a texture id usable in DecalDesc. Images are resampled into
+    /// the atlas geometry (aspect preserved, padded with transparent pixels —
+    /// alpha is the decal mask, so padding is invisible).
+    ///
+    /// NOT interchangeable with loadTexture(): decals sample one Type2DArray
+    /// per channel and carry a slice index into it, so every decal image must
+    /// share one resolution/format/mip-count pool. loadTexture() puts images in
+    /// pool 0 alongside ordinary PBR maps (wrong slices) and its grayscale
+    /// branch produces a non-batched texture the backend refuses outright.
+    ///
+    /// Returns 0 with a clear lastError() when the atlas is FULL — never a
+    /// silent fallback: an overflowing decal would sample another decal's image
+    /// with no warning at all.
+    virtual TextureId   loadDecalTexture(const std::string &path, DecalMap kind) = 0;
+    /// How many slices the `kind` atlas has, and how many are already taken.
+    /// The UI surfaces "decal image budget full" from this rather than guessing.
+    virtual unsigned    decalAtlasCapacity(DecalMap kind) const = 0;
+    virtual unsigned    decalAtlasUsed(DecalMap kind) const = 0;
+
     // ---- Global illumination (GI_SPEC.md). Scene-level, like fog and sky. ----
     /// Applies the GI state idempotently, rebuilding whatever changed. Passing the
     /// same params twice is cheap; GiMode::Off tears everything down. Modes the
@@ -253,6 +288,37 @@ public:
     /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
     /// in milliseconds at editor quality; callers may invoke this per edit.
     virtual void        refreshGlobalIllumination() = 0;
+
+    // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
+    /// Applies the reflection state idempotently. Pushing the same params twice is
+    /// free; a CHANGE rebuilds the whole arm (render targets, cameras, private
+    /// workspaces) and a budget change additionally recompiles PBS shaders, so
+    /// hosts may call this every frame but must not animate the values.
+    /// `budget == 0` tears everything down and costs nothing.
+    ///
+    /// Only ONE scene per process can have reflections at a time: the receiving
+    /// half lives on the process-wide HlmsPbs, exactly like VCT/PCC. The last
+    /// scene to enable owns the binding; enabling on a second scene disables the
+    /// first (which is why the host arms this on the editor scene only).
+    virtual bool        setPlanarReflections(const PlanarReflectionParams &) = 0;
+    /// Makes (or un-makes) a node a reflection plane. The node must already have
+    /// a mesh attached, and that mesh must be PLATE-LIKE — its thinnest local
+    /// extent no more than a tenth of the next — because the plane, its size and
+    /// its normal are all derived from the mesh's own bounds. A sphere or a cube
+    /// is refused (false, lastError()); the 20-degree matching rule would make it
+    /// look broken rather than merely wrong.
+    ///
+    /// The plane's normal is the node's thin axis in the POSITIVE direction: the
+    /// top of a floor reflects, the underside does not. The reflector is excluded
+    /// from its own reflection render, so a mirror never contains itself.
+    /// Reflectors survive `setPlanarReflections` changes; the flag is remembered
+    /// even while the budget is 0.
+    virtual bool        setNodePlanarReflector(NodeId, bool) = 0;
+    virtual bool        nodePlanarReflector(NodeId) const = 0;
+    /// How many reflection planes actually rendered last frame — the "achieved"
+    /// number against the requested budget (planes off screen do not render).
+    /// 0 when reflections are off or nothing has rendered yet.
+    virtual int         activePlanarReflectors() const = 0;
 };
 
 /// A view onto a Scene, rendering into a native window supplied by the host or

@@ -62,11 +62,22 @@ Scene *OgreEngine::createScene(const std::string &name) {
         // HlmsPbs shades point and spot lights ONLY through Forward+ (Forward3D /
         // ForwardClustered); without it only directional lights reach the shader.
         // Values are Ogre's sample defaults: 16x8 grid, 24 slices, 96 lights per
-        // cell, no decals, 2..50 units depth range. 4 cubemap probes per cell:
+        // cell, 2..50 units depth range. 4 cubemap probes per cell:
         // per-pixel PCC (the GI hybrid's reflection probes) is culled through
         // this grid — 0 would silently disable it (costs a slightly larger grid
         // buffer; zero shader cost until probes exist).
-        sm->setForwardClustered(true, 16, 8, 24, 96, 0, 4, 2.0f, 50.0f);
+        //
+        // 8 DECALS PER CELL (DECALS_SPEC D5), always on. This is a per-CELL cap,
+        // not a scene-wide one: more than 8 decals overlapping one cluster cell
+        // drop the farthest. Turning it on costs ~54 KiB more per cached grid
+        // buffer and NOTHING in the shader until a scene actually binds a decal
+        // atlas (the decal code is gated on a non-null SceneManager decal
+        // texture, OgreForwardClustered.cpp:1095-1120). It does shift
+        // hlms_forwardplus_lights_per_cell and the cubemap slot offset, so every
+        // PBS shader recompiles ONCE — CPU fill and shader read use the same
+        // offsets, and the phase-0 gate proved the rendered pixels are
+        // byte-identical either way.
+        sm->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, 4, 2.0f, 50.0f);
         // Shadow maps cover nothing until these are set (Ogre's samples set both).
         sm->setShadowDirectionalLightExtrusionDistance(500.0f);
         sm->setShadowFarDistance(500.0f);
@@ -198,8 +209,15 @@ void OgreEngine::destroyView(View *view) {
 
 void OgreEngine::renderOneFrame() {
     JAH_TRY {
-        for (auto &v : mViews) { v->applyPendingResize(); v->updateParticles(); v->updateGi(); }
-        for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); }
+        for (auto &v : mViews) {
+            v->applyPendingResize(); v->updateParticles(); v->updateGi();
+            // Both ends of the planar-reflection wiring move between frames (the
+            // scene rebuilds its arm on a parameter change, the view recreates
+            // its camera on setScene), so the listener is re-synced rather than
+            // hooked up once. Idempotent and cheap when nothing changed.
+            v->syncPlanarListener();
+        }
+        for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar(); }
         // The post chain's tuning lives in MaterialManager singletons — exposure,
         // bloom threshold, the AO kernel and the SMAA preset are per PROCESS even
         // though the enable flags are per view (POST_CHAIN_SPEC.md §7.4). The rule
@@ -254,10 +272,20 @@ void OgreEngine::setShadowResolution(unsigned pixels) {
         std::vector<OgreView *> rebuilt;
         for (auto &v : mViews)
             if (v->dropWorkspaceForShadowRebuild()) rebuilt.push_back(v.get());
+        // The planar-reflection arm instantiates the HALF-resolution shadow node
+        // in each of its private workspaces, so it holds the same kind of
+        // reference a view's workspace does and must be dropped for the same
+        // reason. Scenes whose reflections do not use shadows report false.
+        std::vector<OgreScene *> planarRebuilt;
+        for (auto &s : mScenes)
+            if (s->dropPlanarForShadowRebuild()) planarRebuilt.push_back(s.get());
         if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
             cm->removeShadowNodeDefinition(OgreView::kShadowNodeName);
+        if (cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
+            cm->removeShadowNodeDefinition(OgreView::kReflectShadowNodeName);
         createShadowNode();
         for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
+        for (OgreScene *s : planarRebuilt) s->recreatePlanarAfterShadowRebuild();
     } JAH_CATCH(mLastError, );
 }
 
@@ -290,6 +318,10 @@ OgreEngine::~OgreEngine() {
         if (mRoot && Ogre::MeshManager::getSingletonPtr())
             Ogre::MeshManager::getSingleton().removeAll();
     } catch (...) {}
+    // The decal atlases are process-wide but their TextureGpu pointers belong to
+    // THIS Root; a second Engine in the same process (test_engine_recreate)
+    // would otherwise inherit dangling masters and slice textures.
+    detail::resetDecalAtlases();
     delete mRoot;
     mRoot = nullptr;
     gLiveEngine = nullptr;
@@ -323,6 +355,14 @@ void OgreEngine::ensureHlms() {
     {
         Ogre::ArchiveVec libs;
         for (const auto &p : libPaths) libs.push_back(am.load(mMediaDir + p, "FileSystem", true));
+        // Jahshaka's own pieces (fog colour + height fog, base-map UV tiling) go in
+        // as a LIBRARY folder rather than as per-datablock custom pieces: one
+        // _piece_vs_piece_ps file then defines the pass-buffer members for BOTH
+        // shader stages, which is the only way the vertex and pixel shader are
+        // guaranteed to agree on the layout of the buffer they both read. It must
+        // be LAST — the fog piece redefines a piece of Hlms/Pbs/Any/Atmosphere,
+        // and a redefinition only works after the original has been collected.
+        libs.push_back(am.load(mMediaDir + "Hlms/Jahshaka", "FileSystem", true));
         mRoot->getHlmsManager()->registerHlms(
             OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
@@ -335,8 +375,10 @@ void OgreEngine::ensureHlms() {
     // GGX-prefiltered sky reflection cubemap instead.
     static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
         ->setAmbientLightMode(Ogre::HlmsPbs::AmbientSh);
-    // Fog: append the per-scene fog constants to every PBS pass buffer. Unlit
-    // gets no listener — gizmos, wires and billboards stay unfogged.
+    // Fog: append the per-scene fog colour + height parameters to every PBS pass
+    // buffer (the exponential distance term itself comes from the scene's
+    // AtmosphereNpr — OgreFog.cpp). Unlit gets no listener: gizmos, wires and
+    // billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
     // generated shader (and its properties) there. Diagnostic only.
@@ -389,6 +431,9 @@ void OgreEngine::registerCommonMaterials() {
                                "2.0/scripts/materials/Tutorial_SMAA/Metal",
                                "2.0/scripts/materials/Tutorial_SMAA/Vulkan",
                                // Jahshaka's own pieces (fog) + the PCC probe compositor.
+                               // The PCC probe compositor (the fog/UV pieces in this
+                               // folder reach HlmsPbs as a library path above, not
+                               // through the resource system).
                                "Hlms/Jahshaka" };
         for (const char *d : dirs) rgm.addResourceLocation(mMediaDir + d, "FileSystem", group, false);
         rgm.initialiseAllResourceGroups(true);
@@ -399,11 +444,23 @@ void OgreEngine::registerCommonMaterials() {
 
 void OgreEngine::createShadowNode() {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-    if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName)) return;
+    if (!cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
+        buildShadowNode(OgreView::kShadowNodeName, mShadowResolution);
+    // The planar-reflection pass's own atlas, at HALF resolution. Definitions
+    // are free — the VRAM is only allocated where a workspace instantiates one,
+    // which for reflections is one atlas PER BUDGET SLOT. At the default 2048 a
+    // shared full-resolution node would cost ~56 MB per slot; half is ~14 MB,
+    // and nobody has ever measured shadow-map resolution inside a mirror.
+    if (!cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
+        buildShadowNode(OgreView::kReflectShadowNodeName, std::max(256u, mShadowResolution / 2u));
+}
+
+void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution) {
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     // The whole atlas derives from one base size (Engine::setShadowResolution):
     // PSSM split 0 and the two focused maps at R, further splits at R/2 —
     // exactly the historical 2048/1024 layout, scaled.
-    const Ogre::uint32 R = mShadowResolution;
+    const Ogre::uint32 R = baseResolution;
     const Ogre::uint32 H = std::max(128u, R / 2u);
     Ogre::ShadowNodeHelper::ShadowParamVec params;
     Ogre::ShadowNodeHelper::ShadowParam p;
@@ -430,7 +487,7 @@ void OgreEngine::createShadowNode() {
     p.atlasStart[0].y = R + H + R;
     params.push_back(p);
     Ogre::ShadowNodeHelper::createShadowNodeWithSettings(
-        cm, mRoot->getRenderSystem()->getCapabilities(), OgreView::kShadowNodeName, params, false);
+        cm, mRoot->getRenderSystem()->getCapabilities(), name, params, false);
 }
 
 void OgreEngine::applyShadowFilter() {

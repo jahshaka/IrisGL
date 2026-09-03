@@ -143,6 +143,7 @@ set(SRCS
     document/materials/postprocessmanager.cpp
     document/animation/propertyanim.cpp
     document/scenegraph/lightnode.cpp
+    document/scenegraph/decalnode.cpp
     document/animation/skeletalanimation.cpp
     document/animation/clipextractor.cpp
     document/assets/skeleton.cpp
@@ -168,6 +169,7 @@ set (HEADERS
     document/animation/nodekeyframe.h
     document/animation/keyframeanimation.h
     document/scenegraph/lightnode.h
+    document/scenegraph/decalnode.h
     document/assets/texture2d.h
     document/assets/texture.h
     document/scenegraph/shadowmap.h

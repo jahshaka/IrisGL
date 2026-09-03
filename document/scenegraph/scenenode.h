@@ -29,7 +29,11 @@ enum class SceneNodeType {
     Mesh,
     Light,
     Camera,
-    Viewer
+    Viewer,
+    // A projected-texture decal (DECALS_SPEC). Unlike CameraNode — which never
+    // assigns its own type and therefore reads as Empty forever — DecalNode's
+    // constructor SETS this; every type switch below depends on it.
+    Decal
 };
 
 class PhysicsProperty;
@@ -86,6 +90,15 @@ public:
     bool pickable;
 	uint64_t pickingGroups;
     bool castShadow;
+
+    // PLANAR REFLECTIONS (PLANAR_REFLECTIONS_SPEC.md §7 option A): this node's
+    // flat surface is a mirror plane. Deliberately a FLAG on an ordinary mesh
+    // node rather than a MirrorNode scene-node type — the plane, its size and
+    // its normal are all derived from the mesh's own bounds, and SceneNodeType
+    // is unreliable in this codebase (CameraNode never sets its own, so
+    // type-switching silently drops cameras). Off by default: an active
+    // reflector is a whole extra scene render and cannot be inferred.
+    bool planarReflector = false;
 
 	mutable QString guid;
 
@@ -232,6 +245,14 @@ public:
 
     bool getShadowCastingEnabled() {
         return castShadow;
+    }
+
+    void setPlanarReflector(bool val) {
+        planarReflector = val;
+    }
+
+    bool getPlanarReflector() const {
+        return planarReflector;
     }
 
     SceneNodeType getSceneNodeType();

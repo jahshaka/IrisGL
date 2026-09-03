@@ -116,6 +116,9 @@ public:
     ViewerNodePtr vrViewer;
 
     QHash<QString, LightNodePtr> lights;
+    /// Every DecalNode in the scene, keyed by guid — the picker and the
+    /// engine-side budget check walk this rather than the whole tree.
+    QHash<QString, DecalNodePtr> decals;
 	QHash<QString, MeshNodePtr> meshes;
 	QHash<QString, ParticleSystemNodePtr> particleSystems;
 	QHash<QString, ViewerNodePtr> viewers;
@@ -131,11 +134,36 @@ public:
 	QColor gradientBot;
 	float gradientOffset;
 
-    // fog properties
+    // Fog properties. The model is EXPONENTIAL (jahshaka::engine::FogDesc):
+    // transmittance = 2^(-distance * fogDensity), times a second, height-varying
+    // layer of the same colour. fogStart/fogEnd are the retired LINEAR pair, kept
+    // so old scenes keep loading and round-tripping: together they still derive
+    // the density when a scene predates fogDensity, and fogStart has no meaning
+    // of its own any more (the World panel greys it out).
     QColor fogColor;
     float fogStart;
     float fogEnd;
     bool fogEnabled;
+    float fogDensity;          // per world unit, exp2
+    float fogHeightDensity;    // 0 = no height layer
+    float fogHeightFalloff;    // per world unit; larger = thins out faster with altitude
+    float fogHeightLevel;      // world Y at which fogHeightDensity applies
+    float fogBreakMinBrightness;   // luminance where bright pixels start resisting the fog
+    float fogBreakFalloff;         // how fast they do; 0 = pure exponential fog
+
+    /// The exponential density an old LINEAR start/end pair maps to: the two
+    /// curves are matched where the eye reads fog, at the HALF-fogged distance.
+    /// Linear fog is 50% at (start + end) / 2; exponential fog is 50% at 1/density.
+    ///
+    /// Matching the far end instead (density = 4.32/end, i.e. 95% fogged exactly
+    /// where the linear fog became total) was tried first and rejected on the
+    /// shipped samples: it washes their SUBJECTS — 55% of the Physics red pipe,
+    /// 24% of the teapot's brightness — because exponential fog, unlike linear,
+    /// starts at the camera. This mapping leaves the subjects where they were and
+    /// still fades the far ground away.
+    static float fogDensityFromLinear(float start, float end) {
+        return 2.0f / qMax(start + end, 0.001f);
+    }
 
     // global illumination (world panel; rendered by the engine viewport only).
     // giBounds min == max means "automatic" (scene bounds + margin).
@@ -186,6 +214,27 @@ public:
     /// actually contains a refractive material — cost when unused is zero),
     /// 2 always on.
     int   refractionsMode;
+    // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6) -----------------
+    // How many mirror planes may re-render the scene. THE most expensive dial
+    // in the world: each active plane is a whole extra scene render every
+    // frame. 0 = off.
+    //
+    // -1 = "follow the world mode" and is the only negative value: it is the
+    // state of a scene that has never had a mode applied and never had the row
+    // pinned. Everything that applies a mode writes a concrete 0..8 here (the
+    // write-through invariant in services/worldmodes.h), so -1 never survives a
+    // mode switch. SceneMirror — which is IrisGL and cannot see the tier table —
+    // reads any negative value as OFF, which is what "never set" means anyway.
+    int planarReflectionBudget;
+    // Edge of each plane's reflection target in pixels; 256..2048. 0 = derive
+    // it from the resolved BUDGET, which is how the world-mode tiers reach it
+    // without needing rows of their own: budget >= 2 (Epic) means 1024, budget
+    // 1 (High) means 512. SceneMirror owns that derivation.
+    int planarReflectionResolution;
+    // Shadows INSIDE the reflections, which cost a private half-resolution
+    // shadow atlas per plane. 0 = off, 1 = on, -1 = derive from the budget the
+    // same way (Epic's 2 planes get shadows, High's 1 does not).
+    int planarReflectionShadows;
 
     // ---- World Modes (POST_CHAIN_SPEC.md §9) --------------------------------
     // A scalability tier for the whole scene. -1 = Custom (no tier: the fields

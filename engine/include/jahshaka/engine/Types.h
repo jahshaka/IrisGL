@@ -267,6 +267,46 @@ struct LightDesc {
     std::string texturePath;
 };
 
+/// A projected-texture decal attached to a node (DECALS_SPEC.md §5.2).
+///
+/// The decal is an ORIENTED BOX that overwrites base colour, roughness and
+/// metalness on every surface inside it. Two conventions, both fixed by the
+/// backend's shader and neither cheap to change:
+///
+///  - it projects down the node's LOCAL -Y (identical to LightDesc's
+///    direction convention), and only affects surfaces whose normal points
+///    back at it;
+///  - the image's U axis is local X and its V axis is local Z, so `width`
+///    is the local-X extent and `height` the local-Z extent. `depth` is the
+///    local-Y thickness of the projector box.
+///
+/// `diffuse` MUST come from Scene::loadDecalTexture(): decal images live in a
+/// dedicated fixed-geometry texture pool and a plain loadTexture() id is either
+/// non-batched (the backend asserts) or in the wrong pool (it would silently
+/// sample another decal's image).
+///
+/// THERE IS NO PER-DECAL OPACITY OR COLOUR TINT. The backend packs exactly four
+/// floats per decal (3 rows of the inverse world matrix + one float4 of
+/// indices/metalness/roughness); adding either would mean forking the shader
+/// template, which this project does not do.
+struct DecalDesc {
+    TextureId diffuse  = 0;   ///< base colour + alpha mask; from loadDecalTexture()
+    TextureId normal   = 0;   ///< optional; from loadDecalTexture(kind Normal)
+    TextureId emissive = 0;   ///< optional; from loadDecalTexture(kind Emissive)
+    float width  = 1.0f;      ///< local X extent
+    float height = 1.0f;      ///< local Z extent
+    float depth  = 0.5f;      ///< local Y extent (projection thickness)
+    float metalness = 0.0f;
+    float roughness = 1.0f;
+    /// Diffuse alpha masks the base colour only, not the normal/emissive maps.
+    bool  ignoreAlphaDiffuse = false;
+};
+
+/// Which pooled decal atlas a decal image is loaded into. The three atlases
+/// have different pixel formats and filters (a normal map is neither sRGB nor
+/// the same channel layout), so the caller must say which one it wants.
+enum class DecalMap { Diffuse, Normal, Emissive };
+
 /// A View's camera. Position/orientation are absolute (the document composes them).
 struct CameraDesc {
     Vec3  position;
@@ -330,6 +370,79 @@ struct GiParams {
     /// Hybrid only: reflection-probe counts along each world axis of the GI
     /// bounds (the parallax-corrected cubemap grid). Clamped to 1..8 per axis.
     int       pccProbesX = 3, pccProbesY = 2, pccProbesZ = 3;
+};
+
+// ---- Fog (scene-level) ------------------------------------------------------
+/// EXPONENTIAL distance fog, plus an optional height-varying layer of the same
+/// colour. Both layers absorb, so their transmittances multiply:
+///
+///     transmittance = 2^( -distance * density ) * 2^( -heightOpticalDepth )
+///     pixel         = lerp( colour, surface, transmittance )
+///
+/// `density` is therefore "how much is lost per world unit" in exp2 units: a
+/// surface 1/density units away keeps half its own colour, and 4.32/density is
+/// where only 5% of it survives. (The document maps the legacy linear start/end
+/// pair onto it by matching the half-fogged distance — iris::Scene.)
+///
+/// Only lit (PBR) surfaces are fogged; unlit overlays (gizmos, wires,
+/// billboards) and the sky never are, exactly as before.
+struct FogDesc {
+    bool   enabled = false;
+    Colour colour;                ///< linear fog colour
+    float  density = 0.024f;      ///< homogeneous density per world unit (exp2)
+
+    /// Height layer: a second exponential medium whose density falls off with
+    /// world Y — density(y) = heightDensity * 2^( -(y - heightLevel) * heightFalloff )
+    /// — integrated along the view ray. heightDensity = 0 disables it exactly
+    /// (the shader branch is skipped, not multiplied by one).
+    float  heightDensity = 0.0f;  ///< density at heightLevel, per world unit (exp2)
+    float  heightFalloff = 0.1f;  ///< per world unit; larger = thins out faster with altitude
+    float  heightLevel   = 0.0f;  ///< world Y where heightDensity applies
+
+    /// Brightness breakthrough: bright pixels (a sun disc, an emissive sign)
+    /// resist the fog instead of dissolving into it. `breakMinBrightness` is the
+    /// luminance where breaking through starts, `breakFalloff` how fast it takes
+    /// hold. breakFalloff = 0 turns it off, leaving pure exponential fog.
+    float  breakMinBrightness = 0.25f;
+    float  breakFalloff       = 0.1f;
+};
+
+// ---- Planar reflections (scene-level, PLANAR_REFLECTIONS_SPEC.md) ----
+/// Mirrors and glossy floors. A node marked a *reflector* (Scene::setNodePlanarReflector)
+/// contributes a world-space reflection PLANE derived from its own flat geometry;
+/// surfaces lying on such a plane, and within 20 degrees of its normal, sample a
+/// re-render of the scene from the mirrored camera.
+///
+/// THE COST IS A WHOLE EXTRA SCENE RENDER PER ACTIVE PLANE, every frame — plus a
+/// private shadow atlas render when `shadows` is on. A scene may hold any number of
+/// reflectors; only `budget` of them (the ones on screen, nearest first) render.
+/// budget == 0 disables the feature completely and costs nothing at all.
+struct PlanarReflectionParams {
+    /// Active reflection planes, 0..8 (0 = off). CHANGING THIS RECOMPILES SHADERS:
+    /// the count is baked into the PBS shader as a property, not passed as a
+    /// uniform. Pushing the same value again is free.
+    int      budget = 0;
+    /// Edge of each plane's square render target, 256..2048 (rounded to a power
+    /// of two). Memory is budget x resolution^2 x 4 bytes x 4/3 (the mip chain),
+    /// allocated whether or not the planes are visible.
+    unsigned resolution = 512;
+    /// Mip chain on the reflection targets. Mips ARE how glossiness works — the
+    /// shader samples at roughness * numMips. Without them a rough floor
+    /// reflects as sharply as a mirror. Free to leave on.
+    bool     mipmaps = true;
+    /// Shadows inside the reflections. Costs a private shadow atlas per plane,
+    /// at HALF the scene's shadow resolution, allocated up front.
+    bool     shadows = false;
+    /// Full lighting update for each reflection camera. Off is faster and rarely
+    /// visibly different (Ogre's own words); on is what "maximum realness" means.
+    bool     accurateLighting = true;
+    /// World-space distance over which a surface's reflection fades out as it
+    /// leaves the plane, and the radius within which a surface may be matched to
+    /// a plane at all. Small values keep a floor's reflection on the floor.
+    float    maxDistance = 2.0f;
+    /// Clear colour of the reflection render (what shows where the scene has no
+    /// geometry and no sky). Normally the view's background.
+    Colour   background = Colour(0.0f, 0.0f, 0.0f, 1.0f);
 };
 
 enum class Backend { Vulkan, OpenGL };

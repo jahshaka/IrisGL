@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/lightnode.h"
+#include "document/scenegraph/decalnode.h"
 #include "document/scenegraph/cameranode.h"
 #include "document/scenegraph/viewernode.h"
 #include "document/scenegraph/meshnode.h"
@@ -92,6 +93,14 @@ Scene::Scene()
     fogStart = 100;
     fogEnd = 180;
     fogEnabled = true;
+    // 2/(100+180) = 0.0071: the exponential density that keeps a 100..180 linear
+    // fog looking like itself (see fogDensityFromLinear).
+    fogDensity = fogDensityFromLinear(fogStart, fogEnd);
+    fogHeightDensity = 0.0f;      // height layer off until asked for
+    fogHeightFalloff = 0.1f;
+    fogHeightLevel = 0.0f;
+    fogBreakMinBrightness = 0.25f;
+    fogBreakFalloff = 0.1f;
 
     // global illumination is opt-in: off by default, everywhere, always
     giMode = GiMode::OFF;
@@ -126,6 +135,14 @@ Scene::Scene()
     smaaPreset = -1;
     ssrMode = 0;
     refractionsMode = 0;
+    // Planar reflections: -1/0/-1 = "follow the world mode" on all three. A
+    // fresh scene in Custom mode therefore reflects nothing until a mode is
+    // applied or the user marks a reflector — the feature is scene-capable by
+    // default (owner's "maximum realness") but never costs a whole extra scene
+    // render before there is something to reflect.
+    planarReflectionBudget = -1;
+    planarReflectionResolution = 0;
+    planarReflectionShadows = -1;
 
     // World Mode: -1 = Custom. A new scene starts with the field values above
     // and no tier applied; picking a mode (World panel or world.mode) is what
@@ -411,6 +428,11 @@ void Scene::addNode(SceneNodePtr node)
         lights.insert(light->getGUID(), light);
     }
 
+    if (node->sceneNodeType == SceneNodeType::Decal) {
+        auto decal = node.staticCast<iris::DecalNode>();
+        decals.insert(decal->getGUID(), decal);
+    }
+
     if (node->sceneNodeType == SceneNodeType::Mesh) {
 		//qDebug() <<"Mesh GUID: " << node->getGUID();
         auto mesh = node.staticCast<iris::MeshNode>();
@@ -439,6 +461,10 @@ void Scene::removeNode(SceneNodePtr node)
 {
     if (node->sceneNodeType == SceneNodeType::Light) {
         lights.remove(lights.key(node.staticCast<iris::LightNode>()));
+    }
+
+    if (node->sceneNodeType == SceneNodeType::Decal) {
+        decals.remove(decals.key(node.staticCast<iris::DecalNode>()));
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
