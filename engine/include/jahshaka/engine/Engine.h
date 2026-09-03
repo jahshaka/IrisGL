@@ -30,25 +30,46 @@ class Scene {
 public:
     virtual ~Scene() = default;
     virtual const std::string &name() const = 0;
+    /// Ambient light as a hemisphere pair: `upper` is what a surface facing +Y
+    /// receives, `lower` what a surface facing -Y receives. Kept as the simple
+    /// entry point (previews, thumbnails, tests); it is expressed EXACTLY in the
+    /// spherical harmonics setAmbientSh() takes — see the note there about the
+    /// scale of a flat (upper == lower) ambient.
     virtual void        setAmbient(const Colour &upper, const Colour &lower) = 0;
+    /// Ambient light as 9 spherical-harmonic coefficients per channel, the form
+    /// a real sky integrates to (a hemisphere pair can only ever say "up" and
+    /// "down"). Layout: 9 groups of 3 floats (r, g, b), in the basis order
+    ///     1, y, z, x, x*y, y*z, 3z^2 - 1, z*x, x^2 - y^2
+    /// over WORLD axes, evaluated for the shading normal. The value the sum
+    /// produces is a MEAN INCIDENT RADIANCE (irradiance / pi), the same unit the
+    /// two hemisphere colours above are in, so a uniform white environment of
+    /// radiance L is sh[0..2] = L and the rest zero.
+    /// This is the only ambient path the backend has: setAmbient() converts.
+    virtual void        setAmbientSh(const float sh[27]) = 0;
     /// Linear distance fog on lit (PBR) surfaces, matching the legacy renderer:
     /// mix(surface, colour, clamp((eyeDistance - start) / (end - start), 0, 1)).
     /// Unlit overlays (gizmos, wires, billboards) and the sky are never fogged.
     /// Off by default; cheap to call every frame (no shader recompilation).
     virtual void        setFog(bool enabled, const Colour &colour, float start, float end) = 0;
-    /// Textured sky behind everything: an equirectangular (lat-long) image, or a
-    /// cubemap texture. SkyMode::NoSky removes it (the View's background shows).
+    /// Textured sky behind everything: an equirectangular (lat-long) image.
+    /// SkyMode::NoSky removes it (the View's background shows). Cubemap skies go
+    /// through setSkyCubemap() — this call rejects SkyMode::Cubemap.
     virtual bool        setSky(SkyMode, TextureId) = 0;
-    /// Cubemap sky from six face textures, in the order +X, -X, +Y, -Y, +Z, -Z.
-    /// Also feeds environment reflections (IBL) from the same faces.
+    /// Cubemap sky from six face textures, in the order +X, -X, +Y, -Y, +Z, -Z,
+    /// each face seen from INSIDE the cube looking down that WORLD axis (the
+    /// backend converts to whatever handedness its cubemaps use). Also feeds
+    /// environment reflections (IBL) from the same faces.
     virtual bool        setSkyCubemap(const TextureId faces[6]) = 0;
-    /// Environment reflections (IBL) WITHOUT touching the sky geometry: six square
-    /// face textures (+X, -X, +Y, -Y, +Z, -Z, all the same size) become the mipped
-    /// reflection cubemap every PBR material samples. This is how equirectangular
-    /// and CPU-baked skies (gradient, realistic) get the reflections cubemap skies
-    /// already have — the host resamples its equirect image into six faces and
-    /// pushes them here. Passing six zero ids clears the reflections. The face
-    /// textures are copied; the caller may destroy them afterwards.
+    /// Environment reflections (IBL) WITHOUT touching the sky: six square face
+    /// textures (+X, -X, +Y, -Y, +Z, -Z, world axes, all the same size) become
+    /// the reflection cubemap every PBR material samples. This is how
+    /// equirectangular and CPU-baked skies (gradient, realistic) get the
+    /// reflections cubemap skies already have — the host resamples its equirect
+    /// image into six faces and pushes them here. The mip chain is a GGX
+    /// (roughness) PREFILTER, not a box mip chain, so a rough metal reads the
+    /// hemisphere around its reflection vector instead of one blurred face.
+    /// Passing six zero ids clears the reflections. The face textures are
+    /// copied; the caller may destroy them afterwards.
     virtual bool        setSkyReflection(const TextureId faces[6]) = 0;
     /// Removes a node and everything it uniquely owns (mesh, material). Unknown or
     /// already-removed ids are ignored and return false. Children are NOT removed;

@@ -1218,32 +1218,47 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // integrals instead, so a red sky reddens what it lights.
     {
         const QColor a = mSource->ambientColor;
-        Colour upper(a.redF(), a.greenF(), a.blueF(), 1.0f), lower = upper;
-        if (mHasSkyAmbient && mSource->ambientFromSky) {
+        float sh[27] = { 0.0f };
+        const bool fromSky = mHasSkyAmbient && mSource->ambientFromSky;
+        if (fromSky) {
             // The World-panel colour becomes a per-channel GAIN on the sky's own
-            // integrals: white = the sky at full physical strength, black = no
+            // integral: white = the sky at full physical strength, black = no
             // ambient at all, and the document default (96,96,96 -> 0.376) lands
             // in the same brightness band the flat ambient used to occupy.
             // Pushing the raw integral instead would double the ambient of every
             // daylight scene — the sky is a full-hemisphere emitter and the flat
             // grey never was.
-            upper = Colour(mSkyAmbientUpper.r * a.redF(), mSkyAmbientUpper.g * a.greenF(),
-                           mSkyAmbientUpper.b * a.blueF(), 1.0f);
-            lower = Colour(mSkyAmbientLower.r * a.redF(), mSkyAmbientLower.g * a.greenF(),
-                           mSkyAmbientLower.b * a.blueF(), 1.0f);
+            const float gain[3] = { float(a.redF()), float(a.greenF()), float(a.blueF()) };
+            for (int i = 0; i < 9; ++i)
+                for (int c = 0; c < 3; ++c) sh[i * 3 + c] = mSkyAmbientSh[i * 3 + c] * gain[c];
+        } else {
+            // No sky (or Ambient From Sky off): the flat World-panel colour, the
+            // way it always was. Scene::setAmbient converts it to the same SH
+            // form — see the note there about the two scales HlmsPbs' own
+            // ambient paths use.
+            const Colour flat(a.redF(), a.greenF(), a.blueF(), 1.0f);
+            if (!mAmbientPushed || mLastAmbientWasSky ||
+                mLastFlatAmbient.r != flat.r || mLastFlatAmbient.g != flat.g ||
+                mLastFlatAmbient.b != flat.b) {
+                mTarget->setAmbient(flat, flat);
+                mLastFlatAmbient = flat;
+                mLastAmbientWasSky = false;
+                mAmbientPushed = true;
+            }
         }
-        // Push on CHANGE only. Ogre picks its ambient shader variant from these
-        // two colours (equal => AmbientFixed, different => AmbientHemisphere)
-        // inside preparePassHash, so a per-frame push of an unchanged value was
-        // re-deciding a shader/root-layout question every frame for nothing.
-        const auto same = [](const Colour &x, const Colour &y) {
-            return x.r == y.r && x.g == y.g && x.b == y.b;
-        };
-        if (!mAmbientPushed || !same(upper, mLastAmbientUpper) || !same(lower, mLastAmbientLower)) {
-            mTarget->setAmbient(upper, lower);
-            mLastAmbientUpper = upper;
-            mLastAmbientLower = lower;
-            mAmbientPushed = true;
+        // Push on CHANGE only. The coefficients feed a pass buffer that HlmsPbs
+        // rebuilds per pass anyway, but setSphericalHarmonics also re-decides the
+        // ambient shader variant, so a per-frame push of an unchanged value was
+        // asking a shader/root-layout question every frame for nothing.
+        if (fromSky) {
+            bool changed = !mAmbientPushed || !mLastAmbientWasSky;
+            for (int i = 0; !changed && i < 27; ++i) changed = sh[i] != mLastAmbientSh[i];
+            if (changed) {
+                mTarget->setAmbientSh(sh);
+                std::memcpy(mLastAmbientSh, sh, sizeof(sh));
+                mLastAmbientWasSky = true;
+                mAmbientPushed = true;
+            }
         }
     }
     // World-panel Enable Shadows (used to be hardcoded on).
@@ -1338,6 +1353,91 @@ iris::LightNode *SceneMirror::resolveGiLight() const
     return directional ? directional : any;
 }
 
+namespace {
+// ---------------------------------------------------------------------------
+// THE lat-long convention. Ogre's SkyEquirectangular_ps.glsl is now the only
+// thing that turns a sky image into directions, so everything that reasons
+// about one — the reflection-cube resample, the ambient integral, the realistic
+// bake — goes through these two functions. (The retired sky SPHERE used a
+// different mapping: u ran the other way and started at -X, so the same image
+// hung 90 degrees round and mirrored. Anything that compares a sky pixel to a
+// world direction had to be re-baselined when the sphere went.)
+//   u = (atan2(x, -z) + PI) / 2PI     -> image centre column looks down -Z
+//   v = acos(y) / PI                  -> row 0 is the zenith
+constexpr float kPi = 3.14159265358979f;
+
+inline void equirectDir(float u, float v, float &x, float &y, float &z)
+{
+    const float phi = v * kPi;
+    const float s = std::sin(phi);
+    y = std::cos(phi);
+    const float t = u * 2.0f * kPi - kPi;
+    x =  s * std::sin(t);
+    z = -s * std::cos(t);
+}
+
+inline void dirToEquirect(float x, float y, float z, float &u, float &v)
+{
+    v = std::acos(std::min(1.0f, std::max(-1.0f, y))) / kPi;
+    u = (std::atan2(x, -z) + kPi) / (2.0f * kPi);
+}
+
+// sRGB byte -> linear float, table-driven: the SH integral touches every texel
+// of a sky that can be 4096x2048, three channels, and std::pow dominated it.
+const float *srgbTable()
+{
+    static float t[256];
+    static const bool once = [] {
+        for (int i = 0; i < 256; ++i) {
+            const float c = i / 255.0f;
+            t[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        return true;
+    }();
+    (void)once;
+    return t;
+}
+
+// Cosine-convolved irradiance in 9 SH bands, in the basis and units
+// Scene::setAmbientSh documents. Accumulate raw radiance moments
+//     A_i = sum( radiance * b_i(dir) * dOmega )
+// over the basis polynomials b = {1, y, z, x, xy, yz, 3z^2-1, zx, x^2-y^2},
+// then fold in BOTH the SH normalisation k_i (twice: once for the projection,
+// once for the reconstruction) and the Lambert convolution ratio
+// A_l/pi = {1, 2/3, 1/4}. The result evaluates to E(n)/pi, a mean incident
+// radiance — the same quantity the two hemisphere colours used to carry, so a
+// sky that used to light a surface at brightness X still does.
+struct ShAccum {
+    double a[9][3] = {};
+
+    void add(float x, float y, float z, double r, double g, double b, double w)
+    {
+        const double bi[9] = { 1.0, y, z, x, double(x) * y, double(y) * z,
+                               3.0 * double(z) * z - 1.0, double(z) * x,
+                               double(x) * x - double(y) * y };
+        for (int i = 0; i < 9; ++i) {
+            const double f = bi[i] * w;
+            a[i][0] += r * f; a[i][1] += g * f; a[i][2] += b * f;
+        }
+    }
+
+    void finish(float out[27]) const
+    {
+        // A_l/pi * k_i^2, per band.
+        static const double k[9] = {
+            0.0795774715,                                     // 1     * 1/(4pi)
+            0.1591549431, 0.1591549431, 0.1591549431,         // y,z,x * 2/3 * 3/(4pi)
+            0.2984155183, 0.2984155183,                       // xy,yz * 1/4 * 15/(4pi)
+            0.0248679599,                                     // 3z^2-1* 1/4 * 5/(16pi)
+            0.2984155183,                                     // zx
+            0.0746038796                                      // x^2-y^2 * 1/4 * 15/(16pi)
+        };
+        for (int i = 0; i < 9; ++i)
+            for (int c = 0; c < 3; ++c) out[i * 3 + c] = float(a[i][c] * k[i]);
+    }
+};
+}  // namespace
+
 void SceneMirror::applySky(View *view)
 {
     if (!mSource || !view) return;
@@ -1393,7 +1493,7 @@ void SceneMirror::applySky(View *view)
                 // A cubemap sky never passes through applySkyReflection (the
                 // engine takes the faces straight): integrate them here so it
                 // drives ambient like every other textured sky (item 3b).
-                recordCubeAmbient(faces);
+                recordCubeAmbientSh(faces);
             } else {
                 mTarget->setSky(SkyMode::NoSky, 0);
             }
@@ -1451,14 +1551,6 @@ void SceneMirror::applySky(View *view)
 }
 
 namespace {
-// sRGB <-> linear, the pair the whole sky-ambient integral is done in: the sky
-// image bytes are gamma-encoded, a mean of gamma-encoded values is not the mean
-// of the light they stand for, and Scene::setAmbient wants linear.
-inline float srgbToLinear(float c)
-{
-    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-}
-
 // Box-downsample an RGBA8888 image to at most `maxW` wide (halving until it
 // fits, so every step is an exact 2x2 average). The equirect->cubemap resample
 // below point-samples the result: without this a 4K sky is decimated ~30x and
@@ -1490,66 +1582,66 @@ QImage boxDownscaleTo(const QImage &src, int maxW)
 void SceneMirror::clearSkyAmbient()
 {
     mHasSkyAmbient = false;
-    mSkyAmbientUpper = Colour(0.0f, 0.0f, 0.0f, 1.0f);
-    mSkyAmbientLower = Colour(0.0f, 0.0f, 0.0f, 1.0f);
+    for (float &c : mSkyAmbientSh) c = 0.0f;
 }
 
-bool SceneMirror::integrateSkyAmbient(const QImage &equirect, Colour &upperOut, Colour &lowerOut)
+bool SceneMirror::integrateSkyAmbientSh(const QImage &equirect, float shOut[27])
 {
     if (equirect.isNull()) return false;
     const QImage src = equirect.convertToFormat(QImage::Format_RGBA8888);
     const int W = src.width(), H = src.height();
     if (W <= 0 || H <= 0) return false;
-    // Row 0 is the zenith (phi = 0). Each row covers a band of solid angle
-    // proportional to sin(phi); the cosine factor is what a surface facing the
-    // hemisphere axis actually receives. So: cosine-weighted MEAN RADIANCE per
-    // hemisphere, which is exactly the quantity setAmbient's two colours are.
-    double up[3] = { 0, 0, 0 }, lo[3] = { 0, 0, 0 }, upW = 0, loW = 0;
-    for (int row = 0; row < H; ++row) {
-        const float phi = float(row + 0.5f) / H * 3.14159265f;
-        const float w = std::sin(phi) * std::fabs(std::cos(phi));
-        if (w <= 0.0f) continue;
-        const unsigned char *p = src.constScanLine(row);
-        double r = 0, g = 0, b = 0;
-        for (int col = 0; col < W; ++col) {
-            r += srgbToLinear(p[size_t(col) * 4u + 0] / 255.0f);
-            g += srgbToLinear(p[size_t(col) * 4u + 1] / 255.0f);
-            b += srgbToLinear(p[size_t(col) * 4u + 2] / 255.0f);
-        }
-        r /= W; g /= W; b /= W;
-        double *acc = std::cos(phi) >= 0.0f ? up : lo;
-        double &accW = std::cos(phi) >= 0.0f ? upW : loW;
-        acc[0] += r * w; acc[1] += g * w; acc[2] += b * w;
-        accW += w;
+    const float *lut = srgbTable();
+    // Per-column longitude, hoisted: every row shares it.
+    std::vector<float> sinT(static_cast<std::vector<float>::size_type>(W)),
+                       cosT(static_cast<std::vector<float>::size_type>(W));
+    for (int col = 0; col < W; ++col) {
+        const float t = (col + 0.5f) / W * 2.0f * kPi - kPi;
+        sinT[size_t(col)] = std::sin(t);
+        cosT[size_t(col)] = std::cos(t);
     }
-    if (upW <= 0.0 && loW <= 0.0) return false;
-    if (upW <= 0.0) { upW = loW; up[0] = lo[0]; up[1] = lo[1]; up[2] = lo[2]; }
-    if (loW <= 0.0) { loW = upW; lo[0] = up[0]; lo[1] = up[1]; lo[2] = up[2]; }
-    upperOut = Colour(float(up[0] / upW), float(up[1] / upW), float(up[2] / upW), 1.0f);
-    lowerOut = Colour(float(lo[0] / loW), float(lo[1] / loW), float(lo[2] / loW), 1.0f);
+    ShAccum acc;
+    for (int row = 0; row < H; ++row) {
+        const float phi = (row + 0.5f) / H * kPi;
+        const float sp = std::sin(phi), y = std::cos(phi);
+        // Solid angle of one texel in this row: sin(phi) * dphi * dtheta.
+        const double w = double(sp) * (kPi / H) * (2.0 * kPi / W);
+        if (w <= 0.0) continue;
+        const unsigned char *p = src.constScanLine(row);
+        for (int col = 0; col < W; ++col) {
+            const float x =  sp * sinT[size_t(col)];
+            const float z = -sp * cosT[size_t(col)];
+            acc.add(x, y, z, lut[p[size_t(col) * 4u + 0]], lut[p[size_t(col) * 4u + 1]],
+                    lut[p[size_t(col) * 4u + 2]], w);
+        }
+    }
+    acc.finish(shOut);
     return true;
 }
 
-void SceneMirror::recordCubeAmbient(const QImage faces[6])
+void SceneMirror::recordCubeAmbientSh(const QImage faces[6])
 {
     if (!faces) return;
-    // Face order is +X,-X,+Y,-Y,+Z,-Z. A cube face texel's solid angle is not
-    // uniform, but the cosine weight against +Y is: +Y contributes entirely to
-    // the upper hemisphere, -Y entirely to the lower, and each side face splits
-    // at its own horizon. Weighting each texel by |cos| against +Y (derived from
-    // the same face basis the reflection resample uses) is the same integral the
-    // equirect path does, evaluated on the faces we happen to have.
+    // Face order is +X,-X,+Y,-Y,+Z,-Z in WORLD axes (what Scene::setSkyCubemap
+    // takes; the engine converts to Ogre's left-handed cube itself). Same basis
+    // vectors the equirect->faces resample below uses, so a cubemap sky and an
+    // equirect sky of the same environment integrate to the same coefficients.
+    // 1/len^3 is the cube-face texel's solid-angle factor.
     static const float ax[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     static const float rt[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
     static const float upv[6][3] = {{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
-    double up[3] = { 0, 0, 0 }, lo[3] = { 0, 0, 0 }, upW = 0, loW = 0;
+    const float *lut = srgbTable();
+    ShAccum acc;
+    bool any = false;
     for (int f = 0; f < 6; ++f) {
         // A face is uniform enough at 32x32 for an irradiance integral, and the
         // downscale is a box filter, so this is cheap and stable.
         const QImage img = boxDownscaleTo(faces[f].convertToFormat(QImage::Format_RGBA8888), 32);
         const int N = img.width(), M = img.height();
         if (N <= 0 || M <= 0) continue;
+        any = true;
         const float *a = ax[f], *r = rt[f], *u = upv[f];
+        const double texel = (2.0 / N) * (2.0 / M);
         for (int py = 0; py < M; ++py) {
             const float uv = 1.0f - 2.0f * (py + 0.5f) / M;
             const unsigned char *p = img.constScanLine(py);
@@ -1560,21 +1652,15 @@ void SceneMirror::recordCubeAmbient(const QImage faces[6])
                 float dz = a[2] + r[2] * ur + u[2] * uv;
                 const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
                 if (len < 1e-6f) continue;
-                const float cosY = dy / len;
-                // 1/len^3 is the cube-face texel's solid-angle factor.
-                const float w = std::fabs(cosY) / (len * len * len);
-                double *acc = cosY >= 0.0f ? up : lo;
-                double &accW = cosY >= 0.0f ? upW : loW;
-                acc[0] += double(srgbToLinear(p[size_t(px) * 4u + 0] / 255.0f)) * w;
-                acc[1] += double(srgbToLinear(p[size_t(px) * 4u + 1] / 255.0f)) * w;
-                acc[2] += double(srgbToLinear(p[size_t(px) * 4u + 2] / 255.0f)) * w;
-                accW += w;
+                const double w = texel / (double(len) * len * len);
+                dx /= len; dy /= len; dz /= len;
+                acc.add(dx, dy, dz, lut[p[size_t(px) * 4u + 0]], lut[p[size_t(px) * 4u + 1]],
+                        lut[p[size_t(px) * 4u + 2]], w);
             }
         }
     }
-    if (upW <= 0.0 || loW <= 0.0) return;
-    mSkyAmbientUpper = Colour(float(up[0] / upW), float(up[1] / upW), float(up[2] / upW), 1.0f);
-    mSkyAmbientLower = Colour(float(lo[0] / loW), float(lo[1] / loW), float(lo[2] / loW), 1.0f);
+    if (!any) return;
+    acc.finish(mSkyAmbientSh);
     mHasSkyAmbient = true;
 }
 
@@ -1583,7 +1669,7 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
     if (equirect.isNull()) return;
     // The ambient integral runs on the FULL-resolution image (it is a mean; the
     // decimation below would bias it) before anything else touches it.
-    if (integrateSkyAmbient(equirect, mSkyAmbientUpper, mSkyAmbientLower))
+    if (integrateSkyAmbientSh(equirect, mSkyAmbientSh))
         mHasSkyAmbient = true;
 
     const int N = 128;   // reflection cube face size; the engine mips it further
@@ -1592,10 +1678,11 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
     const QImage src = boxDownscaleTo(equirect.convertToFormat(QImage::Format_RGBA8888), N * 4);
     const int W = src.width(), H = src.height();
     if (W <= 0 || H <= 0) return;
-    // Face basis identical to the engine's cubemap sky quads (+X,-X,+Y,-Y,+Z,-Z;
-    // dir = axis + right*u + up*v with image row 0 at the top), so reflections
-    // line up with the sky the camera sees. The equirect mapping mirrors the
-    // engine's sky sphere: u = 1 - theta/2pi, v = phi/pi (v = 0 at the zenith).
+    // Face basis in WORLD axes (+X,-X,+Y,-Y,+Z,-Z; dir = axis + right*u + up*v
+    // with image row 0 at the top) — exactly what Scene::setSkyReflection takes;
+    // the engine converts to its cubemap handedness. The equirect fetch below
+    // uses dirToEquirect, i.e. OGRE'S sky mapping, so a reflection lines up with
+    // the sky pixel the camera sees in that direction.
     static const float ax[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     static const float rt[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
     static const float up[6][3] = {{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
@@ -1629,9 +1716,8 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
                 float dz = a[2] + r[2] * ur + u[2] * uv;
                 const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
                 dx /= len; dy /= len; dz /= len;
-                float ut = 1.0f - std::atan2(dz, dx) / 6.2831853f;
-                ut -= std::floor(ut);
-                const float vt = std::acos(std::min(1.0f, std::max(-1.0f, dy))) / 3.14159265f;
+                float ut, vt;
+                dirToEquirect(dx, dy, dz, ut, vt);
                 fetch(ut, vt, &face[(size_t(py) * N + px) * 4u]);
             }
         }
@@ -1708,11 +1794,13 @@ QImage SceneMirror::bakeRealisticSky(const iris::SkyRealistic &sky, int width, i
     QImage img(width, height, QImage::Format_RGBA8888);
     for (int row = 0; row < height; ++row) {
         unsigned char *out = img.scanLine(row);
-        const float phi = (row + 0.5f) / height * pi;      // 0 at the zenith (sphere v)
-        const float sinPhi = std::sin(phi), cosPhi = std::cos(phi);
+        const float v = (row + 0.5f) / height;
         for (int col = 0; col < width; ++col) {
-            const float theta = (1.0f - (col + 0.5f) / width) * 2.0f * pi;   // sphere u = 1 - theta/2pi
-            const V3 dir(sinPhi * std::cos(theta), cosPhi, sinPhi * std::sin(theta));
+            // equirectDir: the mapping Ogre's sky shader reads the bake back
+            // with, so the sun lands in the world direction sunPos names.
+            float dx, dy, dz;
+            equirectDir((col + 0.5f) / width, v, dx, dy, dz);
+            const V3 dir(dx, dy, dz);
 
             const float zenithAngle = std::acos(std::max(0.0f, dir.y));
             const float denom = std::cos(zenithAngle) +

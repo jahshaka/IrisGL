@@ -155,14 +155,14 @@ public:
     /// exactly realisticsky.frag's math per direction. Public for tests.
     static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height);
 
-    /// Cosine-weighted hemisphere averages of an equirect sky image, in LINEAR
-    /// light (the image bytes are sRGB): what the scene's ambient becomes when
-    /// `Scene::ambientFromSky` is on (VISUAL_PARITY_SPEC item 3b). Row 0 of the
-    /// image is the zenith, matching the engine's sky sphere mapping. Returns
-    /// false for a null image. Public for tests.
-    static bool integrateSkyAmbient(const QImage &equirect,
-                                    jahshaka::engine::Colour &upperOut,
-                                    jahshaka::engine::Colour &lowerOut);
+    /// Cosine-convolved irradiance of an equirect sky image as 9 spherical-
+    /// harmonic bands (27 floats, r/g/b per band), in LINEAR light — what the
+    /// scene's ambient becomes when `Scene::ambientFromSky` is on
+    /// (VISUAL_PARITY_SPEC item 3b). Basis, order and units are exactly what
+    /// `Scene::setAmbientSh` documents; row 0 of the image is the zenith and the
+    /// longitude follows Ogre's own sky shader. Returns false for a null image.
+    /// Public for tests.
+    static bool integrateSkyAmbientSh(const QImage &equirect, float shOut[27]);
 
 private:
     struct Entry {
@@ -214,8 +214,8 @@ private:
     void applySkyReflection(const QImage &equirect);
     /// Cubemap skies do not go through applySkyReflection (the engine takes the
     /// six faces directly), so their ambient integral is taken from the face
-    /// images: the same cosine-weighted upper/lower split, per face texel.
-    void recordCubeAmbient(const QImage faces[6]);
+    /// images: the same SH projection, per face texel.
+    void recordCubeAmbientSh(const QImage faces[6]);
     /// Clears the recorded sky ambient (no sky, or a single-colour sky).
     void clearSkyAmbient();
     jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh);
@@ -257,9 +257,12 @@ private:
     // from these (equal => fixed, different => hemisphere), so pushing an
     // unchanged value every frame is not free.
     bool mAmbientPushed = false;
-    jahshaka::engine::Colour mLastAmbientUpper, mLastAmbientLower;
-    jahshaka::engine::Colour mSkyAmbientUpper { 0.0f, 0.0f, 0.0f, 1.0f };
-    jahshaka::engine::Colour mSkyAmbientLower { 0.0f, 0.0f, 0.0f, 1.0f };
+    bool mLastAmbientWasSky = false;
+    jahshaka::engine::Colour mLastFlatAmbient { -1.0f, -1.0f, -1.0f, 1.0f };
+    float mLastAmbientSh[27] = { 0.0f };
+    /// The sky's own SH ambient (before the World-panel gain). Valid while
+    /// mHasSkyAmbient; zeroed by clearSkyAmbient.
+    float mSkyAmbientSh[27] = { 0.0f };
     jahshaka::engine::MeshId mWireMeshes[4] = { 0, 0, 0, 0 };   // directional, point, spot, area
     // Ground grid: one root node (dropped a hair below y=0 against z-fighting
     // with floor geometry) carrying a minor- and a major-line child.

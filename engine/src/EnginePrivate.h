@@ -44,6 +44,7 @@
 #include <OgreLogManager.h>
 #include <OgreResourceGroupManager.h>
 #include <OgreHlmsSamplerblock.h>
+#include <OgreRectangle2D2.h>
 #include <set>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorWorkspace.h>
@@ -159,34 +160,40 @@ public:
     const std::string &name() const override;
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
+    void setAmbientSh(const float sh[27]) override;
 
     void setFog(bool enabled, const Colour &colour, float start, float end) override;
 
-    /// Jahshaka's own sky: a UV sphere around the camera with an unlit textured
-    /// material, depth test/write off, drawn first (render queue 0) so the scene
-    /// paints over it. Ogre's SceneManager::setSky is not used — on Vulkan its
-    /// Sky.material throws on 'sliceIdx' after the sky renderable is already
-    /// attached, which then crashes in the render queue with a null datablock.
+    /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far
+    /// plane whose camera-direction shader samples an equirect or cube texture.
+    /// There is no sky geometry of ours any more — no sphere, no six quads, no
+    /// per-frame follow-the-camera. The equirect method needs a texture whose
+    /// INTERNAL type is Type2DArray (automatic-batching pool slices are; our
+    /// pixel-uploaded ManualTextures are not) — makeSkyArrayTexture() copies when
+    /// it must. And it needs ogre-patch 0009: upstream's Vulkan GLSL declares
+    /// `sliceIdx` but samples slice 0, so glslang strips the uniform and
+    /// SceneManager::setSky throws on setNamedConstant AFTER attaching the sky.
     bool setSky(SkyMode mode, TextureId texId) override;
     bool setSkyCubemap(const TextureId faces[6]) override;
-    /// Environment reflections divorced from the sky geometry: the host pushes six
+    /// Environment reflections divorced from the sky: the host pushes six
     /// resampled faces of its equirect/baked sky image. Six zero ids clear.
     bool setSkyReflection(const TextureId faces[6]) override;
-    /// Builds (replacing any previous) the mipped reflection cubemap from six equal
-    /// faces (+X,-X,+Y,-Y,+Z,-Z) and binds it on every PBR datablock.
-    void buildReflectionCubemap(Ogre::TextureGpu *const tex[6]);
+    /// Builds (replacing any previous) the GGX-prefiltered reflection cubemap by
+    /// convolving `srcCube`, and binds it on every PBR datablock. `ownsSource`
+    /// means the source is ours to destroy once the convolution has run (the
+    /// cubemap-sky path passes false: there the source IS the sky texture).
+    /// The prefilter runs on the next renderOneFrame (applyPendingIbl).
+    void buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource);
     /// Unbinds and destroys the reflection cubemap (no-op when there is none).
     void destroyReflection();
     /// Binds (or clears, when mReflectionTex is null) the scene's sky reflection
     /// cubemap on every PBR material's datablock. (Body in complete-class context,
     /// so it may call the private impl declared further down.)
     void applyReflectionToAll();
-    /// Called by the engine before rendering: keep the sky centred on the camera and
-    /// inside its far plane.
-    void followCamera(const Ogre::Vector3 &camPos, float farClip);
-    struct SkyFace { Ogre::Item *item; Ogre::MeshPtr mesh; std::string meshName, dbName; };
-    std::vector<SkyFace> mSkyFaces;
-    Ogre::TextureGpu *mReflectionTex = nullptr;   // sky cubemap on PBSM_REFLECTION
+    /// Runs the queued ibl_specular convolution (roughness mip chain) for the
+    /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
+    void applyPendingIbl();
+    Ogre::TextureGpu *mReflectionTex = nullptr;   // prefiltered cube on PBSM_REFLECTION
     void destroySky();
     bool removeNode(NodeId id) override;
 
@@ -338,8 +345,27 @@ private:
     /// datablock on a mesh without them (throws, object falls back to flat grey).
     Ogre::MeshPtr buildMeshV2(const std::string &name, const MeshData &data,
                               std::vector<float> *interleavedOut = nullptr);
-    /// Inward-facing UV sphere (radius 1); u = longitude, v = latitude — equirect mapping.
-    Ogre::MeshPtr buildSkySphere(const std::string &name);
+    /// The six WORLD-axis faces (+X,-X,+Y,-Y,+Z,-Z, seen from inside) as ONE Ogre
+    /// cubemap. Ogre samples cubemaps LEFT-handed — HlmsPbs negates the view
+    /// matrix' Z column ("Cubemaps are left-handed", OgreHlmsPbs.cpp:2327) and
+    /// SkyCubemap_ps.glsl negates cameraDir.z — so a world direction d reads the
+    /// cube at (d.x, d.y, -d.z). Mirroring in Z means the +Z and -Z faces swap and
+    /// every face image is mirrored: horizontally for +X,-X,+Z,-Z (their in-face U
+    /// runs along +-Z) and vertically for +Y,-Y (their in-face V does). copyTo
+    /// cannot mirror, so each face is downloaded, flipped and re-uploaded — once
+    /// per sky change, not per frame. Returns null (and sets mError) on failure.
+    /// `extraFlags` is OR-ed into the texture flags; `mips` false = one mip.
+    Ogre::TextureGpu *buildCubeFromWorldFaces(Ogre::TextureGpu *const tex[6],
+                                              const std::string &namePrefix,
+                                              Ogre::uint32 extraFlags, bool mips);
+    /// A Type2DArray (1 slice) copy of a 2D texture: SkyEquirectangular refuses
+    /// anything whose internal type is not Type2DArray.
+    Ogre::TextureGpu *makeSkyArrayTexture(Ogre::TextureGpu *src);
+    /// Applies our render-queue / visibility policy to Ogre's sky renderable:
+    /// queue 0 (the sky is drawn FIRST, exactly where our six quads used to be, so
+    /// on-top overlays at queue 200 still paint over it), and kVisibleBit only, so
+    /// Instant Radiosity's visibility-masked ray casts never hit it.
+    void tuneSkyRenderable();
     /// Frees a node's billboard set and its datablock, in that order (the set
     /// references the datablock until it is destroyed). Safe to call twice.
     void releaseBillboards(Node &n);
@@ -414,10 +440,20 @@ private:
     std::map<MaterialId, MaterialRec> mMaterials;
     std::map<TextureId, TextureRec> mTextures;
     std::set<std::string> mTextureDirs;
-    Ogre::SceneNode *mSkyNode = nullptr;
-    Ogre::Item      *mSkyItem = nullptr;
-    Ogre::MeshPtr    mSkyMesh;
-    std::string      mSkyMeshName, mSkyDatablockName;
+    /// SceneManager::getSkyMethod() never reflects the method actually set
+    /// (upstream's setSky forgets to assign mSkyMethod), so remember it.
+    bool              mSkyIsEquirect = false;
+    /// Textures WE own for Ogre's sky renderable (the equirect Type2DArray copy /
+    /// the converted cube). Null when the sky uses a host texture directly.
+    Ogre::TextureGpu *mSkyOwnedTex = nullptr;
+    /// The un-prefiltered cube the ibl_specular pass convolves into mReflectionTex.
+    /// May alias mSkyOwnedTex (a cubemap sky is its own IBL source); mIblSourceOwned
+    /// says whether it is ours to destroy.
+    Ogre::TextureGpu *mIblSourceTex = nullptr;
+    bool              mIblSourceOwned = false;
+    bool              mIblPending = false;   // convolve on the next frame
+    /// One-shot ibl_specular workspace; kept null between runs.
+    Ogre::Camera *mIblCamera = nullptr;
     Ogre::InstantRadiosity *mInstantRadiosity = nullptr;   // owned; null unless IR mode
     // VCT arm (null unless a VCT mode is live). Teardown order within the arm:
     // unbind HlmsPbs -> PCC -> VctLighting -> VctVoxelizer, all before the
@@ -504,8 +540,6 @@ public:
     /// VulkanMetalWindow does: destroySwapchain (which transitions colour AND depth to
     /// OnStorage) → setFinalResolution → createSwapchain — are resized in place instead.
     void applyPendingResize();
-    /// Keeps the scene's sky sphere centred on this view's camera.
-    void updateSky();
     /// Feeds the camera position to the scene's particle manager: billboard uploads
     /// are depth-sorted against it (matters for alpha-blended sets).
     void updateParticles();

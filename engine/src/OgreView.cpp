@@ -254,10 +254,6 @@ void OgreView::applyPendingResize() {
     } JAH_CATCH(mError, );
 }
 
-void OgreView::updateSky() {
-    if (mEnabled && mScene && mCamera) mScene->followCamera(mCamera->getPosition(), mCamera->getFarClipDistance());
-}
-
 void OgreView::updateParticles() {
     if (mEnabled && mScene && mCamera)
         mScene->sceneManager()->getParticleSystemManager2()->setCameraPosition(mCamera->getPosition());

@@ -194,8 +194,8 @@ void OgreEngine::destroyView(View *view) {
 
 void OgreEngine::renderOneFrame() {
     JAH_TRY {
-        for (auto &v : mViews) { v->applyPendingResize(); v->updateSky(); v->updateParticles(); v->updateGi(); }
-        for (auto &s : mScenes) s->applyPendingGi();
+        for (auto &v : mViews) { v->applyPendingResize(); v->updateParticles(); v->updateGi(); }
+        for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); }
         if (mRoot) mRoot->renderOneFrame();
     } JAH_CATCH(mLastError, );
 }
@@ -279,6 +279,15 @@ void OgreEngine::ensureHlms() {
         mRoot->getHlmsManager()->registerHlms(
             OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
+    // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;
+    // Scene::setAmbient converts the flat/hemisphere pair exactly). The mode is a
+    // property of the HlmsPbs INSTANCE, not of a scene, so it cannot be chosen
+    // per scene: every scene therefore speaks SH, and a scene that pushes nothing
+    // gets black ambient rather than a stale hemisphere. AmbientSh also means the
+    // ambient contributes no specular term of its own — that comes from the
+    // GGX-prefiltered sky reflection cubemap instead.
+    static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
+        ->setAmbientLightMode(Ogre::HlmsPbs::AmbientSh);
     // Fog: append the per-scene fog constants to every PBS pass buffer. Unlit
     // gets no listener — gizmos, wires and billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
