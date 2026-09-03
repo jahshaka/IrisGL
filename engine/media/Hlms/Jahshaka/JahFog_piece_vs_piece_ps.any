@@ -1,0 +1,131 @@
+// Jahshaka fog — Ogre's AtmosphereNpr fog MATH with Jahshaka's authorable colour,
+// plus a height-varying second layer that is entirely ours.
+//
+// WHO DOES WHAT
+//   * The distance term is upstream's: OgreScene registers an AtmosphereNpr on the
+//     SceneManager (sky quad hidden, sun/ambient never linked), which sets the
+//     hlms_fog property and binds its own const buffer. The stock Pbs pixel shader
+//     then does
+//         fogWeight = exp2( -eyeDistance * fogDensity )   (plus the brightness
+//                     "breakthrough" term), colour = lerp( inPs.fog.xyz, colour, w )
+//     and we never maintain that code.
+//   * The COLOUR is ours: upstream computes a procedural sky colour per vertex and
+//     writes it to outVs.fog.xyz. We replace that whole computation (see below) with
+//     the authored fog colour out of the pass buffer — which also deletes ~30 ALU of
+//     sky evaluation per vertex that we would never look at.
+//   * HEIGHT FOG is ours, applied after the built-in fog. Two absorbing layers of the
+//     same colour compose exactly by multiplying their transmittances, so a second
+//     lerp toward the same colour is not an approximation of "one combined density"
+//     — it IS it:  lerp(F, lerp(F, S, T1), T2) = F + (S-F)*T1*T2.
+//
+// THIS FILE IS AN Hlms LIBRARY FILE, not a per-datablock custom piece: the folder is
+// appended to HlmsPbs's library paths in OgreEngine::ensureHlms(). That is what lets
+// ONE file define pieces for BOTH shader stages (the _piece_vs_piece_ps name) — a
+// per-datablock custom piece is attached per stage, and the pass-buffer members must
+// be declared identically in the vertex and pixel shader or the two stages disagree
+// about the layout of a buffer they both read. Verified against a real shader dump
+// (JAHSHAKA_HLMS_DEBUG_DIR): PassBuffer is generated from one property set, so the
+// vertex and pixel copies are byte-identical up to this insertion point.
+//
+// CAUTION for editors: the Hlms parser does NOT respect // comments — an at-directive
+// inside a comment is still executed. Never write one here.
+//
+// The pass-buffer members below are appended to the END of the PassData struct and
+// filled by FogHlmsListener (OgreFog.cpp); the two layouts line up by construction.
+// They exist only when fog is on: fog off unregisters the atmosphere, which drops
+// hlms_fog, which removes every line of this file from the generated shader — the
+// bit-exact "no fog" the offscreen pixel suites depend on.
+
+@property( hlms_fog )
+
+@piece( custom_passBuffer )
+	float4 jahFogColour;	// rgb = fog colour (linear), w = height-layer density (0 = off)
+	float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w unused
+@end
+
+// Replace upstream's per-vertex sky evaluation with the authored colour. Redefinition
+// needs the undef first (the parser rejects a duplicate piece) and needs this folder
+// to be the LAST library folder, after Hlms/Pbs/Any/Atmosphere.
+@undefpiece( DoAtmosphereNprSky )
+@piece( DoAtmosphereNprSky )
+	outVs.fog.xyz = midf3_c( passBuf.jahFogColour.xyz );
+	@property( hlms_normal || hlms_qtangent )
+		outVs.jahFogWorldY = worldPos.y;
+	@end
+@end
+
+@property( hlms_normal || hlms_qtangent )
+	@piece( custom_VStoPS )
+		INTERPOLANT( float jahFogWorldY, @counter(texcoord) );
+	@end
+
+	// The height layer writes outPs_colour0, which is #defined to `outColour`
+	// (Hlms/Common/GLSL/CrossPlatformSettings_piece_all.glsl) — and outColour is
+	// only DECLARED when the shader actually writes colour: not in a shadow
+	// caster, not in a depth/normal prepass, not in a depth-only pass
+	// (Hlms/Pbs/GLSL/PixelShader_ps.glsl). Referencing it there throws out of
+	// renderOneFrame and the frame goes black with one line in the log. The
+	// compositor-chain lane learned this on the old fog piece (irisgl 92e9833);
+	// it is carried forward here rather than re-learned when the SSR prepass
+	// lands. (The built-in fog block upstream is guarded the same way.)
+	@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only )
+	@piece( custom_ps_posExecution )
+	if( passBuf.jahFogColour.w > 0.0 )
+	{
+		// Height layer: density( y ) = D * 2^( -k * ( y - y0 ) ), integrated along the
+		// view ray. With u = k * dy * ln2 the integral is D * A * L * (1 - e^-u) / u,
+		// where A = 2^( -k * ( camY - y0 ) ), L = eye distance and dy the world-Y rise
+		// from the camera to this pixel. The (1 - e^-u)/u factor tends to 1 as u -> 0
+		// (a level ray sees constant density); the clamps keep the exponentials finite
+		// for extreme falloff values instead of producing NaNs.
+		const float jahL    = length( inPs.pos.xyz );
+		const float jahDy   = inPs.jahFogWorldY - passBuf.jahFogHeight.z;
+		const float jahA    = exp2( clamp( -passBuf.jahFogHeight.x *
+										   ( passBuf.jahFogHeight.z - passBuf.jahFogHeight.y ),
+										   -60.0, 60.0 ) );
+		const float jahU    = clamp( passBuf.jahFogHeight.x * jahDy * 0.6931472, -60.0, 60.0 );
+		const float jahRamp = abs( jahU ) < 0.001 ? ( 1.0 - 0.5 * jahU )
+												  : ( ( 1.0 - exp( -jahU ) ) / jahU );
+		const float jahT    = exp2( -passBuf.jahFogColour.w * jahA * jahL * jahRamp );
+		// The built-in fog mixes in linear space, before the shader's gamma write;
+		// this runs after it, so the fog colour is matched to whatever space the
+		// output is in. Ogre-Next 4.0 hardcodes hw_gamma_write to 1 (OgreHlmsPbs
+		// preparePassHash), i.e. the shader always emits linear and the target
+		// encodes -- the first branch is the correct answer if that ever changes.
+		@property( !hw_gamma_write )
+			const midf3 jahFogCol = midf3_c( sqrt( passBuf.jahFogColour.xyz ) );
+		@else
+			const midf3 jahFogCol = midf3_c( passBuf.jahFogColour.xyz );
+		@end
+		outPs_colour0.xyz = lerp( jahFogCol, outPs_colour0.xyz, midf_c( jahT ) );
+	}
+	@end
+	@end
+@end
+
+@end
+
+// Jahshaka UV tiling — the document's PbrMaterial::textureScale. HlmsPbs has no
+// UV transform for its base maps (detail maps alone get offset/scale), so this
+// redefines Ogre's official UV-modifier macros (UvModifierMacros_piece_ps.any,
+// inserted at the top of every Pbs pixel shader) to multiply each base-map
+// lookup by the per-datablock user value that OgreScene::applyPbr writes with
+// setUserValue(0, ...). userValue lives in the material buffer: scale edits are
+// const-buffer updates, never shader rebuilds. Deliberately OUTSIDE the fog
+// property above: alpha-tested (Cutout) caster shaders sample the diffuse map
+// through UV_DIFFUSE with `material` in scope too, and must see the same tiling
+// as the colour pass or shadows detach from the silhouette. UV_SPECULAR covers
+// the metalness map (metallic workflow rides the specular texture slot). No AO
+// macro exists — HlmsPbs has no AO input (see Types.h).
+@piece( custom_ps_uv_modifier_macros )
+	#undef UV_DIFFUSE
+	#undef UV_NORMAL
+	#undef UV_SPECULAR
+	#undef UV_ROUGHNESS
+	#undef UV_EMISSIVE
+	#define UV_DIFFUSE(x) ((x) * material.userValue[0].xy)
+	#define UV_NORMAL(x) ((x) * material.userValue[0].xy)
+	#define UV_SPECULAR(x) ((x) * material.userValue[0].xy)
+	#define UV_ROUGHNESS(x) ((x) * material.userValue[0].xy)
+	#define UV_EMISSIVE(x) ((x) * material.userValue[0].xy)
+@end

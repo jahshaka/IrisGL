@@ -299,6 +299,41 @@ struct GiParams {
     int       pccProbesX = 3, pccProbesY = 2, pccProbesZ = 3;
 };
 
+// ---- Fog (scene-level) ------------------------------------------------------
+/// EXPONENTIAL distance fog, plus an optional height-varying layer of the same
+/// colour. Both layers absorb, so their transmittances multiply:
+///
+///     transmittance = 2^( -distance * density ) * 2^( -heightOpticalDepth )
+///     pixel         = lerp( colour, surface, transmittance )
+///
+/// `density` is therefore "how much is lost per world unit" in exp2 units: a
+/// surface 1/density units away keeps half its own colour, and 4.32/density is
+/// where only 5% of it survives. (The document maps the legacy linear start/end
+/// pair onto it by matching the half-fogged distance — iris::Scene.)
+///
+/// Only lit (PBR) surfaces are fogged; unlit overlays (gizmos, wires,
+/// billboards) and the sky never are, exactly as before.
+struct FogDesc {
+    bool   enabled = false;
+    Colour colour;                ///< linear fog colour
+    float  density = 0.024f;      ///< homogeneous density per world unit (exp2)
+
+    /// Height layer: a second exponential medium whose density falls off with
+    /// world Y — density(y) = heightDensity * 2^( -(y - heightLevel) * heightFalloff )
+    /// — integrated along the view ray. heightDensity = 0 disables it exactly
+    /// (the shader branch is skipped, not multiplied by one).
+    float  heightDensity = 0.0f;  ///< density at heightLevel, per world unit (exp2)
+    float  heightFalloff = 0.1f;  ///< per world unit; larger = thins out faster with altitude
+    float  heightLevel   = 0.0f;  ///< world Y where heightDensity applies
+
+    /// Brightness breakthrough: bright pixels (a sun disc, an emissive sign)
+    /// resist the fog instead of dissolving into it. `breakMinBrightness` is the
+    /// luminance where breaking through starts, `breakFalloff` how fast it takes
+    /// hold. breakFalloff = 0 turns it off, leaving pure exponential fog.
+    float  breakMinBrightness = 0.25f;
+    float  breakFalloff       = 0.1f;
+};
+
 enum class Backend { Vulkan, OpenGL };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at

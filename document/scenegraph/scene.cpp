@@ -92,6 +92,14 @@ Scene::Scene()
     fogStart = 100;
     fogEnd = 180;
     fogEnabled = true;
+    // 2/(100+180) = 0.0071: the exponential density that keeps a 100..180 linear
+    // fog looking like itself (see fogDensityFromLinear).
+    fogDensity = fogDensityFromLinear(fogStart, fogEnd);
+    fogHeightDensity = 0.0f;      // height layer off until asked for
+    fogHeightFalloff = 0.1f;
+    fogHeightLevel = 0.0f;
+    fogBreakMinBrightness = 0.25f;
+    fogBreakFalloff = 0.1f;
 
     // global illumination is opt-in: off by default, everywhere, always
     giMode = GiMode::OFF;

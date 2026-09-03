@@ -3,24 +3,6 @@
 #include "EnginePrivate.h"
 
 namespace jahshaka { namespace engine { namespace detail {
-namespace {
-
-/// Every lit PBS datablock carries the fog piece (Unlit and the sky do not — they
-/// must stay unfogged). A missing piece file degrades to "no fog", logged, instead
-/// of failing material creation.
-void attachFogPiece(Ogre::HlmsPbsDatablock *db) {
-    try {
-        db->setCustomPieceFile("JahFog_piece_ps.any",
-                               Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
-                               Ogre::CustomPieceStage::PixelShader);
-    } catch (Ogre::Exception &e) {
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: fog piece not attached (materials render unfogged): " +
-            e.getFullDescription());
-    }
-}
-
-}  // namespace
 
 Ogre::Hlms *OgreScene::hlmsFor(const MaterialRec &m) const {
     return mRoot->getHlmsManager()->getHlms(m.unlit ? Ogre::HLMS_UNLIT : Ogre::HLMS_PBS);
@@ -34,7 +16,8 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
     db->setNormalMapWeight(p.normalMapWeight);
     // UV tiling: HlmsPbs has no UV transform for its base maps (only detail maps
     // have offset/scale), so the scale rides in the datablock's user values and a
-    // custom_ps_uv_modifier_macros piece (JahFog_piece_ps.any) multiplies every
+    // custom_ps_uv_modifier_macros piece (JahFog_piece_vs_piece_ps.any, a library
+    // folder of HlmsPbs — no longer attached per datablock) multiplies every
     // base-map lookup by material.userValue[0].xy. setUserValue only schedules a
     // const-buffer update — scale edits never recompile shaders.
     db->setUserValue(0, Ogre::Vector4(p.uvScale, p.uvScale, 1.0f, 1.0f));
@@ -155,7 +138,6 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
             Ogre::IdString(rec.datablockName), rec.datablockName,
             Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
         db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
-        attachFogPiece(db);
         applyPbr(db, p);
         if (mReflectionTex) db->setTexture(Ogre::PBSM_REFLECTION, mReflectionTex);
         mMaterials[++mNextMaterialId] = rec;
