@@ -1595,7 +1595,15 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // Pushing the raw integral instead would double the ambient of every
             // daylight scene — the sky is a full-hemisphere emitter and the flat
             // grey never was.
-            const float gain[3] = { float(a.redF()), float(a.greenF()), float(a.blueF()) };
+            // x2: the owner's look call (2026-09-03) after living with the
+            // physically-honest level — "default lighting needs to be 2x
+            // brighter". The default (96,96,96) now lands at 0.75 of the sky's
+            // full integral; Ambient Color remains the artistic dial and
+            // saturates to 2.0 at white.
+            const float kAmbientLift = 2.0f;
+            const float gain[3] = { float(a.redF()) * kAmbientLift,
+                                    float(a.greenF()) * kAmbientLift,
+                                    float(a.blueF()) * kAmbientLift };
             for (int i = 0; i < 9; ++i)
                 for (int c = 0; c < 3; ++c) sh[i * 3 + c] = mSkyAmbientSh[i * 3 + c] * gain[c];
         } else {
