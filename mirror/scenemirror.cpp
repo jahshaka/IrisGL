@@ -1756,7 +1756,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // fight the editor for it. Pushed only on change: setParticleTimeScale
         // and setFixedFrameDelta cancel each other inside the backend, and the
         // suites hold a fixed step across whole runs.
-        if (engine->particleTimeScale() != mSource->particleTimeScale)
+        // ...unless a FIXED frame delta is live (a scripted editor.frame(n, dt)
+        // or a test): the two settings cancel each other inside the backend, so
+        // pushing the scale here would silently undo the caller's determinism
+        // every frame.
+        if (engine->fixedFrameDelta() <= 0.0f &&
+            engine->particleTimeScale() != mSource->particleTimeScale)
             engine->setParticleTimeScale(mSource->particleTimeScale);
     }
     // Shadow Size: one global atlas, so the per-light combo is only a REQUEST
