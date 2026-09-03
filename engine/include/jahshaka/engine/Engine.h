@@ -242,6 +242,39 @@ public:
     /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
 
+    // ---- Decals (DECALS_SPEC.md): a node may carry one projected-texture decal.
+    // A decal is an oriented box that overwrites base colour / roughness /
+    // metalness on the surfaces inside it, projecting down the node's -Y (the
+    // same convention as lights). It draws nothing itself: the PBR shader
+    // consumes it through the Forward+ clustered list.
+    /// Creates or updates the node's decal. False (lastError()) when the desc
+    /// carries no diffuse texture, or one that did not come from
+    /// loadDecalTexture().
+    virtual bool        setDecal(NodeId, const DecalDesc &) = 0;
+    /// KEPT as the explicit counterpart of setDecal: a node may stop being a
+    /// decal without being removed (the document changes a node's type, or the
+    /// user clears the image).
+    virtual bool        removeDecal(NodeId) = 0;
+    /// Loads an image into the DEDICATED, fixed-geometry decal atlas for `kind`
+    /// and returns a texture id usable in DecalDesc. Images are resampled into
+    /// the atlas geometry (aspect preserved, padded with transparent pixels —
+    /// alpha is the decal mask, so padding is invisible).
+    ///
+    /// NOT interchangeable with loadTexture(): decals sample one Type2DArray
+    /// per channel and carry a slice index into it, so every decal image must
+    /// share one resolution/format/mip-count pool. loadTexture() puts images in
+    /// pool 0 alongside ordinary PBR maps (wrong slices) and its grayscale
+    /// branch produces a non-batched texture the backend refuses outright.
+    ///
+    /// Returns 0 with a clear lastError() when the atlas is FULL — never a
+    /// silent fallback: an overflowing decal would sample another decal's image
+    /// with no warning at all.
+    virtual TextureId   loadDecalTexture(const std::string &path, DecalMap kind) = 0;
+    /// How many slices the `kind` atlas has, and how many are already taken.
+    /// The UI surfaces "decal image budget full" from this rather than guessing.
+    virtual unsigned    decalAtlasCapacity(DecalMap kind) const = 0;
+    virtual unsigned    decalAtlasUsed(DecalMap kind) const = 0;
+
     // ---- Global illumination (GI_SPEC.md). Scene-level, like fog and sky. ----
     /// Applies the GI state idempotently, rebuilding whatever changed. Passing the
     /// same params twice is cheap; GiMode::Off tears everything down. Modes the

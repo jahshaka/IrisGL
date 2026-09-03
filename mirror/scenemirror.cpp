@@ -12,6 +12,7 @@
 #include "irisgl/document/scenegraph/scenenode.h"
 #include "irisgl/document/scenegraph/meshnode.h"
 #include "irisgl/document/scenegraph/lightnode.h"
+#include "irisgl/document/scenegraph/decalnode.h"
 #include "irisgl/document/scenegraph/cameranode.h"
 #include "irisgl/document/scenegraph/particlesystemnode.h"
 #include "irisgl/document/scenegraph/particle.h"
@@ -322,7 +323,7 @@ void SceneMirror::syncGrid()
 
 MeshId SceneMirror::wireMeshFor(int kind)
 {
-    if (kind < 0 || kind > 3) return 0;
+    if (kind < 0 || kind > 4) return 0;
     if (mWireMeshes[kind]) return mWireMeshes[kind];
     std::vector<Vec3> pts;
     auto circle = [&](int axis, float r) {
@@ -335,7 +336,18 @@ MeshId SceneMirror::wireMeshFor(int kind)
             else                { pts.push_back(Vec3(c0, s0, 0)); pts.push_back(Vec3(c1, s1, 0)); }
         }
     };
-    if (kind == 1) {                       // point: three rings
+    if (kind == 4) {                       // decal: the projector box (a unit
+                                           // cube, since the node carries the
+                                           // real extents) + a tick down -Y,
+                                           // the projection direction
+        const float h = 0.5f;
+        const Vec3 c[8] = { Vec3(-h,-h,-h), Vec3(h,-h,-h), Vec3(h,-h,h), Vec3(-h,-h,h),
+                            Vec3(-h, h,-h), Vec3(h, h,-h), Vec3(h, h,h), Vec3(-h, h,h) };
+        const int e[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
+                               {0,4},{1,5},{2,6},{3,7} };
+        for (int i = 0; i < 12; ++i) { pts.push_back(c[e[i][0]]); pts.push_back(c[e[i][1]]); }
+        pts.push_back(Vec3(0, 0, 0)); pts.push_back(Vec3(0, -0.9f, 0));
+    } else if (kind == 1) {                // point: three rings
         circle(0, 0.5f); circle(1, 0.5f); circle(2, 0.5f);
     } else if (kind == 3) {                // area: unit rectangle in XZ + a short normal tick
                                            // down -Y (the emit direction, like the arrow)
@@ -587,6 +599,12 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
                                                 unsigned(light->shadowMap->resolution));
         }
         syncLightWires(e, light.data());
+    }
+
+    if (node->getSceneNodeType() == iris::SceneNodeType::Decal) {
+        auto decal = node.staticCast<iris::DecalNode>();
+        syncDecal(e, decal.data());
+        syncDecalWires(e, decal.data());
     }
 
     // `e` is a reference into a QHash: the recursion inserts entries and QHash does not
@@ -881,6 +899,96 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     d.castShadows = light->lightType != iris::LightType::Area &&
                     light->shadowMap && light->shadowMap->shadowType != iris::ShadowMapType::None;
     return d;
+}
+
+DecalDesc SceneMirror::toDecalDesc(iris::DecalNode *decal)
+{
+    DecalDesc d;
+    d.width = decal->width;
+    d.height = decal->height;
+    d.depth = decal->depth;
+    d.metalness = decal->metalness;
+    d.roughness = decal->roughness;
+    d.ignoreAlphaDiffuse = decal->ignoreAlphaDiffuse;
+    return d;
+}
+
+TextureId SceneMirror::decalTextureFor(const QString &path, DecalMap kind)
+{
+    if (path.isEmpty()) return 0;
+    const QString key = QString::number(int(kind)) + '|' + path;
+    auto it = mDecalTextures.constFind(key);
+    if (it != mDecalTextures.constEnd()) return it.value();
+    // Qt resources (":/...") are not files the engine can read.
+    if (!QFileInfo::exists(path)) return 0;
+    const TextureId id = mTarget->loadDecalTexture(path.toStdString(), kind);
+    // Cache failures (0) too — a full atlas or an unreadable file must not be
+    // retried on every single frame.
+    mDecalTextures.insert(key, id);
+    return id;
+}
+
+// A decal is pushed like a light: the engine object rides the mirrored node, so
+// position, orientation and scale follow the document for free. The image is
+// re-bound only when the resolved path set changes (the panel edits guids every
+// keystroke; loadDecalTexture resamples a 512x512 atlas slice and is not free).
+void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
+{
+    if (!e.node) return;
+    const QString sig = decal->resolvedTexturePath + '|' + decal->resolvedNormalPath +
+                        '|' + decal->resolvedEmissivePath;
+    const bool rebind = !e.hasDecal || e.decalSignature != sig;
+
+    const TextureId diffuse = decalTextureFor(decal->resolvedTexturePath, DecalMap::Diffuse);
+    if (!diffuse) {
+        // No image (yet), unreadable, or the atlas is full: the node exists and
+        // draws its wire box, but projects nothing. Never leave a STALE decal
+        // bound — that would keep painting the previous image.
+        if (e.hasDecal) { mTarget->removeDecal(e.node); e.hasDecal = false; }
+        e.decalSignature = sig;
+        return;
+    }
+
+    DecalDesc d = toDecalDesc(decal);
+    d.diffuse = diffuse;
+    d.normal = decalTextureFor(decal->resolvedNormalPath, DecalMap::Normal);
+    d.emissive = decalTextureFor(decal->resolvedEmissivePath, DecalMap::Emissive);
+    if (mTarget->setDecal(e.node, d)) {
+        e.hasDecal = true;
+        if (rebind) e.decalSignature = sig;
+    }
+}
+
+// The wire box: 12 edges of the projector volume plus a tick down -Y showing
+// which way it projects. Always on with the helpers toggle (like the area
+// light's rectangle, it IS the object's shape, not a falloff volume).
+void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
+{
+    if (!mLightWires) {
+        if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
+        return;
+    }
+    if (!e.wireNode) e.wireNode = mTarget->createNode(e.node);
+    if (!e.wireNode) return;
+    MeshId m = wireMeshFor(4);
+    if (!m) return;
+    if (!e.wireMaterial) e.wireMaterial = mTarget->createUnlitMaterial(Colour(1, 1, 1), false);
+    if (!e.wireMaterial) return;
+    if (e.wireKind != 4) { if (mTarget->attachMesh(e.wireNode, m, e.wireMaterial)) e.wireKind = 4; }
+    // Amber when the decal projects, dim grey when it has no usable image —
+    // the difference between "placed" and "placed but blank" has to be visible.
+    mTarget->setUnlitMaterial(e.wireMaterial,
+                              e.hasDecal ? Colour(1.0f, 0.75f, 0.2f, 1.0f)
+                                         : Colour(0.45f, 0.45f, 0.45f, 1.0f));
+    // The wire lives in the decal node's local space: size it to the projector
+    // box and undo the node's own scale, exactly as the light wires do (the box
+    // mesh is authored as a UNIT cube, so the scale IS the extents).
+    const QVector3D s = decal->getLocalScale();
+    mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(),
+                              Vec3(std::max(decal->width, 0.001f) * (s.x() > 1e-6f ? 1.0f / s.x() : 1.0f),
+                                   std::max(decal->depth, 0.001f) * (s.y() > 1e-6f ? 1.0f / s.y() : 1.0f),
+                                   std::max(decal->height, 0.001f) * (s.z() > 1e-6f ? 1.0f / s.z() : 1.0f)));
+    mTarget->setNodeVisible(e.wireNode, true);
 }
 
 bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)

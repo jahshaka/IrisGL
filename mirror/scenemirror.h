@@ -191,6 +191,8 @@ private:
         jahshaka::engine::NodeId node = 0;
         bool hasMesh  = false;
         bool hasLight = false;
+        bool hasDecal = false;                       // an engine decal is bound
+        QString decalSignature;                      // image guid+path+kind set; re-bind on change
         jahshaka::engine::MaterialId material = 0;   // per document material instance
         iris::Material *materialPtr = nullptr;
         jahshaka::engine::MeshId mesh = 0;           // shared engine mesh this entry uses
@@ -239,6 +241,16 @@ private:
     };
     void syncParticles(Entry &e, iris::ParticleSystemNode *ps);
     void syncLightWires(Entry &e, iris::LightNode *light);
+    /// Pushes a DecalNode into the engine (DECALS_SPEC §5.3) and drives its
+    /// wire box. A decal whose image is missing or whose atlas is full leaves
+    /// the node decal-free — the wire box still draws, so the user sees the
+    /// object exists and the panel can say why it projects nothing.
+    void syncDecal(Entry &e, iris::DecalNode *decal);
+    void syncDecalWires(Entry &e, iris::DecalNode *decal);
+    /// A decal image goes into the DEDICATED atlas, never the ordinary texture
+    /// cache: loadTexture()'s pool-0/grayscale paths are both unusable there.
+    jahshaka::engine::TextureId decalTextureFor(const QString &path,
+                                                jahshaka::engine::DecalMap kind);
     void syncLightIcon(Entry &e, iris::LightNode *light);
     jahshaka::engine::TextureId iconTextureFor(const QString &path);
     void syncHighlight();
@@ -282,6 +294,8 @@ private:
 public:
     static bool toPbrParams(iris::Material *material, jahshaka::engine::PbrParams &out);
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
+    /// Fills everything but the texture ids (those need the atlas).
+    static jahshaka::engine::DecalDesc toDecalDesc(iris::DecalNode *decal);
 private:
 
     jahshaka::engine::Scene *mTarget;
@@ -319,7 +333,12 @@ private:
     /// The sky's own SH ambient (before the World-panel gain). Valid while
     /// mHasSkyAmbient; zeroed by clearSkyAmbient.
     float mSkyAmbientSh[27] = { 0.0f };
-    jahshaka::engine::MeshId mWireMeshes[4] = { 0, 0, 0, 0 };   // directional, point, spot, area
+    // directional, point, spot, area, decal box
+    jahshaka::engine::MeshId mWireMeshes[5] = { 0, 0, 0, 0, 0 };
+    /// Decal image path + map kind -> pooled atlas slice id. Separate from
+    /// mTextures on purpose: the two live in different pools and a mix-up is
+    /// silent (the decal would sample another decal's image).
+    QHash<QString, jahshaka::engine::TextureId> mDecalTextures;
     // Ground grid: one root node (dropped a hair below y=0 against z-fighting
     // with floor geometry) carrying a minor- and a major-line child.
     bool  mGridVisible = false;

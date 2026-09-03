@@ -88,8 +88,12 @@ bool OgreScene::removeNode(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return false;
     JAH_TRY {
+        const bool hadDecal = it->second.decal != nullptr;
         releaseNode(it->second);
         mNodes.erase(it);
+        // The last decal leaving must clear the SceneManager's atlas bindings,
+        // which is what drops the decal code back out of every PBS shader.
+        if (hadDecal) refreshDecalBindings();
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -293,11 +297,8 @@ void OgreScene::destroy() {
                 hlms->destroyDatablock(Ogre::IdString(kv.second.datablockName));
         }
         mMaterials.clear();
-        {
-            Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-            for (auto &kv : mTextures) tm->destroyTexture(kv.second.texture);
-            mTextures.clear();
-        }
+        for (auto &kv : mTextures) releaseTextureRec(kv.second);
+        mTextures.clear();
         Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
         for (auto &kv : mMeshes) {
             kv.second.mesh.reset();
@@ -334,6 +335,10 @@ void OgreScene::releaseNode(Node &n) {
     // The internal light child must go before the reparent loop below would leak it to root.
     if (n.light) { n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr; }
     if (n.lightNode) { mSceneMgr->destroySceneNode(n.lightNode); n.lightNode = nullptr; }
+    // Same for the decal's internal child. Note releaseDecal only tears the
+    // objects down; the SceneManager's atlas bindings are refreshed by the
+    // caller (removeNode) once, after the node is gone.
+    releaseDecal(n);
     if (n.node) {   // children survive: re-parent them to the root
         Ogre::SceneNode *root = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
         while (n.node->numChildren() > 0) {

@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/lightnode.h"
+#include "document/scenegraph/decalnode.h"
 #include "document/scenegraph/cameranode.h"
 #include "document/scenegraph/viewernode.h"
 #include "document/scenegraph/meshnode.h"
@@ -385,6 +386,11 @@ void Scene::addNode(SceneNodePtr node)
         lights.insert(light->getGUID(), light);
     }
 
+    if (node->sceneNodeType == SceneNodeType::Decal) {
+        auto decal = node.staticCast<iris::DecalNode>();
+        decals.insert(decal->getGUID(), decal);
+    }
+
     if (node->sceneNodeType == SceneNodeType::Mesh) {
 		//qDebug() <<"Mesh GUID: " << node->getGUID();
         auto mesh = node.staticCast<iris::MeshNode>();
@@ -413,6 +419,10 @@ void Scene::removeNode(SceneNodePtr node)
 {
     if (node->sceneNodeType == SceneNodeType::Light) {
         lights.remove(lights.key(node.staticCast<iris::LightNode>()));
+    }
+
+    if (node->sceneNodeType == SceneNodeType::Decal) {
+        decals.remove(decals.key(node.staticCast<iris::DecalNode>()));
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {

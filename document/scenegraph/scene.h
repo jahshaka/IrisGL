@@ -116,6 +116,9 @@ public:
     ViewerNodePtr vrViewer;
 
     QHash<QString, LightNodePtr> lights;
+    /// Every DecalNode in the scene, keyed by guid — the picker and the
+    /// engine-side budget check walk this rather than the whole tree.
+    QHash<QString, DecalNodePtr> decals;
 	QHash<QString, MeshNodePtr> meshes;
 	QHash<QString, ParticleSystemNodePtr> particleSystems;
 	QHash<QString, ViewerNodePtr> viewers;
