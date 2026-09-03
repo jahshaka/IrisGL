@@ -89,12 +89,10 @@ public:
     /// Static and public for tests.
     static bool toSkeletonDesc(const iris::SkeletonPtr &skeleton,
                                jahshaka::engine::SkeletonDesc &out);
-    /// The live pose as engine bone poses, index-parallel to toSkeletonDesc's
-    /// bones: each bone's transform LOCAL to its parent, decomposed to TRS from
-    /// the document's skin matrices. False when the skeleton is null/empty or its
-    /// boneTransforms are the wrong size.
-    static bool toBonePoses(const iris::SkeletonPtr &skeleton,
-                            std::vector<jahshaka::engine::BonePose> &out);
+    // toBonePoses is GONE with the document's clip evaluator: there is no
+    // document-computed pose to convert any more. The engine holds the pose;
+    // Scene::bonePoses reads it back (and boneWorldTransforms below turns that
+    // into the world matrices the bone overlay draws).
     /// An extracted clip (iris::ClipExtractor) as an engine ClipDesc.
     ///
     /// The `id` is a CONTENT hash of the rig id and every key of every track,
@@ -104,16 +102,19 @@ public:
     /// Static and public for tests.
     static bool toClipDesc(const iris::ExtractedClip &clip, const std::string &rigId,
                            jahshaka::engine::ClipDesc &out);
-    /// CPU-skins bind-pose vertices with the skeleton's live boneTransforms —
-    /// exactly the legacy GL shader's math (weighted sum of bone matrices).
+    /// CPU-skins bind-pose vertices with a set of bone matrices — exactly the
+    /// legacy GL shader's math (weighted sum of bone matrices).
     /// bindNormals/outNormals may be empty. Static and public for tests.
     ///
-    /// NOT PART OF RENDERING any more (GPU_SKINNING_SPEC §6): skinning happens in
-    /// the vertex shader, and sync() never calls this. It survives as the ORACLE
-    /// the GPU path is checked against (skeletal.gpu_parity) and for document-only
-    /// contexts that need posed vertices with no GPU. Note it skins position and
-    /// normal only — the shader also skins the TANGENT, so a normal-mapped
-    /// character lights correctly on the GPU path and did not on this one.
+    /// NOT PART OF RENDERING (GPU_SKINNING_SPEC §6): skinning happens in the
+    /// vertex shader and sync() never calls this. It survives as the ORACLE the
+    /// GPU path is checked against (skeletal.gpu_parity), and it survived the
+    /// clip evaluator's retirement because it is not an evaluator: it is a pure
+    /// function of (bone matrices, vertices), and the matrices now come from the
+    /// ENGINE (Scene::boneMatrices) instead of from the document. Note it skins
+    /// position and normal only — the shader also skins the TANGENT, so a
+    /// normal-mapped character lights correctly on the GPU path and did not on
+    /// this one.
     static void skinVertices(const QVector<QMatrix4x4> &boneTransforms,
                              const std::vector<float> &bindPositions,
                              const std::vector<float> &bindNormals,
@@ -121,6 +122,17 @@ public:
                              const std::vector<float> &boneWeights,
                              std::vector<float> &outPositions,
                              std::vector<float> &outNormals);
+    /// Every skinned bone's WORLD matrix, by bone name, read back from the
+    /// ENGINE — the only place a pose exists once the document's clip evaluator
+    /// is retired.
+    ///
+    /// The engine returns each bone LOCAL to its parent (a root bone: local to
+    /// the mesh node), so this runs the same FK the shader's bone matrices came
+    /// from and premultiplies the mesh node's global transform. That is what the
+    /// bone overlay and `avatar.bones` draw, and it is resolved as of the last
+    /// rendered frame — call it after sync() and after a render, never before.
+    /// False when nothing skinned is mirrored.
+    bool boneWorldTransforms(QHash<QString, QMatrix4x4> &out) const;
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
     static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const QMatrix4x4 &world);
     /// The engine mesh already created for a document mesh, or 0.
@@ -203,8 +215,24 @@ private:
         iris::SceneNode *docNode = nullptr;          // the document node this entry mirrors
         std::string rigId;                           // for the clip def's content key
         QString clipSignature;                       // rig + clip set; re-attach on change
-        QStringList clipNames;                       // document clip name -> engine clip name
-        QStringList engineClipNames;
+        /// Document clip -> its content id -> the name the engine gave it.
+        ///
+        /// Two hops because attachClips is IDEMPOTENT PER CONTENT ID and clips
+        /// really do collide: the Avatar page hands setAnimation a rebuilt copy
+        /// of a clip (root motion is a preview policy), and when there is no
+        /// root motion to strip the copy is byte-identical, so the engine keeps
+        /// one def for both. A one-hop map would leave the copy — the one that
+        /// is actually PLAYING — with no engine clip and the character frozen.
+        ///
+        /// Keyed by the AnimationPtr's IDENTITY, not by name and not by index.
+        /// Not by index because clips ACCUMULATE on a node (the Avatar page
+        /// loads a Mixamo animation onto a loaded character) and an index would
+        /// shift under them; not by NAME because clip names are not unique —
+        /// every Mixamo clip is literally called "mixamo.com", so a character
+        /// with its own T-pose plus a downloaded walk has two clips of that name
+        /// and a name lookup silently plays the wrong one.
+        QHash<const iris::Animation *, QString> clipMap;      // animation -> clip id
+        QHash<QString, QString> clipIdMap;                    // clip id -> engine clip name
         QString  lastClipName;                       // last state pushed, to skip no-ops
         float    lastClipTime = -1.0f;
         bool     lastClipLooping = false;

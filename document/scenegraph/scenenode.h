@@ -262,7 +262,14 @@ public:
      * - Particle systems use this to update animations
      */
     virtual void update(float dt);
+    /// Property animations only — position / rotation / scale on THIS node.
+    /// Skeletal clips are the engine's since the clip evaluator was retired
+    /// (ANIMATION_ENGINE_MIGRATION_SPEC); the document keeps the authored data
+    /// and the clock, and Scene::animationTime is what the mirror pushes.
     virtual void updateAnimation(float time);
+    /// Snapshots the subtree's authored local transforms. Named for what it
+    /// used to do (compose the rest pose into skin matrices); it is now the
+    /// rest-pose capture that clip translation reads.
     void applyDefaultPose();
 
     /// The node's authored local transform, snapshotted while the subtree was
@@ -283,7 +290,6 @@ public:
     QVector3D   restPos;
     QQuaternion restRot;
     QVector3D   restScale{1, 1, 1};
-    void applyAnimationPose(SceneNodePtr node, QMap<QString, QMatrix4x4> skeletonSpaceMatrices);
 
 private:
     void setParent(SceneNodePtr node);

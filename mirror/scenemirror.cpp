@@ -30,6 +30,7 @@
 #include "irisgl/document/assets/texture2d.h"
 #include "irisgl/document/scenegraph/shadowmap.h"
 #include <QFileInfo>
+#include <functional>
 #include <QtMath>
 
 using namespace jahshaka::engine;
@@ -1032,42 +1033,6 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
     return true;
 }
 
-bool SceneMirror::toBonePoses(const iris::SkeletonPtr &skeleton, std::vector<BonePose> &out)
-{
-    out.clear();
-    if (skeleton.isNull() || skeleton->bones.isEmpty()) return false;
-    const QList<iris::BonePtr> &bones = skeleton->bones;
-    if (skeleton->boneTransforms.size() != bones.size()) return false;
-
-    // Two passes. The document's skin matrix already folds in the inverse bind,
-    // so undoing it gives the bone's DERIVED transform relative to the mesh node:
-    //     derived_i = skin_i * meshSpacePose_i
-    // The engine wants each bone LOCAL to its parent, and Ogre re-derives the
-    // chain itself, so:  local_i = inverse(derived_parent) * derived_i.
-    // (Pass one is unordered on purpose — a parent may sit after its child.)
-    std::vector<QMatrix4x4> derived(size_t(bones.size()));
-    for (int i = 0; i < bones.size(); ++i)
-        derived[size_t(i)] = skeleton->boneTransforms[i] * bones[i]->meshSpacePoseMatrix;
-
-    out.resize(size_t(bones.size()));
-    for (int i = 0; i < bones.size(); ++i) {
-        int parent = -1;
-        if (!bones[i]->parentBone.isNull()) {
-            const auto it = skeleton->boneMap.constFind(bones[i]->parentBone->name);
-            if (it != skeleton->boneMap.constEnd() && it.value() != i) parent = it.value();
-        }
-        const QMatrix4x4 local = parent >= 0
-            ? derived[size_t(parent)].inverted() * derived[size_t(i)]
-            : derived[size_t(i)];
-        QVector3D p, s; QQuaternion r;
-        decomposeTRS(local, p, r, s);
-        out[size_t(i)].position = toVec3(p);
-        out[size_t(i)].rotation = toQuat(r);
-        out[size_t(i)].scale    = toVec3(s);
-    }
-    return true;
-}
-
 bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string &rigId,
                              ClipDesc &out)
 {
@@ -1076,11 +1041,11 @@ bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string 
     out.name = clip.name.toStdString();
     out.length = clip.length;
 
-    // R7 again, from the other side: the engine's clip-def cache is
-    // process-lifetime and keyed by NAME, so the id must be content-derived or a
-    // re-imported clip aliases the stale def forever — the same failure class as
-    // the VCT datablock-pointer cache. Everything that can change the sampled
-    // pose goes into the hash: the rig, the name, and every key of every track.
+    // The engine's clip-def cache is process-lifetime and keyed by NAME, so the
+    // id must be content-derived or a re-imported clip aliases the stale def
+    // forever — the same failure class as the VCT datablock-pointer cache.
+    // Everything that can change the sampled pose goes into the hash: the rig,
+    // the name, the length, and every key of every track.
     StructureHash hash;
     hash(QString::fromStdString(rigId));
     hash(clip.name);
@@ -1107,10 +1072,10 @@ bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string 
 }
 
 // ---- CPU skinning -----------------------------------------------------------------
-// The document already computes per-bone skin matrices (Skeleton::boneTransforms,
-// filled by SceneNode::updateAnimation during play). The legacy GL renderer handed
-// those to a skinning vertex shader; on the engine the mirror applies the identical
-// math on the CPU and pushes the posed vertices through Scene::updateMeshVertices.
+// Retained as the GPU path's ORACLE only. The bone matrices it takes used to
+// come from the document (Skeleton::boneTransforms); the document no longer
+// computes a pose, so they come from Scene::boneMatrices — which is what
+// HlmsPbs streams into the bone tex buffer, i.e. the shader's own input.
 
 bool SceneMirror::toSkinData(iris::Mesh *mesh, std::vector<float> &boneIndices,
                              std::vector<float> &boneWeights)
@@ -1217,27 +1182,51 @@ void SceneMirror::attachClipsFor(Entry &e)
     QString signature = QString::fromStdString(e.rigId);
     QList<iris::AnimationPtr> clips;
     if (host) {
-        for (const auto &anim : host->getAnimations()) {
+        QList<iris::AnimationPtr> candidates = host->getAnimations();
+        // The ACTIVE animation is not always IN that list. The Avatar page
+        // rebuilds each clip through buildClipAnimation (root motion is a
+        // preview policy, so the played clip is a stripped copy of the authored
+        // one) and hands the copy to setAnimation without adding it. Attaching
+        // only the listed ones would leave the played clip with no engine
+        // translation at all — the character would sit at bind pose while the
+        // transport ran.
+        const iris::AnimationPtr active = host->getAnimation();
+        if (!active.isNull() && !candidates.contains(active)) candidates.append(active);
+        for (const auto &anim : candidates) {
             if (anim.isNull() || !anim->hasSkeletalAnimation()) continue;
             clips.append(anim);
+            // The POINTER is part of the signature on purpose: the Avatar
+            // page's root-motion toggle rebuilds every clip's Animation object
+            // with the same name and length, and without this the mirror would
+            // keep playing the pre-toggle translation.
             signature += QLatin1Char('|') + anim->getName() +
-                         QLatin1Char(':') + QString::number(double(anim->getLength()), 'g', 6);
+                         QLatin1Char(':') + QString::number(double(anim->getLength()), 'g', 6) +
+                         QLatin1Char('@') + QString::number(quintptr(anim.data()), 16);
         }
     }
     if (signature == e.clipSignature) return;
     e.clipSignature = signature;
-    e.clipNames.clear();
-    e.engineClipNames.clear();
     e.lastClipName.clear();
     e.lastClipTime = -1.0f;
-    if (clips.isEmpty() || !host) return;
+    if (clips.isEmpty() || !host) { e.clipMap.clear(); e.clipIdMap.clear(); return; }
+
+    // R2 again, from the host side: clips ACCUMULATE on a node — the Avatar
+    // page loads a Mixamo animation onto an already-loaded character — so this
+    // runs while the previous set is attached AND, quite possibly, playing.
+    // Ogre's addAnimationsFromSkeleton would dangle every active-animation
+    // pointer, so the engine refuses; disable everything first. (Found by
+    // scripting.e2e.avatar the moment a cross-file clip was added: the
+    // character froze at bind pose with one warning in the log.)
+    mTarget->setClipStates(e.node, nullptr, 0);
 
     // The pivot composition, once per (rig, clip): §3.1's "compose then
     // resample". Its cost is O(bones x keys) and it happens here rather than per
     // frame precisely because it is not cheap.
     std::vector<ClipDesc> descs;
+    QVector<QPair<const iris::Animation *, QString>> pushed;   // (animation, clip id), in push order
     descs.reserve(size_t(clips.size()));
     QVector<iris::ExtractedClip> extracted(clips.size());
+    const std::vector<std::string> before = mTarget->clipNames(e.node);
     for (int i = 0; i < clips.size(); ++i) {
         QString err;
         if (!iris::ClipExtractor::extract(host->sharedFromThis(), e.docNode->sharedFromThis(),
@@ -1261,10 +1250,10 @@ void SceneMirror::attachClipsFor(Entry &e)
         }
         ClipDesc desc;
         if (!toClipDesc(extracted[i], e.rigId, desc)) continue;
-        e.clipNames.append(clips[i]->getName());
+        pushed.append({ clips[i].data(), QString::fromStdString(desc.id) });
         descs.push_back(std::move(desc));
     }
-    if (descs.empty()) return;
+    if (descs.empty()) { e.clipMap.clear(); e.clipIdMap.clear(); return; }
 
     // R2: every clip goes on BEFORE any is enabled. Ogre's
     // addAnimationsFromSkeleton reallocates the vector its active-animation list
@@ -1274,11 +1263,75 @@ void SceneMirror::attachClipsFor(Entry &e)
     // that is needed — and the engine refuses the alternative anyway.
     if (!mTarget->attachClips(e.node, descs.data(), descs.size())) {
         qWarning("SceneMirror: attachClips failed for a skinned node; it will render at bind pose");
-        e.clipNames.clear();
+        e.clipMap.clear();
+        e.clipIdMap.clear();
         return;
     }
-    const std::vector<std::string> engineNames = mTarget->clipNames(e.node);
-    for (const auto &n : engineNames) e.engineClipNames.append(QString::fromStdString(n));
+    // Whatever the engine appended, in the order it was pushed, is the mapping
+    // for the clips that were NOT already there. Names it already knew keep
+    // their existing mapping.
+    QStringList added;
+    {
+        QSet<QString> had;
+        for (const auto &n : before) had.insert(QString::fromStdString(n));
+        for (const auto &n : mTarget->clipNames(e.node)) {
+            const QString name = QString::fromStdString(n);
+            if (!had.contains(name)) added.append(name);
+        }
+    }
+    // Names appear in the engine's list once per DISTINCT content id, in push
+    // order — so walk the pushed ids, skipping ones already mapped and ones
+    // repeated within this batch, and pair each remaining first occurrence with
+    // the next new engine name.
+    int next = 0;
+    for (const auto &entry : pushed) {
+        e.clipMap.insert(entry.first, entry.second);
+        if (e.clipIdMap.contains(entry.second)) continue;
+        if (next < added.size()) e.clipIdMap.insert(entry.second, added[next++]);
+    }
+}
+
+bool SceneMirror::boneWorldTransforms(QHash<QString, QMatrix4x4> &out) const
+{
+    out.clear();
+    if (!mTarget) return false;
+    std::vector<BonePose> poses;
+    bool any = false;
+    for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it) {
+        const Entry &e = *it;
+        if (!e.gpuSkinned || e.skeleton.isNull() || !e.docNode) continue;
+        const QList<iris::BonePtr> &bones = e.skeleton->bones;
+        if (bones.isEmpty() || size_t(bones.size()) != e.boneCount) continue;
+        poses.assign(e.boneCount, BonePose());
+        if (!mTarget->bonePoses(e.node, poses.data(), poses.size())) continue;
+
+        // The engine hands back parent-local TRS; the FK back up to world is
+        // ours. Bone order is free (a parent may follow its child), so the
+        // derived matrices are resolved by walking each bone's own ancestry
+        // rather than assuming the array is topologically sorted.
+        const QMatrix4x4 meshWorld = e.docNode->getGlobalTransform();
+        QVector<QMatrix4x4> derived(bones.size());
+        QVector<char> done(bones.size(), 0);
+        std::function<QMatrix4x4(int)> resolve = [&](int i) -> QMatrix4x4 {
+            if (done[i]) return derived[i];
+            done[i] = 1;                       // cycles are impossible by rig contract; guard anyway
+            const BonePose &p = poses[size_t(i)];
+            QMatrix4x4 local;
+            local.translate(QVector3D(p.position.x, p.position.y, p.position.z));
+            local.rotate(QQuaternion(p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z));
+            local.scale(QVector3D(p.scale.x, p.scale.y, p.scale.z));
+            int parent = -1;
+            if (!bones[i]->parentBone.isNull()) {
+                const auto pit = e.skeleton->boneMap.constFind(bones[i]->parentBone->name);
+                if (pit != e.skeleton->boneMap.constEnd() && pit.value() != i) parent = pit.value();
+            }
+            derived[i] = parent >= 0 ? resolve(parent) * local : local;
+            return derived[i];
+        };
+        for (int i = 0; i < bones.size(); ++i) out.insert(bones[i]->name, meshWorld * resolve(i));
+        any = true;
+    }
+    return any;
 }
 
 void SceneMirror::syncClips()
@@ -1293,7 +1346,7 @@ void SceneMirror::syncClips()
         Entry &e = *it;
         if (!e.gpuSkinned || !e.docNode) continue;
         attachClipsFor(e);
-        if (e.clipNames.isEmpty()) continue;
+        if (e.clipMap.isEmpty()) continue;
 
         iris::SceneNode *host = clipHostOf(e.docNode);
         iris::AnimationPtr active = host ? host->getAnimation() : iris::AnimationPtr();
@@ -1309,9 +1362,11 @@ void SceneMirror::syncClips()
             }
             continue;
         }
-        const int idx = e.clipNames.indexOf(active->getName());
-        if (idx < 0 || idx >= e.engineClipNames.size()) continue;
-        const QString name = e.engineClipNames[idx];
+        const auto mappedId = e.clipMap.constFind(active.data());
+        if (mappedId == e.clipMap.constEnd()) continue;
+        const auto mapped = e.clipIdMap.constFind(mappedId.value());
+        if (mapped == e.clipIdMap.constEnd()) continue;
+        const QString name = mapped.value();
         const bool looping = active->getLooping();
         if (name == e.lastClipName && qFuzzyCompare(t + 1.0f, e.lastClipTime + 1.0f) &&
             looping == e.lastClipLooping)

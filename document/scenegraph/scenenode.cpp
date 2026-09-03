@@ -351,44 +351,15 @@ void SceneNode::updateAnimation(float time)
         if (animation->hasPropertyAnim("scale")) {
             scale = animation->getVector3PropertyAnim("scale")->getValue(time);
         }
-
-        if (animation->hasSkeletalAnimation()) {
-            QMap<QString, QMatrix4x4> skeletonSpaceMatrices;
-            // The skeleton begins at this node, the root
-
-            // recursively update the animation for each node
-            std::function<void(SkeletalAnimationPtr anim, SceneNodePtr node, QMatrix4x4 parentTransform)> animateHierarchy;
-            animateHierarchy = [&animateHierarchy, time, &skeletonSpaceMatrices](SkeletalAnimationPtr anim, SceneNodePtr node, QMatrix4x4 parentTransform)
-            {
-                // skeleton-space transform of current node
-                QMatrix4x4 skelTrans;
-                skelTrans.setToIdentity();
-
-                if (anim->boneAnimations.contains(node->name)) {
-                    auto boneAnim = anim->boneAnimations[node->name];
-
-                    node->pos = boneAnim->posKeys->getValueAt(time);
-                    node->rot = boneAnim->rotKeys->getValueAt(time).normalized();
-                    //node->scale = QVector3D(1,1,1);
-                    node->scale = boneAnim->scaleKeys->getValueAt(time);
-                }
-
-                auto localTrans = node->getLocalTransform(); //calculates the local transform matrix
-                skelTrans = parentTransform * localTrans; //skeleton space transform
-                skeletonSpaceMatrices.insert(node->name, skelTrans);
-
-                for(auto child : node->children) {
-                    animateHierarchy(anim, child, skelTrans);
-                }
-            };
-
-            QMatrix4x4 rootTransform;
-            //rootTransform.setToIdentity();
-            rootTransform = this->getLocalTransform();
-            animateHierarchy(animation->getSkeletalAnimation(), this->sharedFromThis(), rootTransform);
-
-            applyAnimationPose(this->sharedFromThis(), skeletonSpaceMatrices);
-        }
+        // The SKELETAL branch is gone (ANIMATION_ENGINE_MIGRATION_SPEC, full
+        // retirement). It used to walk the scene-node hierarchy by name,
+        // overwrite every bone node's local transform from the clip, compose
+        // skeleton-space matrices into a QMap and hand them to
+        // Skeleton::applyAnimation to produce skin matrices — every frame, per
+        // character, on one thread. Clip evaluation is the engine's now:
+        // SceneMirror translates each clip ONCE and then states only which clip
+        // is active and at what absolute time, and Ogre's threaded SIMD FK does
+        // the rest. What the document keeps is the authored data and the clock.
     }
 
     for (auto child : children) {
@@ -398,71 +369,27 @@ void SceneNode::updateAnimation(float time)
 
 void SceneNode::applyDefaultPose()
 {
-    // The subtree is at rest RIGHT NOW — that is what every one of this
-    // function's call sites means (scene load, fragment import). Snapshot the
-    // authored local transforms while that is still true: clip translation
-    // needs "the transform this node has when no clip is driving it", and after
-    // the first clip has played the live transform is no longer that.
+    // WHAT THIS IS NOW. The subtree is at rest RIGHT NOW — that is what every
+    // one of this function's call sites means (scene load, fragment import) —
+    // so it snapshots each node's authored local transform while that is still
+    // true. Clip translation needs "the transform this node has when no clip is
+    // driving it", and once a clip has played the live transform is not that
+    // any more.
+    //
+    // WHAT IT USED TO BE. The same walk as updateAnimation's skeletal branch
+    // with the key-write step removed: it composed the authored rest transforms
+    // into skeleton-space matrices and pushed them through
+    // Skeleton::applyAnimation to fill Skeleton::boneTransforms. Nothing reads
+    // those any more — the engine resets an untracked bone to its BIND pose,
+    // which is the same thing for every file that does not disagree with itself
+    // (and SceneMirror logs the ones that do).
     hasRest = true;
     restPos = pos;
     restRot = rot;
     restScale = scale;
 
-    if (!!animation) {
-    if (animation->hasSkeletalAnimation()) {
-        QMap<QString, QMatrix4x4> skeletonSpaceMatrices;
-        // The skeleton begins at this node, the root
-
-        // recursively update the animation for each node
-        std::function<void(SkeletalAnimationPtr anim, SceneNodePtr node, QMatrix4x4 parentTransform)> animateHierarchy;
-        animateHierarchy = [&animateHierarchy, &skeletonSpaceMatrices](SkeletalAnimationPtr anim, SceneNodePtr node, QMatrix4x4 parentTransform)
-        {
-            // skeleton-space transform of current node
-            QMatrix4x4 skelTrans;
-            skelTrans.setToIdentity();
-
-            auto localTrans = node->getLocalTransform(); //calculates the local transform matrix
-            skelTrans = parentTransform * localTrans; //skeleton space transform
-            skeletonSpaceMatrices.insert(node->name, skelTrans);
-
-            for(auto child : node->children) {
-                animateHierarchy(anim, child, skelTrans);
-            }
-        };
-
-        QMatrix4x4 rootTransform;
-        rootTransform.setToIdentity();
-        rootTransform = this->getLocalTransform();
-        animateHierarchy(animation->getSkeletalAnimation(), this->sharedFromThis(), rootTransform);
-
-        applyAnimationPose(this->sharedFromThis(), skeletonSpaceMatrices);
-    }
-    }
-
     for (auto child : children) {
         child->applyDefaultPose();
-    }
-}
-
-void SceneNode::applyAnimationPose(SceneNodePtr node, QMap<QString, QMatrix4x4> skeletonSpaceMatrices)
-{
-    if (skeletonSpaceMatrices.contains(node->name)) {
-        if (node->sceneNodeType == SceneNodeType::Mesh) {
-            auto meshNode = node.staticCast<MeshNode>();
-            // GPU_SKINNING_SPEC §7: pose the NODE's skeleton, not the mesh
-            // asset's. The asset's is the rig template, shared by every node
-            // that references the mesh — writing it made two duplicates of one
-            // character share one pose (last writer per frame won).
-            auto skel = meshNode->getSkeleton();
-            if (!skel.isNull()) {
-                auto inverseMeshMatrix = skeletonSpaceMatrices[node->name].inverted();
-                skel->applyAnimation(inverseMeshMatrix, skeletonSpaceMatrices);
-            }
-        }
-    }
-
-    for (auto child : node->children) {
-        applyAnimationPose(child, skeletonSpaceMatrices);
     }
 }
 

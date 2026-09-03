@@ -68,8 +68,8 @@ public:
 	AABB getAABB() { return aabb; }
 	BoundingSphere getBoundingSphere() { return boundingSphere; }
 
-	void applyAnimation(float time);
-	void updateAnimation(float dt);
+	// applyAnimation/updateAnimation deleted with the document clip evaluator
+	// (ANIMATION_ENGINE_MIGRATION_SPEC). Nothing called them.
 
     ~Model();
 private:

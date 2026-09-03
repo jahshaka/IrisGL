@@ -67,16 +67,11 @@ public:
     QList<BonePtr> bones;
 
     BonePtr getBone(QString name);
-    QVector<QMatrix4x4> boneTransforms;
 
     void addBone(BonePtr bone)
     {
         bones.append(bone);
         boneMap.insert(bone->name, bones.size()-1);
-
-        QMatrix4x4 transform;
-        transform.setToIdentity();
-        boneTransforms.append(transform);
     }
 
     BonePtr getRootBone()
@@ -97,13 +92,15 @@ public:
         return roots;
     }
 
-    void applyAnimation(SkeletalAnimationPtr anim, float time);
-
-    void applyAnimation(QMatrix4x4 inverseMeshMatrix, QMap<QString, QMatrix4x4> skeletonSpaceMatrices);
-
-    /// A pose-independent copy of this rig: same bones, same names, same bind
-    /// matrices, same hierarchy — but its OWN Bone objects and its OWN
-    /// boneTransforms vector.
+    // NO applyAnimation. Both overloads are gone with the document's clip
+    // evaluator (ANIMATION_ENGINE_MIGRATION_SPEC, full retirement): one sampled
+    // bone-local keys straight onto the bone hierarchy and was already dead on
+    // the live path, the other turned scene-node skeleton-space matrices into
+    // the per-bone skin matrices the renderer used. A skeleton is now purely
+    // the RIG — names, hierarchy, bind matrices — and the pose lives in the
+    // engine's SkeletonInstance, one per node, read back with Scene::bonePoses.
+    /// A copy of this rig: same bones, same names, same bind matrices, same
+    /// hierarchy — but its OWN Bone objects.
     ///
     /// GPU_SKINNING_SPEC §7: the SkeletonPtr on an iris::Mesh is the rig
     /// TEMPLATE and is shared by every MeshNode that references the mesh asset
