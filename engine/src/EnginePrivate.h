@@ -46,6 +46,7 @@
 // v1 skeletons are a BUILD-TIME scaffold only (SkeletonDef has exactly one
 // constructor and it takes a v1::Skeleton) — the prerequisites header is what
 // lets this file name v1::SkeletonPtr / v1::OldBone without pulling v1 in.
+#include <OgreControllerManager.h>
 #include <OgrePrerequisites.h>
 #include <OgreHlmsSamplerblock.h>
 #include <OgreRectangle2D2.h>
@@ -60,6 +61,10 @@
 #include <Vao/OgreVertexArrayObject.h>
 #include <ParticleSystem/OgreBillboardSet2.h>
 #include <ParticleSystem/OgreParticleSystemManager2.h>
+#include <ParticleSystem/OgreParticleSystem2.h>
+#include <ParticleSystem/OgreEmitter2.h>
+#include <ParticleSystem/OgreParticleAffector2.h>
+#include <OgreParticleEmitter.h>
 #include <OgreForwardPlusBase.h>
 #include <OgreDecal.h>
 #include <InstantRadiosity/OgreInstantRadiosity.h>
@@ -144,6 +149,21 @@ constexpr Ogre::uint32 kNoReflectBit   = 1u << 3;
 // Forward+ clustered decal budget PER CELL (DECALS_SPEC D5). Not a scene-wide
 // cap: decals beyond this in one cluster cell are dropped farthest-first.
 constexpr Ogre::uint32 kDecalsPerCell = 8u;
+
+// ---------------------------------------------------------------------------
+// Particles (PARTICLES_FX2_SPEC.md). The HARD per-definition quota ceiling for
+// every scene: setHighestPossibleQuota is called with this at scene creation,
+// before any definition or billboard set can initialise, and setParticleSystem
+// clamps every request to it. The backend's own limit is 65535/4 = 16383
+// (setHighestPossibleQuota, OgreParticleSystemManager2.cpp:812-817); 16000
+// stays under it with room and costs 768 KiB of shared index buffer per scene,
+// allocated lazily on the first particle draw.
+constexpr Ogre::uint16 kMaxParticleQuota = 16000u;
+// Quota BUCKETS. A definition's quota is frozen at init() — changing it needs a
+// whole new definition, and definitions can never be destroyed — so requests
+// round UP to one of these. Two emitters whose quotas land in the same bucket
+// can trade definitions through the recycling pool.
+constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 
 // ---------------------------------------------------------------------------
 // Render-queue policy (POST_CHAIN_SPEC.md §6). Ogre fixes the queue MODES in
@@ -529,6 +549,18 @@ public:
     bool setBillboards(NodeId id, const BillboardInstance *data, size_t count) override;
     bool destroyBillboardSet(NodeId id) override;
 
+    // ---- Particles: engine-simulated systems (PARTICLES_FX2_SPEC.md) ----
+    // One ParticleSystemDef per node. The def carries quota, material and
+    // visibility; the ParticleSystem2 instance rides the node's SceneNode (the
+    // emitter dereferences getParentNode() with no null check, so attaching is
+    // mandatory). ParticleSystemManager2 has NO API to destroy a single def —
+    // defs live until the SceneManager dies — so releases park the def on
+    // mParticleDefPool keyed by its topology, and a matching rebuild reuses it.
+    bool     setParticleSystem(NodeId id, const ParticleSystemDesc &d) override;
+    bool     removeParticleSystem(NodeId id) override;
+    unsigned particleCount(NodeId id) const override;
+    unsigned particleDefinitionsCreated() const override { return mParticleDefsCreated; }
+
     // ---- Lights ----
     bool setLight(NodeId id, const LightDesc &d) override;
     bool removeLight(NodeId id) override;
@@ -618,6 +650,36 @@ private:
         std::vector<Ogre::uint32> billboardHandles;   // live handles, dense, in order
         std::string               billboardDatablockName;
         unsigned                  billboardCapacity = 0;
+        // Engine-simulated particle system (PARTICLES_FX2_SPEC): the def is NOT
+        // uniquely owned — it outlives the node and returns to mParticleDefPool
+        // (there is no destroyParticleSystemDef). The INSTANCE is ours to
+        // destroy; the datablock belongs to the def and travels with it
+        // (mParticleDatablocks), because a def binds its datablock exactly once,
+        // inside init().
+        Ogre::ParticleSystemDef  *particleDef = nullptr;
+        Ogre::ParticleSystem2    *particleSystem = nullptr;
+        std::string               particleTopology;   // the pool key this def answers to
+        /// What setNodeVisible was last told. Kept because PFX2 objects do not
+        /// live under the node in Ogre's graph (they hang off the STATIC root),
+        /// so no visibility cascade reaches them and a system created or
+        /// recycled later has to be told the node's state explicitly.
+        bool                      visible = true;
+    };
+
+    /// A definition's frozen shape. Two systems can share a recycled def only if
+    /// every element of this matches, because none of it can be changed after
+    /// ParticleSystemDef::init(): setParticleQuota asserts !isInitialized(), and
+    /// adding an emitter once an instance exists corrupts the per-instance
+    /// emitter array (sized once in the ParticleSystem2 ctor, indexed by the
+    /// def's emitter count in the update loop).
+    struct ParticleTopology {
+        unsigned quotaBucket = 0;
+        int      orientation = 0;
+        bool     additive = true;
+        bool     alphaHash = false;
+        std::vector<int> emitterShapes;   // ParticleEmitterShape per emitter, in order
+        std::vector<int> affectorKinds;   // ParticleAffectorDesc::Kind per affector, in order
+        std::string key() const;
     };
     struct MeshRec {
         Ogre::MeshPtr mesh; std::string name;
@@ -772,6 +834,21 @@ private:
     /// Frees a node's billboard set and its datablock, in that order (the set
     /// references the datablock until it is destroyed). Safe to call twice.
     void releaseBillboards(Node &n);
+    /// Detaches and destroys the node's ParticleSystem2 instance, hides the def
+    /// and parks it on mParticleDefPool (there is no destroyParticleSystemDef),
+    /// and destroys the datablock the def referenced. Safe to call twice; must
+    /// run before the SceneManager dies.
+    void releaseParticleSystem(Node &n);
+    /// Builds (or recycles) a definition matching `topo` and points `n` at it.
+    /// The returned def is initialised and has its emitters/affectors in place;
+    /// scalar values are pushed separately by applyParticleValues.
+    bool buildParticleDef(Node &n, const ParticleSystemDesc &d,
+                          const ParticleTopology &topo);
+    /// Pushes every scalar of `d` onto the node's existing def. No rebuild.
+    void applyParticleValues(Node &n, const ParticleSystemDesc &d);
+    /// Creates or updates the Unlit datablock a particle def renders with and
+    /// binds it. Returns the datablock name, empty on failure.
+    std::string ensureParticleDatablock(Node &n, const ParticleSystemDesc &d);
     /// Destroys the node's decal and its internal child node, and re-points the
     /// SceneManager's decal atlases (clearing them when the last decal goes).
     /// Safe to call twice; must run before the SceneManager dies.
@@ -914,6 +991,24 @@ private:
     std::vector<std::string> mPlanarNodeDefs;
     std::set<NodeId>         mReflectors;
     std::map<NodeId, Ogre::PlanarReflectionActor *> mActors;
+    /// Abandoned particle definitions, keyed by ParticleTopology::key(). They
+    /// cannot be destroyed (no such API on ParticleSystemManager2 — defs are
+    /// freed only in its destructor, i.e. with the SceneManager), so a released
+    /// def is hidden and parked here for the next system with the same shape.
+    /// With frozen topologies (one emitter, a fixed affector set, coarse quota
+    /// buckets) the pool stays a handful of entries per scene.
+    std::map<std::string, std::vector<Ogre::ParticleSystemDef *>> mParticleDefPool;
+    /// The Unlit datablock each def is bound to. A def binds its datablock ONCE,
+    /// inside init() (OgreParticleSystem2.cpp:251-256) — setMaterialName
+    /// afterwards is a no-op for PFX2 defs (mIsRendererConfigured is never true
+    /// for them). So the datablock is per-DEF, mutated in place when a node's
+    /// texture or blend mode changes, and destroyed only at scene teardown
+    /// (datablocks belong to the process-wide HlmsManager, not to the
+    /// SceneManager that frees the defs).
+    std::map<Ogre::ParticleSystemDef *, std::string> mParticleDatablocks;
+    /// Every def this scene ever created, for the def-accumulation measurement
+    /// the particle gates print (PARTICLES_FX2_SPEC §3.2). Never shrinks.
+    unsigned            mParticleDefsCreated = 0;
     TextureId           mNextTextureId = 0;
     NodeId              mNextId = 0;
     MeshId              mNextMeshId = 0;
@@ -1120,6 +1215,16 @@ public:
     void renderOneFrame() override;
     const std::string &lastError() const override;
 
+    /// PROCESS-WIDE: both ride Ogre's single frame-time controller value
+    /// (ControllerManager -> FrameTimeControllerValue). Note the backend's own
+    /// coupling — setTimeFactor zeroes the frame delay and setFrameDelay zeroes
+    /// the time factor, so the two are mutually exclusive by construction, not
+    /// by our choice.
+    void  setParticleTimeScale(float scale) override;
+    float particleTimeScale() const override;
+    void  setFixedFrameDelta(float seconds) override;
+    float fixedFrameDelta() const override;
+
     /// GLOBAL by construction: HlmsPbs keeps ONE ShadowFilter for every shadowed
     /// light in every scene (HlmsPbs::mShadowFilter). The filter properties are
     /// evaluated in preparePassHash each pass, so changing it at runtime takes
@@ -1176,6 +1281,9 @@ private:
     Display        *mDisplay = nullptr;
 #endif
     bool            mHlmsRegistered = false;
+    /// Plugin_ParticleFX2 loaded: the emitter/affector factories exist. False
+    /// leaves billboard sets working and setParticleSystem failing cleanly.
+    bool            mHasParticleFX2 = false;
     ShadowFilter    mShadowFilter = ShadowFilter::Soft;
     unsigned        mShadowResolution = 2048;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only

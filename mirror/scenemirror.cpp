@@ -1,6 +1,7 @@
 #include "irisgl/mirror/scenemirror.h"
 
 #include <QQuaternion>
+#include <QTextStream>
 #include <QMatrix3x3>
 #include <QMatrix4x4>
 #include <QVector3D>
@@ -15,7 +16,6 @@
 #include "irisgl/document/scenegraph/decalnode.h"
 #include "irisgl/document/scenegraph/cameranode.h"
 #include "irisgl/document/scenegraph/particlesystemnode.h"
-#include "irisgl/document/scenegraph/particle.h"
 #include "irisgl/document/assets/mesh.h"
 #include "irisgl/document/assets/skeleton.h"
 #include "irisgl/document/animation/animation.h"
@@ -595,8 +595,16 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
         }
     }
 
-    if (node->getSceneNodeType() == iris::SceneNodeType::ParticleSystem)
+    if (node->getSceneNodeType() == iris::SceneNodeType::ParticleSystem) {
         syncParticles(e, static_cast<iris::ParticleSystemNode *>(node.data()));
+    } else if (e.hasParticles) {
+        // A node may stop being an emitter without being removed (the document
+        // changes a node's type in place). removeParticleSystem is the explicit
+        // counterpart setParticleSystem needs for exactly that.
+        mTarget->removeParticleSystem(e.node);
+        e.hasParticles = false;
+        e.particleSignature.clear();
+    }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
         // The light rides on the mirrored node: position and direction follow the document.
@@ -634,35 +642,213 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
 }
 
 // ---- particles ------------------------------------------------------------------
-// The document simulates (ParticleSystemNode::update, CPU, world-space); the
-// mirror pushes the live particle list into the node's engine billboard set each
-// sync. The engine frees the set with the node (removeNode / scene teardown).
+// PARTICLES_FX2_SPEC.md. The ENGINE simulates; this function translates the
+// document's authoring parameters into one ParticleSystemDesc and pushes it —
+// the same shape as syncDecal and setLight, and nothing like what used to be
+// here (a per-frame rebuild of a BillboardInstance array holding every live
+// particle, which the document had allocated one `new` at a time).
+//
+// Two mappings deserve their reasons written down:
+//
+//  * GRAVITY. The legacy integrator used a hard-coded GRAVITY = -50 scaled by
+//    `gravityComplement` (Particle::GRAVITY, deleted with the simulator). The
+//    same -50 is kept here so a scene authored against the old slider falls at
+//    the same rate.
+//  * DISSIPATE. The legacy shrink was `scale *= 1 - elapsed/life` applied per
+//    CALL — which is why update(0) had to be a documented no-op. It becomes a
+//    scale ramp over the LIFE FRACTION, which is what the slider always meant,
+//    and it is now frame-rate independent by construction.
+
+namespace {
+
+/// Ogre's affector list is positional, and the engine's topology key pins the
+/// ORDER as well as the kinds — so this must be deterministic. It is: the same
+/// authoring state always produces the same affector sequence.
+std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *ps)
+{
+    std::vector<ParticleAffectorDesc> out;
+
+    // 1. Colour over life. Authored keys win; with none, the emitter's flat
+    //    colour already covers it and no affector is added at all.
+    if (!ps->colourKeys.isEmpty()) {
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::ColourKeys;
+        a.keyCount = unsigned(std::min(ps->colourKeys.size(), qsizetype(6)));
+        for (unsigned i = 0; i < a.keyCount; ++i) {
+            const iris::ParticleColourKey &k = ps->colourKeys[int(i)];
+            a.colourKeyTimes[i] = k.time;
+            a.colourKeys[i] = Colour(k.r, k.g, k.b, k.a);
+        }
+        out.push_back(a);
+    }
+
+    // 2. Scale over life: authored keys, else the legacy dissipate booleans.
+    std::vector<std::pair<float, float>> scaleRamp;
+    if (!ps->scaleKeys.isEmpty()) {
+        for (const iris::ParticleScaleKey &k : ps->scaleKeys)
+            scaleRamp.emplace_back(k.time, k.scale);
+    } else if (ps->dissipate) {
+        if (ps->dissipateInv) scaleRamp = { {0.0f, 0.0f}, {1.0f, 1.0f} };   // grow in
+        else                  scaleRamp = { {0.0f, 1.0f}, {1.0f, 0.0f} };   // shrink away
+    }
+    if (!scaleRamp.empty()) {
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::ScaleKeys;
+        a.keyCount = unsigned(std::min(scaleRamp.size(), size_t(6)));
+        for (unsigned i = 0; i < a.keyCount; ++i) {
+            a.scaleKeyTimes[i] = scaleRamp[i].first;
+            a.scaleKeys[i] = scaleRamp[i].second;
+        }
+        out.push_back(a);
+    }
+
+    // 3. Spin: a random start angle (the legacy `randomRotation`) and/or a real
+    //    spin speed, which the old system never had.
+    if (ps->randomRotation || ps->rotationSpeedMin != 0.0f || ps->rotationSpeedMax != 0.0f) {
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::Rotator;
+        a.rotStart = 0.0f;
+        a.rotEnd = ps->randomRotation ? 360.0f : 0.0f;
+        a.rotSpeedMin = std::min(ps->rotationSpeedMin, ps->rotationSpeedMax);
+        a.rotSpeedMax = std::max(ps->rotationSpeedMin, ps->rotationSpeedMax);
+        out.push_back(a);
+    }
+
+    // 4. One force affector carrying gravity AND wind. The legacy constant is
+    //    -50 m/s^2 scaled by gravityComplement.
+    const QVector3D force = QVector3D(0.0f, -50.0f * ps->gravityComplement, 0.0f) + ps->wind;
+    if (!force.isNull()) {
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::LinearForce;
+        a.force = Vec3(force.x(), force.y(), force.z());
+        out.push_back(a);
+    }
+
+    // 5. Turbulence LAST, and only when asked for: DirectionRandomiser draws a
+    //    random per particle even at randomness 0 and its own source calls it
+    //    "not very SIMD-friendly", so an unused one is not free.
+    if (ps->turbulence > 0.0f) {
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::Turbulence;
+        a.randomness = ps->turbulence;
+        a.scope = 1.0f;
+        out.push_back(a);
+    }
+
+    return out;
+}
+
+ParticleEmitterShape toEngineShape(iris::ParticleEmitterShape s)
+{
+    switch (s) {
+    case iris::ParticleEmitterShape::Box:             return ParticleEmitterShape::Box;
+    case iris::ParticleEmitterShape::Cylinder:        return ParticleEmitterShape::Cylinder;
+    case iris::ParticleEmitterShape::Ellipsoid:       return ParticleEmitterShape::Ellipsoid;
+    case iris::ParticleEmitterShape::HollowEllipsoid: return ParticleEmitterShape::HollowEllipsoid;
+    case iris::ParticleEmitterShape::Ring:            return ParticleEmitterShape::Ring;
+    case iris::ParticleEmitterShape::Point:           break;
+    }
+    return ParticleEmitterShape::Point;
+}
+
+ParticleOrientation toEngineOrientation(iris::ParticleOrientation o)
+{
+    switch (o) {
+    case iris::ParticleOrientation::StretchedCommon:       return ParticleOrientation::OrientedCommon;
+    case iris::ParticleOrientation::StretchedVelocity:     return ParticleOrientation::OrientedSelf;
+    case iris::ParticleOrientation::PerpendicularCommon:   return ParticleOrientation::PerpendicularCommon;
+    case iris::ParticleOrientation::PerpendicularVelocity: return ParticleOrientation::PerpendicularSelf;
+    case iris::ParticleOrientation::Billboard:             break;
+    }
+    return ParticleOrientation::Point;
+}
+
+}  // namespace
+
+ParticleSystemDesc SceneMirror::toParticleDesc(iris::ParticleSystemNode *ps, TextureId tex)
+{
+    ParticleSystemDesc d;
+    // maxParticles is the document's cap; 0 means the user never set one.
+    d.quota = ps->maxParticles > 0 ? unsigned(ps->maxParticles) : 1024u;
+    d.texture = tex;
+    d.additive = ps->useAdditive;
+    d.alphaHash = ps->alphaHash;
+    d.orientation = toEngineOrientation(ps->orientation);
+
+    ParticleEmitterDesc e;
+    e.shape = toEngineShape(ps->shape);
+    // The document's convention, unchanged since 2016: particles leave along the
+    // node's +Y. The engine rotates this by the node's derived orientation, so
+    // (0,1,0) reproduces it exactly — no adapter child, unlike lights.
+    e.direction = Vec3(0, 1, 0);
+    e.angleDegrees = ps->coneAngle;
+    e.rate = std::max(0.0f, ps->particlesPerSecond);
+    e.velocityMin = std::max(0.0f, ps->speed - ps->speedError);
+    e.velocityMax = std::max(0.0f, ps->speed + ps->speedError);
+    e.ttlMin = std::max(0.01f, ps->lifeLength - ps->lifeError);
+    e.ttlMax = std::max(0.01f, ps->lifeLength + ps->lifeError);
+    // ONE SIZE, no spread: PFX2 emitters carry a single fixed dimension pair and
+    // there is no per-particle random initial size to map `scaleError` onto.
+    // The field is still authored, serialized and shown — it just does nothing
+    // to a particle's birth size any more (PARTICLES_FX2_SPEC §5).
+    e.sizeWidth = e.sizeHeight = std::max(0.0f, ps->particleScale);
+    e.colourStart = Colour(float(ps->emitColourStart.redF()), float(ps->emitColourStart.greenF()),
+                           float(ps->emitColourStart.blueF()), float(ps->emitColourStart.alphaF()));
+    e.colourEnd   = Colour(float(ps->emitColourEnd.redF()), float(ps->emitColourEnd.greenF()),
+                           float(ps->emitColourEnd.blueF()), float(ps->emitColourEnd.alphaF()));
+    e.extents = Vec3(ps->extents.x(), ps->extents.y(), ps->extents.z());
+    e.innerExtents = Vec3(ps->innerExtents.x(), ps->innerExtents.y(), ps->innerExtents.z());
+    e.duration = ps->burstDuration;
+    e.repeatDelay = ps->burstRepeatDelay;
+    e.startTime = ps->startDelay;
+    d.emitters.push_back(e);
+
+    d.affectors = affectorsFor(ps);
+    return d;
+}
+
 void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
 {
     if (!e.node) return;
     const QString texPath = ps->texture ? ps->texture->getSource() : QString();
-    const QString sig = (ps->useAdditive ? QStringLiteral("add|") : QStringLiteral("alpha|")) + texPath;
-    if (!e.hasBillboards || e.billboardSignature != sig) {
-        // maxParticles is the document's (unenforced) cap; 0 means none was set.
-        const unsigned capacity = ps->maxParticles > 0 ? unsigned(ps->maxParticles) : 4096u;
-        // Colour map -> srgb. Qt resource textures (":...") are not files the
-        // engine can read; textureFor returns 0 and the quads render white.
-        TextureId tex = texPath.isEmpty() ? 0 : textureFor(texPath, true);
-        if (!mTarget->createBillboardSet(e.node, tex, ps->useAdditive, capacity))
-            return;
-        e.hasBillboards = true;
-        e.billboardSignature = sig;
+
+    // Every authored value, in one string. A still emitter costs this build and
+    // nothing else — no engine call, no allocation, no per-particle anything.
+    QString sig;
+    sig.reserve(256);
+    QTextStream s(&sig);
+    s << texPath << '|' << int(ps->shape) << '|' << int(ps->orientation) << '|'
+      << ps->useAdditive << ps->alphaHash << ps->randomRotation
+      << ps->dissipate << ps->dissipateInv << '|'
+      << ps->particlesPerSecond << ',' << ps->speed << ',' << ps->speedError << ','
+      << ps->lifeLength << ',' << ps->lifeError << ',' << ps->particleScale << ','
+      << ps->gravityComplement << ',' << ps->coneAngle << ',' << ps->turbulence << ','
+      << ps->rotationSpeedMin << ',' << ps->rotationSpeedMax << ','
+      << ps->burstDuration << ',' << ps->burstRepeatDelay << ',' << ps->startDelay << ','
+      << ps->maxParticles << '|'
+      << ps->extents.x() << ',' << ps->extents.y() << ',' << ps->extents.z() << ','
+      << ps->innerExtents.x() << ',' << ps->innerExtents.y() << ',' << ps->innerExtents.z() << ','
+      << ps->wind.x() << ',' << ps->wind.y() << ',' << ps->wind.z() << '|'
+      << ps->emitColourStart.rgba() << ',' << ps->emitColourEnd.rgba() << '|';
+    for (const iris::ParticleColourKey &k : ps->colourKeys)
+        s << k.time << ':' << k.r << ',' << k.g << ',' << k.b << ',' << k.a << ';';
+    s << '|';
+    for (const iris::ParticleScaleKey &k : ps->scaleKeys)
+        s << k.time << ':' << k.scale << ';';
+    s.flush();
+
+    if (e.hasParticles && e.particleSignature == sig) return;
+
+    // Colour map -> srgb. Qt resource paths (":...") are not files the engine
+    // can open; textureFor returns 0 and the quads render untextured white —
+    // which is exactly the defect the 2026-09-03 save fix chased, so an emitter
+    // whose texture cannot be resolved is left with no texture rather than
+    // silently keeping a stale one.
+    const TextureId tex = texPath.isEmpty() ? 0 : textureFor(texPath, true);
+    if (mTarget->setParticleSystem(e.node, toParticleDesc(ps, tex))) {
+        e.hasParticles = true;
+        e.particleSignature = sig;
     }
-    std::vector<BillboardInstance> instances;
-    instances.reserve(ps->particles.size());
-    for (const iris::Particle *p : ps->particles) {
-        BillboardInstance b;
-        b.position = toVec3(p->position);                    // already world-space
-        b.size = 2.0f * p->scale;                            // legacy quad spans +/- scale
-        b.rotationRadians = qDegreesToRadians(p->rotation);  // legacy stores degrees
-        instances.push_back(b);
-    }
-    mTarget->setBillboards(e.node, instances.data(), instances.size());
 }
 
 void SceneMirror::reclaimUnused()
@@ -1574,6 +1760,20 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         } else if (mAnyShadowCaster && engine->shadowFilter() != mShadowFilter) {
             engine->setShadowFilter(mShadowFilter);
         }
+        // Particle simulation clock (PARTICLES_FX2_SPEC §10.3). PROCESS-WIDE in
+        // the renderer — one frame-time source, no per-scene and no per-node
+        // clock exists — so the last scene to call applyEnvironment owns it.
+        // Offscreen thumbnail and preview scenes never call this, so they never
+        // fight the editor for it. Pushed only on change: setParticleTimeScale
+        // and setFixedFrameDelta cancel each other inside the backend, and the
+        // suites hold a fixed step across whole runs.
+        // ...unless a FIXED frame delta is live (a scripted editor.frame(n, dt)
+        // or a test): the two settings cancel each other inside the backend, so
+        // pushing the scale here would silently undo the caller's determinism
+        // every frame.
+        if (engine->fixedFrameDelta() <= 0.0f &&
+            engine->particleTimeScale() != mSource->particleTimeScale)
+            engine->setParticleTimeScale(mSource->particleTimeScale);
     }
     // Shadow Size: one global atlas, so the per-light combo is only a REQUEST
     // and the largest one wins. World panel "Shadow Quality" (scene->

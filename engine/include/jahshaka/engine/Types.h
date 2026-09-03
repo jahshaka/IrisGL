@@ -217,6 +217,98 @@ struct BillboardInstance {
     Colour colour = Colour(1.0f, 1.0f, 1.0f, 1.0f);   ///< multiplies the texture
 };
 
+// ---- Particles (PARTICLES_FX2_SPEC.md): natively simulated particle systems ----
+// The host describes WHAT it wants; the engine owns every Ogre object behind it.
+// One authored node = one particle-system definition = one quota, one material,
+// one visibility flag (the definition is what the render queue tests).
+
+/// The shape particles spawn inside. Point ignores `extents`.
+enum class ParticleEmitterShape { Point, Box, Cylinder, Ellipsoid, HollowEllipsoid, Ring };
+
+/// How a particle's quad is oriented. `Point` is the camera-facing billboard
+/// everything used before this; `OrientedSelf` streaks the quad along the
+/// particle's own velocity (sparks, rain).
+enum class ParticleOrientation { Point, OrientedCommon, OrientedSelf,
+                                 PerpendicularCommon, PerpendicularSelf };
+
+/// One emitter on a system. Position/direction are LOCAL to the node: the engine
+/// applies the node's derived position and orientation (but NOT its scale — an
+/// emitter's spawn volume is numeric, see `extents`).
+struct ParticleEmitterDesc {
+    ParticleEmitterShape shape = ParticleEmitterShape::Point;
+    Vec3  position{0, 0, 0};       ///< offset from the node's origin
+    Vec3  direction{0, 1, 0};      ///< emission axis; the document's +Y convention
+    float angleDegrees = 0.0f;     ///< emission cone half-angle around `direction`
+    float rate = 24.0f;            ///< particles per second
+    float velocityMin = 1.0f, velocityMax = 1.0f;   ///< initial speed range (m/s)
+    float ttlMin = 1.0f, ttlMax = 1.0f;             ///< time-to-live range (seconds)
+    float sizeWidth = 1.0f, sizeHeight = 1.0f;      ///< initial quad dimensions
+    Colour colourStart{1, 1, 1, 1}, colourEnd{1, 1, 1, 1};   ///< per-particle emission colour range
+    Vec3  extents{1, 1, 1};        ///< Box: w/h/d. Cylinder/Ellipsoid/Ring: radii. Point: ignored
+    Vec3  innerExtents{0, 0, 0};   ///< HollowEllipsoid / Ring only: the hole
+    float duration = 0.0f;         ///< 0 = emit forever; >0 = burst of this many seconds
+    float repeatDelay = 0.0f;      ///< pause between bursts
+    float startTime = 0.0f;        ///< delay before the first emission
+};
+
+/// One affector on a system. `kind` selects which fields matter; the rest are
+/// ignored. Affectors run per particle, per frame, SIMD, on worker threads.
+struct ParticleAffectorDesc {
+    enum class Kind {
+        ColourKeys,     ///< colour over life, up to 6 keys (ColourInterpolator)
+        ScaleKeys,      ///< size multiplier over life, up to 6 keys (ScaleInterpolator)
+        Rotator,        ///< random start angle + spin speed
+        LinearForce,    ///< a constant acceleration: gravity, buoyancy, wind
+        Turbulence,     ///< random velocity perturbation (DirectionRandomiser)
+        DeflectorPlane  ///< bounce off an infinite plane
+    };
+    Kind kind = Kind::LinearForce;
+
+    /// ColourKeys / ScaleKeys. `keyCount` entries are used, in ascending time.
+    /// Times are life fractions in [0,1]. Colour components may exceed 1 — the
+    /// GPU encoding carries [-4, 120], which is what makes HDR fire bloom.
+    unsigned keyCount = 0;
+    Colour colourKeys[6];
+    float  colourKeyTimes[6] = {0, 0, 0, 0, 0, 0};
+    float  scaleKeys[6]      = {1, 1, 1, 1, 1, 1};
+    float  scaleKeyTimes[6]  = {0, 0, 0, 0, 0, 0};
+
+    /// Rotator: degrees. Start angle is picked per particle in [rotStart, rotEnd],
+    /// spin speed per particle in [rotSpeedMin, rotSpeedMax] degrees/second.
+    float rotSpeedMin = 0.0f, rotSpeedMax = 0.0f;
+    float rotStart = 0.0f, rotEnd = 0.0f;
+
+    /// LinearForce: world-space acceleration. `forceAverage` averages the force
+    /// into the velocity instead of adding to it.
+    Vec3 force{0, 0, 0};
+    bool forceAverage = false;
+
+    /// Turbulence: how much random direction is injected, and to what fraction
+    /// of the particles (`scope` in [0,1]).
+    float randomness = 0.0f, scope = 1.0f;
+    bool  keepVelocity = false;
+
+    /// DeflectorPlane.
+    Vec3  planePoint{0, 0, 0}, planeNormal{0, 1, 0};
+    float bounce = 1.0f;
+};
+
+/// A complete particle system for one node. Changing a scalar (rate, colour keys,
+/// force...) is applied in place; changing the TOPOLOGY — the emitter shapes, the
+/// affector kinds, the quota, the orientation — rebuilds the underlying definition,
+/// which is why the engine keeps the affector set fixed and neutral at defaults.
+struct ParticleSystemDesc {
+    unsigned  quota = 1024;        ///< hard cap on live particles; rounded up to a bucket
+    TextureId texture = 0;         ///< 0 = untextured white
+    bool      additive = true;     ///< (src-alpha, one); false = alpha blending
+    bool      alphaHash = true;    ///< order-independent transparency for alpha blending
+                                   ///< (ignored when `additive`, which needs no sorting)
+    ParticleOrientation orientation = ParticleOrientation::Point;
+    Vec3      commonDirection{0, 0, 1}, commonUp{0, 1, 0};   ///< *Common orientations only
+    std::vector<ParticleEmitterDesc>  emitters;
+    std::vector<ParticleAffectorDesc> affectors;
+};
+
 enum class LightType { Directional, Point, Spot, Area };
 
 /// Shadow-map filter quality. GLOBAL to the engine, not per light — the backend's

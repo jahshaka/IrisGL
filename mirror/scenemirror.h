@@ -230,8 +230,16 @@ private:
         // Arming a reflector derives a world plane and registers a PBS
         // receiver; it is not the kind of call to repeat 60 times a second.
         int planarReflector = -1;
-        bool hasBillboards = false;                  // particle emitter mirrored as billboards
+        bool hasBillboards = false;                  // light icon mirrored as a billboard set
         QString billboardSignature;                  // texture + blend; recreate on change
+        // Particles (PARTICLES_FX2_SPEC): the engine simulates, so the mirror
+        // pushes PARAMETERS, not particles — and only when they change. The
+        // signature covers every authored value, so a still emitter costs one
+        // string build per sync and no engine call at all. (Before the adoption
+        // this branch rebuilt a std::vector<BillboardInstance> of every live
+        // particle, sixty times a second.)
+        bool hasParticles = false;
+        QString particleSignature;
         // Skinning (GPU_SKINNING_SPEC): the NODE's own skeleton, not the mesh
         // asset's shared rig template. Pose state is per node, so two duplicates
         // of one character animate independently — on the GPU each node's Item
@@ -266,6 +274,10 @@ private:
         float    lastClipTime = -1.0f;
         bool     lastClipLooping = false;
     };
+    /// Pushes a ParticleSystemNode's AUTHORING parameters into the engine
+    /// (PARTICLES_FX2_SPEC §5), which then simulates them. Guarded by a
+    /// signature over every authored value: an unchanged emitter costs no
+    /// engine call at all.
     void syncParticles(Entry &e, iris::ParticleSystemNode *ps);
     void syncLightWires(Entry &e, iris::LightNode *light);
     /// Pushes a DecalNode into the engine (DECALS_SPEC §5.3) and drives its
@@ -325,6 +337,11 @@ public:
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
     /// Fills everything but the texture ids (those need the atlas).
     static jahshaka::engine::DecalDesc toDecalDesc(iris::DecalNode *decal);
+    /// The document -> engine particle mapping (PARTICLES_FX2_SPEC §5), isolated
+    /// so the suites can assert on the desc without a scene or a frame. Static
+    /// for the same reason toLightDesc is: it reads the node and nothing else.
+    static jahshaka::engine::ParticleSystemDesc toParticleDesc(
+        iris::ParticleSystemNode *ps, jahshaka::engine::TextureId tex);
 private:
 
     jahshaka::engine::Scene *mTarget;

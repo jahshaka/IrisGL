@@ -121,6 +121,7 @@ Scene::Scene()
     // shadow filter: -1 = Auto, i.e. the softest quality any shadow-casting
     // light asked for (the historical derivation)
     shadowFilterTier = -1;
+    particleTimeScale = 1.0f;
 
     // Post chain: everything off. A scene only gets effects when the user picks
     // a World Mode (or turns a row on); nothing changes under anyone's feet.

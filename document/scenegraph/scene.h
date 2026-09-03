@@ -196,6 +196,19 @@ public:
     // 0 = Hard (PCF 2x2), 1 = Soft (4x4), 2 = VerySoft (6x6).
     int shadowFilterTier;
 
+    // Particle simulation clock (PARTICLES_FX2_SPEC.md §10.3). 1 = real time,
+    // 0 = frozen, 2 = double speed. The DOCUMENT owns the clock and the ENGINE
+    // simulates — the same split the animation migration settled on.
+    //
+    // It lives on the SCENE and not on the emitter, because the renderer has
+    // exactly ONE frame-time source for the whole process: there is no per-node
+    // and, strictly, no per-scene particle clock to push. Scene-level is the
+    // finest granularity that is not a lie, and the last scene whose
+    // applyEnvironment runs owns it — the same accepted compromise as the
+    // process-wide GI binding. Offscreen thumbnail and preview scenes never call
+    // applyEnvironment, so they do not fight the editor for it.
+    float particleTimeScale;
+
     // ---- Post-processing chain (POST_CHAIN_SPEC.md phases 3-7) --------------
     // Per scene, pushed to the ENGINE VIEWPORT by SceneMirror. Offscreen views
     // (thumbnails, previews, every pixel suite) ignore all of it by
