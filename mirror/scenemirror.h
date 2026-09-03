@@ -62,6 +62,19 @@ public:
     void applyEnvironment(jahshaka::engine::View *view,
                           jahshaka::engine::Engine *engine = nullptr);
 
+    /// Forgets what applyEnvironment has already pushed, so the next call pushes
+    /// everything again.
+    ///
+    /// applyEnvironment debounces ambient / fog / GI against the last value it
+    /// sent, which is right while ONE mirror owns the screen — but some of that
+    /// state is process-wide inside the backend (HlmsPbs' VCT/PCC binding is
+    /// literally "last scene to enable owns it", OgreGi.cpp). The editor and the
+    /// player are two mirrors over two engine scenes taking turns on screen: the
+    /// one coming back would otherwise decide it had already pushed and leave the
+    /// other's binding in place. Call this whenever a mirror (re)takes the
+    /// screen — EngineSceneViewport::begin(), EnginePlayerScene::begin().
+    void invalidateEnvironment();
+
     /// The document light node driving Instant Radiosity: the scene's giLightGuid
     /// when it names a live light, else the first directional light (by creation
     /// order), else any light. Null when the scene has no lights. Public so the
