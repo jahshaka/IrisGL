@@ -59,10 +59,25 @@ option(ASSIMP_BUILD_TESTS                       "" OFF)
 option(ASSIMP_NO_EXPORT                         "" ON)
 option(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT    "" OFF)
 
+# The importer ALLOWLIST. ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT is OFF above,
+# so an importer that is not named here is not compiled at all (assimp's
+# ADD_ASSIMP_IMPORTER macro -DASSIMP_BUILD_NO_<name>_IMPORTER's it away) and its
+# extension is simply not readable — silently, at runtime. Adding a format is
+# therefore a THREE-part change: the option here, the extension in
+# Constants (MODEL_EXTS / ANIMATION_EXTS, which drive the sniffers and every
+# file dialog), and a suite that proves the format loads through our paths.
 option(ASSIMP_BUILD_OBJ_IMPORTER                "" ON)
 option(ASSIMP_BUILD_FBX_IMPORTER                "" ON)
 option(ASSIMP_BUILD_GLTF_IMPORTER               "" ON)
 option(ASSIMP_BUILD_COLLADA_IMPORTER            "" ON)
+# BVH is MOCAP: animation-only files with zero meshes, for the Avatar module's
+# cross-file clip path (Studio tests/avatar). PLY and STL are mesh formats
+# (scanners, photogrammetry, every 3D printer on earth) with no materials and,
+# for STL, no UVs and no vertex normals worth trusting — the canonical preset's
+# GenSmoothNormals is what makes them shadeable.
+option(ASSIMP_BUILD_BVH_IMPORTER                "" ON)
+option(ASSIMP_BUILD_PLY_IMPORTER                "" ON)
+option(ASSIMP_BUILD_STL_IMPORTER                "" ON)
 if(APPLE)
     # assimp's bundled zlib #defines fdopen on Mac (ancient upstream zlib bug),
     # which breaks the macOS SDK's stdio.h. The SDK always ships zlib: use it.
