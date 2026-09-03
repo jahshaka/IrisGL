@@ -38,6 +38,13 @@ inline long long quantiseTime(float t)
 }
 inline float unquantiseTime(long long q) { return float(double(q) * 1e-6); }
 
+/// Deliberately NOT named composeTRS: a same-named helper in this anonymous
+/// namespace would hide iris::composeTRS for every call in the file.
+inline QMatrix4x4 composeRest(const ClipExtractor::RestLocal &r)
+{
+    return composeTRS(r.pos, r.rot, r.scale);
+}
+
 /// Every ancestor of `node` up to and including `root`, nearest first, with
 /// `node` itself at the front. Empty if `root` is not an ancestor.
 QVector<SceneNode *> pathToRoot(SceneNode *node, SceneNode *root)
@@ -105,6 +112,22 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         }
     }
 
+    // The AUTHORED local of a node no channel of this clip drives. Three
+    // sources, in order: an explicit rest map the caller captured, the node's
+    // own snapshot (taken by applyDefaultPose, whose call sites are the moments
+    // a fragment is known to be at rest), and finally the live transform — which
+    // is only the authored one if nothing has posed the node yet.
+    const auto restOf = [&](SceneNode *n) {
+        RestLocal r;
+        if (rest) {
+            const auto rit = rest->constFind(n);
+            if (rit != rest->constEnd()) return *rit;
+        }
+        if (n->hasRest) { r.pos = n->restPos; r.rot = n->restRot; r.scale = n->restScale; return r; }
+        r.pos = n->getLocalPos(); r.rot = n->getLocalRot(); r.scale = n->getLocalScale();
+        return r;
+    };
+
     // ---- per-node local transform at a time ------------------------------
     const auto localAt = [&](SceneNode *n, float t) -> QMatrix4x4 {
         const auto it = clip->boneAnimations.constFind(n->name);
@@ -118,12 +141,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
                               ba->rotKeys->getValueAt(t).normalized(),
                               ba->scaleKeys->getValueAt(t));
         }
-        if (rest) {
-            const auto rit = rest->constFind(n);
-            if (rit != rest->constEnd())
-                return composeTRS(rit->pos, rit->rot, rit->scale);
-        }
-        return composeTRS(n->getLocalPos(), n->getLocalRot(), n->getLocalScale());
+        return composeRest(restOf(n));
     };
 
     // The product of `path[startIndex] … path[0]`, parent first — the path
@@ -263,17 +281,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         const auto restChain = [&](const QVector<SceneNode *> &path) {
             QMatrix4x4 m;
             m.setToIdentity();
-            for (int k = path.size() - 1; k >= 0; --k) {
-                SceneNode *n = path[k];
-                if (rest) {
-                    const auto rit = rest->constFind(n);
-                    if (rit != rest->constEnd()) {
-                        m = m * composeTRS(rit->pos, rit->rot, rit->scale);
-                        continue;
-                    }
-                }
-                m = m * composeTRS(n->getLocalPos(), n->getLocalRot(), n->getLocalScale());
-            }
+            for (int k = path.size() - 1; k >= 0; --k) m = m * composeRest(restOf(path[k]));
             return m;
         };
         const QMatrix4x4 restLocal = restChain(framePath).inverted() * restChain(bonePath);

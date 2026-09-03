@@ -264,6 +264,25 @@ public:
     virtual void update(float dt);
     virtual void updateAnimation(float time);
     void applyDefaultPose();
+
+    /// The node's authored local transform, snapshotted while the subtree was
+    /// known to be at REST — i.e. before any clip had posed it.
+    ///
+    /// Clip translation needs it (ANIMATION_ENGINE_MIGRATION_SPEC §3.1 step 3):
+    /// composing a bone's chain at time t evaluates each node on that chain with
+    /// its CLIP key if it has one and its AUTHORED transform otherwise, and
+    /// "authored" is not the same as "current" once a different clip has run —
+    /// which is precisely why the Avatar page had to snapshot and restore a rest
+    /// pose around every clip switch.
+    ///
+    /// Captured by applyDefaultPose(), whose four call sites are exactly the
+    /// four moments a fragment is known to be at rest (scene load and fragment
+    /// import). `hasRest` is false for a node nobody ever captured, and callers
+    /// then fall back to the live transform.
+    bool        hasRest = false;
+    QVector3D   restPos;
+    QQuaternion restRot;
+    QVector3D   restScale{1, 1, 1};
     void applyAnimationPose(SceneNodePtr node, QMap<QString, QMatrix4x4> skeletonSpaceMatrices);
 
 private:

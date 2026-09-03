@@ -398,6 +398,16 @@ void SceneNode::updateAnimation(float time)
 
 void SceneNode::applyDefaultPose()
 {
+    // The subtree is at rest RIGHT NOW — that is what every one of this
+    // function's call sites means (scene load, fragment import). Snapshot the
+    // authored local transforms while that is still true: clip translation
+    // needs "the transform this node has when no clip is driving it", and after
+    // the first clip has played the live transform is no longer that.
+    hasRest = true;
+    restPos = pos;
+    restRot = rot;
+    restScale = scale;
+
     if (!!animation) {
     if (animation->hasSkeletalAnimation()) {
         QMap<QString, QMatrix4x4> skeletonSpaceMatrices;

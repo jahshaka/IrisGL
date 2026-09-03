@@ -206,6 +206,9 @@ public:
 	// time counter to pass to shaders that do time-based animation
 	float time;
 
+	// The last absolute animation time, as handed to updateSceneAnimation.
+	float animTime = 0.0f;
+
 	// needed for playing music
 	QMediaPlayer* mediaPlayer;
 	// a playlist is needed to play looping sounds
@@ -256,6 +259,14 @@ public:
 	void setAmbientMusicVolume(float volume);
 
     void updateSceneAnimation(float time);
+    /// The last time updateSceneAnimation was given.
+    ///
+    /// The document owns the CLOCK — that is the half of animation it keeps
+    /// after the clip evaluator moved to the engine. The mirror pushes this
+    /// value as each active clip's ABSOLUTE time; it never advances a clip
+    /// relatively, because a relative clock makes every pose assertion
+    /// order-dependent (and a scrub backwards impossible to reason about).
+    float animationTime() const { return animTime; }
     void update(float dt);
 
     void rayCast(const QVector3D& segStart,

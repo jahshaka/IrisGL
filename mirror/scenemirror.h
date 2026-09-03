@@ -198,7 +198,16 @@ private:
         iris::SkeletonPtr skeleton;
         bool gpuSkinned = false;                     // the engine accepted the rig
         size_t boneCount = 0;
-        QVector<QMatrix4x4> lastPose;                // last pose pushed for THIS node
+        // Clip playback (ANIMATION_ENGINE_MIGRATION_SPEC M3). The document says
+        // WHICH clip and WHEN; the engine samples and blends it.
+        iris::SceneNode *docNode = nullptr;          // the document node this entry mirrors
+        std::string rigId;                           // for the clip def's content key
+        QString clipSignature;                       // rig + clip set; re-attach on change
+        QStringList clipNames;                       // document clip name -> engine clip name
+        QStringList engineClipNames;
+        QString  lastClipName;                       // last state pushed, to skip no-ops
+        float    lastClipTime = -1.0f;
+        bool     lastClipLooping = false;
     };
     void syncParticles(Entry &e, iris::ParticleSystemNode *ps);
     void syncLightWires(Entry &e, iris::LightNode *light);
@@ -212,11 +221,20 @@ private:
     /// Frees engine meshes/materials no live entry references (asset browsing would
     /// otherwise grow them for the life of the process; pointer keys could alias).
     void reclaimUnused();
-    /// Per-frame skinning, all of it (GPU_SKINNING_SPEC phase 3): for every
-    /// GPU-skinned NODE whose pose changed since the last push, decompose the
-    /// document's skin matrices to per-bone local TRS and push them with
-    /// Scene::setBonePoses. O(bones), not O(vertices); nothing is uploaded.
-    void syncBonePoses();
+    /// Per-frame animation, all of it (ANIMATION_ENGINE_MIGRATION_SPEC M3): for
+    /// every GPU-skinned node, attach its clips ONCE (translated out of the
+    /// document's scene-node channels by iris::ClipExtractor, which composes any
+    /// `$AssimpFbx$` pivot chain away) and then push nothing but
+    /// {which clip, absolute time, looping} per frame.
+    ///
+    /// This replaced the old syncBonePoses, which decomposed the document's skin
+    /// matrices to per-bone TRS every frame. The document no longer computes a
+    /// pose at all — it states the clip and the clock, and Ogre's threaded SIMD
+    /// FK does the rest.
+    void syncClips();
+    /// Translates and attaches a node's clips. Idempotent: does nothing unless
+    /// the rig or the clip set changed.
+    void attachClipsFor(Entry &e);
     /// Resamples an equirect sky image into six small cubemap faces and pushes
     /// them as the scene's environment reflections (Scene::setSkyReflection) —
     /// how equirect/gradient/realistic skies get the IBL cubemap skies have.
