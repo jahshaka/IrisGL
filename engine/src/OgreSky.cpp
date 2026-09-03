@@ -247,6 +247,18 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
     return cube;
 }
 
+// EVERY sky change lands here, so this is where the environment cubemap is
+// freed and immediately re-allocated — and the allocator hands the replacement
+// back at the SAME ADDRESS routinely (observed on every re-bake of the Showroom
+// scene: `destroyReflection refl=0x55556cb5e400` then `new cube=0x55556cb5e400`).
+// That matters because Ogre identifies a texture by its TextureGpu POINTER in
+// two caches that outlive it: VulkanTextureGpuManager::mCachedTex (the image
+// views a descriptor set is built from) and DescriptorSetTexture::operator!=
+// (which is how bakeTextures decides a datablock's set is unchanged and can be
+// kept). A recycled address therefore makes an old, dead view look current.
+// destroyReflection() below is what keeps that safe: it lets Ogre's
+// TextureGpuListener::Deleted run so the old descriptor sets die WITH the old
+// texture. Do not "optimise" the order there.
 void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource) {
     destroyReflection();
     mIblSourceTex = srcCube;
@@ -354,8 +366,33 @@ void OgreScene::destroyReflection() {
     if (!mReflectionTex) return;
     Ogre::TextureGpu *tex = mReflectionTex;
     mReflectionTex = nullptr;
+    // DESTROY FIRST, UNBIND SECOND. The order is load-bearing and the reverse
+    // was an intermittent SIGSEGV inside the graphics driver, in
+    // vkUpdateDescriptorSets (2026-09-03; it surfaced as "editor.screenshot with
+    // post-fx crashes on scenes with mirrors", because a planar reflection and
+    // an offscreen shot are each an extra scene render re-binding these sets).
+    //
+    // destroyTexture() fires TextureGpuListener::Deleted, and
+    // HlmsTextureBaseClass::notifyTextureChanged's handler both nulls the slot
+    // AND destroys the datablock's mTexturesDescSet on the spot — which is the
+    // ONLY thing that releases the Vulkan image view Ogre cached for this
+    // TextureGpu*. Unbinding first (setTexture(PBSM_REFLECTION, nullptr)) removes
+    // the datablock from the texture's listener list, so Deleted reaches nobody:
+    // the stale set survives, its view outlives the image, and — because the
+    // replacement cubemap usually lands on the freed address (see
+    // buildReflectionCubemapFrom) — bakeTextures then compares the two sets
+    // EQUAL and never rebuilds it. Every later draw binds a dead view.
+    //
+    // applyReflectionToAll() still runs afterwards: it is the belt-and-braces
+    // unbind for any datablock in mMaterials that was not listening, and the
+    // rebind to the new cubemap when a caller follows this with a rebuild.
+    // Not JAH_CATCH: that returns, and the unbind below must happen even if the
+    // destroy throws (a double-destroy would otherwise leave every datablock
+    // pointing at the old cubemap).
+    try { tm->destroyTexture(tex); }
+    catch (Ogre::Exception &e)  { mError = e.getFullDescription(); }
+    catch (std::exception &e)   { mError = std::string("engine: ") + e.what(); }
     applyReflectionToAll();
-    tm->destroyTexture(tex);
     // Recompute envMapNumMipmaps from whatever reflection textures remain
     // (_notifyIblSpecMipmap only ever grows it).
     static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
