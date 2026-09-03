@@ -145,6 +145,19 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return doubleSided;
     if(valueName == "accurate")
         return accurate;
+    // The two asset BINDINGS are reflected read-only-ish: the guid is the
+    // document's state, the resolved path and the normalisation are the host's
+    // (they come from the asset store, which irisgl cannot reach).
+    if(valueName == "iesProfile")
+        return iesProfileGuid;
+    if(valueName == "iesProfilePath")
+        return iesProfilePath;
+    if(valueName == "iesNormalisation")
+        return iesNormalisation;
+    if(valueName == "lightTexture")
+        return lightTextureGuid;
+    if(valueName == "lightTexturePath")
+        return lightTexturePath;
     if(valueName == "iconSize")
         return iconSize;
 
@@ -169,6 +182,11 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "shadowBias")        { shadowMap->bias = value.toFloat();   return true; }
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return true; }
     if (valueName == "accurate")          { accurate = value.toBool();           return true; }
+    if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return true; }
+    if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return true; }
+    if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return true; }
+    if (valueName == "lightTexture")      { lightTextureGuid = value.toString(); return true; }
+    if (valueName == "lightTexturePath")  { lightTexturePath = value.toString(); return true; }
     if (valueName == "iconSize")          { iconSize = value.toFloat();          return true; }
 
     return SceneNode::setPropertyValue(valueName, value);
@@ -213,6 +231,8 @@ LightNode::LightNode()
     doubleSided = false;
     accurate = false;
 
+    iesNormalisation = 1.0f;   // no profile bound: intensity passes through
+
 	shadowAlpha = 1.0f;
 	shadowColor = QColor(0,0,0);
 
@@ -238,6 +258,11 @@ SceneNodePtr LightNode::createDuplicate()
 	light->rectHeight = this->rectHeight;
 	light->doubleSided = this->doubleSided;
 	light->accurate = this->accurate;
+	light->iesProfileGuid = this->iesProfileGuid;
+	light->iesProfilePath = this->iesProfilePath;
+	light->iesNormalisation = this->iesNormalisation;
+	light->lightTextureGuid = this->lightTextureGuid;
+	light->lightTexturePath = this->lightTexturePath;
 	light->shadowAlpha = this->shadowAlpha;
 	light->shadowColor = this->shadowColor;
 	light->shadowMap->bias = this->shadowMap->bias;

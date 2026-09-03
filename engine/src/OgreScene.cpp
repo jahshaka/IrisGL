@@ -191,6 +191,10 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
                     Ogre::Root::getSingleton().getHlmsManager()->getHlms(Ogre::HLMS_PBS));
                 if (pbs) pbs->loadLtcMatrix();
             }
+            // Ogre budgets ONE forward area light of each kind and silently
+            // drops the rest — a scene's second area light renders nothing
+            // until this runs. Same lazy arm point, same reasoning.
+            lightextras::armAreaLightBudgets(mRoot);
         }
         // HlmsPbs divides diffuse by pi (Lambert BRDF); IrisGL's default shader does
         // not, so matching legacy exposure needs powerScale = intensity * pi. (An
@@ -212,6 +216,46 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             const float inner = outer * (1.0f - std::min(std::max(d.spotSoftness, 0.0f), 0.99f));
             L->setSpotlightRange(Ogre::Degree(inner), Ogre::Degree(outer), 1.0f);
         }
+
+        // IES profile and area-light mask: assigned ONLY when the requested path
+        // actually changed. This function runs for every light on every mirror
+        // sync (60 Hz); LightProfiles::build() recreates and re-uploads a GPU
+        // texture, and a mask costs a decode + resize + mip chain + upload.
+        //
+        // Honesty about what the renderer does with these — the host UI says the
+        // same thing, because there is no engine signal for either:
+        //   * a profile shapes SPOT lights always, POINT lights only while they
+        //     cast no shadows (a shadow-casting point light is shaded from the
+        //     pass buffer, whose point loop has no profile term), and never
+        //     directional or area lights;
+        //   * a mask applies to the area-light APPROXIMATION only — LTC
+        //     ("accurate") ignores it — so accurate mode drops it here rather
+        //     than leaving a stale slice bound.
+        {
+            const bool profileApplies =
+                d.type == LightType::Spot ||
+                (d.type == LightType::Point && !d.castShadows);
+            const std::string wantProfile = profileApplies ? d.iesProfilePath : std::string();
+            if (wantProfile != n.lightProfilePath) {
+                std::string err;
+                if (lightextras::assignProfile(mRoot, L, wantProfile, err)) {
+                    n.lightProfilePath = wantProfile;
+                } else {
+                    mError = err;
+                    // Remember the REQUEST anyway: a failing path must not be
+                    // retried (and re-logged) every single frame.
+                    n.lightProfilePath = wantProfile;
+                }
+            }
+
+            const bool maskApplies = d.type == LightType::Area && !d.accurate;
+            const std::string wantMask = maskApplies ? d.texturePath : std::string();
+            if (wantMask != n.lightMaskPath) {
+                std::string err;
+                if (!lightextras::assignAreaMask(mRoot, L, wantMask, err)) mError = err;
+                n.lightMaskPath = wantMask;
+            }
+        }
         // Lights shine down their node's -Y once attached (document convention).
         return true;
     } JAH_CATCH(mError, false);
@@ -224,6 +268,10 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.light->detachFromParent();
         mSceneMgr->destroyLight(it->second.light);
         it->second.light = nullptr;
+        // A recreated light starts with no profile and no mask: forget what the
+        // dead one carried, or the next setLight would skip re-assigning it.
+        it->second.lightProfilePath.clear();
+        it->second.lightMaskPath.clear();
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         invalidateGiCaches();   // a vanished light must stop bouncing (VCT re-injects)
         return true;

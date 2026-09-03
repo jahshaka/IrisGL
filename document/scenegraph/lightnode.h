@@ -78,6 +78,38 @@ public:
     bool doubleSided;
 
     /**
+     * IES photometric profile bound to this light — the LIBRARY asset's guid
+     * (empty = none), plus the absolute file path the host resolved it to and
+     * the profile's own peak candela scale.
+     *
+     * `iesProfilePath` and `iesNormalisation` are RUNTIME state: whoever binds
+     * the guid (the scene reader, the property panel, a script verb) resolves
+     * both from the asset store, and only the guid is serialized. The
+     * normalisation is the profile's peak `candela/1024 * multiplier * ballast
+     * factors` — the renderer multiplies a light's attenuation by exactly that
+     * term, so dividing intensity by it makes assigning a profile change the
+     * SHAPE of the falloff without changing the brightness.
+     *
+     * Renderer limits, which the panel repeats to the user: spot lights always
+     * honour a profile, point lights honour it only while they cast no shadows,
+     * and directional/area lights never do.
+     */
+    QString iesProfileGuid;
+    QString iesProfilePath;
+    float   iesNormalisation;
+
+    /**
+     * Area light: mask/gobo image bound to this light — the LIBRARY asset's
+     * guid (empty = none) plus the host-resolved absolute path (runtime only,
+     * like iesProfilePath).
+     *
+     * Honoured by the fast approximation only: the `accurate` (LTC) path has no
+     * mask term and silently ignores the texture.
+     */
+    QString lightTextureGuid;
+    QString lightTexturePath;
+
+    /**
      * Area light: physically accurate mode (linearly transformed cosines)
      * instead of the cheaper approximation. Slower; no textured-light support.
      */

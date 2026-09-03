@@ -855,7 +855,15 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     case iris::LightType::Point: default: d.type = LightType::Point; break;
     }
     d.colour = Colour(light->color.redF(), light->color.greenF(), light->color.blueF(), 1.0f);
+    // A photometric profile multiplies the renderer's attenuation by the raw
+    // IES magnitude (peak candela / 1024 * multiplier * ballast factors), which
+    // for real luminaires runs into the hundreds. Divide it out here so binding
+    // a profile changes the SHAPE of the falloff and not the exposure — the
+    // scale factor is recorded on the asset at import time and resolved onto
+    // the node beside the path (LightNode::iesNormalisation).
     d.intensity = light->intensity;
+    if (!light->iesProfilePath.isEmpty() && light->iesNormalisation > 1e-6f)
+        d.intensity = light->intensity / light->iesNormalisation;
     d.range = light->distance;
     d.spotAngleDegrees = light->spotCutOff;
     d.spotSoftness = light->spotCutOffSoftness;
@@ -863,6 +871,11 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     d.rectHeight = light->rectHeight;
     d.doubleSided = light->doubleSided;
     d.accurate = light->accurate;
+    // Asset bindings travel as resolved absolute paths — the engine has no
+    // database. The backend decides what each light type can actually honour
+    // (profiles: spot always, point only unshadowed; masks: approx only).
+    d.iesProfilePath = light->iesProfilePath.toStdString();
+    d.texturePath    = light->lightTexturePath.toStdString();
     // Area lights never cast shadows (Ogre-Next limitation; the engine enforces
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&

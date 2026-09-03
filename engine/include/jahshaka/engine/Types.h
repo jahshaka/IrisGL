@@ -232,6 +232,31 @@ struct LightDesc {
     float     rectHeight = 1.0f;
     bool      doubleSided = false;         // emit from both faces
     bool      accurate = false;            // physically accurate (LTC) instead of fast approx
+
+    /// Absolute path to an IES photometric profile (.ies); empty = none.
+    ///
+    /// The profile is a 1-D candela lobe around the light's own direction; the
+    /// backend samples it as an extra attenuation term. Three hard limits come
+    /// from the renderer, not from us, and the UI must say so:
+    ///   * SPOT lights always honour it (shadow-casting or not).
+    ///   * POINT lights honour it ONLY while they cast no shadows — a
+    ///     shadow-casting point light moves from the clustered light list into
+    ///     the pass buffer, whose point-light loop has no profile term.
+    ///   * DIRECTIONAL and AREA lights never honour it.
+    /// The profile's own candela scale is NOT normalized here: `intensity`
+    /// arrives already divided by the profile's peak (the host does that from
+    /// import-time metadata) so assigning a profile changes the SHAPE of the
+    /// falloff and not the brightness.
+    std::string iesProfilePath;
+
+    /// Absolute path to an area-light mask/gobo image; empty = none.
+    ///
+    /// Honoured ONLY by the fast approximation (`accurate == false`): the LTC
+    /// path has no mask term and silently ignores the texture. Every mask in
+    /// the process shares ONE fixed-size pooled texture array — the backend
+    /// rescales whatever image it is given to the pool's resolution and
+    /// generates the full mip chain the diffuse term needs.
+    std::string texturePath;
 };
 
 /// A View's camera. Position/orientation are absolute (the document composes them).

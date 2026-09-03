@@ -155,6 +155,66 @@ private:
 extern FogHlmsListener gFogListener;
 
 // ---------------------------------------------------------------------------
+// Photometric (IES) light profiles and area-light mask textures — OgreLights.cpp.
+//
+// Both are PROCESS-WIDE by construction, not per-scene, and that is a decision
+// rather than an accident:
+//   * LightProfiles::build() writes HlmsPbs::setLightProfilesTexture AND
+//     Root::_setLightProfilesInvHeight — there is exactly one of each per
+//     process, so a per-scene registry would have scenes fighting over the
+//     binding (the sVctBindingOwner shape in OgreGi.cpp, which we do not want
+//     to repeat).
+//   * HlmsPbs::setAreaLightMasks binds ONE 2D-array pool. Light::setTexture
+//     stores only the pool SLICE index, so a mask that landed in a different
+//     pool renders the WRONG texture with no error at all. One reserved pool,
+//     one fixed resolution/format/mip count, everything resampled into it.
+// Both cost a texture slot in EVERY pass once armed (mTexUnitSlotStart grows),
+// which is why each arms lazily on first use — the loadLtcMatrix precedent.
+namespace lightextras {
+
+/// The mask pool's fixed shape. Every area-light mask is resampled to this,
+/// because a mismatched image silently lands in a DIFFERENT pool and the light
+/// then samples whatever happens to occupy its slice index in ours.
+constexpr Ogre::uint32 kMaskPoolId     = 0x4A414831;   // 'JAH1'
+constexpr Ogre::uint32 kMaskResolution = 512u;
+constexpr Ogre::uint32 kMaskSlices     = 8u;
+/// Colour masks (>2 components) so a mask can TINT the cast. Pool-wide and
+/// one-time: hlms_lights_area_tex_colour is derived from the pool's format.
+constexpr Ogre::PixelFormatGpu kMaskFormat = Ogre::PFG_RGBA8_UNORM_SRGB;
+/// Forward+ area-light budgets. Ogre defaults to ONE of each and silently
+/// drops the rest; the shader property IS the limit (not the live count), so
+/// raising it costs one shader variant, not one per light added.
+constexpr Ogre::uint16 kAreaApproxLimit = 4u;
+constexpr Ogre::uint16 kAreaLtcLimit    = 4u;
+
+/// Assigns the IES profile at `path` to `light` (empty path = unset). Loads and
+/// atlas-builds the profile the first time a path is seen, and NEVER rebuilds
+/// for a path already registered — `setLight` runs every frame, and build()
+/// recreates + re-uploads a GPU texture.
+/// Returns false and fills `error` on failure; the light keeps what it had.
+bool assignProfile(Ogre::Root *root, Ogre::Light *light, const std::string &path,
+                   std::string &error);
+
+/// Binds the area-light mask at `path` to `light` (empty path = unbind). The
+/// image is decoded, resampled to the pool's resolution, given a full mip chain
+/// (the diffuse term samples a very low mip — no mips is a visibly wrong mask)
+/// and uploaded into a pool slice, once per path.
+/// Returns false and fills `error` on failure; the light keeps what it had.
+bool assignAreaMask(Ogre::Root *root, Ogre::Light *light, const std::string &path,
+                    std::string &error);
+
+/// Raises HlmsPbs's forward area-light budgets off Ogre's default of 1. Called
+/// where loadLtcMatrix is armed: the second area light of a scene renders
+/// nothing without it.
+void armAreaLightBudgets(Ogre::Root *root);
+
+/// Destroys the profile atlas and the mask pool. MUST run before `delete Root`
+/// (a TextureGpu outliving its manager is the usual teardown crash).
+void shutdown();
+
+}  // namespace lightextras
+
+// ---------------------------------------------------------------------------
 class OgreScene final : public Scene {
 public:
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
@@ -294,6 +354,12 @@ private:
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
         Ogre::SceneNode *lightNode = nullptr;   // internal child: -Y (document) -> -Z (Ogre)
+        // What is CURRENTLY assigned to `light`, so the per-frame setLight can
+        // do nothing when nothing changed. Both assignments are expensive the
+        // first time (an atlas rebuild / a decode+resize+mipgen+upload) and the
+        // mirror calls setLight for every light on every sync — at 60 Hz.
+        std::string      lightProfilePath;
+        std::string      lightMaskPath;
         // Vestigial since the selftest-era addTestCube was pruned (nothing assigns
         // these any more); releaseNode still clears them so a future node-owned
         // mesh/datablock keeps the "dropped before Root" teardown guarantee.

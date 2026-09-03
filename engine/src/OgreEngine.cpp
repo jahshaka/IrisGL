@@ -237,6 +237,10 @@ OgreEngine::~OgreEngine() {
     mViews.clear();
     for (auto &s : mScenes) s->destroy();
     mScenes.clear();
+    // The IES profile atlas and the area-light mask pool are process-wide, so
+    // no scene owns them: free them here, while Root (and its texture manager)
+    // is still alive.
+    lightextras::shutdown();
     try {
         if (mNullWindow && mRoot) mRoot->getRenderSystem()->destroyRenderWindow(mNullWindow);
         mNullWindow = nullptr;
