@@ -392,7 +392,15 @@ MeshNode::loadAsSceneFragment(QString filePath,
             // meshObj->addSkeletalAnimation(animName, anims[animName]);
             auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
             node->addAnimation(anim);
-            node->setAnimation(anim);
+            // The FIRST clip becomes the active one, not the last. This loop
+            // used to call setAnimation on every iteration, so the clip a
+            // freshly imported model played was whichever name sorted LAST
+            // (anims is a QMap) — and for a Mixamo character download that is
+            // "mixamo.com", the single-frame T-POSE. Every such character
+            // therefore stood still in the editor by default, with a real clip
+            // sitting unused in the list. The Avatar page already worked around
+            // this on its own load path.
+            if (node->getAnimations().size() == 1) node->setAnimation(anim);
         }
 
         auto skel = Mesh::extractSkeleton(mesh, scene);
@@ -424,7 +432,8 @@ MeshNode::loadAsSceneFragment(QString filePath,
     for (auto animName : anims.keys()) {
         auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
         node->addAnimation(anim);
-        node->setAnimation(anim);
+        // The FIRST clip, not the alphabetically last one — see above.
+        if (node->getAnimations().size() == 1) node->setAnimation(anim);
     }
 
     node->applyDefaultPose();
@@ -473,7 +482,8 @@ MeshNode::loadAsSceneFragment(
 			// meshObj->addSkeletalAnimation(animName, anims[animName]);
 			auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
 			node->addAnimation(anim);
-			node->setAnimation(anim);
+			// The FIRST clip, not the alphabetically last one — see above.
+			if (node->getAnimations().size() == 1) node->setAnimation(anim);
 		}
 
 		auto skel = Mesh::extractSkeleton(mesh, scene);
@@ -505,7 +515,8 @@ MeshNode::loadAsSceneFragment(
 	for (auto animName : anims.keys()) {
 		auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
 		node->addAnimation(anim);
-		node->setAnimation(anim);
+		// The FIRST clip, not the alphabetically last one — see above.
+		if (node->getAnimations().size() == 1) node->setAnimation(anim);
 	}
 
 	node->applyDefaultPose();
