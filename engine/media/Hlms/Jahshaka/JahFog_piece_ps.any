@@ -24,6 +24,18 @@
 	float4 jahFogParams;	// x = start, y = end, z = 1/(end-start), w unused
 @end
 
+@end
+
+// The fog EXECUTION needs `outPs_colour0`, which is #defined to `outColour`
+// (Hlms/Common/GLSL/CrossPlatformSettings_piece_all.glsl) — and `outColour` is
+// only DECLARED when !hlms_render_depth_only && !hlms_shadowcaster &&
+// !hlms_prepass (Hlms/Pbs/GLSL/PixelShader_ps.glsl:10-25). A depth/normal
+// prepass shader (POST_CHAIN_SPEC.md §4.3 item 3 — the SSR shape) would
+// therefore reference an undeclared output and throw out of renderOneFrame:
+// JAH_TRY swallows it, and the frame goes black with one line in the log.
+// Guarding here rather than later keeps the SSR phase from re-learning it.
+@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only )
+
 @piece( custom_ps_posExecution )
 	if( passBuf.jahFogColour.w > 0.5 )
 	{

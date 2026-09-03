@@ -252,7 +252,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
         n.item->setVisibilityFlags(tit->second.unlit ? kVisibleBit
                                                      : (kVisibleBit | kGiGeometryBit));
-        if (tit->second.onTop) n.item->setRenderQueueGroup(200);
+        if (tit->second.onTop) n.item->setRenderQueueGroup(kOverlayRenderQueue);
         n.node->attachObject(n.item);   // also hands the skeleton its parent node
         n.meshRef = meshId; n.materialRef = matId;
 

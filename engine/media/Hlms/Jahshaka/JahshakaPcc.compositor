@@ -7,8 +7,11 @@
 // This is the sample's LocalCubemapsProbeWorkspace minus its shadow node — probe
 // captures are unshadowed in v1 (the blurred IBL result hides it almost
 // entirely; a probe shadow node is a quality follow-up).
-// On-top overlays (selection outlines, gizmo geometry, render queue 200) and
-// PCC's own helper geometry (RQ 250+) are excluded from captures via rq_last.
+// On-top overlays (selection outlines, gizmo geometry, render queue 210),
+// refractive items (RQ 200, reserved) and PCC's own helper geometry (RQ 250+)
+// are excluded from captures via rq_last, which is EXCLUSIVE
+// (CompositorPassSceneDef::mLastRQ, "Last Render Queue ID to render. Not
+// inclusive") — so 200 already drops everything from 200 upward.
 
 abstract target jah_pcc_cubemap_face
 {

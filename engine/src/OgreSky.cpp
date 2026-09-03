@@ -151,7 +151,7 @@ void OgreScene::tuneSkyRenderable() {
         skyMat->getTechnique(0)->getPass(0)->getTextureUnitState(0)->setSamplerblock(sampler);
     }
     // Ogre parks the sky at render queue 212 ("render after most stuff"), which
-    // is AFTER our on-top overlays at 200 — a gizmo drawn over empty sky would be
+    // is AFTER our on-top overlays (kOverlayRenderQueue) — a gizmo drawn over empty sky would be
     // painted out, because overlays deliberately write no depth. Queue 0 is where
     // our own sky quads used to sit: the sky writes no depth either, so drawing
     // first costs one screen of overdraw and preserves every existing ordering.

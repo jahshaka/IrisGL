@@ -10,9 +10,17 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     : mRoot(root), mWindow(window), mTexture(texture), mName(name),
       mWidth(w), mHeight(h), mBackground(background), mError(errorSink) {
     mWorkspaceDef = name + "/Workspace";
-    mNodeDef = "AutoGen " + Ogre::IdString(mWorkspaceDef + "/Node").getReleaseText();
-    mRoot->getCompositorManager2()->createBasicWorkspaceDef(
-        mWorkspaceDef, toOgre(background), Ogre::IdString());
+    // The compositor chain (POST_CHAIN_SPEC.md §3) replaces
+    // CompositorManager2::createBasicWorkspaceDef: same pixels in the
+    // passthrough shape, but the graph is ours to grow.
+    chain::build(mRoot->getCompositorManager2(), mWorkspaceDef, chainDesc(), mNodeDefs);
+}
+
+ChainDesc OgreView::chainDesc() const {
+    ChainDesc d;
+    d.background = mBackground;
+    d.shadows    = mShadows;
+    return d;
 }
 
 OgreView::~OgreView() { destroy(); }
@@ -36,16 +44,62 @@ bool OgreView::setScene(Scene *scene) {
         // never handed a CameraDesc keeps these defaults).
         mCamera->setFarClipDistance(1000.0f);
         mCamera->setAutoAspectRatio(true);
-        mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
-            s->sceneManager(), target(), mCamera, mWorkspaceDef, mEnabled);
         mScene = s;
+        return attachWorkspace();
+    } JAH_CATCH(mError, false);
+}
+
+// ---------------------------------------------------------------------------
+// The workspace seam. Everything that (re)creates this view's workspace goes
+// through these two functions — see the comment on the declarations.
+bool OgreView::attachWorkspace() {
+    JAH_TRY {
+        if (mWorkspace) return true;
+        if (!mScene || !mCamera) return false;
+        Ogre::TextureGpu *t = target();
+        if (!t) return false;
+        mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
+            mScene->sceneManager(), t, mCamera, mWorkspaceDef, mEnabled);
+        if (!mWorkspace) return false;
+        for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
+            mWorkspace->addListener(l);
+        ++mWorkspaceGeneration;
         return true;
     } JAH_CATCH(mError, false);
 }
 
+bool OgreView::detachWorkspace() {
+    if (!mWorkspace) return false;
+    JAH_TRY {
+        for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
+            mWorkspace->removeListener(l);
+        mRoot->getCompositorManager2()->removeWorkspace(mWorkspace);
+        mWorkspace = nullptr;
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+void OgreView::addWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
+    if (!l) return;
+    if (std::find(mWorkspaceListeners.begin(), mWorkspaceListeners.end(), l) !=
+        mWorkspaceListeners.end())
+        return;
+    mWorkspaceListeners.push_back(l);
+    JAH_TRY { if (mWorkspace) mWorkspace->addListener(l); } JAH_CATCH(mError, );
+}
+
+void OgreView::removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
+    auto it = std::find(mWorkspaceListeners.begin(), mWorkspaceListeners.end(), l);
+    if (it == mWorkspaceListeners.end()) return;
+    mWorkspaceListeners.erase(it);
+    JAH_TRY { if (mWorkspace) mWorkspace->removeListener(l); } JAH_CATCH(mError, );
+}
+
+unsigned OgreView::workspaceGeneration() const { return mWorkspaceGeneration; }
+
 void OgreView::detachScene() {
     JAH_TRY {
-        if (mWorkspace) { mRoot->getCompositorManager2()->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
+        detachWorkspace();
         if (mCamera && mScene && mScene->sceneManager()) mScene->sceneManager()->destroyCamera(mCamera);
         mCamera = nullptr;
         mScene  = nullptr;
@@ -100,33 +154,20 @@ void OgreView::setBackground(const Colour &c) {
 void OgreView::rebuildWorkspaceDef() {
     JAH_TRY {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-        OgreScene *scene = mScene;
-        const bool hadWorkspace = mWorkspace != nullptr;
-        if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
-        if (cm->hasWorkspaceDefinition(mWorkspaceDef)) cm->removeWorkspaceDefinition(mWorkspaceDef);
-        if (cm->hasNodeDefinition(mNodeDef)) cm->removeNodeDefinition(mNodeDef);
-        cm->createBasicWorkspaceDef(mWorkspaceDef, toOgre(mBackground),
-                                    mShadows ? Ogre::IdString(kShadowNodeName) : Ogre::IdString());
-        if (hadWorkspace && scene && mCamera)
-            mWorkspace = cm->addWorkspace(scene->sceneManager(), target(), mCamera, mWorkspaceDef, mEnabled);
+        const bool hadWorkspace = detachWorkspace();
+        chain::destroy(cm, mWorkspaceDef, mNodeDefs);
+        chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs);
+        if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }
 
 bool OgreView::dropWorkspaceForShadowRebuild() {
     if (!mShadows || !mWorkspace) return false;
-    JAH_TRY {
-        mRoot->getCompositorManager2()->removeWorkspace(mWorkspace);
-        mWorkspace = nullptr;
-        return true;
-    } JAH_CATCH(mError, false);
+    return detachWorkspace();
 }
 
 void OgreView::recreateWorkspaceAfterShadowRebuild() {
-    JAH_TRY {
-        if (mWorkspace || !mScene || !mCamera) return;
-        mWorkspace = mRoot->getCompositorManager2()->addWorkspace(
-            mScene->sceneManager(), target(), mCamera, mWorkspaceDef, mEnabled);
-    } JAH_CATCH(mError, );
+    attachWorkspace();
 }
 
 bool OgreView::isEnabled() const { return mEnabled; }
@@ -148,15 +189,11 @@ void OgreView::resize(unsigned w, unsigned h) {
 
 void OgreView::rebuildRtt(unsigned w, unsigned h) {
     // Rebuild the RTT (at mRequestedSamples) and re-add the workspace.
-    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-    const bool hadWorkspace = mWorkspace != nullptr;
-    if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
+    const bool hadWorkspace = detachWorkspace();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     tm->destroyTexture(mTexture);
     mTexture = createRtt(mRoot, processUniqueName("rtt"), w, h, mRequestedSamples);
-    if (hadWorkspace && mScene)
-        mWorkspace = cm->addWorkspace(mScene->sceneManager(), mTexture, mCamera,
-                                      mWorkspaceDef, mEnabled);
+    if (hadWorkspace) attachWorkspace();
 }
 
 unsigned OgreView::sanitizeSamples(unsigned samples) {
@@ -226,13 +263,9 @@ void OgreView::applyPendingResize() {
             if (sampleChange) {
                 // The workspace is dropped around a sample change: its render pass
                 // targets the window's texture, which changes sample count.
-                Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-                const bool hadWorkspace = mWorkspace != nullptr;
-                if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
+                const bool hadWorkspace = detachWorkspace();
                 mWindow->setFsaa(std::to_string(mRequestedSamples));
-                if (hadWorkspace && mScene && mCamera)
-                    mWorkspace = cm->addWorkspace(mScene->sceneManager(), target(), mCamera,
-                                                  mWorkspaceDef, mEnabled);
+                if (hadWorkspace) attachWorkspace();
             }
             mWindow->requestResolution(w, h);
         } JAH_CATCH(mError, );
@@ -242,15 +275,12 @@ void OgreView::applyPendingResize() {
     // sample-count term relaxing the old same-size early-return).
     if (w == mWidth && h == mHeight && !sampleChange) return;
     JAH_TRY {
-        Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-        const bool hadWorkspace = mWorkspace != nullptr;
-        if (mWorkspace) { cm->removeWorkspace(mWorkspace); mWorkspace = nullptr; }
+        const bool hadWorkspace = detachWorkspace();
         mRoot->getRenderSystem()->destroyRenderWindow(mWindow);
         mWindow = nullptr;
         mWindow = mCreateWindow(w, h, mRequestedSamples);
         mWidth = w; mHeight = h;
-        if (hadWorkspace && mScene && mCamera)
-            mWorkspace = cm->addWorkspace(mScene->sceneManager(), target(), mCamera, mWorkspaceDef, mEnabled);
+        if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }
 
@@ -266,9 +296,7 @@ void OgreView::updateGi() {
 void OgreView::destroy() {
     detachScene();
     JAH_TRY {
-        Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-        if (cm->hasWorkspaceDefinition(mWorkspaceDef)) cm->removeWorkspaceDefinition(mWorkspaceDef);
-        if (cm->hasNodeDefinition(mNodeDef))           cm->removeNodeDefinition(mNodeDef);
+        chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
         if (mWindow)  { mRoot->getRenderSystem()->destroyRenderWindow(mWindow); mWindow = nullptr; }
         if (mTexture) { mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mTexture); mTexture = nullptr; }
     } JAH_CATCH(mError, );

@@ -318,6 +318,15 @@ struct EngineConfig {
     /// pixel readbacks stay exact — raise per view with View::setSampleCount.
     /// The driver may clamp; View::sampleCount() reports what was achieved.
     unsigned sampleCount = 1;
+    /// Build a dedicated, de-duplicated, position-only vertex buffer for each
+    /// mesh's shadow-map pass instead of re-streaming the full vertex. Shadow
+    /// passes then read ~4x less vertex bandwidth, at the cost of extra VRAM per
+    /// mesh and a GPU->CPU readback while the mesh is being created (import
+    /// latency, never frame time). Process-wide and consumed at mesh-build time,
+    /// so it cannot honestly be a per-scene value — a mesh built while it was on
+    /// keeps its optimized buffers. Change at runtime with
+    /// Engine::setShadowMeshOptimization(); it affects meshes built afterwards.
+    bool optimizeShadowMeshes = true;
     /// Host's display connection; required only for on-screen Views (see above).
     NativeDisplayHandle display = 0;
 };

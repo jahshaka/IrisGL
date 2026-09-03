@@ -301,6 +301,13 @@ public:
     /// KEPT: cheap introspection — readPixels() only works offscreen, so callers
     /// (thumbnails, tests) branch on this; pinned by the engine suites.
     virtual bool isOffscreen() const = 0;
+    /// How many times this View has (re)built its compositor workspace — the
+    /// structurally expensive operation behind setShadows(), setBackground(),
+    /// resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts
+    /// at 0 and reaches 1 when a Scene is first bound. Hosts use it to verify
+    /// that a per-frame push really was free; tests use it to pin the fact that
+    /// there is exactly ONE place a workspace is created (POST_CHAIN_SPEC.md).
+    virtual unsigned workspaceGeneration() const = 0;
     /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.
@@ -372,6 +379,13 @@ public:
     /// Clamped to [256, 8192]. Default: 2048.
     virtual void setShadowResolution(unsigned pixels) = 0;
     virtual unsigned shadowResolution() const = 0;
+
+    /// Shadow-caster geometry optimization — see EngineConfig::optimizeShadowMeshes.
+    /// PROCESS-WIDE and consumed when a mesh is BUILT: changing it re-decides the
+    /// question for meshes created afterwards and leaves existing ones alone.
+    /// That is why it is an application preference, not a per-scene setting.
+    virtual void setShadowMeshOptimization(bool on) = 0;
+    virtual bool shadowMeshOptimization() const = 0;
 
     /// Reason for the most recent failure; empty if none.
     virtual const std::string &lastError() const = 0;
