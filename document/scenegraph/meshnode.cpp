@@ -444,7 +444,24 @@ MeshNode::loadAsSceneFragment(
 	if (scene == nullptr)
 		return QSharedPointer<iris::MeshNode>(nullptr);
 	if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
-	if (scene->mNumMeshes == 1) {
+	// Same ITEM ZERO fix as the path-based overload above, for the same reason:
+	// the single-mesh shortcut builds ONE MeshNode and no child SceneNodes, and
+	// pose evaluation is name-matched over the scene-node hierarchy — so a
+	// skinned file taking this shortcut has one entry in that map, every bone
+	// stays at identity, and the character never moves while its clip clock
+	// advances. Silently.
+	//
+	// This overload is the LIBRARY/IMPORT side (assetwidget.cpp:359 dropping an
+	// Object asset into the scene, projectassets.cpp:126 resolving a pinned
+	// project asset), so a rigged character added from the library was frozen
+	// exactly the way one loaded from disk was.
+	//
+	// Guarded on mNumBones, so unskinned single-mesh models — every prop,
+	// thumbnail and sample scene — keep the shortcut, its transform fix and
+	// their exact node shape.
+	const bool singleMeshShortcut =
+		scene->mNumMeshes == 1 && scene->mMeshes[0]->mNumBones == 0;
+	if (singleMeshShortcut) {
 		auto mesh = scene->mMeshes[0];
 		auto node = iris::MeshNode::create();
 
