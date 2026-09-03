@@ -136,6 +136,7 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
     JAH_TRY {
         auto it = mNodes.find(id);
         if (it == mNodes.end()) return;
+        it->second.visible = visible;
         if (it->second.node) it->second.node->setVisible(visible, true);
         // The billboard set hangs off the STATIC root (world-space positions),
         // not off this node, so the cascade above never reaches it. And
@@ -143,6 +144,13 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
         // _addToRenderQueue tests getVisibilityFlags(), which strips the
         // LAYER_VISIBILITY bit setVisible toggles. Toggle the user flags.
         if (it->second.billboards) it->second.billboards->setVisibilityFlags(visible ? 1u : 0u);
+        // Same trap, same fix, for a simulated particle system — except the flag
+        // lives on the DEFINITION, not on the instance: _addToRenderQueue tests
+        // the def (OgreParticleSystemManager2.cpp:762-765). Hiding the def is
+        // also what makes already-emitted particles disappear at once instead
+        // of finishing their lives on screen.
+        if (it->second.particleDef)
+            it->second.particleDef->setVisibilityFlags(visible ? 1u : 0u);
     } JAH_CATCH(mError, );
 }
 
@@ -315,6 +323,23 @@ void OgreScene::destroy() {
         }
         mMeshes.clear();
         mRoot->destroySceneManager(mSceneMgr);
+        // AFTER the SceneManager, deliberately. Particle definitions are freed
+        // only by ~ParticleSystemManager2 (there is no destroyParticleSystemDef),
+        // and a definition is a Renderable linked to its datablock —
+        // ~HlmsDatablock asserts on any renderable still holding it. So the
+        // definitions must die first; then these datablocks, which belong to the
+        // process-wide HlmsManager and would otherwise outlive the scene
+        // forever. mParticleDatablocks covers every def this scene created,
+        // whether it ended on a node or in the recycling pool.
+        {
+            auto *hlmsUnlit = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT);
+            for (auto &kv : mParticleDatablocks) {
+                if (hlmsUnlit->getDatablock(Ogre::IdString(kv.second)))
+                    hlmsUnlit->destroyDatablock(Ogre::IdString(kv.second));
+            }
+            mParticleDatablocks.clear();
+            mParticleDefPool.clear();
+        }
     } JAH_CATCH(mError, );
     FogHlmsListener::unregisterScene(mSceneMgr);
     mSceneMgr = nullptr;
@@ -340,6 +365,9 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // Order: renderable off the node -> item (drops the datablock link and one
     // mesh ref) -> datablock -> node -> our mesh ref -> the mesh itself.
     releaseBillboards(n);
+    // The particle INSTANCE dies with the node; the definition cannot be
+    // destroyed at all (no such API) and returns to the recycling pool, hidden.
+    releaseParticleSystem(n);
     // A destroyed node stops being a reflector for good (unlike detachItem,
     // which only swaps the mesh) — drop the actor AND the flag, before the Item
     // the component tracks by raw pointer dies.

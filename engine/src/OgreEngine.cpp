@@ -36,6 +36,26 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         const char *plugin = (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
                                                               : "RenderSystem_GL3Plus";
         mRoot->loadPlugin(cfg.pluginDir + "/" + plugin, false, nullptr);
+        // ParticleFX2: the SIMULATION half of the particle system. Its core
+        // (definitions, instances, the manager, BillboardSet2) lives in
+        // OgreNextMain and needs no plugin — but every emitter and affector
+        // FACTORY is registered by this plugin's install(), through statics on
+        // ParticleSystemManager2. Without it addEmitter("Point") has nothing to
+        // ask. install() also calls Hlms::_setHasParticleFX2Plugin(true), which
+        // ensureHlms() used to do by hand; that call stays (it is idempotent and
+        // it must still hold if this plugin ever fails to load).
+        //
+        // A missing plugin is NOT fatal: billboard sets (light icons) and every
+        // non-particle feature work without it. setParticleSystem reports the
+        // failure through lastError() instead of taking the whole engine down.
+        try {
+            mRoot->loadPlugin(cfg.pluginDir + "/Plugin_ParticleFX2", false, nullptr);
+            mHasParticleFX2 = true;
+        } catch (const Ogre::Exception &e) {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: Plugin_ParticleFX2 not loaded, particle simulation disabled: " +
+                std::string(e.getDescription()), Ogre::LML_CRITICAL);
+        }
 
         const Ogre::RenderSystemList &list = mRoot->getAvailableRenderers();
         if (list.empty()) { error = "no Ogre render systems available"; return false; }
@@ -81,6 +101,22 @@ Scene *OgreEngine::createScene(const std::string &name) {
         // Shadow maps cover nothing until these are set (Ogre's samples set both).
         sm->setShadowDirectionalLightExtrusionDistance(500.0f);
         sm->setShadowFarDistance(500.0f);
+        // PARTICLE QUOTA CEILING — must be set HERE, before anything in this
+        // scene calls init() on a particle definition or a billboard set.
+        // ParticleSystemManager2 sizes ONE shared index buffer for the whole
+        // scene, on the first init(), from the highest quota it knows about at
+        // that moment (calculateHighestPossibleQuota, OgreParticleSystemManager2
+        // .cpp:823-861). Our light-icon billboard sets are quota 1 and they
+        // initialise as soon as a scene gets a light — so without this the
+        // ceiling would be 1 and the first real emitter would either throw
+        // "Raising highest possible quota after initialization is not yet
+        // implemented" or draw against an index buffer sized for four vertices.
+        //
+        // kMaxParticleQuota is the per-DEFINITION cap the whole engine enforces
+        // (setParticleSystem clamps to it). The buffer costs
+        // kMaxParticleQuota * 4 * 6 * 2 bytes = 768 KiB of immutable index data
+        // per scene, allocated lazily on the first particle draw.
+        sm->getParticleSystemManager2()->setHighestPossibleQuota(kMaxParticleQuota, 0u);
         mScenes.emplace_back(new OgreScene(mRoot, sm, name, mLastError));
         return mScenes.back().get();
     } JAH_CATCH(mLastError, nullptr);
@@ -257,6 +293,39 @@ void OgreEngine::renderOneFrame() {
 }
 
 const std::string &OgreEngine::lastError() const { return mLastError; }
+
+// ---- Simulation clock (PARTICLES_FX2_SPEC.md) ------------------------------
+// SceneManager::updateSceneGraph feeds the particle manager
+// `ControllerManager::getFrameTimeSource()->getValue()` — one value, shared by
+// every scene in the process. There is no per-scene or per-view delta to hook,
+// which is why the header says these verbs are process-wide and means it.
+//
+// The two settings CANCEL EACH OTHER inside Ogre, not here:
+// FrameTimeControllerValue::setTimeFactor zeroes mFrameDelay and setFrameDelay
+// zeroes mTimeFactor (OgrePredefinedControllers.cpp:80-95).
+
+void OgreEngine::setParticleTimeScale(float scale) {
+    JAH_TRY {
+        Ogre::ControllerManager::getSingleton().setTimeFactor(std::max(0.0f, scale));
+    } JAH_CATCH(mLastError, );
+}
+
+float OgreEngine::particleTimeScale() const {
+    return float(Ogre::ControllerManager::getSingleton().getTimeFactor());
+}
+
+void OgreEngine::setFixedFrameDelta(float seconds) {
+    JAH_TRY {
+        if (seconds > 0.0f)
+            Ogre::ControllerManager::getSingleton().setFrameDelay(seconds);
+        else
+            Ogre::ControllerManager::getSingleton().setTimeFactor(1.0f);   // back to the wall clock
+    } JAH_CATCH(mLastError, );
+}
+
+float OgreEngine::fixedFrameDelta() const {
+    return float(Ogre::ControllerManager::getSingleton().getFrameDelay());
+}
 
 void OgreEngine::setShadowFilter(ShadowFilter f) {
     mShadowFilter = f;

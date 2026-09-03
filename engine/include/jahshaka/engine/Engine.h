@@ -237,6 +237,38 @@ public:
     /// system off without destroying its node, and tests/particles pins that.
     virtual bool destroyBillboardSet(NodeId) = 0;
 
+    // ---- Particles (PARTICLES_FX2_SPEC.md): the engine SIMULATES these ----
+    // Unlike billboard sets, the host pushes PARAMETERS, not particles: emission,
+    // forces, colour-over-life and spin run inside the engine (SIMD, on worker
+    // threads) and advance on every renderOneFrame. The document owns the
+    // authoring values and its own clock scalar; it never integrates anything.
+    //
+    // One node = one particle-system DEFINITION. The definition carries the quota,
+    // the material and the visibility flag, so two emitters in a scene are fully
+    // independent. Definitions cannot be individually destroyed by the backend
+    // (there is no such API), so the engine keeps each node's topology FROZEN —
+    // one emitter of the chosen shape plus a fixed, defaults-neutral affector set —
+    // and recycles abandoned definitions through a per-scene pool.
+
+    /// Creates or updates the node's particle system. Scalar changes (rate,
+    /// velocity, colour keys, forces...) are applied in place. A TOPOLOGY change —
+    /// emitter shape or count, affector kinds, quota bucket, orientation, blend
+    /// mode or texture — rebuilds the definition and recycles the old one.
+    /// The system rides on the node: it moves with it, hides with it, and
+    /// removeNode frees it. False with lastError() set; never throws.
+    virtual bool setParticleSystem(NodeId, const ParticleSystemDesc &) = 0;
+    /// KEPT as the explicit counterpart of setParticleSystem: a node may stop
+    /// being an emitter without being removed. Live particles vanish with it.
+    virtual bool removeParticleSystem(NodeId) = 0;
+    /// How many particles are currently alive in the node's system, for tests and
+    /// the properties panel. 0 when the node has no system. SIMD-rounded up.
+    virtual unsigned particleCount(NodeId) const = 0;
+    /// DIAGNOSTIC: how many particle definitions this Scene has ever created.
+    /// Definitions cannot be destroyed before the Scene is, so this number never
+    /// falls — it is the leak the recycling pool exists to bound, and the
+    /// particle suites assert on it. Never call it from UI code.
+    virtual unsigned particleDefinitionsCreated() const = 0;
+
     // ---- Lights (step 5): a node may carry one light. Directional and spot lights
     // shine down the node's -Y (the document's convention: identity = straight down).
     virtual bool        setLight(NodeId, const LightDesc &) = 0;   // creates or updates
@@ -451,6 +483,25 @@ public:
 
     /// Draws every enabled View once. The host owns the loop and calls this.
     virtual void renderOneFrame() = 0;
+
+    // ---- Simulation clock (PARTICLES_FX2_SPEC.md) ----
+    // The engine advances its own particle simulation inside renderOneFrame,
+    // from the backend's frame-time source. These two verbs are the ONLY control
+    // the host has over it, and both are PROCESS-WIDE, not per scene and not per
+    // view — the backend has exactly one frame-time source. "Freeze the editor's
+    // particles while the player window runs" is therefore not expressible; the
+    // document owns one clock scalar and pushes it here, the way the animation
+    // migration does.
+    /// Multiplies the frame delta every simulation reads. 1 = wall clock,
+    /// 0 = frozen, 2 = double speed. Also cancels any fixed frame delta.
+    virtual void setParticleTimeScale(float scale) = 0;
+    virtual float particleTimeScale() const = 0;
+    /// Replaces the wall clock with a FIXED step, in seconds — the same delta
+    /// every frame regardless of how long the frame took. Deterministic enough
+    /// for pixel gates and thumbnail warm-ups (emission is still randomised, so
+    /// those stay statistical); 0 restores the wall clock at scale 1.
+    virtual void setFixedFrameDelta(float seconds) = 0;
+    virtual float fixedFrameDelta() const = 0;
 
     /// Shadow filter quality for EVERY shadowed light in EVERY scene — the
     /// backend's PBR pipeline has one global filter, not a per-light one
