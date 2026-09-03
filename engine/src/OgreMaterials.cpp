@@ -22,11 +22,42 @@ void attachFogPiece(Ogre::HlmsPbsDatablock *db) {
 
 }  // namespace
 
+Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
+    if (m.onTop)      return kOverlayRenderQueue;      // gizmos, wires, always-on-top
+    if (m.refractive) return kRefractiveRenderQueue;   // the chain's refraction pass
+    return 10u;                                        // Ogre's default for normal items
+}
+
+void OgreScene::refileItems(MaterialId id, const MaterialRec &m) {
+    const Ogre::uint8 rq = renderQueueFor(m);
+    for (auto &kv : mNodes)
+        if (kv.second.materialRef == id && kv.second.item)
+            kv.second.item->setRenderQueueGroup(rq);
+}
+
 Ogre::Hlms *OgreScene::hlmsFor(const MaterialRec &m) const {
     return mRoot->getHlmsManager()->getHlms(m.unlit ? Ogre::HLMS_UNLIT : Ogre::HLMS_PBS);
 }
 
-void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
+void OgreScene::setRefractionsActive(bool active) {
+    if (active == mRefractionsActive) return;
+    mRefractionsActive = active;
+    JAH_TRY {
+        auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
+        for (auto &kv : mMaterials) {
+            if (!kv.second.refractive || kv.second.unlit) continue;
+            auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
+                hlmsPbs->getDatablock(Ogre::IdString(kv.second.datablockName)));
+            if (!db) continue;
+            db->setTransparency(db->getTransparency(),
+                                active ? Ogre::HlmsPbsDatablock::Refractive
+                                       : Ogre::HlmsPbsDatablock::Transparent);
+        }
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
+                         bool refractionsActive) {
     db->setDiffuse(Ogre::Vector3(p.albedo.r, p.albedo.g, p.albedo.b));
     db->setMetalness(p.metalness);
     db->setRoughness(p.roughness);
@@ -85,6 +116,20 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
         // blendblock below is SRC_ALPHA/ONE, so Final = Src·alpha + Dest —
         // alpha is the glow intensity, exactly three.js AdditiveBlending.
         db->setTransparency(p.alpha, Ogre::HlmsPbsDatablock::Fade, true, false);
+        break;
+    case PbrAlphaMode::Refractive:
+        db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
+        // Ogre: "similar to transparent, but also performs refractions. The
+        // compositor scene pass must be set to render refractive objects in its
+        // own pass" — that pass is the chain's RQ-200 pass (OgreChain.cpp).
+        // Without it the generated shader references an undeclared refractionMap
+        // and fails to compile, taking the whole frame with it — so outside a
+        // refraction pass the material renders as ordinary glass instead
+        // (setRefractionsActive owns that decision).
+        db->setTransparency(p.alpha, refractionsActive
+                                         ? Ogre::HlmsPbsDatablock::Refractive
+                                         : Ogre::HlmsPbsDatablock::Transparent);
+        db->setRefractionStrength(p.refractionStrength);
         break;
     case PbrAlphaMode::Modulate:
         db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
@@ -150,13 +195,14 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p) {
 MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
     JAH_TRY {
         MaterialRec rec; rec.datablockName = processUniqueName("pbr");
+        rec.refractive = p.alphaMode == PbrAlphaMode::Refractive;
         auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->createDatablock(
             Ogre::IdString(rec.datablockName), rec.datablockName,
             Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
         db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
         attachFogPiece(db);
-        applyPbr(db, p);
+        applyPbr(db, p, mRefractionsActive);
         if (mReflectionTex) db->setTexture(Ogre::PBSM_REFLECTION, mReflectionTex);
         mMaterials[++mNextMaterialId] = rec;
         return mNextMaterialId;
@@ -171,7 +217,14 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->getDatablock(Ogre::IdString(it->second.datablockName)));
         if (!db) return false;
-        applyPbr(db, p);
+        applyPbr(db, p, mRefractionsActive);
+        // An alpha-mode change moves the item between render queues, and the
+        // items already exist: re-file them or a material turned refractive
+        // keeps rendering in the opaque pass (as plain glass) until something
+        // else happens to re-attach it.
+        const bool wasRefractive = it->second.refractive;
+        it->second.refractive = p.alphaMode == PbrAlphaMode::Refractive;
+        if (wasRefractive != it->second.refractive) refileItems(id, it->second);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -204,10 +257,10 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // line meshes must neither bounce nor occlude the radiosity rays.
         n.item->setVisibilityFlags(tit->second.unlit ? kVisibleBit
                                                      : (kVisibleBit | kGiGeometryBit));
-        // On-top overlays render after everything else, in the compositor
-        // chain's dedicated overlay pass (POST_CHAIN_SPEC.md §6 — RQ 200 is now
-        // reserved for refractive items); depth test is off in the material.
-        if (tit->second.onTop) n.item->setRenderQueueGroup(kOverlayRenderQueue);
+        // Render-queue policy (POST_CHAIN_SPEC.md §6): on-top overlays go in the
+        // chain's overlay pass, refractive items in its refraction pass, and
+        // everything else stays on Ogre's default queue.
+        n.item->setRenderQueueGroup(renderQueueFor(tit->second));
         n.node->attachObject(n.item);
         n.meshRef = meshId; n.materialRef = matId;
         // New lit geometry must join the voxel volume / next trace; unlit

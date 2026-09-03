@@ -200,6 +200,36 @@ void OgreEngine::renderOneFrame() {
     JAH_TRY {
         for (auto &v : mViews) { v->applyPendingResize(); v->updateParticles(); v->updateGi(); }
         for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); }
+        // The post chain's tuning lives in MaterialManager singletons — exposure,
+        // bloom threshold, the AO kernel and the SMAA preset are per PROCESS even
+        // though the enable flags are per view (POST_CHAIN_SPEC.md §7.4). The rule
+        // is "the primary on-screen view owns the globals": the first enabled
+        // on-screen view whose chain has effects. Offscreen views never qualify —
+        // their chainDesc() has every effect off by construction.
+        for (auto &v : mViews) {
+            if (!v->isEnabled()) continue;
+            const ChainDesc d = v->chainDesc();
+            if (!d.anyEffect()) continue;   // offscreen views only qualify if they opted in
+            chain::applyGlobals(mRoot, v->camera(), d, v->width(), v->height());
+            break;
+        }
+        // The refraction interlock (OgreScene::setRefractionsActive). A
+        // Refractive datablock drawn by a pass that offers it no refractions
+        // fails to COMPILE and loses the whole frame, and one scene can be drawn
+        // by views with different chains — the editor viewport, the player, and
+        // the throwaway offscreen view a screenshot renders through. So a scene
+        // only keeps its refractive materials refractive while EVERY view that
+        // draws it has the pass; otherwise they fall back to glass. Recomputed
+        // per frame because views come and go; the setter is a no-op on repeat.
+        for (auto &s : mScenes) {
+            bool anyView = false, allHaveRefraction = true;
+            for (auto &v : mViews) {
+                if (v->scene() != s.get() || !v->isEnabled()) continue;
+                anyView = true;
+                if (!v->chainDesc().refractions) allHaveRefraction = false;
+            }
+            s->setRefractionsActive(anyView && allHaveRefraction);
+        }
         if (mRoot) mRoot->renderOneFrame();
     } JAH_CATCH(mLastError, );
 }
@@ -237,6 +267,12 @@ void OgreEngine::setShadowMeshOptimization(bool on) { Ogre::Mesh::msOptimizeForS
 bool OgreEngine::shadowMeshOptimization() const { return Ogre::Mesh::msOptimizeForShadowMapping; }
 
 OgreEngine::~OgreEngine() {
+    // The SSAO rotation-noise texture is ours and must not outlive Root.
+    // Its own try/catch, NOT JAH_TRY: that macro's handler ends in `return`,
+    // which inside a destructor abandons the rest of the teardown — views,
+    // scenes, meshes and Root itself would all leak, and Engine::isAlive() would
+    // never go false. (Found by teardown_is_clean, which is exactly its job.)
+    if (mRoot) { try { chain::destroySsao(mRoot); } catch (...) {} }
     // Dependency order, all BEFORE Root: views (workspaces, cameras, windows,
     // textures) -> scenes (items, datablocks, our MeshPtrs, scene managers)
     // -> null window -> any leftover meshes -> Root.
@@ -333,6 +369,25 @@ void OgreEngine::registerCommonMaterials() {
                                "Compute/Tools", "Compute/Tools/Any", "Compute/Tools/GLSL",
                                "Compute/Tools/HLSL", "Compute/Tools/Metal",
                                "Compute/Algorithms/IBL",
+                               // Post chain (POST_CHAIN_SPEC.md §4.1). The Vulkan
+                               // (glslvk) programs source the SAME .glsl files as
+                               // the GL ones, so GLSL is the folder that matters;
+                               // the others are staged for the other backends.
+                               // SMAA also loads AreaTexDX10.dds / SearchTex.dds
+                               // from its own folder.
+                               "2.0/scripts/materials/HDR",
+                               "2.0/scripts/materials/HDR/GLSL",
+                               "2.0/scripts/materials/HDR/HLSL",
+                               "2.0/scripts/materials/HDR/Metal",
+                               "2.0/scripts/materials/Tutorial_SSAO",
+                               "2.0/scripts/materials/Tutorial_SSAO/GLSL",
+                               "2.0/scripts/materials/Tutorial_SSAO/HLSL",
+                               "2.0/scripts/materials/Tutorial_SSAO/Metal",
+                               "2.0/scripts/materials/Tutorial_SMAA",
+                               "2.0/scripts/materials/Tutorial_SMAA/GLSL",
+                               "2.0/scripts/materials/Tutorial_SMAA/HLSL",
+                               "2.0/scripts/materials/Tutorial_SMAA/Metal",
+                               "2.0/scripts/materials/Tutorial_SMAA/Vulkan",
                                // Jahshaka's own pieces (fog) + the PCC probe compositor.
                                "Hlms/Jahshaka" };
         for (const char *d : dirs) rgm.addResourceLocation(mMediaDir + d, "FileSystem", group, false);

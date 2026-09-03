@@ -65,8 +65,12 @@ public:
     // --- opacity ---
     void setAlpha(float alpha);
     void setAlphaCutoff(float cutoff);
+    void setRefractionStrength(float strength);
     void setAlphaMode(int mode);          // 0 opaque, 1 cutout/masked, 2 blend/translucent,
-                                          // 3 glass, 4 additive (Src+Dest), 5 modulate (Src×Dest)
+                                          // 3 glass, 4 additive (Src+Dest), 5 modulate (Src×Dest),
+                                          // 6 refractive (glass that BENDS what is behind it —
+                                          //   needs the viewport's refraction pass; see
+                                          //   POST_CHAIN_SPEC.md phase 7)
 
     void setTextureScale(float scale);
 
@@ -113,6 +117,10 @@ public:
     float  alpha;
     float  alphaCutoff;
     int    alphaMode;
+    /// Refractive mode (alphaMode 6) only: how far the surface displaces what it
+    /// samples from behind it. Roughly an index-of-refraction knob; 0 is a flat
+    /// window. Ignored by every other alpha mode.
+    float  refractionStrength;
 
     float  textureScale;
 

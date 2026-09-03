@@ -175,7 +175,16 @@ public:
 
     /// The legacy Preetham "realistic" sky, CPU-baked to an equirect image —
     /// exactly realisticsky.frag's math per direction. Public for tests.
-    static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height);
+    /// CPU bake of the analytic (Preetham) sky into an equirect image.
+    ///
+    /// `forHdr` is the POST_CHAIN_SPEC §7.1 decision, adopted: the bake normally
+    /// applies its own Uncharted2 filmic curve and a gamma, because the result
+    /// goes straight to an LDR viewport. Feed THAT into an HDR chain and the sky
+    /// is tonemapped TWICE — washed-out, low-contrast skies in exactly the
+    /// scenes that look best today. With `forHdr` the bake stops after the
+    /// exposure and lets the chain's tonemapper do the grading, once.
+    static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height,
+                                   bool forHdr = false);
 
     /// Cosine-convolved irradiance of an equirect sky image as 9 spherical-
     /// harmonic bands (27 floats, r/g/b per band), in LINEAR light — what the
@@ -281,6 +290,8 @@ private:
     /// Reads a document material into PBR parameters. Public for tests.
 public:
     static bool toPbrParams(iris::Material *material, jahshaka::engine::PbrParams &out);
+    /// Records that this material is refractive, for the chain's Auto mode.
+    void noteRefractive(const jahshaka::engine::PbrParams &p);
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
 private:
 
@@ -352,6 +363,10 @@ private:
     // sync(); pushed engine-wide by applyEnvironment (see comment there).
     jahshaka::engine::ShadowFilter mShadowFilter = jahshaka::engine::ShadowFilter::Hard;
     bool mAnyShadowCaster = false;
+    /// Does the scene contain a refractive material right now? Drives the
+    /// chain's "Auto" refraction mode (POST_CHAIN_SPEC.md §9.5); recomputed
+    /// every sync() exactly like mAnyShadowCaster.
+    bool mAnyRefractive = false;
     // Largest shadow-map resolution any shadow-casting light asked for, from the
     // last sync(); pushed engine-wide by applyEnvironment (the engine's atlas is
     // global, like the filter — rebuild is expensive, so only on change).

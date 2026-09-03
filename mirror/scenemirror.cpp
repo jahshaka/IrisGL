@@ -104,6 +104,7 @@ int SceneMirror::sync()
 
     QSet<long> seen;
     mAnyShadowCaster = false;
+    mAnyRefractive = false;
     mShadowFilter = ShadowFilter::Hard;
     mMaxShadowResolution = 0;
     for (auto &child : mSource->getRootNode()->children)
@@ -559,7 +560,10 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
         } else if (e.hasMesh && e.material && material) {
             // Parameters may change every frame from the property panel: push them.
             PbrParams p;
-            if (toPbrParams(material, p)) mTarget->setPbrMaterial(e.material, p);
+            if (toPbrParams(material, p)) {
+                mTarget->setPbrMaterial(e.material, p);
+                noteRefractive(p);
+            }
             syncTextures(e, material);
         }
     }
@@ -697,11 +701,22 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
         }
         return mDefaultMaterial;
     }
+    noteRefractive(p);
     auto it = mMaterials.constFind(material);
     if (it != mMaterials.constEnd()) return it.value();
     MaterialId id = mTarget->createPbrMaterial(p);
     if (id) mMaterials.insert(material, id);
     return id;
+}
+
+/// Refraction "Auto" (POST_CHAIN_SPEC §9.5) needs to know whether the scene HAS
+/// a refractive material right now: the chain only grows its second scene pass
+/// and its full-res copy while one exists, so the cost when unused is exactly
+/// zero. Accumulated as materials are visited, consumed by applyEnvironment,
+/// reset by sync() — the same shape as mAnyShadowCaster.
+void SceneMirror::noteRefractive(const PbrParams &p)
+{
+    if (p.alphaMode == PbrAlphaMode::Refractive) mAnyRefractive = true;
 }
 
 TextureId SceneMirror::textureFor(const QString &path, bool srgb)
@@ -785,8 +800,10 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         case 3:  out.alphaMode = PbrAlphaMode::Glass;    break;  // fades diffuse, keeps reflections
         case 4:  out.alphaMode = PbrAlphaMode::Additive; break;  // Src + Dest (Unreal Additive)
         case 5:  out.alphaMode = PbrAlphaMode::Modulate; break;  // Src × Dest (Unreal Modulate)
+        case 6:  out.alphaMode = PbrAlphaMode::Refractive; break; // glass that bends the background
         default: out.alphaMode = PbrAlphaMode::Opaque;   break;
         }
+        out.refractionStrength = pbr->refractionStrength;
         out.alpha           = pbr->alpha;
         out.alphaCutoff     = pbr->alphaCutoff;
         out.normalMapWeight = pbr->normalFactor;
@@ -1495,7 +1512,40 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // frame — the engine ignores a repeat of the value already REQUESTED (the
     // achieved count may be clamped lower by the driver, so comparing against
     // view->sampleCount() here would rebuild the target every frame).
-    view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
+    //
+    // ON-SCREEN ONLY (POST_CHAIN_SPEC.md §7.3). Offscreen views — thumbnails,
+    // material previews, the asset and avatar viewers, screenshots and every
+    // pixel suite — stay at 1x so their readbacks are exact and reproducible.
+    // Pushing the scene's count to them was a latent inconsistency: harmless
+    // while scenes defaulted to 1x, and a whole-suite re-baseline the moment a
+    // World Mode set 4x.
+    if (!view->isOffscreen())
+        view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
+    // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
+    // per frame: the engine ignores a repeat of the value already set, and only
+    // a change to an ENABLE flag rebuilds a workspace. Offscreen views (this
+    // includes thumbnails, previews and every pixel suite) discard it inside the
+    // engine, in one place — the host does not have to remember to.
+    {
+        PostFxDesc fx;
+        fx.hdr            = mSource->hdrEnabled;
+        fx.exposure       = mSource->exposure;
+        fx.bloom          = mSource->bloomEnabled;
+        fx.bloomThreshold = mSource->bloomThreshold;
+        fx.ssao           = mSource->ssaoEnabled;
+        fx.ssaoScale      = mSource->ssaoScale;
+        fx.ssaoPower      = mSource->ssaoPower;
+        fx.ssaoRadius     = mSource->ssaoRadius;
+        fx.smaaPreset     = mSource->smaaPreset;
+        fx.ssr            = mSource->ssrMode;
+        // Refraction "Auto" (the recommended default): the second scene pass and
+        // its full-res copy only enter the graph while the scene actually holds a
+        // refractive material, so the cost when unused is exactly zero. The flag
+        // is accumulated by sync() the same way mAnyShadowCaster is.
+        fx.refractions    = mSource->refractionsMode == 2 ||
+                            (mSource->refractionsMode == 1 && mAnyRefractive);
+        view->setPostFx(fx);
+    }
     // Fog panel: linear distance fog on lit surfaces (engine keeps unlit overlays
     // and the sky unfogged, like the legacy renderer). Cheap per-frame push.
     const QColor f = mSource->fogColor;
@@ -1680,10 +1730,14 @@ void SceneMirror::applySky(View *view)
         const iris::SkyRealistic &s = mSource->skyRealistic;
         // Sky Detail (the bake width) rides in the signature: changing it must
         // re-bake exactly like changing a scattering parameter does.
-        signature = QString("realistic:%1/%2/%3/%4/%5/%6/%7/%8@%9")
+        // HDR rides in the signature too: with the post chain on, the bake stops
+        // before its own tonemap (POST_CHAIN_SPEC §7.1), so toggling HDR must
+        // re-bake exactly like changing a scattering parameter does.
+        signature = QString("realistic:%1/%2/%3/%4/%5/%6/%7/%8@%9%10")
                         .arg(s.luminance).arg(s.reileigh).arg(s.mieCoefficient).arg(s.mieDirectionalG)
                         .arg(s.turbidity).arg(s.sunPosX).arg(s.sunPosY).arg(s.sunPosZ)
-                        .arg(mSource->skyBakeResolution);
+                        .arg(mSource->skyBakeResolution)
+                        .arg(mSource->hdrEnabled ? "+hdr" : "");
     }
     if (signature != mSkySignature) {
         // Debounce the realistic bake: a slider drag changes the 8 parameters on
@@ -1757,7 +1811,8 @@ void SceneMirror::applySky(View *view)
             // an equirect image and pushed through the same sky path as gradient.
             const int bakeW = mSource->skyBakeResolution >= 1024 ? 1024
                             : mSource->skyBakeResolution >= 512  ? 512 : 256;
-            const QImage baked = bakeRealisticSky(mSource->skyRealistic, bakeW, bakeW / 2);
+            const QImage baked = bakeRealisticSky(mSource->skyRealistic, bakeW, bakeW / 2,
+                                                  mSource->hdrEnabled);
             mRealisticBakeTimer.restart();
             if (!baked.isNull()) {
                 mSkyFaceTextures[0] = mTarget->createTexture(unsigned(baked.width()), unsigned(baked.height()),
@@ -1963,7 +2018,8 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
 // quirks (the unused ExposureBias, the simplified Rayleigh term) — evaluated per
 // equirect texel over the view direction; the sun's disc, colour and haze land
 // exactly where the legacy renderer put them.
-QImage SceneMirror::bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height)
+QImage SceneMirror::bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height,
+                                     bool forHdr)
 {
     if (width <= 0 || height <= 0) return QImage();
     struct V3 {
@@ -2057,8 +2113,24 @@ QImage SceneMirror::bakeRealisticSky(const iris::SkyRealistic &sky, int width, i
             L0 = L0 + Fex * (sunE * 19000.0f * sundisk);
 
             V3 texColor = (Lin + L0) * 0.04f + V3(0.0f, 0.001f, 0.0025f) * 0.3f;
-            V3 colr = tonemap(texColor * exposure) * whiteScale;
-            colr = vpow(colr, finalGamma);
+            // Two gradings are one too many (POST_CHAIN_SPEC §7.1). Without the
+            // post chain the bake IS the grade — Uncharted2 plus a gamma, and
+            // the result goes to an LDR viewport. With the chain on, the chain's
+            // own filmic tonemapper grades everything else in the frame, so the
+            // sky must arrive UNgraded or it is rolled off twice and reads flat.
+            // The exposure term stays either way: it is what makes a luminance
+            // setting mean anything.
+            V3 colr = texColor * exposure;
+            if (!forHdr) {
+                colr = tonemap(colr) * whiteScale;
+                colr = vpow(colr, finalGamma);
+            } else {
+                // Still 8-bit storage, so the top end has to land somewhere:
+                // Reinhard is the gentlest possible mapping into [0,1] and, unlike
+                // Hable + gamma, leaves the midtones where the chain expects them.
+                colr = V3(colr.x / (1.0f + colr.x), colr.y / (1.0f + colr.y),
+                          colr.z / (1.0f + colr.z));
+            }
 
             const auto to8 = [](float v) {
                 if (!std::isfinite(v)) v = 0.0f;

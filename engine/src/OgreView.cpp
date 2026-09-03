@@ -20,8 +20,50 @@ ChainDesc OgreView::chainDesc() const {
     ChainDesc d;
     d.background = mBackground;
     d.shadows    = mShadows;
+    d.samples    = sampleCount();
+    // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
+    // offscreen view never gets the post chain, whatever the host pushed.
+    // Thumbnails, material previews, the asset viewer, the avatar preview and
+    // every pixel suite render through createOffscreenView, and their exact
+    // colours are what makes them assertable.
+    if (isOffscreen() && !mPostFx.allowOffscreen) {
+        // ...except REFRACTION, which is not a post-process at all: it is how a
+        // refractive material renders. A scene that has one needs the pass in
+        // EVERY view that draws it (thumbnails, previews, screenshots), or the
+        // interlock in OgreScene::setRefractionsActive downgrades the material
+        // to glass everywhere. Scenes without refractive materials never ask for
+        // it, so no existing offscreen view changes shape.
+        d.refractions = mPostFx.refractions;
+        return d;
+    }
+    d.hdr            = mPostFx.hdr;
+    d.exposure       = mPostFx.exposure;
+    d.exposureMin    = mPostFx.exposureMin;
+    d.exposureMax    = mPostFx.exposureMax;
+    // Bloom rides the HDR node; without HDR there is nothing to bright-pass.
+    d.bloom          = mPostFx.bloom && mPostFx.hdr;
+    d.bloomThreshold = mPostFx.bloomThreshold;
+    d.ssao           = mPostFx.ssao;
+    d.ssaoScale      = mPostFx.ssaoScale;
+    d.ssaoPower      = mPostFx.ssaoPower;
+    d.ssaoRadius     = mPostFx.ssaoRadius;
+    d.smaaPreset     = mPostFx.smaaPreset;
+    d.ssr            = mPostFx.ssr;
+    d.refractions    = mPostFx.refractions;
     return d;
 }
+
+void OgreView::setPostFx(const PostFxDesc &fx) {
+    if (fx == mPostFx) return;   // hosts push per frame; the same value is free
+    const ChainDesc before = chainDesc();
+    mPostFx = fx;
+    const ChainDesc after = chainDesc();
+    // Only a SHAPE change rebuilds. Exposure, bloom threshold, AO power and the
+    // SMAA preset are uniforms or shader reloads, not graph edits.
+    if (!ChainDesc::sameShape(before, after)) rebuildWorkspaceDef();
+}
+
+const PostFxDesc &OgreView::postFx() const { return mPostFx; }
 
 OgreView::~OgreView() { destroy(); }
 

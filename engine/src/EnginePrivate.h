@@ -147,8 +147,31 @@ constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
 // SSR, refraction) become extra fields here and extra nodes in OgreChain.cpp,
 // and nothing outside those two places has to learn about them.
 struct ChainDesc {
-    Colour background;
-    bool   shadows = false;   ///< instantiate the process-wide shadow node
+    Colour   background;
+    bool     shadows = false;   ///< instantiate the process-wide shadow node
+    unsigned samples = 1u;      ///< achieved MSAA count of the view's target
+
+    // ---- Effects (phases 3-7). Every one of them is OFF on offscreen views by
+    //      construction: OgreView::chainDesc() clears them (POST_CHAIN_SPEC §7.3).
+    bool  hdr = false;              ///< RGBA16F scene target + filmic tonemap
+    float exposure = 0.0f;          ///< stops; the auto-exposure midpoint
+    float exposureMin = -2.5f;
+    float exposureMax = 2.5f;
+    bool  bloom = false;            ///< rides the HDR node at ~zero marginal cost
+    float bloomThreshold = 5.0f;    ///< bright-pass start, in the sample's units
+    bool  ssao = false;
+    float ssaoScale = 1.0f;         ///< AO buffer resolution factor (0.5 or 1.0)
+    float ssaoPower = 1.5f;
+    float ssaoRadius = 2.0f;
+    int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
+    int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
+    bool  refractions = false;
+
+    /// Does this description need anything beyond the passthrough graph?
+    bool anyEffect() const;
+    /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
+    /// are uniforms — changing one must never rebuild a workspace.
+    static bool sameShape(const ChainDesc &a, const ChainDesc &b);
 };
 
 class OgreView;
@@ -169,6 +192,25 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 /// The name of the scene node definition for a workspace — the anchor later
 /// phases (and the planar-reflection lane) need to find the main scene pass.
 std::string sceneNodeDefName(const std::string &workspaceDef);
+
+// ---- Effect parameters -----------------------------------------------------
+// EVERY ONE OF THESE IS PROCESS-GLOBAL (POST_CHAIN_SPEC.md §7.4): Ogre's HDR,
+// SSAO and SMAA helpers all write MaterialManager singletons. The rule the
+// backend follows is "the primary on-screen view owns the globals" —
+// OgreEngine::renderOneFrame pushes them from the first enabled on-screen view
+// whose chain has effects, and every other view lives with that.
+void initHdrMsaa(unsigned samples);
+void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
+void setBloomThreshold(float minThreshold, float fullColourThreshold);
+void initSsao(Ogre::Root *root);
+void destroySsao(Ogre::Root *root);
+void updateSsao(Ogre::Camera *camera, unsigned aoWidth, unsigned aoHeight,
+                float kernelRadius, float powerScale);
+void initSmaa(Ogre::Root *root, int preset);
+/// One call per frame from the primary view: recompiles what changed and pushes
+/// every per-frame uniform the enabled effects need.
+void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
+                  unsigned viewWidth, unsigned viewHeight);
 }   // namespace chain
 
 // ---------------------------------------------------------------------------
@@ -474,10 +516,38 @@ private:
         /// pushed pose rather than replace it.
         bool clipModeEntered = false;
     };
-    struct MaterialRec { std::string datablockName; bool unlit = false; bool onTop = false; };
+    struct MaterialRec {
+        std::string datablockName;
+        bool unlit = false;
+        bool onTop = false;
+        /// PbrAlphaMode::Refractive. Refractive items must render in the chain's
+        /// OWN pass (kRefractiveRenderQueue) — Ogre's words: "the compositor
+        /// scene pass must be set to render refractive objects in its own pass".
+        /// Left in the opaque pass they render as ordinary glass, silently.
+        bool refractive = false;
+    };
     struct TextureRec { Ogre::TextureGpu *texture = nullptr; std::string path; };
 
     void applyReflectionToAllImpl();
+public:
+    /// Is a refraction pass present in EVERY view that draws this scene?
+    ///
+    /// This is not a preference, it is a SAFETY INTERLOCK. An
+    /// HlmsPbsDatablock::Refractive material rendered by a pass that does not
+    /// offer it refractions generates a pixel shader referencing an undeclared
+    /// `refractionMap`; the compile throws out of renderOneFrame and the WHOLE
+    /// FRAME is lost, not just that object. Views of one scene do not all have
+    /// the same chain (a screenshot renders the editor's scene through a
+    /// throwaway offscreen view), so the engine recomputes this every frame and
+    /// downgrades refractive datablocks to plain glass whenever any view that
+    /// draws them lacks the pass. No combination of settings can black-frame.
+    void setRefractionsActive(bool active);
+    bool refractionsActive() const { return mRefractionsActive; }
+private:
+    /// The render queue an item using this material belongs in.
+    static Ogre::uint8 renderQueueFor(const MaterialRec &m);
+    /// Re-files every item that uses this material after its alpha mode changed.
+    void refileItems(MaterialId id, const MaterialRec &m);
 
     Ogre::Hlms *hlmsFor(const MaterialRec &m) const;
     /// Removes the renderable from a node that references a SHARED mesh/material.
@@ -485,7 +555,10 @@ private:
     // Ogre::HlmsPbsDatablock::None is unspellable here: X11's `None` macro (this
     // file includes Xlib.h for window handles) eats the identifier.
     static constexpr auto kTransparencyNone = static_cast<Ogre::HlmsPbsDatablock::TransparencyModes>(0);
-    static void applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p);
+    /// `refractionsActive` false downgrades PbrAlphaMode::Refractive to plain
+    /// glass — see setRefractionsActive for why that is not optional.
+    static void applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
+                         bool refractionsActive);
     /// Builds (or finds) the in-memory v1 skeleton `rig` translates to and hands
     /// the resulting SkeletonDef to `mesh`. v1 is a BUILD-TIME SCAFFOLD ONLY —
     /// SkeletonDef has exactly one constructor and it takes a v1::Skeleton
@@ -627,6 +700,7 @@ private:
     Ogre::VctLighting                *mVctLighting  = nullptr;
     Ogre::ParallaxCorrectedCubemapAuto *mPcc        = nullptr;
     Ogre::Camera                     *mGiCamera     = nullptr;   // PCC build + tracking
+    bool mRefractionsActive = false;   // see setRefractionsActive
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
     TextureId           mNextTextureId = 0;
@@ -687,6 +761,11 @@ public:
     /// or was not structurally expensive — every rebuild goes through the seam,
     /// so this is exactly the number of times it ran.
     unsigned workspaceGeneration() const override;
+
+    void setPostFx(const PostFxDesc &fx) override;
+    const PostFxDesc &postFx() const override;
+    /// The camera the chain's per-frame globals are computed from.
+    Ogre::Camera *camera() const { return mCamera; }
     /// Shadow-atlas rebuild support (Engine::setShadowResolution): the shadow node
     /// DEFINITION cannot be replaced while any workspace instantiates it, so the
     /// engine first drops every shadowed view's workspace (true = dropped, caller
@@ -771,6 +850,8 @@ private:
     std::vector<std::string>   mNodeDefs;
     std::vector<Ogre::CompositorWorkspaceListener *> mWorkspaceListeners;
     unsigned                   mWorkspaceGeneration = 0;
+    /// What the host asked for. Offscreen views keep it and ignore it.
+    PostFxDesc                 mPostFx;
     unsigned                   mWidth, mHeight;
     Colour                     mBackground;
     bool                       mEnabled = true;

@@ -176,8 +176,13 @@ enum class PbrAlphaMode {
     Additive, ///< Final = Src + Dest (Unreal BLEND_Additive: glows, holograms, fx).
               ///< Contribution scales with alpha; unlit-leaning — lighting response
               ///< is limited by design, as in Unreal. Depth write is off.
-    Modulate  ///< Final = Src × Dest (Unreal BLEND_Modulate: tinting/darkening).
+    Modulate, ///< Final = Src × Dest (Unreal BLEND_Modulate: tinting/darkening).
               ///< alpha is ignored; fog interaction caveat applies. Depth write off.
+    Refractive ///< Glass that BENDS what is behind it. Like Glass, plus the
+               ///< surface samples the already-rendered opaque image, offset by
+               ///< its normal and `refractionStrength`. Needs the view's post
+               ///< chain to carry the refraction pass (PostFxDesc::refractions);
+               ///< without it the material renders as Glass.
 };
 
 /// Metallic-roughness PBR parameters — Jahshaka's material model, sized to what
@@ -197,6 +202,9 @@ struct PbrParams {
     float  normalMapWeight = 1.0f;   ///< strength of the bound normal map
     float  uvScale         = 1.0f;   ///< tiles every bound texture map (UV *= uvScale);
                                      ///< the document's PbrMaterial::textureScale
+    /// Refractive mode only: how far the surface displaces what it samples from
+    /// behind it. Roughly an index-of-refraction knob; 0 is a flat window.
+    float  refractionStrength = 0.35f;
 };
 
 /// One camera-facing textured quad in a node's billboard set (Scene::setBillboards).
@@ -354,6 +362,69 @@ struct EngineConfig {
     bool optimizeShadowMeshes = true;
     /// Host's display connection; required only for on-screen Views (see above).
     NativeDisplayHandle display = 0;
+};
+
+/// The post-processing chain for a View (POST_CHAIN_SPEC.md).
+///
+/// Everything here is OFF by default, and every field is IGNORED on an offscreen
+/// View: thumbnails, material previews, asset viewers and every pixel suite go
+/// through createOffscreenView, and their exact colours are the contract that
+/// makes them testable. Screenshots that WANT the chain ask for an on-screen
+/// view or opt in explicitly.
+///
+/// The enable flags are per View. The TUNING (exposure, bloom threshold, AO
+/// power and radius, SMAA preset) is process-global inside the backend — Ogre's
+/// HDR/SSAO/SMAA materials are MaterialManager singletons — so the engine pushes
+/// the values of the primary on-screen view and every other view lives with
+/// them. Documented rather than hidden: it is a property of the upstream
+/// implementation, not a choice.
+struct PostFxDesc {
+    /// Render the scene into a floating-point target and tonemap it (filmic,
+    /// Hable/Uncharted2) with automatic exposure. The prerequisite for bloom.
+    bool  hdr = false;
+    /// Auto-exposure midpoint, in stops, and the window it may adapt within.
+    float exposure = 0.0f;
+    float exposureMin = -2.5f;
+    float exposureMax = 2.5f;
+    /// Highlight bloom. Rides the HDR node's fixed 256x256 blur chain, so it is
+    /// resolution-independent and nearly free — but it needs `hdr`.
+    bool  bloom = false;
+    /// Where the bright pass starts, in the tonemapper's units. High values read
+    /// as highlight bloom; low values as a haze filter.
+    float bloomThreshold = 5.0f;
+    /// Screen-space ambient occlusion. Adds a normals G-buffer to the main pass.
+    bool  ssao = false;
+    /// AO buffer resolution, as a factor of the view (0.5 or 1.0). The tap count
+    /// is fixed at 64 by the shader and is deliberately not exposed.
+    float ssaoScale = 1.0f;
+    /// Contrast of the occlusion term, and how far in world units it looks.
+    float ssaoPower = 1.5f;
+    float ssaoRadius = 2.0f;
+    /// SMAA: -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra. Runs AFTER tonemapping.
+    int   smaaPreset = -1;
+    /// Screen-space reflections: 0 off, 1 half-resolution rays, 2 full.
+    int   ssr = 0;
+    /// Re-render refractive materials (alphaMode Refractive) in a second pass
+    /// that samples the opaque result. Costs nothing when no material is.
+    bool  refractions = false;
+
+    /// THE offscreen opt-in. Offscreen Views ignore every flag above unless this
+    /// is set, because their exact colours are what thumbnails, previews and the
+    /// pixel suites assert. Two callers set it, both deliberately: a screenshot
+    /// that asked to look like the viewport (`screenshot({postFx:true})`), and
+    /// the engine suite, which is the only way to pixel-test the chain at all.
+    bool  allowOffscreen = false;
+
+    bool operator==(const PostFxDesc &o) const {
+        return hdr == o.hdr && exposure == o.exposure && exposureMin == o.exposureMin &&
+               exposureMax == o.exposureMax && bloom == o.bloom &&
+               bloomThreshold == o.bloomThreshold && ssao == o.ssao &&
+               ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
+               ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
+               ssr == o.ssr && refractions == o.refractions &&
+               allowOffscreen == o.allowOffscreen;
+    }
+    bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
 };
 
 /// A CPU-side RGBA8 image, used to read back an offscreen View.

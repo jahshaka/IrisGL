@@ -1,0 +1,35 @@
+Refractions: 3-argument max() does not exist in any shading language.
+
+`applyRefractions` reduces a COLOURED fresnel F0 to a scalar with
+
+    midf refractF0 = max( pixelData.F0.x, pixelData.F0.y, pixelData.F0.z );
+
+but GLSL, HLSL and Metal all define max() with two arguments only. The
+three-argument form is Ogre's own `max3` macro (Hlms/Common/*/
+CrossPlatformSettings_piece_all.*), which is exactly what is meant here.
+
+The line is inside `@else` of `@property( !fresnel_scalar )`, i.e. it is
+reached whenever fresnel is a colour rather than a scalar — which is every
+metallic-workflow material we author. The result is that the first refractive
+(HlmsPbsDatablock::Refractive) object in a scene fails to compile its pixel
+shader; the exception escapes renderOneFrame and the whole frame is lost, not
+just that object.
+
+Reproduced on Vulkan/glslang, driver 595.84:
+    ERROR: 0:1145: 'max' : no matching overloaded function found
+
+Media-only: this is a shader template staged into bin/media at build time, so
+applying it needs no Ogre rebuild — just the patch loop and a re-stage.
+
+diff --git a/Samples/Media/Hlms/Pbs/Any/Refractions_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Refractions_piece_ps.any
+--- a/Samples/Media/Hlms/Pbs/Any/Refractions_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Refractions_piece_ps.any
+@@ -19,7 +19,7 @@
+ 	@property( !fresnel_scalar )
+ 		midf refractF0 = pixelData.F0;
+ 	@else
+-		midf refractF0 = max( pixelData.F0.x, pixelData.F0.y, pixelData.F0.z );
++		midf refractF0 = max3( pixelData.F0.x, pixelData.F0.y, pixelData.F0.z );
+ 	@end
+
+ 	// refractNormal must be in view space, and we ignore .z component

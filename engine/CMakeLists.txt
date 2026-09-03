@@ -45,12 +45,20 @@ set(OGRE_NEXT_COMMON_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Co
 # VCT voxelizer/lighting compute jobs, Ogre's ComputeTools (clearUav — the
 # voxelizer clears its UAV textures through it) and the IBL specular integrator
 # the PCC probe workspace uses (GI_SPEC.md phases 2-3), ~400K together.
+# Post-chain effect media (POST_CHAIN_SPEC.md §4.1): the HDR/tonemap/bloom node's
+# materials and shaders, SSAO's, and SMAA's (which also carries two DDS lookup
+# textures). ~800K together; registered folder-by-folder like the rest.
+set(OGRE_NEXT_HDR_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/HDR")
+set(OGRE_NEXT_SSAO_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tutorial_SSAO")
+set(OGRE_NEXT_SMAA_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tutorial_SMAA")
 set(OGRE_NEXT_VCT_MEDIA_DIR "${_ogre_media_root}/VCT")
 set(OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR "${_ogre_media_root}/Compute/Tools")
 set(OGRE_NEXT_IBL_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IBL")
 file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_HLMS_SOURCE_DIR}/Common/*" "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/*"
      "${OGRE_NEXT_HLMS_SOURCE_DIR}/Unlit/*" "${OGRE_NEXT_COMMON_MATERIALS_DIR}/*"
+     "${OGRE_NEXT_HDR_MATERIALS_DIR}/*" "${OGRE_NEXT_SSAO_MATERIALS_DIR}/*"
+     "${OGRE_NEXT_SMAA_MATERIALS_DIR}/*"
      "${OGRE_NEXT_VCT_MEDIA_DIR}/*" "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}/*"
      "${OGRE_NEXT_IBL_MEDIA_DIR}/*"
      "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*")
@@ -62,6 +70,9 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     # Jahshaka's own Hlms pieces (linear fog); registered by registerCommonMaterials().
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka" "${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMMON_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Common"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SSAO_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SSAO"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_SMAA_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Tutorial_SMAA"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_VCT_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/VCT"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Tools"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IBL_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IBL"

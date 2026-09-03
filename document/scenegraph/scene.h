@@ -168,6 +168,25 @@ public:
     // 0 = Hard (PCF 2x2), 1 = Soft (4x4), 2 = VerySoft (6x6).
     int shadowFilterTier;
 
+    // ---- Post-processing chain (POST_CHAIN_SPEC.md phases 3-7) --------------
+    // Per scene, pushed to the ENGINE VIEWPORT by SceneMirror. Offscreen views
+    // (thumbnails, previews, every pixel suite) ignore all of it by
+    // construction, which is what keeps their colours exact.
+    bool  hdrEnabled;        ///< float scene target + filmic tonemap + auto exposure
+    float exposure;          ///< stops; the auto-exposure midpoint
+    bool  bloomEnabled;      ///< highlight bloom; rides the HDR node, needs hdrEnabled
+    float bloomThreshold;    ///< where the bright pass starts, in tonemapper units
+    bool  ssaoEnabled;
+    float ssaoScale;         ///< AO buffer resolution factor (0.5 or 1.0)
+    float ssaoPower;         ///< contrast of the occlusion term
+    float ssaoRadius;        ///< world-space reach, in metres
+    int   smaaPreset;        ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
+    int   ssrMode;           ///< 0 off, 1 half-res rays, 2 HQ
+    /// 0 off, 1 AUTO (the chain gains its refraction nodes only while the scene
+    /// actually contains a refractive material — cost when unused is zero),
+    /// 2 always on.
+    int   refractionsMode;
+
     // ---- World Modes (POST_CHAIN_SPEC.md §9) --------------------------------
     // A scalability tier for the whole scene. -1 = Custom (no tier: the fields
     // below are whatever the user/document set them to), 0 = Low, 1 = Medium,

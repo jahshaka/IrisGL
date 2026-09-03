@@ -42,6 +42,7 @@ PbrMaterial::PbrMaterial()
     alpha               = 1.0f;
     alphaCutoff         = 0.5f;
     alphaMode           = 0;
+    refractionStrength  = 0.35f;
 
     textureScale        = 1.0f;
 
@@ -111,6 +112,7 @@ void PbrMaterial::setEmissiveMap(Texture2DPtr tex)
 void PbrMaterial::setAlpha(float a)          { alpha = a; }
 void PbrMaterial::setAlphaCutoff(float c)    { alphaCutoff = c; }
 void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
+void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; }
 void PbrMaterial::setTextureScale(float s)   { textureScale = s; }
 
 void PbrMaterial::setIblIntensity(float intensity) { iblIntensity = intensity; }
@@ -138,6 +140,7 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "roughnessUpperBound") roughnessUpperBound = value.toFloat();
     else if (name == "alphaCutoff")       alphaCutoff       = value.toFloat();
     else if (name == "alphaMode")         alphaMode         = value.toInt();
+    else if (name == "refractionStrength") refractionStrength = value.toFloat();
 
     // Texture properties arrive as a path, matching how CustomMaterial::setValue
     // is driven from the material presets.
@@ -272,15 +275,26 @@ void PbrMaterial::createProperties()
 
     // 0 opaque, 1 cutout/masked, 2 blend/translucent (glTF's OPAQUE/MASK/BLEND),
     // 3 glass (engine realistic transparency), 4 additive (Src+Dest),
-    // 5 modulate (Src×Dest) — the last two are the Unreal-parity blend modes.
+    // 5 modulate (Src×Dest) — the Unreal-parity blend modes — and
+    // 6 refractive (glass that BENDS the background; needs the viewport's
+    // refraction pass, POST_CHAIN_SPEC.md phase 7).
     auto alphaModeProp         = new IntProperty;
     alphaModeProp->id          = id++;
     alphaModeProp->displayName = "Alpha Mode";
     alphaModeProp->name        = "alphaMode";
     alphaModeProp->minValue    = 0;
-    alphaModeProp->maxValue    = 5;
+    alphaModeProp->maxValue    = 6;
     alphaModeProp->value       = alphaMode;
     properties.append(alphaModeProp);
+
+    auto refractProp         = new FloatProperty;
+    refractProp->id          = id++;
+    refractProp->displayName = "Refraction Strength";
+    refractProp->name        = "refractionStrength";
+    refractProp->minValue    = 0.0f;
+    refractProp->maxValue    = 1.0f;
+    refractProp->value       = refractionStrength;
+    properties.append(refractProp);
 
     // The six texture maps. Names match the setValue() cases above (paths, not
     // the "u_*Map" sampler names used as Material::textures keys). Declaring

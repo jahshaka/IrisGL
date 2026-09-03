@@ -113,6 +113,20 @@ Scene::Scene()
     // light asked for (the historical derivation)
     shadowFilterTier = -1;
 
+    // Post chain: everything off. A scene only gets effects when the user picks
+    // a World Mode (or turns a row on); nothing changes under anyone's feet.
+    hdrEnabled = false;
+    exposure = 0.0f;
+    bloomEnabled = false;
+    bloomThreshold = 5.0f;
+    ssaoEnabled = false;
+    ssaoScale = 1.0f;
+    ssaoPower = 1.5f;
+    ssaoRadius = 2.0f;
+    smaaPreset = -1;
+    ssrMode = 0;
+    refractionsMode = 0;
+
     // World Mode: -1 = Custom. A new scene starts with the field values above
     // and no tier applied; picking a mode (World panel or world.mode) is what
     // writes a tier through. POST_CHAIN_SPEC §12 decision 8 proposed defaulting

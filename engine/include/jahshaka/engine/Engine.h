@@ -301,6 +301,19 @@ public:
     /// KEPT: cheap introspection — readPixels() only works offscreen, so callers
     /// (thumbnails, tests) branch on this; pinned by the engine suites.
     virtual bool isOffscreen() const = 0;
+
+    /// The post-processing chain for this View (POST_CHAIN_SPEC.md): HDR +
+    /// filmic tonemap, bloom, SSAO, SMAA, SSR, refractive glass.
+    ///
+    /// IGNORED ON OFFSCREEN VIEWS, always and by construction — postFx() then
+    /// reports what was asked for, and the chain stays the simple one. That is
+    /// what keeps thumbnails, material previews and every pixel suite exact.
+    ///
+    /// Cheap to call with an unchanged value (hosts may push per frame). A
+    /// change to an ENABLE flag rebuilds the workspace; a change to a tuning
+    /// value is a uniform and rebuilds nothing.
+    virtual void setPostFx(const PostFxDesc &) = 0;
+    virtual const PostFxDesc &postFx() const = 0;
     /// How many times this View has (re)built its compositor workspace — the
     /// structurally expensive operation behind setShadows(), setBackground(),
     /// resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts
