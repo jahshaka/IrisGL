@@ -27,6 +27,11 @@ class LightNode;
 class DecalNode;
 class ViewerNode;
 class ParticleSystemNode;
+/// Forward-declared with its underlying type so headers can take one by value
+/// without dragging in particlesystemnode.h (an enumerator still needs the
+/// definition — see SceneEditService::addParticleSystem, which has no default
+/// argument for exactly that reason).
+enum class ParticlePreset : int;
 class Mesh;
 class Model;
 class Frustum;

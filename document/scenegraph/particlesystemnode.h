@@ -46,7 +46,7 @@ enum class ParticleOrientation { Billboard, StretchedCommon, StretchedVelocity,
 
 /// A named starting point for a whole emitter — what the "Particle Preset"
 /// combo has claimed to offer since 2016 and never did.
-enum class ParticlePreset { Custom, Fire, Embers, Smoke, Rain, Snow, SteadyFlow, Sparks };
+enum class ParticlePreset : int { Custom, Fire, Embers, Smoke, Rain, Snow, SteadyFlow, Sparks };
 
 /// An emitter, as the document authors it.
 ///
