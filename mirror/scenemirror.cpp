@@ -24,6 +24,7 @@
 #include "irisgl/document/materials/defaultmaterial.h"
 #include "irisgl/document/materials/custommaterial.h"
 #include "irisgl/core/properties/property.h"
+#include "irisgl/core/math/trs.h"
 #include "irisgl/document/assets/texture2d.h"
 #include "irisgl/document/scenegraph/shadowmap.h"
 #include <QFileInfo>
@@ -952,33 +953,12 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
 
 namespace {
 
-/// Rigid-ish TRS decomposition of an affine 4x4. Returns the worst |cos| between
-/// the (normalized) basis axes so the caller can warn about shear, which a
-/// pos/quat/scale bone cannot represent (R3).
-float decomposeTRS(const QMatrix4x4 &m, QVector3D &pos, QQuaternion &rot, QVector3D &scale)
-{
-    pos = m.column(3).toVector3D();
-    QVector3D c0 = m.column(0).toVector3D();
-    QVector3D c1 = m.column(1).toVector3D();
-    QVector3D c2 = m.column(2).toVector3D();
-    float s0 = c0.length(), s1 = c1.length(), s2 = c2.length();
-    // A negative determinant means the basis is mirrored; a quaternion cannot
-    // express that, so fold the flip into the X scale (the convention assimp and
-    // glTF importers use) rather than producing a silently wrong rotation.
-    if (QVector3D::dotProduct(QVector3D::crossProduct(c0, c1), c2) < 0.0f) { s0 = -s0; c0 = -c0; }
-    const QVector3D n0 = s0 != 0.0f ? c0 / std::fabs(s0) : QVector3D(1, 0, 0);
-    const QVector3D n1 = s1 != 0.0f ? c1 / s1 : QVector3D(0, 1, 0);
-    const QVector3D n2 = s2 != 0.0f ? c2 / s2 : QVector3D(0, 0, 1);
-    scale = QVector3D(s0, s1, s2);
-    QMatrix3x3 basis;
-    basis(0,0)=n0.x(); basis(1,0)=n0.y(); basis(2,0)=n0.z();
-    basis(0,1)=n1.x(); basis(1,1)=n1.y(); basis(2,1)=n1.z();
-    basis(0,2)=n2.x(); basis(1,2)=n2.y(); basis(2,2)=n2.z();
-    rot = QQuaternion::fromRotationMatrix(basis).normalized();
-    return std::max({ std::fabs(QVector3D::dotProduct(n0, n1)),
-                      std::fabs(QVector3D::dotProduct(n0, n2)),
-                      std::fabs(QVector3D::dotProduct(n1, n2)) });
-}
+/// The tree's ONE TRS decomposition lives in irisgl/core/math/trs.h now (the
+/// clip extractor needs the identical function, and two copies of a bone-frame
+/// decomposition that must agree bit-for-bit is how a rig comes apart). It
+/// still returns the worst |cos| between the normalized basis axes so the
+/// caller can warn about shear, which a pos/quat/scale bone cannot represent.
+using iris::decomposeTRS;
 
 /// FNV-1a over whatever is fed in — the structure hash behind SkeletonDesc::id.
 struct StructureHash {

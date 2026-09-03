@@ -107,6 +107,7 @@ set(SRCS
     document/animation/propertyanim.cpp
     document/scenegraph/lightnode.cpp
     document/animation/skeletalanimation.cpp
+    document/animation/clipextractor.cpp
     document/assets/skeleton.cpp
     document/scenegraph/scene.cpp
     document/scenegraph/scenenode.cpp
@@ -167,6 +168,8 @@ set (HEADERS
     document/animation/animableproperty.h
     document/assets/skeleton.h
     document/animation/skeletalanimation.h
+    document/animation/clipextractor.h
+    core/math/trs.h
     document/scenegraph/scene.h
     document/scenegraph/scenenode.h
     core/properties/property.h

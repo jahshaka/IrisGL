@@ -31,6 +31,7 @@ For more information see the LICENSE file
 #include "document/assets/vertexlayout.h"
 #include "core/geometry/trimesh.h"
 #include "document/assets/skeleton.h"
+#include "core/math/trs.h"
 #include "core/geometry/boundingsphere.h"
 #include "core/geometry/aabb.h"
 
@@ -366,6 +367,32 @@ SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)
     };
 
     evalChildren(scene->mRootNode, BonePtr());
+
+    // THE BIND LOCAL of every bone (ANIMATION_ENGINE_MIGRATION_SPEC §1.5 F1).
+    //
+    // `Bone::bindingPos/bindingRot/bindingScale` were never written on the live
+    // import path — the only writers were in irisgl/import/modelloader.cpp,
+    // which the editor's route does not go through. Two consumers read them and
+    // both got the default-constructed values: `Skeleton::applyAnimation(anim,
+    // time)` (dead on the live path), and the glTF EXPORTER, which writes them
+    // as every joint's TRS — so every rig we have ever exported to the web came
+    // out structurally right and bind-posed WRONG: translation (0,0,0),
+    // identity rotation, and a zero scale saved only by a guard in the writer.
+    //
+    // The correct value is the bone's transform local to its PARENT BONE, which
+    // is exactly what SceneMirror::toSkeletonDesc derives for the engine:
+    // FK over these reproduces meshSpacePoseMatrix, whose inverse is assimp's
+    // offset matrix. One quantity, three consumers, computed once here.
+    for (const auto &bone : skel->bones) {
+        const QMatrix4x4 bindLocal = !bone->parentBone.isNull()
+            ? bone->parentBone->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
+            : bone->meshSpacePoseMatrix;
+        decomposeTRS(bindLocal, bone->bindingPos, bone->bindingRot, bone->bindingScale);
+        bone->localMatrix = bindLocal;
+        bone->pos = bone->bindingPos;
+        bone->rot = bone->bindingRot;
+        bone->scale = bone->bindingScale;
+    }
 
     return skel;
 }
