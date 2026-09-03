@@ -46,11 +46,13 @@ public:
     /// radiance L is sh[0..2] = L and the rest zero.
     /// This is the only ambient path the backend has: setAmbient() converts.
     virtual void        setAmbientSh(const float sh[27]) = 0;
-    /// Linear distance fog on lit (PBR) surfaces, matching the legacy renderer:
-    /// mix(surface, colour, clamp((eyeDistance - start) / (end - start), 0, 1)).
-    /// Unlit overlays (gizmos, wires, billboards) and the sky are never fogged.
-    /// Off by default; cheap to call every frame (no shader recompilation).
-    virtual void        setFog(bool enabled, const Colour &colour, float start, float end) = 0;
+    /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
+    /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
+    /// the sky are never fogged. Off by default, and OFF IS EXACT: a disabled
+    /// FogDesc leaves the scene rendering the very same pixels it did before fog
+    /// was ever mentioned. Cheap to call every frame while enabled; the enabled
+    /// EDGE costs a shader rebuild (fog is a shader variant, not a uniform).
+    virtual void        setFog(const FogDesc &) = 0;
     /// Textured sky behind everything: an equirectangular (lat-long) image.
     /// SkyMode::NoSky removes it (the View's background shows). Cubemap skies go
     /// through setSkyCubemap() — this call rejects SkyMode::Cubemap.

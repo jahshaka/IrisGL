@@ -134,11 +134,36 @@ public:
 	QColor gradientBot;
 	float gradientOffset;
 
-    // fog properties
+    // Fog properties. The model is EXPONENTIAL (jahshaka::engine::FogDesc):
+    // transmittance = 2^(-distance * fogDensity), times a second, height-varying
+    // layer of the same colour. fogStart/fogEnd are the retired LINEAR pair, kept
+    // so old scenes keep loading and round-tripping: together they still derive
+    // the density when a scene predates fogDensity, and fogStart has no meaning
+    // of its own any more (the World panel greys it out).
     QColor fogColor;
     float fogStart;
     float fogEnd;
     bool fogEnabled;
+    float fogDensity;          // per world unit, exp2
+    float fogHeightDensity;    // 0 = no height layer
+    float fogHeightFalloff;    // per world unit; larger = thins out faster with altitude
+    float fogHeightLevel;      // world Y at which fogHeightDensity applies
+    float fogBreakMinBrightness;   // luminance where bright pixels start resisting the fog
+    float fogBreakFalloff;         // how fast they do; 0 = pure exponential fog
+
+    /// The exponential density an old LINEAR start/end pair maps to: the two
+    /// curves are matched where the eye reads fog, at the HALF-fogged distance.
+    /// Linear fog is 50% at (start + end) / 2; exponential fog is 50% at 1/density.
+    ///
+    /// Matching the far end instead (density = 4.32/end, i.e. 95% fogged exactly
+    /// where the linear fog became total) was tried first and rejected on the
+    /// shipped samples: it washes their SUBJECTS — 55% of the Physics red pipe,
+    /// 24% of the teapot's brightness — because exponential fog, unlike linear,
+    /// starts at the camera. This mapping leaves the subjects where they were and
+    /// still fades the far ground away.
+    static float fogDensityFromLinear(float start, float end) {
+        return 2.0f / qMax(start + end, 0.001f);
+    }
 
     // global illumination (world panel; rendered by the engine viewport only).
     // giBounds min == max means "automatic" (scene bounds + margin).

@@ -380,6 +380,11 @@ private:
     jahshaka::engine::GiParams mLastGi;
     bool mGiPushed = false;
     QMatrix4x4 mGiLightWorld;
+    // Fog: last pushed state. Enabling/disabling fog creates or destroys the
+    // scene's atmosphere and changes the shader variant, so this one is pushed on
+    // change only, not every frame.
+    jahshaka::engine::FogDesc mLastFog;
+    bool mFogPushed = false;
 };
 
 #endif // SCENEMIRROR_H

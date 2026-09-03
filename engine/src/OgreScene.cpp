@@ -288,6 +288,10 @@ void OgreScene::destroy() {
     if (!mSceneMgr) return;
     JAH_TRY {
         teardownGi();   // VPL lights die while the SceneManager is still alive
+        // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
+        // has to go while that is still alive (teardown law: components, then the
+        // manager).
+        destroyAtmosphere();
         destroySky();   // also unbinds + destroys the reflection cubemap
         for (auto &kv : mNodes) releaseNode(kv.second);
         mNodes.clear();

@@ -302,6 +302,14 @@ void OgreEngine::ensureHlms() {
     {
         Ogre::ArchiveVec libs;
         for (const auto &p : libPaths) libs.push_back(am.load(mMediaDir + p, "FileSystem", true));
+        // Jahshaka's own pieces (fog colour + height fog, base-map UV tiling) go in
+        // as a LIBRARY folder rather than as per-datablock custom pieces: one
+        // _piece_vs_piece_ps file then defines the pass-buffer members for BOTH
+        // shader stages, which is the only way the vertex and pixel shader are
+        // guaranteed to agree on the layout of the buffer they both read. It must
+        // be LAST — the fog piece redefines a piece of Hlms/Pbs/Any/Atmosphere,
+        // and a redefinition only works after the original has been collected.
+        libs.push_back(am.load(mMediaDir + "Hlms/Jahshaka", "FileSystem", true));
         mRoot->getHlmsManager()->registerHlms(
             OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
@@ -314,8 +322,10 @@ void OgreEngine::ensureHlms() {
     // GGX-prefiltered sky reflection cubemap instead.
     static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
         ->setAmbientLightMode(Ogre::HlmsPbs::AmbientSh);
-    // Fog: append the per-scene fog constants to every PBS pass buffer. Unlit
-    // gets no listener — gizmos, wires and billboards stay unfogged.
+    // Fog: append the per-scene fog colour + height parameters to every PBS pass
+    // buffer (the exponential distance term itself comes from the scene's
+    // AtmosphereNpr — OgreFog.cpp). Unlit gets no listener: gizmos, wires and
+    // billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // Shader-generation debugging: JAHSHAKA_HLMS_DEBUG_DIR=/some/dir/ dumps every
     // generated shader (and its properties) there. Diagnostic only.
@@ -348,7 +358,9 @@ void OgreEngine::registerCommonMaterials() {
                                "Compute/Tools", "Compute/Tools/Any", "Compute/Tools/GLSL",
                                "Compute/Tools/HLSL", "Compute/Tools/Metal",
                                "Compute/Algorithms/IBL",
-                               // Jahshaka's own pieces (fog) + the PCC probe compositor.
+                               // The PCC probe compositor (the fog/UV pieces in this
+                               // folder reach HlmsPbs as a library path above, not
+                               // through the resource system).
                                "Hlms/Jahshaka" };
         for (const char *d : dirs) rgm.addResourceLocation(mMediaDir + d, "FileSystem", group, false);
         rgm.initialiseAllResourceGroups(true);

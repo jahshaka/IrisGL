@@ -67,6 +67,9 @@
 #include <Vct/OgreVctLighting.h>
 #include <Cubemaps/OgreParallaxCorrectedCubemapAuto.h>
 #include <Cubemaps/OgrePccPerPixelGridPlacement.h>
+// Fog rides Ogre's Atmosphere component: we take its exponential fog + brightness
+// breakthrough and leave its sky and its sun/ambient coupling alone (OgreFog.cpp).
+#include <Atmosphere/OgreAtmosphereNpr.h>
 
 // X11 is the only on-screen window path today (Ogre Vulkan/XCB). Other
 // platforms build headless-only until they grow a native window backend
@@ -177,16 +180,23 @@ std::string sceneNodeDefName(const std::string &workspaceDef);
 }   // namespace chain
 
 // ---------------------------------------------------------------------------
-// Linear distance fog (media/Hlms/Jahshaka/JahFog_piece_ps.any, attached to every
-// lit PBS datablock). Parameters are per-scene, keyed by SceneManager: the listener
-// is global to HlmsPbs, but preparePassBuffer receives the SceneManager of the pass
-// being built. The two float4s are ALWAYS appended — fog off writes enabled=0 — so
-// the pass-buffer layout is constant and toggling fog is a uniform change, never a
-// shader recompile or Hlms cache event.
-struct FogParams {
+// Fog. The DISTANCE term is Ogre's: an AtmosphereNpr registered on the scene's
+// SceneManager (OgreScene::mAtmosphere) sets hlms_fog and binds its own const
+// buffer, and the stock HlmsPbs pixel shader does the exponential mix. What the
+// component cannot give us is an AUTHORED colour (it computes a procedural sky
+// one) or height fog, so those ride this listener's pass-buffer extension, read
+// by media/Hlms/Jahshaka/JahFog_piece_vs_piece_ps.any in BOTH shader stages.
+//
+// Parameters are per-scene, keyed by SceneManager: the listener is global to
+// HlmsPbs, but preparePassBuffer receives the SceneManager of the pass being
+// built. The two float4s are ALWAYS appended, fog on or off, so the pass-buffer
+// layout never changes size; the shader members simply do not exist when fog is
+// off (no hlms_fog, no piece).
+struct FogState {
     float r = 0.0f, g = 0.0f, b = 0.0f;
-    float start = 0.0f, end = 1.0f;
-    bool  enabled = false;
+    float heightDensity = 0.0f;     ///< 0 = no height layer (shader skips the branch)
+    float heightFalloff = 0.1f;
+    float heightLevel   = 0.0f;
 };
 
 class FogHlmsListener final : public Ogre::HlmsListener {
@@ -198,12 +208,12 @@ public:
 
     /// The per-scene fog table. OgreScene::setFog registers, the scene teardown
     /// unregisters, preparePassBuffer looks up.
-    static void      registerScene(const Ogre::SceneManager *sm, const FogParams &p);
-    static void      unregisterScene(const Ogre::SceneManager *sm);
-    static FogParams lookup(const Ogre::SceneManager *sm);
+    static void     registerScene(const Ogre::SceneManager *sm, const FogState &p);
+    static void     unregisterScene(const Ogre::SceneManager *sm);
+    static FogState lookup(const Ogre::SceneManager *sm);
 
 private:
-    static std::map<const Ogre::SceneManager *, FogParams> sFogParams;   // render thread only
+    static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
 };
 extern FogHlmsListener gFogListener;
 
@@ -290,7 +300,16 @@ public:
     void setAmbient(const Colour &upper, const Colour &lower) override;
     void setAmbientSh(const float sh[27]) override;
 
-    void setFog(bool enabled, const Colour &colour, float start, float end) override;
+    void setFog(const FogDesc &desc) override;
+    /// Creates the scene's AtmosphereNpr (fog only — the sky quad is created and
+    /// immediately hidden, the sun/ambient link is never made) or destroys it.
+    /// Destroying is what makes "fog off" bit-exact: no atmosphere means no
+    /// hlms_fog property, which means the fog code is not in the shader at all.
+    /// destroyAtmosphere() MUST run before the SceneManager dies (the component
+    /// destroys its Rectangle2D through it).
+    void ensureAtmosphere();
+    void destroyAtmosphere();
+    Ogre::AtmosphereNpr *mAtmosphere = nullptr;
 
     /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far
     /// plane whose camera-direction shader samples an equirect or cube texture.

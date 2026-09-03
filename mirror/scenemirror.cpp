@@ -1604,14 +1604,36 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // achieved count may be clamped lower by the driver, so comparing against
     // view->sampleCount() here would rebuild the target every frame).
     view->setSampleCount(unsigned(qBound(1, mSource->antiAliasing, 16)));
-    // Fog panel: linear distance fog on lit surfaces (engine keeps unlit overlays
-    // and the sky unfogged, like the legacy renderer). Cheap per-frame push.
-    const QColor f = mSource->fogColor;
-    mTarget->setFog(mSource->fogEnabled, Colour(f.redF(), f.greenF(), f.blueF(), 1.0f),
-                    mSource->fogStart, mSource->fogEnd);
-    // Global Illumination panel. setGlobalIllumination re-traces, so unlike fog it
-    // is NOT free: push only when the document state changed (the per-frame compare
-    // is the debounce), and re-trace when the driving light itself moved — Instant
+    // Fog panel: exponential distance fog (+ optional height layer) on lit
+    // surfaces; the engine keeps unlit overlays and the sky unfogged, like the
+    // legacy renderer. Cheap per-frame push WHILE THE STATE HOLDS — but the
+    // enabled edge builds/destroys the scene's atmosphere and swaps shader
+    // variants, so push only on change.
+    {
+        FogDesc fog;
+        fog.enabled = mSource->fogEnabled;
+        const QColor f = mSource->fogColor;
+        fog.colour = Colour(f.redF(), f.greenF(), f.blueF(), 1.0f);
+        fog.density = mSource->fogDensity;
+        fog.heightDensity = mSource->fogHeightDensity;
+        fog.heightFalloff = mSource->fogHeightFalloff;
+        fog.heightLevel = mSource->fogHeightLevel;
+        fog.breakMinBrightness = mSource->fogBreakMinBrightness;
+        fog.breakFalloff = mSource->fogBreakFalloff;
+        const bool changed =
+            !mFogPushed || mLastFog.enabled != fog.enabled ||
+            mLastFog.colour.r != fog.colour.r || mLastFog.colour.g != fog.colour.g ||
+            mLastFog.colour.b != fog.colour.b || mLastFog.density != fog.density ||
+            mLastFog.heightDensity != fog.heightDensity ||
+            mLastFog.heightFalloff != fog.heightFalloff ||
+            mLastFog.heightLevel != fog.heightLevel ||
+            mLastFog.breakMinBrightness != fog.breakMinBrightness ||
+            mLastFog.breakFalloff != fog.breakFalloff;
+        if (changed) { mTarget->setFog(fog); mLastFog = fog; mFogPushed = true; }
+    }
+    // Global Illumination panel. setGlobalIllumination re-traces, so like fog it is
+    // pushed on CHANGE only (the per-frame compare is the debounce) — and it also
+    // re-traces when the driving light itself moved — Instant
     // Radiosity solves in milliseconds at editor quality, per GI_SPEC.md.
     {
         GiParams gi;
