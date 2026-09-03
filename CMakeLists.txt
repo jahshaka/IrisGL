@@ -71,6 +71,28 @@ else()
     option(ASSIMP_BUILD_ZLIB                    "" ON)
 endif()
 
+# Vendored trees are never edited in place: our changes to assimp live as patch
+# files in thirdparty/assimp-patches/ and are applied HERE, before the tree is
+# added, so a fresh clone cannot silently build unpatched sources.  Idempotent;
+# a patch that no longer applies is a hard error.  See that directory's
+# README.md (and irisgl/cmake/ApplyVendorPatches.cmake) for the whole law.
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/assimp
+            -DPATCHES=${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/assimp-patches
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake
+    RESULT_VARIABLE _assimp_patch_result
+    OUTPUT_VARIABLE _assimp_patch_output
+    ERROR_VARIABLE  _assimp_patch_output)
+string(REGEX REPLACE "(^|\n)-- " "\\1" _assimp_patch_output "${_assimp_patch_output}")
+string(STRIP "${_assimp_patch_output}" _assimp_patch_output)
+if(_assimp_patch_output)
+    message(STATUS "${_assimp_patch_output}")
+endif()
+if(NOT _assimp_patch_result EQUAL 0)
+    message(FATAL_ERROR "assimp patches could not be applied — see above")
+endif()
+
 add_subdirectory_with_folder("Dependencies/Assimp" thirdparty/assimp)
 
 option(BUILD_BULLET2_DEMOS                      "" OFF)
