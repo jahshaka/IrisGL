@@ -1542,6 +1542,17 @@ void SceneMirror::syncClips()
     }
 }
 
+void SceneMirror::invalidateEnvironment()
+{
+    // Only the "already pushed" latches: the LAST-value members stay, so a
+    // re-push that lands on the same values is still cheap where the engine
+    // setter is idempotent, and correct where it is not.
+    mAmbientPushed = false;
+    mLastAmbientWasSky = false;
+    mFogPushed = false;
+    mGiPushed = false;
+}
+
 void SceneMirror::applyEnvironment(View *view, Engine *engine)
 {
     if (!mSource || !view) return;
