@@ -19,9 +19,62 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreDecals.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSkeleton.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
+
+# --- Shader-cache fingerprint terms (SHADER_CACHE_SPEC.md §4.2) --------------
+# Two things no hash inside Ogre can see, baked in at configure time:
+#
+#  * JAHSHAKA_OGRE_PATCH_SERIES — a hash of irisgl/thirdparty/ogre-patches/*.patch
+#    plus the submodule's pinned SHA. Four of our patches change SHADER media and
+#    the rest change engine C++; a re-run of build-ogre.sh with a new patch
+#    produces a different .so and identical Ogre-side hashes, so without this term
+#    a stale cache would look perfectly valid to Ogre and load.
+#  * JAHSHAKA_ENGINE_BUILD_ID — a hash of the engine's OWN sources. This TU set
+#    decides which Hlms properties are set, which datablocks exist and which
+#    listener extends the pass buffer. Editing OgreEngine.cpp changes what
+#    shaders mean without changing one byte of any template.
+#
+# Configure-time, not build-time: both are inputs to a cache whose only failure
+# mode is "used a stale entry", and CMake re-configures whenever these files
+# change (the glob is CONFIGURE_DEPENDS and the source list is explicit).
+set(_ogre_patch_dir "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ogre-patches")
+set(_fp_blob "")
+file(GLOB _ogre_patches CONFIGURE_DEPENDS "${_ogre_patch_dir}/*.patch")
+foreach(_p IN LISTS _ogre_patches)
+    file(SHA256 "${_p}" _h)
+    get_filename_component(_n "${_p}" NAME)
+    string(APPEND _fp_blob "${_n}:${_h};")
+endforeach()
+# The pin itself: a patch series applied to a different upstream commit is a
+# different engine. `git ls-tree` reads the gitlink without needing the
+# submodule to be checked out at all.
+execute_process(COMMAND git ls-tree HEAD thirdparty/ogre-next
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+                OUTPUT_VARIABLE _ogre_pin ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+string(APPEND _fp_blob "pin:${_ogre_pin};")
+string(SHA256 _ogre_patch_series "${_fp_blob}")
+
+set(_engine_blob "")
+foreach(_s IN LISTS JAHSHAKA_ENGINE_SOURCES)
+    file(SHA256 "${_s}" _h)
+    string(APPEND _engine_blob "${_h};")
+endforeach()
+foreach(_s include/jahshaka/engine/Engine.h include/jahshaka/engine/Types.h)
+    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${_s}" _h)
+    string(APPEND _engine_blob "${_h};")
+endforeach()
+string(SHA256 _engine_build_id "${_engine_blob}")
+# Exported so tests/engine's sanitised copy of the same sources compiles with
+# the same fingerprint terms (it builds JAHSHAKA_ENGINE_SOURCES directly).
+set(JAHSHAKA_ENGINE_BUILD_ID "${_engine_build_id}" PARENT_SCOPE)
+set(JAHSHAKA_OGRE_PATCH_SERIES "${_ogre_patch_series}" PARENT_SCOPE)
+
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
+target_compile_definitions(JahshakaEngine PRIVATE
+    JAHSHAKA_ENGINE_BUILD_ID="${_engine_build_id}"
+    JAHSHAKA_OGRE_PATCH_SERIES="${_ogre_patch_series}")
 target_include_directories(JahshakaEngine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

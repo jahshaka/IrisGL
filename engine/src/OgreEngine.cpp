@@ -28,11 +28,21 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     Ogre::Mesh::msOptimizeForShadowMapping = cfg.optimizeShadowMeshes;
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
+    // The shader cache's fingerprint hashes the staged Hlms tree, so it is
+    // configured as soon as the media directory is known — before Root, long
+    // before anything could compile. The LOAD waits for ensureHlms().
+    mShaderCache.configure(cfg.shaderCacheDir, cfg.appBuildId, mMediaDir);
     try {
         mAbiCookie = Ogre::generateAbiCookie();
         mRoot = new Ogre::Root(&mAbiCookie, "", "",
                                cfg.logFile.empty() ? "jahshaka-ogre.log" : cfg.logFile,
                                "Jahshaka");
+        // Shader accounting starts here, with the log: Ogre has no compile
+        // callback, but it names every compile and every microcode hit in two
+        // fixed sentences, and the counters are what the startup progress
+        // display and the cache tests both read. Runs whether or not the cache
+        // itself is enabled.
+        mShaderCache.attachCounters();
         const char *plugin = (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
                                                               : "RenderSystem_GL3Plus";
         mRoot->loadPlugin(cfg.pluginDir + "/" + plugin, false, nullptr);
@@ -367,7 +377,30 @@ unsigned OgreEngine::shadowResolution() const { return mShadowResolution; }
 void OgreEngine::setShadowMeshOptimization(bool on) { Ogre::Mesh::msOptimizeForShadowMapping = on; }
 bool OgreEngine::shadowMeshOptimization() const { return Ogre::Mesh::msOptimizeForShadowMapping; }
 
+ShaderCacheStats OgreEngine::shaderCacheStats() const {
+    return mShaderCache.stats(mRoot);
+}
+
+bool OgreEngine::saveShaderCache() {
+    if (!mRoot) return false;
+    JAH_TRY { return mShaderCache.save(mRoot); } JAH_CATCH(mLastError, false);
+}
+
+bool OgreEngine::clearShaderCache() {
+    JAH_TRY { return mShaderCache.clear(); } JAH_CATCH(mLastError, false);
+}
+
+void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
+                                     unsigned &expected) const {
+    mShaderCache.progress(compiled, fromCache, expected);
+}
+
 OgreEngine::~OgreEngine() {
+    // Save the shader cache FIRST, while every Ogre singleton the three layers
+    // read is still alive and before a single view or scene has been torn down.
+    // This is the primary save point (SHADER_CACHE_SPEC §4.4): a clean quit is
+    // the only moment we are certain nothing is compiling.
+    if (mRoot) { try { mShaderCache.save(mRoot); } catch (...) {} }
     // The SSAO rotation-noise texture is ours and must not outlive Root.
     // Its own try/catch, NOT JAH_TRY: that macro's handler ends in `return`,
     // which inside a destructor abandons the rest of the teardown — views,
@@ -395,6 +428,8 @@ OgreEngine::~OgreEngine() {
     // THIS Root; a second Engine in the same process (test_engine_recreate)
     // would otherwise inherit dangling masters and slice textures.
     detail::resetDecalAtlases();
+    // The counter listener is registered on Ogre's default log, which Root owns.
+    mShaderCache.detachCounters();
     delete mRoot;
     mRoot = nullptr;
     gLiveEngine = nullptr;
@@ -457,6 +492,14 @@ void OgreEngine::ensureHlms() {
     // generated shader (and its properties) there. Diagnostic only.
     if (const char *dbg = std::getenv("JAHSHAKA_HLMS_DEBUG_DIR"))
         mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setDebugOutputPath(true, true, dbg);
+    // THE CACHE LOAD GOES HERE and nowhere else (SHADER_CACHE_SPEC §4.3 rule 5):
+    // after BOTH registerHlms calls — HlmsDiskCache::applyTo needs the Hlms
+    // instances to exist — and before registerCommonMaterials(), which parses
+    // the low-level scripts and is the first thing that can trigger a compile.
+    // The order INSIDE load() (pipeline blob, then setSaveMicrocodesToCache +
+    // microcode, then the Hlms caches) is upstream's, not ours: see
+    // OgreHlmsDiskCache.h:74-77 and Samples/2.0/Common/src/GraphicsSystem.cpp:626.
+    mShaderCache.load(mRoot);
     mHlmsRegistered = true;
     applyShadowFilter();   // replaces Ogre's PCF_3x3 default with ours (Soft = 4x4)
     registerCommonMaterials();

@@ -567,6 +567,57 @@ struct EngineConfig {
     bool optimizeShadowMeshes = true;
     /// Host's display connection; required only for on-screen Views (see above).
     NativeDisplayHandle display = 0;
+
+    // ---- Persistent shader cache (SHADER_CACHE_SPEC.md) ----
+    /// Directory the backend may persist compiled-shader artifacts in. EMPTY =
+    /// the cache is off: nothing is read, nothing is written, and every launch
+    /// recompiles from scratch (the behaviour before the cache existed). The
+    /// directory is DERIVED DATA — deleting it costs one slow launch and never
+    /// anything a user could miss.
+    std::string shaderCacheDir;
+    /// The HOST's contribution to the cache fingerprint: its own build identity
+    /// (app version + commit, and anything else that changes which Hlms
+    /// properties the host asks for). Any change to this string invalidates the
+    /// whole cache directory, which is the point — the application's C++ decides
+    /// what shaders exist, and no hash inside the engine can see that.
+    std::string appBuildId;
+};
+
+/// What the persistent shader cache did this run, and what is on disk
+/// (SHADER_CACHE_SPEC.md §4.5). `app.shaderCache()` is this struct.
+struct ShaderCacheStats {
+    /// False when EngineConfig::shaderCacheDir was empty — every other field is
+    /// then either zero or still meaningful for the CURRENT RUN (compiled/loaded
+    /// count shaders regardless of whether anything is persisted).
+    bool               enabled = false;
+    /// The resolved directory, whether or not it exists yet.
+    std::string        dir;
+    /// The composite key (§4.2) as printable hex. A cache written under a
+    /// different fingerprint is deleted, never read.
+    std::string        fingerprint;
+    unsigned long long sizeBytes = 0;
+    unsigned           files = 0;
+
+    // ---- what was loaded, per layer ----
+    bool     pipelineCacheLoaded = false;   ///< VkPipelineCache blob accepted by the driver
+    bool     microcodeLoaded = false;       ///< SPIR-V microcode map read back
+    unsigned microcodeEntries = 0;          ///< entries in the live microcode map
+    unsigned hlmsCachesLoaded = 0;          ///< Hlms disk caches applied (0..2: PBS, Unlit)
+
+    // ---- shader accounting for THIS process ----
+    /// Shaders the compiler actually built this run (GLSL -> SPIR-V).
+    unsigned  compiledThisRun = 0;
+    /// Shaders served straight out of the microcode cache — glslang never ran.
+    /// Counts IN-PROCESS hits too (two shaders generated from byte-identical
+    /// source share one microcode entry; the SMAA materials do it three times
+    /// every launch), so a genuinely cold run reports a small non-zero value.
+    /// "Did the disk cache work" is answered by microcodeLoaded, not by this.
+    unsigned  loadedThisRun = 0;
+    /// How many shaders the last saved run needed in total. 0 = unknown (no
+    /// cache has ever been written). The startup progress counter's denominator.
+    unsigned  expectedShaders = 0;
+    /// Wall-clock of the last successful save, ms since the Unix epoch; 0 = never.
+    long long lastSavedUnixMs = 0;
 };
 
 /// The post-processing chain for a View (POST_CHAIN_SPEC.md).

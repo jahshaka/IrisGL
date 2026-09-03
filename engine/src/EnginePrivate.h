@@ -256,6 +256,111 @@ void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
 }   // namespace chain
 
 // ---------------------------------------------------------------------------
+// The persistent shader cache (SHADER_CACHE_SPEC.md; impl in OgreShaderCache.cpp).
+//
+// Three layers Ogre already implements, behind ONE container we fingerprint and
+// checksum ourselves:
+//
+//   pipeline.cache    RenderSystem::load/savePipelineCache  — the VkPipelineCache
+//                     blob (driver ISA). Ogre validates it thoroughly on its own
+//                     (vendor/device/driverVersion/pipelineCacheUUID + a payload
+//                     hash), so this layer is the one we could almost trust.
+//   microcode.cache   GpuProgramManager::load/saveMicrocodeCache — SPIR-V, keyed
+//                     by a hash of the GENERATED shader source, so a stale hit is
+//                     structurally impossible. But the file format has NO magic,
+//                     NO version, NO checksum and NO bounds checking
+//                     (OgreGpuProgramManager.cpp:368-398 reads a count and trusts
+//                     it), and its bytes go straight to vkCreateShaderModule.
+//                     Everything below about checksums exists for this sentence.
+//   hlms.<n>.bin      HlmsDiskCache::saveTo/loadFrom — the Hlms-preprocessed
+//                     shader source per permutation. Ogre version-stamps and
+//                     template-hashes it correctly. NOTE it does NOT replay PSOs
+//                     at our pin (the replay lines are commented out upstream,
+//                     OgreHlmsDiskCache.cpp:424-455): this layer removes template
+//                     parsing, not pipeline creation.
+//
+// THE RULES, in order of how much they cost to get wrong:
+//   1. Never load stale. Any doubt -> delete the directory and start cold. A
+//      cold start costs seconds; a bad SPIR-V blob costs a GPU hang.
+//   2. WE checksum every file, because layer 2 does not.
+//   3. Every write is atomic: *.tmp in the same directory, flushed, renamed.
+//   4. One writer. A second process gets a READ-ONLY cache, never a failed run.
+//   5. Load order is upstream's, not ours: pipeline cache -> setSaveMicrocodes
+//      ToCache(true) then microcode -> Hlms disk caches. Placed inside
+//      ensureHlms() after both registerHlms calls and before any shader can
+//      compile, mirroring Samples/2.0/Common/src/GraphicsSystem.cpp:626-692.
+//   6. Size cap with a generation reset — the microcode map never evicts.
+//   7. A load failure is never fatal. Log, clear, continue cold.
+class ShaderCache {
+public:
+    /// Resolves the directory and computes the fingerprint. No I/O beyond
+    /// hashing the staged Hlms media tree. An empty `dir` leaves the cache off
+    /// (but the compile COUNTERS still run — the startup progress display and
+    /// the tests need them whether or not anything is persisted).
+    void configure(const std::string &dir, const std::string &appBuildId,
+                   const std::string &mediaDir);
+
+    /// Starts counting compiles. Call as soon as the log exists (i.e. right
+    /// after Root), long before any shader is built.
+    void attachCounters();
+    /// Removes the log listener. MUST run before Root is deleted.
+    void detachCounters();
+
+    /// The whole load, in upstream's mandated order. Call from ensureHlms()
+    /// after registerHlms and before anything can compile a shader.
+    void load(Ogre::Root *root);
+    /// Writes every dirty layer. False = the write failed and the previous
+    /// cache (if any) is untouched.
+    bool save(Ogre::Root *root);
+    /// True when something has been compiled since the last save — the
+    /// burst-settle timer's condition, and what makes save() a cheap no-op.
+    bool dirty(Ogre::Root *root) const;
+    /// Deletes every file we wrote. The running process is unaffected.
+    bool clear();
+
+    ShaderCacheStats stats(Ogre::Root *root) const;
+    void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
+
+    /// Both out of line: Counter is only defined in OgreShaderCache.cpp, and a
+    /// unique_ptr member to an incomplete type needs its owner's special
+    /// members compiled where the type IS complete.
+    ShaderCache();
+    ~ShaderCache();
+
+private:
+    struct Entry { std::string name; unsigned long long bytes; std::string hash; };
+
+    bool  readManifest(std::vector<Entry> &filesOut) const;
+    bool  writeManifest(const std::vector<Entry> &files) const;
+    /// Reads `name`, checks it against the manifest entry, and returns the bytes.
+    /// Empty on any mismatch — the caller then wipes.
+    bool  readVerified(const Entry &e, std::vector<char> &out) const;
+    void  wipe() const;
+    bool  acquireLock();
+    void  releaseLock();
+    std::string path(const std::string &name) const;
+
+    std::string mDir, mFingerprint, mMediaDir, mAppBuildId;
+    bool        mEnabled = false;
+    bool        mWriter = false;      ///< we hold the single-writer lock
+    int         mLockFd = -1;
+    unsigned    mExpectedShaders = 0; ///< from the manifest of the last saved run
+    long long   mLastSavedUnixMs = 0;
+    bool        mPipelineLoaded = false, mMicrocodeLoaded = false;
+    unsigned    mHlmsLoaded = 0;
+    /// Microcode-map size right after the load — the baseline compiledThisRun
+    /// would use if we had no log listener. Kept for the dirty() shortcut.
+    size_t      mMicrocodeAtLoad = 0;
+    /// compiled+cached at the last successful write — the "nothing new" test
+    /// that stops a clean quit writing the same bytes twice.
+    unsigned    mSavedAtCompileCount = 0;
+    /// Set by clear(): the next save writes even though nothing new compiled.
+    bool        mForceSave = false;
+    class Counter;
+    std::unique_ptr<Counter> mCounter;
+};
+
+// ---------------------------------------------------------------------------
 // Fog. The DISTANCE term is Ogre's: an AtmosphereNpr registered on the scene's
 // SceneManager (OgreScene::mAtmosphere) sets hlms_fog and binds its own const
 // buffer, and the stock HlmsPbs pixel shader does the exponential mix. What the
@@ -1245,6 +1350,15 @@ public:
     void setShadowMeshOptimization(bool on) override;
     bool shadowMeshOptimization() const override;
 
+    /// The persistent shader cache (SHADER_CACHE_SPEC.md). Loaded inside the
+    /// first createView() -> ensureHlms(); saved on clean teardown and whenever
+    /// the host says a compile burst has settled.
+    ShaderCacheStats shaderCacheStats() const override;
+    bool saveShaderCache() override;
+    bool clearShaderCache() override;
+    void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
+                             unsigned &expected) const override;
+
     ~OgreEngine() override;
 
 private:
@@ -1289,6 +1403,7 @@ private:
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
+    ShaderCache     mShaderCache;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
     std::vector<std::unique_ptr<OgreView>>  mViews;
 };

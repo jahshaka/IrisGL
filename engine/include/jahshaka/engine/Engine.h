@@ -529,6 +529,35 @@ public:
     virtual void setShadowMeshOptimization(bool on) = 0;
     virtual bool shadowMeshOptimization() const = 0;
 
+    // ---- Persistent shader cache (SHADER_CACHE_SPEC.md) ----
+    // Three layers behind one fingerprinted container: the Vulkan pipeline
+    // cache (driver ISA), the microcode cache (SPIR-V), and the Hlms disk cache
+    // (preprocessed shader source). All of it is DERIVED DATA: on any doubt the
+    // backend deletes the directory and starts cold rather than feed a
+    // half-written blob to a driver.
+    //
+    // The cache is loaded once, inside the first createView() — nothing here
+    // needs calling to make it work. These verbs exist so the application can
+    // SHOW what it did and let a user throw it away.
+
+    /// What is on disk and what happened this run. Cheap enough to call from a
+    /// settings page; it stats a handful of files.
+    virtual ShaderCacheStats shaderCacheStats() const = 0;
+    /// Writes the cache now, if anything new has been compiled since the last
+    /// write. Called on clean shutdown and once a compile burst has settled;
+    /// safe (and a no-op) when the cache is disabled or nothing is dirty.
+    /// False means the write failed — the previous cache, if any, is untouched.
+    virtual bool saveShaderCache() = 0;
+    /// Deletes every cached file. The next launch is cold. Always safe: the
+    /// running process keeps its in-memory shaders.
+    virtual bool clearShaderCache() = 0;
+    /// The startup progress counter's source: shaders compiled so far, shaders
+    /// served from the cache so far, and how many the last saved run needed in
+    /// total (0 = never saved, so no denominator exists yet). Two atomic reads;
+    /// no disk, safe to poll on a timer.
+    virtual void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
+                                     unsigned &expected) const = 0;
+
     /// Reason for the most recent failure; empty if none.
     virtual const std::string &lastError() const = 0;
 };
