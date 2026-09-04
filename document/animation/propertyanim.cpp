@@ -1,3 +1,4 @@
+#include "core/math/vec.h"
 #include "document/animation/propertyanim.h"
 #include "document/animation/keyframeanimation.h"
 
@@ -52,9 +53,9 @@ Vector3DPropertyAnim::~Vector3DPropertyAnim()
     delete keyFrames[2];
 }
 
-QVector3D Vector3DPropertyAnim::getValue(float time)
+iris::Vec3 Vector3DPropertyAnim::getValue(float time)
 {
-    return QVector3D(
+    return iris::Vec3(
                 keyFrames[0]->getValueAt(time),
                 keyFrames[1]->getValueAt(time),
                 keyFrames[2]->getValueAt(time)

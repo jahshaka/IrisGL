@@ -1,3 +1,4 @@
+#include "core/math/vec.h"
 #include "document/assets/shapehelper.h"
 #include "document/assets/linemeshbuilder.h"
 #include <qmath.h>
@@ -10,24 +11,24 @@ MeshPtr ShapeHelper::createWireCube(float size)
     auto halfSize = size / 2;
     LineMeshBuilder builder;
 
-    //builder.addLine(QVector3D(halfSize, halfSize, halfSize), QVector3D(halfSize, halfSize, halfSize));
+    //builder.addLine(iris::Vec3(halfSize, halfSize, halfSize), iris::Vec3(halfSize, halfSize, halfSize));
     // build 4 columns
-    builder.addLine(QVector3D(-halfSize, halfSize, -halfSize), QVector3D(-halfSize, halfSize, halfSize));
-    builder.addLine(QVector3D(-halfSize, -halfSize, -halfSize), QVector3D(-halfSize, -halfSize, halfSize));
-    builder.addLine(QVector3D(halfSize, -halfSize, -halfSize), QVector3D(halfSize, -halfSize, halfSize));
-    builder.addLine(QVector3D(halfSize, halfSize, -halfSize), QVector3D(halfSize, halfSize, halfSize));
+    builder.addLine(iris::Vec3(-halfSize, halfSize, -halfSize), iris::Vec3(-halfSize, halfSize, halfSize));
+    builder.addLine(iris::Vec3(-halfSize, -halfSize, -halfSize), iris::Vec3(-halfSize, -halfSize, halfSize));
+    builder.addLine(iris::Vec3(halfSize, -halfSize, -halfSize), iris::Vec3(halfSize, -halfSize, halfSize));
+    builder.addLine(iris::Vec3(halfSize, halfSize, -halfSize), iris::Vec3(halfSize, halfSize, halfSize));
 
     // top
-    builder.addLine(QVector3D(-halfSize, halfSize, halfSize), QVector3D(-halfSize, -halfSize, halfSize));
-    builder.addLine(QVector3D(-halfSize, -halfSize, halfSize), QVector3D(halfSize, -halfSize, halfSize));
-    builder.addLine(QVector3D(halfSize, -halfSize, halfSize), QVector3D(halfSize, halfSize, halfSize));
-    builder.addLine(QVector3D(halfSize, halfSize, halfSize), QVector3D(-halfSize, halfSize, halfSize));
+    builder.addLine(iris::Vec3(-halfSize, halfSize, halfSize), iris::Vec3(-halfSize, -halfSize, halfSize));
+    builder.addLine(iris::Vec3(-halfSize, -halfSize, halfSize), iris::Vec3(halfSize, -halfSize, halfSize));
+    builder.addLine(iris::Vec3(halfSize, -halfSize, halfSize), iris::Vec3(halfSize, halfSize, halfSize));
+    builder.addLine(iris::Vec3(halfSize, halfSize, halfSize), iris::Vec3(-halfSize, halfSize, halfSize));
 
     // bottom
-    builder.addLine(QVector3D(-halfSize, halfSize, -halfSize), QVector3D(-halfSize, -halfSize, -halfSize));
-    builder.addLine(QVector3D(-halfSize, -halfSize, -halfSize), QVector3D(halfSize, -halfSize, -halfSize));
-    builder.addLine(QVector3D(halfSize, -halfSize, -halfSize), QVector3D(halfSize, halfSize, -halfSize));
-    builder.addLine(QVector3D(halfSize, halfSize, -halfSize), QVector3D(-halfSize, halfSize, -halfSize));
+    builder.addLine(iris::Vec3(-halfSize, halfSize, -halfSize), iris::Vec3(-halfSize, -halfSize, -halfSize));
+    builder.addLine(iris::Vec3(-halfSize, -halfSize, -halfSize), iris::Vec3(halfSize, -halfSize, -halfSize));
+    builder.addLine(iris::Vec3(halfSize, -halfSize, -halfSize), iris::Vec3(halfSize, halfSize, -halfSize));
+    builder.addLine(iris::Vec3(halfSize, halfSize, -halfSize), iris::Vec3(-halfSize, halfSize, -halfSize));
 
     return builder.build();
 }
@@ -44,10 +45,10 @@ MeshPtr ShapeHelper::createWireSphere(float radius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        QVector3D a = QVector3D(qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle)), 0) * radius;
+        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle)), 0) * radius;
 
         angle = (i+1) * arcWidth;
-        QVector3D b = QVector3D(qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle)), 0) * radius;
+        iris::Vec3 b = iris::Vec3(qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle)), 0) * radius;
 
         builder.addLine(a, b);
     }
@@ -56,10 +57,10 @@ MeshPtr ShapeHelper::createWireSphere(float radius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        QVector3D a = QVector3D(qSin(qDegreesToRadians(angle)), 0, qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), 0, qCos(qDegreesToRadians(angle))) * radius;
 
         angle = (i+1) * arcWidth;
-        QVector3D b = QVector3D(qSin(qDegreesToRadians(angle)), 0, qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 b = iris::Vec3(qSin(qDegreesToRadians(angle)), 0, qCos(qDegreesToRadians(angle))) * radius;
 
         builder.addLine(a, b);
     }
@@ -68,10 +69,10 @@ MeshPtr ShapeHelper::createWireSphere(float radius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        QVector3D a = QVector3D(0, qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 a = iris::Vec3(0, qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle))) * radius;
 
         angle = (i+1) * arcWidth;
-        QVector3D b = QVector3D(0, qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 b = iris::Vec3(0, qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle))) * radius;
 
         builder.addLine(a, b);
     }
@@ -90,10 +91,10 @@ MeshPtr ShapeHelper::createWireCone(float baseRadius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        QVector3D a = QVector3D(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
+        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
 
         angle = (i+1) * arcWidth;
-        QVector3D b = QVector3D(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
+        iris::Vec3 b = iris::Vec3(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
 
         builder.addLine(a, b);
     }
@@ -104,9 +105,9 @@ MeshPtr ShapeHelper::createWireCone(float baseRadius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        QVector3D a = QVector3D(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
+        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
 
-        QVector3D b = QVector3D(0, 0, 0);
+        iris::Vec3 b = iris::Vec3(0, 0, 0);
 
         builder.addLine(a, b);
     }
@@ -114,7 +115,7 @@ MeshPtr ShapeHelper::createWireCone(float baseRadius)
     return builder.build();
 }
 
-MeshPtr ShapeHelper::createWireCube(const QVector3D& min, const QVector3D& max)
+MeshPtr ShapeHelper::createWireCube(const iris::Vec3& min, const iris::Vec3& max)
 {
 	LineMeshBuilder builder;
 
@@ -122,22 +123,22 @@ MeshPtr ShapeHelper::createWireCube(const QVector3D& min, const QVector3D& max)
 	auto offset = (max + min) * 0.5f;
 
 	// build 4 columns
-	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), -halfSize.z()));
-	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), -halfSize.z()));
-	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), halfSize.z()));
-	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), halfSize.z()));
+	builder.addLine(offset + iris::Vec3(halfSize.x(), -halfSize.y(), -halfSize.z()), offset + iris::Vec3(halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + iris::Vec3(-halfSize.x(), -halfSize.y(), -halfSize.z()), offset + iris::Vec3(-halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + iris::Vec3(-halfSize.x(), -halfSize.y(), halfSize.z()), offset + iris::Vec3(-halfSize.x(), halfSize.y(), halfSize.z()));
+	builder.addLine(offset + iris::Vec3(halfSize.x(), -halfSize.y(), halfSize.z()), offset + iris::Vec3(halfSize.x(), halfSize.y(), halfSize.z()));
 
 	// top
-	builder.addLine(offset + QVector3D(-halfSize.x(), halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), -halfSize.z()));
-	builder.addLine(offset + QVector3D(-halfSize.x(), halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), -halfSize.z()));
-	builder.addLine(offset + QVector3D(halfSize.x(), halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), halfSize.y(), halfSize.z()));
-	builder.addLine(offset + QVector3D(halfSize.x(), halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), halfSize.y(), halfSize.z()));
+	builder.addLine(offset + iris::Vec3(-halfSize.x(), halfSize.y(), halfSize.z()), offset + iris::Vec3(-halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + iris::Vec3(-halfSize.x(), halfSize.y(), -halfSize.z()), offset + iris::Vec3(halfSize.x(), halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + iris::Vec3(halfSize.x(), halfSize.y(), -halfSize.z()), offset + iris::Vec3(halfSize.x(), halfSize.y(), halfSize.z()));
+	builder.addLine(offset + iris::Vec3(halfSize.x(), halfSize.y(), halfSize.z()), offset + iris::Vec3(-halfSize.x(), halfSize.y(), halfSize.z()));
 
 	// bottom
-	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), -halfSize.y(), -halfSize.z()));
-	builder.addLine(offset + QVector3D(-halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), -halfSize.y(), -halfSize.z()));
-	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), -halfSize.z()), offset + QVector3D(halfSize.x(), -halfSize.y(), halfSize.z()));
-	builder.addLine(offset + QVector3D(halfSize.x(), -halfSize.y(), halfSize.z()), offset + QVector3D(-halfSize.x(), -halfSize.y(), halfSize.z()));
+	builder.addLine(offset + iris::Vec3(-halfSize.x(), -halfSize.y(), halfSize.z()), offset + iris::Vec3(-halfSize.x(), -halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + iris::Vec3(-halfSize.x(), -halfSize.y(), -halfSize.z()), offset + iris::Vec3(halfSize.x(), -halfSize.y(), -halfSize.z()));
+	builder.addLine(offset + iris::Vec3(halfSize.x(), -halfSize.y(), -halfSize.z()), offset + iris::Vec3(halfSize.x(), -halfSize.y(), halfSize.z()));
+	builder.addLine(offset + iris::Vec3(halfSize.x(), -halfSize.y(), halfSize.z()), offset + iris::Vec3(-halfSize.x(), -halfSize.y(), halfSize.z()));
 
 
 	return builder.build();

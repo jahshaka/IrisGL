@@ -1,8 +1,8 @@
 #ifndef CHARACTERCONTROLLER_H
 #define CHARACTERCONTROLLER_H
 
+#include "core/math/mat4.h"
 #include <QString>
-#include <QMatrix4x4>
 
 #include "BulletDynamics/Character/btKinematicCharacterController.h"
 #include "BulletDynamics/Dynamics/btRigidBody.h"
@@ -30,7 +30,7 @@ public:
 	QString getSiblingGuid();
 	void setSiblingGuid(const QString &guid);
 
-	const QMatrix4x4 getTransform();
+	const iris::Mat4 getTransform();
 
 private:
 	btKinematicCharacterController *controller;

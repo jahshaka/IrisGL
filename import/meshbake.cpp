@@ -9,6 +9,9 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "import/meshbake.h"
 
 #include <QCryptographicHash>
@@ -76,32 +79,32 @@ QColor readColor(QDataStream &s)
     return QColor(r, g, b, a);
 }
 
-void writeMatrix(QDataStream &s, const QMatrix4x4 &m)
+void writeMatrix(QDataStream &s, const iris::Mat4 &m)
 {
     const float *d = m.constData();
     for (int i = 0; i < 16; ++i) s << float(d[i]);
 }
 
-QMatrix4x4 readMatrix(QDataStream &s)
+iris::Mat4 readMatrix(QDataStream &s)
 {
     float d[16];
     for (int i = 0; i < 16; ++i) s >> d[i];
-    return QMatrix4x4(d[0], d[4], d[8],  d[12],
+    return iris::Mat4(d[0], d[4], d[8],  d[12],
                       d[1], d[5], d[9],  d[13],
                       d[2], d[6], d[10], d[14],
                       d[3], d[7], d[11], d[15]);
 }
 
-void writeVec3(QDataStream &s, const QVector3D &v) { s << float(v.x()) << float(v.y()) << float(v.z()); }
-QVector3D readVec3(QDataStream &s) { float x, y, z; s >> x >> y >> z; return QVector3D(x, y, z); }
+void writeVec3(QDataStream &s, const iris::Vec3 &v) { s << float(v.x()) << float(v.y()) << float(v.z()); }
+iris::Vec3 readVec3(QDataStream &s) { float x, y, z; s >> x >> y >> z; return iris::Vec3(x, y, z); }
 
-void writeQuat(QDataStream &s, const QQuaternion &q)
+void writeQuat(QDataStream &s, const iris::Quat &q)
 {
     s << float(q.scalar()) << float(q.x()) << float(q.y()) << float(q.z());
 }
-QQuaternion readQuat(QDataStream &s)
+iris::Quat readQuat(QDataStream &s)
 {
-    float w, x, y, z; s >> w >> x >> y >> z; return QQuaternion(w, x, y, z);
+    float w, x, y, z; s >> w >> x >> y >> z; return iris::Quat(w, x, y, z);
 }
 
 // ---- materials -------------------------------------------------------------
@@ -194,7 +197,7 @@ SkeletonPtr readSkeleton(QDataStream &s, bool *okOut)
     // The bind local of every bone — the identical loop Mesh::extractSkeleton
     // runs after linking (ANIMATION_ENGINE_MIGRATION_SPEC §1.5 F1).
     for (const auto &bone : skel->bones) {
-        const QMatrix4x4 bindLocal = !bone->parentBone.isNull()
+        const iris::Mat4 bindLocal = !bone->parentBone.isNull()
             ? bone->parentBone->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
             : bone->meshSpacePoseMatrix;
         decomposeTRS(bindLocal, bone->bindingPos, bone->bindingRot, bone->bindingScale);
@@ -254,8 +257,8 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
     float radius = 0.0f;
     s >> radius;
     mesh->boundingSphere.radius = radius;
-    const QVector3D aabbMin = readVec3(s);
-    const QVector3D aabbMax = readVec3(s);
+    const iris::Vec3 aabbMin = readVec3(s);
+    const iris::Vec3 aabbMax = readVec3(s);
     AABB box;
     box.merge(aabbMin);
     box.merge(aabbMax);
@@ -317,9 +320,9 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
                 return MeshPtr();
             }
             mesh->triMesh->addTriangle(
-                QVector3D(positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2]),
-                QVector3D(positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]),
-                QVector3D(positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2]));
+                iris::Vec3(positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2]),
+                iris::Vec3(positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]),
+                iris::Vec3(positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2]));
         }
     }
     return mesh;
@@ -350,11 +353,11 @@ void writeAnimations(QDataStream &s, const QMap<QString, SkeletalAnimationPtr> &
         for (auto b = anim->boneAnimations.constBegin(); b != anim->boneAnimations.constEnd(); ++b) {
             s << b.key();
             writeKeys(s, b.value()->posKeys.data(),
-                      [](QDataStream &st, const QVector3D &v) { writeVec3(st, v); });
+                      [](QDataStream &st, const iris::Vec3 &v) { writeVec3(st, v); });
             writeKeys(s, b.value()->rotKeys.data(),
-                      [](QDataStream &st, const QQuaternion &q) { writeQuat(st, q); });
+                      [](QDataStream &st, const iris::Quat &q) { writeQuat(st, q); });
             writeKeys(s, b.value()->scaleKeys.data(),
-                      [](QDataStream &st, const QVector3D &v) { writeVec3(st, v); });
+                      [](QDataStream &st, const iris::Vec3 &v) { writeVec3(st, v); });
         }
     }
 }
@@ -385,11 +388,11 @@ bool readAnimations(QDataStream &s, const QString &source,
                 for (qint32 k = 0; k < keyCount; ++k) {
                     double time = 0.0;
                     if (kind == 1) {
-                        const QQuaternion q = readQuat(s);
+                        const iris::Quat q = readQuat(s);
                         s >> time;
                         boneAnim->rotKeys->addKey(q, time);
                     } else {
-                        const QVector3D v = readVec3(s);
+                        const iris::Vec3 v = readVec3(s);
                         s >> time;
                         (kind == 0 ? boneAnim->posKeys : boneAnim->scaleKeys)->addKey(v, time);
                     }
@@ -508,9 +511,9 @@ BakedNode bakeNode(const aiScene *scene, const aiNode *node, QVector<int> &mater
     aiQuaternion rot;
     aiMatrix4x4 transform = node->mTransformation;
     transform.Decompose(scale, rot, pos);
-    out.pos = QVector3D(pos.x, pos.y, pos.z);
-    out.scale = QVector3D(scale.x, scale.y, scale.z);
-    out.rot = QQuaternion(rot.w, rot.x, rot.y, rot.z);
+    out.pos = iris::Vec3(pos.x, pos.y, pos.z);
+    out.scale = iris::Vec3(scale.x, scale.y, scale.z);
+    out.rot = iris::Quat(rot.w, rot.x, rot.y, rot.z);
 
     for (unsigned i = 0; i < node->mNumChildren; ++i)
         out.children.append(bakeNode(scene, node->mChildren[i], materialFor));
@@ -616,9 +619,9 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
             aiVector3D pos, scale;
             aiQuaternion rot;
             xform.Decompose(scale, rot, pos);
-            root.pos = QVector3D(pos.x, pos.y, pos.z);
-            root.scale = QVector3D(scale.x, scale.y, scale.z);
-            root.rot = QQuaternion(rot.w, rot.x, rot.y, rot.z);
+            root.pos = iris::Vec3(pos.x, pos.y, pos.z);
+            root.scale = iris::Vec3(scale.x, scale.y, scale.z);
+            root.rot = iris::Quat(rot.w, rot.x, rot.y, rot.z);
         }
         model.root = root;
     } else {

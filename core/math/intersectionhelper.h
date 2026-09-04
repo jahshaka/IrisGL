@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #ifndef INTERSECTIONHELPER_H
 #define INTERSECTIONHELPER_H
 
-#include <QVector3D>
+#include "core/math/vec.h"
 #include <qmath.h>
 #include "core/geometry/plane.h"
 
@@ -20,7 +20,7 @@ namespace iris
 {
 /*
 struct Plane {
-    QVector3D n; // Plane normal. Points x on the plane satisfy Dot(n,x) = d
+    iris::Vec3 n; // Plane normal. Points x on the plane satisfy Dot(n,x) = d
     float d; // d = dot(n,p) for a given point p on the plane
 };
 */
@@ -29,25 +29,25 @@ class IntersectionHelper
 {
 public:
     // Given three noncollinear points (ordered ccw), compute plane equation
-    static Plane computePlaneND(QVector3D a, QVector3D b, QVector3D c) {
-        Plane p = { QVector3D::crossProduct(b - a, c - a).normalized(),
-                    QVector3D::dotProduct(p.normal, a) };
+    static Plane computePlaneND(iris::Vec3 a, iris::Vec3 b, iris::Vec3 c) {
+        Plane p = { iris::Vec3::crossProduct(b - a, c - a).normalized(),
+                    iris::Vec3::dotProduct(p.normal, a) };
         return p;
     }
 
     // realtime collision detection page 178
     // assumes dir is normalized
     // returns whether or not a collision was made
-    static bool raySphereIntersects(QVector3D p,
-                                    QVector3D d,
-                                    QVector3D spherePos,
+    static bool raySphereIntersects(iris::Vec3 p,
+                                    iris::Vec3 d,
+                                    iris::Vec3 spherePos,
                                     float radius,
                                     float& t,
-                                    QVector3D& hitPoint)
+                                    iris::Vec3& hitPoint)
     {
-        QVector3D m = p - spherePos;
-        float b = QVector3D::dotProduct(m, d);
-        float c = QVector3D::dotProduct(m, m) - radius * radius;
+        iris::Vec3 m = p - spherePos;
+        float b = iris::Vec3::dotProduct(m, d);
+        float c = iris::Vec3::dotProduct(m, m) - radius * radius;
 
         if (c > 0 && b > 0) return false;
 
@@ -65,10 +65,10 @@ public:
     }
 
     // realtime collision detection page 175
-    static int intersectSegmentPlane(QVector3D a, QVector3D b, const Plane& p, float &t, QVector3D &q) {
+    static int intersectSegmentPlane(iris::Vec3 a, iris::Vec3 b, const Plane& p, float &t, iris::Vec3 &q) {
         // Compute the t value for the directed line ab intersecting the plane
-        QVector3D ab = b - a;
-        t = (p.d - QVector3D::dotProduct(p.normal, a)) / QVector3D::dotProduct(p.normal, ab);
+        iris::Vec3 ab = b - a;
+        t = (p.d - iris::Vec3::dotProduct(p.normal, a)) / iris::Vec3::dotProduct(p.normal, ab);
         // If t in [0..1] compute and return intersection point
         if (t >= 0.0f && t <= 1.0f) {
             q = a + t * ab;

@@ -12,11 +12,11 @@ For more information see the LICENSE file
 #ifndef IRISUTILS_H
 #define IRISUTILS_H
 
+#include "core/math/vec.h"
 #include <QColor>
 #include <QCoreApplication>
 #include <QDir>
 #include <QJsonObject>
-#include <QVector3D>
 #include <QUuid>
 
 #ifdef Q_OS_WIN32
@@ -45,10 +45,10 @@ public:
         return QDir::cleanPath(result);
     }
 
-    static QVector3D readVector3(const QJsonObject &vecObj) {
-        if (vecObj.isEmpty()) return QVector3D();
+    static iris::Vec3 readVector3(const QJsonObject &vecObj) {
+        if (vecObj.isEmpty()) return iris::Vec3();
 
-        QVector3D vec;
+        iris::Vec3 vec;
         vec.setX(vecObj["x"].toDouble(0));
         vec.setY(vecObj["y"].toDouble(0));
         vec.setZ(vecObj["z"].toDouble(0));

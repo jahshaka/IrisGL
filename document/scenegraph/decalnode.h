@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef DECALNODE_H
 #define DECALNODE_H
 
+#include "core/math/vec.h"
 #include <QString>
 
 #include "irisglfwd.h"
@@ -80,9 +81,9 @@ public:
 
     /// The projection direction in world space: the node's local -Y, the same
     /// convention as LightNode::getLightDir.
-    QVector3D getProjectionDir()
+    iris::Vec3 getProjectionDir()
     {
-        QVector4D dir = (globalTransform * QVector4D(0, -1, 0, 0));
+        iris::Vec4 dir = (globalTransform * iris::Vec4(0, -1, 0, 0));
         return dir.toVector3D();
     }
 

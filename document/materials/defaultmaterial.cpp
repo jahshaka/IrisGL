@@ -10,6 +10,7 @@ For more information see the LICENSE file
 *************************************************************************/
 
 
+#include "core/math/vec.h"
 #include "document/materials/defaultmaterial.h"
 
 #include <QFile>
@@ -23,7 +24,6 @@ For more information see the LICENSE file
 #include "core/irisutils.h"
 
 
-
 namespace iris
 {
 
@@ -34,7 +34,7 @@ DefaultMaterial::DefaultMaterial()
     //program->setUniformValue("u_useNormalTex",false);
     //program->setUniformValue("u_useReflectionTex",false);
     //program->setUniformValue("u_useSpecularTex",false);
-    //program->setUniformValue("u_material.diffuse",QVector3D(1,0,0));
+    //program->setUniformValue("u_material.diffuse",iris::Vec3(1,0,0));
 
     textureScale = 1.0f;
     ambientColor = QColor(0,0,0);

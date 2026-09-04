@@ -1,22 +1,21 @@
+#include "core/math/vec.h"
 #include "document/assets/linemeshbuilder.h"
 #include "document/assets/vertexlayout.h"
 #include "document/assets/mesh.h"
 
 
-
 namespace iris {
 
 
-
-void LineMeshBuilder::addLine(QVector3D a, QVector3D b)
+void LineMeshBuilder::addLine(iris::Vec3 a, iris::Vec3 b)
 {
 	this->addLine(a, QColor(255, 255, 255), b, QColor(255, 255, 255));
 }
 
-void LineMeshBuilder::addLine(QVector3D a, QColor aCol, QVector3D b, QColor bCol)
+void LineMeshBuilder::addLine(iris::Vec3 a, QColor aCol, iris::Vec3 b, QColor bCol)
 {
-	lineData.append({ a, QVector4D(aCol.redF(), aCol.greenF(), aCol.blueF(), aCol.alphaF()) });
-	lineData.append({ b, QVector4D(bCol.redF(), bCol.greenF(), bCol.blueF(), bCol.alphaF()) });
+	lineData.append({ a, iris::Vec4(aCol.redF(), aCol.greenF(), aCol.blueF(), aCol.alphaF()) });
+	lineData.append({ b, iris::Vec4(bCol.redF(), bCol.greenF(), bCol.blueF(), bCol.alphaF()) });
 }
 
 MeshPtr LineMeshBuilder::build()

@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef LIGHTNODE_H
 #define LIGHTNODE_H
 
+#include "core/math/vec.h"
 #include "QColor"
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
@@ -34,7 +35,7 @@ class LightNode:public SceneNode
 {
 
 public:
-    QVector3D lightDir;
+    iris::Vec3 lightDir;
 
     LightType lightType;
 
@@ -134,12 +135,12 @@ public:
         return lightType;
     }
 
-    QVector3D getLightDir()
+    iris::Vec3 getLightDir()
     {
         // this is the default rotation for directional and spotlights - pointing down
-        QVector4D defaultDir(0, -1, 0, 0);
+        iris::Vec4 defaultDir(0, -1, 0, 0);
 
-        QVector4D dir = (globalTransform * defaultDir);
+        iris::Vec4 dir = (globalTransform * defaultDir);
 
         return dir.toVector3D();
     }

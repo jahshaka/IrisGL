@@ -1,6 +1,6 @@
 #pragma once
+#include "core/math/vec.h"
 #include <QVector>
-#include <QVector3D>
 #include "core/geometry/boundingsphere.h"
 
 namespace iris
@@ -8,40 +8,40 @@ namespace iris
 
 class AABB
 {
-	QVector3D minPos;
-	QVector3D maxPos;
+	iris::Vec3 minPos;
+	iris::Vec3 maxPos;
 
 public:
 	AABB();
 
 	void setNegativeInfinity();
 
-	QVector3D getMin() const { return minPos; }
-	QVector3D getMax() const { return maxPos; }
+	iris::Vec3 getMin() const { return minPos; }
+	iris::Vec3 getMax() const { return maxPos; }
 
-	QVector3D getCenter() const;
-	QVector3D getSize() const;
-	QVector3D getHalfSize() const;
+	iris::Vec3 getCenter() const;
+	iris::Vec3 getSize() const;
+	iris::Vec3 getHalfSize() const;
 
-	void offset(const QVector3D& offset);
+	void offset(const iris::Vec3& offset);
 
     // scale from center
     void scale(float scale);
 
     // scale from arbitrary pivot
-    void scale(float scale, const QVector3D& pivot);
+    void scale(float scale, const iris::Vec3& pivot);
 
-	void merge(const QVector3D& point);
-	void merge(const QVector<QVector3D>& points);
+	void merge(const iris::Vec3& point);
+	void merge(const QVector<iris::Vec3>& points);
 	void merge(const AABB& aabb);
 
 	BoundingSphere getMinimalEnclosingSphere() const;
 
-	static AABB fromPoints(const QVector<QVector3D>& points);
+	static AABB fromPoints(const QVector<iris::Vec3>& points);
 
 private:
-	QVector3D getMin(const QVector3D& a, const QVector3D& b) const;
-	QVector3D getMax(const QVector3D& a, const QVector3D& b) const;
+	iris::Vec3 getMin(const iris::Vec3& a, const iris::Vec3& b) const;
+	iris::Vec3 getMax(const iris::Vec3& a, const iris::Vec3& b) const;
 };
 
 }

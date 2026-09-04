@@ -1,9 +1,10 @@
 #ifndef TRANSFORM_H
 #define TRANSFORM_H
 
-#include <QQuaternion>
-#include <QVector3D>
-#include <QMatrix4x4>
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
+
 
 namespace iris
 {
@@ -11,13 +12,13 @@ namespace iris
 class Transform
 {
 public:
-    QVector3D pos;
-    QQuaternion rot;
-    QVector3D scale;
+    iris::Vec3 pos;
+    iris::Quat rot;
+    iris::Vec3 scale;
 
-    QMatrix4x4 toMatrix()
+    iris::Mat4 toMatrix()
     {
-        QMatrix4x4 matrix;
+        iris::Mat4 matrix;
         matrix.setToIdentity();
         return matrix;
     }

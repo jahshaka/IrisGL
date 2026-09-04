@@ -1,3 +1,4 @@
+#include "core/math/vec.h"
 #include "core/geometry/plane.h"
 #include "core/geometry/boundingsphere.h"
 
@@ -24,16 +25,15 @@ SphereClassification Plane::classifySphere(BoundingSphere *sphere)
 
 Plane::Plane()
 {
-    normal = QVector3D(0, 1, 0);
+    normal = iris::Vec3(0, 1, 0);
     d = 0;
 }
 
-Plane::Plane(QVector3D planeNormal, float distance)
+Plane::Plane(iris::Vec3 planeNormal, float distance)
 {
     normal = planeNormal;
     d = distance;
 }
-
 
 
 }

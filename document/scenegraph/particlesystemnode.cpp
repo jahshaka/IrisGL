@@ -9,6 +9,8 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "core/math/qtinterop.h"
+#include "core/math/vec.h"
 #include <QColor>
 
 #include "core/properties/property.h"
@@ -49,8 +51,8 @@ void ParticleSystemNode::resetAuthoringDefaults()
     speedError = lifeError = scaleError = 0;
 
     shape = ParticleEmitterShape::Point;
-    extents = QVector3D(1, 1, 1);
-    innerExtents = QVector3D(0, 0, 0);
+    extents = iris::Vec3(1, 1, 1);
+    innerExtents = iris::Vec3(0, 0, 0);
     coneAngle = 0.0f;
     emitColourStart = QColor(255, 255, 255);
     emitColourEnd = QColor(255, 255, 255);
@@ -58,7 +60,7 @@ void ParticleSystemNode::resetAuthoringDefaults()
     colourKeys.clear();
     scaleKeys.clear();
     turbulence = 0.0f;
-    wind = QVector3D(0, 0, 0);
+    wind = iris::Vec3(0, 0, 0);
     rotationSpeedMin = rotationSpeedMax = 0.0f;
     orientation = ParticleOrientation::Billboard;
     alphaHash = true;
@@ -115,7 +117,7 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
         particleScale = 0.35f;
         coneAngle = 15.0f;
         gravityComplement = 0.0f;
-        wind = QVector3D(0.0f, 1.2f, 0.0f);
+        wind = iris::Vec3(0.0f, 1.2f, 0.0f);
         turbulence = 2.5f;
         randomRotation = true;
         rotationSpeedMin = -40.0f; rotationSpeedMax = 90.0f;
@@ -138,7 +140,7 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
         particleScale = 0.06f;
         coneAngle = 35.0f;
         gravityComplement = 0.04f;      // -50 * 0.04 = -2 m/s^2, a slow fall
-        wind = QVector3D(0.3f, 0.9f, 0.0f);
+        wind = iris::Vec3(0.3f, 0.9f, 0.0f);
         turbulence = 3.0f;
         useAdditive = true;
         maxParticles = 256;
@@ -155,9 +157,9 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
         lifeLength = 3.2f; lifeError = 0.8f;
         particleScale = 0.7f;
         shape = ParticleEmitterShape::Ellipsoid;
-        extents = QVector3D(0.4f, 0.2f, 0.4f);
+        extents = iris::Vec3(0.4f, 0.2f, 0.4f);
         coneAngle = 20.0f;
-        wind = QVector3D(0.3f, 0.8f, 0.0f);
+        wind = iris::Vec3(0.3f, 0.8f, 0.0f);
         turbulence = 1.0f;
         randomRotation = true;
         rotationSpeedMin = -12.0f; rotationSpeedMax = 12.0f;
@@ -177,7 +179,7 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
         lifeLength = 1.6f;
         particleScale = 0.05f;
         shape = ParticleEmitterShape::Box;
-        extents = QVector3D(12.0f, 0.2f, 12.0f);
+        extents = iris::Vec3(12.0f, 0.2f, 12.0f);
         gravityComplement = 0.35f;
         useAdditive = false;
         alphaHash = true;
@@ -193,9 +195,9 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
         lifeLength = 6.0f; lifeError = 1.5f;
         particleScale = 0.09f;
         shape = ParticleEmitterShape::Box;
-        extents = QVector3D(12.0f, 0.2f, 12.0f);
+        extents = iris::Vec3(12.0f, 0.2f, 12.0f);
         gravityComplement = 0.02f;
-        wind = QVector3D(0.4f, 0.0f, 0.0f);
+        wind = iris::Vec3(0.4f, 0.0f, 0.0f);
         turbulence = 1.2f;
         randomRotation = true;
         rotationSpeedMin = -30.0f; rotationSpeedMax = 30.0f;
@@ -371,9 +373,9 @@ QList<Property*> ParticleSystemNode::getProperties()
     intProp->value = maxParticles;
     props.append(intProp);
 
-    auto addVec3 = [&props](const char *display, const char *name, const QVector3D &value) {
+    auto addVec3 = [&props](const char *display, const char *name, const iris::Vec3 &value) {
         auto *p = new Vec3Property();
-        p->displayName = display; p->name = name; p->value = value;
+        p->displayName = display; p->name = name; p->value = iris::toQt(value);
         props.append(p);
     };
     addVec3("Extents",       "extents",      extents);
@@ -437,10 +439,10 @@ QVariant ParticleSystemNode::getPropertyValue(QString valueName)
     if (valueName == "preset")             return presetName(preset);
     if (valueName == "texture")            return !!texture ? texture->getSource() : QString();
     // Vector rows the panel and the API module edit but the Property system has
-    // no kind for. Returned as QVector3D; setPropertyValue accepts the same.
-    if (valueName == "extents")            return extents;
-    if (valueName == "innerExtents")       return innerExtents;
-    if (valueName == "wind")               return wind;
+    // no kind for. Returned as iris::Vec3; setPropertyValue accepts the same.
+    if (valueName == "extents")            return iris::toQt(extents);
+    if (valueName == "innerExtents")       return iris::toQt(innerExtents);
+    if (valueName == "wind")               return iris::toQt(wind);
     if (valueName == "emitColourStart")    return emitColourStart;
     if (valueName == "emitColourEnd")      return emitColourEnd;
 
@@ -473,9 +475,9 @@ bool ParticleSystemNode::setPropertyValue(QString valueName, const QVariant &val
     if (valueName == "shape")              { shape = shapeFromName(value.toString()); return true; }
     if (valueName == "orientation")        { orientation = orientationFromName(value.toString()); return true; }
     if (valueName == "preset")             { applyPreset(presetFromName(value.toString())); return true; }
-    if (valueName == "extents")            { extents      = value.value<QVector3D>(); return true; }
-    if (valueName == "innerExtents")       { innerExtents = value.value<QVector3D>(); return true; }
-    if (valueName == "wind")               { wind         = value.value<QVector3D>(); return true; }
+    if (valueName == "extents")            { extents      = iris::fromQt(value.value<QVector3D>()); return true; }
+    if (valueName == "innerExtents")       { innerExtents = iris::fromQt(value.value<QVector3D>()); return true; }
+    if (valueName == "wind")               { wind         = iris::fromQt(value.value<QVector3D>()); return true; }
     if (valueName == "emitColourStart")    { emitColourStart = value.value<QColor>(); return true; }
     if (valueName == "emitColourEnd")      { emitColourEnd   = value.value<QColor>(); return true; }
     if (valueName == "texture")            return false;   // read-only, see getProperties()

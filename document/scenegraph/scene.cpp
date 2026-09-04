@@ -9,7 +9,9 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
-#include <QQuaternion>
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/lightnode.h"
@@ -105,11 +107,11 @@ Scene::Scene()
     // global illumination is opt-in: off by default, everywhere, always
     giMode = GiMode::OFF;
     giQuality = GiQuality::MEDIUM;
-    giBoundsMin = QVector3D();          // min == max -> automatic bounds
-    giBoundsMax = QVector3D();
+    giBoundsMin = iris::Vec3();          // min == max -> automatic bounds
+    giBoundsMax = iris::Vec3();
     giNumBounces = 1;
     giAutoRefresh = true;
-    giPccGrid = QVector3D(3, 2, 3);
+    giPccGrid = iris::Vec3(3, 2, 3);
 
     // anti-aliasing is opt-in like GI: off (1 sample) by default
     antiAliasing = 1;
@@ -366,14 +368,14 @@ void Scene::update(float dt)
 			continue;
 
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
-		//auto simulatedTransform = QMatrix4x4(matrix).transposed();
+		//auto simulatedTransform = iris::Mat4(matrix).transposed();
 		//simulatedTransform.scale(mesh->getLocalScale());
 		// Set our scenenode to the simulated transform for the duration of the sim
 		//mesh->setGlobalTransform(simulatedTransform);
 		auto pos = rigidBodyWorldTransform.getOrigin();
-		mesh->setGlobalPos(QVector3D(pos.x(), pos.y(), pos.z()));
+		mesh->setGlobalPos(iris::Vec3(pos.x(), pos.y(), pos.z()));
 		auto rot = rigidBodyWorldTransform.getRotation();
-		mesh->setGlobalRot(QQuaternion(rot.w(), rot.x(), rot.y(), rot.z()));
+		mesh->setGlobalRot(iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
 	}
 
 	// Cameras aren't always a part of the scene hierarchy, so their matrices are updated here
@@ -385,8 +387,8 @@ void Scene::update(float dt)
 	rootNode->update(dt);
 }
 
-void Scene::rayCast(const QVector3D& segStart,
-                    const QVector3D& segEnd,
+void Scene::rayCast(const iris::Vec3& segStart,
+                    const iris::Vec3& segEnd,
                     QList<PickingResult>& hitList,
 					uint64_t pickingMask,
 					bool allowUnpickable)
@@ -395,8 +397,8 @@ void Scene::rayCast(const QVector3D& segStart,
 }
 
 void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
-                    const QVector3D& segStart,
-                    const QVector3D& segEnd,
+                    const iris::Vec3& segStart,
+                    const iris::Vec3& segEnd,
                     QList<iris::PickingResult>& hitList,
 					uint64_t pickingMask,
 					bool allowUnpickable)
@@ -419,7 +421,7 @@ void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
 			auto mesh = meshNode->getMesh();
 			auto sphere = mesh->getBoundingSphere();
 			float t;
-			QVector3D hitPoint;
+			iris::Vec3 hitPoint;
 			if (IntersectionHelper::raySphereIntersects(a, (b - a).normalized(), sphere.pos, sphere.radius, t, hitPoint)) {
 				auto triMesh = meshNode->getMesh()->getTriMesh();
 

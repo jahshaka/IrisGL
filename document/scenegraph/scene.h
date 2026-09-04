@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef SCENE_H
 #define SCENE_H
 
+#include "core/math/vec.h"
 #include <QList>
 #include "irisglfwd.h"
 #include "document/assets/texture2d.h"
@@ -37,7 +38,7 @@ enum class SceneRenderFlags : int
 struct PickingResult
 {
     iris::SceneNodePtr hitNode;
-    QVector3D hitPoint;
+    iris::Vec3 hitPoint;
 
     float distanceFromStartSqrd;
 };
@@ -169,12 +170,12 @@ public:
     // giBounds min == max means "automatic" (scene bounds + margin).
     GiMode giMode;
     GiQuality giQuality;
-    QVector3D giBoundsMin;
-    QVector3D giBoundsMax;
+    iris::Vec3 giBoundsMin;
+    iris::Vec3 giBoundsMax;
     QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
     int giNumBounces;          // 1..4
     bool giAutoRefresh;        // editor: re-solve automatically on edits
-    QVector3D giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
+    iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
 
     // anti-aliasing: MSAA sample count for the scene's viewport — 1 (off), 2, 4
     // or 8 (rendered by the engine viewport only; the driver may clamp).
@@ -386,15 +387,15 @@ public:
     float animationTime() const { return animTime; }
     void update(float dt);
 
-    void rayCast(const QVector3D& segStart,
-                 const QVector3D& segEnd,
+    void rayCast(const iris::Vec3& segStart,
+                 const iris::Vec3& segEnd,
                  QList<PickingResult>& hitList,
 			     uint64_t pickingMask = 0,
 				 bool allowUnpickable = false);
 
     void rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
-                 const QVector3D& segStart,
-                 const QVector3D& segEnd,
+                 const iris::Vec3& segStart,
+                 const iris::Vec3& segEnd,
                  QList<iris::PickingResult>& hitList,
 				 uint64_t pickingMask = 0,
 				 bool allowUnpickable = false);

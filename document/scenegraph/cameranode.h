@@ -12,8 +12,9 @@ For more information see the LICENSE file
 #ifndef CAMERANODE_H
 #define CAMERANODE_H
 
-#include <QMatrix4x4>
 
+#include "core/math/mat4.h"
+#include "core/math/vec.h"
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
 
@@ -39,8 +40,8 @@ public:
 
 	CameraProjection projMode;
 
-    QMatrix4x4 viewMatrix;
-    QMatrix4x4 projMatrix;
+    iris::Mat4 viewMatrix;
+    iris::Mat4 projMatrix;
 
 	void setProjection(CameraProjection view);
     CameraProjection getProjection();
@@ -49,7 +50,7 @@ public:
     void setAspectRatio(float aspect);
     void setFieldOfViewRadians(float fov);
     void setFieldOfViewDegrees(float fov);
-    void lookAt(QVector3D target);
+    void lookAt(iris::Vec3 target);
     void updateCameraMatrices();
 	void setOrthagonalZoom(float size);
     void update(float dt) override;
@@ -66,7 +67,7 @@ public:
      * @param pos point in screen space
      * @return
      */
-    QVector3D calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos);
+    iris::Vec3 calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos);
 
     virtual QList<Property*> getProperties() override;
     virtual QVariant getPropertyValue(QString valueName) override;

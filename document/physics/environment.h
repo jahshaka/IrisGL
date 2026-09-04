@@ -9,6 +9,8 @@
 
 // See { bullet specific variables, bullet specific constraints }
 
+#include "core/math/mat4.h"
+#include "core/math/vec.h"
 #include "document/physics/physicshelper.h"
 
 #include <QVector>
@@ -61,7 +63,7 @@ public:
 	bool walkBackward = 0;
 	bool walkLeft = 0;
 	bool walkRight = 0;
-	QVector2D walkDir;
+	iris::Vec2 walkDir;
 	bool jump = 0;
 
     Environment();
@@ -70,9 +72,9 @@ public:
 	QHash<QString, CharacterController*> characterControllers;
 	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;
-    QHash<QString, QMatrix4x4> nodeTransforms;
+    QHash<QString, iris::Mat4> nodeTransforms;
 
-	void setDirection(QVector2D dir);
+	void setDirection(iris::Vec2 dir);
 
 	void addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node);
 	/// Adds the body AND takes ownership of every allocation behind it (the
@@ -121,9 +123,9 @@ public:
 
 	// These manage a unique picking constraint that is used to manipulate a rigid body about a scene
 	// Primarily used in the 3D viewport, the constraint can be loosened to behave more interactively
-	void createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd);
+	void createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const iris::Vec3 &segStart, const iris::Vec3 &segEnd);
 	void updatePickingConstraint(PickingHandleType handleType, const btVector3 &rayDirection, const btVector3 &cameraPosition);
-	void updatePickingConstraint(PickingHandleType handleType, const QMatrix4x4 &handTransformation);
+	void updatePickingConstraint(PickingHandleType handleType, const iris::Mat4 &handTransformation);
 	void cleanupPickingConstraint(PickingHandleType handleType);
 
 	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);

@@ -9,6 +9,7 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "core/math/vec.h"
 #include "core/geometry/trimesh.h"
 
 #include <cmath>
@@ -22,9 +23,9 @@ namespace iris
  * @param b
  * @param c
  */
-void TriMesh::addTriangle(const QVector3D& a,const QVector3D& b,const QVector3D& c)
+void TriMesh::addTriangle(const iris::Vec3& a,const iris::Vec3& b,const iris::Vec3& c)
 {
-    Triangle tri = {a,b,c,QVector3D::crossProduct(b-a,c-a)};
+    Triangle tri = {a,b,c,iris::Vec3::crossProduct(b-a,c-a)};
 
     triangles.append(tri);
 }
@@ -32,7 +33,7 @@ void TriMesh::addTriangle(const QVector3D& a,const QVector3D& b,const QVector3D&
 //https://github.com/qt/qt3d/blob/5476bc6b4b6a12c921da502c24c4e078b04dd3b3/src/render/jobs/pickboundingvolumejob.cpp
 //realtime rendering page 192
 //no need to get uvw, just return true at the first sign of a hit
-bool TriMesh::isHitBySegment(const QVector3D& segmentStart,const QVector3D& segmentEnd,QVector3D& hitPoint)
+bool TriMesh::isHitBySegment(const iris::Vec3& segmentStart,const iris::Vec3& segmentEnd,iris::Vec3& hitPoint)
 {
     for(auto tri:triangles)
     {
@@ -41,8 +42,8 @@ bool TriMesh::isHitBySegment(const QVector3D& segmentStart,const QVector3D& segm
         auto qp = segmentStart-segmentEnd;
 
         //auto normal = tri.normal;
-        auto normal = QVector3D::crossProduct(ab, ac);
-        float d = QVector3D::dotProduct(qp, normal);
+        auto normal = iris::Vec3::crossProduct(ab, ac);
+        float d = iris::Vec3::dotProduct(qp, normal);
 
         //if (d <= 0)
         //    continue;
@@ -55,18 +56,18 @@ bool TriMesh::isHitBySegment(const QVector3D& segmentStart,const QVector3D& segm
         const float ad = std::fabs(d);
 
         auto ap = segmentStart - tri.a;
-        auto t = QVector3D::dotProduct(ap, normal) * sign;
+        auto t = iris::Vec3::dotProduct(ap, normal) * sign;
 
         if (t < 0 || t > ad)
             continue;
 
-        auto e = QVector3D::crossProduct(qp, ap);
-        auto v = QVector3D::dotProduct(ac, e) * sign;
+        auto e = iris::Vec3::crossProduct(qp, ap);
+        auto v = iris::Vec3::dotProduct(ac, e) * sign;
 
         if (v < 0.0f || v > ad)
             continue;
 
-        auto w = -QVector3D::dotProduct(ab, e) * sign;
+        auto w = -iris::Vec3::dotProduct(ab, e) * sign;
 
         if (w < 0.0f || v + w > ad)
             continue;
@@ -87,7 +88,7 @@ bool TriMesh::isHitBySegment(const QVector3D& segmentStart,const QVector3D& segm
  * Returns number of intersections
  * @return
  */
-int TriMesh::getSegmentIntersections(const QVector3D& segmentStart,const QVector3D& segmentEnd,QList<TriangleIntersectionResult>& results)
+int TriMesh::getSegmentIntersections(const iris::Vec3& segmentStart,const iris::Vec3& segmentEnd,QList<TriangleIntersectionResult>& results)
 {
     int hits = 0;
     for(auto i=0;i<triangles.size();i++)
@@ -99,8 +100,8 @@ int TriMesh::getSegmentIntersections(const QVector3D& segmentStart,const QVector
         auto qp = segmentStart-segmentEnd;
 
         //auto normal = tri.normal;
-        auto normal = QVector3D::crossProduct(ab, ac);
-        float d = QVector3D::dotProduct(qp, normal);
+        auto normal = iris::Vec3::crossProduct(ab, ac);
+        float d = iris::Vec3::dotProduct(qp, normal);
 
         // TWO-SIDED. `d <= 0` here rejected every triangle the segment reaches
         // from behind, so picking BACK-FACE CULLED: a plane (or any open
@@ -121,18 +122,18 @@ int TriMesh::getSegmentIntersections(const QVector3D& segmentStart,const QVector
         const float ad = std::fabs(d);
 
         auto ap = segmentStart - tri.a;
-        auto t = QVector3D::dotProduct(ap, normal) * sign;
+        auto t = iris::Vec3::dotProduct(ap, normal) * sign;
 
         if (t < 0 || t > ad)
             continue;
 
-        auto e = QVector3D::crossProduct(qp, ap);
-        auto v = QVector3D::dotProduct(ac, e) * sign;
+        auto e = iris::Vec3::crossProduct(qp, ap);
+        auto v = iris::Vec3::dotProduct(ac, e) * sign;
 
         if (v < 0 || v > ad)
             continue;
 
-        auto w = -QVector3D::dotProduct(ab, e) * sign;
+        auto w = -iris::Vec3::dotProduct(ab, e) * sign;
 
         if (w < 0.0f || v + w > ad)
             continue;
@@ -144,7 +145,7 @@ int TriMesh::getSegmentIntersections(const QVector3D& segmentStart,const QVector
         // so callers reading the count saw 2, 4, 6... Nothing branched on the
         // parity, but `if (int n = getSegmentIntersections(...))` is used as a
         // "how many" as well as a "any", and it was lying.)
-        const QVector3D hitPoint = segmentStart + (segmentEnd-segmentStart)*t;
+        const iris::Vec3 hitPoint = segmentStart + (segmentEnd-segmentStart)*t;
 
         TriangleIntersectionResult result;
         result.triangleIndex = i;

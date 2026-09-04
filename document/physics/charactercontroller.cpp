@@ -1,3 +1,4 @@
+#include "core/math/mat4.h"
 #include "document/physics/charactercontroller.h"
 
 CharacterController::CharacterController()
@@ -50,11 +51,11 @@ void CharacterController::setSiblingGuid(const QString &guid)
 	siblingGuid = guid;
 }
 
-const QMatrix4x4 CharacterController::getTransform()
+const iris::Mat4 CharacterController::getTransform()
 {
 	btScalar data[16];
 	ghostObject->getWorldTransform().getOpenGLMatrix(data);
-	return QMatrix4x4(data).transposed();
+	return iris::Mat4(data).transposed();
 }
 
 void CharacterController::createController()

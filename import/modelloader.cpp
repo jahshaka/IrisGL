@@ -1,4 +1,6 @@
-#include <QQuaternion>
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "irisglfwd.h"
 #include "import/modelloader.h"
 #include "import/model.h"
@@ -100,9 +102,9 @@ SkeletonPtr ModelLoader::extractSkeletonFromScene(const aiScene* scene)
 
 		//auto transform = node->mTransformation;
 		node->mTransformation.Decompose(scale, rot, pos);
-		bone->pos = QVector3D(pos.x, pos.y, pos.z);
-		bone->scale = QVector3D(scale.x, scale.y, scale.z);
-		bone->rot = QQuaternion(rot.w, rot.x, rot.y, rot.z);
+		bone->pos = iris::Vec3(pos.x, pos.y, pos.z);
+		bone->scale = iris::Vec3(scale.x, scale.y, scale.z);
+		bone->rot = iris::Quat(rot.w, rot.x, rot.y, rot.z);
 
 		bone->bindingPos = bone->pos;
 		bone->bindingScale = bone->scale;
@@ -143,11 +145,11 @@ QVector<ModelMesh> ModelLoader::extractMeshesFromScene(const aiScene * scene)
 		globalTransform.Decompose(scale, rot, pos);
 
 		// all meshes under this node will inherit this transform
-		QMatrix4x4 meshTransform;
+		iris::Mat4 meshTransform;
 		meshTransform.setToIdentity();
-		meshTransform.translate(QVector3D(pos.x, pos.y, pos.z));
-		meshTransform.rotate(QQuaternion(rot.w, rot.x, rot.y, rot.z));
-		meshTransform.scale(QVector3D(scale.x, scale.y, scale.z));
+		meshTransform.translate(iris::Vec3(pos.x, pos.y, pos.z));
+		meshTransform.rotate(iris::Quat(rot.w, rot.x, rot.y, rot.z));
+		meshTransform.scale(iris::Vec3(scale.x, scale.y, scale.z));
 
 		for (int i = 0; i < node->mNumMeshes; i++) {
 			auto mesh = scene->mMeshes[node->mMeshes[i]];

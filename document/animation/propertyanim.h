@@ -1,6 +1,7 @@
 #ifndef ANIMFRAMES_H
 #define ANIMFRAMES_H
 
+#include "core/math/vec.h"
 #include "irisglfwd.h"
 
 namespace iris {
@@ -68,7 +69,7 @@ public:
     Vector3DPropertyAnim();
     ~Vector3DPropertyAnim();
 
-    QVector3D getValue(float time);
+    iris::Vec3 getValue(float time);
     virtual QList<PropertyAnimInfo> getKeyFrames() override;
     virtual FloatKeyFrame* getKeyFrame(QString name) override;
     virtual FloatKeyFrame* getKeyFrame(int index) override;

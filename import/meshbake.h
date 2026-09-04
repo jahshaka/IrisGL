@@ -60,13 +60,13 @@ For more information see the LICENSE file
 // worker; read/deserialize run on the open worker; buildFragment runs on
 // whichever thread consumes it.
 
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include <QByteArray>
 #include <QList>
 #include <QMap>
-#include <QQuaternion>
 #include <QString>
 #include <QVector>
-#include <QVector3D>
 #include <functional>
 
 #include "irisglfwd.h"
@@ -82,9 +82,9 @@ namespace iris
 struct BakedNode
 {
     QString name;
-    QVector3D pos;
-    QVector3D scale = QVector3D(1, 1, 1);
-    QQuaternion rot;
+    iris::Vec3 pos;
+    iris::Vec3 scale = iris::Vec3(1, 1, 1);
+    iris::Quat rot;
     /// True when this node is a MeshNode (carries geometry).
     bool isMeshNode = false;
     /// Index into Model::meshes (aiScene mesh order), or -1.

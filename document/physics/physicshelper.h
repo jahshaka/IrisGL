@@ -1,8 +1,8 @@
 #ifndef PHYSICS_HELPER
 #define PHYSICS_HELPER
 
+#include "core/math/vec.h"
 #include <QVector>
-#include <QVector3D>
 
 #include "btBulletDynamicsCommon.h"
 #include "BulletCollision/CollisionShapes/btConvexHullShape.h"
@@ -48,8 +48,8 @@ public:
     PhysicsHelper() = default;
     static btTriangleMesh *btTriangleMeshShapeFromMesh(iris::MeshPtr mesh);
     static btConvexHullShape *btConvexHullShapeFromMesh(iris::MeshPtr mesh);
-    static btVector3 btVector3FromQVector3D(QVector3D vector);
-	static QVector3D QVector3DFrombtVector3(btVector3 vector);
+    static btVector3 btVector3FromQVector3D(iris::Vec3 vector);
+	static iris::Vec3 QVector3DFrombtVector3(btVector3 vector);
     /// Builds the body for `sceneNode`. The caller OWNS everything in the
     /// returned PhysicsBody (Environment::addBodyToWorld takes it over).
     /// `body` is null when the node's shape kind is not one we build.

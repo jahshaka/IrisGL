@@ -1,8 +1,8 @@
 #ifndef FRUSTUM_H
 #define FRUSTUM_H
 
+#include "core/math/mat4.h"
 #include <QList>
-#include <QMatrix4x4>
 #include "core/geometry/plane.h"
 
 namespace iris {
@@ -14,7 +14,7 @@ public:
     QList<Plane> planes;
 
     // projection x view
-    void build(QMatrix4x4 viewProj);
+    void build(iris::Mat4 viewProj);
 
     // checks if the sphere is inside or touches the bounding sphere
     bool isSphereInside(BoundingSphere* sphere);

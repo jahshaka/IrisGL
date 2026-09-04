@@ -1,3 +1,5 @@
+
+#include "core/math/vec.h"
 #ifndef PHYSICS_PROPERTIES
 #define PHYSICS_PROPERTIES
 
@@ -64,8 +66,8 @@ struct PhysicsProperty
     bool isStatic;
     PhysicsCollisionShape shape;
     PhysicsType type;
-    QVector3D centerOfMass;
-    QVector3D pivotPoint;
+    iris::Vec3 centerOfMass;
+    iris::Vec3 pivotPoint;
 
     QVector<ConstraintProperty> constraints;
 };

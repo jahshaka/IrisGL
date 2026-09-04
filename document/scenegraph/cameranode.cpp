@@ -9,9 +9,10 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "core/math/mat4.h"
+#include "core/math/vec.h"
 #include "document/scenegraph/cameranode.h"
 
-#include <QVector3D>
 #include <QPoint>
 
 #include "core/math/mathhelper.h"
@@ -127,9 +128,9 @@ void CameraNode::updateCameraMatrices()
 {
     viewMatrix.setToIdentity();
 
-    QVector3D pos = globalTransform.column(3).toVector3D();
-    QVector3D dir = (globalTransform * QVector4D(0, 0, -1, 1)).toVector3D();
-    QVector3D up = (globalTransform * QVector4D(0, 1, 0, 0)).toVector3D();
+    iris::Vec3 pos = globalTransform.column(3).toVector3D();
+    iris::Vec3 dir = (globalTransform * iris::Vec4(0, 0, -1, 1)).toVector3D();
+    iris::Vec3 up = (globalTransform * iris::Vec4(0, 1, 0, 0)).toVector3D();
 
     viewMatrix.lookAt(pos, dir, up);
 
@@ -155,12 +156,12 @@ void CameraNode::setFieldOfViewDegrees(float fov)
     angle = fov;
 }
 
-void CameraNode::lookAt(QVector3D target)
+void CameraNode::lookAt(iris::Vec3 target)
 {
     //todo: use global matrices
-    QMatrix4x4 matrix;
+    iris::Mat4 matrix;
     matrix.setToIdentity();
-    matrix.lookAt(pos, target, QVector3D(0, 1, 0));
+    matrix.lookAt(pos, target, iris::Vec3(0, 1, 0));
     matrix = matrix.inverted();
     MathHelper::decomposeMatrix(matrix, pos, rot, scale);
     setTransformDirty();
@@ -178,12 +179,12 @@ void CameraNode::update(float dt)
     updateCameraMatrices();
 }
 
-QVector3D CameraNode::calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos)
+iris::Vec3 CameraNode::calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos)
 {
     float x = ((2.0f * pos.x()) / viewPortWidth) - 1.0f;
     float y = 1.0f - ((2.0f * pos.y()) / viewPortHeight);
 
-    QVector4D ray = projMatrix.inverted() * QVector4D(x, y, -1.0f, 1.0f);
+    iris::Vec4 ray = projMatrix.inverted() * iris::Vec4(x, y, -1.0f, 1.0f);
     ray.setZ(-1.0f);
     ray.setW(0.0f);
     ray = viewMatrix.inverted() * ray;

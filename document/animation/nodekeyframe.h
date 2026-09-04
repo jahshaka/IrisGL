@@ -12,9 +12,9 @@ For more information see the LICENSE file
 #ifndef NODEKEYFRAME_H
 #define NODEKEYFRAME_H
 
-#include <QQuaternion>
-#include "QVector3D"
-#include "QQuaternion"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
+
 //#include "keyframeanimation.h"
 
 /*
@@ -24,16 +24,16 @@ namespace iris
 class NodeKeyFrame
 {
 public:
-    QVector3D pos;
-    QVector3D scale;
-    QQuaternion rot;
+    iris::Vec3 pos;
+    iris::Vec3 scale;
+    iris::Quat rot;
     float time;
 
     NodeKeyFrame()
     {
-        pos = QVector3D();
-        scale = QVector3D(1,1,1);
-        rot = QQuaternion();
+        pos = iris::Vec3();
+        scale = iris::Vec3(1,1,1);
+        rot = iris::Quat();
         time = 0;
     }
 };

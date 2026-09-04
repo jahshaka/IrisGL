@@ -1,12 +1,12 @@
+#include "core/math/mat4.h"
 #include "core/geometry/frustum.h"
 #include "core/geometry/plane.h"
 #include "core/geometry/boundingsphere.h"
-#include <QMatrix4x4>
 
 namespace iris {
 
 // https://github.com/playcanvas/engine/blob/master/src/shape/frustum.js#L27
-void Frustum::build(QMatrix4x4 viewProj)
+void Frustum::build(iris::Mat4 viewProj)
 {
     planes.clear();
 
@@ -45,7 +45,6 @@ bool Frustum::isSphereInside(BoundingSphere *sphere)
 
     return true;
 }
-
 
 
 }

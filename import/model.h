@@ -12,9 +12,9 @@ For more information see the LICENSE file
 #ifndef MODEL_H
 #define MODEL_H
 
+#include "core/math/mat4.h"
 #include <QString>
 #include <QColor>
-#include <QMatrix4x4>
 #include "irisglfwd.h"
 #include "document/animation/skeletalanimation.h"
 #include "core/geometry/boundingsphere.h"
@@ -34,7 +34,7 @@ struct ModelMesh
 	QString meshName;
 
 	// from the root of the model's scene
-	QMatrix4x4 transform;
+	iris::Mat4 transform;
 
 	ModelMesh()
 	{

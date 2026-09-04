@@ -9,7 +9,10 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
-#include <QQuaternion>
+#include "core/math/qtinterop.h"
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "document/scenegraph/scenenode.h"
 
 #include <functional>
@@ -42,9 +45,9 @@ namespace iris
 static std::atomic<qint64> sNextNodeId{0};
 
 SceneNode::SceneNode():
-    pos(QVector3D(0,0,0)),
-    scale(QVector3D(1,1,1)),
-    rot(QQuaternion())
+    pos(iris::Vec3(0,0,0)),
+    scale(iris::Vec3(1,1,1)),
+    rot(iris::Quat())
 
 {
     sceneNodeType = SceneNodeType::Empty;
@@ -96,7 +99,7 @@ qint64 SceneNode::getNodeId()
     return nodeId;
 }
 
-void SceneNode::rotate(QQuaternion rot, bool global)
+void SceneNode::rotate(iris::Quat rot, bool global)
 {
 	if (global)
 		this->rot = this->rot * rot;
@@ -105,25 +108,25 @@ void SceneNode::rotate(QQuaternion rot, bool global)
 	setTransformDirty();
 }
 
-void SceneNode::setLocalPos(QVector3D pos)
+void SceneNode::setLocalPos(iris::Vec3 pos)
 {
     this->pos = pos;
     setTransformDirty();
 }
 
-void SceneNode::setLocalRot(QQuaternion rot)
+void SceneNode::setLocalRot(iris::Quat rot)
 {
     this->rot = rot;
     setTransformDirty();
 }
 
-void SceneNode::setLocalScale(QVector3D scale)
+void SceneNode::setLocalScale(iris::Vec3 scale)
 {
     this->scale = scale;
     setTransformDirty();
 }
 
-void SceneNode::setLocalTransform(QMatrix4x4 transformMatrix)
+void SceneNode::setLocalTransform(iris::Mat4 transformMatrix)
 {
     MathHelper::decomposeMatrix(transformMatrix, pos, rot, scale);
     setTransformDirty();
@@ -204,19 +207,19 @@ QList<Property*> SceneNode::getProperties()
     auto prop = new Vec3Property();
     prop->displayName = "Position";
     prop->name = "position";
-    prop->value = pos;
+    prop->value = iris::toQt(pos);
     props.append(prop);
 
     prop = new Vec3Property();
     prop->displayName = "Rotation";
     prop->name = "rotation";
-    prop->value = rot.toEulerAngles();
+    prop->value = iris::toQt(rot.toEulerAngles());
     props.append(prop);
 
     prop = new Vec3Property();
     prop->displayName = "Scale";
     prop->name = "scale";
-    prop->value = scale;
+    prop->value = iris::toQt(scale);
     props.append(prop);
 
     // There is no StringProperty in core/properties/property.h; FileProperty is
@@ -259,9 +262,9 @@ QList<Property*> SceneNode::getProperties()
 
 QVariant SceneNode::getPropertyValue(QString valueName)
 {
-    if (valueName == "position") return pos;
-    if (valueName == "rotation") return rot.toEulerAngles();
-    if (valueName == "scale")	 return scale;
+    if (valueName == "position") return iris::toQt(pos);
+    if (valueName == "rotation") return iris::toQt(rot.toEulerAngles());
+    if (valueName == "scale")	 return iris::toQt(scale);
     if (valueName == "name")       return getName();
     if (valueName == "visible")    return isVisible();
     if (valueName == "castShadow") return getShadowCastingEnabled();
@@ -273,9 +276,9 @@ QVariant SceneNode::getPropertyValue(QString valueName)
 
 bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
 {
-    if (valueName == "position") { setLocalPos(value.value<QVector3D>());   return true; }
-    if (valueName == "rotation") { setLocalRot(QQuaternion::fromEulerAngles(value.value<QVector3D>())); return true; }
-    if (valueName == "scale")    { setLocalScale(value.value<QVector3D>()); return true; }
+    if (valueName == "position") { setLocalPos(iris::fromQt(value.value<QVector3D>()));   return true; }
+    if (valueName == "rotation") { setLocalRot(iris::Quat::fromEulerAngles(iris::fromQt(value.value<QVector3D>()))); return true; }
+    if (valueName == "scale")    { setLocalScale(iris::fromQt(value.value<QVector3D>())); return true; }
     if (valueName == "name")       { setName(value.toString());                  return true; }
     // setVisible, not show()/hide(): those cascade to children, which is a
     // different operation from setting this node's own flag.
@@ -324,12 +327,12 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 
         auto pos = diff.column(3).toVector3D();
         node->pos = pos;
-        node->rot = QQuaternion::fromRotationMatrix(diff.normalMatrix()).normalized();
+        node->rot = iris::Quat::fromRotationMatrix(diff.normalMatrix()).normalized();
 
         auto data = diff.data();
 
         // extracts the scale from the transform
-        //node->scale = QVector3D(data[0], data[5], data[10]);
+        //node->scale = iris::Vec3(data[0], data[5], data[10]);
         node->scale.setX(diff.column(0).toVector3D().length());
         node->scale.setY(diff.column(1).toVector3D().length());
         node->scale.setZ(diff.column(2).toVector3D().length());
@@ -387,7 +390,7 @@ void SceneNode::updateAnimation(float time)
         }
         if (animation->hasPropertyAnim("rotation")) {
             auto r = animation->getVector3PropertyAnim("rotation")->getValue(time);
-            rot = QQuaternion::fromEulerAngles(r);
+            rot = iris::Quat::fromEulerAngles(r);
             posed = true;
         }
         if (animation->hasPropertyAnim("scale")) {
@@ -518,18 +521,18 @@ qint64 SceneNode::generateNodeId()
     return sNextNodeId.fetch_add(1, std::memory_order_relaxed);
 }
 
-QQuaternion SceneNode::getGlobalRotation()
+iris::Quat SceneNode::getGlobalRotation()
 {
 	if (auto p = getParent()) return p->getGlobalRotation() * rot;
 	return rot;
 }
 
-QVector3D SceneNode::getGlobalPosition()
+iris::Vec3 SceneNode::getGlobalPosition()
 {
     return getGlobalTransform().column(3).toVector3D();
 }
 
-QMatrix4x4 SceneNode::getGlobalTransform()
+iris::Mat4 SceneNode::getGlobalTransform()
 {
     localTransform.setToIdentity();
 
@@ -547,7 +550,7 @@ QMatrix4x4 SceneNode::getGlobalTransform()
     return globalTransform;
 }
 
-QMatrix4x4 SceneNode::getLocalTransform()
+iris::Mat4 SceneNode::getLocalTransform()
 {
     localTransform.setToIdentity();
 
@@ -558,7 +561,7 @@ QMatrix4x4 SceneNode::getLocalTransform()
     return localTransform;
 }
 
-void SceneNode::setGlobalPos(QVector3D pos)
+void SceneNode::setGlobalPos(iris::Vec3 pos)
 {
 	auto p = getParent();
 	if (!p) {
@@ -575,7 +578,7 @@ void SceneNode::setGlobalPos(QVector3D pos)
 	this->setTransformDirty();
 }
 
-void SceneNode::setGlobalRot(QQuaternion rot)
+void SceneNode::setGlobalRot(iris::Quat rot)
 {
 	auto p = getParent();
 	if (!p) {
@@ -591,7 +594,7 @@ void SceneNode::setGlobalRot(QQuaternion rot)
 	this->setTransformDirty();
 }
 
-void SceneNode::setGlobalTransform(QMatrix4x4 transform)
+void SceneNode::setGlobalTransform(iris::Mat4 transform)
 {
 	auto p = getParent();
 	if (!p) {

@@ -9,6 +9,7 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "core/math/vec.h"
 #include "document/scenegraph/viewernode.h"
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
@@ -73,7 +74,7 @@ void ViewerNode::setViewScale(float scale)
     this->viewScale = scale;
     // Writes the node's TRS directly, so it owes the flag (setLocalScale would
     // have set it; this predates that setter existing).
-    this->scale = QVector3D(scale, scale, scale);
+    this->scale = iris::Vec3(scale, scale, scale);
     this->setTransformDirty();
 }
 

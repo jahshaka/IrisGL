@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #ifndef TRIMESH_H
 #define TRIMESH_H
 
-#include <QVector3D>
+#include "core/math/vec.h"
 #include <QList>
 
 namespace iris
@@ -21,7 +21,7 @@ namespace iris
 struct TriangleIntersectionResult
 {
     int triangleIndex;
-    QVector3D hitPoint;
+    iris::Vec3 hitPoint;
     float t;//distance along length of the segment
 
     TriangleIntersectionResult()
@@ -34,8 +34,8 @@ class Triangle
 {
 public:
     //triangle's points in counter-clockwise order
-    QVector3D a,b,c;
-    QVector3D normal;
+    iris::Vec3 a,b,c;
+    iris::Vec3 normal;
 };
 
 
@@ -54,19 +54,19 @@ public:
      * @param b
      * @param c
      */
-    void addTriangle(const QVector3D& a, const QVector3D& b, const QVector3D& c);
+    void addTriangle(const iris::Vec3& a, const iris::Vec3& b, const iris::Vec3& c);
 
     //https://github.com/qt/qt3d/blob/5476bc6b4b6a12c921da502c24c4e078b04dd3b3/src/render/jobs/pickboundingvolumejob.cpp
     //realtime rendering page 192
     //no need to get uvw, just return true at the first sign of a hit
-    bool isHitBySegment(const QVector3D& segmentStart, const QVector3D& segmentEnd, QVector3D& hitPoint);
+    bool isHitBySegment(const iris::Vec3& segmentStart, const iris::Vec3& segmentEnd, iris::Vec3& hitPoint);
 
     /**
      * Does a segment-mesh intersection test
      * Returns number of intersections
      * @return
      */
-    int getSegmentIntersections(const QVector3D& segmentStart, const QVector3D& segmentEnd, QList<TriangleIntersectionResult>& results);
+    int getSegmentIntersections(const iris::Vec3& segmentStart, const iris::Vec3& segmentEnd, QList<TriangleIntersectionResult>& results);
 
 
 };

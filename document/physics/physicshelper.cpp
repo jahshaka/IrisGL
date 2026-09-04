@@ -1,3 +1,4 @@
+#include "core/math/vec.h"
 #include "document/physics/physicshelper.h"
 
 #include "core/geometry/trimesh.h"
@@ -46,14 +47,14 @@ btConvexHullShape *PhysicsHelper::btConvexHullShapeFromMesh(iris::MeshPtr mesh)
     return shape;
 }
 
-btVector3 PhysicsHelper::btVector3FromQVector3D(QVector3D vector)
+btVector3 PhysicsHelper::btVector3FromQVector3D(iris::Vec3 vector)
 {
     return btVector3(vector.x(), vector.y(), vector.z());
 }
 
-QVector3D PhysicsHelper::QVector3DFrombtVector3(btVector3 vector)
+iris::Vec3 PhysicsHelper::QVector3DFrombtVector3(btVector3 vector)
 {
-	return QVector3D(vector.getX(), vector.getY(), vector.getZ());
+	return iris::Vec3(vector.getX(), vector.getY(), vector.getZ());
 }
 
 // Every `new` below lands in `owned` — the body's shape, a compound's child
@@ -63,7 +64,7 @@ QVector3D PhysicsHelper::QVector3DFrombtVector3(btVector3 vector)
 PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode, const iris::PhysicsProperty &props)
 {
     PhysicsBody owned;
-	QVector3D globalPos = sceneNode->getGlobalPosition();
+	iris::Vec3 globalPos = sceneNode->getGlobalPosition();
     btVector3 pos(globalPos.x(), globalPos.y(), globalPos.z());
     btRigidBody *body = nullptr;
 

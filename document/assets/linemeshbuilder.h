@@ -1,9 +1,8 @@
 #ifndef LINEMESHBUILDER_H
 #define LINEMESHBUILDER_H
 
+#include "core/math/vec.h"
 #include <QVector>
-#include <QVector3D>
-#include <QVector4D>
 #include "irisglfwd.h"
 
 namespace iris {
@@ -12,15 +11,15 @@ class LineMeshBuilder
 {
 	struct LineData
 	{
-		QVector3D pos;
-		QVector4D color;
+		iris::Vec3 pos;
+		iris::Vec4 color;
 	};
 
     QVector<LineData> lineData;
 
 public:
-    void addLine(QVector3D a, QVector3D b);
-	void addLine(QVector3D a, QColor aCol, QVector3D b, QColor bCol);
+    void addLine(iris::Vec3 a, iris::Vec3 b);
+	void addLine(iris::Vec3 a, QColor aCol, iris::Vec3 b, QColor bCol);
     MeshPtr build();
 };
 

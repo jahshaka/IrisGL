@@ -12,14 +12,14 @@ For more information see the LICENSE file
 #ifndef IRIS_CLIPEXTRACTOR_H
 #define IRIS_CLIPEXTRACTOR_H
 
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "irisglfwd.h"
 
 #include <QHash>
-#include <QQuaternion>
 #include <QString>
 #include <QStringList>
 #include <QVector>
-#include <QVector3D>
 
 namespace iris
 {
@@ -30,9 +30,9 @@ namespace iris
 struct ClipBoneKey
 {
     float       time = 0.0f;
-    QVector3D   position;
-    QQuaternion rotation;
-    QVector3D   scale{1, 1, 1};
+    iris::Vec3   position;
+    iris::Quat rotation;
+    iris::Vec3   scale{1, 1, 1};
 };
 
 /// One bone's track. `bone` indexes Skeleton::bones.
@@ -97,9 +97,9 @@ class ClipExtractor
 public:
     struct RestLocal
     {
-        QVector3D   pos;
-        QQuaternion rot;
-        QVector3D   scale{1, 1, 1};
+        iris::Vec3   pos;
+        iris::Quat rot;
+        iris::Vec3   scale{1, 1, 1};
     };
     /// The authored local TRS of every node of a subtree, by node POINTER.
     using RestPose = QHash<const SceneNode *, RestLocal>;

@@ -12,15 +12,18 @@ For more information see the LICENSE file
 #ifndef IVIEWSOURCE_H
 #define IVIEWSOURCE_H
 
+#include "core/math/mat4.h"
+#include "core/math/vec.h"
+
 
 namespace iris{
 
 class IViewSource
 {
 public:
-    virtual QVector3D getPosition() = 0;
-    virtual QMatrix4x4 getViewMatrix() = 0;
-    virtual QMatrix4x4 getProjMatrix() = 0;
+    virtual iris::Vec3 getPosition() = 0;
+    virtual iris::Mat4 getViewMatrix() = 0;
+    virtual iris::Mat4 getProjMatrix() = 0;
     virtual float getNearClip();
     virtual float getFarClip();
 

@@ -12,7 +12,8 @@ For more information see the LICENSE file
 #ifndef MESH_H
 #define MESH_H
 
-#include <QQuaternion>
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include <QString>
 #include <QColor>
 
@@ -159,17 +160,17 @@ public:
                 // extract tracks (tick → second conversion at the source)
                 for (unsigned k = 0; k<nodeAnim->mNumPositionKeys; k++) {
                     auto key = nodeAnim->mPositionKeys[k];
-                    boneAnim->posKeys->addKey(QVector3D(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
+                    boneAnim->posKeys->addKey(iris::Vec3(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
                 }
 
                 for (unsigned k = 0; k<nodeAnim->mNumRotationKeys; k++) {
                     auto key = nodeAnim->mRotationKeys[k];
-                    boneAnim->rotKeys->addKey(QQuaternion(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
+                    boneAnim->rotKeys->addKey(iris::Quat(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
                 }
 
                 for (unsigned k = 0; k<nodeAnim->mNumScalingKeys; k++) {
                     auto key = nodeAnim->mScalingKeys[k];
-                    boneAnim->scaleKeys->addKey(QVector3D(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
+                    boneAnim->scaleKeys->addKey(iris::Vec3(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
                 }
 
                 skelAnim->addBoneAnimation(nodeName, boneAnim);

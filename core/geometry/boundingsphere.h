@@ -1,7 +1,10 @@
 #ifndef BOUNDINGSPHERE_H
 #define BOUNDINGSPHERE_H
 
-#include <QVector3D>
+#include <algorithm>
+
+#include "core/math/vec.h"
+
 
 namespace iris
 {
@@ -9,7 +12,7 @@ namespace iris
 class BoundingSphere
 {
 public:
-    QVector3D pos;
+    iris::Vec3 pos;
     /// INITIALISED, deliberately: Mesh's non-assimp constructors never run
     /// calculateBounds, so a default-constructed BoundingSphere is what
     /// getBoundingSphere() hands out for them. Indeterminate here means a
@@ -17,7 +20,7 @@ public:
     /// uninitialised memory. Zero is the honest answer: "no bounds known".
     float radius = 0.0f;
 
-    void expand(QVector3D point)
+    void expand(iris::Vec3 point)
     {
         auto dist = pos.distanceToPoint(point);
         if (dist > radius)
@@ -31,7 +34,7 @@ public:
 
     static BoundingSphere merge(const BoundingSphere& a, const BoundingSphere& b)
     {
-        QVector3D center = b.pos - a.pos;
+        iris::Vec3 center = b.pos - a.pos;
         auto dist = center.length();
 
         // handle the case where one sphere might be in the next
@@ -43,8 +46,8 @@ public:
                 return b;
         }
 
-        float aRad = qMax(a.radius - dist, b.radius);
-        float bRad = qMax(a.radius + dist, b.radius);
+        float aRad = std::max(a.radius - dist, b.radius);
+        float bRad = std::max(a.radius + dist, b.radius);
 
         center = center + (((aRad - bRad) / (2 * center.length())) * center);
 

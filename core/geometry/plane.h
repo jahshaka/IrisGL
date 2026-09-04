@@ -1,8 +1,8 @@
 #ifndef PLANE_H
 #define PLANE_H
 
-#include <QVector3D>
-#include <QVector4D>
+#include "core/math/vec.h"
+
 
 namespace iris
 {
@@ -18,11 +18,11 @@ enum SphereClassification
 class Plane
 {
 public:
-    QVector3D normal;
+    iris::Vec3 normal;
     float d;
 
     Plane();
-    Plane(QVector3D planeNormal, float distance);
+    Plane(iris::Vec3 planeNormal, float distance);
 
     SphereClassification classifySphere(BoundingSphere* sphere);
 };

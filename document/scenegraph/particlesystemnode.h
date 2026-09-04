@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef PARTICLESYSTEMNODE_H
 #define PARTICLESYSTEMNODE_H
 
+#include "core/math/vec.h"
 #include <QVector>
 
 #include "irisglfwd.h"
@@ -101,9 +102,9 @@ public:
     // ---- ParticleFX2 authoring (PARTICLES_FX2_SPEC.md) -----------------------
     ParticleEmitterShape shape;
     /// Box: width/height/depth. Cylinder/Ellipsoid/Ring: radii. Point: unused.
-    QVector3D extents;
+    iris::Vec3 extents;
     /// HollowEllipsoid / Ring: the hole, as a fraction of `extents` in [0, 1).
-    QVector3D innerExtents;
+    iris::Vec3 innerExtents;
     /// Emission cone half-angle around the node's +Y, in degrees. 0 = a beam.
     float coneAngle;
     /// Per-particle emission colour, picked between the two at birth. This is
@@ -123,7 +124,7 @@ public:
     /// omits the affector entirely, which is not free to add).
     float turbulence;
     /// A constant world-space force on top of gravity: wind, buoyancy, updraft.
-    QVector3D wind;
+    iris::Vec3 wind;
     /// Spin, degrees per second, picked per particle in [min, max].
     float rotationSpeedMin, rotationSpeedMax;
 

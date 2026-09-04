@@ -13,10 +13,9 @@ For more information see the LICENSE file
 #define SCENENODE_H
 
 
-#include <QQuaternion>
-#include <QMatrix4x4>
-#include <QVector3D>
-
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "irisglfwd.h"
 #include "document/physics/physicsproperties.h"
 
@@ -48,9 +47,9 @@ protected:
     QList<AnimationPtr> animations;
     AnimationPtr animation;
 
-    QVector3D pos;
-    QVector3D scale;
-    QQuaternion rot;
+    iris::Vec3 pos;
+    iris::Vec3 scale;
+    iris::Quat rot;
 
     // ---- transform invalidation (deep audit 2026-09, area 3) --------------
     // These two flags were set true in the constructor and NEVER cleared
@@ -77,8 +76,8 @@ protected:
     bool hasDirtyChildren;
 public:
     // cached local and global transform
-    QMatrix4x4 localTransform;
-    QMatrix4x4 globalTransform;
+    iris::Mat4 localTransform;
+    iris::Mat4 globalTransform;
 
     SceneNodeType sceneNodeType;
 
@@ -177,29 +176,29 @@ public:
 		return exportable;
 	}
 
-    QVector3D getLocalPos() {
+    iris::Vec3 getLocalPos() {
         return pos;
     }
 
-    QQuaternion getLocalRot() {
+    iris::Quat getLocalRot() {
         return rot;
     }
 
-    QVector3D getLocalScale() {
+    iris::Vec3 getLocalScale() {
         return scale;
     }
 
-	void rotate(QQuaternion rot, bool global = false);
+	void rotate(iris::Quat rot, bool global = false);
     
     bool hasChildren() {
         return !children.empty();
     }
 
-    void setLocalPos(QVector3D pos);
-    void setLocalRot(QQuaternion rot);
-    void setLocalScale(QVector3D scale);
+    void setLocalPos(iris::Vec3 pos);
+    void setLocalRot(iris::Quat rot);
+    void setLocalScale(iris::Vec3 scale);
 
-    void setLocalTransform(QMatrix4x4 transformMatrix);
+    void setLocalTransform(iris::Mat4 transformMatrix);
 
     void setTransformDirty();
     void setHasDirtyChildren();
@@ -322,14 +321,14 @@ public:
 
     bool isRootNode();
 
-	QQuaternion getGlobalRotation();
-    QVector3D getGlobalPosition();
-    QMatrix4x4 getGlobalTransform();
-    QMatrix4x4 getLocalTransform();
+	iris::Quat getGlobalRotation();
+    iris::Vec3 getGlobalPosition();
+    iris::Mat4 getGlobalTransform();
+    iris::Mat4 getLocalTransform();
 
-	void setGlobalPos(QVector3D pos);
-	void setGlobalRot(QQuaternion rot);
-	void setGlobalTransform(QMatrix4x4 transform);
+	void setGlobalPos(iris::Vec3 pos);
+	void setGlobalRot(iris::Quat rot);
+	void setGlobalTransform(iris::Mat4 transform);
 
     /*
      * This function does multiple things:
@@ -362,9 +361,9 @@ public:
     /// import). `hasRest` is false for a node nobody ever captured, and callers
     /// then fall back to the live transform.
     bool        hasRest = false;
-    QVector3D   restPos;
-    QQuaternion restRot;
-    QVector3D   restScale{1, 1, 1};
+    iris::Vec3   restPos;
+    iris::Quat restRot;
+    iris::Vec3   restScale{1, 1, 1};
 
 private:
     void setParent(SceneNodePtr node);

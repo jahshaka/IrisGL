@@ -1,10 +1,11 @@
 #ifndef SKELETON_H
 #define SKELETON_H
 
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "irisglfwd.h"
 #include <Qt>
-#include <QMatrix4x4>
-#include <QQuaternion>
 
 namespace iris
 {
@@ -20,22 +21,22 @@ class Bone : public QEnableSharedFromThis<Bone>
     Bone(){}
 public:
     QString name;
-    QMatrix4x4 inverseMeshSpacePoseMatrix;// mesh space
-    QMatrix4x4 meshSpacePoseMatrix;// mesh space
-    QMatrix4x4 transformMatrix;// skeleton space
+    iris::Mat4 inverseMeshSpacePoseMatrix;// mesh space
+    iris::Mat4 meshSpacePoseMatrix;// mesh space
+    iris::Mat4 transformMatrix;// skeleton space
 
-    QMatrix4x4 localMatrix;// local space (to parent bone)
+    iris::Mat4 localMatrix;// local space (to parent bone)
 
 	// local to bone's parent
-	QVector3D pos, scale;
-	QQuaternion rot;
+	iris::Vec3 pos, scale;
+	iris::Quat rot;
 
 	// binding local transform of object
 	// these arent changed throughout the lifetime of the bone
-	QVector3D bindingPos, bindingScale;
-	QQuaternion bindingRot;
+	iris::Vec3 bindingPos, bindingScale;
+	iris::Quat bindingRot;
 
-    QMatrix4x4 skinMatrix;// final transform sent to the shader
+    iris::Mat4 skinMatrix;// final transform sent to the shader
 
     QList<BonePtr> childBones;
     BonePtr parentBone;
@@ -116,7 +117,6 @@ public:
         return SkeletonPtr(new Skeleton());
     }
 };
-
 
 
 }

@@ -12,9 +12,9 @@ For more information see the LICENSE file
 #ifndef MATHHELPER_H
 #define MATHHELPER_H
 
-#include <QMatrix4x4>
-#include <QVector3D>
-#include <QQuaternion>
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include <QtMath>
 
 namespace iris
@@ -27,10 +27,10 @@ public:
     // https://github.com/MonoGame/MonoGame/blob/develop/MonoGame.Framework/Matrix.cs#L1455
 	// look into doing better decomposition:
 	// https://github.com/qt/qt3d/blob/fb18ee8f05ff36f517ef2248539fda8a79c33f0e/src/core/transforms/qmath3d_p.h
-    static void decomposeMatrix(const QMatrix4x4& matrix, QVector3D& pos, QQuaternion& rot, QVector3D& scale)
+    static void decomposeMatrix(const iris::Mat4& matrix, iris::Vec3& pos, iris::Quat& rot, iris::Vec3& scale)
     {
         pos = matrix.column(3).toVector3D();
-        rot = QQuaternion::fromRotationMatrix(matrix.normalMatrix());
+        rot = iris::Quat::fromRotationMatrix(matrix.normalMatrix());
 
         auto col = matrix.column(0);
         auto sx = sign(col.x() * col.y() * col.z() * col.w()) < 0 ? -1 : 1;
@@ -58,35 +58,35 @@ public:
 
 
     // Realtime Collision Detection, page 149
-    static float closestPointBetweenSegments(QVector3D p1, QVector3D q1, QVector3D p2, QVector3D q2,
-                                             float& s, float& t, QVector3D& c1, QVector3D& c2)
+    static float closestPointBetweenSegments(iris::Vec3 p1, iris::Vec3 q1, iris::Vec3 p2, iris::Vec3 q2,
+                                             float& s, float& t, iris::Vec3& c1, iris::Vec3& c2)
     {
         const float EPILSON = 0.000001f;
-        QVector3D d1 = q1 - p1;
-        QVector3D d2 = q2 - p2;
-        QVector3D r  = p1 - p2;
-        float a = QVector3D::dotProduct(d1, d1);
-        float e = QVector3D::dotProduct(d2, d2);
-        float f = QVector3D::dotProduct(d2, r);
+        iris::Vec3 d1 = q1 - p1;
+        iris::Vec3 d2 = q2 - p2;
+        iris::Vec3 r  = p1 - p2;
+        float a = iris::Vec3::dotProduct(d1, d1);
+        float e = iris::Vec3::dotProduct(d2, d2);
+        float f = iris::Vec3::dotProduct(d2, r);
 
         if (a <= EPILSON && e <= EPILSON) {
             s = 0;
             t = 0;
             c1 = p1;
             c2 = p2;
-            return QVector3D::dotProduct(c1-c2, c1-c2);
+            return iris::Vec3::dotProduct(c1-c2, c1-c2);
         }
         if (a <= EPILSON) {
             s = 0;
             t = f/e;
             t = qBound(0.0f, t, 1.0f);
         } else {
-            float c = QVector3D::dotProduct(d1, r);
+            float c = iris::Vec3::dotProduct(d1, r);
             if (e <= EPILSON) {
                 t = 0;
                 s = qBound(0.0f, -c/a, 1.0f);
             } else {
-                float b = QVector3D::dotProduct(d1, d2);
+                float b = iris::Vec3::dotProduct(d1, d2);
                 float denom = a*e - b*b;
 
                 if (denom != 0) {
@@ -110,7 +110,7 @@ public:
         c1 = p1 + d1 * s;
         c2 = p2 + d2 * t;
 
-        return QVector3D::dotProduct(c1 - c2, c1 - c2);
+        return iris::Vec3::dotProduct(c1 - c2, c1 - c2);
     }
 };
 

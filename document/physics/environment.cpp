@@ -1,3 +1,5 @@
+#include "core/math/mat4.h"
+#include "core/math/vec.h"
 #include "document/physics/environment.h"
 
 #include "document/scenegraph/viewernode.h"
@@ -33,7 +35,7 @@ Environment::~Environment()
     destroyPhysicsWorld();
 }
 
-void Environment::setDirection(QVector2D dir)
+void Environment::setDirection(iris::Vec2 dir)
 {
 	//walkDirection = btVector3(0.0, 0.0, 0.0);
 	walkDir = dir;
@@ -360,7 +362,7 @@ void Environment::createPhysicsWorld()
 	world->getDispatchInfo().m_allowedCcdPenetration = 0.0001f;
 }
 
-void Environment::createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const QVector3D &segStart, const QVector3D &segEnd)
+void Environment::createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const iris::Vec3 &segStart, const iris::Vec3 &segEnd)
 {
 	PickingHandle& handle = pickingHandles[(int)handleType];
 
@@ -439,7 +441,7 @@ void Environment::updatePickingConstraint(PickingHandleType handleType, const bt
 	}
 }
 
-void Environment::updatePickingConstraint(PickingHandleType handleType, const QMatrix4x4 &handTransformation)
+void Environment::updatePickingConstraint(PickingHandleType handleType, const iris::Mat4 &handTransformation)
 {
 	PickingHandle& handle = pickingHandles[(int)handleType];
 

@@ -8,7 +8,8 @@ and/or modify it under the terms of the MIT License
 
 For more information see the LICENSE file
 *************************************************************************/
-#include <QQuaternion>
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "document/scenegraph/meshnode.h"
 
 #include <QFileInfo>
@@ -231,9 +232,9 @@ static void _applyMeshNodeTransform(const aiScene* scene, MeshNodePtr node)
     aiVector3D pos, scale;
     aiQuaternion rot;
     xform.Decompose(scale, rot, pos);
-    node->setLocalPos(QVector3D(pos.x, pos.y, pos.z));
-    node->setLocalScale(QVector3D(scale.x, scale.y, scale.z));
-    node->setLocalRot(QQuaternion(rot.w, rot.x, rot.y, rot.z));
+    node->setLocalPos(iris::Vec3(pos.x, pos.y, pos.z));
+    node->setLocalScale(iris::Vec3(scale.x, scale.y, scale.z));
+    node->setLocalRot(iris::Quat(rot.w, rot.x, rot.y, rot.z));
 }
 
 QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
@@ -311,10 +312,10 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 
     //auto transform = node->mTransformation;
     node->mTransformation.Decompose(scale,rot,pos);
-    sceneNode->setLocalPos(QVector3D(pos.x,pos.y,pos.z));
-    sceneNode->setLocalScale(QVector3D(scale.x,scale.y,scale.z));
+    sceneNode->setLocalPos(iris::Vec3(pos.x,pos.y,pos.z));
+    sceneNode->setLocalScale(iris::Vec3(scale.x,scale.y,scale.z));
 
-    sceneNode->setLocalRot(QQuaternion(rot.w,rot.x,rot.y,rot.z));
+    sceneNode->setLocalRot(iris::Quat(rot.w,rot.x,rot.y,rot.z));
 
     // this is probably the first node in the hierarchy, set it as the rootBone
     if (!rootBone) rootBone = sceneNode;

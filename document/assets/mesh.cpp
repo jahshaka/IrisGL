@@ -10,7 +10,9 @@ For more information see the LICENSE file
 *************************************************************************/
 
 
-#include <QQuaternion>
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "document/assets/mesh.h"
 
 #include <QString>
@@ -40,7 +42,7 @@ For more information see the LICENSE file
 namespace iris
 {
 
-QMatrix4x4 aiMatrixToQMatrix(aiMatrix4x4 aiMat) {
+iris::Mat4 aiMatrixToQMatrix(aiMatrix4x4 aiMat) {
     aiVector3D pos,scale;
     aiQuaternion rot;
 
@@ -48,11 +50,11 @@ QMatrix4x4 aiMatrixToQMatrix(aiMatrix4x4 aiMat) {
 
     rot.Normalize();
 
-    QMatrix4x4 mat;
+    iris::Mat4 mat;
     mat.setToIdentity();
-    mat.translate(QVector3D(pos.x, pos.y, pos.z));
-    mat.rotate(QQuaternion(rot.w, rot.x, rot.y, rot.z));
-    mat.scale(QVector3D(scale.x, scale.y, scale.z));
+    mat.translate(iris::Vec3(pos.x, pos.y, pos.z));
+    mat.rotate(iris::Quat(rot.w, rot.x, rot.y, rot.z));
+    mat.scale(iris::Vec3(scale.x, scale.y, scale.z));
 
     return mat;
 }
@@ -157,9 +159,9 @@ Mesh::Mesh(aiMesh* mesh)
         auto b = mesh->mVertices[face.mIndices[1]];
         auto c = mesh->mVertices[face.mIndices[2]];
 
-        triMesh->addTriangle(QVector3D(a.x, a.y, a.z),
-                             QVector3D(b.x, b.y, b.z),
-                             QVector3D(c.x, c.y, c.z));
+        triMesh->addTriangle(iris::Vec3(a.x, a.y, a.z),
+                             iris::Vec3(b.x, b.y, b.z),
+                             iris::Vec3(c.x, c.y, c.z));
     }
 
     usesIndexBuffer = true;
@@ -384,7 +386,7 @@ SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)
     // FK over these reproduces meshSpacePoseMatrix, whose inverse is assimp's
     // offset matrix. One quantity, three consumers, computed once here.
     for (const auto &bone : skel->bones) {
-        const QMatrix4x4 bindLocal = !bone->parentBone.isNull()
+        const iris::Mat4 bindLocal = !bone->parentBone.isNull()
             ? bone->parentBone->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
             : bone->meshSpacePoseMatrix;
         decomposeTRS(bindLocal, bone->bindingPos, bone->bindingRot, bone->bindingScale);
@@ -440,7 +442,7 @@ void Mesh::calculateBounds(const aiMesh* mesh)
 	aabb = AABB();
 	for (unsigned int i = 0; i<mesh->mNumVertices; i++) {
 		auto& vert = mesh->mVertices[i];
-		aabb.merge(QVector3D(vert.x, vert.y, vert.z));
+		aabb.merge(iris::Vec3(vert.x, vert.y, vert.z));
 	}
 
 	boundingSphere = aabb.getMinimalEnclosingSphere();
@@ -482,7 +484,7 @@ BoundingSphere Mesh::calculateBoundingSphere(const aiMesh *mesh)
     }
 
     BoundingSphere sphere;
-    sphere.pos = QVector3D(averagePos.x, averagePos.y, averagePos.x);
+    sphere.pos = iris::Vec3(averagePos.x, averagePos.y, averagePos.x);
     sphere.radius = qSqrt(maxDistSqrd);
     return sphere;
 }

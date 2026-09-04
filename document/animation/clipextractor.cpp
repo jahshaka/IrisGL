@@ -9,6 +9,7 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "core/math/mat4.h"
 #include "document/animation/clipextractor.h"
 
 #include "core/math/trs.h"
@@ -17,7 +18,6 @@ For more information see the LICENSE file
 #include "document/assets/skeleton.h"
 #include "document/scenegraph/scenenode.h"
 
-#include <QMatrix4x4>
 #include <QSet>
 #include <algorithm>
 #include <cmath>
@@ -40,7 +40,7 @@ inline float unquantiseTime(long long q) { return float(double(q) * 1e-6); }
 
 /// Deliberately NOT named composeTRS: a same-named helper in this anonymous
 /// namespace would hide iris::composeTRS for every call in the file.
-inline QMatrix4x4 composeRest(const ClipExtractor::RestLocal &r)
+inline iris::Mat4 composeRest(const ClipExtractor::RestLocal &r)
 {
     return composeTRS(r.pos, r.rot, r.scale);
 }
@@ -129,7 +129,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     };
 
     // ---- per-node local transform at a time ------------------------------
-    const auto localAt = [&](SceneNode *n, float t) -> QMatrix4x4 {
+    const auto localAt = [&](SceneNode *n, float t) -> iris::Mat4 {
         const auto it = clip->boneAnimations.constFind(n->name);
         if (it != clip->boneAnimations.constEnd() && !it.value().isNull()) {
             // SceneNode::updateAnimation writes all THREE components whenever a
@@ -147,7 +147,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     // The product of `path[startIndex] … path[0]`, parent first — the path
     // arrives nearest-first, so it is walked backwards.
     const auto chainBelow = [&](const QVector<SceneNode *> &path, int startIndex, float t) {
-        QMatrix4x4 m;
+        iris::Mat4 m;
         m.setToIdentity();
         for (int i = startIndex; i >= 0; --i) m = m * localAt(path[i], t);
         return m;
@@ -240,9 +240,9 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         for (long long q : times) {
             const float t = unquantiseTime(q);
             // ---- step 3: compose the chain at t, both frames --------------
-            const QMatrix4x4 boneChain  = chainBelow(bonePath, boneDepth, t);
-            const QMatrix4x4 frameChain = chainBelow(framePath, frameDepth, t);
-            const QMatrix4x4 local = frameChain.inverted() * boneChain;
+            const iris::Mat4 boneChain  = chainBelow(bonePath, boneDepth, t);
+            const iris::Mat4 frameChain = chainBelow(framePath, frameDepth, t);
+            const iris::Mat4 local = frameChain.inverted() * boneChain;
             // ---- step 4: decompose -----------------------------------------
             ClipBoneKey key;
             key.time = t;
@@ -266,7 +266,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
             const auto pit = rig->boneMap.constFind(bone->parentBone->name);
             if (pit != rig->boneMap.constEnd() && pit.value() != i) parentIndex = pit.value();
         }
-        const QMatrix4x4 bindLocal = parentIndex >= 0
+        const iris::Mat4 bindLocal = parentIndex >= 0
             ? bones[parentIndex]->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
             : bone->meshSpacePoseMatrix;
 
@@ -279,12 +279,12 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
 
         // The rest local is the same composition with NO clip driving it.
         const auto restChain = [&](const QVector<SceneNode *> &path) {
-            QMatrix4x4 m;
+            iris::Mat4 m;
             m.setToIdentity();
             for (int k = path.size() - 1; k >= 0; --k) m = m * composeRest(restOf(path[k]));
             return m;
         };
-        const QMatrix4x4 restLocal = restChain(framePath).inverted() * restChain(bonePath);
+        const iris::Mat4 restLocal = restChain(framePath).inverted() * restChain(bonePath);
         float worst = 0.0f;
         for (int c = 0; c < 16; ++c)
             worst = std::max(worst, std::fabs(restLocal.constData()[c] - bindLocal.constData()[c]));

@@ -12,11 +12,9 @@ For more information see the LICENSE file
 #ifndef KEYFRAMEANIMATION_H
 #define KEYFRAMEANIMATION_H
 
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include <QString>
-#include <QVector2D>
-#include <QVector3D>
-#include <QVector4D>
-#include <QQuaternion>
 #include <QColor>
 
 #include "core/math/bezierhelper.h"
@@ -310,40 +308,40 @@ public:
     }
 };
 
-class Vector2DKeyFrame:public KeyFrame<QVector2D>
+class Vector2DKeyFrame:public KeyFrame<iris::Vec2>
 {
 public:
-    QVector2D interpolate(QVector2D a,QVector2D b,float t)
+    iris::Vec2 interpolate(iris::Vec2 a,iris::Vec2 b,float t)
     {
         return a+(b-a)*t;
     }
 };
 
-class Vector3DKeyFrame:public KeyFrame<QVector3D>
+class Vector3DKeyFrame:public KeyFrame<iris::Vec3>
 {
 public:
-    QVector3D interpolate(QVector3D a,QVector3D b,float t)
+    iris::Vec3 interpolate(iris::Vec3 a,iris::Vec3 b,float t)
     {
         return a+((b-a)*t);
     }
 };
 
-class Vector4DKeyFrame:public KeyFrame<QVector4D>
+class Vector4DKeyFrame:public KeyFrame<iris::Vec4>
 {
 public:
-    QVector4D interpolate(QVector4D a,QVector4D b,float t)
+    iris::Vec4 interpolate(iris::Vec4 a,iris::Vec4 b,float t)
     {
         return a+(b-a)*t;
     }
 };
 
-class QuaternionKeyFrame:public KeyFrame<QQuaternion>
+class QuaternionKeyFrame:public KeyFrame<iris::Quat>
 {
 public:
-    QQuaternion interpolate(QQuaternion a,QQuaternion b,float t)
+    iris::Quat interpolate(iris::Quat a,iris::Quat b,float t)
     {
         //slerp instead of lerp
-        return QQuaternion::slerp(a,b,t);
+        return iris::Quat::slerp(a,b,t);
     }
 };
 
