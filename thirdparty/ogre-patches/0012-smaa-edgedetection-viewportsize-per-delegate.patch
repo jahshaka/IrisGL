@@ -1,0 +1,54 @@
+diff --git a/Samples/Media/2.0/scripts/materials/Tutorial_SMAA/SMAA.material b/Samples/Media/2.0/scripts/materials/Tutorial_SMAA/SMAA.material
+index e43831c30..12493da53 100644
+--- a/Samples/Media/2.0/scripts/materials/Tutorial_SMAA/SMAA.material
++++ b/Samples/Media/2.0/scripts/materials/Tutorial_SMAA/SMAA.material
+@@ -62,6 +62,13 @@ fragment_program SMAA/EdgeDetection_ps_HLSL hlsl
+ 	source SMAA_EdgeDetection_ps.hlsl
+ 	target ps_5_0 ps_4_0 ps_4_0_level_9_1 ps_4_0_level_9_3
+ 	entry_point main
++	// (Jahshaka) moved down from the unified program's default_params: the
++	// HLSL edge-detection PS is the only D3D delegate that references
++	// viewportSize (SMAA_EdgeDetection_ps.hlsl:19).
++	default_params
++	{
++		param_named_auto viewportSize	viewport_size
++	}
+ }
+ 
+ fragment_program SMAA/EdgeDetection_ps_Metal metal
+@@ -69,6 +76,11 @@ fragment_program SMAA/EdgeDetection_ps_Metal metal
+ 	source SMAA_EdgeDetection_ps.metal
+ 	enable_include_header true
+ 	shader_reflection_pair_hint SMAA/EdgeDetection_vs
++	// (Jahshaka) as above — SMAA_EdgeDetection_ps.metal does use viewportSize.
++	default_params
++	{
++		param_named_auto viewportSize	viewport_size
++	}
+ }
+ 
+ fragment_program SMAA/EdgeDetection_ps unified
+@@ -78,10 +90,19 @@ fragment_program SMAA/EdgeDetection_ps unified
+ 	delegate SMAA/EdgeDetection_ps_HLSL
+ 	delegate SMAA/EdgeDetection_ps_Metal
+ 
+-	default_params
+-	{
+-		param_named_auto viewportSize	viewport_size
+-	}
++	// (Jahshaka) `param_named_auto viewportSize viewport_size` used to live
++	// here. UnifiedHighLevelGpuProgram::getDefaultParameters() forwards to the
++	// ACTIVE delegate (OgreUnifiedHighLevelGpuProgram.cpp:219-224), so this
++	// block was never "shared" — it wrote into whichever language the render
++	// system picked. On Vulkan that is SMAA/EdgeDetection_ps_VK, whose GLSL
++	// never reads viewportSize (the edge-detection PS consumes precomputed
++	// offsets from the VS), so glslang strips the whole `Params` block and the
++	// reflection lookup throws:
++	//     OGRE EXCEPTION(5:ItemIdentityException): Parameter called
++	//     viewportSize does not exist. ... SMAA.material(83)
++	// every boot. Same class as patch 0003 (Sky.material sliceIdx). The
++	// binding is kept on the two delegates that actually declare it, so no
++	// backend loses it.
+ }
+ 
+ material SMAA/EdgeDetection
