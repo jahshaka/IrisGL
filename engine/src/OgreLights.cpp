@@ -35,6 +35,9 @@ Ogre::TextureGpu *gMaskPool = nullptr;
 /// the same mask any frame.
 std::map<std::string, Ogre::TextureGpu *> gMasks;
 bool gAreaBudgetsRaised = false;
+/// Has loadLtcMatrix run against the LIVE Root? Reset by shutdown() — see
+/// armLtcMatrix's header comment for why this cannot be a function-local static.
+bool gLtcLoaded = false;
 
 Ogre::HlmsPbs *pbsOf(Ogre::Root *root) {
     if (!root || !root->getHlmsManager()) return nullptr;
@@ -118,6 +121,17 @@ void armAreaLightBudgets(Ogre::Root *root) {
     gAreaBudgetsRaised = true;
     try {
         pbs->setAreaLightForwardSettings(kAreaApproxLimit, kAreaLtcLimit);
+    } catch (...) {}
+}
+
+// ---------------------------------------------------------------------------
+void armLtcMatrix(Ogre::Root *root) {
+    if (gLtcLoaded) return;
+    Ogre::HlmsPbs *pbs = pbsOf(root);
+    if (!pbs) return;
+    gLtcLoaded = true;   // even a failed attempt: don't retry every frame
+    try {
+        pbs->loadLtcMatrix();
     } catch (...) {}
 }
 
@@ -246,6 +260,9 @@ void shutdown() {
     gMasks.clear();
     gMaskPool = nullptr;
     gAreaBudgetsRaised = false;
+    // The LTC matrix belongs to the Root's HlmsPbs, which is about to die: the
+    // next Engine must load it again or its area lights render unlit.
+    gLtcLoaded = false;
 }
 
 }  // namespace lightextras

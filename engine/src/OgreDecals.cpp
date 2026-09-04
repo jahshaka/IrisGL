@@ -191,9 +191,12 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
     DecalAtlas &atlas = decalAtlas(kind);
 
     // Already in this scene's table? (Same path, same kind = same slice.)
-    for (auto &kv : mTextures)
-        if (kv.second.decal && kv.second.decalKind == kind && kv.second.path == path)
-            return kv.first;
+    // One hash lookup, not a scan of every texture the scene holds — the index
+    // namespaces decal slices by kind exactly so this stays correct.
+    {
+        auto hit = mTextureIndex.find(textureKey(path, true, kind));
+        if (hit != mTextureIndex.end()) return hit->second;
+    }
 
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -207,8 +210,7 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
             rec.path = path;
             rec.decal = true;
             rec.decalKind = kind;
-            mTextures[++mNextTextureId] = rec;
-            return mNextTextureId;
+            return trackTexture(rec);
         }
 
         // Budget check BEFORE anything is created. Overflow is the one failure
@@ -381,8 +383,7 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
         rec.path = path;
         rec.decal = true;
         rec.decalKind = kind;
-        mTextures[++mNextTextureId] = rec;
-        return mNextTextureId;
+        return trackTexture(rec);
     } JAH_CATCH(mError, 0);
 }
 

@@ -42,7 +42,14 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
                          bool refractionsActive) {
     db->setDiffuse(Ogre::Vector3(p.albedo.r, p.albedo.g, p.albedo.b));
     db->setMetalness(p.metalness);
-    db->setRoughness(p.roughness);
+    // Roughness 0 is reachable from the material slider, and HlmsPbs then logs
+    // "Very low roughness values can cause NaNs in the pixel shader!" — once per
+    // setRoughness, i.e. once per material PER FRAME while the mirror pushes.
+    // The shader really can produce NaNs there too, so this is a clamp, not a
+    // log suppression; 1e-4 sits an order of magnitude above Ogre's own 1e-6
+    // warning threshold and is visually indistinguishable from a mirror.
+    // The contract is stated on PbrParams::roughness in Types.h.
+    db->setRoughness(std::max(p.roughness, 1e-4f));
     db->setEmissive(Ogre::Vector3(p.emissive.r, p.emissive.g, p.emissive.b));
     db->setNormalMapWeight(p.normalMapWeight);
     // UV tiling: HlmsPbs has no UV transform for its base maps (only detail maps
@@ -55,7 +62,18 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     // Manage the macroblock ourselves: setTwoSidedLighting(changeMacroblock=true)
     // swaps culling to CULL_NONE when enabling but never restores it when
     // disabling, and applyPbr must be idempotent in both directions.
-    db->setTwoSidedLighting(p.twoSided, false);
+    //
+    // GUARDED, unlike every other setter here: HlmsPbsDatablock::setTwoSidedLighting
+    // ends in an UNCONDITIONAL flushRenderables() (OgreHlmsPbsDatablock.cpp:787) —
+    // it does not compare against mTwoSided first, the way setAlphaTest and
+    // setTransparency compare against their own state. flushRenderables walks
+    // every renderable using the datablock and recomputes its Hlms hash, so an
+    // unconditional call from applyPbr made the mirror's per-frame
+    // setPbrMaterial push a full hash recompute for every renderable, 60x a
+    // second (deep audit 2026-09, area 5). The mirror now skips unchanged
+    // pushes as well; this guard is the engine-side half, and it also protects
+    // every other caller of applyPbr.
+    if (db->getTwoSidedLighting() != p.twoSided) db->setTwoSidedLighting(p.twoSided, false);
     {
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
         const Ogre::CullingMode want = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
@@ -264,14 +282,33 @@ bool OgreScene::detachMesh(NodeId id) {
 }
 
 // ---- Textures ----
+std::string OgreScene::textureKey(const std::string &path, bool decal, DecalMap kind) {
+    if (!decal) return path;
+    return "d" + std::to_string(int(kind)) + "|" + path;
+}
+
+TextureId OgreScene::trackTexture(const TextureRec &rec) {
+    const TextureId id = ++mNextTextureId;
+    mTextures[id] = rec;
+    // Pixel-uploaded textures (createTexture) have no path and are never
+    // deduplicated — the caller owns their identity.
+    if (!rec.path.empty())
+        mTextureIndex.emplace(textureKey(rec.path, rec.decal, rec.decalKind), id);
+    return id;
+}
+
 TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
     // Path dedup, but NEVER across the decal atlases: the same image file can be
     // both an ordinary PBR map and a decal image, and they live in different
     // pools with different formats. Handing a decal slice back from here would
     // bind a pooled slice as a base map AND let the caller destroyTexture() a
-    // texture other scenes' decals are still sampling.
-    for (auto &kv : mTextures)
-        if (!kv.second.decal && kv.second.path == path) return kv.first;
+    // texture other scenes' decals are still sampling. mTextureIndex keeps the
+    // two namespaces apart (textureKey) — and turns what was a linear scan of
+    // every texture in the scene into one hash lookup.
+    {
+        auto hit = mTextureIndex.find(textureKey(path, false, DecalMap::Diffuse));
+        if (hit != mTextureIndex.end()) return hit->second;
+    }
     const size_t slash = path.find_last_of("/\\");
     const std::string dir  = slash == std::string::npos ? "." : path.substr(0, slash);
     const std::string file = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -326,8 +363,7 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 tex->scheduleTransitionTo(Ogre::GpuResidency::Resident, rgba, true);   // deletes rgba
                 tex->waitForData();
                 TextureRec rec; rec.texture = tex; rec.path = path;
-                mTextures[++mNextTextureId] = rec;
-                return mNextTextureId;
+                return trackTexture(rec);
             }
         }
         Ogre::uint32 flags = Ogre::TextureFlags::AutomaticBatching;
@@ -340,8 +376,7 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
         tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
         tex->waitForData();
         TextureRec rec; rec.texture = tex; rec.path = path;
-        mTextures[++mNextTextureId] = rec;
-        return mNextTextureId;
+        return trackTexture(rec);
     } JAH_CATCH(mError, 0);
 }
 
@@ -377,8 +412,7 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         staging->upload(box, tex, 0, nullptr, nullptr, true);
         tm->removeStagingTexture(staging);
         TextureRec rec; rec.texture = tex; rec.path = "";
-        mTextures[++mNextTextureId] = rec;
-        return mNextTextureId;
+        return trackTexture(rec);
     } JAH_CATCH(mError, 0);
 }
 
@@ -396,10 +430,45 @@ bool OgreScene::destroyTexture(TextureId id) {
     if (it == mTextures.end()) return false;
     JAH_TRY {
         invalidateGiCaches();   // BEFORE the texture dies: IR caches images by TextureGpu*
+        // UNBIND FIRST, from every material still holding it. An
+        // HlmsPbsDatablock keeps the raw TextureGpu* (and a descriptor set
+        // built from it); destroying a bound texture leaves that pointer
+        // dangling with no diagnostic until the GPU faults. Nothing reclaimed
+        // textures before the deep-audit fix wave, so this was latent — it
+        // stops being latent the moment reclaimUnused frees one.
+        for (auto &kv : mMaterials) {
+            MaterialRec &m = kv.second;
+            if (m.unlit) continue;
+            for (size_t s = 0; s < kPbrTextureSlotCount; ++s) {
+                if (m.boundTextures[s] != id) continue;
+                m.boundTextures[s] = 0;
+                auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
+                    hlmsFor(m)->getDatablock(Ogre::IdString(m.datablockName)));
+                if (db) db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(PbrTextureSlot(s))),
+                                       (Ogre::TextureGpu *)nullptr);
+            }
+        }
+        if (!it->second.path.empty()) {
+            const std::string key = textureKey(it->second.path, it->second.decal,
+                                               it->second.decalKind);
+            auto ix = mTextureIndex.find(key);
+            if (ix != mTextureIndex.end() && ix->second == id) mTextureIndex.erase(ix);
+        }
         releaseTextureRec(it->second);
         mTextures.erase(it);
         return true;
     } JAH_CATCH(mError, false);
+}
+
+Ogre::PbsTextureTypes OgreScene::pbsSlotOf(PbrTextureSlot slot) {
+    switch (slot) {
+    case PbrTextureSlot::Albedo:    return Ogre::PBSM_DIFFUSE;
+    case PbrTextureSlot::Normal:    return Ogre::PBSM_NORMAL;
+    case PbrTextureSlot::Metalness: return Ogre::PBSM_METALLIC;
+    case PbrTextureSlot::Roughness: return Ogre::PBSM_ROUGHNESS;
+    case PbrTextureSlot::Emissive:  return Ogre::PBSM_EMISSIVE;
+    }
+    return Ogre::PBSM_DIFFUSE;
 }
 
 bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId texId) {
@@ -410,14 +479,9 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
     JAH_TRY {
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsFor(mit->second)->getDatablock(Ogre::IdString(mit->second.datablockName)));
         if (!db) return false;
-        Ogre::PbsTextureTypes unit = Ogre::PBSM_DIFFUSE;
-        switch (slot) {
-        case PbrTextureSlot::Albedo:    unit = Ogre::PBSM_DIFFUSE;   break;
-        case PbrTextureSlot::Normal:    unit = Ogre::PBSM_NORMAL;    break;
-        case PbrTextureSlot::Metalness: unit = Ogre::PBSM_METALLIC;  break;
-        case PbrTextureSlot::Roughness: unit = Ogre::PBSM_ROUGHNESS; break;
-        case PbrTextureSlot::Emissive:  unit = Ogre::PBSM_EMISSIVE;  break;
-        }
+        const Ogre::PbsTextureTypes unit = pbsSlotOf(slot);
+        // Remember the binding so destroyTexture can undo it (see there).
+        mit->second.boundTextures[size_t(slot)] = texId;
         Ogre::HlmsSamplerblock sampler;
         sampler.mU = Ogre::TAM_WRAP; sampler.mV = Ogre::TAM_WRAP;
         // Anisotropy must stay 1 while min/mag/mip are FO_LINEAR: Ogre warns, and

@@ -16,6 +16,11 @@ struct Colour {
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
     Colour() = default;
     Colour(float r_, float g_, float b_, float a_ = 1.0f) : r(r_), g(g_), b(b_), a(a_) {}
+    /// EXACT float equality, on purpose: callers use this to answer "is this the
+    /// same value I already pushed?", where a tolerance would let a slider
+    /// creep without ever reaching the backend.
+    bool operator==(const Colour &o) const { return r == o.r && g == o.g && b == o.b && a == o.a; }
+    bool operator!=(const Colour &o) const { return !(*this == o); }
 };
 
 /// Rotation as a unit quaternion. Identity by default.
@@ -193,6 +198,9 @@ enum class PbrAlphaMode {
 struct PbrParams {
     Colour albedo   = Colour(0.8f, 0.8f, 0.8f);
     float  metalness = 0.0f;
+    /// 0 is accepted and CLAMPED to 1e-4 by the backend: the PBR pixel shader
+    /// divides by roughness terms and Ogre warns (once per material per push)
+    /// below 1e-6. Callers do not need to pre-clamp; a perfect mirror is 1e-4.
     float  roughness = 0.6f;
     Colour emissive = Colour(0.0f, 0.0f, 0.0f);
     PbrAlphaMode alphaMode = PbrAlphaMode::Opaque;
@@ -205,6 +213,18 @@ struct PbrParams {
     /// Refractive mode only: how far the surface displaces what it samples from
     /// behind it. Roughly an index-of-refraction knob; 0 is a flat window.
     float  refractionStrength = 0.35f;
+
+    /// "Is this the same material state I last pushed?" — the guard a host with
+    /// a per-frame push loop needs. Exact comparison (see Colour::operator==):
+    /// a tolerance here would let a dragged slider stop reaching the backend.
+    bool operator==(const PbrParams &o) const {
+        return albedo == o.albedo && metalness == o.metalness && roughness == o.roughness &&
+               emissive == o.emissive && alphaMode == o.alphaMode && alpha == o.alpha &&
+               alphaCutoff == o.alphaCutoff && twoSided == o.twoSided &&
+               normalMapWeight == o.normalMapWeight && uvScale == o.uvScale &&
+               refractionStrength == o.refractionStrength;
+    }
+    bool operator!=(const PbrParams &o) const { return !(*this == o); }
 };
 
 /// One camera-facing textured quad in a node's billboard set (Scene::setBillboards).
