@@ -1,9 +1,9 @@
+#include "core/math/mat3.h"
+#include "core/math/mat4.h"
+#include "core/math/quat.h"
+#include "core/math/vec.h"
 #include "irisgl/mirror/scenemirror.h"
 
-#include <QQuaternion>
-#include <QMatrix3x3>
-#include <QMatrix4x4>
-#include <QVector3D>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -37,8 +37,8 @@
 using namespace jahshaka::engine;
 
 namespace {
-inline Vec3 toVec3(const QVector3D &v) { return Vec3(v.x(), v.y(), v.z()); }
-inline Quat toQuat(const QQuaternion &q) { return Quat(q.x(), q.y(), q.z(), q.scalar()); }
+inline Vec3 toVec3(const iris::Vec3 &v) { return Vec3(v.x(), v.y(), v.z()); }
+inline Quat toQuat(const iris::Quat &q) { return Quat(q.x(), q.y(), q.z(), q.scalar()); }
 
 /// The mirror's per-frame "has anything changed?" hash (deep audit 2026-09,
 /// area 8 — the biggest measurable Qt cost in the hot path).
@@ -75,7 +75,7 @@ struct Hasher {
         return *this;
     }
     Hasher &operator<<(const QColor &c) { return *this << c.rgba(); }
-    Hasher &operator<<(const QVector3D &v) { return *this << v.x() << v.y() << v.z(); }
+    Hasher &operator<<(const iris::Vec3 &v) { return *this << v.x() << v.y() << v.z(); }
 };
 }
 
@@ -170,16 +170,16 @@ MeshId SceneMirror::engineMesh(iris::Mesh *mesh) const
     return it == mMeshes.constEnd() ? 0 : it.value();
 }
 
-void SceneMirror::pushTransform(Scene *scene, NodeId node, const QMatrix4x4 &t)
+void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
 {
-    const QVector3D cx = t.column(0).toVector3D(), cy = t.column(1).toVector3D(), cz = t.column(2).toVector3D();
-    const QVector3D scale(cx.length(), cy.length(), cz.length());
-    const QVector3D pos = t.column(3).toVector3D();
+    const iris::Vec3 cx = t.column(0).toVector3D(), cy = t.column(1).toVector3D(), cz = t.column(2).toVector3D();
+    const iris::Vec3 scale(cx.length(), cy.length(), cz.length());
+    const iris::Vec3 pos = t.column(3).toVector3D();
     const float sx = scale.x() > 1e-8f ? scale.x() : 1.0f, sy = scale.y() > 1e-8f ? scale.y() : 1.0f, sz = scale.z() > 1e-8f ? scale.z() : 1.0f;
     float m[9] = { cx.x() / sx, cy.x() / sy, cz.x() / sz,
                    cx.y() / sx, cy.y() / sy, cz.y() / sz,
                    cx.z() / sx, cy.z() / sy, cz.z() / sz };
-    const QQuaternion rot = QQuaternion::fromRotationMatrix(QMatrix3x3(m));
+    const iris::Quat rot = iris::Quat::fromRotationMatrix(iris::Mat3(m));
     scene->setNodeTransform(node, Vec3(pos.x(), pos.y(), pos.z()),
                             Quat(rot.x(), rot.y(), rot.z(), rot.scalar()),
                             Vec3(scale.x(), scale.y(), scale.z()));
@@ -266,7 +266,7 @@ void SceneMirror::syncHighlight()
         // colour does (scene->outlineWidth, pushed by MainWindow): width/150 maps
         // the historical default 6 to the historical 1.04 hull; today's default 3
         // gives 1.02 — half the band. <=0 (never pushed) falls back to the default.
-        QMatrix4x4 t = meshNode->globalTransform;
+        iris::Mat4 t = meshNode->globalTransform;
         if (!mHighlightWireframe) {
             const int w = (mSource && mSource->outlineWidth > 0) ? mSource->outlineWidth : 3;
             t.scale(1.0f + float(w) / 150.0f);
@@ -490,7 +490,7 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
         rx = std::max(light->rectWidth, 0.01f);    // unit rect scaled to the emitting rectangle
         rz = std::max(light->rectHeight, 0.01f);   // (width = local X, height = local Z; tick stays)
     }
-    const QVector3D s = light->getLocalScale();
+    const iris::Vec3 s = light->getLocalScale();
     mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(),
                               Vec3(rx * (s.x() > 1e-6f ? 1.0f / s.x() : 1.0f),
                                    ry * (s.y() > 1e-6f ? 1.0f / s.y() : 1.0f),
@@ -527,7 +527,7 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
         e.iconSignature = path;
     }
     BillboardInstance b;
-    const QVector3D p = light->getGlobalPosition();
+    const iris::Vec3 p = light->getGlobalPosition();
     b.position = Vec3(p.x(), p.y(), p.z());
     b.size = light->iconSize > 0.0f ? light->iconSize : 0.5f;
     mTarget->setBillboards(e.wireNode, &b, 1);
@@ -803,7 +803,7 @@ std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *p
 
     // 4. One force affector carrying gravity AND wind. The legacy constant is
     //    -50 m/s^2 scaled by gravityComplement.
-    const QVector3D force = QVector3D(0.0f, -50.0f * ps->gravityComplement, 0.0f) + ps->wind;
+    const iris::Vec3 force = iris::Vec3(0.0f, -50.0f * ps->gravityComplement, 0.0f) + ps->wind;
     if (!force.isNull()) {
         ParticleAffectorDesc a;
         a.kind = ParticleAffectorDesc::Kind::LinearForce;
@@ -1345,7 +1345,7 @@ void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
     // The wire lives in the decal node's local space: size it to the projector
     // box and undo the node's own scale, exactly as the light wires do (the box
     // mesh is authored as a UNIT cube, so the scale IS the extents).
-    const QVector3D s = decal->getLocalScale();
+    const iris::Vec3 s = decal->getLocalScale();
     mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(),
                               Vec3(std::max(decal->width, 0.001f) * (s.x() > 1e-6f ? 1.0f / s.x() : 1.0f),
                                    std::max(decal->depth, 0.001f) * (s.y() > 1e-6f ? 1.0f / s.y() : 1.0f),
@@ -1459,8 +1459,8 @@ struct StructureHash {
     // Quantised so float noise below the tolerance the whole pipeline works to
     // cannot split one rig into two cache entries.
     void operator()(float v) { const int q = int(std::lround(double(v) * 4096.0)); bytes(&q, sizeof(q)); }
-    void operator()(const QVector3D &v) { (*this)(v.x()); (*this)(v.y()); (*this)(v.z()); }
-    void operator()(const QQuaternion &q) { (*this)(q.x()); (*this)(q.y()); (*this)(q.z()); (*this)(q.scalar()); }
+    void operator()(const iris::Vec3 &v) { (*this)(v.x()); (*this)(v.y()); (*this)(v.z()); }
+    void operator()(const iris::Quat &q) { (*this)(q.x()); (*this)(q.y()); (*this)(q.z()); (*this)(q.scalar()); }
     void operator()(const QString &s) { const QByteArray b = s.toUtf8(); bytes(b.constData(), size_t(b.size())); }
     std::string hex() const { char buf[24]; std::snprintf(buf, sizeof(buf), "%016llx", h); return buf; }
 };
@@ -1495,10 +1495,10 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
         // R1: the bind LOCAL that makes the engine's derived reverse bind pose
         // come out equal to assimp's offset matrix. FK over these reproduces
         // meshSpacePoseMatrix, whose inverse IS the offset matrix.
-        const QMatrix4x4 bindLocal = bd.parent >= 0
+        const iris::Mat4 bindLocal = bd.parent >= 0
             ? bones[bd.parent]->inverseMeshSpacePoseMatrix * b->meshSpacePoseMatrix
             : b->meshSpacePoseMatrix;
-        QVector3D p, s; QQuaternion r;
+        iris::Vec3 p, s; iris::Quat r;
         const float shear = decomposeTRS(bindLocal, p, r, s);
         if (shear > 1e-3f && !warnedShear) {
             warnedShear = true;
@@ -1582,7 +1582,7 @@ bool SceneMirror::toSkinData(iris::Mesh *mesh, std::vector<float> &boneIndices,
     return !boneIndices.empty() && boneIndices.size() == boneWeights.size();
 }
 
-void SceneMirror::skinVertices(const QVector<QMatrix4x4> &boneTransforms,
+void SceneMirror::skinVertices(const QVector<iris::Mat4> &boneTransforms,
                                const std::vector<float> &bindPositions,
                                const std::vector<float> &bindNormals,
                                const std::vector<float> &boneIndices,
@@ -1596,7 +1596,7 @@ void SceneMirror::skinVertices(const QVector<QMatrix4x4> &boneTransforms,
     outNormals = haveNormals ? bindNormals : std::vector<float>();
     if (boneTransforms.isEmpty() || boneIndices.size() < nv * 4 || boneWeights.size() < nv * 4)
         return;
-    // Flatten each bone's skin matrix to row-major 3x4 (QMatrix4x4 stores
+    // Flatten each bone's skin matrix to row-major 3x4 (iris::Mat4 stores
     // column-major). Row-major keeps the per-vertex loop cache-friendly.
     const int nb = boneTransforms.size();
     std::vector<float> mats(size_t(nb) * 12);
@@ -1774,7 +1774,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     }
 }
 
-bool SceneMirror::boneWorldTransforms(QHash<QString, QMatrix4x4> &out) const
+bool SceneMirror::boneWorldTransforms(QHash<QString, iris::Mat4> &out) const
 {
     out.clear();
     if (!mTarget) return false;
@@ -1792,17 +1792,17 @@ bool SceneMirror::boneWorldTransforms(QHash<QString, QMatrix4x4> &out) const
         // ours. Bone order is free (a parent may follow its child), so the
         // derived matrices are resolved by walking each bone's own ancestry
         // rather than assuming the array is topologically sorted.
-        const QMatrix4x4 meshWorld = e.docNode->getGlobalTransform();
-        QVector<QMatrix4x4> derived(bones.size());
+        const iris::Mat4 meshWorld = e.docNode->getGlobalTransform();
+        QVector<iris::Mat4> derived(bones.size());
         QVector<char> done(bones.size(), 0);
-        std::function<QMatrix4x4(int)> resolve = [&](int i) -> QMatrix4x4 {
+        std::function<iris::Mat4(int)> resolve = [&](int i) -> iris::Mat4 {
             if (done[i]) return derived[i];
             done[i] = 1;                       // cycles are impossible by rig contract; guard anyway
             const BonePose &p = poses[size_t(i)];
-            QMatrix4x4 local;
-            local.translate(QVector3D(p.position.x, p.position.y, p.position.z));
-            local.rotate(QQuaternion(p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z));
-            local.scale(QVector3D(p.scale.x, p.scale.y, p.scale.z));
+            iris::Mat4 local;
+            local.translate(iris::Vec3(p.position.x, p.position.y, p.position.z));
+            local.rotate(iris::Quat(p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z));
+            local.scale(iris::Vec3(p.scale.x, p.scale.y, p.scale.z));
             int parent = -1;
             if (!bones[i]->parentBone.isNull()) {
                 const auto pit = e.skeleton->boneMap.constFind(bones[i]->parentBone->name);
@@ -2095,7 +2095,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // ONE driving light, so only that light's transform matters; VCT
         // injects EVERY light into the voxel volume, so any light moving (or
         // appearing/dying) goes stale until a re-voxelize.
-        QMatrix4x4 lightWorld;
+        iris::Mat4 lightWorld;
         if (driver) {
             lightWorld = driver->globalTransform;
         } else if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {

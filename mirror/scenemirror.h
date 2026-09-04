@@ -15,11 +15,11 @@
 // (document types AND the engine abstraction). Lives in the IrisGL repo
 // (audit §3.3/§10: iris/mirror/) so boundary changes and mirror updates land
 // in one commit. Includes iris (Qt) and jahshaka/engine. Never Ogre.
+#include "core/math/mat4.h"
 #include <QColor>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QImage>
-#include <QMatrix4x4>
 #include <QSet>
 #include <utility>
 #include <vector>
@@ -128,7 +128,7 @@ public:
     /// position and normal only — the shader also skins the TANGENT, so a
     /// normal-mapped character lights correctly on the GPU path and did not on
     /// this one.
-    static void skinVertices(const QVector<QMatrix4x4> &boneTransforms,
+    static void skinVertices(const QVector<iris::Mat4> &boneTransforms,
                              const std::vector<float> &bindPositions,
                              const std::vector<float> &bindNormals,
                              const std::vector<float> &boneIndices,
@@ -145,9 +145,9 @@ public:
     /// bone overlay and `avatar.bones` draw, and it is resolved as of the last
     /// rendered frame — call it after sync() and after a render, never before.
     /// False when nothing skinned is mirrored.
-    bool boneWorldTransforms(QHash<QString, QMatrix4x4> &out) const;
+    bool boneWorldTransforms(QHash<QString, iris::Mat4> &out) const;
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
-    static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const QMatrix4x4 &world);
+    static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const iris::Mat4 &world);
     /// The engine mesh already created for a document mesh, or 0.
     jahshaka::engine::MeshId engineMesh(iris::Mesh *mesh) const;
 
@@ -482,7 +482,7 @@ private:
     // applyEnvironment only re-pushes on change and re-traces on light movement.
     jahshaka::engine::GiParams mLastGi;
     bool mGiPushed = false;
-    QMatrix4x4 mGiLightWorld;
+    iris::Mat4 mGiLightWorld;
     // Fog: last pushed state. Enabling/disabling fog creates or destroys the
     // scene's atmosphere and changes the shader variant, so this one is pushed on
     // change only, not every frame.
