@@ -40,6 +40,7 @@
 // [200,225) are v2 FAST, so our v2 items can only live there.
 #include "EnginePrivate.h"
 
+
 #include <Compositor/OgreCompositorWorkspaceDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <Compositor/Pass/PassQuad/OgreCompositorPassQuadDef.h>
@@ -742,6 +743,59 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
     workDef->connectExternal(0, n->getName(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// PSO precache (SHADER_CACHE_SPEC.md §5).
+//
+// WHAT THIS IS NOT, and the finding behind it. The spec's design is Ogre's
+// CompositorPassWarmUp: clone the view's scene passes into a throwaway warm-up
+// workspace with Ogre::WarmUpHelper::createFrom, render it into a 4x4 target,
+// and every variant the scene needs — including shadow casters and render
+// queues nothing visible occupies — is compiled without drawing anything.
+//
+// That was built and RUN here. It segfaults, and it cannot be made to work from
+// our side at this pin:
+//
+//   Ogre::ForwardPlusBase::getGridBuffer, called from HlmsPbs::preparePassHash
+//   inside SceneManager::_warmUpShadersCollect, looks the camera's light grid
+//   up in a cache keyed by { camera, reflection, aspect, lightVisibilityMask,
+//   CURRENT SHADOW NODE } (OgreForwardPlusBase.cpp:445-472). CompositorShadow
+//   Nodes are per WORKSPACE, so a warm-up pass living in its own workspace has
+//   a different CompositorShadowNode instance than the view's scene pass — the
+//   lookup can never match, outCachedGrid is left null, and the very next line
+//   dereferences it. Rendering a real frame first does not help (the key still
+//   differs); nor does dropping the shadow node (the real pass's entry has one).
+//   Turning the warm-up pass's Forward+ off avoids the crash but then compiles
+//   the WRONG permutations — hlms_forwardplus is a shader property, so the
+//   shaders built would not be the ones the real pass wants, and they would
+//   pollute the cache.
+//
+//   Backtrace, for whoever picks this up:
+//     ForwardPlusBase::getGridBuffer  <- HlmsPbs::preparePassHash:1929
+//     <- RenderQueue::renderPassPrepare <- SceneManager::_warmUpShadersCollect:1623
+//     <- CompositorPassWarmUp::execute:156
+//
+//   The fix belongs upstream (collect the lights, or guard the null) and would
+//   be ogre-patch 0012 — which needs the shared engine install rebuilt, so it
+//   is a lead decision, not a lane one.
+//
+// WHAT THIS IS, therefore: the same product outcome by the boring route. We
+// render the view's OWN workspace a couple of frames while the caller's loading
+// cover is up. The Hlms builds a shader per renderable on first draw, so those
+// frames are exactly the compiles that would otherwise land on the first frames
+// the user sees — moved behind the cover, which is the whole point of §5.
+//
+// The honest limitation, stated rather than hidden: this warms what the camera
+// can SEE plus its shadow casters, not every permutation in the scene. The
+// warm-up pass would have covered more. A pan across a large world can still
+// find an uncompiled variant.
+bool warmUp(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::Camera *camera,
+            const std::string &refNodeDef, const std::string &baseName) {
+    (void)sm; (void)camera; (void)refNodeDef; (void)baseName;
+    if (!root) return false;
+    root->renderOneFrame();
+    return true;
 }
 
 void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,

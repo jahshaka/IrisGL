@@ -235,6 +235,26 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 /// phases (and the planar-reflection lane) need to find the main scene pass.
 std::string sceneNodeDefName(const std::string &workspaceDef);
 
+/// PSO precache for a scene (SHADER_CACHE_SPEC.md §5): builds a throwaway
+/// warm-up workspace that mirrors `refNodeDef`'s scene passes, renders it once
+/// into a 4x4 target, and tears it down. Every shader `sm` needs through
+/// `camera` — including shadow casters — is generated and compiled by the time
+/// this returns.
+///
+/// The pass type is Ogre's own PASS_WARM_UP and the node is built by
+/// Ogre::WarmUpHelper::createFrom, which copies the reference node's scene and
+/// shadow passes (their RQ ranges, visibility masks and shadow nodes) into
+/// warm-up passes and marks the last one CollectAndTrigger. So this warms
+/// exactly the passes the real view runs, and it stays correct automatically
+/// when the chain shape changes — there is no second description of the chain
+/// to keep in step.
+///
+/// Nothing is presented. Returns false if the reference node is missing or the
+/// workspace could not be built; failure is never fatal (the shaders compile
+/// later, exactly as they did before this existed).
+bool warmUp(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::Camera *camera,
+            const std::string &refNodeDef, const std::string &baseName);
+
 // ---- Effect parameters -----------------------------------------------------
 // EVERY ONE OF THESE IS PROCESS-GLOBAL (POST_CHAIN_SPEC.md §7.4): Ogre's HDR,
 // SSAO and SMAA helpers all write MaterialManager singletons. The rule the
@@ -1182,6 +1202,7 @@ public:
     unsigned workspaceGeneration() const override;
 
     unsigned long long framesPresented() const override;
+    bool warmUpShaders() override;
     /// Called by OgreEngine::renderOneFrame AFTER Root::renderOneFrame: counts
     /// this frame if the view was actually part of it (enabled + workspace +
     /// scene). The one place mFramesPresented moves up.

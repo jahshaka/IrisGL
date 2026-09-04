@@ -350,6 +350,26 @@ void OgreView::updateGi() {
     if (mEnabled && mScene && mCamera) mScene->updateGiTracking(mCamera->getPosition());
 }
 
+bool OgreView::warmUpShaders() {
+    if (!mScene)  { mError = "warmUpShaders: no scene is bound to view '" + mName + "'"; return false; }
+    if (!mCamera) { mError = "warmUpShaders: view '" + mName + "' has no camera"; return false; }
+    JAH_TRY {
+        if (!attachWorkspace()) { mError = "warmUpShaders: no workspace for view '" + mName + "'"; return false; }
+        // A DISABLED view renders nothing, and the caller's whole reason for
+        // being here is that the view is not on screen yet — the editor's
+        // viewport is disabled until its page is shown, and the loading cover
+        // is over it. Enable it just for these frames and put it back. Anything
+        // presented meanwhile is behind the cover, which is a native window
+        // stacked above the viewport's (src/viewport/viewportcover.h).
+        const bool wasEnabled = mEnabled;
+        if (!wasEnabled) setEnabled(true);
+        const bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera,
+                                      chain::sceneNodeDefName(mWorkspaceDef), mName);
+        if (!wasEnabled) setEnabled(false);
+        return ok;
+    } JAH_CATCH(mError, false);
+}
+
 void OgreView::destroy() {
     detachScene();
     JAH_TRY {

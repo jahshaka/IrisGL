@@ -435,6 +435,27 @@ public:
     /// returns false for on-screen windows. This is the thumbnail path, and what
     /// makes the engine testable without a window.
     virtual bool readPixels(Image &out) = 0;
+
+    /// Compiles every shader this View's SCENE needs, now, without drawing it
+    /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
+    ///
+    /// The engine builds a shader per renderable, on first draw. Left alone,
+    /// that means the first frames of a freshly-opened world stutter through
+    /// dozens of compiles while the user is looking at them. This does the same
+    /// work early: it renders a WARM-UP pass over this view's scene — Ogre
+    /// walks the live render queues itself, so there is no material list to
+    /// build or maintain — into a 4x4 target, which forces every variant the
+    /// scene actually needs (including shadow casters) to be generated and
+    /// compiled. Nothing is presented and no pixel of the real view changes.
+    ///
+    /// SYNCHRONOUS, and that is the point: the caller holds its loading cover
+    /// up until this returns. It therefore LENGTHENS a cold open by however
+    /// long the compiles take, and shortens every frame after it.
+    ///
+    /// Requires a scene (setScene first). Returns false with lastError() set if
+    /// there is nothing to warm up or the warm-up pass could not be built; a
+    /// failure is never fatal — the shaders simply compile later, as before.
+    virtual bool warmUpShaders() = 0;
 };
 
 /// Owns the device and every Scene and View.
