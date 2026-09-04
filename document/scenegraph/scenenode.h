@@ -62,7 +62,11 @@ public:
     SceneNodeType sceneNodeType;
 
     QString name;
-    long nodeId;
+    /// Process-unique, monotonic, and 64 bits WHATEVER the platform: this was
+    /// `long`, which is 32 bits on Windows LLP64 (deep audit 2026-09, area 5).
+    /// SceneMirror keys its entry map on it, so a wrap is a silent aliasing of
+    /// two different nodes onto one engine entry.
+    qint64 nodeId;
 
     // OWNERSHIP (deep audit 2026-09, area 3 / List B item 4). The tree has ONE
     // ownership direction: a parent owns its children, strongly. The two
@@ -134,7 +138,7 @@ public:
     void setName(QString name);
     QString getName();
 
-    long getNodeId();
+    qint64 getNodeId();
 
 	void setGUID(const QString &id) const {
 		guid = id;
@@ -346,8 +350,7 @@ private:
     void setScene(ScenePtr scene);
     void removeFromScene();
 
-    static long generateNodeId();
-    static long nextId;
+    static qint64 generateNodeId();
 };
 
 }

@@ -29,8 +29,17 @@ For more information see the LICENSE file
 
 #include <QUuid>
 
+#include <atomic>
+
 namespace iris
 {
+
+/// The node-id counter. It was a plain `static long nextId` incremented with
+/// `nextId++` — not atomic, so two threads creating nodes could hand out the
+/// same id, and 32-bit on Windows LLP64 besides (deep audit 2026-09, area 5).
+/// Relaxed ordering is enough: the only requirement is that no two calls
+/// return the same value, not that ids order anything.
+static std::atomic<qint64> sNextNodeId{0};
 
 SceneNode::SceneNode():
     pos(QVector3D(0,0,0)),
@@ -81,7 +90,7 @@ void SceneNode::setName(QString name)
     this->name = name;
 }
 
-long SceneNode::getNodeId()
+qint64 SceneNode::getNodeId()
 {
     return nodeId;
 }
@@ -461,9 +470,9 @@ void SceneNode::removeFromScene()
     }
 }
 
-long SceneNode::generateNodeId()
+qint64 SceneNode::generateNodeId()
 {
-    return nextId++;
+    return sNextNodeId.fetch_add(1, std::memory_order_relaxed);
 }
 
 QQuaternion SceneNode::getGlobalRotation()
@@ -585,7 +594,5 @@ SceneNodePtr SceneNode::duplicate()
 
     return node.staticCast<SceneNode>();
 }
-
-long SceneNode::nextId = 0;
 
 }
