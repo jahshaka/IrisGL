@@ -75,6 +75,21 @@ public:
     /// screen — EngineSceneViewport::begin(), EnginePlayerScene::begin().
     void invalidateEnvironment();
 
+    /// How many times applyEnvironment has pushed a NEW GI configuration
+    /// (Scene::setGlobalIllumination) and how many times it has asked for a
+    /// re-solve of the existing one (Scene::refreshGlobalIllumination).
+    ///
+    /// Both are expensive — a VCT refresh tears the voxelizer down and rebuilds
+    /// it from every item in the scene — and both are debounced against the last
+    /// pushed value, so "an idle scene refreshes ZERO times" is a contract, not
+    /// an optimisation. It is not observable from the document or from pixels
+    /// (a re-voxelized scene looks identical; it just costs a frame), which is
+    /// why the counters exist: mirror.document_to_engine's "GI idle" block
+    /// asserts an idle VCT scene re-solves ZERO times over 60 frames, and that
+    /// a light that really moves re-solves exactly once.
+    quint64 giPushCount() const { return mGiPushCount; }
+    quint64 giRefreshCount() const { return mGiRefreshCount; }
+
     /// The document light node driving Instant Radiosity: the scene's giLightGuid
     /// when it names a live light, else the first directional light (by creation
     /// order), else any light. Null when the scene has no lights. Public so the
@@ -483,6 +498,11 @@ private:
     jahshaka::engine::GiParams mLastGi;
     bool mGiPushed = false;
     iris::Mat4 mGiLightWorld;
+    // Diagnostics behind giPushCount() / giRefreshCount(); never read by the
+    // mirror itself, and NOT reset by invalidateEnvironment (a re-take of the
+    // screen is a real push, and the gate counts real pushes).
+    quint64 mGiPushCount = 0;
+    quint64 mGiRefreshCount = 0;
     // Fog: last pushed state. Enabling/disabling fog creates or destroys the
     // scene's atmosphere and changes the shader variant, so this one is pushed on
     // change only, not every frame.

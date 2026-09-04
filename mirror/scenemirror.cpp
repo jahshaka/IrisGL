@@ -2107,13 +2107,18 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastGi = gi;
             mGiLightWorld = lightWorld;
             mGiPushed = true;
+            ++mGiPushCount;
         } else if (gi.mode != GiMode::Off && mSource->giAutoRefresh &&
                    lightWorld != mGiLightWorld) {
             // IR re-traces in milliseconds; VCT re-injects + re-voxelizes on the
             // GPU (a few ms at editor volumes on real hardware). The per-frame
-            // signature compare is the debounce, as for the push above.
+            // signature compare is the debounce, as for the push above — and the
+            // debounce is load-bearing: this branch firing every frame is a whole
+            // VCT rebuild per frame, which is invisible in the picture and fatal
+            // to the frame rate. giRefreshCount() is what proves it does not.
             mGiLightWorld = lightWorld;
             mTarget->refreshGlobalIllumination();
+            ++mGiRefreshCount;
         }
     }
     // Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6). Same discipline as GI:
