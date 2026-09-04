@@ -609,7 +609,29 @@ public:
                                      unsigned &expected) const = 0;
 
     /// Reason for the most recent failure; empty if none.
+    ///
+    /// NOTE this is a PEEK: the sink is never cleared on success, so a stale
+    /// reason outlives the call that set it. Callers that check a specific
+    /// verb's return value read this immediately and are fine; anything that
+    /// POLLS must use takeLastError() instead, or it cannot tell a fresh
+    /// failure from one that happened at startup.
     virtual const std::string &lastError() const = 0;
+
+    /// Reason for the most recent failure, AND clears the sink — so the next
+    /// call reports only what has failed since. Empty when nothing has.
+    ///
+    /// This exists because the backend swallows failures by design: every
+    /// backend virtual is wrapped in a try/catch that records the reason here
+    /// and returns a refusal value, and most callers (SceneMirror above all)
+    /// ignore that value. Nothing ever read the sink, so ~86 catch sites had no
+    /// reader at all — a mesh with no tangents, a texture that will not decode,
+    /// a full decal atlas all produced a wrong picture and ZERO log lines.
+    /// Draining this once a frame is what turns them back into diagnostics
+    /// (src/services/engineerrorpump.h).
+    ///
+    /// There is ONE sink per process: every Scene and View holds a reference to
+    /// the Engine's string, so this drains all of them.
+    virtual std::string takeLastError() = 0;
 };
 
 }}  // namespace jahshaka::engine
