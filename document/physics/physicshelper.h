@@ -48,8 +48,8 @@ public:
     PhysicsHelper() = default;
     static btTriangleMesh *btTriangleMeshShapeFromMesh(iris::MeshPtr mesh);
     static btConvexHullShape *btConvexHullShapeFromMesh(iris::MeshPtr mesh);
-    static btVector3 btVector3FromQVector3D(iris::Vec3 vector);
-	static iris::Vec3 QVector3DFrombtVector3(btVector3 vector);
+    static btVector3 btVector3FromVec3(iris::Vec3 vector);
+	static iris::Vec3 vec3FromBtVector3(btVector3 vector);
     /// Builds the body for `sceneNode`. The caller OWNS everything in the
     /// returned PhysicsBody (Environment::addBodyToWorld takes it over).
     /// `body` is null when the node's shape kind is not one we build.

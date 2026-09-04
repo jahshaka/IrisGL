@@ -47,12 +47,12 @@ btConvexHullShape *PhysicsHelper::btConvexHullShapeFromMesh(iris::MeshPtr mesh)
     return shape;
 }
 
-btVector3 PhysicsHelper::btVector3FromQVector3D(iris::Vec3 vector)
+btVector3 PhysicsHelper::btVector3FromVec3(iris::Vec3 vector)
 {
     return btVector3(vector.x(), vector.y(), vector.z());
 }
 
-iris::Vec3 PhysicsHelper::QVector3DFrombtVector3(btVector3 vector)
+iris::Vec3 PhysicsHelper::vec3FromBtVector3(btVector3 vector)
 {
 	return iris::Vec3(vector.getX(), vector.getY(), vector.getZ());
 }
@@ -114,7 +114,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             float rad = 1.0;
 
             shape = new btSphereShape(rad);
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 
@@ -137,7 +137,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setRotation(quat);
 
             shape = new btStaticPlaneShape(btVector3(0, 1, 0), 0.f);
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 
@@ -159,7 +159,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setRotation(quat);
 
             shape = new btBoxShape(btVector3(1, 1, 1));
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 
@@ -202,7 +202,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             delete hull;
             delete tmpShape;
 
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
 
             motionState = new btDefaultMotionState(transform);
 
@@ -229,7 +229,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             owned.meshInterfaces.append(triMesh);   // outlives the shape below
 
             shape = new btConvexTriangleMeshShape(triMesh, true);
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 

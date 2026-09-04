@@ -119,7 +119,7 @@ void Environment::addCharacterControllerToWorldUsingNode(const iris::SceneNodePt
 {
 	btTransform startTransform;
 	startTransform.setIdentity();
-	startTransform.setOrigin(PhysicsHelper::btVector3FromQVector3D(node->getGlobalPosition()));
+	startTransform.setOrigin(PhysicsHelper::btVector3FromVec3(node->getGlobalPosition()));
 
 	auto controller = new CharacterController;
 	controller->setSiblingGuid(node->getGUID());
@@ -414,8 +414,8 @@ void Environment::createPickingConstraint(PickingHandleType handleType, const QS
 		dof6->setParam(BT_CONSTRAINT_STOP_ERP, erp, i);
 	}
 
-	btVector3 rayFromWorld = iris::PhysicsHelper::btVector3FromQVector3D(segStart);
-	btVector3 rayToWorld = iris::PhysicsHelper::btVector3FromQVector3D(segEnd);
+	btVector3 rayFromWorld = iris::PhysicsHelper::btVector3FromVec3(segStart);
+	btVector3 rayToWorld = iris::PhysicsHelper::btVector3FromVec3(segEnd);
 
 	handle.constraintOldPickingPosition = rayToWorld;
 	handle.constraintHitPosition = hitPoint;
