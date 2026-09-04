@@ -493,7 +493,7 @@ public:
         mm.m[1][3] = 0.0f;
         mm.m[2][3] = -1.0f;
         mm.m[3][3] = 0.0f;
-        mm.flagBits = Perspective;
+        mm.flagBits = General;
 
         *this *= mm;
     }
@@ -526,7 +526,9 @@ public:
         mm.m[1][3] = 0.0f;
         mm.m[2][3] = -1.0f;
         mm.m[3][3] = 0.0f;
-        mm.flagBits = Perspective;
+        // General, not Perspective: Qt is deliberately conservative here, and
+        // the flags decide which arithmetic every later operation takes.
+        mm.flagBits = General;
 
         *this *= mm;
     }
@@ -685,10 +687,15 @@ public:
             inv.m[2][1] = -float((double(m[0][0]) * m[2][1] - double(m[2][0]) * m[0][1]) * det);
             inv.m[2][2] =  float((double(m[0][0]) * m[1][1] - double(m[1][0]) * m[0][1]) * det);
             inv.m[2][3] = 0.0f;
-            // Float arithmetic here, on the already-rounded inverse basis.
-            inv.m[3][0] = -(inv.m[0][0] * m[3][0] + inv.m[1][0] * m[3][1] + inv.m[2][0] * m[3][2]);
-            inv.m[3][1] = -(inv.m[0][1] * m[3][0] + inv.m[1][1] * m[3][1] + inv.m[2][1] * m[3][2]);
-            inv.m[3][2] = -(inv.m[0][2] * m[3][0] + inv.m[1][2] * m[3][1] + inv.m[2][2] * m[3][2]);
+            // Float arithmetic on the already-rounded inverse basis, and Qt's
+            // association: negate the FIRST product, then subtract the other
+            // two. `-(a + b + c)` is the same number except when all three are
+            // zero, where it always yields -0 while this yields the sign of
+            // -inv[0][0] — and "except for the sign of a zero" is not a
+            // difference this migration is allowed to have.
+            inv.m[3][0] = (-inv.m[0][0] * m[3][0]) - inv.m[1][0] * m[3][1] - inv.m[2][0] * m[3][2];
+            inv.m[3][1] = (-inv.m[0][1] * m[3][0]) - inv.m[1][1] * m[3][1] - inv.m[2][1] * m[3][2];
+            inv.m[3][2] = (-inv.m[0][2] * m[3][0]) - inv.m[1][2] * m[3][1] - inv.m[2][2] * m[3][2];
             inv.m[3][3] = 1.0f;
             inv.flagBits = flagBits;
 
@@ -734,11 +741,25 @@ public:
         if (flagBits < Scale) {
             return inv;
         } else if (flagBits < Rotation2D) {
-            if (fuzzyIsNull(m[0][0]) || fuzzyIsNull(m[1][1]) || fuzzyIsNull(m[2][2]))
+            // Diagonal: the reciprocals. EXACT zero tests, not fuzzy ones — a
+            // scale of 1e-6 is small but perfectly invertible, and Qt inverts it.
+            if (m[0][0] == 0.0f || m[1][1] == 0.0f || m[2][2] == 0.0f)
                 return inv;
             inv.data()[0] = 1.0f / m[0][0];
             inv.data()[4] = 1.0f / m[1][1];
             inv.data()[8] = 1.0f / m[2][2];
+            return inv;
+        } else if ((flagBits & ~(Translation | Rotation2D | Rotation)) == Identity) {
+            // ORTHONORMAL: the inverse-transpose of a rotation is the rotation,
+            // so the basis is COPIED, not solved for. This path is not an
+            // optimization — a Cramer solve of the same matrix lands one or two
+            // ulps away, and CameraNode::lookAt runs straight through here
+            // (lookAt -> inverted -> normalMatrix -> fromRotationMatrix), so
+            // solving instead of copying moves the editor camera's orientation
+            // and, three stages later, three pixels of the rendered frame.
+            for (int col = 0; col < 3; ++col)
+                for (int row = 0; row < 3; ++row)
+                    inv(row, col) = m[col][row];
             return inv;
         }
 
