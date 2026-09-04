@@ -196,13 +196,11 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             // a texture slot in every pass, so do it lazily, once, here —
             // never for scenes without area lights. The .dds files ship with
             // the staged Common material scripts (registerCommonResources).
-            static bool sLtcLoaded = false;
-            if (!sLtcLoaded) {
-                sLtcLoaded = true;   // even a failed attempt: don't retry every frame
-                auto *pbs = static_cast<Ogre::HlmsPbs *>(
-                    Ogre::Root::getSingleton().getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-                if (pbs) pbs->loadLtcMatrix();
-            }
+            // The "once" flag lives in lightextras beside the area-light
+            // budgets and is reset by its shutdown(): as a function-local
+            // static it survived Engine destruction and the SECOND Engine's
+            // area lights then rendered with no LTC matrix loaded.
+            lightextras::armLtcMatrix(mRoot);
             // Ogre budgets ONE forward area light of each kind and silently
             // drops the rest — a scene's second area light renders nothing
             // until this runs. Same lazy arm point, same reasoning.
@@ -316,6 +314,7 @@ void OgreScene::destroy() {
         mMaterials.clear();
         for (auto &kv : mTextures) releaseTextureRec(kv.second);
         mTextures.clear();
+        mTextureIndex.clear();
         Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
         for (auto &kv : mMeshes) {
             kv.second.mesh.reset();

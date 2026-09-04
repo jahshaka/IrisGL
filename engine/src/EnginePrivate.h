@@ -52,6 +52,7 @@
 #include <OgreRectangle2D2.h>
 #include <OgreVertexFormatWarmUp.h>
 #include <set>
+#include <unordered_map>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/OgreCompositorNodeDef.h>
@@ -183,6 +184,10 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // inside the single range the old one-pass workspace drew.)
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
+
+/// How many entries PbrTextureSlot has (Albedo..Emissive). The enum is a plain
+/// public enum with no sentinel, and MaterialRec indexes an array by it.
+constexpr size_t kPbrTextureSlotCount = 5;
 
 // ---------------------------------------------------------------------------
 // What shape of compositor chain a view wants. Phase 1 carries only what every
@@ -545,6 +550,19 @@ bool assignAreaMask(Ogre::Root *root, Ogre::Light *light, const std::string &pat
 /// nothing without it.
 void armAreaLightBudgets(Ogre::Root *root);
 
+/// Loads HlmsPbs's LTC/BRDF lookup matrices, once — required before ANY area
+/// light is drawn (the approximate kind loads them too). Lazy on purpose: the
+/// load reserves a texture slot in EVERY pass, so scenes without area lights
+/// must never pay it.
+///
+/// Lives here rather than as a function-local `static bool` at the call site
+/// (where it was until the deep audit, OgreScene.cpp) because a function-local
+/// static outlives the Engine: destroy the Engine, build a second one, and the
+/// flag still says "loaded" while the new Root's HlmsPbs has no LTC matrix —
+/// every area light in the second Engine then renders wrong, silently.
+/// shutdown() resets it with the rest of the process-wide light state.
+void armLtcMatrix(Ogre::Root *root);
+
 /// Destroys the profile atlas and the mask pool. MUST run before `delete Root`
 /// (a TextureGpu outliving its manager is the usual teardown crash).
 void shutdown();
@@ -867,6 +885,14 @@ private:
         /// scene pass must be set to render refractive objects in its own pass".
         /// Left in the opaque pass they render as ordinary glass, silently.
         bool refractive = false;
+        /// Which TextureId occupies each PbrTextureSlot right now (0 = none).
+        /// The REVERSE of the binding, kept so destroyTexture can unbind a
+        /// texture from every material holding it: an Ogre datablock keeps a
+        /// raw TextureGpu* and a descriptor set, so destroying a still-bound
+        /// texture leaves a dangling pointer that only shows up as a GPU-side
+        /// fault later. Latent until something actually reclaims textures —
+        /// which the mirror now does.
+        TextureId boundTextures[kPbrTextureSlotCount] = { 0, 0, 0, 0, 0 };
     };
     struct TextureRec {
         Ogre::TextureGpu *texture = nullptr;
@@ -1079,6 +1105,21 @@ private:
     std::map<NodeId, NodeClips> mClips;
     std::map<MaterialId, MaterialRec> mMaterials;
     std::map<TextureId, TextureRec> mTextures;
+    /// Dedup index over mTextures: loadTexture and loadDecalTexture both used
+    /// to LINEAR-SCAN the whole table on every call, which is quadratic across
+    /// a scene open (a few hundred maps -> tens of thousands of string
+    /// compares). Key = textureKey(): the bare path for ordinary textures, a
+    /// kind-prefixed path for decal-atlas slices, because the two live in
+    /// different pools and handing one out for the other is silent corruption
+    /// (loadTexture's comment). Kept in step by destroyTexture / destroy().
+    std::unordered_map<std::string, TextureId> mTextureIndex;
+    /// The index key for a texture record: decal slices are namespaced by kind.
+    static std::string textureKey(const std::string &path, bool decal, DecalMap kind);
+    /// Registers a texture record: assigns the next id and indexes it by path.
+    /// The ONLY way a TextureRec enters mTextures, so the index cannot drift.
+    TextureId trackTexture(const TextureRec &rec);
+    /// Our slot enum -> Ogre's PBSM_* unit.
+    static Ogre::PbsTextureTypes pbsSlotOf(PbrTextureSlot slot);
     std::set<std::string> mTextureDirs;
     /// SceneManager::getSkyMethod() never reflects the method actually set
     /// (upstream's setSky forgets to assign mSkyMethod), so remember it.
