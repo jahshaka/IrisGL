@@ -68,6 +68,7 @@ SceneNode::SceneNode():
     attached = false;
 
     transformDirty = true;
+    globalDirty = false;      // transformDirty already forces the global
     hasDirtyChildren = true;
 
     //keyFrameSet = KeyFrameSet::create();
@@ -128,6 +129,11 @@ void SceneNode::setLocalTransform(QMatrix4x4 transformMatrix)
     setTransformDirty();
 }
 
+/// This node's own TRS changed. The flag propagates UPWARDS as
+/// hasDirtyChildren so that update() descends to us from the root; the
+/// downward half — every descendant's globalTransform is now stale too — is
+/// update()'s job, because it is the only place that knows the new world
+/// transform.
 void SceneNode::setTransformDirty()
 {
     transformDirty = true;
@@ -328,6 +334,12 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         node->scale.setY(diff.column(1).toVector3D().length());
         node->scale.setZ(diff.column(2).toVector3D().length());
     }
+
+    // Unconditionally: a reparent changes the node's world transform even when
+    // its local one is untouched, and the keepTransform branch above writes
+    // pos/rot/scale directly. This also marks the new parent chain, which is
+    // how a freshly added subtree gets visited at all.
+    node->setTransformDirty();
 }
 
 void SceneNode::removeFromParent()
@@ -341,6 +353,9 @@ void SceneNode::removeChild(SceneNodePtr node)
 {
     children.removeOne(node);
     node->parent.clear();
+    // Losing a parent changes the node's world transform (its local one is now
+    // its global one) — it has to recompose.
+    node->setTransformDirty();
     node->removeFromScene();
 }
 
@@ -361,16 +376,25 @@ void SceneNode::updateAnimation(float time)
 
     if (!!animation) {
         time = animation->getSampleTime(time);
+        // These write pos/rot/scale DIRECTLY rather than through the setters,
+        // so they are the one mutator path that has to remember the flag
+        // itself (it did not, and could not be noticed while the flags were
+        // never cleared).
+        bool posed = false;
         if (animation->hasPropertyAnim("position")) {
             pos = animation->getVector3PropertyAnim("position")->getValue(time);
+            posed = true;
         }
         if (animation->hasPropertyAnim("rotation")) {
             auto r = animation->getVector3PropertyAnim("rotation")->getValue(time);
             rot = QQuaternion::fromEulerAngles(r);
+            posed = true;
         }
         if (animation->hasPropertyAnim("scale")) {
             scale = animation->getVector3PropertyAnim("scale")->getValue(time);
+            posed = true;
         }
+        if (posed) setTransformDirty();
         // The SKELETAL branch is gone (ANIMATION_ENGINE_MIGRATION_SPEC, full
         // retirement). It used to walk the scene-node hierarchy by name,
         // overwrite every bone node's local transform from the clip, compose
@@ -421,11 +445,22 @@ void SceneNode::update(float dt)
         localTransform.translate(pos);
         localTransform.rotate(rot);
         localTransform.scale(scale);
+    }
 
+    if (transformDirty || globalDirty) {
         if (auto p = getParent()) {
             globalTransform = p->globalTransform * localTransform;
         } else {
             globalTransform = localTransform;
+        }
+
+        // Our world transform moved, so every descendant's did. This is the
+        // downward half of the invalidation, and the reason a moved node is
+        // enough to refresh its whole subtree: setTransformDirty only ever
+        // walked up.
+        if (!children.isEmpty()) {
+            for (const auto &child : children) child->globalDirty = true;
+            hasDirtyChildren = true;
         }
     }
 
@@ -434,6 +469,14 @@ void SceneNode::update(float dt)
             child->update(dt);
         }
     }
+
+    // Cleared AFTER the descent, never before: `hasDirtyChildren` is what the
+    // loop above tests, and the flag this node may have just set for itself
+    // (because its own world transform moved) has to survive until the loop
+    // has used it.
+    transformDirty = false;
+    globalDirty = false;
+    hasDirtyChildren = false;
 }
 
 void SceneNode::setParent(SceneNodePtr node)
@@ -520,6 +563,7 @@ void SceneNode::setGlobalPos(QVector3D pos)
 	auto p = getParent();
 	if (!p) {
 		this->pos = pos;
+		this->setTransformDirty();
 		return;
 	}
 
@@ -536,6 +580,7 @@ void SceneNode::setGlobalRot(QQuaternion rot)
 	auto p = getParent();
 	if (!p) {
 		this->rot = rot;
+		this->setTransformDirty();
 		return;
 	}
 

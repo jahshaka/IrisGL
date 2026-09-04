@@ -52,7 +52,28 @@ protected:
     QVector3D scale;
     QQuaternion rot;
 
+    // ---- transform invalidation (deep audit 2026-09, area 3) --------------
+    // These two flags were set true in the constructor and NEVER cleared
+    // anywhere in the tree, so update() recomposed localTransform AND
+    // globalTransform for every node of every scene, every frame — a cache
+    // that only ever cost. They mean what they say now:
+    //
+    //   transformDirty    this node's own TRS changed, so localTransform must
+    //                     be recomposed (and globalTransform with it). Set by
+    //                     every mutator; see setTransformDirty().
+    //   globalDirty       an ANCESTOR moved, so only globalTransform needs
+    //                     recomputing. This is the DOWNWARD half of the
+    //                     invalidation and update() is what sets it, because
+    //                     setTransformDirty walks UPWARDS (it tells ancestors
+    //                     to descend) and can never reach a subtree.
+    //   hasDirtyChildren  some descendant needs update() work at all; the flag
+    //                     that lets an untouched branch be skipped whole.
+    //
+    // All three are cleared at the end of update(). A mutator that forgets to
+    // set them is a stale-transform bug — the picker, the gizmos and the
+    // mirror's selection outline all read `globalTransform` directly.
     bool transformDirty;
+    bool globalDirty;
     bool hasDirtyChildren;
 public:
     // cached local and global transform
