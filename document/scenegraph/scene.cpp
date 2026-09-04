@@ -441,14 +441,14 @@ void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
         }
     }
 
-    for (auto child : sceneNode->children) {
+    for (const auto &child : sceneNode->children) {
         rayCast(child, segStart, segEnd, hitList, pickingMask, allowUnpickable);
     }
 }
 
 void Scene::addNode(SceneNodePtr node)
 {
-    if (!!node->scene) {
+    if (node->hasScene()) {
         //qDebug() << "Node already has scene";
         //throw "Node already has scene";
     }
@@ -550,8 +550,21 @@ void Scene::setOutlineColor(QColor color)
     outlineColor = color;
 }
 
+Scene::~Scene()
+{
+    cleanup();
+}
+
 void Scene::cleanup()
 {
+    // Everything here is a STRONG reference the scene owns. The tree hangs off
+    // rootNode; `nodes` (and the per-type hashes beside it) is a second strong
+    // reference to every node in it, registered by SceneNode::setScene. Both
+    // halves have to go or the subtree outlives the scene — which is exactly
+    // what happened before the deep audit of 2026-09: `nodes` and `decals` were
+    // not cleared here at all, so even after MainWindow's close path called
+    // cleanup() every node in the world was still reachable (and, with the old
+    // strong `SceneNode::scene`, still pinned the scene itself).
     camera.clear();
     rootNode.clear();
     vrViewer.clear();
@@ -559,9 +572,11 @@ void Scene::cleanup()
     skyTexture.clear();
 
     lights.clear();
+    decals.clear();
     meshes.clear();
     particleSystems.clear();
     viewers.clear();
+    nodes.clear();
 }
 
 }

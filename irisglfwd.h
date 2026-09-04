@@ -75,6 +75,15 @@ typedef QSharedPointer<iris::Animation> AnimationPtr;
 typedef QSharedPointer<Shader> ShaderPtr;
 typedef QSharedPointer<Scene> ScenePtr;
 typedef QSharedPointer<SceneNode> SceneNodePtr;
+
+/// The scene graph's NON-owning links. The tree has exactly one ownership
+/// direction — a parent owns its children — so the back-references (child to
+/// parent, node to scene) are weak. They were QSharedPointer until the deep
+/// audit of 2026-09 (area 3) measured what that costs: every parent/child pair
+/// was a reference cycle, so no scene, no subtree and no node ever died and
+/// every world the app had opened stayed resident for the life of the process.
+typedef QWeakPointer<Scene> SceneWPtr;
+typedef QWeakPointer<SceneNode> SceneNodeWPtr;
 typedef QSharedPointer<Mesh> MeshPtr;
 typedef QSharedPointer<Model> ModelPtr;
 typedef QSharedPointer<Material> MaterialPtr;

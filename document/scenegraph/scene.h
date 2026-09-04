@@ -326,6 +326,15 @@ public:
 
     Scene();
 public:
+    /// Scene had no destructor at all until the deep audit of 2026-09 (area 3):
+    /// it did not need one while `SceneNode::scene` was a QSharedPointer,
+    /// because that cycle meant no Scene was ever destroyed in the first place.
+    /// Now that the back-references are weak, this runs — and it runs cleanup()
+    /// so that a scene dropped WITHOUT an explicit close (every offscreen /
+    /// preview / test scene) releases its node registries exactly like one that
+    /// was closed properly.
+    ~Scene();
+
     static ScenePtr create();
 
     /**

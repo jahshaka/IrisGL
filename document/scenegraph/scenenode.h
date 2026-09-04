@@ -64,8 +64,20 @@ public:
     QString name;
     long nodeId;
 
-    ScenePtr scene;
-    SceneNodePtr parent;
+    // OWNERSHIP (deep audit 2026-09, area 3 / List B item 4). The tree has ONE
+    // ownership direction: a parent owns its children, strongly. The two
+    // back-references are therefore WEAK — they were QSharedPointer until this
+    // change, which made every parent/child pair and every node/scene pair a
+    // reference cycle, so nothing in a document ever died.
+    //
+    // Read them through getScene() / getParent(), never directly: a weak
+    // pointer must be locked before it is used, and the lock is what keeps the
+    // target alive for the duration of the expression. The two members stay
+    // public only because the codebase is full of `node->parent` call sites
+    // that now read as `node->getParent()`; new code has no reason to touch
+    // them.
+    SceneWPtr scene;
+    SceneNodeWPtr parent;
     QList<SceneNodePtr> children;
 
     // editor specific
@@ -170,10 +182,27 @@ public:
     bool isAttached();
     void setAttached(bool attached);
 
-	SceneNodePtr getParent()
+	/// The owning parent, locked. Null for a root node — and also null for a
+	/// node whose parent has been destroyed, which is a state that could not
+	/// exist while `parent` was strong.
+	SceneNodePtr getParent() const
 	{
-		return parent;
+		return parent.lock();
 	}
+
+	/// The scene this node belongs to, locked. Null when the node is detached,
+	/// and null once the scene itself is gone.
+	ScenePtr getScene() const
+	{
+		return scene.lock();
+	}
+
+	/// "Is there a live parent / scene", without materialising a
+	/// QSharedPointer. QWeakPointer::isNull() already reports expiry — it turns
+	/// true the moment the last strong reference goes — so these are the honest
+	/// replacements for the old `!!node->parent` / `!!node->scene` tests.
+	bool hasParent() const { return !parent.isNull(); }
+	bool hasScene()  const { return !scene.isNull(); }
 
     void addAnimation(AnimationPtr anim);
     QList<AnimationPtr> getAnimations();
@@ -214,7 +243,7 @@ public:
     void show(bool hideChildren = false) {
         visible = true;
 		if (hideChildren) {
-			for (auto child : children)
+			for (const auto &child : children)
 				child->show(hideChildren);
 		}
     }
@@ -222,7 +251,7 @@ public:
     void hide(bool hideChildren = false) {
         visible = false;
 		if (hideChildren) {
-			for (auto child : children)
+			for (const auto &child : children)
 				child->hide(hideChildren);
 		}
     }
