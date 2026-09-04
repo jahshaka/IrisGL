@@ -101,8 +101,13 @@ done
 # three, and the rest rode upstream defaults -- two of which are machine
 # dependent: OVERLAY is a cmake_dependent_option on FREETYPE_FOUND and DEAR_IMGUI
 # on DearImgui_FOUND, so a box without libfreetype-dev silently produced a
-# different install. OVERLAY is OFF by decision: we link neither the library nor
-# any Overlay header, and turning it off removes the hidden freetype dependency.
+# different install. OVERLAY is ON by decision (STATS_OVERLAY_SPEC.md D1,
+# 2026-09-05): the stats overlay + engine-drawn loading cover use it. That makes
+# freetype a HARD dependency of this build -- the guard below fails loudly on a
+# box without it, because cmake_dependent_option would otherwise silently force
+# the component OFF and produce a different install (the exact machine-dependence
+# this explicit pin exists to prevent). Runtime: libOgreNextOverlay NEEDS
+# libfreetype.so.6 (DebugFont is type=truetype, rasterised at load).
 # PLANAR_REFLECTIONS is ours (mirrors / glossy floors); note it is #ifdef-ed
 # INSIDE OgreHlmsPbs.h, so it changes HlmsPbs's member layout -- consumers MUST
 # recompile after a flip. generateAbiCookie() does not hash component defines,
@@ -118,7 +123,7 @@ cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DOGRE_BUILD_COMPONENT_SCENE_FORMAT=ON \
   -DOGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS=ON \
   -DOGRE_BUILD_COMPONENT_ATMOSPHERE=ON -DOGRE_BUILD_COMPONENT_MESHLODGENERATOR=ON \
-  -DOGRE_BUILD_COMPONENT_PROPERTY=ON -DOGRE_BUILD_COMPONENT_OVERLAY=OFF \
+  -DOGRE_BUILD_COMPONENT_PROPERTY=ON -DOGRE_BUILD_COMPONENT_OVERLAY=ON \
   -DOGRE_BUILD_COMPONENT_PAGING=OFF -DOGRE_BUILD_COMPONENT_VOLUME=OFF \
   -DOGRE_BUILD_COMPONENT_DEAR_IMGUI=OFF \
   -DOGRE_BUILD_SAMPLES2=OFF -DOGRE_BUILD_TESTS=OFF -DOGRE_BUILD_TOOLS=ON
@@ -135,6 +140,14 @@ grep -q "RenderSystem_Vulkan" "$SRC/build/build.ninja" || {
 # and OgrePlanarReflections.cpp will not build.
 grep -q "OgreNextPlanarReflections" "$SRC/build/build.ninja" || {
     echo "PlanarReflections component was NOT configured — the explicit component pin above did not take." >&2
+    exit 1
+}
+
+# Overlay is a cmake_dependent_option on FREETYPE_FOUND: -DOVERLAY=ON on a box
+# without freetype dev headers is SILENTLY forced OFF at configure. Fail loudly
+# (STATS_OVERLAY_SPEC.md D1 makes the component load-bearing).
+grep -q "OgreNextOverlay" "$SRC/build/build.ninja" || {
+    echo "Overlay component was NOT configured — freetype missing? (libfreetype-dev / vendored freetype required)." >&2
     exit 1
 }
 
