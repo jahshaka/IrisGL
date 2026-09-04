@@ -393,9 +393,11 @@ QList<Property*> ParticleSystemNode::getProperties()
     // Enum-ish rows travel as their NAME, never as an ordinal (see the tables
     // above). FileProperty is the QString-valued Property here — the same one
     // the texture row has always used.
-    auto addString = [&props](const char *display, const char *name, const QString &value) {
+    auto addString = [&props](const char *display, const char *name, const QString &value,
+                              bool readOnly = false) {
         auto *p = new FileProperty();
         p->displayName = display; p->name = name; p->value = value;
+        p->readOnly = readOnly;
         props.append(p);
     };
     addString("Emitter Shape", "shape",       shapeName(shape));
@@ -406,7 +408,7 @@ QList<Property*> ParticleSystemNode::getProperties()
     // manager (guid -> file), which the document layer has no access to. The
     // texture's source path is exposed for inspection only; setPropertyValue
     // refuses it.
-    addString("Texture", "texture", !!texture ? texture->getSource() : QString());
+    addString("Texture", "texture", !!texture ? texture->getSource() : QString(), true);
 
     return props;
 }

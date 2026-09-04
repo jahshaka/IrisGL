@@ -37,16 +37,24 @@ QList<Property*> DecalNode::getProperties()
     prop->value = depth;
     props.append(prop);
 
+    // The only scene-node rows with a range worth declaring: setPropertyValue
+    // below qBounds both to 0..1, so this is the setter's own contract written
+    // down, not a UI slider's taste. Every other node row leaves min == max ==
+    // 0, which readers must take as "no declared range" (property.h).
     prop = new FloatProperty();
     prop->displayName = "Metalness";
     prop->name = "metalness";
     prop->value = metalness;
+    prop->minValue = 0.0f;
+    prop->maxValue = 1.0f;
     props.append(prop);
 
     prop = new FloatProperty();
     prop->displayName = "Roughness";
     prop->name = "roughness";
     prop->value = roughness;
+    prop->minValue = 0.0f;
+    prop->maxValue = 1.0f;
     props.append(prop);
 
     auto boolProp = new BoolProperty();

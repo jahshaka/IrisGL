@@ -79,12 +79,14 @@ QList<Property*> MeshNode::getProperties()
     pathProp->displayName = "Mesh Path";
     pathProp->name = "meshPath";
     pathProp->value = meshPath;
+    pathProp->readOnly = true;      // matches the setPropertyValue refusal below
     props.append(pathProp);
 
     auto intProp = new IntProperty();
     intProp->displayName = "Mesh Index";
     intProp->name = "meshIndex";
     intProp->value = meshIndex;
+    intProp->readOnly = true;
     props.append(intProp);
 
     intProp = new IntProperty();

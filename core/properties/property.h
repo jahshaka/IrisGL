@@ -27,11 +27,25 @@ enum class PropertyType
 
 struct Property
 {
-    unsigned            id;
+    /// The panel's widget index (PropertyWidget stores it on every row it
+    /// builds). Only the MATERIAL property lists ever assigned it —
+    /// PbrMaterial::createProperties numbers its rows — so a scene node's
+    /// properties handed to the same widget carried an indeterminate index.
+    /// Zero-initialised: an unnumbered row is row 0, not garbage.
+    unsigned            id = 0;
     QString             displayName;
     QString             name;
     QString             uniform;
-    PropertyType        type;
+    PropertyType        type = PropertyType::None;
+
+    /// Reflected, but not writable through setPropertyValue: the field behind
+    /// it needs an operation the reflection layer cannot perform (reloading a
+    /// mesh, resolving an asset guid to bytes). Declared HERE, at the one place
+    /// that is always in step with the row itself, because the alternative is a
+    /// second list of names in the scripting layer that silently rots — and a
+    /// surface that tells an agent a row is writable when it is not is exactly
+    /// the silent-success defect class AI_SURFACE_AUDIT catalogued.
+    bool                readOnly = false;
 
     virtual QVariant    getValue() = 0;
     virtual void        setValue(QVariant val) = 0;
@@ -67,11 +81,20 @@ struct BoolProperty : public Property
     }
 };
 
+// min/max are ZERO-INITIALISED, and that is load-bearing. The ctors used to set
+// only `type`, and no getProperties() in irisgl/document/scenegraph/ has ever
+// assigned minValue/maxValue — so every scene-node int/float row carried two
+// indeterminate numbers. Nothing read them while the only consumer was the
+// material panel (PbrMaterial DOES set real ranges), but a verb that reports
+// them would hand a model uninitialised memory as fact
+// (AI_SURFACE_PROGRAM_SPEC §3.A). The convention that follows from zeroing them:
+// a row has a declared range only when max > min, and readers must emit min/max
+// on exactly that condition.
 struct IntProperty : public Property
 {
-    int value;
-    int minValue;
-    int maxValue;
+    int value = 0;
+    int minValue = 0;
+    int maxValue = 0;
 
     IntProperty() {
         type = PropertyType::Int;
@@ -88,9 +111,9 @@ struct IntProperty : public Property
 
 struct FloatProperty : public Property
 {
-    float value;
-    float minValue;
-    float maxValue;
+    float value = 0.0f;
+    float minValue = 0.0f;
+    float maxValue = 0.0f;
 
     FloatProperty() {
         type = PropertyType::Float;
@@ -164,7 +187,7 @@ struct FileProperty : public Property
 struct ListProperty : public Property
 {
     QStringList value;
-    int index;
+    int index = 0;      // same uninitialised-member class as min/max above
 
     ListProperty () {
         type = PropertyType::List;
