@@ -160,6 +160,20 @@ cmake --build "$SRC/build" -j"$JOBS"
 rm -f "$PREFIX"/lib/libOgreNext*.so* "$PREFIX"/lib/OGRE-Next/*.so*
 cmake --install "$SRC/build" > /dev/null
 
+# The Overlay component again, on the INSTALL side. The configure-time grep
+# above cannot see an install-side prune or a rename, and the whole point of the
+# guard is that a missing libOgreNextOverlay is otherwise indistinguishable from
+# a working install until the editor silently stops drawing its loading cover.
+# (Studio's cmake/IncludeOgre.cmake refuses to configure without it too; this is
+# the half that fires on the machine that BUILT the engine.)
+ls "$PREFIX"/lib/libOgreNextOverlay.so* > /dev/null 2>&1 ||
+ls "$PREFIX"/lib/libOgreNextOverlay*.dylib > /dev/null 2>&1 || {
+    echo "libOgreNextOverlay was configured and built but is NOT in $PREFIX/lib —" >&2
+    echo "the install step dropped it. The stats overlay and the engine-drawn" >&2
+    echo "loading cover (SPECS/STATS_OVERLAY_SPEC.md) cannot work without it." >&2
+    exit 1
+}
+
 # Self-containment gate. Every installed Ogre library must resolve its OWN
 # dependencies in a clean environment (see the $ORIGIN note above): if this
 # fails, binaries built against the install start failing at load time in ways
