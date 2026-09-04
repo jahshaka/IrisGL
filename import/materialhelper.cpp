@@ -61,6 +61,95 @@ QString MaterialHelper::sniffImageExtension(const unsigned char* d, int len)
     return QString();
 }
 
+// ---------------------------------------------------------------------------
+// Texture-path containment (deep audit 2026-09, finding F2)
+// ---------------------------------------------------------------------------
+// Everything a model says about its textures is FILE CONTENT. Before this,
+// every resolve site below did the same two things: join a relative name onto
+// the model's directory, or take an absolute name verbatim — so a .obj/.mtl
+// naming `../../../.ssh/id_rsa` or `/etc/passwd` had that file opened, hashed
+// into the content-addressed store as a "texture", and written into every
+// export of the project. Nothing checked where the result landed.
+
+/// Canonical absolute form: symlinks and `..` resolved when the path exists,
+/// a cleaned absolute path when it does not (so a name that escapes and does
+/// not exist is still recognised as escaping).
+static QString canonicalOrCleaned(const QString &path)
+{
+    const QFileInfo info(path);
+    const QString canonical = info.canonicalFilePath();
+    return canonical.isEmpty() ? QDir::cleanPath(info.absoluteFilePath()) : canonical;
+}
+
+static bool pathIsInside(const QString &path, const QString &dir)
+{
+    if (dir.isEmpty() || path.isEmpty()) return false;
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    // Both platforms' default filesystems are case-insensitive: two spellings
+    // of the same directory ARE the same directory, and containment must say so.
+    const Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    const Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+    if (path.compare(dir, cs) == 0) return true;
+    const QString prefix = dir.endsWith(QLatin1Char('/')) ? dir : dir + QLatin1Char('/');
+    return path.startsWith(prefix, cs);
+}
+
+QStringList& MaterialHelper::warningSink()
+{
+    // Thread-local: extraction is synchronous on its caller's thread (the
+    // import pipeline's worker), so a parallel import cannot steal another's
+    // warnings and no lock is needed.
+    static thread_local QStringList sink;
+    return sink;
+}
+
+QStringList MaterialHelper::takeContainmentWarnings()
+{
+    QStringList taken;
+    taken.swap(warningSink());
+    return taken;
+}
+
+QString MaterialHelper::containedTexturePath(const QString &name, const QString &sourceDir,
+                                             const QString &kind)
+{
+    if (name.isEmpty()) return QString();
+    // "*0" and friends are assimp's EMBEDDED texture references, not paths.
+    // They never touch the filesystem; the embedded loader resolves them.
+    if (name.startsWith(QLatin1Char('*'))) return name;
+    if (sourceDir.isEmpty()) return QString();
+
+    const QString dir = canonicalOrCleaned(sourceDir);
+    const QString resolved = canonicalOrCleaned(QDir(dir).filePath(name));
+    if (pathIsInside(resolved, dir)) return resolved;
+
+    // Escaped. The overwhelmingly common innocent case is a DCC tool writing
+    // its authoring machine's absolute path for a texture that actually ships
+    // beside the model, so fall back to the BASENAME inside the model's own
+    // directory; the hostile case simply names a file that is not there and
+    // the reference dies at the callers' isFile() checks.
+    const QString base = QFileInfo(name).fileName();
+    const QString fallback = base.isEmpty() ? QString()
+                                            : QDir::cleanPath(QDir(dir).filePath(base));
+    const bool haveFallback = !fallback.isEmpty() && QFileInfo(fallback).isFile();
+    const QString warning =
+        haveFallback
+            ? QStringLiteral("%1 \"%2\" points outside the model's folder; "
+                             "using \"%3\" from the model's folder instead")
+                  .arg(kind, name, base)
+            : QStringLiteral("%1 \"%2\" points outside the model's folder; "
+                             "the reference was dropped").arg(kind, name);
+    QStringList &sink = warningSink();
+    if (!sink.contains(warning)) sink.append(warning);   // once per distinct name
+    // The fallback is returned even when no such file exists: it stays inside
+    // the model's directory (so nothing outside can be read), it lets the
+    // EMBEDDED lookup — which matches on short file name — still find media
+    // carried inside the model, and every consumer guards on isFile().
+    return fallback;
+}
+
 QImage MaterialHelper::convertAiTextureToImage(const aiTexture *at)
 {
     if (!at) return QImage();
@@ -90,7 +179,10 @@ DefaultMaterialPtr MaterialHelper::createMaterial(aiMaterial* aiMat, QString ass
     if (!assetPath.isEmpty()) {
         QString diffuseTex = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE);
         if (!diffuseTex.isEmpty()) {
-            mat->setDiffuseTexture(Texture2D::load(QDir::cleanPath(assetPath + QDir::separator() + diffuseTex)));
+            // Contained: the model does not get to name a file outside its own
+            // folder (see containedTexturePath).
+            const QString path = containedTexturePath(diffuseTex, assetPath);
+            if (!path.isEmpty()) mat->setDiffuseTexture(Texture2D::load(path));
         }
     }
     return mat;
@@ -190,7 +282,10 @@ void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
     texPath.clear();
 
     if (!image.isNull()) {
-        QString imagePath = QDir(assetPath).filePath(fileName);
+        // The embedded texture's own file name is file content too: a GLB may
+        // call its image "../../evil.png". Extraction writes into the staging
+        // dir and nowhere else, so take the base name only.
+        QString imagePath = QDir(assetPath).filePath(QFileInfo(fileName).fileName());
         texPath = imagePath;
         hasEmbedded = true;
 
@@ -287,13 +382,17 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
 
     if (assetPath.isEmpty()) return;
 
+    // Every on-disk resolve below goes through containedTexturePath: the model
+    // names its textures, so `../../` and absolute paths are file content and
+    // must not be able to reach outside the model's own directory (deep audit
+    // 2026-09 F2). The old code here was exactly the vulnerable shape —
+    // "relative? join it; absolute? take it".
+
     // ------------------------
     // Diffuse
     // ------------------------
     QString diffuseTex = getAiMaterialTexture(aiMat, aiTextureType_DIFFUSE);
-    mat.diffuseTexture = QFileInfo(diffuseTex).isRelative()
-                             ? QDir::cleanPath(QDir(assetPath).filePath(diffuseTex))
-                             : QDir::cleanPath(diffuseTex);
+    mat.diffuseTexture = containedTexturePath(diffuseTex, assetPath);
 
     loadEmbeddedTexture(scene, diffuseTex, outDir, mat.diffuseTexture, mat.hasEmbeddedDiffTexture);
 
@@ -301,9 +400,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     // Specular
     // ------------------------
     QString specularTex = getAiMaterialTexture(aiMat, aiTextureType_SPECULAR);
-    mat.specularTexture = QFileInfo(specularTex).isRelative()
-                              ? QDir::cleanPath(QDir(assetPath).filePath(specularTex))
-                              : QDir::cleanPath(specularTex);
+    mat.specularTexture = containedTexturePath(specularTex, assetPath);
 
     loadEmbeddedTexture(scene, specularTex, outDir, mat.specularTexture, mat.hasEmbeddedSpecularTexture);
 
@@ -311,9 +408,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     // Normals
     // ------------------------
     QString normalsTex = getAiMaterialTexture(aiMat, aiTextureType_NORMALS);
-    mat.normalTexture = QFileInfo(normalsTex).isRelative()
-                            ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
-                            : QDir::cleanPath(normalsTex);
+    mat.normalTexture = containedTexturePath(normalsTex, assetPath);
 
     loadEmbeddedTexture(scene, normalsTex, outDir, mat.normalTexture, mat.hasEmbeddedNormalTexture);
 
@@ -322,9 +417,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     // ------------------------
     if (normalsTex.isEmpty()) {
         normalsTex = getAiMaterialTexture(aiMat, aiTextureType_HEIGHT);
-        mat.hightTexture = QFileInfo(normalsTex).isRelative()
-                               ? QDir::cleanPath(QDir(assetPath).filePath(normalsTex))
-                               : QDir::cleanPath(normalsTex);
+        mat.hightTexture = containedTexturePath(normalsTex, assetPath);
 
         loadEmbeddedTexture(scene, normalsTex, outDir, mat.hightTexture, mat.hasEmbeddedHightTexture);
     }
@@ -337,9 +430,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     // ------------------------
     auto resolveTex = [&](const QString& name, QString& outPath) {
         if (name.isEmpty()) { outPath.clear(); return; }
-        outPath = QFileInfo(name).isRelative()
-                      ? QDir::cleanPath(QDir(assetPath).filePath(name))
-                      : QDir::cleanPath(name);
+        outPath = containedTexturePath(name, assetPath);
         bool embedded = false;
         loadEmbeddedTexture(scene, name, outDir, outPath, embedded);
     };

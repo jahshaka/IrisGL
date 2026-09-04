@@ -14,6 +14,7 @@ For more information see the LICENSE file
 
 #include <QColor>
 #include <QFuture>
+#include <QStringList>
 
 #include "irisglfwd.h"
 #include "document/assets/mesh.h"
@@ -44,6 +45,31 @@ public:
     /// Public: importers and tests use it to keep written extensions honest.
     static QString sniffImageExtension(const unsigned char* data, int len);
 
+    /// CONTAINMENT (deep audit 2026-09, finding F2). A model file names its
+    /// textures itself, and those names are FILE CONTENT: `../../../.ssh/id_rsa`
+    /// and `/etc/passwd` are both legal in an .obj/.mtl/.fbx/.gltf. Resolved
+    /// verbatim (what this code used to do) such a reference is opened, copied
+    /// into the content-addressed store and shipped in every export — a
+    /// one-hop exfiltration primitive out of any downloaded model.
+    ///
+    /// Resolves `name` against `sourceDir` and returns a path GUARANTEED to sit
+    /// inside `sourceDir` (symlinks resolved), or an empty string when no such
+    /// file exists. An escaping reference falls back to its own basename inside
+    /// `sourceDir` — the overwhelmingly common real-world case is a DCC tool
+    /// writing an absolute authoring path for a texture that ships beside the
+    /// model — and records a warning either way.
+    ///
+    /// Warnings are drained by the caller on the SAME THREAD (the sink is
+    /// thread-local): the import pipeline takes them right after its parse and
+    /// puts them in ImportResult::warnings.
+    /// `kind` names the reference in the warning text ("texture", "material
+    /// library", …) — the containment rule itself is the same for all of them.
+    static QString containedTexturePath(const QString& name, const QString& sourceDir,
+                                        const QString& kind = QStringLiteral("texture"));
+
+    /// Take (and clear) this thread's containment warnings.
+    static QStringList takeContainmentWarnings();
+
 private:
     static QImage loadOMEmbeddedTexture(const aiScene* scene,
                                         const QString& texPath,
@@ -65,6 +91,9 @@ private:
 
     static void waitForTextureSave(const QString& path);
     static void waitForAllTextureSaves();
+
+    /// The containment warning sink (thread-local; see takeContainmentWarnings).
+    static QStringList& warningSink();
 
     struct SaveTask {
         QFuture<void> future;
