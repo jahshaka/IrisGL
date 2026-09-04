@@ -38,7 +38,12 @@ void Animation::setSkeletalAnimation(const SkeletalAnimationPtr &value)
 
 float Animation::getSampleTime(float time)
 {
-    if (loop) {
+    // length <= 0 is REACHABLE, not theoretical: calculateAnimationLength takes
+    // the length from the last key, so an animation with a single key at t=0 —
+    // one press of the Timeline's insert button, one anim.keyframe call — is
+    // zero seconds long. fmod(t, 0) is NaN, and a NaN sample time poses NaN
+    // positions into the document and then into the engine's transforms.
+    if (loop && length > 0.0f) {
         return fmod(time, length);
     }
 
@@ -118,33 +123,47 @@ void Animation::addPropertyAnim(PropertyAnim *anim)
 
 void Animation::removePropertyAnim(QString name)
 {
-    auto prop = properties[name];
-    delete prop;
+    // QMap::operator[] on a non-const map INSERTS a default-constructed value
+    // when the key is missing — so the old `auto prop = properties[name]` put a
+    // NULL track into the map, and the remove() below then found the row it had
+    // just created and returned 1. The "doesnt exist" warning was unreachable,
+    // and every missed lookup left a null entry behind for the next iteration
+    // over properties to trip on. take() removes and hands back in one step,
+    // and default-constructs nothing when the key is absent.
+    if (!properties.contains(name)) {
+        qDebug() << "Animation property " << name << " doesnt exist";
+        return;
+    }
 
-    if (properties.remove(name) == 0)
-        qDebug() << "Animation property "<<name<<" doesnt exist";
+    delete properties.take(name);
 }
 
+// Every getter below reads with QMap::value(), NEVER with operator[]: on a
+// non-const map the subscript INSERTS a default-constructed (null) value for a
+// missing key. So READING a track that was not there used to CREATE a null
+// one — after which hasPropertyAnim() answers yes forever, the serializer
+// writes the empty row out, and the next walk over `properties` dereferences
+// a null PropertyAnim. Every caller guarded the read with hasPropertyAnim()
+// precisely because the getter could not be trusted; now a miss returns
+// nullptr and leaves the map alone, and callers null-check instead.
 PropertyAnim* Animation::getPropertyAnim(QString name)
 {
-    //Q_ASSERT(properties.contains(name));
-
-    return properties[name];
+    return properties.value(name, nullptr);
 }
 
 FloatPropertyAnim *Animation::getFloatPropertyAnim(QString name)
 {
-    return (FloatPropertyAnim*)properties[name];
+    return (FloatPropertyAnim*)properties.value(name, nullptr);
 }
 
 Vector3DPropertyAnim *Animation::getVector3PropertyAnim(QString name)
 {
-    return (Vector3DPropertyAnim*)properties[name];
+    return (Vector3DPropertyAnim*)properties.value(name, nullptr);
 }
 
 ColorPropertyAnim *Animation::getColorPropertyAnim(QString name)
 {
-    return (ColorPropertyAnim*)properties[name];
+    return (ColorPropertyAnim*)properties.value(name, nullptr);
 }
 
 bool Animation::hasPropertyAnim(QString name)
