@@ -5,6 +5,8 @@
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
 
+#include <OgreFrameStats.h>
+
 #include <fstream>
 
 namespace jahshaka { namespace engine {
@@ -135,6 +137,11 @@ Scene *OgreEngine::createScene(const std::string &name) {
         // kMaxParticleQuota * 4 * 6 * 2 bytes = 768 KiB of immutable index data
         // per scene, allocated lazily on the first particle draw.
         sm->getParticleSystemManager2()->setHighestPossibleQuota(kMaxParticleQuota, 0u);
+        // The engine-drawn overlay's render-queue half is registered PER
+        // SceneManager (STATS_OVERLAY_SPEC §2.1) — which is what makes it
+        // per-scene free. Whether anything is actually DRAWN is decided per
+        // pass (ChainDesc::overlays) and per element (hud::apply).
+        hud::attach(sm);
         mScenes.emplace_back(new OgreScene(mRoot, sm, name, mLastError));
         return mScenes.back().get();
     } JAH_CATCH(mLastError, nullptr);
@@ -341,7 +348,37 @@ void OgreEngine::renderOneFrame() {
             }
             s->setRefractionsActive(anyView && allHaveRefraction);
         }
+        // THE HUD OWNER for this frame (STATS_OVERLAY_SPEC §7.8). Ogre's
+        // overlay set is process-wide, so one view has to speak for it: the
+        // first ENABLED view that is entitled to overlays (on-screen, or
+        // offscreen with allowOffscreen) and whose desc asks for something.
+        // Same shape as the post chain's globals rule above, and the same
+        // reason — the state lives in an Ogre singleton, not per view.
+        //
+        // Nothing found -> hide(). That is what keeps every thumbnail, preview
+        // and pixel suite byte-identical even before the per-pass gate: an
+        // offscreen view is never the owner unless it opted in.
+        {
+            const OgreView *owner = nullptr;
+            for (auto &v : mViews) {
+                if (!v->isEnabled() || !v->overlaysAllowed() || !v->overlay().anything()) continue;
+                owner = v.get();
+                break;
+            }
+            if (owner) {
+                RenderStats stats;
+                renderStats(stats);
+                hud::apply(owner->overlay(), stats, owner->width(), owner->height());
+            } else {
+                hud::hide();
+            }
+        }
         if (mRoot) mRoot->renderOneFrame();
+        // THE ONE-SHOT RE-CAPTION (OgreOverlayHud.cpp's `Caption`): a TextArea
+        // whose caption was set before its first rendered frame built its
+        // geometry against an unloaded font and renders nothing, for ever,
+        // silently. This is the "after the first frame" the workaround needs.
+        hud::afterFrame();
         // The frame is drawn and (for window views) presented: every view that
         // took part in it now has its OWN pixels on its target. This is the
         // signal hosts gate a loading cover on (View::framesPresented).
@@ -524,6 +561,53 @@ ShaderCacheStats OgreEngine::shaderCacheStats() const {
     return mShaderCache.stats(mRoot);
 }
 
+bool OgreEngine::renderStats(RenderStats &out) const {
+    out = RenderStats();
+    if (!mRoot) return false;
+    JAH_TRY {
+        // ---- timing. Already live: Root::renderOneFrame samples FrameStats
+        // itself (OgreRoot.cpp:1123), and ours is the call that drives it, so
+        // there is nothing to wire. Note what this actually measures — the
+        // HOST's 16 ms QTimer, not the renderer's capability (RenderStats' own
+        // doc comment says so, and app.frameStats().workMs is the honest one).
+        if (const Ogre::FrameStats *fs = mRoot->getFrameStats()) {
+            const double rolling = fs->getRollingAverage();
+            out.frameMs = rolling * 1000.0;
+            out.fps     = rolling > 0.0 ? 1.0 / rolling : 0.0;
+            out.lastMs  = fs->getLatestTimeSinceLast() * 1000.0;
+            out.p95Ms   = fs->getPercentile95th(true) * 1000.0;
+            out.p99Ms   = fs->getPercentile99th(true) * 1000.0;
+            out.bestMs  = fs->getBestTime()  * 1000.0;
+            out.worstMs = fs->getWorstTime() * 1000.0;
+        }
+        // ---- geometry. LAZY, and this is the whole reason the accessor is not
+        // a plain getter: recording is OFF by default in Ogre (OgreCommon.cpp:
+        // 177) and costs integer adds per draw batch, so nothing that never
+        // asks for stats ever pays for them. The FIRST call switches it on and
+        // honestly reports metricsRecording=false with zeroed counters; every
+        // call after a rendered frame reports real numbers.
+        if (Ogre::RenderSystem *rs = mRoot->getRenderSystem()) {
+            const Ogre::RenderingMetrics &m = rs->getMetrics();
+            out.metricsRecording = m.mIsRecordingMetrics;
+            if (!m.mIsRecordingMetrics) {
+                rs->setMetricsRecordingEnabled(true);
+            } else {
+                out.draws     = (unsigned long long)m.mDrawCount;
+                out.batches   = (unsigned long long)m.mBatchCount;
+                out.triangles = (unsigned long long)m.mFaceCount;
+                out.vertices  = (unsigned long long)m.mVertexCount;
+                out.instances = (unsigned long long)m.mInstanceCount;
+            }
+        }
+        return true;
+    }
+    // Not JAH_CATCH: this verb is const and the error sink is not. Nothing here
+    // can fail in a way a caller could act on anyway — the counters are plain
+    // reads and one flag flip — so "false, and `out` is default" is the whole
+    // contract.
+    catch (...) { out = RenderStats(); return false; }
+}
+
 bool OgreEngine::saveShaderCache() {
     if (!mRoot) return false;
     JAH_TRY { return mShaderCache.save(mRoot); } JAH_CATCH(mLastError, false);
@@ -561,6 +645,12 @@ OgreEngine::~OgreEngine() {
     // no scene owns them: free them here, while Root (and its texture manager)
     // is still alive.
     lightextras::shutdown();
+    // AFTER every scene (each of which removed its own render-queue listener in
+    // OgreScene::destroy) and BEFORE Root: ~OverlaySystem deletes the
+    // FontManager, whose Font::unloadResource destroys the HlmsUnlit datablock
+    // the font created. An OverlaySystem outliving Root is the same class of
+    // bug as a MeshPtr outliving Root.
+    try { hud::destroySystem(); } catch (...) {}
     try {
         if (mNullWindow && mRoot) mRoot->getRenderSystem()->destroyRenderWindow(mNullWindow);
         mNullWindow = nullptr;
@@ -586,6 +676,14 @@ bool OgreEngine::viewNameTaken(const std::string &name) {
 
 void OgreEngine::ensureHlms() {
     if (mHlmsRegistered) return;
+    // THE OVERLAY SYSTEM GOES FIRST, and the order is load-bearing
+    // (STATS_OVERLAY_SPEC §2.1, spikes/overlay-v1-vulkan/FINDINGS.md): its
+    // constructor creates BOTH the OverlayManager and the FontManager, so it
+    // must run after a render window exists — every caller of this function has
+    // just made one — and BEFORE registerCommonMaterials() below calls
+    // initialiseAllResourceGroups, which is the moment `.fontdef` scripts are
+    // parsed. Construct it later and the font script is never seen at all.
+    hud::createSystem();
     // BillboardSet2 needs no ParticleFX2 plugin (its core is in OgreNextMain),
     // BUT the Hlms only puts the view matrix in the pass buffer — which the
     // particle vertex shader needs for camera-facing quads — when this static
@@ -646,6 +744,11 @@ void OgreEngine::ensureHlms() {
     mHlmsRegistered = true;
     applyShadowFilter();   // replaces Ogre's PCF_3x3 default with ours (Soft = 4x4)
     registerCommonMaterials();
+    // After the resource groups are initialised (the .fontdef has been parsed by
+    // now) and after HlmsUnlit exists (overlay elements bind Unlit datablocks):
+    // build the overlay's elements and pay the freetype rasterization once,
+    // here, rather than on the first frame of a world open.
+    hud::build(mRoot);
     createShadowNode();
 }
 
@@ -695,6 +798,12 @@ void OgreEngine::registerCommonMaterials() {
                                // through the resource system).
                                "Hlms/Jahshaka" };
         for (const char *d : dirs) rgm.addResourceLocation(mMediaDir + d, "FileSystem", group, false);
+        // The overlay font pack (DebugFont.fontdef + Inconsolata-Bold.ttf + its
+        // OFL licence), staged unzipped by irisgl/engine/CMakeLists.txt. Added
+        // HERE, in the same group, so the one initialiseAllResourceGroups below
+        // parses the .fontdef — a font location registered after it would never
+        // be scanned.
+        hud::addFontLocation(mMediaDir, group);
         rgm.initialiseAllResourceGroups(true);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: common material scripts not registered: " + e.getFullDescription());

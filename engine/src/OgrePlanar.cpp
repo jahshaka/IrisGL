@@ -113,6 +113,13 @@ void buildWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspaceDe
         // ctor masks with it, and dropping the reserved bits would hide
         // everything Ogre marks with layer visibility.
         pass->mVisibilityMask = ~kNoReflectBit & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
+        // Ogre's own overlay set (the stats readout / loading cover) out too —
+        // explicitly, even though kReflectLastRQ (199) already cuts below the
+        // overlay RQ 254. The rule in OgreChain.cpp's kIncludeOverlaysNote is
+        // "every scene pass says false except THE overlay pass", and a
+        // guarantee that leans on an RQ constant somebody may widen later is
+        // not a guarantee.
+        pass->mIncludeOverlays = false;
         if (!shadowNodeName.empty()) pass->mShadowNode = Ogre::IdString(shadowNodeName);
         pass->mProfilingId = "Jahshaka planar reflection";
     }
