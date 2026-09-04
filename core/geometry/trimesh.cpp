@@ -11,6 +11,8 @@ For more information see the LICENSE file
 
 #include "core/geometry/trimesh.h"
 
+#include <cmath>
+
 namespace iris
 {
 
@@ -44,26 +46,32 @@ bool TriMesh::isHitBySegment(const QVector3D& segmentStart,const QVector3D& segm
 
         //if (d <= 0)
         //    continue;
+        // Two-sided, the same fold getSegmentIntersections documents: this one
+        // already refused only the parallel case, but then compared the
+        // barycentric numerators against a possibly-negative d, so a back-facing
+        // triangle was rejected anyway.
         if (d == 0) continue;
+        const float sign = d < 0.0f ? -1.0f : 1.0f;
+        const float ad = std::fabs(d);
 
         auto ap = segmentStart - tri.a;
-        auto t = QVector3D::dotProduct(ap, normal);
+        auto t = QVector3D::dotProduct(ap, normal) * sign;
 
-        if (t < 0 || t > d)
+        if (t < 0 || t > ad)
             continue;
 
         auto e = QVector3D::crossProduct(qp, ap);
-        auto v = QVector3D::dotProduct(ac, e);
+        auto v = QVector3D::dotProduct(ac, e) * sign;
 
-        if (v < 0.0f || v > d)
+        if (v < 0.0f || v > ad)
             continue;
 
-        auto w = -QVector3D::dotProduct(ab, e);
+        auto w = -QVector3D::dotProduct(ab, e) * sign;
 
-        if (w < 0.0f || v + w > d)
+        if (w < 0.0f || v + w > ad)
             continue;
 
-        t /= d;
+        t /= ad;
 
         //all conditions have been met
         //todo: fix please. return t instead
@@ -94,33 +102,49 @@ int TriMesh::getSegmentIntersections(const QVector3D& segmentStart,const QVector
         auto normal = QVector3D::crossProduct(ab, ac);
         float d = QVector3D::dotProduct(qp, normal);
 
-        if (d <= 0)
+        // TWO-SIDED. `d <= 0` here rejected every triangle the segment reaches
+        // from behind, so picking BACK-FACE CULLED: a plane (or any open
+        // surface, or a model whose winding the importer flipped) was
+        // unselectable from one side, and the player's raycast — which comes
+        // through this same function — reported no hit at all. Only a
+        // degenerate triangle, or a segment exactly parallel to its plane, has
+        // nothing to intersect (deep audit 2026-09, area 2).
+        //
+        // With d free to be negative, the barycentric tests below are done
+        // against |d| with each numerator carrying d's sign: t/d, v/d and w/d
+        // are the actual parameters, and each must land in [0,1] with
+        // v/d + w/d <= 1. Multiplying through by d flips the inequalities when
+        // d < 0, which is exactly what the sign fold undoes.
+        if (d == 0.0f)
             continue;
+        const float sign = d < 0.0f ? -1.0f : 1.0f;
+        const float ad = std::fabs(d);
 
         auto ap = segmentStart - tri.a;
-        auto t = QVector3D::dotProduct(ap, normal);
+        auto t = QVector3D::dotProduct(ap, normal) * sign;
 
-        if (t < 0 || t > d)
+        if (t < 0 || t > ad)
             continue;
 
         auto e = QVector3D::crossProduct(qp, ap);
-        auto v = QVector3D::dotProduct(ac, e);
+        auto v = QVector3D::dotProduct(ac, e) * sign;
 
-        if (v < 0 || v > d)
+        if (v < 0 || v > ad)
             continue;
 
-        auto w = -QVector3D::dotProduct(ab, e);
+        auto w = -QVector3D::dotProduct(ab, e) * sign;
 
-        if (w < 0.0f || v + w > d)
+        if (w < 0.0f || v + w > ad)
             continue;
 
-        t /= d;
+        t /= ad;
 
         //all conditions have been met
-        hits++;
-
-        auto dist = segmentStart.distanceToPoint(segmentEnd);
-        auto hitPoint = segmentStart + (segmentEnd-segmentStart)*t;
+        // (This counted every hit TWICE — once here and once after appending —
+        // so callers reading the count saw 2, 4, 6... Nothing branched on the
+        // parity, but `if (int n = getSegmentIntersections(...))` is used as a
+        // "how many" as well as a "any", and it was lying.)
+        const QVector3D hitPoint = segmentStart + (segmentEnd-segmentStart)*t;
 
         TriangleIntersectionResult result;
         result.triangleIndex = i;

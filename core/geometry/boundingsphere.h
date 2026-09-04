@@ -10,7 +10,12 @@ class BoundingSphere
 {
 public:
     QVector3D pos;
-    float radius;
+    /// INITIALISED, deliberately: Mesh's non-assimp constructors never run
+    /// calculateBounds, so a default-constructed BoundingSphere is what
+    /// getBoundingSphere() hands out for them. Indeterminate here means a
+    /// ray-sphere broad phase (ScenePicker, Scene::rayCast) answers from
+    /// uninitialised memory. Zero is the honest answer: "no bounds known".
+    float radius = 0.0f;
 
     void expand(QVector3D point)
     {
