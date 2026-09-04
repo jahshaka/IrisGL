@@ -46,16 +46,21 @@ template<typename T>
 class Key
 {
 public:
-    T value;
-    double time;
+    T value{};
+    double time = 0.0;
 
-    TangentType leftTangent;
-    TangentType rightTangent;
+    // Defaulted in the class, not left to the caller: KeyFrame::addKey happens
+    // to value-initialize (`new Key<T>()`, with the parentheses), so these were
+    // zeroed by luck rather than by contract — the same class one `new Key<T>`
+    // away from indeterminate curve shapes. Free/Joined/0 slopes IS the
+    // "straight line through the key" default the curve editor starts from.
+    TangentType leftTangent = TangentType::Free;
+    TangentType rightTangent = TangentType::Free;
 
-    float leftSlope;
-    float rightSlope;
+    float leftSlope = 0.0f;
+    float rightSlope = 0.0f;
 
-    HandleMode handleMode;
+    HandleMode handleMode = HandleMode::Joined;
 
     inline bool operator< ( const T& rhs)
     {

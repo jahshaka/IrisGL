@@ -80,9 +80,14 @@ FloatKeyFrame *Vector3DPropertyAnim::getKeyFrame(QString name)
     return nullptr;
 }
 
+// OFF BY ONE, fixed 2026-09-04: the guard was `index > 3` on a THREE element
+// array, so getKeyFrame(3) read one past the end and handed the caller whatever
+// followed it in the object. SceneReader drives this index straight from a
+// scene blob's keyFrames array length, so a file with four entries on a vector3
+// track was an out-of-bounds read of document memory.
 FloatKeyFrame *Vector3DPropertyAnim::getKeyFrame(int index)
 {
-    if (index < 0 || index > 3)
+    if (index < 0 || index >= 3)
         return nullptr;
 
     return keyFrames[index];
@@ -135,9 +140,11 @@ FloatKeyFrame *ColorPropertyAnim::getKeyFrame(QString name)
     return nullptr;
 }
 
+// Same off-by-one as Vector3DPropertyAnim above: four channels, so index 4 was
+// one past the end.
 FloatKeyFrame *ColorPropertyAnim::getKeyFrame(int index)
 {
-    if (index < 0 || index > 4)
+    if (index < 0 || index >= 4)
         return nullptr;
 
     return keyFrames[index];
