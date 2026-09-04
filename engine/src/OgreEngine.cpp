@@ -306,6 +306,17 @@ void OgreEngine::renderOneFrame() {
 
 const std::string &OgreEngine::lastError() const { return mLastError; }
 
+std::string OgreEngine::takeLastError()
+{
+    // Swap, don't copy-then-clear: every OgreScene and OgreView holds
+    // `std::string &mError` bound to THIS member (OgreEngine.cpp createScene /
+    // createView), so the object must stay put — swapping its contents is fine,
+    // reseating it would not be.
+    std::string taken;
+    taken.swap(mLastError);
+    return taken;
+}
+
 // ---- Simulation clock (PARTICLES_FX2_SPEC.md) ------------------------------
 // SceneManager::updateSceneGraph feeds the particle manager
 // `ControllerManager::getFrameTimeSource()->getValue()` — one value, shared by

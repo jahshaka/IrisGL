@@ -942,7 +942,18 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
 {
     auto it = mTextures.constFind(path);
     if (it != mTextures.constEnd()) return it.value();
-    if (!QFileInfo::exists(path)) return 0;      // Qt resources (":/...") are not files the engine can read
+    // Qt resources are not files the engine can read. This test used to be
+    // QFileInfo::exists() alone, whose comment claimed to cover them and did
+    // not: exists() is TRUE for ":assets/…", so the path went to the engine,
+    // Ogre's resource group could not find it, and the boundary recorded
+    // "loadTexture: file not found: :assets/textures/default_particle.jpg"
+    // into a sink nobody read. (Every fresh emitter does this: the document's
+    // ParticleSystemNode ctor defaults its texture to that resource, and
+    // SceneEditService only copies the real file into the project a moment
+    // later.) Found the day the error pump landed — STABILITY_PROGRAM_SPEC
+    // Lane 1, which is what it is for.
+    if (path.startsWith(QLatin1Char(':'))) return 0;
+    if (!QFileInfo::exists(path)) return 0;
     TextureId id = mTarget->loadTexture(path.toStdString(), srgb);
     if (id) mTextures.insert(path, id);
     return id;

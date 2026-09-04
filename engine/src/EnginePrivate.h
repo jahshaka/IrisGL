@@ -1341,6 +1341,7 @@ public:
 
     void renderOneFrame() override;
     const std::string &lastError() const override;
+    std::string takeLastError() override;
 
     /// PROCESS-WIDE: both ride Ogre's single frame-time controller value
     /// (ControllerManager -> FrameTimeControllerValue). Note the backend's own
