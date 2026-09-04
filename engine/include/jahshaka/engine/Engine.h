@@ -572,6 +572,35 @@ public:
     /// Deletes every cached file. The next launch is cold. Always safe: the
     /// running process keeps its in-memory shaders.
     virtual bool clearShaderCache() = 0;
+    // ---- Recorded warm-up sets (SHADER_CACHE_SPEC.md §2.7b / phase 3) ----
+    // Unreal's ".rec" recordings, our shape. A warm-up SET is not shaders and
+    // not SPIR-V — it is the list of {vertex format, render queue, one
+    // representative material per distinct shader} a scene actually used. That
+    // makes it small, and unlike the microcode and pipeline blobs it is
+    // platform- and driver-independent, so it is the only one of these
+    // artifacts that could ever be shipped.
+    //
+    // The point of the indirection: applying a set compiles every permutation
+    // in it against DEGENERATE 4-vertex buffers, so nothing is loaded from disk
+    // and nothing reaches VRAM. A recorded session's shaders can be rebuilt
+    // without its meshes, its skeletons or its textures.
+
+    /// Adds everything `scene` currently draws to this process's warm-up set,
+    /// or EVERY LIVE SCENE when `scene` is null. ACCUMULATES — call it for
+    /// every scene a session touches and the set is their union, which is what
+    /// makes "merging recordings" a no-op rather than a tool. Duplicate
+    /// permutations are folded by the engine.
+    virtual bool recordWarmUpSet(Scene * = nullptr) = 0;
+    /// Writes the accumulated set. False if nothing has been recorded or the
+    /// file cannot be written.
+    virtual bool saveWarmUpSet(const std::string &file) = 0;
+    /// Loads a set and compiles every permutation in it, using `scene` as the
+    /// host for the degenerate renderables it creates (null = the first live
+    /// scene; they exist for one frame and are destroyed again, so any will
+    /// do). Returns how many shaders were built — 0 is a legitimate answer on a
+    /// warm cache. The scene is left exactly as it was found.
+    virtual unsigned applyWarmUpSet(const std::string &file, Scene * = nullptr) = 0;
+
     /// The startup progress counter's source: shaders compiled so far, shaders
     /// served from the cache so far, and how many the last saved run needed in
     /// total (0 = never saved, so no denominator exists yet). Two atomic reads;

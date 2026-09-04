@@ -50,6 +50,7 @@
 #include <OgrePrerequisites.h>
 #include <OgreHlmsSamplerblock.h>
 #include <OgreRectangle2D2.h>
+#include <OgreVertexFormatWarmUp.h>
 #include <set>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorWorkspace.h>
@@ -1374,6 +1375,10 @@ public:
     /// The persistent shader cache (SHADER_CACHE_SPEC.md). Loaded inside the
     /// first createView() -> ensureHlms(); saved on clean teardown and whenever
     /// the host says a compile burst has settled.
+    bool recordWarmUpSet(Scene * = nullptr) override;
+    bool saveWarmUpSet(const std::string &file) override;
+    unsigned applyWarmUpSet(const std::string &file, Scene * = nullptr) override;
+
     ShaderCacheStats shaderCacheStats() const override;
     bool saveShaderCache() override;
     bool clearShaderCache() override;
@@ -1425,6 +1430,11 @@ private:
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
     ShaderCache     mShaderCache;
+    /// The process's recorded permutation set (SHADER_CACHE_SPEC §2.7b).
+    /// PROCESS-wide because Ogre's analyze() accumulates and its entries are
+    /// private — accumulating in one storage IS the merge. Held by pointer so
+    /// the Ogre type stays out of every other TU's view of this header.
+    std::unique_ptr<Ogre::VertexFormatWarmUpStorage> mWarmUpSet;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
     std::vector<std::unique_ptr<OgreView>>  mViews;
 };
