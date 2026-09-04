@@ -9,6 +9,7 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "core/math/trs.h"
 #include "core/math/qtinterop.h"
 #include "core/math/mat4.h"
 #include "core/math/quat.h"
@@ -325,17 +326,13 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         //auto diff = initialGlobalTransform * thisGlobalTransform.inverted();
         auto diff = thisGlobalTransform.inverted() * initialGlobalTransform;
 
-        auto pos = diff.column(3).toVector3D();
-        node->pos = pos;
-        node->rot = iris::Quat::fromRotationMatrix(diff.normalMatrix()).normalized();
-
-        auto data = diff.data();
-
-        // extracts the scale from the transform
-        //node->scale = iris::Vec3(data[0], data[5], data[10]);
-        node->scale.setX(diff.column(0).toVector3D().length());
-        node->scale.setY(diff.column(1).toVector3D().length());
-        node->scale.setZ(diff.column(2).toVector3D().length());
+        // ONE decomposition, the correct one. This used to take the rotation
+        // from diff.normalMatrix() — the inverse-transpose, R * S^-1, which is
+        // R only at scale 1 — while taking the scale from the column lengths.
+        // The two disagreed for every non-uniformly scaled node, so reparenting
+        // one with keepTransform rotated it (measured: +55 degrees of yaw on a
+        // scaled character root) and did so again on every subsequent reparent.
+        decomposeTRS(diff, node->pos, node->rot, node->scale);
     }
 
     // Unconditionally: a reparent changes the node's world transform even when

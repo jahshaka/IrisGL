@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #define MATHHELPER_H
 
 #include "core/math/mat4.h"
+#include "core/math/trs.h"
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include <QtMath>
@@ -24,26 +25,30 @@ class MathHelper
 {
 public:
 
-    // https://github.com/MonoGame/MonoGame/blob/develop/MonoGame.Framework/Matrix.cs#L1455
-	// look into doing better decomposition:
-	// https://github.com/qt/qt3d/blob/fb18ee8f05ff36f517ef2248539fda8a79c33f0e/src/core/transforms/qmath3d_p.h
+    /// Affine 4x4 -> translation / rotation / scale.
+    ///
+    /// THIS USED TO EXTRACT THE ROTATION FROM normalMatrix(), WHICH IS WRONG.
+    /// normalMatrix() is the inverse-transpose of the upper 3x3 — that is
+    /// R * S^-1, which equals R only when the scale is 1. Feed it a node scaled
+    /// (2, 1, 1) and the "rotation" it hands back is a shear pretending to be a
+    /// quaternion; the measured symptom was +55 degrees of yaw appearing on a
+    /// scaled character root, compounding on every reparent because
+    /// SceneNode::setLocalTransform and CameraNode::lookAt both round-trip
+    /// through here.
+    ///
+    /// The correct decomposition already existed in the tree — decomposeTRS
+    /// normalizes each basis column by its own length, which is exactly the
+    /// step normalMatrix does not perform — so this is now one implementation,
+    /// not two. It also fixes the old sign convention: the mirrored case is
+    /// decided by the determinant and folded into the X scale, not by the
+    /// sign of a product of four matrix elements (which was arbitrary).
+    ///
+    /// The shear measure decomposeTRS returns is discarded here; callers that
+    /// care (the clip extractor, the mirror's bind poses) call decomposeTRS
+    /// directly and check it.
     static void decomposeMatrix(const iris::Mat4& matrix, iris::Vec3& pos, iris::Quat& rot, iris::Vec3& scale)
     {
-        pos = matrix.column(3).toVector3D();
-        rot = iris::Quat::fromRotationMatrix(matrix.normalMatrix());
-
-        auto col = matrix.column(0);
-        auto sx = sign(col.x() * col.y() * col.z() * col.w()) < 0 ? -1 : 1;
-
-        col = matrix.column(1);
-        auto sy = sign(col.x() * col.y() * col.z() * col.w()) < 0 ? -1 : 1;
-
-        col = matrix.column(2);
-        auto sz = sign(col.x() * col.y() * col.z() * col.w()) < 0 ? -1 : 1;
-
-        scale.setX(sx * matrix.column(0).toVector3D().length());
-        scale.setY(sy * matrix.column(1).toVector3D().length());
-        scale.setZ(sz * matrix.column(2).toVector3D().length());
+        decomposeTRS(matrix, pos, rot, scale);
     }
 
     static float lerp(float norm, float min, float max) {
