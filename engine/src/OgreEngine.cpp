@@ -15,6 +15,12 @@ namespace {
 /// `new Root` asserts, so create() refuses while this is set.
 OgreEngine *gLiveEngine = nullptr;
 
+/// "Lowest latency vsync" — MAILBOX rather than FIFO — is encoded by Ogre in
+/// the SIGN BIT of the vsync interval (VulkanWindowSwapChainBased::setVSync
+/// masks the low 31 bits into mVSyncInterval and reads bit 31 into
+/// mLowestLatencyVSync). Named here so no call site carries a bare 0x80000000.
+const Ogre::uint32 kLowestLatencyVSync = 0x80000000u;
+
 }  // namespace
 
 bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
@@ -184,11 +190,46 @@ View *OgreEngine::createView(const std::string &name,
 #endif
         params["vsync"]         = "true";
         params["vsyncInterval"] = "1";
+        // MAILBOX, not FIFO (deep audit area 7 F8). Plain vsync gives Vulkan's
+        // FIFO present mode: a queue up to the swapchain's depth, so a frame
+        // submitted now is shown up to ~4 refreshes later — four frames of
+        // latency between dragging a gizmo and seeing it move — and it paces the
+        // whole loop against the 16ms driver timer (two pacers beating against
+        // each other, ~62fps on a 60Hz panel and no better on a 144Hz one).
+        // MAILBOX keeps the vsync tear-free guarantee and drops every frame the
+        // display did not get to: latest-wins, one frame deep.
+        //
+        // Ogre expresses it two ways and both are set here, deliberately:
+        //   * miscParams "vsync_method" = "Lowest Latency" — read by
+        //     parseSharedParams BEFORE the first createSwapchain, so the very
+        //     first swapchain is already MAILBOX;
+        //   * setVSync's sign bit (kLowestLatencyVSync) — setVSync would
+        //     otherwise CLEAR mLowestLatencyVSync on this very call (it assigns
+        //     the flag before its "nothing changed" early-return), and it is
+        //     what survives into every later swapchain rebuild.
+        // Selection is graceful BY CONSTRUCTION: OgreVulkanWindow's present-mode
+        // search tries MAILBOX, then falls back to FIFO, which the spec
+        // guarantees every surface supports. No capability gate is needed here,
+        // and the outcome is always in the engine log ("Trying presentMode =
+        // MAILBOX_KHR" / "Chosen presentMode = ...").
+        //
+        // MEASURED 2026-09-04, and not what you would guess: whether MAILBOX
+        // exists is a property of the WSI, not of the GPU. On this box's
+        // xcb surfaces the NVIDIA driver offers only FIFO / IMMEDIATE /
+        // FIFO_LATEST_READY — NO MAILBOX — while lavapipe on the same X server
+        // offers it, and NVIDIA offers it on a WAYLAND surface. Studio forces
+        // xcb (Ogre has no Wayland backend), so on Linux/NVIDIA this request
+        // currently lands on the FIFO fallback and changes nothing; it is the
+        // correct request everywhere else (Mesa, MoltenVK, win32) and costs
+        // nothing where it is refused. The real Linux/NVIDIA lever is
+        // VK_EXT_present_mode_fifo_latest_ready, which that list shows and Ogre
+        // does not know about at this pin — an ogre-patch, not this call.
+        params["vsync_method"] = "Lowest Latency";
         // MSAA: the FSAA misc param must be passed at EVERY window creation —
         // here AND in the resize lambda below, or a resize silently resets it.
         params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
-        window->setVSync(true, 1);
+        window->setVSync(true, 1u | kLowestLatencyVSync);
         ensureHlms();
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
                                          background, mLastError));
@@ -212,9 +253,13 @@ View *OgreEngine::createView(const std::string &name,
             if (vulkan) p["SDL2x11"] = Ogre::StringConverter::toString((unsigned long)&x11);
             else { p["parentWindowHandle"] = Ogre::StringConverter::toString((unsigned long)handle); p["gamma"] = "true"; }
             p["vsync"] = "true"; p["vsyncInterval"] = "1";
+            // Same MAILBOX request as the first window above — this hook is the
+            // MSAA-change recreate path, and a window rebuilt without it would
+            // silently drop back to FIFO for the rest of the session.
+            p["vsync_method"] = "Lowest Latency";
             p["FSAA"] = Ogre::StringConverter::toString(samples);
             Ogre::Window *win = root->createRenderWindow(name + "/" + processUniqueName("resize"), w, h, false, &p);
-            win->setVSync(true, 1);
+            win->setVSync(true, 1u | kLowestLatencyVSync);
             return win;
         };
         return view;
@@ -302,6 +347,16 @@ void OgreEngine::renderOneFrame() {
         // signal hosts gate a loading cover on (View::framesPresented).
         for (auto &v : mViews) v->notePresented();
     } JAH_CATCH(mLastError, );
+}
+
+bool OgreEngine::hasEnabledViews() const {
+    // Offscreen views count: they are enabled by construction and something is
+    // waiting on their pixels (a thumbnail, a preview dock, a scripted
+    // screenshot). The only state this reports is View::setEnabled, which the
+    // hosts drive from widget visibility.
+    for (const auto &v : mViews)
+        if (v->isEnabled()) return true;
+    return false;
 }
 
 const std::string &OgreEngine::lastError() const { return mLastError; }

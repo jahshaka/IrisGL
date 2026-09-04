@@ -529,6 +529,20 @@ public:
     /// Draws every enabled View once. The host owns the loop and calls this.
     virtual void renderOneFrame() = 0;
 
+    /// True while at least one View is enabled (View::setEnabled) — i.e. while
+    /// renderOneFrame() has anything at all to draw.
+    ///
+    /// The host's render loop asks this BEFORE calling renderOneFrame, and skips
+    /// the frame entirely when the answer is false (deep audit area 7 F8). A
+    /// frame with nothing enabled is not free: it still walks every scene, runs
+    /// the per-frame interlocks, submits a command buffer and takes a slot in
+    /// the present queue — ~62 of them a second while the user sits on a page
+    /// that shows no viewport at all. Asking is O(views) and allocates nothing.
+    ///
+    /// Only View::setEnabled moves this, so nothing else has to change to stay
+    /// correct: the tick after a viewport is shown sees `true` and renders.
+    virtual bool hasEnabledViews() const = 0;
+
     // ---- Simulation clock (PARTICLES_FX2_SPEC.md) ----
     // The engine advances its own particle simulation inside renderOneFrame,
     // from the backend's frame-time source. These two verbs are the ONLY control

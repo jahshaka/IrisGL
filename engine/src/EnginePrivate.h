@@ -1398,6 +1398,7 @@ public:
     void destroyView(View *view) override;
 
     void renderOneFrame() override;
+    bool hasEnabledViews() const override;
     const std::string &lastError() const override;
     std::string takeLastError() override;
 
