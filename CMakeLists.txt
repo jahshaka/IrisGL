@@ -137,6 +137,7 @@ set(SRCS
     document/scenegraph/meshnode.cpp
     import/graphicshelper.cpp
     import/meshprewarm.cpp
+    import/meshbake.cpp
     document/scenegraph/cameranode.cpp
     document/assets/texture2d.cpp
     document/materials/material.cpp
@@ -196,6 +197,7 @@ set (HEADERS
     core/viewport.h
     import/graphicshelper.h
     import/meshprewarm.h
+    import/meshbake.h
     core/geometry/trimesh.h
     core/math/mathhelper.h
     irisglfwd.h
@@ -253,6 +255,30 @@ if(WIN32 AND MSVC)
     set(USE_MSVC_RUNTIME_LIBRARY_DLL 1)
 endif()
 
+# --- Mesh-bake producer id (MESH_BAKE_SPEC.md phase 1) -----------------------
+# The same mechanism the engine uses for its shader-cache fingerprint
+# (irisgl/engine/CMakeLists.txt): a configure-time SHA256 over the TUs that
+# PRODUCE a bake. A bake is derived data whose validity depends on the code
+# that built it, and nothing inside the blob can see a source edit — so the
+# producer hash is a term of the bake's fingerprint, exactly as
+# JAHSHAKA_ENGINE_BUILD_ID is a term of the shader cache's.
+#
+# Deliberately NOT the engine build id: a bake carries no engine-produced
+# bytes (see the rationale at the top of import/meshbake.h), so an engine
+# rebuild cannot invalidate one, and folding it in would throw the whole
+# library's bakes away on every OgreEngine.cpp edit for no correctness gain.
+set(_mesh_bake_blob "")
+foreach(_s import/meshbake.cpp import/meshbake.h
+            import/importflags.h import/materialhelper.cpp import/graphicshelper.cpp
+            document/assets/mesh.cpp document/assets/mesh.h
+            document/assets/skeleton.cpp document/assets/skeleton.h
+            document/scenegraph/meshnode.cpp core/geometry/trimesh.cpp)
+    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${_s}" _h)
+    string(APPEND _mesh_bake_blob "${_h};")
+endforeach()
+string(SHA256 _mesh_bake_producer_id "${_mesh_bake_blob}")
+set(JAHSHAKA_MESH_BAKE_PRODUCER_ID "${_mesh_bake_producer_id}" PARENT_SCOPE)
+
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
@@ -267,6 +293,8 @@ target_include_directories(IrisGL PUBLIC
 
 target_link_libraries (IrisGL  assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
 target_compile_options(IrisGL PUBLIC)
+target_compile_definitions(IrisGL PRIVATE
+    JAHSHAKA_MESH_BAKE_PRODUCER_ID="${_mesh_bake_producer_id}")
 
 # A6: these two warning classes are undefined behaviour, not style - keep them fixed.
 if (NOT MSVC)

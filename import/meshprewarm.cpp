@@ -27,11 +27,34 @@ MeshPrewarm::~MeshPrewarm() = default;
 
 void MeshPrewarm::parse(const QString &path)
 {
+    PrewarmItem item;
+    item.path = path;
+    parse(item);
+}
+
+void MeshPrewarm::parse(const PrewarmItem &item)
+{
+    const QString &path = item.path;
     if (path.isEmpty() || path.startsWith(':')) return;   // built-in primitives
     {
         QMutexLocker locked(&mLock);
         if (mEntries.contains(path)) return;
     }
+
+    // THE BAKE, first. A hit costs one file read and a handful of memcpys and
+    // the assimp parse below never happens — the whole point of MESH_BAKE
+    // phase 1. Any failure (missing, truncated, wrong format, stale
+    // fingerprint) returns an invalid model and falls through.
+    if (!item.bakePath.isEmpty()) {
+        MeshBake::Model model = MeshBake::read(item.bakePath, item.bakeFingerprint);
+        if (model.valid) {
+            QMutexLocker locked(&mLock);
+            mBaked.insert(path, std::make_shared<const MeshBake::Model>(std::move(model)));
+            mEntries.insert(path, std::shared_ptr<SceneSource>());
+            return;
+        }
+    }
+
     if (!QFileInfo::exists(path)) {
         QMutexLocker locked(&mLock);
         mEntries.insert(path, std::shared_ptr<SceneSource>());
@@ -57,6 +80,12 @@ const aiScene *MeshPrewarm::scene(const QString &path) const
     return (*it)->importer.GetScene();
 }
 
+BakedModelPtr MeshPrewarm::baked(const QString &path) const
+{
+    QMutexLocker locked(&mLock);
+    return mBaked.value(path);
+}
+
 bool MeshPrewarm::contains(const QString &path) const
 {
     QMutexLocker locked(&mLock);
@@ -69,7 +98,13 @@ int MeshPrewarm::count() const
     int n = 0;
     for (const auto &entry : mEntries)
         if (entry) ++n;
-    return n;
+    return n + mBaked.size();
+}
+
+int MeshPrewarm::bakedCount() const
+{
+    QMutexLocker locked(&mLock);
+    return mBaked.size();
 }
 
 QStringList MeshPrewarm::paths() const
@@ -77,7 +112,7 @@ QStringList MeshPrewarm::paths() const
     QMutexLocker locked(&mLock);
     QStringList out;
     for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it)
-        if (it.value()) out.append(it.key());
+        if (it.value() || mBaked.contains(it.key())) out.append(it.key());
     return out;
 }
 
@@ -85,6 +120,7 @@ void MeshPrewarm::clear()
 {
     QMutexLocker locked(&mLock);
     mEntries.clear();
+    mBaked.clear();
 }
 
 }   // namespace iris
