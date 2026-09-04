@@ -172,7 +172,11 @@ void OgreView::setCamera(const CameraDesc &c) {
         mCamera->setFarClipDistance(std::max(c.farClip, c.nearClip + 0.01f));
         if (c.orthographic) {
             mCamera->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
-            const float aspect = mHeight ? float(mWidth) / float(mHeight) : 1.0f;
+            // The REAL target size, not the last requested one: an ortho view
+            // whose window is mid-resize would otherwise project through a stale
+            // aspect and its pick rays would miss.
+            const unsigned tw = width(), th = height();
+            const float aspect = th ? float(tw) / float(th) : 1.0f;
             // orthoSize is the HALF vertical extent (the document camera's
             // ortho(-orthoSize..+orthoSize) convention); Ogre's setOrthoWindow
             // takes FULL extents. Passing orthoSize directly rendered 2x
@@ -228,19 +232,54 @@ void OgreView::recreateWorkspaceAfterShadowRebuild() {
 }
 
 bool OgreView::isEnabled() const { return mEnabled; }
-unsigned OgreView::width()  const { return mWidth; }
-unsigned OgreView::height() const { return mHeight; }
+
+// The ACHIEVED size, exactly like sampleCount() reports the achieved sample
+// count: what the render target really is, not what the host asked for. For an
+// on-screen view those differ constantly — the swapchain follows the native
+// window (and on X11 the surface's currentExtent wins outright, ogre-patch
+// 0008), a request made this frame is applied at the next applyPendingResize,
+// and a window manager may never grant the size at all. Reporting the request
+// made the selftest's resize assertion tautological (deep audit area 7 F3):
+// it compared the values we had just pushed with themselves.
+unsigned OgreView::width() const {
+    Ogre::TextureGpu *t = target();
+    return t ? t->getWidth() : mWidth;
+}
+unsigned OgreView::height() const {
+    Ogre::TextureGpu *t = target();
+    return t ? t->getHeight() : mHeight;
+}
 bool OgreView::isOffscreen() const { return mTexture != nullptr; }
 
 void OgreView::resize(unsigned w, unsigned h) {
     if (!w || !h) return;
     JAH_TRY {
         if (mWindow) {
+            // Record the request ONLY. mWidth/mHeight are the last size actually
+            // applied to the window; eagerly assigning them here made
+            // applyPendingResize's "nothing changed" guard true for every pure
+            // size change, so the on-screen resize path was dead code and
+            // resizes only ever happened through Ogre's OUT_OF_DATE swapchain
+            // self-heal (deep audit area 7 F1 — whose non-convergent case is
+            // the "viewport stops presenting after a dock-open resize" defect).
             mPendingW = w; mPendingH = h;
         } else {
             rebuildRtt(w, h);   // an RTT cannot be resized in place
+            mWidth = w; mHeight = h;
         }
-        mWidth = w; mHeight = h;
+    } JAH_CATCH(mError, );
+}
+
+void OgreView::stallDevice() {
+    // A FULL device stall through the public VaoManager contract:
+    // waitForSpecificFrameToFinish(getFrameCount()) is documented (OgreVaoManager.h)
+    // as "will perform a full stall", and the Vulkan backend implements it as
+    // VulkanDevice::stall() — flush bindings, submit the open command buffer,
+    // vkDeviceWaitIdle, _notifyDeviceStalled. Backend-neutral: every VaoManager
+    // implements it, so this stays correct if the render system is ever not Vulkan.
+    JAH_TRY {
+        Ogre::VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
+        if (vao) vao->waitForSpecificFrameToFinish(vao->getFrameCount());
     } JAH_CATCH(mError, );
 }
 
@@ -325,18 +364,60 @@ void OgreView::applyPendingResize() {
                 if (hadWorkspace) attachWorkspace();
             }
             mWindow->requestResolution(w, h);
+            // resize() no longer assigns these (it must not — see there), so the
+            // in-place backend records the applied request here. POINTS on this
+            // path deliberately: requestResolution takes points and the window
+            // converts, so getWidth() (pixels) is a different unit on Retina.
+            mWidth = w; mHeight = h;
         } JAH_CATCH(mError, );
         return;
     }
-    // A pending MSAA change recreates the window even at the same size (the
-    // sample-count term relaxing the old same-size early-return).
-    if (w == mWidth && h == mHeight && !sampleChange) return;
+    // ---- SIZE ONLY: no recreate. --------------------------------------------
+    // Ogre's own Window::windowMovedOrResized() is documented for exactly this
+    // ("you don't need to call this unless you created the window externally" —
+    // OgreWindow.h) and the XCB implementation does the whole job properly:
+    // xcb_get_geometry for the REAL current size of the host's window,
+    // mDevice->stallIgnoringDeviceLost(), destroySwapchain (which transitions
+    // colour AND depth to OnStorage — the stale-depth-buffer fault the recreate
+    // existed to avoid), setFinalResolution, createSwapchain. ogre-patch 0008
+    // then makes the new swapchain honour the surface's currentExtent, so the
+    // extent lands right even if the geometry moved again in between.
+    //
+    // It had ZERO call sites in this tree, which is why the recreate below was
+    // the only path — and, with resize() eagerly updating mWidth/mHeight, an
+    // unreachable one (area 7 F1).
+    if (!sampleChange) {
+        JAH_TRY {
+            const unsigned curW = mWindow->getWidth(), curH = mWindow->getHeight();
+            if (w == curW && h == curH) { mWidth = w; mHeight = h; return; }
+            mWindow->windowMovedOrResized();
+            // The window read its own geometry: believe IT, not the request.
+            mWidth = mWindow->getWidth(); mHeight = mWindow->getHeight();
+        } JAH_CATCH(mError, );
+        return;
+    }
+    // ---- MSAA CHANGE: the one case that still recreates the window. ---------
+    // Vulkan/XCB has no setFsaa (only the Metal window implements it, patch
+    // 0007), so the sample count can only change by building a new window with
+    // a different FSAA misc param on the same native handle.
+    //
+    // STALL FIRST. destroyRenderWindow tears down the swapchain and calls
+    // VulkanVaoManager::notifySemaphoreUnused on its acquire semaphore, which
+    // is a bare vkDestroySemaphore — and every on-screen window sits in
+    // SwapchainAcquired at a frame boundary (VulkanQueue::commitAndNextCommand
+    // Buffer re-acquires immediately after each present), with frames still in
+    // flight behind it. Destroying those with live GPU work is the credible
+    // mechanism behind the VUID-vkAcquireNextImageKHR validation flake. Ogre's
+    // own equivalent (windowMovedOrResized, above) stalls before it rebuilds;
+    // this path did not.
     JAH_TRY {
         const bool hadWorkspace = detachWorkspace();
+        stallDevice();
         mRoot->getRenderSystem()->destroyRenderWindow(mWindow);
         mWindow = nullptr;
         mWindow = mCreateWindow(w, h, mRequestedSamples);
-        mWidth = w; mHeight = h;
+        mWidth = mWindow ? mWindow->getWidth() : w;
+        mHeight = mWindow ? mWindow->getHeight() : h;
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }
@@ -374,6 +455,12 @@ void OgreView::destroy() {
     detachScene();
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);
+        // Same reason as the MSAA recreate: destroying a render window destroys
+        // its swapchain and acquire semaphore outright, and this runs at
+        // runtime too — Engine::destroyView, and the host rebuilding a view on
+        // a new native window (EngineViewWidget::recreateViewForNewWindow) —
+        // not only at teardown, so there can be frames in flight.
+        if (mWindow) stallDevice();
         if (mWindow)  { mRoot->getRenderSystem()->destroyRenderWindow(mWindow); mWindow = nullptr; }
         if (mTexture) { mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mTexture); mTexture = nullptr; }
     } JAH_CATCH(mError, );

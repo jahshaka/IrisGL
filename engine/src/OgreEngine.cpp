@@ -19,7 +19,7 @@ OgreEngine *gLiveEngine = nullptr;
 
 bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
 #ifdef __linux__
-    mDisplay = reinterpret_cast<Display *>(cfg.display);
+    mDisplay = reinterpret_cast<void *>(cfg.display);
 #else
     (void)cfg.display;  // X11-only; 0 on other hosts (Types.h documents the leak)
 #endif
@@ -172,7 +172,7 @@ View *OgreEngine::createView(const std::string &name,
 #else
         // Ogre consumes the SDL2x11 struct synchronously inside createRenderWindow;
         // a stack local is correct (the old heap vector was a leak).
-        X11Handle x11{ mDisplay, (::Window)handle };
+        X11Handle x11{ mDisplay, (unsigned long)handle };
         if (mBackendName.find("Vulkan") != std::string::npos) {
             // Vulkan/XCB takes only "SDL2x11": a pointer to {Display*, Window}.
             if (!mDisplay) { mLastError = "createView: host must supply its X display"; return nullptr; }
@@ -203,12 +203,12 @@ View *OgreEngine::createView(const std::string &name,
         return view;
 #else
         const bool vulkan = mBackendName.find("Vulkan") != std::string::npos;
-        Display *display = mDisplay;
+        void *display = mDisplay;
         Ogre::Root *root = mRoot;
         view->mCreateWindow = [root, vulkan, display, handle, name](unsigned w, unsigned h,
                                                                     unsigned samples) -> Ogre::Window * {
             Ogre::NameValuePairList p;
-            X11Handle x11{ display, (::Window)handle };
+            X11Handle x11{ display, (unsigned long)handle };
             if (vulkan) p["SDL2x11"] = Ogre::StringConverter::toString((unsigned long)&x11);
             else { p["parentWindowHandle"] = Ogre::StringConverter::toString((unsigned long)handle); p["gamma"] = "true"; }
             p["vsync"] = "true"; p["vsyncInterval"] = "1";
