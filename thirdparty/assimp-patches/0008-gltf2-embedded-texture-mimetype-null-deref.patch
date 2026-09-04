@@ -1,0 +1,41 @@
+glTF2: ImportEmbeddedTextures dereferences a NULL mimeType separator
+
+Backport of upstream assimp commit 24bd7ee6 ("Fix glTF2 ImportEmbeddedTextures
+NULL deref when mimeType has no '/'", PR #6733) -- merged after our pinned
+release tag v6.0.5. Applied verbatim; it lands cleanly on the pin.
+
+The bug
+-------
+    const char *ext = strchr(img.mimeType.c_str(), '/') + 1;
+    if (ext) {
+
+The null check is dead: when strchr returns nullptr the code has ALREADY
+computed nullptr + 1, which is undefined behaviour and non-null, so the branch
+is taken and every strncmp/strcmp below reads through the bogus pointer. The
+mimeType string is file content -- a .glb whose image declares e.g.
+"image" (no slash) reaches it.
+
+Directly relevant to Jahshaka: embedded-texture extension handling is a path
+we already patched around at our own layer (MaterialHelper::sniffImageExtension
+exists because glTF mimeTypes lie), and .glb is the format the asset pipeline
+suites exercise most.
+
+The fix
+-------
+Test the separator, then form the extension pointer.
+
+diff --git a/code/AssetLib/glTF2/glTF2Importer.cpp b/code/AssetLib/glTF2/glTF2Importer.cpp
+--- a/code/AssetLib/glTF2/glTF2Importer.cpp
++++ b/code/AssetLib/glTF2/glTF2Importer.cpp
+@@ -1720,8 +1720,9 @@ void glTF2Importer::ImportEmbeddedTextures(glTF2::Asset &r) {
+         tex->pcData = reinterpret_cast<aiTexel *>(data);
+ 
+         if (!img.mimeType.empty()) {
+-            const char *ext = strchr(img.mimeType.c_str(), '/') + 1;
+-            if (ext) {
++            const char *slash = strchr(img.mimeType.c_str(), '/');
++            if (slash != nullptr) {
++                const char *ext = slash + 1;
+                 if (strncmp(ext, "jpeg", 4) == 0) {
+                     ext = "jpg";
+                 } else if (strcmp(ext, "ktx2") == 0) { // basisu: ktx remains

@@ -110,6 +110,17 @@ endif()
 
 add_subdirectory_with_folder("Dependencies/Assimp" thirdparty/assimp)
 
+# assimp's ~1,900 internal ai_assert()s are its OWN bounds/invariant checks on
+# parsed FILE CONTENT, and ai_assert expands to NOTHING unless ASSIMP_BUILD_DEBUG
+# is defined (include/assimp/ai_assert.h) — assimp's build never defines it, so
+# until 2026-09-04 every Jahshaka build, Debug included, compiled them all away.
+# That is how CVE-2025-70067's "guarded" strcpy shipped live (see
+# thirdparty/assimp-patches/0002). Turn them on in DEBUG BUILDS ONLY, and only
+# for assimp's own objects (PRIVATE): a malformed model then aborts loudly on a
+# developer's machine — which is the point — while release builds keep upstream's
+# shipping configuration. Multi-config safe via the generator expression.
+target_compile_definitions(assimp PRIVATE $<$<CONFIG:Debug>:ASSIMP_BUILD_DEBUG>)
+
 option(BUILD_BULLET2_DEMOS                      "" OFF)
 option(BUILD_OPENGL3_DEMOS                      "" OFF)
 option(BUILD_CPU_DEMOS                          "" OFF)
