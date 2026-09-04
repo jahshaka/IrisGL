@@ -288,6 +288,38 @@ std::string OgreScene::ensureParticleDatablock(Node &n, const ParticleSystemDesc
         db->setColour(Ogre::ColourValue::White);
     }
 
+    // ALPHA HASHING NEEDS A UV INTERPOLANT, AND UNLIT ONLY EMITS ONE FOR A
+    // TEXTURE. Both of Unlit's alpha-hash branches read `inPs.uv0`
+    // (Hlms/Unlit/Any/800.PixelShader_piece_ps.any:116 and :129), but the uv
+    // interpolant list is built ONLY from the datablock's bound textures
+    // (OgreHlmsUnlit.cpp calculateHashForPreCreate: every uvOutputs entry sits
+    // behind `if( hasTexture )`). Particles do have UVs — Hlms sets
+    // hlms_uv_count0 = 2 for them and the VS synthesises inVs_uv0 from the
+    // vertex-in-quad index (Common/Any/ParticleSystem_piece_vs.any) — but with
+    // no texture nothing forwards them, so the pixel shader references a field
+    // its input struct does not have.
+    //
+    // The consequence, live since PFX2 landed and completely silent: every
+    // UNTEXTURED alpha-blended emitter (the "smoke" preset, and any emitter at
+    // its defaults, because ParticleSystemNode::alphaHash defaults true) asked
+    // for a shader that cannot exist. Ogre logged
+    //   ERROR: 0:400: 'uv0' : no such field in structure 'inPs'
+    // plus an OGRE EXCEPTION, retried it EVERY FRAME, and drew nothing — 248
+    // error lines and 124 exceptions per scripting.e2e.particles run, in both
+    // passing and failing runs, which is how it stayed invisible.
+    //
+    // So the request is honoured only where the backend can honour it. A
+    // textured emitter keeps stochastic transparency; an untextured one falls
+    // back to plain alpha blending, which is what it had before alpha hashing
+    // existed and is infinitely better than not being drawn. The document keeps
+    // its alphaHash flag either way: it is a request, and it starts working the
+    // moment a texture is assigned.
+    // (Upstream gap, recorded rather than patched: Unlit could force one uv
+    // output when hlms_alpha_hash is set, or the piece could use vPos like its
+    // own parameter name suggests. Both are Ogre-side; patch decisions are the
+    // lead's.)
+    const bool alphaHash = !d.additive && d.alphaHash && tex != nullptr;
+
     // Depth test on, depth write off — particles never occlude each other and
     // must not write into the depth the rest of the frame reads.
     Ogre::HlmsMacroblock macro;
@@ -304,12 +336,14 @@ std::string OgreScene::ensureParticleDatablock(Node &n, const ParticleSystemDesc
         // hashing (stochastic transparency against blue noise) makes the draw
         // order stop mattering; it resolves cleanly only with MSAA + A2C, so
         // offscreen 1x views see the dither. That is expected, not a defect.
-        blend.mAlphaToCoverage = d.alphaHash ? Ogre::HlmsBlendblock::A2cEnabledMsaaOnly
-                                             : Ogre::HlmsBlendblock::A2cDisabled;
+        // A2C follows the alpha hashing it exists to resolve — enabling it
+        // without the hash would just thin the quads.
+        blend.mAlphaToCoverage = alphaHash ? Ogre::HlmsBlendblock::A2cEnabledMsaaOnly
+                                           : Ogre::HlmsBlendblock::A2cDisabled;
     }
     db->setMacroblock(macro);
     db->setBlendblock(blend);
-    db->setAlphaHashing(!d.additive && d.alphaHash);
+    db->setAlphaHashing(alphaHash);
     Ogre::HlmsSamplerblock sampler;
     sampler.mU = Ogre::TAM_CLAMP; sampler.mV = Ogre::TAM_CLAMP;
     sampler.mMipFilter = Ogre::FO_LINEAR;
