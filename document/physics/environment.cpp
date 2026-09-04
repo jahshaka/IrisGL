@@ -364,8 +364,19 @@ void Environment::createPickingConstraint(PickingHandleType handleType, const QS
 {
 	PickingHandle& handle = pickingHandles[(int)handleType];
 
-	// Fetch our rigid body from the list stored in the world by guid
+	// Fetch our rigid body from the list stored in the world by guid.
+	// A miss is NORMAL, not exceptional: the caller guards on the DOCUMENT's
+	// isPhysicsBody flag, but the WORLD may hold no body for that guid — the
+	// simulation may not have built bodies yet, the body's creation may have
+	// failed, or a restart may be mid-flight. Dereferencing the null return
+	// was the owner's first captured crash-*.log (2026-09-05: clicking the
+	// Showroom floor in play mode).
 	handle.activeRigidBodyBeingManipulated = hashBodies.value(pickedNodeGUID);
+	if (!handle.activeRigidBodyBeingManipulated) {
+		irisLog("physics: no rigid body in the world for picked node " +
+		        pickedNodeGUID + " — picking constraint refused");
+		return;
+	}
 	// Prevent the picked object from falling asleep while it is being moved
 	handle.activeRigidBodySavedState = handle.activeRigidBodyBeingManipulated->getActivationState();
 	handle.activeRigidBodyBeingManipulated->setActivationState(DISABLE_DEACTIVATION);
