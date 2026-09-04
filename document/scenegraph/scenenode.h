@@ -52,7 +52,28 @@ protected:
     QVector3D scale;
     QQuaternion rot;
 
+    // ---- transform invalidation (deep audit 2026-09, area 3) --------------
+    // These two flags were set true in the constructor and NEVER cleared
+    // anywhere in the tree, so update() recomposed localTransform AND
+    // globalTransform for every node of every scene, every frame — a cache
+    // that only ever cost. They mean what they say now:
+    //
+    //   transformDirty    this node's own TRS changed, so localTransform must
+    //                     be recomposed (and globalTransform with it). Set by
+    //                     every mutator; see setTransformDirty().
+    //   globalDirty       an ANCESTOR moved, so only globalTransform needs
+    //                     recomputing. This is the DOWNWARD half of the
+    //                     invalidation and update() is what sets it, because
+    //                     setTransformDirty walks UPWARDS (it tells ancestors
+    //                     to descend) and can never reach a subtree.
+    //   hasDirtyChildren  some descendant needs update() work at all; the flag
+    //                     that lets an untouched branch be skipped whole.
+    //
+    // All three are cleared at the end of update(). A mutator that forgets to
+    // set them is a stale-transform bug — the picker, the gizmos and the
+    // mirror's selection outline all read `globalTransform` directly.
     bool transformDirty;
+    bool globalDirty;
     bool hasDirtyChildren;
 public:
     // cached local and global transform
@@ -62,10 +83,26 @@ public:
     SceneNodeType sceneNodeType;
 
     QString name;
-    long nodeId;
+    /// Process-unique, monotonic, and 64 bits WHATEVER the platform: this was
+    /// `long`, which is 32 bits on Windows LLP64 (deep audit 2026-09, area 5).
+    /// SceneMirror keys its entry map on it, so a wrap is a silent aliasing of
+    /// two different nodes onto one engine entry.
+    qint64 nodeId;
 
-    ScenePtr scene;
-    SceneNodePtr parent;
+    // OWNERSHIP (deep audit 2026-09, area 3 / List B item 4). The tree has ONE
+    // ownership direction: a parent owns its children, strongly. The two
+    // back-references are therefore WEAK — they were QSharedPointer until this
+    // change, which made every parent/child pair and every node/scene pair a
+    // reference cycle, so nothing in a document ever died.
+    //
+    // Read them through getScene() / getParent(), never directly: a weak
+    // pointer must be locked before it is used, and the lock is what keeps the
+    // target alive for the duration of the expression. The two members stay
+    // public only because the codebase is full of `node->parent` call sites
+    // that now read as `node->getParent()`; new code has no reason to touch
+    // them.
+    SceneWPtr scene;
+    SceneNodeWPtr parent;
     QList<SceneNodePtr> children;
 
     // editor specific
@@ -122,7 +159,7 @@ public:
     void setName(QString name);
     QString getName();
 
-    long getNodeId();
+    qint64 getNodeId();
 
 	void setGUID(const QString &id) const {
 		guid = id;
@@ -170,10 +207,27 @@ public:
     bool isAttached();
     void setAttached(bool attached);
 
-	SceneNodePtr getParent()
+	/// The owning parent, locked. Null for a root node — and also null for a
+	/// node whose parent has been destroyed, which is a state that could not
+	/// exist while `parent` was strong.
+	SceneNodePtr getParent() const
 	{
-		return parent;
+		return parent.lock();
 	}
+
+	/// The scene this node belongs to, locked. Null when the node is detached,
+	/// and null once the scene itself is gone.
+	ScenePtr getScene() const
+	{
+		return scene.lock();
+	}
+
+	/// "Is there a live parent / scene", without materialising a
+	/// QSharedPointer. QWeakPointer::isNull() already reports expiry — it turns
+	/// true the moment the last strong reference goes — so these are the honest
+	/// replacements for the old `!!node->parent` / `!!node->scene` tests.
+	bool hasParent() const { return !parent.isNull(); }
+	bool hasScene()  const { return !scene.isNull(); }
 
     void addAnimation(AnimationPtr anim);
     QList<AnimationPtr> getAnimations();
@@ -214,7 +268,7 @@ public:
     void show(bool hideChildren = false) {
         visible = true;
 		if (hideChildren) {
-			for (auto child : children)
+			for (const auto &child : children)
 				child->show(hideChildren);
 		}
     }
@@ -222,7 +276,7 @@ public:
     void hide(bool hideChildren = false) {
         visible = false;
 		if (hideChildren) {
-			for (auto child : children)
+			for (const auto &child : children)
 				child->hide(hideChildren);
 		}
     }
@@ -317,8 +371,7 @@ private:
     void setScene(ScenePtr scene);
     void removeFromScene();
 
-    static long generateNodeId();
-    static long nextId;
+    static qint64 generateNodeId();
 };
 
 }

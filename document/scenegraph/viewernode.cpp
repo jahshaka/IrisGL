@@ -71,7 +71,10 @@ ViewerNode::~ViewerNode()
 void ViewerNode::setViewScale(float scale)
 {
     this->viewScale = scale;
+    // Writes the node's TRS directly, so it owes the flag (setLocalScale would
+    // have set it; this predates that setter existing).
     this->scale = QVector3D(scale, scale, scale);
+    this->setTransformDirty();
 }
 
 float ViewerNode::getViewScale()

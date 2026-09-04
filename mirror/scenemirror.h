@@ -375,7 +375,7 @@ private:
 
     jahshaka::engine::Scene *mTarget;
     iris::ScenePtr           mSource;
-    QHash<long, Entry>       mEntries;         // keyed by iris SceneNode::nodeId
+    QHash<qint64, Entry>     mEntries;         // keyed by iris SceneNode::nodeId
     /// Document mesh/material -> engine object, keyed by RAW POINTER.
     ///
     /// KNOWN RESIDUAL (deep audit 2026-09, area 5, deliberately not fixed here):

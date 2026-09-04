@@ -29,8 +29,17 @@ For more information see the LICENSE file
 
 #include <QUuid>
 
+#include <atomic>
+
 namespace iris
 {
+
+/// The node-id counter. It was a plain `static long nextId` incremented with
+/// `nextId++` — not atomic, so two threads creating nodes could hand out the
+/// same id, and 32-bit on Windows LLP64 besides (deep audit 2026-09, area 5).
+/// Relaxed ordering is enough: the only requirement is that no two calls
+/// return the same value, not that ids order anything.
+static std::atomic<qint64> sNextNodeId{0};
 
 SceneNode::SceneNode():
     pos(QVector3D(0,0,0)),
@@ -59,6 +68,7 @@ SceneNode::SceneNode():
     attached = false;
 
     transformDirty = true;
+    globalDirty = false;      // transformDirty already forces the global
     hasDirtyChildren = true;
 
     //keyFrameSet = KeyFrameSet::create();
@@ -81,7 +91,7 @@ void SceneNode::setName(QString name)
     this->name = name;
 }
 
-long SceneNode::getNodeId()
+qint64 SceneNode::getNodeId()
 {
     return nodeId;
 }
@@ -119,21 +129,26 @@ void SceneNode::setLocalTransform(QMatrix4x4 transformMatrix)
     setTransformDirty();
 }
 
+/// This node's own TRS changed. The flag propagates UPWARDS as
+/// hasDirtyChildren so that update() descends to us from the root; the
+/// downward half — every descendant's globalTransform is now stale too — is
+/// update()'s job, because it is the only place that knows the new world
+/// transform.
 void SceneNode::setTransformDirty()
 {
     transformDirty = true;
-    if (!!parent)
+    if (auto p = getParent())
     {
-        parent->setHasDirtyChildren();
+        p->setHasDirtyChildren();
     }
 }
 
 void SceneNode::setHasDirtyChildren()
 {
     hasDirtyChildren = true;
-    if (!!parent)
+    if (auto p = getParent())
     {
-        parent->setHasDirtyChildren();
+        p->setHasDirtyChildren();
     }
 }
 
@@ -285,7 +300,7 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 {
     auto initialGlobalTransform = node->getGlobalTransform();
 
-    if (!!node->parent) {
+    if (node->hasParent()) {
         node->removeFromParent();
     }
 
@@ -294,8 +309,8 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 
     children.insert(position, node);
     node->setParent(self);
-    if (!!scene) {
-        node->setScene(self->scene);
+    if (auto sc = getScene()) {
+        node->setScene(sc);
         //scene->addNode(node);
     }
 
@@ -319,26 +334,35 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         node->scale.setY(diff.column(1).toVector3D().length());
         node->scale.setZ(diff.column(2).toVector3D().length());
     }
+
+    // Unconditionally: a reparent changes the node's world transform even when
+    // its local one is untouched, and the keepTransform branch above writes
+    // pos/rot/scale directly. This also marks the new parent chain, which is
+    // how a freshly added subtree gets visited at all.
+    node->setTransformDirty();
 }
 
 void SceneNode::removeFromParent()
 {
     auto self = sharedFromThis();
 
-    if (!parent.isNull()) this->parent->removeChild(self);
+    if (auto p = getParent()) p->removeChild(self);
 }
 
 void SceneNode::removeChild(SceneNodePtr node)
 {
     children.removeOne(node);
-    node->parent = QSharedPointer<SceneNode>(Q_NULLPTR);
+    node->parent.clear();
+    // Losing a parent changes the node's world transform (its local one is now
+    // its global one) — it has to recompose.
+    node->setTransformDirty();
     node->removeFromScene();
 }
 
 bool SceneNode::isRootNode()
 {
-    if (this->scene->getRootNode().data() == this) return true;
-    return false;
+    auto sc = getScene();
+    return sc && sc->getRootNode().data() == this;
 }
 
 void SceneNode::updateAnimation(float time)
@@ -352,16 +376,25 @@ void SceneNode::updateAnimation(float time)
 
     if (!!animation) {
         time = animation->getSampleTime(time);
+        // These write pos/rot/scale DIRECTLY rather than through the setters,
+        // so they are the one mutator path that has to remember the flag
+        // itself (it did not, and could not be noticed while the flags were
+        // never cleared).
+        bool posed = false;
         if (animation->hasPropertyAnim("position")) {
             pos = animation->getVector3PropertyAnim("position")->getValue(time);
+            posed = true;
         }
         if (animation->hasPropertyAnim("rotation")) {
             auto r = animation->getVector3PropertyAnim("rotation")->getValue(time);
             rot = QQuaternion::fromEulerAngles(r);
+            posed = true;
         }
         if (animation->hasPropertyAnim("scale")) {
             scale = animation->getVector3PropertyAnim("scale")->getValue(time);
+            posed = true;
         }
+        if (posed) setTransformDirty();
         // The SKELETAL branch is gone (ANIMATION_ENGINE_MIGRATION_SPEC, full
         // retirement). It used to walk the scene-node hierarchy by name,
         // overwrite every bone node's local transform from the clip, compose
@@ -373,7 +406,7 @@ void SceneNode::updateAnimation(float time)
         // the rest. What the document keeps is the authored data and the clock.
     }
 
-    for (auto child : children) {
+    for (const auto &child : children) {
         child->updateAnimation(sceneTime);
     }
 }
@@ -399,7 +432,7 @@ void SceneNode::applyDefaultPose()
     restRot = rot;
     restScale = scale;
 
-    for (auto child : children) {
+    for (const auto &child : children) {
         child->applyDefaultPose();
     }
 }
@@ -412,19 +445,38 @@ void SceneNode::update(float dt)
         localTransform.translate(pos);
         localTransform.rotate(rot);
         localTransform.scale(scale);
+    }
 
-        if (!!parent) {
-            globalTransform = this->parent->globalTransform * localTransform;
+    if (transformDirty || globalDirty) {
+        if (auto p = getParent()) {
+            globalTransform = p->globalTransform * localTransform;
         } else {
             globalTransform = localTransform;
+        }
+
+        // Our world transform moved, so every descendant's did. This is the
+        // downward half of the invalidation, and the reason a moved node is
+        // enough to refresh its whole subtree: setTransformDirty only ever
+        // walked up.
+        if (!children.isEmpty()) {
+            for (const auto &child : children) child->globalDirty = true;
+            hasDirtyChildren = true;
         }
     }
 
     if (hasDirtyChildren) {
-        for (auto child : children) {
+        for (const auto &child : children) {
             child->update(dt);
         }
     }
+
+    // Cleared AFTER the descent, never before: `hasDirtyChildren` is what the
+    // loop above tests, and the flag this node may have just set for itself
+    // (because its own world transform moved) has to survive until the loop
+    // has used it.
+    transformDirty = false;
+    globalDirty = false;
+    hasDirtyChildren = false;
 }
 
 void SceneNode::setParent(SceneNodePtr node)
@@ -435,39 +487,40 @@ void SceneNode::setParent(SceneNodePtr node)
 void SceneNode::setScene(ScenePtr scene)
 {
     // should not already be a part of scene
-    Q_ASSERT(!this->scene);
+    Q_ASSERT(!hasScene());
 
-    this->scene = scene;
-    this->scene->addNode(this->sharedFromThis());
+    this->scene = scene.toWeakRef();
+    scene->addNode(this->sharedFromThis());
 
     // add children
-    for (auto &child : children) {
+    for (const auto &child : children) {
         child->setScene(scene);
     }
 }
 
 void SceneNode::removeFromScene()
 {
-    // should already have a scene to be removed from
-    Q_ASSERT(!!this->scene);
-
-    this->scene->removeNode(this->sharedFromThis());
+    // The scene may already be gone — the link is weak now, so "my scene died
+    // first" is a reachable state (it was not while the link kept the scene
+    // alive). Nothing to unregister from in that case.
+    auto sc = getScene();
     this->scene.clear();
+    if (sc) sc->removeNode(this->sharedFromThis());
 
-    // add children
-    for (auto &child : children) {
+    // ...and the children
+    for (const auto &child : children) {
         child->removeFromScene();
     }
 }
 
-long SceneNode::generateNodeId()
+qint64 SceneNode::generateNodeId()
 {
-    return nextId++;
+    return sNextNodeId.fetch_add(1, std::memory_order_relaxed);
 }
 
 QQuaternion SceneNode::getGlobalRotation()
 {
-	if (!!parent) return parent->getGlobalRotation() * rot;
+	if (auto p = getParent()) return p->getGlobalRotation() * rot;
 	return rot;
 }
 
@@ -484,11 +537,11 @@ QMatrix4x4 SceneNode::getGlobalTransform()
     localTransform.rotate(rot);
     localTransform.scale(scale);
 
-    if (parent.isNull()) {
+    if (auto p = getParent()) {
+        globalTransform = p->getGlobalTransform() * localTransform;
+    } else {
         // this is a check for the root node
         globalTransform = localTransform;
-    } else {
-        globalTransform = parent->getGlobalTransform() * localTransform;
     }
 
     return globalTransform;
@@ -507,12 +560,14 @@ QMatrix4x4 SceneNode::getLocalTransform()
 
 void SceneNode::setGlobalPos(QVector3D pos)
 {
-	if (!parent) {
+	auto p = getParent();
+	if (!p) {
 		this->pos = pos;
+		this->setTransformDirty();
 		return;
 	}
 
-	auto globInv = this->parent->getGlobalTransform().inverted();
+	auto globInv = p->getGlobalTransform().inverted();
 
 	auto res = globInv * pos;
 
@@ -522,12 +577,14 @@ void SceneNode::setGlobalPos(QVector3D pos)
 
 void SceneNode::setGlobalRot(QQuaternion rot)
 {
-	if (!parent) {
+	auto p = getParent();
+	if (!p) {
 		this->rot = rot;
+		this->setTransformDirty();
 		return;
 	}
 
-	auto globInv = this->parent->getGlobalRotation().inverted();
+	auto globInv = p->getGlobalRotation().inverted();
 	auto res = globInv * rot;
 
 	this->rot = res;
@@ -536,12 +593,13 @@ void SceneNode::setGlobalRot(QQuaternion rot)
 
 void SceneNode::setGlobalTransform(QMatrix4x4 transform)
 {
-	if (!parent) {
+	auto p = getParent();
+	if (!p) {
 		this->setLocalTransform(transform);
 		return;
 	}
 
-	auto globInv = this->parent->getGlobalTransform().inverted();
+	auto globInv = p->getGlobalTransform().inverted();
 	auto res = globInv * transform;
 	this->setLocalTransform(res);
 
@@ -581,7 +639,5 @@ SceneNodePtr SceneNode::duplicate()
 
     return node.staticCast<SceneNode>();
 }
-
-long SceneNode::nextId = 0;
 
 }

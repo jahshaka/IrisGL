@@ -163,6 +163,7 @@ void CameraNode::lookAt(QVector3D target)
     matrix.lookAt(pos, target, QVector3D(0, 1, 0));
     matrix = matrix.inverted();
     MathHelper::decomposeMatrix(matrix, pos, rot, scale);
+    setTransformDirty();
 }
 
 void CameraNode::setOrthagonalZoom(float size)
