@@ -314,8 +314,11 @@ public:
 	// The last absolute animation time, as handed to updateSceneAnimation.
 	float animTime = 0.0f;
 
-	// needed for playing music
+	// needed for playing music — nullptr until the first startPlayingAmbientMusic();
+	// building one costs an audio-device probe, so it is NOT built in the ctor
+	// (STABILITY_PROGRAM_SPEC Lane 6a; see scene.cpp ensureMediaPlayer()).
 	QMediaPlayer* mediaPlayer;
+	void ensureMediaPlayer();
 	// a playlist is needed to play looping sounds
 	QMediaPlaylist* playList;
 	QString ambientMusicPath;

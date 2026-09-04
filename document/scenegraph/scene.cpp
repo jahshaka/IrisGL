@@ -249,10 +249,30 @@ Scene::Scene()
 	gravity = environment->getWorldGravity();
 
 	ambientMusicVolume = 50;
-	mediaPlayer = new QMediaPlayer();
-    // mediaPlayer->setVolume(ambientMusicVolume);
+	// NOT `new QMediaPlayer()` — see ensureMediaPlayer(). Constructing one here
+	// put the Qt multimedia backend on the startup path of every process that
+	// ever makes a Scene, which is all of them.
+	mediaPlayer = nullptr;
     // playList = new QMediaPlaylist();
     // playList->setPlaybackMode(QMediaPlaylist::Loop);
+}
+
+// Build the ambient-music player on first play, not in the constructor.
+//
+// The constructor used to do `mediaPlayer = new QMediaPlayer()` unconditionally.
+// Every Scene::create() therefore loaded the Qt multimedia (ffmpeg) backend and
+// enumerated audio devices — a pipewire connect + PulseAudio fallback on a Linux
+// desktop — and the editor makes several Scenes during shell setup
+// (EngineAssetScene, the preview scenes, the editor scene), so it happened on
+// every launch and in every headless suite. Nothing reaches this player until
+// a world with an ambientMusicPath is opened (scenereader.cpp) or the World
+// panel selects one. STABILITY_PROGRAM_SPEC Lane 6a.
+//
+// Note the player is parentless and Scene has no destructor, so it leaks — it
+// always did; deferring it means it now only leaks when it is actually used.
+void Scene::ensureMediaPlayer()
+{
+	if (!mediaPlayer) mediaPlayer = new QMediaPlayer();
 }
 
 void Scene::setSkyTexture(Texture2DPtr tex)
@@ -294,11 +314,12 @@ void Scene::setAmbientMusic(QString path)
 
 void Scene::stopPlayingAmbientMusic()
 {
-	mediaPlayer->stop();
+	if (mediaPlayer) mediaPlayer->stop();   // never played: nothing to stop
 }
 
 void Scene::startPlayingAmbientMusic()
 {
+	ensureMediaPlayer();
 	mediaPlayer->stop();
 	//mediaPlayer = new QMediaPlayer();
     // playList->removeMedia(0);
