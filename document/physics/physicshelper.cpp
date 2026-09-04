@@ -27,15 +27,21 @@ btConvexHullShape *PhysicsHelper::btConvexHullShapeFromMesh(iris::MeshPtr mesh)
 {
     btConvexHullShape *shape = new btConvexHullShape;
 
-    for (int i = 0; i < mesh->getTriMesh()->triangles.count(); ++i) {
-        auto triangle = mesh->getTriMesh()->triangles[i];
+    // addPoint()'s default recalculateLocalAabb=true walks EVERY point already
+    // added, so adding n points cost O(n^2) — on the UI thread, at Play, for
+    // every convex-hull body in the scene (deep audit 2026-09, area 4 F4).
+    // One recalc at the end is the same AABB in O(n).
+    const auto &triangles = mesh->getTriMesh()->triangles;
+    for (int i = 0; i < triangles.count(); ++i) {
+        auto triangle = triangles[i];
         btVector3 btVertexA(triangle.a.x(), triangle.a.y(), triangle.a.z());
         btVector3 btVertexB(triangle.b.x(), triangle.b.y(), triangle.b.z());
         btVector3 btVertexC(triangle.c.x(), triangle.c.y(), triangle.c.z());
-        shape->addPoint(btVertexA);
-        shape->addPoint(btVertexB);
-        shape->addPoint(btVertexC);
+        shape->addPoint(btVertexA, false);
+        shape->addPoint(btVertexB, false);
+        shape->addPoint(btVertexC, false);
     }
+    shape->recalcLocalAabb();
 
     return shape;
 }
@@ -50,8 +56,13 @@ QVector3D PhysicsHelper::QVector3DFrombtVector3(btVector3 vector)
 	return QVector3D(vector.getX(), vector.getY(), vector.getZ());
 }
 
-btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode, const iris::PhysicsProperty &props)
+// Every `new` below lands in `owned` — the body's shape, a compound's child
+// shapes and the btTriangleMesh interfaces behind the mesh shapes. Bullet owns
+// none of them (deep audit 2026-09, area 4 F3: they leaked, once per body, per
+// Play). The caller destroys the set at world teardown.
+PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode, const iris::PhysicsProperty &props)
 {
+    PhysicsBody owned;
 	QVector3D globalPos = sceneNode->getGlobalPosition();
     btVector3 pos(globalPos.x(), globalPos.y(), globalPos.z());
     btRigidBody *body = nullptr;
@@ -214,6 +225,7 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
             // convert triangle mesh into convex shape
 
             auto triMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(meshNode->getMesh());
+            owned.meshInterfaces.append(triMesh);   // outlives the shape below
 
             shape = new btConvexTriangleMeshShape(triMesh, true);
             shape->setLocalScaling(iris::PhysicsHelper::btVector3FromQVector3D(meshNode->getLocalScale()));
@@ -240,7 +252,10 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
 				[&](btCollisionShape *baseShape, const SceneNodePtr node)
 			{
 				auto childMeshNode = node.staticCast<iris::MeshNode>();
-				auto childShape = new btConvexTriangleMeshShape(iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh()), true);
+				auto *childTriMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh());
+				owned.meshInterfaces.append(childTriMesh);
+				auto childShape = new btConvexTriangleMeshShape(childTriMesh, true);
+				owned.shapes.append(childShape);   // a compound does not own its children
 				childShape->setMargin(margin);
 
 				auto shapeTransform = rootTransformInverse * childMeshNode->getGlobalTransform();
@@ -292,7 +307,19 @@ btRigidBody *PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode
         default: break;
     }
 
-    return body;
+    owned.body = body;
+    if (shape) {
+        // The body's own shape goes FIRST: destroyPhysicsWorld deletes the
+        // array in order and a compound must die before its children.
+        owned.shapes.prepend(shape);
+    } else {
+        // No body was built (unknown shape kind): nothing to hand back, and
+        // nothing was allocated past this point.
+        owned.shapes.clear();
+        qDeleteAll(owned.meshInterfaces);
+        owned.meshInterfaces.clear();
+    }
+    return owned;
 }
 
 btTypedConstraint * PhysicsHelper::createConstraintFromProperty(Environment *environment, const iris::ConstraintProperty & prop)
@@ -301,6 +328,10 @@ btTypedConstraint * PhysicsHelper::createConstraintFromProperty(Environment *env
 
     auto bodyA = environment->hashBodies.value(prop.constraintFrom);
     auto bodyB = environment->hashBodies.value(prop.constraintTo);
+    // A saved constraint can name a node that no longer has a physics body
+    // (deleted, or its isPhysicsBody flag cleared): hashBodies.value() then
+    // returns null and the pivot reads below dereferenced it.
+    if (!bodyA || !bodyB) return nullptr;
 
     // Constraints must be defined in LOCAL SPACE...
     btVector3 pivotA = bodyA->getCenterOfMassTransform().getOrigin();

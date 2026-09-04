@@ -26,6 +26,8 @@ class btDispatcher;
 class btBroadphaseInterface;
 class btConstraintSolver;
 class btDynamicsWorld;
+class btStridingMeshInterface;
+class btGhostPairCallback;
 
 class CharacterController;
 
@@ -73,10 +75,20 @@ public:
 	void setDirection(QVector2D dir);
 
 	void addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node);
+	/// Adds the body AND takes ownership of every allocation behind it (the
+	/// collision shape, a compound's children, the triangle-mesh interfaces).
+	/// This is the only overload that leaves the world leak-free.
+	void addBodyToWorld(PhysicsBody &owned, const iris::SceneNodePtr &node);
 	void removeBodyFromWorld(btRigidBody *body);
 	void removeBodyFromWorld(const QString &guid);
 
     void storeCollisionShape(btCollisionShape *shape);
+    void storeMeshInterface(btStridingMeshInterface *iface);
+
+    /// Collision shapes / mesh interfaces this world owns. Zero after
+    /// destroyPhysicsWorld(); the play/stop gate asserts on both.
+    int ownedShapeCount() const { return collisionShapes.size(); }
+    int ownedMeshInterfaceCount() const { return meshInterfaces.size(); }
 
     void addConstraintToWorld(btTypedConstraint *constraint, bool disableCollisions = true);
     void removeConstraintFromWorld(btTypedConstraint *constraint);
@@ -128,7 +140,15 @@ private:
 	QHash<int, PickingHandle> pickingHandles;
 
     QVector<btTypedConstraint*> constraints;
+    /// Owned. Destroyed front-to-back at teardown, so a compound shape comes
+    /// before its children (PhysicsHelper::createPhysicsBody builds it so).
     btAlignedObjectArray<btCollisionShape*>	collisionShapes;
+    /// Owned, and destroyed AFTER collisionShapes: a btConvexTriangleMeshShape
+    /// reads its striding interface in its own destructor path.
+    QVector<btStridingMeshInterface*> meshInterfaces;
+    /// The ghost-pair callback the broadphase's pair cache points at but does
+    /// NOT own. One per world; deleted after the broadphase.
+    btGhostPairCallback *ghostPairCallback = nullptr;
 
 	btVector3 walkDirection;
 	btScalar worldYGravity;
