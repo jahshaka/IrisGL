@@ -80,12 +80,15 @@
 #include <OgrePlanarReflections.h>
 #include <Compositor/OgreCompositorWorkspaceListener.h>
 
-// X11 is the only on-screen window path today (Ogre Vulkan/XCB). Other
-// platforms build headless-only until they grow a native window backend
-// (macOS: CAMetalLayer + VK_EXT_metal_surface — see DOCS/HANDOFF.md §7).
-#ifdef __linux__
-#    include <X11/Xlib.h>
-#endif
+// NO <X11/Xlib.h> HERE, deliberately. The only X11 thing this header ever
+// needed was the {Display*, Window} pair Ogre's Vulkan/XCB backend consumes as
+// its "SDL2x11" misc param, and that pair is layout-compatible with
+// {void*, unsigned long} (X11's `Window` is an `XID`, i.e. `unsigned long`, on
+// every platform that has an Xlib) — see OgreVulkanXcbWindow::_initialize,
+// which reinterpret_casts the pointer to its own local struct. Including Xlib
+// here cost more than it bought: it drags ~40 macros (`None`, `Status`,
+// `Bool`, `Success`) into every Ogre-private TU of the engine, and it is dead
+// weight on any arm that has no X server at all (Windows).
 #include <atomic>
 #include <functional>
 #include <algorithm>
@@ -932,8 +935,10 @@ private:
     Ogre::Hlms *hlmsFor(const MaterialRec &m) const;
     /// Removes the renderable from a node that references a SHARED mesh/material.
     void detachItem(NodeId id, Node &n);
-    // Ogre::HlmsPbsDatablock::None is unspellable here: X11's `None` macro (this
-    // file includes Xlib.h for window handles) eats the identifier.
+    // Ogre::HlmsPbsDatablock::None used to be unspellable here: X11's `None`
+    // macro ate the identifier while this header included Xlib.h. It no longer
+    // does — but X11 headers can still arrive transitively through Ogre on a
+    // GL-enabled build, so the numeric spelling stays as the cheap guard.
     static constexpr auto kTransparencyNone = static_cast<Ogre::HlmsPbsDatablock::TransparencyModes>(0);
     /// `refractionsActive` false downgrades PbrAlphaMode::Refractive to plain
     /// glass — see setRefractionsActive for why that is not optional.
@@ -1289,14 +1294,26 @@ public:
 
     bool readPixels(Image &out) override;
 
-    /// The XCB window does not reallocate its depth buffer when the host resizes it
-    /// (the swapchain follows the surface, the depth texture keeps its old size, and
-    /// the mismatched framebuffer faults the GPU — Vulkan validation VUID 04533/04534),
-    /// so on X11 a size change recreates the render window on the same native handle
-    /// (mCreateWindow). Windows that implement requestResolution properly — macOS's
-    /// VulkanMetalWindow does: destroySwapchain (which transitions colour AND depth to
-    /// OnStorage) → setFinalResolution → createSwapchain — are resized in place instead.
+    /// Applies whatever resize()/setSampleCount() recorded, at frame time.
+    ///
+    /// THREE paths, and which one runs is decided here:
+    ///  * No mCreateWindow hook (macOS): requestResolution/setFsaa in place —
+    ///    VulkanMetalWindow rebuilds its own swapchain (colour AND depth).
+    ///  * Size change on X11: Ogre::Window::windowMovedOrResized() — the window
+    ///    re-reads its native geometry, stalls the device and rebuilds the
+    ///    swapchain including the depth buffer. NOT a recreate. (Before this,
+    ///    the size branch recreated the whole window, and — because resize()
+    ///    eagerly updated mWidth/mHeight — never actually ran: resizes worked
+    ///    only through Ogre's OUT_OF_DATE self-heal.)
+    ///  * MSAA change on X11: the window IS recreated on the same native handle,
+    ///    because Vulkan/XCB has no setFsaa. The device is stalled first.
     void applyPendingResize();
+    /// Full GPU stall through the public VaoManager contract. Required before
+    /// destroying a render window: the swapchain's acquire semaphore is
+    /// destroyed outright (VulkanVaoManager::notifySemaphoreUnused →
+    /// vkDestroySemaphore) and every on-screen window holds an acquired image
+    /// at a frame boundary.
+    void stallDevice();
     /// Feeds the camera position to the scene's particle manager: billboard uploads
     /// are depth-sorted against it (matters for alpha-blended sets).
     void updateParticles();
@@ -1431,7 +1448,12 @@ public:
 
 private:
 #ifdef __linux__
-    struct X11Handle { Display *display; ::Window window; };
+    /// The exact layout Ogre's Vulkan/XCB backend reads out of the "SDL2x11"
+    /// misc param (`struct SDLx11 { Display *display; ::Window window; }`,
+    /// OgreVulkanXcbWindow.cpp) — spelled without Xlib so this header stays
+    /// X11-free. `Display*` is an opaque pointer and `Window` is `XID` =
+    /// `unsigned long`; same sizes, same alignments, same order.
+    struct X11Handle { void *display; unsigned long window; };
 #endif
 
     bool viewNameTaken(const std::string &name);
@@ -1460,7 +1482,9 @@ private:
     Ogre::Root     *mRoot = nullptr;
     Ogre::Window   *mNullWindow = nullptr;
 #ifdef __linux__
-    Display        *mDisplay = nullptr;
+    /// The host's X11 `Display*`, kept opaque (see X11Handle) — this TU never
+    /// dereferences it, it only hands it back to Ogre.
+    void           *mDisplay = nullptr;
 #endif
     bool            mHlmsRegistered = false;
     /// Plugin_ParticleFX2 loaded: the emitter/affector factories exist. False

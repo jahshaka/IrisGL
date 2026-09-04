@@ -384,7 +384,20 @@ public:
     /// KEPT: cheap introspection — hosts query it before pushing per-frame state
     /// into a View they may have disabled; pinned by the engine suites.
     virtual bool isEnabled() const = 0;
+    /// Asks for a new size in LOGICAL POINTS (see Engine::createView on units).
+    /// Cheap and idempotent: for an on-screen View this only records the request
+    /// — it is applied once, at frame time, by the next renderOneFrame(), so a
+    /// layout burst costs one swapchain rebuild rather than one per event. An
+    /// offscreen View's texture is replaced immediately (an RTT cannot resize in
+    /// place), which also drops whatever was rendered into it.
     virtual void resize(unsigned width, unsigned height) = 0;
+    /// The render target's ACTUAL size, in PIXELS — not what resize() was last
+    /// asked for. Exactly like sampleCount() reports the ACHIEVED sample count:
+    /// a swapchain follows the native window (on X11 the surface's currentExtent
+    /// wins outright), a request made this frame lands at the next frame, and a
+    /// window manager may never grant it at all. Hosts that need to know what is
+    /// really being drawn — and every test that asserts a resize took — must read
+    /// these, not their own request.
     virtual unsigned width() const = 0;
     virtual unsigned height() const = 0;
     /// Hardware anti-aliasing (MSAA) for this view's render target: 1 = off,
@@ -483,6 +496,17 @@ public:
     /// exists, and creating a Scene before that dereferences null.
     ///   createView(...)  ->  createScene(...)  ->  view->setScene(scene)
     /// Names must be unique among live Views; a duplicate returns null (lastError()).
+    ///
+    /// UNITS (the contract for every size that crosses this boundary, in or out):
+    /// `width`/`height` here — and every later View::resize() — are LOGICAL
+    /// POINTS, the units the host's toolkit lays out in (Qt's QWidget::width()).
+    /// The window backend converts: on X11 at the current pin the conversion is
+    /// the identity, on macOS the Metal window multiplies by the layer's
+    /// contentsScale. What comes BACK — View::width()/height() — is the render
+    /// target's real size in PIXELS, which is why it can differ from what was
+    /// pushed (see View::width). Points == pixels on every unscaled display, so
+    /// the two only diverge on HiDPI, which is its own program and not handled
+    /// anywhere in this tree yet (deep audit area 7 F4).
     virtual View  *createView(const std::string &name,
                               NativeWindowHandle, unsigned width, unsigned height,
                               const Colour &background) = 0;
