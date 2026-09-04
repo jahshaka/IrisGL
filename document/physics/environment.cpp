@@ -40,20 +40,38 @@ void Environment::setDirection(QVector2D dir)
 }
 
 void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node)
-{ 
-    world->addRigidBody(body); 
+{
+    world->addRigidBody(body);
 
 	hashBodies.insert(node->getGUID(), body);
 	nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
-} 
+}
+
+void Environment::addBodyToWorld(PhysicsBody &owned, const iris::SceneNodePtr &node)
+{
+	if (!owned.body) return;
+	addBodyToWorld(owned.body, node);
+	// The world takes over everything the helper allocated. Bullet reference
+	// counts none of it (deep audit 2026-09, area 4 F3).
+	for (auto *shape : owned.shapes) collisionShapes.push_back(shape);
+	for (auto *iface : owned.meshInterfaces) meshInterfaces.append(iface);
+	owned.shapes.clear();
+	owned.meshInterfaces.clear();
+	owned.body = nullptr;
+}
 
 void Environment::removeBodyFromWorld(btRigidBody *body)
 {
-    if (!hashBodies.contains(hashBodies.key(body))) return;
+    // The key has to be read BEFORE the first remove(): the old code looked it
+    // up again for nodeTransforms, by which time the hash no longer held the
+    // body and key() returned a default-constructed QString — so the node
+    // transform was never dropped.
+    const QString guid = hashBodies.key(body);
+    if (!hashBodies.contains(guid)) return;
 
     world->removeRigidBody(body);
-    hashBodies.remove(hashBodies.key(body));
-    nodeTransforms.remove(hashBodies.key(body));
+    hashBodies.remove(guid);
+    nodeTransforms.remove(guid);
 }
 
 void Environment::removeBodyFromWorld(const QString &guid)
@@ -67,11 +85,19 @@ void Environment::removeBodyFromWorld(const QString &guid)
 
 void Environment::storeCollisionShape(btCollisionShape *shape)
 {
-    collisionShapes.push_back(shape);
+    if (shape) collisionShapes.push_back(shape);
+}
+
+void Environment::storeMeshInterface(btStridingMeshInterface *iface)
+{
+    if (iface) meshInterfaces.append(iface);
 }
 
 void Environment::addConstraintToWorld(btTypedConstraint *constraint, bool disableCollisions)
 {
+    // createConstraintFromProperty returns null for a constraint kind it does
+    // not build; bullet dereferences what it is handed.
+    if (!constraint || !world) return;
     world->addConstraint(constraint, disableCollisions);
     constraints.append(constraint);
 }
@@ -152,8 +178,11 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 	std::function<void(const SceneNodePtr)> createPhysicsBodiesFromNode = [&](const SceneNodePtr node) {
 		for (const auto child : node->children) {
 			if (child->isPhysicsBody) {
-				auto body = PhysicsHelper::createPhysicsBody(child, child->physicsProperty);
-				if (body) addBodyToWorld(body, child);
+				auto owned = PhysicsHelper::createPhysicsBody(child, child->physicsProperty);
+				// The overload that ALSO takes the shapes: without it every
+				// shape, compound child and triangle-mesh interface built here
+				// leaked, once per Play.
+				addBodyToWorld(owned, child);
 			}
 
 			// ONLY viewers carry the flag. The type test is load-bearing: the
@@ -313,7 +342,10 @@ void Environment::createPhysicsWorld()
 	btVector3 worldMin(-1000, -1000, -1000);
 	btVector3 worldMax(1000, 1000, 1000);
 	btAxisSweep3* sweepBP = new btAxisSweep3(worldMin, worldMax);
-	sweepBP->getOverlappingPairCache()->setInternalGhostPairCallback(new btGhostPairCallback());
+	// The pair cache stores the callback but does not own it — one leaked per
+	// play/stop cycle before this member.
+	ghostPairCallback = new btGhostPairCallback();
+	sweepBP->getOverlappingPairCache()->setInternalGhostPairCallback(ghostPairCallback);
 	broadphase = sweepBP;
 
 	collisionConfig = new btDefaultCollisionConfiguration();
@@ -414,13 +446,21 @@ void Environment::cleanupPickingConstraint(PickingHandleType handleType)
 	PickingHandle& handle = pickingHandles[(int)handleType];
 
 	if (handle.activePickingConstraint) {
-		handle.activeRigidBodyBeingManipulated->forceActivationState(handle.activeRigidBodySavedState);
-		handle.activeRigidBodyBeingManipulated->activate();
-		removeConstraintFromWorld(handle.activePickingConstraint);
-		handle.activePickingConstraint = 0;
-		handle.activeRigidBodyBeingManipulated = 0;
-		delete handle.activePickingConstraint;
-		delete handle.activeRigidBodyBeingManipulated;
+		if (handle.activeRigidBodyBeingManipulated) {
+			handle.activeRigidBodyBeingManipulated->forceActivationState(handle.activeRigidBodySavedState);
+			handle.activeRigidBodyBeingManipulated->activate();
+		}
+		btTypedConstraint *constraint = handle.activePickingConstraint;
+		removeConstraintFromWorld(constraint);
+		handle.activePickingConstraint = nullptr;
+		// The rigid body is NOT ours — the world owns it and destroyPhysicsWorld
+		// deletes it with the rest of the collision objects. Only the picking
+		// constraint we created here is. (The old code nulled both members
+		// FIRST and then "deleted" the nulls: the constraint leaked on every
+		// drag, and the intent to delete the body would have been a
+		// double-free.)
+		handle.activeRigidBodyBeingManipulated = nullptr;
+		delete constraint;
 	}
 }
 
@@ -504,6 +544,17 @@ void Environment::destroyPhysicsWorld()
 			world->removeConstraint(world->getConstraint(i));
 		}
 
+		// removeConstraint() only unregisters. The constraints WE created
+		// (addConstraintToWorld tracked every one) are ours to destroy, and
+		// leaving the vector populated left dangling pointers that the next
+		// world's removeConstraintFromWorld could match by address.
+		qDeleteAll(constraints);
+		constraints.clear();
+		for (auto &handle : pickingHandles) {
+			handle.activePickingConstraint = nullptr;
+			handle.activeRigidBodyBeingManipulated = nullptr;
+		}
+
 		for (i = world->getNumCollisionObjects() - 1; i >= 0; i--) {
 			btCollisionObject* obj = world->getCollisionObjectArray()[i];
 			btRigidBody* body = btRigidBody::upcast(obj);
@@ -521,13 +572,22 @@ void Environment::destroyPhysicsWorld()
 			pair_cache->cleanOverlappingPair(pair_array[i], world->getDispatcher());
 	}
 
-	// delete collision shapes
+	// Delete collision shapes. This loop used to iterate an ALWAYS-EMPTY array
+	// (storeCollisionShape had no call sites), so every shape built for every
+	// body leaked on each play/stop cycle — deep audit 2026-09, area 4 F3.
+	// Order: front to back, so a btCompoundShape is destroyed before the child
+	// shapes it points at.
 	for (int j = 0; j < collisionShapes.size(); j++) {
 		btCollisionShape* shape = collisionShapes[j];
 		delete shape;
 	}
 
 	collisionShapes.clear();
+
+	// AFTER the shapes: btConvexTriangleMeshShape reads its striding interface
+	// on the way out.
+	qDeleteAll(meshInterfaces);
+	meshInterfaces.clear();
 
 	delete world;
 	world = 0;
@@ -538,6 +598,10 @@ void Environment::destroyPhysicsWorld()
 	delete broadphase;
 	broadphase = 0;
 
+	// After the broadphase — its pair cache holds the pointer.
+	delete ghostPairCallback;
+	ghostPairCallback = 0;
+
 	delete dispatcher;
 	dispatcher = 0;
 
@@ -546,6 +610,10 @@ void Environment::destroyPhysicsWorld()
 
 	hashBodies.clear();
 	hashBodies.squeeze();
+	// nodeTransforms is deliberately NOT cleared here: restartPhysics() runs
+	// this, and its caller then calls restoreNodeTransformations() to put the
+	// scene back where it was before Play. Clearing it would restore every
+	// physics body to the identity transform.
 }
 
 }
