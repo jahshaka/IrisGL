@@ -1,13 +1,13 @@
 #include "irisgl/mirror/scenemirror.h"
 
 #include <QQuaternion>
-#include <QTextStream>
 #include <QMatrix3x3>
 #include <QMatrix4x4>
 #include <QVector3D>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 #include "irisgl/document/scenegraph/scene.h"
 #include "irisgl/document/scenegraph/scenenode.h"
@@ -39,6 +39,44 @@ using namespace jahshaka::engine;
 namespace {
 inline Vec3 toVec3(const QVector3D &v) { return Vec3(v.x(), v.y(), v.z()); }
 inline Quat toQuat(const QQuaternion &q) { return Quat(q.x(), q.y(), q.z(), q.scalar()); }
+
+/// The mirror's per-frame "has anything changed?" hash (deep audit 2026-09,
+/// area 8 — the biggest measurable Qt cost in the hot path).
+///
+/// Every one of these tests used to build a QString: QTextStream for the
+/// particle signature (an allocation, a locale-aware float format and a
+/// heap-grown buffer per emitter per frame), operator+ chains for textures and
+/// decals, ten QString::arg calls for the sky. They exist ONLY to be compared
+/// with the previous frame's value, so a 64-bit FNV-1a over the same bytes is
+/// the same test with no allocation at all.
+///
+/// Raw-byte hashing of floats is deliberate: it is a CHANGE test, not a
+/// numeric comparison. (A NaN parameter therefore re-pushes every frame
+/// instead of comparing equal to itself — a degenerate authoring state that
+/// costs one extra engine call, never a wrong pixel.)
+struct Hasher {
+    quint64 h = 1469598103934665603ull;          // FNV-1a 64 offset basis
+    void bytes(const void *p, size_t n) {
+        const unsigned char *b = static_cast<const unsigned char *>(p);
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    }
+    /// Any trivially-copyable value (floats, ints, enums, small structs).
+    template <class T> Hasher &operator<<(const T &v) {
+        static_assert(std::is_trivially_copyable<T>::value, "hash raw bytes only");
+        bytes(&v, sizeof(T));
+        return *this;
+    }
+    /// Strings fold in their LENGTH as well as their characters, so that
+    /// ("ab","c") and ("a","bc") cannot collide across field boundaries.
+    Hasher &operator<<(const QString &s) {
+        const quint32 n = quint32(s.size());
+        bytes(&n, sizeof n);
+        bytes(s.utf16(), size_t(s.size()) * sizeof(char16_t));
+        return *this;
+    }
+    Hasher &operator<<(const QColor &c) { return *this << c.rgba(); }
+    Hasher &operator<<(const QVector3D &v) { return *this << v.x() << v.y() << v.z(); }
+};
 }
 
 SceneMirror::SceneMirror(Scene *target) : mTarget(target) {}
@@ -81,10 +119,18 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mTextures.clear();
     for (TextureId t : mIconTextures) mTarget->destroyTexture(t);
     mIconTextures.clear();
+    // Decal-atlas slices are a FIXED, process-wide budget (32 slices), and this
+    // map used to survive setSource: open five worlds with decals and the atlas
+    // was full, after which every decal in the session silently projected
+    // nothing. The atlas is refcounted, so releasing our references here is
+    // enough — a slice another scene still holds stays alive.
+    for (TextureId t : mDecalTextures) if (t) mTarget->destroyTexture(t);
+    mDecalTextures.clear();
     mTarget->setSky(SkyMode::NoSky, 0);   // also clears the engine's reflection cubemap
     for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
     for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
-    mSkySignature.clear();
+    mSkyKind = SkyKind::None;
+    mSkyHash = 0;
     clearSkyAmbient();
     mAmbientPushed = false;
     mSource = scene;
@@ -108,7 +154,7 @@ int SceneMirror::sync()
     mAnyRefractive = false;
     mShadowFilter = ShadowFilter::Hard;
     mMaxShadowResolution = 0;
-    for (auto &child : mSource->getRootNode()->children)
+    for (const auto &child : mSource->getRootNode()->children)
         visit(child, 0, seen);
     removeMissing(seen);
     reclaimUnused();
@@ -160,7 +206,7 @@ void SceneMirror::collectHighlightMeshes(const iris::SceneNodePtr &node,
         if (iris::Mesh *mesh = meshNode->getMesh().data())
             if (MeshId m = engineMesh(mesh)) out.emplace_back(meshNode, m);
     }
-    for (auto &child : node->children) collectHighlightMeshes(child, out);
+    for (const auto &child : node->children) collectHighlightMeshes(child, out);
 }
 
 void SceneMirror::syncHighlight()
@@ -377,6 +423,16 @@ MeshId SceneMirror::wireMeshFor(int kind)
     return mWireMeshes[kind];
 }
 
+void SceneMirror::pushWireColour(Entry &e, const Colour &c)
+{
+    if (!e.wireMaterial) return;
+    if (e.wireColourPushed && e.wireColour == c) return;
+    if (mTarget->setUnlitMaterial(e.wireMaterial, c)) {
+        e.wireColour = c;
+        e.wireColourPushed = true;
+    }
+}
+
 void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
 {
     if (!mLightWires) {
@@ -415,7 +471,9 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     if (!e.wireMaterial) return;
     if (e.wireKind != shape) { if (mTarget->attachMesh(e.wireNode, m, e.wireMaterial)) e.wireKind = shape; }
     const QColor c = light->color;
-    mTarget->setUnlitMaterial(e.wireMaterial, Colour(c.redF(), c.greenF(), c.blueF(), 1.0f));
+    // On change only, like every other push here: setUnlitMaterial schedules a
+    // const-buffer update, and a light's colour is edited by hand, not animated.
+    pushWireColour(e, Colour(c.redF(), c.greenF(), c.blueF(), 1.0f));
     // Wires live in the light node's local space; undo the node's own scale, and
     // size the shape by the light's range so the wire shows the actual falloff
     // volume (the meshes are authored at ring radius 0.5, cone depth 1.5 /
@@ -515,7 +573,7 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     return id;
 }
 
-void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen)
+void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long> &seen)
 {
     if (!node) return;
     seen.insert(node->nodeId);
@@ -539,7 +597,12 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
         iris::Material *material = meshNode->getMaterial().data();
         // The pose authority for this node (null for unskinned meshes).
         e.skeleton = meshNode->getSkeleton();
-        if (mesh && (!e.hasMesh || e.materialPtr != material)) {
+        // A MESH swap has to re-attach too. `e.meshPtr` was written here and
+        // never read anywhere (deep audit 2026-09, area 5): setMesh() on a live
+        // node changed the document and nothing else, which is why the mesh
+        // picker in the properties panel is commented out and why the material
+        // preview replaced whole nodes to change its subject.
+        if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh)) {
             MeshId m = meshFor(mesh);
             MaterialId mat = materialFor(material);
             bool attached = false;
@@ -566,14 +629,37 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
             if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
             if (attached) {
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
-                e.textureSignature.clear();
+                e.texturesPushed = false;
+                e.pbrPushed = false;
                 syncTextures(e, material);
             }
+        } else if (!mesh && e.hasMesh) {
+            // The document dropped the mesh (a node kept, its MeshPtr cleared).
+            // Without this the engine kept drawing the old geometry forever.
+            mTarget->detachMesh(e.node);
+            e.hasMesh = false;
+            e.mesh = 0;
+            e.meshPtr = nullptr;
+            e.gpuSkinned = false;
+            e.boneCount = 0;
+            e.pbrPushed = false;
+            e.texturesPushed = false;
+            e.boundTextures.clear();
         } else if (e.hasMesh && e.material && material) {
-            // Parameters may change every frame from the property panel: push them.
+            // Parameters may change every frame from the property panel, so the
+            // mirror LOOKS every frame — but it only PUSHES on a change.
+            // setPbrMaterial re-applies the whole datablock (a const-buffer
+            // upload) and used to drag an unconditional flushRenderables along
+            // with it through setTwoSidedLighting: the audit's per-frame Hlms
+            // hash recompute for every renderable in the scene.
             PbrParams p;
             if (toPbrParams(material, p)) {
-                mTarget->setPbrMaterial(e.material, p);
+                if (!e.pbrPushed || !(p == e.lastPbr)) {
+                    if (mTarget->setPbrMaterial(e.material, p)) {
+                        e.lastPbr = p;
+                        e.pbrPushed = true;
+                    }
+                }
                 noteRefractive(p);
             }
             syncTextures(e, material);
@@ -603,7 +689,8 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
         // counterpart setParticleSystem needs for exactly that.
         mTarget->removeParticleSystem(e.node);
         e.hasParticles = false;
-        e.particleSignature.clear();
+        e.particleSignature = 0;
+        e.particleTexture = 0;
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
@@ -637,7 +724,7 @@ void SceneMirror::visit(iris::SceneNodePtr node, NodeId parent, QSet<long> &seen
     // `e` is a reference into a QHash: the recursion inserts entries and QHash does not
     // keep value references stable across inserts (use-after-free under ASan). Copy first.
     const NodeId self = e.node;
-    for (auto &child : node->children)
+    for (const auto &child : node->children)
         visit(child, self, seen);
 }
 
@@ -812,30 +899,29 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     if (!e.node) return;
     const QString texPath = ps->texture ? ps->texture->getSource() : QString();
 
-    // Every authored value, in one string. A still emitter costs this build and
-    // nothing else — no engine call, no allocation, no per-particle anything.
-    QString sig;
-    sig.reserve(256);
-    QTextStream s(&sig);
-    s << texPath << '|' << int(ps->shape) << '|' << int(ps->orientation) << '|'
-      << ps->useAdditive << ps->alphaHash << ps->randomRotation
-      << ps->dissipate << ps->dissipateInv << '|'
-      << ps->particlesPerSecond << ',' << ps->speed << ',' << ps->speedError << ','
-      << ps->lifeLength << ',' << ps->lifeError << ',' << ps->particleScale << ','
-      << ps->gravityComplement << ',' << ps->coneAngle << ',' << ps->turbulence << ','
-      << ps->rotationSpeedMin << ',' << ps->rotationSpeedMax << ','
-      << ps->burstDuration << ',' << ps->burstRepeatDelay << ',' << ps->startDelay << ','
-      << ps->maxParticles << '|'
-      << ps->extents.x() << ',' << ps->extents.y() << ',' << ps->extents.z() << ','
-      << ps->innerExtents.x() << ',' << ps->innerExtents.y() << ',' << ps->innerExtents.z() << ','
-      << ps->wind.x() << ',' << ps->wind.y() << ',' << ps->wind.z() << '|'
-      << ps->emitColourStart.rgba() << ',' << ps->emitColourEnd.rgba() << '|';
+    // Every authored value, folded into one 64-bit hash. A still emitter costs
+    // this fold and nothing else — no engine call, no allocation, no
+    // per-particle anything. (It used to be a QTextStream-built QString, which
+    // is what "no allocation" above did NOT mean.)
+    Hasher hs;
+    hs << texPath << int(ps->shape) << int(ps->orientation)
+       << ps->useAdditive << ps->alphaHash << ps->randomRotation
+       << ps->dissipate << ps->dissipateInv
+       << ps->particlesPerSecond << ps->speed << ps->speedError
+       << ps->lifeLength << ps->lifeError << ps->particleScale
+       << ps->gravityComplement << ps->coneAngle << ps->turbulence
+       << ps->rotationSpeedMin << ps->rotationSpeedMax
+       << ps->burstDuration << ps->burstRepeatDelay << ps->startDelay
+       << ps->maxParticles
+       << ps->extents << ps->innerExtents << ps->wind
+       << ps->emitColourStart << ps->emitColourEnd
+       << quint32(ps->colourKeys.size());
     for (const iris::ParticleColourKey &k : ps->colourKeys)
-        s << k.time << ':' << k.r << ',' << k.g << ',' << k.b << ',' << k.a << ';';
-    s << '|';
+        hs << k.time << k.r << k.g << k.b << k.a;
+    hs << quint32(ps->scaleKeys.size());
     for (const iris::ParticleScaleKey &k : ps->scaleKeys)
-        s << k.time << ':' << k.scale << ';';
-    s.flush();
+        hs << k.time << k.scale;
+    const quint64 sig = hs.h;
 
     if (e.hasParticles && e.particleSignature == sig) return;
 
@@ -848,6 +934,7 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     if (mTarget->setParticleSystem(e.node, toParticleDesc(ps, tex))) {
         e.hasParticles = true;
         e.particleSignature = sig;
+        e.particleTexture = tex;   // the engine's definition holds it: keep it alive
     }
 }
 
@@ -863,6 +950,36 @@ void SceneMirror::reclaimUnused()
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
         mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
+    }
+    // Textures, the third cache — and the one that was never reclaimed at all
+    // (deep audit 2026-09, area 5). Browsing an asset library or editing a
+    // material's maps grew mTextures for the life of the process.
+    //
+    // Only the PBR-map cache is reclaimed here. NOT the icon glyphs (a fixed
+    // handful, recreated constantly as helpers toggle), NOT the sky faces (the
+    // sky signature owns their lifetime), and NOT the decal atlas (its slices
+    // are a shared refcounted budget, released wholesale by setSource — a decal
+    // whose node is momentarily unbound must not surrender its slice, because
+    // the atlas can be full when it asks for it back).
+    //
+    // Safe only because engine-side destroyTexture now UNBINDS the texture from
+    // any material that still holds it first: an HlmsPbsDatablock keeps a raw
+    // TextureGpu*, so reclaiming without that would have introduced exactly the
+    // stale-binding crash this lane was told to close before opening.
+    QSet<TextureId> usedTextures;
+    for (const Entry &e : mEntries) {
+        for (TextureId t : e.boundTextures) usedTextures.insert(t);
+        // A particle emitter's map is not a material binding, but it comes out
+        // of the same cache and the engine's particle definition holds it for
+        // as long as the emitter's signature stands.
+        if (e.particleTexture) usedTextures.insert(e.particleTexture);
+    }
+    // The equirect sky samples a plain cache texture, and the engine keeps it
+    // until the sky changes — mSkyKind/mSkyHash own that lifetime, not this.
+    if (mSkyTexture) usedTextures.insert(mSkyTexture);
+    for (auto it = mTextures.begin(); it != mTextures.end();) {
+        if (usedTextures.contains(it.value())) { ++it; continue; }
+        mTarget->destroyTexture(it.value()); it = mTextures.erase(it);
     }
 }
 
@@ -994,17 +1111,33 @@ void SceneMirror::syncTextures(Entry &e, iris::Material *material)
                 binds.append({ PbrTextureSlot::Emissive, path, true });
         }
     }
-    QString signature;
-    for (const Bind &b : binds) signature += QString::number(int(b.slot)) + '=' + b.path + ';';
-    if (signature == e.textureSignature) return;
+    // Which slot gets which file, as one hash: this runs per mesh per frame and
+    // its whole job is to conclude "unchanged" (it used to concatenate a
+    // QString to do it).
+    Hasher hs;
+    hs << quint32(binds.size());
+    for (const Bind &b : binds) hs << int(b.slot) << b.path;
+    const quint64 signature = hs.h;
+    if (e.texturesPushed && signature == e.textureSignature) return;
     e.textureSignature = signature;
+    e.texturesPushed = true;
     bool bound[5] = { false, false, false, false, false };
+    TextureId boundIds[5] = { 0, 0, 0, 0, 0 };
     for (const Bind &b : binds) {
         if (bound[int(b.slot)]) continue;
         TextureId t = textureFor(b.path, b.srgb);
-        if (t && mTarget->setPbrTexture(e.material, b.slot, t)) bound[int(b.slot)] = true;
+        if (t && mTarget->setPbrTexture(e.material, b.slot, t)) {
+            bound[int(b.slot)] = true;
+            boundIds[int(b.slot)] = t;
+        }
     }
     for (int i = 0; i < 5; ++i) if (!bound[i]) mTarget->setPbrTexture(e.material, PbrTextureSlot(i), 0);
+    // What reclaimUnused needs: the IDS, not the paths. A world switch or a
+    // material edit that drops a map leaves the engine texture referenced by
+    // nobody, and before this the mirror simply never freed one.
+    e.boundTextures.assign(boundIds, boundIds + 5);
+    e.boundTextures.erase(std::remove(e.boundTextures.begin(), e.boundTextures.end(), TextureId(0)),
+                          e.boundTextures.end());
 }
 
 bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
@@ -1164,8 +1297,9 @@ TextureId SceneMirror::decalTextureFor(const QString &path, DecalMap kind)
 void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
 {
     if (!e.node) return;
-    const QString sig = decal->resolvedTexturePath + '|' + decal->resolvedNormalPath +
-                        '|' + decal->resolvedEmissivePath;
+    Hasher hs;
+    hs << decal->resolvedTexturePath << decal->resolvedNormalPath << decal->resolvedEmissivePath;
+    const quint64 sig = hs.h;   // three concatenated QStrings per decal per frame, before
     const bool rebind = !e.hasDecal || e.decalSignature != sig;
 
     const TextureId diffuse = decalTextureFor(decal->resolvedTexturePath, DecalMap::Diffuse);
@@ -1206,9 +1340,8 @@ void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
     if (e.wireKind != 4) { if (mTarget->attachMesh(e.wireNode, m, e.wireMaterial)) e.wireKind = 4; }
     // Amber when the decal projects, dim grey when it has no usable image —
     // the difference between "placed" and "placed but blank" has to be visible.
-    mTarget->setUnlitMaterial(e.wireMaterial,
-                              e.hasDecal ? Colour(1.0f, 0.75f, 0.2f, 1.0f)
-                                         : Colour(0.45f, 0.45f, 0.45f, 1.0f));
+    pushWireColour(e, e.hasDecal ? Colour(1.0f, 0.75f, 0.2f, 1.0f)
+                                 : Colour(0.45f, 0.45f, 0.45f, 1.0f));
     // The wire lives in the decal node's local space: size it to the projector
     // box and undo the node's own scale, exactly as the light wires do (the box
     // mesh is authored as a UNIT cube, so the scale IS the extents).
@@ -2124,48 +2257,65 @@ struct ShAccum {
 void SceneMirror::applySky(View *view)
 {
     if (!mSource || !view) return;
-    QString signature;
-    if (mSource->skyType == iris::SkyType::EQUIRECTANGULAR && mSource->skyTexture)
-        signature = "equirect:" + mSource->skyTexture->source;
-    else if (mSource->skyType == iris::SkyType::CUBEMAP && mSource->skyTexture && mSource->skyTexture->isCubeMap())
-        signature = "cubemap:" + QString::number(reinterpret_cast<quintptr>(mSource->skyTexture.data()));
-    else if (mSource->skyType == iris::SkyType::GRADIENT)
-        signature = QString("gradient:%1/%2/%3/%4").arg(mSource->gradientTop.name(), mSource->gradientMid.name(),
-                                                        mSource->gradientBot.name()).arg(mSource->gradientOffset);
-    else if (mSource->skyType == iris::SkyType::REALISTIC) {
+    // WHICH sky (the dispatch below switches on it, and the realistic-bake
+    // debounce asks whether the previous sky was realistic too) plus a hash of
+    // the values it is built from. This used to be one QString built with
+    // startsWith() dispatch — up to ten QString::arg calls per frame whose
+    // only purpose was an equality test (deep audit 2026-09, area 8).
+    SkyKind kind = SkyKind::None;
+    Hasher hs;
+    if (mSource->skyType == iris::SkyType::EQUIRECTANGULAR && mSource->skyTexture) {
+        kind = SkyKind::Equirect;
+        hs << mSource->skyTexture->source;
+    } else if (mSource->skyType == iris::SkyType::CUBEMAP && mSource->skyTexture &&
+               mSource->skyTexture->isCubeMap()) {
+        kind = SkyKind::Cubemap;
+        hs << reinterpret_cast<quintptr>(mSource->skyTexture.data());
+    } else if (mSource->skyType == iris::SkyType::GRADIENT) {
+        kind = SkyKind::Gradient;
+        hs << mSource->gradientTop << mSource->gradientMid << mSource->gradientBot
+           << mSource->gradientOffset;
+    } else if (mSource->skyType == iris::SkyType::REALISTIC) {
+        kind = SkyKind::Realistic;
         const iris::SkyRealistic &s = mSource->skyRealistic;
         // Sky Detail (the bake width) rides in the signature: changing it must
         // re-bake exactly like changing a scattering parameter does.
         // HDR rides in the signature too: with the post chain on, the bake stops
         // before its own tonemap (POST_CHAIN_SPEC §7.1), so toggling HDR must
         // re-bake exactly like changing a scattering parameter does.
-        signature = QString("realistic:%1/%2/%3/%4/%5/%6/%7/%8@%9%10")
-                        .arg(s.luminance).arg(s.reileigh).arg(s.mieCoefficient).arg(s.mieDirectionalG)
-                        .arg(s.turbidity).arg(s.sunPosX).arg(s.sunPosY).arg(s.sunPosZ)
-                        .arg(mSource->skyBakeResolution)
-                        .arg(mSource->hdrEnabled ? "+hdr" : "");
+        hs << s.luminance << s.reileigh << s.mieCoefficient << s.mieDirectionalG
+           << s.turbidity << s.sunPosX << s.sunPosY << s.sunPosZ
+           << mSource->skyBakeResolution << mSource->hdrEnabled;
     }
-    if (signature != mSkySignature) {
+    // A skyless scene hashes to 0, not to the FNV basis: that keeps the initial
+    // (None, 0) state EQUAL to "no sky", so a single-colour sky does not push a
+    // redundant setSky(NoSky) on its first frame the way a non-zero empty hash
+    // would. (The old code compared two empty QStrings and got the same answer.)
+    const quint64 signature = kind == SkyKind::None ? 0 : hs.h;
+    if (kind != mSkyKind || signature != mSkyHash) {
         // Debounce the realistic bake: a slider drag changes the 8 parameters on
         // every event, and the Preetham bake is per-pixel CPU math. Re-bake at
         // most every 150 ms — applySky recomputes the signature next frame, so
         // the final value always lands once the slider settles.
-        if (signature.startsWith("realistic:") && mSkySignature.startsWith("realistic:") &&
+        if (kind == SkyKind::Realistic && mSkyKind == SkyKind::Realistic &&
             mRealisticBakeTimer.isValid() && mRealisticBakeTimer.elapsed() < 150)
             return;
-        mSkySignature = signature;
+        mSkyKind = kind;
+        mSkyHash = signature;
+        mSkyTexture = 0;
         for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
         for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
         // The ambient integral belongs to the sky that is about to be built:
         // drop the old one first so a failed build cannot leave a stale colour.
         clearSkyAmbient();
-        if (signature.startsWith("equirect:")) {
+        if (kind == SkyKind::Equirect) {
             TextureId t = textureFor(mSource->skyTexture->source, true);
+            mSkyTexture = t;   // held against reclaimUnused for as long as the sky stands
             mTarget->setSky(t ? SkyMode::Equirectangular : SkyMode::NoSky, t);
             // Cubemap skies feed environment reflections (IBL); give equirect
             // skies the same by resampling the image into six small faces.
             if (t) applySkyReflection(QImage(mSource->skyTexture->source));
-        } else if (signature.startsWith("cubemap:")) {
+        } else if (kind == SkyKind::Cubemap) {
             // The document keeps the six face images (+X,-X,+Y,-Y,+Z,-Z); upload them.
             const QImage *faces = mSource->skyTexture->cubeFaces();
             bool ok = faces != nullptr;
@@ -2184,7 +2334,7 @@ void SceneMirror::applySky(View *view)
             } else {
                 mTarget->setSky(SkyMode::NoSky, 0);
             }
-        } else if (signature.startsWith("gradient:")) {
+        } else if (kind == SkyKind::Gradient) {
             // Legacy gradientsky.frag is a pure vertical 3-stop ramp: bake it into a
             // narrow equirect strip (row 0 = zenith) and reuse the equirect sky path.
             const float middle = qBound(0.01f, mSource->gradientOffset, 0.99f);
@@ -2212,7 +2362,7 @@ void SceneMirror::applySky(View *view)
                     std::memcpy(strip.scanLine(r), &px[size_t(r) * W * 4u], size_t(W) * 4u);
                 applySkyReflection(strip);
             }
-        } else if (signature.startsWith("realistic:")) {
+        } else if (kind == SkyKind::Realistic) {
             // Legacy realisticsky.frag (Preetham-style scattering), CPU-baked to
             // an equirect image and pushed through the same sky path as gradient.
             const int bakeW = mSource->skyBakeResolution >= 1024 ? 1024

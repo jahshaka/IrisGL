@@ -214,15 +214,36 @@ private:
         bool hasMesh  = false;
         bool hasLight = false;
         bool hasDecal = false;                       // an engine decal is bound
-        QString decalSignature;                      // image guid+path+kind set; re-bind on change
+        quint64 decalSignature = 0;                  // image guid+path+kind set; re-bind on change
         jahshaka::engine::MaterialId material = 0;   // per document material instance
         iris::Material *materialPtr = nullptr;
         jahshaka::engine::MeshId mesh = 0;           // shared engine mesh this entry uses
         iris::Mesh *meshPtr = nullptr;
-        QString textureSignature;                    // which files are bound; re-sync on change
+        /// The PBR state last pushed for `material`, and whether anything was.
+        ///
+        /// setPbrMaterial is NOT free: it re-applies the whole datablock, which
+        /// schedules a const-buffer upload, and Ogre's setTwoSidedLighting used
+        /// to flush every renderable's Hlms hash on top (deep audit 2026-09,
+        /// area 5 — the engine guards that now too). The property panel can
+        /// change these values any frame, so the mirror still has to LOOK every
+        /// frame; it just does not have to PUSH.
+        jahshaka::engine::PbrParams lastPbr;
+        bool pbrPushed = false;
+        quint64 textureSignature = 0;                // which files are bound; re-sync on change
+        bool texturesPushed = false;                 // ...and whether anything was ever pushed
+        /// The engine texture ids this entry's material has bound right now, so
+        /// reclaimUnused can free the ones no live entry references any more.
+        /// The signature alone cannot do it: it says WHICH FILES, not which ids,
+        /// and a reclaim needs ids.
+        std::vector<jahshaka::engine::TextureId> boundTextures;
         jahshaka::engine::NodeId wireNode = 0;       // light wire shape, child of `node`
         jahshaka::engine::MaterialId wireMaterial = 0;
         int wireKind = -1;                           // which shape is attached
+        /// Last colour pushed to `wireMaterial`. A light's wire colour changes
+        /// only when the user edits the light, but the push happened every
+        /// frame, and setUnlitMaterial schedules a const-buffer update per call.
+        jahshaka::engine::Colour wireColour;
+        bool wireColourPushed = false;
         bool hasIcon = false;                        // light icon billboard on wireNode
         QString iconSignature;                       // icon image path; recreate on change
         // Planar reflections: the last flag pushed to the engine, so the
@@ -230,16 +251,22 @@ private:
         // Arming a reflector derives a world plane and registers a PBS
         // receiver; it is not the kind of call to repeat 60 times a second.
         int planarReflector = -1;
-        bool hasBillboards = false;                  // light icon mirrored as a billboard set
-        QString billboardSignature;                  // texture + blend; recreate on change
+        // (hasBillboards/billboardSignature lived here and had no reader or
+        // writer anywhere in the tree — deleted with the deep-audit fix wave.)
         // Particles (PARTICLES_FX2_SPEC): the engine simulates, so the mirror
         // pushes PARAMETERS, not particles — and only when they change. The
         // signature covers every authored value, so a still emitter costs one
-        // string build per sync and no engine call at all. (Before the adoption
+        // 64-bit hash per sync and no engine call at all. (Before the adoption
         // this branch rebuilt a std::vector<BillboardInstance> of every live
-        // particle, sixty times a second.)
+        // particle, sixty times a second; before the deep-audit fix wave the
+        // signature itself was a QString built through QTextStream — an
+        // allocation and a locale-aware float format per emitter per frame,
+        // under a comment that claimed it allocated nothing.)
         bool hasParticles = false;
-        QString particleSignature;
+        quint64 particleSignature = 0;
+        /// The map the engine's particle definition is holding. Comes out of
+        /// the shared texture cache, so reclaimUnused has to see it.
+        jahshaka::engine::TextureId particleTexture = 0;
         // Skinning (GPU_SKINNING_SPEC): the NODE's own skeleton, not the mesh
         // asset's shared rig template. Pose state is per node, so two duplicates
         // of one character animate independently — on the GPU each node's Item
@@ -280,6 +307,8 @@ private:
     /// engine call at all.
     void syncParticles(Entry &e, iris::ParticleSystemNode *ps);
     void syncLightWires(Entry &e, iris::LightNode *light);
+    /// Colours an entry's wire material, on change only.
+    void pushWireColour(Entry &e, const jahshaka::engine::Colour &c);
     /// Pushes a DecalNode into the engine (DECALS_SPEC §5.3) and drives its
     /// wire box. A decal whose image is missing or whose atlas is full leaves
     /// the node decal-free — the wire box still draws, so the user sees the
@@ -295,7 +324,7 @@ private:
     void syncHighlight();
     void syncGrid();
     jahshaka::engine::MeshId wireMeshFor(int kind);
-    void visit(iris::SceneNodePtr node, jahshaka::engine::NodeId parent, QSet<long> &seen);
+    void visit(const iris::SceneNodePtr &node, jahshaka::engine::NodeId parent, QSet<long> &seen);
     void removeMissing(const QSet<long> &seen);
     /// Frees engine meshes/materials no live entry references (asset browsing would
     /// otherwise grow them for the life of the process; pointer keys could alias).
@@ -347,6 +376,18 @@ private:
     jahshaka::engine::Scene *mTarget;
     iris::ScenePtr           mSource;
     QHash<long, Entry>       mEntries;         // keyed by iris SceneNode::nodeId
+    /// Document mesh/material -> engine object, keyed by RAW POINTER.
+    ///
+    /// KNOWN RESIDUAL (deep audit 2026-09, area 5, deliberately not fixed here):
+    /// the allocator can hand a freed iris::Mesh's address to a new one, and a
+    /// stale entry would then alias the wrong engine mesh. reclaimUnused runs
+    /// every sync() and erases any entry no live Entry references, which closes
+    /// the window to "a mesh freed and a new one allocated at the same address
+    /// between two syncs, while the old one was still referenced" — i.e. it
+    /// cannot happen through the mirror's own bookkeeping. Closing it properly
+    /// needs a stable identity ON iris::Mesh/iris::Material (a monotonic
+    /// generation counter or the asset guid); neither type has one today, and
+    /// adding one is a document-model change, not a mirror change.
     QHash<iris::Mesh *, jahshaka::engine::MeshId> mMeshes;
     /// Reused across frames so a per-frame pose push allocates nothing.
     std::vector<jahshaka::engine::BonePose> mPoseScratch;
@@ -355,7 +396,19 @@ private:
     QHash<QString, jahshaka::engine::TextureId> mIconTextures;   // light icon glyphs (Qt resources)
     jahshaka::engine::MaterialId mDefaultMaterial = 0;
     bool mLightWires = true;
-    QString mSkySignature;
+    /// Which sky the engine currently shows, and a 64-bit hash of the values it
+    /// was built from. Two fields rather than one string because applySky
+    /// DISPATCHES on the kind (and the realistic-bake debounce asks "was the
+    /// previous sky also realistic?"), while the parameters only ever need an
+    /// equality test — and building the parameter string cost ten QString::arg
+    /// calls per frame to conclude nothing had changed.
+    enum class SkyKind { None, Equirect, Cubemap, Gradient, Realistic };
+    SkyKind mSkyKind = SkyKind::None;
+    quint64 mSkyHash = 0;
+    /// The equirect sky's texture, taken from the shared cache (unlike the
+    /// cubemap/gradient/realistic paths, which upload their own). Held so
+    /// reclaimUnused does not free what the engine's sky is sampling.
+    jahshaka::engine::TextureId mSkyTexture = 0;
     jahshaka::engine::TextureId mSkyFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
     // Faces the reflection (IBL) cubemap was built from; kept until the sky
     // changes (the engine copies them, but destroy-after-copy stays ours).
