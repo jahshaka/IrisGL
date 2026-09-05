@@ -31,8 +31,6 @@ class btDynamicsWorld;
 class btStridingMeshInterface;
 class btGhostPairCallback;
 
-class CharacterController;
-
 namespace iris
 {
 
@@ -59,22 +57,12 @@ class Environment
 {
 public:
 
-	bool walkForward = 0;
-	bool walkBackward = 0;
-	bool walkLeft = 0;
-	bool walkRight = 0;
-	iris::Vec2 walkDir;
-	bool jump = 0;
-
     Environment();
     ~Environment();
 
-	QHash<QString, CharacterController*> characterControllers;
 	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;
     QHash<QString, iris::Mat4> nodeTransforms;
-
-	void setDirection(iris::Vec2 dir);
 
 	void addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node);
 	/// Adds the body AND takes ownership of every allocation behind it (the
@@ -95,18 +83,9 @@ public:
     void addConstraintToWorld(btTypedConstraint *constraint, bool disableCollisions = true);
     void removeConstraintFromWorld(btTypedConstraint *constraint);
 
-	void addCharacterControllerToWorldUsingNode(const iris::SceneNodePtr &node);
-	void removeCharacterControllerFromWorld(const QString &guid);
-	/// Unregisters and destroys every character controller (teardown path).
-	void removeAllCharacterControllersFromWorld();
-	CharacterController *getActiveCharacterController();
-
 	void initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode);
-	void updateCharacterTransformFromSceneNode(const iris::SceneNodePtr rootNode);
 
     btDynamicsWorld *getWorld();
-
-	void updateCharacterControllers(float delta);
 
     // These are special functions used for creating a constraint to drag bodies
 	void simulatePhysics();
@@ -153,13 +132,7 @@ private:
     /// NOT own. One per world; deleted after the broadphase.
     btGhostPairCallback *ghostPairCallback = nullptr;
 
-	btVector3 walkDirection;
 	btScalar worldYGravity;
-
-	CharacterController *activeCharacterController;
-
-	/// Takes `controller` off the world's action list and out of the broadphase.
-	void detachCharacterControllerFromWorld(CharacterController *controller);
 
     bool simulating;
     bool simulationStarted;

@@ -231,7 +231,6 @@ bool SceneNode::isStaticEligible() const
     case SceneNodeType::ParticleSystem:
     case SceneNodeType::Decal:
     case SceneNodeType::Camera:
-    case SceneNodeType::Viewer:
         return false;
     case SceneNodeType::Empty:
     case SceneNodeType::Mesh:

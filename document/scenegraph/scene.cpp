@@ -17,7 +17,6 @@ For more information see the LICENSE file
 #include "document/scenegraph/lightnode.h"
 #include "document/scenegraph/decalnode.h"
 #include "document/scenegraph/cameranode.h"
-#include "document/scenegraph/viewernode.h"
 #include "document/scenegraph/meshnode.h"
 #include "document/scenegraph/particlesystemnode.h"
 #include "document/scenegraph/scenepicking.h"
@@ -441,14 +440,6 @@ void Scene::addNode(SceneNodePtr node)
         particleSystems.insert(node->getGUID(), particleSystem);
     }
 
-    if (node->sceneNodeType == SceneNodeType::Viewer) {
-        auto viewer = node.staticCast<iris::ViewerNode>();
-        viewers.insert(node->getGUID(), viewer);
-
-        if (!vrViewer)
-			vrViewer = viewer;
-    }
-
     // CAMERAS_SPEC §3: scene-graph cameras. Reachable only now that the
     // CameraNode constructor sets its own type — before that a camera added to
     // a scene arrived here as an Empty and was never registered.
@@ -547,21 +538,6 @@ void Scene::removeNode(SceneNodePtr node)
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
         particleSystems.remove(particleSystems.key(node.staticCast<iris::ParticleSystemNode>()));
-    }
-
-    if (node->sceneNodeType == SceneNodeType::Viewer) {
-        auto viewer = node.staticCast<iris::ViewerNode>();
-        viewers.remove(viewer->getGUID());
-
-        // Removing a viewer only changes the ACTIVE viewer when it WAS the
-        // active one; then any remaining viewer takes over, otherwise there is
-        // no active viewer left. (The old else-branch walked the iterator to
-        // constEnd() and dereferenced it — past-the-end read on every removal
-        // of a non-active viewer.)
-        if (vrViewer == viewer) {
-            if (viewers.isEmpty()) vrViewer.reset();
-            else vrViewer = *viewers.constBegin();
-        }
     }
 
     if (node->sceneNodeType == SceneNodeType::Camera) {
@@ -716,7 +692,6 @@ void Scene::cleanup()
     // strong `SceneNode::scene`, still pinned the scene itself).
     camera.clear();
     rootNode.clear();
-    vrViewer.clear();
 
     skyTexture.clear();
 
@@ -724,7 +699,6 @@ void Scene::cleanup()
     decals.clear();
     meshes.clear();
     particleSystems.clear();
-    viewers.clear();
     cameras.clear();
     nodes.clear();
     socketAttachments.clear();   // a third strong reference to attached nodes
