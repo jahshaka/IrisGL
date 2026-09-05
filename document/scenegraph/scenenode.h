@@ -210,6 +210,51 @@ public:
 	// and uses the actual transform of the body.
 	bool useInterpolatedPhysicsTransform = true;
 
+    // ---- COLLISION CONTENT (AVATAR_LOCOMOTION_SPEC §6.3, option C) --------
+    //
+    // "This mesh is something a character can walk into." Only `isPhysicsBody`
+    // nodes were ever in the collision world, so an imported level mesh was
+    // invisible to a character and the user walked through their own building.
+    // This flag is the discoverable, switchable middle road the spec picked
+    // over silently colliding everything (option B) and over making the user
+    // find `node.physics` (option A).
+    //
+    // Default ON for MESH nodes and off for everything else — an empty, a
+    // light or a camera is not a wall. It is NOT a physics body: nothing here
+    // gets mass, a motion state or a simulated transform; the world gets a
+    // static triangle-mesh collider that only exists to be swept against, and
+    // ONLY when the scene actually contains an avatar (Environment builds them
+    // lazily for exactly that reason — the spec's own cost objection).
+    bool collisionEnabled = false;
+
+    bool isCollisionEnabled() const { return collisionEnabled; }
+    void setCollisionEnabled(bool on)
+    {
+        collisionEnabled = on;
+        notifyChanged(NodeChange::Flags);
+    }
+
+    // ---- THE AVATAR COMPONENT (AVATAR_LOCOMOTION_SPEC §6) ----------------
+    //
+    // Null on every node but an avatar wrapper. A POINTER rather than a value
+    // member because 8 bytes on every node in every scene is the price of a
+    // feature almost no node has, and because the component owns a Bullet cast
+    // shape that a plain value member would drag into scenenode.h's include
+    // graph.
+    //
+    // It lives in the DOCUMENT, not in the mirror: the mirror's per-node state
+    // is destroyed by `SceneMirror::evacuateEngineObjects` on every
+    // editor<->player page switch (§3.2a), so a movement component kept there
+    // would reset its velocity, its coyote clock and its jump counter every
+    // time the user toggled pages while playing.
+    AvatarMovementPtr avatarMovement;
+
+    bool hasAvatarComponent() const { return !avatarMovement.isNull(); }
+    /// The component, or null. Borrowed — the node owns it.
+    AvatarMovement *avatar() const { return avatarMovement.data(); }
+    /// Installs (or replaces) the component. Passing a null pointer removes it.
+    void setAvatarComponent(const AvatarMovementPtr &component);
+
     PhysicsProperty physicsProperty;
 
     bool pickable;

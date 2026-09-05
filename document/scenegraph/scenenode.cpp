@@ -27,6 +27,7 @@ For more information see the LICENSE file
 #include "core/properties/property.h"
 #include "document/assets/mesh.h"
 #include "document/assets/skeleton.h"
+#include "document/physics/avatarmovement.h"
 #include "core/math/mathhelper.h"
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/meshnode.h"
@@ -102,6 +103,12 @@ SceneNode::~SceneNode()
 SceneNodePtr SceneNode::create()
 {
     return QSharedPointer<SceneNode>(new SceneNode());
+}
+
+void SceneNode::setAvatarComponent(const AvatarMovementPtr &component)
+{
+    avatarMovement = component;
+    notifyChanged(NodeChange::Flags);
 }
 
 QString SceneNode::getName()
@@ -689,6 +696,20 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	node->pickable		= this->pickable;
 	node->planarReflector = this->planarReflector;
 	node->attached		= this->attached;
+	// Whether a character can walk into the copy (AVATAR_LOCOMOTION_SPEC §6.3).
+	// The constructor already set the TYPE default; this carries the user's
+	// override, so duplicating a mesh you had made non-solid does not hand back
+	// a solid one.
+	node->collisionEnabled = this->collisionEnabled;
+	// THE AVATAR COMPONENT, DEEP-COPIED. Sharing the pointer would put two
+	// scene nodes on one movement component: both would be stepped, each would
+	// overwrite the other's velocity and jump counter, and only one of them
+	// would appear to move. A duplicate of a character is a SECOND character.
+	if (this->avatarMovement) {
+		auto copy = AvatarMovementPtr(new AvatarMovement());
+		copy->setParams(this->avatarMovement->params());
+		node->setAvatarComponent(copy);
+	}
     // The user's SCENE_STATIC decision travels with the copy (the derived hint
     // does not: the copy is about to be parented somewhere, and the policy pass
     // that follows every add re-derives it). Without this a duplicate of a node

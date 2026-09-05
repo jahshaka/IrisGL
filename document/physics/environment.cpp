@@ -4,6 +4,14 @@
 
 #include "btBulletDynamicsCommon.h"
 #include "BulletCollision/CollisionDispatch/btGhostObject.h"
+#include "BulletCollision/CollisionShapes/btBvhTriangleMeshShape.h"
+
+#include "document/physics/avatarmovement.h"
+#include "document/scenegraph/meshnode.h"
+#include "document/scenegraph/scene.h"
+#include "document/scenegraph/scenenode.h"
+#include "document/assets/mesh.h"
+#include "core/geometry/trimesh.h"
 
 namespace iris
 {
@@ -118,6 +126,26 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 
 	createPhysicsBodiesFromNode(rootNode);
 
+	// AVATARS, in DOCUMENT ORDER (depth first from the root) — the order §8.5's
+	// "auto-possess the first avatar in the scene" is defined against, and the
+	// order updateAvatarMovement steps them in.
+	std::function<void(const SceneNodePtr &)> registerAvatars = [&](const SceneNodePtr &node) {
+		const int kids = node->childCount();
+		for (int i = 0; i < kids; ++i) {
+			iris::SceneNode *raw = node->childAt(i);
+			if (!raw) continue;
+			auto child = raw->sharedFromThis();
+			if (child->hasAvatarComponent()) addAvatarToWorld(child);
+			registerAvatars(child);
+		}
+	};
+	registerAvatars(rootNode);
+
+	// §6.3 option C, and its cost fence: this returns immediately when the
+	// scene has no avatar in it, so a scene that never had a character costs
+	// exactly what it cost before this feature existed.
+	buildCollisionContent(rootNode);
+
 	// now add constraints
 	// TODO - avoid looping like this, get constraint list -- list and then use that
 	// TODO - handle children of children?
@@ -167,8 +195,159 @@ void Environment::stepSimulation(float delta)
 {
     if (simulating) {
 		world->stepSimulation(delta);
+		// AVATAR_LOCOMOTION_SPEC §6.3: the seam the 2016 controller update
+		// left. AFTER the rigid-body solve, so the sweeps see this frame's
+		// world, and OUTSIDE bullet's substepping, because the movement
+		// component does its own fixed sub-stepping (§6.1) and a component
+		// stepped from a bullet internal tick would be stepped a variable
+		// number of times per frame — defect 3 of the removed controller.
+		updateAvatarMovement(delta);
 		//drawDebugShapes();
     }
+}
+
+// ---------------------------------------------------------------------------
+// AVATARS (AVATAR_LOCOMOTION_SPEC §6)
+
+void Environment::addAvatarToWorld(const iris::SceneNodePtr &node)
+{
+	if (!node || !node->hasAvatarComponent()) return;
+	const QString guid = node->getGUID();
+	for (const auto &weak : avatars) {
+		auto existing = weak.toStrongRef();
+		if (existing && existing->getGUID() == guid) return;
+	}
+	avatars.append(node.toWeakRef());
+	// PRE-PLAY TRANSFORM, so Stop puts the character back where the user left
+	// it. An avatar is NOT a physics body, so it never appeared in this hash
+	// and `restoreNodeTransformations` would have left it wherever it walked to
+	// — the spec's acceptance step 5 ("Stop returns both to their pre-play
+	// transforms") read as a defect.
+	nodeTransforms.insert(guid, node->getGlobalTransform());
+	// R6, answered: an avatar spawned DURING play registers on the spot rather
+	// than being refused. Its capsule is fitted here so a spawn that happens
+	// before the mesh finished loading still gets the right dimensions.
+	if (auto *movement = node->avatar()) {
+		movement->fitCapsuleToNode(node);
+		movement->reset();
+	}
+	// A late arrival needs something to stand on: content built lazily at play
+	// start would otherwise be missing for the first avatar spawned after it.
+	if (auto scene = node->getScene())
+		buildCollisionContent(scene->getRootNode());
+}
+
+void Environment::removeAvatarFromWorld(const QString &guid)
+{
+	for (int i = avatars.size() - 1; i >= 0; --i) {
+		auto node = avatars[i].toStrongRef();
+		if (!node || node->getGUID() == guid) avatars.removeAt(i);
+	}
+}
+
+void Environment::removeAllAvatarsFromWorld()
+{
+	avatars.clear();
+}
+
+void Environment::updateAvatarMovement(float delta)
+{
+	// PRUNE first, in one backward pass. An avatar deleted mid-play (gate M7)
+	// leaves an expired weak pointer, and a node whose scene is gone has been
+	// taken out of the document — either way the world must stop stepping it,
+	// and it must stop stepping it BEFORE the step loop so the loop can run
+	// forward.
+	for (int i = avatars.size() - 1; i >= 0; --i) {
+		auto node = avatars[i].toStrongRef();
+		// The SCENE'S REGISTRY is the truth for "still in the document", not the
+		// shared pointer: `Scene::removeNode` drops the guid from `nodes` but
+		// does NOT clear the node's own scene back-pointer, and the undo stack
+		// deliberately keeps a deleted node alive (SCENEGRAPH audit §3.3). So a
+		// deleted-but-undoable avatar has a live pointer AND a live scene
+		// pointer, and only its absence from the registry says it is gone.
+		auto scene = node ? node->getScene() : iris::ScenePtr();
+		const bool gone = !node || !node->hasAvatarComponent() || !scene
+		                  || !scene->nodes.contains(node->getGUID());
+		if (gone) avatars.removeAt(i);
+	}
+
+	// EVERY avatar, possessed or not, in REGISTRATION ORDER, and no `break`:
+	// the removed controller iterated a QHash and stopped at the first active
+	// entry, so with two characters the one that walked was whichever the hash
+	// happened to order first (§4.4 defect 1). Registration order is document
+	// order, which is what makes a two-avatar run reproducible.
+	for (int i = 0; i < avatars.size(); ++i) {
+		auto node = avatars[i].toStrongRef();
+		if (!node) continue;
+		node->avatar()->step(world, node, delta, world ? float(world->getGravity().y()) : -10.0f);
+	}
+}
+
+void Environment::buildCollisionContent(const iris::SceneNodePtr &rootNode)
+{
+	if (!rootNode || !world) return;
+	// LAZY, and this is the whole cost story (§6.3's objection to option B):
+	// no avatar in the scene means no character can walk into anything, so
+	// nothing is built and Play costs exactly what it costs today.
+	if (avatars.isEmpty()) return;
+
+	std::function<void(const iris::SceneNodePtr &)> walk = [&](const iris::SceneNodePtr &node) {
+		const int kids = node->childCount();
+		for (int i = 0; i < kids; ++i) {
+			iris::SceneNode *raw = node->childAt(i);
+			if (!raw) continue;
+			auto child = raw->sharedFromThis();
+			// A node that is ALREADY a physics body has a collider; giving it a
+			// second one would make the character collide with the box twice.
+			// An avatar's own subtree is skipped too — a character must not be
+			// a wall to itself.
+			const bool skip = child->isPhysicsBody || child->hasAvatarComponent();
+			if (!skip && child->getSceneNodeType() == iris::SceneNodeType::Mesh
+			    && child->isCollisionEnabled()
+			    && !collisionContentNodes.contains(child->getGUID())) {
+				auto meshNode = child.staticCast<iris::MeshNode>();
+				auto mesh = meshNode->getMesh();
+				if (mesh && mesh->getTriMesh() && !mesh->getTriMesh()->triangles.isEmpty()) {
+					btTriangleMesh *tri = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(mesh);
+					// A BVH shape, built once: this is static content and the
+					// sweep is the only thing that ever queries it.
+					auto *shape = new btBvhTriangleMeshShape(tri, true);
+					// The GLOBAL scale, read off the transform's basis columns:
+					// the document exposes only a LOCAL scale, and using it
+					// here would silently ignore every scaled parent — the
+					// class of bug where the collider is a tenth the size of
+					// the wall you can see.
+					const auto xform = child->getGlobalTransform();
+					const float sx = iris::Vec3(xform(0, 0), xform(1, 0), xform(2, 0)).length();
+					const float sy = iris::Vec3(xform(0, 1), xform(1, 1), xform(2, 1)).length();
+					const float sz = iris::Vec3(xform(0, 2), xform(1, 2), xform(2, 2)).length();
+					shape->setLocalScaling(btVector3(sx, sy, sz));
+					btTransform t;
+					t.setIdentity();
+					const auto pos = child->getGlobalPosition();
+					const auto rot = child->getGlobalRotation();
+					t.setOrigin(btVector3(pos.x(), pos.y(), pos.z()));
+					t.setRotation(btQuaternion(rot.x(), rot.y(), rot.z(), rot.scalar()));
+					auto *obj = new btCollisionObject();
+					obj->setCollisionShape(shape);
+					obj->setWorldTransform(t);
+					obj->setCollisionFlags(obj->getCollisionFlags()
+					                       | btCollisionObject::CF_STATIC_OBJECT);
+					world->addCollisionObject(obj);
+					// The world owns all three now; destroyPhysicsWorld's
+					// collision-object loop deletes the object, and the shape
+					// and its triangle data ride the same owned arrays every
+					// other body's do.
+					collisionShapes.push_back(shape);
+					meshInterfaces.append(tri);
+					collisionObjects.insert(child->getGUID(), obj);
+					collisionContentNodes.insert(child->getGUID());
+				}
+			}
+			walk(child);
+		}
+	};
+	walk(rootNode);
 }
 
 void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
@@ -186,7 +365,11 @@ void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
 void Environment::restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node)
 {
 	for (auto &child : node->children()) {
-		if (child->isPhysicsBody && nodeTransforms.contains(child->getGUID()))
+		// Physics bodies AND avatars: the movement component writes the wrapper
+		// node's transform every frame, and nothing else would ever put it back
+		// (AVATAR_LOCOMOTION_SPEC §2 step 5).
+		const bool restorable = child->isPhysicsBody || child->hasAvatarComponent();
+		if (restorable && nodeTransforms.contains(child->getGUID()))
 			child->setGlobalTransform(nodeTransforms.value(child->getGUID()));
 		restoreNodeTransformationsRecursive(child);
 	}
@@ -407,6 +590,13 @@ float Environment::getWorldGravity()
 void Environment::destroyPhysicsWorld()
 {
 	// this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
+
+	// The avatar registry holds no world object, but it must not outlive the
+	// world it swept against: a component stepped after this would hand a
+	// dangling btCollisionWorld* to convexSweepTest.
+	avatars.clear();
+	collisionContentNodes.clear();
+	collisionObjects.clear();
 
 	if (world) {
 		int i;

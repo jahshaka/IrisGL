@@ -15,6 +15,7 @@
 
 #include <QVector>
 #include <QHash>
+#include <QSet>
 
 #include "btBulletDynamicsCommon.h"
 
@@ -94,6 +95,29 @@ public:
 	void stopSimulation();
 	void stepSimulation(float delta);
 
+	// ---- AVATARS (AVATAR_LOCOMOTION_SPEC §6.3) ---------------------------
+	//
+	// The seam the 2016 `updateCharacterControllers` call left behind, filled
+	// with a component that owns NOTHING in the world. Every registered avatar
+	// steps, possessed or not (§8.4: an unpossessed avatar must idle, not
+	// freeze), and there is no `break` — the defect that made "which of two
+	// characters walks" depend on QHash iteration order is not reproduced.
+	void addAvatarToWorld(const iris::SceneNodePtr &node);
+	void removeAvatarFromWorld(const QString &guid);
+	void removeAllAvatarsFromWorld();
+	int avatarCount() const { return avatars.size(); }
+	/// Steps every registered avatar's movement component. Called from
+	/// stepSimulation AFTER the rigid-body solve, so a sweep sees this frame's
+	/// world.
+	void updateAvatarMovement(float delta);
+
+	/// Static triangle-mesh colliders for every `collisionEnabled` mesh that is
+	/// not already a physics body (§6.3 option C). Built LAZILY — only when the
+	/// scene actually contains an avatar — because the spec's own objection to
+	/// option B was the seconds-per-Play cost of building a BVH for a whole
+	/// level, and a scene with no character has nothing to collide with.
+	void buildCollisionContent(const iris::SceneNodePtr &rootNode);
+
 	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
 	void restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node);
 
@@ -120,6 +144,15 @@ private:
     btDynamicsWorld             *world;
 	
 	QHash<int, PickingHandle> pickingHandles;
+
+    /// The registered avatars, WEAKLY. A strong reference here would make the
+    /// world the thing that keeps a deleted avatar alive, and "delete a moving
+    /// avatar mid-play" (gate M7) would then be a leak rather than a removal.
+    /// Expired entries are pruned by updateAvatarMovement.
+    QVector<iris::SceneNodeWPtr> avatars;
+    /// The guids of the nodes `buildCollisionContent` gave a static collider,
+    /// so a second call is idempotent.
+    QSet<QString> collisionContentNodes;
 
     QVector<btTypedConstraint*> constraints;
     /// Owned. Destroyed front-to-back at teardown, so a compound shape comes

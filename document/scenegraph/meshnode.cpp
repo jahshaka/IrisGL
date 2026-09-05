@@ -52,6 +52,14 @@ MeshNode::MeshNode() {
     sceneNodeType = SceneNodeType::Mesh;
 
     faceCullingMode = FaceCullingMode::DefinedInMaterial;
+
+    // AVATAR_LOCOMOTION_SPEC §6.3 option C: a mesh is something a character can
+    // walk into, unless the user says otherwise. ON here and off on every other
+    // node type — this is the ONE place the default lives, so the flag reaches
+    // imported models, primitives and library instances alike without any of
+    // those paths knowing about it. It costs nothing until a scene with an
+    // avatar in it starts playing (Environment builds the colliders lazily).
+    collisionEnabled = true;
 }
 
 // @todo: cleanup previous mesh item

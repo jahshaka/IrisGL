@@ -174,6 +174,7 @@ set(SRCS
 	document/materials/renderstates.cpp
     document/materials/rasterizerstate.cpp
     import/modelloader.cpp
+    document/physics/avatarmovement.cpp
     document/physics/environment.cpp
     document/physics/physicshelper.cpp
 
@@ -242,6 +243,7 @@ set (HEADERS
     document/materials/postfx/fxaapostprocess.h
     document/materials/rasterizerstate.h
 	import/modelloader.h
+    document/physics/avatarmovement.h
     document/physics/environment.h
     document/physics/physicshelper.h
     document/physics/physicsproperties.h

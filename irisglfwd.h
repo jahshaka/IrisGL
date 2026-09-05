@@ -69,11 +69,15 @@ class BoundingSphere;
 class VertexBuffer;
 class IndexBuffer;
 class AABB;
+/// The avatar movement component (AVATAR_LOCOMOTION_SPEC §6), carried by the
+/// avatar WRAPPER node and by nothing else.
+class AvatarMovement;
 
 typedef QSharedPointer<iris::Animation> AnimationPtr;
 typedef QSharedPointer<Shader> ShaderPtr;
 typedef QSharedPointer<Scene> ScenePtr;
 typedef QSharedPointer<SceneNode> SceneNodePtr;
+typedef QSharedPointer<AvatarMovement> AvatarMovementPtr;
 
 /// The scene graph's NON-owning links. The tree has exactly one ownership
 /// direction — a parent owns its children — so the back-references (child to
