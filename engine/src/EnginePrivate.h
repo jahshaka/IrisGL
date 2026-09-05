@@ -1603,6 +1603,7 @@ public:
 
     Scene *createScene(const std::string &name) override;
     void *documentGraphScene() override;
+    bool  isHeadless() const override { return mHeadless; }
 
     void destroyScene(Scene *scene) override;
 
@@ -1710,6 +1711,9 @@ private:
     void           *mDisplay = nullptr;
 #endif
     bool            mHlmsRegistered = false;
+    /// EngineConfig::headless: the NULL render system is loaded, mNullWindow is
+    /// the 1x1 window IT created at boot, and no View can exist.
+    bool            mHeadless = false;
     /// Plugin_ParticleFX2 loaded: the emitter/affector factories exist. False
     /// leaves billboard sets working and setParticleSystem failing cleanly.
     bool            mHasParticleFX2 = false;

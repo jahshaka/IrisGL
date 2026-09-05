@@ -592,11 +592,23 @@ public:
     /// holds, every document that has not met a SceneMirror. It renders nothing
     /// and is never bound to a View.
     ///
-    /// Creating it forces the backend's one-time preparation (a surfaceless
-    /// window and the Hlms/resource registration a scene manager cannot exist
-    /// without), which is why the host asks for it exactly once, right after
-    /// Engine::create(), and hands it to iris::graph.
+    /// Creating it forces the backend's one-time preparation — the
+    /// Hlms/resource registration a scene manager cannot exist without, and, on
+    /// a RENDERING boot only, a surfaceless window to hang that registration
+    /// on. A HEADLESS engine (EngineConfig::headless) already has both when
+    /// create() returns, so asking for this costs nothing there.
+    ///
+    /// Hosts ask for it once, before their first document node, and hand it to
+    /// iris::graph. On a rendering boot, asking BEFORE the first real View is
+    /// what makes the backend create that surfaceless window ahead of the
+    /// on-screen one; hosts that can wait should wait (Studio's EngineHost
+    /// registers it lazily for exactly this reason).
     virtual void *documentGraphScene() = 0;
+    /// True when this engine was created with EngineConfig::headless — the NULL
+    /// render system, no display, no device, and no View of any kind. Hosts
+    /// that decide what to show read it instead of guessing from a failed
+    /// createView().
+    virtual bool  isHeadless() const = 0;
     /// Destroys the Scene and every node, mesh and material it owns. Views bound to
     /// it are detached first (they stay alive, showing nothing).
     virtual void   destroyScene(Scene *) = 0;

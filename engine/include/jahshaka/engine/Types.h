@@ -648,6 +648,33 @@ enum class Backend { Vulkan, OpenGL };
 /// Nothing in the engine is baked to a build-machine path.
 struct EngineConfig {
     Backend     backend = Backend::Vulkan;
+    /// HEADLESS: boot the backend's NULL render system instead of `backend`
+    /// (SPECS/SCENEGRAPH_SPEC.md §3b, v2). Everything that is not pixels works
+    /// exactly as it does on a real device — scenes, the document scene graph,
+    /// nodes, meshes, materials, queries, transforms — and NOTHING renders:
+    ///
+    ///   * no display, no GPU and no driver are needed or opened (this is the
+    ///     one mode that runs with DISPLAY unset);
+    ///   * the render system creates its own 1x1 surfaceless window at boot,
+    ///     which is what satisfies Ogre's window-before-SceneManager rule, so
+    ///     the engine never makes a window of its own;
+    ///   * createView() AND createOffscreenView() REFUSE (lastError() says so):
+    ///     a NULL-render-system texture has no contents, and returning a View
+    ///     whose readPixels answers uninitialised memory would be worse than a
+    ///     clean "no";
+    ///   * renderOneFrame() is legal and does nothing — with no View there is
+    ///     nothing to draw into.
+    ///
+    /// ONE RENDER SYSTEM PER PROCESS: `Ogre::Root` is a singleton and its
+    /// render system is chosen once, at boot. A process is EITHER headless OR
+    /// rendering; there is no mixed mode and no way to upgrade one into the
+    /// other. Hosts pick at startup (Studio: `--headless` / `--dump-api-docs`
+    /// and the document-only suites).
+    ///
+    /// Also forces the persistent shader cache OFF: nothing compiles here, and
+    /// a cache written under the NULL system must never be read back by a real
+    /// one (the fingerprint does not name the render system).
+    bool        headless = false;
     /// Directory holding the render-system plugins (RenderSystem_Vulkan.so ...).
     std::string pluginDir;
     /// Directory that CONTAINS the `Hlms/` folder (Hlms/Common, Hlms/Pbs, Hlms/Unlit).

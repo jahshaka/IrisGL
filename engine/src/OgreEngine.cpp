@@ -38,10 +38,18 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     Ogre::Mesh::msOptimizeForShadowMapping = cfg.optimizeShadowMeshes;
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
+    mHeadless = cfg.headless;
     // The shader cache's fingerprint hashes the staged Hlms tree, so it is
     // configured as soon as the media directory is known — before Root, long
     // before anything could compile. The LOAD waits for ensureHlms().
-    mShaderCache.configure(cfg.shaderCacheDir, cfg.appBuildId, mMediaDir);
+    //
+    // NEVER under the NULL render system: a headless run compiles nothing worth
+    // keeping, and the fingerprint (§4.2) does not name the render system — a
+    // blob written here would be offered verbatim to a real Vulkan device on
+    // the next launch. Silently off, not an error: the caller's config is a
+    // reasonable thing to reuse between a windowed and a headless run.
+    mShaderCache.configure(cfg.headless ? std::string() : cfg.shaderCacheDir,
+                           cfg.appBuildId, mMediaDir);
     try {
         mAbiCookie = Ogre::generateAbiCookie();
         mRoot = new Ogre::Root(&mAbiCookie, "", "",
@@ -53,8 +61,16 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // display and the cache tests both read. Runs whether or not the cache
         // itself is enabled.
         mShaderCache.attachCounters();
-        const char *plugin = (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
-                                                              : "RenderSystem_GL3Plus";
+        // HEADLESS = the NULL render system (Types.h EngineConfig::headless).
+        // It ships in every engine install unconditionally, needs no display,
+        // no driver and no device, and its VaoManager/TextureGpuManager hand
+        // out real objects backed by plain memory — meshes, Items, datablocks
+        // and queries all behave (verified end to end by the Studio suite
+        // tests/engine/test_engine_headless.cpp — the lane's first assertion —
+        // and by spikes/scenegraph-null-rs for the graph half).
+        const char *plugin = cfg.headless      ? "RenderSystem_NULL"
+                             : (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
+                                                                : "RenderSystem_GL3Plus";
         mRoot->loadPlugin(cfg.pluginDir + "/" + plugin, false, nullptr);
         // ParticleFX2: the SIMULATION half of the particle system. Its core
         // (definitions, instances, the manager, BillboardSet2) lives in
@@ -81,7 +97,19 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         if (list.empty()) { error = "no Ogre render systems available"; return false; }
         mRoot->setRenderSystem(list[0]);
         mBackendName = list[0]->getName();
-        mRoot->initialise(false);
+        // AUTO-CREATE THE WINDOW ONLY WHEN HEADLESS. Ogre's rule (a render
+        // target must exist before registerHlms/createSceneManager — really
+        // RenderSystem::oneTimePostWindowInit, which is private and only ever
+        // called from createRenderWindow) has to be satisfied somehow, and
+        // under the NULL system the cheapest satisfaction is the render
+        // system's own 1x1 window: initialise(true) makes it, and it needs
+        // nothing from the machine. Keeping the pointer means documentGraphScene
+        // and the (refused) view calls never make a second one.
+        //
+        // A RENDERING boot stays exactly as it always was — initialise(false),
+        // no window, no device — so the first window a Vulkan session creates
+        // is the host's real one whenever the host can wait that long.
+        mNullWindow = mRoot->initialise(cfg.headless, "jahshaka-headless");
         // NOTE: Hlms registration is deferred to the first view. The VaoManager
         // does not exist until a render target is created, and HlmsUnlit/HlmsPbs
         // registration walks it via ConstBufferPool::_changeRenderSystem —
@@ -97,9 +125,15 @@ void *OgreEngine::documentGraphScene() {
         // manager cannot exist before a Window and before the Hlms/resource
         // registration (CLAUDE.md's startup-order fact; the crash is inside
         // SceneManager's constructor, which looks up a material the common
-        // scripts define). The host asks for this scene ONCE, right after
-        // Engine::create(), so that from then on "an engine exists" and "a
+        // scripts define). The host asks for this scene once, before its first
+        // document node, so that from then on "an engine exists" and "a
         // document node has real graph storage" are the same statement.
+        //
+        // HEADLESS runs never enter the branch below: the NULL render system
+        // created mNullWindow itself inside init(), so the rule is already
+        // satisfied and this call only registers the Hlms and makes the scene
+        // manager. A RENDERING run that asks before its first View is what
+        // makes the surfaceless window happen — see Engine.h.
         if (!mHlmsRegistered && !mNullWindow) {
             Ogre::NameValuePairList wp; wp["windowType"] = "null";
             mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"),
@@ -189,6 +223,15 @@ View *OgreEngine::createView(const std::string &name,
                              NativeWindowHandle handle, unsigned width, unsigned height,
                              const Colour &background) {
     if (viewNameTaken(name)) return nullptr;
+    if (mHeadless) {
+        // A polite, documented refusal (Types.h EngineConfig::headless), not a
+        // crash and not a View that draws nothing: the NULL render system has
+        // no swapchain and no device to present with.
+        (void)handle; (void)width; (void)height; (void)background;
+        mLastError = "createView('" + name + "'): this engine is headless (NULL render system) "
+                     "— it has no window system and renders nothing";
+        return nullptr;
+    }
 #if !defined(__linux__) && !defined(__APPLE__)
     // On-screen views need a native Vulkan window backend; this platform has
     // none yet. Offscreen views and the null window (headless) work everywhere.
@@ -304,6 +347,17 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
                                       const Colour &background) {
     if (viewNameTaken(name)) return nullptr;
     if (!width || !height) { mLastError = "createOffscreenView: zero size"; return nullptr; }
+    if (mHeadless) {
+        // REFUSED, deliberately (Types.h EngineConfig::headless). The NULL
+        // render system would hand back a TextureGpu whose "contents" are
+        // whatever malloc returned, and every readPixels caller in this tree
+        // asserts on colours. A clean no with a reason beats a View that lies:
+        // suites that need pixels run on the rendering boot, which is why
+        // exactly none of them are headless.
+        mLastError = "createOffscreenView('" + name + "'): this engine is headless (NULL render "
+                     "system) — offscreen views would produce no pixels";
+        return nullptr;
+    }
     JAH_TRY {
         // Ogre requires a Window before Hlms/SceneManager exist. A purely offscreen
         // engine satisfies it with a surfaceless "null" window, kept for the
@@ -333,6 +387,10 @@ void OgreEngine::destroyView(View *view) {
 }
 
 void OgreEngine::renderOneFrame() {
+    // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
+    // headless engine can hold no View, so every loop below iterates nothing
+    // and Root::renderOneFrame walks a workspace-less render system. Hosts do
+    // not have to special-case their frame loop; it simply costs nothing.
     JAH_TRY {
         for (auto &v : mViews) {
             v->applyPendingResize(); v->updateParticles(); v->updateGi();
@@ -714,6 +772,32 @@ bool OgreEngine::viewNameTaken(const std::string &name) {
 
 void OgreEngine::ensureHlms() {
     if (mHlmsRegistered) return;
+    // WHAT A HEADLESS ENGINE SKIPS, and why (EngineConfig::headless). Three of
+    // the steps below exist only to make PIXELS possible, and one of them is
+    // not merely useless without a device — it CRASHES:
+    //
+    //   * registerCommonMaterials() parses the low-level .material/.program
+    //     scripts. Every one of them declares GPU programs in a shader language
+    //     (glsl/glslvk/hlsl/metal), and the NULL render system supports none of
+    //     them and creates no GpuProgramManager at all. Ogre's script
+    //     translator does not check: PassTranslator::translateVertexProgramRef
+    //     -> Pass::setVertexProgram -> GpuProgramUsage::recreateParameters ->
+    //     UnifiedHighLevelGpuProgram::createParameters, which calls
+    //     GpuProgramManager::getSingleton() on a null singleton and SEGFAULTS
+    //     (OgreUnifiedHighLevelGpuProgram.cpp:158, reproduced 2026-09-06 on the
+    //     first Atmosphere.material). Not catchable, not fixable from here —
+    //     the scripts simply must not be parsed without a real render system.
+    //   * the overlay/HUD system rasterizes a font into a texture and builds
+    //     overlay elements — screen furniture for a screen that does not exist.
+    //     Skipping createSystem() leaves every other hud:: call a no-op by
+    //     construction (they all test gSystem), including attach() per scene.
+    //   * createShadowNode() defines compositor workspaces, and only a View can
+    //     instantiate one.
+    //
+    // What DOES happen headless is everything the document model needs: both
+    // Hlms implementations (materials and datablocks are real), the ambient
+    // mode, the fog listener and the shadow-filter preference.
+    const bool pixels = !mHeadless;
     // THE OVERLAY SYSTEM GOES FIRST, and the order is load-bearing
     // (STATS_OVERLAY_SPEC §2.1, spikes/overlay-v1-vulkan/FINDINGS.md): its
     // constructor creates BOTH the OverlayManager and the FontManager, so it
@@ -721,7 +805,7 @@ void OgreEngine::ensureHlms() {
     // just made one — and BEFORE registerCommonMaterials() below calls
     // initialiseAllResourceGroups, which is the moment `.fontdef` scripts are
     // parsed. Construct it later and the font script is never seen at all.
-    hud::createSystem();
+    if (pixels) hud::createSystem();
     // BillboardSet2 needs no ParticleFX2 plugin (its core is in OgreNextMain),
     // BUT the Hlms only puts the view matrix in the pass buffer — which the
     // particle vertex shader needs for camera-facing quads — when this static
@@ -781,6 +865,7 @@ void OgreEngine::ensureHlms() {
     mShaderCache.load(mRoot);
     mHlmsRegistered = true;
     applyShadowFilter();   // replaces Ogre's PCF_3x3 default with ours (Soft = 4x4)
+    if (!pixels) return;   // the rest is rendering-only — see the top of this function
     registerCommonMaterials();
     // After the resource groups are initialised (the .fontdef has been parsed by
     // now) and after HlmsUnlit exists (overlay elements bind Unlit datablocks):
