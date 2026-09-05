@@ -29,7 +29,6 @@ enum class SceneNodeType {
     Mesh,
     Light,
     Camera,
-    Viewer,
     // A projected-texture decal (DECALS_SPEC). Every node type's constructor
     // SETS its own value here and every type switch in both repos depends on
     // it. (CameraNode was the one that never did, for the whole life of the

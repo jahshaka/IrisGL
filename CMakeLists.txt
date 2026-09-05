@@ -148,7 +148,6 @@ set(SRCS
     document/animation/animation.cpp
     document/animation/keyframeset.cpp
     import/materialhelper.cpp
-    document/scenegraph/viewernode.cpp
     document/scenegraph/particlesystemnode.cpp
     core/math/mathhelper.cpp
     document/materials/custommaterial.cpp
@@ -177,7 +176,6 @@ set(SRCS
     import/modelloader.cpp
     document/physics/environment.cpp
     document/physics/physicshelper.cpp
-    document/physics/charactercontroller.cpp
 
 )
 
@@ -213,7 +211,6 @@ set (HEADERS
     import/materialhelper.h
     core/irisutils.h
     core/ziphelper.h
-    document/scenegraph/viewernode.h
     document/scenegraph/particlesystemnode.h
     document/scenegraph/iviewsource.h
     document/materials/custommaterial.h
@@ -248,7 +245,6 @@ set (HEADERS
     document/physics/environment.h
     document/physics/physicshelper.h
     document/physics/physicsproperties.h
-    document/physics/charactercontroller.h
 )
 
 set(QRCS assets.qrc)

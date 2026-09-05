@@ -25,7 +25,6 @@ namespace iris
 class CameraNode;
 class LightNode;
 class DecalNode;
-class ViewerNode;
 class ParticleSystemNode;
 /// Forward-declared with its underlying type so headers can take one by value
 /// without dragging in particlesystemnode.h (an enumerator still needs the
@@ -98,7 +97,6 @@ typedef QSharedPointer<KeyFrameSet> KeyFrameSetPtr;
 typedef QSharedPointer<FloatKeyFrame> FloatKeyFramePtr;
 typedef QSharedPointer<CustomMaterial> CustomMaterialPtr;
 typedef QSharedPointer<PbrMaterial> PbrMaterialPtr;
-typedef QSharedPointer<ViewerNode> ViewerNodePtr;
 typedef QSharedPointer<ParticleSystemNode> ParticleSystemNodePtr;
 typedef QSharedPointer<PostProcess> PostProcessPtr;
 typedef QSharedPointer<PostProcessManager> PostProcessManagerPtr;

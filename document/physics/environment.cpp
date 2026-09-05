@@ -2,13 +2,8 @@
 #include "core/math/vec.h"
 #include "document/physics/environment.h"
 
-#include "document/scenegraph/viewernode.h"
-
 #include "btBulletDynamicsCommon.h"
-#include "BulletDynamics/Character/btKinematicCharacterController.h"
 #include "BulletCollision/CollisionDispatch/btGhostObject.h"
-
-#include "document/physics/charactercontroller.h"
 
 namespace iris
 {
@@ -16,10 +11,6 @@ namespace iris
 Environment::Environment()
 {
 	worldYGravity = 15.f;
-	// Was left indeterminate: getActiveCharacterController() returned garbage
-	// before the first character controller was ever created.
-	activeCharacterController = nullptr;
-
     createPhysicsWorld();
  
     simulating = false;
@@ -33,12 +24,6 @@ Environment::Environment()
 Environment::~Environment()
 {
     destroyPhysicsWorld();
-}
-
-void Environment::setDirection(iris::Vec2 dir)
-{
-	//walkDirection = btVector3(0.0, 0.0, 0.0);
-	walkDir = dir;
 }
 
 void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node)
@@ -115,66 +100,6 @@ void Environment::removeConstraintFromWorld(btTypedConstraint *constraint)
     }
 }
 
-void Environment::addCharacterControllerToWorldUsingNode(const iris::SceneNodePtr &node)
-{
-	btTransform startTransform;
-	startTransform.setIdentity();
-	startTransform.setOrigin(PhysicsHelper::btVector3FromVec3(node->getGlobalPosition()));
-
-	auto controller = new CharacterController;
-	controller->setSiblingGuid(node->getGUID());
-	controller->getGhostObject()->setWorldTransform(startTransform);
-
-	world->addCollisionObject(controller->getGhostObject(), btBroadphaseProxy::CharacterFilter, btBroadphaseProxy::StaticFilter | btBroadphaseProxy::DefaultFilter);
-	world->addAction(controller->getKinematicController());
-
-	characterControllers.insert(node->getGUID(), controller);
-
-	activeCharacterController = controller;
-}
-
-// Exact mirror of addCharacterControllerToWorldUsingNode: the action comes off
-// the world's action list and the ghost off the broadphase BEFORE the objects
-// die. Deleting the controller while bullet still held those pointers left
-// stale entries that the next stepSimulation walked.
-void Environment::removeCharacterControllerFromWorld(const QString &guid)
-{
-	if (!characterControllers.contains(guid)) return;
-	auto controller = characterControllers.value(guid);
-	characterControllers.remove(guid);
-
-	detachCharacterControllerFromWorld(controller);
-
-	if (activeCharacterController == controller) {
-		activeCharacterController = characterControllers.isEmpty()
-			? nullptr : *characterControllers.constBegin();
-	}
-
-	delete controller;
-}
-
-void Environment::detachCharacterControllerFromWorld(CharacterController *controller)
-{
-	if (!world || !controller) return;
-	world->removeAction(controller->getKinematicController());
-	world->removeCollisionObject(controller->getGhostObject());
-}
-
-void Environment::removeAllCharacterControllersFromWorld()
-{
-	for (auto controller : characterControllers) {
-		detachCharacterControllerFromWorld(controller);
-		delete controller;
-	}
-	characterControllers.clear();
-	activeCharacterController = nullptr;
-}
-
-CharacterController *Environment::getActiveCharacterController()
-{
-	return activeCharacterController;
-}
-
 void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode)
 {
 	std::function<void(const SceneNodePtr)> createPhysicsBodiesFromNode = [&](const SceneNodePtr node) {
@@ -185,16 +110,6 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 				// shape, compound child and triangle-mesh interface built here
 				// leaked, once per Play.
 				addBodyToWorld(owned, child);
-			}
-
-			// ONLY viewers carry the flag. The type test is load-bearing: the
-			// unguarded staticCast used to read isActiveCharacterController out
-			// of every node in the scene (a heap over-read past the end of a
-			// MeshNode/LightNode, and a nonzero pad byte there spawned a bogus
-			// character controller on a mesh or a light).
-			if (child->sceneNodeType == SceneNodeType::Viewer &&
-				child.staticCast<iris::ViewerNode>()->isActiveCharacterController()) {
-				addCharacterControllerToWorldUsingNode(child);
 			}
 
 			createPhysicsBodiesFromNode(child);
@@ -217,15 +132,6 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 
 	// notice the - sign for the gravity, show it as positive in the interface but flip it here
 	world->setGravity(btVector3(0, -worldYGravity, 0));
-}
-
-void Environment::updateCharacterTransformFromSceneNode(const iris::SceneNodePtr node)
-{
-	btTransform ghostTransform;
-	ghostTransform.setIdentity();
-	ghostTransform.setFromOpenGLMatrix(node->getGlobalTransform().constData());
-	if (!characterControllers.contains(node->getGUID())) return;
-	characterControllers.value(node->getGUID())->getKinematicController()->getGhostObject()->setWorldTransform(ghostTransform);
 }
 
 btDynamicsWorld *Environment::getWorld()
@@ -261,60 +167,8 @@ void Environment::stepSimulation(float delta)
 {
     if (simulating) {
 		world->stepSimulation(delta);
-		updateCharacterControllers(delta);
 		//drawDebugShapes();
     }
-}
-
-void Environment::updateCharacterControllers(float delta)
-{
-	walkDirection = btVector3(0.0, 0.0, 0.0);
-	btScalar walkVelocity = btScalar(1.1) * 5.0; // 4 km/h -> 1.1 m/s
-	btScalar walkSpeed = walkVelocity * delta;
-
-	for (auto controller : characterControllers) {
-		if (controller->isActive()) {
-			auto character = controller->getKinematicController();
-
-			btTransform transform;
-			transform = character->getGhostObject()->getWorldTransform();
-
-			btVector3 forwardDir = transform.getBasis()[2];
-			btVector3 upDir = transform.getBasis()[1];
-			btVector3 strafeDir = transform.getBasis()[0];
-
-			forwardDir.normalize();
-			upDir.normalize();
-			strafeDir.normalize();
-
-			if (character->onGround() && jump) {
-				character->jump(btVector3(0, 6, 0));
-			}
-
-			walkDirection += strafeDir * walkDir.x();
-			walkDirection += forwardDir * walkDir.y();
-
-			if (walkForward) {
-				walkDirection -= forwardDir;
-			}
-
-			if (walkBackward) {
-				walkDirection += forwardDir;
-			}
-
-			if (walkLeft) {
-				walkDirection -= strafeDir;
-			}
-
-			if (walkRight) {
-				walkDirection += strafeDir;
-			}
-
-			character->setWalkDirection(walkDirection * walkSpeed);
-
-			break;
-		}
-	}
 }
 
 void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
@@ -553,12 +407,6 @@ float Environment::getWorldGravity()
 void Environment::destroyPhysicsWorld()
 {
 	// this is rougly verbose the same thing as the exitPhysics() function in the bullet demos
-
-	// Character controllers first: their ghost objects live in the collision
-	// object array below, so they have to be unregistered and destroyed here or
-	// the loop deletes the ghosts out from under the CharacterControllers the
-	// hash still owns (the next play cycle then stepped stale pointers).
-	removeAllCharacterControllersFromWorld();
 
 	if (world) {
 		int i;

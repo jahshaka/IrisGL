@@ -117,19 +117,12 @@ public:
         return environment;
     }
 
-    /*
-     * This is the default viewer that the scene
-     * will use when playing in vr mode
-     */
-    ViewerNodePtr vrViewer;
-
     QHash<QString, LightNodePtr> lights;
     /// Every DecalNode in the scene, keyed by guid — the picker and the
     /// engine-side budget check walk this rather than the whole tree.
     QHash<QString, DecalNodePtr> decals;
 	QHash<QString, MeshNodePtr> meshes;
 	QHash<QString, ParticleSystemNodePtr> particleSystems;
-	QHash<QString, ViewerNodePtr> viewers;
     /// Every scene-graph CameraNode, keyed by guid (CAMERAS_SPEC §3). NOT the
     /// editor camera: `camera` above is the viewport's virtual explorer and is
     /// never a child of the root, so it is never in here.
@@ -466,9 +459,6 @@ public:
                  QList<PickingResult>& hitList,
 			     uint64_t pickingMask = 0,
 				 bool allowUnpickable = false);
-
-	ViewerNodePtr getActiveVrViewer() { return vrViewer; }
-	void setActiveVrViewer(ViewerNodePtr viewer) { this->vrViewer = viewer; }
 
     /**
      * Adds node to scene. If node is a LightNode then it is added to a list of lights.
