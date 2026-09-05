@@ -544,7 +544,9 @@ SceneNodePtr MeshNode::createDuplicate()
     node->setMesh(this->getMesh());
     node->meshPath = this->meshPath;
     node->meshIndex = this->meshIndex;
-    node->setMaterial(this->material->duplicate());
+    // A mesh node without a material exists (synthetic nodes, partially-built
+    // imports) — duplicating one crashed here (found by the Stage 2 lane).
+    if (this->material) node->setMaterial(this->material->duplicate());
 
 	// todo: clone instead of copying (Nick)
 	for (auto anim : animations) {
