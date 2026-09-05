@@ -344,7 +344,13 @@ void Environment::buildCollisionContent(const iris::SceneNodePtr &rootNode)
 					collisionContentNodes.insert(child->getGUID());
 				}
 			}
-			walk(child);
+			// The skip must cover the SUBTREE, not just the node: an avatar's
+			// wrapper carries the component but its MESH is a child, and
+			// descending here rebuilt that mesh as a static wall the capsule
+			// starts inside — a spawned character at certain offsets could not
+			// move at all (found by the Stage 3 lane, measured on rig2.glb).
+			// A physics body's subtree likewise already moves with its body.
+			if (!skip) walk(child);
 		}
 	};
 	walk(rootNode);
