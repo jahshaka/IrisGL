@@ -46,7 +46,7 @@ inline bool passesFlags(SceneNode *node, uint64_t pickingMask, bool allowUnpicka
 /// Every mesh node whose bounds the segment could cross. Two sources, one
 /// shape: see the header.
 void collectCandidates(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
-                       std::vector<MeshNode *> &out)
+                       bool allowUnpickable, std::vector<MeshNode *> &out)
 {
     out.clear();
     SceneNodePtr root = scene->getRootNode();
@@ -54,13 +54,19 @@ void collectCandidates(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
 
     gLastUsedEngine = handle && graph::hasQueryableGeometry(handle);
     if (gLastUsedEngine) {
-        // THE ENGINE'S BROAD PHASE. The mask keeps unpickable geometry out of
-        // the SIMD sweep itself — that is the bulk rejection; `pickable` is
-        // still re-checked exactly on what comes back, because a node whose
-        // flag changed since the last mirror sync has stale query flags.
+        // THE ENGINE'S BROAD PHASE. The mask rejects unpickable geometry inside
+        // the SIMD sweep — that is the bulk rejection, and it is the only part
+        // of the document's picking semantics Ogre's ANY-test mask can express.
+        // `pickable` is re-checked exactly on what comes back all the same: an
+        // Item created since the last sync still carries Ogre's default query
+        // flags (all bits), so it arrives as a candidate whatever the document
+        // says, and the exact test is what decides it.
+        const unsigned mask =
+            allowUnpickable ? (graph::kPickableQueryBit | graph::kUnpickableQueryBit)
+                            : graph::kPickableQueryBit;
         static std::vector<graph::RayCandidate> hits;
         const Vec3 dir = segEnd - segStart;
-        graph::rayQuery(handle, segStart, dir, 0xFFFFFFFFu, hits);
+        graph::rayQuery(handle, segStart, dir, mask, hits);
         const float segLength = dir.length();
         out.reserve(hits.size());
         for (const graph::RayCandidate &c : hits) {
@@ -104,7 +110,7 @@ QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &se
     if (!scene || !scene->getRootNode()) return out;
 
     std::vector<MeshNode *> candidates;
-    collectCandidates(scene, segStart, segEnd, candidates);
+    collectCandidates(scene, segStart, segEnd, allowUnpickable, candidates);
 
     for (MeshNode *meshNode : candidates) {
         if (!passesFlags(meshNode, pickingMask, allowUnpickable)) continue;

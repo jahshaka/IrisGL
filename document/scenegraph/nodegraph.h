@@ -298,9 +298,17 @@ void rayQuery(SceneHandle s, const Vec3 &origin, const Vec3 &dir, unsigned query
 /// test is `(flags & mask) != 0` (ANY) while `pickingGroups` is an ALL test
 /// (`(groups & mask) == mask`), so groups cannot be expressed as query flags
 /// and stay an exact test on the CANDIDATES, which costs O(hits), not O(scene).
+/// THE PICKABLE BIT IS OGRE'S OWN DEFAULT, deliberately. An Ogre-Next Item is
+/// born with query flags `SceneManager::QUERY_ENTITY_DEFAULT_MASK` = 0x80000000
+/// (OgreItem.cpp:54 — and note that `MovableObject::msDefaultQueryFlags`, the
+/// 0xFFFFFFFF one every Ogre 1.x tutorial names, is dead code in this pin: no
+/// object ever reads it). Reusing that bit means an Item the mirror has not
+/// pushed a flag onto yet — one created THIS sync — is pickable, which is the
+/// document's default for a new node too. Anything else leaves a window in
+/// which a freshly added object cannot be clicked.
 enum : unsigned {
-    kPickableQueryBit = 1u << 0,
-    kUnpickableQueryBit = 1u << 1,
+    kPickableQueryBit = 0x80000000u,
+    kUnpickableQueryBit = 0x40000000u,
 };
 
 /// Pushes `pickable` onto every engine object attached to `n` as query flags.

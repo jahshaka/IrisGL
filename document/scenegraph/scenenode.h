@@ -360,6 +360,13 @@ public:
 
     void setPickable(bool canPick) {
         pickable = canPick;
+        // Straight through to this node's engine objects as Ogre QUERY FLAGS:
+        // picking's broad phase is a masked RaySceneQuery (SCENEGRAPH_SPEC §2)
+        // and the mask is tested inside the sweep, so a node that stopped being
+        // pickable has to say so before the next pick, not before the next
+        // mirror sync. (The mirror pushes it too — that is the path for an Item
+        // that did not exist yet when the flag was set.)
+        graph::setPickable(mGraphNode, canPick);
         notifyChanged(NodeChange::Flags);
     }
 
