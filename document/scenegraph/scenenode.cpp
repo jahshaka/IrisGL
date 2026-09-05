@@ -277,6 +277,16 @@ void SceneNode::_applyStaticHint(bool value)
     notifyChanged(NodeChange::Flags);
 }
 
+void SceneNode::reapplyStaticHints()
+{
+    // Top-down: a parent must be static before its child asks (rule 2), and
+    // Ogre pushes the class down anyway — the order makes every ask legal.
+    if (mStaticHint) _applyStaticHint(true);
+    const int n = childCount();
+    for (int i = 0; i < n; ++i)
+        if (SceneNode *c = childAt(i)) c->reapplyStaticHints();
+}
+
 void SceneNode::applyStaticDefaults()
 {
     // A HUMAN'S DECISION BEATS THE POLICY (StaticOverride). `Dynamic` leaves

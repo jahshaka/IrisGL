@@ -654,6 +654,15 @@ void Scene::setGraphScene(graph::SceneHandle target)
         ++it;
     }
     mGraphScene = target;
+    // A migration REBUILDS every Ogre node under the new manager, and rebuilt
+    // nodes are born SCENE_DYNAMIC — the document's static hints survive on
+    // the handles but the graph state is silently lost (found 2026-09-05:
+    // every project load lost its whole static classification the moment the
+    // viewport bound the scene, because the reader's applyStaticDefaults ran
+    // against the staging manager). Re-assert from the hints, top-down; the
+    // staging manager is skipped — nothing renders there, and the next real
+    // bind re-asserts anyway.
+    if (target != graph::stagingScene() && rootNode) rootNode->reapplyStaticHints();
 }
 
 void Scene::rememberDetached(const SceneNodePtr &node)

@@ -503,6 +503,14 @@ public:
     /// an override never gets overwritten by the default.
     void applyStaticDefaults();
 
+    /// Re-asserts recorded static hints into the GRAPH, top-down, changing no
+    /// hint and no override. For after a graph migration (Scene::setGraphScene)
+    /// — migrate rebuilds Ogre nodes, which are born dynamic, so the graph
+    /// state is lost while the document's hints survive. Policy-free on
+    /// purpose: applyStaticDefaults here would re-staticize nodes the user
+    /// moved this session (hint cleared, override None).
+    void reapplyStaticHints();
+
     SceneNodeType getSceneNodeType();
     /**
      * @brief addChild
