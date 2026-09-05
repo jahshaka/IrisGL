@@ -197,6 +197,16 @@ public:
     }
 
     SceneNodePtr createDuplicate() override;
+
+    /// A SKINNED mesh is never static (SCENEGRAPH_SPEC §6): its Item carries a
+    /// SkeletonInstance that the engine poses every frame, and a static Item is
+    /// not in the per-frame bounds list at all — the character would render at
+    /// its bind-pose bounds and be culled wrong. Sockets ride skinned nodes too.
+    bool isStaticEligible() const override
+    {
+        return !skeleton && SceneNode::isStaticEligible();
+    }
+
     float getMeshRadius();
     BoundingSphere getTransformedBoundingSphere();
 

@@ -24,12 +24,16 @@ For more information see the LICENSE file
 #include <QDebug>
 
 #include "OgreMatrix4.h"
+#include "OgreMovableObject.h"
 #include "OgreQuaternion.h"
+#include "OgreRay.h"
 #include "OgreRoot.h"
 #include "OgreHlmsManager.h"
 #include "OgreSceneManager.h"
 #include "OgreSceneNode.h"
+#include "OgreSceneQuery.h"
 #include "OgreVector3.h"
+#include "Math/Array/OgreObjectMemoryManager.h"
 
 namespace iris
 {
@@ -148,6 +152,11 @@ Ogre::SceneManager *gStaging = nullptr;
 /// engine and must not be destroyed here.
 bool gStagingIsOurs = false;
 std::size_t gLiveNodes = 0;
+/// How many live handles sit in a SCENE_STATIC memory manager. Maintained by
+/// applyStaticSubtree and by the destroy/migrate paths, so the benchmark can
+/// assert that its 80% static population really reached the static manager
+/// rather than reporting a hint nobody applied.
+std::size_t gStaticNodes = 0;
 
 Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
 {
@@ -155,6 +164,124 @@ Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
 }
 
 inline SceneNode *ownerRaw(Ogre::SceneNode *n) { return ownerById(n->getId()); }
+
+// ---- SCENE_STATIC ---------------------------------------------------------
+
+/// Rule 2 (nodegraph.h): a static node's parent must be static, or must be the
+/// DOCUMENT ROOT. The document root is recognised structurally — it is the
+/// document node whose own Ogre parent is the scene manager's root node — and
+/// its local transform is identity for the life of the scene (nothing in
+/// either repo writes a transform on `Scene::getRootNode()`; SceneNode's
+/// transform setters say so and Scene::rootNode is never handed to a command).
+bool isDocumentRoot(Ogre::Node *n)
+{
+    // A document node with no document node above it: either its Ogre parent is
+    // the scene manager's own root node (a scene bound to an engine, and the
+    // node detach() re-homes things under), or it has NO parent at all — which
+    // is how every node is born and how `Scene::Scene` builds its root before
+    // the document has ever met an engine scene.
+    Ogre::Node *p = n->getParent();
+    return !p || ownerById(p->getId()) == nullptr;
+}
+
+bool eligibleStaticParent(Ogre::Node *p)
+{
+    if (!p) return false;                       // detached: nothing anchors it
+    if (p->isStatic()) return true;
+    return isDocumentRoot(p);
+}
+
+/// Switches ONE node, attachments included, without SceneNode::setStatic's
+/// half-way failure mode: that one migrates the node FIRST and only then
+/// throws if an attachment refuses, leaving the node in the new manager and
+/// the object in the old — which is the state `attachObject` calls a bug.
+/// Returns false having changed nothing.
+bool switchOne(Ogre::SceneNode *n, bool value)
+{
+    if (n->isStatic() == value) return true;
+    // Attachments first. MovableObject::setStatic REPORTS a refusal (its
+    // object memory manager has no twin — lights and PFX2 particle systems)
+    // instead of throwing, and it drags the parent node along with it, so
+    // after the first success the node is already in the right manager.
+    std::vector<Ogre::MovableObject *> switched;
+    switched.reserve(n->numAttachedObjects());
+    for (std::size_t i = 0; i < n->numAttachedObjects(); ++i) {
+        Ogre::MovableObject *obj = n->getAttachedObject(i);
+        if (obj->isStatic() == value) continue;
+        if (!obj->setStatic(value)) {
+            for (Ogre::MovableObject *done : switched) done->setStatic(!value);
+            return false;
+        }
+        switched.push_back(obj);
+    }
+    // Node::setStatic, not SceneNode::setStatic: the attachments are already
+    // where they belong, and the override would walk them a second time.
+    n->Ogre::Node::setStatic(value);
+    if (value && n->getCreator()) n->getCreator()->notifyStaticDirty(n);
+    return true;
+}
+
+/// May THIS node go static? An engine-owned node (a light's -Y adapter, a
+/// decal box, a wire) has no opinion and rides its parent; a document node
+/// answers with its own kind (SceneNode::isStaticEligible).
+inline bool eligibleForStatic(Ogre::SceneNode *n)
+{
+    SceneNode *o = ownerById(n->getId());
+    return !o || o->isStaticEligible();
+}
+
+/// Rule 1: static is a SUBTREE property.
+///
+/// SKIP, DO NOT VETO. A branch that cannot go static — a light inside an
+/// imported model, an animated node, a particle emitter — is left dynamic
+/// together with everything under it, and the REST of the subtree still goes
+/// static. (Ogre is explicit that a dynamic child of a static parent is valid
+/// and useful; it is the opposite that is a bug.) Vetoing instead would mean
+/// one lamp in a building denied the whole building its classification.
+///
+/// Returns whether the ROOT `n` itself changed class — that is the only
+/// refusal a caller can act on. Demotion never fails: the only objects that
+/// cannot switch (lights, particle systems) are permanently dynamic anyway, so
+/// they are never in a state a demotion has to undo.
+bool applyStaticSubtree(Ogre::SceneNode *n, bool value)
+{
+    std::function<bool(Ogre::SceneNode *)> walk = [&](Ogre::SceneNode *cur) -> bool {
+        if (value && !eligibleForStatic(cur)) return false;   // skip it and its branch
+        const bool was = cur->isStatic();
+        if (!switchOne(cur, value)) return false;
+        if (was != cur->isStatic()) {
+            if (value) ++gStaticNodes;
+            else if (gStaticNodes) --gStaticNodes;
+        }
+        for (std::size_t i = 0; i < cur->numChildren(); ++i)
+            walk(static_cast<Ogre::SceneNode *>(cur->getChild(i)));
+        return true;
+    };
+    return walk(n);
+}
+
+/// The document's own answer to "should this subtree be static?", read through
+/// the owner back-pointer. An engine-owned node has no opinion.
+inline bool ownerWantsStatic(Ogre::SceneNode *n)
+{
+    SceneNode *owner = ownerById(n->getId());
+    return owner && owner->wantsStatic();
+}
+
+/// Brings a freshly (re-)parented subtree's class in line with the document's
+/// hint. Called once per structural move, on the SUBTREE ROOT.
+///
+/// The default case costs NOTHING: a node with no static hint attached to a
+/// dynamic parent is already dynamic (it inherited the parent's manager), so
+/// the comparison fails and no migration happens. Only a static-hinted subtree
+/// under an eligible parent, or a dynamic subtree that inherited static from a
+/// static parent, pays.
+void reconcileStatic(Ogre::SceneNode *n)
+{
+    const bool want = ownerWantsStatic(n) && eligibleStaticParent(n->getParent());
+    if (n->isStatic() == want) return;
+    applyStaticSubtree(n, want);
+}
 
 /// Depth-first, deepest-first destruction. Ogre's destroySceneNode ORPHANS the
 /// children it does not destroy and leaks them into mSceneNodes until
@@ -179,6 +306,7 @@ void destroyRecursive(Ogre::SceneNode *n)
     if (SceneNode *owner = ownerRaw(n)) owner->_setGraphNode(nullptr);
     setOwnerById(n->getId(), nullptr);
     if (gLiveNodes) --gLiveNodes;
+    if (n->isStatic() && gStaticNodes) --gStaticNodes;
     if (n->getParent()) n->getParent()->removeChild(n);
     n->getCreator()->destroySceneNode(n);
 }
@@ -292,8 +420,18 @@ int indexInParent(NodeHandle n)
     if (!n || !engineAlive()) return -1;
     Ogre::Node *p = nd(n)->getParent();
     if (!p) return -1;
-    for (std::size_t i = 0; i < p->numChildren(); ++i)
-        if (p->getChild(i) == nd(n)) return int(i);
+    // The DOCUMENT sibling index — engine-owned children (a light's -Y adapter,
+    // a decal box, a range wire) share the vector and must not be counted.
+    // This is the inverse of attach()'s `index`, which resolves against owned
+    // children too; a raw vector index here would have made the pair disagree
+    // by however many helpers the engine had hung off that parent, silently
+    // reordering the hierarchy panel on every undo of a delete.
+    int owned = 0;
+    for (std::size_t i = 0; i < p->numChildren(); ++i) {
+        Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(p->getChild(i));
+        if (c == nd(n)) return owned;
+        if (ownerRaw(c)) ++owned;
+    }
     return -1;
 }
 
@@ -308,7 +446,11 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     // for the sibling-index machinery below: at a fan-out of k that scan is
     // O(k) per insert, i.e. quadratic in a node's child count over a whole
     // document build.
-    if (index < 0 || std::size_t(index) >= p->numChildren()) { p->addChild(c); return; }
+    if (index < 0 || std::size_t(index) >= p->numChildren()) {
+        p->addChild(c);
+        reconcileStatic(c);
+        return;
+    }
 
     // Ogre only appends, and its child vector also carries the ENGINE's own
     // children (a light's -Y adapter, a decal box, a range wire), which the
@@ -327,11 +469,12 @@ void attach(NodeHandle parent, NodeHandle child, int index)
         if (owned == index) { insertAt = i; break; }
         ++owned;
     }
-    if (insertAt >= kids.size()) { p->addChild(c); return; }
+    if (insertAt >= kids.size()) { p->addChild(c); reconcileStatic(c); return; }
 
     for (Ogre::Node *k : kids) p->removeChild(k);
     kids.insert(kids.begin() + std::ptrdiff_t(insertAt), c);
     for (Ogre::Node *k : kids) p->addChild(k);
+    reconcileStatic(c);
 }
 
 NodeHandle detach(NodeHandle child)
@@ -393,7 +536,11 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
             Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(s->getChild(i));
             if (ownerRaw(c)) copy(c, dst);
         }
-        if (s->isStatic()) dst->setStatic(true);
+        // Static-ness is NOT carried here: `dst` was created under `parent`
+        // and has already inherited its class (Node::setParent gives a child
+        // its parent's memory manager). The caller reconciles the SUBTREE ROOT
+        // with the document's hint once the whole copy exists — doing it per
+        // node inside the recursion would migrate the same node twice.
         return dst;
     };
 
@@ -415,10 +562,12 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
         }
         setOwnerById(s->getId(), nullptr);
         if (gLiveNodes) --gLiveNodes;
+        if (s->isStatic() && gStaticNodes) --gStaticNodes;
         if (s->getParent()) s->getParent()->removeChild(s);
         s->getCreator()->destroySceneNode(s);
     };
     drop(src);
+    reconcileStatic(dst);
     return wrap(dst);
 }
 
@@ -430,13 +579,62 @@ Vec3 localScale(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getS
 
 namespace
 {
-/// A static node's transform is not refreshed by updateAllTransforms; the
-/// manager has to be told each time one moves (spec §5: batch these per frame
-/// when a whole import moves at once — the document does not, and cannot,
-/// because a document edit is one node).
+/// RULE 4 (nodegraph.h): MOVING A STATIC NODE PROMOTES IT.
+///
+/// The alternative — notifyStaticDirty on every write, which is what v1 did —
+/// re-runs the whole static transform+bounds pass from that node's depth on
+/// the next frame. For a node the user is DRAGGING that is one full static
+/// pass per frame, i.e. exactly the cost SCENE_STATIC exists to avoid, paid
+/// while the scene is least able to afford it. Demoting the node (and its
+/// subtree, rule 1) makes the second write and every one after it free, and
+/// the document's hint is cleared with it so nothing puts it back.
+///
+/// Out of line and behind an `isStatic()` test that is false for almost every
+/// node in almost every scene: this sits on the path of every transform write
+/// in the program.
+void promoteOnWrite(Ogre::SceneNode *n);
+void promoteStaticChildren(Ogre::SceneNode *n);
+
 inline void markMoved(Ogre::SceneNode *n)
 {
-    if (n->isStatic() && n->getCreator()) n->getCreator()->notifyStaticDirty(n);
+    if (n->isStatic()) { promoteOnWrite(n); return; }
+    // The root-moved case (see promoteStaticChildren). Two loads, and only in a
+    // process that has static nodes at all.
+    if (gStaticNodes && isDocumentRoot(n)) promoteStaticChildren(n);
+}
+
+void promoteOnWrite(Ogre::SceneNode *n)
+{
+    std::lock_guard<std::recursive_mutex> lock(graphMutex());
+    if (SceneNode *owner = ownerById(n->getId())) owner->_clearStaticHint();
+    applyStaticSubtree(n, false);
+}
+
+/// THE ONE HOLE RULE 2 LEAVES, closed. A static node's parent must be static
+/// OR be the document root, and the root is exempt because its transform is
+/// identity and nothing writes it. "Nothing writes it" is a claim, not a
+/// mechanism — so if something DOES write it, every static node under it would
+/// freeze at the root's old world position. This promotes them instead.
+///
+/// It runs only for a node that is itself a document root (two loads to tell)
+/// in a process that has static nodes at all (one load), so the ordinary
+/// transform write — a child, in a scene with or without statics — pays a
+/// predictable compare and nothing else.
+void promoteStaticChildren(Ogre::SceneNode *n)
+{
+    std::lock_guard<std::recursive_mutex> lock(graphMutex());
+    bool any = false;
+    for (std::size_t i = 0; i < n->numChildren(); ++i) {
+        Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(n->getChild(i));
+        if (!c->isStatic()) continue;
+        if (SceneNode *owner = ownerById(c->getId())) owner->_clearStaticHint();
+        applyStaticSubtree(c, false);
+        any = true;
+    }
+    if (any)
+        qWarning("iris::graph: the scene's ROOT node was moved — every static subtree under it "
+                 "has been promoted back to dynamic, because a static node cannot follow a "
+                 "moving parent (SCENEGRAPH_SPEC §6 rule 2).");
 }
 }  // namespace
 
@@ -539,21 +737,103 @@ void setVisible(NodeHandle n, bool visible, bool cascade)
 
 bool isStatic(NodeHandle n) { return n && engineAlive() && nd(n)->isStatic(); }
 
-void setStatic(NodeHandle n, bool value)
+bool canBeStatic(NodeHandle n)
 {
-    if (!n || !engineAlive()) return;
-    std::lock_guard<std::recursive_mutex> lock(graphMutex());
-    try {
-        nd(n)->setStatic(value);
-    } catch (const Ogre::Exception &e) {
-        // An Item created dynamic cannot become static (SceneNode::setStatic
-        // throws for exactly that). v1's static hint is authoring-time and
-        // opt-in; refusing loudly is better than a half-switched node.
-        qWarning("iris::graph::setStatic refused: %s", e.getDescription().c_str());
-    }
+    if (!n || !engineAlive()) return false;
+    return eligibleStaticParent(nd(n)->getParent());
 }
 
+bool setStatic(NodeHandle n, bool value)
+{
+    if (!n || !engineAlive()) return false;
+    std::lock_guard<std::recursive_mutex> lock(graphMutex());
+    Ogre::SceneNode *o = nd(n);
+    if (o->isStatic() == value) return true;                    // already there
+    if (value && !eligibleStaticParent(o->getParent())) {
+        qWarning("iris::graph::setStatic(true) refused: a static node's parent must be static "
+                 "or the document root (SCENEGRAPH_SPEC §6 rule 2).");
+        return false;
+    }
+    return applyStaticSubtree(o, value);
+}
+
+std::size_t staticNodeCount() { return gStaticNodes; }
+
 std::size_t liveNodeCount() { return gLiveNodes; }
+
+// ---- picking: the broad phase ---------------------------------------------
+
+bool hasQueryableGeometry(SceneHandle s)
+{
+    if (!s || !engineAlive()) return false;
+    Ogre::SceneManager *m = sm(s);
+    return m->_getEntityMemoryManager(Ogre::SCENE_DYNAMIC).getTotalNumObjects() > 0 ||
+           m->_getEntityMemoryManager(Ogre::SCENE_STATIC).getTotalNumObjects() > 0;
+}
+
+namespace
+{
+/// Collects the DISTINCT document nodes a ray sweep hit. Ogre reports one
+/// result per MovableObject and a node may carry several (a mesh Item plus a
+/// wire overlay), so the listener keeps the nearest entry per node.
+class OwnerCollector : public Ogre::RaySceneQueryListener
+{
+public:
+    explicit OwnerCollector(std::vector<RayCandidate> &out) : mOut(out) {}
+
+    bool queryResult(Ogre::MovableObject *obj, Ogre::Real distance) override
+    {
+        Ogre::Node *parent = obj ? obj->getParentNode() : nullptr;
+        if (!parent) return true;
+        SceneNode *owner = ownerById(parent->getId());
+        // An engine-owned node (a light's -Y adapter, a decal box, a wire) has
+        // no document owner: its hits belong to no document node and are
+        // dropped rather than attributed to the nearest one.
+        if (!owner) return true;
+        for (RayCandidate &c : mOut) {
+            if (c.node != owner) continue;
+            if (float(distance) < c.distance) c.distance = float(distance);
+            return true;
+        }
+        mOut.push_back(RayCandidate{ owner, float(distance) });
+        return true;
+    }
+
+    bool queryResult(Ogre::SceneQuery::WorldFragment *, Ogre::Real) override { return true; }
+
+private:
+    std::vector<RayCandidate> &mOut;
+};
+}  // namespace
+
+void rayQuery(SceneHandle s, const Vec3 &origin, const Vec3 &dir, unsigned queryMask,
+              std::vector<RayCandidate> &out)
+{
+    out.clear();
+    if (!s || !engineAlive()) return;
+    Ogre::SceneManager *m = sm(s);
+    // The query object is created and destroyed per call on purpose: it is a
+    // small allocation, and a cached one would have to be invalidated when the
+    // scene manager dies (which happens on every world switch).
+    Ogre::RaySceneQuery *q = m->createRayQuery(
+        Ogre::Ray(toOgre(origin), toOgre(dir).normalisedCopy()), queryMask);
+    OwnerCollector collector(out);
+    try {
+        q->execute(&collector);
+    } catch (const Ogre::Exception &e) {
+        qWarning("iris::graph::rayQuery failed: %s", e.getDescription().c_str());
+    }
+    m->destroyQuery(q);
+}
+
+void setPickable(NodeHandle n, bool pickable)
+{
+    if (!n || !engineAlive()) return;
+    Ogre::SceneNode *o = nd(n);
+    const Ogre::uint32 flags = pickable ? kPickableQueryBit : kUnpickableQueryBit;
+    for (std::size_t i = 0; i < o->numAttachedObjects(); ++i)
+        o->getAttachedObject(i)->setQueryFlags(flags);
+}
 
 }  // namespace graph
 }  // namespace iris
