@@ -20,6 +20,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSkeleton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreOverlayHud.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
@@ -109,6 +110,15 @@ set(OGRE_NEXT_SMAA_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tuto
 set(OGRE_NEXT_VCT_MEDIA_DIR "${_ogre_media_root}/VCT")
 set(OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR "${_ogre_media_root}/Compute/Tools")
 set(OGRE_NEXT_IBL_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IBL")
+# The overlay font (STATS_OVERLAY_SPEC §9.3 — patch-0009 class: staged from the
+# SOURCE tree, so EVERY tree and every worktree re-stages, and a tree that has
+# not rebuilt has no font and therefore no stats readout and no loading cover).
+#
+# Three files out of Ogre's DebugPack.zip, not the zip: it is 285 KB and carries
+# Cube_d.mesh, Sphere1000.mesh, cuckoo.ttf, Inconsolata-Regular.ttf and a
+# .material we will never use. `Inconsolate-OFL.txt` travels with the font
+# because that is how the licence question is answered.
+set(OGRE_NEXT_DEBUGPACK_ZIP "${_ogre_media_root}/packs/DebugPack.zip")
 file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_HLMS_SOURCE_DIR}/Common/*" "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/*"
      "${OGRE_NEXT_HLMS_SOURCE_DIR}/Unlit/*" "${OGRE_NEXT_COMMON_MATERIALS_DIR}/*"
@@ -117,6 +127,7 @@ file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_VCT_MEDIA_DIR}/*" "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}/*"
      "${OGRE_NEXT_IBL_MEDIA_DIR}/*"
      "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*")
+list(APPEND _hlms_inputs "${OGRE_NEXT_DEBUGPACK_ZIP}")
 add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${JAHSHAKA_MEDIA_DIR}/Hlms"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HLMS_SOURCE_DIR}/Common" "${JAHSHAKA_MEDIA_DIR}/Hlms/Common"
@@ -135,6 +146,16 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_VCT_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/VCT"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Tools"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IBL_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IBL"
+    # The overlay font. `cmake -E tar` extracts named members, so only the three
+    # files we ship land in bin/media/packs/DebugPack — which is exactly the
+    # directory OgreEngine::registerCommonMaterials adds as a resource location
+    # (hud::addFontLocation). Wiped first, like Hlms/Jahshaka: a renamed font
+    # left behind would be parsed alongside its replacement.
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${JAHSHAKA_MEDIA_DIR}/packs"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${JAHSHAKA_MEDIA_DIR}/packs"
+    COMMAND ${CMAKE_COMMAND} -E chdir "${JAHSHAKA_MEDIA_DIR}/packs"
+            ${CMAKE_COMMAND} -E tar xf "${OGRE_NEXT_DEBUGPACK_ZIP}" --
+            DebugPack/DebugFont.fontdef DebugPack/Inconsolata-Bold.ttf DebugPack/Inconsolate-OFL.txt
     COMMAND ${CMAKE_COMMAND} -E touch "${_hlms_stamp}"
     DEPENDS ${_hlms_inputs}
     COMMENT "Staging Ogre-Next Hlms templates into bin/media/Hlms")

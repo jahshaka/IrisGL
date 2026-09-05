@@ -218,6 +218,17 @@ struct ChainDesc {
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
     bool  refractions = false;
 
+    // ---- Engine-drawn overlay (STATS_OVERLAY_SPEC.md §6.5) ----
+    /// Whether the FINAL overlay pass gets mIncludeOverlays = true. This is a
+    /// property of the VIEW, not of what is currently being drawn: it is true
+    /// for every on-screen view and for an offscreen view that set
+    /// ViewOverlayDesc::allowOffscreen, and it never changes when the host
+    /// toggles the stats readout or raises the cover. That is deliberate —
+    /// showing and hiding is Ogre overlay-element state, so a toggle must not
+    /// rebuild a workspace (STATS_OVERLAY_SPEC §6.6 test 3). Every OTHER scene
+    /// pass in this file sets mIncludeOverlays = false unconditionally.
+    bool  overlays = false;
+
     /// Does this description need anything beyond the passthrough graph?
     bool anyEffect() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
@@ -283,6 +294,66 @@ void initSmaa(Ogre::Root *root, int preset);
 void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                   unsigned viewWidth, unsigned viewHeight);
 }   // namespace chain
+
+// ---------------------------------------------------------------------------
+// The engine-drawn overlay — stats readout AND loading cover (impl in
+// OgreOverlayHud.cpp; design in SPECS/STATS_OVERLAY_SPEC.md; the phase-0
+// evidence in spikes/overlay-v1-vulkan/FINDINGS.md).
+//
+// Ogre's Components/Overlay, adopted whole (owner decision D1, ALL-IN-ON-OGRE).
+// Everything in it is `namespace Ogre::v1` and it reaches the frame through a
+// per-SceneManager RenderQueueListener at RQ 254 — inside the [210, 255) span
+// our final "Jahshaka overlays" pass already draws, so no compositor change was
+// needed.
+//
+// ONE SET FOR THE PROCESS. OverlayManager is a singleton with one overlay set,
+// so there is exactly one HUD here, not one per view. Two on-screen Views
+// therefore cannot show different text at once — the application's shape saves
+// us (all its on-screen views live on different pages, so at most one is
+// enabled at a time), and the engine recomposes the captions from the enabled
+// view's desc once per frame. Documented on ViewOverlayDesc; if the invariant
+// ever breaks, this is where it breaks.
+namespace hud {
+/// Creates the process-wide OverlaySystem. ORDER IS LOAD-BEARING: its ctor
+/// creates BOTH OverlayManager and FontManager, so it must run AFTER a render
+/// window exists and BEFORE any resource group holding a `.fontdef` is
+/// initialised, or the font script is never parsed. Idempotent; silent no-op if
+/// the component is unavailable.
+void createSystem();
+/// Adds `<mediaDir>packs/DebugPack` as a resource location in `group`. Call
+/// between createSystem() and initialiseAllResourceGroups.
+void addFontLocation(const std::string &mediaDir, const std::string &group);
+/// Builds the overlay + its elements + the `Jahshaka/OverlayFill` HlmsUnlit
+/// datablock, and EAGERLY LOADS the font. Call after Hlms registration and
+/// resource-group initialisation. The eager load matters: the first caption on
+/// a truetype font pays a full freetype rasterization + texture upload, and
+/// under owner decision D2 the first caption happens while a world is loading —
+/// the worst possible moment.
+void build(Ogre::Root *root);
+/// Registers/unregisters the render-queue listener on a SceneManager. Per
+/// scene, so a scene that never shows an overlay pays nothing.
+void attach(Ogre::SceneManager *sm);
+void detach(Ogre::SceneManager *sm);
+/// Recomposes the overlay from one view's desc, for the frame about to be
+/// drawn. `viewWidth`/`viewHeight` are that view's target size IN PIXELS —
+/// they turn the desc's pixel-sized type into Ogre's relative overlay metrics,
+/// so the text is the same physical size whatever the viewport is.
+void apply(const ViewOverlayDesc &desc, const RenderStats &stats,
+           unsigned viewWidth, unsigned viewHeight);
+/// Hides everything (no eligible view this frame).
+void hide();
+/// THE ONE-SHOT RE-CAPTION, run right after Root::renderOneFrame — see
+/// OgreOverlayHud.cpp's `Caption` for the trap it exists for. Cheap: it does
+/// nothing unless a caption changed in the frame just drawn.
+void afterFrame();
+/// Teardown: removeRenderQueueListener (per scene) -> destroy scenes -> THIS ->
+/// delete Root. An OverlaySystem outliving Root is the same class of bug as a
+/// MeshPtr outliving Root: ~OverlaySystem deletes the FontManager, and
+/// Font::unloadResource destroys the HlmsUnlit datablock it created.
+void destroySystem();
+/// False when the Overlay component is not in this build/install at all.
+bool available();
+}   // namespace hud
 
 // ---------------------------------------------------------------------------
 // The persistent shader cache (SHADER_CACHE_SPEC.md; impl in OgreShaderCache.cpp).
@@ -1257,6 +1328,14 @@ public:
 
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
+
+    void setOverlay(const ViewOverlayDesc &d) override;
+    const ViewOverlayDesc &overlay() const override;
+    /// Is this view ENTITLED to draw the process HUD at all? On-screen always;
+    /// offscreen only with ViewOverlayDesc::allowOffscreen. Decided in the same
+    /// one place as the post chain's offscreen guarantee (chainDesc()), and
+    /// read by OgreEngine::renderOneFrame when it picks the frame's HUD owner.
+    bool overlaysAllowed() const;
     /// The camera the chain's per-frame globals are computed from.
     Ogre::Camera *camera() const { return mCamera; }
     /// Shadow-atlas rebuild support (Engine::setShadowResolution): the shadow node
@@ -1372,6 +1451,8 @@ private:
     unsigned long long         mFramesPresented = 0;
     /// What the host asked for. Offscreen views keep it and ignore it.
     PostFxDesc                 mPostFx;
+    /// Ditto for the engine-drawn overlay (STATS_OVERLAY_SPEC §5.1).
+    ViewOverlayDesc            mOverlay;
     unsigned                   mWidth, mHeight;
     Colour                     mBackground;
     bool                       mEnabled = true;
@@ -1440,6 +1521,7 @@ public:
     unsigned applyWarmUpSet(const std::string &file, Scene * = nullptr) override;
 
     ShaderCacheStats shaderCacheStats() const override;
+    bool renderStats(RenderStats &out) const override;
     bool saveShaderCache() override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,

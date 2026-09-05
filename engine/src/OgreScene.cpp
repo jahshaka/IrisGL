@@ -293,6 +293,12 @@ Ogre::SceneManager *OgreScene::sceneManager() const { return mSceneMgr; }
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
     JAH_TRY {
+        // FIRST, before anything else in this scene goes: the overlay system's
+        // render-queue listener is registered on THIS SceneManager, and the
+        // teardown order the component needs is
+        // removeRenderQueueListener -> destroy scenes -> delete OverlaySystem
+        // -> delete Root (OgreOverlayHud.cpp's header).
+        hud::detach(mSceneMgr);
         teardownGi();   // VPL lights die while the SceneManager is still alive
         // The atmosphere destroys its Rectangle2D THROUGH the SceneManager, so it
         // has to go while that is still alive (teardown law: components, then the

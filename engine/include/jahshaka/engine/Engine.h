@@ -425,6 +425,24 @@ public:
     /// value is a uniform and rebuilds nothing.
     virtual void setPostFx(const PostFxDesc &) = 0;
     virtual const PostFxDesc &postFx() const = 0;
+
+    /// The engine-drawn overlay for this View (STATS_OVERLAY_SPEC.md §5.1):
+    /// a corner stats readout and/or a full-view loading cover.
+    ///
+    /// IGNORED ON OFFSCREEN VIEWS unless ViewOverlayDesc::allowOffscreen — the
+    /// same guarantee, in the same one place, as setPostFx. overlay() still
+    /// reports what the host asked for.
+    ///
+    /// Cheap to call with an unchanged value, and cheap to TOGGLE: showing or
+    /// hiding the overlay is element state, never a workspace rebuild
+    /// (workspaceGeneration does not move). Only a change to `allowOffscreen`
+    /// on an offscreen view changes the graph.
+    ///
+    /// The captions are recomposed once per frame from the ENABLED view's desc:
+    /// Ogre's overlay set is process-wide, so two on-screen Views cannot show
+    /// different text simultaneously (see ViewOverlayDesc's constraint note).
+    virtual void setOverlay(const ViewOverlayDesc &) = 0;
+    virtual const ViewOverlayDesc &overlay() const = 0;
     /// How many times this View has (re)built its compositor workspace — the
     /// structurally expensive operation behind setShadows(), setBackground(),
     /// resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts
@@ -602,6 +620,19 @@ public:
     /// What is on disk and what happened this run. Cheap enough to call from a
     /// settings page; it stats a handful of files.
     virtual ShaderCacheStats shaderCacheStats() const = 0;
+
+    /// What the renderer measured (STATS_OVERLAY_SPEC.md §4). Cheap: it reads
+    /// counters the backend already keeps, and copies no buffers.
+    ///
+    /// LAZY BY DESIGN. Geometry counting (draws/batches/triangles) is OFF in
+    /// the backend by default and costs integer adds per draw call, so the
+    /// FIRST call to this switches it on and reports metricsRecording=false
+    /// with zeroed counters. Every call after a rendered frame reports real
+    /// numbers. Nothing that never asks for stats ever pays for them.
+    ///
+    /// Returns false only when there is no backend to ask; `out` is then left
+    /// default-constructed.
+    virtual bool renderStats(RenderStats &out) const = 0;
     /// Writes the cache now, if anything new has been compiled since the last
     /// write. Called on clean shutdown and once a compile burst has settled;
     /// safe (and a no-op) when the cache is disabled or nothing is dirty.

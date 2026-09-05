@@ -707,6 +707,112 @@ struct PostFxDesc {
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
 };
 
+/// What the renderer measured this frame (STATS_OVERLAY_SPEC.md §4).
+/// A POD, exactly like ShaderCacheStats — `app.renderStats()` is this struct.
+///
+/// PROCESS-WIDE, not per view. There is one Root and one render loop, so the
+/// timings describe the loop; the geometry counters are the FRAME's running
+/// totals at the end of the last camera's pass (OgreSceneManager::_renderPhase02
+/// snapshots them per camera), which is why they are labelled "frame" and never
+/// "this view". With two on-screen views the second view's numbers include the
+/// first's — an approximation upstream makes, not one this boundary adds.
+///
+/// THE HONESTY NOTE that belongs beside every FPS number in this application:
+/// the loop is a 16 ms QTimer (EngineRenderDriver), so `fps` measures the TIMER,
+/// not the renderer. A scene that got twice as expensive but still fits inside
+/// 16 ms reads the same ~62. The number that diagnoses anything is the host's
+/// work-per-tick (app.frameStats().workMs), not this one.
+struct RenderStats {
+    /// True when the backend was recording geometry counters for the frames
+    /// these numbers describe. Reading renderStats() turns recording ON (it is
+    /// off by default in Ogre and costs integer adds per draw call), so the
+    /// FIRST read reports false with zeroed counters and every read after a
+    /// rendered frame reports true. Timings are valid either way.
+    bool               metricsRecording = false;
+
+    // ---- timing: Ogre::FrameStats, fed by Root::renderOneFrame ----
+    double fps = 0.0;         ///< rolling average FPS — the number to display
+    double frameMs = 0.0;     ///< rolling average frame time, ms
+    double lastMs = 0.0;      ///< the latest inter-sample delta, ms (noisy)
+    double p95Ms = 0.0;       ///< 95th percentile frame time, ms (0.4 fps buckets)
+    double p99Ms = 0.0;       ///< 99th percentile frame time, ms
+    double bestMs = 0.0;      ///< best frame since the counters were reset
+    double worstMs = 0.0;     ///< worst frame since the counters were reset
+
+    // ---- geometry: Ogre::RenderingMetrics, reset per frame ----
+    unsigned long long draws = 0;
+    unsigned long long batches = 0;
+    unsigned long long triangles = 0;
+    unsigned long long vertices = 0;
+    unsigned long long instances = 0;
+};
+
+/// Where a corner-anchored readout sits in a View.
+enum class OverlayCorner { TopLeft, TopRight, BottomLeft, BottomRight };
+
+/// ONE engine-drawn overlay per View (STATS_OVERLAY_SPEC.md §5.1). It covers
+/// BOTH jobs the owner asked for: a stats readout in a corner, and/or a
+/// full-view cover while nothing is being presented.
+///
+/// One desc, not two, because the cover and the readout are the same mechanism,
+/// the same Ogre overlay, the same per-pass gate and the same offscreen rule.
+/// The cover fill is drawn UNDER the stats text, so "stats visible while
+/// loading" is free and correct — it is the frame you most want numbers for.
+///
+/// IGNORED ON OFFSCREEN VIEWS unless `allowOffscreen` is set, exactly like
+/// PostFxDesc and enforced in the same single place (OgreView::chainDesc): the
+/// cover is up during EVERY open, so a leak into offscreen views would put a
+/// flat grey panel over every thumbnail and every pixel suite in the tree.
+///
+/// CONSTRAINT, documented rather than hidden: Ogre's OverlayManager is a
+/// PROCESS-WIDE singleton with one overlay set, so two on-screen Views cannot
+/// show DIFFERENT text at the same time. The application's shape saves us — all
+/// its on-screen views live on different pages, so at most one is enabled at a
+/// time, and the engine composes the overlay from the enabled view's desc once
+/// per frame. If that invariant is ever broken (a tear-off viewport, a second
+/// window, a VR mirror) this becomes a real limitation.
+struct ViewOverlayDesc {
+    // ---- stats readout ----
+    bool          stats = false;
+    OverlayCorner corner = OverlayCorner::TopLeft;
+    /// Text size multiplier. Snapped to sensible steps by the backend; HiDPI is
+    /// NOT solved anywhere in this engine, so on a Retina panel this is the
+    /// only handle there is.
+    float         scale = 1.0f;
+    Colour        colour { 1.0f, 1.0f, 1.0f, 1.0f };
+    /// The lines the HOST wants drawn, top to bottom. Empty = the engine draws
+    /// its own one-line RenderStats summary, which is what makes this boundary
+    /// testable with no host at all.
+    ///
+    /// The host supplies these because the most useful number — work per tick —
+    /// is the host's, not Ogre's. Rate-limit the pushes host-side (4-10 Hz): a
+    /// number that changes 62 times a second is unreadable anyway.
+    std::vector<std::string> lines;
+
+    // ---- the cover (the ported ViewportCover states) ----
+    enum class Cover { None, Loading, NoScene };
+    Cover       cover = Cover::None;
+    std::string coverTitle;      ///< "Loading world…" / "No world open"
+    std::string coverSubtitle;   ///< the world's name, or the "Open or create…" hint
+    /// The fill grey from viewportcover.cpp:15, kept to the pixel.
+    Colour      coverFill { 44 / 255.0f, 46 / 255.0f, 52 / 255.0f, 1.0f };
+
+    /// THE offscreen opt-in — same meaning and same word as
+    /// PostFxDesc::allowOffscreen. Only the engine suite sets it.
+    bool allowOffscreen = false;
+
+    /// True when this desc asks for anything to be drawn at all.
+    bool anything() const { return stats || cover != Cover::None; }
+
+    bool operator==(const ViewOverlayDesc &o) const {
+        return stats == o.stats && corner == o.corner && scale == o.scale &&
+               colour == o.colour && lines == o.lines && cover == o.cover &&
+               coverTitle == o.coverTitle && coverSubtitle == o.coverSubtitle &&
+               coverFill == o.coverFill && allowOffscreen == o.allowOffscreen;
+    }
+    bool operator!=(const ViewOverlayDesc &o) const { return !(*this == o); }
+};
+
 /// A CPU-side RGBA8 image, used to read back an offscreen View.
 struct Image {
     unsigned width = 0, height = 0;

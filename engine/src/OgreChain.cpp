@@ -38,6 +38,26 @@
 // SSAO normals G-buffer, out of the HDR luminance average and out of SMAA edge
 // detection. Ogre's RenderQueue constructor fixes the modes: [0,100) and
 // [200,225) are v2 FAST, so our v2 items can only live there.
+//
+// kIncludeOverlaysNote — THE mIncludeOverlays SWEEP (STATS_OVERLAY_SPEC §6.5).
+// Ogre's own overlay set (the engine-drawn stats readout and loading cover,
+// OgreOverlayHud.cpp) reaches a pass through CompositorPassSceneDef::
+// mIncludeOverlays, which upstream DEFAULTS TO TRUE for every scene pass
+// (Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h). Left alone, that
+// would put a flat grey loading panel into every thumbnail, every material
+// preview and every pixel suite in the tree — the cover is raised on EVERY
+// world open, so this would not be a rare edge.
+//
+// So: every scene pass created anywhere in this backend sets it FALSE
+// explicitly, and exactly one — the final "Jahshaka overlays" pass, in each of
+// the two chain shapes — sets it from ChainDesc::overlays, which is true only
+// for on-screen views and for offscreen views that passed
+// ViewOverlayDesc::allowOffscreen. The rule is asserted, not argued:
+// test_engine's hud_overlay_is_ignored_offscreen_unless_asked renders the same
+// scene with a cover requested and with none and demands BYTE-IDENTICAL
+// readbacks. The planar-reflection pass (OgrePlanar.cpp) sets it false too,
+// even though its RQ range already excludes 254 — the guarantee must not
+// depend on an RQ constant somebody may widen later.
 #include "EnginePrivate.h"
 
 
@@ -204,6 +224,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.refractions == b.refractions && a.samples == b.samples &&
+           a.overlays == b.overlays &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
            a.background.b == b.background.b && a.background.a == b.background.a;
 }
@@ -249,6 +270,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // offer it a refraction texture). Cutting at 200 made them vanish.
             // Pixel-neutral otherwise — nothing else lives in [200, 210).
             p->mLastRQ  = kOverlayRenderQueue;
+            p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka opaque";
         }
         {
@@ -260,6 +282,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             p->mFirstRQ = kOverlayRenderQueue;
             p->mLastRQ  = 255u;
+            // THE ONE pass in the whole engine allowed to draw Ogre's overlay
+            // set — and only when this view is entitled to it (see
+            // kIncludeOverlaysNote and ChainDesc::overlays).
+            p->mIncludeOverlays = desc.overlays;
             p->mProfilingId = "Jahshaka overlays";
         }
         Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
@@ -494,6 +520,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // Stop before the refractive queue only when there IS a refraction pass
         // to pick those items up; otherwise they render here, as plain glass.
         p->mLastRQ  = desc.refractions ? kRefractiveRenderQueue : kOverlayRenderQueue;
+        p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
         p->mProfilingId = "Jahshaka opaque";
     }
 
@@ -550,6 +577,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->setUseRefractions(msaa ? kDepthNoMsaa : kDepth, kRt0);
             p->mFirstRQ = kRefractiveRenderQueue;
             p->mLastRQ  = kOverlayRenderQueue;
+            p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka refractives";
         }
         sceneResult = kRefractOut;
@@ -738,6 +766,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mStoreActionStencil  = Ogre::StoreAction::DontCare;
         p->mFirstRQ = kOverlayRenderQueue;
         p->mLastRQ  = 255u;
+        // The effect shape's copy of THE ONE overlay-bearing pass — same rule
+        // as the passthrough shape's (kIncludeOverlaysNote).
+        p->mIncludeOverlays = desc.overlays;
         p->mProfilingId = "Jahshaka overlays";
     }
 

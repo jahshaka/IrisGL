@@ -21,6 +21,11 @@ ChainDesc OgreView::chainDesc() const {
     d.background = mBackground;
     d.shadows    = mShadows;
     d.samples    = sampleCount();
+    // Set BEFORE the offscreen early-out below: the overlay's entitlement is
+    // its own opt-in (ViewOverlayDesc::allowOffscreen), not the post chain's,
+    // so an offscreen view may legitimately keep the passthrough shape AND be
+    // allowed to draw the HUD — which is exactly what the engine suite does.
+    d.overlays   = overlaysAllowed();
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -52,6 +57,28 @@ ChainDesc OgreView::chainDesc() const {
     d.refractions    = mPostFx.refractions;
     return d;
 }
+
+bool OgreView::overlaysAllowed() const {
+    // THE offscreen guarantee for the engine-drawn overlay, in the SAME single
+    // place as the post chain's (STATS_OVERLAY_SPEC §5.2). It is a property of
+    // the VIEW, not of what the desc currently asks to draw — that is what
+    // makes toggling the stats readout or the loading cover free (element
+    // state, never a workspace rebuild). See kIncludeOverlaysNote.
+    return !isOffscreen() || mOverlay.allowOffscreen;
+}
+
+void OgreView::setOverlay(const ViewOverlayDesc &d) {
+    if (d == mOverlay) return;          // hosts push per frame; the same value is free
+    const bool wasAllowed = overlaysAllowed();
+    mOverlay = d;
+    // ONLY the entitlement can change the graph. Everything else (stats on/off,
+    // cover state, captions, colours) is Ogre overlay-element state, applied
+    // once a frame by hud::apply — so workspaceGeneration does not move, which
+    // test_engine's hud_overlay_toggle_does_not_rebuild_the_workspace pins.
+    if (overlaysAllowed() != wasAllowed) rebuildWorkspaceDef();
+}
+
+const ViewOverlayDesc &OgreView::overlay() const { return mOverlay; }
 
 void OgreView::setPostFx(const PostFxDesc &fx) {
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free
