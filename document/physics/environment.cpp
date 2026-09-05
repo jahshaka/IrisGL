@@ -319,14 +319,23 @@ void Environment::updateCharacterControllers(float delta)
 
 void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
 {
-	for (auto &node : rootNode->children) {
-		if (node->isPhysicsBody) {
-			node->setGlobalTransform(nodeTransforms.value(node->getGUID()));
-		}
-	}
+	// Null-tolerant (a scene switch can hand in a torn-down scene's null root
+	// — crash-1788594910.log) and RECURSIVE: body creation walks the whole
+	// subtree (initializePhysicsWorldFromScene), so restore must too — a
+	// nested physics body never returned to its pre-play pose (deep-audit F4).
+	if (rootNode) restoreNodeTransformationsRecursive(rootNode);
 
 	nodeTransforms.clear();
 	nodeTransforms.squeeze();
+}
+
+void Environment::restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node)
+{
+	for (auto &child : node->children) {
+		if (child->isPhysicsBody && nodeTransforms.contains(child->getGUID()))
+			child->setGlobalTransform(nodeTransforms.value(child->getGUID()));
+		restoreNodeTransformationsRecursive(child);
+	}
 }
 
 void Environment::restartPhysics()

@@ -116,6 +116,7 @@ public:
 	void stepSimulation(float delta);
 
 	void restoreNodeTransformations(iris::SceneNodePtr rootNode);
+	void restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node);
 
     void restartPhysics();
     void createPhysicsWorld();

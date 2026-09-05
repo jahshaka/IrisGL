@@ -340,7 +340,10 @@ void Scene::setAmbientMusicVolume(float volume)
 void Scene::updateSceneAnimation(float time)
 {
     animTime = time;
-    rootNode->updateAnimation(time);
+    // A torn-down scene (cleanup() ran, root dropped) can still receive this
+    // from a viewport unwinding stale play state on a scene switch — the
+    // second frame of the crash-1788594910 class.
+    if (rootNode) rootNode->updateAnimation(time);
 }
 
 void Scene::update(float dt)
@@ -361,10 +364,11 @@ void Scene::update(float dt)
 		auto rigidBodyWorldTransform = physicsBodies.value()->getWorldTransform();
 		// Put the transform matrix's float data into our array
 		rigidBodyWorldTransform.getOpenGLMatrix(matrix);
-		// Get the matching scenenode
+		// Get the matching scenenode. NULL-CHECKED (deep-audit F3): a body
+		// whose node was deleted mid-simulation (or a stale hash after a
+		// scene switch) otherwise dereferences null here every frame.
 		auto mesh = nodes.value(physicsBodies.key());
-
-		if (mesh->disablePhysicsTransform)
+		if (!mesh || mesh->disablePhysicsTransform)
 			continue;
 
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
