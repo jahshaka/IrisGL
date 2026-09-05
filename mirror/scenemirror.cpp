@@ -2948,7 +2948,16 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view)
     // in any preview whose viewpoint happens to be a scene node. Recorded here
     // because this function is "the ONLY way a View's camera moves" (Engine.h),
     // so it is the one place that always knows.
-    mViewCamera = camera.data();
+    if (mViewCamera != camera.data()) {
+        mViewCamera = camera.data();
+        // ...and hide its helpers NOW rather than at the next sync. Hosts call
+        // sync() and applyCamera() in either order (the editor syncs first, the
+        // gizmo suite applies first), and a viewport that renders one frame
+        // between them would show the camera's own frustum fanning across the
+        // whole image. Cheap: one hash lookup on a change only.
+        auto it = mEntries.find(mViewCamera ? mViewCamera->nodeId : -1);
+        if (it != mEntries.end() && it->wireNode) mTarget->setNodeVisible(it->wireNode, false);
+    }
 
     view->setCamera(toCameraDesc(camera));
 }
