@@ -347,6 +347,12 @@ void pipRects(const ViewPipDesc &pip, float targetAspect,
 /// later, exactly as they did before this existed).
 bool warmUp(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::Camera *camera,
             const std::string &refNodeDef, const std::string &baseName);
+/// True when warmUp() will take the CompositorPassWarmUp route rather than the
+/// "render the view's own workspace" fallback. The caller needs to know because
+/// the two routes want OPPOSITE things from the view: the warm-up pass runs in
+/// its own workspace and needs the view's to stay DISABLED, while the fallback
+/// is the view's own frame and needs it enabled.
+bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef);
 
 // ---- Effect parameters -----------------------------------------------------
 // EVERY ONE OF THESE IS PROCESS-GLOBAL (POST_CHAIN_SPEC.md §7.4): Ogre's HDR,
@@ -520,6 +526,9 @@ private:
     unsigned    mExpectedShaders = 0; ///< from the manifest of the last saved run
     long long   mLastSavedUnixMs = 0;
     bool        mPipelineLoaded = false, mMicrocodeLoaded = false;
+    /// The driver's verdict on the pipeline blob, scraped from its own log
+    /// (ShaderCacheStats::pipelineCacheReason documents the values).
+    std::string mPipelineReason = "absent";
     unsigned    mHlmsLoaded = 0;
     /// Microcode-map size right after the load — the baseline compiledThisRun
     /// would use if we had no log listener. Kept for the dirty() shortcut.

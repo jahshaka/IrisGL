@@ -677,17 +677,28 @@ bool OgreView::warmUpShaders() {
     if (!mCamera) { mError = "warmUpShaders: view '" + mName + "' has no camera"; return false; }
     JAH_TRY {
         if (!attachWorkspace()) { mError = "warmUpShaders: no workspace for view '" + mName + "'"; return false; }
-        // A DISABLED view renders nothing, and the caller's whole reason for
-        // being here is that the view is not on screen yet — the editor's
-        // viewport is disabled until its page is shown, and the loading cover
-        // is over it. Enable it just for these frames and put it back. Anything
-        // presented meanwhile is behind the cover, which is a native window
-        // stacked above the viewport's (src/viewport/viewportcover.h).
+        const std::string refNode = chain::sceneNodeDefName(mWorkspaceDef);
+        // THE TWO ROUTES WANT OPPOSITE THINGS FROM THIS VIEW.
+        //
+        // CompositorPassWarmUp (the route ogre-patch 0016 unblocked) runs in its
+        // OWN 4x4 workspace and this view's must stay DISABLED, or the frame
+        // that drives it also renders the real thing at full resolution — the
+        // ~250 ms this whole route exists to remove. If the view is somehow
+        // already enabled, disable it for the duration.
+        //
+        // The fallback route IS this view's own frame, so there it is the other
+        // way round: a disabled view renders nothing at all, and the caller's
+        // whole reason for being here is that the view is not on screen yet
+        // (the editor's viewport is disabled until its page is shown, with the
+        // loading cover over it). Anything presented meanwhile is behind that
+        // cover, which is a native window stacked above the viewport's
+        // (src/viewport/viewportcover.h).
+        const bool usesPass = chain::warmUpUsesPass(mRoot->getCompositorManager2(), refNode);
         const bool wasEnabled = mEnabled;
-        if (!wasEnabled) setEnabled(true);
-        const bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera,
-                                      chain::sceneNodeDefName(mWorkspaceDef), mName);
-        if (!wasEnabled) setEnabled(false);
+        const bool wantEnabled = !usesPass;
+        if (wasEnabled != wantEnabled) setEnabled(wantEnabled);
+        const bool ok = chain::warmUp(mRoot, mScene->sceneManager(), mCamera, refNode, mName);
+        if (wasEnabled != wantEnabled) setEnabled(wasEnabled);
         return ok;
     } JAH_CATCH(mError, false);
 }

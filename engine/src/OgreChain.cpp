@@ -69,6 +69,8 @@
 #include <Compositor/Pass/PassCompute/OgreCompositorPassComputeDef.h>
 #include <Compositor/Pass/PassDepthCopy/OgreCompositorPassDepthCopyDef.h>
 #include <Compositor/Pass/PassStencil/OgreCompositorPassStencilDef.h>
+#include <Compositor/Pass/PassWarmUp/OgreCompositorPassWarmUp.h>
+#include <Compositor/Pass/PassWarmUp/OgreCompositorPassWarmUpDef.h>
 #include <OgreMaterialManager.h>
 #include <OgreMaterial.h>
 #include <OgreTechnique.h>
@@ -916,55 +918,134 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 }
 
 // ---------------------------------------------------------------------------
-// PSO precache (SHADER_CACHE_SPEC.md §5).
+// PSO precache (SHADER_CACHE_SPEC.md §5) — CompositorPassWarmUp, which is what
+// the spec asked for all along.
 //
-// WHAT THIS IS NOT, and the finding behind it. The spec's design is Ogre's
-// CompositorPassWarmUp: clone the view's scene passes into a throwaway warm-up
-// workspace with Ogre::WarmUpHelper::createFrom, render it into a 4x4 target,
-// and every variant the scene needs — including shadow casters and render
-// queues nothing visible occupies — is compiled without drawing anything.
+// THE HISTORY, because the comment that used to live here said this was
+// impossible and it was wrong about WHY (SHADER_CACHE_AUDIT.md F2).
 //
-// That was built and RUN here. It segfaults, and it cannot be made to work from
-// our side at this pin:
+// The design is Ogre's `WarmUpHelper::createFrom`: clone the view's scene
+// passes into a throwaway warm-up node, render that into a 4x4 target, and
+// every variant the scene needs — including shadow casters and render queues
+// nothing visible occupies — is compiled without drawing anything.
 //
-//   Ogre::ForwardPlusBase::getGridBuffer, called from HlmsPbs::preparePassHash
-//   inside SceneManager::_warmUpShadersCollect, looks the camera's light grid
-//   up in a cache keyed by { camera, reflection, aspect, lightVisibilityMask,
-//   CURRENT SHADOW NODE } (OgreForwardPlusBase.cpp:445-472). CompositorShadow
-//   Nodes are per WORKSPACE, so a warm-up pass living in its own workspace has
-//   a different CompositorShadowNode instance than the view's scene pass — the
-//   lookup can never match, outCachedGrid is left null, and the very next line
-//   dereferences it. Rendering a real frame first does not help (the key still
-//   differs); nor does dropping the shadow node (the real pass's entry has one).
-//   Turning the warm-up pass's Forward+ off avoids the crash but then compiles
-//   the WRONG permutations — hlms_forwardplus is a shader property, so the
-//   shaders built would not be the ones the real pass wants, and they would
-//   pollute the cache.
+// It was built, it segfaulted, and the crash was blamed on the shadow-node term
+// of Forward+'s cached-grid key: "shadow nodes are per workspace, so a warm-up
+// pass in its own workspace can never match the view's entry." That diagnosis
+// was WRONG. The key does contain the shadow node, but that is not what fails,
+// because there is nothing to match against in the first place:
 //
-//   Backtrace, for whoever picks this up:
-//     ForwardPlusBase::getGridBuffer  <- HlmsPbs::preparePassHash:1929
-//     <- RenderQueue::renderPassPrepare <- SceneManager::_warmUpShadersCollect:1623
-//     <- CompositorPassWarmUp::execute:156
+//   SceneManager::_cullPhase01 calls mForwardPlusImpl->collectLights( camera )
+//   immediately before RenderQueue::renderPassPrepare (OgreSceneManager.cpp:
+//   1382-1385). _warmUpShadersCollect calls renderPassPrepare with NO
+//   collectLights anywhere in the function. collectLights is the ONLY thing
+//   that inserts into mCachedGrid, so on a warm-up pass the cache has no entry
+//   for that camera at all; getCachedGridFor misses, outCachedGrid is left null
+//   and getGridBuffer dereferences it. In a build with NDEBUG the
+//   "You must call ForwardPlusBase::collectLights first!" assert is compiled
+//   out and the null deref is the whole story (OgreForwardPlusBase.cpp:527-538).
 //
-//   The fix belongs upstream (collect the lights, or guard the null) and would
-//   be ogre-patch 0012 — which needs the shared engine install rebuilt, so it
-//   is a lead decision, not a lane one.
+// The fix is upstream and is three lines: **ogre-patch 0016** adds the missing
+// collectLights to _warmUpShadersCollect, mirroring _cullPhase01 exactly. With
+// it the insert and the lookup happen inside the SAME call, off the SAME
+// camera and the SAME viewport, so every term of the key — including the
+// light-visibility mask CompositorPassWarmUp::execute hardcodes to 0xFFFFFFFF
+// (:101) and the current shadow node — agrees by construction. The
+// cross-workspace worry never arises; nothing is being matched across passes.
 //
-// WHAT THIS IS, therefore: the same product outcome by the boring route. We
-// render the view's OWN workspace a couple of frames while the caller's loading
-// cover is up. The Hlms builds a shader per renderable on first draw, so those
-// frames are exactly the compiles that would otherwise land on the first frames
-// the user sees — moved behind the cover, which is the whole point of §5.
+// WHAT THIS BUYS over the old "just render a real frame" route:
+//   * the warm-up target is 4x4 (WarmUpHelper shrinks every local texture), so
+//     the arming open costs milliseconds instead of a full-resolution frame —
+//     which is what unblocks `shader_warmup_on_open` defaulting ON;
+//   * the pass ignores culling and sweeps ALL render queues, so it reaches
+//     permutations the camera cannot currently see;
+//   * it copies the reference node's PASS_SHADOWS passes too, so shadow-caster
+//     variants compile as well.
 //
-// The honest limitation, stated rather than hidden: this warms what the camera
-// can SEE plus its shadow casters, not every permutation in the scene. The
-// warm-up pass would have covered more. A pan across a large world can still
-// find an uncompiled variant.
+// STANDING CAVEAT, from the audit and unchanged: no upstream sample exercises
+// WarmUpHelper. It is lightly-trodden code. `JAHSHAKA_WARMUP_NO_PASS=1` in the
+// environment falls back to the old full-frame route without a rebuild — the
+// rollback, kept deliberately.
+namespace {
+
+/// The rollback switch. Read once; an env var rather than a setting because the
+/// thing it disables is an ENGINE route, not a product policy, and the only
+/// people who need it are debugging a driver.
+bool warmUpPassDisabled() {
+    static const bool off = []() {
+        const char *v = std::getenv("JAHSHAKA_WARMUP_NO_PASS");
+        return v && *v && *v != '0';
+    }();
+    return off;
+}
+
+}   // namespace
+
+bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef) {
+    return !warmUpPassDisabled() && cm && cm->hasNodeDefinition(refNodeDef);
+}
+
 bool warmUp(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::Camera *camera,
             const std::string &refNodeDef, const std::string &baseName) {
-    (void)sm; (void)camera; (void)refNodeDef; (void)baseName;
     if (!root) return false;
-    root->renderOneFrame();
+    Ogre::CompositorManager2 *cm = root->getCompositorManager2();
+    if (!sm || !camera || !warmUpUsesPass(cm, refNodeDef)) {
+        // The fallback, and the ONLY route for a view whose chain we cannot see
+        // (nothing in-tree hits that today, but a caller that passes an unknown
+        // node def gets a warm-up rather than a refusal).
+        root->renderOneFrame();
+        return true;
+    }
+
+    const std::string nodeName = baseName + "/WarmUpNode";
+    const std::string wsName   = baseName + "/WarmUp";
+    // Left behind by an earlier failed attempt? Definitions are named and
+    // global to the CompositorManager2; re-adding one throws.
+    if (cm->hasWorkspaceDefinition(wsName)) cm->removeWorkspaceDefinition(wsName);
+    if (cm->hasNodeDefinition(nodeName))    cm->removeNodeDefinition(nodeName);
+
+    Ogre::TextureGpu *tiny = nullptr;
+    Ogre::CompositorWorkspace *ws = nullptr;
+    bool ok = false;
+    try {
+        // The external target the cloned node's rt_output input channel binds
+        // to. 4x4 for the same reason WarmUpHelper shrinks its local textures:
+        // nothing about WHICH shader gets built depends on the resolution.
+        // PFG_RGBA8_UNORM matches every view target in this engine, and the
+        // format IS a pass property (the Hlms hashes the render-target format),
+        // so it must match or the warm-up compiles variants nothing draws.
+        tiny = OgreView::createRtt(root, baseName + "/WarmUpRtt", 4u, 4u, 1u);
+
+        Ogre::WarmUpHelper::createFrom(cm, nodeName, refNodeDef, false);
+        Ogre::CompositorWorkspaceDef *wd = cm->addWorkspaceDefinition(wsName);
+        wd->connectExternal(0, nodeName, 0);
+
+        // The view that owns refNodeDef is DISABLED while this runs (see
+        // OgreView::warmUpShaders), so this frame executes the warm-up
+        // workspace and nothing else.
+        ws = cm->addWorkspace(sm, tiny, camera, wsName, true);
+        if (ws) {
+            root->renderOneFrame();
+            ok = true;
+        }
+    } catch (const Ogre::Exception &) {
+        ok = false;
+    }
+
+    // Teardown in reverse, and unconditional: a throw halfway through must not
+    // leave a node definition or a 4x4 render target behind for the next call
+    // to collide with.
+    if (ws) cm->removeWorkspace(ws);
+    if (cm->hasWorkspaceDefinition(wsName)) cm->removeWorkspaceDefinition(wsName);
+    if (cm->hasNodeDefinition(nodeName))    cm->removeNodeDefinition(nodeName);
+    if (tiny) root->getRenderSystem()->getTextureGpuManager()->destroyTexture(tiny);
+
+    if (!ok) {
+        // Never leave the caller un-warmed because the untrodden path refused:
+        // fall back to the frame that always worked.
+        root->renderOneFrame();
+        return true;
+    }
     return true;
 }
 
