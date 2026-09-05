@@ -177,6 +177,7 @@ set(SRCS
     document/physics/avatarmovement.cpp
     document/physics/environment.cpp
     document/physics/physicshelper.cpp
+    document/input/inputmap.cpp
 
 )
 
@@ -247,6 +248,7 @@ set (HEADERS
     document/physics/environment.h
     document/physics/physicshelper.h
     document/physics/physicsproperties.h
+    document/input/inputmap.h
 )
 
 set(QRCS assets.qrc)
