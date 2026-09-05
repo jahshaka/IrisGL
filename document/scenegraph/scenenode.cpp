@@ -487,7 +487,11 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         // setStaticHint validates eligibility under the NEW parent itself.
         const bool wantedStatic = node->wantsStatic();
         node->setGlobalTransform(initialGlobalTransform);
-        if (wantedStatic) node->setStaticHint(true);
+        // The RAW setter, not setStaticHint: since v2, setStaticHint records a
+        // USER decision (StaticOverride) that the serializer persists — a plain
+        // reparent of a policy-derived static node must not stamp the
+        // derivation into the file.
+        if (wantedStatic) node->_applyStaticHint(true);
     }
 
     node->notifyChanged(NodeChange::Structure);
