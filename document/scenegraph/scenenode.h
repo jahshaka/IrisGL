@@ -56,6 +56,28 @@ enum class NodeChange {
     Name
 };
 
+/// Whether the SCENE_STATIC classification of this node was DECIDED BY A HUMAN
+/// or merely derived by the default policy (applyStaticDefaults).
+///
+/// The distinction is the whole reason the serializer can persist the hint at
+/// all. `applyStaticDefaults` is a greedy policy — it marks every eligible
+/// branch of every scene that loads — so writing its result to the file would
+/// store a derivation, not a decision, and freeze today's policy into every
+/// document ever saved. What IS worth persisting is the case where the user
+/// disagreed with the policy: "this crate is going to be moved by a script,
+/// leave it dynamic" (Dynamic), or "mark this branch static even though the
+/// policy did not reach it" (Static).
+///
+/// So: `None` is written as NOTHING and re-derived on load; the other two are
+/// written explicitly and beat the policy. A transform write clears the
+/// override along with the hint (see SceneNode::_clearStaticHint) — moving a
+/// thing is a newer and stronger statement of intent than a checkbox.
+enum class StaticOverride : quint8 {
+    None = 0,     ///< no user opinion; applyStaticDefaults decides
+    Static = 1,   ///< the user asked for static
+    Dynamic = 2   ///< the user asked for dynamic, policy notwithstanding
+};
+
 // -----------------------------------------------------------------------------
 // iris::SceneNode — a TYPED HANDLE onto one Ogre::SceneNode.
 //
@@ -105,6 +127,9 @@ protected:
 
     /// SCENE_STATIC, the document's side of it. See setStaticHint().
     bool mStaticHint = false;
+
+    /// The USER's word on SCENE_STATIC, when there is one. See StaticOverride.
+    StaticOverride mStaticOverride = StaticOverride::None;
 
 public:
     SceneNodeType sceneNodeType;
@@ -415,20 +440,42 @@ public:
     /// Nodes whose engine attachment cannot change class — lights and particle
     /// systems (their object memory managers have no static twin) — refuse the
     /// hint. isStaticEligible() is the document-side test.
+    /// The EXPLICIT setter — node.setStatic, the properties panel, the reader
+    /// replaying a persisted override. It records that a human decided
+    /// (staticOverride() stops being None), which is what the serializer
+    /// writes and what applyStaticDefaults then refuses to overrule.
     void setStaticHint(bool value);
     bool staticHint() const { return mStaticHint; }
     /// What iris::graph reads when it reconciles a subtree after a structural
     /// move. Same value as staticHint(); named for the question it answers.
     bool wantsStatic() const { return mStaticHint; }
+    /// The user's recorded decision, or None when the classification is just
+    /// the default policy's output. Serializer v2 writes only the first two.
+    StaticOverride staticOverride() const { return mStaticOverride; }
+    /// Replays a persisted override without touching the graph — the reader's
+    /// setter, used while a subtree is still being built and its parent chain
+    /// is not final. The applyStaticDefaults() pass at the end of the load is
+    /// what turns these into real graph state.
+    void _setStaticOverride(StaticOverride o) { mStaticOverride = o; }
     /// Cleared by iris::graph when a transform write demotes this subtree.
     /// Not a public setter: it must not re-enter the graph.
-    void _clearStaticHint() { mStaticHint = false; }
+    ///
+    /// The OVERRIDE goes with it: the user just moved this thing, and that is a
+    /// newer statement of intent than whatever checkbox produced the override.
+    /// Without this a node the user had pinned Static would come back static on
+    /// every load and be demoted again by the first drag, forever.
+    void _clearStaticHint() { mStaticHint = false; mStaticOverride = StaticOverride::None; }
     /// Is this node the KIND of thing that may be static at all? Never-animated
     /// geometry and plain groupings only: a light, a particle system, a decal,
     /// a camera or a viewer carries an engine object that cannot switch class;
     /// a physics body, a socket rider, a skinned mesh and anything holding an
     /// animation are all going to move.
     virtual bool isStaticEligible() const;
+    /// setStaticHint's body, WITHOUT recording a user decision — the graph
+    /// state only. Two callers, both of which have their own idea of intent:
+    /// the default policy (applyStaticDefaults) and undo, which restores a
+    /// classification it captured rather than making a new one.
+    void _applyStaticHint(bool value);
     /// True when the graph really did put this node in the static manager —
     /// the hint is what was ASKED for, this is what happened.
     bool isStaticInGraph() const { return graph::isStatic(mGraphNode); }
@@ -448,9 +495,12 @@ public:
     /// every imported prop dropping out of the engine's per-frame transform and
     /// bounds passes for the life of the session.
     ///
-    /// NOT SERIALIZED YET. The hint is re-derived on load rather than written,
-    /// which is why this is called from the reader; serializer v2 should
-    /// persist an explicit user override on top of it.
+    /// THE POLICY IS NOT SERIALIZED, the OVERRIDE is (serializer v2). This runs
+    /// on every load, so a scene's classification always reflects today's
+    /// policy rather than the policy of the build that saved it; the only thing
+    /// the file carries is the places a human disagreed (StaticOverride). Those
+    /// are replayed by the reader BEFORE this pass and this pass honours them:
+    /// an override never gets overwritten by the default.
     void applyStaticDefaults();
 
     SceneNodeType getSceneNodeType();
