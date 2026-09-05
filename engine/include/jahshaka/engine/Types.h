@@ -731,6 +731,21 @@ struct ShaderCacheStats {
 
     // ---- what was loaded, per layer ----
     bool     pipelineCacheLoaded = false;   ///< VkPipelineCache blob accepted by the driver
+    /// WHY pipelineCacheLoaded reads the way it does — the honest per-layer
+    /// report the caching audit (F7) asked for. `loadPipelineCache` is void and
+    /// the driver's verdict exists only as a log line, so this is scraped from
+    /// the render system's own sentences and is the difference between "there
+    /// was no blob" and "the driver threw yours away":
+    ///   "absent"          nothing on disk to offer
+    ///   "accepted"        loaded, N bytes
+    ///   "outdated"        header mismatch (device/driver/UUID/hash) — the
+    ///                     normal cost of a driver update
+    ///   "rejected"        vkCreatePipelineCache refused it
+    ///   "silent"          the render system said nothing at all: the PowerVR
+    ///                     broken-pipeline-cache workaround makes load and save
+    ///                     no-ops (OgreVulkanDevice.cpp), and every launch on
+    ///                     such a device pays full PSO creation
+    std::string pipelineCacheReason = "absent";
     bool     microcodeLoaded = false;       ///< SPIR-V microcode map read back
     unsigned microcodeEntries = 0;          ///< entries in the live microcode map
     unsigned hlmsCachesLoaded = 0;          ///< Hlms disk caches applied (0..2: PBS, Unlit)

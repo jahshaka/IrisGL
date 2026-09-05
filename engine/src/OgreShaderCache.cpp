@@ -198,13 +198,37 @@ public:
     std::atomic<unsigned> compiled{0};
     std::atomic<unsigned> fromCache{0};
 
+    /// THE PIPELINE BLOB'S ACTUAL FATE (audit F7). `loadPipelineCache` is void:
+    /// the driver's verdict on the blob we hand it exists ONLY as a log line, so
+    /// the same listener that counts shaders reads it. Three sentinels, all from
+    /// OgreVulkanRenderSystem::loadPipelineCache:
+    ///   ":613  Vulkan: Pipeline cache outdated, not loaded."  (header mismatch)
+    ///   ":628  Vulkan: Pipeline cache loaded, N bytes."       (accepted)
+    ///   ":635  Vulkan: Pipeline cache loading failed. ..."    (vkCreate failed)
+    /// A FOURTH case says nothing at all: OGRE_VK_WORKAROUND_BROKEN_VKPIPELINECACHE
+    /// makes load and save silent no-ops on PowerVR (OgreVulkanDevice.cpp:813).
+    /// Defaulting the verdict to "not accepted" and only ever raising it on the
+    /// "loaded" sentence covers that path for free — silence is a rejection.
+    enum class PipelineVerdict { Silent, Accepted, Outdated, Rejected };
+    std::atomic<PipelineVerdict> pipeline{PipelineVerdict::Silent};
+
     void messageLogged(const Ogre::String &message, Ogre::LogMessageLevel,
                        bool, const Ogre::String &, bool &) override {
-        // Both sentences begin "Shader ". Bail on the first character for the
-        // thousands of unrelated messages a startup logs.
-        if (message.size() < 8 || message.compare(0, 7, "Shader ") != 0) return;
-        if (message.find(" compiled successfully") != Ogre::String::npos)      ++compiled;
-        else if (message.find(" was in microcode cache") != Ogre::String::npos) ++fromCache;
+        // Both shader sentences begin "Shader ". Bail on the first character for
+        // the thousands of unrelated messages a startup logs.
+        if (message.size() >= 8 && message.compare(0, 7, "Shader ") == 0) {
+            if (message.find(" compiled successfully") != Ogre::String::npos)      ++compiled;
+            else if (message.find(" was in microcode cache") != Ogre::String::npos) ++fromCache;
+            return;
+        }
+        // The pipeline-cache verdicts. Same shape: one fixed prefix, then the
+        // discriminating word. Cheap enough to sit beside the hot path.
+        if (message.compare(0, 30, "Vulkan: Pipeline cache loaded,") == 0)
+            pipeline.store(PipelineVerdict::Accepted);
+        else if (message.compare(0, 29, "Vulkan: Pipeline cache outdat") == 0)
+            pipeline.store(PipelineVerdict::Outdated);
+        else if (message.compare(0, 29, "Vulkan: Pipeline cache loadin") == 0)
+            pipeline.store(PipelineVerdict::Rejected);
     }
 };
 
@@ -394,6 +418,7 @@ bool ShaderCache::clear() {
     mExpectedShaders = 0;
     mLastSavedUnixMs = 0;
     mPipelineLoaded = mMicrocodeLoaded = false;
+    mPipelineReason = "absent";
     mHlmsLoaded = 0;
     mMicrocodeAtLoad = 0;
     // The next save must WRITE, even though nothing has compiled since the last
@@ -463,12 +488,40 @@ void ShaderCache::load(Ogre::Root *root) {
     // Order is upstream's (OgreHlmsDiskCache.h:74-77 + GraphicsSystem.cpp).
     try {
         if (!pipeline.empty()) {
-            Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(pipeline.data(), pipeline.size(), false, true));
+            // NAMED streams, all three of them (audit F11). Ogre logs the stream
+            // NAME when it reads one — "Loading HlmsDiskCache from " with an
+            // empty tail is the log line that started the caching audit — and a
+            // MemoryDataStream built from the anonymous ctor has none. The full
+            // path is the useful name: it says which cache directory a session
+            // read, which is exactly the question a support log has to answer.
+            Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(path("pipeline.cache"),
+                                                                  pipeline.data(), pipeline.size(),
+                                                                  false, true));
+            // The verdict comes from the LOG, not from the call (F7): the driver
+            // may reject the blob outright (wrong device, wrong driver version,
+            // bad hash) and loadPipelineCache would still return void. Clear the
+            // listener's verdict first so a second load in the same process
+            // cannot inherit the first one's answer.
+            if (mCounter) mCounter->pipeline.store(Counter::PipelineVerdict::Silent);
+            mPipelineReason = "silent";
             rs->loadPipelineCache(s);
-            mPipelineLoaded = true;
+            if (mCounter) {
+                switch (mCounter->pipeline.load()) {
+                case Counter::PipelineVerdict::Accepted:
+                    mPipelineLoaded = true;  mPipelineReason = "accepted"; break;
+                case Counter::PipelineVerdict::Outdated:
+                    mPipelineLoaded = false; mPipelineReason = "outdated"; break;
+                case Counter::PipelineVerdict::Rejected:
+                    mPipelineLoaded = false; mPipelineReason = "rejected"; break;
+                case Counter::PipelineVerdict::Silent:
+                    mPipelineLoaded = false; mPipelineReason = "silent";   break;
+                }
+            }
         }
         if (!microcode.empty()) {
-            Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(microcode.data(), microcode.size(), false, true));
+            Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(path("microcode.cache"),
+                                                                  microcode.data(), microcode.size(),
+                                                                  false, true));
             Ogre::GpuProgramManager::getSingleton().loadMicrocodeCache(s);
             mMicrocodeLoaded = true;
             // Ogre exposes no count for the live map, but the file's first
@@ -490,8 +543,9 @@ void ShaderCache::load(Ogre::Root *root) {
             for (auto &entry : hlms) {
                 Ogre::Hlms *h = hm->getHlms(static_cast<Ogre::HlmsTypes>(entry.first));
                 if (!h) continue;
-                Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(entry.second.data(),
-                                                                      entry.second.size(), false, true));
+                Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(
+                    path("hlms." + std::to_string(entry.first) + ".bin"),
+                    entry.second.data(), entry.second.size(), false, true));
                 disk.loadFrom(s);
                 // numThreads is INERT for us: supportsMultithreadedShaderCompilation()
                 // is false in this install (OgreBuildSettings.h has
@@ -508,6 +562,7 @@ void ShaderCache::load(Ogre::Root *root) {
         logLine(std::string("load failed (") + e.getDescription() + ") — starting cold");
         wipe();
         mPipelineLoaded = mMicrocodeLoaded = false;
+        mPipelineReason = "rejected";
         mHlmsLoaded = 0;
         return;
     }
@@ -581,7 +636,10 @@ bool ShaderCache::save(Ogre::Root *root) {
             // FileStreamDataStream::close() frees it with OGRE_DELETE_T.
             std::fstream *fs = OGRE_NEW_T(std::fstream, Ogre::MEMCATEGORY_GENERAL)(
                 scratch.c_str(), std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
-            Ogre::DataStreamPtr s(OGRE_NEW Ogre::FileStreamDataStream(name, fs, 0, true));
+            // Named for the file the bytes are ACTUALLY in (F11). It used to be
+            // named "hlms.1.bin" while writing hlms.1.bin.building, so a log
+            // line naming the stream named a file that did not exist yet.
+            Ogre::DataStreamPtr s(OGRE_NEW Ogre::FileStreamDataStream(scratch, fs, 0, true));
             writer(s);
             s->close();
         }
@@ -638,9 +696,19 @@ bool ShaderCache::save(Ogre::Root *root) {
         if (!rewritten && ::stat(path(p.name).c_str(), &st) == 0) files.push_back(p);
     }
 
+    // THE SPLASH DENOMINATOR, and it is LAST-RUN, not all-time (audit F6).
+    // shaderbuildgate.h:26-29 promises "the run that wrote the cache recorded
+    // how many shaders it needed", and std::max broke that promise in one
+    // direction only: one heavy world (or one run with the cache disabled, or
+    // one that opened five projects) pinned the number forever and every launch
+    // afterwards showed "61/76" and stopped. A session total that only ever
+    // grows is not a denominator, it is a high-water mark.
+    //
+    // The last save of a session is the clean-quit save (EngineHost::shutdown),
+    // so the value that survives IS the session total — which is what the next
+    // launch should expect to build or serve.
     if (mCounter)
-        mExpectedShaders = std::max(mExpectedShaders,
-                                    mCounter->compiled.load() + mCounter->fromCache.load());
+        mExpectedShaders = mCounter->compiled.load() + mCounter->fromCache.load();
     if (!writeManifest(files)) return false;
     mLastSavedUnixMs = nowUnixMs();
     if (mCounter) mSavedAtCompileCount = mCounter->compiled.load() + mCounter->fromCache.load();
@@ -664,6 +732,7 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.fingerprint = mEnabled ? hexOf(mFingerprint) : std::string();
     if (mEnabled) s.sizeBytes = dirBytes(mDir, &s.files);
     s.pipelineCacheLoaded = mPipelineLoaded;
+    s.pipelineCacheReason = mPipelineReason;
     s.microcodeLoaded = mMicrocodeLoaded;
     s.hlmsCachesLoaded = mHlmsLoaded;
     (void)root;
