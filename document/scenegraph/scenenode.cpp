@@ -43,15 +43,9 @@ namespace iris
 /// that no two calls return the same value, not that ids order anything.
 static std::atomic<qint64> sNextNodeId{0};
 
-static SceneNode::ChangeObserver sChangeObserver = nullptr;
+SceneNode::ChangeObserver SceneNode::sChangeObserver = nullptr;
 
 void SceneNode::setChangeObserver(ChangeObserver observer) { sChangeObserver = observer; }
-SceneNode::ChangeObserver SceneNode::changeObserver() { return sChangeObserver; }
-
-void SceneNode::notifyChanged(NodeChange what)
-{
-    if (sChangeObserver) sChangeObserver(this, what);
-}
 
 SceneNode::SceneNode()
 {

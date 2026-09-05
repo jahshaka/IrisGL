@@ -211,8 +211,14 @@ public:
     /// A single process-wide observer, null by default (v1 keeps the seam
     /// minimal deliberately — SPECS/SCENEGRAPH_SPEC.md §3 step 1). Every setter
     /// on this class routes through notifyChanged() before it forwards.
+    ///
+    /// The pointer is exposed so notifyChanged can be INLINE: this is on the
+    /// path of every transform write in the program, and in a Debug build (the
+    /// one the §6 benchmark measures) an out-of-line call whose body is one
+    /// null test costs more than the test.
+    static ChangeObserver sChangeObserver;
     static void setChangeObserver(ChangeObserver observer);
-    static ChangeObserver changeObserver();
+    static ChangeObserver changeObserver() { return sChangeObserver; }
 
     void setName(QString name);
     QString getName();
@@ -437,7 +443,10 @@ public:
 
 protected:
     /// THE funnel. Every mutator calls it before (or instead of) forwarding.
-    void notifyChanged(NodeChange what);
+    void notifyChanged(NodeChange what)
+    {
+        if (sChangeObserver) sChangeObserver(this, what);
+    }
 
 private:
     void setScene(ScenePtr scene);
