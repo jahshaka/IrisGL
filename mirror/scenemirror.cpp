@@ -288,6 +288,173 @@ void SceneMirror::setLightWires(bool on)
     mLightWires = on;
 }
 
+void SceneMirror::setCameraBodies(bool on)
+{
+    mCameraBodies = on;
+}
+
+// ---- camera helpers (CAMERAS_SPEC D2 / §3, phase 2b) ------------------------------
+//
+// A scene camera has no geometry of its own, so the editor draws it: a small BODY
+// (a boxy camera with a lens barrel and a viewfinder nub, pointing down the
+// camera's -Z like the projection does) and its view FRUSTUM.
+//
+// Two things make this different from the light shapes above, and they are the
+// reason it does not go through wireMeshFor():
+//
+//  * the geometry is DERIVED. The frustum is the document's own lens — fov,
+//    aspect, near and far — so there is no fixed shape to cache per kind. Each
+//    camera owns a mesh and it is rebuilt only when the signature of those
+//    values (plus the selection state) changes; a camera nobody is editing costs
+//    one 64-bit hash per frame.
+//  * the far plane is CLIPPED for drawing. A camera's far clip defaults to 500
+//    units: an honest frustum would be a pair of lines vanishing off screen and
+//    would swallow the viewport. The drawn frustum stops at kFrustumDraw (or the
+//    real far plane, whichever is nearer) — the same thing Ogre's own
+//    Frustum::getCustomWorldSpaceCorners(out, customFarPlane) exists for, done
+//    document-side because that is where the lens already lives.
+//
+// The lines are unlit and depth-test OFF, i.e. the on-top overlay render queue —
+// which is also what keeps a camera out of its OWN picture-in-picture preview
+// (chain::buildPip renders below that queue) with nothing to keep in step.
+
+namespace {
+
+/// How far down -Z the drawn frustum reaches, in world units, when the camera's
+/// own far plane is further out. Chosen so a default 45-degree camera's frustum
+/// is a readable wedge next to a human-scale object rather than a horizon-filling
+/// funnel.
+constexpr float kFrustumDraw = 6.0f;
+
+quint64 hashFloat(quint64 h, float v)
+{
+    // Bit-exact: these values come from sliders and property writes, and a
+    // tolerance here would let a lens creep without the wires ever rebuilding.
+    quint32 bits = 0;
+    static_assert(sizeof(bits) == sizeof(v), "float is 4 bytes");
+    std::memcpy(&bits, &v, sizeof(bits));
+    return (h ^ quint64(bits)) * 1099511628211ull;
+}
+
+}   // namespace
+
+void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
+{
+    using jahshaka::engine::Vec3;
+    const bool wanted = mCameraBodies && camera->bodyVisible &&
+                        camera != mViewCamera;   // never draws itself — see applyCamera
+    if (!wanted) {
+        if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
+        return;
+    }
+    if (!e.wireNode) e.wireNode = mTarget->createNode(e.node);
+    if (!e.wireNode) return;
+
+    const bool selected = mHighlighted &&
+                          mHighlighted.data() == static_cast<iris::SceneNode *>(camera);
+    const float fov     = camera->angle > 0.0f ? camera->angle : 45.0f;
+    // The authored aspect when the camera constrains it, its own field otherwise
+    // — and never zero, which would make the frustum a plane.
+    float aspect = camera->constrainAspect ? camera->aspectRatio : camera->aspectRatio;
+    if (!(aspect > 0.01f)) aspect = 16.0f / 9.0f;
+    const float nearClip = std::max(0.01f, camera->nearClip);
+    const float farDraw  = std::max(nearClip + 0.05f, std::min(camera->farClip, kFrustumDraw));
+
+    quint64 sig = 1469598103934665603ull;
+    sig = hashFloat(sig, fov);
+    sig = hashFloat(sig, aspect);
+    sig = hashFloat(sig, nearClip);
+    sig = hashFloat(sig, farDraw);
+    sig = hashFloat(sig, camera->orthoSize);
+    sig = (sig ^ quint64(camera->isPerspective ? 1 : 0)) * 1099511628211ull;
+    sig = (sig ^ quint64(selected ? 2 : 0)) * 1099511628211ull;
+
+    if (e.cameraSignature != sig || !e.cameraMesh) {
+        std::vector<Vec3> pts;
+        const auto line = [&pts](const Vec3 &a, const Vec3 &b) { pts.push_back(a); pts.push_back(b); };
+        const auto box = [&](float hx, float hy, float z0, float z1) {
+            const Vec3 c[8] = {
+                Vec3(-hx, -hy, z0), Vec3(hx, -hy, z0), Vec3(hx, hy, z0), Vec3(-hx, hy, z0),
+                Vec3(-hx, -hy, z1), Vec3(hx, -hy, z1), Vec3(hx, hy, z1), Vec3(-hx, hy, z1) };
+            for (int i = 0; i < 4; ++i) {
+                line(c[i], c[(i + 1) % 4]);
+                line(c[4 + i], c[4 + (i + 1) % 4]);
+                line(c[i], c[4 + i]);
+            }
+        };
+        // THE BODY. A 0.5 x 0.36 x 0.6 case behind the origin, a short lens
+        // barrel in FRONT of it down -Z (the direction the camera actually
+        // looks), and a viewfinder nub on top — enough silhouette to read as a
+        // camera at a glance and to aim a click at.
+        box(0.25f, 0.18f, 0.30f, -0.30f);
+        const float lensR = 0.13f;
+        for (int i = 0; i < 12; ++i) {
+            const float a0 = float(i) / 12 * 6.2831853f, a1 = float(i + 1) / 12 * 6.2831853f;
+            const Vec3 f0(std::cos(a0) * lensR, std::sin(a0) * lensR, -0.30f);
+            const Vec3 f1(std::cos(a1) * lensR, std::sin(a1) * lensR, -0.30f);
+            const Vec3 b0(std::cos(a0) * lensR, std::sin(a0) * lensR, -0.48f);
+            const Vec3 b1(std::cos(a1) * lensR, std::sin(a1) * lensR, -0.48f);
+            line(f0, f1); line(b0, b1);
+            if (i % 3 == 0) line(f0, b0);
+        }
+        box(0.09f, 0.07f, 0.18f, -0.05f);          // viewfinder nub, lifted below
+        for (size_t i = pts.size() - 24; i < pts.size(); ++i) pts[i].y += 0.24f;
+
+        // THE FRUSTUM, straight out of the document's lens.
+        auto corners = [&](float z, Vec3 out[4]) {
+            float hh, hw;
+            if (camera->isPerspective) {
+                hh = std::tan(fov * 0.5f * 3.14159265f / 180.0f) * z;
+                hw = hh * aspect;
+            } else {
+                hh = std::max(0.01f, camera->orthoSize);
+                hw = hh * aspect;
+            }
+            out[0] = Vec3(-hw, -hh, -z); out[1] = Vec3(hw, -hh, -z);
+            out[2] = Vec3(hw,  hh, -z);  out[3] = Vec3(-hw, hh, -z);
+        };
+        Vec3 n[4], f[4];
+        corners(nearClip, n);
+        corners(farDraw, f);
+        for (int i = 0; i < 4; ++i) {
+            line(n[i], n[(i + 1) % 4]);
+            line(f[i], f[(i + 1) % 4]);
+            line(n[i], f[i]);
+        }
+        // An "up" tick on the far plane: without it a camera rolled 180 degrees
+        // looks identical to one that is not.
+        line(f[3], Vec3((f[2].x + f[3].x) * 0.5f, f[3].y * 1.25f, f[3].z));
+        line(f[2], Vec3((f[2].x + f[3].x) * 0.5f, f[2].y * 1.25f, f[2].z));
+
+        const jahshaka::engine::MeshId built = mTarget->createLineMesh(pts, false);
+        if (built) {
+            if (e.cameraMesh) mTarget->destroyMesh(e.cameraMesh);
+            e.cameraMesh = built;
+            e.cameraSignature = sig;
+            e.wireKind = -2;                       // force the attach below
+            if (!e.wireMaterial)
+                e.wireMaterial = mTarget->createUnlitMaterial(jahshaka::engine::Colour(1, 1, 1), false);
+            if (e.wireMaterial) mTarget->attachMesh(e.wireNode, e.cameraMesh, e.wireMaterial);
+        }
+    }
+    if (!e.wireMaterial) return;
+    // Selection reads the same way it does on a light: the helper takes the
+    // highlight colour. (The mesh itself is rebuilt on the selection edge only
+    // because the signature includes it — the geometry is identical; keeping it
+    // in the signature is what would let a later phase draw a selected camera
+    // differently without a second code path.)
+    pushWireColour(e, selected ? jahshaka::engine::Colour(1.0f, 0.72f, 0.15f, 1.0f)
+                               : jahshaka::engine::Colour(0.75f, 0.78f, 0.85f, 1.0f));
+    // Wires live in the camera node's local space; undo the node's own scale so
+    // a scaled camera node still draws a true frustum.
+    const iris::Vec3 sc = camera->getLocalScale();
+    mTarget->setNodeTransform(e.wireNode, jahshaka::engine::Vec3(), jahshaka::engine::Quat(),
+                              jahshaka::engine::Vec3(sc.x() > 1e-6f ? 1.0f / sc.x() : 1.0f,
+                                                     sc.y() > 1e-6f ? 1.0f / sc.y() : 1.0f,
+                                                     sc.z() > 1e-6f ? 1.0f / sc.z() : 1.0f));
+    mTarget->setNodeVisible(e.wireNode, true);
+}
+
 // ---- ground grid (EDITOR_SHORTCUTS_SPEC §3) --------------------------------------
 
 void SceneMirror::setGrid(bool visible, float spacing)
@@ -721,6 +888,12 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
         syncDecalWires(e, decal.data());
     }
 
+    if (node->getSceneNodeType() == iris::SceneNodeType::Camera) {
+        // Phase 1 finally made CameraNode set its own type, which is what lets
+        // this branch exist at all (CAMERAS_SPEC §1, the type-enum trap).
+        syncCameraWires(e, static_cast<iris::CameraNode *>(node.data()));
+    }
+
     // `e` is a reference into a QHash: the recursion inserts entries and QHash does not
     // keep value references stable across inserts (use-after-free under ASan). Copy first.
     const NodeId self = e.node;
@@ -989,6 +1162,10 @@ void SceneMirror::removeMissing(const QSet<long> &seen)
         if (seen.contains(it.key())) { ++it; continue; }
         if (it->wireNode) mTarget->removeNode(it->wireNode);
         if (it->wireMaterial) mTarget->destroyMaterial(it->wireMaterial);
+        // The camera body/frustum mesh belongs to this entry alone (it is
+        // derived from that one camera's lens, so nothing else can reference
+        // it) and lives outside the shared mMeshes cache reclaimUnused sweeps.
+        if (it->cameraMesh) mTarget->destroyMesh(it->cameraMesh);
         if (it->node)  mTarget->removeNode(it->node);
         it = mEntries.erase(it);
     }
@@ -2704,6 +2881,44 @@ QImage SceneMirror::bakeRealisticSky(const iris::SkyRealistic &sky, int width, i
     return img;
 }
 
+/// Translates a document camera into the engine's CameraDesc — the shared half
+/// of applyCamera and applyPip (CAMERAS_SPEC §7.7). It reads the node and
+/// nothing else, so both the main view and the inset see the same lens.
+static CameraDesc toCameraDesc(const iris::CameraNodePtr &camera)
+{
+    CameraDesc c;
+    camera->update(0.0f);
+    c.position     = toVec3(camera->getGlobalPosition());
+    c.orientation  = toQuat(camera->getGlobalRotation());
+    c.fovDegrees   = camera->angle > 0.0f ? camera->angle : 45.0f;
+    c.nearClip     = camera->nearClip;
+    c.farClip      = camera->farClip;
+    c.orthographic = !camera->isPerspective;
+    c.orthoSize    = camera->orthoSize;
+    // Phase 2c: the letterbox travels with the lens, so any view showing this
+    // camera constrains it the same way (§7.4).
+    c.constrainAspect = camera->constrainAspect;
+    c.aspect          = camera->aspectRatio > 0.01f ? camera->aspectRatio : 16.0f / 9.0f;
+    return c;
+}
+
+void SceneMirror::applyPip(iris::CameraNodePtr camera, View *view, const ViewPipDesc &desc)
+{
+    if (!view) return;
+    ViewPipDesc d = desc;
+    if (!camera || !d.enabled) {
+        // OFF is a value, not a special case: the engine tears the second
+        // workspace down and the frame is byte-identical to one that never had
+        // an inset. Keep the rest of the desc so a host that toggles does not
+        // also have to re-state its rect.
+        d.enabled = false;
+        view->setPip(d);
+        return;
+    }
+    d.camera = toCameraDesc(camera);
+    view->setPip(d);
+}
+
 void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view)
 {
     if (!camera || !view) return;
@@ -2726,14 +2941,23 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view)
         if (auto active = mSource->getActiveCamera()) camera = active;
     }
 
-    camera->update(0.0f);
-    CameraDesc c;
-    c.position     = toVec3(camera->getGlobalPosition());
-    c.orientation  = toQuat(camera->getGlobalRotation());
-    c.fovDegrees   = camera->angle > 0.0f ? camera->angle : 45.0f;
-    c.nearClip     = camera->nearClip;
-    c.farClip      = camera->farClip;
-    c.orthographic = !camera->isPerspective;
-    c.orthoSize    = camera->orthoSize;
-    view->setCamera(c);
+    // A CAMERA NEVER DRAWS ITSELF (CAMERAS_SPEC phase 2b). Whatever camera is
+    // driving the view is, by definition, the one whose body would sit on the
+    // near plane and whose frustum lines would fan across the whole image —
+    // while piloting it (phase 3), while playing through the active camera, or
+    // in any preview whose viewpoint happens to be a scene node. Recorded here
+    // because this function is "the ONLY way a View's camera moves" (Engine.h),
+    // so it is the one place that always knows.
+    if (mViewCamera != camera.data()) {
+        mViewCamera = camera.data();
+        // ...and hide its helpers NOW rather than at the next sync. Hosts call
+        // sync() and applyCamera() in either order (the editor syncs first, the
+        // gizmo suite applies first), and a viewport that renders one frame
+        // between them would show the camera's own frustum fanning across the
+        // whole image. Cheap: one hash lookup on a change only.
+        auto it = mEntries.find(mViewCamera ? mViewCamera->nodeId : -1);
+        if (it != mEntries.end() && it->wireNode) mTarget->setNodeVisible(it->wireNode, false);
+    }
+
+    view->setCamera(toCameraDesc(camera));
 }

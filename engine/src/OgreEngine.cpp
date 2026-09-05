@@ -316,6 +316,12 @@ void OgreEngine::renderOneFrame() {
             // its camera on setScene), so the listener is re-synced rather than
             // hooked up once. Idempotent and cheap when nothing changed.
             v->syncPlanarListener();
+            // The inset's rectangles are derived from the TARGET's aspect
+            // (a normalised rect is not a pixel rect), so a resize that never
+            // touched ViewPipDesc still moves the letterbox. Re-derived here,
+            // once a frame, right after applyPendingResize; free when there is
+            // no inset.
+            v->applyLetterboxAndPip();
         }
         for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar(); }
         // The post chain's tuning lives in MaterialManager singletons — exposure,

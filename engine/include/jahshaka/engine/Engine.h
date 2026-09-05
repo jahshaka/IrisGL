@@ -443,6 +443,27 @@ public:
     /// different text simultaneously (see ViewOverlayDesc's constraint note).
     virtual void setOverlay(const ViewOverlayDesc &) = 0;
     virtual const ViewOverlayDesc &overlay() const = 0;
+
+    /// The picture-in-picture inset for this View (CAMERAS_SPEC §7.7): a second
+    /// camera's view of the SAME scene, composited into a rectangle of this
+    /// View's target. See ViewPipDesc for the mechanism and every rule it obeys.
+    ///
+    /// This is the spec's `setPipCamera(CameraDesc|null, rect)` in this
+    /// boundary's own idiom: the camera, the rect, the inset's background and
+    /// the offscreen opt-in travel together in one value, exactly like
+    /// setPostFx and setOverlay — "null" is `ViewPipDesc::enabled = false`.
+    ///
+    /// IGNORED ON OFFSCREEN VIEWS unless ViewPipDesc::allowOffscreen — the same
+    /// guarantee, in the same one place, as setPostFx and setOverlay. pip()
+    /// still reports what the host asked for.
+    ///
+    /// Cheap to call with an unchanged value (hosts may push per frame), and
+    /// cheap to MOVE: changing only the rect or the camera is a live viewport
+    /// modifier / camera write, never a workspace rebuild (workspaceGeneration
+    /// does not move). Turning the inset on or off does build/tear its
+    /// workspace — that is the one structural change here.
+    virtual void setPip(const ViewPipDesc &) = 0;
+    virtual const ViewPipDesc &pip() const = 0;
     /// How many times this View has (re)built its compositor workspace — the
     /// structurally expensive operation behind setShadows(), setBackground(),
     /// resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts

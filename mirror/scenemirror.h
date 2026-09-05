@@ -48,6 +48,18 @@ public:
 
     /// Points `view`'s camera where the document camera is looking.
     void applyCamera(iris::CameraNodePtr camera, jahshaka::engine::View *view);
+    /// Points `view`'s picture-in-picture inset at a document camera
+    /// (CAMERAS_SPEC D3, phase 2c). `desc` carries everything but the camera —
+    /// the rect, the inset's background, the offscreen opt-in — and this fills
+    /// in `desc.camera` from the document node, the same translation
+    /// applyCamera does for the main view.
+    ///
+    /// A null camera or `desc.enabled == false` switches the inset OFF, which
+    /// the engine guarantees is byte-exact (no workspace, no trace). Cheap to
+    /// call every frame: an unchanged value never reaches the backend.
+    void applyPip(iris::CameraNodePtr camera, jahshaka::engine::View *view,
+                  const jahshaka::engine::ViewPipDesc &desc);
+
     /// Pushes the document's sky onto the view. Flat colour skies become the clear
     /// colour; cubemap/equirect/gradient/realistic skies are a later step and leave
     /// the view's current background.
@@ -182,6 +194,20 @@ public:
     void setLightWires(bool on);
     bool lightWires() const { return mLightWires; }
 
+    /// Camera helpers (CAMERAS_SPEC D2, phase 2b): a small camera BODY and its
+    /// view FRUSTUM, drawn as unlit on-top lines at every scene CameraNode whose
+    /// `bodyVisible` is set. Highlighted like any other helper when the camera
+    /// is the selected node.
+    ///
+    /// Separate from setLightWires on purpose — the two are different objects
+    /// with different toggles — but hosts hide BOTH in Game View and in play,
+    /// which is where "editor helper" is actually defined. The engine keeps
+    /// them out of a picture-in-picture inset by RENDER QUEUE (they are on-top
+    /// overlays, and the inset draws below that range), so a camera never
+    /// appears in its own preview.
+    void setCameraBodies(bool on);
+    bool cameraBodies() const { return mCameraBodies; }
+
     /// Editor ground grid (EDITOR_SHORTCUTS_SPEC §3): an unlit line overlay on
     /// y=0 — extent ±100 units, a line every `spacing`, every 10th line major
     /// (brighter). Same never-fogged overlay class as the light wires, depth-
@@ -261,6 +287,11 @@ private:
         bool wireColourPushed = false;
         bool hasIcon = false;                        // light icon billboard on wireNode
         QString iconSignature;                       // icon image path; recreate on change
+        /// Camera body + frustum (CAMERAS_SPEC phase 2b). The mesh is OWNED by
+        /// this entry — it is derived from the camera's own lens, so there is
+        /// nothing to share — and rebuilt only when `cameraSignature` moves.
+        jahshaka::engine::MeshId cameraMesh = 0;
+        quint64 cameraSignature = 0;
         // Planar reflections: the last flag pushed to the engine, so the
         // per-frame visit does nothing when nothing changed. -1 = never pushed.
         // Arming a reflector derives a world plane and registers a PBS
@@ -335,6 +366,12 @@ private:
     jahshaka::engine::TextureId decalTextureFor(const QString &path,
                                                 jahshaka::engine::DecalMap kind);
     void syncLightIcon(Entry &e, iris::LightNode *light);
+    /// Builds/updates a camera's body + frustum lines (CAMERAS_SPEC §3). The
+    /// geometry is DERIVED — fov, aspect, near and the clipped far all come out
+    /// of the document — so unlike the light shapes it cannot be one cached
+    /// mesh per kind: each camera owns a mesh, rebuilt only when the signature
+    /// of those values (and the selection state) changes.
+    void syncCameraWires(Entry &e, iris::CameraNode *camera);
     jahshaka::engine::TextureId iconTextureFor(const QString &path);
     void syncHighlight();
     void syncGrid();
@@ -411,6 +448,12 @@ private:
     QHash<QString, jahshaka::engine::TextureId> mIconTextures;   // light icon glyphs (Qt resources)
     jahshaka::engine::MaterialId mDefaultMaterial = 0;
     bool mLightWires = true;
+    bool mCameraBodies = true;
+    /// The camera currently DRIVING the view (applyCamera's last one, after the
+    /// active-camera substitution). Its own body and frustum are suppressed —
+    /// see applyCamera. Raw pointer, compared only for identity; the document
+    /// owns it and a dangling value can only ever fail to match.
+    const iris::CameraNode *mViewCamera = nullptr;
     /// Which sky the engine currently shows, and a 64-bit hash of the values it
     /// was built from. Two fields rather than one string because applySky
     /// DISPATCHES on the kind (and the realistic-bake debounce asks "was the

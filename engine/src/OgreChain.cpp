@@ -130,6 +130,22 @@ constexpr const char *kSmaaBlend = "jahSmaaBlend";
 constexpr const char *kRefractOut   = "jahRefractOut";
 constexpr const char *kRefractRtv   = "jahRefractRtv";
 constexpr const char *kDepthNoMsaa  = "jahDepthNoMsaa";
+/// The picture-in-picture inset's background swatch (CAMERAS_SPEC §7.7): a 4x4
+/// texture cleared to ViewPipDesc::background and copied over the inset rect.
+/// It exists because the inset's colour attachment must LOAD (a Vulkan clear is
+/// full-target and would wipe the main frame) and a loaded attachment shows the
+/// main image wherever the inset's scene draws nothing.
+constexpr const char *kPipFill = "jahPipFill";
+/// The LETTERBOX background swatch (CAMERAS_SPEC §7.4): the same trick as
+/// kPipFill, for the same reason. A letterboxed view clears its whole target to
+/// the BAR colour (a Vulkan clear is full-target, which is exactly what bars
+/// want) and then copies this 4x4 swatch of the view's real background into the
+/// inner rectangle, so the shot sits on the scene's clear colour and the
+/// remainder stays black.
+constexpr const char *kLetterboxFill = "jahLetterboxFill";
+/// The bars. Not configurable: every editor that letterboxes draws black ones,
+/// and a bar colour setting is a preference nobody has asked for.
+const Ogre::ColourValue kLetterboxBars(0.0f, 0.0f, 0.0f, 1.0f);
 
 /// Declares a local texture AND the same-named RenderTargetView that makes it
 /// usable as a target.
@@ -192,6 +208,34 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// the first addTargetPass. Nothing below may call it again.
 constexpr size_t kMaxTargetPasses = 48;
 
+/// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
+///
+/// CAMERAS_SPEC §7.3 correction 1, proved in pixels by spikes/camera-pip-vulkan
+/// (T4). The compositor's default for a final pass is `StoreOrResolve`, which
+/// on an MSAA target resolves AND DISCARDS the multisample contents. That is
+/// correct while exactly one workspace draws into the target — nothing follows,
+/// so nothing needs the samples. It stops being correct the moment a SECOND
+/// workspace renders into the same target (the picture-in-picture inset, phase
+/// 2c): the second workspace's first pass Loads a colour attachment whose
+/// samples were thrown away, and at 4x the whole frame outside the inset went
+/// WHITE — 198,000 differing pixels in the spike, 13,575 in this tree's own
+/// gate, and not a subtle artefact either time.
+///
+/// Plain `Store` is not the answer either: it keeps the samples and never
+/// resolves, so with no PiP at all the frame is BLACK (that half is what
+/// tests/engine's msaa_overlay_pass_resolves_at_every_sample_count pins).
+///
+/// `StoreAndMultisampleResolve` is both: the samples survive for whoever
+/// renders next AND the resolve target is written, so the last resolve on the
+/// target is the one you see. At 1x there are no samples to keep, so it is
+/// byte-for-byte what `StoreOrResolve` did — which is what makes this change
+/// pixel-neutral for every existing view and every pixel suite in the tree.
+///
+/// The rule, stated once: EVERY workspace on a target keeps the samples and
+/// resolves; only the last one's resolve reaches the screen.
+constexpr Ogre::StoreAction::StoreAction kMultiWorkspaceStore =
+    Ogre::StoreAction::StoreAndMultisampleResolve;
+
 Ogre::CompositorPassQuadDef *addQuad(Ogre::CompositorNodeDef *n, const char *target,
                                      const char *material, const char *profilingId) {
     Ogre::CompositorTargetDef *t = n->addTargetPass(target);
@@ -221,6 +265,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     // Only what changes the GRAPH. Exposure, bloom threshold, AO power and the
     // like are uniforms — pushing them must never rebuild a workspace.
     return a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
+           a.letterbox == b.letterbox &&
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.refractions == b.refractions && a.samples == b.samples &&
@@ -232,8 +277,73 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
 namespace chain {
 
 // ---------------------------------------------------------------------------
+void letterboxRect(float aspect, float targetAspect, float inner[4]) {
+    inner[0] = 0.0f; inner[1] = 0.0f; inner[2] = 1.0f; inner[3] = 1.0f;
+    if (!(aspect > 0.0f) || !(targetAspect > 0.0f)) return;
+    if (aspect > targetAspect) {          // wider than the target: bars top and bottom
+        const float h = targetAspect / aspect;
+        inner[1] = (1.0f - h) * 0.5f;
+        inner[3] = h;
+    } else {                               // taller: bars left and right
+        const float w = aspect / targetAspect;
+        inner[0] = (1.0f - w) * 0.5f;
+        inner[2] = w;
+    }
+}
+
+namespace {
+
+/// Confines a pass to the letterbox's inner rectangle. The RECT itself is
+/// written later and per frame (OgreView::applyLetterbox); this only records
+/// which passes take it.
+void inset(ChainHandles &h, Ogre::CompositorPassDef *p) { h.insetPasses.push_back(p); }
+
+/// The letterbox prologue on `target` (CAMERAS_SPEC §7.4): one quad pass that
+/// CLEARS the whole target to the bar colour — a Vulkan clear ignores the
+/// viewport and covers the whole attachment, which for once is exactly what is
+/// wanted — and then draws the view's background into the inner rectangle only.
+///
+/// It has to be a quad and not a second clear for precisely the reason the
+/// picture-in-picture inset needs one: there is no way to clear a REGION on
+/// this backend (OgreVulkanRenderPassDescriptor.cpp:945). The background
+/// travels as a 4x4 swatch through Ogre's own Ogre/Copy/4xFP32, so the
+/// letterbox costs no new shader and no new media.
+///
+/// After this the scene passes LOAD colour and CLEAR depth, inset to the same
+/// rectangle — so the bars survive and the shot is never stretched into them.
+void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
+                          const char *target, ChainHandles &handles) {
+    {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kLetterboxFill);
+        t->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+        c->setAllClearColours(toOgre(desc.background));
+        c->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        c->mStoreActionDepth     = Ogre::StoreAction::DontCare;
+        c->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+        c->mProfilingId = "Jahshaka letterbox swatch";
+        handles.letterboxSwatch = c;
+    }
+    Ogre::CompositorTargetDef *t = n->addTargetPass(target);
+    t->setNumPasses(1);
+    auto *q = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
+    q->mMaterialName = "Ogre/Copy/4xFP32";
+    q->addQuadTextureSource(0, kLetterboxFill);
+    q->setAllClearColours(kLetterboxBars);
+    q->setAllLoadActions(Ogre::LoadAction::Clear);     // full-target: THE BARS
+    q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+    q->mStoreActionDepth     = Ogre::StoreAction::Store;
+    q->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+    q->mProfilingId = "Jahshaka letterbox";
+    inset(handles, q);                                 // ...and the background inside
+}
+
+}   // namespace
+
 void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
-           const ChainDesc &desc, std::vector<std::string> &nodeDefsOut) {
+           const ChainDesc &desc, std::vector<std::string> &nodeDefsOut,
+           ChainHandles &handlesOut) {
+    handlesOut = ChainHandles();
     const std::string sceneNode = sceneNodeDefName(workspaceDef);
     Ogre::CompositorNodeDef *n = cm->addNodeDefinition(sceneNode);
     nodeDefsOut.push_back(sceneNode);
@@ -247,6 +357,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // PASSTHROUGH — the shape every view had before this file, and the shape
     // every offscreen view still has. Bit-identical to createBasicWorkspaceDef.
     if (!desc.anyEffect()) {
+        if (desc.letterbox) {
+            // Bars first, background inside them; the scene passes below then
+            // LOAD colour instead of clearing it (a clear is full-target and
+            // would wipe the bars) and confine themselves to the inner rect.
+            n->setNumLocalTextureDefinitions(1);
+            addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+            addLetterboxPrologue(n, desc, kTargetChannel, handlesOut);
+        }
         Ogre::CompositorTargetDef *t = n->addTargetPass(kTargetChannel);
         t->setNumPasses(2);
         {
@@ -254,6 +372,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
             p->setAllClearColours(toOgre(desc.background));
             p->setAllLoadActions(Ogre::LoadAction::Clear);
+            if (desc.letterbox) {
+                p->mLoadActionColour[0] = Ogre::LoadAction::Load;   // keep the bars
+                inset(handlesOut, p);
+            }
             // NOT the compositor default (StoreOrResolve): on an MSAA target
             // that resolves and DISCARDS the multisample contents, and the
             // overlay pass below still has to render into them. Plain Store
@@ -275,9 +397,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
-            // Load actions keep the compositor defaults (Load everywhere) and
-            // colour store keeps StoreOrResolve — this is the last pass on the
-            // target, so it is where an MSAA resolve belongs.
+            // Load actions keep the compositor defaults (Load everywhere); the
+            // colour store is kMultiWorkspaceStore — see the note there. This is
+            // the last pass of THIS workspace on the target, so it is where the
+            // MSAA resolve belongs, but it must not be the DISCARDING kind.
+            p->mStoreActionColour[0] = kMultiWorkspaceStore;
             p->mStoreActionDepth   = Ogre::StoreAction::DontCare;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             p->mFirstRQ = kOverlayRenderQueue;
@@ -287,6 +411,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // kIncludeOverlaysNote and ChainDesc::overlays).
             p->mIncludeOverlays = desc.overlays;
             p->mProfilingId = "Jahshaka overlays";
+            // Gizmos and wires belong to the SHOT, not to the bars.
+            if (desc.letterbox) inset(handlesOut, p);
         }
         Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
         workDef->connectExternal(0, n->getName(), 0);
@@ -318,7 +444,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
     msaa = false;
-    n->setNumLocalTextureDefinitions(20);
+    n->setNumLocalTextureDefinitions(21);   // 20 + the letterbox swatch
+    if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // The scene target. RGBA16_FLOAT whenever HDR is on — that is the whole
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
@@ -497,12 +624,21 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // The opaque scene pass.
     {
         const char *sceneTarget = namedDepth ? kSceneRtv : kRt0;
+        // LETTERBOX (§7.4) goes on the SCENE target, not on the window: the
+        // bars have to be inside the image the post chain then tonemaps and
+        // composites, or the composite quad would stretch a letterboxed image
+        // back out over them.
+        if (desc.letterbox) addLetterboxPrologue(n, desc, sceneTarget, handlesOut);
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
         t->setNumPasses(1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
         p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
         p->setAllClearColours(toOgre(desc.background));
         p->setAllLoadActions(Ogre::LoadAction::Clear);
+        if (desc.letterbox) {
+            p->mLoadActionColour[0] = Ogre::LoadAction::Load;   // keep the bars
+            inset(handlesOut, p);
+        }
         // With refractions the opaque result must exist BOTH as multisample
         // (the refractive pass keeps rendering into a clone of it) and resolved
         // (that same pass samples it) — the sample's "store_and_resolve".
@@ -762,6 +898,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mLoadActionColour[0] = Ogre::LoadAction::Load;
         p->mLoadActionDepth     = Ogre::LoadAction::DontCare;
         p->mLoadActionStencil   = Ogre::LoadAction::DontCare;
+        p->mStoreActionColour[0] = kMultiWorkspaceStore;   // see kMultiWorkspaceStore
         p->mStoreActionDepth    = Ogre::StoreAction::DontCare;
         p->mStoreActionStencil  = Ogre::StoreAction::DontCare;
         p->mFirstRQ = kOverlayRenderQueue;
@@ -770,6 +907,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // as the passthrough shape's (kIncludeOverlaysNote).
         p->mIncludeOverlays = desc.overlays;
         p->mProfilingId = "Jahshaka overlays";
+        // Gizmos and wires belong to the SHOT, not to the bars.
+        if (desc.letterbox) inset(handlesOut, p);
     }
 
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
@@ -838,6 +977,164 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     for (auto it = nodeDefs.rbegin(); it != nodeDefs.rend(); ++it)
         if (cm->hasNodeDefinition(*it)) cm->removeNodeDefinition(*it);
     nodeDefs.clear();
+}
+
+// ---------------------------------------------------------------------------
+// THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7). Design notes and the full
+// list of spike findings this obeys live on ViewPipDesc (Types.h); what follows
+// is only what is specific to the graph.
+//
+// TWO PASSES, ONE TARGET — the view's own window/RTT, connected exactly like
+// the main chain's:
+//
+//   1. PASS_QUAD, the inset's BACKGROUND. It cannot be a clear: Vulkan hard-
+//      codes a clear's renderArea to the whole attachment
+//      (OgreVulkanRenderPassDescriptor.cpp:945), so a PASS_CLEAR here would
+//      wipe the main frame, which is exactly what the colour Load exists to
+//      preserve. A quad respects the viewport and the scissor, so it paints the
+//      inset rect and nothing else.
+//
+//      The quad's material is an HLMS datablock, not a low-level material
+//      (CompositorPassQuadDef::mMaterialIsHlms; CompositorPassQuad rebinds it
+//      on every execute, so sharing Ogre's one fullscreen rectangle between
+//      quad passes is safe). That buys a solid colour with NO new shader and no
+//      new media — HlmsUnlit's colour path is already compiled for the loading
+//      cover's fill panel. Depth off, cull none, opaque, exactly like that one.
+//
+//   2. PASS_SCENE, the inset itself:
+//        colour LOAD   — the main frame is already in the attachment and only
+//                        the rect may change;
+//        depth  CLEAR  — the spike's other finding, and a CORRECTNESS one: with
+//                        Load the main view's depth buffer occludes 92% of the
+//                        inset;
+//        shadows OFF   — shadow nodes are per workspace, so a shadowed inset is
+//                        a second full shadow set every frame (§7.2);
+//        RQ [0, kOverlayRenderQueue) — an inset shows THE SHOT: no gizmos, no
+//                        light wires, no grid, and in particular not the camera
+//                        body whose selection raised the inset. §7.7 reaches
+//                        the same place with a per-pass visibility bit; the RQ
+//                        range is the same guarantee with nothing to keep in
+//                        step, because every editor helper in this engine is
+//                        already defined as "the overlay queue" (OgreMaterials'
+//                        renderQueueFor).
+//
+// Both store colour with kMultiWorkspaceStore: this workspace is last, so its
+// resolve is the one that reaches the screen, and it must still keep the
+// samples in case anything is ever added after it.
+void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDesc &pip,
+              std::vector<std::string> &nodeDefsOut, PipHandles &handlesOut) {
+    Ogre::CompositorManager2 *cm = root->getCompositorManager2();
+    handlesOut = PipHandles();
+
+    const std::string nodeName = workspaceDef + "/PipNode";
+    Ogre::CompositorNodeDef *n = cm->addNodeDefinition(nodeName);
+    nodeDefsOut.push_back(nodeName);
+    n->addTextureSourceName(kTargetChannel, 0, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
+    n->setNumLocalTextureDefinitions(1);
+    // A 4x4 swatch, cleared to the inset's background and then copied over the
+    // rect. Its FORMAT is deliberately the same plain UNORM the offscreen views
+    // use, which is also what makes the copy land on the same value as a clear
+    // would: both write the linear value the caller asked for, and an sRGB
+    // window encodes both of them identically on the way in.
+    addTex(n, kPipFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+    n->setNumTargetPass(2);
+
+    {   // The swatch. A clear's renderArea IS the whole target on Vulkan, which
+        // is precisely why it cannot be used on the view — but on a 4x4 texture
+        // of our own that is exactly what we want.
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kPipFill);
+        t->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+        c->setAllClearColours(toOgre(pip.background));
+        c->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        c->mStoreActionDepth     = Ogre::StoreAction::DontCare;
+        c->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+        // A clear pass defaults to vpModifierMask 0x00 / executionMask 0x01
+        // (OgreCompositorManager2.h): the mask must stay 0 here or the
+        // workspace's inset rectangle would be applied to this 4x4 texture too.
+        c->mViewportModifierMask = 0x00;
+        c->mProfilingId = "Jahshaka PiP fill swatch";
+        handlesOut.fill = c;
+    }
+    {
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kTargetChannel);
+        t->setNumPasses(2);
+        {   // The background, as a COPY rather than a clear (see above) and as a
+            // low-level material rather than an Hlms datablock: at this pin
+            // CompositorPassQuadDef::mMaterialIsHlms routes through
+            // RenderQueue::renderSingleObject, whose fillBuffersFor overload
+            // BOTH desktop Hlms implementations answer with
+            // "Trying to use slow-path on a desktop implementation"
+            // (OgreHlmsUnlit.cpp:971 / OgreHlmsPbs.cpp) — an exception per
+            // frame and an inset that never appears. Ogre's own
+            // Ogre/Copy/4xFP32 is already staged, already used by this chain's
+            // composite pass, and samples with point filtering and clamp, so a
+            // 4x4 swatch reads back as one flat colour.
+            auto *q = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
+            q->mMaterialName = "Ogre/Copy/4xFP32";
+            q->addQuadTextureSource(0, kPipFill);
+            q->mLoadActionColour[0] = Ogre::LoadAction::Load;   // keep the main frame
+            q->mLoadActionDepth     = Ogre::LoadAction::DontCare;
+            q->mLoadActionStencil   = Ogre::LoadAction::DontCare;
+            q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            q->mStoreActionDepth     = Ogre::StoreAction::DontCare;
+            q->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+            q->mProfilingId = "Jahshaka PiP fill";
+        }
+        {
+            auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+            p->mLoadActionColour[0] = Ogre::LoadAction::Load;
+            p->mLoadActionDepth     = Ogre::LoadAction::Clear;   // correctness, not thrift
+            p->mLoadActionStencil   = Ogre::LoadAction::DontCare;
+            p->mClearDepth = 1.0f;
+            p->mStoreActionColour[0] = kMultiWorkspaceStore;
+            p->mStoreActionDepth     = Ogre::StoreAction::DontCare;
+            p->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+            p->mFirstRQ = 0u;
+            p->mLastRQ  = kOverlayRenderQueue;    // no gizmos, wires, grid or camera bodies
+            p->mIncludeOverlays = false;          // see kIncludeOverlaysNote
+            p->mShadowNode = Ogre::IdString();    // §7.2: the inset ships shadows OFF
+            p->mProfilingId = "Jahshaka PiP scene";
+            handlesOut.scenePass = p;
+        }
+    }
+
+    Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
+    workDef->connectExternal(0, n->getName(), 0);
+}
+
+void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
+                std::vector<std::string> &nodeDefs, PipHandles &handles) {
+    destroy(root->getCompositorManager2(), workspaceDef, nodeDefs);
+    handles = PipHandles();
+}
+
+void pipRects(const ViewPipDesc &pip, float targetAspect, float outer[4], float inner[4]) {
+    // The requested rect, clamped so a host cannot ask for something outside
+    // the target (Ogre would happily set a viewport off the attachment).
+    float w = std::max(0.02f, std::min(pip.width, 1.0f));
+    float h = std::max(0.02f, std::min(pip.height, 1.0f));
+    float l = std::max(0.0f, std::min(pip.left, 1.0f - w));
+    float tp = std::max(0.0f, std::min(pip.top, 1.0f - h));
+    outer[0] = l; outer[1] = tp; outer[2] = w; outer[3] = h;
+    inner[0] = l; inner[1] = tp; inner[2] = w; inner[3] = h;
+    if (!pip.camera.constrainAspect || pip.camera.aspect <= 0.0f || targetAspect <= 0.0f) return;
+
+    // LETTERBOX (§7.4). Normalised rects are not pixel rects: the outer rect's
+    // PIXEL aspect is (w * targetWidth) / (h * targetHeight), i.e. the
+    // normalised ratio times the target's own aspect. Fit the authored aspect
+    // inside that, then convert back to normalised units.
+    const float outerPixelAspect = (w / h) * targetAspect;
+    if (pip.camera.aspect > outerPixelAspect) {
+        // Wider than the rect: full width, bars top and bottom.
+        const float newH = h * (outerPixelAspect / pip.camera.aspect);
+        inner[1] = tp + (h - newH) * 0.5f;
+        inner[3] = newH;
+    } else {
+        const float newW = w * (pip.camera.aspect / outerPixelAspect);
+        inner[0] = l + (w - newW) * 0.5f;
+        inner[2] = newW;
+    }
 }
 
 // ---------------------------------------------------------------------------
