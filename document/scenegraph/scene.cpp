@@ -20,6 +20,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/viewernode.h"
 #include "document/scenegraph/meshnode.h"
 #include "document/scenegraph/particlesystemnode.h"
+#include "document/scenegraph/scenepicking.h"
 #include "document/assets/mesh.h"
 #include "core/geometry/trimesh.h"
 #include "core/irisutils.h"
@@ -398,59 +399,14 @@ void Scene::rayCast(const iris::Vec3& segStart,
 					uint64_t pickingMask,
 					bool allowUnpickable)
 {
-    rayCast(rootNode, segStart, segEnd, hitList, pickingMask, allowUnpickable);
-}
-
-void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
-                    const iris::Vec3& segStart,
-                    const iris::Vec3& segEnd,
-                    QList<iris::PickingResult>& hitList,
-					uint64_t pickingMask,
-					bool allowUnpickable)
-{
-	if ((sceneNode->getSceneNodeType() == iris::SceneNodeType::Mesh) &&
-		(sceneNode->isPickable() || allowUnpickable) &&
-		(sceneNode->pickingGroups & pickingMask) == pickingMask)// check flag
-	{
-        auto meshNode = sceneNode.staticCast<iris::MeshNode>();
-        auto mesh = meshNode->getMesh();
-        if(mesh != nullptr)
-        {
-            
-            // transform segment to local space
-            const auto nodeWorld = meshNode->getGlobalTransform();
-            auto invTransform = nodeWorld.inverted();
-            auto a = invTransform * segStart;
-            auto b = invTransform * segEnd;
-
-			// ray-sphere intersection first
-			auto mesh = meshNode->getMesh();
-			auto sphere = mesh->getBoundingSphere();
-			float t;
-			iris::Vec3 hitPoint;
-			if (IntersectionHelper::raySphereIntersects(a, (b - a).normalized(), sphere.pos, sphere.radius, t, hitPoint)) {
-				auto triMesh = meshNode->getMesh()->getTriMesh();
-
-				QList<iris::TriangleIntersectionResult> results;
-				if (int resultCount = triMesh->getSegmentIntersections(a, b, results)) {
-					for (auto triResult : results) {
-						// convert hit to world space
-						auto hitPoint = nodeWorld * triResult.hitPoint;
-
-						PickingResult pick;
-						pick.hitNode = sceneNode;
-						pick.hitPoint = hitPoint;
-						pick.distanceFromStartSqrd = (hitPoint - segStart).lengthSquared();
-
-						hitList.append(pick);
-					}
-				}
-			}
-        }
-    }
-
-    for (const auto &child : sceneNode->children()) {
-        rayCast(child, segStart, segEnd, hitList, pickingMask, allowUnpickable);
+    for (const iris::MeshPick &p :
+         iris::picking::raycastMeshes(this, segStart, segEnd, pickingMask, allowUnpickable)) {
+        PickingResult pick;
+        pick.hitNode = p.node;
+        pick.hitPoint = p.hitPoint;
+        pick.distanceFromStartSqrd = p.distanceSqrd;
+        pick.triangleIndex = p.triangleIndex;
+        hitList.append(pick);
     }
 }
 
