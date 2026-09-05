@@ -245,6 +245,17 @@ bool SceneNode::isStaticEligible() const
 
 void SceneNode::setStaticHint(bool value)
 {
+    // The user's word, recorded BEFORE the eligibility test: a refusal is still
+    // an opinion the file should carry ("I want this static") and it becomes
+    // legal the moment the node stops being a physics body, loses its clip or
+    // moves under a static parent. The refusal below leaves the graph alone; it
+    // does not un-record the intent.
+    mStaticOverride = value ? StaticOverride::Static : StaticOverride::Dynamic;
+    _applyStaticHint(value);
+}
+
+void SceneNode::_applyStaticHint(bool value)
+{
     if (value && !isStaticEligible()) {
         qWarning("iris::SceneNode::setStaticHint(true) refused for '%s': this node kind moves "
                  "(SCENEGRAPH_SPEC §6 — lights, particles, decals, cameras, viewers, physics "
@@ -268,9 +279,27 @@ void SceneNode::setStaticHint(bool value)
 
 void SceneNode::applyStaticDefaults()
 {
-    // canBeStatic() first: an ineligible PARENT means this whole branch stays
-    // dynamic, and asking anyway would log a refusal per node.
-    if (isStaticEligible() && graph::canBeStatic(mGraphNode)) setStaticHint(true);
+    // A HUMAN'S DECISION BEATS THE POLICY (StaticOverride). `Dynamic` leaves
+    // this node moving — and, through canBeStatic, its whole branch with it,
+    // which is exactly rule 2 doing the right thing for free. `Static` is
+    // re-asserted rather than skipped: the node may have arrived here through a
+    // reparent that reset its memory-manager class.
+    switch (mStaticOverride) {
+    case StaticOverride::Dynamic:
+        _applyStaticHint(false);
+        break;
+    case StaticOverride::Static:
+        _applyStaticHint(true);
+        break;
+    case StaticOverride::None:
+        // canBeStatic() first: an ineligible PARENT means this whole branch
+        // stays dynamic, and asking anyway would log a refusal per node.
+        // applyStaticHint, not setStaticHint: the POLICY must never leave a
+        // recorded "the user asked for this" behind (that would put the
+        // derivation in the file on the next save — see StaticOverride).
+        if (isStaticEligible() && graph::canBeStatic(mGraphNode)) _applyStaticHint(true);
+        break;
+    }
     // Descend regardless — a light in the middle of an imported rig does not
     // stop the props below it from being static, it only stops ITSELF (and,
     // through canBeStatic, the branch under it, which is the rule).
@@ -628,6 +657,11 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	node->pickable		= this->pickable;
 	node->planarReflector = this->planarReflector;
 	node->attached		= this->attached;
+    // The user's SCENE_STATIC decision travels with the copy (the derived hint
+    // does not: the copy is about to be parented somewhere, and the policy pass
+    // that follows every add re-derives it). Without this a duplicate of a node
+    // the user had pinned Dynamic came back Static on the next load.
+    node->_setStaticOverride(this->mStaticOverride);
 
     auto id = QUuid::createUuid();
     auto guid = id.toString().remove(0, 1);
