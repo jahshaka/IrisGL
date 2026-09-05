@@ -14,6 +14,7 @@ For more information see the LICENSE file
 
 #include "core/math/vec.h"
 #include <QList>
+#include <QStringList>
 #include "irisglfwd.h"
 #include "document/assets/texture2d.h"
 #include "document/scenegraph/nodegraph.h"
@@ -292,6 +293,19 @@ public:
     // { rowId: value } — the rows the user pinned. Overrides survive mode
     // switches by design (owner requirement).
     QJsonObject worldOverrides;
+
+    // ---- OUTLINER FOLDERS (SCENEGRAPH_SPEC.md §6b) --------------------------
+    // Folders are EDITOR ORGANISATION, never nodes: no transform, no place in
+    // the hierarchy, invisible to the player, the exporters and the engine.
+    // Membership is the per-node `folderPath` on the handle; this list is the
+    // other half — the folders that exist even when nothing is in them, which
+    // an implicit-from-membership model cannot express (Unreal's model exactly).
+    //
+    // Paths are "/"-separated and always NORMALISED (no leading/trailing slash,
+    // no empty segment) — src/services/scenefolders.h owns that policy and is
+    // the only thing that should write this list. Serialized in the project's
+    // EDITOR section, beside editor.camera, never in the node format.
+    QStringList folders;
 
     float gravity;
     bool shadowEnabled;

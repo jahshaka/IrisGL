@@ -695,6 +695,10 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
     // that follows every add re-derives it). Without this a duplicate of a node
     // the user had pinned Dynamic came back Static on the next load.
     node->_setStaticOverride(this->mStaticOverride);
+	// A duplicate lands in the same outliner folder as its original — a copy
+	// that jumped back to the root level would be a small, constant annoyance
+	// (SCENEGRAPH_SPEC §6b). The folder itself is untouched; this is metadata.
+	node->folderPath	= this->folderPath;
 
     auto id = QUuid::createUuid();
     auto guid = id.toString().remove(0, 1);
