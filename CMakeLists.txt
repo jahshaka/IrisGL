@@ -162,6 +162,7 @@ set(SRCS
     document/assets/skeleton.cpp
     document/scenegraph/scene.cpp
     document/scenegraph/scenenode.cpp
+    document/scenegraph/socket.cpp
     core/geometry/plane.cpp
     core/geometry/frustum.cpp
     core/geometry/aabb.cpp
@@ -225,6 +226,7 @@ set (HEADERS
     core/math/trs.h
     document/scenegraph/scene.h
     document/scenegraph/scenenode.h
+    document/scenegraph/socket.h
     core/properties/property.h
     core/geometry/boundingsphere.h
     core/geometry/plane.h
