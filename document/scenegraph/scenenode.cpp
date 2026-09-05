@@ -361,7 +361,10 @@ SceneNodeType SceneNode::getSceneNodeType()
 
 void SceneNode::addChild(SceneNodePtr node, bool keepTransform)
 {
-    insertChild(childCount(), node, keepTransform);
+    // -1 = APPEND. Passing childCount() would be the same position but would
+    // send insertChild's sibling-index path down a scan it does not need, on
+    // every child of every node of every document build.
+    insertChild(-1, node, keepTransform);
 }
 
 void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)

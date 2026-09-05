@@ -669,9 +669,16 @@ void Scene::setGraphScene(graph::SceneHandle target)
     // destroyed while a document was still bound to it (the mirror is supposed
     // to unbind first). Say so; walking those handles is a use-after-free.
     if (mGraphScene && !graph::sceneAlive(mGraphScene)) {
+        // The scene manager died under us — an engine scene destroyed while a
+        // document was still bound to it (SceneMirror is supposed to unbind
+        // first). Every handle in it is dangling, so nothing may WALK the tree:
+        // the registries are the only safe enumeration, and they cover every
+        // node the tree reached (SceneNode::setScene registers them all).
         qWarning("iris::Scene: the engine scene this document was bound to has already been "
                  "destroyed — every node handle in it is dangling and its transforms are lost. "
                  "SceneMirror must unbind (setSource(null)) before Engine::destroyScene().");
+        rootNode->_setGraphNode(nullptr);
+        for (const auto &n : nodes) if (n) n->_setGraphNode(nullptr);
         mGraphScene = target;
         return;
     }

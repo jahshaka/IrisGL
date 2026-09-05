@@ -16,20 +16,19 @@ For more information see the LICENSE file
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/scenenode.h"
 
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <vector>
 
 #include <QDebug>
 
-#include "OgreAny.h"
 #include "OgreMatrix4.h"
 #include "OgreQuaternion.h"
 #include "OgreRoot.h"
 #include "OgreHlmsManager.h"
 #include "OgreSceneManager.h"
 #include "OgreSceneNode.h"
-#include "OgreUserObjectBindings.h"
 #include "OgreVector3.h"
 
 namespace iris
@@ -75,10 +74,63 @@ inline Mat4 toIris(const Ogre::Matrix4 &m)
                 m[3][0], m[3][1], m[3][2], m[3][3]);
 }
 
-/// The key the back-pointer rides under. Ogre's UserObjectBindings is an
-/// unserializable Any bag (audit §1) — which is exactly right for a runtime
-/// back-reference and exactly wrong for metadata, which stays on the handle.
-const Ogre::String kOwnerKey("iris.node");
+// ---------------------------------------------------------------------------
+// THE BACK-POINTER TABLE — Ogre node id -> document handle.
+//
+// The obvious home for this is Ogre's UserObjectBindings, and that is where it
+// started. It cost too much: `setUserAny` allocates an Attributes block on
+// demand and `Ogre::Any`'s copy constructor CLONES its holder, so a back-
+// pointer was three heap allocations on the path every document node creation
+// takes. Measured on the §6 benchmark: 1.3 us per node, +23% on e.build_doc,
+// i.e. the single largest cost the whole swap added. Removing it puts document
+// build back at pre-swap parity.
+//
+// So: a chunked flat array indexed by `Ogre::Node::getId()` (a process-wide
+// monotonic counter — OgreSceneManager.cpp:915). Lookup is two loads and no
+// hashing, which matters because ownerOf() is on the hot path of every
+// children() and every getParent(). Writes take the graph mutex; reads take
+// nothing, and are safe against a concurrent write because the chunk POINTERS
+// are atomic and a chunk, once published, is never moved or freed.
+//
+// Cost: 512 KB of untouched BSS for the chunk directory, and 64 KB per 8192
+// live ids actually used. Ids are never reused, so a session that creates
+// hundreds of millions of nodes would run off the end — that is reported once
+// and then the node simply has no owner (it reads as engine-owned), which
+// degrades to "invisible to the document" rather than to a wrong answer.
+constexpr std::size_t kOwnerChunkShift = 13;                     // 8192 ids / chunk
+constexpr std::size_t kOwnerChunkSize = std::size_t(1) << kOwnerChunkShift;
+constexpr std::size_t kOwnerChunkCount = 65536;                  // 536 M ids
+std::atomic<SceneNode **> gOwnerChunks[kOwnerChunkCount];
+
+inline SceneNode *ownerById(Ogre::IdType id)
+{
+    const std::size_t chunk = std::size_t(id) >> kOwnerChunkShift;
+    if (chunk >= kOwnerChunkCount) return nullptr;
+    SceneNode **entries = gOwnerChunks[chunk].load(std::memory_order_acquire);
+    return entries ? entries[std::size_t(id) & (kOwnerChunkSize - 1)] : nullptr;
+}
+
+/// Under graphMutex().
+void setOwnerById(Ogre::IdType id, SceneNode *owner)
+{
+    const std::size_t chunk = std::size_t(id) >> kOwnerChunkShift;
+    if (chunk >= kOwnerChunkCount) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            qWarning("iris::graph: the scene-node id space is exhausted (id %llu) — document "
+                     "nodes created from here on have no back-pointer.",
+                     static_cast<unsigned long long>(id));
+        }
+        return;
+    }
+    SceneNode **entries = gOwnerChunks[chunk].load(std::memory_order_relaxed);
+    if (!entries) {
+        entries = new SceneNode *[kOwnerChunkSize]();
+        gOwnerChunks[chunk].store(entries, std::memory_order_release);
+    }
+    entries[std::size_t(id) & (kOwnerChunkSize - 1)] = owner;
+}
 
 std::recursive_mutex &graphMutex()
 {
@@ -102,13 +154,7 @@ Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
     return s->getRootSceneNode(Ogre::SCENE_DYNAMIC);
 }
 
-SceneNode *ownerRaw(Ogre::SceneNode *n)
-{
-    const Ogre::Any &any = n->getUserObjectBindings().getUserAny(kOwnerKey);
-    if (any.has_value())
-        return Ogre::any_cast<SceneNode *>(any);
-    return nullptr;
-}
+inline SceneNode *ownerRaw(Ogre::SceneNode *n) { return ownerById(n->getId()); }
 
 /// Depth-first, deepest-first destruction. Ogre's destroySceneNode ORPHANS the
 /// children it does not destroy and leaks them into mSceneNodes until
@@ -131,6 +177,7 @@ void destroyRecursive(Ogre::SceneNode *n)
         }
     }
     if (SceneNode *owner = ownerRaw(n)) owner->_setGraphNode(nullptr);
+    setOwnerById(n->getId(), nullptr);
     if (gLiveNodes) --gLiveNodes;
     if (n->getParent()) n->getParent()->removeChild(n);
     n->getCreator()->destroySceneNode(n);
@@ -203,9 +250,15 @@ NodeHandle createNode(SceneHandle s, NodeHandle parent, SceneNode *owner)
 {
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     if (!s || !engineAlive()) return nullptr;
-    Ogre::SceneNode *p = parent ? nd(parent) : rootOf(sm(s));
-    Ogre::SceneNode *n = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
-    n->getUserObjectBindings().setUserAny(kOwnerKey, Ogre::Any(owner));
+    // PARENTLESS when no parent is named. A node created under the scene's root
+    // and then re-parented by insertChild pays TWO NodeMemoryManager migrations
+    // (Node::setParent detaches from one depth level and attaches to another),
+    // and "create it, set it up, then add it to something" is how every caller
+    // in the tree builds a document. Ogre-Next supports a parentless node — it
+    // sits at depth 0 against the manager's dummy parent transform.
+    Ogre::SceneNode *n = parent ? nd(parent)->createChildSceneNode(Ogre::SCENE_DYNAMIC)
+                                : sm(s)->createSceneNode(Ogre::SCENE_DYNAMIC);
+    setOwnerById(n->getId(), owner);
     ++gLiveNodes;
     return wrap(n);
 }
@@ -251,7 +304,11 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     Ogre::SceneNode *p = nd(parent);
     Ogre::SceneNode *c = nd(child);
     if (c->getParent()) c->getParent()->removeChild(c);
-    if (index < 0) { p->addChild(c); return; }
+    // APPEND is the overwhelming majority (addChild passes -1) and must not pay
+    // for the sibling-index machinery below: at a fan-out of k that scan is
+    // O(k) per insert, i.e. quadratic in a node's child count over a whole
+    // document build.
+    if (index < 0 || std::size_t(index) >= p->numChildren()) { p->addChild(c); return; }
 
     // Ogre only appends, and its child vector also carries the ENGINE's own
     // children (a light's -Y adapter, a decal box, a range wire), which the
@@ -316,7 +373,7 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
         dst->setScale(s->getScale());
         SceneNode *owner = ownerRaw(s);
         if (owner) {
-            dst->getUserObjectBindings().setUserAny(kOwnerKey, Ogre::Any(owner));
+            setOwnerById(dst->getId(), owner);
             owner->_setGraphNode(wrap(dst));
         }
         // Visibility is NOT copied: Ogre's setVisible walks a node's
@@ -350,6 +407,7 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
                 if (c != sceneRoot) sceneRoot->addChild(c);
             }
         }
+        setOwnerById(s->getId(), nullptr);
         if (gLiveNodes) --gLiveNodes;
         if (s->getParent()) s->getParent()->removeChild(s);
         s->getCreator()->destroySceneNode(s);
