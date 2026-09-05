@@ -18,7 +18,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${OGRE_SOURCE:-$REPO_ROOT/thirdparty/ogre-next}"
-PREFIX="${OGRE_PREFIX:-$HOME/Developer/engines/ogre-next-install}"
+# PER-TREE INSTALL (owner decree 2026-09-06: "we should not have a shared
+# engine"). The install lives beside its source inside THIS tree, so every
+# checkout and every worktree is self-contained: no cross-lane mutation of a
+# shared artifact, no stale-install ambiguity, and a worktree that patches its
+# submodule gets exactly the engine it patched. The engine builds in ~2-3 min
+# on this class of machine — the old shared install's rationale (expensive
+# builds) is dead. OGRE_PREFIX still overrides for special layouts (the macOS
+# workspace keeps its own convention until its docs migrate).
+PREFIX="${OGRE_PREFIX:-$REPO_ROOT/thirdparty/ogre-next-install}"
 PATCHES="$REPO_ROOT/thirdparty/ogre-patches"
 if [ "$(uname -s)" = "Darwin" ]; then
     JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
@@ -31,9 +39,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
     # No FreeImage on macOS (no package manager): bundled STBI codec instead.
     PLATFORM_FLAGS="-DOGRE_CONFIG_UNIX_NO_X11=TRUE -DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=OFF -DOGRE_BUILD_LIBS_AS_FRAMEWORKS=OFF -DOGRE_CONFIG_ENABLE_FREEIMAGE=OFF -DOGRE_CONFIG_ENABLE_STBI=ON"
     # rapidjson (header-only; apt's rapidjson-dev on Linux): FindRapidjson
-    # honours Rapidjson_HOME. Default to <engines>/deps/rapidjson beside the
-    # install prefix; RAPIDJSON_HOME overrides.
+    # honours Rapidjson_HOME. Look beside the (now per-tree) install prefix
+    # first, then the legacy shared-workspace location the Mac vendored it to
+    # before the per-tree move; RAPIDJSON_HOME overrides both.
     DEFAULT_RJ="$(dirname "$PREFIX")/deps/rapidjson"
+    LEGACY_RJ="$HOME/Desktop/JahshakaDev/jahshakaclaude/engines/deps/rapidjson"
+    [ -d "$DEFAULT_RJ" ] || { [ -d "$LEGACY_RJ" ] && DEFAULT_RJ="$LEGACY_RJ"; }
     if [ -n "${RAPIDJSON_HOME:-}" ] || [ -d "$DEFAULT_RJ" ]; then
         export Rapidjson_HOME="${RAPIDJSON_HOME:-$DEFAULT_RJ}"
     fi
