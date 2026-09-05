@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include <functional>
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
+#include "document/scenegraph/socket.h"
 #include "core/irisutils.h"
 #include "document/assets/texture2d.h"
 #include "document/assets/mesh.h"
@@ -149,6 +150,35 @@ public:
     /// Null when the mesh has no skeleton.
     SkeletonPtr getSkeleton() const { return skeleton; }
     bool hasSkeleton() const { return !skeleton.isNull(); }
+    /// Whether this node's rig has a bone by this name.
+    bool hasBone(const QString &boneName) const;
+
+    // ---- sockets (CAMERAS_SPEC §5, D9; see scenegraph/socket.h) -----------
+    //
+    // Named attach points on this node's BONES. They live on the NODE and not
+    // on the mesh asset for the same reason the pose does: two characters
+    // sharing one rig must be able to carry different sockets, and a socket is
+    // authored per character, not per file.
+
+    /// This node's sockets, in the order they were added (the order the file
+    /// writes and `node.sockets` reports).
+    const QList<Socket> &getSockets() const { return sockets; }
+    /// The socket with this name, or null. The pointer is into `sockets` and is
+    /// invalidated by any add/remove — read it, do not keep it.
+    const Socket *findSocket(const QString &name) const;
+    /// Adds a socket. Refused (false, with `error` set when given) for an empty
+    /// name, a name this node already uses, or a bone this node's rig does not
+    /// have — including "this node has no rig at all", which is the refusal a
+    /// caller most often means to hit.
+    bool addSocket(const Socket &socket, QString *error = nullptr);
+    /// Removes the socket by name. False when there was none.
+    /// NOTE: this does NOT detach whatever was riding it — that is the scene's
+    /// job (Scene::detachFromSocket), because a node knows nothing about who
+    /// points at it. An attachment left pointing at a removed socket simply
+    /// stops moving (the fail-soft rule in socket.h).
+    bool removeSocket(const QString &name);
+    /// Replaces the whole list (the reader, and duplication).
+    void setSockets(const QList<Socket> &list) { sockets = list; }
 
     void setMaterial(MaterialPtr material);
 
@@ -177,6 +207,8 @@ private:
     MeshNode();
     /// Clones the mesh's rig template into this node's `skeleton` (or clears it).
     void adoptSkeletonFromMesh();
+
+    QList<Socket> sockets;
 };
 
 }

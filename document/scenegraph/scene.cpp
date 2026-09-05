@@ -494,6 +494,78 @@ void Scene::addNode(SceneNodePtr node)
     }
 
 	nodes.insert(node->getGUID(), node);
+
+    // CAMERAS_SPEC §5: a node read from a file already carries its attachment,
+    // so registration happens HERE and not only in attachToSocket — otherwise a
+    // saved socketed camera would come back detached (and stationary) on open.
+    if (node->isSocketAttached()) registerSocketAttachment(node);
+}
+
+void Scene::registerSocketAttachment(const SceneNodePtr &node)
+{
+    if (node.isNull() || !node->isSocketAttached()) return;
+    QList<SceneNodePtr> &list = socketAttachments[node->socketOwnerGuid];
+    if (!list.contains(node)) list.append(node);
+}
+
+void Scene::unregisterSocketAttachment(const SceneNodePtr &node)
+{
+    if (node.isNull()) return;
+    // The node's own guid is the wrong key here (the registry is keyed by
+    // OWNER so a rig's pose is read once), and the owner field may ALREADY have
+    // been cleared by the caller — so sweep every bucket rather than trusting
+    // it. Buckets are tiny; there is one per rig that carries attachments.
+    for (auto it = socketAttachments.begin(); it != socketAttachments.end(); ) {
+        it.value().removeAll(node);
+        if (it.value().isEmpty()) it = socketAttachments.erase(it);
+        else ++it;
+    }
+}
+
+bool Scene::attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
+                           const QString &socketName, QString *error)
+{
+    const auto refuse = [error](const QString &message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (node.isNull()) return refuse(QStringLiteral("no node"));
+    if (node->getGUID() == ownerGuid)
+        return refuse(QStringLiteral("a node cannot ride its own socket"));
+
+    const SceneNodePtr owner = nodes.value(ownerGuid);
+    if (owner.isNull())
+        return refuse(QStringLiteral("no node with id '%1'").arg(ownerGuid));
+    if (owner->getSceneNodeType() != SceneNodeType::Mesh)
+        return refuse(QStringLiteral("'%1' is not a mesh, so it carries no sockets")
+                          .arg(owner->getName()));
+    auto meshOwner = owner.staticCast<iris::MeshNode>();
+    if (!meshOwner->findSocket(socketName))
+        return refuse(QStringLiteral("'%1' has no socket named '%2'")
+                          .arg(owner->getName(), socketName));
+
+    // A cycle would be a transform feedback loop: the owner's pose is read to
+    // place the attached node, and the owner's own world transform is part of
+    // that pose. Refuse an owner that lives INSIDE the attached node's subtree.
+    for (SceneNodePtr walk = owner; !walk.isNull(); walk = walk->getParent()) {
+        if (walk == node)
+            return refuse(QStringLiteral("'%1' is inside '%2' — attaching it would make the "
+                                         "socket drive its own owner")
+                              .arg(owner->getName(), node->getName()));
+    }
+
+    unregisterSocketAttachment(node);
+    node->setSocketAttachment(ownerGuid, socketName);
+    registerSocketAttachment(node);
+    return true;
+}
+
+bool Scene::detachFromSocket(const SceneNodePtr &node)
+{
+    if (node.isNull() || !node->isSocketAttached()) return false;
+    unregisterSocketAttachment(node);
+    node->setSocketAttachment(QString(), QString());
+    return true;
 }
 
 void Scene::removeNode(SceneNodePtr node)
@@ -540,6 +612,11 @@ void Scene::removeNode(SceneNodePtr node)
     }
 
 	nodes.remove(node->getGUID());
+    // The node stops riding anything. Whatever was riding IT keeps its bucket:
+    // the owner simply stops resolving (SocketResolver counts it as dangling
+    // and moves nothing), so an UNDO of the delete — which re-adds the same
+    // guid — puts every rider back on its socket with no second verb.
+    unregisterSocketAttachment(node);
 
     for (auto &child : node->children) {
         removeNode(child);
@@ -614,6 +691,7 @@ void Scene::cleanup()
     viewers.clear();
     cameras.clear();
     nodes.clear();
+    socketAttachments.clear();   // a third strong reference to attached nodes
 }
 
 }

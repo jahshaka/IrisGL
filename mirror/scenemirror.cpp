@@ -79,7 +79,17 @@ struct Hasher {
 };
 }
 
-SceneMirror::SceneMirror(Scene *target) : mTarget(target) {}
+SceneMirror::SceneMirror(Scene *target) : mTarget(target)
+{
+    // The mirror is the only thing in the program that can see BOTH a document
+    // node and the engine pose of its rig, so it is the mirror that hands the
+    // socket resolver its pose source (CAMERAS_SPEC §5). Without one the
+    // resolver still works — at the rig's bind pose — which is exactly what a
+    // document-only host should get.
+    mSockets.setPoseSource([this](iris::MeshNode *node, QHash<QString, iris::Mat4> &out) {
+        return boneWorldTransforms(node, out);
+    });
+}
 
 SceneMirror::~SceneMirror()
 {
@@ -148,6 +158,10 @@ int SceneMirror::sync()
     if (!mSource || !mSource->getRootNode()) return 0;
     // Refresh the document's global transforms (lights and cameras read them).
     mSource->getRootNode()->update(0.0f);
+    // Sockets (CAMERAS_SPEC §5) move nodes, so they resolve BEFORE the walk
+    // that pushes transforms — a camera on a character's head has to be on the
+    // head in the frame that renders it, not in the one after.
+    resolveSockets();
 
     QSet<long> seen;
     mAnyShadowCaster = false;
@@ -1951,47 +1965,77 @@ void SceneMirror::attachClipsFor(Entry &e)
     }
 }
 
+bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::Mat4> &out) const
+{
+    if (!mTarget) return false;
+    if (!e.gpuSkinned || e.skeleton.isNull() || !e.docNode) return false;
+    const QList<iris::BonePtr> &bones = e.skeleton->bones;
+    if (bones.isEmpty() || size_t(bones.size()) != e.boneCount) return false;
+    // The three scratch buffers are MEMBERS, not locals: this used to run once
+    // per bone-overlay refresh, and now it runs every frame for every rig that
+    // carries a socket. assign()/resize() on a member keeps the capacity, so
+    // the steady state is zero allocations here.
+    mPoseScratch.assign(e.boneCount, BonePose());
+    if (!mTarget->bonePoses(e.node, mPoseScratch.data(), mPoseScratch.size())) return false;
+    std::vector<BonePose> &poses = mPoseScratch;
+
+    // The engine hands back parent-local TRS; the FK back up to world is
+    // ours. Bone order is free (a parent may follow its child), so the
+    // derived matrices are resolved by walking each bone's own ancestry
+    // rather than assuming the array is topologically sorted.
+    const iris::Mat4 meshWorld = e.docNode->getGlobalTransform();
+    mDerivedScratch.assign(size_t(bones.size()), iris::Mat4());
+    mDerivedDone.assign(size_t(bones.size()), 0);
+    std::vector<iris::Mat4> &derived = mDerivedScratch;
+    std::vector<char> &done = mDerivedDone;
+    std::function<iris::Mat4(int)> resolve = [&](int i) -> iris::Mat4 {
+        if (done[i]) return derived[i];
+        done[i] = 1;                       // cycles are impossible by rig contract; guard anyway
+        const BonePose &p = poses[size_t(i)];
+        iris::Mat4 local;
+        local.translate(iris::Vec3(p.position.x, p.position.y, p.position.z));
+        local.rotate(iris::Quat(p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z));
+        local.scale(iris::Vec3(p.scale.x, p.scale.y, p.scale.z));
+        int parent = -1;
+        if (!bones[i]->parentBone.isNull()) {
+            const auto pit = e.skeleton->boneMap.constFind(bones[i]->parentBone->name);
+            if (pit != e.skeleton->boneMap.constEnd() && pit.value() != i) parent = pit.value();
+        }
+        derived[i] = parent >= 0 ? resolve(parent) * local : local;
+        return derived[i];
+    };
+    for (int i = 0; i < bones.size(); ++i) out.insert(bones[i]->name, meshWorld * resolve(i));
+    return true;
+}
+
 bool SceneMirror::boneWorldTransforms(QHash<QString, iris::Mat4> &out) const
 {
     out.clear();
     if (!mTarget) return false;
-    std::vector<BonePose> poses;
     bool any = false;
-    for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it) {
-        const Entry &e = *it;
-        if (!e.gpuSkinned || e.skeleton.isNull() || !e.docNode) continue;
-        const QList<iris::BonePtr> &bones = e.skeleton->bones;
-        if (bones.isEmpty() || size_t(bones.size()) != e.boneCount) continue;
-        poses.assign(e.boneCount, BonePose());
-        if (!mTarget->bonePoses(e.node, poses.data(), poses.size())) continue;
-
-        // The engine hands back parent-local TRS; the FK back up to world is
-        // ours. Bone order is free (a parent may follow its child), so the
-        // derived matrices are resolved by walking each bone's own ancestry
-        // rather than assuming the array is topologically sorted.
-        const iris::Mat4 meshWorld = e.docNode->getGlobalTransform();
-        QVector<iris::Mat4> derived(bones.size());
-        QVector<char> done(bones.size(), 0);
-        std::function<iris::Mat4(int)> resolve = [&](int i) -> iris::Mat4 {
-            if (done[i]) return derived[i];
-            done[i] = 1;                       // cycles are impossible by rig contract; guard anyway
-            const BonePose &p = poses[size_t(i)];
-            iris::Mat4 local;
-            local.translate(iris::Vec3(p.position.x, p.position.y, p.position.z));
-            local.rotate(iris::Quat(p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z));
-            local.scale(iris::Vec3(p.scale.x, p.scale.y, p.scale.z));
-            int parent = -1;
-            if (!bones[i]->parentBone.isNull()) {
-                const auto pit = e.skeleton->boneMap.constFind(bones[i]->parentBone->name);
-                if (pit != e.skeleton->boneMap.constEnd() && pit.value() != i) parent = pit.value();
-            }
-            derived[i] = parent >= 0 ? resolve(parent) * local : local;
-            return derived[i];
-        };
-        for (int i = 0; i < bones.size(); ++i) out.insert(bones[i]->name, meshWorld * resolve(i));
-        any = true;
-    }
+    for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it)
+        if (entryBoneWorldTransforms(*it, out)) any = true;
     return any;
+}
+
+bool SceneMirror::boneWorldTransforms(iris::SceneNode *node, QHash<QString, iris::Mat4> &out) const
+{
+    out.clear();
+    if (!mTarget || !node) return false;
+    const auto it = mEntries.constFind(node->nodeId);
+    if (it == mEntries.constEnd()) return false;
+    return entryBoneWorldTransforms(it.value(), out);
+}
+
+int SceneMirror::resolveSockets()
+{
+    // Read the pose the last rendered frame produced, then move whatever rides
+    // it — which is why this runs at the TOP of sync(), before the walk that
+    // pushes transforms to the engine. The one-frame lag is inherent (see
+    // document/scenegraph/socket.h) and is not worth an extra engine update to
+    // close.
+    if (!mSource) return 0;
+    return mSockets.resolve(mSource.data());
 }
 
 void SceneMirror::syncClips()

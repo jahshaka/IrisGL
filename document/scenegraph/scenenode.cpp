@@ -609,6 +609,24 @@ void SceneNode::setGlobalTransform(iris::Mat4 transform)
 
 SceneNodePtr SceneNode::duplicate()
 {
+    QHash<QString, QString> guidMap;
+    auto node = duplicateInto(guidMap);
+    if (!node) return node;
+    node->remapSocketOwners(guidMap);
+    return node;
+}
+
+void SceneNode::remapSocketOwners(const QHash<QString, QString> &guidMap)
+{
+    if (!socketOwnerGuid.isEmpty()) {
+        const auto it = guidMap.constFind(socketOwnerGuid);
+        if (it != guidMap.constEnd()) socketOwnerGuid = it.value();
+    }
+    for (const auto &child : children) child->remapSocketOwners(guidMap);
+}
+
+SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
+{
     if (!duplicable) return SceneNodePtr();
 
     auto node = this->createDuplicate();
@@ -630,10 +648,16 @@ SceneNodePtr SceneNode::duplicate()
     auto guid = id.toString().remove(0, 1);
     guid.chop(1);
     node->setGUID(guid);
+    guidMap.insert(this->getGUID(), guid);
+
+    // The attachment travels with the copy. Whether it points at the ORIGINAL
+    // owner or at the copy's own is decided by remapSocketOwners once the whole
+    // subtree is known — see the note on duplicateInto.
+    node->setSocketAttachment(this->socketOwnerGuid, this->socketName);
 
     for (auto &child : this->children) {
         if (child->isDuplicable()) {
-            node->addChild(child->duplicate(), false);
+            node->addChild(child->duplicateInto(guidMap), false);
         }
     }
 

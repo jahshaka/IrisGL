@@ -25,6 +25,7 @@
 #include <vector>
 #include "irisgl/irisglfwd.h"
 #include "irisgl/document/animation/clipextractor.h"
+#include "irisgl/document/scenegraph/socket.h"
 #include "jahshaka/engine/Engine.h"
 
 namespace iris { class Mesh; class Material; struct SkyRealistic; }
@@ -173,6 +174,19 @@ public:
     /// rendered frame — call it after sync() and after a render, never before.
     /// False when nothing skinned is mirrored.
     bool boneWorldTransforms(QHash<QString, iris::Mat4> &out) const;
+    /// The same, for ONE node — which is what sockets need, because bone names
+    /// are only unique within a rig and the whole-scene overload above silently
+    /// lets a second character of the same rig overwrite the first's bones.
+    /// False when the node is not a mirrored skinned mesh.
+    bool boneWorldTransforms(iris::SceneNode *node, QHash<QString, iris::Mat4> &out) const;
+    /// Drives every socket-attached node of the source scene from the pose the
+    /// last rendered frame produced (CAMERAS_SPEC §5). Called at the top of
+    /// sync(); public so a headless suite can step it explicitly. Returns how
+    /// many nodes moved.
+    int resolveSockets();
+    /// The socket resolver, for tests and for hosts that want the dangling
+    /// count. Its pose source is installed by this mirror's constructor.
+    iris::SocketResolver &socketResolver() { return mSockets; }
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
     static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const iris::Mat4 &world);
     /// The engine mesh already created for a document mesh, or 0.
@@ -392,6 +406,10 @@ private:
     /// pose at all — it states the clip and the clock, and Ogre's threaded SIMD
     /// FK does the rest.
     void syncClips();
+    /// One entry's bones in world space, APPENDED to `out` (it is not cleared —
+    /// the whole-scene overload accumulates every rig into one map). False when
+    /// the entry is not a posed skinned mesh.
+    bool entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::Mat4> &out) const;
     /// Translates and attaches a node's clips. Idempotent: does nothing unless
     /// the rig or the clip set changed.
     void attachClipsFor(Entry &e);
@@ -428,6 +446,15 @@ private:
     jahshaka::engine::Scene *mTarget;
     iris::ScenePtr           mSource;
     QHash<qint64, Entry>     mEntries;         // keyed by iris SceneNode::nodeId
+    /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
+    /// its pose source is this mirror, installed by the constructor.
+    iris::SocketResolver     mSockets;
+    /// entryBoneWorldTransforms' scratch. Members because sockets made that
+    /// function per-frame work (it used to run only when the bone overlay
+    /// refreshed) — see the note at its assign() calls.
+    mutable std::vector<jahshaka::engine::BonePose> mPoseScratch;
+    mutable std::vector<iris::Mat4>                 mDerivedScratch;
+    mutable std::vector<char>                       mDerivedDone;
     /// Document mesh/material -> engine object, keyed by RAW POINTER.
     ///
     /// KNOWN RESIDUAL (deep audit 2026-09, area 5, deliberately not fixed here):
@@ -441,8 +468,9 @@ private:
     /// generation counter or the asset guid); neither type has one today, and
     /// adding one is a document-model change, not a mirror change.
     QHash<iris::Mesh *, jahshaka::engine::MeshId> mMeshes;
-    /// Reused across frames so a per-frame pose push allocates nothing.
-    std::vector<jahshaka::engine::BonePose> mPoseScratch;
+    // (A second `mPoseScratch` lived here, unused since the document's pose PUSH
+    // was retired with its clip evaluator — deleted rather than shadowed by the
+    // read-back scratch above, which is a live buffer with the same name.)
     QHash<iris::Material *, jahshaka::engine::MaterialId> mMaterials;
     QHash<QString, jahshaka::engine::TextureId> mTextures;
     QHash<QString, jahshaka::engine::TextureId> mIconTextures;   // light icon glyphs (Qt resources)

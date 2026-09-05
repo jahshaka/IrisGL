@@ -118,6 +118,30 @@ public:
 	// the node.
 	bool disablePhysicsTransform = false;
 
+    // ---- socket attachment (CAMERAS_SPEC §5; see scenegraph/socket.h) -----
+    //
+    // "This node rides bone X of that character." Both fields are empty for the
+    // overwhelming majority of nodes; when they are set, SocketResolver writes
+    // this node's transform every frame from the owner's posed bone, and any
+    // transform the user or a script sets is overwritten on the next frame
+    // (which is what "attached" means — detach first to move it by hand).
+    //
+    // The owner is named by GUID and not by pointer on purpose: it survives the
+    // file, it survives a re-import that rebuilds the node objects, and a
+    // dangling one is inert rather than a crash.
+    QString socketOwnerGuid;
+    QString socketName;
+
+    bool isSocketAttached() const { return !socketOwnerGuid.isEmpty() && !socketName.isEmpty(); }
+    /// The RAW setter — no validation, no registry. The reader and duplication
+    /// use it; everything else goes through Scene::attachToSocket, which
+    /// validates the owner and keeps the scene's attachment registry correct.
+    void setSocketAttachment(const QString &ownerGuid, const QString &socket)
+    {
+        socketOwnerGuid = ownerGuid;
+        socketName = socket;
+    }
+
 	// Bullet interpolates the transform of physics bodies
 	// to give them a smooth movement. This bool disables that
 	// and uses the actual transform of the body.
@@ -258,6 +282,20 @@ public:
    }
 
    SceneNodePtr duplicate();
+
+private:
+   /// duplicate()'s recursion. `guidMap` records old guid -> new guid for the
+   /// WHOLE copied subtree, which the public duplicate() then uses to re-point
+   /// socket attachments: copying a character with a camera on its head must
+   /// give the COPY's camera the COPY's head, not the original's (the guids are
+   /// regenerated, so a straight field copy would have every duplicate riding
+   /// the first character forever).
+   SceneNodePtr duplicateInto(QHash<QString, QString> &guidMap);
+   /// Re-points this subtree's socket owners through `guidMap`; an owner
+   /// OUTSIDE the copied subtree keeps its guid, which is the "second camera on
+   /// the same character" case and is correct.
+   void remapSocketOwners(const QHash<QString, QString> &guidMap);
+public:
 
     bool isVisible() {
         return visible;

@@ -129,6 +129,16 @@ public:
     QHash<QString, CameraNodePtr> cameras;
 	QHash<QString, SceneNodePtr> nodes;
 
+    /// Socket attachments (CAMERAS_SPEC §5), keyed by the SOCKET OWNER's guid:
+    /// owner guid -> every node currently riding one of that owner's sockets.
+    ///
+    /// Keyed by owner and not by rider on purpose — SocketResolver reads a
+    /// rig's posed bones ONCE per owner however many things hang off it, and
+    /// this is the grouping that makes that free. Maintained by addNode /
+    /// removeNode / attachToSocket / detachFromSocket; never serialized (the
+    /// attachment lives on the RIDER, which is what the file carries).
+    QHash<QString, QList<SceneNodePtr>> socketAttachments;
+
     /// The camera PLAY renders through (CAMERAS_SPEC D6). Empty = the free
     /// viewer, which is what every scene written before cameras existed means.
     /// Serialized with the scene; resolved through `cameras` above.
@@ -455,6 +465,28 @@ public:
     /// resolves (the camera was deleted with the guid still recorded).
     CameraNodePtr getActiveCamera() const;
     QString getActiveCameraGuid() const { return activeCameraGuid; }
+
+    // ---- sockets (CAMERAS_SPEC §5, D9; see scenegraph/socket.h) ----------
+    //
+    // The scene owns the ATTACHMENT half — which node rides whose socket — the
+    // way it owns the active-camera choice: it is the only place that can
+    // resolve a guid to a node and therefore the only place that can validate
+    // one. The sockets themselves live on the owning MeshNode.
+
+    /// Points `node` at `ownerGuid`'s socket `socketName`, and registers it so
+    /// SocketResolver drives it. Refused (false, `error` set when given) when
+    /// the owner does not exist, is not a mesh, has no such socket, or sits
+    /// inside `node`'s own subtree (which would be a feedback loop). The
+    /// node's transform is not touched here — the next resolve() does that.
+    bool attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
+                        const QString &socketName, QString *error = nullptr);
+    /// Stops driving `node`. It keeps the pose it was last resolved to.
+    /// False when it was not attached.
+    bool detachFromSocket(const SceneNodePtr &node);
+    /// Registry maintenance for the paths that set the attachment directly
+    /// (the reader, node duplication) — addNode already calls the first one.
+    void registerSocketAttachment(const SceneNodePtr &node);
+    void unregisterSocketAttachment(const SceneNodePtr &node);
 
     /// Whether the scene is being PLAYED (editor play-in-place or the player
     /// view). Runtime state, never serialized: PlayBack owns it, and

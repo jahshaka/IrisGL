@@ -543,7 +543,55 @@ SceneNodePtr MeshNode::createDuplicate()
 	}
 	node->setAnimation(animation);
 
+    // Sockets are per-node authoring (see meshnode.h), so a duplicate carries
+    // its own copy of the list — a second character has the same head socket
+    // and does not share it.
+    node->setSockets(this->sockets);
+
     return node;
+}
+
+bool MeshNode::hasBone(const QString &boneName) const
+{
+    if (skeleton.isNull() || boneName.isEmpty()) return false;
+    return skeleton->boneMap.contains(boneName);
+}
+
+const Socket *MeshNode::findSocket(const QString &socketName) const
+{
+    for (const Socket &socket : sockets)
+        if (socket.name == socketName) return &socket;
+    return nullptr;
+}
+
+bool MeshNode::addSocket(const Socket &socket, QString *error)
+{
+    const auto refuse = [error](const QString &message) {
+        if (error) *error = message;
+        return false;
+    };
+    if (socket.name.isEmpty()) return refuse(QStringLiteral("a socket needs a name"));
+    if (findSocket(socket.name))
+        return refuse(QStringLiteral("this node already has a socket named '%1'").arg(socket.name));
+    if (skeleton.isNull() || skeleton->bones.isEmpty())
+        return refuse(QStringLiteral("'%1' has no rig — sockets attach to BONES, so only a "
+                                     "skinned mesh can carry one").arg(name));
+    if (!hasBone(socket.boneName))
+        return refuse(QStringLiteral("'%1' has no bone named '%2'").arg(name, socket.boneName));
+
+    sockets.append(socket);
+    return true;
+}
+
+bool MeshNode::removeSocket(const QString &socketName)
+{
+    for (int i = 0; i < sockets.size(); ++i) {
+        if (sockets[i].name == socketName) {
+            sockets.removeAt(i);
+            return true;
+        }
+    }
+    return false;
 }
 
 }
