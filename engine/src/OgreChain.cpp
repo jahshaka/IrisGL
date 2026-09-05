@@ -192,6 +192,34 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// the first addTargetPass. Nothing below may call it again.
 constexpr size_t kMaxTargetPasses = 48;
 
+/// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
+///
+/// CAMERAS_SPEC §7.3 correction 1, proved in pixels by spikes/camera-pip-vulkan
+/// (T4). The compositor's default for a final pass is `StoreOrResolve`, which
+/// on an MSAA target resolves AND DISCARDS the multisample contents. That is
+/// correct while exactly one workspace draws into the target — nothing follows,
+/// so nothing needs the samples. It stops being correct the moment a SECOND
+/// workspace renders into the same target (the picture-in-picture inset, phase
+/// 2c): the second workspace's first pass Loads a colour attachment whose
+/// samples were thrown away, and at 4x the whole frame outside the inset went
+/// WHITE — 198,000 differing pixels in the spike, 13,575 in this tree's own
+/// gate, and not a subtle artefact either time.
+///
+/// Plain `Store` is not the answer either: it keeps the samples and never
+/// resolves, so with no PiP at all the frame is BLACK (that half is what
+/// tests/engine's msaa_overlay_pass_resolves_at_every_sample_count pins).
+///
+/// `StoreAndMultisampleResolve` is both: the samples survive for whoever
+/// renders next AND the resolve target is written, so the last resolve on the
+/// target is the one you see. At 1x there are no samples to keep, so it is
+/// byte-for-byte what `StoreOrResolve` did — which is what makes this change
+/// pixel-neutral for every existing view and every pixel suite in the tree.
+///
+/// The rule, stated once: EVERY workspace on a target keeps the samples and
+/// resolves; only the last one's resolve reaches the screen.
+constexpr Ogre::StoreAction::StoreAction kMultiWorkspaceStore =
+    Ogre::StoreAction::StoreAndMultisampleResolve;
+
 Ogre::CompositorPassQuadDef *addQuad(Ogre::CompositorNodeDef *n, const char *target,
                                      const char *material, const char *profilingId) {
     Ogre::CompositorTargetDef *t = n->addTargetPass(target);
@@ -275,9 +303,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
-            // Load actions keep the compositor defaults (Load everywhere) and
-            // colour store keeps StoreOrResolve — this is the last pass on the
-            // target, so it is where an MSAA resolve belongs.
+            // Load actions keep the compositor defaults (Load everywhere); the
+            // colour store is kMultiWorkspaceStore — see the note there. This is
+            // the last pass of THIS workspace on the target, so it is where the
+            // MSAA resolve belongs, but it must not be the DISCARDING kind.
+            p->mStoreActionColour[0] = kMultiWorkspaceStore;
             p->mStoreActionDepth   = Ogre::StoreAction::DontCare;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             p->mFirstRQ = kOverlayRenderQueue;
@@ -762,6 +792,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mLoadActionColour[0] = Ogre::LoadAction::Load;
         p->mLoadActionDepth     = Ogre::LoadAction::DontCare;
         p->mLoadActionStencil   = Ogre::LoadAction::DontCare;
+        p->mStoreActionColour[0] = kMultiWorkspaceStore;   // see kMultiWorkspaceStore
         p->mStoreActionDepth    = Ogre::StoreAction::DontCare;
         p->mStoreActionStencil  = Ogre::StoreAction::DontCare;
         p->mFirstRQ = kOverlayRenderQueue;
