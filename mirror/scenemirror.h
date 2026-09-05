@@ -279,6 +279,16 @@ private:
         /// flag (Ogre's setVisible walks a node's attachments, so an empty node
         /// has no visibility of its own) but it is pushed on CHANGE only.
         int visiblePushed = -1;
+        /// The `pickable` flag last pushed onto this node's engine objects as
+        /// Ogre QUERY FLAGS; -1 = never. Ogre's RaySceneQuery is the picking
+        /// broad phase now (SCENEGRAPH_SPEC §2), and its mask is tested inside
+        /// the SIMD sweep — so unpickable geometry has to carry the bit that
+        /// keeps it out. Change-guarded like visibility, and re-pushed whenever
+        /// geometry is (re-)attached, because the flags live on the Item and a
+        /// new Item is born with the default mask.
+        int pickablePushed = -1;
+        /// The sync() this entry was last reached by. See mSyncStamp.
+        quint32 lastSeen = 0;
         bool hasMesh  = false;
         bool hasLight = false;
         bool hasDecal = false;                       // an engine decal is bound
@@ -403,9 +413,17 @@ private:
     void syncHighlight();
     void syncGrid();
     jahshaka::engine::MeshId wireMeshFor(int kind);
-    void visit(const iris::SceneNodePtr &node, jahshaka::engine::NodeId parent, QSet<long> &seen);
+    /// The per-sync document walk. Takes a RAW node and iterates children
+    /// through iris::graph rather than through SceneNode::children(), which
+    /// materialises a QList<QSharedPointer> — one heap allocation and one
+    /// atomic refcount per child — for every node of the scene, every frame.
+    void visit(iris::SceneNode *node);
     void releaseEntry(Entry &e);
-    void removeMissing(const QSet<long> &seen);
+    /// Drops the entries this sync did not reach. The "seen" set used to be a
+    /// QSet<long> filled with one insert per node per frame (and keyed on a
+    /// type that is 32-bit on Windows LLP64 while nodeId is 64-bit — audit F7);
+    /// it is a stamp on the entry now, so noticing a node costs a store.
+    void removeMissing();
     /// Frees engine meshes/materials no live entry references (asset browsing would
     /// otherwise grow them for the life of the process; pointer keys could alias).
     void reclaimUnused();
@@ -459,7 +477,50 @@ private:
 
     jahshaka::engine::Scene *mTarget;
     iris::ScenePtr           mSource;
-    QHash<qint64, Entry>     mEntries;         // keyed by iris SceneNode::nodeId
+    /// Keyed by the DOCUMENT NODE ITSELF, not by `nodeId` (SCENEGRAPH_SPEC §4:
+    /// "the mirror's ... nodeId entry keying" dies with the swap). The node
+    /// pointer is the identity the walk already holds, so this is one pointer
+    /// hash instead of a field read plus a 64-bit hash — and the freed-address
+    /// hazard shared with mMeshes below is closed the same way plus one more:
+    /// every entry carries the engine node's handle and epoch, so an entry
+    /// reached through a recycled address is released and re-adopted rather
+    /// than believed.
+    QHash<const iris::SceneNode *, Entry> mEntries;
+    /// Bumped once per sync(); an entry whose `lastSeen` is not this value did
+    /// not appear in the document this frame. Replaces the per-frame seen-set.
+    quint32                  mSyncStamp = 0;
+    /// How many document nodes the current walk reached — sync()'s return value.
+    int                      mVisited = 0;
+    /// Something may have stopped referencing an engine mesh / material /
+    /// texture since the last cache sweep. reclaimUnused() rebuilds three
+    /// QSets out of every entry in the scene, so running it on a frame where
+    /// nothing was released is pure cost — 20k+ set inserts a frame at 10k
+    /// nodes. Armed by releaseEntry() and by every site that CHANGES an
+    /// entry's mesh / material / texture / particle-texture reference.
+    /// Conservative by construction: a missed site delays a free to the next
+    /// real change, it never frees something still in use.
+    bool                     mReclaimPending = true;
+    /// PER-SYNC memo of the two things that depend only on the MATERIAL, not on
+    /// the node: its PbrParams and its texture-bind signature. Both used to be
+    /// recomputed per MESH per frame — `toPbrParams` runs two dynamic_casts and
+    /// a scan of every shader property, and `syncTextures` did seven
+    /// QHash<QString> lookups whose keys it built from `const char *` (a QString
+    /// construction each) plus a QVector of binds — so a scene of 8000 cubes
+    /// sharing ONE material paid for that material 8000 times a frame. Cleared
+    /// at the top of every sync: within one sync a material cannot change.
+    struct TextureBind {
+        jahshaka::engine::PbrTextureSlot slot;
+        QString path;
+        bool srgb;
+    };
+    struct MaterialSync {
+        bool                          hasPbr = false;
+        jahshaka::engine::PbrParams   pbr;
+        quint64                       textureSignature = 0;
+        std::vector<TextureBind>      binds;
+    };
+    QHash<iris::Material *, MaterialSync> mMaterialSync;
+    const MaterialSync &materialSyncFor(iris::Material *material);
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
     iris::SocketResolver     mSockets;
