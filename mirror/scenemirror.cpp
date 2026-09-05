@@ -3146,8 +3146,20 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view)
     // Preview scenes (thumbnails, material/asset/avatar previews) have their
     // own documents, which are never playing and have no active camera, so they
     // are untouched by construction.
+    //
+    // ...with ONE exception, and it is a mode choice rather than a special case
+    // (AVATAR_LOCOMOTION_SPEC §8.5): while an avatar is POSSESSED, the
+    // spring-arm follow camera is what the player is looking through, and the
+    // arm drives `Scene::camera` — the very camera the host already passed in.
+    // A scene that has both an armed active camera and a possessed character
+    // has said which one it wants by possessing; letting the active camera win
+    // there would render the shot from a tripod while the user drove a
+    // character they could not see.
     if (mSource && mSource->isPlaying()) {
-        if (auto active = mSource->getActiveCamera()) camera = active;
+        const iris::AvatarPossession *possession = mSource->getPossession();
+        const bool possessing = possession && possession->isPossessing();
+        if (!possessing)
+            if (auto active = mSource->getActiveCamera()) camera = active;
     }
 
     // A CAMERA NEVER DRAWS ITSELF (CAMERAS_SPEC phase 2b). Whatever camera is

@@ -251,6 +251,10 @@ Scene::Scene()
 
     environment = QSharedPointer<Environment>(new Environment());
 	gravity = environment->getWorldGravity();
+    // The possession slot (AVATAR_LOCOMOTION_SPEC §8.4). Owned for the scene's
+    // whole life like the Environment: `playMode` is what the file carries, and
+    // WHICH avatar is being driven never is.
+    possession = QSharedPointer<AvatarPossession>(new AvatarPossession(this));
 
 	ambientMusicVolume = 50;
 	// NOT `new QMediaPlayer()` — see ensureMediaPlayer(). Constructing one here
@@ -355,6 +359,15 @@ void Scene::update(float dt)
 
 	time += dt < 0 ? 0 : dt;
 
+    // POSSESSION, first half (AVATAR_LOCOMOTION_SPEC §8.4): the possessed
+    // avatar is the ONE consumer of the gameplay input state, and its intent is
+    // camera-relative. This must run BEFORE the physics step, because
+    // Environment::updateAvatarMovement — which stepSimulation calls — is what
+    // spends the input. Every OTHER registered avatar steps with whatever input
+    // it has, which for an unpossessed one is zero (unpossess clears it), so it
+    // idles rather than freezing.
+    if (playing && possession) possession->routeInput(dt);
+
     environment->stepSimulation(dt);
 
 	// Iterate over all rigid bodies and update the corresponding scenenode
@@ -383,6 +396,12 @@ void Scene::update(float dt)
 		auto rot = rigidBodyWorldTransform.getRotation();
 		mesh->setGlobalRot(iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
 	}
+
+    // POSSESSION, second half: the spring arm follows the pose the step just
+    // produced, so the camera never lags the character by a frame. It writes
+    // `camera` — which the block below then updates and re-derives matrices
+    // for, exactly as it does for any other camera move.
+    if (playing && possession) possession->updateFollowCamera();
 
 	// Cameras aren't always a part of the scene hierarchy, so their matrices are updated here
 	if (!!camera) {
@@ -582,6 +601,31 @@ CameraNodePtr Scene::getActiveCamera() const
 {
     if (activeCameraGuid.isEmpty()) return CameraNodePtr();
     return cameras.value(activeCameraGuid);
+}
+
+// ---- play state + possession (AVATAR_LOCOMOTION_SPEC §8.4/§8.5) -----------
+//
+// setPlaying is EDGE-DETECTING. Everything possession does at a play boundary
+// hangs off the transition and not off the caller, which is the whole of §8.3
+// rule 1: `editor.stop()` has no early-out by design (a script must always be
+// able to force a real stop), so a second stop must find nothing left to do
+// rather than faulting or re-running a release. Gate P6.
+void Scene::setPlaying(bool playing)
+{
+    if (this->playing == playing) return;
+    this->playing = playing;
+    if (!possession) return;
+    if (playing) possession->onPlayStarted();
+    else possession->onPlayStopped();
+}
+
+void Scene::setPlayMode(ScenePlayMode mode)
+{
+    if (playMode == mode) return;
+    playMode = mode;
+    // Re-arm a RUNNING scene: switching a playing scene to third-person should
+    // hand the keys to a character now, not at the next stop/start.
+    if (playing && possession) possession->onPlayStarted();
 }
 
 ScenePtr Scene::create()

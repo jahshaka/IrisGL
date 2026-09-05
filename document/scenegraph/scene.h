@@ -18,6 +18,7 @@ For more information see the LICENSE file
 #include <QStringList>
 #include "irisglfwd.h"
 #include "document/assets/texture2d.h"
+#include "document/input/possession.h"
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/shadowmap.h"
 #include "core/geometry/frustum.h"
@@ -108,6 +109,9 @@ struct SkyRealistic
 class Scene: public QEnableSharedFromThis<Scene>
 {
     QSharedPointer<Environment> environment;
+    /// The one possession slot (§8.4). Owned like `environment` — created in
+    /// the constructor, destroyed with the scene, never serialized.
+    QSharedPointer<AvatarPossession> possession;
 
 public:
     CameraNodePtr camera;
@@ -146,6 +150,11 @@ public:
 
     /// Play state (see setPlaying). Runtime only — never written to the file.
     bool playing = false;
+
+    /// What PLAY does with this scene (AVATAR_LOCOMOTION_SPEC §8.5). SERIALIZED
+    /// with the scene, beside `activeCameraGuid`, as a stable string. Read
+    /// through getPlayMode(); the possession slot it arms is runtime only.
+    ScenePlayMode playMode = ScenePlayMode::Explorer;
 
     QColor clearColor;
     bool renderSky;
@@ -528,8 +537,29 @@ public:
     /// SceneMirror::applyCamera reads it to decide whether the active camera
     /// takes the view. Editing must NOT route through the active camera — the
     /// main viewport stays the explorer until phase 3's pilot mode.
-    void setPlaying(bool playing) { this->playing = playing; }
+    ///
+    /// EDGE-DETECTING since AVATAR_LOCOMOTION Stage 3: the rising edge arms
+    /// possession from `playMode` (auto-possess the first avatar in
+    /// `third-person`) and the falling edge releases it and puts the editor
+    /// camera back. Hanging that off the TRANSITION rather than off the caller
+    /// is what makes `editor.stop(); editor.stop();` free — `editor.stop()`
+    /// deliberately has no early-out (§8.3 rule 1, gate P6).
+    void setPlaying(bool playing);
     bool isPlaying() const { return playing; }
+
+    // ---- possession + the play mode (AVATAR_LOCOMOTION_SPEC §8.4/§8.5) ----
+
+    /// The one possession slot and the spring-arm follow camera that rides with
+    /// it. Never null: the scene owns one for its whole life, the way it owns
+    /// its Environment. Nothing in it is serialized.
+    AvatarPossession *getPossession() { return possession.data(); }
+    const AvatarPossession *getPossession() const { return possession.data(); }
+
+    ScenePlayMode getPlayMode() const { return playMode; }
+    /// Changing the mode WHILE PLAYING re-arms possession immediately (the same
+    /// transition the play edge runs), so a script can switch a running scene
+    /// from explorer to third-person without a stop/start round trip.
+    void setPlayMode(ScenePlayMode mode);
 
     /**
      * Sets the viewport stencil width

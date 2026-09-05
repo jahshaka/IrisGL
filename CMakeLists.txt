@@ -178,6 +178,7 @@ set(SRCS
     document/physics/environment.cpp
     document/physics/physicshelper.cpp
     document/input/inputmap.cpp
+    document/input/possession.cpp
 
 )
 
@@ -249,6 +250,7 @@ set (HEADERS
     document/physics/physicshelper.h
     document/physics/physicsproperties.h
     document/input/inputmap.h
+    document/input/possession.h
 )
 
 set(QRCS assets.qrc)
