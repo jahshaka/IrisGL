@@ -2707,6 +2707,25 @@ QImage SceneMirror::bakeRealisticSky(const iris::SkyRealistic &sky, int width, i
 void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view)
 {
     if (!camera || !view) return;
+
+    // THE ACTIVE-CAMERA SEAM (CAMERAS_SPEC D6, phase 1). This function is the
+    // ONLY way a View's camera moves (Engine.h), so the whole of "play renders
+    // through the designated scene camera" is one substitution of the SOURCE
+    // node — every caller keeps passing whatever camera it owns.
+    //
+    // Two conditions, both required:
+    //   * the document says it is PLAYING (PlayBack sets it, for the editor's
+    //     play-in-place and for the player view alike). EDITING must never
+    //     route through the active camera — the main viewport stays the
+    //     explorer until phase 3's pilot mode.
+    //   * an active camera is set and still resolves.
+    // Preview scenes (thumbnails, material/asset/avatar previews) have their
+    // own documents, which are never playing and have no active camera, so they
+    // are untouched by construction.
+    if (mSource && mSource->isPlaying()) {
+        if (auto active = mSource->getActiveCamera()) camera = active;
+    }
+
     camera->update(0.0f);
     CameraDesc c;
     c.position     = toVec3(camera->getGlobalPosition());

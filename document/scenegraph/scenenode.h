@@ -29,9 +29,11 @@ enum class SceneNodeType {
     Light,
     Camera,
     Viewer,
-    // A projected-texture decal (DECALS_SPEC). Unlike CameraNode — which never
-    // assigns its own type and therefore reads as Empty forever — DecalNode's
-    // constructor SETS this; every type switch below depends on it.
+    // A projected-texture decal (DECALS_SPEC). Every node type's constructor
+    // SETS its own value here and every type switch in both repos depends on
+    // it. (CameraNode was the one that never did, for the whole life of the
+    // codebase — so cameras read as Empty everywhere. Fixed by CAMERAS_SPEC
+    // phase 1, together with a sweep of every switch it re-routes.)
     Decal
 };
 
@@ -130,9 +132,10 @@ public:
     // PLANAR REFLECTIONS (PLANAR_REFLECTIONS_SPEC.md §7 option A): this node's
     // flat surface is a mirror plane. Deliberately a FLAG on an ordinary mesh
     // node rather than a MirrorNode scene-node type — the plane, its size and
-    // its normal are all derived from the mesh's own bounds, and SceneNodeType
-    // is unreliable in this codebase (CameraNode never sets its own, so
-    // type-switching silently drops cameras). Off by default: an active
+    // its normal are all derived from the mesh's own bounds. (The other half
+    // of that reasoning — "SceneNodeType is unreliable, CameraNode never sets
+    // its own" — no longer holds: CAMERAS_SPEC phase 1 fixed it. The flag
+    // stays a flag for the geometric reason above.) Off by default: an active
     // reflector is a whole extra scene render and cannot be inferred.
     bool planarReflector = false;
 

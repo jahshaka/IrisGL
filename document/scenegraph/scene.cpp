@@ -482,8 +482,15 @@ void Scene::addNode(SceneNodePtr node)
         auto viewer = node.staticCast<iris::ViewerNode>();
         viewers.insert(node->getGUID(), viewer);
 
-        if (!vrViewer) 
+        if (!vrViewer)
 			vrViewer = viewer;
+    }
+
+    // CAMERAS_SPEC §3: scene-graph cameras. Reachable only now that the
+    // CameraNode constructor sets its own type — before that a camera added to
+    // a scene arrived here as an Empty and was never registered.
+    if (node->sceneNodeType == SceneNodeType::Camera) {
+        cameras.insert(node->getGUID(), node.staticCast<iris::CameraNode>());
     }
 
 	nodes.insert(node->getGUID(), node);
@@ -522,6 +529,16 @@ void Scene::removeNode(SceneNodePtr node)
         }
     }
 
+    if (node->sceneNodeType == SceneNodeType::Camera) {
+        cameras.remove(node->getGUID());
+        // Deleting the ACTIVE camera falls back to the free viewer rather than
+        // leaving a guid that resolves to nothing. Undo re-adds the node with
+        // the same guid, so re-pointing play at it is one setActiveCamera —
+        // but a play that happens in between must not render through a dead
+        // pointer's last transform.
+        if (activeCameraGuid == node->getGUID()) activeCameraGuid.clear();
+    }
+
 	nodes.remove(node->getGUID());
 
     for (auto &child : node->children) {
@@ -532,6 +549,23 @@ void Scene::removeNode(SceneNodePtr node)
 void Scene::setCamera(CameraNodePtr cameraNode)
 {
     camera = cameraNode;
+}
+
+bool Scene::setActiveCamera(const QString &guid)
+{
+    if (guid.isEmpty()) {          // back to the free viewer
+        activeCameraGuid.clear();
+        return true;
+    }
+    if (!cameras.contains(guid)) return false;
+    activeCameraGuid = guid;
+    return true;
+}
+
+CameraNodePtr Scene::getActiveCamera() const
+{
+    if (activeCameraGuid.isEmpty()) return CameraNodePtr();
+    return cameras.value(activeCameraGuid);
 }
 
 ScenePtr Scene::create()
@@ -578,6 +612,7 @@ void Scene::cleanup()
     meshes.clear();
     particleSystems.clear();
     viewers.clear();
+    cameras.clear();
     nodes.clear();
 }
 

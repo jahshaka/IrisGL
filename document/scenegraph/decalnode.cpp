@@ -121,9 +121,10 @@ void DecalNode::updateAnimation(float time)
 
 DecalNode::DecalNode()
 {
-    // THE line CameraNode never had. Every switch on getSceneNodeType() —
-    // Scene's registry, the mirror, the writer, the picker, the panel — reads
-    // this; without it a decal is silently an Empty node forever.
+    // Every switch on getSceneNodeType() — Scene's registry, the mirror, the
+    // writer, the picker, the panel — reads this; without it a decal is
+    // silently an Empty node forever. (This was the line CameraNode was
+    // missing until CAMERAS_SPEC phase 1.)
     this->sceneNodeType = SceneNodeType::Decal;
 
     // A decal is an editor helper object: it is not exported as geometry.
