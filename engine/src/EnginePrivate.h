@@ -143,21 +143,18 @@ class OgreEngine;
 // would otherwise occlude rays or raycast as garbage triangles (a non-indexed
 // line VAO reads as a vertex triangle list). kGiLightBit marks exactly the one
 // light Instant Radiosity traces from (InstantRadiosity::mLightMask).
-// kNoReflectBit marks objects that must NOT appear inside a planar reflection —
-// today exactly the reflector planes themselves (a mirror containing itself is
-// a feedback artefact, and Ogre's own sample excludes them the same way).
 //
-// THE TRAP, and why this bit is INVERTED relative to the other three: Ogre's
-// PlanarReflections sample uses `visibility_mask 0xfffffffe` and tags mirrors
-// `setVisibilityFlags(1u)` — i.e. in the sample, bit 0 means "not in
-// reflections". Bit 0 here is kVisibleBit and EVERY object carries it, so
-// copying the sample's mask renders a perfectly empty reflection. Ours is a new
-// bit with the opposite polarity: the reflective pass masks with
-// ~kNoReflectBit, so an object is in reflections unless it says otherwise.
+// THERE IS NO "not in reflections" BIT, and there cannot be one in this
+// polarity: Ogre's visibility test is ANY-BIT-SET
+// (`objFlags & visibilityMask`, MovableObject::_addToRenderQueue), so a mask
+// can only say "draw things that carry one of THESE bits" — never "skip
+// things that carry THIS bit". A `~kNoReflectBit` pass mask was carried here
+// until 2026-09-06 and was a total no-op (probe-proven: flagging a plate
+// visible in a reflection moved zero pixels). What actually keeps a mirror out
+// of its own reflection is upstream's, not ours — see OgrePlanar.cpp's header.
 constexpr Ogre::uint32 kVisibleBit     = 1u;
 constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
-constexpr Ogre::uint32 kNoReflectBit   = 1u << 3;
 
 // Forward+ clustered decal budget PER CELL (DECALS_SPEC D5). Not a scene-wide
 // cap: decals beyond this in one cluster cell are dropped farthest-first.
@@ -1229,14 +1226,14 @@ private:
     /// call twice; MUST run before the SceneManager dies (it owns the
     /// reflection cameras and workspaces).
     void teardownPlanar();
-    /// Registers `n` with the live arm: adds its actor, adds its item as a PBS
-    /// receiver, and tags the item kNoReflectBit so the mirror stays out of its
-    /// own reflection. No-op when the arm is down. Returns false + mError when
-    /// the node's mesh is not plate-like.
+    /// Registers `n` with the live arm: adds its actor and adds its item as a
+    /// PBS receiver. No-op when the arm is down. Returns false + mError when
+    /// the node's mesh is not plate-like, or when its material is TWO-SIDED
+    /// (which defeats the winding-based self-exclusion — OgrePlanar.cpp).
     bool armReflector(NodeId id, Node &n);
-    /// Removes `n` from the live arm and restores its visibility flags. MUST be
-    /// called before the node's Item is destroyed: PlanarReflections keeps raw
-    /// Renderable pointers and its own header says so in as many words.
+    /// Removes `n` from the live arm. MUST be called before the node's Item is
+    /// destroyed: PlanarReflections keeps raw Renderable pointers and its own
+    /// header says so in as many words.
     void disarmReflector(NodeId id, Node &n);
     /// disarmReflector for every reflector, keeping the flags — used when the
     /// arm itself is being torn down and rebuilt.

@@ -9,14 +9,35 @@
 // the best-aligned active actor within 20 degrees and maxDistance, and the pixel
 // shader samples the slot at roughness * numMips.
 //
-// The three things that are ours, not Ogre's:
+// WHY A MIRROR IS NOT IN ITS OWN REFLECTION — upstream's mechanism, not ours,
+// and worth stating because we shipped a comment claiming otherwise for a while
+// (defect-verifier, 2026-09-06). Ogre MIRRORS the reflection camera about the
+// actor's plane (`enableReflection`, OgrePlanarReflections.cpp:710). Because
+// that camera then answers `isReflected()`, two things happen for free:
 //
-//  1. THE VISIBILITY MASK IS INVERTED relative to Ogre's sample. See kNoReflectBit
-//     in EnginePrivate.h — the sample's mask would render an empty reflection here.
-//  2. THE WORKSPACE IS BUILT IN C++, like the main chain and the shadow node, not
+//   * Hlms turns on a GLOBAL CLIP PLANE for the pass (OgreHlms.cpp:3729-3737,
+//     `PsoClipDistances`/`GlobalClipPlanes`), and the plane it uploads is the
+//     camera's reflection plane itself (`clipPlane0` from
+//     `renderingCamera->getReflectionPlane()`, OgreHlmsPbs.cpp:2220-2223). So
+//     every fragment on the near side of the mirror plane — the mirror's own
+//     slab included — is clipped away before it can be shaded.
+//   * SceneManager inverts vertex winding for the pass
+//     (OgreSceneManager.cpp:1369-1372), so the mirror's back faces stay culled
+//     as back faces from the flipped camera.
+//
+// There is therefore NO per-object "not in reflections" flag here, and there
+// cannot be one in Ogre's polarity (its visibility test is any-bit-set, so a
+// mask cannot express exclusion — EnginePrivate.h). The one case the two
+// mechanisms above do NOT cover is a TWO-SIDED reflector: nothing is culled by
+// winding, and a slab thick enough to have geometry behind the clip plane paints
+// its whole RTT with itself. armReflector refuses those.
+//
+// The two things that are ours, not Ogre's:
+//
+//  1. THE WORKSPACE IS BUILT IN C++, like the main chain and the shadow node, not
 //     copied from Samples/.../PlanarReflections.compositor (whose hard-coded
 //     2048x7168 shadow atlas would fight Engine::setShadowResolution).
-//  3. THE ACTOR PLANE IS DERIVED, not authored. A reflector is an ordinary flat
+//  2. THE ACTOR PLANE IS DERIVED, not authored. A reflector is an ordinary flat
 //     mesh the user ticked; its own bounds give the centre, size and normal. No
 //     MirrorNode type, no manual plane fields.
 //
@@ -104,15 +125,15 @@ void buildWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspaceDe
         pass->mStoreActionColour[0] = Ogre::StoreAction::StoreOrResolve;
         pass->mStoreActionDepth   = Ogre::StoreAction::DontCare;
         pass->mStoreActionStencil = Ogre::StoreAction::DontCare;
-        // Overlays out by RENDER QUEUE (see kReflectLastRQ), reflector planes
-        // out by VISIBILITY BIT (kNoReflectBit) — the two mechanisms cover
-        // different things and the spec asks for both.
+        // Overlays out by RENDER QUEUE (see kReflectLastRQ). NOT by visibility
+        // mask: the pass keeps the default RESERVED_VISIBILITY_FLAGS, because
+        // Ogre's test is any-bit-set and every object we draw carries
+        // kVisibleBit — a mask here can only turn the reflection OFF wholesale,
+        // never single objects out of it (a `~kNoReflectBit` mask lived here
+        // until 2026-09-06 and was measurably a no-op). The mirror's own
+        // exclusion is the reflected camera's clip plane; see the file header.
         pass->mFirstRQ = 0u;
         pass->mLastRQ  = kReflectLastRQ;
-        // RESERVED_VISIBILITY_FLAGS must survive: CompositorPassSceneDef's own
-        // ctor masks with it, and dropping the reserved bits would hide
-        // everything Ogre marks with layer visibility.
-        pass->mVisibilityMask = ~kNoReflectBit & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
         // Ogre's own overlay set (the stats readout / loading cover) out too —
         // explicitly, even though kReflectLastRQ (199) already cuts below the
         // overlay RQ 254. The rule in OgreChain.cpp's kIncludeOverlaysNote is
@@ -150,6 +171,36 @@ void destroyWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspace
 }
 
 // ---------------------------------------------------------------------------
+// TWO-SIDED REFLECTORS ARE REFUSED (defect-verifier, 2026-09-06 — probe-proven,
+// latent: nothing in Studio wires a document material's double-sidedness to a
+// reflector today, but a glTF `doubleSided` import would).
+//
+// Self-exclusion is upstream's clip plane plus INVERTED WINDING (file header).
+// A material with CULL_NONE has no back faces to cull, so the far side of the
+// mirror's own slab — the part beyond the clip plane, i.e. the part the plane
+// does not remove — is drawn from the reflected camera, filling the RTT with
+// the mirror itself. There is no bit that can take it out again (Ogre's
+// visibility test is any-bit-set), so the honest answer is to refuse the
+// reflector and say why, exactly as a mesh that is not flat enough is refused.
+//
+// CHECKED AT ARM TIME, which covers the ordering the mirror actually uses (it
+// pushes a node's MATERIAL before that node's reflector flag, scenemirror.cpp
+// — so the first sync already sees the real datablock). Turning a material
+// two-sided AFTER its node armed is not re-checked; the next reflector-flag
+// change is what re-arms. Recorded, not silently patched over with a per-frame
+// datablock poll.
+constexpr const char *kTwoSidedRefusal =
+    "planar reflector: the mesh's material is two-sided, and a two-sided mirror fills its "
+    "own reflection with itself. Turn double-sided off on the reflector's material.";
+
+bool isTwoSided(const Ogre::Item *item) {
+    if (!item || item->getNumSubItems() == 0) return false;
+    const Ogre::SubItem *sub = item->getSubItem(0);
+    const Ogre::HlmsDatablock *db = sub ? sub->getDatablock() : nullptr;
+    const Ogre::HlmsMacroblock *macro = db ? db->getMacroblock() : nullptr;
+    return macro && macro->mCullMode == Ogre::CULL_NONE;
+}
+
 bool derivePlane(Ogre::SceneNode *node, const Ogre::Item *item, Plane &out,
                  std::string &error) {
     if (!node || !item || !item->getMesh()) { error = "planar reflector: node has no mesh"; return false; }
@@ -320,14 +371,15 @@ bool OgreScene::armReflector(NodeId id, Node &n) {
     if (!mPlanar) return true;                  // flag remembered; nothing to arm
     if (mActors.find(id) != mActors.end()) return true;
     if (!n.node || !n.item) { mError = "planar reflector: node has no mesh attached"; return false; }
+    if (planar::isTwoSided(n.item)) { mError = planar::kTwoSidedRefusal; return false; }
     planar::Plane pl;
     if (!planar::derivePlane(n.node, n.item, pl, mError)) return false;
     Ogre::PlanarReflectionActor *actor =
         mPlanar->addActor(Ogre::PlanarReflectionActor(pl.centre, pl.halfSize, pl.orientation));
     mActors[id] = actor;
-    // The mirror must not appear in its own reflection.
-    n.item->setVisibilityFlags(n.item->getVisibilityFlags() | kNoReflectBit);
-    // ... and it must RECEIVE one. PBS matches registered renderables to actors
+    // The mirror is kept out of its own reflection by the reflected camera's
+    // clip plane and by inverted winding — both upstream's, neither ours (file
+    // header). It must RECEIVE one, though. PBS matches registered renderables to actors
     // dynamically, ignoring the datablock; addRenderable asserts the
     // renderable's mCustomParameter is 0, which is the channel it then owns
     // (nothing else in this backend touches mCustomParameter). Every mesh we
@@ -348,7 +400,6 @@ void OgreScene::disarmReflector(NodeId id, Node &n) {
         if (mPlanar) mPlanar->destroyActor(it->second);
     } JAH_CATCH(mError, );
     mActors.erase(it);
-    if (n.item) n.item->setVisibilityFlags(n.item->getVisibilityFlags() & ~kNoReflectBit);
 }
 
 void OgreScene::disarmAllReflectors() {
@@ -372,6 +423,7 @@ bool OgreScene::setNodePlanarReflector(NodeId id, bool on) {
     // Validate NOW even when the arm is down, so the user is told immediately
     // that a sphere cannot be a mirror instead of at some later mode switch.
     if (!it->second.item) { mError = "setNodePlanarReflector: node has no mesh attached"; return false; }
+    if (planar::isTwoSided(it->second.item)) { mError = planar::kTwoSidedRefusal; return false; }
     planar::Plane probe;
     if (!planar::derivePlane(it->second.node, it->second.item, probe, mError)) return false;
     mReflectors.insert(id);
