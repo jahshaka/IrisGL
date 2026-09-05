@@ -251,7 +251,15 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
     JAH_TRY {
         Node &n = nit->second;
         detachItem(id, n);
-        n.item = mSceneMgr->createItem(mit->second.mesh, Ogre::SCENE_DYNAMIC);
+        // THE ITEM IS BORN IN ITS NODE'S CLASS (SCENEGRAPH_SPEC §6 rule 3):
+        // SceneNode::attachObject THROWS when the object's static flag and the
+        // node's disagree, and the document marks never-moving geometry
+        // SCENE_STATIC before the mirror ever gets here. Reading the node
+        // rather than hard-coding SCENE_DYNAMIC is the whole of the engine's
+        // part in static subtrees.
+        const Ogre::SceneMemoryMgrTypes cls =
+            n.node && n.node->isStatic() ? Ogre::SCENE_STATIC : Ogre::SCENE_DYNAMIC;
+        n.item = mSceneMgr->createItem(mit->second.mesh, cls);
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
         // line meshes must neither bounce nor occlude the radiosity rays.
@@ -262,6 +270,10 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // everything else stays on Ogre's default queue.
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
         n.node->attachObject(n.item);
+        // A static Item is not in the per-frame bounds list: without this its
+        // world AABB stays at its birth value and it is culled (and picked)
+        // wrong. The manager batches the dirty per frame.
+        if (cls == Ogre::SCENE_STATIC) mSceneMgr->notifyStaticAabbDirty(n.item);
         n.meshRef = meshId; n.materialRef = matId;
         // New lit geometry must join the voxel volume / next trace; unlit
         // overlays (outlines, wires) never participate in GI.

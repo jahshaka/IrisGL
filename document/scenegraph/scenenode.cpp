@@ -208,21 +208,76 @@ void SceneNode::setVisible(bool flag)
 void SceneNode::show(bool cascade)
 {
     setVisible(true);
-    if (cascade)
-        for (const auto &child : children()) child->show(cascade);
+    if (cascade) {
+        const int n = childCount();
+        for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->show(cascade);
+    }
 }
 
 void SceneNode::hide(bool cascade)
 {
     setVisible(false);
-    if (cascade)
-        for (const auto &child : children()) child->hide(cascade);
+    if (cascade) {
+        const int n = childCount();
+        for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->hide(cascade);
+    }
+}
+
+bool SceneNode::isStaticEligible() const
+{
+    // Node kinds whose engine attachment cannot change memory-manager class.
+    switch (sceneNodeType) {
+    case SceneNodeType::Light:
+    case SceneNodeType::ParticleSystem:
+    case SceneNodeType::Decal:
+    case SceneNodeType::Camera:
+    case SceneNodeType::Viewer:
+        return false;
+    case SceneNodeType::Empty:
+    case SceneNodeType::Mesh:
+        break;
+    }
+    if (isPhysicsBody) return false;         // Bullet writes its transform every step
+    if (isSocketAttached()) return false;    // the socket resolver writes it every frame
+    if (!animations.isEmpty() || !animation.isNull()) return false;
+    return true;
 }
 
 void SceneNode::setStaticHint(bool value)
 {
+    if (value && !isStaticEligible()) {
+        qWarning("iris::SceneNode::setStaticHint(true) refused for '%s': this node kind moves "
+                 "(SCENEGRAPH_SPEC §6 — lights, particles, decals, cameras, viewers, physics "
+                 "bodies, socket riders and animated nodes are never static).",
+                 qPrintable(name));
+        return;
+    }
+    // The GRAPH state is part of the test, not just the field: a node that
+    // inherited static from a static parent has `mStaticHint == false` while
+    // sitting in the static manager, and setStaticHint(false) on it must
+    // really demote it.
+    if (mStaticHint == value && graph::isStatic(mGraphNode) == value) return;
+    mStaticHint = value;
+    // The graph may refuse (an ineligible parent, an attachment that cannot
+    // switch): the document then remembers what was asked for, because a later
+    // reparent under a static parent makes the same request legal. `staticHint`
+    // is the intent; `isStaticInGraph()` is the outcome.
     graph::setStatic(mGraphNode, value);
     notifyChanged(NodeChange::Flags);
+}
+
+void SceneNode::applyStaticDefaults()
+{
+    // canBeStatic() first: an ineligible PARENT means this whole branch stays
+    // dynamic, and asking anyway would log a refusal per node.
+    if (isStaticEligible() && graph::canBeStatic(mGraphNode)) setStaticHint(true);
+    // Descend regardless — a light in the middle of an imported rig does not
+    // stop the props below it from being static, it only stops ITSELF (and,
+    // through canBeStatic, the branch under it, which is the rule).
+    const std::size_t n = graph::childCount(mGraphNode);
+    for (std::size_t i = 0; i < n; ++i)
+        if (SceneNode *c = graph::ownerOf(graph::childAt(mGraphNode, i)))
+            c->applyStaticDefaults();
 }
 
 void SceneNode::addAnimation(AnimationPtr anim)
@@ -454,9 +509,12 @@ void SceneNode::updateAnimation(float time)
         // keeps is the authored data and the clock.
     }
 
-    for (const auto &child : children()) {
-        child->updateAnimation(sceneTime);
-    }
+    // childAt(), not children(): this runs for every node of the document on
+    // every play-mode tick, and children() allocates a QList and bumps a
+    // refcount per child to hand back what a raw walk reads for free.
+    const int n = childCount();
+    for (int i = 0; i < n; ++i)
+        if (SceneNode *c = childAt(i)) c->updateAnimation(sceneTime);
 }
 
 void SceneNode::applyDefaultPose()
@@ -469,9 +527,9 @@ void SceneNode::applyDefaultPose()
     restRot = getLocalRot();
     restScale = getLocalScale();
 
-    for (const auto &child : children()) {
-        child->applyDefaultPose();
-    }
+    const int n = childCount();
+    for (int i = 0; i < n; ++i)
+        if (SceneNode *c = childAt(i)) c->applyDefaultPose();
 }
 
 void SceneNode::update(float dt)
@@ -479,9 +537,10 @@ void SceneNode::update(float dt)
     // NO transform work. Composition, invalidation and propagation are Ogre's
     // (SIMD, threaded, inside the frame); what is left is the walk that lets
     // subclasses do their own per-frame business.
-    for (const auto &child : children()) {
-        child->update(dt);
-    }
+    // Per-frame, whole document: no allocation, no refcount (see childAt).
+    const int n = childCount();
+    for (int i = 0; i < n; ++i)
+        if (SceneNode *c = childAt(i)) c->update(dt);
 }
 
 void SceneNode::setScene(ScenePtr scene)
@@ -548,7 +607,8 @@ void SceneNode::remapSocketOwners(const QHash<QString, QString> &guidMap)
         const auto it = guidMap.constFind(socketOwnerGuid);
         if (it != guidMap.constEnd()) socketOwnerGuid = it.value();
     }
-    for (const auto &child : children()) child->remapSocketOwners(guidMap);
+    const int n = childCount();
+    for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->remapSocketOwners(guidMap);
 }
 
 SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)

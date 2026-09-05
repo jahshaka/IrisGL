@@ -103,6 +103,9 @@ protected:
     /// How many times mGraphNode has been REPLACED. See graphEpoch().
     quint32 mGraphEpoch = 0;
 
+    /// SCENE_STATIC, the document's side of it. See setStaticHint().
+    bool mStaticHint = false;
+
 public:
     SceneNodeType sceneNodeType;
 
@@ -275,9 +278,29 @@ public:
     /// The children, in order, resolved through Ogre's child vector and the
     /// back-pointers. Built on demand: this is a QList by value, not a
     /// reference to a member, because there is no member any more.
+    ///
+    /// COSTS AN ALLOCATION AND N ATOMIC INCREMENTS. That is fine for a one-shot
+    /// (a panel rebuilding a tree, a serializer, an exporter) and it is not
+    /// fine inside a walk that runs every frame or over the whole document —
+    /// use childCount()/childAt() there, which read Ogre's child vector and the
+    /// owner back-pointers directly and allocate nothing. The mirror's per-sync
+    /// walk was the biggest single cost in an idle frame until it stopped
+    /// calling this.
     QList<SceneNodePtr> children() const;
     /// The child count without materialising the list.
     int childCount() const { return int(graph::childCount(mGraphNode)); }
+    /// The i'th DOCUMENT child, borrowed — null when `i` names one of the
+    /// engine's own children (a light's -Y adapter, a decal box, a wire), which
+    /// share the tree and are not part of the document. Callers that walk
+    /// SKIP nulls; they must not assume childAt(0..childCount()) is dense.
+    ///
+    /// Borrowed, not shared: a walk that only reads has no business bumping a
+    /// refcount per node, and the caller's own reference to the root keeps the
+    /// subtree alive. Do not store the result.
+    SceneNode *childAt(int i) const
+    {
+        return graph::ownerOf(graph::childAt(mGraphNode, std::size_t(i)));
+    }
     /// This node's position among its siblings, or -1. Undo captures it.
     int siblingIndex() const { return graph::indexInParent(mGraphNode); }
 
@@ -337,6 +360,13 @@ public:
 
     void setPickable(bool canPick) {
         pickable = canPick;
+        // Straight through to this node's engine objects as Ogre QUERY FLAGS:
+        // picking's broad phase is a masked RaySceneQuery (SCENEGRAPH_SPEC §2)
+        // and the mask is tested inside the sweep, so a node that stopped being
+        // pickable has to say so before the next pick, not before the next
+        // mirror sync. (The mirror pushes it too — that is the path for an Item
+        // that did not exist yet when the flag was set.)
+        graph::setPickable(mGraphNode, canPick);
         notifyChanged(NodeChange::Flags);
     }
 
@@ -362,22 +392,66 @@ public:
         return planarReflector;
     }
 
-    /// SCENE_STATIC (SPECS/SCENEGRAPH_SPEC.md §6): "this node never moves".
-    /// Static nodes are skipped by Ogre's per-frame transform update entirely,
-    /// which is where the multiplier of the whole swap lives. Opt-in, default
-    /// off, and an authoring-time decision: switching is not free, and an
-    /// engine attachment created dynamic refuses to become static.
+    /// SCENE_STATIC (SPECS/SCENEGRAPH_SPEC.md §6): "this node and everything
+    /// under it never moves". Static nodes are skipped by Ogre's per-frame
+    /// transform AND bounds passes entirely, which is where the multiplier of
+    /// the whole swap lives (the passes run for them only on the frames after
+    /// something changed — the engine batches that itself).
     ///
-    /// TWO THINGS IT IS NOT, both pinned by tests/document/test_document_no_gl:
-    ///  * it is not sticky across a RE-PARENT. Ogre gives a node its parent's
-    ///    memory-manager class whenever the parent changes (Node::setParent
-    ///    migrates the child), so a hint set before the node reaches its final
-    ///    parent is silently lost. Mark AFTER parenting.
-    ///  * it is not a lock. A static node that moves anyway still resolves
-    ///    correctly — iris::graph tells the scene manager (notifyStaticDirty)
-    ///    on every write — it simply costs more than moving a dynamic one.
+    /// The hint is a DOCUMENT FIELD, not a read of the graph, for two reasons:
+    /// it survives a reparent (Ogre gives a node its parent's memory-manager
+    /// class whenever the parent changes, so a graph-derived hint was silently
+    /// lost by every insertChild — iris::graph re-applies the field instead),
+    /// and it is what the serializer writes.
+    ///
+    /// THREE RULES, all in nodegraph.h and all enforced by iris::graph:
+    ///  * it applies to the WHOLE SUBTREE. Ogre cannot do otherwise.
+    ///  * a static node's parent must be static or be the scene's root node.
+    ///    Setting the hint on a node under a moving parent is refused, loudly.
+    ///  * MOVING A STATIC NODE UNDOES IT. The first transform write through
+    ///    the funnel demotes the subtree back to dynamic and clears this flag,
+    ///    which is what keeps a dragged node from paying a static pass a frame.
+    ///
+    /// Nodes whose engine attachment cannot change class — lights and particle
+    /// systems (their object memory managers have no static twin) — refuse the
+    /// hint. isStaticEligible() is the document-side test.
     void setStaticHint(bool value);
-    bool staticHint() const { return graph::isStatic(mGraphNode); }
+    bool staticHint() const { return mStaticHint; }
+    /// What iris::graph reads when it reconciles a subtree after a structural
+    /// move. Same value as staticHint(); named for the question it answers.
+    bool wantsStatic() const { return mStaticHint; }
+    /// Cleared by iris::graph when a transform write demotes this subtree.
+    /// Not a public setter: it must not re-enter the graph.
+    void _clearStaticHint() { mStaticHint = false; }
+    /// Is this node the KIND of thing that may be static at all? Never-animated
+    /// geometry and plain groupings only: a light, a particle system, a decal,
+    /// a camera or a viewer carries an engine object that cannot switch class;
+    /// a physics body, a socket rider, a skinned mesh and anything holding an
+    /// animation are all going to move.
+    virtual bool isStaticEligible() const;
+    /// True when the graph really did put this node in the static manager —
+    /// the hint is what was ASKED for, this is what happened.
+    bool isStaticInGraph() const { return graph::isStatic(mGraphNode); }
+
+    /// THE DEFAULT POLICY: mark this subtree static wherever it is safe to.
+    ///
+    /// Called when a subtree JOINS a scene — a primitive from the Add menu, an
+    /// imported model, a project as it finishes loading — i.e. at the moments
+    /// the document knows a branch is complete and at rest. Top-down, so a
+    /// node is only marked once its parent already is (rule 2), and it marks
+    /// nothing that isStaticEligible() refuses.
+    ///
+    /// Marking is not a decision the user has to make and cannot get wrong:
+    /// the first transform write demotes whatever it touches (rule 4), so the
+    /// worst case of an over-eager default is one subtree migration the first
+    /// time something moves. The BEST case is the ground, the architecture and
+    /// every imported prop dropping out of the engine's per-frame transform and
+    /// bounds passes for the life of the session.
+    ///
+    /// NOT SERIALIZED YET. The hint is re-derived on load rather than written,
+    /// which is why this is called from the reader; serializer v2 should
+    /// persist an explicit user override on top of it.
+    void applyStaticDefaults();
 
     SceneNodeType getSceneNodeType();
     /**

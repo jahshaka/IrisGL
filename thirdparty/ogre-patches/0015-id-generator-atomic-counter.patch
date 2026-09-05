@@ -1,0 +1,49 @@
+diff --git a/OgreMain/include/OgreId.h b/OgreMain/include/OgreId.h
+index 2a1a2e3958..0a98682052 100644
+--- a/OgreMain/include/OgreId.h
++++ b/OgreMain/include/OgreId.h
+@@ -29,6 +29,9 @@ THE SOFTWARE.
+ #ifndef __Id_H__
+ #define __Id_H__
+ 
++// Jahshaka patch 0015: <atomic>, for the id counter below.
++#include <atomic>
++
+ namespace Ogre
+ {
+     /// Big projects with lots, lots of units for very long periods of time (MMORPGs?)
+@@ -42,12 +45,31 @@ namespace Ogre
+     class _OgreExport Id
+     {
+     public:
+-        // This function assumes creation of new objects can't be made from multiple threads!!!
++        // Jahshaka patch 0015: THE COUNTER IS ATOMIC.
++        //
++        // Upstream's comment used to read "This function assumes creation of
++        // new objects can't be made from multiple threads!!!" and the counter
++        // was a plain `IdType`. Jahshaka breaks that assumption on purpose: an
++        // iris::SceneNode IS an Ogre::SceneNode (SPECS/SCENEGRAPH_SPEC.md), and
++        // the asset-import worker builds its fragment off the main thread while
++        // the main thread keeps rendering — and creating engine objects.
++        //
++        // Everything ELSE those two threads touch is already disjoint (they
++        // create into different SceneManagers, so different node vectors and
++        // different memory managers; the document side serialises its own
++        // creations on iris::graph's mutex). This static was the one piece of
++        // shared mutable state on both paths, and a lost increment hands two
++        // live objects the same id — which in Jahshaka also aliases two
++        // document handles onto one entry in the owner table.
++        //
++        // Relaxed ordering: the only requirement is uniqueness. Nothing orders
++        // anything by id, and an uncontended relaxed fetch_add costs the same
++        // as the increment it replaces.
+         template <typename T>
+         static IdType generateNewId()
+         {
+-            static IdType g_currentId = 0;
+-            return g_currentId++;
++            static std::atomic<IdType> g_currentId{ 0 };
++            return g_currentId.fetch_add( 1, std::memory_order_relaxed );
+         }
+     };
+ 

@@ -42,6 +42,10 @@ struct PickingResult
     iris::Vec3 hitPoint;
 
     float distanceFromStartSqrd;
+    /// The TriMesh triangle that was hit. Reported since both ray walks became
+    /// one implementation (audit F13): this half of the pair used to drop it
+    /// while the other half depended on it.
+    int triangleIndex = -1;
 };
 
 enum class SkyType : int
@@ -429,17 +433,14 @@ public:
     /// undo after a world switch would walk dangling handles.
     void rememberDetached(const SceneNodePtr &node);
 
+    /// One of the TWO ENTRY POINTS onto iris::picking::raycastMeshes (the other
+    /// is Studio's ScenePicker) — audit F13's duplicate walk is gone, and with
+    /// it the recursive `->children` descent this used to do. The broad phase
+    /// is Ogre's RaySceneQuery; the triangle test is ours.
     void rayCast(const iris::Vec3& segStart,
                  const iris::Vec3& segEnd,
                  QList<PickingResult>& hitList,
 			     uint64_t pickingMask = 0,
-				 bool allowUnpickable = false);
-
-    void rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
-                 const iris::Vec3& segStart,
-                 const iris::Vec3& segEnd,
-                 QList<iris::PickingResult>& hitList,
-				 uint64_t pickingMask = 0,
 				 bool allowUnpickable = false);
 
 	ViewerNodePtr getActiveVrViewer() { return vrViewer; }

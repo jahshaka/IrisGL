@@ -45,13 +45,38 @@ For more information see the LICENSE file
 //     v1 consequence the spec calls out (§3, "v1 may temporarily require a
 //     display for these paths"); v2 replaces it with the NULL render system.
 //
-// THREADING: Ogre's id generator is a plain non-atomic counter with a comment
-// saying so (OgreId.h: "assumes creation of new objects can't be made from
-// multiple threads"). createNode/destroyNode/migrate therefore take a process
-// mutex. Transform writes do not — they touch only their own SoA slot.
+// THREADING, and the one thing that was still broken. createNode/destroyNode/
+// migrate/attach take a process mutex; transform writes do not (they touch
+// only their own SoA slot). That covers the DOCUMENT's own creations on both
+// threads — but not the shared state underneath them.
+//
+// The asset-import worker builds its fragment off the main thread (audit §3.10
+// item 34: "the graph's only off-main-thread exposure") while the main thread
+// keeps rendering, which means the ENGINE is creating Ogre objects at the same
+// time — Items, wire nodes, light adapters — and the engine holds no mutex of
+// ours and cannot: `IrisGL` and `JahshakaEngine` are two libraries that never
+// link each other (ARCHITECTURE), so there is no lock they could share, and
+// injecting one would mean wrapping every Ogre construction in the backend.
+//
+// Almost everything the two threads touch is disjoint by construction: they
+// create into DIFFERENT SceneManagers (the worker's fragments are born in the
+// staging manager), so different `mSceneNodes` vectors and different node
+// memory managers. The single piece of genuinely shared mutable state was
+// `Ogre::Id::generateNewId<T>()` — one function-local static counter per type,
+// incremented non-atomically, with an upstream comment saying it assumed no
+// one would do this. A lost increment there hands two live objects one id,
+// which in this file also aliases two document handles onto one owner slot.
+//
+// FIXED WHERE IT LIVES: `ogre-patches/0015-id-generator-atomic-counter.patch`
+// makes the counter a relaxed `std::atomic`. That is the whole fix — no lock
+// on the engine's side, no main-thread marshalling of the importer, and no
+// second transform store (the "worker builds pure data" alternative would need
+// one, and §6a rejects that). Re-run `irisgl/scripts/build-ogre.sh` after
+// pulling this: an engine built before patch 0015 still has the racy counter.
 // -----------------------------------------------------------------------------
 
 #include <cstddef>
+#include <vector>
 
 #include "core/math/mat4.h"
 #include "core/math/quat.h"
@@ -174,14 +199,122 @@ void setGlobalTransform(NodeHandle n, const Mat4 &m);
 void setVisible(NodeHandle n, bool visible, bool cascade);
 
 bool isStatic(NodeHandle n);
-/// SCENE_STATIC (spec §6): a static node is skipped by updateAllTransforms
-/// entirely — that is where the multiplier is. Switching costs a full static
-/// pass, so this is an authoring-time hint, never a per-frame call. Moving a
-/// static node afterwards still works: setLocalPos notifies the manager.
-void setStatic(NodeHandle n, bool value);
+
+// ---- SCENE_STATIC (SPECS/SCENEGRAPH_SPEC.md §6 — the multiplier) -----------
+//
+// Ogre-Next keeps two node memory managers per SceneManager. Only the DYNAMIC
+// one is walked by `updateAllTransforms` every frame; the STATIC one joins the
+// update list only for the frames something in it changed
+// (SceneManager::highLevelCull tests `mStaticMinDepthLevelDirty`, and
+// `updateSceneGraph` clears it again — so static dirties are BATCHED PER FRAME
+// by the engine itself, which is upstream's advice in spec §2 and needs no
+// batching of ours). The same is true of `updateAllBounds` for the entities
+// hanging off those nodes. A scene whose ground, architecture and imported
+// props are static therefore pays per-frame transform + bounds work for the
+// moving 20% only.
+//
+// THE RULES, all forced by Ogre and all enforced here:
+//
+//  1. STATIC IS A SUBTREE PROPERTY. `Node::setParent` gives a child its
+//     PARENT's memory manager and `parentDepthLevelChanged` propagates that
+//     down the whole subtree, so "this node is static but its child is not"
+//     cannot survive a reparent. setStatic therefore switches n AND its whole
+//     subtree, and a node's hint takes effect at the subtree's root.
+//  2. A STATIC NODE'S PARENT MUST BE STATIC — or be the document root, whose
+//     local transform is identity and which nothing ever writes. Ogre says the
+//     same in OgreNode.h ("static children, dynamic parent is probably a
+//     bug"): a static node's derived transform is refreshed only on static
+//     dirties, so a moving dynamic parent would leave it behind.
+//  3. ATTACHMENTS TRAVEL WITH THE NODE. `SceneNode::attachObject` THROWS when
+//     the object's static flag disagrees with the node's, and lights and PFX2
+//     particle definitions cannot switch at all (their object memory managers
+//     have no twin). So the engine creates a node's Item in the node's class
+//     (OgreMaterials.cpp attachMesh), and setStatic rolls the whole subtree
+//     back if any attachment refuses.
+//  4. MOVING A STATIC NODE PROMOTES IT. Every transform write goes through
+//     this file; a write to a static node demotes it (and its subtree) back to
+//     dynamic instead of paying a whole static pass per edit. The document's
+//     hint is cleared with it — see SceneNode::setStaticHint.
+
+/// True when `n` may legally be static: its parent is static, or its parent is
+/// the DOCUMENT ROOT (a document node whose own parent is the scene manager's
+/// root node). Rule 2 above.
+bool canBeStatic(NodeHandle n);
+
+/// Switches `n` AND ITS WHOLE SUBTREE between the two memory managers, moving
+/// every attachment with it. Returns false (changing nothing) when the switch
+/// is illegal (rule 2) or when some attachment in the subtree refuses (rule 3).
+///
+/// This is an AUTHORING-TIME call: switching costs a migration per node plus
+/// one static pass on the next frame. Never call it per frame.
+bool setStatic(NodeHandle n, bool value);
+
+/// How many nodes in this process currently live in a SCENE_STATIC manager.
+/// The benchmark asserts on it; nothing else should need it.
+std::size_t staticNodeCount();
 
 /// Debug/diagnostic: how many live handles this process has made.
 std::size_t liveNodeCount();
+
+// ---- picking: the broad phase (SPECS/SCENEGRAPH_SPEC.md §2) ----------------
+//
+// Ogre's ray queries are AABB-precision and have no triangle path, so the
+// TRIANGLE NARROW PHASE STAYS OURS (V-snap reads the triangle index back).
+// What moves to the engine is the broad phase: instead of walking the document
+// tree and testing a bounding SPHERE per mesh, `rayQuery` runs
+// `RaySceneQuery` — a 4-wide SIMD sweep of the entity SoA that tests the same
+// WORLD AABBs the renderer culls with, and is masked in the sweep itself.
+//
+// Hits come back as DOCUMENT nodes: every engine object hangs off an
+// `Ogre::SceneNode`, and that node's back-pointer names the handle that owns
+// it (nodegraph.cpp's owner table — the UserObjectBindings role, done as a
+// flat array because Any allocates).
+
+/// One broad-phase candidate: the document node an engine object hangs off,
+/// and the ray parameter at which the ray entered its world AABB.
+struct RayCandidate
+{
+    SceneNode *node;
+    float distance;
+};
+
+/// True when `s` holds query-able geometry at all. A document that no mirror
+/// has met yet has NONE — nothing has been attached to its nodes — and picking
+/// there falls back to the document's own bounds walk (see picking.cpp).
+bool hasQueryableGeometry(SceneHandle s);
+
+/// The broad phase. `out` is CLEARED and filled with one entry per distinct
+/// document node whose geometry's world AABB the ray crosses, unsorted.
+///
+/// TWO ENGINE RULES the caller inherits: the sweep also rejects anything whose
+/// LAYER_VISIBILITY bit is clear (an invisible object is not a candidate), and
+/// the AABBs it reads are the ones the last `updateSceneGraph` computed — so a
+/// node moved since the last frame is tested at its previous position.
+void rayQuery(SceneHandle s, const Vec3 &origin, const Vec3 &dir, unsigned queryMask,
+              std::vector<RayCandidate> &out);
+
+/// The query-flag vocabulary — THE one place document picking semantics are
+/// mapped onto Ogre's masks. Only the `pickable` split lives here: Ogre's mask
+/// test is `(flags & mask) != 0` (ANY) while `pickingGroups` is an ALL test
+/// (`(groups & mask) == mask`), so groups cannot be expressed as query flags
+/// and stay an exact test on the CANDIDATES, which costs O(hits), not O(scene).
+/// THE PICKABLE BIT IS OGRE'S OWN DEFAULT, deliberately. An Ogre-Next Item is
+/// born with query flags `SceneManager::QUERY_ENTITY_DEFAULT_MASK` = 0x80000000
+/// (OgreItem.cpp:54 — and note that `MovableObject::msDefaultQueryFlags`, the
+/// 0xFFFFFFFF one every Ogre 1.x tutorial names, is dead code in this pin: no
+/// object ever reads it). Reusing that bit means an Item the mirror has not
+/// pushed a flag onto yet — one created THIS sync — is pickable, which is the
+/// document's default for a new node too. Anything else leaves a window in
+/// which a freshly added object cannot be clicked.
+enum : unsigned {
+    kPickableQueryBit = 0x80000000u,
+    kUnpickableQueryBit = 0x40000000u,
+};
+
+/// Pushes `pickable` onto every engine object attached to `n` as query flags.
+/// Called by the mirror when it attaches geometry and when the flag changes;
+/// a node with no attachments remembers nothing (there is nothing to query).
+void setPickable(NodeHandle n, bool pickable);
 
 }  // namespace graph
 }  // namespace iris

@@ -163,7 +163,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
 NodeId SceneMirror::engineNode(const iris::SceneNode *node) const
 {
     if (!node) return 0;
-    auto it = mEntries.constFind(node->nodeId);
+    auto it = mEntries.constFind(node);
     return it == mEntries.constEnd() ? 0 : it->node;
 }
 
@@ -179,19 +179,35 @@ int SceneMirror::sync()
     // head in the frame that renders it, not in the one after.
     resolveSockets();
 
-    QSet<long> seen;
+    ++mSyncStamp;
+    mVisited = 0;
+    // Per-material work is memoised for the duration of this walk (see
+    // MaterialSync): every mesh node sharing a material used to pay for it.
+    mMaterialSync.clear();
     mAnyShadowCaster = false;
     mAnyRefractive = false;
     mShadowFilter = ShadowFilter::Hard;
     mMaxShadowResolution = 0;
-    for (const auto &child : mSource->getRootNode()->children())
-        visit(child, 0, seen);
-    removeMissing(seen);
-    reclaimUnused();
+    // RAW children, no QList: SceneNode::children() builds a
+    // QList<QSharedPointer> — a heap allocation plus an atomic refcount per
+    // child — and the walk below runs over the whole document every frame.
+    iris::SceneNode *root = mSource->getRootNode().data();
+    const std::size_t rootChildren = iris::graph::childCount(root->graphNode());
+    for (std::size_t i = 0; i < rootChildren; ++i)
+        if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
+            visit(c);
+    removeMissing();
+    // THE CACHE SWEEP, ON DEMAND. reclaimUnused builds three QSets out of every
+    // entry in the scene; at 10k nodes that was 20k+ set inserts a frame to
+    // conclude, almost always, that nothing had been dropped. An engine mesh /
+    // material / texture can only become unreferenced when an entry is released
+    // or when an entry's reference to one CHANGES — every such site arms the
+    // flag, and only then does the sweep run.
+    if (mReclaimPending) { reclaimUnused(); mReclaimPending = false; }
     syncClips();
     syncHighlight();
     syncGrid();
-    return seen.size();
+    return mVisited;
 }
 
 MeshId SceneMirror::engineMesh(iris::Mesh *mesh) const
@@ -236,7 +252,10 @@ void SceneMirror::collectHighlightMeshes(const iris::SceneNodePtr &node,
         if (iris::Mesh *mesh = meshNode->getMesh().data())
             if (MeshId m = engineMesh(mesh)) out.emplace_back(meshNode, m);
     }
-    for (const auto &child : node->children()) collectHighlightMeshes(child, out);
+    const int n = node->childCount();
+    for (int i = 0; i < n; ++i)
+        if (iris::SceneNode *c = node->childAt(i))
+            collectHighlightMeshes(c->sharedFromThis(), out);
 }
 
 void SceneMirror::syncHighlight()
@@ -247,6 +266,7 @@ void SceneMirror::syncHighlight()
     if (mHighlighted) collectHighlightMeshes(mHighlighted, targets);
     if (targets.empty()) {
         for (HighlightShell &s : mHighlightShells) { if (s.node) mTarget->setNodeVisible(s.node, false); s.mesh = 0; }
+        mReclaimPending = true;
         return;
     }
     // The user's outline colour preference lives on the document
@@ -288,6 +308,7 @@ void SceneMirror::syncHighlight()
             if (mTarget->attachMesh(s.node, m, mat)) {
                 s.mesh = m;
                 s.wireframe = mHighlightWireframe;
+                mReclaimPending = true;   // the shell's previous mesh may be free
             }
         }
         // The outline is the same mesh scaled up slightly around the node's pivot:
@@ -770,13 +791,13 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     return id;
 }
 
-void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long> &seen)
+void SceneMirror::visit(iris::SceneNode *node)
 {
-    (void)parent;   // the tree IS the engine's tree now; parentage is not pushed
     if (!node) return;
-    seen.insert(node->nodeId);
+    ++mVisited;
 
-    Entry &e = mEntries[node->nodeId];
+    Entry &e = mEntries[node];
+    e.lastSeen = mSyncStamp;
     // ONE TREE (SPECS/SCENEGRAPH_SPEC.md D2). The engine no longer makes a node
     // for a document node — it ADOPTS the document's own, which is already an
     // Ogre scene node in this scene's manager. That single change deletes the
@@ -797,9 +818,10 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
         e.graphEpoch = node->graphEpoch();
         if (!e.node) return;
         e.visiblePushed = -1;      // force one visibility application
+        e.pickablePushed = -1;     // ...and one query-flag application
     }
 
-    e.docNode = node.data();
+    e.docNode = node;
     // Visibility is still the DOCUMENT's flag (Ogre's setVisible walks a node's
     // attachments, so an empty node has no visibility of its own) — but it is
     // pushed on CHANGE only now, like every other signature-guarded half of
@@ -810,12 +832,26 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
         e.visiblePushed = wantVisible;
     }
 
+    // Picking's broad phase is Ogre's RaySceneQuery (SCENEGRAPH_SPEC §2) and
+    // its mask is tested inside the SIMD sweep, so `pickable` has to reach the
+    // node's engine objects as QUERY FLAGS. Change-guarded; the document's flag
+    // stays the authority and is re-checked exactly on the candidates.
+    const int wantPickable = node->isPickable() ? 1 : 0;
+    if (e.pickablePushed != wantPickable) {
+        iris::graph::setPickable(node->graphNode(), wantPickable != 0);
+        e.pickablePushed = wantPickable;
+    }
+
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
-        auto meshNode = node.staticCast<iris::MeshNode>();
-        iris::Mesh *mesh = meshNode->getMesh().data();
-        iris::Material *material = meshNode->getMaterial().data();
+        auto *meshNode = static_cast<iris::MeshNode *>(node);
+        // The members, not the by-value getters: `getMesh()`/`getMaterial()`/
+        // `getSkeleton()` each return a QSharedPointer BY VALUE, so reading
+        // them costs an atomic increment and decrement per mesh per frame for
+        // three pointers that almost never change.
+        iris::Mesh *mesh = meshNode->mesh.data();
+        iris::Material *material = meshNode->material.data();
         // The pose authority for this node (null for unskinned meshes).
-        e.skeleton = meshNode->getSkeleton();
+        if (e.skeleton.data() != meshNode->skeleton.data()) e.skeleton = meshNode->skeleton;
         // A MESH swap has to re-attach too. `e.meshPtr` was written here and
         // never read anywhere (deep audit 2026-09, area 5): setMesh() on a live
         // node changed the document and nothing else, which is why the mesh
@@ -848,14 +884,17 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
             if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
             if (attached) {
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
+                mReclaimPending = true;   // the old mesh/material may now be unreferenced
                 e.texturesPushed = false;
                 e.pbrPushed = false;
+                e.pickablePushed = -1;   // a NEW Item carries the default query mask
                 syncTextures(e, material);
             }
         } else if (!mesh && e.hasMesh) {
             // The document dropped the mesh (a node kept, its MeshPtr cleared).
             // Without this the engine kept drawing the old geometry forever.
             mTarget->detachMesh(e.node);
+            mReclaimPending = true;
             e.hasMesh = false;
             e.mesh = 0;
             e.meshPtr = nullptr;
@@ -871,15 +910,15 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
             // upload) and used to drag an unconditional flushRenderables along
             // with it through setTwoSidedLighting: the audit's per-frame Hlms
             // hash recompute for every renderable in the scene.
-            PbrParams p;
-            if (toPbrParams(material, p)) {
-                if (!e.pbrPushed || !(p == e.lastPbr)) {
-                    if (mTarget->setPbrMaterial(e.material, p)) {
-                        e.lastPbr = p;
+            const MaterialSync &ms = materialSyncFor(material);
+            if (ms.hasPbr) {
+                if (!e.pbrPushed || !(ms.pbr == e.lastPbr)) {
+                    if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
+                        e.lastPbr = ms.pbr;
                         e.pbrPushed = true;
                     }
                 }
-                noteRefractive(p);
+                noteRefractive(ms.pbr);
             }
             syncTextures(e, material);
         }
@@ -901,7 +940,7 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::ParticleSystem) {
-        syncParticles(e, static_cast<iris::ParticleSystemNode *>(node.data()));
+        syncParticles(e, static_cast<iris::ParticleSystemNode *>(node));
     } else if (e.hasParticles) {
         // A node may stop being an emitter without being removed (the document
         // changes a node's type in place). removeParticleSystem is the explicit
@@ -910,12 +949,13 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
         e.hasParticles = false;
         e.particleSignature = 0;
         e.particleTexture = 0;
+        mReclaimPending = true;
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
         // The light rides on the mirrored node: position and direction follow the document.
-        auto light = node.staticCast<iris::LightNode>();
-        if (mTarget->setLight(e.node, toLightDesc(light.data()))) e.hasLight = true;
+        auto *light = static_cast<iris::LightNode *>(node);
+        if (mTarget->setLight(e.node, toLightDesc(light))) e.hasLight = true;
         // The document's per-light shadow type (Hard/Soft/VerySoft) has no per-light
         // engine equivalent — the filter is global. Accumulate the strongest request;
         // applyEnvironment pushes it (iris::ShadowMapType orders None<Hard<Soft<VerySoft).
@@ -931,26 +971,29 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
                 mMaxShadowResolution = std::max(mMaxShadowResolution,
                                                 unsigned(light->shadowMap->resolution));
         }
-        syncLightWires(e, light.data());
+        syncLightWires(e, light);
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Decal) {
-        auto decal = node.staticCast<iris::DecalNode>();
-        syncDecal(e, decal.data());
-        syncDecalWires(e, decal.data());
+        auto *decal = static_cast<iris::DecalNode *>(node);
+        syncDecal(e, decal);
+        syncDecalWires(e, decal);
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Camera) {
         // Phase 1 finally made CameraNode set its own type, which is what lets
         // this branch exist at all (CAMERAS_SPEC §1, the type-enum trap).
-        syncCameraWires(e, static_cast<iris::CameraNode *>(node.data()));
+        syncCameraWires(e, static_cast<iris::CameraNode *>(node));
     }
 
-    // `e` is a reference into a QHash: the recursion inserts entries and QHash does not
-    // keep value references stable across inserts (use-after-free under ASan). Copy first.
-    const NodeId self = e.node;
-    for (const auto &child : node->children())
-        visit(child, self, seen);
+    // `e` is a reference into a QHash and the recursion INSERTS entries, which
+    // QHash does not keep value references stable across (use-after-free under
+    // ASan) — so nothing below may touch `e`.
+    const iris::graph::NodeHandle h = node->graphNode();
+    const std::size_t n = iris::graph::childCount(h);
+    for (std::size_t i = 0; i < n; ++i)
+        if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(h, i)))
+            visit(c);
 }
 
 // ---- particles ------------------------------------------------------------------
@@ -1160,6 +1203,7 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
         e.hasParticles = true;
         e.particleSignature = sig;
         e.particleTexture = tex;   // the engine's definition holds it: keep it alive
+    mReclaimPending = true;
     }
 }
 
@@ -1213,6 +1257,7 @@ void SceneMirror::reclaimUnused()
 /// handle was rebuilt by a migration, so the adopted id names a dead node).
 void SceneMirror::releaseEntry(Entry &e)
 {
+    mReclaimPending = true;
     if (e.wireNode) mTarget->removeNode(e.wireNode);
     if (e.wireMaterial) mTarget->destroyMaterial(e.wireMaterial);
     // The camera body/frustum mesh belongs to this entry alone (it is derived
@@ -1225,10 +1270,10 @@ void SceneMirror::releaseEntry(Entry &e)
     e = Entry();
 }
 
-void SceneMirror::removeMissing(const QSet<long> &seen)
+void SceneMirror::removeMissing()
 {
     for (auto it = mEntries.begin(); it != mEntries.end();) {
-        if (seen.contains(it.key())) { ++it; continue; }
+        if (it->lastSeen == mSyncStamp) { ++it; continue; }
         releaseEntry(*it);
         it = mEntries.erase(it);
     }
@@ -1316,27 +1361,43 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
     return id;
 }
 
-void SceneMirror::syncTextures(Entry &e, iris::Material *material)
+/// EVERYTHING THAT DEPENDS ONLY ON THE MATERIAL, computed once per material per
+/// sync instead of once per mesh per frame (see MaterialSync in the header).
+///
+/// The two halves used to sit inline in visit(): `toPbrParams` runs two
+/// dynamic_casts and, for a shader-graph material, a scan of every property
+/// with a QVariant read and a QString compare each; the texture resolve did
+/// seven QHash lookups whose keys were built from `const char *` (one QString
+/// construction per lookup) plus a QVector of binds and a hash over their
+/// paths. A lattice of 8000 cubes sharing ONE material paid all of that 8000
+/// times a frame, and the mirror's walk was ~90% of the idle tick because of it.
+const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *material)
 {
-    if (!material || !e.material || e.material == mDefaultMaterial) return;
+    auto it = mMaterialSync.find(material);
+    if (it != mMaterialSync.end()) return it.value();
+
+    MaterialSync ms;
+    ms.hasPbr = toPbrParams(material, ms.pbr);
+
     // Document slot name -> engine slot. PbrMaterial and DefaultMaterial naming.
     // PbrMaterial's "u_occlusionMap" is deliberately NOT mapped: the engine has no
     // ambient-occlusion slot (HlmsPbs limitation, see engine Types.h).
-    struct Slot { const char *name; PbrTextureSlot slot; bool srgb; };
+    struct Slot { QLatin1StringView name; PbrTextureSlot slot; bool srgb; };
     static const Slot kSlots[] = {
-        { "u_baseColorMap",  PbrTextureSlot::Albedo,    true  }, { "u_diffuseTexture", PbrTextureSlot::Albedo,    true  },
-        { "u_normalMap",     PbrTextureSlot::Normal,    false }, { "u_normalTexture",  PbrTextureSlot::Normal,    false },
-        { "u_metallicMap",   PbrTextureSlot::Metalness, false }, { "u_roughnessMap",   PbrTextureSlot::Roughness, false },
-        { "u_emissiveMap",   PbrTextureSlot::Emissive,  true  },
+        { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
+        { QLatin1StringView("u_diffuseTexture"), PbrTextureSlot::Albedo,   true  },
+        { QLatin1StringView("u_normalMap"),     PbrTextureSlot::Normal,    false },
+        { QLatin1StringView("u_normalTexture"), PbrTextureSlot::Normal,    false },
+        { QLatin1StringView("u_metallicMap"),   PbrTextureSlot::Metalness, false },
+        { QLatin1StringView("u_roughnessMap"),  PbrTextureSlot::Roughness, false },
+        { QLatin1StringView("u_emissiveMap"),   PbrTextureSlot::Emissive,  true  },
     };
-    // Resolve every candidate path first: the textures map (Texture2D::source), then
+    // Resolve every candidate path: the textures map (Texture2D::source), then
     // shader-graph texture properties (a file path in the property value).
-    struct Bind { PbrTextureSlot slot; QString path; bool srgb; };
-    QVector<Bind> binds;
     for (const Slot &sl : kSlots) {
-        auto it = material->textures.constFind(sl.name);
-        if (it != material->textures.constEnd() && it.value() && !it.value()->source.isEmpty())
-            binds.append({ sl.slot, it.value()->source, sl.srgb });
+        auto tit = material->textures.constFind(sl.name);
+        if (tit != material->textures.constEnd() && tit.value() && !tit.value()->source.isEmpty())
+            ms.binds.push_back({ sl.slot, tit.value()->source, sl.srgb });
     }
     if (auto *custom = dynamic_cast<iris::CustomMaterial *>(material)) {
         for (iris::Property *prop : custom->properties) {
@@ -1344,26 +1405,36 @@ void SceneMirror::syncTextures(Entry &e, iris::Material *material)
             const QString path = prop->getValue().toString();
             if (path.isEmpty()) continue;
             if (prop->name == "diffuseTexture" || prop->name == "baseColorMap" || prop->name == "albedoMap")
-                binds.append({ PbrTextureSlot::Albedo, path, true });
+                ms.binds.push_back({ PbrTextureSlot::Albedo, path, true });
             else if (prop->name == "normalTexture" || prop->name == "normalMap")
-                binds.append({ PbrTextureSlot::Normal, path, false });
+                ms.binds.push_back({ PbrTextureSlot::Normal, path, false });
             else if (prop->name == "emissiveMap")
-                binds.append({ PbrTextureSlot::Emissive, path, true });
+                ms.binds.push_back({ PbrTextureSlot::Emissive, path, true });
         }
     }
-    // Which slot gets which file, as one hash: this runs per mesh per frame and
-    // its whole job is to conclude "unchanged" (it used to concatenate a
-    // QString to do it).
+    // Which slot gets which file, as one hash: the whole job of this number is
+    // to let a mesh conclude "unchanged" in one comparison.
     Hasher hs;
-    hs << quint32(binds.size());
-    for (const Bind &b : binds) hs << int(b.slot) << b.path;
-    const quint64 signature = hs.h;
+    hs << quint32(ms.binds.size());
+    for (const TextureBind &b : ms.binds) hs << int(b.slot) << b.path;
+    ms.textureSignature = hs.h;
+
+    return *mMaterialSync.insert(material, ms);
+}
+
+void SceneMirror::syncTextures(Entry &e, iris::Material *material)
+{
+    if (!material || !e.material || e.material == mDefaultMaterial) return;
+    const MaterialSync &ms = materialSyncFor(material);
+    const std::vector<TextureBind> &binds = ms.binds;
+    const quint64 signature = ms.textureSignature;
     if (e.texturesPushed && signature == e.textureSignature) return;
     e.textureSignature = signature;
     e.texturesPushed = true;
+    mReclaimPending = true;
     bool bound[5] = { false, false, false, false, false };
     TextureId boundIds[5] = { 0, 0, 0, 0, 0 };
-    for (const Bind &b : binds) {
+    for (const TextureBind &b : binds) {
         if (bound[int(b.slot)]) continue;
         TextureId t = textureFor(b.path, b.srgb);
         if (t && mTarget->setPbrTexture(e.material, b.slot, t)) {
@@ -2071,7 +2142,7 @@ bool SceneMirror::boneWorldTransforms(iris::SceneNode *node, QHash<QString, iris
 {
     out.clear();
     if (!mTarget || !node) return false;
-    const auto it = mEntries.constFind(node->nodeId);
+    const auto it = mEntries.constFind(node);
     if (it == mEntries.constEnd()) return false;
     return entryBoneWorldTransforms(it.value(), out);
 }
@@ -2578,6 +2649,7 @@ void SceneMirror::applySky(View *view)
         mSkyKind = kind;
         mSkyHash = signature;
         mSkyTexture = 0;
+        mReclaimPending = true;
         for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
         for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
         // The ambient integral belongs to the sky that is about to be built:
@@ -3048,7 +3120,7 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view)
         // gizmo suite applies first), and a viewport that renders one frame
         // between them would show the camera's own frustum fanning across the
         // whole image. Cheap: one hash lookup on a change only.
-        auto it = mEntries.find(mViewCamera ? mViewCamera->nodeId : -1);
+        auto it = mEntries.find(mViewCamera);
         if (it != mEntries.end() && it->wireNode) mTarget->setNodeVisible(it->wireNode, false);
     }
 
