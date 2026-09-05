@@ -90,6 +90,31 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     } JAH_CATCH(error, false);
 }
 
+void *OgreEngine::documentGraphScene() {
+    JAH_TRY {
+        if (mDocumentScene) return mDocumentScene;
+        // The same one-time preparation createOffscreenView does. A scene
+        // manager cannot exist before a Window and before the Hlms/resource
+        // registration (CLAUDE.md's startup-order fact; the crash is inside
+        // SceneManager's constructor, which looks up a material the common
+        // scripts define). The host asks for this scene ONCE, right after
+        // Engine::create(), so that from then on "an engine exists" and "a
+        // document node has real graph storage" are the same statement.
+        if (!mHlmsRegistered && !mNullWindow) {
+            Ogre::NameValuePairList wp; wp["windowType"] = "null";
+            mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"),
+                                                    8, 8, false, &wp);
+        }
+        ensureHlms();
+        if (!mHlmsRegistered) { mLastError = "documentGraphScene: Hlms unavailable"; return nullptr; }
+        // ONE worker thread and no Forward+ setup: nothing in here is ever
+        // culled, lit or drawn. It exists to hold nodes.
+        mDocumentScene = mRoot->createSceneManager(Ogre::ST_GENERIC, 1u,
+                                                   processUniqueName("jahshaka-document"));
+        return mDocumentScene;
+    } JAH_CATCH(mLastError, nullptr);
+}
+
 Scene *OgreEngine::createScene(const std::string &name) {
     if (!mHlmsRegistered) {
         mLastError = "createScene('" + name + "'): no View exists yet — create a View first";
@@ -657,6 +682,13 @@ OgreEngine::~OgreEngine() {
     // the font created. An OverlaySystem outliving Root is the same class of
     // bug as a MeshPtr outliving Root.
     try { hud::destroySystem(); } catch (...) {}
+    try {
+        // The document's staging manager goes with the rest of the scenes and
+        // before the Root. Every handle in it dangles afterwards, which is why
+        // iris::graph tests Ogre::Root's liveness on every call.
+        if (mDocumentScene && mRoot) mRoot->destroySceneManager(mDocumentScene);
+        mDocumentScene = nullptr;
+    } catch (...) {}
     try {
         if (mNullWindow && mRoot) mRoot->getRenderSystem()->destroyRenderWindow(mNullWindow);
         mNullWindow = nullptr;

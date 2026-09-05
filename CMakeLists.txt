@@ -162,6 +162,7 @@ set(SRCS
     document/assets/skeleton.cpp
     document/scenegraph/scene.cpp
     document/scenegraph/scenenode.cpp
+    document/scenegraph/nodegraph.cpp
     document/scenegraph/socket.cpp
     core/geometry/plane.cpp
     core/geometry/frustum.cpp
@@ -226,6 +227,7 @@ set (HEADERS
     core/math/trs.h
     document/scenegraph/scene.h
     document/scenegraph/scenenode.h
+    document/scenegraph/nodegraph.h
     document/scenegraph/socket.h
     core/properties/property.h
     core/geometry/boundingsphere.h
@@ -293,7 +295,13 @@ target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/thirdparty/zip/src"
 )
 
-target_link_libraries (IrisGL  assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL PUBLIC assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+
+# THE scene graph is Ogre-Next's (SPECS/SCENEGRAPH_SPEC.md D2), so the document
+# library links it. PRIVATE, exactly like the engine does: Ogre must not reach
+# Studio's include path, and the ONE translation unit here that includes an Ogre
+# header is document/scenegraph/nodegraph.cpp. See nodegraph.h for the law.
+target_link_libraries(IrisGL PRIVATE OgreNext)
 target_compile_options(IrisGL PUBLIC)
 target_compile_definitions(IrisGL PRIVATE
     JAHSHAKA_MESH_BAKE_PRODUCER_ID="${_mesh_bake_producer_id}")

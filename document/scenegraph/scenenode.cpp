@@ -31,6 +31,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/meshnode.h"
 
+#include <QDebug>
 #include <QUuid>
 
 #include <atomic>
@@ -38,18 +39,15 @@ For more information see the LICENSE file
 namespace iris
 {
 
-/// The node-id counter. It was a plain `static long nextId` incremented with
-/// `nextId++` — not atomic, so two threads creating nodes could hand out the
-/// same id, and 32-bit on Windows LLP64 besides (deep audit 2026-09, area 5).
-/// Relaxed ordering is enough: the only requirement is that no two calls
-/// return the same value, not that ids order anything.
+/// The node-id counter. Relaxed ordering is enough: the only requirement is
+/// that no two calls return the same value, not that ids order anything.
 static std::atomic<qint64> sNextNodeId{0};
 
-SceneNode::SceneNode():
-    pos(iris::Vec3(0,0,0)),
-    scale(iris::Vec3(1,1,1)),
-    rot(iris::Quat())
+SceneNode::ChangeObserver SceneNode::sChangeObserver = nullptr;
 
+void SceneNode::setChangeObserver(ChangeObserver observer) { sChangeObserver = observer; }
+
+SceneNode::SceneNode()
 {
     sceneNodeType = SceneNodeType::Empty;
     nodeId = generateNodeId();
@@ -66,18 +64,39 @@ SceneNode::SceneNode():
 	pickingGroups = 0;
     castShadow = true;
 
-    localTransform.setToIdentity();
-    globalTransform.setToIdentity();
-
     attached = false;
 
-    transformDirty = true;
-    globalDirty = false;      // transformDirty already forces the global
-    hasDirtyChildren = true;
+    // THE handle. Every node is born detached, in the staging scene manager
+    // (SPECS/SCENEGRAPH_SPEC.md §4: "fragments build as detached handle trees,
+    // attach on commit"); addChild moves it into whatever manager its new
+    // parent lives in.
+    mGraphNode = graph::createNode(graph::stagingScene(), nullptr, this);
+    if (!mGraphNode) {
+        // v1 consequence, stated honestly rather than papered over: the
+        // document graph IS Ogre's, so an Ogre::Root must exist before the
+        // first node. Headless paths boot the engine offscreen until v2's NULL
+        // render system lands (spec §3).
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            qWarning("iris::SceneNode: no scene graph device — an Ogre::Root must exist "
+                     "before the first document node is created (SCENEGRAPH_SPEC v1). "
+                     "Every transform on this node will read as identity.");
+        }
+    }
 
-    //keyFrameSet = KeyFrameSet::create();
-    //animation = iris::Animation::create("");
 	setGUID(IrisUtils::generateGUID());
+}
+
+SceneNode::~SceneNode()
+{
+    // Deepest-first, through the one sanctioned path. The children's handles
+    // are cleared on the way, so the QSharedPointers in mChildRefs (released
+    // after this body runs) find nothing left to destroy.
+    if (mGraphNode) {
+        graph::destroyNode(mGraphNode);
+        mGraphNode = nullptr;
+    }
 }
 
 SceneNodePtr SceneNode::create()
@@ -93,6 +112,7 @@ QString SceneNode::getName()
 void SceneNode::setName(QString name)
 {
     this->name = name;
+    notifyChanged(NodeChange::Name);
 }
 
 qint64 SceneNode::getNodeId()
@@ -100,60 +120,72 @@ qint64 SceneNode::getNodeId()
     return nodeId;
 }
 
+// ---- structure -------------------------------------------------------------
+
+SceneNodePtr SceneNode::getParent() const
+{
+    SceneNode *p = graph::ownerOf(graph::parentOf(mGraphNode));
+    return p ? p->sharedFromThis() : SceneNodePtr();
+}
+
+bool SceneNode::hasParent() const
+{
+    return graph::ownerOf(graph::parentOf(mGraphNode)) != nullptr;
+}
+
+QList<SceneNodePtr> SceneNode::children() const
+{
+    QList<SceneNodePtr> out;
+    const std::size_t n = graph::childCount(mGraphNode);
+    out.reserve(int(n));
+    for (std::size_t i = 0; i < n; ++i) {
+        // Engine-owned children (a light's -Y adapter, a decal's projector box,
+        // a range wire) share the tree and have no document owner: they are not
+        // part of the document and never appear here.
+        if (SceneNode *o = graph::ownerOf(graph::childAt(mGraphNode, i)))
+            out.append(o->sharedFromThis());
+    }
+    return out;
+}
+
+void SceneNode::_migrateGraph(graph::SceneHandle target, graph::NodeHandle newParent)
+{
+    if (!mGraphNode) return;
+    mGraphNode = graph::migrate(mGraphNode, target, newParent);
+}
+
 void SceneNode::rotate(iris::Quat rot, bool global)
 {
-	if (global)
-		this->rot = this->rot * rot;
-	else
-		this->rot = rot * this->rot;
-	setTransformDirty();
+    const iris::Quat cur = graph::localRot(mGraphNode);
+    notifyChanged(NodeChange::Transform);
+    graph::setLocalRot(mGraphNode, global ? cur * rot : rot * cur);
 }
 
 void SceneNode::setLocalPos(iris::Vec3 pos)
 {
-    this->pos = pos;
-    setTransformDirty();
+    notifyChanged(NodeChange::Transform);
+    graph::setLocalPos(mGraphNode, pos);
 }
 
 void SceneNode::setLocalRot(iris::Quat rot)
 {
-    this->rot = rot;
-    setTransformDirty();
+    notifyChanged(NodeChange::Transform);
+    graph::setLocalRot(mGraphNode, rot);
 }
 
 void SceneNode::setLocalScale(iris::Vec3 scale)
 {
-    this->scale = scale;
-    setTransformDirty();
+    notifyChanged(NodeChange::Transform);
+    graph::setLocalScale(mGraphNode, scale);
 }
 
 void SceneNode::setLocalTransform(iris::Mat4 transformMatrix)
 {
-    MathHelper::decomposeMatrix(transformMatrix, pos, rot, scale);
-    setTransformDirty();
-}
-
-/// This node's own TRS changed. The flag propagates UPWARDS as
-/// hasDirtyChildren so that update() descends to us from the root; the
-/// downward half — every descendant's globalTransform is now stale too — is
-/// update()'s job, because it is the only place that knows the new world
-/// transform.
-void SceneNode::setTransformDirty()
-{
-    transformDirty = true;
-    if (auto p = getParent())
-    {
-        p->setHasDirtyChildren();
-    }
-}
-
-void SceneNode::setHasDirtyChildren()
-{
-    hasDirtyChildren = true;
-    if (auto p = getParent())
-    {
-        p->setHasDirtyChildren();
-    }
+    iris::Vec3 p, s;
+    iris::Quat r;
+    MathHelper::decomposeMatrix(transformMatrix, p, r, s);
+    notifyChanged(NodeChange::Transform);
+    graph::setLocalTrs(mGraphNode, p, r, s);
 }
 
 bool SceneNode::isAttached()
@@ -164,6 +196,33 @@ bool SceneNode::isAttached()
 void SceneNode::setAttached(bool attached)
 {
     this->attached = attached;
+    notifyChanged(NodeChange::Flags);
+}
+
+void SceneNode::setVisible(bool flag)
+{
+    visible = flag;
+    notifyChanged(NodeChange::Visibility);
+}
+
+void SceneNode::show(bool cascade)
+{
+    setVisible(true);
+    if (cascade)
+        for (const auto &child : children()) child->show(cascade);
+}
+
+void SceneNode::hide(bool cascade)
+{
+    setVisible(false);
+    if (cascade)
+        for (const auto &child : children()) child->hide(cascade);
+}
+
+void SceneNode::setStaticHint(bool value)
+{
+    graph::setStatic(mGraphNode, value);
+    notifyChanged(NodeChange::Flags);
 }
 
 void SceneNode::addAnimation(AnimationPtr anim)
@@ -208,19 +267,19 @@ QList<Property*> SceneNode::getProperties()
     auto prop = new Vec3Property();
     prop->displayName = "Position";
     prop->name = "position";
-    prop->value = iris::toQt(pos);
+    prop->value = iris::toQt(getLocalPos());
     props.append(prop);
 
     prop = new Vec3Property();
     prop->displayName = "Rotation";
     prop->name = "rotation";
-    prop->value = iris::toQt(rot.toEulerAngles());
+    prop->value = iris::toQt(getLocalRot().toEulerAngles());
     props.append(prop);
 
     prop = new Vec3Property();
     prop->displayName = "Scale";
     prop->name = "scale";
-    prop->value = iris::toQt(scale);
+    prop->value = iris::toQt(getLocalScale());
     props.append(prop);
 
     // There is no StringProperty in core/properties/property.h; FileProperty is
@@ -244,8 +303,7 @@ QList<Property*> SceneNode::getProperties()
     props.append(boolProp);
 
     // A TOP-LEVEL row beside Cast Shadow, not a buried Reflections section
-    // (PLANAR_REFLECTIONS_SPEC.md §7): the flag is the only way a user gets a
-    // mirror, and an author cannot be expected to hunt for it.
+    // (PLANAR_REFLECTIONS_SPEC.md §7).
     boolProp = new BoolProperty();
     boolProp->displayName = "Planar Reflector";
     boolProp->name = "planarReflector";
@@ -263,9 +321,9 @@ QList<Property*> SceneNode::getProperties()
 
 QVariant SceneNode::getPropertyValue(QString valueName)
 {
-    if (valueName == "position") return iris::toQt(pos);
-    if (valueName == "rotation") return iris::toQt(rot.toEulerAngles());
-    if (valueName == "scale")	 return iris::toQt(scale);
+    if (valueName == "position") return iris::toQt(getLocalPos());
+    if (valueName == "rotation") return iris::toQt(getLocalRot().toEulerAngles());
+    if (valueName == "scale")	 return iris::toQt(getLocalScale());
     if (valueName == "name")       return getName();
     if (valueName == "visible")    return isVisible();
     if (valueName == "castShadow") return getShadowCastingEnabled();
@@ -297,66 +355,73 @@ SceneNodeType SceneNode::getSceneNodeType()
 
 void SceneNode::addChild(SceneNodePtr node, bool keepTransform)
 {
-    insertChild(children.size(), node, keepTransform);
+    // -1 = APPEND. Passing childCount() would be the same position but would
+    // send insertChild's sibling-index path down a scan it does not need, on
+    // every child of every node of every document build.
+    insertChild(-1, node, keepTransform);
 }
 
 void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 {
-    auto initialGlobalTransform = node->getGlobalTransform();
+    if (!node) return;
+    const iris::Mat4 initialGlobalTransform = node->getGlobalTransform();
 
-    if (node->hasParent()) {
-        node->removeFromParent();
-    }
+    if (auto oldParent = node->getParent())
+        oldParent->removeChildInternal(node, false);
 
-    // @TODO: check if child is already a node
-    auto self = sharedFromThis();
+    // ONE tree: the child moves inside Ogre's hierarchy. A child that lives in
+    // a different scene manager (the staging one, which is where every node is
+    // born) is REBUILT under us — an Ogre::SceneNode belongs to its creator and
+    // cannot be handed to another manager.
+    if (graph::sceneOf(node->mGraphNode) != graph::sceneOf(mGraphNode))
+        node->_migrateGraph(graph::sceneOf(mGraphNode), mGraphNode);
+    graph::attach(mGraphNode, node->mGraphNode, position);
 
-    children.insert(position, node);
-    node->setParent(self);
-    if (auto sc = getScene()) {
-        node->setScene(sc);
-        //scene->addNode(node);
-    }
+    mChildRefs.append(node);      // the lifetime anchor; never the structure
+
+    if (auto sc = getScene()) node->setScene(sc);
 
     if (keepTransform) {
-        // @TODO: ensure global transform is calculated
-        // this->update(0);///shortcut for now
-        auto thisGlobalTransform = this->getGlobalTransform();
-
-        //auto diff = initialGlobalTransform * thisGlobalTransform.inverted();
-        auto diff = thisGlobalTransform.inverted() * initialGlobalTransform;
-
-        // ONE decomposition, the correct one. This used to take the rotation
-        // from diff.normalMatrix() — the inverse-transpose, R * S^-1, which is
-        // R only at scale 1 — while taking the scale from the column lengths.
-        // The two disagreed for every non-uniformly scaled node, so reparenting
-        // one with keepTransform rotated it (measured: +55 degrees of yaw on a
-        // scaled character root) and did so again on every subsequent reparent.
-        decomposeTRS(diff, node->pos, node->rot, node->scale);
+        // ONE decomposition, Ogre's: the world transform the node had before
+        // the move is re-expressed in the new parent's space. (The old code
+        // took the rotation from diff.normalMatrix() — the inverse-transpose,
+        // R * S^-1, which is R only at scale 1 — and the scale from the column
+        // lengths, so reparenting a non-uniformly scaled node rotated it.)
+        node->setGlobalTransform(initialGlobalTransform);
     }
 
-    // Unconditionally: a reparent changes the node's world transform even when
-    // its local one is untouched, and the keepTransform branch above writes
-    // pos/rot/scale directly. This also marks the new parent chain, which is
-    // how a freshly added subtree gets visited at all.
-    node->setTransformDirty();
+    node->notifyChanged(NodeChange::Structure);
+    notifyChanged(NodeChange::Structure);
 }
 
 void SceneNode::removeFromParent()
 {
     auto self = sharedFromThis();
-
     if (auto p = getParent()) p->removeChild(self);
 }
 
 void SceneNode::removeChild(SceneNodePtr node)
 {
-    children.removeOne(node);
-    node->parent.clear();
-    // Losing a parent changes the node's world transform (its local one is now
-    // its global one) — it has to recompose.
-    node->setTransformDirty();
+    removeChildInternal(node, true);
+}
+
+void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph)
+{
+    if (!node) return;
+    // Out of the tree first (this is what makes it stop rendering and stop
+    // being reachable), THEN out of the scene registries, THEN drop our
+    // ownership — the caller's own SceneNodePtr is what keeps it alive.
+    if (detachGraph) {
+        // The scene has to be told BEFORE removeFromScene clears the link: the
+        // subtree stays in that scene's scene manager and has to travel with it
+        // when it unbinds (see Scene::rememberDetached).
+        if (auto sc = node->getScene()) sc->rememberDetached(node);
+        node->mGraphNode = graph::detach(node->mGraphNode);
+    }
     node->removeFromScene();
+    mChildRefs.removeOne(node);
+    node->notifyChanged(NodeChange::Structure);
+    notifyChanged(NodeChange::Structure);
 }
 
 bool SceneNode::isRootNode()
@@ -369,119 +434,54 @@ void SceneNode::updateAnimation(float time)
 {
     // Children sample the ORIGINAL scene time (SKELETAL_PLAYBACK_SPEC S5):
     // this node's loop-remapped time must not leak into sibling/nested clips
-    // of different lengths. (The old `length > 60 → time × 1000` hack is gone:
-    // Mesh::extractAnimations now converts assimp ticks to seconds at the
-    // source, so scene time and key time share one unit.)
+    // of different lengths.
     const float sceneTime = time;
 
     if (!!animation) {
         time = animation->getSampleTime(time);
-        // These write pos/rot/scale DIRECTLY rather than through the setters,
-        // so they are the one mutator path that has to remember the flag
-        // itself (it did not, and could not be noticed while the flags were
-        // never cleared).
-        bool posed = false;
-        if (animation->hasPropertyAnim("position")) {
-            pos = animation->getVector3PropertyAnim("position")->getValue(time);
-            posed = true;
-        }
-        if (animation->hasPropertyAnim("rotation")) {
-            auto r = animation->getVector3PropertyAnim("rotation")->getValue(time);
-            rot = iris::Quat::fromEulerAngles(r);
-            posed = true;
-        }
-        if (animation->hasPropertyAnim("scale")) {
-            scale = animation->getVector3PropertyAnim("scale")->getValue(time);
-            posed = true;
-        }
-        if (posed) setTransformDirty();
+        // Through the funnel, like every other mutation (SCENEGRAPH_SPEC §3
+        // step 4): these used to write pos/rot/scale directly and had to
+        // remember the dirty flag themselves.
+        if (animation->hasPropertyAnim("position"))
+            setLocalPos(animation->getVector3PropertyAnim("position")->getValue(time));
+        if (animation->hasPropertyAnim("rotation"))
+            setLocalRot(iris::Quat::fromEulerAngles(
+                animation->getVector3PropertyAnim("rotation")->getValue(time)));
+        if (animation->hasPropertyAnim("scale"))
+            setLocalScale(animation->getVector3PropertyAnim("scale")->getValue(time));
         // The SKELETAL branch is gone (ANIMATION_ENGINE_MIGRATION_SPEC, full
-        // retirement). It used to walk the scene-node hierarchy by name,
-        // overwrite every bone node's local transform from the clip, compose
-        // skeleton-space matrices into a QMap and hand them to
-        // Skeleton::applyAnimation to produce skin matrices — every frame, per
-        // character, on one thread. Clip evaluation is the engine's now:
-        // SceneMirror translates each clip ONCE and then states only which clip
-        // is active and at what absolute time, and Ogre's threaded SIMD FK does
-        // the rest. What the document keeps is the authored data and the clock.
+        // retirement): clip evaluation is the engine's, and what the document
+        // keeps is the authored data and the clock.
     }
 
-    for (const auto &child : children) {
+    for (const auto &child : children()) {
         child->updateAnimation(sceneTime);
     }
 }
 
 void SceneNode::applyDefaultPose()
 {
-    // WHAT THIS IS NOW. The subtree is at rest RIGHT NOW — that is what every
-    // one of this function's call sites means (scene load, fragment import) —
-    // so it snapshots each node's authored local transform while that is still
-    // true. Clip translation needs "the transform this node has when no clip is
-    // driving it", and once a clip has played the live transform is not that
-    // any more.
-    //
-    // WHAT IT USED TO BE. The same walk as updateAnimation's skeletal branch
-    // with the key-write step removed: it composed the authored rest transforms
-    // into skeleton-space matrices and pushed them through
-    // Skeleton::applyAnimation to fill Skeleton::boneTransforms. Nothing reads
-    // those any more — the engine resets an untracked bone to its BIND pose,
-    // which is the same thing for every file that does not disagree with itself
-    // (and SceneMirror logs the ones that do).
+    // The subtree is at rest RIGHT NOW — that is what every one of this
+    // function's call sites means (scene load, fragment import) — so it
+    // snapshots each node's authored local transform while that is still true.
     hasRest = true;
-    restPos = pos;
-    restRot = rot;
-    restScale = scale;
+    restPos = getLocalPos();
+    restRot = getLocalRot();
+    restScale = getLocalScale();
 
-    for (const auto &child : children) {
+    for (const auto &child : children()) {
         child->applyDefaultPose();
     }
 }
 
 void SceneNode::update(float dt)
 {
-    if (transformDirty) {
-        localTransform.setToIdentity();
-
-        localTransform.translate(pos);
-        localTransform.rotate(rot);
-        localTransform.scale(scale);
+    // NO transform work. Composition, invalidation and propagation are Ogre's
+    // (SIMD, threaded, inside the frame); what is left is the walk that lets
+    // subclasses do their own per-frame business.
+    for (const auto &child : children()) {
+        child->update(dt);
     }
-
-    if (transformDirty || globalDirty) {
-        if (auto p = getParent()) {
-            globalTransform = p->globalTransform * localTransform;
-        } else {
-            globalTransform = localTransform;
-        }
-
-        // Our world transform moved, so every descendant's did. This is the
-        // downward half of the invalidation, and the reason a moved node is
-        // enough to refresh its whole subtree: setTransformDirty only ever
-        // walked up.
-        if (!children.isEmpty()) {
-            for (const auto &child : children) child->globalDirty = true;
-            hasDirtyChildren = true;
-        }
-    }
-
-    if (hasDirtyChildren) {
-        for (const auto &child : children) {
-            child->update(dt);
-        }
-    }
-
-    // Cleared AFTER the descent, never before: `hasDirtyChildren` is what the
-    // loop above tests, and the flag this node may have just set for itself
-    // (because its own world transform moved) has to survive until the loop
-    // has used it.
-    transformDirty = false;
-    globalDirty = false;
-    hasDirtyChildren = false;
-}
-
-void SceneNode::setParent(SceneNodePtr node)
-{
-    this->parent = node;
 }
 
 void SceneNode::setScene(ScenePtr scene)
@@ -493,22 +493,19 @@ void SceneNode::setScene(ScenePtr scene)
     scene->addNode(this->sharedFromThis());
 
     // add children
-    for (const auto &child : children) {
+    for (const auto &child : children()) {
         child->setScene(scene);
     }
 }
 
 void SceneNode::removeFromScene()
 {
-    // The scene may already be gone — the link is weak now, so "my scene died
-    // first" is a reachable state (it was not while the link kept the scene
-    // alive). Nothing to unregister from in that case.
     auto sc = getScene();
     this->scene.clear();
     if (sc) sc->removeNode(this->sharedFromThis());
 
     // ...and the children
-    for (const auto &child : children) {
+    for (const auto &child : children()) {
         child->removeFromScene();
     }
 }
@@ -518,94 +515,23 @@ qint64 SceneNode::generateNodeId()
     return sNextNodeId.fetch_add(1, std::memory_order_relaxed);
 }
 
-iris::Quat SceneNode::getGlobalRotation()
-{
-	if (auto p = getParent()) return p->getGlobalRotation() * rot;
-	return rot;
-}
-
-iris::Vec3 SceneNode::getGlobalPosition()
-{
-    return getGlobalTransform().column(3).toVector3D();
-}
-
-iris::Mat4 SceneNode::getGlobalTransform()
-{
-    localTransform.setToIdentity();
-
-    localTransform.translate(pos);
-    localTransform.rotate(rot);
-    localTransform.scale(scale);
-
-    if (auto p = getParent()) {
-        globalTransform = p->getGlobalTransform() * localTransform;
-    } else {
-        // this is a check for the root node
-        globalTransform = localTransform;
-    }
-
-    return globalTransform;
-}
-
-iris::Mat4 SceneNode::getLocalTransform()
-{
-    localTransform.setToIdentity();
-
-    localTransform.translate(pos);
-    localTransform.rotate(rot);
-    localTransform.scale(scale);
-
-    return localTransform;
-}
-
 void SceneNode::setGlobalPos(iris::Vec3 pos)
 {
-	auto p = getParent();
-	if (!p) {
-		this->pos = pos;
-		this->setTransformDirty();
-		return;
-	}
-
-	auto globInv = p->getGlobalTransform().inverted();
-
-	auto res = globInv * pos;
-
-	this->pos = res;
-	this->setTransformDirty();
+    notifyChanged(NodeChange::Transform);
+    graph::setGlobalPos(mGraphNode, pos);
 }
 
 void SceneNode::setGlobalRot(iris::Quat rot)
 {
-	auto p = getParent();
-	if (!p) {
-		this->rot = rot;
-		this->setTransformDirty();
-		return;
-	}
-
-	auto globInv = p->getGlobalRotation().inverted();
-	auto res = globInv * rot;
-
-	this->rot = res;
-	this->setTransformDirty();
+    notifyChanged(NodeChange::Transform);
+    graph::setGlobalRot(mGraphNode, rot);
 }
 
 void SceneNode::setGlobalTransform(iris::Mat4 transform)
 {
-	auto p = getParent();
-	if (!p) {
-		this->setLocalTransform(transform);
-		return;
-	}
-
-	auto globInv = p->getGlobalTransform().inverted();
-	auto res = globInv * transform;
-	this->setLocalTransform(res);
-
-	this->setTransformDirty();
+    notifyChanged(NodeChange::Transform);
+    graph::setGlobalTransform(mGraphNode, transform);
 }
-
 
 SceneNodePtr SceneNode::duplicate()
 {
@@ -622,7 +548,7 @@ void SceneNode::remapSocketOwners(const QHash<QString, QString> &guidMap)
         const auto it = guidMap.constFind(socketOwnerGuid);
         if (it != guidMap.constEnd()) socketOwnerGuid = it.value();
     }
-    for (const auto &child : children) child->remapSocketOwners(guidMap);
+    for (const auto &child : children()) child->remapSocketOwners(guidMap);
 }
 
 SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
@@ -632,15 +558,14 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
     auto node = this->createDuplicate();
 
     node->setName(this->getName());
-    node->setLocalPos(this->pos);
-    node->setLocalScale(this->scale);
-    node->setLocalRot(this->rot);
+    node->setLocalPos(this->getLocalPos());
+    node->setLocalScale(this->getLocalScale());
+    node->setLocalRot(this->getLocalRot());
 	node->castShadow	= this->castShadow;
 	node->duplicable	= this->duplicable;
 	node->visible		= this->visible;
 	node->removable		= this->removable;
 	node->pickable		= this->pickable;
-	node->castShadow	= this->castShadow;
 	node->planarReflector = this->planarReflector;
 	node->attached		= this->attached;
 
@@ -655,7 +580,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
     // subtree is known — see the note on duplicateInto.
     node->setSocketAttachment(this->socketOwnerGuid, this->socketName);
 
-    for (auto &child : this->children) {
+    for (const auto &child : this->children()) {
         if (child->isDuplicable()) {
             node->addChild(child->duplicateInto(guidMap), false);
         }

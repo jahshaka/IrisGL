@@ -72,10 +72,7 @@ ViewerNode::~ViewerNode()
 void ViewerNode::setViewScale(float scale)
 {
     this->viewScale = scale;
-    // Writes the node's TRS directly, so it owes the flag (setLocalScale would
-    // have set it; this predates that setter existing).
-    this->scale = iris::Vec3(scale, scale, scale);
-    this->setTransformDirty();
+    setLocalScale(iris::Vec3(scale, scale, scale));
 }
 
 float ViewerNode::getViewScale()

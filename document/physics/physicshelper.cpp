@@ -273,7 +273,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 			{
 				if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) createTriangleMeshAndAddToShape(rootShape, node);
 				
-				for (auto child : node->children) {
+				for (auto child : node->children()) {
 					if (child->getSceneNodeType() == iris::SceneNodeType::Mesh ||
 						child->getSceneNodeType() == iris::SceneNodeType::Empty)
 					{
@@ -292,7 +292,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 
 			if (mass != 0.0) shape->calculateLocalInertia(mass, inertia);
 
-			//btScalar masses[2] = { mass, mass / meshNode->children.count() };
+			//btScalar masses[2] = { mass, mass / meshNode->children().count() };
 			//static_cast<btCompoundShape*>(shape)->calculatePrincipalAxisTransform(masses, transform, inertia);
 
 			btRigidBody::btRigidBodyConstructionInfo info(mass, motionState, shape, inertia);

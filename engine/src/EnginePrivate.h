@@ -785,6 +785,8 @@ public:
 
     // ---- Hierarchy and transforms ----
     NodeId createNode(NodeId parent) override;
+    NodeId adoptNode(void *nativeSceneNode) override;
+    void *nativeSceneManager() const override;
     bool setNodeParent(NodeId id, NodeId parent) override;
     void setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) override;
     void setNodeVisible(NodeId id, bool visible) override;
@@ -912,6 +914,12 @@ private:
     /// Item, Light, mesh and datablock on removal (audit).
     struct Node {
         Ogre::SceneNode *node  = nullptr;
+        /// False for a node ADOPTED from the document's own graph
+        /// (SPECS/SCENEGRAPH_SPEC.md: one tree). The engine hangs its Item,
+        /// light and decal off it but never destroys it, never re-parents its
+        /// children and must never dereference it after the document has let
+        /// it go — releaseNode nulls the pointer first.
+        bool             owned = true;
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
         Ogre::SceneNode *lightNode = nullptr;   // internal child: -Y (document) -> -Z (Ogre)
@@ -1594,6 +1602,7 @@ public:
     bool init(const EngineConfig &cfg, std::string &error);
 
     Scene *createScene(const std::string &name) override;
+    void *documentGraphScene() override;
 
     void destroyScene(Scene *scene) override;
 
@@ -1692,6 +1701,9 @@ private:
 
     Ogre::Root     *mRoot = nullptr;
     Ogre::Window   *mNullWindow = nullptr;
+    /// The document's staging scene manager (SPECS/SCENEGRAPH_SPEC.md D2).
+    /// Owned here so that it dies with the engine, before the Root.
+    Ogre::SceneManager *mDocumentScene = nullptr;
 #ifdef __linux__
     /// The host's X11 `Display*`, kept opaque (see X11Handle) — this TU never
     /// dereferences it, it only hands it back to Ogre.

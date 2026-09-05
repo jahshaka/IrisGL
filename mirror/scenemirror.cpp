@@ -9,6 +9,7 @@
 #include <cmath>
 #include <type_traits>
 
+#include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/scene.h"
 #include "irisgl/document/scenegraph/scenenode.h"
 #include "irisgl/document/scenegraph/meshnode.h"
@@ -95,16 +96,23 @@ SceneMirror::~SceneMirror()
 {
     // The engine scene may already be gone (Engine destroyed first); only touch it
     // if the caller kept the documented order. Entries are cheap to drop.
+    //
+    // The DOCUMENT, however, must come out of the engine's scene manager
+    // (SPECS/SCENEGRAPH_SPEC.md D2: its nodes ARE that manager's nodes now).
+    // Unbinding here covers the ordinary case; a caller that destroys the engine
+    // scene BEFORE letting go of the mirror gets a loud warning out of
+    // Scene::setGraphScene instead of a silent use-after-free.
+    if (mSource) mSource->setGraphScene(iris::graph::stagingScene());
 }
 
 void SceneMirror::setSource(iris::ScenePtr scene)
 {
-    for (const Entry &e : mEntries) {
-        if (e.wireNode) mTarget->removeNode(e.wireNode);
-        if (e.wireMaterial) mTarget->destroyMaterial(e.wireMaterial);
-        if (e.node) mTarget->removeNode(e.node);
-    }
+    for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
+    // The outgoing document leaves the engine's scene manager before anything
+    // else is torn down: its nodes live IN that manager (one tree), and the
+    // caller is free to destroy the engine scene the moment this returns.
+    if (mSource) mSource->setGraphScene(iris::graph::stagingScene());
     for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
     if (mGridNode) {                    // removeNode reparents children, so drop them explicitly
         if (mGridMinorNode) mTarget->removeNode(mGridMinorNode);
@@ -144,6 +152,12 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     clearSkyAmbient();
     mAmbientPushed = false;
     mSource = scene;
+    // ...and the incoming one moves INTO it. This is the whole of the swap from
+    // the mirror's side: after it, the engine reads the very nodes the user
+    // edits, and the per-frame transform push (audit F1) has nothing to do.
+    if (mSource)
+        mSource->setGraphScene(
+            reinterpret_cast<iris::graph::SceneHandle>(mTarget->nativeSceneManager()));
 }
 
 NodeId SceneMirror::engineNode(const iris::SceneNode *node) const
@@ -156,8 +170,10 @@ NodeId SceneMirror::engineNode(const iris::SceneNode *node) const
 int SceneMirror::sync()
 {
     if (!mSource || !mSource->getRootNode()) return 0;
-    // Refresh the document's global transforms (lights and cameras read them).
-    mSource->getRootNode()->update(0.0f);
+    // NO transform refresh. There is nothing to refresh: the document's world
+    // transforms ARE Ogre's, resolved by the engine's threaded SIMD pass inside
+    // the frame and, for the readers that need one between frames, on demand
+    // (iris::graph::globalTransform -> Node::_getFullTransformUpdated).
     // Sockets (CAMERAS_SPEC §5) move nodes, so they resolve BEFORE the walk
     // that pushes transforms — a camera on a character's head has to be on the
     // head in the frame that renders it, not in the one after.
@@ -168,7 +184,7 @@ int SceneMirror::sync()
     mAnyRefractive = false;
     mShadowFilter = ShadowFilter::Hard;
     mMaxShadowResolution = 0;
-    for (const auto &child : mSource->getRootNode()->children)
+    for (const auto &child : mSource->getRootNode()->children())
         visit(child, 0, seen);
     removeMissing(seen);
     reclaimUnused();
@@ -220,7 +236,7 @@ void SceneMirror::collectHighlightMeshes(const iris::SceneNodePtr &node,
         if (iris::Mesh *mesh = meshNode->getMesh().data())
             if (MeshId m = engineMesh(mesh)) out.emplace_back(meshNode, m);
     }
-    for (const auto &child : node->children) collectHighlightMeshes(child, out);
+    for (const auto &child : node->children()) collectHighlightMeshes(child, out);
 }
 
 void SceneMirror::syncHighlight()
@@ -280,7 +296,7 @@ void SceneMirror::syncHighlight()
         // colour does (scene->outlineWidth, pushed by MainWindow): width/150 maps
         // the historical default 6 to the historical 1.04 hull; today's default 3
         // gives 1.02 — half the band. <=0 (never pushed) falls back to the default.
-        iris::Mat4 t = meshNode->globalTransform;
+        iris::Mat4 t = meshNode->getGlobalTransform();
         if (!mHighlightWireframe) {
             const int w = (mSource && mSource->outlineWidth > 0) ? mSource->outlineWidth : 3;
             t.scale(1.0f + float(w) / 150.0f);
@@ -756,21 +772,43 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
 
 void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long> &seen)
 {
+    (void)parent;   // the tree IS the engine's tree now; parentage is not pushed
     if (!node) return;
     seen.insert(node->nodeId);
 
     Entry &e = mEntries[node->nodeId];
-    if (!e.node) {
-        e.node = mTarget->createNode(parent);
+    // ONE TREE (SPECS/SCENEGRAPH_SPEC.md D2). The engine no longer makes a node
+    // for a document node — it ADOPTS the document's own, which is already an
+    // Ogre scene node in this scene's manager. That single change deletes the
+    // whole of audit F1: there is no transform to push (the engine reads the
+    // graph the user edited), and no parent to re-push either (a reparent in
+    // the hierarchy panel IS the reparent in the engine's tree).
+    const void *graphNode = reinterpret_cast<void *>(node->graphNode());
+    if (!e.node || e.graphNode != graphNode || e.graphEpoch != node->graphEpoch()) {
+        if (e.node) {
+            // The handle was rebuilt under us (a migration between scene
+            // managers). Everything the engine hung off the old one is gone
+            // with it; drop the entry's engine state and adopt afresh.
+            releaseEntry(e);
+        }
+        if (!graphNode) return;
+        e.node = mTarget->adoptNode(const_cast<void *>(graphNode));
+        e.graphNode = graphNode;
+        e.graphEpoch = node->graphEpoch();
         if (!e.node) return;
-    } else {
-        // Parent may have changed in the document (drag in the hierarchy widget).
-        mTarget->setNodeParent(e.node, parent);
+        e.visiblePushed = -1;      // force one visibility application
     }
 
     e.docNode = node.data();
-    mTarget->setNodeTransform(e.node, toVec3(node->getLocalPos()), toQuat(node->getLocalRot()), toVec3(node->getLocalScale()));
-    mTarget->setNodeVisible(e.node, node->visible);
+    // Visibility is still the DOCUMENT's flag (Ogre's setVisible walks a node's
+    // attachments, so an empty node has no visibility of its own) — but it is
+    // pushed on CHANGE only now, like every other signature-guarded half of
+    // this walk, never unconditionally.
+    const int wantVisible = node->visible ? 1 : 0;
+    if (e.visiblePushed != wantVisible) {
+        mTarget->setNodeVisible(e.node, node->visible);
+        e.visiblePushed = wantVisible;
+    }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto meshNode = node.staticCast<iris::MeshNode>();
@@ -911,7 +949,7 @@ void SceneMirror::visit(const iris::SceneNodePtr &node, NodeId parent, QSet<long
     // `e` is a reference into a QHash: the recursion inserts entries and QHash does not
     // keep value references stable across inserts (use-after-free under ASan). Copy first.
     const NodeId self = e.node;
-    for (const auto &child : node->children)
+    for (const auto &child : node->children())
         visit(child, self, seen);
 }
 
@@ -1170,17 +1208,28 @@ void SceneMirror::reclaimUnused()
     }
 }
 
+/// Everything the engine hung off one entry, released. Used both by
+/// removeMissing (the node left the document) and by visit (the document's
+/// handle was rebuilt by a migration, so the adopted id names a dead node).
+void SceneMirror::releaseEntry(Entry &e)
+{
+    if (e.wireNode) mTarget->removeNode(e.wireNode);
+    if (e.wireMaterial) mTarget->destroyMaterial(e.wireMaterial);
+    // The camera body/frustum mesh belongs to this entry alone (it is derived
+    // from that one camera's lens, so nothing else can reference it) and lives
+    // outside the shared mMeshes cache reclaimUnused sweeps.
+    if (e.cameraMesh) mTarget->destroyMesh(e.cameraMesh);
+    // removeNode on an ADOPTED node releases the engine's attachments and
+    // forgets the id; the node itself belongs to the document.
+    if (e.node) mTarget->removeNode(e.node);
+    e = Entry();
+}
+
 void SceneMirror::removeMissing(const QSet<long> &seen)
 {
     for (auto it = mEntries.begin(); it != mEntries.end();) {
         if (seen.contains(it.key())) { ++it; continue; }
-        if (it->wireNode) mTarget->removeNode(it->wireNode);
-        if (it->wireMaterial) mTarget->destroyMaterial(it->wireMaterial);
-        // The camera body/frustum mesh belongs to this entry alone (it is
-        // derived from that one camera's lens, so nothing else can reference
-        // it) and lives outside the shared mMeshes cache reclaimUnused sweeps.
-        if (it->cameraMesh) mTarget->destroyMesh(it->cameraMesh);
-        if (it->node)  mTarget->removeNode(it->node);
+        releaseEntry(*it);
         it = mEntries.erase(it);
     }
 }
@@ -2318,10 +2367,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // appearing/dying) goes stale until a re-voxelize.
         iris::Mat4 lightWorld;
         if (driver) {
-            lightWorld = driver->globalTransform;
+            lightWorld = driver->getGlobalTransform();
         } else if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
             for (const auto &l : mSource->lights)
-                if (!l.isNull()) lightWorld *= l->globalTransform;   // cheap combined signature
+                if (!l.isNull()) lightWorld *= l->getGlobalTransform();   // cheap combined signature
         }
         if (!mGiPushed || !same(gi, mLastGi)) {
             mTarget->setGlobalIllumination(gi);

@@ -178,7 +178,7 @@ CharacterController *Environment::getActiveCharacterController()
 void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootNode)
 {
 	std::function<void(const SceneNodePtr)> createPhysicsBodiesFromNode = [&](const SceneNodePtr node) {
-		for (const auto child : node->children) {
+		for (const auto child : node->children()) {
 			if (child->isPhysicsBody) {
 				auto owned = PhysicsHelper::createPhysicsBody(child, child->physicsProperty);
 				// The overload that ALSO takes the shapes: without it every
@@ -206,7 +206,7 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 	// now add constraints
 	// TODO - avoid looping like this, get constraint list -- list and then use that
 	// TODO - handle children of children?
-	for (const auto &node : rootNode->children) {
+	for (const auto &node : rootNode->children()) {
 		if (node->isPhysicsBody) {
 			for (const auto &constraintProperties : node->physicsProperty.constraints) {
 				auto constraint = PhysicsHelper::createConstraintFromProperty(this, constraintProperties);
@@ -331,7 +331,7 @@ void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
 
 void Environment::restoreNodeTransformationsRecursive(const iris::SceneNodePtr &node)
 {
-	for (auto &child : node->children) {
+	for (auto &child : node->children()) {
 		if (child->isPhysicsBody && nodeTransforms.contains(child->getGUID()))
 			child->setGlobalTransform(nodeTransforms.value(child->getGUID()));
 		restoreNodeTransformationsRecursive(child);

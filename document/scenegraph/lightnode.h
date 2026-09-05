@@ -140,7 +140,7 @@ public:
         // this is the default rotation for directional and spotlights - pointing down
         iris::Vec4 defaultDir(0, -1, 0, 0);
 
-        iris::Vec4 dir = (globalTransform * defaultDir);
+        iris::Vec4 dir = (getGlobalTransform() * defaultDir);
 
         return dir.toVector3D();
     }

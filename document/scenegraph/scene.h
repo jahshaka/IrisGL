@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include <QList>
 #include "irisglfwd.h"
 #include "document/assets/texture2d.h"
+#include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/shadowmap.h"
 #include "core/geometry/frustum.h"
 
@@ -409,6 +410,25 @@ public:
     float animationTime() const { return animTime; }
     void update(float dt);
 
+    // ---- the scene-graph binding (SPECS/SCENEGRAPH_SPEC.md D2) ------------
+    /// The Ogre scene manager this document's ONE tree lives in. A scene starts
+    /// in the process-wide STAGING manager (which renders nothing) and is moved
+    /// into an engine scene's manager the moment a SceneMirror binds it — that
+    /// move is what lets the engine read the document's transforms directly
+    /// instead of having them pushed at it every frame (audit F1).
+    graph::SceneHandle graphScene() const { return mGraphScene; }
+    /// Rebuilds the whole tree inside `target`. Passing the staging handle (or
+    /// nothing) UNBINDS: SceneMirror does that before it lets go of a document,
+    /// because an engine scene may be destroyed at any time afterwards and the
+    /// document's handles must not be inside it when that happens.
+    void setGraphScene(graph::SceneHandle target);
+    /// A subtree that has just left this scene's tree but is still ALIVE (the
+    /// undo stack holds deleted nodes — audit §3.3). It stays in this scene's
+    /// scene manager, so setGraphScene has to take it along; without that it
+    /// would be left inside a manager the engine is free to destroy, and an
+    /// undo after a world switch would walk dangling handles.
+    void rememberDetached(const SceneNodePtr &node);
+
     void rayCast(const iris::Vec3& segStart,
                  const iris::Vec3& segEnd,
                  QList<PickingResult>& hitList,
@@ -509,6 +529,15 @@ public:
     void setOutlineColor(QColor color);
 
     void cleanup();
+
+private:
+    /// Where this document's tree currently lives. Never null once an
+    /// Ogre::Root exists; see setGraphScene.
+    graph::SceneHandle mGraphScene = nullptr;
+    /// Subtrees detached from this scene and still alive — see
+    /// rememberDetached. WEAK: this list must never be the reason a deleted
+    /// node stays alive; expired entries are pruned as they are found.
+    QList<SceneNodeWPtr> mDetached;
 };
 
 }
