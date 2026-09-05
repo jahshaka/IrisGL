@@ -32,6 +32,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     (void)cfg.display;  // X11-only; 0 on other hosts (Types.h documents the leak)
 #endif
     mDefaultSamples = OgreView::sanitizeSamples(cfg.sampleCount);
+    mVsync = cfg.vsync;
     // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
     // is a plain static, not engine state.
@@ -149,7 +150,7 @@ void *OgreEngine::documentGraphScene() {
     } JAH_CATCH(mLastError, nullptr);
 }
 
-Scene *OgreEngine::createScene(const std::string &name) {
+Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) {
     if (!mHlmsRegistered) {
         mLastError = "createScene('" + name + "'): no View exists yet — create a View first";
         return nullptr;
@@ -157,7 +158,18 @@ Scene *OgreEngine::createScene(const std::string &name) {
     for (auto &s : mScenes)
         if (s->name() == name) { mLastError = "Scene '" + name + "' already exists"; return nullptr; }
     JAH_TRY {
-        Ogre::SceneManager *sm = mRoot->createSceneManager(Ogre::ST_GENERIC, 2, name);
+        // WORKER THREADS ARE PER SCENE, and the caller decides (Engine.h).
+        // Ogre forks culling, render-queue building and object updates across
+        // this pool and joins them on a barrier; every SceneManager owns its
+        // own, so a process with an editor scene, a player scene, a thumbnail
+        // scene and three preview scenes has six pools. 2 was hardcoded here
+        // for every one of them — the fps audit's F3 — which left a 16-core
+        // box drawing the editor on two threads while six thumbnail scenes
+        // held two each. 0 keeps that historical default so that no caller
+        // that does not care has to think about it.
+        const unsigned threads = workerThreads == 0u ? 2u
+                                                     : (workerThreads > 32u ? 32u : workerThreads);
+        Ogre::SceneManager *sm = mRoot->createSceneManager(Ogre::ST_GENERIC, threads, name);
         // HlmsPbs shades point and spot lights ONLY through Forward+ (Forward3D /
         // ForwardClustered); without it only directional lights reach the shader.
         // Values are Ogre's sample defaults: 16x8 grid, 24 slices, 96 lights per
@@ -263,7 +275,12 @@ View *OgreEngine::createView(const std::string &name,
             params["gamma"] = "true";
         }
 #endif
-        params["vsync"]         = "true";
+        // VSYNC IS THE HOST'S CHOICE (EngineConfig::vsync / Engine::setVsync,
+        // fps audit F1) — it was hardcoded true here and in the recreate hook
+        // below. Off means an immediate, tearing present mode: the swapchain
+        // acquire stops blocking, and the loop's rate stops quantizing to
+        // refresh/n. Everything else about the request is unchanged.
+        params["vsync"]         = mVsync ? "true" : "false";
         params["vsyncInterval"] = "1";
         // MAILBOX, not FIFO (deep audit area 7 F8). Plain vsync gives Vulkan's
         // FIFO present mode: a queue up to the swapchain's depth, so a frame
@@ -304,7 +321,7 @@ View *OgreEngine::createView(const std::string &name,
         // here AND in the resize lambda below, or a resize silently resets it.
         params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
-        window->setVSync(true, 1u | kLowestLatencyVSync);
+        window->setVSync(mVsync, 1u | kLowestLatencyVSync);
         ensureHlms();
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
                                          background, mLastError));
@@ -321,20 +338,25 @@ View *OgreEngine::createView(const std::string &name,
         const bool vulkan = mBackendName.find("Vulkan") != std::string::npos;
         void *display = mDisplay;
         Ogre::Root *root = mRoot;
-        view->mCreateWindow = [root, vulkan, display, handle, name](unsigned w, unsigned h,
-                                                                    unsigned samples) -> Ogre::Window * {
+        // `this` is safe to capture: the hook lives on a View, and every View
+        // is owned by (and destroyed with) the Engine.
+        view->mCreateWindow = [this, root, vulkan, display, handle, name](unsigned w, unsigned h,
+                                                                          unsigned samples) -> Ogre::Window * {
             Ogre::NameValuePairList p;
             X11Handle x11{ display, (unsigned long)handle };
             if (vulkan) p["SDL2x11"] = Ogre::StringConverter::toString((unsigned long)&x11);
             else { p["parentWindowHandle"] = Ogre::StringConverter::toString((unsigned long)handle); p["gamma"] = "true"; }
-            p["vsync"] = "true"; p["vsyncInterval"] = "1";
+            // The host's CURRENT pacing choice, not the one it started with:
+            // a window rebuilt for an MSAA change must not silently switch
+            // vsync back on (the same reasoning as the MAILBOX request below).
+            p["vsync"] = mVsync ? "true" : "false"; p["vsyncInterval"] = "1";
             // Same MAILBOX request as the first window above — this hook is the
             // MSAA-change recreate path, and a window rebuilt without it would
             // silently drop back to FIFO for the rest of the session.
             p["vsync_method"] = "Lowest Latency";
             p["FSAA"] = Ogre::StringConverter::toString(samples);
             Ogre::Window *win = root->createRenderWindow(name + "/" + processUniqueName("resize"), w, h, false, &p);
-            win->setVSync(true, 1u | kLowestLatencyVSync);
+            win->setVSync(mVsync, 1u | kLowestLatencyVSync);
             return win;
         };
         return view;
@@ -483,6 +505,29 @@ bool OgreEngine::hasEnabledViews() const {
     for (const auto &v : mViews)
         if (v->isEnabled()) return true;
     return false;
+}
+
+void OgreEngine::listViews(std::vector<View *> &out) const {
+    out.clear();
+    out.reserve(mViews.size());
+    for (const auto &v : mViews) out.push_back(v.get());
+}
+
+void OgreEngine::setVsync(bool on) {
+    if (mVsync == on) return;
+    mVsync = on;
+    JAH_TRY {
+        for (auto &v : mViews) {
+            Ogre::Window *w = v->ogreWindow();
+            if (!w) continue;   // offscreen views never present
+            // The sign bit goes with EVERY call: setVSync assigns
+            // mLowestLatencyVSync from the interval BEFORE its "nothing
+            // changed" early-return, so a bare setVSync(x, 1) would clear the
+            // lowest-latency request for the rest of the session.
+            w->setVSync(on, 1u | kLowestLatencyVSync);
+        }
+        return;
+    } JAH_CATCH(mLastError, );
 }
 
 const std::string &OgreEngine::lastError() const { return mLastError; }

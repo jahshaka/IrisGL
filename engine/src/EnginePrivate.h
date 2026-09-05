@@ -1447,6 +1447,10 @@ public:
     unsigned width()  const override;
     unsigned height() const override;
     bool isOffscreen() const override;
+    /// The presenting window, or null for an offscreen view. The engine needs
+    /// it for the one decision that is process-wide but lives on the window:
+    /// vsync (Engine::setVsync).
+    Ogre::Window *ogreWindow() const { return mWindow; }
 
     /// Set by the engine for on-screen views ON X11: creates a fresh Ogre window on the
     /// same native handle at the given size and MSAA sample count (the "FSAA" misc param —
@@ -1610,7 +1614,7 @@ class OgreEngine final : public Engine {
 public:
     bool init(const EngineConfig &cfg, std::string &error);
 
-    Scene *createScene(const std::string &name) override;
+    Scene *createScene(const std::string &name, unsigned workerThreads = 0) override;
     void *documentGraphScene() override;
     bool  isHeadless() const override { return mHeadless; }
 
@@ -1627,6 +1631,12 @@ public:
 
     void renderOneFrame() override;
     bool hasEnabledViews() const override;
+    void listViews(std::vector<View *> &out) const override;
+
+    /// Applies to every on-screen window that exists AND is remembered for the
+    /// ones created later (createView and the MSAA-recreate hook both read it).
+    void setVsync(bool on) override;
+    bool vsync() const override { return mVsync; }
     const std::string &lastError() const override;
     std::string takeLastError() override;
 
@@ -1729,6 +1739,10 @@ private:
     ShadowFilter    mShadowFilter = ShadowFilter::Soft;
     unsigned        mShadowResolution = 2048;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
+    /// EngineConfig::vsync, then whatever setVsync() last said. Read at every
+    /// window creation (createView + the MSAA-recreate hook), so the pacing
+    /// choice survives a resize or a sample-count change.
+    bool            mVsync = true;
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
     ShaderCache     mShaderCache;

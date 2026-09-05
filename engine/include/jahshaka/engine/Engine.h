@@ -17,6 +17,7 @@
 // failing call overwrites it.
 #include <memory>
 #include <string>
+#include <vector>
 #include "Types.h"
 
 namespace jahshaka { namespace engine {
@@ -583,7 +584,20 @@ public:
 
     /// Returns null if called before the first createView()/createOffscreenView(),
     /// or if the name is already in use (lastError()).
-    virtual Scene *createScene(const std::string &name) = 0;
+    ///
+    /// `workerThreads` sizes THIS SCENE'S OWN worker pool — the threads the
+    /// backend forks culling, render-queue building and object updates across.
+    /// Every scene gets its own pool (they are not shared), so the number is a
+    /// per-scene decision and not a global one: the on-screen editor scene
+    /// wants the machine, a 128x128 thumbnail scene wants one thread and no
+    /// barriers. 0 means "the backend's default" (2), which is what every
+    /// caller that does not care should pass. Clamped to [1, 32].
+    ///
+    /// MORE IS NOT FREE. The pool synchronises through a barrier per parallel
+    /// pass, so at small scene sizes the barrier cost outweighs the split work
+    /// — measure before raising it (tests/benchmarks/bench_scenegraph has a
+    /// `--threads` flag for exactly this).
+    virtual Scene *createScene(const std::string &name, unsigned workerThreads = 0) = 0;
 
     /// The scene manager DETACHED document nodes live in, opaque
     /// (`Ogre::SceneManager*`). SPECS/SCENEGRAPH_SPEC.md D2: a document node IS
@@ -629,6 +643,40 @@ public:
     /// Only View::setEnabled moves this, so nothing else has to change to stay
     /// correct: the tick after a viewport is shown sees `true` and renders.
     virtual bool hasEnabledViews() const = 0;
+
+    /// Every live View, in creation order (the vector is cleared first).
+    ///
+    /// Hosts need this for the ONE thing hasEnabledViews() cannot express:
+    /// temporarily quieting the on-screen views around an offscreen render.
+    /// A thumbnail or screenshot readback calls renderOneFrame() twice, and
+    /// renderOneFrame draws EVERY enabled View — so each readback also redraws
+    /// the whole editor twice and burns two vsync presents on frames nobody
+    /// asked for (fps audit F5; a thumbnail queue paced this way holds the
+    /// editor at ~20 fps). Disabling the on-screen views for the duration is
+    /// the whole fix, and it needs the list.
+    ///
+    /// The pointers are the Engine's and die with it — hold them for the
+    /// duration of a call, never across one that could destroy a View.
+    virtual void listViews(std::vector<View *> &out) const = 0;
+
+    // ---- Presentation pacing (fps audit F1) --------------------------------
+    /// Vertical sync for every ON-SCREEN View, now and for every window created
+    /// afterwards (a window rebuilt by an MSAA change or a resize keeps it).
+    /// Offscreen Views never present and are unaffected.
+    ///
+    /// ON (the default, EngineConfig::vsync) the backend presents in a
+    /// vsync-respecting mode and the swapchain acquire BLOCKS until the display
+    /// releases an image — which, combined with a host loop that ticks on a
+    /// timer, is why the frame rate steps to refresh/n rather than sliding.
+    /// OFF asks for an immediate (tearing) present mode: frames go out as fast
+    /// as the loop produces them, which is what "unlimited" means and the only
+    /// honest way to see what the renderer can actually do.
+    ///
+    /// NOT FREE TO TOGGLE: each on-screen View's swapchain is destroyed and
+    /// rebuilt, exactly as a resize does. Call it on a user's change of mind,
+    /// never per frame. A no-op when the value is unchanged.
+    virtual void setVsync(bool) = 0;
+    virtual bool vsync() const = 0;
 
     // ---- Simulation clock (PARTICLES_FX2_SPEC.md) ----
     // The engine advances its own particle simulation inside renderOneFrame,
