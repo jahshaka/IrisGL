@@ -159,6 +159,13 @@ public:
     static Model read(const QString &path,
                       const QString &expectFingerprint = QString());
 
+    /// HEADER-ONLY probe: magic + version + fingerprint, no payload read.
+    /// The catalog can hold several producer GENERATIONS of one model under
+    /// the same bake name (the name derives from the source oid alone) — a
+    /// lookup walking candidates needs a cheap "is this row the current
+    /// generation" test, not a full deserialize per stale row.
+    static bool headerMatches(const QString &path, const QString &expectFingerprint);
+
     /// Write ATOMICALLY (temp + rename in the same directory): a bake at its
     /// final path is either absent or complete, even through a SIGKILL.
     static bool write(const QString &path, const Model &model, QString *errorOut);

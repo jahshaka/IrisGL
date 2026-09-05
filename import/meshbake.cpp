@@ -669,6 +669,30 @@ QByteArray MeshBake::serialize(const Model &model)
     return blob;
 }
 
+bool MeshBake::headerMatches(const QString &path, const QString &expectFingerprint)
+{
+    if (path.isEmpty() || expectFingerprint.isEmpty()) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    // Magic + version + the length-prefixed fingerprint string sit at the
+    // front (serialize()); 4KB covers them with room to spare and reads no
+    // mesh payload.
+    const QByteArray head = file.read(4096);
+    file.close();
+    if (head.size() < 16) return false;
+
+    QDataStream s(head);
+    configure(s);
+    quint32 magic = 0;
+    qint32 version = 0;
+    QString fingerprint;
+    s >> magic >> version;
+    if (magic != kMagic || version != kFormatVersion) return false;
+    s >> fingerprint;
+    if (s.status() != QDataStream::Ok) return false;
+    return fingerprint == expectFingerprint;
+}
+
 MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &expectFingerprint)
 {
     Model model;
