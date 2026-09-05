@@ -56,7 +56,7 @@ diff --git a/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp b/RenderSystems/Vulka
 index e06b45daf..1b3f00ded 100644
 --- a/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
 +++ b/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
-@@ -404,23 +404,51 @@ namespace Ogre
+@@ -404,23 +404,54 @@ namespace Ogre
                                               "SHARED_DEMAND_REFRESH_KHR",
                                               "SHARED_CONTINUOUS_REFRESH_KHR" };
  
@@ -65,17 +65,20 @@ index e06b45daf..1b3f00ded 100644
 -            LogManager::getSingleton().logMessage( "Trying presentMode = " +
 -                                                   c_presentModeStrs[targetPresentModes[i]] );
 -            if( presentModesFound[i] )
-+        // Jahshaka patch 0013: FIFO_LATEST_READY = vsync pacing without the
-+        // FIFO queue backlog — the latency win MAILBOX gives elsewhere, on
-+        // drivers (NVIDIA xcb) that never expose MAILBOX. Only with vsync on,
-+        // only when the device extension was actually enabled (the device side
-+        // of this patch), only when the surface enumerates the mode. NOTE the
++        // Jahshaka patch 0013 (rev 2): FIFO_LATEST_READY = vsync pacing
++        // without the FIFO queue backlog, ONLY AS A FALLBACK when the surface
++        // does not expose the REQUESTED mode (MAILBOX under Lowest Latency —
++        // NVIDIA xcb never offers it). Rev 1 pre-empted MAILBOX everywhere it
++        // existed and quantized a 100 Hz panel to 25/20 fps (2026-09-05).
++        // Only with vsync on, only when the device extension was enabled
++        // (the device side of this patch), only when enumerated. NOTE the
 +        // mode's enum value is 1000361000 — it must never index
 +        // c_presentModeStrs (that read would be wild).
 +        bool useFifoLatestReady = false;
 +#ifdef VK_KHR_present_mode_fifo_latest_ready
-+        if( mVSync && ( mDevice->hasDeviceExtension( "VK_KHR_present_mode_fifo_latest_ready" ) ||
-+                        mDevice->hasDeviceExtension( "VK_EXT_present_mode_fifo_latest_ready" ) ) )
++        if( mVSync && !presentModesFound[0] &&
++            ( mDevice->hasDeviceExtension( "VK_KHR_present_mode_fifo_latest_ready" ) ||
++              mDevice->hasDeviceExtension( "VK_EXT_present_mode_fifo_latest_ready" ) ) )
 +        {
 +            for( size_t i = 0u; i < numPresentModes; ++i )
              {
