@@ -123,7 +123,19 @@ public:
 	QHash<QString, MeshNodePtr> meshes;
 	QHash<QString, ParticleSystemNodePtr> particleSystems;
 	QHash<QString, ViewerNodePtr> viewers;
+    /// Every scene-graph CameraNode, keyed by guid (CAMERAS_SPEC §3). NOT the
+    /// editor camera: `camera` above is the viewport's virtual explorer and is
+    /// never a child of the root, so it is never in here.
+    QHash<QString, CameraNodePtr> cameras;
 	QHash<QString, SceneNodePtr> nodes;
+
+    /// The camera PLAY renders through (CAMERAS_SPEC D6). Empty = the free
+    /// viewer, which is what every scene written before cameras existed means.
+    /// Serialized with the scene; resolved through `cameras` above.
+    QString activeCameraGuid;
+
+    /// Play state (see setPlaying). Runtime only — never written to the file.
+    bool playing = false;
 
     QColor clearColor;
     bool renderSky;
@@ -416,15 +428,41 @@ public:
     void removeNode(SceneNodePtr node);
 
     /**
-     * Sets the active camera of the scene
+     * Sets the scene's VIEWPORT camera — the editor's virtual explorer, or the
+     * camera a preview scene renders through. NOT the "active camera" of
+     * CAMERAS_SPEC D6: that one is a scene-graph node, named by guid below.
      * @param cameraNode
      */
     void setCamera(CameraNodePtr cameraNode);
 
 	/*
-	Return scene's active camera
+	Return scene's viewport camera (see setCamera).
 	*/
 	iris::CameraNodePtr getCamera() { return camera; }
+
+    // ---- the ACTIVE camera (CAMERAS_SPEC D6) -----------------------------
+    //
+    // A scene-graph camera that PLAY renders through. Null/empty means the
+    // free viewer, which is the behaviour every scene had before cameras
+    // existed. Switching it at runtime from a script is camera cuts v0.
+
+    /// Points play at a scene camera. An empty guid clears it (free viewer).
+    /// A guid that names no camera in this scene is REFUSED — returns false and
+    /// leaves the previous choice alone, because silently rendering through the
+    /// wrong camera is exactly the failure a caller cannot see.
+    bool setActiveCamera(const QString &guid);
+    /// The active camera node, or null when there is none / the guid no longer
+    /// resolves (the camera was deleted with the guid still recorded).
+    CameraNodePtr getActiveCamera() const;
+    QString getActiveCameraGuid() const { return activeCameraGuid; }
+
+    /// Whether the scene is being PLAYED (editor play-in-place or the player
+    /// view). Runtime state, never serialized: PlayBack owns it, and
+    /// SceneMirror::applyCamera reads it to decide whether the active camera
+    /// takes the view. Editing must NOT route through the active camera — the
+    /// main viewport stays the explorer until phase 3's pilot mode.
+    void setPlaying(bool playing) { this->playing = playing; }
+    bool isPlaying() const { return playing; }
 
     /**
      * Sets the viewport stencil width
