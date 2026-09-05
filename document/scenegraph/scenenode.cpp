@@ -411,7 +411,13 @@ void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph)
     // Out of the tree first (this is what makes it stop rendering and stop
     // being reachable), THEN out of the scene registries, THEN drop our
     // ownership — the caller's own SceneNodePtr is what keeps it alive.
-    if (detachGraph) node->mGraphNode = graph::detach(node->mGraphNode);
+    if (detachGraph) {
+        // The scene has to be told BEFORE removeFromScene clears the link: the
+        // subtree stays in that scene's scene manager and has to travel with it
+        // when it unbinds (see Scene::rememberDetached).
+        if (auto sc = node->getScene()) sc->rememberDetached(node);
+        node->mGraphNode = graph::detach(node->mGraphNode);
+    }
     node->removeFromScene();
     mChildRefs.removeOne(node);
     node->notifyChanged(NodeChange::Structure);

@@ -340,16 +340,22 @@ NodeHandle detach(NodeHandle child)
     if (!engineAlive()) return child;
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     Ogre::SceneNode *c = nd(child);
-    Ogre::SceneManager *staging = sm(stagingScene());
-    // OUT of the render tree, not merely out of its parent. A detached subtree
-    // is one the undo stack still owns and may re-attach; leaving it under a
-    // rendering scene manager's root would keep it drawable until the next
-    // mirror pass AND would leave it inside a scene manager the engine is free
-    // to destroy while the undo stack still points at it.
-    if (c->getCreator() != staging)
-        return migrate(child, stagingScene(), nullptr);
+    // Out of its parent and under its scene manager's root — NOT migrated to
+    // the staging manager, which is what this used to do. A migration rebuilds
+    // the whole subtree, which changes every handle in it, which makes the
+    // mirror release and re-adopt every one of those nodes (and re-attach every
+    // mesh and material) on the next sync. Measured on the §6 benchmark, that
+    // turned a 500-node reparent — remove from one parent, add to another —
+    // into two full subtree rebuilds plus 1000 re-adoptions, ~10% of
+    // c.reparent_500 at 1k.
+    //
+    // What the migration bought was safety against "the engine scene is
+    // destroyed while the undo stack still holds a node that was in it". That
+    // is now iris::Scene's job instead: it remembers the subtrees detached from
+    // it (Scene::rememberDetached) and takes them along when it unbinds.
     if (c->getParent()) c->getParent()->removeChild(c);
-    rootOf(staging)->addChild(c);
+    Ogre::SceneNode *root = rootOf(c->getCreator());
+    if (c != root) root->addChild(c);
     return child;
 }
 

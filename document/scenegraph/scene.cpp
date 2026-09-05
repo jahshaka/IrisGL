@@ -679,12 +679,36 @@ void Scene::setGraphScene(graph::SceneHandle target)
                  "SceneMirror must unbind (setSource(null)) before Engine::destroyScene().");
         rootNode->_setGraphNode(nullptr);
         for (const auto &n : nodes) if (n) n->_setGraphNode(nullptr);
+        for (const auto &w : mDetached) if (auto n = w.lock()) n->_setGraphNode(nullptr);
+        mDetached.clear();
         mGraphScene = target;
         return;
     }
 
     rootNode->_migrateGraph(target, nullptr);
+    // ...and everything that left the tree but is still held somewhere (the
+    // undo stack). Anything that has since been re-attached elsewhere, or has
+    // died, is dropped here rather than followed.
+    const graph::SceneHandle leaving = mGraphScene;
+    for (auto it = mDetached.begin(); it != mDetached.end();) {
+        SceneNodePtr n = it->lock();
+        if (!n) { it = mDetached.erase(it); continue; }
+        if (graph::sceneOf(n->graphNode()) != leaving) { it = mDetached.erase(it); continue; }
+        n->_migrateGraph(target, nullptr);
+        ++it;
+    }
     mGraphScene = target;
+}
+
+void Scene::rememberDetached(const SceneNodePtr &node)
+{
+    if (node.isNull()) return;
+    for (auto it = mDetached.begin(); it != mDetached.end();) {
+        if (it->isNull()) it = mDetached.erase(it);
+        else if (it->lock() == node) return;
+        else ++it;
+    }
+    mDetached.append(node.toWeakRef());
 }
 
 void Scene::setOutlineWidth(int width)
