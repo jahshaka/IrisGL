@@ -84,6 +84,7 @@ SkyRealistic SkyRealistic::defaults()
 
 Scene::Scene()
 {
+    mGraphScene = graph::stagingScene();
     rootNode = SceneNode::create();
     rootNode->setName("World");
 
@@ -361,8 +362,12 @@ void Scene::update(float dt)
 		auto rigidBodyWorldTransform = physicsBodies.value()->getWorldTransform();
 		// Put the transform matrix's float data into our array
 		rigidBodyWorldTransform.getOpenGLMatrix(matrix);
-		// Get the matching scenenode
+		// Get the matching scenenode. CHECKED (audit F3): this was an
+		// unconditional dereference of a QHash lookup, so a body whose node had
+		// been removed — an ordinary delete during a running simulation — was a
+		// null dereference every step.
 		auto mesh = nodes.value(physicsBodies.key());
+		if (!mesh) continue;
 
 		if (mesh->disablePhysicsTransform)
 			continue;
@@ -413,7 +418,8 @@ void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
         {
             
             // transform segment to local space
-            auto invTransform = meshNode->globalTransform.inverted();
+            const auto nodeWorld = meshNode->getGlobalTransform();
+            auto invTransform = nodeWorld.inverted();
             auto a = invTransform * segStart;
             auto b = invTransform * segEnd;
 
@@ -429,7 +435,7 @@ void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
 				if (int resultCount = triMesh->getSegmentIntersections(a, b, results)) {
 					for (auto triResult : results) {
 						// convert hit to world space
-						auto hitPoint = meshNode->globalTransform * triResult.hitPoint;
+						auto hitPoint = nodeWorld * triResult.hitPoint;
 
 						PickingResult pick;
 						pick.hitNode = sceneNode;
@@ -443,7 +449,7 @@ void Scene::rayCast(const QSharedPointer<iris::SceneNode>& sceneNode,
         }
     }
 
-    for (const auto &child : sceneNode->children) {
+    for (const auto &child : sceneNode->children()) {
         rayCast(child, segStart, segEnd, hitList, pickingMask, allowUnpickable);
     }
 }
@@ -618,7 +624,7 @@ void Scene::removeNode(SceneNodePtr node)
     // guid — puts every rider back on its socket with no second verb.
     unregisterSocketAttachment(node);
 
-    for (auto &child : node->children) {
+    for (const auto &child : node->children()) {
         removeNode(child);
     }
 }
@@ -651,6 +657,27 @@ ScenePtr Scene::create()
     scene->rootNode->setScene(scene);
 
     return scene;
+}
+
+void Scene::setGraphScene(graph::SceneHandle target)
+{
+    if (!target) target = graph::stagingScene();
+    if (target == mGraphScene) return;
+    if (!rootNode) { mGraphScene = target; return; }
+
+    // The scene manager we are LEAVING may already be gone — an engine scene
+    // destroyed while a document was still bound to it (the mirror is supposed
+    // to unbind first). Say so; walking those handles is a use-after-free.
+    if (mGraphScene && !graph::sceneAlive(mGraphScene)) {
+        qWarning("iris::Scene: the engine scene this document was bound to has already been "
+                 "destroyed — every node handle in it is dangling and its transforms are lost. "
+                 "SceneMirror must unbind (setSource(null)) before Engine::destroyScene().");
+        mGraphScene = target;
+        return;
+    }
+
+    rootNode->_migrateGraph(target, nullptr);
+    mGraphScene = target;
 }
 
 void Scene::setOutlineWidth(int width)

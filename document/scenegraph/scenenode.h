@@ -18,6 +18,7 @@ For more information see the LICENSE file
 #include "core/math/vec.h"
 #include "irisglfwd.h"
 #include "document/physics/physicsproperties.h"
+#include "document/scenegraph/nodegraph.h"
 
 namespace iris
 {
@@ -43,44 +44,66 @@ class Animation;
 class PropertyAnim;
 typedef QSharedPointer<Animation> AnimationPtr;
 
+/// What a mutation changed. The funnel below reports it; v1.5's undo capture
+/// and the properties panel's live refresh are meant to ride this seam rather
+/// than polling (SPECS/SCENEGRAPH_SPEC.md §1: "the handle notifies; Ogre has no
+/// write events — its only transform hook is compiled out in release").
+enum class NodeChange {
+    Transform,   ///< local or world TRS
+    Structure,   ///< parent / child list / scene membership
+    Visibility,
+    Flags,       ///< pickable, castShadow, planarReflector, ...
+    Name
+};
+
+// -----------------------------------------------------------------------------
+// iris::SceneNode — a TYPED HANDLE onto one Ogre::SceneNode.
+//
+// SPECS/SCENEGRAPH_SPEC.md D2. This class kept its name and its whole public
+// API on purpose (the audit counted ~620 transform and ~548 hierarchy call
+// sites), but it no longer OWNS any of the graph. Gone, by construction:
+//
+//   pos / rot / scale            -> Ogre's SoA transform
+//   localTransform, globalTransform (the two cached Mat4, 128 bytes a node)
+//   transformDirty / globalDirty / hasDirtyChildren
+//   update()'s transform recursion
+//   getGlobalTransform()'s recompute-and-write-the-cache body (audit F2 — the
+//     non-const "getter" that walked and wrote the whole ancestor chain; it is
+//     now Ogre's own dirty-gated _getFullTransformUpdated())
+//   QList<SceneNodePtr> children as the HIERARCHY
+//
+// What the handle still owns is everything that was never graph structure:
+// identity (guid + nodeId), the editor flags, physics, animation clips, the
+// rest pose, asset references and the properties/reflection surface.
+//
+// OWNERSHIP, and why one list survives. Ogre's node holds a RAW back-pointer to
+// this handle (UserObjectBindings), never a QSharedPointer: an Ogre-held strong
+// reference would make `graph::destroyNode` the only way a node could ever die,
+// and the undo stack's contract is the opposite — "the undo stack is what keeps
+// deleted nodes alive" (audit §3.3). So `mChildRefs` below is kept as a pure
+// LIFETIME ANCHOR: it holds the QSharedPointers, it is never read for order,
+// parentage or iteration, and exactly two functions (insertChild / removeChild)
+// touch it. Structure comes from Ogre, always.
+// -----------------------------------------------------------------------------
 class SceneNode : public QEnableSharedFromThis<SceneNode>
 {
 protected:
     QList<AnimationPtr> animations;
     AnimationPtr animation;
 
-    iris::Vec3 pos;
-    iris::Vec3 scale;
-    iris::Quat rot;
+    /// This node's Ogre::SceneNode, opaque here (see nodegraph.h). Null only
+    /// when no Ogre::Root existed at construction time — a v1 programming
+    /// error, reported once and loudly, not a supported mode.
+    graph::NodeHandle mGraphNode = nullptr;
 
-    // ---- transform invalidation (deep audit 2026-09, area 3) --------------
-    // These two flags were set true in the constructor and NEVER cleared
-    // anywhere in the tree, so update() recomposed localTransform AND
-    // globalTransform for every node of every scene, every frame — a cache
-    // that only ever cost. They mean what they say now:
-    //
-    //   transformDirty    this node's own TRS changed, so localTransform must
-    //                     be recomposed (and globalTransform with it). Set by
-    //                     every mutator; see setTransformDirty().
-    //   globalDirty       an ANCESTOR moved, so only globalTransform needs
-    //                     recomputing. This is the DOWNWARD half of the
-    //                     invalidation and update() is what sets it, because
-    //                     setTransformDirty walks UPWARDS (it tells ancestors
-    //                     to descend) and can never reach a subtree.
-    //   hasDirtyChildren  some descendant needs update() work at all; the flag
-    //                     that lets an untouched branch be skipped whole.
-    //
-    // All three are cleared at the end of update(). A mutator that forgets to
-    // set them is a stale-transform bug — the picker, the gizmos and the
-    // mirror's selection outline all read `globalTransform` directly.
-    bool transformDirty;
-    bool globalDirty;
-    bool hasDirtyChildren;
+    /// LIFETIME ANCHOR ONLY — see the class note. Never iterate it; use
+    /// children().
+    QList<SceneNodePtr> mChildRefs;
+
+    /// How many times mGraphNode has been REPLACED. See graphEpoch().
+    quint32 mGraphEpoch = 0;
+
 public:
-    // cached local and global transform
-    iris::Mat4 localTransform;
-    iris::Mat4 globalTransform;
-
     SceneNodeType sceneNodeType;
 
     QString name;
@@ -90,21 +113,9 @@ public:
     /// two different nodes onto one engine entry.
     qint64 nodeId;
 
-    // OWNERSHIP (deep audit 2026-09, area 3 / List B item 4). The tree has ONE
-    // ownership direction: a parent owns its children, strongly. The two
-    // back-references are therefore WEAK — they were QSharedPointer until this
-    // change, which made every parent/child pair and every node/scene pair a
-    // reference cycle, so nothing in a document ever died.
-    //
-    // Read them through getScene() / getParent(), never directly: a weak
-    // pointer must be locked before it is used, and the lock is what keeps the
-    // target alive for the duration of the expression. The two members stay
-    // public only because the codebase is full of `node->parent` call sites
-    // that now read as `node->getParent()`; new code has no reason to touch
-    // them.
+    /// The scene this node belongs to, weakly (a scene owns its nodes through
+    /// its registries; a node must never keep its scene alive).
     SceneWPtr scene;
-    SceneNodeWPtr parent;
-    QList<SceneNodePtr> children;
 
     // editor specific
     bool duplicable;
@@ -156,11 +167,7 @@ public:
     // PLANAR REFLECTIONS (PLANAR_REFLECTIONS_SPEC.md §7 option A): this node's
     // flat surface is a mirror plane. Deliberately a FLAG on an ordinary mesh
     // node rather than a MirrorNode scene-node type — the plane, its size and
-    // its normal are all derived from the mesh's own bounds. (The other half
-    // of that reasoning — "SceneNodeType is unreliable, CameraNode never sets
-    // its own" — no longer holds: CAMERAS_SPEC phase 1 fixed it. The flag
-    // stays a flag for the geometric reason above.) Off by default: an active
-    // reflector is a whole extra scene render and cannot be inferred.
+    // its normal are all derived from the mesh's own bounds.
     bool planarReflector = false;
 
 	mutable QString guid;
@@ -177,10 +184,35 @@ public:
 
 public:
     SceneNode();
-	SceneNode(const SceneNode&);
-    virtual ~SceneNode() {}
+    virtual ~SceneNode();
 
     static SceneNodePtr create();
+
+    // ---- the handle itself ------------------------------------------------
+    /// This node's Ogre node. The mirror hands it to the engine (adoptNode) so
+    /// that the engine's Item rides the DOCUMENT's node — which is what makes
+    /// the per-frame transform push (audit F1) unnecessary.
+    graph::NodeHandle graphNode() const { return mGraphNode; }
+    /// Called by iris::graph when a migration rebuilds this node in another
+    /// scene manager, and by its recursive destroy. Not for general use.
+    void _setGraphNode(graph::NodeHandle h) { mGraphNode = h; ++mGraphEpoch; }
+    /// Bumped every time the handle is REPLACED. The pointer alone cannot be
+    /// used to notice that: Ogre recycles node memory, so a migrate out and
+    /// back lands the rebuilt node on the very address the old one had (found
+    /// by mirror.document_to_engine's reparent case — the cube went invisible
+    /// because the mirror kept an engine Item attached to a destroyed node).
+    quint32 graphEpoch() const { return mGraphEpoch; }
+    /// Rebuilds this subtree inside `target` (an engine scene's manager, or the
+    /// staging one). Scene::setGraphScene is the only caller.
+    void _migrateGraph(graph::SceneHandle target, graph::NodeHandle newParent);
+
+    // ---- the mutation funnel ----------------------------------------------
+    using ChangeObserver = void (*)(SceneNode *, NodeChange);
+    /// A single process-wide observer, null by default (v1 keeps the seam
+    /// minimal deliberately — SPECS/SCENEGRAPH_SPEC.md §3 step 1). Every setter
+    /// on this class routes through notifyChanged() before it forwards.
+    static void setChangeObserver(ChangeObserver observer);
+    static ChangeObserver changeObserver();
 
     void setName(QString name);
     QString getName();
@@ -203,23 +235,13 @@ public:
 		return exportable;
 	}
 
-    iris::Vec3 getLocalPos() {
-        return pos;
-    }
-
-    iris::Quat getLocalRot() {
-        return rot;
-    }
-
-    iris::Vec3 getLocalScale() {
-        return scale;
-    }
+    iris::Vec3 getLocalPos()   { return graph::localPos(mGraphNode); }
+    iris::Quat getLocalRot()   { return graph::localRot(mGraphNode); }
+    iris::Vec3 getLocalScale() { return graph::localScale(mGraphNode); }
 
 	void rotate(iris::Quat rot, bool global = false);
-    
-    bool hasChildren() {
-        return !children.empty();
-    }
+
+    bool hasChildren() { return graph::childCount(mGraphNode) > 0; }
 
     void setLocalPos(iris::Vec3 pos);
     void setLocalRot(iris::Quat rot);
@@ -227,19 +249,12 @@ public:
 
     void setLocalTransform(iris::Mat4 transformMatrix);
 
-    void setTransformDirty();
-    void setHasDirtyChildren();
-
     bool isAttached();
     void setAttached(bool attached);
 
-	/// The owning parent, locked. Null for a root node — and also null for a
-	/// node whose parent has been destroyed, which is a state that could not
-	/// exist while `parent` was strong.
-	SceneNodePtr getParent() const
-	{
-		return parent.lock();
-	}
+	/// The owning parent. Null for a root node and for a detached one. Derived
+	/// from the ONE tree — Ogre's — through the node's back-pointer.
+	SceneNodePtr getParent() const;
 
 	/// The scene this node belongs to, locked. Null when the node is detached,
 	/// and null once the scene itself is gone.
@@ -248,12 +263,17 @@ public:
 		return scene.lock();
 	}
 
-	/// "Is there a live parent / scene", without materialising a
-	/// QSharedPointer. QWeakPointer::isNull() already reports expiry — it turns
-	/// true the moment the last strong reference goes — so these are the honest
-	/// replacements for the old `!!node->parent` / `!!node->scene` tests.
-	bool hasParent() const { return !parent.isNull(); }
+	bool hasParent() const;
 	bool hasScene()  const { return !scene.isNull(); }
+
+    /// The children, in order, resolved through Ogre's child vector and the
+    /// back-pointers. Built on demand: this is a QList by value, not a
+    /// reference to a member, because there is no member any more.
+    QList<SceneNodePtr> children() const;
+    /// The child count without materialising the list.
+    int childCount() const { return int(graph::childCount(mGraphNode)); }
+    /// This node's position among its siblings, or -1. Undo captures it.
+    int siblingIndex() const { return graph::indexInParent(mGraphNode); }
 
     void addAnimation(AnimationPtr anim);
     QList<AnimationPtr> getAnimations();
@@ -277,7 +297,6 @@ public:
     * 1) The duplicate shouldnt have a parent node or be added to a scene
     */
    virtual SceneNodePtr createDuplicate() {
-       //qt_assert((QString("This node isnt duplicable: ") + name).toStdString().c_str(),__FILE__,__LINE__);
 	   return SceneNodePtr(new SceneNode());
    }
 
@@ -301,25 +320,10 @@ public:
         return visible;
     }
 
-	void setVisible(bool flag = true) {
-		visible = flag;
-	}
+	void setVisible(bool flag = true);
 
-    void show(bool hideChildren = false) {
-        visible = true;
-		if (hideChildren) {
-			for (const auto &child : children)
-				child->show(hideChildren);
-		}
-    }
-
-    void hide(bool hideChildren = false) {
-        visible = false;
-		if (hideChildren) {
-			for (const auto &child : children)
-				child->hide(hideChildren);
-		}
-    }
+    void show(bool cascade = false);
+    void hide(bool cascade = false);
 
     bool isRemovable() {
         return removable;
@@ -327,6 +331,7 @@ public:
 
     void setPickable(bool canPick) {
         pickable = canPick;
+        notifyChanged(NodeChange::Flags);
     }
 
     bool isPickable() {
@@ -335,6 +340,7 @@ public:
 
     void setShadowCastingEnabled(bool val) {
         castShadow = val;
+        notifyChanged(NodeChange::Flags);
     }
 
     bool getShadowCastingEnabled() {
@@ -343,11 +349,20 @@ public:
 
     void setPlanarReflector(bool val) {
         planarReflector = val;
+        notifyChanged(NodeChange::Flags);
     }
 
     bool getPlanarReflector() const {
         return planarReflector;
     }
+
+    /// SCENE_STATIC (SPECS/SCENEGRAPH_SPEC.md §6): "this node never moves".
+    /// Static nodes are skipped by Ogre's per-frame transform update entirely,
+    /// which is where the multiplier of the whole swap lives. Opt-in, default
+    /// off, and an authoring-time decision: switching is not free, and an
+    /// engine attachment created dynamic refuses to become static.
+    void setStaticHint(bool value);
+    bool staticHint() const { return graph::isStatic(mGraphNode); }
 
     SceneNodeType getSceneNodeType();
     /**
@@ -359,22 +374,29 @@ public:
     void insertChild(int position, SceneNodePtr node, bool keepTransform = true);
     void removeFromParent();
     void removeChild(SceneNodePtr node);
+private:
+    /// removeChild's body. `detachGraph` is false for the reparent path, which
+    /// hands the node straight to its new parent — detaching it to the staging
+    /// manager first would rebuild the whole subtree twice.
+    void removeChildInternal(const SceneNodePtr &node, bool detachGraph);
+public:
 
     bool isRootNode();
 
-	iris::Quat getGlobalRotation();
-    iris::Vec3 getGlobalPosition();
-    iris::Mat4 getGlobalTransform();
-    iris::Mat4 getLocalTransform();
+	iris::Quat getGlobalRotation() { return graph::globalRot(mGraphNode); }
+    iris::Vec3 getGlobalPosition() { return graph::globalPos(mGraphNode); }
+    iris::Mat4 getGlobalTransform() { return graph::globalTransform(mGraphNode); }
+    iris::Mat4 getLocalTransform()  { return graph::localTransform(mGraphNode); }
 
 	void setGlobalPos(iris::Vec3 pos);
 	void setGlobalRot(iris::Quat rot);
 	void setGlobalTransform(iris::Mat4 transform);
 
     /*
-     * This function does multiple things:
-     * - Calculates the transformation of the objects
-     * - Particle systems use this to update animations
+     * Per-node tick. NO transform work happens here any more — Ogre resolves
+     * the hierarchy, in SIMD, on its worker threads, during the frame. What is
+     * left is the subclasses' own per-frame business (cameras recompute their
+     * matrices) and the walk that reaches them.
      */
     virtual void update(float dt);
     /// Property animations only — position / rotation / scale on THIS node.
@@ -393,21 +415,22 @@ public:
     /// Clip translation needs it (ANIMATION_ENGINE_MIGRATION_SPEC §3.1 step 3):
     /// composing a bone's chain at time t evaluates each node on that chain with
     /// its CLIP key if it has one and its AUTHORED transform otherwise, and
-    /// "authored" is not the same as "current" once a different clip has run —
-    /// which is precisely why the Avatar page had to snapshot and restore a rest
-    /// pose around every clip switch.
+    /// "authored" is not the same as "current" once a different clip has run.
     ///
-    /// Captured by applyDefaultPose(), whose four call sites are exactly the
-    /// four moments a fragment is known to be at rest (scene load and fragment
-    /// import). `hasRest` is false for a node nobody ever captured, and callers
-    /// then fall back to the live transform.
+    /// Captured by applyDefaultPose(), whose call sites are exactly the moments
+    /// a fragment is known to be at rest (scene load and fragment import).
+    /// `hasRest` is false for a node nobody ever captured, and callers then
+    /// fall back to the live transform.
     bool        hasRest = false;
     iris::Vec3   restPos;
     iris::Quat restRot;
     iris::Vec3   restScale{1, 1, 1};
 
+protected:
+    /// THE funnel. Every mutator calls it before (or instead of) forwarding.
+    void notifyChanged(NodeChange what);
+
 private:
-    void setParent(SceneNodePtr node);
     void setScene(ScenePtr scene);
     void removeFromScene();
 
@@ -416,6 +439,5 @@ private:
 
 }
 
-Q_DECLARE_METATYPE(iris::SceneNode)
 Q_DECLARE_METATYPE(iris::SceneNodePtr)
 #endif // SCENENODE_H

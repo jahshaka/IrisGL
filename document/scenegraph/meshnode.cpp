@@ -172,9 +172,10 @@ void MeshNode::setMaterial(MaterialPtr material)
 
 float MeshNode::getMeshRadius()
 {
-    float scaleX = globalTransform.column(0).toVector3D().length();
-    float scaleY = globalTransform.column(1).toVector3D().length();
-    float scaleZ = globalTransform.column(2).toVector3D().length();
+    const iris::Mat4 world = getGlobalTransform();
+    float scaleX = world.column(0).toVector3D().length();
+    float scaleY = world.column(1).toVector3D().length();
+    float scaleZ = world.column(2).toVector3D().length();
 
     return qMax(qMax(scaleX, scaleY), scaleZ);
 }
@@ -182,7 +183,7 @@ float MeshNode::getMeshRadius()
 BoundingSphere MeshNode::getTransformedBoundingSphere()
 {
     BoundingSphere boundingSphere;
-    boundingSphere.pos = this->globalTransform * mesh->boundingSphere.pos;
+    boundingSphere.pos = getGlobalTransform() * mesh->boundingSphere.pos;
     boundingSphere.radius = mesh->boundingSphere.radius * getMeshRadius();
     return boundingSphere;
 }

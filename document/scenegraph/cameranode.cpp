@@ -253,9 +253,10 @@ void CameraNode::updateCameraMatrices()
 {
     viewMatrix.setToIdentity();
 
-    iris::Vec3 pos = globalTransform.column(3).toVector3D();
-    iris::Vec3 dir = (globalTransform * iris::Vec4(0, 0, -1, 1)).toVector3D();
-    iris::Vec3 up = (globalTransform * iris::Vec4(0, 1, 0, 0)).toVector3D();
+    const iris::Mat4 world = getGlobalTransform();
+    iris::Vec3 pos = world.column(3).toVector3D();
+    iris::Vec3 dir = (world * iris::Vec4(0, 0, -1, 1)).toVector3D();
+    iris::Vec3 up = (world * iris::Vec4(0, 1, 0, 0)).toVector3D();
 
     viewMatrix.lookAt(pos, dir, up);
 
@@ -332,10 +333,9 @@ void CameraNode::lookAt(iris::Vec3 target)
     //todo: use global matrices
     iris::Mat4 matrix;
     matrix.setToIdentity();
-    matrix.lookAt(pos, target, iris::Vec3(0, 1, 0));
+    matrix.lookAt(getLocalPos(), target, iris::Vec3(0, 1, 0));
     matrix = matrix.inverted();
-    MathHelper::decomposeMatrix(matrix, pos, rot, scale);
-    setTransformDirty();
+    setLocalTransform(matrix);
 }
 
 void CameraNode::setOrthagonalZoom(float size)

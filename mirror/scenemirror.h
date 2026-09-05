@@ -266,6 +266,19 @@ public:
 private:
     struct Entry {
         jahshaka::engine::NodeId node = 0;
+        /// The DOCUMENT's Ogre scene node this entry adopted (opaque —
+        /// iris::graph::NodeHandle). Compared every sync: a migration between
+        /// scene managers rebuilds the handle, and the adopted id then names a
+        /// node that no longer exists.
+        const void *graphNode = nullptr;
+        /// ...and its epoch. The pointer alone is not enough: Ogre recycles
+        /// node memory, so a migration out of this scene manager and back can
+        /// hand the rebuilt node the SAME address.
+        quint32 graphEpoch = 0;
+        /// The visibility last pushed; -1 = never. Visibility is the document's
+        /// flag (Ogre's setVisible walks a node's attachments, so an empty node
+        /// has no visibility of its own) but it is pushed on CHANGE only.
+        int visiblePushed = -1;
         bool hasMesh  = false;
         bool hasLight = false;
         bool hasDecal = false;                       // an engine decal is bound
@@ -391,6 +404,7 @@ private:
     void syncGrid();
     jahshaka::engine::MeshId wireMeshFor(int kind);
     void visit(const iris::SceneNodePtr &node, jahshaka::engine::NodeId parent, QSet<long> &seen);
+    void releaseEntry(Entry &e);
     void removeMissing(const QSet<long> &seen);
     /// Frees engine meshes/materials no live entry references (asset browsing would
     /// otherwise grow them for the life of the process; pointer keys could alias).

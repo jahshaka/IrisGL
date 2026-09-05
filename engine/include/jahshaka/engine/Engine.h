@@ -81,6 +81,29 @@ public:
     // ---- Hierarchy and transforms (VIEWPORT_MIGRATION_PLAN.md step 2) ----
     /// An empty transform node under `parent` (0 = the scene root).
     virtual NodeId      createNode(NodeId parent = 0) = 0;
+    /// ADOPTS a scene node the HOST already owns and gives it a NodeId, so that
+    /// everything else on this interface (attachMesh, setLight, decals, clips,
+    /// particles) works on it exactly as if the engine had made it.
+    ///
+    /// SPECS/SCENEGRAPH_SPEC.md D2: the document's scene graph IS this backend's
+    /// scene graph, and this is the one call that says so. An adopted node's
+    /// transform, parent and children belong to the host — setNodeTransform and
+    /// setNodeParent on it are refused — which is what makes the old per-frame
+    /// transform push unnecessary.
+    ///
+    /// The pointer is opaque here on purpose (`Ogre::SceneNode*` in the Ogre
+    /// backend); the host obtains it from iris::graph, which is the only other
+    /// place in the program that names an engine node type. The node must belong
+    /// to THIS scene's native scene manager — nativeSceneManager() is how the
+    /// host arranges that. Returns 0 on a null pointer or a foreign manager.
+    ///
+    /// removeNode() releases the engine's attachments and forgets the id; it
+    /// never destroys an adopted node.
+    virtual NodeId      adoptNode(void *nativeSceneNode) = 0;
+    /// This scene's native scene manager, opaque (`Ogre::SceneManager*`). The
+    /// document migrates its tree into it when a SceneMirror binds; nothing else
+    /// may use it.
+    virtual void       *nativeSceneManager() const = 0;
     virtual bool        setNodeParent(NodeId, NodeId parent) = 0;
     /// Absolute LOCAL transform (relative to the parent). The document owns the
     /// numbers; the engine composes the hierarchy.
@@ -561,6 +584,19 @@ public:
     /// Returns null if called before the first createView()/createOffscreenView(),
     /// or if the name is already in use (lastError()).
     virtual Scene *createScene(const std::string &name) = 0;
+
+    /// The scene manager DETACHED document nodes live in, opaque
+    /// (`Ogre::SceneManager*`). SPECS/SCENEGRAPH_SPEC.md D2: a document node IS
+    /// an engine node, so one has to exist for nodes that are not (yet) in any
+    /// rendered scene — every node an importer builds, everything the undo stack
+    /// holds, every document that has not met a SceneMirror. It renders nothing
+    /// and is never bound to a View.
+    ///
+    /// Creating it forces the backend's one-time preparation (a surfaceless
+    /// window and the Hlms/resource registration a scene manager cannot exist
+    /// without), which is why the host asks for it exactly once, right after
+    /// Engine::create(), and hands it to iris::graph.
+    virtual void *documentGraphScene() = 0;
     /// Destroys the Scene and every node, mesh and material it owns. Views bound to
     /// it are detached first (they stay alive, showing nothing).
     virtual void   destroyScene(Scene *) = 0;

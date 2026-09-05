@@ -83,7 +83,7 @@ public:
     /// convention as LightNode::getLightDir.
     iris::Vec3 getProjectionDir()
     {
-        iris::Vec4 dir = (globalTransform * iris::Vec4(0, -1, 0, 0));
+        iris::Vec4 dir = (getGlobalTransform() * iris::Vec4(0, -1, 0, 0));
         return dir.toVector3D();
     }
 

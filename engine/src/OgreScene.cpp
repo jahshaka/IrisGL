@@ -109,10 +109,29 @@ NodeId OgreScene::createNode(NodeId parent) {
     } JAH_CATCH(mError, 0);
 }
 
+NodeId OgreScene::adoptNode(void *nativeSceneNode) {
+    JAH_TRY {
+        Ogre::SceneNode *n = static_cast<Ogre::SceneNode *>(nativeSceneNode);
+        if (!n) { mError = "adoptNode: null node"; return 0; }
+        if (n->getCreator() != mSceneMgr) {
+            mError = "adoptNode: the node belongs to another scene manager";
+            return 0;
+        }
+        Node rec;
+        rec.node = n;
+        rec.owned = false;
+        return track(rec);
+    } JAH_CATCH(mError, 0);
+}
+
+void *OgreScene::nativeSceneManager() const { return mSceneMgr; }
+
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
     JAH_TRY {
         Ogre::SceneNode *n = node(id);
         if (!n) { mError = "setNodeParent: unknown node"; return false; }
+        // An adopted node's place in the tree is the DOCUMENT's (one tree).
+        if (!mNodes[id].owned) { mError = "setNodeParent: node is adopted"; return false; }
         Ogre::SceneNode *p = parent ? node(parent) : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
         if (!p) { mError = "setNodeParent: unknown parent"; return false; }
         if (n->getParent() == p) return true;
@@ -124,6 +143,14 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
 
 void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) {
     JAH_TRY {
+        auto it = mNodes.find(id);
+        if (it != mNodes.end() && !it->second.owned) {
+            // The document owns an adopted node's transform. Silently ignoring
+            // the write would be worse than saying so: a caller that still
+            // pushes transforms at the engine has not been converted.
+            mError = "setNodeTransform: node is adopted; the document owns its transform";
+            return;
+        }
         if (auto *n = node(id)) {
             n->setPosition(toOgre(pos));
             n->setOrientation(Ogre::Quaternion(rot.w, rot.x, rot.y, rot.z));
@@ -367,6 +394,14 @@ void OgreScene::detachItem(NodeId id, Node &n) {
 }
 
 void OgreScene::releaseNode(NodeId id, Node &n) {
+    // An ADOPTED node belongs to the document, which may already have destroyed
+    // it (a delete, or a migration into another scene manager). Drop the pointer
+    // FIRST: everything below either destroys it or walks its children, and both
+    // are use-after-free on a node we do not own. Its engine-owned children — a
+    // light's -Y adapter, a decal's projector box — were re-homed under the
+    // scene root by iris::graph precisely so that they are still destroyable
+    // here.
+    if (!n.owned) n.node = nullptr;
     // Order: renderable off the node -> item (drops the datablock link and one
     // mesh ref) -> datablock -> node -> our mesh ref -> the mesh itself.
     releaseBillboards(n);

@@ -72,7 +72,7 @@ ClipExtractor::RestPose ClipExtractor::captureRest(const SceneNodePtr &root)
         r.rot = n->getLocalRot();
         r.scale = n->getLocalScale();
         out.insert(n, r);
-        for (const auto &child : n->children) stack.append(child.data());
+        for (const auto &child : n->children()) stack.append(child.data());
     }
     return out;
 }
@@ -108,7 +108,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         for (int i = 0; i < order.size(); ++i) {
             SceneNode *n = order[i];
             byName.insert(n->name, n);
-            for (const auto &child : n->children) order.append(child.data());
+            for (const auto &child : n->children()) order.append(child.data());
         }
     }
 
