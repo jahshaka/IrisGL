@@ -361,6 +361,15 @@ public:
     /// which is where the multiplier of the whole swap lives. Opt-in, default
     /// off, and an authoring-time decision: switching is not free, and an
     /// engine attachment created dynamic refuses to become static.
+    ///
+    /// TWO THINGS IT IS NOT, both pinned by tests/document/test_document_no_gl:
+    ///  * it is not sticky across a RE-PARENT. Ogre gives a node its parent's
+    ///    memory-manager class whenever the parent changes (Node::setParent
+    ///    migrates the child), so a hint set before the node reaches its final
+    ///    parent is silently lost. Mark AFTER parenting.
+    ///  * it is not a lock. A static node that moves anyway still resolves
+    ///    correctly — iris::graph tells the scene manager (notifyStaticDirty)
+    ///    on every write — it simply costs more than moving a dynamic one.
     void setStaticHint(bool value);
     bool staticHint() const { return graph::isStatic(mGraphNode); }
 
