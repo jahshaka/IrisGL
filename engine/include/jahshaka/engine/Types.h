@@ -698,6 +698,12 @@ struct EngineConfig {
     bool optimizeShadowMeshes = true;
     /// Host's display connection; required only for on-screen Views (see above).
     NativeDisplayHandle display = 0;
+    /// Vertical sync for ON-SCREEN views, as they are created (fps audit F1).
+    /// True is what every window did unconditionally before this field existed.
+    /// False asks for an immediate, tearing present mode — the "unlimited"
+    /// pacing mode. Change it later with Engine::setVsync(), which documents
+    /// what it costs and what it means; this only decides where windows start.
+    bool vsync = true;
 
     // ---- Persistent shader cache (SHADER_CACHE_SPEC.md) ----
     /// Directory the backend may persist compiled-shader artifacts in. EMPTY =
