@@ -962,27 +962,47 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 //   * it copies the reference node's PASS_SHADOWS passes too, so shadow-caster
 //     variants compile as well.
 //
-// STANDING CAVEAT, from the audit and unchanged: no upstream sample exercises
-// WarmUpHelper. It is lightly-trodden code. `JAHSHAKA_WARMUP_NO_PASS=1` in the
-// environment falls back to the old full-frame route without a rebuild — the
-// rollback, kept deliberately.
+// AND IT IS OFF BY DEFAULT ANYWAY. The audit's standing caveat — "no upstream
+// sample exercises WarmUpHelper, it is lightly-trodden code" — was right twice
+// over. Patch 0016 removes the FIRST crash; there is a SECOND one downstream of
+// it that this lane could not fix without a second patch, and it is a
+// use-after-free, which is not something to default anybody into:
+//
+//   SIGSEGV in ParallelHlmsCompileQueue::warmUpSerial (OgreRenderQueue.cpp:1333)
+//   on the SECOND world opened in an editor session, every time. At the crash
+//   `request.queuedRenderable.renderable->getDatablock()` is null and the
+//   request's `movableObject` cannot be read at all — the collected requests
+//   name objects from a world that has since been destroyed. Neither
+//   RenderQueue::warmUpShaders (:1169) nor warmUpSerial (:1332) null-checks the
+//   datablock, and nothing clears the pending request list when the scene that
+//   filled it goes away. Reproduced under gdb on an Xvfb display with the app
+//   driven over MCP: cold open fine, close, warm open dead.
+//
+//   NOT reproducible offscreen (tests/shadercache/test_warm_up.cpp case 7
+//   rebinds three worlds on one view and survives), which is why this is a
+//   default-off engine route and not a test that would have caught it.
+//
+// So: `JAHSHAKA_WARMUP_PASS=1` opts in, for the suite that measures what the
+// route buys and for whoever picks the second patch up. Everything else takes
+// the boring route below — render the view's own workspace a couple of frames
+// while the caller's loading cover is up. That warms what the camera can SEE
+// plus its shadow casters, and nothing else; the pass would have covered more.
 namespace {
 
-/// The rollback switch. Read once; an env var rather than a setting because the
-/// thing it disables is an ENGINE route, not a product policy, and the only
-/// people who need it are debugging a driver.
-bool warmUpPassDisabled() {
-    static const bool off = []() {
-        const char *v = std::getenv("JAHSHAKA_WARMUP_NO_PASS");
+/// OFF unless asked. An env var rather than a setting because the thing it
+/// switches is an ENGINE route with a known crash, not a product policy.
+bool warmUpPassEnabled() {
+    static const bool on = []() {
+        const char *v = std::getenv("JAHSHAKA_WARMUP_PASS");
         return v && *v && *v != '0';
     }();
-    return off;
+    return on;
 }
 
 }   // namespace
 
 bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef) {
-    return !warmUpPassDisabled() && cm && cm->hasNodeDefinition(refNodeDef);
+    return warmUpPassEnabled() && cm && cm->hasNodeDefinition(refNodeDef);
 }
 
 bool warmUp(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::Camera *camera,
@@ -1017,6 +1037,49 @@ bool warmUp(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::Camera *camera,
         tiny = OgreView::createRtt(root, baseName + "/WarmUpRtt", 4u, 4u, 1u);
 
         Ogre::WarmUpHelper::createFrom(cm, nodeName, refNodeDef, false);
+
+        // THE COLLECT/TRIGGER PAIRING, AND WHY WE HAVE TO ASSERT IT OURSELVES.
+        //
+        // A warm-up pass in Collect mode appends to two process-wide lists on
+        // the SceneManager's RenderQueue — ParallelHlmsCompileQueue::mRequests
+        // (each holding a raw Renderable*) and mPendingPassCaches — and only a
+        // pass in Trigger mode consumes and clears them
+        // (OgreRenderQueue.cpp:584-595). A Collect with no Trigger therefore
+        // leaves RAW POINTERS INTO THIS WORLD'S RENDERABLES parked on the
+        // render queue; close the world, open another, and the next Trigger
+        // walks them. Measured: SIGSEGV in HlmsManager::getHlms off a dangling
+        // datablock, on the SECOND scene open in the editor, every time.
+        //
+        // WarmUpHelper marks the last pass CollectAndTrigger only when the
+        // reference node's LAST target pass contains scene passes
+        // (OgreCompositorPassWarmUp.cpp:348-352: `i + 1u == numTargetPasses`
+        // is tested with `i` walking the REFERENCE node's target passes, from
+        // inside a block that only runs for targets that have scene passes).
+        // Our post-chain shape ends in a quad pass — the final composite into
+        // the window — so that test is never true and NOTHING triggers.
+        //
+        // So: find the last warm-up pass we were given and make it trigger.
+        // Upstream's intent, asserted from our side rather than assumed.
+        {
+            Ogre::CompositorNodeDef *warmDef = cm->getNodeDefinitionNonConst(nodeName);
+            Ogre::CompositorPassWarmUpDef *last = nullptr;
+            const size_t targets = warmDef ? warmDef->getNumTargetPasses() : 0u;
+            for (size_t t = 0; t < targets; ++t)
+                for (Ogre::CompositorPassDef *p :
+                     warmDef->getTargetPass(t)->getCompositorPassesNonConst())
+                    if (p->getType() == Ogre::PASS_WARM_UP)
+                        last = static_cast<Ogre::CompositorPassWarmUpDef *>(p);
+            if (!last) {
+                // No warm-up pass at all: nothing would be collected, so there
+                // is nothing to warm. Fall back rather than run an empty
+                // workspace.
+                throw Ogre::Exception(Ogre::Exception::ERR_INVALIDPARAMS,
+                                      "warm-up node has no warm-up passes",
+                                      "chain::warmUp");
+            }
+            last->mMode = Ogre::CompositorPassWarmUpDef::CollectAndTrigger;
+        }
+
         Ogre::CompositorWorkspaceDef *wd = cm->addWorkspaceDefinition(wsName);
         wd->connectExternal(0, nodeName, 0);
 
