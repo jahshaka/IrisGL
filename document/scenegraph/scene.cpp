@@ -576,7 +576,7 @@ void Scene::removeNode(SceneNodePtr node)
 
 	nodes.remove(node->getGUID());
     // The node stops riding anything. Whatever was riding IT keeps its bucket:
-    // the owner simply stops resolving (SocketResolver counts it as dangling
+    // the owner simply stops resolving (SocketResolver counts it as stale
     // and moves nothing), so an UNDO of the delete — which re-adds the same
     // guid — puts every rider back on its socket with no second verb.
     unregisterSocketAttachment(node);
@@ -624,15 +624,15 @@ void Scene::setGraphScene(graph::SceneHandle target)
 
     // The scene manager we are LEAVING may already be gone — an engine scene
     // destroyed while a document was still bound to it (the mirror is supposed
-    // to unbind first). Say so; walking those handles is a use-after-free.
+    // to unbind first). Say so; walking those handles is a read-after-destroy.
     if (mGraphScene && !graph::sceneAlive(mGraphScene)) {
         // The scene manager died under us — an engine scene destroyed while a
         // document was still bound to it (SceneMirror is supposed to unbind
-        // first). Every handle in it is dangling, so nothing may WALK the tree:
+        // first). Every handle in it is stale, so nothing may WALK the tree:
         // the registries are the only safe enumeration, and they cover every
         // node the tree reached (SceneNode::setScene registers them all).
         qWarning("iris::Scene: the engine scene this document was bound to has already been "
-                 "destroyed — every node handle in it is dangling and its transforms are lost. "
+                 "destroyed — every node handle in it is stale and its transforms are lost. "
                  "SceneMirror must unbind (setSource(null)) before Engine::destroyScene().");
         // The owner's engine objects died with the manager; firing the hook
         // would walk dead handles. Drop it.

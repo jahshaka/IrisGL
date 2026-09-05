@@ -136,7 +136,7 @@ void Environment::addCharacterControllerToWorldUsingNode(const iris::SceneNodePt
 // Exact mirror of addCharacterControllerToWorldUsingNode: the action comes off
 // the world's action list and the ghost off the broadphase BEFORE the objects
 // die. Deleting the controller while bullet still held those pointers left
-// dangling entries that the next stepSimulation walked.
+// stale entries that the next stepSimulation walked.
 void Environment::removeCharacterControllerFromWorld(const QString &guid)
 {
 	if (!characterControllers.contains(guid)) return;
@@ -557,7 +557,7 @@ void Environment::destroyPhysicsWorld()
 	// Character controllers first: their ghost objects live in the collision
 	// object array below, so they have to be unregistered and destroyed here or
 	// the loop deletes the ghosts out from under the CharacterControllers the
-	// hash still owns (the next play cycle then stepped dangling pointers).
+	// hash still owns (the next play cycle then stepped stale pointers).
 	removeAllCharacterControllersFromWorld();
 
 	if (world) {
@@ -568,7 +568,7 @@ void Environment::destroyPhysicsWorld()
 
 		// removeConstraint() only unregisters. The constraints WE created
 		// (addConstraintToWorld tracked every one) are ours to destroy, and
-		// leaving the vector populated left dangling pointers that the next
+		// leaving the vector populated left stale pointers that the next
 		// world's removeConstraintFromWorld could match by address.
 		qDeleteAll(constraints);
 		constraints.clear();

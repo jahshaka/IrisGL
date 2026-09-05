@@ -445,7 +445,7 @@ bool OgreScene::destroyTexture(TextureId id) {
         // UNBIND FIRST, from every material still holding it. An
         // HlmsPbsDatablock keeps the raw TextureGpu* (and a descriptor set
         // built from it); destroying a bound texture leaves that pointer
-        // dangling with no diagnostic until the GPU faults. Nothing reclaimed
+        // stale with no diagnostic until the GPU faults. Nothing reclaimed
         // textures before the deep-audit fix wave, so this was latent — it
         // stops being latent the moment reclaimUnused frees one.
         for (auto &kv : mMaterials) {

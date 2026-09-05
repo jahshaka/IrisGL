@@ -442,7 +442,7 @@ public:
     /// engine-side object it hung off the document's nodes (particle systems,
     /// planar-reflection registrations, highlight shells, Items) while those
     /// nodes still exist. Without this, whichever mirror bound the document
-    /// last silently stole the graph and the loser's engine objects kept
+    /// last silently took over the graph and the loser's engine objects kept
     /// pointers to destroyed nodes — the 2026-09-05 player→editor faults.
     void _setGraphEvacuationHook(std::function<void()> hook) { mGraphEvacuationHook = std::move(hook); }
     /// Rebuilds the whole tree inside `target`. Passing the staging handle (or
@@ -454,7 +454,7 @@ public:
     /// undo stack holds deleted nodes — audit §3.3). It stays in this scene's
     /// scene manager, so setGraphScene has to take it along; without that it
     /// would be left inside a manager the engine is free to destroy, and an
-    /// undo after a world switch would walk dangling handles.
+    /// undo after a world switch would walk stale handles.
     void rememberDetached(const SceneNodePtr &node);
 
     /// One of the TWO ENTRY POINTS onto iris::picking::raycastMeshes (the other

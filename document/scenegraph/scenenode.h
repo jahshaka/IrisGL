@@ -167,7 +167,7 @@ public:
     //
     // The owner is named by GUID and not by pointer on purpose: it survives the
     // file, it survives a re-import that rebuilds the node objects, and a
-    // dangling one is inert rather than a crash.
+    // stale one is inert rather than a crash.
     QString socketOwnerGuid;
     QString socketName;
 

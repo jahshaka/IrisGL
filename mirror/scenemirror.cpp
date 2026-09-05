@@ -101,7 +101,7 @@ SceneMirror::~SceneMirror()
     // (SPECS/SCENEGRAPH_SPEC.md D2: its nodes ARE that manager's nodes now).
     // Unbinding here covers the ordinary case; a caller that destroys the engine
     // scene BEFORE letting go of the mirror gets a loud warning out of
-    // Scene::setGraphScene instead of a silent use-after-free.
+    // Scene::setGraphScene instead of a silent read-after-destroy.
     //
     // ONLY IF WE STILL OWN THE GRAPH: another mirror may have taken it since
     // (player/editor share one document — 2026-09-05). Yanking it to staging
@@ -1031,7 +1031,7 @@ void SceneMirror::visit(iris::SceneNode *node)
     }
 
     // `e` is a reference into a QHash and the recursion INSERTS entries, which
-    // QHash does not keep value references stable across (use-after-free under
+    // QHash does not keep value references stable across (read-after-destroy under
     // ASan) — so nothing below may touch `e`.
     const iris::graph::NodeHandle h = node->graphNode();
     const std::size_t n = iris::graph::childCount(h);
@@ -2051,7 +2051,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     // R2 again, from the host side: clips ACCUMULATE on a node — the Avatar
     // page loads a Mixamo animation onto an already-loaded character — so this
     // runs while the previous set is attached AND, quite possibly, playing.
-    // Ogre's addAnimationsFromSkeleton would dangle every active-animation
+    // Ogre's addAnimationsFromSkeleton would go stale every active-animation
     // pointer, so the engine refuses; disable everything first. (Found by
     // scripting.e2e.avatar the moment a cross-file clip was added: the
     // character froze at bind pose with one warning in the log.)
@@ -2096,7 +2096,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     // R2: every clip goes on BEFORE any is enabled. Ogre's
     // addAnimationsFromSkeleton reallocates the vector its active-animation list
     // holds raw pointers into and does not fix that list up, so attaching to a
-    // playing node dangles every one of them. Nothing is enabled yet at this
+    // playing node goes stale every one of them. Nothing is enabled yet at this
     // point (the state push below is what enables), so one batched call is all
     // that is needed — and the engine refuses the alternative anyway.
     if (!mTarget->attachClips(e.node, descs.data(), descs.size())) {

@@ -205,7 +205,7 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// vector<CompositorTargetDef>::reserve, and CompositorTargetDef has a
 /// destructor that OGRE_DELETEs its passes but no move constructor. Growing the
 /// vector after targets exist therefore destroys the passes the relocated
-/// copies still point at — a use-after-free the moment the next pass is added.
+/// copies still point at — a read-after-destroy the moment the next pass is added.
 /// So it is called EXACTLY ONCE, with a capacity no chain can exceed, before
 /// the first addTargetPass. Nothing below may call it again.
 constexpr size_t kMaxTargetPasses = 48;
@@ -966,7 +966,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 // sample exercises WarmUpHelper, it is lightly-trodden code" — was right twice
 // over. Patch 0016 removes the FIRST crash; there is a SECOND one downstream of
 // it that this lane could not fix without a second patch, and it is a
-// use-after-free, which is not something to default anybody into:
+// read-after-destroy, which is not something to default anybody into:
 //
 //   SIGSEGV in ParallelHlmsCompileQueue::warmUpSerial (OgreRenderQueue.cpp:1333)
 //   on the SECOND world opened in an editor session, every time. At the crash
@@ -1047,7 +1047,7 @@ bool warmUp(Ogre::Root *root, Ogre::SceneManager *sm, Ogre::Camera *camera,
         // (OgreRenderQueue.cpp:584-595). A Collect with no Trigger therefore
         // leaves RAW POINTERS INTO THIS WORLD'S RENDERABLES parked on the
         // render queue; close the world, open another, and the next Trigger
-        // walks them. Measured: SIGSEGV in HlmsManager::getHlms off a dangling
+        // walks them. Measured: SIGSEGV in HlmsManager::getHlms off a stale
         // datablock, on the SECOND scene open in the editor, every time.
         //
         // WarmUpHelper marks the last pass CollectAndTrigger only when the

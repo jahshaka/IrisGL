@@ -352,7 +352,7 @@ void OgreScene::teardownPlanar() {
     }
     JAH_TRY {
         disarmAllReflectors();
-        // ~PlanarReflections leaves HlmsPbs::mPlanarReflections DANGLING — it
+        // ~PlanarReflections leaves HlmsPbs::mPlanarReflections STALE — it
         // does not unbind itself. Only the owner clears it (another scene may
         // have taken the binding since).
         if (planar::sBindingOwner == this) {

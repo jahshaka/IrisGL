@@ -191,7 +191,7 @@ public:
     /// sync(); public so a headless suite can step it explicitly. Returns how
     /// many nodes moved.
     int resolveSockets();
-    /// The socket resolver, for tests and for hosts that want the dangling
+    /// The socket resolver, for tests and for hosts that want the stale
     /// count. Its pose source is installed by this mirror's constructor.
     iris::SocketResolver &socketResolver() { return mSockets; }
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
@@ -573,7 +573,7 @@ private:
     /// The camera currently DRIVING the view (applyCamera's last one, after the
     /// active-camera substitution). Its own body and frustum are suppressed —
     /// see applyCamera. Raw pointer, compared only for identity; the document
-    /// owns it and a dangling value can only ever fail to match.
+    /// owns it and a stale value can only ever fail to match.
     const iris::CameraNode *mViewCamera = nullptr;
     /// Which sky the engine currently shows, and a 64-bit hash of the values it
     /// was built from. Two fields rather than one string because applySky

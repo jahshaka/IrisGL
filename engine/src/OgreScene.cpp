@@ -397,7 +397,7 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // An ADOPTED node belongs to the document, which may already have destroyed
     // it (a delete, or a migration into another scene manager). Drop the pointer
     // FIRST: everything below either destroys it or walks its children, and both
-    // are use-after-free on a node we do not own. Its engine-owned children — a
+    // are read-after-destroy on a node we do not own. Its engine-owned children — a
     // light's -Y adapter, a decal's projector box — were re-homed under the
     // scene root by iris::graph precisely so that they are still destroyable
     // here.

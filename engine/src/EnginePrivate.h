@@ -729,7 +729,7 @@ void shutdown();
 // Decal atlases (OgreDecals.cpp). PROCESS-WIDE, like the TextureGpuManager pools
 // they wrap: one image loaded by two scenes costs one slice. resetDecalAtlases()
 // MUST run when Ogre::Root dies, or the next Engine in the process inherits
-// dangling TextureGpu pointers (test_engine_recreate creates a second one).
+// stale TextureGpu pointers (test_engine_recreate creates a second one).
 struct DecalAtlas;
 DecalAtlas &decalAtlas(DecalMap kind);
 void        resetDecalAtlases();
@@ -1053,7 +1053,7 @@ private:
         /// The REVERSE of the binding, kept so destroyTexture can unbind a
         /// texture from every material holding it: an Ogre datablock keeps a
         /// raw TextureGpu* and a descriptor set, so destroying a still-bound
-        /// texture leaves a dangling pointer that only shows up as a GPU-side
+        /// texture leaves a stale pointer that only shows up as a GPU-side
         /// fault later. Latent until something actually reclaims textures —
         /// which the mirror now does.
         TextureId boundTextures[kPbrTextureSlotCount] = { 0, 0, 0, 0, 0 };
@@ -1192,7 +1192,7 @@ private:
     /// enough (a few ms at editor quality) to run on every light move.
     /// Ogre::InstantRadiosity caches mesh data by raw VertexArrayObject* and
     /// downloaded images by TextureGpu* (OgreInstantRadiosity.h:238-244). Destroying
-    /// a mesh/texture while IR is live leaves those caches dangling — the owner's
+    /// a mesh/texture while IR is live leaves those caches stale — the owner's
     /// scene-switch crash ("double free or corruption" tearing down a scene with IR
     /// enabled while the next project's assets churned). Ogre::VctVoxelizer has the
     /// same shape twice over: addItem keeps raw Item* until removeAllItems, and

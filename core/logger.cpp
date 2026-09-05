@@ -82,7 +82,7 @@ Logger *Logger::getSingleton()
     // nobody had opened).
     //
     // Deliberately NEVER destroyed — the same lifetime it has always had.
-    // A logger that dies at static-destruction time is a use-after-free
+    // A logger that dies at static-destruction time is a read-after-destroy
     // waiting for the first qWarning past main().
     static Logger *const singleton = [] {
         auto *logger = new Logger();

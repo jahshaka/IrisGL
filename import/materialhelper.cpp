@@ -99,7 +99,7 @@ static bool pathIsInside(const QString &path, const QString &dir)
 QStringList& MaterialHelper::warningSink()
 {
     // Thread-local: extraction is synchronous on its caller's thread (the
-    // import pipeline's worker), so a parallel import cannot steal another's
+    // import pipeline's worker), so a parallel import cannot take another's
     // warnings and no lock is needed.
     static thread_local QStringList sink;
     return sink;

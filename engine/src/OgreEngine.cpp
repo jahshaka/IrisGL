@@ -742,7 +742,7 @@ OgreEngine::~OgreEngine() {
     try { hud::destroySystem(); } catch (...) {}
     try {
         // The document's staging manager goes with the rest of the scenes and
-        // before the Root. Every handle in it dangles afterwards, which is why
+        // before the Root. Every handle in it goes stale afterwards, which is why
         // iris::graph tests Ogre::Root's liveness on every call.
         if (mDocumentScene && mRoot) mRoot->destroySceneManager(mDocumentScene);
         mDocumentScene = nullptr;
@@ -755,7 +755,7 @@ OgreEngine::~OgreEngine() {
     } catch (...) {}
     // The decal atlases are process-wide but their TextureGpu pointers belong to
     // THIS Root; a second Engine in the same process (test_engine_recreate)
-    // would otherwise inherit dangling masters and slice textures.
+    // would otherwise inherit stale masters and slice textures.
     detail::resetDecalAtlases();
     // The counter listener is registered on Ogre's default log, which Root owns.
     mShaderCache.detachCounters();

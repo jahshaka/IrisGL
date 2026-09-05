@@ -122,7 +122,7 @@ SceneHandle sceneOf(NodeHandle n);
 
 /// Is that scene manager still registered with the Root? An engine scene
 /// destroyed while a document was still bound to it answers false, and the
-/// document's handles are all dangling — the caller's job is to say so loudly
+/// document's handles are all stale — the caller's job is to say so loudly
 /// rather than to walk them.
 bool sceneAlive(SceneHandle s);
 

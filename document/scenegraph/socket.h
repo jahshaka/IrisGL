@@ -41,7 +41,7 @@ For more information see the LICENSE file
 // of sync() — read the pose the engine just computed, move the attached nodes,
 // then push everything. Nothing here re-renders to close that gap.
 //
-// FAIL SOFT, ALWAYS. A dangling attachment (the owner was deleted, the socket
+// FAIL SOFT, ALWAYS. A stale attachment (the owner was deleted, the socket
 // was removed, the bone was renamed by a re-import) does not move its node and
 // does not raise: it is reported by the verbs (node.sockets, node.info) and the
 // node simply stays where it is. A hard failure here would mean a re-imported
