@@ -146,6 +146,31 @@ public:
     QString socketOwnerGuid;
     QString socketName;
 
+    // ---- OUTLINER FOLDERS (SCENEGRAPH_SPEC.md §6b) -------------------------
+    //
+    // Which editor folder this node is filed under — "Props/Kitchen", empty for
+    // the root level. It is METADATA and nothing else: a folder is not a node,
+    // has no transform, and never appears in the hierarchy, the player, an
+    // export or the engine. The transform tree and the folder tree are
+    // orthogonal (Unreal's outliner model), which is why this is a plain string
+    // on the handle and not a parent pointer.
+    //
+    // Written by src/services/scenefolders.h (which owns path normalisation and
+    // is the only thing that should touch it) and persisted in the project's
+    // EDITOR section — never in the node's own serialized block.
+    QString folderPath;
+
+    QString getFolderPath() const { return folderPath; }
+    /// Raw setter — no normalisation, no scene-side folder registration. The
+    /// reader, duplication and scenefolders:: use it; UI and verbs go through
+    /// scenefolders::setNodeFolder, which normalises and keeps the scene's
+    /// explicit folder list correct.
+    void _setFolderPath(const QString &path)
+    {
+        folderPath = path;
+        notifyChanged(NodeChange::Flags);
+    }
+
     bool isSocketAttached() const { return !socketOwnerGuid.isEmpty() && !socketName.isEmpty(); }
     /// The RAW setter — no validation, no registry. The reader and duplication
     /// use it; everything else goes through Scene::attachToSocket, which

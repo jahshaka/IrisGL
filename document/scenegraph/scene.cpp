@@ -164,6 +164,7 @@ Scene::Scene()
     // atlas on for every scene and every test, so it is left to the owner.
     worldMode = -1;
     worldOverrides = QJsonObject();
+    folders.clear();
 
     // selection outline: width in Preferences units (SceneMirror maps it to the
     // inverted-hull scale as 1 + width/150); colour stays invalid = "never set",
