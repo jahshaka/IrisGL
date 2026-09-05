@@ -2,6 +2,12 @@
 // camera that draw a scene into it.
 #include "EnginePrivate.h"
 
+// The inset's letterbox rectangle is written straight onto its scene pass'
+// DEFINITION (chain::PipHandles::scenePass) between frames — Ogre re-reads it
+// on every execute, so that is a live viewport change with no rebuild.
+#include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
+#include <Compositor/Pass/PassClear/OgreCompositorPassClearDef.h>
+
 namespace jahshaka { namespace engine { namespace detail {
 
 OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *texture,
@@ -13,7 +19,8 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     // The compositor chain (POST_CHAIN_SPEC.md §3) replaces
     // CompositorManager2::createBasicWorkspaceDef: same pixels in the
     // passthrough shape, but the graph is ours to grow.
-    chain::build(mRoot->getCompositorManager2(), mWorkspaceDef, chainDesc(), mNodeDefs);
+    chain::build(mRoot->getCompositorManager2(), mWorkspaceDef, chainDesc(), mNodeDefs,
+                 mChainHandles);
 }
 
 ChainDesc OgreView::chainDesc() const {
@@ -26,6 +33,13 @@ ChainDesc OgreView::chainDesc() const {
     // so an offscreen view may legitimately keep the passthrough shape AND be
     // allowed to draw the HUD — which is exactly what the engine suite does.
     d.overlays   = overlaysAllowed();
+    // LETTERBOX (CAMERAS_SPEC §7.4) is a property of the CAMERA the host
+    // pushed, not of the view — a camera that constrains its aspect does so in
+    // every view that shows it. Unlike the effects below it is NOT cleared for
+    // offscreen views: an export or a screenshot of a constrained camera must
+    // show the same shot the viewport does, and the flag can only be true when
+    // a host deliberately pushed a constrained camera.
+    d.letterbox  = mCameraDesc.constrainAspect && mCameraDesc.aspect > 0.0f;
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -79,6 +93,146 @@ void OgreView::setOverlay(const ViewOverlayDesc &d) {
 }
 
 const ViewOverlayDesc &OgreView::overlay() const { return mOverlay; }
+
+// ---------------------------------------------------------------------------
+// THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7). The graph shape and every
+// spike finding behind it: ViewPipDesc (Types.h) and chain::buildPip.
+
+bool OgreView::pipAllowed() const {
+    // THE determinism law's single gate, in the same shape and the same place
+    // as overlaysAllowed() and chainDesc()'s post-fx early-out: an offscreen
+    // view NEVER gets an inset unless it opted in. Thumbnails, material
+    // previews and every pixel suite must stay byte-identical whatever a host
+    // pushes at them (tests/engine's pip_is_ignored_offscreen_unless_asked).
+    return !isOffscreen() || mPip.allowOffscreen;
+}
+
+void OgreView::setPip(const ViewPipDesc &d) {
+    if (d == mPip) return;              // hosts push per frame; the same value is free
+    mPip = d;
+    syncPip();                          // builds/tears the workspace only when needed
+    applyPip();                         // camera + rects are live, never a rebuild
+}
+
+const ViewPipDesc &OgreView::pip() const { return mPip; }
+
+void OgreView::syncPip() {
+    const bool want = mPip.enabled && pipAllowed() && mScene && mWorkspace;
+    if (!want) { destroyPip(); return; }
+    JAH_TRY {
+        Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+        if (mPipWorkspaceDef.empty()) {
+            mPipWorkspaceDef = mName + "/PipWorkspace";
+            chain::buildPip(mRoot, mPipWorkspaceDef, mPip, mPipNodeDefs, mPipHandles);
+        }
+        if (!mPipCamera) {
+            // POOLED, and created with isVisible = false: an idle camera costs
+            // only a frustum in the light-cull inner loop, and the spike proved
+            // (T6) that a camera which RENDERS is byte-identical either way,
+            // because Forward Clustered culls lights against the camera
+            // directly and never consults mVisibleCameras. Note the naming trap
+            // — the header calls the argument notShadowCaster, the .cpp calls
+            // it isVisible.
+            mPipCamera = mScene->sceneManager()->createCamera(mName + "/PipCamera", false);
+            mPipCamera->setNearClipDistance(0.1f);
+            mPipCamera->setFarClipDistance(1000.0f);
+        }
+        // ORDER IS THE WHOLE POINT. addWorkspace always appends (position -1),
+        // and there is NO reorder API — so the inset is (re)added here, after
+        // the main workspace, every time either of them is built. Adding it
+        // before the main workspace is not a subtle bug: the main pass simply
+        // paints over the inset and the frame hashes identical to no-PiP
+        // (spike T2).
+        if (mPipWorkspace) { cm->removeWorkspace(mPipWorkspace); mPipWorkspace = nullptr; }
+        mPipWorkspace = cm->addWorkspace(
+            mScene->sceneManager(), target(), mPipCamera, mPipWorkspaceDef, mEnabled,
+            /*position*/ -1, /*uavBuffers*/ nullptr, /*initialLayouts*/ nullptr,
+            /*vpOffsetScale*/ Ogre::Vector4(mPip.left, mPip.top, mPip.width, mPip.height),
+            // 0x00 IS THE DEFAULT AND IT SILENTLY DISABLES THE MODIFIER — the
+            // inset would render full-screen over the main view with no error
+            // of any kind (spike, correction 3).
+            /*vpModifierMask*/ 0xFF, /*executionMask*/ 0xFF);
+    } JAH_CATCH(mError, );
+}
+
+void OgreView::destroyPip() {
+    JAH_TRY {
+        Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+        if (mPipWorkspace) { cm->removeWorkspace(mPipWorkspace); mPipWorkspace = nullptr; }
+        if (!mPipWorkspaceDef.empty()) {
+            chain::destroyPip(mRoot, mPipWorkspaceDef, mPipNodeDefs, mPipHandles);
+            mPipWorkspaceDef.clear();
+        }
+        // LAST, and only now: the workspace's scene pass held this pointer, and
+        // destroying the camera first segfaults on the next frame (spike T6).
+        if (mPipCamera && mScene && mScene->sceneManager())
+            mScene->sceneManager()->destroyCamera(mPipCamera);
+        mPipCamera = nullptr;
+    } JAH_CATCH(mError, );
+}
+
+void OgreView::applyLetterboxAndPip() {
+    applyLetterbox();
+    applyPip();
+}
+
+void OgreView::applyPip() {
+    if (!mPipWorkspace || !mPipCamera) return;
+    JAH_TRY {
+        const CameraDesc &c = mPip.camera;
+        mPipCamera->setPosition(toOgre(c.position));
+        mPipCamera->setOrientation(
+            Ogre::Quaternion(c.orientation.w, c.orientation.x, c.orientation.y, c.orientation.z));
+        mPipCamera->setNearClipDistance(std::max(c.nearClip, 0.001f));
+        mPipCamera->setFarClipDistance(std::max(c.farClip, c.nearClip + 0.01f));
+
+        const unsigned tw = width(), th = height();
+        const float targetAspect = th ? float(tw) / float(th) : 1.0f;
+        float outer[4], inner[4];
+        chain::pipRects(mPip, targetAspect, outer, inner);
+
+        if (c.orthographic) {
+            mPipCamera->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
+            const float rectAspect = (inner[3] * th) > 0.0f
+                ? (inner[2] * float(tw)) / (inner[3] * float(th)) : 1.0f;
+            mPipCamera->setOrthoWindow(2.0f * c.orthoSize * rectAspect, 2.0f * c.orthoSize);
+        } else {
+            mPipCamera->setProjectionType(Ogre::PT_PERSPECTIVE);
+            mPipCamera->setFOVy(Ogre::Degree(std::max(1.0f, std::min(c.fovDegrees, 179.0f))));
+        }
+        // LETTERBOX (§7.4). setAutoAspectRatio would make the camera adopt the
+        // INNER rect's aspect every frame, which is right by accident but only
+        // because we computed the inner rect from `aspect` in the first place;
+        // freezing it is the honest statement and it is what keeps a world
+        // square square (spike T5: 32x32 px with it, 32x54 without).
+        mPipCamera->setAutoAspectRatio(!c.constrainAspect);
+        if (c.constrainAspect && c.aspect > 0.0f) mPipCamera->setAspectRatio(c.aspect);
+
+        // LIVE, both of them — no rebuild, spike T3. The workspace modifier
+        // places (and scissors) every pass of the inset node at the OUTER rect;
+        // the scene pass's own mVpRect then pulls it in to the INNER one, which
+        // Ogre re-reads from the definition on every execute
+        // (CompositorPass::setRenderPassDescToCurrent). The fill quad keeps
+        // [0,1] and therefore paints the whole outer rect: background where the
+        // two rects agree, letterbox bars where they do not.
+        mPipWorkspace->setViewportModifier(
+            Ogre::Vector4(outer[0], outer[1], outer[2], outer[3]));
+        if (mPipHandles.scenePass) {
+            auto &vp = mPipHandles.scenePass->mVpRect[0];
+            // width  = passWidth * outerWidth  -> passWidth = innerWidth / outerWidth
+            // left   = passLeft  + outerLeft   -> passLeft  = innerLeft  - outerLeft
+            vp.mVpLeft   = inner[0] - outer[0];
+            vp.mVpTop    = inner[1] - outer[1];
+            vp.mVpWidth  = outer[2] > 0.0f ? inner[2] / outer[2] : 1.0f;
+            vp.mVpHeight = outer[3] > 0.0f ? inner[3] / outer[3] : 1.0f;
+            vp.mVpScissorLeft   = vp.mVpLeft;
+            vp.mVpScissorTop    = vp.mVpTop;
+            vp.mVpScissorWidth  = vp.mVpWidth;
+            vp.mVpScissorHeight = vp.mVpHeight;
+        }
+        if (mPipHandles.fill) mPipHandles.fill->setAllClearColours(toOgre(mPip.background));
+    } JAH_CATCH(mError, );
+}
 
 void OgreView::setPostFx(const PostFxDesc &fx) {
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free
@@ -138,6 +292,13 @@ bool OgreView::attachWorkspace() {
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->addListener(l);
         ++mWorkspaceGeneration;
+        // RE-ASSERT THE INSET'S POSITION (CAMERAS_SPEC §7.2's ordering trap).
+        // The main workspace has just been appended, so it is now LAST on the
+        // target and would paint over the inset. There is no reorder API: the
+        // inset is removed and re-added, here, after every single main-workspace
+        // build — which is exactly why that all goes through this one seam.
+        syncPip();
+        applyPip();
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -145,6 +306,13 @@ bool OgreView::attachWorkspace() {
 bool OgreView::detachWorkspace() {
     if (!mWorkspace) return false;
     JAH_TRY {
+        // The inset's workspace targets the same texture and names a camera the
+        // main path may be about to replace: it goes first, and comes back
+        // through attachWorkspace's syncPip.
+        if (mPipWorkspace) {
+            mRoot->getCompositorManager2()->removeWorkspace(mPipWorkspace);
+            mPipWorkspace = nullptr;
+        }
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->removeListener(l);
         mRoot->getCompositorManager2()->removeWorkspace(mWorkspace);
@@ -183,6 +351,9 @@ void OgreView::notePresented() {
 void OgreView::detachScene() {
     JAH_TRY {
         detachWorkspace();
+        // The inset's camera belongs to the scene that is going away, and its
+        // definitions name this view — both die here, workspace before camera.
+        destroyPip();
         if (mCamera && mScene && mScene->sceneManager()) mScene->sceneManager()->destroyCamera(mCamera);
         mCamera = nullptr;
         mScene  = nullptr;
@@ -193,6 +364,14 @@ void OgreView::detachScene() {
 void OgreView::setCamera(const CameraDesc &c) {
     JAH_TRY {
         if (!mCamera) return;
+        // The LETTERBOX is a graph change (extra passes + inset viewports), so
+        // it goes through the same "only a shape change rebuilds" rule as the
+        // post chain: the flag flipping rebuilds, everything else — including
+        // the authored aspect and the camera's whole pose — is free.
+        const bool wasLetterboxed = chainDesc().letterbox;
+        mCameraDesc = c;
+        if (chainDesc().letterbox != wasLetterboxed) rebuildWorkspaceDef();
+        applyLetterbox();
         mCamera->setPosition(toOgre(c.position));
         mCamera->setOrientation(Ogre::Quaternion(c.orientation.w, c.orientation.x, c.orientation.y, c.orientation.z));
         mCamera->setNearClipDistance(std::max(c.nearClip, 0.001f));
@@ -214,12 +393,47 @@ void OgreView::setCamera(const CameraDesc &c) {
             mCamera->setProjectionType(Ogre::PT_PERSPECTIVE);
             mCamera->setFOVy(Ogre::Degree(std::max(1.0f, std::min(c.fovDegrees, 179.0f))));
         }
+        // §7.4: setAutoAspectRatio is ON for every ordinary view (the image
+        // fills the target), and must be OFF for a constrained one or the
+        // camera adopts the target's aspect and the shot is stretched into the
+        // bars instead of fitted between them.
+        mCamera->setAutoAspectRatio(!chainDesc().letterbox);
+        if (chainDesc().letterbox) mCamera->setAspectRatio(c.aspect);
+    } JAH_CATCH(mError, );
+}
+
+// ---------------------------------------------------------------------------
+// LETTERBOX (CAMERAS_SPEC §7.4). The FLAG is a graph change and lives in
+// ChainDesc; the RECTANGLE is derived from the target's own aspect, so it moves
+// on every resize and is written straight onto the pass definitions — which
+// Ogre re-reads on every execute, so this rebuilds nothing.
+void OgreView::applyLetterbox() {
+    if (mChainHandles.insetPasses.empty()) return;
+    JAH_TRY {
+        const unsigned w = width(), h = height();
+        const float targetAspect = h ? float(w) / float(h) : 1.0f;
+        float inner[4];
+        chain::letterboxRect(mCameraDesc.aspect, targetAspect, inner);
+        for (Ogre::CompositorPassDef *p : mChainHandles.insetPasses) {
+            auto &vp = p->mVpRect[0];
+            vp.mVpLeft = inner[0]; vp.mVpTop = inner[1];
+            vp.mVpWidth = inner[2]; vp.mVpHeight = inner[3];
+            vp.mVpScissorLeft = inner[0]; vp.mVpScissorTop = inner[1];
+            vp.mVpScissorWidth = inner[2]; vp.mVpScissorHeight = inner[3];
+        }
+        if (mChainHandles.letterboxSwatch)
+            mChainHandles.letterboxSwatch->setAllClearColours(toOgre(mBackground));
     } JAH_CATCH(mError, );
 }
 
 void OgreView::setEnabled(bool on) {
     mEnabled = on;
-    JAH_TRY { if (mWorkspace) mWorkspace->setEnabled(on); } JAH_CATCH(mError, );
+    JAH_TRY {
+        if (mWorkspace) mWorkspace->setEnabled(on);
+        // The inset rides the view: a disabled view that still ran its second
+        // workspace would draw an inset onto a frame nobody else touched.
+        if (mPipWorkspace) mPipWorkspace->setEnabled(on);
+    } JAH_CATCH(mError, );
 }
 
 Colour OgreView::background() const { return mBackground; }
@@ -244,7 +458,7 @@ void OgreView::rebuildWorkspaceDef() {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
         const bool hadWorkspace = detachWorkspace();
         chain::destroy(cm, mWorkspaceDef, mNodeDefs);
-        chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs);
+        chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }

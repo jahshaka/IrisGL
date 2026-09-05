@@ -428,6 +428,90 @@ struct CameraDesc {
     bool  orthographic = false;
     float orthoSize = 10.0f;           // HALF the vertical extent when orthographic
                                        // (the document camera's ortho(-s..+s) convention)
+
+    /// LETTERBOX the camera to `aspect` instead of filling the target
+    /// (CAMERAS_SPEC §2/§7.4). Off (the default) is the historical behaviour:
+    /// the camera's aspect follows the target, so the image always fills it.
+    ///
+    /// On, the drawn region is the largest `aspect`-shaped rectangle that fits
+    /// in the target (or in the PiP rect), centred, with bars in the remainder —
+    /// and the camera's own aspect ratio is FROZEN at `aspect` (Ogre's
+    /// setAutoAspectRatio goes off), because that is what stops the image being
+    /// stretched into the outer rectangle instead of fitted into the inner one.
+    bool  constrainAspect = false;
+    /// The authored aspect (width / height), used only when constrainAspect.
+    float aspect = 16.0f / 9.0f;
+
+    bool operator==(const CameraDesc &o) const {
+        return position.x == o.position.x && position.y == o.position.y &&
+               position.z == o.position.z &&
+               orientation.x == o.orientation.x && orientation.y == o.orientation.y &&
+               orientation.z == o.orientation.z && orientation.w == o.orientation.w &&
+               fovDegrees == o.fovDegrees && nearClip == o.nearClip && farClip == o.farClip &&
+               orthographic == o.orthographic && orthoSize == o.orthoSize &&
+               constrainAspect == o.constrainAspect && aspect == o.aspect;
+    }
+    bool operator!=(const CameraDesc &o) const { return !(*this == o); }
+};
+
+/// THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7): a second camera's view of
+/// the SAME scene, composited into a rectangle of this View's target.
+///
+/// Mechanism, and why it is this one: Ogre's own split-screen recipe — a SECOND
+/// CompositorWorkspace on the SAME render target, placed by addWorkspace's
+/// vpOffsetScale and moved live by setViewportModifier. Route A of
+/// CAMERAS_SPEC §7.2, proven on Vulkan at our pin by
+/// spikes/camera-pip-vulkan/FINDINGS.md before a line of this was written.
+///
+/// What the spike found, in one place, because every one of them is a rule this
+/// struct's implementation obeys:
+///   * the inset workspace must be LAST on the target, and there is no reorder
+///     API — every rebuild of the main workspace re-appends it, so the inset is
+///     removed and re-added after each one (OgreView::attachWorkspace);
+///   * its colour LOADs (a Clear on Vulkan is full-target and would wipe the
+///     main frame) and its depth CLEARs (Load leaves the main view's depth
+///     occluding 92% of the inset — a correctness requirement, not a saving);
+///   * because the colour Loads, the inset needs its OWN BACKGROUND: an unlit
+///     quad pass at the rect, before the scene pass;
+///   * addWorkspace's vpModifierMask defaults to 0x00, which silently makes the
+///     rect inert — it is passed 0xFF;
+///   * the main chain's final pass must keep MSAA samples AND resolve them
+///     (chain::kMultiWorkspaceStore) or the inset destroys the frame at 4x;
+///   * cameras are POOLED and destroyed AFTER the workspace that names them
+///     (the other order segfaults on the next frame).
+///
+/// COST: a second cull and a second render of everything the inset camera sees.
+/// The spike measured +0.33 ms/frame CPU on a trivial scene. It is off unless a
+/// host asks for it, and the editor asks only while a camera is selected.
+///
+/// IGNORED ON OFFSCREEN VIEWS unless `allowOffscreen` — the same guarantee, in
+/// the same single place, as PostFxDesc and ViewOverlayDesc. Thumbnails,
+/// previews and every pixel suite must stay byte-identical whatever a host
+/// pushes (tests/engine's pip_is_ignored_offscreen_unless_asked).
+struct ViewPipDesc {
+    /// Draw the inset at all. False is free — the workspace is not even built.
+    bool enabled = false;
+    /// The camera the inset renders from. Absolute, exactly like View::setCamera.
+    CameraDesc camera;
+    /// The inset rectangle in NORMALISED target coordinates: (0,0) is top-left,
+    /// (1,1) bottom-right. Defaults to a bottom-right inset a bit under a third
+    /// of the view (CAMERAS_SPEC D3).
+    float left = 0.66f, top = 0.64f, width = 0.31f, height = 0.33f;
+    /// The inset's own background, painted at the rect before the scene renders
+    /// — and the letterbox bars when the camera constrains its aspect. Without
+    /// it the main image shows through wherever the inset scene does not draw.
+    Colour background { 0.06f, 0.06f, 0.07f, 1.0f };
+
+    /// THE offscreen opt-in — same meaning and same word as
+    /// PostFxDesc::allowOffscreen and ViewOverlayDesc::allowOffscreen.
+    bool allowOffscreen = false;
+
+    bool operator==(const ViewPipDesc &o) const {
+        return enabled == o.enabled && camera == o.camera && left == o.left && top == o.top &&
+               width == o.width && height == o.height && background == o.background &&
+               allowOffscreen == o.allowOffscreen;
+    }
+    bool operator!=(const ViewPipDesc &o) const { return !(*this == o); }
 };
 
 /// Native window handle a View renders into (X11 Window / HWND / NSView).

@@ -102,6 +102,14 @@
 #include <string>
 #include <vector>
 
+// The two compositor definition types this header names but does not use: the
+// PiP's scene pass, whose viewport rectangle the view rewrites live, and the
+// clear pass that owns the inset's background colour (chain::PipHandles).
+// Forward-declared rather than included so the pass-def headers stay where they
+// belong — inside the .cpp files that build passes.
+namespace Ogre { class CompositorPassSceneDef; class CompositorPassClearDef;
+                 class CompositorPassQuadDef; class CompositorPassDef; }
+
 namespace jahshaka { namespace engine {
 // The backend's own namespace: these types and helpers are shared between the
 // TUs under engine/src and by nothing else (they used to live in one anonymous
@@ -218,6 +226,18 @@ struct ChainDesc {
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
     bool  refractions = false;
 
+    // ---- Letterbox (CAMERAS_SPEC §7.4) ----
+    /// Render the scene into an inner rectangle of the target instead of
+    /// filling it, with bars in the remainder — what a camera whose
+    /// CameraDesc::constrainAspect is set asks any view showing it for
+    /// (the main view while PILOTING it, phase 3).
+    ///
+    /// Only the FLAG is a graph change. The rectangle itself is written onto
+    /// the pass definitions live (ChainHandles::insetPasses), because it is
+    /// derived from the target's own aspect and therefore moves on every
+    /// resize — and Ogre re-reads mVpRect from the definition on every execute.
+    bool  letterbox = false;
+
     // ---- Engine-drawn overlay (STATS_OVERLAY_SPEC.md §6.5) ----
     /// Whether the FINAL overlay pass gets mIncludeOverlays = true. This is a
     /// property of the VIEW, not of what is currently being drawn: it is true
@@ -241,12 +261,33 @@ class OgreView;
 /// The chain builder (OgreChain.cpp). Not a class: it has no state — the state
 /// is the ChainDesc the view owns and the definition names it hands back.
 namespace chain {
+/// What build() hands back so the view can move things that are NOT graph
+/// changes — today exactly one thing: the letterbox rectangle
+/// (CAMERAS_SPEC §7.4). Ogre re-reads a pass's mVpRect from its DEFINITION on
+/// every execute (CompositorPass::setRenderPassDescToCurrent), so writing these
+/// between frames is live and rebuilds nothing.
+///
+/// Empty unless ChainDesc::letterbox — the pointers are into definitions this
+/// view owns and die with chain::destroy.
+struct ChainHandles {
+    /// Every pass that must be confined to the INNER rectangle: the scene
+    /// passes and the quad that paints the inner background.
+    std::vector<Ogre::CompositorPassDef *> insetPasses;
+    /// The clear that fills the tiny background swatch the inner-rect quad
+    /// copies. Its colour is the view's background, pushed live.
+    Ogre::CompositorPassClearDef *letterboxSwatch = nullptr;
+};
+
 /// Creates the node definitions and the workspace definition `desc` describes,
 /// under `workspaceDef`. EVERY node definition created is appended to
 /// `nodeDefsOut`, in creation order: a multi-node chain whose owner cleans up
 /// only one definition leaks the rest across view recreation.
 void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
-           const ChainDesc &desc, std::vector<std::string> &nodeDefsOut);
+           const ChainDesc &desc, std::vector<std::string> &nodeDefsOut,
+           ChainHandles &handlesOut);
+/// The inner rectangle for a letterboxed view: the largest `aspect`-shaped
+/// rectangle centred in a target of `targetAspect`. Normalised coordinates.
+void letterboxRect(float aspect, float targetAspect, float inner[4]);
 /// Removes the workspace definition and every node definition in `nodeDefs`
 /// (which is cleared). Safe when nothing was built.
 void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
@@ -254,6 +295,41 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 /// The name of the scene node definition for a workspace — the anchor later
 /// phases (and the planar-reflection lane) need to find the main scene pass.
 std::string sceneNodeDefName(const std::string &workspaceDef);
+
+// ---- The picture-in-picture inset (CAMERAS_SPEC §7.7) ----------------------
+/// What buildPip hands back so the view can move the inset without rebuilding
+/// anything: the letterbox rect lives on the SCENE pass's own mVpRect, which
+/// Ogre re-reads from the definition on every execute
+/// (CompositorPass::setRenderPassDescToCurrent), so writing it between frames
+/// is live. The fill quad keeps the full [0,1] rect and therefore always paints
+/// the whole inset — background plus bars.
+struct PipHandles {
+    Ogre::CompositorPassSceneDef *scenePass = nullptr;
+    /// The clear pass that paints the inset's background swatch. Its colour is
+    /// read per execute too, so pushing a new background never rebuilds either.
+    Ogre::CompositorPassClearDef *fill = nullptr;
+};
+
+/// Builds the inset's node + workspace definitions under `workspaceDef`.
+///
+/// The shape is the spike's, and every line of it is a finding (see
+/// ViewPipDesc): quad fill (Load colour, so the main frame survives) then one
+/// scene pass with Load on colour, CLEAR on depth, shadows OFF and the overlay
+/// render queues excluded — an inset is "what the camera sees", not a second
+/// copy of the editor's gizmos, and the camera BODY that put the inset on
+/// screen must not appear inside it.
+void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDesc &pip,
+              std::vector<std::string> &nodeDefsOut, PipHandles &handlesOut);
+/// Tears down what buildPip made, including its datablock.
+void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
+                std::vector<std::string> &nodeDefs, PipHandles &handles);
+/// The inset's two rectangles in NORMALISED TARGET coordinates: `outer` is the
+/// requested rect (clamped into the target), `inner` the largest `aspect`-shaped
+/// rectangle centred inside it. Without constrainAspect the two are the same.
+/// `targetAspect` is the target's own width/height — the outer rect is
+/// normalised, so a square rect on a 16:9 view is not square in pixels.
+void pipRects(const ViewPipDesc &pip, float targetAspect,
+              float outer[4], float inner[4]);
 
 /// PSO precache for a scene (SHADER_CACHE_SPEC.md §5): builds a throwaway
 /// warm-up workspace that mirrors `refNodeDef`'s scene passes, renders it once
@@ -1331,6 +1407,15 @@ public:
 
     void setOverlay(const ViewOverlayDesc &d) override;
     const ViewOverlayDesc &overlay() const override;
+
+    // ---- The picture-in-picture inset (CAMERAS_SPEC §7.7) ------------------
+    void setPip(const ViewPipDesc &d) override;
+    const ViewPipDesc &pip() const override;
+    /// Is this view ENTITLED to draw an inset at all? On-screen always;
+    /// offscreen only with ViewPipDesc::allowOffscreen. The determinism law's
+    /// single gate, in the same shape as overlaysAllowed() and chainDesc()'s
+    /// post-fx early-out.
+    bool pipAllowed() const;
     /// Is this view ENTITLED to draw the process HUD at all? On-screen always;
     /// offscreen only with ViewOverlayDesc::allowOffscreen. Decided in the same
     /// one place as the post chain's offscreen guarantee (chainDesc()), and
@@ -1399,6 +1484,19 @@ public:
     /// Feeds the camera position to the scene's GI (PCC probe blending tracks
     /// the viewer in hybrid mode).
     void updateGi();
+    /// Per-frame maintenance of everything derived from the TARGET's size:
+    /// the letterbox rectangle and the inset's. Free when neither is in use.
+    void applyLetterboxAndPip();
+    /// Writes the letterbox's inner rectangle onto the chain's inset passes and
+    /// the bar/background colours (CAMERAS_SPEC §7.4). Live; never a rebuild.
+    void applyLetterbox();
+    /// Pushes the inset's camera state and its two rectangles. LIVE: the
+    /// workspace's viewport modifier and the scene pass's own mVpRect are both
+    /// read per frame by Ogre, so moving or letterboxing the inset rebuilds
+    /// nothing. Called once a frame (the rects depend on the TARGET's aspect,
+    /// which a resize changes without the host touching ViewPipDesc) and from
+    /// setPip. Free when there is no inset.
+    void applyPip();
     /// Arms or disarms this view's planar-reflection compositor listener to
     /// match the bound scene's current state, and re-points it at the current
     /// camera and PlanarReflections instance. Cheap and idempotent; called once
@@ -1428,6 +1526,20 @@ private:
     void rebuildRtt(unsigned w, unsigned h);
     Ogre::TextureGpu *target() const;
 
+    // ---- PiP internals (CAMERAS_SPEC §7.7) --------------------------------
+    /// Brings the inset's workspace into line with mPip + pipAllowed(): builds
+    /// or tears it down, and re-appends it AFTER the main workspace. Called
+    /// from setPip and from attachWorkspace — the latter is the "re-assert the
+    /// order after every rebuild" rule (there is no reorder API, and
+    /// attachWorkspace always appends, so a main-workspace rebuild would
+    /// otherwise draw straight over the inset).
+    void syncPip();
+    /// Tears down workspace, definitions, datablock and camera, in that order.
+    /// The camera goes LAST: a pass holds a raw Camera* and destroying it first
+    /// segfaults on the next frame (spike T6).
+    void destroyPip();
+
+
     Ogre::Root                *mRoot;
     Ogre::Window              *mWindow;
     Ogre::TextureGpu          *mTexture;
@@ -1453,6 +1565,25 @@ private:
     PostFxDesc                 mPostFx;
     /// Ditto for the engine-drawn overlay (STATS_OVERLAY_SPEC §5.1).
     ViewOverlayDesc            mOverlay;
+    /// Ditto for the picture-in-picture inset (CAMERAS_SPEC §7.7).
+    ViewPipDesc                mPip;
+    /// The inset's second workspace on THIS view's target, its POOLED camera
+    /// (created once, reused for the life of the bound scene — Forward+ caches
+    /// light grids on the raw Camera* with a 3-frame TTL, so churning cameras
+    /// per frame is the VctMaterial aliasing class of bug), and the definitions
+    /// and handles chain::buildPip made.
+    Ogre::CompositorWorkspace *mPipWorkspace = nullptr;
+    Ogre::Camera              *mPipCamera    = nullptr;
+    std::string                mPipWorkspaceDef;
+    std::vector<std::string>   mPipNodeDefs;
+    chain::PipHandles          mPipHandles;
+    /// What chain::build handed back for THIS view's main chain — today the
+    /// letterbox's inset passes and its background swatch.
+    chain::ChainHandles        mChainHandles;
+    /// The last CameraDesc a host pushed. Kept because two things derive from
+    /// it beyond the Ogre camera itself: the letterbox flag (a graph change)
+    /// and its rectangle (re-derived on every resize).
+    CameraDesc                 mCameraDesc;
     unsigned                   mWidth, mHeight;
     Colour                     mBackground;
     bool                       mEnabled = true;
