@@ -86,6 +86,10 @@ void collectCandidates(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
     out.reserve(scene->meshes.size());
     for (const MeshNodePtr &mn : scene->meshes) {
         if (!mn) continue;
+        // The engine sweep masks on LAYER_VISIBILITY, so hidden objects never
+        // reach its candidate list — the fallback must agree, or "can I click
+        // a hidden mesh?" gets two answers depending on which path ran.
+        if (!mn->isVisible()) continue;
         MeshPtr mesh = mn->getMesh();
         if (!mesh) continue;
         const Mat4 inv = mn->getGlobalTransform().inverted();

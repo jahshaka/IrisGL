@@ -180,10 +180,14 @@ void setLocalScale(NodeHandle n, const Vec3 &v);
 void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 
 Mat4 localTransform(NodeHandle n);
-/// The world transform, RESOLVED: Ogre's `_getFullTransformUpdated()` walks up
-/// and recomputes only what is dirty. This is the honest replacement for the
-/// old getGlobalTransform() double-writer (audit F2) — same shape, but it is
-/// Ogre's own dirty-gated path rather than an unconditional recompose.
+/// The world transform, RESOLVED via Ogre's `_getFullTransformUpdated()`.
+/// COST MODEL (corrected 2026-09-05, verified at the pin): this is NOT
+/// dirty-gated — `Node::_updateFromParent()` recurses to the root
+/// unconditionally (OgreNode.cpp:283-293) and recomputes the node's whole
+/// 4-lane SIMD block. Fine as a point call; do NOT call it per candidate
+/// inside a loop over the document (cache the matrix for the loop instead).
+/// Still the honest replacement for the old getGlobalTransform()
+/// double-writer (audit F2) — one owner, no second store.
 Mat4 globalTransform(NodeHandle n);
 Vec3 globalPos(NodeHandle n);
 Quat globalRot(NodeHandle n);

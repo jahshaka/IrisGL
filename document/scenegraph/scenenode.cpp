@@ -421,8 +421,15 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
     if (!node) return;
     const iris::Mat4 initialGlobalTransform = node->getGlobalTransform();
 
+    // A move inside the same scene keeps its scene membership: tearing the
+    // registries down and rebuilding them loses state that only exists at the
+    // scene level (Scene::removeNode clears activeCameraGuid — a reparented
+    // active camera silently stopped being active) and pays remove+add over
+    // the whole subtree for a node that never left the document.
+    const bool sameSceneMove = node->hasScene() && getScene() &&
+                               node->getScene() == getScene();
     if (auto oldParent = node->getParent())
-        oldParent->removeChildInternal(node, false);
+        oldParent->removeChildInternal(node, false, sameSceneMove);
 
     // ONE tree: the child moves inside Ogre's hierarchy. A child that lives in
     // a different scene manager (the staging one, which is where every node is
@@ -434,7 +441,9 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 
     mChildRefs.append(node);      // the lifetime anchor; never the structure
 
-    if (auto sc = getScene()) node->setScene(sc);
+    if (auto sc = getScene()) {
+        if (!node->hasScene()) node->setScene(sc);
+    }
 
     if (keepTransform) {
         // ONE decomposition, Ogre's: the world transform the node had before
@@ -442,7 +451,14 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         // took the rotation from diff.normalMatrix() — the inverse-transpose,
         // R * S^-1, which is R only at scale 1 — and the scale from the column
         // lengths, so reparenting a non-uniformly scaled node rotated it.)
+        //
+        // The write below is rule 4's "a transform write demotes" firing on a
+        // node that did not move in any sense the user would name — its world
+        // pose is preserved by construction. Re-assert the static hint after;
+        // setStaticHint validates eligibility under the NEW parent itself.
+        const bool wantedStatic = node->wantsStatic();
         node->setGlobalTransform(initialGlobalTransform);
+        if (wantedStatic) node->setStaticHint(true);
     }
 
     node->notifyChanged(NodeChange::Structure);
@@ -460,7 +476,8 @@ void SceneNode::removeChild(SceneNodePtr node)
     removeChildInternal(node, true);
 }
 
-void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph)
+void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph,
+                                    bool keepSceneMembership)
 {
     if (!node) return;
     // Out of the tree first (this is what makes it stop rendering and stop
@@ -473,7 +490,9 @@ void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph)
         if (auto sc = node->getScene()) sc->rememberDetached(node);
         node->mGraphNode = graph::detach(node->mGraphNode);
     }
-    node->removeFromScene();
+    // keepSceneMembership: insertChild's same-scene move — the node is about
+    // to be re-attached under a parent in the SAME scene, so registries stay.
+    if (!keepSceneMembership) node->removeFromScene();
     mChildRefs.removeOne(node);
     node->notifyChanged(NodeChange::Structure);
     notifyChanged(NodeChange::Structure);

@@ -467,7 +467,8 @@ private:
     /// removeChild's body. `detachGraph` is false for the reparent path, which
     /// hands the node straight to its new parent — detaching it to the staging
     /// manager first would rebuild the whole subtree twice.
-    void removeChildInternal(const SceneNodePtr &node, bool detachGraph);
+    void removeChildInternal(const SceneNodePtr &node, bool detachGraph,
+                             bool keepSceneMembership = false);
 public:
 
     bool isRootNode();
