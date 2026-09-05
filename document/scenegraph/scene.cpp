@@ -634,12 +634,24 @@ void Scene::setGraphScene(graph::SceneHandle target)
         qWarning("iris::Scene: the engine scene this document was bound to has already been "
                  "destroyed — every node handle in it is dangling and its transforms are lost. "
                  "SceneMirror must unbind (setSource(null)) before Engine::destroyScene().");
+        // The owner's engine objects died with the manager; firing the hook
+        // would walk dead handles. Drop it.
+        mGraphEvacuationHook = nullptr;
         rootNode->_setGraphNode(nullptr);
         for (const auto &n : nodes) if (n) n->_setGraphNode(nullptr);
         for (const auto &w : mDetached) if (auto n = w.lock()) n->_setGraphNode(nullptr);
         mDetached.clear();
         mGraphScene = target;
         return;
+    }
+
+    // The graph's current OWNER releases its engine-side objects while the
+    // nodes still exist (see _setGraphEvacuationHook). One-shot: whoever binds
+    // next registers a fresh hook.
+    if (mGraphEvacuationHook) {
+        auto evacuate = std::move(mGraphEvacuationHook);
+        mGraphEvacuationHook = nullptr;
+        evacuate();
     }
 
     rootNode->_migrateGraph(target, nullptr);

@@ -28,6 +28,13 @@
 #include "irisgl/document/scenegraph/socket.h"
 #include "jahshaka/engine/Engine.h"
 
+// The graph-ownership handle (nodegraph.h's opaque pair) — forward-declared so
+// this header stays free of the graph API.
+namespace iris { namespace graph {
+struct SceneOpaque;
+using SceneHandle = SceneOpaque *;
+}}
+
 namespace iris { class Mesh; class Material; struct SkyRealistic; }
 
 class SceneMirror
@@ -419,6 +426,17 @@ private:
     /// atomic refcount per child — for every node of the scene, every frame.
     void visit(iris::SceneNode *node);
     void releaseEntry(Entry &e);
+    /// Releases every engine object this mirror hung off DOCUMENT nodes
+    /// (entries + highlight shells) — the body of the graph-evacuation hook
+    /// (Scene::_setGraphEvacuationHook). Runs while the nodes still exist,
+    /// right before another mirror migrates the document's graph away. The
+    /// mirror-scene-scoped objects (grid, sky, wire meshes) stay: they live on
+    /// OUR engine scene's own nodes, not the document's.
+    void evacuateEngineObjects();
+    /// The graph handle of OUR engine scene as of the last bind — kept so the
+    /// destructor can test ownership without touching mTarget (which may
+    /// already be gone).
+    iris::graph::SceneHandle mBoundHandle = nullptr;
     /// Drops the entries this sync did not reach. The "seen" set used to be a
     /// QSet<long> filled with one insert per node per frame (and keyed on a
     /// type that is 32-bit on Windows LLP64 while nodeId is 64-bit — audit F7);

@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #define SCENE_H
 
 #include "core/math/vec.h"
+#include <functional>
 #include <QList>
 #include <QStringList>
 #include "irisglfwd.h"
@@ -435,6 +436,15 @@ public:
     /// move is what lets the engine read the document's transforms directly
     /// instead of having them pushed at it every frame (audit F1).
     graph::SceneHandle graphScene() const { return mGraphScene; }
+    /// Registered by the mirror that OWNS this document's graph (the one whose
+    /// engine scene the tree lives in). setGraphScene fires it exactly once,
+    /// right BEFORE migrating the tree away, so the owner can release every
+    /// engine-side object it hung off the document's nodes (particle systems,
+    /// planar-reflection registrations, highlight shells, Items) while those
+    /// nodes still exist. Without this, whichever mirror bound the document
+    /// last silently stole the graph and the loser's engine objects kept
+    /// pointers to destroyed nodes — the 2026-09-05 player→editor faults.
+    void _setGraphEvacuationHook(std::function<void()> hook) { mGraphEvacuationHook = std::move(hook); }
     /// Rebuilds the whole tree inside `target`. Passing the staging handle (or
     /// nothing) UNBINDS: SceneMirror does that before it lets go of a document,
     /// because an engine scene may be destroyed at any time afterwards and the
@@ -549,6 +559,8 @@ private:
     /// Where this document's tree currently lives. Never null once an
     /// Ogre::Root exists; see setGraphScene.
     graph::SceneHandle mGraphScene = nullptr;
+    /// See _setGraphEvacuationHook. One-shot: setGraphScene clears it as it fires.
+    std::function<void()> mGraphEvacuationHook;
     /// Subtrees detached from this scene and still alive — see
     /// rememberDetached. WEAK: this list must never be the reason a deleted
     /// node stays alive; expired entries are pruned as they are found.

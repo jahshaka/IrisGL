@@ -102,7 +102,15 @@ SceneMirror::~SceneMirror()
     // Unbinding here covers the ordinary case; a caller that destroys the engine
     // scene BEFORE letting go of the mirror gets a loud warning out of
     // Scene::setGraphScene instead of a silent use-after-free.
-    if (mSource) mSource->setGraphScene(iris::graph::stagingScene());
+    //
+    // ONLY IF WE STILL OWN THE GRAPH: another mirror may have taken it since
+    // (player/editor share one document — 2026-09-05). Yanking it to staging
+    // from a non-owner would silently blank the owner's view; and the hook is
+    // the owner's, not ours to fire or clear.
+    if (mSource && mSource->graphScene() == mBoundHandle) {
+        mSource->_setGraphEvacuationHook(nullptr);   // entries are dropped, not released
+        mSource->setGraphScene(iris::graph::stagingScene());
+    }
 }
 
 void SceneMirror::setSource(iris::ScenePtr scene)
@@ -112,7 +120,13 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // The outgoing document leaves the engine's scene manager before anything
     // else is torn down: its nodes live IN that manager (one tree), and the
     // caller is free to destroy the engine scene the moment this returns.
-    if (mSource) mSource->setGraphScene(iris::graph::stagingScene());
+    // Ownership-guarded (2026-09-05): if another mirror has taken the graph
+    // since, it is not ours to move — and the hook registered on the document
+    // is the owner's, not ours.
+    if (mSource && mSource->graphScene() == mBoundHandle) {
+        mSource->_setGraphEvacuationHook(nullptr);   // entries released above
+        mSource->setGraphScene(iris::graph::stagingScene());
+    }
     for (MeshId &m : mWireMeshes) { if (m) mTarget->destroyMesh(m); m = 0; }
     if (mGridNode) {                    // removeNode reparents children, so drop them explicitly
         if (mGridMinorNode) mTarget->removeNode(mGridMinorNode);
@@ -155,9 +169,30 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // ...and the incoming one moves INTO it. This is the whole of the swap from
     // the mirror's side: after it, the engine reads the very nodes the user
     // edits, and the per-frame transform push (audit F1) has nothing to do.
-    if (mSource)
-        mSource->setGraphScene(
-            reinterpret_cast<iris::graph::SceneHandle>(mTarget->nativeSceneManager()));
+    if (mSource) {
+        mBoundHandle =
+            reinterpret_cast<iris::graph::SceneHandle>(mTarget->nativeSceneManager());
+        // setGraphScene fires the PREVIOUS owner's evacuation hook (another
+        // mirror sharing this document — the player page's, say) before the
+        // migration destroys the nodes its engine objects sit on.
+        mSource->setGraphScene(mBoundHandle);
+        mSource->_setGraphEvacuationHook([this] { evacuateEngineObjects(); });
+    }
+}
+
+void SceneMirror::evacuateEngineObjects()
+{
+    // The document's graph is about to migrate out of our manager: everything
+    // we attached to its nodes must go first, while those nodes still exist.
+    // (The 2026-09-05 player→editor faults: particle systems and the planar
+    // pass reading nodes the migration had already destroyed.)
+    for (Entry &e : mEntries) releaseEntry(e);
+    mEntries.clear();
+    for (HighlightShell &s : mHighlightShells)
+        if (s.node) mTarget->removeNode(s.node);
+    mHighlightShells.clear();
+    mHighlighted.clear();
+    mReclaimPending = true;
 }
 
 NodeId SceneMirror::engineNode(const iris::SceneNode *node) const
@@ -170,6 +205,15 @@ NodeId SceneMirror::engineNode(const iris::SceneNode *node) const
 int SceneMirror::sync()
 {
     if (!mSource || !mSource->getRootNode()) return 0;
+    // RE-TAKE the graph if another mirror took it while this view was hidden
+    // (player and editor share one document; whichever page is visible syncs,
+    // so the visible page owns). The previous owner's evacuation hook releases
+    // its engine objects before the migration; our own entries were emptied
+    // the same way when WE lost it, so the walk below rebuilds from scratch.
+    if (mSource->graphScene() != mBoundHandle) {
+        mSource->setGraphScene(mBoundHandle);
+        mSource->_setGraphEvacuationHook([this] { evacuateEngineObjects(); });
+    }
     // NO transform refresh. There is nothing to refresh: the document's world
     // transforms ARE Ogre's, resolved by the engine's threaded SIMD pass inside
     // the frame and, for the readers that need one between frames, on demand
