@@ -1,0 +1,121 @@
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+--- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+@@ -974,6 +974,20 @@
+ 
+         deviceExtensions.push_back( VK_KHR_SWAPCHAIN_EXTENSION_NAME );
+ 
++        // Jahshaka patch 0013: fifo_latest_ready = vsync without the FIFO
++        // queue backlog (NVIDIA xcb has no MAILBOX). A separate pass on
++        // purpose — this block must stay clear of patch 0006's context.
++        // String literals like portability_subset: the name macros need a
++        // recent SDK and the KHR/EXT spellings alias the same enum value.
++        for( const VkExtensionProperties &ext : availableExtensions )
++        {
++            const String extensionName = ext.extensionName;
++            if( extensionName == "VK_KHR_present_mode_fifo_latest_ready" )
++                deviceExtensions.push_back( "VK_KHR_present_mode_fifo_latest_ready" );
++            else if( extensionName == "VK_EXT_present_mode_fifo_latest_ready" )
++                deviceExtensions.push_back( "VK_EXT_present_mode_fifo_latest_ready" );
++        }
++
+ #if OGRE_DEBUG_MODE >= OGRE_DEBUG_HIGH
+         if( VulkanInstance::hasValidationLayers )
+             deviceExtensions.push_back( VK_EXT_DEBUG_MARKER_EXTENSION_NAME );
+@@ -1056,11 +1070,29 @@
+         VkPhysicalDevice16BitStorageFeatures device16BitStorageFeatures;
+         VkPhysicalDeviceShaderFloat16Int8Features deviceShaderFloat16Int8Features;
+         VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT deviceCacheControlFeatures;
++#ifdef VK_KHR_present_mode_fifo_latest_ready
++        // Jahshaka patch 0013: the present mode is legal only when its feature
++        // was enabled at device creation. Guarded on the SDK macro so an older
++        // SDK compiles this patch to nothing (and the window side then never
++        // selects the mode, because the extension was never requested).
++        VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR fifoLatestReadyFeature;
++        makeVkStruct( fifoLatestReadyFeature,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR );
++        fifoLatestReadyFeature.presentModeFifoLatestReady = VK_TRUE;
++#endif
+         if( fillDeviceFeatures2( deviceFeatures2, device16BitStorageFeatures,
+                                  deviceShaderFloat16Int8Features, deviceCacheControlFeatures ) )
+         {
+             createInfo.pNext = &deviceFeatures2;
+             deviceFeatures2.features = mDeviceFeatures;
++#ifdef VK_KHR_present_mode_fifo_latest_ready
++            if( hasDeviceExtension( "VK_KHR_present_mode_fifo_latest_ready" ) ||
++                hasDeviceExtension( "VK_EXT_present_mode_fifo_latest_ready" ) )
++            {
++                fifoLatestReadyFeature.pNext = deviceFeatures2.pNext;
++                deviceFeatures2.pNext = &fifoLatestReadyFeature;
++            }
++#endif
+         }
+         else
+             createInfo.pEnabledFeatures = &mDeviceFeatures;
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp b/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
+index e06b45daf..1b3f00ded 100644
+--- a/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
+@@ -404,23 +404,51 @@ namespace Ogre
+                                              "SHARED_DEMAND_REFRESH_KHR",
+                                              "SHARED_CONTINUOUS_REFRESH_KHR" };
+ 
+-        for( size_t i = 0u; i < 2u; ++i )
+-        {
+-            LogManager::getSingleton().logMessage( "Trying presentMode = " +
+-                                                   c_presentModeStrs[targetPresentModes[i]] );
+-            if( presentModesFound[i] )
++        // Jahshaka patch 0013: FIFO_LATEST_READY = vsync pacing without the
++        // FIFO queue backlog — the latency win MAILBOX gives elsewhere, on
++        // drivers (NVIDIA xcb) that never expose MAILBOX. Only with vsync on,
++        // only when the device extension was actually enabled (the device side
++        // of this patch), only when the surface enumerates the mode. NOTE the
++        // mode's enum value is 1000361000 — it must never index
++        // c_presentModeStrs (that read would be wild).
++        bool useFifoLatestReady = false;
++#ifdef VK_KHR_present_mode_fifo_latest_ready
++        if( mVSync && ( mDevice->hasDeviceExtension( "VK_KHR_present_mode_fifo_latest_ready" ) ||
++                        mDevice->hasDeviceExtension( "VK_EXT_present_mode_fifo_latest_ready" ) ) )
++        {
++            for( size_t i = 0u; i < numPresentModes; ++i )
+             {
+-                presentMode = targetPresentModes[i];
+-                break;
++                if( presentModes[i] == VK_PRESENT_MODE_FIFO_LATEST_READY_KHR )
++                {
++                    presentMode = VK_PRESENT_MODE_FIFO_LATEST_READY_KHR;
++                    useFifoLatestReady = true;
++                    break;
++                }
+             }
+-            else
++        }
++#endif
++
++        if( !useFifoLatestReady )
++        {
++            for( size_t i = 0u; i < 2u; ++i )
+             {
+-                LogManager::getSingleton().logMessage( "PresentMode not available" );
++                LogManager::getSingleton().logMessage( "Trying presentMode = " +
++                                                       c_presentModeStrs[targetPresentModes[i]] );
++                if( presentModesFound[i] )
++                {
++                    presentMode = targetPresentModes[i];
++                    break;
++                }
++                else
++                {
++                    LogManager::getSingleton().logMessage( "PresentMode not available" );
++                }
+             }
+         }
+ 
+-        LogManager::getSingleton().logMessage( "Chosen presentMode = " +
+-                                               c_presentModeStrs[presentMode] );
++        LogManager::getSingleton().logMessage(
++            "Chosen presentMode = " + ( useFifoLatestReady ? String( "FIFO_LATEST_READY_KHR" )
++                                                           : c_presentModeStrs[presentMode] ) );
+ 
+         //-----------------------------
+         // Create swapchain
