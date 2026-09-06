@@ -645,6 +645,26 @@ struct PlanarReflectionParams {
 
 enum class Backend { Vulkan, OpenGL };
 
+/// `Engine::createScene(name, kSceneMainThreadOnly)` — "this scene gets NO
+/// worker threads" (SPECS/THREADING_ADOPTION_SPEC.md P5).
+///
+/// It needs a spelling of its own because the natural one is taken: `0` has
+/// always meant "I do not care, give me the backend's default", and every
+/// caller that passes nothing passes 0. So the boundary needs two ways to say
+/// "zero", and only one of them may reach the backend as zero.
+///
+/// WHY IT IS NOT JUST A SMALLER NUMBER. At 1 the backend still SPAWNS a worker
+/// thread and still pays two barrier syncs per parallel pass, to do exactly the
+/// serial work the calling thread could have done inline. At 0 it spawns
+/// nothing and every pass runs inline with no barrier at all
+/// (`mForceMainThread`, OgreSceneManager.cpp:171 and :4705-4717). For a scene
+/// that is never drawn — the document's staging scene manager — or one that
+/// draws 128x128 once and is emptied again, 1 is strictly worse than 0.
+///
+/// The value is deliberately not 0 and deliberately not a plausible thread
+/// count, so a caller that computes a number can never land on it by accident.
+constexpr unsigned kSceneMainThreadOnly = ~0u;
+
 /// The host's sink for the engine's OWN log records (SESSION_LOG_SPEC F3-B).
 /// `level` is 0 for ordinary messages and 1 for LML_CRITICAL. See
 /// Engine::setLogSink for the three rules an implementation must obey — it is
@@ -914,6 +934,23 @@ struct RenderStats {
     unsigned long long triangles = 0;
     unsigned long long vertices = 0;
     unsigned long long instances = 0;
+
+    /// PSOs the LAST frame gave up on because it ran out of its compile budget
+    /// (SPECS/THREADING_ADOPTION_SPEC.md P4(b), decision D-E(1)). Objects using
+    /// an incomplete PSO do not appear that frame and are resubmitted for the
+    /// next one.
+    ///
+    /// ALWAYS 0 IN THIS ENGINE, AND THAT IS THE POINT. The budget
+    /// (RenderSystem::setPsoRequestsTimeout) is left at Ogre's default of 0,
+    /// i.e. off, deliberately: upstream's own documentation warns that
+    /// "techniques that rely on running a shader once (e.g. to fill a texture)
+    /// may end up uninitialized", which is every thumbnail, IBL bake, VCT
+    /// voxelization and offscreen pixel suite we have — and the knob is
+    /// process-wide while the only thing worth protecting is one on-screen view.
+    /// The counter costs one read, so it is reported anyway: a non-zero value
+    /// means somebody turned the deadline on, and would be the first thing to
+    /// look at if thumbnails ever came back half-drawn.
+    unsigned           incompletePsoRequests = 0;
 };
 
 /// A CENSUS of everything alive behind the boundary (fps audit F11).
@@ -946,6 +983,17 @@ struct ObjectCounts {
     /// editor is the NORMAL, wanted state; `updatedScenes == scenes` with
     /// several preview pages alive means the gate stopped working.
     unsigned updatedScenes = 0;
+    /// SceneManagers the engine holds that are NOT Scenes: the document's
+    /// staging manager (SPECS/SCENEGRAPH_SPEC.md D2), where every node that is
+    /// not in a rendered scene lives — everything an importer builds, everything
+    /// the undo stack holds, every document that has not met a SceneMirror.
+    ///
+    /// A ROW OF ITS OWN rather than part of `scenes` (THREADING_ADOPTION_SPEC.md
+    /// P5): it has no View, no workspace, no worker threads and no place in the
+    /// frame loop, and the census is a debugging instrument — a number that
+    /// mixes two kinds of object answers no question. 0 until the host asks for
+    /// documentGraphScene(), 1 after.
+    unsigned stagingScenes = 0;
     unsigned nodes = 0;         ///< tracked node records, summed over scenes
     unsigned meshes = 0;        ///< tracked mesh records, summed over scenes
     unsigned materials = 0;     ///< tracked material records, summed over scenes

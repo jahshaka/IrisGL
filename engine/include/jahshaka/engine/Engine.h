@@ -638,6 +638,21 @@ public:
     /// pass, so at small scene sizes the barrier cost outweighs the split work
     /// — measure before raising it (tests/benchmarks/bench_scenegraph has a
     /// `--threads` flag for exactly this).
+    ///
+    /// AND LESS THAN ONE IS A REAL ANSWER: pass `kSceneMainThreadOnly`
+    /// (Types.h) for a scene that should have NO worker threads at all
+    /// (SPECS/THREADING_ADOPTION_SPEC.md P5). That is a different mode, not a
+    /// smaller pool — the backend spawns nothing and every parallel pass runs
+    /// inline with no barrier, instead of waking one thread and paying two
+    /// barrier syncs to do the same serial work. It is what a staging scene
+    /// manager (which is never drawn) and a 128x128 thumbnail scene actually
+    /// want. It cannot be spelled `0`, because 0 has always meant "I do not
+    /// care, give me the default".
+    ///
+    /// NOT FOR A SCENE THAT COMPILES SHADERS: parallel Hlms and warm-up compile
+    /// need more than one worker (OgreRenderQueue.cpp:588), and 0 and 1 are
+    /// equally serial there. The startup warm-up scene is the worked example —
+    /// see the note on Tier::Utility in src/bridge/sceneworkerthreads.h.
     virtual Scene *createScene(const std::string &name, unsigned workerThreads = 0) = 0;
 
     /// The scene manager DETACHED document nodes live in, opaque

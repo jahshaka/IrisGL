@@ -172,9 +172,18 @@ void *OgreEngine::documentGraphScene() {
         }
         ensureHlms();
         if (!mHlmsRegistered) { mLastError = "documentGraphScene: Hlms unavailable"; return nullptr; }
-        // ONE worker thread and no Forward+ setup: nothing in here is ever
+        // NO worker threads and no Forward+ setup: nothing in here is ever
         // culled, lit or drawn. It exists to hold nodes.
-        mDocumentScene = mRoot->createSceneManager(Ogre::ST_GENERIC, 1u,
+        //
+        // ZERO, NOT ONE (THREADING_ADOPTION_SPEC.md P5). This asked for 1 until
+        // the hygiene phase, which spawned a thread and paid two barrier syncs
+        // per parallel pass so that a scene NOBODY EVER DRAWS could do its
+        // serial work on someone else's stack. At 0 Ogre sets mForceMainThread
+        // and runs those passes inline with no barrier and no thread
+        // (OgreSceneManager.cpp:171, :4705-4717). The frame loop has skipped
+        // this manager entirely since P3, so in practice the passes do not run
+        // at all — but the THREAD was created regardless, once per process.
+        mDocumentScene = mRoot->createSceneManager(Ogre::ST_GENERIC, 0u,
                                                    processUniqueName("jahshaka-document"));
         return mDocumentScene;
     } JAH_CATCH(mLastError, nullptr);
@@ -197,8 +206,18 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
         // box drawing the editor on two threads while six thumbnail scenes
         // held two each. 0 keeps that historical default so that no caller
         // that does not care has to think about it.
-        const unsigned threads = workerThreads == 0u ? 2u
-                                                     : (workerThreads > 32u ? 32u : workerThreads);
+        // TWO WAYS TO SAY ZERO, and only one of them reaches Ogre as zero
+        // (THREADING_ADOPTION_SPEC.md P5). `0` keeps its historical meaning —
+        // "I do not care", answered with the old hardcoded 2 — while
+        // kSceneMainThreadOnly (Types.h) is the caller who genuinely wants no
+        // pool: Ogre then sets mForceMainThread, spawns nothing, and runs every
+        // parallel pass inline with no barrier (OgreSceneManager.cpp:171,
+        // :4705-4717). Passing 1 instead is strictly worse — a thread is
+        // spawned and two barrier syncs are paid per pass to do the same serial
+        // work.
+        const unsigned threads = workerThreads == kSceneMainThreadOnly ? 0u
+                                 : workerThreads == 0u                 ? 2u
+                                 : (workerThreads > 32u ? 32u : workerThreads);
         Ogre::SceneManager *sm = mRoot->createSceneManager(Ogre::ST_GENERIC, threads, name);
         // HlmsPbs shades point and spot lights ONLY through Forward+ (Forward3D /
         // ForwardClustered); without it only directional lights reach the shader.
@@ -949,6 +968,23 @@ bool OgreEngine::renderStats(RenderStats &out) const {
                 out.vertices  = (unsigned long long)m.mVertexCount;
                 out.instances = (unsigned long long)m.mInstanceCount;
             }
+            // THE PSO DEADLINE'S HONEST HALF (THREADING_ADOPTION_SPEC.md P4(b),
+            // decision D-E(1)). Ogre can budget PSO compilation per frame and
+            // turn anything that misses the deadline into a stub, so the objects
+            // using it simply do not appear that frame
+            // (RenderSystem::setPsoRequestsTimeout, OgreRenderSystem.h:907-935).
+            // WE DELIBERATELY DO NOT USE IT: upstream's own warning is that
+            // "techniques that rely on running a shader once (e.g. to fill a
+            // texture) may end up uninitialized", which describes our thumbnail
+            // renders, IBL cubemap generation, VCT voxelization and every
+            // offscreen pixel suite — and the knob is process-wide while the
+            // thing worth protecting is one on-screen view.
+            //
+            // The COUNTER is free and honest, so it is here. At timeout 0 (our
+            // setting, and Ogre's default) it reads 0 for ever, which is exactly
+            // the useful statement: "no frame in this session dropped a PSO".
+            // Reset by the render system at the start of every frame.
+            out.incompletePsoRequests = (unsigned)rs->getIncompletePsoRequestsCounter();
         }
         return true;
     }
@@ -966,6 +1002,20 @@ bool OgreEngine::objectCounts(ObjectCounts &out) const {
         out.views  = unsigned(mViews.size());
         out.scenes = unsigned(mScenes.size());
         out.updatedScenes = mUpdatedScenes;
+        // STAGING SCENES ARE THEIR OWN ROW, not folded into `scenes`
+        // (THREADING_ADOPTION_SPEC.md P5, audit F10). `mScenes` holds the
+        // Scene OBJECTS this boundary handed out; the document's staging
+        // manager is an Ogre::SceneManager with no Scene wrapper, no View, no
+        // workspace and no place in the frame loop — invisible in this census
+        // until now. Folding it into `scenes` would have made the two kinds
+        // indistinguishable, and they behave nothing alike: this one is written
+        // by the import worker and never drawn.
+        //
+        // At most one per engine (documentGraphScene is memoised); the
+        // document's own fallback manager (iris::graph, "iris-staging") belongs
+        // to a Root this engine may not own and is deliberately not counted
+        // here — it exists only for hosts that never called setStagingScene.
+        if (mDocumentScene) out.stagingScenes = 1u;
         for (const auto &v : mViews) {
             if (v && v->isEnabled()) ++out.enabledViews;
         }

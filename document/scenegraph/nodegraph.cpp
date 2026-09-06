@@ -342,7 +342,14 @@ SceneHandle stagingScene()
     // rather than crash inside Ogre: the caller reports it.
     if (!root->getHlmsManager() || !root->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
         return nullptr;
-    gStaging = root->createSceneManager(Ogre::ST_GENERIC, 1u, "iris-staging");
+    // NO worker threads (SPECS/THREADING_ADOPTION_SPEC.md P5): this manager is
+    // never drawn and never culled, and since the explicit frame loop (P3) the
+    // render loop does not even walk it. 1 spawned a thread and paid two
+    // barrier syncs per parallel pass for nothing; 0 makes Ogre run those
+    // passes inline with no thread and no barrier (mForceMainThread,
+    // OgreSceneManager.cpp:171). The engine-side twin is
+    // OgreEngine::documentGraphScene.
+    gStaging = root->createSceneManager(Ogre::ST_GENERIC, 0u, "iris-staging");
     gStagingIsOurs = true;
     return wrap(gStaging);
 }
