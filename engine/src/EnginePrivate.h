@@ -810,10 +810,15 @@ public:
     bool destroyMaterial(MaterialId id) override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool detachMesh(NodeId id) override;
+    size_t itemCount(NodeId id) const override;
 
     // ---- Rigs: GPU skinning (GPU_SKINNING_SPEC; impl in OgreSkeleton.cpp) ----
     bool attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
                            const SkeletonDesc &rig) override;
+    bool followSkeleton(NodeId follower, NodeId source) override;
+    /// Copies every follower's pose from its source. Once per rendered frame,
+    /// AFTER the frame, so the poses copied are the ones just drawn.
+    void applySkeletonFollowers();
     bool hasSkeleton(NodeId id) const override;
     std::vector<std::string> boneNames(NodeId id) const override;
     bool setBonePoses(NodeId id, const BonePose *poses, size_t count) override;
@@ -835,7 +840,7 @@ public:
 
     // ---- Overlay primitives ----
     MaterialId createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe) override;
-    MaterialId createOutlineMaterial(const Colour &c) override;
+    MaterialId createOutlineMaterial(const Colour &c, bool skinnable) override;
     bool setUnlitMaterial(MaterialId id, const Colour &c) override;
     MeshId createLineMesh(const std::vector<Vec3> &points, bool strip) override;
 
@@ -946,6 +951,12 @@ private:
         std::string      datablockName;     // uniquely owned
         MeshId           meshRef     = 0;   // shared, owned by mMeshes
         MaterialId       materialRef = 0;   // shared, owned by mMaterials
+        /// Pose FOLLOWING (followSkeleton): the node this one copies its pose
+        /// from, and the nodes copying theirs from this one. Kept on both sides
+        /// so the per-frame pass can walk it from either end and so a node that
+        /// goes away takes its pairings with it.
+        NodeId               skeletonSource = 0;
+        std::vector<NodeId>  skeletonFollowers;
         // Billboard set (particles): uniquely owned; freed by releaseBillboards
         // BEFORE the scene manager dies (its _destroy needs the live VaoManager).
         // Decal (DECALS_SPEC): the Decal rides an internal child node whose
@@ -1043,6 +1054,11 @@ private:
     struct MaterialRec {
         std::string datablockName;
         bool unlit = false;
+        /// An `unlit` material whose datablock actually lives on HlmsPbs: the
+        /// SKINNED selection silhouette (HlmsUnlit has no skeletal path, so a
+        /// rigged shell has to be a Pbs datablock with the colour as emissive).
+        /// Only hlmsFor and setUnlitMaterial care.
+        bool pbsBacked = false;
         bool onTop = false;
         /// PbrAlphaMode::Refractive. Refractive items must render in the chain's
         /// OWN pass (kRefractiveRenderQueue) — Ogre's words: "the compositor
@@ -1096,6 +1112,15 @@ private:
     Ogre::Hlms *hlmsFor(const MaterialRec &m) const;
     /// Removes the renderable from a node that references a SHARED mesh/material.
     void detachItem(NodeId id, Node &n);
+    /// Forgets this node's pose-following pairings in both directions — the
+    /// node itself is going away (releaseNode).
+    void dropSkeletonFollowers(NodeId id, Node &n);
+    /// One follower's bone-local transforms, copied from its source.
+    void copySkeletonPose(Node &follower, Node &source);
+    /// Every node that HAS followers, so the per-frame copy costs the number of
+    /// pairings and not the number of nodes in the scene. Pruned lazily by the
+    /// pass itself.
+    std::vector<NodeId> mFollowSources;
     // Ogre::HlmsPbsDatablock::None used to be unspellable here: X11's `None`
     // macro ate the identifier while this header included Xlib.h. It no longer
     // does — but X11 headers can still arrive transitively through Ogre on a

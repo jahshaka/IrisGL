@@ -291,6 +291,94 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
 }
 
 // ---------------------------------------------------------------------------
+bool OgreScene::followSkeleton(NodeId followerId, NodeId sourceId) {
+    auto fit = mNodes.find(followerId);
+    if (fit == mNodes.end()) { mError = "followSkeleton: unknown follower node"; return false; }
+    Node &f = fit->second;
+    // source = 0 means "stop following".
+    if (!sourceId) {
+        if (f.skeletonSource) {
+            auto old = mNodes.find(f.skeletonSource);
+            if (old != mNodes.end()) {
+                auto &list = old->second.skeletonFollowers;
+                list.erase(std::remove(list.begin(), list.end(), followerId), list.end());
+            }
+            f.skeletonSource = 0;
+        }
+        return true;
+    }
+    if (followerId == sourceId) { mError = "followSkeleton: a node cannot follow itself"; return false; }
+    auto sit = mNodes.find(sourceId);
+    if (sit == mNodes.end()) { mError = "followSkeleton: unknown source node"; return false; }
+    Node &s = sit->second;
+    if (!f.item || !s.item) { mError = "followSkeleton: both nodes need a renderable"; return false; }
+    Ogre::SkeletonInstance *fs = f.item->getSkeletonInstance();
+    Ogre::SkeletonInstance *ss = s.item->getSkeletonInstance();
+    if (!fs || !ss) { mError = "followSkeleton: both renderables must be skinned"; return false; }
+    if (fs->getNumBones() != ss->getNumBones()) {
+        mError = "followSkeleton: the two rigs have different bone counts";
+        return false;
+    }
+    if (f.skeletonSource && f.skeletonSource != sourceId) {
+        auto old = mNodes.find(f.skeletonSource);
+        if (old != mNodes.end()) {
+            auto &list = old->second.skeletonFollowers;
+            list.erase(std::remove(list.begin(), list.end(), followerId), list.end());
+        }
+    }
+    f.skeletonSource = sourceId;
+    if (std::find(s.skeletonFollowers.begin(), s.skeletonFollowers.end(), followerId)
+        == s.skeletonFollowers.end())
+        s.skeletonFollowers.push_back(followerId);
+    // The per-frame pass walks THIS list, never mNodes: a scene with thousands
+    // of nodes and no follower must not pay a sweep per frame for a feature
+    // nothing in it uses.
+    if (std::find(mFollowSources.begin(), mFollowSources.end(), sourceId) == mFollowSources.end())
+        mFollowSources.push_back(sourceId);
+    // One copy right now, so a follower that appears mid-animation is posed on
+    // the frame it appears rather than flashing its bind pose once.
+    copySkeletonPose(f, s);
+    return true;
+}
+
+void OgreScene::copySkeletonPose(Node &follower, Node &source) {
+    Ogre::SkeletonInstance *fs = follower.item ? follower.item->getSkeletonInstance() : nullptr;
+    Ogre::SkeletonInstance *ss = source.item ? source.item->getSkeletonInstance() : nullptr;
+    if (!fs || !ss || fs == ss || fs->getNumBones() != ss->getNumBones()) return;
+    JAH_TRY {
+        // LOCAL transforms (Bone::getPosition/Orientation/Scale are
+        // parent-relative), so the follower's own scene node still decides where
+        // the result lands — which is the whole reason this is a copy and not
+        // Ogre's Item::useSkeletonInstanceFrom.
+        const size_t bones = fs->getNumBones();
+        for (size_t i = 0; i < bones; ++i) {
+            Ogre::Bone *d = fs->getBone(i);
+            const Ogre::Bone *s = ss->getBone(i);
+            d->setPosition(s->getPosition());
+            d->setOrientation(s->getOrientation());
+            d->setScale(s->getScale());
+        }
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::applySkeletonFollowers() {
+    if (!mSceneMgr || mFollowSources.empty()) return;
+    for (auto srcIt = mFollowSources.begin(); srcIt != mFollowSources.end();) {
+        auto nit = mNodes.find(*srcIt);
+        if (nit == mNodes.end()) { srcIt = mFollowSources.erase(srcIt); continue; }
+        Node &src = nit->second;
+        for (auto it = src.skeletonFollowers.begin(); it != src.skeletonFollowers.end();) {
+            auto fit = mNodes.find(*it);
+            if (fit == mNodes.end()) { it = src.skeletonFollowers.erase(it); continue; }
+            copySkeletonPose(fit->second, src);
+            ++it;
+        }
+        if (src.skeletonFollowers.empty()) { srcIt = mFollowSources.erase(srcIt); continue; }
+        ++srcIt;
+    }
+}
+
+// ---------------------------------------------------------------------------
 Ogre::SkeletonInstance *OgreScene::skeletonOf(NodeId id) const {
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.item) return nullptr;

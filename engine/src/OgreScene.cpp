@@ -383,7 +383,13 @@ void OgreScene::detachItem(NodeId id, Node &n) {
     // Renderable". The reflector FLAG survives in mReflectors, so a node that is
     // given a new mesh re-arms in attachMesh.
     if (n.item) disarmReflector(id, n);
-    if (n.item && n.meshRef) {
+    // ANY Item, not just one with a mesh reference. It used to be
+    // `n.item && n.meshRef`, so an Item whose bookkeeping had been lost — a
+    // throw between createItem and the meshRef assignment is enough — was
+    // ORPHANED: still attached to the scene node, still drawing, with the next
+    // attach overwriting the only pointer to it. An engine that cannot destroy
+    // a renderable it created has no way back to one-item-per-node.
+    if (n.item) {
         // Only GI-participating (lit) geometry invalidates — detaching a selection
         // outline or wire overlay must not trigger a re-voxelize. BEFORE the
         // destroy: the voxelizer/IR hold raw pointers into the dying geometry.
@@ -391,6 +397,38 @@ void OgreScene::detachItem(NodeId id, Node &n) {
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
     }
     n.meshRef = 0; n.materialRef = 0;
+}
+
+// Pose FOLLOWING (followSkeleton) is bookkeeping plus one copy per frame. The
+// pairing is INTENT and survives the Items: an editor re-attaches geometry all
+// the time — a material change, a mesh swap — and a silhouette that follows a
+// character must come back posed, not frozen at bind. Nothing has to be undone
+// when an Item dies (no shared Ogre state), so only node destruction drops it.
+void OgreScene::dropSkeletonFollowers(NodeId id, Node &n) {
+    for (NodeId followerId : n.skeletonFollowers) {
+        auto fit = mNodes.find(followerId);
+        if (fit != mNodes.end() && fit->second.skeletonSource == id)
+            fit->second.skeletonSource = 0;
+    }
+    n.skeletonFollowers.clear();
+    if (n.skeletonSource) {
+        auto sit = mNodes.find(n.skeletonSource);
+        if (sit != mNodes.end()) {
+            auto &list = sit->second.skeletonFollowers;
+            list.erase(std::remove(list.begin(), list.end(), id), list.end());
+        }
+        n.skeletonSource = 0;
+    }
+}
+
+size_t OgreScene::itemCount(NodeId id) const {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end() || !it->second.node) return 0;
+    size_t n = 0;
+    Ogre::SceneNode *sn = it->second.node;
+    for (size_t i = 0; i < sn->numAttachedObjects(); ++i)
+        if (dynamic_cast<Ogre::Item *>(sn->getAttachedObject(i))) ++n;
+    return n;
 }
 
 void OgreScene::releaseNode(NodeId id, Node &n) {
@@ -417,6 +455,10 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
     if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit)))
         invalidateGiCaches();
+    // The node is going away for good, so its pose-following pairings go with
+    // it (detachItem does NOT: an Item swap keeps them, so a re-attached
+    // character still drags its silhouette along).
+    dropSkeletonFollowers(id, n);
     if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.

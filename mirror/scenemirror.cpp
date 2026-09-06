@@ -416,7 +416,13 @@ void SceneMirror::syncHighlight()
         // prevent. A shell that was already released has released nothing.
         for (HighlightShell &s : mHighlightShells) {
             if (s.node && s.shown) { mTarget->setNodeVisible(s.node, false); s.shown = false; }
-            if (s.mesh) { s.mesh = 0; mReclaimPending = true; }
+            if (s.mesh) {
+                s.mesh = 0;
+                // A parked shell stops riding its character's pose: the per-frame
+                // copy should cost only what is actually on screen.
+                if (s.skinned) { mTarget->followSkeleton(s.node, 0); s.skinned = false; s.master = 0; }
+                mReclaimPending = true;
+            }
         }
         return;
     }
@@ -444,6 +450,7 @@ void SceneMirror::syncHighlight()
         mHighlightColourApplied = pref;
         if (mHighlightMaterial) mTarget->setUnlitMaterial(mHighlightMaterial, kSelection);
         if (mOutlineMaterial)   mTarget->setUnlitMaterial(mOutlineMaterial, kSelection);
+        if (mOutlineSkinnedMaterial) mTarget->setUnlitMaterial(mOutlineSkinnedMaterial, kSelection);
     }
     if (!mat) return;
     // One pooled shell per target mesh; extra shells from a previous (larger)
@@ -455,10 +462,43 @@ void SceneMirror::syncHighlight()
         HighlightShell &s = mHighlightShells[i];
         if (!s.node) s.node = mTarget->createNode();
         if (!s.node) continue;
-        if (s.mesh != m || s.wireframe != mHighlightWireframe) {
-            if (mTarget->attachMesh(s.node, m, mat)) {
+
+        // A SKINNED target needs a shell that follows the pose. The shell is a
+        // second Item over the SAME mesh, so it comes out skeleton-animated —
+        // but with a skeleton of its OWN, sitting at bind pose, and (until
+        // 2026-09-06) an HlmsUnlit datablock, which has no skeletal path at all.
+        // The result was a solid selection-coloured twin of the character
+        // standing wherever its bind pose was, for as long as it animated.
+        //
+        // So: the Pbs-backed silhouette (the only Hlms here that skins) plus
+        // followSkeleton, which copies the character's pose onto the shell's own
+        // skeleton every frame — a COPY and not Ogre's instance sharing,
+        // because a shared instance carries the character's WORLD transforms and
+        // the shell would then render exactly on top of the character, its own
+        // node (and with it the whole silhouette scale) meaning nothing.
+        //
+        // The wireframe highlight mode is unlit-only and therefore cannot skin;
+        // a rigged target gets the hull silhouette in both modes rather than a
+        // stale wireframe ghost.
+        const auto ent = mEntries.constFind(meshNode);
+        const bool skinned = ent != mEntries.constEnd() && ent->gpuSkinned && ent->node;
+        const NodeId master = skinned ? ent->node : NodeId(0);
+        MaterialId shellMat = mat;
+        if (skinned) {
+            if (!mOutlineSkinnedMaterial)
+                mOutlineSkinnedMaterial = mTarget->createOutlineMaterial(kSelection, true);
+            if (mOutlineSkinnedMaterial) shellMat = mOutlineSkinnedMaterial;
+        }
+        if (s.mesh != m || s.wireframe != mHighlightWireframe || s.skinned != skinned
+            || s.master != master) {
+            if (mTarget->attachMesh(s.node, m, shellMat)) {
                 s.mesh = m;
                 s.wireframe = mHighlightWireframe;
+                s.skinned = skinned;
+                s.master = master;
+                // The pairing is remembered engine-side, so a re-attach on
+                // either end re-arms it by itself.
+                mTarget->followSkeleton(s.node, master);   // 0 master = stop following
                 mReclaimPending = true;   // the shell's previous mesh may be free
             }
         }
@@ -492,7 +532,11 @@ void SceneMirror::syncHighlight()
     for (size_t i = targets.size(); i < mHighlightShells.size(); ++i) {
         HighlightShell &s = mHighlightShells[i];
         if (s.node && s.shown) { mTarget->setNodeVisible(s.node, false); s.shown = false; }
-        if (s.mesh) { s.mesh = 0; mReclaimPending = true; }
+        if (s.mesh) {
+            s.mesh = 0;
+            if (s.skinned) { mTarget->followSkeleton(s.node, 0); s.skinned = false; s.master = 0; }
+            mReclaimPending = true;
+        }
     }
 }
 

@@ -18,7 +18,12 @@ void OgreScene::refileItems(MaterialId id, const MaterialRec &m) {
 }
 
 Ogre::Hlms *OgreScene::hlmsFor(const MaterialRec &m) const {
-    return mRoot->getHlmsManager()->getHlms(m.unlit ? Ogre::HLMS_UNLIT : Ogre::HLMS_PBS);
+    // `unlit` is a POLICY flag (an overlay: no GI, its own render queue), not a
+    // statement about which Hlms owns the datablock. The skinned selection
+    // silhouette is unlit in effect but built on HlmsPbs, because HlmsUnlit
+    // cannot skin — see createOutlineMaterial.
+    const bool pbs = !m.unlit || m.pbsBacked;
+    return mRoot->getHlmsManager()->getHlms(pbs ? Ogre::HLMS_PBS : Ogre::HLMS_UNLIT);
 }
 
 void OgreScene::setRefractionsActive(bool active) {
@@ -529,20 +534,51 @@ MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool 
     } JAH_CATCH(mError, 0);
 }
 
-MaterialId OgreScene::createOutlineMaterial(const Colour &c) {
+MaterialId OgreScene::createOutlineMaterial(const Colour &c, bool skinnable) {
     JAH_TRY {
         MaterialRec rec; rec.datablockName = processUniqueName("outline"); rec.unlit = true;
-        auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
         Ogre::HlmsMacroblock macro;
         // Inverted hull: cull FRONT faces so only the shell's far side shows,
         // forming a silhouette band around the (slightly smaller) original.
         macro.mCullMode = Ogre::CULL_ANTICLOCKWISE;
         macro.mDepthCheck = true;
         macro.mDepthWrite = false;
-        auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsUnlit->createDatablock(
+        if (!skinnable) {
+            auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
+            auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsUnlit->createDatablock(
+                Ogre::IdString(rec.datablockName), rec.datablockName, macro, Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
+            db->setUseColour(true);
+            db->setColour(toOgre(c));
+            mMaterials[++mNextMaterialId] = rec;
+            return mNextMaterialId;
+        }
+        // THE SKINNED SILHOUETTE. HlmsUnlit has no skeletal path in this engine
+        // (`hlms_skeleton` appears only in the Pbs templates), so an unlit hull
+        // over a rigged mesh is welded to the bind pose while the character
+        // animates away from it — which is not a subtle artefact: it is a
+        // second, solid, selection-coloured body standing in the scene.
+        //
+        // HlmsPbs skins, so the same silhouette is built there and made unlit IN
+        // EFFECT: no diffuse, no specular, no metal, the colour as EMISSIVE.
+        // Emissive is added straight to the shaded result, so with everything
+        // else at zero the shell renders the flat selection colour — and it
+        // deforms, which is the whole point. `rec.unlit` stays TRUE because it
+        // means "an overlay, not scene geometry" everywhere else in this file
+        // (GI participation, render-queue choice); rec.pbsBacked is what tells
+        // hlmsFor which Hlms actually owns the datablock.
+        rec.pbsBacked = true;
+        auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+        auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->createDatablock(
             Ogre::IdString(rec.datablockName), rec.datablockName, macro, Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
-        db->setUseColour(true);
-        db->setColour(toOgre(c));
+        db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+        db->setDiffuse(Ogre::Vector3::ZERO);
+        db->setSpecular(Ogre::Vector3::ZERO);
+        db->setMetalness(0.0f);
+        db->setRoughness(1.0f);
+        db->setEmissive(Ogre::Vector3(c.r, c.g, c.b));
+        // The shell is a UI affordance, not geometry: it must not throw a
+        // shadow of the character it outlines.
+        db->setReceiveShadows(false);
         mMaterials[++mNextMaterialId] = rec;
         return mNextMaterialId;
     } JAH_CATCH(mError, 0);
@@ -552,6 +588,16 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end() || !it->second.unlit) return false;
     JAH_TRY {
+        // The skinned silhouette's colour lives in a Pbs datablock's EMISSIVE
+        // (createOutlineMaterial), so the one setter the host calls has to know
+        // both shapes — a live outline-colour change must reach either.
+        if (it->second.pbsBacked) {
+            auto *pbs = static_cast<Ogre::HlmsPbsDatablock *>(
+                hlmsFor(it->second)->getDatablock(Ogre::IdString(it->second.datablockName)));
+            if (!pbs) return false;
+            pbs->setEmissive(Ogre::Vector3(c.r, c.g, c.b));
+            return true;
+        }
         auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsFor(it->second)->getDatablock(Ogre::IdString(it->second.datablockName)));
         if (!db) return false;
         db->setColour(toOgre(c));

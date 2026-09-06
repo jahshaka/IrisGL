@@ -134,6 +134,15 @@ public:
     /// survive the node.
     virtual bool        attachMesh(NodeId, MeshId, MaterialId) = 0;
     virtual bool        detachMesh(NodeId) = 0;
+    /// How many renderables this node actually carries right now.
+    ///
+    /// The invariant is ONE (a node renders at most one mesh) and this is how a
+    /// suite can say so: an attach path that created an Item and then lost its
+    /// bookkeeping would leave the old one attached to the same scene node,
+    /// drawing a second copy of the object with nothing in the host's model
+    /// saying so. Counts the engine node's own attachments only — an outline
+    /// shell lives on a node of its own and never shows up here.
+    virtual size_t      itemCount(NodeId) const = 0;
 
     // ---- Rigs: GPU skinning (GPU_SKINNING_SPEC) ----
     /// Like attachMesh, but the mesh deforms on the GPU: the host pushes bone
@@ -241,7 +250,38 @@ public:
     /// Selection silhouette: unlit colour drawn on BACK faces only, so a copy of the
     /// mesh scaled up slightly (~4%) renders as a clean outline band around the
     /// original (inverted hull). Depth-tested, so occluders still hide it.
-    virtual MaterialId  createOutlineMaterial(const Colour &) = 0;
+    ///
+    /// `skinnable` picks the variant a SKINNED character needs. HlmsUnlit has no
+    /// skeletal path at all in this engine (`hlms_skeleton` lives only in the Pbs
+    /// templates), so an unlit hull over a rigged mesh draws the BIND POSE
+    /// forever: the moment the character animates, its "outline" peels off and
+    /// stands there as a solid selection-coloured twin (found 2026-09-06 on a
+    /// Mixamo character — it read as "the character renders twice"). The
+    /// skinnable variant is the same silhouette built on HlmsPbs with black
+    /// diffuse/specular and the colour as EMISSIVE, which is unlit in effect and
+    /// skins; pair it with shareSkeleton so the shell rides the character's own
+    /// pose instead of a second, un-posed skeleton.
+    virtual MaterialId  createOutlineMaterial(const Colour &, bool skinnable = false) = 0;
+    /// Makes `follower`'s renderable copy `source`'s POSE every frame — the
+    /// selection silhouette over an animating character, and anything else that
+    /// needs a second renderable of the same rig to move with the first.
+    ///
+    /// A COPY, not Ogre's Item::useSkeletonInstanceFrom: a shared instance
+    /// carries the source's WORLD transforms in its bone matrices, so the
+    /// follower renders exactly where the source is and its own scene node stops
+    /// meaning anything — which is fatal for a silhouette, whose whole existence
+    /// is a few percent of scale on that node. Copying the LOCAL bone transforms
+    /// keeps each renderable's own node in charge of where it lands.
+    ///
+    /// The copy happens after each rendered frame, so the follower rides ONE
+    /// FRAME behind. That is deliberate: the alternative is forcing a second
+    /// skeleton update per frame before rendering, and a selection band 16 ms
+    /// behind the character is not visible while a second full animation pass is
+    /// measurable. Both rigs must have the same bone count.
+    ///
+    /// The pairing is REMEMBERED across re-attaches on either end, and drops
+    /// itself when either node goes away. Passing source = 0 stops following.
+    virtual bool        followSkeleton(NodeId follower, NodeId source) = 0;
     /// A line list (pairs of points) or, with `strip`, a connected polyline.
     /// Attach with attachMesh like any mesh. One pixel wide.
     virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip) = 0;
