@@ -671,6 +671,28 @@ public:
     /// Draws every enabled View once. The host owns the loop and calls this.
     virtual void renderOneFrame() = 0;
 
+    /// RESOLVES ONE SCENE'S GRAPH WITHOUT DRAWING ANYTHING — transforms,
+    /// skeletal animations, tag points, bounds and the light list, exactly the
+    /// pass `renderOneFrame` runs for the scenes it draws.
+    ///
+    /// WHY THIS EXISTS (SPECS/THREADING_ADOPTION_SPEC.md P3). Bone transforms,
+    /// world AABBs and derived transforms are resolved by the scene-graph
+    /// update, which is part of a FRAME. Until P3 the frame updated every scene
+    /// manager in the process, so a host that wanted a pose resolved could get
+    /// one by calling `renderOneFrame()` with every view disabled — a frame
+    /// that drew nothing and updated everything. That is no longer true: the
+    /// frame now updates only the scenes an enabled View draws. Hosts that need
+    /// a resolved graph WITHOUT pixels — reading a bone after setting a clip
+    /// time is the real case — say so here instead.
+    ///
+    /// Strictly cheaper than the old trick (one scene, no render system work at
+    /// all) and correct whether or not the scene's page is on screen.
+    /// `clearFrameData` runs with it, so repeated calls do not accumulate the
+    /// global light list.
+    ///
+    /// False = no such scene, or the backend refused; `lastError()` says which.
+    virtual bool updateScene(Scene *scene) = 0;
+
     /// True while at least one View is enabled (View::setEnabled) — i.e. while
     /// renderOneFrame() has anything at all to draw.
     ///
@@ -831,6 +853,21 @@ public:
     /// Returns false only when there is no backend to ask; `out` is then left
     /// default-constructed.
     virtual bool objectCounts(ObjectCounts &out) const = 0;
+
+    /// WHAT THE ENGINE IS THREADING (see EngineThreading;
+    /// SPECS/THREADING_ADOPTION_SPEC.md P1). Reads the backend's own capability
+    /// answer and the live per-scene worker counts — no measurement, no state.
+    ///
+    /// The reason this is a verb rather than a build-time constant: the
+    /// multithreaded-shader-compilation flag lives in the ENGINE INSTALL, not
+    /// in Studio, so the only honest way to know whether this binary is talking
+    /// to a mode-2 engine is to ask the render system at run time. A tree that
+    /// forgot to re-run `irisgl/scripts/build-ogre.sh` reports false here and
+    /// nowhere else.
+    ///
+    /// Returns false only when there is no backend to ask.
+    virtual bool threading(EngineThreading &out) const = 0;
+
     /// Writes the cache now, if anything new has been compiled since the last
     /// write. Called on clean shutdown and once a compile burst has settled;
     /// safe (and a no-op) when the cache is disabled or nothing is dirty.

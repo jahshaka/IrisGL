@@ -58,21 +58,41 @@ For more information see the LICENSE file
 // link each other (ARCHITECTURE), so there is no lock they could share, and
 // injecting one would mean wrapping every Ogre construction in the backend.
 //
-// Almost everything the two threads touch is disjoint by construction: they
-// create into DIFFERENT SceneManagers (the worker's fragments are born in the
-// staging manager), so different `mSceneNodes` vectors and different node
-// memory managers. The single piece of genuinely shared mutable state was
-// `Ogre::Id::generateNewId<T>()` — one function-local static counter per type,
-// incremented non-atomically, with an upstream comment saying it assumed no
-// one would do this. A lost increment there hands two live objects one id,
-// which in this file also aliases two document handles onto one owner slot.
+// THE HAZARD, stated properly (this paragraph used to argue the opposite; it
+// was wrong, and a safety comment that is wrong is worse than none). The worker
+// creates into the STAGING SceneManager and the main thread edits the bound
+// one, so they own different `mSceneNodes` vectors — but "different scene
+// managers" was never sufficient, because the RENDER LOOP walked both.
+// `Root::renderOneFrame` (OgreRoot.cpp:1101-1126) iterates EVERY SceneManager
+// in the process and calls `updateSceneGraph()` on each, staging included. So
+// while the worker was inside `SceneManager::createSceneNode` ->
+// `ArrayMemoryManager::createNewSlot`, which on growth `OGRE_FREE_SIMD`s the
+// old SoA pools (OgreArrayMemoryManager.cpp:167-215), the main thread was
+// inside `updateAllTransforms` reading those very pools. That is a
+// use-after-free, not a torn read of a value.
 //
-// FIXED WHERE IT LIVES: `ogre-patches/0015-id-generator-atomic-counter.patch`
-// makes the counter a relaxed `std::atomic`. That is the whole fix — no lock
-// on the engine's side, no main-thread marshalling of the importer, and no
-// second transform store (the "worker builds pure data" alternative would need
-// one, and §6a rejects that). Re-run `irisgl/scripts/build-ogre.sh` after
-// pulling this: an engine built before patch 0015 still has the racy counter.
+// TWO FIXES, in two places, and both are needed:
+//
+//   * the ID COUNTER. `Ogre::Id::generateNewId<T>()` is one function-local
+//     static per type, incremented non-atomically, with an upstream comment
+//     saying it assumed nobody would do this. A lost increment hands two live
+//     objects one id, which in this file also aliases two document handles
+//     onto one owner slot. FIXED WHERE IT LIVES:
+//     `ogre-patches/0015-id-generator-atomic-counter.patch` makes it a relaxed
+//     `std::atomic`. Re-run `irisgl/scripts/build-ogre.sh` after pulling: an
+//     engine built before patch 0015 still has the racy counter.
+//   * the POOLS, i.e. the use-after-free above. Fixed STRUCTURALLY, by the
+//     engine: `OgreEngine::renderOneFrame` no longer calls
+//     `Root::renderOneFrame` — it inlines its body and updates only the scenes
+//     an ENABLED View draws (THREADING_ADOPTION_SPEC.md P3). A staging manager
+//     never feeds a View, so the render thread never touches it, and the two
+//     threads really are disjoint now — by construction rather than by
+//     assertion. No lock on the engine's side, no main-thread marshalling of
+//     the importer, and no second transform store (the "worker builds pure
+//     data" alternative would need one, and §6a rejects that).
+//
+// If the engine ever goes back to `Root::renderOneFrame()`, this hazard comes
+// back with it — that revert is not neutral.
 // -----------------------------------------------------------------------------
 
 #include <cstddef>

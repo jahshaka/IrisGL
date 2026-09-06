@@ -60,6 +60,34 @@ cmake -S . -B build -G Ninja \
 `CMAKE_POLICY_VERSION_MINIMUM=3.5` is defensive — same reason as Jahshaka's build; Ogre-Next's own
 root is `cmake_minimum_required(VERSION 3.13)`, but nested third-party CMake can be older.
 
+**The list above is historical (2026-08-29); `scripts/build-ogre.sh` is the source of truth**
+and pins every component explicitly. One argument there deserves calling out because it is an
+*ABI* switch rather than a component:
+
+```
+-DOGRE_SHADER_COMPILATION_THREADING_MODE=2
+```
+
+Multithreaded shader/PSO compilation (`SPECS/THREADING_ADOPTION_SPEC.md` P1). Upstream's
+default (1) enables the threaded path only through compiler TLS and only when `OGRE_STATIC`
+is true — we build **shared**, so mode 1 means "off, on every platform, for ever". Mode 2
+drops the backwards-compatible tid-less `Hlms` overloads instead; we use none of them (we
+subclass `Hlms` nowhere, and our one `HlmsListener` overrides only the two hooks that carry no
+`tid` in either mode), which is what makes the flip free of source changes.
+
+Two consequences to know:
+
+* **Every tree must re-run `build-ogre.sh` after pulling the commit that added it.**
+  `generateAbiCookie()` hashes both threading macros, so a Studio compiled against the old
+  `OgreBuildSettings.h` and linked against a mode-2 engine **aborts at `Ogre::Root`
+  construction**. That is the loud failure; the quiet one is the reverse — an engine still
+  built at mode 1, where everything works and `app.threading().multithreadedShaderCompilation`
+  reads `false`.
+* **The script fails loudly if the flag did not take**: after installing, it greps the
+  installed `include/OGRE-Next/OgreBuildSettings.h` and exits non-zero while
+  `OGRE_SHADER_THREADING_BACKWARDS_COMPATIBLE_API` is still defined. A stale CMake cache in
+  `thirdparty/ogre-next/build` is the usual cause — delete it and re-run.
+
 ### ✅ RESULT — built and installed clean, 2026-08-29
 
 `554/554` targets, **zero errors**, install exit 0. Wall time ~10 min on 32 threads.

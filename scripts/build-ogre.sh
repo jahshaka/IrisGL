@@ -124,10 +124,53 @@ done
 # recompile after a flip. generateAbiCookie() does not hash component defines,
 # so nothing catches a stale consumer at runtime; we rely on CMake's -MD depfiles
 # tracking the installed OgreBuildSettings.h (do not make those includes SYSTEM).
+#
+# OGRE_SHADER_COMPILATION_THREADING_MODE=2 (SPECS/THREADING_ADOPTION_SPEC.md P1)
+# turns Ogre's MULTITHREADED SHADER/PSO COMPILATION on. It is not a performance
+# knob with a default we happen to disagree with -- upstream's mode 1 (the
+# default) enables the threaded path only via compiler TLS, and only when
+# OGRE_STATIC is true (ogre-next/CMakeLists.txt:446-449). We build SHARED, so
+# mode 1 means "off", for ever, on every platform: VulkanRenderSystem::
+# supportsMultithreadedShaderCompilation() returns false, the parallel Hlms
+# compile queue never starts, and HlmsDiskCache::applyTo runs single-threaded.
+# Mode 2 drops the backwards-compatible tid-less overloads instead of using TLS
+# -- API we use nowhere (we subclass Hlms nowhere, and our one HlmsListener
+# overrides only the two tid-less hooks), which is what makes the flip free.
+#
+# PLATFORM-NEUTRAL ON PURPOSE: it belongs in this shared arg list, not in
+# PLATFORM_FLAGS. macOS runs the same VulkanRenderSystem through MoltenVK and
+# is in exactly the same shared-build situation, and so is MSVC.
+#
+# MEASURED RESIDUAL, recorded here because this flag is what creates it.
+# ThreadSanitizer over an INSTRUMENTED Ogre (built once for this purpose, 2026-09-06)
+# reports exactly one race in the parallel compile path: two
+# ParallelHlmsCompileQueue threads inside Hlms::compileShaderCode -> gp->load()
+# -> ResourceManager::_notifyResourceLoaded, both doing `mMemoryUsage += size`.
+# `mMemoryUsage` is an Ogre::AtomicScalar whose operator+= is guarded by
+# OGRE_AUTO_MUTEX -- a NO-OP at OGRE_THREAD_SUPPORT 0, which is what upstream's
+# default (and our install) uses. So it is a genuine unsynchronised counter, by
+# design: compileShaderCode holds msGlobalMutex only around createProgram, and
+# the compile itself runs outside it, which is the entire point.
+# CONSEQUENCE, bounded: mMemoryUsage feeds only ResourceManager::checkUsage(),
+# whose branch is gated on mMemoryBudget -- SIZE_MAX by default, and Jahshaka
+# never calls setMemoryBudget. Nothing reads the counter for a decision, so the
+# cost is bookkeeping drift, not a crash or a leak. If a memory budget is ever
+# set, this becomes real and the fix is upstream's (a std::atomic counter, or
+# OGRE_THREAD_SUPPORT).
+#
+# THE FLIP CHANGES THE ABI. generateAbiCookie() hashes both threading macros
+# (OgreAbiUtils.h:72-81), so a Studio compiled against the old
+# OgreBuildSettings.h and linked against a mode-2 engine ABORTS at Root
+# construction -- loud, not silent. On Linux and macOS the -MD depfiles track
+# the installed header (Studio's cmake/IncludeOgre.cmake adds Ogre's include
+# dirs deliberately NOT as SYSTEM), so `cmake --build` after this script picks
+# the rebuild up by itself. EVERY TREE MUST RE-RUN THIS SCRIPT after pulling the
+# commit that added the flag.
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DOGRE_SHADER_COMPILATION_THREADING_MODE=2 \
   $PLATFORM_FLAGS -DOGRE_BUILD_RENDERSYSTEM_VULKAN=ON \
   -DOGRE_VULKAN_WINDOW_NULL=ON \
   -DOGRE_BUILD_COMPONENT_HLMS_PBS=ON -DOGRE_BUILD_COMPONENT_HLMS_UNLIT=ON \
@@ -170,6 +213,26 @@ cmake --build "$SRC/build" -j"$JOBS"
 # prefix is safe to prune — this script owns it.
 rm -f "$PREFIX"/lib/libOgreNext*.so* "$PREFIX"/lib/OGRE-Next/*.so*
 cmake --install "$SRC/build" > /dev/null
+
+# MULTITHREADED SHADER COMPILATION, on the INSTALL side (THREADING_ADOPTION_SPEC
+# P1, gate G1-a). Same class of guard as the three above, and it needs to be at
+# least as loud: a STALE CMake CACHE keeps mode 1 while everything still
+# configures, builds, installs and RUNS. Nothing goes red — the editor simply
+# compiles its shaders on one core for ever, and the whole phase evaporates
+# silently. The installed header is the only honest witness (the CMake option is
+# translated into these two macros at ogre-next/CMakeLists.txt:445-453), so read
+# it rather than the cache.
+_bs="$PREFIX/include/OGRE-Next/OgreBuildSettings.h"
+[ -f "$_bs" ] || { echo "OgreBuildSettings.h missing from $PREFIX/include/OGRE-Next — the install did not land." >&2; exit 1; }
+if grep -qE '^[[:space:]]*#define[[:space:]]+OGRE_SHADER_THREADING_BACKWARDS_COMPATIBLE_API' "$_bs"; then
+    echo "OGRE_SHADER_THREADING_BACKWARDS_COMPATIBLE_API is STILL defined in $_bs —" >&2
+    echo "the -DOGRE_SHADER_COMPILATION_THREADING_MODE=2 argument above did not take." >&2
+    echo "Almost always a stale CMake cache in $SRC/build: delete it and re-run this" >&2
+    echo "script. Do NOT ignore this — the build would otherwise succeed and run with" >&2
+    echo "single-threaded shader compilation (SPECS/THREADING_ADOPTION_SPEC.md P1)." >&2
+    exit 1
+fi
+unset _bs
 
 # The Overlay component again, on the INSTALL side. The configure-time grep
 # above cannot see an install-side prune or a rename, and the whole point of the

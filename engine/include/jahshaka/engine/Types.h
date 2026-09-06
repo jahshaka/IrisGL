@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace jahshaka { namespace engine {
@@ -938,11 +939,50 @@ struct ObjectCounts {
     unsigned views = 0;         ///< live View objects (on-screen + offscreen)
     unsigned enabledViews = 0;  ///< of those, the ones renderOneFrame draws
     unsigned scenes = 0;        ///< live Scene objects
+    /// Of those, how many the LAST frame updated — the scenes an enabled View
+    /// draws (THREADING_ADOPTION_SPEC.md P3). The frame loop walks exactly
+    /// these; every other scene manager in the process, including the
+    /// document's staging ones, is skipped. `updatedScenes < scenes` in the
+    /// editor is the NORMAL, wanted state; `updatedScenes == scenes` with
+    /// several preview pages alive means the gate stopped working.
+    unsigned updatedScenes = 0;
     unsigned nodes = 0;         ///< tracked node records, summed over scenes
     unsigned meshes = 0;        ///< tracked mesh records, summed over scenes
     unsigned materials = 0;     ///< tracked material records, summed over scenes
     unsigned textures = 0;      ///< tracked texture records, summed over scenes
     unsigned datablocks = 0;    ///< Hlms datablocks in the process (all types)
+};
+
+/// WHAT THE ENGINE IS THREADING (SPECS/THREADING_ADOPTION_SPEC.md P1).
+/// `app.threading()` is this struct. It exists because the single most
+/// expensive failure mode of the threading program is SILENT: an engine built
+/// with a stale CMake cache keeps single-threaded shader compilation, every
+/// build still succeeds, every test still passes, and the editor compiles its
+/// shaders on one core for ever. This is the read-back that makes that
+/// falsifiable from a script.
+struct EngineThreading {
+    /// `RenderSystem::supportsMultithreadedShaderCompilation()` — the backend's
+    /// own answer, not our guess. False means the parallel Hlms compile queue
+    /// never starts (OgreRenderQueue.cpp:388) and HlmsDiskCache::applyTo runs
+    /// its serial branch whatever thread count it is given.
+    bool multithreadedShaderCompilation = false;
+    /// The build-time mode this engine was compiled with, decoded from the two
+    /// OgreBuildSettings.h macros the CMake option sets:
+    ///   0 = disabled           (BACKWARDS_COMPATIBLE_API, no TLS)
+    ///   1 = compatible API     (BACKWARDS_COMPATIBLE_API + TLS, static builds)
+    ///   2 = force-enabled      (no BACKWARDS_COMPATIBLE_API)
+    /// 0 and 1-without-TLS are indistinguishable in the header, so a shared
+    /// build reports 1 for both; what matters operationally is
+    /// multithreadedShaderCompilation above.
+    unsigned shaderThreadingMode = 1;
+    /// Per-scene worker pools, by scene name — the threads Ogre forks culling,
+    /// transforms, bounds and (after mode 2) shader compilation across. The
+    /// engine's staging scene managers are not Scenes and are not listed.
+    std::vector<std::pair<std::string, unsigned>> sceneWorkerThreads;
+    /// The largest of those counts: the ceiling on how many threads any single
+    /// pass can compile shaders on, and the count the disk cache's applyTo is
+    /// given at load. 1 means "serial no matter what the flag says".
+    unsigned hlmsThreads = 1;
 };
 
 /// Where a corner-anchored readout sits in a View.

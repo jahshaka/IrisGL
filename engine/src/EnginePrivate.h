@@ -1659,6 +1659,7 @@ public:
     void destroyView(View *view) override;
 
     void renderOneFrame() override;
+    bool updateScene(Scene *scene) override;
     bool hasEnabledViews() const override;
     void listViews(std::vector<View *> &out) const override;
 
@@ -1719,6 +1720,7 @@ public:
 
     bool renderStats(RenderStats &out) const override;
     bool objectCounts(ObjectCounts &out) const override;
+    bool threading(EngineThreading &out) const override;
     bool saveShaderCache() override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
@@ -1737,6 +1739,13 @@ private:
 #endif
 
     bool viewNameTaken(const std::string &name);
+
+    /// The scenes an ENABLED View draws — the one definition of "takes part in
+    /// this frame" (THREADING_ADOPTION_SPEC.md P3). renderOneFrame updates
+    /// exactly these and nothing else, which is both the idle-cost gate and the
+    /// structural reason the render thread never walks a staging manager the
+    /// import worker is growing. Cheap enough to call once per frame.
+    void scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const;
 
     /// First render target: the VaoManager now exists, so Hlms can be registered.
     void ensureHlms();
@@ -1791,6 +1800,11 @@ private:
     /// window creation (createView + the MSAA-recreate hook), so the pacing
     /// choice survives a resize or a sample-count change.
     bool            mVsync = true;
+    /// How many scenes the LAST renderOneFrame updated (ObjectCounts::
+    /// updatedScenes). A census row, not a timing: in a process holding seven
+    /// scene managers this is the number that says how many of them the frame
+    /// loop actually paid for.
+    unsigned        mUpdatedScenes = 0;
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
     ShaderCache     mShaderCache;

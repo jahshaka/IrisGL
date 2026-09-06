@@ -6,7 +6,12 @@
 #include "EnginePrivate.h"
 
 #include <OgreFrameStats.h>
+// The frame loop's clock. `Root::getTimer()` returns `Ogre::Timer *` and
+// OgreRoot.h forward-declares it only — the inlined FrameStats sample
+// (renderOneFrame, mirroring OgreRoot.cpp:1123) calls through it.
+#include <OgreTimer.h>
 
+#include <algorithm>
 #include <fstream>
 
 namespace jahshaka { namespace engine {
@@ -416,6 +421,23 @@ void OgreEngine::destroyView(View *view) {
     mLastError = "destroyView: unknown View";
 }
 
+void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const {
+    // THE GATING PREDICATE (THREADING_ADOPTION_SPEC.md P3). One definition, in
+    // one place: a scene takes part in a frame iff some ENABLED View draws it.
+    // renderOneFrame used to compute this twice inline (the refraction
+    // interlock and the HUD owner); both now read this set instead.
+    //
+    // Deliberately built from mScenes rather than from the views, so the answer
+    // is always a subset of the scenes THIS engine owns and is in a stable
+    // order. Both vectors are single digits — the nesting costs nothing.
+    out.clear();
+    for (const auto &s : mScenes) {
+        for (const auto &v : mViews) {
+            if (v && v->isEnabled() && v->scene() == s.get()) { out.push_back(s.get()); break; }
+        }
+    }
+}
+
 void OgreEngine::renderOneFrame() {
     // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
@@ -450,6 +472,16 @@ void OgreEngine::renderOneFrame() {
             chain::applyGlobals(mRoot, v->camera(), d, v->width(), v->height());
             break;
         }
+        // THE SCENES THIS FRAME BELONGS TO (THREADING_ADOPTION_SPEC.md P3).
+        // Computed ONCE, here, and read three times below: by the refraction
+        // interlock, by the frame loop's update/clear passes, and by the
+        // engineObjects census. Nothing between this line and the frame can
+        // change a View's enabled flag, so one snapshot is honest.
+        std::vector<OgreScene *> updated;
+        scenesFeedingEnabledViews(updated);
+        const auto drawnThisFrame = [&updated](const OgreScene *s) {
+            return std::find(updated.begin(), updated.end(), s) != updated.end();
+        };
         // The refraction interlock (OgreScene::setRefractionsActive). A
         // Refractive datablock drawn by a pass that offers it no refractions
         // fails to COMPILE and loses the whole frame, and one scene can be drawn
@@ -459,11 +491,13 @@ void OgreEngine::renderOneFrame() {
         // draws it has the pass; otherwise they fall back to glass. Recomputed
         // per frame because views come and go; the setter is a no-op on repeat.
         for (auto &s : mScenes) {
-            bool anyView = false, allHaveRefraction = true;
-            for (auto &v : mViews) {
-                if (v->scene() != s.get() || !v->isEnabled()) continue;
-                anyView = true;
-                if (!v->chainDesc().refractions) allHaveRefraction = false;
+            const bool anyView = drawnThisFrame(s.get());
+            bool allHaveRefraction = true;
+            if (anyView) {
+                for (auto &v : mViews) {
+                    if (v->scene() != s.get() || !v->isEnabled()) continue;
+                    if (!v->chainDesc().refractions) allHaveRefraction = false;
+                }
             }
             s->setRefractionsActive(anyView && allHaveRefraction);
         }
@@ -492,7 +526,65 @@ void OgreEngine::renderOneFrame() {
                 hud::hide();
             }
         }
-        if (mRoot) mRoot->renderOneFrame();
+        // THE FRAME (THREADING_ADOPTION_SPEC.md P3 — "the explicit frame loop").
+        //
+        // This is `Root::renderOneFrame()`'s body (OgreRoot.cpp:1101-1126)
+        // inlined verbatim, with ONE difference: upstream walks EVERY
+        // SceneManager in the process, ours walks only the scenes an enabled
+        // View draws. Two reasons, and the second is the important one:
+        //
+        //  1. COST. `updateSceneGraph` is not free on an idle scene — it fires
+        //     barrier round-trips per pass (transforms, animations, bounds,
+        //     light list) whether or not anything in that scene moved. The
+        //     process holds the editor's scene, the player's, the asset page's,
+        //     the material preview's, the avatar preview's, a thumbnail scene
+        //     and BOTH staging managers; without this gate every one of them
+        //     is updated 60 times a second so that at most one of them can be
+        //     seen. The render half was always gated (`_updateAllRenderTargets`
+        //     walks only enabled workspaces, OgreRoot.cpp:1575-1599, and
+        //     View::setEnabled propagates to the workspace) — only the update
+        //     half was not.
+        //  2. CORRECTNESS. The document's STAGING scene managers are written by
+        //     the import worker WHILE this loop runs. Upstream's unconditional
+        //     walk had the render thread inside `updateAllTransforms` on the
+        //     very SoA pools `ArrayMemoryManager::createNewSlot` frees when it
+        //     grows them (OgreArrayMemoryManager.cpp:167-215) — a use-after-free,
+        //     not merely a torn read. A staging manager never feeds a View, so
+        //     after this gate the render thread never touches it at all. See
+        //     the THREADING section of irisgl/document/scenegraph/nodegraph.h.
+        //
+        // THE RULE THIS MUST NOT BREAK: a scene whose workspace runs must have
+        // been updated in the SAME frame. Every workspace in this engine belongs
+        // to a View (OgreView owns it), and planar-reflection workspaces belong
+        // to a scene some enabled View draws — so the two sets agree today. A
+        // future feature that creates a workspace NOT owned by a View has to
+        // extend `scenesFeedingEnabledViews` with it, or it will render against
+        // a scene graph nobody updated.
+        if (mRoot) {
+            // `_fireFrameStarted()` can veto the frame (a lost device, or a
+            // frame listener saying stop); upstream returns false there and
+            // does nothing else, so neither do we.
+            if (mRoot->_fireFrameStarted()) {
+                for (OgreScene *s : updated) s->sceneManager()->updateSceneGraph();
+                if (mRoot->_updateAllRenderTargets()) {
+                    for (OgreScene *s : updated) s->sceneManager()->clearFrameData();
+                    // MIRRORS OgreRoot.cpp:1123 EXACTLY. `Root::renderOneFrame`
+                    // is the only place upstream samples FrameStats, so skipping
+                    // it would zero fps/frameMs/p95/p99/best/worst in
+                    // renderStats() (and fail scripting.e2e.render_stats). The
+                    // const_cast is well-defined — the FrameStats object is not
+                    // const, only the accessor's return type is (OgreRoot.h:540)
+                    // — and it is spelled out here so a pin bump re-checks that
+                    // upstream still samples in the same place, with the same
+                    // clock (Root::getTimer, OgreRoot.h:783).
+                    if (const Ogre::FrameStats *fs = mRoot->getFrameStats())
+                        const_cast<Ogre::FrameStats *>(fs)->addSample(
+                            mRoot->getTimer()->getMicroseconds());
+                    mRoot->_fireFrameEnded();
+                }
+            }
+            mUpdatedScenes = unsigned(updated.size());
+        }
         // POSE FOLLOWERS (Scene::followSkeleton — the selection silhouette over
         // an animating character). AFTER the frame, deliberately: the source's
         // bones are only resolved inside the render, so copying here takes the
@@ -510,6 +602,27 @@ void OgreEngine::renderOneFrame() {
         // signal hosts gate a loading cover on (View::framesPresented).
         for (auto &v : mViews) v->notePresented();
     } JAH_CATCH(mLastError, );
+}
+
+bool OgreEngine::updateScene(Scene *scene) {
+    if (!mRoot || !scene) { mLastError = "updateScene: no engine or no scene"; return false; }
+    // Ownership check, not politeness: a Scene* from a destroyed engine, or a
+    // pointer this engine never handed out, would otherwise be dereferenced.
+    OgreScene *target = nullptr;
+    for (auto &s : mScenes)
+        if (s.get() == scene) { target = s.get(); break; }
+    if (!target) { mLastError = "updateScene: unknown Scene"; return false; }
+    JAH_TRY {
+        Ogre::SceneManager *sm = target->sceneManager();
+        if (!sm) { mLastError = "updateScene: scene has no manager"; return false; }
+        sm->updateSceneGraph();
+        // PAIRED, and it matters: updateSceneGraph APPENDS to the manager's
+        // global light list (buildLightList) and leaves render-queue state
+        // behind. Root's frame clears both afterwards; a standalone update has
+        // to do the same or repeated calls grow the light list without bound.
+        sm->clearFrameData();
+        return true;
+    } JAH_CATCH(mLastError, false);
 }
 
 bool OgreEngine::hasEnabledViews() const {
@@ -763,6 +876,7 @@ bool OgreEngine::objectCounts(ObjectCounts &out) const {
     JAH_TRY {
         out.views  = unsigned(mViews.size());
         out.scenes = unsigned(mScenes.size());
+        out.updatedScenes = mUpdatedScenes;
         for (const auto &v : mViews) {
             if (v && v->isEnabled()) ++out.enabledViews;
         }
@@ -789,6 +903,38 @@ bool OgreEngine::objectCounts(ObjectCounts &out) const {
     // Same reasoning as renderStats: const method, no error sink, and nothing
     // here fails in a way a caller could act on.
     catch (...) { out = ObjectCounts(); return false; }
+}
+
+bool OgreEngine::threading(EngineThreading &out) const {
+    out = EngineThreading();
+    if (!mRoot) return false;
+    JAH_TRY {
+        // THE MODE, decoded from the macros the CMake option sets
+        // (ogre-next/CMakeLists.txt:445-453). This is compiled into THIS
+        // translation unit against the INSTALLED OgreBuildSettings.h, so it
+        // reports what Studio was built against; the capability query below
+        // reports what the LINKED engine can actually do. In a healthy tree the
+        // two agree — and if they ever disagree, Root's ABI cookie
+        // (generateAbiCookie, which hashes both macros) has already aborted the
+        // process before anyone could read either.
+#ifndef OGRE_SHADER_THREADING_BACKWARDS_COMPATIBLE_API
+        out.shaderThreadingMode = 2u;
+#else
+        out.shaderThreadingMode = 1u;
+#endif
+        if (Ogre::RenderSystem *rs = mRoot->getRenderSystem())
+            out.multithreadedShaderCompilation = rs->supportsMultithreadedShaderCompilation();
+        for (const auto &s : mScenes) {
+            if (!s) continue;
+            const unsigned n = s->sceneManager()
+                                   ? unsigned(s->sceneManager()->getNumWorkerThreads()) : 0u;
+            out.sceneWorkerThreads.emplace_back(s->name(), n);
+            if (n > out.hlmsThreads) out.hlmsThreads = n;
+        }
+        return true;
+    }
+    // Same reasoning as renderStats/objectCounts: const method, no error sink.
+    catch (...) { out = EngineThreading(); return false; }
 }
 
 bool OgreEngine::saveShaderCache() {
