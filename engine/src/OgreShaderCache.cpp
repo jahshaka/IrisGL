@@ -32,6 +32,7 @@
 #include <fstream>
 #include <functional>
 #include <sstream>
+#include <thread>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -547,12 +548,30 @@ void ShaderCache::load(Ogre::Root *root) {
                     path("hlms." + std::to_string(entry.first) + ".bin"),
                     entry.second.data(), entry.second.size(), false, true));
                 disk.loadFrom(s);
-                // numThreads is INERT for us: supportsMultithreadedShaderCompilation()
-                // is false in this install (OgreBuildSettings.h has
-                // OGRE_SHADER_THREADING_BACKWARDS_COMPATIBLE_API and not
-                // OGRE_SHADER_THREADING_USE_TLS), so applyTo runs the serial
-                // branch whatever we pass. Passing 1 says so honestly.
-                disk.applyTo(h, 1u);
+                // THREADED CACHE APPLY (THREADING_ADOPTION_SPEC.md P1). This
+                // used to pass a hardcoded 1 with a comment explaining that
+                // anything else was a lie: mode 1 in a SHARED build leaves
+                // supportsMultithreadedShaderCompilation() false, and applyTo
+                // takes its serial branch whatever it is given
+                // (OgreHlmsDiskCache.cpp:396). Since the engine is built with
+                // OGRE_SHADER_COMPILATION_THREADING_MODE=2 the number is real,
+                // and this is the single largest win of the whole flip: every
+                // shader in the disk cache is re-created here, on the critical
+                // path of the first createView.
+                //
+                // WHY THIS COUNT. Nothing better is available at this point in
+                // the boot — the cache loads inside the first createView, and
+                // no Scene (and so no worker pool) exists yet. Studio's
+                // measured Primary tier is clamp(idealThreadCount, 2, 8)
+                // (src/bridge/sceneworkerthreads.h); the engine cannot include
+                // that header (IrisGL and Studio never link each other), so the
+                // policy is reproduced here rather than shared. 8 is the same
+                // measured ceiling, and the floor of 1 keeps a
+                // hardware_concurrency() of 0 (allowed to fail) honest.
+                unsigned threads = std::thread::hardware_concurrency();
+                if (threads == 0u) threads = 1u;
+                if (threads > 8u) threads = 8u;
+                disk.applyTo(h, threads);
                 ++mHlmsLoaded;
             }
         }

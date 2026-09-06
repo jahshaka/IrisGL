@@ -1710,6 +1710,7 @@ public:
     ShaderCacheStats shaderCacheStats() const override;
     bool renderStats(RenderStats &out) const override;
     bool objectCounts(ObjectCounts &out) const override;
+    bool threading(EngineThreading &out) const override;
     bool saveShaderCache() override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,

@@ -897,6 +897,38 @@ bool OgreEngine::objectCounts(ObjectCounts &out) const {
     catch (...) { out = ObjectCounts(); return false; }
 }
 
+bool OgreEngine::threading(EngineThreading &out) const {
+    out = EngineThreading();
+    if (!mRoot) return false;
+    JAH_TRY {
+        // THE MODE, decoded from the macros the CMake option sets
+        // (ogre-next/CMakeLists.txt:445-453). This is compiled into THIS
+        // translation unit against the INSTALLED OgreBuildSettings.h, so it
+        // reports what Studio was built against; the capability query below
+        // reports what the LINKED engine can actually do. In a healthy tree the
+        // two agree — and if they ever disagree, Root's ABI cookie
+        // (generateAbiCookie, which hashes both macros) has already aborted the
+        // process before anyone could read either.
+#ifndef OGRE_SHADER_THREADING_BACKWARDS_COMPATIBLE_API
+        out.shaderThreadingMode = 2u;
+#else
+        out.shaderThreadingMode = 1u;
+#endif
+        if (Ogre::RenderSystem *rs = mRoot->getRenderSystem())
+            out.multithreadedShaderCompilation = rs->supportsMultithreadedShaderCompilation();
+        for (const auto &s : mScenes) {
+            if (!s) continue;
+            const unsigned n = s->sceneManager()
+                                   ? unsigned(s->sceneManager()->getNumWorkerThreads()) : 0u;
+            out.sceneWorkerThreads.emplace_back(s->name(), n);
+            if (n > out.hlmsThreads) out.hlmsThreads = n;
+        }
+        return true;
+    }
+    // Same reasoning as renderStats/objectCounts: const method, no error sink.
+    catch (...) { out = EngineThreading(); return false; }
+}
+
 bool OgreEngine::saveShaderCache() {
     if (!mRoot) return false;
     JAH_TRY { return mShaderCache.save(mRoot); } JAH_CATCH(mLastError, false);

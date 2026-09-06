@@ -826,6 +826,20 @@ public:
     /// default-constructed.
     virtual bool objectCounts(ObjectCounts &out) const = 0;
 
+    /// WHAT THE ENGINE IS THREADING (see EngineThreading;
+    /// SPECS/THREADING_ADOPTION_SPEC.md P1). Reads the backend's own capability
+    /// answer and the live per-scene worker counts — no measurement, no state.
+    ///
+    /// The reason this is a verb rather than a build-time constant: the
+    /// multithreaded-shader-compilation flag lives in the ENGINE INSTALL, not
+    /// in Studio, so the only honest way to know whether this binary is talking
+    /// to a mode-2 engine is to ask the render system at run time. A tree that
+    /// forgot to re-run `irisgl/scripts/build-ogre.sh` reports false here and
+    /// nowhere else.
+    ///
+    /// Returns false only when there is no backend to ask.
+    virtual bool threading(EngineThreading &out) const = 0;
+
     /// Writes the cache now, if anything new has been compiled since the last
     /// write. Called on clean shutdown and once a compile burst has settled;
     /// safe (and a no-op) when the cache is disabled or nothing is dirty.
