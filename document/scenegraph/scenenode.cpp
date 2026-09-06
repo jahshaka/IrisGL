@@ -245,7 +245,35 @@ bool SceneNode::isStaticEligible() const
     }
     if (isPhysicsBody) return false;         // Bullet writes its transform every step
     if (isSocketAttached()) return false;    // the socket resolver writes it every frame
-    if (!animations.isEmpty() || !animation.isNull()) return false;
+    // ANIMATED means "something writes this node's transform", not "an
+    // Animation object is attached". The distinction is not academic: the
+    // animation panel gives every node it is shown a default, CHANNEL-LESS
+    // `Animation` the moment the user looks at it, the writer persists it, and
+    // the reader hands it straight back — so the shipped samples carry an empty
+    // "Animation" on most of their TOP-LEVEL nodes (Showroom: 31 of 32 have no
+    // properties and no skeletal clip at all).
+    //
+    // Counting those as animated cost every loaded world its ENTIRE static
+    // classification (measured 2026-09-06: a freshly opened Showroom reported 0
+    // static nodes out of 241, while the same scene's Add-menu additions
+    // classified fine). Rule 2 is what turns it into a wipe-out rather than a
+    // few misses: an ineligible top-level node stays dynamic, and
+    // `canBeStatic` then refuses its whole subtree — 205 of Showroom's 241
+    // nodes were themselves perfectly eligible and were refused for their
+    // parent's sake.
+    //
+    // A channel-less animation drives nothing: SceneNode::updateAnimation only
+    // writes a transform through `hasPropertyAnim("position"/"rotation"/
+    // "scale")`, and a skeletal clip is the engine's. So the test is whether
+    // any attached animation actually HAS something to play — and if one grows
+    // channels later, rule 4 (the first transform write demotes the subtree)
+    // catches it without a document-side hook.
+    const auto drives = [](const AnimationPtr &a) {
+        return !a.isNull() && (!a->properties.isEmpty() || !a->skeletalAnimation.isNull());
+    };
+    if (drives(animation)) return false;
+    for (const AnimationPtr &a : animations)
+        if (drives(a)) return false;
     return true;
 }
 

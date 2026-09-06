@@ -537,8 +537,14 @@ public:
     /// Is this node the KIND of thing that may be static at all? Never-animated
     /// geometry and plain groupings only: a light, a particle system, a decal,
     /// a camera or a viewer carries an engine object that cannot switch class;
-    /// a physics body, a socket rider, a skinned mesh and anything holding an
-    /// animation are all going to move.
+    /// a physics body, a socket rider, a skinned mesh and anything carrying an
+    /// animation THAT CAN PLAY are all going to move.
+    ///
+    /// "That can play" is the load-bearing half (2026-09-06): a channel-less
+    /// `Animation` — which the animation panel attaches to every node it is
+    /// shown and the writer persists — drives nothing, and counting it as
+    /// animated cost every loaded world its whole static classification. See
+    /// the body for the measurement.
     virtual bool isStaticEligible() const;
     /// setStaticHint's body, WITHOUT recording a user decision — the graph
     /// state only. Two callers, both of which have their own idea of intent:
