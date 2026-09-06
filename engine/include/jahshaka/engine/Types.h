@@ -902,6 +902,13 @@ struct ObjectCounts {
     unsigned views = 0;         ///< live View objects (on-screen + offscreen)
     unsigned enabledViews = 0;  ///< of those, the ones renderOneFrame draws
     unsigned scenes = 0;        ///< live Scene objects
+    /// Of those, how many the LAST frame updated — the scenes an enabled View
+    /// draws (THREADING_ADOPTION_SPEC.md P3). The frame loop walks exactly
+    /// these; every other scene manager in the process, including the
+    /// document's staging ones, is skipped. `updatedScenes < scenes` in the
+    /// editor is the NORMAL, wanted state; `updatedScenes == scenes` with
+    /// several preview pages alive means the gate stopped working.
+    unsigned updatedScenes = 0;
     unsigned nodes = 0;         ///< tracked node records, summed over scenes
     unsigned meshes = 0;        ///< tracked mesh records, summed over scenes
     unsigned materials = 0;     ///< tracked material records, summed over scenes
