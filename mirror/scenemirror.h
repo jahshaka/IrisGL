@@ -33,6 +33,8 @@
 namespace iris { namespace graph {
 struct SceneOpaque;
 using SceneHandle = SceneOpaque *;
+struct NodeOpaque;
+using NodeHandle = NodeOpaque *;
 }}
 
 namespace iris { class Mesh; class Material; struct SkyRealistic; }
@@ -329,8 +331,27 @@ private:
         /// frame, and setUnlitMaterial schedules a const-buffer update per call.
         jahshaka::engine::Colour wireColour;
         bool wireColourPushed = false;
+        /// The wire node's local scale, as a signature, and the visibility last
+        /// pushed to it (-1 = never). Both were written every frame for every
+        /// light in the scene; both are derived from hand-edited values (audit
+        /// F7).
+        quint64 wireXformKey = 0;
+        bool wireXformPushed = false;
+        int wireVisible = -1;
         bool hasIcon = false;                        // light icon billboard on wireNode
         QString iconSignature;                       // icon image path; recreate on change
+        /// The icon billboard's instance (world position + size) as a
+        /// signature. setBillboards rewrites the set's whole instance buffer,
+        /// and a still light's icon does not move.
+        quint64 iconKey = 0;
+        bool iconPushed = false;
+        /// The LightDesc last pushed, and whether one ever was. setLight is
+        /// ~20 Ogre setters including an attenuation solve and an AABB rewrite;
+        /// the mirror still LOOKS every frame (the panel can edit any value)
+        /// but pushes only a change — exactly the discipline `lastPbr` gives
+        /// materials (audit F7).
+        jahshaka::engine::LightDesc lastLight;
+        bool lightPushed = false;
         /// Camera body + frustum (CAMERAS_SPEC phase 2b). The mesh is OWNED by
         /// this entry — it is derived from the camera's own lens, so there is
         /// nothing to share — and rebuilt only when `cameraSignature` moves.
@@ -364,6 +385,15 @@ private:
         iris::SkeletonPtr skeleton;
         bool gpuSkinned = false;                     // the engine accepted the rig
         size_t boneCount = 0;
+        /// Each bone's PARENT INDEX, resolved once per rig instead of by a
+        /// QHash<QString> probe on the parent bone's NAME per bone per frame
+        /// (audit F13 — that walk became per-frame work the moment a scene had
+        /// a socket). PER ENTRY, not one shared slot: a scene with two rigged
+        /// characters would thrash a single cache back to the string lookups it
+        /// replaces. `boneParentsOwner` is only ever compared, and it cannot
+        /// dangle — `skeleton` above is a strong reference to it.
+        mutable std::vector<int> boneParents;
+        mutable const iris::Skeleton *boneParentsOwner = nullptr;
         // Clip playback (ANIMATION_ENGINE_MIGRATION_SPEC M3). The document says
         // WHICH clip and WHEN; the engine samples and blends it.
         iris::SceneNode *docNode = nullptr;          // the document node this entry mirrors
@@ -548,6 +578,11 @@ private:
     mutable std::vector<jahshaka::engine::BonePose> mPoseScratch;
     mutable std::vector<iris::Mat4>                 mDerivedScratch;
     mutable std::vector<char>                       mDerivedDone;
+    /// entryBoneWorldTransforms' FK step, hoisted out of a per-frame
+    /// heap-allocating std::function. Fills mDerivedScratch[i] (and its
+    /// ancestors) from `parents` and returns it.
+    const iris::Mat4 &resolveBoneDerived(int i, const std::vector<int> &parents,
+                                        const std::vector<jahshaka::engine::BonePose> &poses) const;
     /// Document mesh/material -> engine object, keyed by RAW POINTER.
     ///
     /// KNOWN RESIDUAL (deep audit 2026-09, area 5, deliberately not fixed here):
@@ -637,9 +672,22 @@ private:
         jahshaka::engine::NodeId node = 0;
         jahshaka::engine::MeshId mesh = 0;   // engine mesh currently attached
         bool wireframe = false;              // which material the shell carries
+        /// Whether the engine currently shows this shell. setNodeVisible is not
+        /// free and the answer changes only when the selection does.
+        bool shown = false;
+        /// The world-transform signature (plus the outline width) the shell's
+        /// transform was last derived from; the derive is a full world matrix,
+        /// a decomposition and an engine write, and a standing selection needs
+        /// none of it. `transformPushed` is false until the first one lands.
+        quint64 transformKey = 0;
+        bool transformPushed = false;
     };
     std::vector<HighlightShell> mHighlightShells;
-    void collectHighlightMeshes(const iris::SceneNodePtr &node,
+    /// syncHighlight's per-frame target list. A member so the walk over the
+    /// selected subtree reuses its storage instead of allocating a vector a
+    /// frame.
+    std::vector<std::pair<iris::MeshNode *, jahshaka::engine::MeshId>> mHighlightTargets;
+    void collectHighlightMeshes(iris::SceneNode *node,
                                 std::vector<std::pair<iris::MeshNode *, jahshaka::engine::MeshId>> &out);
     jahshaka::engine::MaterialId mHighlightMaterial = 0;   // wireframe (on top)
     jahshaka::engine::MaterialId mOutlineMaterial = 0;     // inverted hull
@@ -661,7 +709,14 @@ private:
     // applyEnvironment only re-pushes on change and re-traces on light movement.
     jahshaka::engine::GiParams mLastGi;
     bool mGiPushed = false;
-    iris::Mat4 mGiLightWorld;
+    /// The GI-driving light transform(s), as a CHANGE KEY rather than a
+    /// matrix — see the signature's derivation in applyEnvironment (audit F8).
+    quint64 mGiLightSignature = 0;
+    /// applyEnvironment's ancestor-signature scratch: the lights of a scene
+    /// share their parent chains, so the chain above each distinct parent is
+    /// walked once per call instead of once per light. A member for its
+    /// capacity only; it is cleared at the top of every use.
+    std::vector<std::pair<iris::graph::NodeHandle, quint64>> mGiChainMemo;
     // Diagnostics behind giPushCount() / giRefreshCount(); never read by the
     // mirror itself, and NOT reset by invalidateEnvironment (a re-take of the
     // screen is a real push, and the gate counts real pushes).
