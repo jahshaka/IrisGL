@@ -1,6 +1,7 @@
 #pragma once
 // Engine-neutral value types. NOTHING here may reference Ogre, Qt or GL.
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -643,6 +644,13 @@ struct PlanarReflectionParams {
 
 enum class Backend { Vulkan, OpenGL };
 
+/// The host's sink for the engine's OWN log records (SESSION_LOG_SPEC F3-B).
+/// `level` is 0 for ordinary messages and 1 for LML_CRITICAL. See
+/// Engine::setLogSink for the three rules an implementation must obey — it is
+/// called under Ogre's log mutex, on whatever thread logged, and must never
+/// call back into the engine.
+using EngineLogSink = std::function<void(int level, const std::string &message)>;
+
 /// Everything the engine needs to start. All paths are resolved by the HOST at
 /// runtime (next to the executable, an env override, or a compile-time default).
 /// Nothing in the engine is baked to a build-machine path.
@@ -682,6 +690,12 @@ struct EngineConfig {
     std::string hlmsMediaDir;
     /// Log file path; empty means the backend's default name in the working directory.
     std::string logFile = "jahshaka-ogre.log";
+    /// Optional forwarding sink, installed with the log listener itself — i.e.
+    /// BEFORE the plugins load and the render system initialises, which is
+    /// where the boot-time criticals (a missing render-system plugin, a Vulkan
+    /// validation error, an ABI complaint) actually happen. Setting it through
+    /// Engine::setLogSink afterwards works too and misses exactly that window.
+    EngineLogSink logSink;
     /// Initial MSAA sample count for ON-SCREEN views (1 = off; 2/4/8 typical).
     /// Offscreen views (thumbnails, previews, tests) always start at 1 so their
     /// pixel readbacks stay exact — raise per view with View::setSampleCount.
@@ -718,6 +732,28 @@ struct EngineConfig {
     /// whole cache directory, which is the point — the application's C++ decides
     /// what shaders exist, and no hash inside the engine can see that.
     std::string appBuildId;
+};
+
+/// The device the engine is actually running on (SESSION_LOG_SPEC §4).
+///
+/// Every field already existed engine-side — the shader cache's fingerprint has
+/// read vendor/device/driver out of RenderSystemCapabilities since it shipped —
+/// but none of it was on the boundary, so a session log could not say which GPU
+/// produced a picture. Ogre-free by construction: plain strings, filled by the
+/// one TU that may include Ogre.
+///
+/// `apiVersion` is a SCRAPE, not an accessor: RenderSystemCapabilities carries
+/// no API version, and the Vulkan render system only ever states it as a log
+/// line ("Vulkan: API Version: X.Y.Z (0x...)"). The engine's log listener
+/// captures it — the same "the verdict exists only as a log line" pattern the
+/// shader cache's pipelineCacheReason already uses. Empty on a backend that
+/// does not say, which is not an error.
+struct DeviceInfo {
+    std::string renderSystem;    ///< "Vulkan Rendering Subsystem", "NULL Rendering Subsystem", ...
+    std::string vendor;          ///< RenderSystemCapabilities::getVendor()
+    std::string deviceName;      ///< getDeviceName()
+    std::string driverVersion;   ///< getDriverVersion().toString()
+    std::string apiVersion;      ///< scraped; empty when the backend never says
 };
 
 /// What the persistent shader cache did this run, and what is on disk

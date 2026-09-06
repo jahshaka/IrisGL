@@ -15,6 +15,7 @@
 // ERRORS: no backend exception ever escapes this boundary. A failing call returns
 // null/false and the reason is available from Engine::lastError() until the next
 // failing call overwrites it.
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -777,6 +778,33 @@ public:
     /// What is on disk and what happened this run. Cheap enough to call from a
     /// settings page; it stats a handful of files.
     virtual ShaderCacheStats shaderCacheStats() const = 0;
+
+    // ---- The engine's own log, forwarded (SESSION_LOG_SPEC fork F3-B) ----
+    //
+    // Ogre writes thousands of LML_NORMAL lines per boot into its OWN
+    // per-session file, and folding all of that into the application's session
+    // log would destroy exactly the signal-to-noise the log exists for. What
+    // the application DOES want is the criticals — the ~55 in OgreMain and the
+    // 15 in the Vulkan render system, which include every Vulkan validation
+    // error — where a human will actually see them.
+    //
+    // THREE RULES the sink must obey, all of them properties of Ogre's Log:
+    //   1. It is called UNDER Ogre's log mutex, from whatever thread logged
+    //      (including the background streaming and texture threads). It must be
+    //      thread-safe.
+    //   2. It must NEVER call back into Ogre. That is a deadlock, not a risk.
+    //   3. It must not block: a slow sink slows every log line in the process.
+    //
+    // `level` is 0 for ordinary messages and 1 for LML_CRITICAL. Ogre's own
+    // file and console output are untouched — the listener never sets
+    // skipThisMessage.
+    using LogSink = EngineLogSink;
+    virtual void setLogSink(LogSink sink) = 0;
+
+    /// Which GPU, which driver, which API version — filled once the render
+    /// system has a device. Empty strings before that, and under the NULL
+    /// render system everything but `renderSystem` is legitimately empty.
+    virtual DeviceInfo deviceInfo() const = 0;
 
     /// What the renderer measured (STATS_OVERLAY_SPEC.md §4). Cheap: it reads
     /// counters the backend already keeps, and copies no buffers.

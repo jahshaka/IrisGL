@@ -62,6 +62,14 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // display and the cache tests both read. Runs whether or not the cache
         // itself is enabled.
         mShaderCache.attachCounters();
+        // The engine's log bridge (SESSION_LOG_SPEC F3-B), attached in the same
+        // breath and for the same reason: everything after this point —
+        // plugin loads, render-system init, device detection, and every Vulkan
+        // validation error — is captured. The only lines missed are those
+        // emitted INSIDE Root's constructor, which is the ABI-cookie check; an
+        // ABI mismatch still lands in Ogre's own sibling file.
+        attachLogBridge();
+        if (cfg.logSink) setLogSink(cfg.logSink);
         // HEADLESS = the NULL render system (Types.h EngineConfig::headless).
         // It ships in every engine install unconditionally, needs no display,
         // no driver and no device, and its VaoManager/TextureGpuManager hand
@@ -843,8 +851,9 @@ OgreEngine::~OgreEngine() {
     // THIS Root; a second Engine in the same process (test_engine_recreate)
     // would otherwise inherit stale masters and slice textures.
     detail::resetDecalAtlases();
-    // The counter listener is registered on Ogre's default log, which Root owns.
+    // Both log listeners are registered on Ogre's default log, which Root owns.
     mShaderCache.detachCounters();
+    detachLogBridge();
     delete mRoot;
     mRoot = nullptr;
     gLiveEngine = nullptr;
