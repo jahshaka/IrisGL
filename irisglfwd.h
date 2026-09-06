@@ -72,12 +72,18 @@ class AABB;
 /// The avatar movement component (AVATAR_LOCOMOTION_SPEC §6), carried by the
 /// avatar WRAPPER node and by nothing else.
 class AvatarMovement;
+/// The locomotion state machine (AVATAR_LOCOMOTION_SPEC §7), carried by the
+/// same avatar WRAPPER node. Separate from the movement component on purpose:
+/// movement is physics and locomotion is animation, and the state machine
+/// CONSUMES the movement's five-parameter contract rather than living inside it.
+class AvatarLocomotion;
 
 typedef QSharedPointer<iris::Animation> AnimationPtr;
 typedef QSharedPointer<Shader> ShaderPtr;
 typedef QSharedPointer<Scene> ScenePtr;
 typedef QSharedPointer<SceneNode> SceneNodePtr;
 typedef QSharedPointer<AvatarMovement> AvatarMovementPtr;
+typedef QSharedPointer<AvatarLocomotion> AvatarLocomotionPtr;
 
 /// The scene graph's NON-owning links. The tree has exactly one ownership
 /// direction — a parent owns its children — so the back-references (child to

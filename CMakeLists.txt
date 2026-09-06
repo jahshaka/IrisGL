@@ -158,6 +158,7 @@ set(SRCS
     document/scenegraph/decalnode.cpp
     document/animation/skeletalanimation.cpp
     document/animation/clipextractor.cpp
+    document/animation/locomotion.cpp
     document/assets/skeleton.cpp
     document/scenegraph/scene.cpp
     document/scenegraph/scenenode.cpp
@@ -225,6 +226,7 @@ set (HEADERS
     document/assets/skeleton.h
     document/animation/skeletalanimation.h
     document/animation/clipextractor.h
+    document/animation/locomotion.h
     core/math/trs.h
     document/scenegraph/scene.h
     document/scenegraph/scenenode.h

@@ -24,6 +24,7 @@ For more information see the LICENSE file
 #include "document/animation/keyframeset.h"
 #include "document/animation/propertyanim.h"
 #include "document/animation/skeletalanimation.h"
+#include "document/animation/locomotion.h"
 #include "core/properties/property.h"
 #include "document/assets/mesh.h"
 #include "document/assets/skeleton.h"
@@ -108,6 +109,12 @@ SceneNodePtr SceneNode::create()
 void SceneNode::setAvatarComponent(const AvatarMovementPtr &component)
 {
     avatarMovement = component;
+    notifyChanged(NodeChange::Flags);
+}
+
+void SceneNode::setLocomotionComponent(const AvatarLocomotionPtr &component)
+{
+    avatarLocomotion = component;
     notifyChanged(NodeChange::Flags);
 }
 
@@ -709,6 +716,20 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 		auto copy = AvatarMovementPtr(new AvatarMovement());
 		copy->setParams(this->avatarMovement->params());
 		node->setAvatarComponent(copy);
+	}
+	// THE LOCOMOTION STATE MACHINE, deep-copied for the same reason: the asset
+	// and the role bindings travel with the copy (they are the character's
+	// authoring), but the CLOCK does not — a duplicate starts at its entry
+	// state with a zero phase rather than mid-stride at the original's phase,
+	// which is what stops two copies of one character from marching in
+	// lock-step (§3.2's per-avatar phase requirement, from the other end).
+	if (this->avatarLocomotion) {
+		auto copy = AvatarLocomotionPtr(new AvatarLocomotion());
+		copy->markRolesFromFile(this->avatarLocomotion->roles(),
+		                        this->avatarLocomotion->usesDefaultAsset());
+		QString err;
+		copy->setAssetPreservingDefaultFlag(this->avatarLocomotion->asset(), &err);
+		node->setLocomotionComponent(copy);
 	}
     // The user's SCENE_STATIC decision travels with the copy (the derived hint
     // does not: the copy is about to be parented somewhere, and the policy pass
