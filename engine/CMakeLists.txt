@@ -20,6 +20,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSkeleton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreTextureCache.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreLogBridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreOverlayHud.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp)

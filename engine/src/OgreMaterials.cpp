@@ -314,6 +314,28 @@ TextureId OgreScene::trackTexture(const TextureRec &rec) {
     return id;
 }
 
+bool syncTextureLoads() {
+    // Read ONCE per process: the answer cannot change while a process runs, and
+    // a getenv per texture in a mirror walk would be a silly cost to add to the
+    // phase that exists to remove one.
+    static const bool sync = [] {
+        const char *v = std::getenv("JAH_TEXTURE_SYNC_LOAD");
+        return v && *v && v[0] != '0';
+    }();
+    return sync;
+}
+
+void waitForTextureResident(Ogre::TextureGpu *tex) {
+    // Read the contract in EnginePrivate.h. Two guards, both meaningful: a
+    // texture already Resident has nothing to wait for, and a ManualTexture is
+    // transitioned by hand and would deadlock in waitForData (there is no
+    // streaming request behind it to complete).
+    if (!tex) return;
+    if (tex->getResidencyStatus() == Ogre::GpuResidency::Resident && tex->isDataReady()) return;
+    if (tex->isManualTexture()) return;
+    tex->waitForData();
+}
+
 TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
     // Path dedup, but NEVER across the decal atlases: the same image file can be
     // both an ordinary PBR map and a decal image, and they live in different
@@ -339,11 +361,28 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
         }
         if (!rgm.resourceExists(kGroup, file)) { mError = "loadTexture: file not found: " + path; return 0; }
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-        {
-            // Grayscale files (single-channel jpg/png) decode to an R8 texture and
-            // sample red-only — a black/white checker renders black/red. Expand to
-            // RGBA on the CPU and upload with CPU-generated mipmaps instead.
-            //
+        // THE CHANNEL PROBE, and the sidecar that skips it (THREADING_ADOPTION_
+        // SPEC.md P2 item 7, decision D-D(b)).
+        //
+        // Grayscale files (single-channel jpg/png) decode to an R8 texture and
+        // sample red-only — a black/white checker renders black/red — so they
+        // are expanded to RGBA on the CPU below. Asking "is this file
+        // single-channel?" used to mean FULLY DECODING every texture on the UI
+        // thread and throwing the result away: every image in the project was
+        // decoded twice, once here and once by the streaming worker.
+        //
+        // The sidecar (TextureCache, EnginePrivate.h) remembers the answer per
+        // path. A hit that says "not grayscale" skips the decode entirely, which
+        // is the common case and the whole win. A hit that says "grayscale" still
+        // has to decode, because the expansion needs the PIXELS — that is not a
+        // regression, it is the same work as today, on the rare path. A miss
+        // decodes once and records, so a first-ever launch pays exactly what
+        // every launch used to.
+        unsigned cachedComponents = 0;
+        bool     cachedCompressed = false;
+        const bool cacheHit = textureCache().channels(path, cachedComponents, cachedCompressed);
+        const bool mayBeGrayscale = !cacheHit || (cachedComponents == 1 && !cachedCompressed);
+        if (mayBeGrayscale) {
             // load2, not load(file, group): load() picks the codec by file
             // extension alone and THROWS on mislabeled files (the old importer
             // wrote PNG bytes under .jpg names — GLB embedded textures), which
@@ -357,8 +396,10 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 probe.load2(stream, file);
             }
             const Ogre::PixelFormatGpu pf = probe.getPixelFormat();
-            if (Ogre::PixelFormatGpuUtils::getNumberOfComponents(pf) == 1 &&
-                !Ogre::PixelFormatGpuUtils::isCompressed(pf)) {
+            const unsigned components = Ogre::PixelFormatGpuUtils::getNumberOfComponents(pf);
+            const bool compressed = Ogre::PixelFormatGpuUtils::isCompressed(pf);
+            textureCache().note(path, components, compressed);
+            if (components == 1 && !compressed) {
                 const Ogre::uint32 w = probe.getWidth(), h = probe.getHeight();
                 Ogre::Image2 *rgba = new Ogre::Image2();
                 rgba->createEmptyImage(w, h, 1u, Ogre::TextureTypes::Type2D,
@@ -378,6 +419,12 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 tex->setNumMipmaps(rgba->getNumMipmaps());
                 tex->setPixelFormat(rgba->getPixelFormat());
                 tex->scheduleTransitionTo(Ogre::GpuResidency::Resident, rgba, true);   // deletes rgba
+                // THIS WAIT STAYS (THREADING_ADOPTION_SPEC.md P2 item 1). It is
+                // not a file-streaming request: the pixels are a CPU-built
+                // Image2 we own, passing one implies bSkipMultiload
+                // (OgreTextureGpu.h:405-418), and single-channel images are
+                // rare. Keeping it synchronous costs nothing measurable and
+                // keeps this branch's ownership of `rgba` obvious.
                 tex->waitForData();
                 TextureRec rec; rec.texture = tex; rec.path = path;
                 return trackTexture(rec);
@@ -390,8 +437,37 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                                                             flags, Ogre::TextureTypes::Type2D, kGroup,
                                                             Ogre::TextureFilter::TypeGenerateDefaultMipmaps);
         if (!tex) { mError = "loadTexture: could not create texture for " + path; return 0; }
+        // SCHEDULE, DO NOT WAIT (THREADING_ADOPTION_SPEC.md P2 item 1, decision
+        // D-C(1)). This used to be followed by `tex->waitForData()`, which
+        // blocked the calling thread — the UI thread, inside SceneMirror's
+        // per-frame walk — until this ONE texture had been read, decoded and
+        // uploaded. N textures in a scene meant N serial round trips to the
+        // streaming worker, and a texture-heavy open was a sequence of stalls.
+        //
+        // Now every texture in a mirror walk is SCHEDULED before any of them is
+        // WAITED ON, so their decodes overlap (and, with the multiload pool,
+        // run on several threads); the wait happens once, at the frame edge, in
+        // OgreEngine::renderOneFrame. Nothing between here and that wait draws
+        // anything, so no frame ever samples a texture that is not resident —
+        // which is what keeps every pixel suite byte-exact.
+        //
+        // BINDING A NOT-YET-RESIDENT TEXTURE IS SAFE ANYWAY, and that is
+        // upstream's design rather than our luck: any residency or pool-slot
+        // change destroys the datablock's descriptor set and reschedules its
+        // const-buffer update (OgreHlmsTextureBaseClass.inl:459-486), and the
+        // rebake re-reads getInternalSliceStart() ("May have changed if the
+        // TextureGpuManager updated the Texture", :165-180).
+        //
+        // JAH_TEXTURE_SYNC_LOAD=1 PUTS THE OLD WAIT BACK, at run time, with no
+        // rebuild. Two reasons it exists, both named in the spec: it is the A
+        // arm of the batched-loading A/B measurement (G2-c — "today's behaviour,
+        // kept reachable by env for exactly this purpose"), and it is the second
+        // step of the phase's order of retreat (pool -> wait -> caches) if this
+        // ever has to be backed out on a user's machine. A measurement and
+        // recovery hatch, deliberately not a preference and not persisted — the
+        // same shape as JAHSHAKA_SCENE_THREADS.
         tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
-        tex->waitForData();
+        if (detail::syncTextureLoads()) tex->waitForData();
         TextureRec rec; rec.texture = tex; rec.path = path;
         return trackTexture(rec);
     } JAH_CATCH(mError, 0);

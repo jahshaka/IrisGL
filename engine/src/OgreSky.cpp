@@ -37,6 +37,14 @@ bool OgreScene::setSky(SkyMode mode, TextureId texId) {
         auto it = mTextures.find(texId);
         if (it == mTextures.end()) { mError = "setSky: unknown texture"; return false; }
         Ogre::TextureGpu *src = it->second.texture;
+        // WAIT FOR THIS ONE TEXTURE (THREADING_ADOPTION_SPEC.md P2). Everything
+        // below reads the texture ITSELF rather than binding it: its internal
+        // type, and — inside Ogre's setSky — its POOL SLICE, written into the
+        // sky material as a one-shot `sliceIdx` uniform. A texture that is still
+        // streaming answers Type2D and slice 0, so the sky would render whatever
+        // else happens to be in slice 0 of that pool, for ever, silently. See
+        // waitForTextureResident in EnginePrivate.h.
+        waitForTextureResident(src);
         // SkyEquirectangular is hard-gated on getInternalTextureType() ==
         // Type2DArray (OgreSceneManager.cpp:1125). File-loaded textures are
         // automatic-batching pool slices and already qualify; pixel-uploaded
@@ -68,6 +76,10 @@ bool OgreScene::setSkyCubemap(const TextureId faces[6]) {
             if (it == mTextures.end()) { mError = "setSkyCubemap: unknown face texture"; return false; }
             tex[i] = it->second.texture;
         }
+        // The faces are READ here, not bound: their resolution decides the cube's,
+        // and buildCubeFromWorldFaces copies their PIXELS. Both need them resident
+        // (THREADING_ADOPTION_SPEC.md P2 — loadTexture only schedules).
+        for (int i = 0; i < 6; ++i) waitForTextureResident(tex[i]);
         for (int i = 0; i < 6; ++i)
             if (tex[i]->getWidth() != tex[0]->getWidth() || tex[i]->getHeight() != tex[0]->getHeight()) {
                 mError = "setSkyCubemap: the six faces must all be the same size";
@@ -114,6 +126,8 @@ bool OgreScene::setSkyReflection(const TextureId faces[6]) {
             if (it == mTextures.end()) { mError = "setSkyReflection: unknown face texture"; return false; }
             tex[i] = it->second.texture;
         }
+        // Same reason as setSkyCubemap: read, not bound.
+        for (int i = 0; i < 6; ++i) waitForTextureResident(tex[i]);
         for (int i = 0; i < 6; ++i)
             if (tex[i]->getWidth() != tex[0]->getWidth() || tex[i]->getHeight() != tex[0]->getWidth()) {
                 mError = "setSkyReflection: the six faces must be square and the same size";

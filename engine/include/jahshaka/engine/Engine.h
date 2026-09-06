@@ -722,6 +722,70 @@ public:
     /// duration of a call, never across one that could destroy a View.
     virtual void listViews(std::vector<View *> &out) const = 0;
 
+    // ---- Texture streaming (SPECS/THREADING_ADOPTION_SPEC.md P2) -----------
+    //
+    // WHAT CHANGED, in one sentence: `loadTexture` used to block the calling
+    // thread until that ONE texture was read, decoded and uploaded; now it only
+    // SCHEDULES the load, and the wait happens ONCE, at the frame edge, inside
+    // renderOneFrame(). N textures therefore decode concurrently instead of one
+    // at a time, and the frame that draws them still sees every one of them
+    // resident — which is what keeps the pixel suites byte-exact (decision
+    // D-C(1); option (2), "do not wait for the on-screen view either", is a
+    // visible-quality decision that was deliberately NOT taken here).
+    //
+    // A HOST NEEDS THESE THREE ONLY FOR ONE-SHOT RENDERS. Anything that draws
+    // through the ordinary loop is already covered by renderOneFrame's own
+    // wait. What is NOT covered is a caller that renders a fixed number of
+    // frames and then reads the pixels back — a thumbnail, an asset snapshot, a
+    // screenshot — because a texture whose load request arrives DURING that
+    // frame is resident only for the next one. Upstream's own recipe for that
+    // (OgreTextureGpuManager.h:849-868) is: wait, snapshot the request counter,
+    // render, and if the counter moved, wait and render again.
+
+    /// True when nothing is queued or in flight in the streaming worker(s).
+    /// Cheap — one flag and a queue size behind a mutex.
+    virtual bool texturesDoneStreaming() const = 0;
+
+    /// Blocks until texturesDoneStreaming() is true, pumping the streaming
+    /// worker's completion queue while it waits. Returns the milliseconds spent
+    /// waiting (0.0 when there was nothing to wait for), which is the number the
+    /// A/B harness reports and the only honest way to say what a "batched" open
+    /// actually cost.
+    ///
+    /// NOT NEEDED before a normal frame — renderOneFrame does it. It is here for
+    /// one-shot renders and for scripts that want a provably complete image.
+    virtual double waitForTextureLoads() = 0;
+
+    /// A monotonic count of texture LOAD REQUESTS this process has made. Only
+    /// differences mean anything: snapshot it, render, compare. It moving across
+    /// a render is exactly the condition upstream's double-render guard tests.
+    virtual unsigned long long textureLoadRequests() const = 0;
+
+    /// How many threads the multiload pool has (0 = the feature is off and
+    /// loading is the single background streaming thread). Set once at engine
+    /// init from the machine's core count, overridable with JAH_TEXTURE_MULTILOAD
+    /// for measurement — see the A/B protocol in THREADING_ADOPTION_SPEC G2-c.
+    virtual unsigned textureMultiLoadThreads() const = 0;
+
+    /// Rows in the backend's texture METADATA cache (P2 item 6): resolution,
+    /// format, mipmaps and pool per texture path, remembered across launches so
+    /// the main thread can reserve the right pool slice before the worker has
+    /// decoded anything. Derived data with the same delete-and-rebuild contract
+    /// as the shader cache, in the same directory. Not free to ask — the backend
+    /// exposes no size() and this exports the map to count it.
+    virtual unsigned textureMetadataCacheEntries() const = 0;
+
+    /// Rows in OUR channel sidecar (P2 item 7, decision D-D(b)): path ->
+    /// {numComponents, compressed}, remembered so that asking "is this file
+    /// single-channel?" — which used to mean fully decoding every image on the
+    /// calling thread and throwing the result away — costs a map lookup. Free to
+    /// ask: it is a container size.
+    virtual unsigned textureChannelCacheEntries() const = 0;
+
+    /// Writes the texture cache (metadata + the channel sidecar) now. Called on
+    /// clean shutdown beside saveShaderCache(); a no-op when the cache is off.
+    virtual bool saveTextureCache() = 0;
+
     // ---- Presentation pacing (fps audit F1) --------------------------------
     /// Vertical sync for every ON-SCREEN View, now and for every window created
     /// afterwards (a window rebuilt by an MSAA change or a resize keeps it).

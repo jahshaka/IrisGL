@@ -435,6 +435,164 @@ bool available();
 }   // namespace hud
 
 // ---------------------------------------------------------------------------
+// Small on-disk-cache primitives, shared by the TWO caches this engine keeps
+// (the shader cache and the texture cache). Defined once in OgreShaderCache.cpp,
+// where they were born as file statics; they moved into a named namespace when
+// the texture cache (THREADING_ADOPTION_SPEC.md P2) became the second caller,
+// because a second copy of "write it atomically" is a second place to get the
+// rename wrong.
+//
+// Deliberately POSIX and deliberately not <filesystem>: the engine targets C++17
+// on toolchains where <filesystem> still needs an extra link library on some
+// hosts, and every one of these is a handful of lines.
+// ---------------------------------------------------------------------------
+/// WAIT FOR ONE TEXTURE TO BE RESIDENT (THREADING_ADOPTION_SPEC.md P2).
+///
+/// Since P2, `OgreScene::loadTexture` only SCHEDULES the load and the frame edge
+/// collects (OgreEngine::renderOneFrame). That is safe for the overwhelming
+/// majority of consumers — BINDING a not-yet-resident texture to an Hlms
+/// datablock is self-correcting, because any residency or pool-slot change
+/// destroys the descriptor set and reschedules the const-buffer update
+/// (OgreHlmsTextureBaseClass.inl:459-486) and the rebake re-reads the slice.
+///
+/// IT IS NOT SAFE FOR A CALLER THAT READS THE TEXTURE ITSELF before the next
+/// frame — its resolution, its internal type, its POOL SLICE, or its pixels.
+/// Those reads happen once and are never revisited, so a texture that is still
+/// on storage answers "0x0, Type2D, slice 0" and the caller quietly bakes that
+/// in. The sky is the worked example and the reason this function exists:
+/// SceneManager::setSky writes the texture's `sliceIdx` into the sky material as
+/// a one-shot uniform, so an unresident equirect sky renders whatever is in
+/// slice 0 of its pool — i.e. some OTHER image — for ever, silently. (Caught by
+/// tests/engine equirect_sky_fills_the_background, which is exactly why that
+/// assertion loads a second sky into the same pool.)
+///
+/// Cheap and honest: a no-op for a texture that is already resident, and for a
+/// ManualTexture, which is resident by construction.
+void waitForTextureResident(Ogre::TextureGpu *tex);
+
+/// JAH_TEXTURE_SYNC_LOAD — restore the pre-P2 per-texture wait inside
+/// loadTexture, at run time. The A arm of the batched-loading measurement
+/// (THREADING_ADOPTION_SPEC.md G2-c) and the second step of the phase's order of
+/// retreat (pool -> wait -> caches). Read once per process; a measurement and
+/// recovery hatch, not a preference.
+bool syncTextureLoads();
+
+namespace cachefile {
+/// mkdir -p. False only when a component could not be created.
+bool mkpath(const std::string &dir);
+/// Whole-file read. False when the file does not exist or could not be read.
+bool readWholeFile(const std::string &path, std::vector<char> &out);
+/// ATOMIC write: `<name>.tmp` in the SAME directory, flushed to the platform,
+/// then renamed over the target. A crash mid-write leaves the previous good file
+/// or no file — never half of one. (Ogre's Archive::create gives neither.)
+bool writeAtomic(const std::string &dir, const std::string &name,
+                 const void *data, size_t len);
+/// 128-bit content hash as printable hex — Murmur3, which ships with Ogre.
+/// NOT a cryptographic hash and not used as one: it detects corruption and
+/// staleness, not tampering.
+std::string hex128(const void *data, size_t len);
+inline std::string hexOf(const std::string &s) { return hex128(s.data(), s.size()); }
+}   // namespace cachefile
+
+// ---------------------------------------------------------------------------
+// The persistent TEXTURE cache (THREADING_ADOPTION_SPEC.md P2 items 6 and 7;
+// impl in OgreTextureCache.cpp). TWO files, one manifest, one validity key.
+//
+//   texture-meta.json      Ogre's OWN texture metadata cache, exported verbatim
+//                          by TextureGpuManager::exportTextureMetadataCache and
+//                          fed back by importTextureMetadataCache. It records
+//                          resolution/format/mipmaps/pool per texture PATH, which
+//                          lets the MAIN thread reserve the right pool slice and
+//                          transition the texture Resident BEFORE the worker has
+//                          decoded anything (OgreTextureGpuManager.cpp:1788-1793)
+//                          — removing the main<->worker ping-pong upstream
+//                          describes at OgreTextureGpuManager.h:186-198.
+//   texture-channels.txt   OURS (decision D-D(b)): path -> {numComponents,
+//                          compressed}. It exists to kill a DOUBLE DECODE.
+//                          loadTexture has to know whether a file is
+//                          single-channel (those decode to R8 and sample red, so
+//                          we expand them to RGBA on the CPU) and the only way to
+//                          ask was to fully decode the image and throw the result
+//                          away. With a hit, the probe is skipped entirely.
+//
+// WHY A LYING CACHE IS SAFE, and this is the load-bearing sentence for the whole
+// item: Ogre SELF-CORRECTS. If the metadata says 2048x2048 RGBA8 and the file on
+// disk is now something else, the streaming worker raises `OutOfDateCache`
+// (OgreObjCmdBuffer.cpp:137-152), which drops the entry, transitions the texture
+// back to OnStorage and reloads it properly. The cost of a stale entry is one
+// wasted transition, never a wrong pixel — which is exactly what upstream's
+// "performance will be degraded if the metadata cache lied" means.
+//
+// I-5, WHY THE VALIDITY KEY IS SIMPLER THAN THE SHADER CACHE'S: it lives in the
+// SAME DIRECTORY (one lifetime, one "clear cache" button, one wipe) but has its
+// OWN manifest and its OWN key, which deliberately does NOT name the GPU or the
+// driver. Nothing here is device-specific — a resolution and a channel count are
+// properties of a FILE — so folding it into the shader cache's fingerprint would
+// throw both caches away on every driver update for no reason.
+//
+// PROCESS-WIDE, like its subject: `TextureGpuManager` belongs to the render
+// system, not to a Scene, and `OgreScene::loadTexture` (the channel sidecar's
+// only reader) has no engine pointer. `textureCache()` is the accessor.
+class TextureCache {
+public:
+    /// Resolves the directory and computes the key. No I/O. An empty `dir`
+    /// leaves the cache off — every method below then does nothing, and
+    /// `channels()` always misses, which is exactly today's behaviour.
+    void configure(const std::string &dir, const std::string &appBuildId);
+
+    /// Reads both files (after verifying the manifest) and hands Ogre's half to
+    /// `importTextureMetadataCache`. Call from ensureHlms(), after the Hlms is
+    /// registered and before anything can ask for a texture. Any doubt — missing
+    /// manifest, wrong key, size or hash mismatch, a JSON parse error — deletes
+    /// both files and starts cold. Never throws, never fatal.
+    void load(Ogre::Root *root);
+
+    /// Writes both files and the manifest. Cheap and idempotent; a no-op when
+    /// the cache is off or nothing changed since the last write.
+    bool save(Ogre::Root *root);
+
+    /// Forgets everything, in memory and on disk. The engine's clearShaderCache
+    /// calls this too — the two caches share a directory, so "delete the cache"
+    /// has to mean both or the manifest would outlive its files.
+    bool clear();
+
+    /// THE SIDECAR READ (D-D(b)). True when this path's channel count is known.
+    /// A miss is not an error: the caller decodes once, exactly as it always
+    /// did, and calls note() with the answer.
+    bool channels(const std::string &path, unsigned &components, bool &compressed) const;
+    /// Records what a decode found. Marks the cache dirty.
+    void note(const std::string &path, unsigned components, bool compressed);
+
+    /// Rows in the channel sidecar — a census number for app.textureStreaming().
+    unsigned channelEntries() const;
+    /// Rows in OGRE's metadata cache right now. Ogre exposes no size() for it,
+    /// so this exports the map and counts entries; call it from a settings page,
+    /// not from a frame.
+    unsigned metadataEntries(Ogre::Root *root) const;
+
+    TextureCache();
+    ~TextureCache();
+
+private:
+    struct FileRec { std::string name; unsigned long long bytes; std::string hash; };
+    bool readManifest(std::vector<FileRec> &out) const;
+    bool writeManifest(const std::vector<FileRec> &files) const;
+    void wipe() const;
+    std::string path(const std::string &name) const;
+
+    std::string mDir, mKey;
+    bool        mEnabled = false;
+    bool        mDirty = false;
+    /// path -> (components, compressed). The channel sidecar, in memory.
+    std::map<std::string, std::pair<unsigned, bool>> mChannels;
+};
+
+/// The process's one texture cache. Process-wide because TextureGpuManager is:
+/// there is one render system per process (Ogre::Root is a singleton), so a
+/// per-Engine instance would be the same object with more ways to get it wrong.
+TextureCache &textureCache();
+
+// ---------------------------------------------------------------------------
 // The persistent shader cache (SHADER_CACHE_SPEC.md; impl in OgreShaderCache.cpp).
 //
 // Three layers Ogre already implements, behind ONE container we fingerprint and
@@ -1663,6 +1821,17 @@ public:
     bool hasEnabledViews() const override;
     void listViews(std::vector<View *> &out) const override;
 
+    // Texture streaming (THREADING_ADOPTION_SPEC.md P2) — all five are one call
+    // into TextureGpuManager, which belongs to the render system and is
+    // therefore process-wide, not per scene.
+    bool texturesDoneStreaming() const override;
+    double waitForTextureLoads() override;
+    unsigned long long textureLoadRequests() const override;
+    unsigned textureMultiLoadThreads() const override;
+    unsigned textureMetadataCacheEntries() const override;
+    unsigned textureChannelCacheEntries() const override;
+    bool saveTextureCache() override;
+
     /// Applies to every on-screen window that exists AND is remembered for the
     /// ones created later (createView and the MSAA-recreate hook both read it).
     void setVsync(bool on) override;
@@ -1805,6 +1974,11 @@ private:
     /// scene managers this is the number that says how many of them the frame
     /// loop actually paid for.
     unsigned        mUpdatedScenes = 0;
+    /// Threads in the multiload texture pool (THREADING_ADOPTION_SPEC.md P2
+    /// item 5). 0 means the feature is off — the single background streaming
+    /// thread does every decode, which is Ogre's default and what
+    /// JAH_TEXTURE_MULTILOAD=0 restores at run time.
+    unsigned        mMultiLoadThreads = 0;
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
     ShaderCache     mShaderCache;

@@ -40,6 +40,16 @@
 
 namespace jahshaka { namespace engine {
 namespace detail {
+
+// The shared on-disk-cache primitives are DEFINED at the bottom of this file
+// (`namespace cachefile`) and declared in EnginePrivate.h; pulled in here so the
+// rest of the file reads exactly as it did when they were file statics.
+using cachefile::hex128;
+using cachefile::hexOf;
+using cachefile::mkpath;
+using cachefile::readWholeFile;
+using cachefile::writeAtomic;
+
 namespace {
 
 /// Our container's own format version. Bump it and every existing cache on
@@ -55,31 +65,9 @@ constexpr unsigned long long kMaxCacheBytes = 256ull * 1024ull * 1024ull;
 constexpr const char *kManifest = "cache-manifest.txt";
 constexpr const char *kLockFile = "cache.lock";
 
-std::string hex128(const void *data, size_t len) {
-    Ogre::uint64 out[2] = {};
-    Ogre::MurmurHash3_x64_128(data, static_cast<int>(len), 0x9E3779B9u, out);
-    char buf[33];
-    std::snprintf(buf, sizeof(buf), "%016llx%016llx",
-                  static_cast<unsigned long long>(out[0]), static_cast<unsigned long long>(out[1]));
-    return std::string(buf);
-}
-
-std::string hexOf(const std::string &s) { return hex128(s.data(), s.size()); }
-
 long long nowUnixMs() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-}
-
-bool readWholeFile(const std::string &p, std::vector<char> &out) {
-    std::ifstream f(p, std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    const std::streamoff n = f.tellg();
-    if (n < 0) return false;
-    out.resize(static_cast<size_t>(n));
-    f.seekg(0);
-    if (n && !f.read(out.data(), n)) return false;
-    return true;
 }
 
 /// Hash of the staged Hlms template tree. Belt-and-braces: Ogre's own
@@ -136,6 +124,39 @@ unsigned long long dirBytes(const std::string &dir, unsigned *fileCount) {
     return total;
 }
 
+void logLine(const std::string &s) {
+    if (Ogre::LogManager::getSingletonPtr())
+        Ogre::LogManager::getSingleton().logMessage("Jahshaka shader cache: " + s);
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// The shared on-disk-cache primitives (EnginePrivate.h `namespace cachefile`).
+// They were file statics here until the texture cache became the second caller
+// (THREADING_ADOPTION_SPEC.md P2); nothing about them changed but the linkage.
+namespace cachefile {
+
+std::string hex128(const void *data, size_t len) {
+    Ogre::uint64 out[2] = {};
+    Ogre::MurmurHash3_x64_128(data, static_cast<int>(len), 0x9E3779B9u, out);
+    char buf[33];
+    std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                  static_cast<unsigned long long>(out[0]), static_cast<unsigned long long>(out[1]));
+    return std::string(buf);
+}
+
+bool readWholeFile(const std::string &p, std::vector<char> &out) {
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamoff n = f.tellg();
+    if (n < 0) return false;
+    out.resize(static_cast<size_t>(n));
+    f.seekg(0);
+    if (n && !f.read(out.data(), n)) return false;
+    return true;
+}
+
 bool mkpath(const std::string &dir) {
     if (dir.empty()) return false;
     std::string acc;
@@ -155,14 +176,6 @@ bool mkpath(const std::string &dir) {
     return true;
 }
 
-void logLine(const std::string &s) {
-    if (Ogre::LogManager::getSingletonPtr())
-        Ogre::LogManager::getSingleton().logMessage("Jahshaka shader cache: " + s);
-}
-
-/// Atomic write: <name>.tmp in the SAME directory, flushed to the platform, then
-/// renamed over the target. A crash mid-write leaves the previous good file or
-/// no file — never half of one. (Ogre's Archive::create gives neither property.)
 bool writeAtomic(const std::string &dir, const std::string &name,
                  const void *data, size_t len) {
     const std::string tmp = dir + "/" + name + ".tmp";
@@ -179,7 +192,7 @@ bool writeAtomic(const std::string &dir, const std::string &name,
     return true;
 }
 
-}  // namespace
+}   // namespace cachefile
 
 // ---------------------------------------------------------------------------
 // The compile counters.

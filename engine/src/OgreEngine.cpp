@@ -12,7 +12,10 @@
 #include <OgreTimer.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <fstream>
+#include <thread>
 
 namespace jahshaka { namespace engine {
 namespace detail {
@@ -56,6 +59,20 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     // reasonable thing to reuse between a windowed and a headless run.
     mShaderCache.configure(cfg.headless ? std::string() : cfg.shaderCacheDir,
                            cfg.appBuildId, mMediaDir);
+    // The TEXTURE cache (THREADING_ADOPTION_SPEC.md P2 items 6-7) rides the same
+    // directory and the same headless rule, with its own manifest and its own
+    // key (I-5: a resolution and a channel count are properties of a FILE, so
+    // its key names neither the GPU nor the driver and a driver update does not
+    // throw it away). Configured here — no I/O — and LOADED in ensureHlms().
+    // JAH_TEXTURE_CACHE=0 switches BOTH halves off for a run — the third and
+    // last step of P2's order of retreat (pool -> wait -> caches), and the arm
+    // of the G2-c measurement that isolates what the caches are worth.
+    {
+        const char *cacheEnv = std::getenv("JAH_TEXTURE_CACHE");
+        const bool cacheOff = cacheEnv && cacheEnv[0] == '0';
+        textureCache().configure(cfg.headless || cacheOff ? std::string() : cfg.shaderCacheDir,
+                                 cfg.appBuildId);
+    }
     try {
         mAbiCookie = Ogre::generateAbiCookie();
         mRoot = new Ogre::Root(&mAbiCookie, "", "",
@@ -444,6 +461,31 @@ void OgreEngine::renderOneFrame() {
     // and Root::renderOneFrame walks a workspace-less render system. Hosts do
     // not have to special-case their frame loop; it simply costs nothing.
     JAH_TRY {
+        // THE ONE TEXTURE WAIT (THREADING_ADOPTION_SPEC.md P2 item 3, decision
+        // D-C(1)). `loadTexture` no longer waits per texture; it schedules, and
+        // this is where the frame collects. It is at the very TOP of the frame,
+        // before _fireFrameStarted and before the per-view pending work below,
+        // because that work is not all "drawing": applyPendingIbl and
+        // applyPendingGi READ texture contents (an IBL cubemap, the VCT
+        // voxelizer's albedo reads), and giving them a texture that has not
+        // finished streaming would be a wrong picture rather than a slow one.
+        //
+        // A NO-OP WHEN NOTHING IS PENDING — isDoneStreaming is a flag and a
+        // queue size behind a mutex, so an idle editor pays a few nanoseconds a
+        // frame. When something IS pending, this blocks exactly as long as the
+        // old per-texture waits did in TOTAL, minus everything the decodes
+        // managed to overlap, which is the entire point of the phase.
+        //
+        // EVERY RENDER PATH FUNNELS THROUGH HERE: the driver tick, thumbnails,
+        // asset scenes, the warm-up gate and the selftest all call
+        // renderOneFrame. That is what makes one call enough.
+        if (mRoot) {
+            if (Ogre::RenderSystem *rs = mRoot->getRenderSystem()) {
+                if (Ogre::TextureGpuManager *tm = rs->getTextureGpuManager()) {
+                    if (!tm->isDoneStreaming()) tm->waitForStreamingCompletion();
+                }
+            }
+        }
         for (auto &v : mViews) {
             v->applyPendingResize(); v->updateParticles(); v->updateGi();
             // Both ends of the planar-reflection wiring move between frames (the
@@ -639,6 +681,53 @@ void OgreEngine::listViews(std::vector<View *> &out) const {
     out.clear();
     out.reserve(mViews.size());
     for (const auto &v : mViews) out.push_back(v.get());
+}
+
+// ---------------------------------------------------------------------------
+// Texture streaming (THREADING_ADOPTION_SPEC.md P2). One TextureGpuManager per
+// process — it belongs to the render system, not to a Scene — so all of these
+// are Engine verbs, not Scene ones. Every one of them is safe before the render
+// system exists (a headless run, or the window between Root and initialise):
+// they answer "done", 0, or do nothing.
+namespace {
+Ogre::TextureGpuManager *textureManagerOf(Ogre::Root *root) {
+    if (!root) return nullptr;
+    Ogre::RenderSystem *rs = root->getRenderSystem();
+    return rs ? rs->getTextureGpuManager() : nullptr;
+}
+}   // namespace
+
+bool OgreEngine::texturesDoneStreaming() const {
+    Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
+    return tm ? tm->isDoneStreaming() : true;
+}
+
+double OgreEngine::waitForTextureLoads() {
+    Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
+    if (!tm || tm->isDoneStreaming()) return 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    tm->waitForStreamingCompletion();
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+unsigned long long OgreEngine::textureLoadRequests() const {
+    Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
+    return tm ? static_cast<unsigned long long>(tm->getLoadRequestsCounter()) : 0ull;
+}
+
+unsigned OgreEngine::textureMultiLoadThreads() const { return mMultiLoadThreads; }
+
+unsigned OgreEngine::textureMetadataCacheEntries() const {
+    return textureCache().metadataEntries(mRoot);
+}
+
+unsigned OgreEngine::textureChannelCacheEntries() const {
+    return textureCache().channelEntries();
+}
+
+bool OgreEngine::saveTextureCache() {
+    if (!mRoot) return false;
+    JAH_TRY { return textureCache().save(mRoot); } JAH_CATCH(mLastError, false);
 }
 
 void OgreEngine::setVsync(bool on) {
@@ -943,7 +1032,15 @@ bool OgreEngine::saveShaderCache() {
 }
 
 bool OgreEngine::clearShaderCache() {
-    JAH_TRY { return mShaderCache.clear(); } JAH_CATCH(mLastError, false);
+    // BOTH CACHES, because they are one directory and one lifetime (I-5). The
+    // shader cache's wipe() unlinks every file in that directory anyway, so a
+    // clear that left the texture cache's in-memory state standing would write
+    // a manifest naming files it had just deleted on the next save.
+    JAH_TRY {
+        const bool ok = mShaderCache.clear();
+        textureCache().clear();
+        return ok;
+    } JAH_CATCH(mLastError, false);
 }
 
 void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
@@ -957,6 +1054,13 @@ OgreEngine::~OgreEngine() {
     // This is the primary save point (SHADER_CACHE_SPEC §4.4): a clean quit is
     // the only moment we are certain nothing is compiling.
     if (mRoot) { try { mShaderCache.save(mRoot); } catch (...) {} }
+    // The TEXTURE cache in the same breath and for the same reason
+    // (THREADING_ADOPTION_SPEC.md P2): its metadata half is exported from
+    // TextureGpuManager, which dies with the render system a few lines below.
+    // The host also saves it explicitly at shutdown (EngineHost::shutdown, next
+    // to saveShaderCache) — this is the point that runs even when the Engine
+    // outlives that call, and save() is idempotent.
+    if (mRoot) { try { textureCache().save(mRoot); } catch (...) {} }
     // The SSAO rotation-noise texture is ours and must not outlive Root.
     // Its own try/catch, NOT JAH_TRY: that macro's handler ends in `return`,
     // which inside a destructor abandons the rest of the teardown — views,
@@ -1104,6 +1208,47 @@ void OgreEngine::ensureHlms() {
     // microcode, then the Hlms caches) is upstream's, not ours: see
     // OgreHlmsDiskCache.h:74-77 and Samples/2.0/Common/src/GraphicsSystem.cpp:626.
     mShaderCache.load(mRoot);
+    // THE TEXTURE SIDE, in the same breath and for the same reason
+    // (THREADING_ADOPTION_SPEC.md P2 items 5 and 6): the render system and its
+    // TextureGpuManager exist by now, and nothing has asked for a texture yet.
+    //
+    // THE MULTILOAD POOL. Ogre's default is 0 — ONE background thread doing
+    // every read and every PNG/JPG decode, serially. Upstream's measured sweet
+    // spot is 4-8 (OgreTextureGpuManager.h:1132) and the documented cost is
+    // memory ("you may end up with many images loaded in RAM", :1106-1107), so
+    // the default here is deliberately conservative: half the machine's threads,
+    // clamped to [2, 6]. JAH_TEXTURE_MULTILOAD overrides it (0 disables the
+    // feature entirely and restores today's single-threaded loading with no
+    // rebuild — the A arm of the G2-c measurement, and the first step of P2's
+    // order of retreat).
+    //
+    // SAFE FOR US, and this needs saying because upstream flags it: multiload
+    // loads OUT OF ORDER. That matters only to callers that use reservePoolId()
+    // to assign pool slices themselves, which we never do; and the paths that DO
+    // need ordering — the grayscale expansion and every createTexture upload —
+    // pass an Image2, which sets bSkipMultiload implicitly
+    // (OgreTextureGpu.h:405-418).
+    if (Ogre::RenderSystem *rs = mRoot->getRenderSystem()) {
+        if (Ogre::TextureGpuManager *tm = rs->getTextureGpuManager()) {
+            unsigned threads = 0;
+            const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+            threads = std::min(6u, std::max(2u, cores / 2u));
+            if (const char *forced = std::getenv("JAH_TEXTURE_MULTILOAD")) {
+                const long n = std::strtol(forced, nullptr, 10);
+                threads = unsigned(std::max(0l, std::min(32l, n)));
+            }
+            // Never under the NULL render system: a headless run decodes nothing
+            // worth parallelising and the pool would be four idle threads.
+            if (mHeadless) threads = 0;
+            if (threads > 0) tm->setMultiLoadPool(threads);
+            mMultiLoadThreads = threads;
+        }
+    }
+    // The texture cache (configured beside the shader cache in init(); it shares
+    // that directory and its lifetime, with its own manifest and its own simpler
+    // validity key — I-5). Loaded HERE, after the Hlms exists and before
+    // anything can ask for a texture, exactly like the shader cache above.
+    textureCache().load(mRoot);
     mHlmsRegistered = true;
     applyShadowFilter();   // replaces Ogre's PCF_3x3 default with ours (Soft = 4x4)
     if (!pixels) return;   // the rest is rendering-only — see the top of this function
