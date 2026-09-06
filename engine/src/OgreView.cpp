@@ -109,9 +109,18 @@ bool OgreView::pipAllowed() const {
 
 void OgreView::setPip(const ViewPipDesc &d) {
     if (d == mPip) return;              // hosts push per frame; the same value is free
+    // SHAPE vs STATE, the setPostFx split. Only `enabled` and `allowOffscreen`
+    // decide whether the workspace exists (syncPip's `want`); the camera pose,
+    // rects and background are ALL live in applyPip — even the background,
+    // which applyPip re-writes over what buildPip baked. Before this split a
+    // MOVING previewed camera (animated, socketed, possessed, dragged) tore
+    // down and re-added the compositor workspace once per frame, because the
+    // desc carries the pose and the old code called syncPip on any change.
+    const bool shapeChanged = d.enabled != mPip.enabled ||
+                              d.allowOffscreen != mPip.allowOffscreen;
     mPip = d;
-    syncPip();                          // builds/tears the workspace only when needed
-    applyPip();                         // camera + rects are live, never a rebuild
+    if (shapeChanged) syncPip();        // build/tear only on an existence flip
+    applyPip();                         // camera + rects + background, no rebuild
 }
 
 const ViewPipDesc &OgreView::pip() const { return mPip; }
