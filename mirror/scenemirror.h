@@ -237,7 +237,12 @@ public:
     /// tested so geometry occludes it. Hidden by default; hosts push visibility
     /// and spacing per frame (cheap — the mesh only rebuilds when the spacing
     /// changes). The next sync() applies it.
-    void setGrid(bool visible, float spacing);
+    /// Which world plane the grid lies in. Floor is the classic XZ ground
+    /// grid; FrontXY / SideYZ exist for the canonical orthographic views,
+    /// where a floor grid seen edge-on is a single useless line — the
+    /// viewport picks the plane that faces the view axis.
+    enum class GridPlane { Floor, FrontXY, SideYZ };
+    void setGrid(bool visible, float spacing, GridPlane plane = GridPlane::Floor);
     bool gridVisible() const { return mGridVisible; }
 
     /// How far the grid reaches from the origin, in world units (default 100 =
@@ -696,6 +701,8 @@ private:
     // Ground grid: one root node (dropped a hair below y=0 against z-fighting
     // with floor geometry) carrying a minor- and a major-line child.
     bool  mGridVisible = false;
+    GridPlane mGridPlane = GridPlane::Floor;
+    GridPlane mGridBuiltPlane = GridPlane::Floor;
     float mGridSpacing = 1.0f;
     float mGridExtent = 100.0f;
     float mGridBuiltSpacing = -1.0f;                            // what the meshes were built for

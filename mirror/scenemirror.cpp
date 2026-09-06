@@ -716,9 +716,10 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
 
 // ---- ground grid (EDITOR_SHORTCUTS_SPEC §3) --------------------------------------
 
-void SceneMirror::setGrid(bool visible, float spacing)
+void SceneMirror::setGrid(bool visible, float spacing, GridPlane plane)
 {
     mGridVisible = visible;
+    mGridPlane = plane;
     // Sanitise: the spacing is the editor's snap size; refuse degenerate values.
     mGridSpacing = std::min(std::max(spacing, 0.01f), 100.0f);
 }
@@ -759,17 +760,34 @@ void SceneMirror::syncGrid()
         if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
         mGridColoursDirty = false;
     }
+    bool freshNode = false;
     if (!mGridNode) {
         mGridNode = mTarget->createNode();
         if (!mGridNode) return;
+        freshNode = true;
         mGridMinorNode = mTarget->createNode(mGridNode);
         mGridMajorNode = mTarget->createNode(mGridNode);
-        // A hair below y=0 so floor geometry sitting on the plane (the default
-        // ground is at +1e-4) occludes the grid cleanly instead of z-fighting.
-        mTarget->setNodeTransform(mGridNode, Vec3(0, -0.01f, 0), Quat(), Vec3(1, 1, 1));
         // Unlit (never fogged), depth-tested (occluded by geometry), blended.
         mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
         mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
+    }
+    if (freshNode || mGridBuiltPlane != mGridPlane) {
+        // The mesh is authored in XZ; the node rotates it into the plane that
+        // faces the requesting view. Floor sits a hair below y=0 so geometry
+        // resting on the plane (the default ground is at +1e-4) occludes it
+        // cleanly instead of z-fighting; the vertical planes pass through the
+        // origin — they are alignment aids for the orthographic views and
+        // nothing habitually coexists at exactly x=0 / z=0.
+        static const float s = 0.70710678f;   // sin/cos 45°: a 90° rotation
+        Vec3 pos(0, -0.01f, 0);
+        Quat rot;                             // Floor: identity
+        switch (mGridPlane) {
+        case GridPlane::FrontXY: pos = Vec3(); rot = Quat(s, 0, 0, s); break;
+        case GridPlane::SideYZ:  pos = Vec3(); rot = Quat(0, 0, s, s); break;
+        case GridPlane::Floor: break;
+        }
+        mTarget->setNodeTransform(mGridNode, pos, rot, Vec3(1, 1, 1));
+        mGridBuiltPlane = mGridPlane;
     }
     if (mGridBuiltSpacing != mGridSpacing || mGridBuiltExtent != mGridExtent) {
         if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
