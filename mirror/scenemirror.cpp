@@ -77,7 +77,97 @@ struct Hasher {
     }
     Hasher &operator<<(const QColor &c) { return *this << c.rgba(); }
     Hasher &operator<<(const iris::Vec3 &v) { return *this << v.x() << v.y() << v.z(); }
+    Hasher &operator<<(const iris::Quat &q) { return *this << q.x() << q.y() << q.z() << q.scalar(); }
 };
+
+/// FNV-1a over one float's bit pattern, a WORD at a time. Hasher::bytes runs
+/// the mix per BYTE, which is right for strings and four times the work here —
+/// and this is on a per-light, per-selected-mesh, per-ancestor path.
+inline void mixFloat(quint64 &h, float f)
+{
+    quint32 bits;
+    std::memcpy(&bits, &f, sizeof bits);
+    h = (h ^ quint64(bits)) * 1099511628211ull;
+}
+
+constexpr quint64 kTrsBasis = 1469598103934665603ull;   // FNV-1a 64 offset basis
+
+/// One node's own local TRS, folded into `sig`.
+inline void mixLocalTrs(quint64 &sig, iris::graph::NodeHandle h)
+{
+    const iris::Vec3 p = iris::graph::localPos(h);
+    const iris::Quat r = iris::graph::localRot(h);
+    const iris::Vec3 s = iris::graph::localScale(h);
+    mixFloat(sig, p.x()); mixFloat(sig, p.y()); mixFloat(sig, p.z());
+    mixFloat(sig, r.x()); mixFloat(sig, r.y()); mixFloat(sig, r.z()); mixFloat(sig, r.scalar());
+    mixFloat(sig, s.x()); mixFloat(sig, s.y()); mixFloat(sig, s.z());
+}
+
+/// A change-key for a node's WORLD transform, WITHOUT computing one.
+///
+/// `globalTransform()` is `Ogre::Node::_getFullTransformUpdated()`, and that
+/// call recurses to the ROOT unconditionally, running the full transform
+/// recomposition (and a listener call) at every level — every time, whether
+/// anything moved or not. Three per-frame sites only ever wanted to know
+/// whether the answer CHANGED (the GI light signature, the light icon's
+/// billboard instance and the selection outline's shells), and paid the whole
+/// recomposition per light / per selected mesh per frame to find out (audit
+/// F7 / F8 / F9).
+///
+/// This reads the local TRS of the node and of every ancestor — plain member
+/// reads, no matrix maths — and folds them into one 64-bit hash. Exactly as
+/// sensitive as the world matrix: a world transform can only change if some
+/// local TRS on the chain did. (A hash is a change test, not a value: the
+/// collision risk is one refusal to notice a move in 2^64, against a whole
+/// matrix chain per frame.)
+quint64 worldTrsSignature(iris::graph::NodeHandle h)
+{
+    quint64 sig = kTrsBasis;
+    for (; h; h = iris::graph::parentOf(h)) mixLocalTrs(sig, h);
+    return sig;
+}
+
+/// worldTrsSignature with the ANCESTOR half memoised — for the one caller that
+/// asks about many nodes at once (the GI light signature). A scene's lights
+/// share their parent chains, so without this the same ancestors are re-read
+/// once per light per frame; with it the chain is walked once per distinct
+/// parent. `memo` is a caller-owned scratch buffer (a linear scan: a scene has
+/// a handful of distinct light parents, and a QHash would allocate).
+quint64 worldTrsSignatureMemo(iris::graph::NodeHandle h,
+                              std::vector<std::pair<iris::graph::NodeHandle, quint64>> &memo)
+{
+    if (!h) return kTrsBasis;
+    const iris::graph::NodeHandle parent = iris::graph::parentOf(h);
+    quint64 sig = kTrsBasis;
+    bool have = false;
+    for (const auto &e : memo)
+        if (e.first == parent) { sig = e.second; have = true; break; }
+    if (!have) {
+        sig = worldTrsSignature(parent);
+        memo.emplace_back(parent, sig);
+    }
+    mixLocalTrs(sig, h);
+    return sig;
+}
+
+/// Field equality for LightDesc, so the mirror can push it on change only.
+/// Spelled out rather than hashed: the struct holds two std::strings, it is
+/// compared once per light per frame (not once per node), and an exact compare
+/// has no collision story to tell. Every field setLight reads is here — add a
+/// field to LightDesc and this must grow with it, or the new field silently
+/// stops reaching the engine after the first push.
+bool sameLight(const LightDesc &a, const LightDesc &b)
+{
+    return a.type == b.type &&
+           a.colour.r == b.colour.r && a.colour.g == b.colour.g &&
+           a.colour.b == b.colour.b && a.colour.a == b.colour.a &&
+           a.intensity == b.intensity && a.range == b.range &&
+           a.spotAngleDegrees == b.spotAngleDegrees && a.spotSoftness == b.spotSoftness &&
+           a.castShadows == b.castShadows &&
+           a.rectWidth == b.rectWidth && a.rectHeight == b.rectHeight &&
+           a.doubleSided == b.doubleSided && a.accurate == b.accurate &&
+           a.iesProfilePath == b.iesProfilePath && a.texturePath == b.texturePath;
+}
 }
 
 SceneMirror::SceneMirror(Scene *target) : mTarget(target)
@@ -287,30 +377,46 @@ void SceneMirror::setHighlightWireframe(bool on)
     mHighlightWireframe = on;
 }
 
-void SceneMirror::collectHighlightMeshes(const iris::SceneNodePtr &node,
+/// RAW nodes, no QSharedPointer. This runs over the whole selected subtree
+/// every frame; `sharedFromThis()` per child was one QSharedPointer
+/// construction (and two atomic refcount ops) per node per frame to hand back
+/// what `childAt` already returns raw — audit F9. `getMesh()` was the same
+/// mistake one level down: it returns a MeshPtr BY VALUE.
+void SceneMirror::collectHighlightMeshes(iris::SceneNode *node,
                                          std::vector<std::pair<iris::MeshNode *, MeshId>> &out)
 {
     if (!node || !node->isVisible()) return;
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
-        auto meshNode = static_cast<iris::MeshNode *>(node.data());
-        if (iris::Mesh *mesh = meshNode->getMesh().data())
+        auto meshNode = static_cast<iris::MeshNode *>(node);
+        if (iris::Mesh *mesh = meshNode->mesh.data())
             if (MeshId m = engineMesh(mesh)) out.emplace_back(meshNode, m);
     }
     const int n = node->childCount();
     for (int i = 0; i < n; ++i)
         if (iris::SceneNode *c = node->childAt(i))
-            collectHighlightMeshes(c->sharedFromThis(), out);
+            collectHighlightMeshes(c, out);
 }
 
 void SceneMirror::syncHighlight()
 {
     // Every mesh under the highlighted node, the node itself included: selecting
     // an asset's ROOT (or any group) outlines the whole asset, not just one part.
-    std::vector<std::pair<iris::MeshNode *, MeshId>> targets;
-    if (mHighlighted) collectHighlightMeshes(mHighlighted, targets);
+    // The scratch vector is a MEMBER: this is a per-frame walk, and a local
+    // vector re-allocated its storage on every frame with a selection.
+    std::vector<std::pair<iris::MeshNode *, MeshId>> &targets = mHighlightTargets;
+    targets.clear();
+    if (mHighlighted) collectHighlightMeshes(mHighlighted.data(), targets);
     if (targets.empty()) {
-        for (HighlightShell &s : mHighlightShells) { if (s.node) mTarget->setNodeVisible(s.node, false); s.mesh = 0; }
-        mReclaimPending = true;
+        // ARM THE SWEEP ONLY ON A REAL TRANSITION (audit F4). This branch runs
+        // on every frame with nothing selected — which is most frames — and it
+        // used to set mReclaimPending unconditionally, so reclaimUnused()
+        // (three QSets built out of every entry in the scene) ran EVERY frame
+        // of an idle editor, exactly the per-frame sweep the flag exists to
+        // prevent. A shell that was already released has released nothing.
+        for (HighlightShell &s : mHighlightShells) {
+            if (s.node && s.shown) { mTarget->setNodeVisible(s.node, false); s.shown = false; }
+            if (s.mesh) { s.mesh = 0; mReclaimPending = true; }
+        }
         return;
     }
     // The user's outline colour preference lives on the document
@@ -361,18 +467,31 @@ void SceneMirror::syncHighlight()
         // colour does (scene->outlineWidth, pushed by MainWindow): width/150 maps
         // the historical default 6 to the historical 1.04 hull; today's default 3
         // gives 1.02 — half the band. <=0 (never pushed) falls back to the default.
-        iris::Mat4 t = meshNode->getGlobalTransform();
-        if (!mHighlightWireframe) {
-            const int w = (mSource && mSource->outlineWidth > 0) ? mSource->outlineWidth : 3;
-            t.scale(1.0f + float(w) / 150.0f);
+        //
+        // ON CHANGE ONLY (audit F9). Deriving the shell's transform is a world
+        // matrix (Ogre's full chain recomposition, up to the root), a scale, a
+        // decomposition into TRS — three square roots and a
+        // quaternion-from-matrix — and an engine node write, and the selection
+        // is standing still on almost every frame it is up. The key is the
+        // node's own world-transform signature (cheap: local TRS reads up the
+        // chain, no matrix maths) plus the width, because the width scales the
+        // shell without moving the node.
+        const int width = (mSource && mSource->outlineWidth > 0) ? mSource->outlineWidth : 3;
+        Hasher key;
+        key << worldTrsSignature(meshNode->graphNode()) << width << mHighlightWireframe;
+        if (!s.transformPushed || s.transformKey != key.h) {
+            iris::Mat4 t = meshNode->getGlobalTransform();
+            if (!mHighlightWireframe) t.scale(1.0f + float(width) / 150.0f);
+            pushTransform(mTarget, s.node, t);
+            s.transformKey = key.h;
+            s.transformPushed = true;
         }
-        pushTransform(mTarget, s.node, t);
-        mTarget->setNodeVisible(s.node, true);
+        if (!s.shown) { mTarget->setNodeVisible(s.node, true); s.shown = true; }
     }
     for (size_t i = targets.size(); i < mHighlightShells.size(); ++i) {
         HighlightShell &s = mHighlightShells[i];
-        if (s.node) mTarget->setNodeVisible(s.node, false);
-        s.mesh = 0;
+        if (s.node && s.shown) { mTarget->setNodeVisible(s.node, false); s.shown = false; }
+        if (s.mesh) { s.mesh = 0; mReclaimPending = true; }
     }
 }
 
@@ -700,7 +819,7 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     if (!mLightWires) {
         // Hides the wire lines AND the icon billboard set riding on wireNode
         // (the engine toggles a set's visibility flags with its owning node).
-        if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
+        if (e.wireNode && e.wireVisible != 0) { mTarget->setNodeVisible(e.wireNode, false); e.wireVisible = 0; }
         return;
     }
     int kind = 1;
@@ -723,7 +842,8 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     if (!e.wireNode) return;
     if (shape < 0) {
         if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; }
-        mTarget->setNodeVisible(e.wireNode, true);   // the icon set rides this node
+        // the icon set rides this node
+        if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
         syncLightIcon(e, light);
         return;
     }
@@ -753,11 +873,21 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
         rz = std::max(light->rectHeight, 0.01f);   // (width = local X, height = local Z; tick stays)
     }
     const iris::Vec3 s = light->getLocalScale();
-    mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(),
-                              Vec3(rx * (s.x() > 1e-6f ? 1.0f / s.x() : 1.0f),
-                                   ry * (s.y() > 1e-6f ? 1.0f / s.y() : 1.0f),
-                                   rz * (s.z() > 1e-6f ? 1.0f / s.z() : 1.0f)));
-    mTarget->setNodeVisible(e.wireNode, true);
+    const Vec3 wireScale(rx * (s.x() > 1e-6f ? 1.0f / s.x() : 1.0f),
+                         ry * (s.y() > 1e-6f ? 1.0f / s.y() : 1.0f),
+                         rz * (s.z() > 1e-6f ? 1.0f / s.z() : 1.0f));
+    // ON CHANGE ONLY (audit F7). The wire's transform is derived from the
+    // light's range/cone/rect and the node's own scale — all of them
+    // hand-edited values — but this ran every frame for every light in the
+    // scene, and setNodeTransform is a real engine write plus a node dirty.
+    Hasher wireKey;
+    wireKey << wireScale.x << wireScale.y << wireScale.z;
+    if (!e.wireXformPushed || e.wireXformKey != wireKey.h) {
+        mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(), wireScale);
+        e.wireXformKey = wireKey.h;
+        e.wireXformPushed = true;
+    }
+    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
     syncLightIcon(e, light);
 }
 
@@ -787,12 +917,25 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
             return;
         e.hasIcon = true;
         e.iconSignature = path;
+        e.iconPushed = false;        // a fresh set holds no instance yet
     }
+    // ON CHANGE ONLY (audit F7). setBillboards rewrites the set's whole
+    // instance buffer; the instance is one world position and a size, and a
+    // light that is not being dragged has neither change. The position comes
+    // from the node's world transform, so the key is the same cheap
+    // local-TRS-chain signature the outline shells use — never
+    // getGlobalPosition(), which is Ogre's full chain recomposition.
+    Hasher key;
+    key << worldTrsSignature(light->graphNode()) << light->iconSize;
+    if (e.iconPushed && e.iconKey == key.h) return;
     BillboardInstance b;
     const iris::Vec3 p = light->getGlobalPosition();
     b.position = Vec3(p.x(), p.y(), p.z());
     b.size = light->iconSize > 0.0f ? light->iconSize : 0.5f;
-    mTarget->setBillboards(e.wireNode, &b, 1);
+    if (mTarget->setBillboards(e.wireNode, &b, 1)) {
+        e.iconKey = key.h;
+        e.iconPushed = true;
+    }
 }
 
 TextureId SceneMirror::iconTextureFor(const QString &path)
@@ -999,7 +1142,23 @@ void SceneMirror::visit(iris::SceneNode *node)
     if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
         // The light rides on the mirrored node: position and direction follow the document.
         auto *light = static_cast<iris::LightNode *>(node);
-        if (mTarget->setLight(e.node, toLightDesc(light))) e.hasLight = true;
+        // ON CHANGE ONLY (audit F7). setLight is ~20 Ogre setters — type,
+        // diffuse, specular, cast-shadows, power scale, an attenuation solve
+        // (setAttenuationBasedOnRadius takes a square root and rewrites the
+        // light's local AABB), spot range — plus two std::string compares for
+        // the profile/mask paths, and it ran for every light in the scene on
+        // every frame to re-push values a human edits by hand. It reads NOTHING
+        // from the node's transform (the light rides the adopted node and the
+        // graph carries position and direction), so skipping an unchanged push
+        // cannot freeze a moving light.
+        const LightDesc want = toLightDesc(light);
+        if (!e.lightPushed || !sameLight(want, e.lastLight)) {
+            if (mTarget->setLight(e.node, want)) {
+                e.hasLight = true;
+                e.lastLight = want;
+                e.lightPushed = true;
+            }
+        }
         // The document's per-light shadow type (Hard/Soft/VerySoft) has no per-light
         // engine equivalent — the filter is global. Accumulate the strongest request;
         // applyEnvironment pushes it (iris::ShadowMapType orders None<Hard<Soft<VerySoft).
@@ -2148,28 +2307,57 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
     // derived matrices are resolved by walking each bone's own ancestry
     // rather than assuming the array is topologically sorted.
     const iris::Mat4 meshWorld = e.docNode->getGlobalTransform();
-    mDerivedScratch.assign(size_t(bones.size()), iris::Mat4());
-    mDerivedDone.assign(size_t(bones.size()), 0);
-    std::vector<iris::Mat4> &derived = mDerivedScratch;
-    std::vector<char> &done = mDerivedDone;
-    std::function<iris::Mat4(int)> resolve = [&](int i) -> iris::Mat4 {
-        if (done[i]) return derived[i];
-        done[i] = 1;                       // cycles are impossible by rig contract; guard anyway
-        const BonePose &p = poses[size_t(i)];
-        iris::Mat4 local;
-        local.translate(iris::Vec3(p.position.x, p.position.y, p.position.z));
-        local.rotate(iris::Quat(p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z));
-        local.scale(iris::Vec3(p.scale.x, p.scale.y, p.scale.z));
-        int parent = -1;
-        if (!bones[i]->parentBone.isNull()) {
-            const auto pit = e.skeleton->boneMap.constFind(bones[i]->parentBone->name);
-            if (pit != e.skeleton->boneMap.constEnd() && pit.value() != i) parent = pit.value();
+    const size_t n = size_t(bones.size());
+    mDerivedScratch.assign(n, iris::Mat4());
+    mDerivedDone.assign(n, 0);
+    // PARENT INDICES, RESOLVED ONCE PER RIG (audit F13). This ran per rigged
+    // node per frame the moment the scene had a socket, and the parent lookup
+    // was a QHash<QString> probe keyed on the parent bone's NAME — a string
+    // hash per bone per frame for a relationship that is fixed by the rig. The
+    // cache is keyed on the skeleton pointer and the bone count, so a
+    // re-imported rig rebuilds it.
+    if (e.boneParentsOwner != e.skeleton.data() || e.boneParents.size() != n) {
+        e.boneParents.assign(n, -1);
+        for (size_t i = 0; i < n; ++i) {
+            if (bones[int(i)]->parentBone.isNull()) continue;
+            const auto pit = e.skeleton->boneMap.constFind(bones[int(i)]->parentBone->name);
+            if (pit != e.skeleton->boneMap.constEnd() && size_t(pit.value()) != i)
+                e.boneParents[i] = pit.value();
         }
-        derived[i] = parent >= 0 ? resolve(parent) * local : local;
-        return derived[i];
-    };
-    for (int i = 0; i < bones.size(); ++i) out.insert(bones[i]->name, meshWorld * resolve(i));
+        e.boneParentsOwner = e.skeleton.data();
+    }
+    // ...and the FK itself is a member function, not a recursive
+    // std::function: the closure captured six references, which is past
+    // libstdc++'s small-object buffer, so building it was a HEAP ALLOCATION per
+    // rigged node per frame, and every bone paid an indirect call on top.
+    for (size_t i = 0; i < n; ++i) resolveBoneDerived(int(i), e.boneParents, poses);
+    for (int i = 0; i < bones.size(); ++i)
+        out.insert(bones[i]->name, meshWorld * mDerivedScratch[size_t(i)]);
     return true;
+}
+
+const iris::Mat4 &SceneMirror::resolveBoneDerived(int i, const std::vector<int> &parents,
+                                                  const std::vector<BonePose> &poses) const
+{
+    if (mDerivedDone[size_t(i)]) return mDerivedScratch[size_t(i)];
+    mDerivedDone[size_t(i)] = 1;           // cycles are impossible by rig contract; guard anyway
+    const BonePose &p = poses[size_t(i)];
+    iris::Mat4 local;
+    local.translate(iris::Vec3(p.position.x, p.position.y, p.position.z));
+    local.rotate(iris::Quat(p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z));
+    local.scale(iris::Vec3(p.scale.x, p.scale.y, p.scale.z));
+    const int parent = parents[size_t(i)];
+    // The parent's matrix is read into a LOCAL before the write: the recursion
+    // can resize nothing (the scratch is sized above) but it can write
+    // mDerivedScratch[parent], and taking a reference across that write is the
+    // kind of aliasing that only shows up under a different inliner.
+    if (parent >= 0) {
+        const iris::Mat4 parentWorld = resolveBoneDerived(parent, parents, poses);
+        mDerivedScratch[size_t(i)] = parentWorld * local;
+    } else {
+        mDerivedScratch[size_t(i)] = local;
+    }
+    return mDerivedScratch[size_t(i)];
 }
 
 bool SceneMirror::boneWorldTransforms(QHash<QString, iris::Mat4> &out) const
@@ -2480,28 +2668,43 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // ONE driving light, so only that light's transform matters; VCT
         // injects EVERY light into the voxel volume, so any light moving (or
         // appearing/dying) goes stale until a re-voxelize.
-        iris::Mat4 lightWorld;
+        //
+        // The signature is a HASH of local TRS up each light's parent chain,
+        // not a product of world matrices (audit F8). The old form called
+        // `getGlobalTransform()` — Ogre's `_getFullTransformUpdated`, which
+        // recurses to the root and recomposes the transform at every level,
+        // unconditionally — once per light per frame, and then multiplied the
+        // results into a Mat4. Both halves were pure overhead for a question
+        // that is only ever "is this the same as last frame?".
+        // (It is also STRICTLY more sensitive than what it replaced: a product
+        // of world matrices is blind to two lights swapping pure-translation
+        // transforms, because translation matrices commute. A per-light hash
+        // folded in scene order is not.)
+        quint64 lightSig = 0;
         if (driver) {
-            lightWorld = driver->getGlobalTransform();
+            lightSig = worldTrsSignature(driver->graphNode());
         } else if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
+            mGiChainMemo.clear();          // capacity kept; contents are per call
+            Hasher h;
             for (const auto &l : mSource->lights)
-                if (!l.isNull()) lightWorld *= l->getGlobalTransform();   // cheap combined signature
+                if (!l.isNull()) h << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo);
+            lightSig = h.h;
         }
         if (!mGiPushed || !same(gi, mLastGi)) {
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
-            mGiLightWorld = lightWorld;
+            mGiLightSignature = lightSig;
             mGiPushed = true;
             ++mGiPushCount;
         } else if (gi.mode != GiMode::Off && mSource->giAutoRefresh &&
-                   lightWorld != mGiLightWorld) {
+                   lightSig != mGiLightSignature) {
             // IR re-traces in milliseconds; VCT re-injects + re-voxelizes on the
             // GPU (a few ms at editor volumes on real hardware). The per-frame
             // signature compare is the debounce, as for the push above — and the
             // debounce is load-bearing: this branch firing every frame is a whole
             // VCT rebuild per frame, which is invisible in the picture and fatal
             // to the frame rate. giRefreshCount() is what proves it does not.
-            mGiLightWorld = lightWorld;
+            mGiLightSignature = lightSig;
             mTarget->refreshGlobalIllumination();
             ++mGiRefreshCount;
         }
