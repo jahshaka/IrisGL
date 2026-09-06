@@ -7,6 +7,7 @@
 #include "BulletCollision/CollisionShapes/btBvhTriangleMeshShape.h"
 
 #include "document/physics/avatarmovement.h"
+#include "document/animation/locomotion.h"
 #include "document/scenegraph/meshnode.h"
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
@@ -279,7 +280,17 @@ void Environment::updateAvatarMovement(float delta)
 	for (int i = 0; i < avatars.size(); ++i) {
 		auto node = avatars[i].toStrongRef();
 		if (!node) continue;
-		node->avatar()->step(world, node, delta, world ? float(world->getGravity().y()) : -10.0f);
+		AvatarMovement *movement = node->avatar();
+		movement->step(world, node, delta, world ? float(world->getGravity().y()) : -10.0f);
+		// THE LOCOMOTION STATE MACHINE, stepped IMMEDIATELY after the movement
+		// that published the contract it reads (AVATAR_LOCOMOTION_SPEC §7,
+		// Stage 4). Immediately, and not a frame later, because
+		// `jumpRequested` is a LATCH: it is true only in the step the movement
+		// component consumed it, so a machine stepped on the next frame would
+		// never see a jump and §7.2's transition 1 would never fire.
+		if (AvatarLocomotion *loco = node->locomotion())
+			loco->stepForNode(node, movement->state(), delta,
+			                  movement->params().walkSpeed, movement->params().runSpeed);
 	}
 }
 

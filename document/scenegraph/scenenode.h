@@ -255,6 +255,28 @@ public:
     /// Installs (or replaces) the component. Passing a null pointer removes it.
     void setAvatarComponent(const AvatarMovementPtr &component);
 
+    // ---- THE LOCOMOTION STATE MACHINE (AVATAR_LOCOMOTION_SPEC §7) --------
+    //
+    // A SECOND pointer beside the movement component rather than a member of
+    // it: movement is physics (it owns a Bullet cast shape and asks the
+    // collision world questions) and locomotion is animation (it owns a clock,
+    // an asset and a clip-weight list). The state machine CONSUMES the
+    // movement's §5 contract through a plain struct, which is what lets it be
+    // tested with no physics world at all — and what keeps `avatarmovement.h`
+    // out of the animation layer's include graph.
+    //
+    // Same lifetime argument as the movement component, and the same §3.2a
+    // reason for being here rather than in the mirror: the per-avatar phase,
+    // the blend clock and "which state am I in" are destroyed by
+    // `evacuateEngineObjects` on every editor<->player page switch, so the
+    // document is the only place they can live.
+    AvatarLocomotionPtr avatarLocomotion;
+
+    bool hasLocomotionComponent() const { return !avatarLocomotion.isNull(); }
+    /// The state machine, or null. Borrowed — the node owns it.
+    AvatarLocomotion *locomotion() const { return avatarLocomotion.data(); }
+    void setLocomotionComponent(const AvatarLocomotionPtr &component);
+
     PhysicsProperty physicsProperty;
 
     bool pickable;
