@@ -742,6 +742,40 @@ bool OgreEngine::renderStats(RenderStats &out) const {
     catch (...) { out = RenderStats(); return false; }
 }
 
+bool OgreEngine::objectCounts(ObjectCounts &out) const {
+    out = ObjectCounts();
+    if (!mRoot) return false;
+    JAH_TRY {
+        out.views  = unsigned(mViews.size());
+        out.scenes = unsigned(mScenes.size());
+        for (const auto &v : mViews) {
+            if (v && v->isEnabled()) ++out.enabledViews;
+        }
+        for (const auto &s : mScenes) {
+            if (s) s->addObjectCounts(out);
+        }
+        // The one PROCESS-WIDE number. Datablocks belong to the HlmsManager,
+        // not to a SceneManager (EnginePrivate.h says so where the particle
+        // datablocks are declared), so there is nothing per-scene to sum: walk
+        // the registered Hlms types once. HLMS_MAX is the end of the ordinary
+        // types; HLMS_COMPUTE sits AFTER it in the enum and is not part of
+        // mRegisteredHlms's addressable range, which is why the loop stops
+        // where it does. The count includes Ogre's own defaults (one per
+        // registered Hlms), so only its DELTA carries meaning — ObjectCounts
+        // says as much.
+        if (Ogre::HlmsManager *hlmsMgr = mRoot->getHlmsManager()) {
+            for (int t = 0; t < Ogre::HLMS_MAX; ++t) {
+                if (Ogre::Hlms *h = hlmsMgr->getHlms(Ogre::HlmsTypes(t)))
+                    out.datablocks += unsigned(h->getDatablockMap().size());
+            }
+        }
+        return true;
+    }
+    // Same reasoning as renderStats: const method, no error sink, and nothing
+    // here fails in a way a caller could act on.
+    catch (...) { out = ObjectCounts(); return false; }
+}
+
 bool OgreEngine::saveShaderCache() {
     if (!mRoot) return false;
     JAH_TRY { return mShaderCache.save(mRoot); } JAH_CATCH(mLastError, false);

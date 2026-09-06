@@ -455,4 +455,16 @@ Ogre::SceneNode *OgreScene::node(NodeId id) const {
 
 NodeId OgreScene::track(const Node &n) { mNodes[++mNextId] = n; return mNextId; }
 
+void OgreScene::addObjectCounts(ObjectCounts &out) const {
+    // Registry sizes, not Ogre object counts: these are the ids this boundary
+    // has handed out and still honours. That is deliberately the leak-relevant
+    // number — a record kept after its document node died holds the Ogre
+    // object alive too, and a record freed while the Ogre object leaked would
+    // be a different (and louder) bug.
+    out.nodes     += unsigned(mNodes.size());
+    out.meshes    += unsigned(mMeshes.size());
+    out.materials += unsigned(mMaterials.size());
+    out.textures  += unsigned(mTextures.size());
+}
+
 }}}  // namespace jahshaka::engine::detail
