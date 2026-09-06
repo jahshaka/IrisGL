@@ -417,9 +417,38 @@ private:
         /// and a name lookup silently plays the wrong one.
         QHash<const iris::Animation *, QString> clipMap;      // animation -> clip id
         QHash<QString, QString> clipIdMap;                    // clip id -> engine clip name
-        QString  lastClipName;                       // last state pushed, to skip no-ops
-        float    lastClipTime = -1.0f;
-        bool     lastClipLooping = false;
+        /// Document clip NAME -> the name the engine gave it — the third map,
+        /// and the only one the LOCOMOTION push can use (AVATAR_LOCOMOTION_SPEC
+        /// Stage 5). The state machine names its clips the way a human does,
+        /// because a scene file and a role binding both store a name; it has no
+        /// AnimationPtr to hand over. Built alongside the other two so the two
+        /// paths cannot drift.
+        ///
+        /// FIRST WINS on a duplicate name, which is not a shrug: the document
+        /// side collapses duplicates the same way (`collectAvatarClips` skips a
+        /// name it already has), so both ends pick the same clip out of a
+        /// character carrying two "mixamo.com"s. The AnimationPtr-keyed map
+        /// above stays the authored path's lookup precisely because THAT path
+        /// can tell the two apart and this one cannot.
+        QHash<QString, QString> clipNameMap;                  // document clip name -> engine clip name
+        /// One clip state as last pushed to the engine — the change-detection
+        /// latch, generalised from Stage 4's single {name, time, looping}
+        /// triple to the N weighted states a blend space publishes.
+        ///
+        /// `name` is the ENGINE's clip name and it is deliberately the very
+        /// QString stored in `clipIdMap` / `clipNameMap`: Qt strings are
+        /// implicitly shared, so comparing it against next frame's lookup is a
+        /// d-pointer compare and not a strcmp, and NOTHING is converted to
+        /// std::string on a frame whose push is skipped.
+        struct ClipPush {
+            QString name;
+            float   time = 0.0f;
+            float   weight = 0.0f;
+            bool    looping = false;
+        };
+        /// Empty means "nothing is enabled on this node right now", which is
+        /// also what the disable push leaves behind.
+        QVector<ClipPush> lastClipPush;
     };
     /// Pushes a ParticleSystemNode's AUTHORING parameters into the engine
     /// (PARTICLES_FX2_SPEC §5), which then simulates them. Guarded by a
@@ -485,6 +514,11 @@ private:
     /// matrices to per-bone TRS every frame. The document no longer computes a
     /// pose at all — it states the clip and the clock, and Ogre's threaded SIMD
     /// FK does the rest.
+    ///
+    /// Stage 5 (AVATAR_LOCOMOTION_SPEC §7.3) added the second source: an avatar
+    /// pushes the N weighted clips its locomotion state machine published this
+    /// step, each at its own absolute time. See the comment at the definition
+    /// for why that is a PURE TRANSLATION and can never become a cache.
     void syncClips();
     /// One entry's bones in world space, APPENDED to `out` (it is not cleared —
     /// the whole-scene overload accumulates every rig into one map). False when
@@ -578,6 +612,13 @@ private:
     mutable std::vector<jahshaka::engine::BonePose> mPoseScratch;
     mutable std::vector<iris::Mat4>                 mDerivedScratch;
     mutable std::vector<char>                       mDerivedDone;
+    /// syncClips' two reused buffers, members for the same reason: it runs for
+    /// every skinned node every frame, and a blend space publishes a fresh
+    /// weight set on all of them (Stage 5). Reusing the buffers keeps their
+    /// capacity — and the ClipState strings' capacity — instead of allocating
+    /// per avatar per frame.
+    QVector<Entry::ClipPush>                 mClipPushScratch;
+    std::vector<jahshaka::engine::ClipState> mClipStateScratch;
     /// entryBoneWorldTransforms' FK step, hoisted out of a per-frame
     /// heap-allocating std::function. Fills mDerivedScratch[i] (and its
     /// ancestors) from `parents` and returns it.

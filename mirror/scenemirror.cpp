@@ -21,6 +21,7 @@
 #include "irisgl/document/assets/skeleton.h"
 #include "irisgl/document/animation/animation.h"
 #include "irisgl/document/animation/clipextractor.h"
+#include "irisgl/document/animation/locomotion.h"   // the N-clip push's source (Stage 5)
 #include "irisgl/document/assets/vertexlayout.h"
 #include "irisgl/document/assets/vertexbuffer.h"     // VertexBuffer / IndexBuffer (CPU copies)
 #include "irisgl/document/materials/material.h"
@@ -2165,6 +2166,19 @@ iris::SceneNode *clipHostOf(iris::SceneNode *node)
     return nullptr;
 }
 
+/// The nearest ancestor-or-self carrying a LOCOMOTION component, and the state
+/// machine on it (AVATAR_LOCOMOTION_SPEC Stage 5). Walks UP for the same reason
+/// clipHostOf does: `avatar.spawn` puts the movement and locomotion components
+/// on the avatar WRAPPER, and the rigged mesh that owns the engine rig is a
+/// descendant of it. Null for every node that is not part of an avatar, which is
+/// how the authored transport keeps the whole rest of the scene.
+const iris::AvatarLocomotion *locomotionHostOf(iris::SceneNode *node)
+{
+    for (iris::SceneNode *n = node; n; n = n->getParent().data())
+        if (n->hasLocomotionComponent()) return n->locomotion();
+    return nullptr;
+}
+
 }  // namespace
 
 void SceneMirror::attachClipsFor(Entry &e)
@@ -2203,9 +2217,13 @@ void SceneMirror::attachClipsFor(Entry &e)
     }
     if (signature == e.clipSignature) return;
     e.clipSignature = signature;
-    e.lastClipName.clear();
-    e.lastClipTime = -1.0f;
-    if (clips.isEmpty() || !host) { e.clipMap.clear(); e.clipIdMap.clear(); return; }
+    e.lastClipPush.clear();
+    if (clips.isEmpty() || !host) {
+        e.clipMap.clear();
+        e.clipIdMap.clear();
+        e.clipNameMap.clear();
+        return;
+    }
 
     // R2 again, from the host side: clips ACCUMULATE on a node — the Avatar
     // page loads a Mixamo animation onto an already-loaded character — so this
@@ -2250,7 +2268,12 @@ void SceneMirror::attachClipsFor(Entry &e)
         pushed.append({ clips[i].data(), QString::fromStdString(desc.id) });
         descs.push_back(std::move(desc));
     }
-    if (descs.empty()) { e.clipMap.clear(); e.clipIdMap.clear(); return; }
+    if (descs.empty()) {
+        e.clipMap.clear();
+        e.clipIdMap.clear();
+        e.clipNameMap.clear();
+        return;
+    }
 
     // R2: every clip goes on BEFORE any is enabled. Ogre's
     // addAnimationsFromSkeleton reallocates the vector its active-animation list
@@ -2262,6 +2285,7 @@ void SceneMirror::attachClipsFor(Entry &e)
         qWarning("SceneMirror: attachClips failed for a skinned node; it will render at bind pose");
         e.clipMap.clear();
         e.clipIdMap.clear();
+        e.clipNameMap.clear();
         return;
     }
     // Whatever the engine appended, in the order it was pushed, is the mapping
@@ -2285,6 +2309,18 @@ void SceneMirror::attachClipsFor(Entry &e)
         e.clipMap.insert(entry.first, entry.second);
         if (e.clipIdMap.contains(entry.second)) continue;
         if (next < added.size()) e.clipIdMap.insert(entry.second, added[next++]);
+    }
+    // ...and the NAME hop the locomotion push needs (Stage 5). Same pass, same
+    // order, so the two lookups can never disagree about which engine clip a
+    // document clip is; FIRST WINS on a duplicate name, which is the rule
+    // `collectAvatarClips` applies at the other end.
+    e.clipNameMap.clear();
+    for (const auto &entry : pushed) {
+        const QString docName = entry.first->getName();
+        if (docName.isEmpty() || e.clipNameMap.contains(docName)) continue;
+        const auto engineName = e.clipIdMap.constFind(entry.second);
+        if (engineName != e.clipIdMap.constEnd())
+            e.clipNameMap.insert(docName, engineName.value());
     }
 }
 
@@ -2392,10 +2428,37 @@ int SceneMirror::resolveSockets()
 
 void SceneMirror::syncClips()
 {
-    // The per-frame animation cost, all of it: one small struct per skinned
-    // node, pushed only when the clip or the time actually moved. No matrix
-    // decompositions, no vertices, no uploads — the sampling, the blending and
-    // the FK all happen inside the engine's threaded update.
+    // The per-frame animation cost, all of it: one small struct PER ENABLED CLIP
+    // per skinned node. No matrix decompositions, no vertices, no uploads — the
+    // sampling, the blending and the FK all happen inside the engine's threaded
+    // update.
+    //
+    // TWO SOURCES, ONE PUSH (AVATAR_LOCOMOTION_SPEC Stage 5). An ordinary
+    // animated node plays its ONE active authored clip at the scene clock. An
+    // AVATAR plays the N weighted clips its locomotion state machine published
+    // this step — a blend space's bracketing pair, doubled during a cross-fade —
+    // each at its OWN absolute time. The locomotion source wins where it exists,
+    // because a node carrying a locomotion component is being driven by the
+    // machine and not by the transport.
+    //
+    // AND IT IS A PURE TRANSLATION, WHICH IS A REQUIREMENT AND NOT A STYLE
+    // (§3.2a). Nothing about the machine is cached here: not the phase, not the
+    // blend clock, not "which state am I in". `evacuateEngineObjects` releases
+    // EVERY entry when the other page takes the shared document's graph
+    // (releaseEntry ends with `e = Entry();`), so anything kept mirror-side is
+    // destroyed on every editor<->player toggle and would come back reset. The
+    // document advances the per-avatar clock and publishes ABSOLUTE times; this
+    // function reads them and nothing else (§13 R1 — there is deliberately no
+    // addTime on the boundary).
+    //
+    // THE LATCH IS GENERALISED TO N, and the old comment here ("pushed only when
+    // the clip or the time actually moved") is now true of the AUTHORED path
+    // only: under a blend space every weight and every time moves every frame,
+    // so an avatar pushes every frame by construction. That is fine — the push
+    // is a small struct array — and the latch still earns its keep twice: a
+    // paused or still authored animation costs one implicitly-shared QString
+    // compare per node and no engine call, and no std::string is built at all on
+    // a frame whose push is skipped.
     if (!mSource) return;
     const float t = mSource->animationTime();
     for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
@@ -2404,44 +2467,131 @@ void SceneMirror::syncClips()
         attachClipsFor(e);
         if (e.clipMap.isEmpty()) continue;
 
-        iris::SceneNode *host = clipHostOf(e.docNode);
-        iris::AnimationPtr active = host ? host->getAnimation() : iris::AnimationPtr();
+        // ---- 1. what should be playing on this node, this frame ------------
+        mClipPushScratch.clear();
+
+        // (a) LOCOMOTION. The component lives on the avatar WRAPPER and the
+        // skinned mesh is a descendant of it, so the lookup walks up — the same
+        // direction clipHostOf walks, for the same reason.
+        //
+        // GATED ON THE DOCUMENT'S PLAY FLAG, and that is the whole gate: the
+        // machine only advances inside the physics step (Environment::
+        // updateAvatarMovement), so after Stop it still holds the last weight
+        // set it published. Without this the Avatar page's transport would
+        // never get its character back — the mirror would keep pushing a
+        // frozen mid-stride blend over whatever clip the user scrubbed.
+        // `Scene::playing` is the right flag rather than a mirror-side one:
+        // PlayBack is the one place BOTH play paths pass through (editor
+        // play-in-place and the player view) and it is what sets it, a PAUSED
+        // scene deliberately stays "playing" so the pose holds, and it is
+        // document state — so this is still a pure translation.
+        const iris::AvatarLocomotion *loco =
+            mSource->isPlaying() ? locomotionHostOf(e.docNode) : nullptr;
+        if (loco) {
+            float total = 0.0f;
+            for (const auto &w : loco->weights()) {
+                // A zero-weight sample is a real, ordinary output: a three-sample
+                // blend space names all three clips every step and brackets two
+                // of them. Leaving it out of the array DISABLES it engine-side
+                // ("clips the array does not name are disabled"), which is one
+                // fewer animation for the engine to sample and is exactly what a
+                // zero weight means.
+                if (w.weight <= 1e-6f) continue;
+                const auto engineName = e.clipNameMap.constFind(w.clip);
+                // A clip the machine names that this rig does not carry. Not
+                // fatal and not worth a per-frame warning: the state machine
+                // degrades on missing roles by design, and the remaining
+                // weights still describe a pose.
+                if (engineName == e.clipNameMap.constEnd()) continue;
+                Entry::ClipPush p;
+                p.name = engineName.value();
+                p.time = w.time;
+                p.weight = w.weight;
+                p.looping = w.looping;
+                mClipPushScratch.append(p);
+                total += w.weight;
+            }
+            // R2 from the mirror's side. An empty set FREEZES the pose and an
+            // all-zero set is REFUSED by the boundary, so if nothing the machine
+            // named survived the mapping we fall through to the authored path
+            // rather than pushing a set that means "stop rendering this
+            // character correctly, silently".
+            if (total <= 1e-6f) mClipPushScratch.clear();
+        }
+
+        // (b) the AUTHORED transport — one active animation at the scene clock.
+        if (mClipPushScratch.isEmpty()) {
+            iris::SceneNode *host = clipHostOf(e.docNode);
+            iris::AnimationPtr active = host ? host->getAnimation() : iris::AnimationPtr();
+            if (!active.isNull() && active->hasSkeletalAnimation()) {
+                const auto mappedId = e.clipMap.constFind(active.data());
+                if (mappedId != e.clipMap.constEnd()) {
+                    const auto mapped = e.clipIdMap.constFind(mappedId.value());
+                    if (mapped != e.clipIdMap.constEnd()) {
+                        Entry::ClipPush p;
+                        p.name = mapped.value();
+                        // ABSOLUTE time, always — the document owns the clock and
+                        // the engine does its own wrap (fmod when looping, clamp
+                        // when not), which is exactly what
+                        // Animation::getSampleTime does document-side.
+                        p.time = t;
+                        p.weight = 1.0f;
+                        p.looping = active->getLooping();
+                        mClipPushScratch.append(p);
+                    }
+                }
+            }
+        }
+
+        // ---- 2. nothing to play ---------------------------------------------
+        //
         // A node with clips attached but none active keeps its BIND pose: with
         // no active animation SkeletonInstance::update() does not even reset to
         // pose, so "no clip" is a frozen pose by construction, and the pose it
         // is frozen at is the one the rig was created with.
-        if (active.isNull() || !active->hasSkeletalAnimation()) {
-            if (!e.lastClipName.isEmpty()) {
+        if (mClipPushScratch.isEmpty()) {
+            if (!e.lastClipPush.isEmpty()) {
                 mTarget->setClipStates(e.node, nullptr, 0);
-                e.lastClipName.clear();
-                e.lastClipTime = -1.0f;
+                e.lastClipPush.clear();
             }
             continue;
         }
-        const auto mappedId = e.clipMap.constFind(active.data());
-        if (mappedId == e.clipMap.constEnd()) continue;
-        const auto mapped = e.clipIdMap.constFind(mappedId.value());
-        if (mapped == e.clipIdMap.constEnd()) continue;
-        const QString name = mapped.value();
-        const bool looping = active->getLooping();
-        if (name == e.lastClipName && qFuzzyCompare(t + 1.0f, e.lastClipTime + 1.0f) &&
-            looping == e.lastClipLooping)
-            continue;
 
-        ClipState state;
-        state.name = name.toStdString();
-        state.enabled = true;
-        // ABSOLUTE time, always — the document owns the clock and the engine
-        // does its own wrap (fmod when looping, clamp when not), which is
-        // exactly what Animation::getSampleTime does document-side.
-        state.time = t;
-        state.weight = 1.0f;
-        state.looping = looping;
-        if (mTarget->setClipStates(e.node, &state, 1)) {
-            e.lastClipName = name;
-            e.lastClipTime = t;
-            e.lastClipLooping = looping;
+        // ---- 3. the latch, over the whole set -------------------------------
+        bool changed = mClipPushScratch.size() != e.lastClipPush.size();
+        for (int i = 0; !changed && i < mClipPushScratch.size(); ++i) {
+            const Entry::ClipPush &a = mClipPushScratch[i];
+            const Entry::ClipPush &b = e.lastClipPush[i];
+            // The float compares stay FUZZY, as they were: a paused authored
+            // animation must keep skipping its push, and a weight that moved by
+            // one ulp is not a pose change.
+            changed = a.name != b.name || a.looping != b.looping
+                      || !qFuzzyCompare(a.time + 1.0f, b.time + 1.0f)
+                      || !qFuzzyCompare(a.weight + 1.0f, b.weight + 1.0f);
         }
+        if (!changed) continue;
+
+        // ---- 4. the push -----------------------------------------------------
+        mClipStateScratch.resize(size_t(mClipPushScratch.size()));
+        for (int i = 0; i < mClipPushScratch.size(); ++i) {
+            const Entry::ClipPush &p = mClipPushScratch[i];
+            ClipState &s = mClipStateScratch[size_t(i)];
+            // assign() into the reused string rather than a fresh std::string:
+            // this array is rewritten for every avatar on every frame.
+            const QByteArray utf8 = p.name.toUtf8();
+            s.name.assign(utf8.constData(), size_t(utf8.size()));
+            s.enabled = true;
+            s.time = p.time;
+            // RAW INTENT. The weights are NOT normalized here and must not be:
+            // the backend normalizes them PER BONE from the clips' coverage, so
+            // a bone only one clip animates gets all of that clip at any split
+            // (Engine.h:207, proved by tests/skeletal G5). Summing them to 1
+            // here would be a second, wrong normalization.
+            s.weight = p.weight;
+            s.looping = p.looping;
+        }
+        if (mTarget->setClipStates(e.node, mClipStateScratch.data(), mClipStateScratch.size()))
+            e.lastClipPush = mClipPushScratch;
     }
 }
 
