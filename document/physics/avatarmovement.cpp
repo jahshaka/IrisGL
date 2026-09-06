@@ -13,6 +13,7 @@ For more information see the LICENSE file
 
 #include "core/geometry/aabb.h"
 #include "document/assets/mesh.h"
+#include "document/assets/vertexbuffer.h"
 #include "document/scenegraph/meshnode.h"
 #include "document/scenegraph/scenenode.h"
 
@@ -516,17 +517,59 @@ void AvatarMovement::step(btCollisionWorld *world, const SceneNodePtr &node, flo
 
 namespace
 {
-/// Walks the subtree, merging every mesh's local AABB CORNERS expressed in the
-/// wrapper's frame. Corners (not just min/max) because the lower-half test
-/// below needs individual points, and because a rotated child's AABB corners
-/// are the only cheap approximation of its real footprint.
-void mergeNodeBounds(SceneNode *n, const Mat4 &rootInv, AABB &full, QVector<Vec3> &corners)
+/// The character's geometry, in WORLD space, reduced to the two numbers a
+/// capsule needs.
+///
+/// WORLD SPACE, not the wrapper's frame (fixed 2026-09-06). The measurement
+/// used to run in the wrapper's local frame — `rootInv * child->global`, which
+/// divides the wrapper's own scale back out — while every consumer of these
+/// numbers is world-space: stepOnce says "WORLD SPACE throughout", tryStepUp
+/// compares the capsule's dimensions against maxStepHeight in metres, and the
+/// follow camera sizes its arm off capsuleHeight. An imported centimetre-unit
+/// character (Mixamo's Beta: a 0.01 wrapper scale) therefore produced
+/// capsuleHeight = 180.7 and an arm length of 397 metres — the camera ended up
+/// so far away the viewport went black. Transforming each point by its node's
+/// FULL world matrix also handles a rotated or non-uniformly scaled wrapper
+/// correctly, which multiplying a local result by "the" scale could not.
+struct BodyMeasure
+{
+    float minY = 0.0f, maxY = 0.0f;       ///< world-space vertical extent
+    float lowerRadius = 0.0f;             ///< max horizontal distance from the axis, lower half
+    bool  any = false;
+};
+
+/// The mesh's CPU position buffer (importers and the .jmb bake both fill it),
+/// or null when this mesh has none.
+const float *positionsOf(Mesh *mesh, int &floats)
+{
+    floats = 0;
+    if (!mesh) return nullptr;
+    for (const auto &vb : mesh->getVertexBuffers()) {
+        if (!vb || !vb->data || vb->dataSize <= 0) continue;
+        QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        // One attribute per buffer is how every producer in the tree builds them
+        // (importers, the .jmb bake, the procedural builders), and this walk
+        // reads xyz triples with no stride — so an interleaved buffer is
+        // declined rather than misread.
+        if (attribs.size() != 1) continue;
+        if (attribs.first().usage != VertexAttribUsage::Position) continue;
+        if (attribs.first().type != AttribTypeFloat || attribs.first().count < 3) continue;
+        floats = vb->dataSize / int(sizeof(float));
+        return reinterpret_cast<const float *>(vb->data);
+    }
+    return nullptr;
+}
+
+/// Vertical extent from the mesh AABB (cheap, exact enough for a height), and
+/// the LOWER-HALF radius from real vertices. Two passes because the lower half
+/// is not known until the whole body's extent is.
+void mergeExtent(SceneNode *n, AABB &full, bool &any)
 {
     if (!n) return;
     if (n->getSceneNodeType() == SceneNodeType::Mesh) {
         auto *meshNode = static_cast<MeshNode *>(n);
         if (auto mesh = meshNode->getMesh()) {
-            const Mat4 toRoot = rootInv * n->getGlobalTransform();
+            const Mat4 toWorld = n->getGlobalTransform();
             const AABB local = mesh->getAABB();
             const Vec3 mn = local.getMin();
             const Vec3 mx = local.getMax();
@@ -534,18 +577,56 @@ void mergeNodeBounds(SceneNode *n, const Mat4 &rootInv, AABB &full, QVector<Vec3
                 const Vec3 p((c & 1) ? mx.x() : mn.x(),
                              (c & 2) ? mx.y() : mn.y(),
                              (c & 4) ? mx.z() : mn.z());
-                const Vec3 w = toRoot * p;
-                full.merge(w);
-                corners.append(w);
+                full.merge(toWorld * p);
+                any = true;
             }
         }
     }
     const int kids = n->childCount();
-    for (int i = 0; i < kids; ++i) {
-        SceneNode *c = n->childAt(i);
-        if (!c) continue;
-        mergeNodeBounds(c, rootInv, full, corners);
+    for (int i = 0; i < kids; ++i) mergeExtent(n->childAt(i), full, any);
+}
+
+/// Furthest horizontal distance from the capsule's axis among the vertices
+/// BELOW `midY`. Vertices, not AABB corners: a whole-body mesh has ONE box, and
+/// on a T-posed character that box is as wide as the arm span, so the old
+/// corner filter measured the arms and called them legs (Beta: radius 0.81 m,
+/// a barrel). The lower half of a biped is legs and feet, and its widest real
+/// point is the toe — about 0.2 m on a 1.8 m human.
+void mergeLowerRadius(SceneNode *n, float axisX, float axisZ, float midY, BodyMeasure &out)
+{
+    if (!n) return;
+    if (n->getSceneNodeType() == SceneNodeType::Mesh) {
+        auto *meshNode = static_cast<MeshNode *>(n);
+        if (auto mesh = meshNode->getMesh()) {
+            const Mat4 toWorld = n->getGlobalTransform();
+            int floats = 0;
+            if (const float *pos = positionsOf(mesh.data(), floats)) {
+                for (int i = 0; i + 2 < floats; i += 3) {
+                    const Vec3 w = toWorld * Vec3(pos[i], pos[i + 1], pos[i + 2]);
+                    if (w.y() > midY) continue;
+                    const float dx = w.x() - axisX, dz = w.z() - axisZ;
+                    out.lowerRadius = std::max(out.lowerRadius, std::sqrt(dx * dx + dz * dz));
+                    out.any = true;
+                }
+            } else {
+                // No CPU positions (a procedurally built mesh): fall back to the
+                // box corners, which is what the whole fit used to be.
+                const AABB local = mesh->getAABB();
+                const Vec3 mn = local.getMin(), mx = local.getMax();
+                for (int c = 0; c < 8; ++c) {
+                    const Vec3 w = toWorld * Vec3((c & 1) ? mx.x() : mn.x(),
+                                                  (c & 2) ? mx.y() : mn.y(),
+                                                  (c & 4) ? mx.z() : mn.z());
+                    if (w.y() > midY) continue;
+                    const float dx = w.x() - axisX, dz = w.z() - axisZ;
+                    out.lowerRadius = std::max(out.lowerRadius, std::sqrt(dx * dx + dz * dz));
+                    out.any = true;
+                }
+            }
+        }
     }
+    const int kids = n->childCount();
+    for (int i = 0; i < kids; ++i) mergeLowerRadius(n->childAt(i), axisX, axisZ, midY, out);
 }
 }   // namespace
 
@@ -553,48 +634,37 @@ void AvatarMovement::fitCapsuleToNode(const SceneNodePtr &node)
 {
     if (!node || !mParams.capsuleAuto) return;
 
-    // Everything is measured in the WRAPPER's frame: the wrapper is what the
-    // component moves, and a capsule expressed in any other frame would drift
-    // the moment the wrapper is rotated by orient-to-movement.
-    const Mat4 rootInv = node->getGlobalTransform().inverted();
-
     AABB full;
     full.setNegativeInfinity();
-    QVector<Vec3> corners;
-
-    mergeNodeBounds(node.data(), rootInv, full, corners);
-
-    if (corners.isEmpty()) return;   // nothing to measure — the defaults stand
+    bool anyGeometry = false;
+    mergeExtent(node.data(), full, anyGeometry);
+    if (!anyGeometry) return;   // nothing to measure — the defaults stand
 
     const float minY = full.getMin().y();
     const float maxY = full.getMax().y();
     const float height = maxY - minY;
     if (!(height > 0.01f)) return;
 
-    // R4: the radius comes from the planar footprint of the LOWER HALF only.
-    // A T-posed character's full width is its ARM SPAN, and a capsule fitted to
-    // it is a barrel that fits through no door.
-    const float midY = minY + height * 0.5f;
-    float halfX = 0.0f, halfZ = 0.0f;
-    bool any = false;
-    for (const Vec3 &p : corners) {
-        if (p.y() > midY) continue;
-        halfX = std::max(halfX, std::fabs(p.x()));
-        halfZ = std::max(halfZ, std::fabs(p.z()));
-        any = true;
-    }
-    if (!any) {
-        for (const Vec3 &p : corners) {
-            halfX = std::max(halfX, std::fabs(p.x()));
-            halfZ = std::max(halfZ, std::fabs(p.z()));
-        }
-    }
+    // The capsule stands on the wrapper's origin and rises along world +Y
+    // (stepOnce: feet = the node's global position, centre = feet + half), so
+    // the radius is measured about THAT axis, not about the geometry's centre.
+    const Vec3 origin = node->getGlobalPosition();
+    BodyMeasure m;
+    m.minY = minY;
+    m.maxY = maxY;
+    mergeLowerRadius(node.data(), origin.x(), origin.z(), minY + height * 0.5f, m);
 
     AvatarMovementParams p = mParams;
     p.capsuleHeight = height;
-    // Never wider than the capsule is tall: a capsule whose radius exceeds
-    // half its height is a sphere and steps stop working.
-    p.capsuleRadius = std::min(std::max(halfX, halfZ), height * 0.5f * 0.9f);
+    // A human is roughly 1/4 as wide as tall at the widest; the clamp is the
+    // backstop for a body whose lower half is genuinely odd (a mermaid tail, a
+    // wide-stance A-pose, a mesh with no CPU vertices left) so an auto fit can
+    // never produce the barrel again. The floor keeps a degenerate reading
+    // (nothing below mid-height at all) from collapsing to a hairline capsule.
+    const float maxRadius = height * 0.25f;
+    const float minRadius = height * 0.05f;
+    p.capsuleRadius = m.any ? std::min(std::max(m.lowerRadius, minRadius), maxRadius)
+                            : maxRadius * 0.5f;
     const bool keepAuto = mParams.capsuleAuto;
     setParams(p);
     mParams.capsuleAuto = keepAuto;
