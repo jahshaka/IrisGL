@@ -1678,6 +1678,16 @@ public:
     unsigned applyWarmUpSet(const std::string &file, Scene * = nullptr) override;
 
     ShaderCacheStats shaderCacheStats() const override;
+    // The log bridge (SESSION_LOG_SPEC F3-B) — OgreLogBridge.cpp.
+    void setLogSink(Engine::LogSink sink) override;
+    DeviceInfo deviceInfo() const override;
+    /// Attaches/detaches the Ogre LogListener. attach() runs immediately after
+    /// `new Ogre::Root` (beside mShaderCache.attachCounters) so plugin loads,
+    /// render-system init and device detection are all captured; detach() MUST
+    /// run before Root is deleted.
+    void attachLogBridge();
+    void detachLogBridge();
+
     bool renderStats(RenderStats &out) const override;
     bool saveShaderCache() override;
     bool clearShaderCache() override;
@@ -1736,6 +1746,14 @@ private:
     /// Plugin_ParticleFX2 loaded: the emitter/affector factories exist. False
     /// leaves billboard sets working and setParticleSystem failing cleanly.
     bool            mHasParticleFX2 = false;
+    /// The forwarding LogListener. Defined only in OgreLogBridge.cpp, and held
+    /// as a RAW pointer for that reason: a unique_ptr member would instantiate
+    /// its deleter in ~OgreEngine (OgreEngine.cpp), where this type is
+    /// incomplete. Created by attachLogBridge and deleted by detachLogBridge,
+    /// both of which live in the TU where LogBridge IS complete; ~OgreEngine
+    /// calls detach unconditionally, before Root goes.
+    class LogBridge;
+    LogBridge *mLogBridge = nullptr;
     ShadowFilter    mShadowFilter = ShadowFilter::Soft;
     unsigned        mShadowResolution = 2048;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
