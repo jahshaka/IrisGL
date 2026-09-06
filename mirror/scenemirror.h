@@ -713,6 +713,12 @@ private:
         jahshaka::engine::NodeId node = 0;
         jahshaka::engine::MeshId mesh = 0;   // engine mesh currently attached
         bool wireframe = false;              // which material the shell carries
+        /// Whether the shell is the SKINNED silhouette (Pbs-backed, riding the
+        /// character's skeleton) and, if so, whose skeleton it rides. Both are
+        /// part of the shell's identity: a target that becomes (or stops being)
+        /// GPU-skinned, or whose engine node was rebuilt, needs a re-attach.
+        bool skinned = false;
+        jahshaka::engine::NodeId master = 0;
         /// Whether the engine currently shows this shell. setNodeVisible is not
         /// free and the answer changes only when the selection does.
         bool shown = false;
@@ -732,6 +738,10 @@ private:
                                 std::vector<std::pair<iris::MeshNode *, jahshaka::engine::MeshId>> &out);
     jahshaka::engine::MaterialId mHighlightMaterial = 0;   // wireframe (on top)
     jahshaka::engine::MaterialId mOutlineMaterial = 0;     // inverted hull
+    /// The same hull for SKINNED targets: HlmsUnlit cannot skin, so a rigged
+    /// character's silhouette is a Pbs datablock with the colour as emissive,
+    /// sharing the character's own skeleton instance (see syncHighlight).
+    jahshaka::engine::MaterialId mOutlineSkinnedMaterial = 0;
     bool mHighlightWireframe = false;
     QColor mHighlightColourApplied;                        // what the materials show now
     // Strongest shadow quality any shadow-casting light asked for, from the last

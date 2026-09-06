@@ -485,6 +485,13 @@ void OgreEngine::renderOneFrame() {
             }
         }
         if (mRoot) mRoot->renderOneFrame();
+        // POSE FOLLOWERS (Scene::followSkeleton — the selection silhouette over
+        // an animating character). AFTER the frame, deliberately: the source's
+        // bones are only resolved inside the render, so copying here takes the
+        // pose that was just drawn and shows it on the next frame. One frame of
+        // lag on a selection band, against a second full skeleton update per
+        // frame if it were done the other way round.
+        for (auto &s : mScenes) s->applySkeletonFollowers();
         // THE ONE-SHOT RE-CAPTION (OgreOverlayHud.cpp's `Caption`): a TextArea
         // whose caption was set before its first rendered frame built its
         // geometry against an unloaded font and renders nothing, for ever,
