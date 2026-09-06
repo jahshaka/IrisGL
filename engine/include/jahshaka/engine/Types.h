@@ -879,6 +879,36 @@ struct RenderStats {
     unsigned long long instances = 0;
 };
 
+/// A CENSUS of everything alive behind the boundary (fps audit F11).
+/// A POD, exactly like RenderStats — `app.engineObjects()` is this struct.
+///
+/// WHY IT EXISTS. RenderStats says what a frame COST; nothing said what the
+/// renderer was HOLDING. A leak on this side of the boundary — a view that is
+/// created per readback and never destroyed, a mesh record kept after the
+/// document node died, a datablock per material push — is invisible in pixels,
+/// invisible in the document, and shows up only as a frame that costs a little
+/// more every minute. These counts are flat in a scene nobody is editing, so
+/// "sample 2 equals sample 6" is a contract a test can assert without a
+/// per-machine baseline (tests/perf/epic_steady_state.js).
+///
+/// SCOPE. `views` and `scenes` are the engine's own vectors. `nodes`, `meshes`,
+/// `materials` and `textures` are the per-Scene registries SUMMED over every
+/// live scene — they are ids the boundary handed out and still honours, not
+/// Ogre objects. `datablocks` is the one PROCESS-WIDE number: HlmsManager keeps
+/// one datablock map per Hlms type for the whole Root, so it counts across
+/// scenes by construction (and includes the backend's own defaults, which is
+/// why only its DELTA means anything).
+struct ObjectCounts {
+    unsigned views = 0;         ///< live View objects (on-screen + offscreen)
+    unsigned enabledViews = 0;  ///< of those, the ones renderOneFrame draws
+    unsigned scenes = 0;        ///< live Scene objects
+    unsigned nodes = 0;         ///< tracked node records, summed over scenes
+    unsigned meshes = 0;        ///< tracked mesh records, summed over scenes
+    unsigned materials = 0;     ///< tracked material records, summed over scenes
+    unsigned textures = 0;      ///< tracked texture records, summed over scenes
+    unsigned datablocks = 0;    ///< Hlms datablocks in the process (all types)
+};
+
 /// Where a corner-anchored readout sits in a View.
 enum class OverlayCorner { TopLeft, TopRight, BottomLeft, BottomRight };
 

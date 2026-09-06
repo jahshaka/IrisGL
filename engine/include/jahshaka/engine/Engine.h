@@ -750,6 +750,19 @@ public:
     /// Returns false only when there is no backend to ask; `out` is then left
     /// default-constructed.
     virtual bool renderStats(RenderStats &out) const = 0;
+
+    /// What the renderer is HOLDING (see ObjectCounts). The companion to
+    /// renderStats: that one answers "what did the frame cost", this one
+    /// answers "what is alive", which is the question a slow leak makes
+    /// people ask an hour too late.
+    ///
+    /// Not lazy and not measured — every field is a container size() plus one
+    /// walk of the (tiny) view and scene vectors, so it is safe to call every
+    /// frame and costs nothing when nobody does.
+    ///
+    /// Returns false only when there is no backend to ask; `out` is then left
+    /// default-constructed.
+    virtual bool objectCounts(ObjectCounts &out) const = 0;
     /// Writes the cache now, if anything new has been compiled since the last
     /// write. Called on clean shutdown and once a compile burst has settled;
     /// safe (and a no-op) when the cache is disabled or nothing is dirty.

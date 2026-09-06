@@ -1206,6 +1206,10 @@ private:
     /// from the LIVE scene, so a recycled pointer can never alias.
     void invalidateGiCaches();
 public:
+    /// ADDS this scene's registry sizes into `out` (nodes/meshes/materials/
+    /// textures). Additive because Engine::objectCounts sums every live scene
+    /// into one census — see ObjectCounts. Touches nothing else in `out`.
+    void addObjectCounts(ObjectCounts &out) const;
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
     /// Called by OgreView each frame with its camera position: the PCC probe
@@ -1679,6 +1683,7 @@ public:
 
     ShaderCacheStats shaderCacheStats() const override;
     bool renderStats(RenderStats &out) const override;
+    bool objectCounts(ObjectCounts &out) const override;
     bool saveShaderCache() override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
