@@ -688,6 +688,20 @@ struct GiStatus {
     bool   pccBound = false;
     /// Whether this scene owns the process-wide VCT lighting binding.
     bool   vctBound = false;
+    /// The RESOLVED lit volume — what the voxelizer was actually given, after
+    /// the explicit-bounds check, the per-node exclude flag and the extent
+    /// outlier rejection (REFLECTIONS_ADOPTION_SPEC.md P1a). Equal corners mean
+    /// "no volume" (GI off, or nothing to light). This is the only way to see
+    /// what the auto-fit decided: the document's giBounds rows stay at 0,0,0
+    /// for every scene that never pinned them.
+    Vec3   boundsMin;
+    Vec3   boundsMax;
+    /// The RESOLVED reflection-probe region — the free space the probe grid was
+    /// placed in, which is deliberately NOT the lit volume (it carries no
+    /// margin and is pulled in to the room's walls). Equal corners in every mode
+    /// but the hybrid.
+    Vec3   probeRegionMin;
+    Vec3   probeRegionMax;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

@@ -221,23 +221,42 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
         Ogre::SceneManager *sm = mRoot->createSceneManager(Ogre::ST_GENERIC, threads, name);
         // HlmsPbs shades point and spot lights ONLY through Forward+ (Forward3D /
         // ForwardClustered); without it only directional lights reach the shader.
-        // Values are Ogre's sample defaults: 16x8 grid, 24 slices, 96 lights per
-        // cell, 2..50 units depth range. 4 cubemap probes per cell:
-        // per-pixel PCC (the GI hybrid's reflection probes) is culled through
-        // this grid — 0 would silently disable it (costs a slightly larger grid
-        // buffer; zero shader cost until probes exist).
+        // 16x8 grid, 24 slices, 2..50 units depth range.
         //
-        // 8 DECALS PER CELL (DECALS_SPEC D5), always on. This is a per-CELL cap,
-        // not a scene-wide one: more than 8 decals overlapping one cluster cell
-        // drop the farthest. Turning it on costs ~54 KiB more per cached grid
-        // buffer and NOTHING in the shader until a scene actually binds a decal
-        // atlas (the decal code is gated on a non-null SceneManager decal
-        // texture, OgreForwardClustered.cpp:1095-1120). It does shift
-        // hlms_forwardplus_lights_per_cell and the cubemap slot offset, so every
-        // PBS shader recompiles ONCE — CPU fill and shader read use the same
-        // offsets, and the phase-0 gate proved the rendered pixels are
-        // byte-identical either way.
-        sm->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, 4, 2.0f, 50.0f);
+        // 8 CUBEMAP PROBES PER CELL (REFLECTIONS_ADOPTION_SPEC.md P1c), up from
+        // 4. Per-pixel PCC is culled through this grid, and with the shipped
+        // probe overlap of 1.5 a point sits inside up to 8 probe volumes while
+        // a cell intersects 6-8 of an 18-probe grid. The excess was dropped at
+        // CELL granularity (ForwardClustered::collectObjsForSlice), which reads
+        // as reflections popping as the camera crosses a cell boundary. Cost:
+        // the grid buffer is cells x objsPerCell x uint16, so 3072 x 4 x 2 =
+        // +24 KiB. The upstream sample passes 16.
+        //
+        // 96 LIGHTS PER CELL STAYS, and the spec's recommended companion cut to
+        // 32 is DELIBERATELY NOT TAKEN — measured, not argued. The spec's case
+        // was "32 forward lights overlapping ONE cluster cell is beyond any
+        // scene we ship". That is true of lights a user places and false of the
+        // ones the renderer plants: INSTANT RADIOSITY's virtual point lights
+        // ride this very list (setEnableVpls, OgreGi.cpp), and at Medium quality
+        // it plants enough of them that the cap is what decides how much bounce
+        // survives. gi.modes' floor bounce, same scene, same everything else:
+        //     96 lights/cell -> r 0.831 g 0.506   (the shipped look)
+        //     64             -> r 0.471 g 0.451   (nearly gone)
+        //     48             -> r 0.427 g 0.427   (gone: no red at all)
+        //     32             -> r 0.388 g 0.388   (gone)
+        // So the 384 KiB the cut would have saved costs a whole GI mode. Worth
+        // recording the other direction too: at 96 the bounce is still being
+        // clipped by this cap, so RAISING it would brighten Instant Radiosity —
+        // a measurement for whoever next owns that mode, not a change to make
+        // while chasing reflections.
+        //
+        // The slot change shifts hlms properties (the cubemap slot offset,
+        // OgreForwardClustered.cpp), so every Forward+ shader recompiles ONCE;
+        // the shader cache self-invalidates on the engine build id. A slow first
+        // run after this build is that, not a defect. Rendered pixels must come
+        // back identical — CPU fill and shader read use the same offsets — which
+        // is what the full pixel sweep gates.
+        sm->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, 8, 2.0f, 50.0f);
         // Shadow maps cover nothing until these are set (Ogre's samples set both).
         sm->setShadowDirectionalLightExtrusionDistance(500.0f);
         sm->setShadowFarDistance(500.0f);

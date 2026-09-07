@@ -42,6 +42,18 @@ abstract target jah_pcc_cubemap_face
 		overlays			off
 		camera_cubemap_reorient true
 
+		// EDITOR HELPERS OUT OF REFLECTIONS (REFLECTIONS_ADOPTION_SPEC.md P1b).
+		// 0x1 is kVisibleBit (EnginePrivate.h). Every real object carries it;
+		// editor helpers — the ground grid at RQ 10, the light-icon billboards
+		// at RQ 15, range wires, camera helpers — carry kHelperBit (0x8)
+		// INSTEAD, so they fail this pass's any-bit test and stop being baked
+		// into every probe. Gizmos and selection outlines at RQ 210 were already
+		// out via rq_last. This is the ONLY pass in the whole program that sets
+		// an explicit visibility_mask; the main chain's all-ones default is what
+		// keeps helpers drawing in the viewport. ANY future pass that sets one
+		// must include 0x8 or helpers vanish from it.
+		visibility_mask 0x1
+
 		rq_first	0
 		rq_last		200
 

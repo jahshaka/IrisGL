@@ -72,6 +72,35 @@ void OgreScene::refreshGlobalIllumination() {
     } JAH_CATCH(mError, );
 }
 
+// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2). VERIFIED AGAINST
+// THE PIN by this lane, because the spec listed it as unproven: VctLighting::
+// update() re-collects the scene's lights, re-maps its const buffer and
+// re-dispatches the injection compute job against the voxelizer's EXISTING
+// albedo/normal/emissive textures (OgreVctLighting.cpp). It touches neither the
+// VctVoxelizer's raw Item* cache nor VctMaterial's datablock cache, which is
+// what the "always from scratch" rule in rebuildVct exists to protect — and
+// upstream's own Voxelizer sample re-calls it on a keypress without rebuilding
+// anything (Samples/2.0/Tests/Voxelizer, the F4/F5 handlers). So it is safe to
+// re-run, and the from-scratch rule stays exactly as strict for the voxelizer.
+//
+// updateSceneGraph() first: light injection reads each light's DERIVED position
+// (VctLighting::addLight -> getParentNode()->_getDerivedPosition()), and the
+// whole point of this call is that a light just moved.
+bool OgreScene::refreshGiLighting() {
+    JAH_TRY {
+        if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity) {
+            rebuildGi();          // IR has no cheaper path: the re-trace IS it
+            return true;
+        }
+        if (!mVctLighting || !mVctVoxelizer) return false;
+        mSceneMgr->updateSceneGraph();
+        const Ogre::uint32 extraBounces =
+            Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
+        mVctLighting->update(mSceneMgr, extraBounces);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
 GiStatus OgreScene::giStatus() const {
     GiStatus st;
     st.mode = mGi.mode;
@@ -84,8 +113,29 @@ GiStatus OgreScene::giStatus() const {
         Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
         st.pccBound = mPcc && pbs->getParallaxCorrectedCubemap() == mPcc;
         st.vctBound = mVctLighting && pbs->getVctLighting() == mVctLighting;
+        const auto toV = [](const Ogre::Vector3 &v) { return Vec3(v.x, v.y, v.z); };
+        st.boundsMin      = toV(mGiLitVolume.getMinimum());
+        st.boundsMax      = toV(mGiLitVolume.getMaximum());
+        st.probeRegionMin = toV(mGiProbeRegion.getMinimum());
+        st.probeRegionMax = toV(mGiProbeRegion.getMaximum());
     } JAH_CATCH(mError, st);
     return st;
+}
+
+void OgreScene::setNodeGiBoundsExcluded(NodeId id, bool excluded) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    if (it->second.giBoundsExcluded == excluded) return;
+    it->second.giBoundsExcluded = excluded;
+    // The flag changes WHERE GI happens, so it is exactly as much of a change
+    // as moving the geometry: flag the caches and let the frame-time flush
+    // rebuild once, however many nodes the caller toggles in a burst.
+    invalidateGiCaches();
+}
+
+bool OgreScene::nodeGiBoundsExcluded(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it != mNodes.end() && it->second.giBoundsExcluded;
 }
 
 // ---- GI internals ----
@@ -113,6 +163,59 @@ Ogre::Light *OgreScene::markGiLight(NodeId requested) {
     return chosen;
 }
 
+// The GI-participating items' world AABBs, AFTER the two document-driven
+// filters: the per-node "exclude from GI bounds" flag, and the extent-outlier
+// rejection below. Everything that reasons about the shape of the lit world
+// starts here so that the lit volume and the probe region can never disagree
+// about which objects define it.
+//
+// OUTLIER REJECTION (REFLECTIONS_ADOPTION_SPEC.md P1a.1): take each item's
+// LARGEST world-AABB extent, take the median of those, and drop items whose
+// largest extent is more than 4x the median. The case it exists for is the one
+// every default scene has: a ground plane 200 units across sitting under a
+// handful of 1-2 unit primitives. Unioning it puts the voxel volume and the
+// probe grid over 40,000 square units of empty air — the "basic cubemap" look
+// GI_SPEC blamed on probe count. The median (not the mean) is what makes one
+// enormous object unable to drag the threshold up to cover itself.
+//
+// It only runs with FOUR items or more: below that "the median" is not a
+// statement about a population, and a three-object scene where one object is
+// genuinely the subject would lose it. The document's explicit exclude flag is
+// the deterministic escape hatch when the heuristic guesses wrong either way.
+std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
+    std::vector<Ogre::Aabb> all;
+    all.reserve(mNodes.size());
+    for (const auto &kv : mNodes) {
+        const Ogre::Item *item = kv.second.item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        if (kv.second.giBoundsExcluded) continue;
+        all.push_back(const_cast<Ogre::Item *>(item)->getWorldAabbUpdated());
+    }
+    if (all.size() < 4u) return all;
+
+    std::vector<float> extents;
+    extents.reserve(all.size());
+    for (const Ogre::Aabb &a : all) {
+        const Ogre::Vector3 s = a.getSize();
+        extents.push_back(std::max(std::max(s.x, s.y), s.z));
+    }
+    std::vector<float> sorted = extents;
+    std::sort(sorted.begin(), sorted.end());
+    const size_t n = sorted.size();
+    const float median = (n % 2u) ? sorted[n / 2u]
+                                  : 0.5f * (sorted[n / 2u - 1u] + sorted[n / 2u]);
+    if (median <= 0.0f) return all;          // degenerate (all points) — keep everything
+    const float limit = median * 4.0f;
+
+    std::vector<Ogre::Aabb> kept;
+    kept.reserve(all.size());
+    for (size_t i = 0; i < all.size(); ++i)
+        if (extents[i] <= limit) kept.push_back(all[i]);
+    // Never return nothing: if the filter somehow ate the whole scene the plain
+    // union is a worse answer than no answer at all.
+    return kept.empty() ? all : kept;
+}
+
 bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
     const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
     if (a.x != b.x || a.y != b.y || a.z != b.z) {
@@ -120,20 +223,129 @@ bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
         mx = Ogre::Vector3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
         return true;
     }
-    bool any = false;
+    const std::vector<Ogre::Aabb> items = giItemBounds();
+    if (items.empty()) return false;
     mn = Ogre::Vector3(1e30f); mx = Ogre::Vector3(-1e30f);
-    for (const auto &kv : mNodes) {
-        const Ogre::Item *item = kv.second.item;
-        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        const Ogre::Aabb aabb = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
+    for (const Ogre::Aabb &aabb : items) {
         mn.makeFloor(aabb.getMinimum());
         mx.makeCeil(aabb.getMaximum());
-        any = true;
     }
-    if (!any) return false;
-    const Ogre::Vector3 margin = (mx - mn) * 0.1f + Ogre::Vector3(0.5f);
+    // The margin is ONE VOXEL per axis, and no more (P1a). It exists for exactly
+    // one reason: a surface lying exactly on the union's boundary would sit on
+    // the volume's face, where it may or may not be rasterised into a voxel. One
+    // voxel of slack removes the question.
+    //
+    // It used to be 10% + 0.5 absolute, which was our invention — upstream's own
+    // `VctVoxelizer::autoCalculateRegion` is the plain union with NO margin at
+    // all — and it cost twice: a volume 20% larger per axis at a FIXED voxel
+    // resolution spends ~40% of its voxels on empty air, and (measured in
+    // gi.pcc_bounds) an over-inflated volume moves the VCT cone hit far enough
+    // from the probe's parallax hit that `getPccVctBlendWeight` hands the pixel
+    // to VCT and the probe reflection vanishes. In this room the old margin was
+    // 1.58 units and the reflection died between 1.0 and 1.3.
+    const Ogre::Vector3 size = mx - mn;
+    const float res = float(giVoxelResolution());
+    Ogre::Vector3 margin = size / res;
+    // Degenerate axes (a single ground plane is flat in Y) get a real one from
+    // the scene's own scale rather than a magic constant.
+    const float maxExtent = std::max(std::max(size.x, size.y), size.z);
+    const float floorMargin = std::max(maxExtent / res, 1e-3f);
+    for (size_t a = 0; a < 3u; ++a) margin[a] = std::max(margin[a], floorMargin);
     mn -= margin; mx += margin;
     return true;
+}
+
+// Voxel volume resolution per axis, by quality. Shared so the bounds margin can
+// be expressed in voxels rather than in a made-up percentage.
+unsigned OgreScene::giVoxelResolution() const {
+    switch (mGi.quality) {
+    case GiQuality::Low:  return 32u;
+    case GiQuality::High: return 128u;
+    default:              return 64u;
+    }
+}
+
+// THE PROBE REGION — not the lit volume (REFLECTIONS_ADOPTION_SPEC.md P1a, the
+// root cause of P4's finding 2).
+//
+// `PccPerPixelGridPlacement::setFullRegion` does NOT take a bounding box of the
+// geometry. It takes the FREE SPACE the probes will live in: upstream's own
+// sample hands it the interior cube's exact interior (half-size 0.5 for a
+// 1x1x1 room, no margin at all). We used to hand it the voxel volume — the
+// geometry union plus 10% plus 0.5, or whatever the user typed into the bounds
+// rows — and that is a materially different box.
+//
+// Why it matters, measured (gi.pcc_bounds, 2x1x2 probes, identical geometry,
+// ONLY the region changing):
+//     region = geometry + 0.2   mirror pixel r = 0.251
+//     region = geometry + 0.4                   0.063
+//     region = geometry + 0.6                   0.000   <- black
+//     region = geometry + 1.6                   0.000
+// The chain: buildEnd shrink-fits each probe by reading ONE 1x1 averaged depth
+// value per cube face, encoded as 0.5 * fDist / fApproxDist where fApproxDist
+// is measured to the REGION box. Averaging that ratio over a 90-degree face is
+// only well behaved while the region is close to the geometry; once it is not,
+// the fitted parallax boxes overshoot the room by many units (measured: a probe
+// in a room spanning x in [-4,4] fitted to x in [-4.6, +7.7]). The PBS hybrid
+// then compares the probe's parallax-reconstructed hit against the VCT cone hit
+// (getPccVctBlendWeight -> distToVct), finds them further apart than
+// pccVctMinDistance, and hands the pixel to VCT — which in a sealed room has
+// nothing, i.e. black. probeCount and pccBound stay perfectly healthy
+// throughout, which is exactly why P4 could not see it.
+//
+// So: start from the TIGHT union (no margin) of the same items the lit volume
+// uses, clamp it into the lit volume (an explicit user bounds box therefore
+// still governs the extent, and a user who types the room's interior gets the
+// room's interior), and then pull each of the six faces in to the nearest
+// ENCLOSING slab — the floor, the ceiling, the walls. An item counts as a wall
+// for a direction when it lies wholly on that side of the hull's centre and
+// spans at least half of the hull on both other axes; furniture and the subject
+// of the scene fail that test and are ignored. In an open scene no wall is
+// found on most axes and the tight hull stands, which is the right answer
+// there.
+//
+// KNOWN LIMIT, documented rather than papered over: a room imported as ONE
+// hollow mesh has an AABB that IS its outer shell, and no axis-aligned test can
+// find its interior. Such a scene needs the explicit bounds rows (which clamp
+// this region) or the per-node exclude flag. Only a second depth-readback pass
+// could do better, and that doubles the probe render cost.
+Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume) const {
+    const std::vector<Ogre::Aabb> items = giItemBounds();
+    if (items.empty()) return litVolume;
+
+    Ogre::Vector3 mn(1e30f), mx(-1e30f);
+    for (const Ogre::Aabb &a : items) { mn.makeFloor(a.getMinimum()); mx.makeCeil(a.getMaximum()); }
+    mn.makeCeil(litVolume.getMinimum());     // clamp INTO the lit volume
+    mx.makeFloor(litVolume.getMaximum());
+    for (size_t ax = 0; ax < 3u; ++ax)
+        if (!(mn[ax] < mx[ax])) return litVolume;   // clamped to nothing: keep the caller's box
+
+    const Ogre::Vector3 hullMin = mn, hullMax = mx;
+    const Ogre::Vector3 centre = (hullMin + hullMax) * 0.5f;
+    const Ogre::Vector3 hullSize = hullMax - hullMin;
+
+    for (size_t ax = 0; ax < 3u; ++ax) {
+        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+        float nearestMax = hullMax[ax];      // the +axis face, pulled inwards
+        float nearestMin = hullMin[ax];      // the -axis face, pulled inwards
+        for (const Ogre::Aabb &a : items) {
+            const Ogre::Vector3 amn = a.getMinimum(), amx = a.getMaximum();
+            // Wall-like for this axis: covers at least half of the hull on both
+            // of the OTHER axes. A 2-unit box in a 9-unit room never qualifies.
+            const auto covers = [&](size_t k) {
+                if (hullSize[k] <= 0.0f) return true;
+                const float lo = std::max(amn[k], hullMin[k]);
+                const float hi = std::min(amx[k], hullMax[k]);
+                return (hi - lo) >= hullSize[k] * 0.5f;
+            };
+            if (!covers(o1) || !covers(o2)) continue;
+            if (amn[ax] > centre[ax] && amn[ax] < nearestMax) nearestMax = amn[ax];
+            if (amx[ax] < centre[ax] && amx[ax] > nearestMin) nearestMin = amx[ax];
+        }
+        // Only accept the pull if it leaves a real volume behind.
+        if (nearestMin < nearestMax) { mn[ax] = nearestMin; mx[ax] = nearestMax; }
+    }
+    return Ogre::Aabb::newFromExtents(mn, mx);
 }
 
 void OgreScene::invalidateGiCaches() {
@@ -173,6 +385,8 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
 }
 
 void OgreScene::rebuildGi() {
+    // Every early return below leaves "nothing built" showing in giStatus.
+    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     Ogre::Light *driver = markGiLight(mGi.irLight);
     Ogre::Vector3 mn, mx;
     if (!driver || !computeGiBounds(mn, mx)) {
@@ -182,6 +396,7 @@ void OgreScene::rebuildGi() {
     // One area of interest covering the GI bounds. Directional rays start
     // outside the sphere so nearby geometry occludes correctly.
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
+    mGiLitVolume = aabb;
     mInstantRadiosity->mAoI.clear();
     mInstantRadiosity->mAoI.push_back(
         Ogre::InstantRadiosity::AreaOfInterest(aabb, aabb.getRadius() * 2.0f));
@@ -217,6 +432,8 @@ void OgreScene::rebuildGi() {
 }
 
 void OgreScene::rebuildVct() {
+    // Every early return below leaves "nothing built" showing in giStatus.
+    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     // ALWAYS from scratch: VctVoxelizer keeps raw Item* until removeAllItems and
     // VctMaterial caches conversions by raw datablock pointer across builds — a
     // recycled address would alias. A fresh voxelizer per (re)build can't.
@@ -227,12 +444,8 @@ void OgreScene::rebuildVct() {
 
     // Quality -> voxel volume resolution (the memory/compute knob: 32^3 =~ fast
     // preview, 128^3 =~ crisp indirect shadows) and anisotropic cone mips.
-    Ogre::uint32 res = 64u; bool anisotropic = true;
-    switch (mGi.quality) {
-    case GiQuality::Low:    res = 32u;  anisotropic = false; break;
-    case GiQuality::Medium: res = 64u;  anisotropic = true;  break;
-    case GiQuality::High:   res = 128u; anisotropic = true;  break;
-    }
+    const Ogre::uint32 res = giVoxelResolution();
+    const bool anisotropic = mGi.quality != GiQuality::Low;
 
     // World transforms must be current before voxelization (the sample calls
     // this before every voxelizeScene; outside the render loop it is a no-op
@@ -272,7 +485,13 @@ void OgreScene::rebuildVct() {
     hlmsPbs(mRoot)->setVctLighting(mVctLighting);
     sVctBindingOwner = this;
 
-    if (mGi.mode == GiMode::VctPccHybrid) buildPcc(aabb);
+    mGiLitVolume = aabb;
+    // The probe grid gets its OWN region — the free space, not the padded voxel
+    // volume. computeProbeRegion's header is the whole argument (P4 finding 2).
+    if (mGi.mode == GiMode::VctPccHybrid) {
+        mGiProbeRegion = computeProbeRegion(aabb);
+        buildPcc(mGiProbeRegion);
+    }
 
     if (std::getenv("JAHSHAKA_GI_DEBUG"))
         Ogre::LogManager::getSingleton().logMessage(
@@ -320,14 +539,56 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
                          std::max(0.02f, diag * 0.001f), std::max(1.0f, diag * 2.0f));
     placement.buildEnd();   // reads probe depth back and re-fits probe shapes
 
+    // Diagnostic: JAHSHAKA_GI_DEBUG=1 dumps where every probe ENDED UP. This is
+    // the only window onto PccPerPixelGridPlacement's depth-readback shrink-fit,
+    // and the shape is what decides whether a surface gets probe reflections at
+    // all: the PBS per-pixel path skips any probe whose SHAPE does not contain
+    // the shaded point (getProbeFade > 0, ForwardPlus_DecalsCubemaps_piece_ps),
+    // so a shape that lost the room reads downstream as "reflections are black"
+    // with probeCount and pccBound both still healthy.
+    if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+        Ogre::LogManager &lm = Ogre::LogManager::getSingleton();
+        const auto toS = [](const Ogre::Vector3 &v) {
+            return Ogre::StringConverter::toString(v);
+        };
+        lm.logMessage("Jahshaka GI: PCC region " + toS(aabb.getMinimum()) + " .. " +
+                      toS(aabb.getMaximum()) + " grid " + std::to_string(numProbes[0]) + "x" +
+                      std::to_string(numProbes[1]) + "x" + std::to_string(numProbes[2]));
+        const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+        for (size_t i = 0; i < probes.size(); ++i) {
+            const Ogre::CubemapProbe *p = probes[i];
+            const Ogre::Aabb shape = p->getProbeShape();
+            const Ogre::Aabb area  = p->getArea();
+            lm.logMessage("Jahshaka GI:  probe " + std::to_string(i) +
+                          " cam " + toS(p->getProbeCameraPos()) +
+                          " shape " + toS(shape.getMinimum()) + " .. " + toS(shape.getMaximum()) +
+                          " area " + toS(area.getMinimum()) + " .. " + toS(area.getMaximum()));
+        }
+    }
+
     // The hybrid blend: reflections whose PCC-vs-VCT parallax error is below
     // minDistance come from the probes (near geometry, sharp), above maxDistance
-    // from cone tracing (far, soft), faded in between. Scaled to the scene.
+    // from cone tracing (far, soft), faded in between. Scaled to the PROBE
+    // REGION now that the region and the lit volume are two different boxes:
+    // what the shader measures (getPccVctBlendWeight -> distToVct) is a
+    // disagreement between two answers about the space the probes cover, so
+    // that space is the right thing to scale it by — not a voxel volume that
+    // may be padded out well past it.
+    //
+    // MEASURED LIMIT, left as a finding rather than tuned away: when the LIT
+    // VOLUME is padded to roughly twice the room (a user typing very generous
+    // bounds rows — the auto path cannot produce it any more), the VCT cone hit
+    // drifts 16+ voxels from the probe's parallax hit and this blend correctly
+    // concludes the two disagree, so probe reflections fade out even though the
+    // probes themselves are placed perfectly. Widening the window to ~32 voxels
+    // restores them, but that is the hybrid abandoning its own judgement, so it
+    // is NOT the default. gi.pcc_bounds' header records the numbers.
     const float minDist = std::max(0.25f, diag * 0.05f);
     hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, minDist, minDist * 2.0f);
 }
 
 void OgreScene::teardownVct() {
+    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     if (sVctBindingOwner == this) {
         hlmsPbs(mRoot)->setParallaxCorrectedCubemap(nullptr);
         hlmsPbs(mRoot)->setVctLighting(nullptr);
@@ -343,6 +604,7 @@ void OgreScene::teardownVct() {
 }
 
 void OgreScene::teardownIr() {
+    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     if (!mInstantRadiosity) return;
     delete mInstantRadiosity;   // ~InstantRadiosity clears the VPLs
     mInstantRadiosity = nullptr;
