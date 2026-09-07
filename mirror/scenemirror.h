@@ -117,6 +117,10 @@ public:
     /// a light that really moves re-solves exactly once.
     quint64 giPushCount() const { return mGiPushCount; }
     quint64 giRefreshCount() const { return mGiRefreshCount; }
+    /// How many times the CHEAP light-only re-inject ran instead of a full
+    /// re-solve (REFLECTIONS_ADOPTION_SPEC.md P2). During a light drag this is
+    /// the counter that moves; giRefreshCount() stays still until the drag ends.
+    quint64 giLightRefreshCount() const { return mGiLightRefreshCount; }
 
     /// The document light node driving Instant Radiosity: the scene's giLightGuid
     /// when it names a live light, else the first directional light (by creation
@@ -391,6 +395,11 @@ private:
         // Arming a reflector derives a world plane and registers a PBS
         // receiver; it is not the kind of call to repeat 60 times a second.
         int planarReflector = -1;
+        // GI bounds exclusion (REFLECTIONS_ADOPTION_SPEC.md P1a.2), same
+        // push-on-change discipline: the engine invalidates its GI caches when
+        // the flag really changes, so re-pushing it every frame would flag a
+        // rebuild every frame. -1 = never pushed.
+        int giBoundsExcluded = -1;
         // (hasBillboards/billboardSignature lived here and had no reader or
         // writer anywhere in the tree — deleted with the deep-audit fix wave.)
         // Particles (PARTICLES_FX2_SPEC): the engine simulates, so the mirror
@@ -817,6 +826,29 @@ private:
     // screen is a real push, and the gate counts real pushes).
     quint64 mGiPushCount = 0;
     quint64 mGiRefreshCount = 0;
+    quint64 mGiLightRefreshCount = 0;
+    // ---- Rebuild coalescing (REFLECTIONS_ADOPTION_SPEC.md §5 / P2) ----
+    // A moving light ARMS a refresh instead of performing one; the expensive
+    // rebuild fires when the light has held still. See applyEnvironment for the
+    // argument. The constants are deliberately not exposed: they are a debounce,
+    // not a preference.
+    bool     mGiPendingRefresh = false;
+    int      mGiStableFrames = 0;
+    int      mGiFramesSinceLightOnly = 0;
+    QElapsedTimer mGiPendingTimer;
+    /// The value of Scene::giRefreshSerial this mirror has already acted on
+    /// (P1d). An EXPLICIT refresh never waits for the stability window.
+    quint64  mGiRefreshSerialSeen = 0;
+    /// Frames of a still light signature before the full rebuild fires. 15 at
+    /// 60 Hz is a quarter second — long enough that no drag ever crosses it,
+    /// short enough that letting go feels immediate.
+    static constexpr int kGiStableFrames = 15;
+    /// ...or this many milliseconds, whichever comes FIRST. A slow Debug frame
+    /// rate must not stretch the wait into seconds.
+    static constexpr qint64 kGiStableMs = 250;
+    /// While waiting, run the cheap light-only re-inject this often, so bounced
+    /// light follows a light that is being dragged.
+    static constexpr int kGiLightOnlyEveryN = 10;
     // Fog: last pushed state. Enabling/disabling fog creates or destroys the
     // scene's atmosphere and changes the shader variant, so this one is pushed on
     // change only, not every frame.

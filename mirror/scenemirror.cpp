@@ -638,7 +638,14 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
         if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
         return;
     }
-    if (!e.wireNode) e.wireNode = mTarget->createNode(e.node);
+    if (!e.wireNode) {
+        e.wireNode = mTarget->createNode(e.node);
+        // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b): wires, range circles
+        // and light icons are things the user must see and a reflection probe
+        // must never capture. Marked at CREATION so the very first frame of
+        // geometry already carries kHelperBit.
+        if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
+    }
     if (!e.wireNode) return;
 
     const bool selected = mHighlighted &&
@@ -799,6 +806,13 @@ void SceneMirror::syncGrid()
         freshNode = true;
         mGridMinorNode = mTarget->createNode(mGridNode);
         mGridMajorNode = mTarget->createNode(mGridNode);
+        // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b). The grid used to be
+        // baked into every reflection-probe capture — the single most visible
+        // thing wrong with a probe reflection in an editor scene. Marked on the
+        // LEAF nodes because that is where the Items hang; the helper flag is
+        // per node, not inherited.
+        mTarget->setNodeHelper(mGridMinorNode, true);
+        mTarget->setNodeHelper(mGridMajorNode, true);
         // Unlit (never fogged), depth-tested (occluded by geometry), blended.
         mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
         mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
@@ -933,7 +947,14 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
         if (kind == 1) shape = -1;        // point: rings are the falloff volume
         else if (kind == 2) shape = 0;    // spot: keep the arrow, drop the cone
     }
-    if (!e.wireNode) e.wireNode = mTarget->createNode(e.node);
+    if (!e.wireNode) {
+        e.wireNode = mTarget->createNode(e.node);
+        // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b): wires, range circles
+        // and light icons are things the user must see and a reflection probe
+        // must never capture. Marked at CREATION so the very first frame of
+        // geometry already carries kHelperBit.
+        if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
+    }
     if (!e.wireNode) return;
     if (shape < 0) {
         if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; }
@@ -1236,6 +1257,17 @@ void SceneMirror::visit(iris::SceneNode *node)
         if (e.planarReflector != want) {
             mTarget->setNodePlanarReflector(e.node, want != 0);
             e.planarReflector = want;
+        }
+    }
+
+    // "Do not let this object decide where GI happens" (P1a.2). ON CHANGE ONLY,
+    // for the same reason: setNodeGiBoundsExcluded invalidates the GI caches, so
+    // a per-frame push would re-voxelize the scene every frame.
+    {
+        const int want = node->getGiBoundsExcluded() ? 1 : 0;
+        if (e.giBoundsExcluded != want) {
+            mTarget->setNodeGiBoundsExcluded(e.node, want != 0);
+            e.giBoundsExcluded = want;
         }
     }
 
@@ -1967,7 +1999,14 @@ void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
         if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
         return;
     }
-    if (!e.wireNode) e.wireNode = mTarget->createNode(e.node);
+    if (!e.wireNode) {
+        e.wireNode = mTarget->createNode(e.node);
+        // EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b): wires, range circles
+        // and light icons are things the user must see and a reflection probe
+        // must never capture. Marked at CREATION so the very first frame of
+        // geometry already carries kHelperBit.
+        if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
+    }
     if (!e.wireNode) return;
     MeshId m = wireMeshFor(4);
     if (!m) return;
@@ -2966,18 +3005,86 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastGi = gi;
             mGiLightSignature = lightSig;
             mGiPushed = true;
+            mGiPendingRefresh = false;
+            mGiStableFrames = 0;
+            mGiRefreshSerialSeen = mSource->giRefreshSerial;
             ++mGiPushCount;
-        } else if (gi.mode != GiMode::Off && mSource->giAutoRefresh &&
-                   lightSig != mGiLightSignature) {
-            // IR re-traces in milliseconds; VCT re-injects + re-voxelizes on the
-            // GPU (a few ms at editor volumes on real hardware). The per-frame
-            // signature compare is the debounce, as for the push above — and the
-            // debounce is load-bearing: this branch firing every frame is a whole
-            // VCT rebuild per frame, which is invisible in the picture and fatal
-            // to the frame rate. giRefreshCount() is what proves it does not.
-            mGiLightSignature = lightSig;
-            mTarget->refreshGlobalIllumination();
-            ++mGiRefreshCount;
+        } else if (gi.mode != GiMode::Off) {
+            // ---- REBUILD COALESCING (REFLECTIONS_ADOPTION_SPEC.md §5 / P2) ----
+            //
+            // A full GI refresh is a teardown plus a re-voxelize plus, in the
+            // hybrid, every probe re-rendered twice (216 face renders at the
+            // shipped 18-probe grid). Doing it on the frame a light MOVES means
+            // doing it on every frame of a drag, synchronously inside mirror
+            // sync. The old code did exactly that — the branch's own comment
+            // knew, and the only thing saving the frame rate was that lights
+            // are usually still.
+            //
+            // So a changed light signature no longer refreshes. It ARMS a
+            // pending refresh and resets a stability counter; the expensive
+            // rebuild fires once the signature has held still for
+            // kGiStableFrames frames or kGiStableMs milliseconds, whichever
+            // comes first. During the wait the CHEAP path runs every
+            // kGiLightOnlyEveryN frames — re-inject the lights into the voxels
+            // that are already there — so bounced light follows the light being
+            // dragged instead of freezing until the mouse is released. Probes
+            // deliberately do not update on that path; they come back at the
+            // stability fire.
+            //
+            // Both a frame count AND a clock, because neither alone is right:
+            // frames alone make the delay depend on how fast the scene renders
+            // (and tests that step frames by hand would never fire), a clock
+            // alone makes a stepped test depend on wall time. Whichever arrives
+            // first wins, so a headless test that pumps 15 frames instantly
+            // still gets its refresh.
+            const bool sigChanged = lightSig != mGiLightSignature;
+            // world.refreshGi() / the panel's Refresh button (P1d): an explicit
+            // demand, so it does NOT wait for the stability window.
+            const bool explicitRefresh = mSource->giRefreshSerial != mGiRefreshSerialSeen;
+
+            if (sigChanged) {
+                if (mSource->giAutoRefresh) {
+                    // The remembered signature is only advanced while Auto
+                    // Refresh is ON, exactly as before this phase: with it off
+                    // the mirror is not tracking lights at all, so turning it
+                    // back on must notice the moves that happened meanwhile
+                    // rather than adopting them silently.
+                    mGiLightSignature = lightSig;
+                    // Both gates measure STABILITY, so both restart on every
+                    // change: a drag that keeps changing the signature never
+                    // satisfies either, which is the whole point. (Arming the
+                    // clock once instead would fire a full re-solve mid-drag as
+                    // soon as the drag outlasted 250 ms — the exact cost this
+                    // phase exists to remove, just less often.)
+                    mGiPendingTimer.restart();
+                    if (!mGiPendingRefresh) mGiFramesSinceLightOnly = 0;
+                    mGiPendingRefresh = true;
+                    mGiStableFrames = 0;
+                }
+            } else if (mGiPendingRefresh) {
+                ++mGiStableFrames;
+            }
+
+            if (explicitRefresh) {
+                mGiRefreshSerialSeen = mSource->giRefreshSerial;
+                mGiPendingRefresh = false;
+                mGiStableFrames = 0;
+                mTarget->refreshGlobalIllumination();
+                ++mGiRefreshCount;
+            } else if (mGiPendingRefresh &&
+                       (mGiStableFrames >= kGiStableFrames ||
+                        mGiPendingTimer.elapsed() >= kGiStableMs)) {
+                mGiPendingRefresh = false;
+                mGiStableFrames = 0;
+                mTarget->refreshGlobalIllumination();
+                ++mGiRefreshCount;
+            } else if (mGiPendingRefresh) {
+                // Still moving: the cheap path, rate-limited.
+                if (++mGiFramesSinceLightOnly >= kGiLightOnlyEveryN) {
+                    mGiFramesSinceLightOnly = 0;
+                    if (mTarget->refreshGiLighting()) ++mGiLightRefreshCount;
+                }
+            }
         }
     }
     // Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6). Same discipline as GI:

@@ -145,17 +145,38 @@ class OgreEngine;
 // line VAO reads as a vertex triangle list). kGiLightBit marks exactly the one
 // light Instant Radiosity traces from (InstantRadiosity::mLightMask).
 //
-// THERE IS NO "not in reflections" BIT, and there cannot be one in this
-// polarity: Ogre's visibility test is ANY-BIT-SET
-// (`objFlags & visibilityMask`, MovableObject::_addToRenderQueue), so a mask
-// can only say "draw things that carry one of THESE bits" — never "skip
-// things that carry THIS bit". A `~kNoReflectBit` pass mask was carried here
-// until 2026-09-06 and was a total no-op (probe-proven: flagging a plate
-// visible in a reflection moved zero pixels). What actually keeps a mirror out
-// of its own reflection is upstream's, not ours — see OgrePlanar.cpp's header.
+// AN EXCLUDE BIT IS IMPOSSIBLE; AN INCLUDE CHANNEL IS NOT. Ogre's visibility
+// test is ANY-BIT-SET (`objFlags & visibilityMask`,
+// MovableObject::_addToRenderQueue), so a mask can only say "draw things
+// carrying one of THESE bits" — never "skip things carrying THIS bit". A
+// `~kNoReflectBit` pass mask was carried here until 2026-09-06 and was a total
+// no-op (probe-proven: flagging a plate visible in a reflection moved zero
+// pixels). What keeps a mirror out of its OWN reflection is upstream's, not
+// ours — see OgrePlanar.cpp's header.
+//
+// The way to get "not in this pass" out of an any-bit test is INVERSION, and
+// that is what kHelperBit is (REFLECTIONS_ADOPTION_SPEC.md P1b). Editor helpers
+// — the ground grid, light icons, range wires, camera helpers — carry
+// kHelperBit *INSTEAD OF* kVisibleBit. Then:
+//   * the MAIN chain sets no explicit visibility_mask anywhere (verified across
+//     OgreChain.cpp and every compositor we ship), so its all-ones default plus
+//     the any-bit test keeps drawing them exactly as before — nothing to widen;
+//   * the reflection-probe face pass in JahshakaPcc.compositor carries
+//     `visibility_mask 0x1`, i.e. kVisibleBit only, so helpers drop out of
+//     every probe capture. Real geometry all carries kVisibleBit, so nothing
+//     else changes.
+// PCC forcing the SceneManager's mask wide does not defeat this: the pass mask
+// governs the user bits through `_getCombinedVisibilityMask`
+// (OgreSceneManager.cpp) and CompositorPassScene applies it per pass.
+//
+// THE RULE THAT COMES WITH IT: any future pass that sets an explicit
+// visibility_mask must include kHelperBit, or helpers vanish from that pass.
+// The planar-reflection path is the next place that wants this channel
+// (helpers out of mirrors); the bit is ready, the mask is not wired there yet.
 constexpr Ogre::uint32 kVisibleBit     = 1u;
 constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
+constexpr Ogre::uint32 kHelperBit      = 1u << 3;
 
 // Forward+ clustered decal budget PER CELL (DECALS_SPEC D5). Not a scene-wide
 // cap: decals beyond this in one cluster cell are dropped farthest-first.
@@ -1080,6 +1101,11 @@ public:
     bool setGlobalIllumination(const GiParams &p) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
+    bool refreshGiLighting() override;
+    void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
+    bool nodeGiBoundsExcluded(NodeId id) const override;
+    void setNodeHelper(NodeId id, bool helper) override;
+    bool nodeHelper(NodeId id) const override;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
@@ -1167,6 +1193,24 @@ private:
         /// so no visibility cascade reaches them and a system created or
         /// recycled later has to be told the node's state explicitly.
         bool                      visible = true;
+        /// "Do not let this object define where GI happens"
+        /// (REFLECTIONS_ADOPTION_SPEC.md P1a.2). It still VOXELIZES and still
+        /// bounces light — the exclusion is only from the two AABB reductions
+        /// (the lit volume and the probe region), which is the deterministic
+        /// escape hatch for the ground plane, the skybox shell, the level's
+        /// terrain: geometry that is real but is not what the lighting is about.
+        bool                      giBoundsExcluded = false;
+        /// EDITOR HELPER (REFLECTIONS_ADOPTION_SPEC.md P1b): the grid, light
+        /// icons, range wires — things the user must see but a reflection probe
+        /// must not capture. Carries kHelperBit instead of kVisibleBit.
+        bool                      helper = false;
+        /// Whether the attached material is UNLIT, recorded at attach time.
+        /// Needed because the helper flag can be toggled after the fact and the
+        /// item's own flags cannot answer it once kVisibleBit is gone: a helper
+        /// carries kHelperBit alone, so "does it have kGiGeometryBit" would read
+        /// every helper as unlit and a lit mesh would never get its GI bit back
+        /// when the flag cleared.
+        bool                      materialUnlit = false;
     };
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
@@ -1473,9 +1517,27 @@ private:
     /// and lighting are recreated from scratch every time (see invalidateGiCaches).
     /// In hybrid mode also (re)builds the PCC probe grid.
     void rebuildVct();
-    /// Builds the ParallaxCorrectedCubemapAuto probe grid over the same bounds
-    /// and binds it with distance-blended VCT specular (PccVctMinDistance).
-    void buildPcc(const Ogre::Aabb &aabb);
+    /// Builds the ParallaxCorrectedCubemapAuto probe grid over `region` — the
+    /// FREE SPACE from computeProbeRegion, NOT the voxel volume — and binds it
+    /// with distance-blended VCT specular (PccVctMinDistance).
+    void buildPcc(const Ogre::Aabb &region);
+    /// The visibility flags an Item attached to `n` must carry, given the
+    /// material's unlit-ness and the node's helper designation. THE one place
+    /// the bit scheme is applied to geometry.
+    Ogre::uint32 itemVisibilityFlags(Node &n, bool unlit);
+    /// Re-applies itemVisibilityFlags (and the billboard/particle equivalents)
+    /// to whatever `n` currently carries. Needed because the helper flag can be
+    /// set before or after the geometry is attached.
+    void applyNodeVisibilityFlags(Node &n);
+    /// Voxel volume resolution per axis for the current quality.
+    unsigned giVoxelResolution() const;
+    /// The GI items' world AABBs after the exclude flag and the extent-outlier
+    /// rejection: the one place that decides which objects define the lit world.
+    std::vector<Ogre::Aabb> giItemBounds() const;
+    /// Where the reflection probes live: the free space inside `litVolume`.
+    /// See the long-form argument on the definition — handing the padded voxel
+    /// volume here instead is what made P4's finding-2 reflections go black.
+    Ogre::Aabb computeProbeRegion(const Ogre::Aabb &litVolume) const;
     /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
@@ -1576,6 +1638,13 @@ private:
     bool mRefractionsActive = false;   // see setRefractionsActive
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
+    /// What the last (re)build ACTUALLY used, recorded rather than recomputed:
+    /// giStatus() must report the volume the renderer is using, not the one the
+    /// scene would resolve to if it rebuilt right now (geometry moves between
+    /// rebuilds — that is the whole point of the refresh verb). Equal corners =
+    /// nothing built.
+    Ogre::Aabb mGiLitVolume    = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+    Ogre::Aabb mGiProbeRegion  = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     /// Live decals in THIS scene. The SceneManager-level atlas binding is
     /// driven off the count (see refreshDecalBindings).
     unsigned            mDecalCount = 0;

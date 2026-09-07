@@ -196,7 +196,11 @@ bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlen
         n.billboardDatablockName = dbName;
         n.billboardCapacity = std::max(1u, capacity);
         // Visibility follows the node: the caller pushes it via setNodeVisible
-        // (the mirror does so every frame); a fresh set starts visible.
+        // (the mirror does so every frame); a fresh set starts visible. But a
+        // set created on a node ALREADY marked helper must carry kHelperBit from
+        // its first frame — the light icons are created after setNodeHelper and
+        // one uncorrected frame is one polluted probe capture (P1b).
+        applyNodeVisibilityFlags(n);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -546,7 +550,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
         // onto it here. Node::visible is the record setNodeVisible keeps for
         // exactly this: the def is not a child of the node in Ogre's graph — it
         // hangs off the STATIC root — so no visibility cascade ever reaches it.
-        n.particleDef->setVisibilityFlags(n.visible ? 1u : 0u);
+        n.particleDef->setVisibilityFlags(n.visible ? (n.helper ? kHelperBit : kVisibleBit) : 0u);
         return true;
     } JAH_CATCH(mError, false);
 }

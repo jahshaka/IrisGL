@@ -159,6 +159,41 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
     } JAH_CATCH(mError, );
 }
 
+// THE bit-scheme application point (REFLECTIONS_ADOPTION_SPEC.md P1b).
+// Helpers carry kHelperBit INSTEAD OF kVisibleBit — an include channel, because
+// Ogre's any-bit test cannot express an exclude bit (EnginePrivate.h's block).
+// Only lit (PBR) surfaces get kGiGeometryBit: unlit overlays, wires and line
+// meshes must neither bounce nor occlude GI rays.
+Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit) {
+    n.materialUnlit = unlit;          // remembered for applyNodeVisibilityFlags
+    if (n.helper) return kHelperBit;
+    return unlit ? kVisibleBit : (kVisibleBit | kGiGeometryBit);
+}
+
+void OgreScene::applyNodeVisibilityFlags(Node &n) {
+    // The material's unlit-ness was recorded when the geometry attached, so a
+    // lit mesh that is marked helper and then unmarked gets its kGiGeometryBit
+    // back. Reading it off the item's CURRENT flags could not do that: a helper
+    // carries kHelperBit alone.
+    if (n.item) n.item->setVisibilityFlags(itemVisibilityFlags(n, n.materialUnlit));
+    const Ogre::uint32 on = n.helper ? kHelperBit : kVisibleBit;
+    if (n.billboards) n.billboards->setVisibilityFlags(n.visible ? on : 0u);
+    if (n.particleDef) n.particleDef->setVisibilityFlags(n.visible ? on : 0u);
+}
+
+void OgreScene::setNodeHelper(NodeId id, bool helper) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    if (it->second.helper == helper) return;
+    it->second.helper = helper;
+    applyNodeVisibilityFlags(it->second);
+}
+
+bool OgreScene::nodeHelper(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it != mNodes.end() && it->second.helper;
+}
+
 void OgreScene::setNodeVisible(NodeId id, bool visible) {
     JAH_TRY {
         auto it = mNodes.find(id);
@@ -170,14 +205,17 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
         // setVisible() is USELESS for PFX2 objects: ParticleSystemManager2::
         // _addToRenderQueue tests getVisibilityFlags(), which strips the
         // LAYER_VISIBILITY bit setVisible toggles. Toggle the user flags.
-        if (it->second.billboards) it->second.billboards->setVisibilityFlags(visible ? 1u : 0u);
+        // A HELPER's billboards carry kHelperBit, not kVisibleBit (P1b): the
+        // light icons are the biggest single thing probe captures used to eat.
+        const Ogre::uint32 on = it->second.helper ? kHelperBit : kVisibleBit;
+        if (it->second.billboards) it->second.billboards->setVisibilityFlags(visible ? on : 0u);
         // Same trap, same fix, for a simulated particle system — except the flag
         // lives on the DEFINITION, not on the instance: _addToRenderQueue tests
         // the def (OgreParticleSystemManager2.cpp:762-765). Hiding the def is
         // also what makes already-emitted particles disappear at once instead
         // of finishing their lives on screen.
         if (it->second.particleDef)
-            it->second.particleDef->setVisibilityFlags(visible ? 1u : 0u);
+            it->second.particleDef->setVisibilityFlags(visible ? on : 0u);
     } JAH_CATCH(mError, );
 }
 

@@ -289,6 +289,16 @@ public:
     // its normal are all derived from the mesh's own bounds.
     bool planarReflector = false;
 
+    // GI BOUNDS EXCLUSION (REFLECTIONS_ADOPTION_SPEC.md P1a.2): "this object
+    // must not decide WHERE global illumination happens". It still voxelizes
+    // and still bounces light; it is only kept out of the two AABB reductions
+    // the renderer does — the lit volume and the reflection-probe region. The
+    // ground plane is the case it exists for: 200 units of it under a 2-unit
+    // scene spreads both over empty air. The auto-fit heuristic rejects extent
+    // outliers on its own; this flag is the deterministic override for when it
+    // guesses wrong in either direction.
+    bool giBoundsExcluded = false;
+
 	mutable QString guid;
 
     friend class Renderer;
@@ -506,6 +516,15 @@ public:
 
     bool getPlanarReflector() const {
         return planarReflector;
+    }
+
+    void setGiBoundsExcluded(bool val) {
+        giBoundsExcluded = val;
+        notifyChanged(NodeChange::Flags);
+    }
+
+    bool getGiBoundsExcluded() const {
+        return giBoundsExcluded;
     }
 
     /// SCENE_STATIC (SPECS/SCENEGRAPH_SPEC.md §6): "this node and everything

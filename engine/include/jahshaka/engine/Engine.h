@@ -457,12 +457,45 @@ public:
     /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
     /// in milliseconds at editor quality; callers may invoke this per edit.
     virtual void        refreshGlobalIllumination() = 0;
+    /// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2): re-injects the
+    /// scene's lights into the EXISTING voxel volume and leaves the geometry
+    /// alone. Orders of magnitude cheaper than the full call — no
+    /// re-voxelization, no probe re-render — and it is what a light being
+    /// DRAGGED needs: the bounce follows the light live while the expensive
+    /// rebuild waits for the drag to stop.
+    ///
+    /// It is a partial answer on purpose and the caller must know which parts it
+    /// does not update: reflection PROBES capture lighting, so probe reflections
+    /// stay as they were until the next full refresh. Under Instant Radiosity
+    /// there is no cheaper path than the re-trace, so there this IS the
+    /// re-trace. Returns false when nothing could be done (GI off, or nothing
+    /// built yet), so a caller can tell "cheap refresh done" from "no-op".
+    virtual bool        refreshGiLighting() = 0;
     /// What GI actually ACHIEVED, as opposed to what was requested — probe
     /// count and whether the probe/VCT bindings are live on this scene. The
     /// hybrid can degrade to plain VCT (a missing probe workspace definition);
     /// without this nothing, not even a pixel test, could tell the difference.
     /// Cheap: reads live pointers, renders nothing.
     virtual GiStatus    giStatus() const = 0;
+    /// "This object must not define WHERE global illumination happens"
+    /// (REFLECTIONS_ADOPTION_SPEC.md P1a). The object still voxelizes and still
+    /// bounces light — it is only kept out of the two AABB reductions, the lit
+    /// volume and the reflection-probe region. The case it exists for is the
+    /// ground plane: 200 units of it under a 2-unit scene drags the voxel
+    /// volume and the probe grid over empty air. Takes effect on the next GI
+    /// (re)build, exactly like moving the geometry would.
+    virtual void        setNodeGiBoundsExcluded(NodeId, bool) = 0;
+    virtual bool        nodeGiBoundsExcluded(NodeId) const = 0;
+    /// "This node is an EDITOR HELPER" (REFLECTIONS_ADOPTION_SPEC.md P1b): the
+    /// ground grid, light icons, range wires, camera helpers — geometry the
+    /// user must see in the viewport and a reflection probe must never capture.
+    /// It renders in the main view exactly as before; it is excluded from
+    /// reflection-probe captures, and from any future pass that opts into the
+    /// same channel. Applies to the node's mesh, billboards and particles, and
+    /// takes effect immediately whether it is set before or after they attach.
+    /// Not inherited: set it on each node that carries helper geometry.
+    virtual void        setNodeHelper(NodeId, bool) = 0;
+    virtual bool        nodeHelper(NodeId) const = 0;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is

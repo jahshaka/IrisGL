@@ -686,8 +686,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
         // line meshes must neither bounce nor occlude the radiosity rays.
-        n.item->setVisibilityFlags(tit->second.unlit ? kVisibleBit
-                                                     : (kVisibleBit | kGiGeometryBit));
+        n.item->setVisibilityFlags(itemVisibilityFlags(n, tit->second.unlit));
         // Render-queue policy (POST_CHAIN_SPEC.md §6): on-top overlays go in the
         // chain's overlay pass, refractive items in its refraction pass, and
         // everything else stays on Ogre's default queue.

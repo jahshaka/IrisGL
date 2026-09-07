@@ -445,6 +445,15 @@ QList<Property*> SceneNode::getProperties()
     boolProp->value = planarReflector;
     props.append(boolProp);
 
+    // GI bounds exclusion (REFLECTIONS_ADOPTION_SPEC.md P1a.2) — beside the
+    // other per-object rendering flags, reached from scripts as
+    // node.setProperty(id, "giBoundsExcluded", true).
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Exclude From GI Bounds";
+    boolProp->name = "giBoundsExcluded";
+    boolProp->value = giBoundsExcluded;
+    props.append(boolProp);
+
     boolProp = new BoolProperty();
     boolProp->displayName = "Pickable";
     boolProp->name = "pickable";
@@ -463,6 +472,7 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     if (valueName == "visible")    return isVisible();
     if (valueName == "castShadow") return getShadowCastingEnabled();
     if (valueName == "planarReflector") return getPlanarReflector();
+    if (valueName == "giBoundsExcluded") return getGiBoundsExcluded();
     if (valueName == "pickable")   return isPickable();
 
     return QVariant();
@@ -479,6 +489,7 @@ bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "visible")    { setVisible(value.toBool());                 return true; }
     if (valueName == "castShadow") { setShadowCastingEnabled(value.toBool());    return true; }
     if (valueName == "planarReflector") { setPlanarReflector(value.toBool());     return true; }
+    if (valueName == "giBoundsExcluded") { setGiBoundsExcluded(value.toBool());   return true; }
     if (valueName == "pickable")   { setPickable(value.toBool());                return true; }
     return false;
 }
@@ -730,6 +741,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	node->removable		= this->removable;
 	node->pickable		= this->pickable;
 	node->planarReflector = this->planarReflector;
+	node->giBoundsExcluded = this->giBoundsExcluded;
 	node->attached		= this->attached;
 	// Whether a character can walk into the copy (AVATAR_LOCOMOTION_SPEC §6.3).
 	// The constructor already set the TYPE default; this carries the user's

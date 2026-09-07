@@ -207,6 +207,13 @@ public:
     int giNumBounces;          // 1..4
     bool giAutoRefresh;        // editor: re-solve automatically on edits
     iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
+    /// MONOTONIC, never serialized: bumped by world.refreshGi() and by the
+    /// Refresh button (REFLECTIONS_ADOPTION_SPEC.md P1d). The mirror compares it
+    /// against the value it last acted on and re-solves the engine's GI once per
+    /// bump. A serial rather than a bool because two refreshes in one frame must
+    /// still be one re-solve, and because a bool would need a clearer — which is
+    /// the mirror's job, not the caller's.
+    quint64 giRefreshSerial = 0;
 
     // anti-aliasing: MSAA sample count for the scene's viewport — 1 (off), 2, 4
     // or 8 (rendered by the engine viewport only; the driver may clamp).
