@@ -378,8 +378,13 @@ void CameraNode::updateCameraMatrices()
     projMatrix.setToIdentity();
 
     if ((projMode == CameraProjection::Perspective)) {
+        // THE WIDE-ASPECT FOV CAP (see `hfovCapDegrees`). Uncapped — every
+        // authored camera, and every host that never sets one — this returns
+        // `angle` itself with no arithmetic, so the matrix below is bit-for-bit
+        // the one this function has always produced.
+        const float fov = effectiveFovDegrees();
         if (lensShiftX == 0.0f && lensShiftY == 0.0f) {
-            projMatrix.perspective(angle, aspectRatio, nearClip, farClip);
+            projMatrix.perspective(fov, aspectRatio, nearClip, farClip);
         } else {
             // LENS SHIFT, document-side (CAMERA_LENS_SPEC §3). The engine offsets
             // its own frustum; this matrix is what PICKING and every document-side
@@ -387,7 +392,7 @@ void CameraNode::updateCameraMatrices()
             // would land where the shot is not. Derived here from fov/aspect/near
             // rather than stored, exactly like the engine's copy — see
             // cameralens.h's note about why this conversion is never cached.
-            const float halfH = iris::lens::halfExtentAtNear(angle, nearClip);
+            const float halfH = iris::lens::halfExtentAtNear(fov, nearClip);
             const float halfW = halfH * (aspectRatio > 0.0f ? aspectRatio : 1.0f);
             const float ox = iris::lens::nearOffsetFromShift(lensShiftX, halfW);
             const float oy = iris::lens::nearOffsetFromShift(lensShiftY, halfH);
@@ -413,6 +418,22 @@ void CameraNode::setFieldOfViewDegrees(float fov)
     // The user just spoke in degrees; a later sensor change keeps THIS number
     // and moves the focal length (CAMERAS_SPEC §2).
     authorMode = CameraAuthorMode::Degrees;
+}
+
+void CameraNode::setHorizontalFovCap(float capDegrees)
+{
+    const float cap = capDegrees > 0.0f ? capDegrees : 0.0f;
+    if (cap == hfovCapDegrees) return;
+    hfovCapDegrees = cap;
+    // Re-derive NOW. The host sets this once when it adopts the camera, and the
+    // very next thing that happens may be a pick (screenSegment re-derives too,
+    // but the player's mouse controller reads projMatrix straight).
+    updateCameraMatrices();
+}
+
+float CameraNode::effectiveFovDegrees() const
+{
+    return iris::lens::verticalFovDegForHorizontalCap(angle, aspectRatio, hfovCapDegrees);
 }
 
 // ---- the lens <-> angle binding (CAMERAS_SPEC §2) -------------------------

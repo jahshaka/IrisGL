@@ -223,14 +223,15 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
         // ForwardClustered); without it only directional lights reach the shader.
         // 16x8 grid, 24 slices, 2..50 units depth range.
         //
-        // 8 CUBEMAP PROBES PER CELL (REFLECTIONS_ADOPTION_SPEC.md P1c), up from
-        // 4. Per-pixel PCC is culled through this grid, and with the shipped
-        // probe overlap of 1.5 a point sits inside up to 8 probe volumes while
-        // a cell intersects 6-8 of an 18-probe grid. The excess was dropped at
-        // CELL granularity (ForwardClustered::collectObjsForSlice), which reads
-        // as reflections popping as the camera crosses a cell boundary. Cost:
-        // the grid buffer is cells x objsPerCell x uint16, so 3072 x 4 x 2 =
-        // +24 KiB. The upstream sample passes 16.
+        // CUBEMAP PROBES PER CELL: the STARTING budget only
+        // (kCubemapProbeSlotsDefault, EnginePrivate.h, which carries the whole
+        // argument and the Grand Showroom measurement). A scene that arms the
+        // VCT+PCC hybrid grows it to hold its own probe grid in buildPcc, so
+        // this value is what a scene with no probes at all pays. Per-pixel PCC
+        // is culled through this grid and
+        // ForwardClustered::collectObjsForSlice drops, silently and per cell,
+        // every probe past the budget — which is the black-rectangle defect the
+        // derived budget exists to remove.
         //
         // 96 LIGHTS PER CELL STAYS, and the spec's recommended companion cut to
         // 32 is DELIBERATELY NOT TAKEN — measured, not argued. The spec's case
@@ -256,7 +257,8 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
         // run after this build is that, not a defect. Rendered pixels must come
         // back identical — CPU fill and shader read use the same offsets — which
         // is what the full pixel sweep gates.
-        sm->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, 8, 2.0f, 50.0f);
+        sm->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell,
+                                kCubemapProbeSlotsDefault, 2.0f, 50.0f);
         // Shadow maps cover nothing until these are set (Ogre's samples set both).
         sm->setShadowDirectionalLightExtrusionDistance(500.0f);
         sm->setShadowFarDistance(500.0f);

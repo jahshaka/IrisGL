@@ -60,6 +60,36 @@ public:
     /// it, not a second field, so a direct write here (the reader, the
     /// controllers, the preview framing) can never leave the two disagreeing.
     float angle;
+
+    /// THE WIDE-ASPECT FOV CAP — TRANSIENT, and every word of that matters
+    /// (owner report 2026-09-07; the picking half of the defect).
+    ///
+    /// A HOST'S STATEMENT ABOUT A CAMERA IT OWNS, not a property of the shot:
+    /// "this one is a free explorer, do not let a 32:9 window fisheye it".
+    /// Zero — the default, and what EVERY authored camera keeps forever — is
+    /// off. Only the app's two FREE cameras (the editor explorer, which the
+    /// player flies too) ever carry a non-zero value, set by the viewport that
+    /// owns them; see src/viewport/freecamerapolicy.h for the policy and the
+    /// number.
+    ///
+    /// It lives on the camera and NOT in the picker's arguments because the
+    /// projection is what has to change: `updateCameraMatrices` narrows the
+    /// vertical angle exactly as the engine does when it draws
+    /// (iris::lens::verticalFovDegForHorizontalCap), so the document's
+    /// projMatrix IS the frustum on screen and every consumer of it — the four
+    /// ScenePicker::screenSegment call sites (object pick, gizmo drag, drop,
+    /// vertex snap) and the player's mouse controller — agrees with the image
+    /// without knowing the cap exists. Before this, a click on a wide window
+    /// unprojected through a WIDER frustum than the one drawn and selected
+    /// whatever sat behind the thing the user aimed at.
+    ///
+    /// NEVER SERIALIZED, NEVER KEYFRAMED, NEVER DUPLICATED: it is not part of
+    /// the document (scenewriter/scenereader do not mention it, it is absent
+    /// from getProperties, and createDuplicate leaves the copy at 0). A saved
+    /// scene reopened in a host that does not set it behaves exactly as it did
+    /// before this field existed.
+    float hfovCapDegrees;
+
     float nearClip;
     float farClip;
     float vrViewScale;
@@ -169,6 +199,19 @@ public:
     void setFieldOfViewRadians(float fov);
     void setFieldOfViewDegrees(float fov);
 
+    /// Sets the transient wide-aspect cap (see `hfovCapDegrees`) and re-derives
+    /// the matrices, so the projection is correct before the next pick even if
+    /// nothing else touches the camera this frame. Non-positive turns it off.
+    void setHorizontalFovCap(float capDegrees);
+    float horizontalFovCap() const { return hfovCapDegrees; }
+
+    /// The VERTICAL angle the PROJECTION uses at the camera's current aspect —
+    /// `angle` narrowed by the cap when one is set, and `angle` itself
+    /// otherwise. The AUTHORED angle is never touched: `angle`, `focalLength()`,
+    /// `horizontalFov()` and the panel/verbs all keep reporting the lens the
+    /// user chose, because the cap is a viewing constraint and not an edit.
+    float effectiveFovDegrees() const;
+
     /// This camera's filmback as the lens math sees it — sensor pair, squeeze,
     /// fit and the authored aspect, in one struct (cameralens.h).
     iris::lens::Filmback filmback() const;
@@ -242,6 +285,7 @@ private:
         // one of those switches — the phase-1 sweep audited each.
         sceneNodeType = SceneNodeType::Camera;
         angle = 45;         // Degrees are always used internally
+        hfovCapDegrees = 0.0f;   // no cap: every authored camera, forever
         nearClip = 0.1f;
         farClip = 500.0f;
         aspectRatio = 1.0f; // Assumes a square viewport by default
