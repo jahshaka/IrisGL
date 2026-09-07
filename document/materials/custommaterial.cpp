@@ -21,7 +21,6 @@ For more information see the LICENSE file
 
 #include "document/materials/custommaterial.h"
 #include "document/assets/texture2d.h"
-#include "document/assets/shader.h"
 #include "core/irisutils.h"
 
 namespace iris
@@ -73,8 +72,8 @@ QString CustomMaterial::firstTextureSlot() const
 
 QJsonObject CustomMaterial::loadShaderFromDisk(const QString &filePath)
 {
-    // MEMOIZED for the same reason as GraphicsHelper::loadAndProcessShader
-    // (lane-openasync, 2026-09-03): the built-in material presets each
+    // MEMOIZED (lane-openasync, 2026-09-03) for the same reason the deleted
+    // GLSL include-expander was: the built-in material presets each
     // generate() the SAME shader definition, so this parsed the identical
     // JSON 31 times per scene open. Keyed on path + mtime.
     static QHash<QString, QPair<qint64, QJsonObject>> cache;
@@ -110,25 +109,12 @@ void CustomMaterial::generate(const QString &fileName, bool project)
     setName(jahShader["name"].toString());
     setGuid(jahShader["guid"].toString());
 
-    auto vertPath = jahShader["vertex_shader"].toString();
-    auto fragPath = jahShader["fragment_shader"].toString();
-
     setBaseMaterialProperties(jahShader);
 
-    // Guard: an absent vertex_shader/fragment_shader key yields "", and
-    // getAbsoluteAssetPath("") resolves to the application directory - which then
-    // "loads" as an empty shader and fails to link with "must write to gl_Position".
-    // This was firing ~100x per run and masking real shader errors.
-    if (vertPath.isEmpty() || fragPath.isEmpty()) {
-        qWarning("CustomMaterial::generate: shader path missing (vertex=\"%s\" fragment=\"%s\") - not building a program",
-                 qUtf8Printable(vertPath), qUtf8Printable(fragPath));
-        return;
-    }
-
-    if (!vertPath.startsWith(":")) vertPath = IrisUtils::getAbsoluteAssetPath(vertPath);
-    if (!fragPath.startsWith(":")) fragPath = IrisUtils::getAbsoluteAssetPath(fragPath);
-
-    createProgramFromShaderSource(vertPath, fragPath);
+    // The "vertex_shader"/"fragment_shader" keys are still WRITTEN by old
+    // .shader files and are deliberately not read: HLMS_ADOPTION P3 deleted
+    // the GLSL load path (nothing ever read the loaded text back). Only the
+    // declared uniforms and render states matter now.
 	parseProperties(jahShader["uniforms"].toArray());
 }
 
@@ -137,23 +123,10 @@ void CustomMaterial::generate(const QJsonObject &object)
     setName(object["name"].toString());
     setGuid(object["guid"].toString());
 
-    auto vertPath = object["vertex_shader"].toString();
-    auto fragPath = object["fragment_shader"].toString();
-
-	if (vertPath == "") {
-		vertPath = object["vertexShaderSource"].toString();
-		fragPath = object["fragmentShaderSource"].toString();
-	}
-
-	if (!vertPath.startsWith(":") && !QFileInfo(vertPath).exists())
-		vertPath = IrisUtils::getAbsoluteAssetPath(vertPath);
-	if (!fragPath.startsWith(":") && !QFileInfo(fragPath).exists())
-		fragPath = IrisUtils::getAbsoluteAssetPath(fragPath);
-
-
     setBaseMaterialProperties(object);
 
-    createProgramFromShaderSource(vertPath, fragPath);
+    // See generate(fileName, project): the shader-source keys are unread since
+    // HLMS_ADOPTION P3.
 	parseProperties(object["uniforms"].toArray());
 }
 
@@ -307,12 +280,7 @@ MaterialPtr CustomMaterial::duplicate()
 		else {
 			// v2 material spec
 			// todo: user materialhelper to generate this instead
-			auto vertSource = materialDefinitions["vertexShaderSource"].toString();
-			auto fragSource = materialDefinitions["fragmentShaderSource"].toString();
-			auto shader = iris::Shader::create(vertSource, fragSource);
-
 			mat = CustomMaterial::create();
-			mat->setShader(shader);
 			mat->renderStates = this->renderStates;
 			mat->renderLayer = this->renderLayer;
 			mat->setName(this->getName());
@@ -334,13 +302,6 @@ MaterialPtr CustomMaterial::duplicate()
 	return mat;
 }
 
-CustomMaterialPtr CustomMaterial::createFromShader(iris::ShaderPtr shader)
-{
-	auto mat = CustomMaterial::create();
-	mat->setShader(shader);
-	return mat;
-}
-
 CustomMaterialPtr CustomMaterial::createFromShaderPath(const QString& shaderPath)
 {
 	auto data = QFile(shaderPath).readAll();
@@ -354,17 +315,7 @@ CustomMaterialPtr CustomMaterial::createFromShaderJson(const QJsonObject &object
 	mat->setName(object["name"].toString());
 	mat->setGuid(object["guid"].toString());
 
-	auto vertPath = object["vertex_shader"].toString();
-	auto fragPath = object["fragment_shader"].toString();
-
-	if (vertPath == "") {
-		vertPath = object["vertexShaderSource"].toString();
-		fragPath = object["fragmentShaderSource"].toString();
-	}
-
-	auto shader = iris::Shader::load(vertPath, fragPath);
-	mat->setShader(shader);
-
+	// The shader-source keys are unread since HLMS_ADOPTION P3.
 	mat->setBaseMaterialProperties(object);
 	mat->parseProperties(object["uniforms"].toArray());
 

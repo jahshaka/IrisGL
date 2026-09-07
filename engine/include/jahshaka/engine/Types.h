@@ -166,10 +166,19 @@ struct ClipState {
 using TextureId = unsigned int;
 enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides with X11's macro
 
-/// PBR texture slots. NOTE: there is deliberately NO Occlusion slot — the Ogre
-/// backend (HlmsPbs) has no dedicated ambient-occlusion input, so the document's
-/// occlusionMap/occlusionFactor are documented as unsupported rather than faked
-/// (bake AO into the base colour map at import time if it matters).
+/// PBR texture slots. There is NO Occlusion slot, and since HLMS_ADOPTION P2
+/// there is no occlusion row on the document side either: the backend has no
+/// ambient-occlusion input AT ALL (not one `occlusion` reference in its whole
+/// PBS component), so an AO map, factor, graph socket and per-texel bake all
+/// existed to be dropped here. They are gone rather than "documented as
+/// unsupported" — a knob that costs bake time and does nothing is worse than
+/// an absent one.
+///
+/// Bake AO into the base-colour map at import if it matters. The reachable
+/// engine-side alternative — a carrier texture in a free detail slot plus an
+/// @undefpiece override of DoAmbientLighting from our Hlms library folder — is
+/// costed and deferred (see PbrMaterial's header for why the cheaper
+/// custom_ps_preLights hook cannot do it).
 enum class PbrTextureSlot { Albedo, Normal, Metalness, Roughness, Emissive };
 
 /// How PbrParams::alpha / alphaCutoff are interpreted (glTF's OPAQUE/MASK/BLEND,
@@ -216,6 +225,40 @@ struct PbrParams {
     /// behind it. Roughly an index-of-refraction knob; 0 is a flat window.
     float  refractionStrength = 0.35f;
 
+    /// A second specular lobe over the surface — car paint, lacquer, wet
+    /// plastic. 0 is INERT: at zero the backend removes the clear-coat shader
+    /// blocks entirely rather than multiplying by zero, so a scene that never
+    /// touches these two produces byte-identical pixels.
+    /// Only honoured on the Default BRDF family — see `brdf`.
+    float  clearCoat          = 0.0f;   ///< 0 none .. 1 full coat
+    float  clearCoatRoughness = 0.0f;   ///< the coat's own roughness (0 = mirror)
+
+    /// The shading BRDF, BY NAME. Deliberately not a number: the backend's own
+    /// enumeration is a bitfield whose values are backend-private, and a
+    /// document that stored them would pin us to one renderer's bit layout.
+    /// The six accepted names (anything else falls back to "Default" and is
+    /// reported):
+    ///   "Default"                             physically accurate GGX + Disney diffuse
+    ///   "CookTorrance"                        Beckmann + Cook-Torrance; silk, synthetic fabric
+    ///   "BlinnPhong"                          normalized Blinn-Phong; cheaper
+    ///   "DefaultSeparateDiffuseFresnel"       + separate diffuse fresnel: glass,
+    ///   "CookTorranceSeparateDiffuseFresnel"    transparent plastics, fur, marbles —
+    ///   "BlinnPhongSeparateDiffuseFresnel"      surfaces with complex re-scattering
+    /// CLEAR COAT IS ONLY AVAILABLE ON "Default": the backend gates the whole
+    /// clear-coat shader path on the Default BRDF family. A non-Default BRDF
+    /// therefore IGNORES clearCoat/clearCoatRoughness (the backend reports it);
+    /// the values are not destroyed, so switching back restores them.
+    std::string brdf = "Default";
+
+    /// Whether shadow maps darken this surface. `false` is the flat-lit look
+    /// used for overlays and signage.
+    bool   receiveShadows     = true;
+    /// Treat the emissive map as a baked LIGHTMAP (it multiplies the diffuse
+    /// albedo) instead of as self-illumination added on top. Only meaningful
+    /// with an emissive map bound; the emissive COLOUR should be white (1,1,1)
+    /// or it tints the lightmap.
+    bool   emissiveAsLightmap = false;
+
     /// "Is this the same material state I last pushed?" — the guard a host with
     /// a per-frame push loop needs. Exact comparison (see Colour::operator==):
     /// a tolerance here would let a dragged slider stop reaching the backend.
@@ -224,7 +267,10 @@ struct PbrParams {
                emissive == o.emissive && alphaMode == o.alphaMode && alpha == o.alpha &&
                alphaCutoff == o.alphaCutoff && twoSided == o.twoSided &&
                normalMapWeight == o.normalMapWeight && uvScale == o.uvScale &&
-               refractionStrength == o.refractionStrength;
+               refractionStrength == o.refractionStrength &&
+               clearCoat == o.clearCoat && clearCoatRoughness == o.clearCoatRoughness &&
+               brdf == o.brdf && receiveShadows == o.receiveShadows &&
+               emissiveAsLightmap == o.emissiveAsLightmap;
     }
     bool operator!=(const PbrParams &o) const { return !(*this == o); }
 };

@@ -293,6 +293,13 @@ NodeId SceneMirror::engineNode(const iris::SceneNode *node) const
     return it == mEntries.constEnd() ? 0 : it->node;
 }
 
+MaterialId SceneMirror::engineMaterial(const iris::SceneNode *node) const
+{
+    if (!node) return 0;
+    auto it = mEntries.constFind(node);
+    return it == mEntries.constEnd() ? 0 : it->material;
+}
+
 int SceneMirror::sync()
 {
     if (!mSource || !mSource->getRootNode()) return 0;
@@ -1646,8 +1653,10 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     ms.hasPbr = toPbrParams(material, ms.pbr);
 
     // Document slot name -> engine slot. PbrMaterial and DefaultMaterial naming.
-    // PbrMaterial's "u_occlusionMap" is deliberately NOT mapped: the engine has no
-    // ambient-occlusion slot (HlmsPbs limitation, see engine Types.h).
+    // There is no occlusion entry because there is no occlusion ROW any more
+    // (HLMS_ADOPTION P2): the engine has no ambient-occlusion slot, so the
+    // document stopped pretending to have one. An old file's "u_occlusionMap"
+    // simply matches nothing here, which is what tolerance looks like.
     struct Slot { QLatin1StringView name; PbrTextureSlot slot; bool srgb; };
     static const Slot kSlots[] = {
         { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
@@ -1749,8 +1758,15 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.normalMapWeight = pbr->normalFactor;
         out.uvScale         = pbr->textureScale;
         out.twoSided        = pbr->renderStates.rasterState.cullMode == iris::CullMode::None;
-        // occlusionMap/occlusionFactor: no engine equivalent (HlmsPbs has no AO
-        // slot — see Types.h); intentionally dropped, not faked.
+        // HLMS_ADOPTION P1. The BRDF crosses as a NAME, never as the document's
+        // index and never as the renderer's enum value: the index is a document
+        // convention and the enum is a renderer bitfield, and the boundary
+        // should carry neither. PbrMaterial::brdfEngineName is the one table.
+        out.brdf               = iris::PbrMaterial::brdfEngineName(pbr->brdf).toStdString();
+        out.clearCoat          = pbr->clearCoat;
+        out.clearCoatRoughness = pbr->clearCoatRoughness;
+        out.receiveShadows     = pbr->receiveShadows;
+        out.emissiveAsLightmap = pbr->emissiveAsLightmap;
         return true;
     }
     if (auto *custom = dynamic_cast<iris::CustomMaterial *>(material)) {

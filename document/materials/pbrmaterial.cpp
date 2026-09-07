@@ -32,8 +32,16 @@ PbrMaterial::PbrMaterial()
     useNormalMap        = false;
     normalFactor        = 1.0f;
 
-    useOcclusionMap     = false;
-    occlusionFactor     = 1.0f;
+    // HLMS_ADOPTION P1. EVERY ONE OF THESE DEFAULTS IS THE RENDERER'S OWN
+    // CONSTRUCTED DEFAULT, deliberately: at these values the backend removes
+    // the clear-coat shader blocks entirely and its BRDF/shadow/lightmap
+    // setters early-return, so an existing scene's generated shader text — and
+    // therefore its pixels — is unchanged by this feature existing.
+    clearCoat           = 0.0f;
+    clearCoatRoughness  = 0.0f;
+    brdf                = 0;      // Default
+    receiveShadows      = true;
+    emissiveAsLightmap  = false;
 
     emissiveColor       = QColor(0, 0, 0);
     emissiveIntensity   = 0.0f;
@@ -51,8 +59,6 @@ PbrMaterial::PbrMaterial()
     // that mapping - Background is drawn before the sky. Using Opaque here.
     setRenderLayer(RenderLayer::Opaque);
 
-    useIbl              = false;
-    iblIntensity        = 1.0f;
 
     createProperties();
 }
@@ -92,13 +98,49 @@ void PbrMaterial::setNormalMap(Texture2DPtr tex)
 
 void PbrMaterial::setNormalFactor(float factor)     { normalFactor = factor; }
 
-void PbrMaterial::setOcclusionMap(Texture2DPtr tex)
+void PbrMaterial::setClearCoat(float coat)              { clearCoat = coat; }
+void PbrMaterial::setClearCoatRoughness(float r)        { clearCoatRoughness = r; }
+void PbrMaterial::setBrdf(int index)                    { brdf = index; }
+void PbrMaterial::setReceiveShadows(bool receive)       { receiveShadows = receive; }
+void PbrMaterial::setEmissiveAsLightmap(bool asLightmap){ emissiveAsLightmap = asLightmap; }
+
+// The BRDF vocabulary. Six of the renderer's twelve named values: the three
+// families, plain and with SEPARATE diffuse fresnel (the variant that exists
+// for glass, transparent plastics, fur and marbles — surfaces with complex
+// re-scattering). The other six are uncorrelated/legacy-math combinations of
+// these; twelve rows of jargon is worse product than six.
+//
+// INDEX IS THE STORED VALUE AND IT IS PERMANENT: appending is safe, reordering
+// or removing a row silently re-points every saved material.
+const QVector<PbrMaterial::BrdfName> &PbrMaterial::brdfNames()
 {
-    if (!!tex) { useOcclusionMap = true;  addTexture("u_occlusionMap", tex); }
-    else       { useOcclusionMap = false; removeTexture("u_occlusionMap"); }
+    static const QVector<BrdfName> kNames = {
+        { "Default",                            "Default" },
+        { "CookTorrance",                       "Cook-Torrance" },
+        { "BlinnPhong",                         "Blinn-Phong" },
+        { "DefaultSeparateDiffuseFresnel",      "Default (Diffuse Fresnel)" },
+        { "CookTorranceSeparateDiffuseFresnel", "Cook-Torrance (Diffuse Fresnel)" },
+        { "BlinnPhongSeparateDiffuseFresnel",   "Blinn-Phong (Diffuse Fresnel)" },
+    };
+    return kNames;
 }
 
-void PbrMaterial::setOcclusionFactor(float factor)  { occlusionFactor = factor; }
+QString PbrMaterial::brdfEngineName(int index)
+{
+    const auto &names = brdfNames();
+    if (index < 0 || index >= names.size()) return QStringLiteral("Default");
+    return QString::fromLatin1(names[index].engineName);
+}
+
+bool PbrMaterial::brdfSupportsClearCoat(int index)
+{
+    // The renderer's BRDF value is (family | modifier bits); the clear-coat
+    // path is gated on the FAMILY being Default, so the diffuse-fresnel
+    // variants of Default qualify and Cook-Torrance / Blinn-Phong do not.
+    // Expressed on the names because the bit layout is the renderer's, not
+    // the document's.
+    return brdfEngineName(index).startsWith(QStringLiteral("Default"));
+}
 
 void PbrMaterial::setEmissiveColor(QColor color)        { emissiveColor = color; }
 void PbrMaterial::setEmissiveIntensity(float intensity) { emissiveIntensity = intensity; }
@@ -115,7 +157,6 @@ void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
 void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; }
 void PbrMaterial::setTextureScale(float s)   { textureScale = s; }
 
-void PbrMaterial::setIblIntensity(float intensity) { iblIntensity = intensity; }
 
 // Empty path clears the slot; a missing file yields a null texture, which the
 // set*Map functions treat as "no map" rather than failing.
@@ -131,7 +172,6 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "metallic")          metallicFactor    = value.toFloat();
     else if (name == "roughness")         roughnessFactor   = value.toFloat();
     else if (name == "normalFactor")      normalFactor      = value.toFloat();
-    else if (name == "occlusionFactor")   occlusionFactor   = value.toFloat();
     else if (name == "emissiveColor")     emissiveColor     = value.value<QColor>();
     else if (name == "emissiveIntensity") emissiveIntensity = value.toFloat();
     else if (name == "alpha")             alpha             = value.toFloat();
@@ -141,6 +181,11 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "alphaCutoff")       alphaCutoff       = value.toFloat();
     else if (name == "alphaMode")         alphaMode         = value.toInt();
     else if (name == "refractionStrength") refractionStrength = value.toFloat();
+    else if (name == "clearCoat")          clearCoat          = value.toFloat();
+    else if (name == "clearCoatRoughness") clearCoatRoughness = value.toFloat();
+    else if (name == "brdf")               brdf               = value.toInt();
+    else if (name == "receiveShadows")     receiveShadows     = value.toBool();
+    else if (name == "emissiveAsLightmap") emissiveAsLightmap = value.toBool();
 
     // Texture properties arrive as a path, matching how CustomMaterial::setValue
     // is driven from the material presets.
@@ -148,7 +193,6 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "metallicMap")   setMetallicMap(loadTexture(value.toString()));
     else if (name == "roughnessMap")  setRoughnessMap(loadTexture(value.toString()));
     else if (name == "normalMap")     setNormalMap(loadTexture(value.toString()));
-    else if (name == "occlusionMap")  setOcclusionMap(loadTexture(value.toString()));
     else if (name == "emissiveMap")   setEmissiveMap(loadTexture(value.toString()));
 
     // keep the Property object in step so the panel and the field agree
@@ -200,15 +244,6 @@ void PbrMaterial::createProperties()
     normalProp->maxValue    = 2.0f;
     normalProp->value       = normalFactor;
     properties.append(normalProp);
-
-    auto occlusionProp         = new FloatProperty;
-    occlusionProp->id          = id++;
-    occlusionProp->displayName = "Occlusion";
-    occlusionProp->name        = "occlusionFactor";
-    occlusionProp->minValue    = 0.0f;
-    occlusionProp->maxValue    = 1.0f;
-    occlusionProp->value       = occlusionFactor;
-    properties.append(occlusionProp);
 
     auto emissiveColProp         = new ColorProperty;
     emissiveColProp->id          = id++;
@@ -278,12 +313,18 @@ void PbrMaterial::createProperties()
     // 5 modulate (Src×Dest) — the Unreal-parity blend modes — and
     // 6 refractive (glass that BENDS the background; needs the viewport's
     // refraction pass, POST_CHAIN_SPEC.md phase 7).
-    auto alphaModeProp         = new IntProperty;
+    //
+    // A ListProperty (the generic ENUM row), not an IntProperty with a
+    // hardcoded name branch in the panel: the labels ride the row, so the
+    // picker cannot disagree with the vocabulary (PUBLISH_AUDIT #4 was exactly
+    // that disagreement). ON DISK IT IS STILL AN INT — the enum row's value IS
+    // the index — so existing scenes and .material files load unchanged.
+    auto alphaModeProp         = new ListProperty;
     alphaModeProp->id          = id++;
     alphaModeProp->displayName = "Alpha Mode";
     alphaModeProp->name        = "alphaMode";
-    alphaModeProp->minValue    = 0;
-    alphaModeProp->maxValue    = 6;
+    alphaModeProp->labels      = { "Opaque", "Masked", "Translucent", "Glass",
+                                   "Additive", "Modulate", "Refractive" };
     alphaModeProp->value       = alphaMode;
     properties.append(alphaModeProp);
 
@@ -296,6 +337,56 @@ void PbrMaterial::createProperties()
     refractProp->value       = refractionStrength;
     properties.append(refractProp);
 
+    // ---- HLMS_ADOPTION P1: the cheap PBS knobs ----
+    // The BRDF picker comes FIRST because it constrains the two coat rows: the
+    // renderer can only carry a clear coat on the Default family, so the panel
+    // disables them on any other pick (D-P1b) and the coat values are kept, not
+    // destroyed.
+    auto brdfProp         = new ListProperty;
+    brdfProp->id          = id++;
+    brdfProp->displayName = "Shading BRDF";
+    brdfProp->name        = "brdf";
+    for (const auto &n : brdfNames()) brdfProp->labels << QString::fromLatin1(n.displayName);
+    brdfProp->value       = brdf;
+    properties.append(brdfProp);
+
+    auto coatProp         = new FloatProperty;
+    coatProp->id          = id++;
+    coatProp->displayName = "Clear Coat";
+    coatProp->name        = "clearCoat";
+    coatProp->minValue    = 0.0f;
+    coatProp->maxValue    = 1.0f;
+    coatProp->value       = clearCoat;
+    properties.append(coatProp);
+
+    auto coatRoughProp         = new FloatProperty;
+    coatRoughProp->id          = id++;
+    coatRoughProp->displayName = "Clear Coat Roughness";
+    coatRoughProp->name        = "clearCoatRoughness";
+    coatRoughProp->minValue    = 0.0f;
+    coatRoughProp->maxValue    = 1.0f;
+    coatRoughProp->value       = clearCoatRoughness;
+    properties.append(coatRoughProp);
+
+    // NAMED "receiveShadows" AND NOTHING ELSE. The materials graph used to ship
+    // a `receiveShadow` (singular) checkbox in MaterialSettings that reached
+    // nothing at all; that ghost is deleted. This row is the real one.
+    auto receiveShadowsProp         = new BoolProperty;
+    receiveShadowsProp->id          = id++;
+    receiveShadowsProp->displayName = "Receive Shadows";
+    receiveShadowsProp->name        = "receiveShadows";
+    receiveShadowsProp->value       = receiveShadows;
+    properties.append(receiveShadowsProp);
+
+    // Only meaningful with an emissive map bound, and the emissive colour
+    // should be white or it tints the lightmap.
+    auto lightmapProp         = new BoolProperty;
+    lightmapProp->id          = id++;
+    lightmapProp->displayName = "Emissive as Lightmap";
+    lightmapProp->name        = "emissiveAsLightmap";
+    lightmapProp->value       = emissiveAsLightmap;
+    properties.append(lightmapProp);
+
     // The six texture maps. Names match the setValue() cases above (paths, not
     // the "u_*Map" sampler names used as Material::textures keys). Declaring
     // them is what makes SceneWriter persist the maps and SceneReader restore
@@ -306,7 +397,6 @@ void PbrMaterial::createProperties()
         { "Normal Map",     "normalMap"    },
         { "Metallic Map",   "metallicMap"  },
         { "Roughness Map",  "roughnessMap" },
-        { "Occlusion Map",  "occlusionMap" },
         { "Emissive Map",   "emissiveMap"  },
     };
     for (const auto &m : kMaps) {

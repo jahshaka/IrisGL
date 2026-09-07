@@ -11,7 +11,6 @@ For more information see the LICENSE file
 
 #include "document/materials/material.h"
 #include "document/assets/texture2d.h"
-#include "document/assets/shader.h"
 
 namespace iris
 {
@@ -41,46 +40,11 @@ bool Material::isFlagEnabled(QString flag)
 void Material::enableFlag(QString flag)
 {
 	flags.insert(flag);
-	if (!!shader) shader->enableFlag(flag);
-	if (!!shadowShader) shadowShader->enableFlag(flag);
 }
 
 void Material::disableFlag(QString flag)
 {
 	flags.remove(flag);
-	if (!!shader) shader->disableFlag(flag);
-	if (!!shadowShader) shadowShader->disableFlag(flag);
-}
-
-void Material::createProgramFromShaderSource(QString vsFile, QString fsFile)
-{
-	setShader(Shader::load(vsFile, fsFile));
-}
-
-MaterialPtr Material::fromShader(ShaderPtr shader)
-{
-	Material* mat = new Material();
-	mat->setShader(shader);
-
-	return MaterialPtr(mat);
-}
-
-void Material::setShader(ShaderPtr shader)
-{
-	this->shader = shader;
-	if (!!shader) {
-		for (auto flag : flags)
-			shader->enableFlag(flag);
-	}
-}
-
-void Material::setShadowShader(ShaderPtr shader)
-{
-	this->shadowShader = shader;
-	if (!!shader) {
-		for (auto flag : flags)
-			shader->enableFlag(flag);
-	}
 }
 
 void Material::setBlendState(const iris::BlendState& blendState) {

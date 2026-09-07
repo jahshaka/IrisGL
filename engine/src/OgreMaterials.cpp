@@ -43,6 +43,41 @@ void OgreScene::setRefractionsActive(bool active) {
     } JAH_CATCH(mError, );
 }
 
+// The six BRDFs we expose, by NAME (PbrParams::brdf). Ogre's PbsBrdf values are
+// a bitfield — BRDF_MASK selects the family, the high bits are modifiers — and
+// nothing outside this file should ever see one. Six of the pin's twelve named
+// values: the three families, plain and with SEPARATE diffuse fresnel (the
+// variant Ogre documents for glass, transparent plastics, fur and marbles).
+// The remaining six are uncorrelated/legacy-math combinations; offering twelve
+// rows of jargon is worse product than six (HLMS_ADOPTION_SPEC D-P1a).
+//
+// An unknown name is Default, NOT an error: a document written by a newer build
+// must still open, and a material silently falling back to the physically
+// accurate BRDF is the safe direction.
+static Ogre::PbsBrdf::PbsBrdf brdfFromName(const std::string &name, bool *known = nullptr) {
+    struct Row { const char *name; Ogre::PbsBrdf::PbsBrdf value; };
+    static const Row kRows[] = {
+        { "Default",                            Ogre::PbsBrdf::Default },
+        { "CookTorrance",                       Ogre::PbsBrdf::CookTorrance },
+        { "BlinnPhong",                         Ogre::PbsBrdf::BlinnPhong },
+        { "DefaultSeparateDiffuseFresnel",      Ogre::PbsBrdf::DefaultSeparateDiffuseFresnel },
+        { "CookTorranceSeparateDiffuseFresnel", Ogre::PbsBrdf::CookTorranceSeparateDiffuseFresnel },
+        { "BlinnPhongSeparateDiffuseFresnel",   Ogre::PbsBrdf::BlinnPhongSeparateDiffuseFresnel },
+    };
+    for (const Row &r : kRows)
+        if (name == r.name) { if (known) *known = true; return r.value; }
+    if (known) *known = false;
+    return Ogre::PbsBrdf::Default;
+}
+
+static void warnUnknownBrdfOnce(const std::string &name) {
+    static std::set<std::string> warned;
+    if (!warned.insert(name).second) return;
+    Ogre::LogManager::getSingleton().logMessage(
+        "Jahshaka: unknown material brdf '" + name + "' — falling back to Default",
+        Ogre::LML_CRITICAL);
+}
+
 void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
                          bool refractionsActive) {
     db->setDiffuse(Ogre::Vector3(p.albedo.r, p.albedo.g, p.albedo.b));
@@ -84,9 +119,50 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
         const Ogre::CullingMode want = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
         if (macro.mCullMode != want) { macro.mCullMode = want; db->setMacroblock(macro); }
     }
-    // NOTE HlmsPbs has NO ambient-occlusion slot and no roughness remap: the
-    // document's occlusionMap/Factor stay unsupported (see Types.h), and
+    // NOTE HlmsPbs has NO ambient-occlusion slot and no roughness remap:
     // roughness bounds are clamped by the caller before they reach here.
+    //
+    // ---- BRDF + clear coat (HLMS_ADOPTION P1) ----
+    // ORDER IS LOAD-BEARING, in both directions:
+    //  * setClearCoat asserts the datablock's BRDF family is Default
+    //    (OgreHlmsPbsDatablock.cpp:887). Our Ogre is built RelWithDebInfo, so
+    //    NDEBUG compiles that assert out and the failure would be SILENT —
+    //    exactly the class of defect this program exists to remove. So the coat
+    //    is cleared BEFORE the family changes and set only AFTER it is Default.
+    //  * BRDF WINS over the coat. A non-Default BRDF does not merely ignore the
+    //    coat, it cannot carry one at all: PbsProperty::ClearCoat is set only
+    //    inside the Default branch (OgreHlmsPbs.cpp:796-804). The panel disables
+    //    the coat rows on a non-Default BRDF (D-P1b) so the two agree; the
+    //    document keeps the authored values, so switching back restores them.
+    //    (HLMS_ADOPTION_SPEC §3.3 sketched the opposite rule — force Default
+    //    when coat > 0 — which contradicts D-P1b: the picker would say
+    //    Cook-Torrance while the surface rendered Default. Reported to the lead.)
+    {
+        bool knownBrdf = false;
+        const Ogre::PbsBrdf::PbsBrdf want = brdfFromName(p.brdf, &knownBrdf);
+        // applyPbr is static (no mError) and runs per changed material per
+        // frame, so an unknown name is logged ONCE per distinct spelling.
+        if (!knownBrdf) warnUnknownBrdfOnce(p.brdf);
+        const bool defaultFamily = (want & Ogre::PbsBrdf::BRDF_MASK) == Ogre::PbsBrdf::Default;
+        const bool coatWanted    = defaultFamily && p.clearCoat > 0.0f;
+
+        if (!coatWanted && db->getClearCoat() != 0.0f &&
+            (db->getBrdf() & Ogre::PbsBrdf::BRDF_MASK) == Ogre::PbsBrdf::Default)
+            db->setClearCoat(0.0f);   // flushes only on the non-zero -> zero edge
+        if (db->getBrdf() != static_cast<Ogre::uint32>(want)) db->setBrdf(want);
+        if (coatWanted) {
+            db->setClearCoat(p.clearCoat);
+            // Clamped for the same reason as roughness above, and for a second
+            // one: setClearCoatRoughness LOGS A WARNING at <= 1e-6 on EVERY
+            // call, with no compare-first (OgreHlmsPbsDatablock.cpp:899-909),
+            // and the mirror pushes changed materials per frame.
+            db->setClearCoatRoughness(std::max(p.clearCoatRoughness, 1e-4f));
+        }
+    }
+    // Both compare-before-flush internally (OgreHlmsPbsDatablock.cpp:914-929),
+    // so the per-frame push costs nothing at an unchanged value.
+    db->setReceiveShadows(p.receiveShadows);
+    db->setUseEmissiveAsLightmap(p.emissiveAsLightmap);
     switch (p.alphaMode) {
     case PbrAlphaMode::Opaque:
         db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
@@ -232,6 +308,24 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         if (wasRefractive != it->second.refractive) refileItems(id, it->second);
         return true;
     } JAH_CATCH(mError, false);
+}
+
+std::string OgreScene::dumpMaterial(MaterialId id) const {
+    auto it = mMaterials.find(id);
+    if (it == mMaterials.end()) { mError = "dumpMaterial: unknown material"; return {}; }
+    JAH_TRY {
+        auto *hlms = hlmsFor(it->second);
+        auto *db = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
+        if (!db) { mError = "dumpMaterial: the material has no datablock"; return {}; }
+        // A null listener is fine — HlmsJson substitutes its own default
+        // (OgreHlmsJson.cpp:147-153). This reads the LIVE datablock, so what
+        // comes back is the state after every clamp, guard and idempotency
+        // rule in applyPbr, which is the entire point of the verb.
+        Ogre::HlmsJson json(mRoot->getHlmsManager(), nullptr);
+        Ogre::String out;
+        json.saveMaterial(db, out, Ogre::BLANKSTRING);
+        return std::string(out.c_str());
+    } JAH_CATCH(mError, {});
 }
 
 bool OgreScene::destroyMaterial(MaterialId id) {

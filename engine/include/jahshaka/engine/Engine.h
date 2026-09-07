@@ -130,6 +130,23 @@ public:
     virtual MaterialId  createPbrMaterial(const PbrParams &) = 0;
     virtual bool        setPbrMaterial(MaterialId, const PbrParams &) = 0;
     virtual bool        destroyMaterial(MaterialId) = 0;
+    /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
+    /// text. Empty (lastError()) for an unknown material.
+    ///
+    /// "What did the datablock actually end up holding?" has been the hardest
+    /// question in every material bug so far — the document says one thing, the
+    /// mirror pushes another, the backend clamps or ignores a third, and
+    /// nothing between them was inspectable without a debugger. This answers it
+    /// from a script, in a running app. It pairs with the shader dump
+    /// (JAHSHAKA_HLMS_DEBUG_DIR), which answers "and what shader did that
+    /// produce".
+    ///
+    /// The format is the BACKEND'S, and it is a DIAGNOSTIC ONLY. It is not a
+    /// material format and must never become one: the document is the truth,
+    /// and it holds asset guids, a node graph, baked maps, our alpha-mode
+    /// vocabulary and roughness remap bounds — none of which a datablock has a
+    /// home for. Do not parse this.
+    virtual std::string dumpMaterial(MaterialId) const = 0;
     /// Makes the node render `mesh` with `material`. A node renders at most one mesh;
     /// attaching again replaces it. Mesh and material may be shared across nodes and
     /// survive the node.

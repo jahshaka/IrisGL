@@ -28,6 +28,7 @@
 #include <OgreMeshManager2.h>
 #include <OgreSubMesh2.h>
 #include <OgreArchiveManager.h>
+#include <OgreHlmsJson.h>
 #include <OgreHlmsManager.h>
 #include <OgreHlmsListener.h>
 #include <OgreHlmsPbs.h>
@@ -966,6 +967,7 @@ public:
     MaterialId createPbrMaterial(const PbrParams &p) override;
     bool setPbrMaterial(MaterialId id, const PbrParams &p) override;
     bool destroyMaterial(MaterialId id) override;
+    std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool detachMesh(NodeId id) override;
     size_t itemCount(NodeId id) const override;

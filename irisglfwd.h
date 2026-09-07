@@ -40,7 +40,6 @@ class SceneNode;
 class Texture2D;
 class Texture;
 class Scene;
-class Shader;
 class VertexLayout;
 class TriMesh;
 class Viewport;
@@ -79,7 +78,6 @@ class AvatarMovement;
 class AvatarLocomotion;
 
 typedef QSharedPointer<iris::Animation> AnimationPtr;
-typedef QSharedPointer<Shader> ShaderPtr;
 typedef QSharedPointer<Scene> ScenePtr;
 typedef QSharedPointer<SceneNode> SceneNodePtr;
 typedef QSharedPointer<AvatarMovement> AvatarMovementPtr;
