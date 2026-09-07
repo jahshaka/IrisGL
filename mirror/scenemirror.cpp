@@ -1749,8 +1749,15 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.normalMapWeight = pbr->normalFactor;
         out.uvScale         = pbr->textureScale;
         out.twoSided        = pbr->renderStates.rasterState.cullMode == iris::CullMode::None;
-        // occlusionMap/occlusionFactor: no engine equivalent (HlmsPbs has no AO
-        // slot — see Types.h); intentionally dropped, not faked.
+        // HLMS_ADOPTION P1. The BRDF crosses as a NAME, never as the document's
+        // index and never as the renderer's enum value: the index is a document
+        // convention and the enum is a renderer bitfield, and the boundary
+        // should carry neither. PbrMaterial::brdfEngineName is the one table.
+        out.brdf               = iris::PbrMaterial::brdfEngineName(pbr->brdf).toStdString();
+        out.clearCoat          = pbr->clearCoat;
+        out.clearCoatRoughness = pbr->clearCoatRoughness;
+        out.receiveShadows     = pbr->receiveShadows;
+        out.emissiveAsLightmap = pbr->emissiveAsLightmap;
         return true;
     }
     if (auto *custom = dynamic_cast<iris::CustomMaterial *>(material)) {

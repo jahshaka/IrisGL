@@ -184,10 +184,26 @@ struct FileProperty : public Property
     }
 };
 
+/// THE GENERIC ENUM ROW (HLMS_ADOPTION P1, spec correction C3).
+///
+/// It used to be a QStringList with an unused `index`, had ZERO producers in
+/// the whole tree, and PropertyWidget's `case List:` was empty — so an enum was
+/// only renderable by hardcoding its name in the panel. Exactly one row ever
+/// did (alphaMode), and the comment there records what that costs: a material
+/// set to a mode with no label showed a BLANK combo and any pick silently
+/// downgraded it (PUBLISH_AUDIT #4).
+///
+/// Now: `value` is the STORED ENUM VALUE and it is an int, so an enum row
+/// serializes, reads back and reports exactly like an IntProperty — no new
+/// on-disk shape, no new scripting type coercion. `labels` is the vocabulary,
+/// index == value, and it travels WITH the row so the picker cannot disagree
+/// with it. A row whose labels do not cover its whole value range is the same
+/// defect as before; the labels being the only source of the range is what
+/// makes that unrepresentable.
 struct ListProperty : public Property
 {
-    QStringList value;
-    int index = 0;      // same uninitialised-member class as min/max above
+    int value = 0;          ///< the selected enum value == index into `labels`
+    QStringList labels;     ///< one label per value, in value order
 
     ListProperty () {
         type = PropertyType::List;
@@ -198,7 +214,7 @@ struct ListProperty : public Property
     }
 
     void setValue(QVariant val) {
-        value = val.toStringList();
+        value = val.toInt();
     }
 };
 
