@@ -544,6 +544,11 @@ private:
     /// mesh per kind: each camera owns a mesh, rebuilt only when the signature
     /// of those values (and the selection state) changes.
     void syncCameraWires(Entry &e, iris::CameraNode *camera);
+    /// Resolves `focusMode == Track` into `focusDistance` for one camera, in
+    /// world space, after sockets have posed everything (CAMERA_LENS_SPEC §3
+    /// P2). No-op for Manual and Off — and for a target guid that no longer
+    /// resolves, which freezes the last distance rather than snapping.
+    void resolveFocusTracking(iris::CameraNode *camera);
     jahshaka::engine::TextureId iconTextureFor(const QString &path);
     void syncHighlight();
     void syncGrid();
@@ -686,6 +691,15 @@ private:
     /// setShaderTimeOverride so a frame is reproducible.
     float mShaderTimeOverride = -1.0f;
     QElapsedTimer mShaderClock;
+    /// FOCUS SMOOTHING's clock and the seconds it produced for THIS sync
+    /// (CAMERA_LENS_SPEC §3 P2). One clock for the whole walk, not one per
+    /// camera, so every tracking camera eases by the same dt in a frame. Zero
+    /// on the first sync (nothing to ease from) and clamped, so a stalled
+    /// editor does not teleport focus on the frame it wakes up. The smoothing
+    /// arithmetic itself is a pure function of this dt
+    /// (iris::lens::smoothTowards) precisely so it can be tested without one.
+    QElapsedTimer mFocusClock;
+    float         mFocusDt = 0.0f;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
     iris::SocketResolver     mSockets;

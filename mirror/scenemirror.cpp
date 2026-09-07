@@ -347,6 +347,11 @@ int SceneMirror::sync()
 
     ++mSyncStamp;
     mVisited = 0;
+    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2). Zero on
+    // the first sync, and capped at a tenth of a second: a stall must not let a
+    // tracking camera jump its whole remaining focus travel in one frame.
+    if (!mFocusClock.isValid()) { mFocusClock.start(); mFocusDt = 0.0f; }
+    else mFocusDt = std::min(0.1f, float(mFocusClock.restart()) * 0.001f);
     // Per-material work is memoised for the duration of this walk (see
     // MaterialSync): every mesh node sharing a material used to pay for it.
     mMaterialSync.clear();
@@ -639,6 +644,49 @@ quint64 hashFloat(quint64 h, float v)
 
 }   // namespace
 
+// ---- focus tracking (CAMERA_LENS_SPEC §3, P2) ------------------------------
+//
+// `focusMode == Track` means "the focus distance is wherever that node is", and
+// this is the only place in the program that can answer it: resolving it needs
+// BOTH camera and target in world space, in the same frame, after sockets have
+// moved anything that rides a bone. The mirror's walk is exactly that moment —
+// which is why the spec puts it here rather than on the node (a document node
+// cannot see the scene it is in) or in a verb (a verb runs when it is called,
+// not per frame).
+//
+// It WRITES `focusDistance`, deliberately: in Track mode the field is a
+// readout, the same way a follow-focus rig's marked distance is. Manual mode
+// never touches it, so a user's authored (or keyframed) pull is safe.
+//
+// The distance is measured ALONG THE OPTICAL AXIS — the depth of the subject,
+// which is what an image-plane blur is a function of — not the straight line to
+// it. A target behind the camera has no focus distance and clamps to the
+// minimum, rather than reporting a negative one that would make the optics
+// nonsense downstream.
+void SceneMirror::resolveFocusTracking(iris::CameraNode *camera)
+{
+    if (!camera || camera->focusMode != iris::CameraFocusMode::Track) return;
+    if (camera->focusTarget.isEmpty() || !mSource) return;
+    const iris::SceneNodePtr target = mSource->nodes.value(camera->focusTarget);
+    // A guid that no longer resolves (the target was deleted) leaves the last
+    // distance standing: freezing focus is a far better failure than snapping
+    // to a minimum nobody asked for.
+    if (!target) return;
+
+    camera->update(0.0f);
+    target->update(0.0f);
+    const iris::Vec3 toTarget = target->getGlobalPosition() - camera->getGlobalPosition();
+    // The camera looks down its own -Z (the whole document agrees on this).
+    const iris::Vec3 forward = camera->getGlobalRotation().rotatedVector(iris::Vec3(0, 0, -1));
+    float distance = iris::Vec3::dotProduct(toTarget, forward) + camera->focusOffset;
+    distance = std::max(camera->minFocusDistance, distance);
+
+    if (camera->smoothFocus && camera->focusSmoothingSpeed > 0.0f && mFocusDt > 0.0f)
+        distance = iris::lens::smoothTowards(camera->focusDistance, distance,
+                                             camera->focusSmoothingSpeed, mFocusDt);
+    camera->focusDistance = distance;
+}
+
 void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
 {
     using jahshaka::engine::Vec3;
@@ -676,6 +724,11 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
     sig = hashFloat(sig, camera->orthoSize);
     sig = (sig ^ quint64(camera->isPerspective ? 1 : 0)) * 1099511628211ull;
     sig = (sig ^ quint64(selected ? 2 : 0)) * 1099511628211ull;
+    // The focus plane rides the same derived mesh, so it rides the same
+    // signature: with it off, both terms are constant and the hash — and
+    // therefore the geometry — is exactly what it was before this phase.
+    sig = (sig ^ quint64(camera->focusPlaneVisible ? 4 : 0)) * 1099511628211ull;
+    if (camera->focusPlaneVisible) sig = hashFloat(sig, camera->focusDistance);
 
     if (e.cameraSignature != sig || !e.cameraMesh) {
         std::vector<Vec3> pts;
@@ -733,6 +786,23 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
         // looks identical to one that is not.
         line(f[3], Vec3((f[2].x + f[3].x) * 0.5f, f[3].y * 1.25f, f[3].z));
         line(f[2], Vec3((f[2].x + f[3].x) * 0.5f, f[2].y * 1.25f, f[2].z));
+
+        // THE FOCUS PLANE (CAMERA_LENS_SPEC §3 P2), off by default. A rectangle
+        // across the frustum at the focus distance, with a cross through the
+        // middle so it reads as a plane and not as another far-plane rectangle.
+        // Drawn at the REAL distance — clipped only by the camera's own clip
+        // planes, not by the frustum's drawing limit, because "the focus is
+        // way out there" is exactly what a user with a 30 m pull needs to see.
+        if (camera->focusPlaneVisible) {
+            const float fz = std::max(nearClip,
+                                      std::min(camera->focusDistance, camera->farClip));
+            Vec3 p[4];
+            corners(fz, p);
+            for (int i = 0; i < 4; ++i) line(p[i], p[(i + 1) % 4]);
+            const Vec3 mid((p[0].x + p[2].x) * 0.5f, (p[0].y + p[2].y) * 0.5f, p[0].z);
+            line(Vec3(p[0].x, mid.y, p[0].z), Vec3(p[1].x, mid.y, p[1].z));
+            line(Vec3(mid.x, p[0].y, p[0].z), Vec3(mid.x, p[2].y, p[2].z));
+        }
 
         const jahshaka::engine::MeshId built = mTarget->createLineMesh(pts, false);
         if (built) {
@@ -1450,7 +1520,9 @@ void SceneMirror::visit(iris::SceneNode *node)
     if (node->getSceneNodeType() == iris::SceneNodeType::Camera) {
         // Phase 1 finally made CameraNode set its own type, which is what lets
         // this branch exist at all (CAMERAS_SPEC §1, the type-enum trap).
-        syncCameraWires(e, static_cast<iris::CameraNode *>(node));
+        auto *cam = static_cast<iris::CameraNode *>(node);
+        resolveFocusTracking(cam);
+        syncCameraWires(e, cam);
     }
 
     // `e` is a reference into a QHash and the recursion INSERTS entries, which
@@ -3878,6 +3950,12 @@ static CameraDesc toCameraDesc(const iris::CameraNodePtr &camera)
     // camera constrains it the same way (§7.4).
     c.constrainAspect = camera->constrainAspect;
     c.aspect          = camera->aspectRatio > 0.01f ? camera->aspectRatio : 16.0f / 9.0f;
+    // CAMERA_LENS_SPEC §3: the shift travels as a FRACTION of the frame and the
+    // engine converts it, because the conversion needs the aspect the VIEW is
+    // rendering at (Types.h says why at length). Zero is the default and is a
+    // symmetric frustum, bit for bit.
+    c.lensShiftX      = camera->lensShiftX;
+    c.lensShiftY      = camera->lensShiftY;
     return c;
 }
 

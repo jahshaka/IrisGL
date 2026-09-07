@@ -139,6 +139,7 @@ set(SRCS
     import/meshprewarm.cpp
     import/meshbake.cpp
     document/scenegraph/cameranode.cpp
+    document/scenegraph/cameralens.cpp
     document/assets/texture2d.cpp
     document/materials/material.cpp
     core/geometry/trimesh.cpp
@@ -193,6 +194,7 @@ set (HEADERS
     import/model.h
     document/materials/material.h
     document/scenegraph/cameranode.h
+    document/scenegraph/cameralens.h
     document/scenegraph/meshnode.h
     document/materials/defaultmaterial.h
     document/assets/vertexlayout.h

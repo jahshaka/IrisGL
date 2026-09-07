@@ -1918,6 +1918,17 @@ public:
     /// Writes the letterbox's inner rectangle onto the chain's inset passes and
     /// the bar/background colours (CAMERAS_SPEC §7.4). Live; never a rebuild.
     void applyLetterbox();
+    /// Converts the camera's FRACTION-OF-FRAME lens shift into Ogre's
+    /// world-space frustum offset and applies it (CAMERA_LENS_SPEC §3).
+    /// Re-derived every time because it depends on the fov, the near distance
+    /// AND the aspect the view is currently rendering at — so it runs from
+    /// setCamera AND once a frame, where a resize is noticed. Free (one
+    /// setFrustumOffset of zero) when nothing is shifted.
+    void applyLensShift(Ogre::Camera *camera, const CameraDesc &c, float aspect);
+    /// The aspect this view actually projects at: the authored one when the
+    /// camera constrains it, the TARGET's otherwise (which is what Ogre's auto
+    /// aspect ratio arrives at, one frame sooner).
+    float viewAspect(const CameraDesc &c) const;
     /// Pushes the inset's camera state and its two rectangles. LIVE: the
     /// workspace's viewport modifier and the scene pass's own mVpRect are both
     /// read per frame by Ogre, so moving or letterboxing the inset rebuilds
