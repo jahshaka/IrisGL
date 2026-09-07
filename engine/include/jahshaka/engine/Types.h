@@ -606,6 +606,20 @@ struct CameraDesc {
     /// it, and only they can, because only their hosts know they are free.
     float maxHorizontalFovDegrees = 0.0f;
 
+    /// LENS SHIFT (CAMERA_LENS_SPEC §3), as a FRACTION OF THE FRAME: +0.5 in X
+    /// slides the image half a frame to the right without rotating the camera.
+    /// Zero (the default) is a centred, symmetric frustum — byte-identical to a
+    /// camera that never heard of lens shift.
+    ///
+    /// THE FRACTION IS WHAT CROSSES THE BOUNDARY, deliberately. The projection
+    /// wants a WORLD-SPACE offset at the near plane, and that offset depends on
+    /// the field of view, the near distance AND the aspect the view is actually
+    /// rendering at — which only the engine knows (an unconstrained view adopts
+    /// its target's aspect). A host that pre-multiplied would be shifting by
+    /// the wrong amount on every window that is not the shape it assumed.
+    float lensShiftX = 0.0f;
+    float lensShiftY = 0.0f;
+
     bool operator==(const CameraDesc &o) const {
         return position.x == o.position.x && position.y == o.position.y &&
                position.z == o.position.z &&
@@ -614,7 +628,8 @@ struct CameraDesc {
                fovDegrees == o.fovDegrees && nearClip == o.nearClip && farClip == o.farClip &&
                orthographic == o.orthographic && orthoSize == o.orthoSize &&
                constrainAspect == o.constrainAspect && aspect == o.aspect &&
-               maxHorizontalFovDegrees == o.maxHorizontalFovDegrees;
+               maxHorizontalFovDegrees == o.maxHorizontalFovDegrees &&
+               lensShiftX == o.lensShiftX && lensShiftY == o.lensShiftY;
     }
     bool operator!=(const CameraDesc &o) const { return !(*this == o); }
 };

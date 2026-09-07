@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include "core/math/mat4.h"
 #include "core/math/vec.h"
 #include "irisglfwd.h"
+#include "document/scenegraph/cameralens.h"
 #include "document/scenegraph/scenenode.h"
 
 
@@ -76,11 +77,33 @@ public:
 
     /// Sensor size in millimetres. 36 x 24 = full frame — OURS, not a
     /// reproduction of any engine's published default (Epic publishes none).
-    /// The angle of view is VERTICAL, so it binds through `sensorHeight`;
-    /// `sensorWidth` is stored because a horizontal FOV (Unreal import, a
-    /// future UI row) is derived from it and because a sensor is a pair.
+    /// The angle of view is VERTICAL; WHICH sensor dimension it binds through is
+    /// `sensorFit` below (CAMERA_LENS_SPEC §3 — the phase that finally made
+    /// `sensorWidth` do something; it was stored and inert before).
     float sensorWidth;
     float sensorHeight;
+
+    // ---- CAMERA_LENS_SPEC §3: the filmback block -------------------------
+
+    /// Which sensor dimension the focal length binds through (see cameralens.h
+    /// for the whole model). VERTICAL is the default because it is what this
+    /// class always did: no existing scene's projection moves because these
+    /// fields arrived.
+    CameraSensorFit sensorFit;
+
+    /// Anamorphic squeeze factor: the effective sensor WIDTH is
+    /// `sensorWidth * anamorphicSqueeze`. 1.0 (spherical) is the default and is
+    /// inert; a 2x anamorphic sees as wide as a half-length spherical lens.
+    /// Only participates when the binding axis is horizontal.
+    float anamorphicSqueeze;
+
+    /// LENS SHIFT (rise/fall and cross), as a FRACTION OF THE FRAME: 0.5 slides
+    /// the image half a frame width / height without tilting the camera — the
+    /// architectural-photography move that keeps verticals parallel. The
+    /// conversion into a projection offset is re-derived from fov/aspect/near
+    /// wherever it is applied (never stored), because it depends on all three.
+    float lensShiftX;
+    float lensShiftY;
 
     /// Which view of the angle the user authored. Only consulted when the
     /// SENSOR changes: in Degrees the angle is kept and the focal length
@@ -98,6 +121,32 @@ public:
     float focusDistance;      // metres, used when focusMode == Manual
     QString focusTarget;      // node guid, used when focusMode == Track
     float fStop;
+
+    // ---- CAMERA_LENS_SPEC §3 P2: the focus block -------------------------
+    //
+    // RENDER-INERT, all of it: no pass reads these (the DoF pass is deferred by
+    // the owner). What they DO drive is the tracking arithmetic, the focus
+    // numbers `camera.focusInfo` reports, and the debug plane — i.e. everything
+    // needed to author a focus pull correctly before anything renders it.
+
+    /// Added to the tracked distance in Track mode (metres, may be negative):
+    /// "focus a little in front of his eyes" is a real instruction.
+    float focusOffset;
+    /// Ease the tracked distance instead of snapping it (a focus puller's hand,
+    /// not a servo). Off by default so tracking stays exactly predictable.
+    bool smoothFocus;
+    /// How fast the eased distance converges, in e-folds per second
+    /// (lens::smoothTowards). 8 is roughly "settles in half a second".
+    float focusSmoothingSpeed;
+    /// The closest the lens can focus, in metres. Tracking clamps to it.
+    float minFocusDistance;
+    /// Diaphragm blades — the shape of the bokeh. Stored for the deferred DoF
+    /// pass and for export; nothing samples it yet. Clamped to 3..16.
+    int bladeCount;
+    /// Draw the focus plane as a wire rectangle inside the frustum helper
+    /// (an editor helper like the body: hidden in play/game view, never in a
+    /// render). Off by default.
+    bool focusPlaneVisible;
 
     /// The output height in pixels for RENDERS and EXPORTS; with aspectRatio it
     /// derives the whole output size. The main view and the PiP ignore it
@@ -120,11 +169,15 @@ public:
     void setFieldOfViewRadians(float fov);
     void setFieldOfViewDegrees(float fov);
 
-    /// The lens view of `angle`, in millimetres, through the sensor HEIGHT
-    /// (the angle is vertical):
+    /// This camera's filmback as the lens math sees it — sensor pair, squeeze,
+    /// fit and the authored aspect, in one struct (cameralens.h).
+    iris::lens::Filmback filmback() const;
+
+    /// The lens view of `angle`, in millimetres, through the filmback:
     ///
-    ///     angle       = 2 * atan(sensorHeight / (2 * focalLength))
-    ///     focalLength = sensorHeight / (2 * tan(angle / 2))
+    ///     vertical fit:   angle = 2 * atan(sensorHeight / (2 * focalLength))
+    ///     horizontal fit: hFov  = 2 * atan(sensorWidth * squeeze / (2 * f))
+    ///                     angle = 2 * atan(tan(hFov / 2) / aspectRatio)
     ///
     /// Exact inverses of each other, and derived rather than stored, so the
     /// dozen places that assign `angle` directly cannot desynchronise the pair.
@@ -136,6 +189,23 @@ public:
     /// in Degrees the angle survives, in Millimeters the focal length does.
     /// Non-positive dimensions are ignored.
     void setSensorSize(float widthMm, float heightMm);
+    /// Same contract as setSensorSize for the other two filmback rows: the
+    /// authored view of the angle survives, the derived one moves.
+    void setSensorFit(CameraSensorFit fit);
+    void setAnamorphicSqueeze(float squeeze);
+
+    /// The horizontal / diagonal angles of view (degrees) for the authored
+    /// aspect. Derived, never stored — reported by the verbs and the panel.
+    float horizontalFov() const;
+    float diagonalFov() const;
+
+    /// Depth of field, in numbers (CAMERA_LENS_SPEC §3, P2): hyperfocal
+    /// distance and the near/far limits at the CURRENT focus distance, for this
+    /// lens, f-stop and sensor. Render-inert — this is what makes the stored
+    /// aperture honest before any DoF pass exists. `focusMode == Off` still
+    /// reports, using focusDistance, because "what would be sharp" is a
+    /// question about the lens, not about the tracking mode.
+    iris::lens::FocusInfo focusInfo() const;
 
     void lookAt(iris::Vec3 target);
     void updateCameraMatrices();
@@ -183,11 +253,25 @@ private:
         sensorWidth = 36.0f;
         sensorHeight = 24.0f;
         authorMode = CameraAuthorMode::Degrees;
+        // CAMERA_LENS_SPEC §3 defaults, chosen so a camera made today projects
+        // EXACTLY what a camera made yesterday did: vertical fit is the old
+        // hard-coded binding, a squeeze of 1 is spherical, and zero shift is a
+        // centred frustum.
+        sensorFit = CameraSensorFit::Vertical;
+        anamorphicSqueeze = 1.0f;
+        lensShiftX = 0.0f;
+        lensShiftY = 0.0f;
         constrainAspect = false;
         dofEnabled = false;
         focusMode = CameraFocusMode::Manual;
         focusDistance = 10.0f;
         fStop = 2.8f;
+        focusOffset = 0.0f;
+        smoothFocus = false;
+        focusSmoothingSpeed = 8.0f;
+        minFocusDistance = 0.1f;
+        bladeCount = 5;
+        focusPlaneVisible = false;
         outputHeight = 1080;
         bodyVisible = true;
 		// Was left indeterminate (only setProjection() wrote it): any consumer

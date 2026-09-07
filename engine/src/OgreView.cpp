@@ -187,6 +187,10 @@ void OgreView::destroyPip() {
 
 void OgreView::applyLetterboxAndPip() {
     applyLetterbox();
+    // The shift's world-space offset is a function of the TARGET's aspect, so a
+    // resize moves it even though nothing touched the CameraDesc — same reason
+    // the letterbox rectangle is re-derived here. Free when nothing is shifted.
+    if (mCamera) applyLensShift(mCamera, mCameraDesc, viewAspect(mCameraDesc));
     applyPip();
 }
 
@@ -221,6 +225,13 @@ void OgreView::applyPip() {
         // square square (spike T5: 32x32 px with it, 32x54 without).
         mPipCamera->setAutoAspectRatio(!c.constrainAspect);
         if (c.constrainAspect && c.aspect > 0.0f) mPipCamera->setAspectRatio(c.aspect);
+        // The inset is the same lens: a shifted camera is shifted in its own
+        // preview too. The aspect here is the INNER rect's, not the target's.
+        {
+            const float rectAspect = (c.constrainAspect && c.aspect > 0.0f) ? c.aspect
+                : ((inner[3] * th) > 0.0f ? (inner[2] * float(tw)) / (inner[3] * float(th)) : 1.0f);
+            applyLensShift(mPipCamera, c, rectAspect);
+        }
 
         // LIVE, both of them — no rebuild, spike T3. The workspace modifier
         // places (and scissors) every pass of the inset node at the OUTER rect;
@@ -423,7 +434,54 @@ void OgreView::setCamera(const CameraDesc &c) {
         // bars instead of fitted between them.
         mCamera->setAutoAspectRatio(!chainDesc().letterbox);
         if (chainDesc().letterbox) mCamera->setAspectRatio(c.aspect);
+        applyLensShift(mCamera, c, viewAspect(c));
     } JAH_CATCH(mError, );
+}
+
+// ---------------------------------------------------------------------------
+// LENS SHIFT (CAMERA_LENS_SPEC §3). The document authors a FRACTION OF THE
+// FRAME; a projection needs a world-space offset at the near plane. This is the
+// conversion, and it lives here — not in the document and not in the mirror —
+// because it needs the aspect the view is ACTUALLY rendering at, which only a
+// view knows.
+//
+// THE TRAP, verified in the pin (OgreFrustum.cpp:370-371): setFrustumOffset is
+// world-space and Ogre scales it internally by mNearDist / mFocalLength, where
+// mFocalLength is the STEREO divisor (default 1.0) and emphatically NOT a
+// camera lens — nothing in this program calls Frustum::setFocalLength. With the
+// default the near distance cancels, but the multiplication is written out
+// anyway: the cancellation is a property of a default somebody could change.
+//
+// The DOCUMENT does the identical arithmetic for its own projection matrix
+// (iris::lens::nearOffsetFromShift, CameraNode::updateCameraMatrices) so
+// picking rays land in the shifted image. The two must agree; the formula is
+// one line and the engine may not include the document's headers, so it is
+// spelled twice on purpose, each pointing at the other.
+float OgreView::viewAspect(const CameraDesc &c) const {
+    if (chainDesc().letterbox && c.aspect > 0.0f) return c.aspect;
+    const unsigned w = width(), h = height();
+    return h ? float(w) / float(h) : 1.0f;
+}
+
+void OgreView::applyLensShift(Ogre::Camera *camera, const CameraDesc &c, float aspect) {
+    if (!camera) return;
+    // Orthographic frusta ignore the offset entirely in the pin ("Unknown how
+    // to apply frustum offset to orthographic camera, just ignore here",
+    // OgreFrustum.cpp) — say so by zeroing rather than pretending.
+    if (c.orthographic || (c.lensShiftX == 0.0f && c.lensShiftY == 0.0f)) {
+        camera->setFrustumOffset(Ogre::Vector2::ZERO);
+        return;
+    }
+    const float nearDist = std::max(c.nearClip, 0.001f);
+    const float fovDeg   = std::max(1.0f, std::min(c.fovDegrees, 179.0f));
+    const float halfH    = std::tan(float(fovDeg) * 0.5f * 3.14159265f / 180.0f) * nearDist;
+    const float halfW    = halfH * (aspect > 0.0f ? aspect : 1.0f);
+    const float stereoFocal = camera->getFocalLength() > 0.0f ? camera->getFocalLength() : 1.0f;
+    const float scale    = nearDist / stereoFocal;
+    // offsetAtNear = shift * (2 * halfExtent); frustumOffset = offsetAtNear / scale
+    camera->setFrustumOffset(
+        Ogre::Vector2((c.lensShiftX * 2.0f * halfW) / scale,
+                      (c.lensShiftY * 2.0f * halfH) / scale));
 }
 
 // ---------------------------------------------------------------------------

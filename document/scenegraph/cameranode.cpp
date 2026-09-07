@@ -99,6 +99,32 @@ QList<Property*> CameraNode::getProperties()
     intProp->value = static_cast<int>(authorMode);
     props.append(intProp);
 
+    // ---- CAMERA_LENS_SPEC §3, the filmback rows --------------------------
+
+    intProp = new IntProperty();
+    intProp->displayName = "Sensor Fit";
+    intProp->name = "sensorFit";
+    intProp->value = static_cast<int>(sensorFit);
+    props.append(intProp);
+
+    prop = new FloatProperty();
+    prop->displayName = "Anamorphic Squeeze";
+    prop->name = "anamorphicSqueeze";
+    prop->value = anamorphicSqueeze;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Lens Shift X";
+    prop->name = "lensShiftX";
+    prop->value = lensShiftX;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Lens Shift Y";
+    prop->name = "lensShiftY";
+    prop->value = lensShiftY;
+    props.append(prop);
+
     auto boolProp = new BoolProperty();
     boolProp->displayName = "Constrain Aspect Ratio";
     boolProp->name = "constrainAspect";
@@ -128,6 +154,47 @@ QList<Property*> CameraNode::getProperties()
     prop->name = "fStop";
     prop->value = fStop;
     props.append(prop);
+
+    // ---- CAMERA_LENS_SPEC §3 P2, the focus rows --------------------------
+    // Keyable like everything else here, which is the whole point: a focus pull
+    // is a keyframed focusDistance and a stop ramp is a keyframed fStop, both
+    // authorable before the DoF pass exists to render them.
+
+    prop = new FloatProperty();
+    prop->displayName = "Focus Offset";
+    prop->name = "focusOffset";
+    prop->value = focusOffset;
+    props.append(prop);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Smooth Focus";
+    boolProp->name = "smoothFocus";
+    boolProp->value = smoothFocus;
+    props.append(boolProp);
+
+    prop = new FloatProperty();
+    prop->displayName = "Focus Smoothing Speed";
+    prop->name = "focusSmoothingSpeed";
+    prop->value = focusSmoothingSpeed;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Min Focus Distance";
+    prop->name = "minFocusDistance";
+    prop->value = minFocusDistance;
+    props.append(prop);
+
+    intProp = new IntProperty();
+    intProp->displayName = "Diaphragm Blades";
+    intProp->name = "bladeCount";
+    intProp->value = bladeCount;
+    props.append(intProp);
+
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Show Focus Plane";
+    boolProp->name = "focusPlaneVisible";
+    boolProp->value = focusPlaneVisible;
+    props.append(boolProp);
 
     intProp = new IntProperty();
     intProp->displayName = "Output Height";
@@ -166,6 +233,17 @@ QVariant CameraNode::getPropertyValue(QString valueName)
     if (valueName == "sensorWidth")     return sensorWidth;
     if (valueName == "sensorHeight")    return sensorHeight;
     if (valueName == "authorMode")      return static_cast<int>(authorMode);
+    // CAMERA_LENS_SPEC §3.
+    if (valueName == "sensorFit")         return static_cast<int>(sensorFit);
+    if (valueName == "anamorphicSqueeze") return anamorphicSqueeze;
+    if (valueName == "lensShiftX")        return lensShiftX;
+    if (valueName == "lensShiftY")        return lensShiftY;
+    if (valueName == "focusOffset")         return focusOffset;
+    if (valueName == "smoothFocus")         return smoothFocus;
+    if (valueName == "focusSmoothingSpeed") return focusSmoothingSpeed;
+    if (valueName == "minFocusDistance")    return minFocusDistance;
+    if (valueName == "bladeCount")          return bladeCount;
+    if (valueName == "focusPlaneVisible")   return focusPlaneVisible;
     if (valueName == "constrainAspect") return constrainAspect;
     if (valueName == "dofEnabled")      return dofEnabled;
     if (valueName == "focusMode")       return static_cast<int>(focusMode);
@@ -201,6 +279,28 @@ bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
                          ? CameraAuthorMode::Millimeters : CameraAuthorMode::Degrees;
         return true;
     }
+    // CAMERA_LENS_SPEC §3. The three filmback rows go through their setters for
+    // the same reason the sensor pair does: each of them changes what a focal
+    // length MEANS, so the authored view of the angle has to be the one that
+    // survives.
+    if (valueName == "sensorFit") {
+        const int f = value.toInt();
+        setSensorFit(f == static_cast<int>(CameraSensorFit::Horizontal) ? CameraSensorFit::Horizontal
+                   : f == static_cast<int>(CameraSensorFit::Auto)       ? CameraSensorFit::Auto
+                                                                        : CameraSensorFit::Vertical);
+        return true;
+    }
+    if (valueName == "anamorphicSqueeze") { setAnamorphicSqueeze(value.toFloat()); return true; }
+    // Shift is clamped to a frame either way: past that the frustum's near rect
+    // no longer contains the axis and the projection stops being useful.
+    if (valueName == "lensShiftX") { lensShiftX = qBound(-1.0f, value.toFloat(), 1.0f); return true; }
+    if (valueName == "lensShiftY") { lensShiftY = qBound(-1.0f, value.toFloat(), 1.0f); return true; }
+    if (valueName == "focusOffset")         { focusOffset = value.toFloat();               return true; }
+    if (valueName == "smoothFocus")         { smoothFocus = value.toBool();                return true; }
+    if (valueName == "focusSmoothingSpeed") { focusSmoothingSpeed = qMax(0.0f, value.toFloat()); return true; }
+    if (valueName == "minFocusDistance")    { minFocusDistance = qMax(0.0f, value.toFloat()); return true; }
+    if (valueName == "bladeCount")          { bladeCount = qBound(3, value.toInt(), 16);   return true; }
+    if (valueName == "focusPlaneVisible")   { focusPlaneVisible = value.toBool();          return true; }
     if (valueName == "constrainAspect") { constrainAspect = value.toBool(); return true; }
     if (valueName == "dofEnabled")      { dofEnabled = value.toBool();      return true; }
     if (valueName == "focusMode") {
@@ -246,7 +346,22 @@ void CameraNode::setVrViewScale(float viewScale)
 
 void CameraNode::setAspectRatio(float aspect)
 {
+    // THE ASPECT IS PART OF THE LENS BINDING when the fit is horizontal
+    // (CAMERA_LENS_SPEC §3): a 35 mm lens covers a fixed HORIZONTAL angle, so
+    // changing the frame's shape must change the VERTICAL angle and not the
+    // lens. Only when the user authored millimetres, and only when the fit
+    // actually resolves horizontally — which is why the default (Vertical) and
+    // every camera authored in degrees behave exactly as they always did: this
+    // branch is not taken and the aspect is a plain assignment.
+    const bool rebind = authorMode == CameraAuthorMode::Millimeters &&
+                        iris::lens::fitAxis(sensorFit, aspect) == iris::lens::FitAxis::Horizontal &&
+                        iris::lens::fitAxis(sensorFit, aspectRatio) == iris::lens::FitAxis::Horizontal;
+    const float keepMm = rebind ? focalLength() : 0.0f;
     aspectRatio = aspect;
+    if (rebind && keepMm > 0.0f) {
+        const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
+        if (v > 0.0f) angle = v;
+    }
 }
 
 void CameraNode::updateCameraMatrices()
@@ -263,7 +378,22 @@ void CameraNode::updateCameraMatrices()
     projMatrix.setToIdentity();
 
     if ((projMode == CameraProjection::Perspective)) {
-        projMatrix.perspective(angle, aspectRatio, nearClip, farClip);
+        if (lensShiftX == 0.0f && lensShiftY == 0.0f) {
+            projMatrix.perspective(angle, aspectRatio, nearClip, farClip);
+        } else {
+            // LENS SHIFT, document-side (CAMERA_LENS_SPEC §3). The engine offsets
+            // its own frustum; this matrix is what PICKING and every document-side
+            // projection use, so it has to be the same off-axis frustum or a click
+            // would land where the shot is not. Derived here from fov/aspect/near
+            // rather than stored, exactly like the engine's copy — see
+            // cameralens.h's note about why this conversion is never cached.
+            const float halfH = iris::lens::halfExtentAtNear(angle, nearClip);
+            const float halfW = halfH * (aspectRatio > 0.0f ? aspectRatio : 1.0f);
+            const float ox = iris::lens::nearOffsetFromShift(lensShiftX, halfW);
+            const float oy = iris::lens::nearOffsetFromShift(lensShiftY, halfH);
+            projMatrix.frustum(-halfW + ox, halfW + ox, -halfH + oy, halfH + oy,
+                               nearClip, farClip);
+        }
     }
     else {
         projMatrix.ortho(-orthoSize * aspectRatio, orthoSize * aspectRatio, -orthoSize, orthoSize, -farClip, farClip);
@@ -297,20 +427,33 @@ void CameraNode::setFieldOfViewDegrees(float fov)
 // what makes a direct `cam->angle = x` (the scene reader, the camera
 // controllers, previewframing) impossible to get wrong.
 
+iris::lens::Filmback CameraNode::filmback() const
+{
+    iris::lens::Filmback fb;
+    fb.sensorWidth  = sensorWidth;
+    fb.sensorHeight = sensorHeight;
+    fb.squeeze      = anamorphicSqueeze;
+    fb.fit          = sensorFit;
+    // The AUTHORED aspect. A view that does not constrain the aspect renders at
+    // its target's, so a horizontal-fit camera's horizontal angle is only
+    // exactly this one in a frame of the authored shape (cameralens.h says so
+    // at length). The VERTICAL angle — the value that is stored and pushed — is
+    // always what the document says, whatever the frame.
+    fb.aspect       = aspectRatio > 0.01f ? aspectRatio : 1.0f;
+    return fb;
+}
+
 float CameraNode::focalLength() const
 {
-    // Both ends of the angle range are degenerate for a lens: 0 has no finite
-    // focal length and 180 has none either (tan blows up at 90 degrees).
-    const float half = qDegreesToRadians(qBound(0.0001f, angle, 179.9f) * 0.5f);
-    const float t = std::tan(half);
-    if (t <= 0.0f) return 0.0f;
-    return sensorHeight / (2.0f * t);
+    return iris::lens::focalFromVerticalFovDeg(filmback(), angle);
 }
 
 void CameraNode::setFocalLength(float mm)
 {
     if (mm <= 0.0f) return;   // a zero-length lens has no angle of view
-    angle = qRadiansToDegrees(2.0f * std::atan(sensorHeight / (2.0f * mm)));
+    const float v = iris::lens::verticalFovDegFromFocal(filmback(), mm);
+    if (v <= 0.0f) return;
+    angle = v;
     authorMode = CameraAuthorMode::Millimeters;
 }
 
@@ -324,8 +467,51 @@ void CameraNode::setSensorSize(float widthMm, float heightMm)
     sensorWidth = widthMm;
     sensorHeight = heightMm;
     if (authorMode == CameraAuthorMode::Millimeters && keepMm > 0.0f) {
-        angle = qRadiansToDegrees(2.0f * std::atan(sensorHeight / (2.0f * keepMm)));
+        const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
+        if (v > 0.0f) angle = v;
     }
+}
+
+void CameraNode::setSensorFit(CameraSensorFit fit)
+{
+    // Same contract as setSensorSize, and for the same reason: changing the fit
+    // changes which sensor dimension a focal length is measured against, so it
+    // changes the angle a "35 mm" means. In Degrees the framing is what the
+    // user authored and it stays; in Millimeters the lens is, and the framing
+    // moves under it.
+    const float keepMm = focalLength();
+    sensorFit = fit;
+    if (authorMode == CameraAuthorMode::Millimeters && keepMm > 0.0f) {
+        const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
+        if (v > 0.0f) angle = v;
+    }
+}
+
+void CameraNode::setAnamorphicSqueeze(float squeeze)
+{
+    if (!(squeeze > 0.0f)) return;   // a zero or negative squeeze is not a lens
+    const float keepMm = focalLength();
+    anamorphicSqueeze = squeeze;
+    if (authorMode == CameraAuthorMode::Millimeters && keepMm > 0.0f) {
+        const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
+        if (v > 0.0f) angle = v;
+    }
+}
+
+float CameraNode::horizontalFov() const
+{
+    return iris::lens::horizontalFovDeg(angle, filmback().aspect);
+}
+
+float CameraNode::diagonalFov() const
+{
+    return iris::lens::diagonalFovDeg(angle, filmback().aspect);
+}
+
+iris::lens::FocusInfo CameraNode::focusInfo() const
+{
+    return iris::lens::focusInfo(focalLength(), fStop, focusDistance,
+                                 iris::lens::circleOfConfusionMm(sensorWidth, sensorHeight));
 }
 
 void CameraNode::lookAt(iris::Vec3 target)
@@ -385,6 +571,19 @@ SceneNodePtr CameraNode::createDuplicate()
 	camera->sensorWidth = this->sensorWidth;
 	camera->sensorHeight = this->sensorHeight;
 	camera->authorMode = this->authorMode;
+	// CAMERA_LENS_SPEC §3: the filmback and focus blocks, by VALUE for the same
+	// reason as the rest — a duplicate must be the same camera, not a
+	// re-derivation of one.
+	camera->sensorFit = this->sensorFit;
+	camera->anamorphicSqueeze = this->anamorphicSqueeze;
+	camera->lensShiftX = this->lensShiftX;
+	camera->lensShiftY = this->lensShiftY;
+	camera->focusOffset = this->focusOffset;
+	camera->smoothFocus = this->smoothFocus;
+	camera->focusSmoothingSpeed = this->focusSmoothingSpeed;
+	camera->minFocusDistance = this->minFocusDistance;
+	camera->bladeCount = this->bladeCount;
+	camera->focusPlaneVisible = this->focusPlaneVisible;
 	camera->constrainAspect = this->constrainAspect;
 	camera->dofEnabled = this->dofEnabled;
 	camera->focusMode = this->focusMode;
