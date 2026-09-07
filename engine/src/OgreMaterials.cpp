@@ -505,6 +505,10 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         // datablock's: re-bind them or a switch would silently strip every
         // texture until something happened to push them again.
         bindTrackedTextures(rec);
+        // ...and the same for a generated piece: the new datablock is a blank
+        // one, so a graph material that took a detour through Unlit would come
+        // back rendering its plain PBR surface with no error anywhere.
+        bindTrackedPieces(rec);
 
         for (const auto &na : attached) attachMesh(na.first, na.second, id);
         return true;
@@ -527,6 +531,125 @@ std::string OgreScene::dumpMaterial(MaterialId id) const {
         json.saveMaterial(db, out, Ogre::BLANKSTRING);
         return std::string(out.c_str());
     } JAH_CATCH(mError, {});
+}
+
+// ---- Generated shader pieces (HLMS_ADOPTION P5) ----
+//
+// A "custom piece" is a fragment of the backend's own shader language spliced
+// into ONE datablock's generated shader at a named hook. It is the mechanism
+// the shader graph needs and the CPU baker cannot be: a bake freezes time, has
+// a resolution, and cannot move a vertex at all.
+//
+// Two rules make this safe to hand a generator:
+//   * A material with NO piece is unaffected, bit for bit. The backend only
+//     sets its `_DatablockCustomPieceShaderName*` property when the datablock
+//     carries a piece id, and only parses when that property is set — so every
+//     material in the tree that never calls this generates exactly the source
+//     it generated before the verb existed.
+//   * The piece REGISTRY IS KEYED BY FILE NAME (an IdString hash of it), not by
+//     path, and re-registering one name with different content is a hard throw
+//     from the backend. The same trap the IES profile loader documents, with a
+//     stricter failure mode. We do not guard it with a clash test the way
+//     OgreLights does; we ask callers to name pieces by a hash of their
+//     CONTENT, which makes "same name, different content" impossible instead of
+//     merely detected. The generator does exactly that.
+static Ogre::CustomPieceStage::CustomPieceStage ogrePieceStage(CustomPieceStage stage) {
+    return stage == CustomPieceStage::VertexPreTransform ? Ogre::CustomPieceStage::VertexShader
+                                                         : Ogre::CustomPieceStage::PixelShader;
+}
+
+bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
+                                       CustomPieceStage stage) {
+    auto it = mMaterials.find(id);
+    if (it == mMaterials.end()) { mError = "setMaterialCustomPiece: unknown material"; return false; }
+    MaterialRec &rec = it->second;
+    // The Unlit family runs a different template with a different pixel-data
+    // structure; a piece written against the PBR surface would not compile
+    // there, and a shader that does not compile takes the whole frame with it.
+    // The BINDING IS KEPT in the record either way, so a material that goes
+    // Unlit and comes back gets its piece again (setShadingModel re-applies).
+    const size_t slot = stage == CustomPieceStage::VertexPreTransform ? 1u : 0u;
+    if (rec.unlit) {
+        rec.customPiece[slot] = path;
+        mError = "setMaterialCustomPiece: the Unlit shading model has no PBR surface for a "
+                 "generated piece to write to; the binding is remembered and applies again "
+                 "if the material returns to Lit";
+        return false;
+    }
+    JAH_TRY {
+        auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
+            hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+        if (!db) { mError = "setMaterialCustomPiece: the material has no datablock"; return false; }
+        if (path.empty()) {
+            db->setCustomPieceFile(Ogre::BLANKSTRING, Ogre::BLANKSTRING, ogrePieceStage(stage));
+            rec.customPiece[slot].clear();
+            applyClockProperty(db, rec);
+            return true;
+        }
+        const size_t sep = path.find_last_of("/\\");
+        const std::string dir  = sep == std::string::npos ? "." : path.substr(0, sep);
+        const std::string file = sep == std::string::npos ? path : path.substr(sep + 1);
+        Ogre::ResourceGroupManager &rgm = Ogre::ResourceGroupManager::getSingleton();
+        static const char *kGroup = "Jahshaka";
+        if (!rgm.resourceGroupExists(kGroup)) rgm.createResourceGroup(kGroup, false);
+        if (!mPieceDirs.count(dir)) {
+            rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
+            mPieceDirs.insert(dir);
+        }
+        if (!rgm.resourceExists(kGroup, file)) {
+            mError = "setMaterialCustomPiece: piece file not found: " + path;
+            return false;
+        }
+        // Throws (and is caught below) when this NAME was already registered
+        // with different content — see the header comment. Also flushes the
+        // material's renderables, which is what makes the new shader take.
+        db->setCustomPieceFile(file, kGroup, ogrePieceStage(stage));
+        rec.customPiece[slot] = path;
+        applyClockProperty(db, rec);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+void OgreScene::setShaderTime(float seconds) {
+    mShaderTime = seconds;
+    // Read by FogHlmsListener::preparePassBuffer, on the render thread, once
+    // per pass. Nothing is flushed and nothing recompiles — the value lands in
+    // the pass constant buffer the next time one is built.
+    FogHlmsListener::setSceneTime(mSceneMgr, seconds);
+}
+
+float OgreScene::shaderTime() const { return mShaderTime; }
+
+// OUR OWN datablock property, and the isolation contract in one function:
+// `jah_shader_clock` is what our Hlms library gates the pass-buffer clock
+// declaration on, so a material with no generated piece declares nothing, reads
+// nothing, and produces byte-identical shader source to a build in which none
+// of this existed. Set when a piece is bound, cleared when the last one goes.
+void OgreScene::applyClockProperty(Ogre::HlmsPbsDatablock *db, const MaterialRec &rec) {
+    const bool wanted = !rec.customPiece[0].empty() || !rec.customPiece[1].empty();
+    const Ogre::HlmsDatablock::CustomPropertyVec &current = db->getCustomProperties();
+    const bool have = !current.empty();
+    if (wanted == have) return;   // setCustomProperties flushes renderables: idempotent or nothing
+    Ogre::HlmsDatablock::CustomPropertyVec props;
+    if (wanted) props.emplace_back("jah_shader_clock", 1);
+    db->setCustomProperties(props, true);
+}
+
+void OgreScene::bindTrackedPieces(const MaterialRec &rec) {
+    if (rec.unlit) return;
+    auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
+        hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName)));
+    if (!db) return;
+    for (size_t slot = 0; slot < 2; ++slot) {
+        if (rec.customPiece[slot].empty()) continue;
+        const std::string &path = rec.customPiece[slot];
+        const size_t sep = path.find_last_of("/\\");
+        const std::string file = sep == std::string::npos ? path : path.substr(sep + 1);
+        db->setCustomPieceFile(file, "Jahshaka",
+                               ogrePieceStage(slot == 1 ? CustomPieceStage::VertexPreTransform
+                                                        : CustomPieceStage::PixelPreLights));
+    }
+    applyClockProperty(db, rec);
 }
 
 bool OgreScene::destroyMaterial(MaterialId id) {

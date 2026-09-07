@@ -181,6 +181,27 @@ enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides wit
 /// custom_ps_preLights hook cannot do it).
 enum class PbrTextureSlot { Albedo, Normal, Metalness, Roughness, Emissive };
 
+/// Where a GENERATED shader piece is spliced into the backend's shader
+/// (HLMS_ADOPTION P5). Two values, because two hook points is what the graph
+/// needs: one that rewrites the surface just before lighting is accumulated,
+/// and one that moves vertices before they are transformed.
+///
+/// Deliberately OUR OWN enum, not the backend's: the backend's stage list is
+/// six values wide (its own shader-stage vocabulary) and its numeric values
+/// are private to it. These two are the only ones the material system can
+/// target, and naming them after WHAT THEY DO rather than after a shader stage
+/// is what keeps the graph's vocabulary independent of the renderer's.
+enum class CustomPieceStage {
+    /// Pixel shader, immediately before the first light is accumulated. At this
+    /// point the surface is fully assembled — base colour, specular/F0,
+    /// roughness and the TBN-transformed normal — and nothing has been lit yet,
+    /// which is exactly the semantics of the graph's master surface sockets.
+    PixelPreLights,
+    /// Vertex shader, before the world/view/projection transform. The graph's
+    /// Vertex Offset / Vertex Extrusion sockets, which no CPU bake can express.
+    VertexPreTransform
+};
+
 /// How PbrParams::alpha / alphaCutoff are interpreted (glTF's OPAQUE/MASK/BLEND,
 /// plus Glass for authored transparency that should still reflect).
 enum class PbrAlphaMode {
