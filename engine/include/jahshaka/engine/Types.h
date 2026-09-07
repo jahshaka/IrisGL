@@ -1120,10 +1120,45 @@ struct PostFxDesc {
     /// SMAA: -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra. Runs AFTER tonemapping.
     int   smaaPreset = -1;
     /// Screen-space reflections: 0 off, 1 half-resolution rays, 2 full.
-    /// NOT IMPLEMENTED YET — the field and the chain's plumbing exist, but the
-    /// backend builds no SSR passes, so a non-zero value renders as if it were
-    /// zero. World Modes declares the row unavailable for the same reason.
+    ///
+    /// The one reflection source that knows about things that MOVE. A depth +
+    /// normal + roughness prepass feeds a ray march against this frame's depth
+    /// buffer and the PREVIOUS frame's colour; the result is handed to HlmsPbs
+    /// as the pass' `ssrTexture` and upstream's own shader lerps it into the
+    /// specular environment term before planar reflections and ambient
+    /// (`hlms_use_ssr`). Where the march found nothing — off screen, occluded,
+    /// too rough, pointing back at the camera — the confidence is zero and the
+    /// pixel keeps exactly the probe/sky answer it has today.
+    ///
+    /// COSTS A SECOND FULL SCENE TRAVERSAL (the prepass), which is why the
+    /// World Modes table never turns it on below High.
+    ///
+    /// KNOWN v1 LIMITATION, and it is upstream's architecture rather than ours:
+    /// while SSR is on, the main scene pass shades from the prepass G-buffer
+    /// (`use_prepass`), so an ALPHA-BLENDED material — Fade or Transparent,
+    /// NOT Refractive, which renders in its own later pass and is unaffected —
+    /// overwrites the G-buffer normal of whatever is behind it, and that
+    /// surface is then shaded with the blended material's normal. Scenes that
+    /// lean on translucent panes should leave SSR off until the prepass learns
+    /// a visibility split.
     int   ssr = 0;
+    /// How far a reflection ray may travel, in world units. Beyond this the
+    /// march gives up and the pixel falls back to the probe/sky reflection.
+    /// Scene-scale dependent: the default suits a room, not a landscape.
+    float ssrMaxDistance = 25.0f;
+    /// How thick the depth buffer's surfaces are assumed to be, in world units.
+    /// A depth buffer records a surface's FRONT and nothing else, so a crossing
+    /// is only accepted when the ray passed within this much of it — too small
+    /// and reflections drop out behind objects, too large and they smear.
+    float ssrThickness = 0.5f;
+    /// Above this roughness a surface shows no screen-space reflection at all
+    /// (with a ramp starting at half the value). V1 has no roughness-varying
+    /// blur, so the cutoff is what keeps a matte floor from showing a sharp
+    /// mirror image; raising it without a blur chain looks wrong, not better.
+    float ssrRoughnessCutoff = 0.35f;
+    /// A straight multiplier on the composite confidence. 1.0 is physical —
+    /// the reflection replaces the probe answer where the march is confident.
+    float ssrIntensity = 1.0f;
     /// Re-render refractive materials (alphaMode Refractive) in a second pass
     /// that samples the opaque result. Costs nothing when no material is.
     bool  refractions = false;
@@ -1141,7 +1176,11 @@ struct PostFxDesc {
                bloomThreshold == o.bloomThreshold && ssao == o.ssao &&
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
                ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
-               ssr == o.ssr && refractions == o.refractions &&
+               ssr == o.ssr && ssrMaxDistance == o.ssrMaxDistance &&
+               ssrThickness == o.ssrThickness &&
+               ssrRoughnessCutoff == o.ssrRoughnessCutoff &&
+               ssrIntensity == o.ssrIntensity &&
+               refractions == o.refractions &&
                allowOffscreen == o.allowOffscreen;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }

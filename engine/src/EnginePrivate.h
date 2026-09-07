@@ -243,6 +243,10 @@ struct ChainDesc {
     float ssaoRadius = 2.0f;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
+    float ssrMaxDistance = 25.0f;   ///< ray length, world units
+    float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
+    float ssrRoughnessCutoff = 0.35f;
+    float ssrIntensity = 1.0f;
     bool  refractions = false;
 
     // ---- Letterbox (CAMERAS_SPEC §7.4) ----
@@ -390,6 +394,12 @@ void destroySsao(Ogre::Root *root);
 void updateSsao(Ogre::Camera *camera, unsigned aoWidth, unsigned aoHeight,
                 float kernelRadius, float powerScale);
 void initSmaa(Ogre::Root *root, int preset);
+/// The SSR march's per-frame uniforms: the camera's linearization constants and
+/// the left-handed view→texture-space matrix the ray march projects with, plus
+/// the tuning the description carries. Built exactly like Ogre's own
+/// ScreenSpaceReflections::update — the matrix surgery there is not obvious and
+/// is not ours to reinvent.
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc);
 /// One call per frame from the primary view: recompiles what changed and pushes
 /// every per-frame uniform the enabled effects need.
 void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,

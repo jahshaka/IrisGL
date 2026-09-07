@@ -120,6 +120,16 @@ constexpr const char *kAoApplied   = "jahAoApplied";
 /// RTV whose depth attachment is this texture.
 constexpr const char *kDepth    = "jahDepth";
 constexpr const char *kSceneRtv = "jahSceneRtv";
+/// SSR. The prepass' second G-buffer (HlmsPbs writes shadow term in x and
+/// packed roughness in y), the RTV the prepass renders through, the ray march's
+/// output (hit coordinates, at half or full resolution), the full-resolution
+/// reflection HlmsPbs samples, and the one-frame colour history the resolve
+/// reads. See the SSR block in build() for the whole shape and why.
+constexpr const char *kSsrShadowRough = "jahSsrShadowRough";
+constexpr const char *kSsrPrepassRtv  = "jahSsrPrepassRtv";
+constexpr const char *kSsrRays        = "jahSsrRays";
+constexpr const char *kSsrReflection  = "jahSsrReflection";
+constexpr const char *kSsrPrev        = "jahSsrPrev";
 /// SMAA: LDR edge detection AFTER tonemapping, so it needs its own full-res
 /// sRGB target to work on before the result reaches the window.
 constexpr const char *kLdr      = "jahLdr";
@@ -446,8 +456,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
     msaa = false;
-    n->setNumLocalTextureDefinitions(21);   // 20 + the letterbox swatch
+    n->setNumLocalTextureDefinitions(26);   // 25 + the letterbox swatch
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+
+    // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
+    // once here because half the shape below reads it.
+    const bool ssr = desc.ssr > 0;
 
     // The scene target. RGBA16_FLOAT whenever HDR is on — that is the whole
     // point: light values above 1.0 survive to the tonemapper. Without HDR the
@@ -515,15 +529,74 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         if (msaa) td->fsaa = std::to_string(desc.samples);
     }
 
-    if (desc.ssao) {
-        // The main pass gains a SECOND colour attachment. Ogre throws at pass
-        // construction if mGenNormalsGBuf is set on an RTV with fewer than two
-        // colour attachments (OgreCompositorPassScene.cpp:92-99).
+    // THE NORMALS G-BUFFER, and it is ONE texture for two effects. SSAO gets it
+    // from the main pass as a second colour attachment (mGenNormalsGBuf); SSR
+    // gets it from its prepass, which writes normals AND roughness. When both
+    // are on the prepass wins and the main pass writes no normals at all — the
+    // content is identical (HlmsPbs emits `pixelData.normal * 0.5 + 0.5` in both
+    // paths, 800.PixelShader_piece_ps.any:978 vs :988), and asking the main pass
+    // for a second attachment it does not need is pure bandwidth.
+    if (desc.ssao || ssr) {
+        auto *td = addTex(n, kGBufNormals, Ogre::PFG_R10G10B10A2_UNORM);
+        if (msaa) td->fsaa = std::to_string(desc.samples);
+        syncRtvDepth(n, kGBufNormals, td);
+    }
+
+    if (ssr) {
+        // The prepass' SECOND G-buffer: HlmsPbs writes the shadow term in x and
+        // roughness in y, packed as (r - 0.02) * 1.02040816. RG16_UNORM is the
+        // sample's own format for it and there is no reason to differ.
+        addTex(n, kSsrShadowRough, Ogre::PFG_RG16_UNORM);
+        // The prepass renders colour into the two G-buffers and depth into the
+        // SAME depth texture the main pass then depth-TESTS against read-only
+        // (setUseDepthPrePass sets mReadOnlyDepth). Sharing it is not a saving,
+        // it is the contract: the main pass writes no depth, so every fragment
+        // it draws has to find its own exact depth already there.
         {
-            auto *td = addTex(n, kGBufNormals, Ogre::PFG_R10G10B10A2_UNORM);
-            if (msaa) td->fsaa = std::to_string(desc.samples);
-            syncRtvDepth(n, kGBufNormals, td);
+            Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kSsrPrepassRtv);
+            Ogre::RenderTargetViewEntry normals, shadowRough;
+            normals.textureName = kGBufNormals;
+            shadowRough.textureName = kSsrShadowRough;
+            rtv->colourAttachments.push_back(normals);
+            rtv->colourAttachments.push_back(shadowRough);
+            rtv->depthAttachment.textureName = kDepth;
+            rtv->stencilAttachment.textureName = kDepth;
+            rtv->preferDepthTexture = true;
         }
+        // The march's output: hit coordinates, not colour. RGBA16_UNORM because
+        // every channel is a [0,1] quantity (two texture coordinates and two
+        // fades) and 16 bits of a UV is a quarter of a pixel at 16K.
+        //
+        // HALF RESOLUTION IS THE QUALITY ROW. `ssr == 1` marches a quarter of
+        // the pixels; `ssr == 2` marches all of them. Nothing else in the graph
+        // changes, which is why the row is a scale factor and not a shape.
+        {
+            const float s = desc.ssr >= 2 ? 1.0f : 0.5f;
+            addTex(n, kSsrRays, Ogre::PFG_RGBA16_UNORM, 0u, 0u, s, s);
+        }
+        // What HlmsPbs actually samples. FULL resolution, always: the Pbs
+        // shader does OGRE_Load2D( ssrTexture, iFragCoord, 0 ), i.e. an
+        // unfiltered fetch at the fragment's own pixel, so a smaller texture
+        // would read the wrong texel rather than a blurrier one.
+        // RGBA16_FLOAT because the rgb is scene RADIANCE and, with HDR on, may
+        // legitimately exceed 1.
+        addTex(n, kSsrReflection, Ogre::PFG_RGBA16_FLOAT);
+        // The one-frame colour history. keep_content (RenderToTexture rather
+        // than the default DiscardableContent) for exactly the reason the HDR
+        // luminance history needs it: it is written at the END of a frame and
+        // read at the START of the next one, and a discardable texture nothing
+        // wrote this frame is Undefined to the barrier solver.
+        //
+        // Its format follows the scene target's so the copy at the end of the
+        // frame is an exact one.
+        {
+            auto *td = addTex(n, kSsrPrev,
+                              desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+            td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+        }
+    }
+
+    if (desc.ssao) {
         // Half-res depth, exactly the sample's layout: the AO march is the
         // expensive part and it reads a downsampled MAX depth.
         {
@@ -587,13 +660,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     // The view the scene pass renders through when it needs more than a plain
     // colour target: a named depth attachment, and for SSAO a second colour
-    // attachment for the normals G-buffer.
+    // attachment for the normals G-buffer — unless SSR's prepass already filled
+    // it (see the note on kGBufNormals above).
     if (namedDepth) {
         Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kSceneRtv);
         Ogre::RenderTargetViewEntry colour0;
         colour0.textureName = kRt0;
         rtv->colourAttachments.push_back(colour0);
-        if (desc.ssao) {
+        if (desc.ssao && !ssr) {
             Ogre::RenderTargetViewEntry colour1;
             colour1.textureName = kGBufNormals;
             rtv->colourAttachments.push_back(colour1);
@@ -623,6 +697,92 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         c->mProfilingId = "Jahshaka HDR luminance seed";
     }
 
+    // -----------------------------------------------------------------------
+    // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6).
+    //
+    // WHY THERE IS A SECOND SCENE TRAVERSAL, stated once so nobody tries to
+    // remove it: the reflection has to EXIST BEFORE the pass that shades with
+    // it. HlmsPbs consumes it inside its pixel shader —
+    //     hlms_use_ssr: envColourS = lerp( envColourS, ssr.rgb, ssr.w )
+    // (800.PixelShader_piece_ps.any:927) — and the property only appears in
+    // PrePassUse mode with an ssr texture bound (OgreHlms.cpp:3748-3767). So
+    // the frame is: prepass writes normals + roughness + depth, the march reads
+    // them, the resolve turns hits into radiance, and only then does the real
+    // scene pass run and composite. That ordering is Ogre's, not a choice of
+    // ours, and it is also why the colour the resolve samples is the PREVIOUS
+    // frame's (there is no other one yet).
+    //
+    // WHAT IS OURS: the two quads and their shaders (media/Hlms/Jahshaka/
+    // JahSsr*), a deliberately simpler marcher than the sample's — no
+    // reprojection matrix, no compute colour history, no mip chain — plus the
+    // resolution row and the roughness cutoff. WHAT IS NOT: the composite.
+    //
+    // MSAA never reaches here (the chain forces 1x, see the block above), which
+    // deletes the entire `use_prepass_msaa` half of upstream's recipe: no
+    // explicit-resolve G-buffers, no depth resolve, no per-subsample coverage
+    // test in the Pbs shader.
+    if (ssr) {
+        // The colour history, seeded ONCE. Without this the first frame's
+        // resolve samples an Undefined texture; with it, the first frame simply
+        // reflects black and the second is correct.
+        {
+            Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrev);
+            t->setNumPasses(1);
+            auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+            c->mNumInitialPasses = 1;
+            c->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 1.0f));
+            c->mProfilingId = "Jahshaka SSR history seed";
+        }
+        // THE PREPASS. Same camera, same shadow node and — critically — the
+        // same render-queue range as the opaque pass below, because that pass
+        // depth-tests read-only against what this one wrote: a fragment the
+        // prepass never drew has no depth to be equal to.
+        {
+            Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrepassRtv);
+            t->setNumPasses(1);
+            auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+            p->mPrePassMode = Ogre::PrePassCreate;
+            p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName)
+                                          : Ogre::IdString();
+            // Clear to white, the sample's value: an unwritten normals texel
+            // decodes to (1,1,1) rather than (-1,-1,-1), and the march rejects
+            // it by DEPTH anyway (nothing was drawn, so the depth is still the
+            // clear value — the test that ogre-patch 0011 taught SSAO).
+            p->setAllClearColours(Ogre::ColourValue::White);
+            p->setAllLoadActions(Ogre::LoadAction::Clear);
+            p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            p->mStoreActionColour[1] = Ogre::StoreAction::Store;
+            p->mStoreActionDepth     = Ogre::StoreAction::Store;
+            p->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+            p->mFirstRQ = 0u;
+            p->mLastRQ  = desc.refractions ? kRefractiveRenderQueue : kOverlayRenderQueue;
+            p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
+            p->mProfilingId = "Jahshaka SSR prepass";
+            // A letterboxed view's G-buffer has to line up with its image.
+            if (desc.letterbox) inset(handlesOut, p);
+        }
+        // THE MARCH. Half or full resolution per the quality row; the frustum
+        // corners are what let the shader rebuild a view-space position from
+        // one depth fetch instead of an inverse projection per pixel.
+        {
+            auto *q = addQuad(n, kSsrRays, "Jahshaka/SsrRayMarch", "Jahshaka SSR rays");
+            q->addQuadTextureSource(0, kDepth);
+            q->addQuadTextureSource(1, kGBufNormals);
+            q->addQuadTextureSource(2, kSsrShadowRough);
+            q->mFrustumCorners = Ogre::CompositorPassQuadDef::VIEW_SPACE_CORNERS_NORMALIZED_LH;
+            q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        }
+        // THE RESOLVE, always full resolution — HlmsPbs fetches this one at the
+        // fragment's own pixel.
+        {
+            auto *q = addQuad(n, kSsrReflection, "Jahshaka/SsrResolve", "Jahshaka SSR resolve");
+            q->addQuadTextureSource(0, kSsrRays);
+            q->addQuadTextureSource(1, kSsrShadowRough);
+            q->addQuadTextureSource(2, kSsrPrev);
+            q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        }
+    }
+
     // The opaque scene pass.
     {
         const char *sceneTarget = namedDepth ? kSceneRtv : kRt0;
@@ -641,19 +801,39 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mLoadActionColour[0] = Ogre::LoadAction::Load;   // keep the bars
             inset(handlesOut, p);
         }
+        // WITH SSR THE DEPTH IS THE PREPASS'. setUseDepthPrePass sets
+        // mReadOnlyDepth (OgreCompositorPassSceneDef.h:232-241), so this pass
+        // writes no depth at all and every fragment it draws has to find its
+        // own value already in the buffer — clearing it here would throw that
+        // away and the frame would come out empty. Loading it also buys exact
+        // early-Z for free, which is most of what pays for the extra traversal.
+        if (ssr) p->mLoadActionDepth = Ogre::LoadAction::Load;
         // With refractions the opaque result must exist BOTH as multisample
         // (the refractive pass keeps rendering into a clone of it) and resolved
         // (that same pass samples it) — the sample's "store_and_resolve".
         p->mStoreActionColour[0] = (desc.refractions && msaa)
                                        ? Ogre::StoreAction::StoreAndMultisampleResolve
                                        : Ogre::StoreAction::Store;
-        if (desc.ssao) p->mStoreActionColour[1] = Ogre::StoreAction::Store;
+        if (desc.ssao && !ssr) p->mStoreActionColour[1] = Ogre::StoreAction::Store;
         // Depth survives the pass: SSAO marches it, refraction copies it, and
         // the refractive pass depth-tests against it.
-        p->mStoreActionDepth   = (desc.ssao || desc.ssr || desc.refractions)
+        p->mStoreActionDepth   = (desc.ssao || ssr || desc.refractions)
                                      ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
         p->mStoreActionStencil = Ogre::StoreAction::DontCare;
-        p->mGenNormalsGBuf = desc.ssao;
+        // Ignored in a prepass mode (the flag's own documentation says so), and
+        // with SSR on the RTV has one colour attachment anyway.
+        p->mGenNormalsGBuf = desc.ssao && !ssr;
+        if (ssr) {
+            // THE COMPOSITE. Two G-buffers, the depth (only the MSAA path's
+            // shader reads it, but the sample passes it and so do we), and the
+            // reflection. This one call is what puts `hlms_use_ssr` into every
+            // HlmsPbs shader of this pass.
+            Ogre::IdStringVec prePassTextures;
+            prePassTextures.push_back(Ogre::IdString(kGBufNormals));
+            prePassTextures.push_back(Ogre::IdString(kSsrShadowRough));
+            p->setUseDepthPrePass(prePassTextures, Ogre::IdString(kDepth),
+                                  Ogre::IdString(kSsrReflection));
+        }
         p->mFirstRQ = 0u;
         // Stop before the refractive queue only when there IS a refraction pass
         // to pick those items up; otherwise they render here, as plain glass.
@@ -719,6 +899,20 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mProfilingId = "Jahshaka refractives";
         }
         sceneResult = kRefractOut;
+    }
+
+    // SSR's colour history for the NEXT frame — copied here, deliberately, and
+    // not at the end of the chain: what a reflection needs is the scene's
+    // LINEAR RADIANCE, which is what HlmsPbs' `envColourS` is measured in. The
+    // tonemapped, bloomed, SMAA'd image further down is a picture, not a
+    // radiance field, and lerping one into a specular term double-grades every
+    // reflection. Refraction is already folded in at this point (glass reflects
+    // what is behind it, correctly); ambient occlusion is not, which is the
+    // right way round — AO is a shading term of the RECEIVING surface.
+    if (ssr) {
+        auto *q = addQuad(n, kSsrPrev, "Ogre/Copy/4xFP32", "Jahshaka SSR history");
+        q->addQuadTextureSource(0, sceneResult);
+        q->mStoreActionColour[0] = Ogre::StoreAction::Store;
     }
 
     // SSAO: half-res depth downsample -> AO march -> separable blur (which is
@@ -1511,6 +1705,56 @@ void initSmaa(Ogre::Root *root, int preset) {
     gSmaaPreset = preset;
 }
 
+// ---- SSR ------------------------------------------------------------------
+// The march needs two things per frame that no auto-param provides: the depth
+// linearization constants, and a matrix that takes a LEFT-HANDED view-space
+// point straight to texture space.
+//
+// THE MATRIX SURGERY IS VERBATIM FROM OGRE'S OWN HELPER
+// (Samples/2.0/Common/src/Utils/ScreenSpaceReflections.cpp:55-72) and every
+// line of it earns its place:
+//   1. row 2 is averaged with row 3 — the API-independent projection matrix
+//      Camera::getProjectionMatrix() returns maps depth to [-1,1]; this maps it
+//      to [0,1]. Our shader only reads xy/w, so this is fidelity to the source
+//      rather than necessity, and keeping it means the matrix is reusable if a
+//      later phase does want depth out of it.
+//   2. column 2 is negated — right-handed to left-handed. THIS one is
+//      load-bearing: it is what makes w come out as +z for a point in front of
+//      the camera, which is the convention the frustum corners
+//      (VIEW_SPACE_CORNERS_NORMALIZED_LH) and therefore the whole march use.
+//   3. left-multiply by the clip→image matrix — the *0.5+0.5 and the y flip, so
+//      the shader divides by w and has a texture coordinate, full stop.
+void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
+    if (!camera || desc.ssr <= 0) return;
+    Ogre::Pass *march = materialPass("Jahshaka/SsrRayMarch");
+    if (!march) return;
+
+    static const Ogre::Matrix4 kClipToImage(0.5,  0.0, 0.0, 0.5,
+                                            0.0, -0.5, 0.0, 0.5,
+                                            0.0,  0.0, 1.0, 0.0,
+                                            0.0,  0.0, 0.0, 1.0);
+    Ogre::Matrix4 m = camera->getProjectionMatrix();
+    for (int i = 0; i < 4; ++i) m[2][i] = (m[2][i] + m[3][i]) * 0.5f;   // depth [-1,1] -> [0,1]
+    for (int i = 0; i < 4; ++i) m[i][2] = -m[i][2];                     // RH -> LH
+    m = kClipToImage * m;
+
+    Ogre::GpuProgramParametersSharedPtr ps = march->getFragmentProgramParameters();
+    ps->setNamedConstant("projectionParams", camera->getProjectionParamsAB());
+    ps->setNamedConstant("viewToTextureSpaceMatrix", m);
+    // The step budget IS the quality row's other half: half-resolution rays get
+    // 48 steps, full-resolution rays 96. Both are inside the shader's
+    // compile-time loop bound of 128.
+    ps->setNamedConstant("rayParams",
+                         Ogre::Vector4(desc.ssrMaxDistance, desc.ssrThickness,
+                                       desc.ssr >= 2 ? 96.0f : 48.0f,
+                                       desc.ssrRoughnessCutoff));
+
+    if (Ogre::Pass *resolve = materialPass("Jahshaka/SsrResolve"))
+        resolve->getFragmentProgramParameters()->setNamedConstant(
+            "resolveParams",
+            Ogre::Vector4(desc.ssrRoughnessCutoff, desc.ssrIntensity, 0.0f, 0.0f));
+}
+
 // ---- The per-frame push ---------------------------------------------------
 void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                   unsigned viewWidth, unsigned viewHeight) {
@@ -1529,6 +1773,7 @@ void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                    desc.ssaoRadius, desc.ssaoPower);
     }
     if (desc.smaaPreset >= 0) initSmaa(root, desc.smaaPreset);
+    if (desc.ssr > 0) updateSsr(camera, desc);
 }
 
 }   // namespace chain

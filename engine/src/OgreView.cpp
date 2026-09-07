@@ -68,6 +68,10 @@ ChainDesc OgreView::chainDesc() const {
     d.ssaoRadius     = mPostFx.ssaoRadius;
     d.smaaPreset     = mPostFx.smaaPreset;
     d.ssr            = mPostFx.ssr;
+    d.ssrMaxDistance = mPostFx.ssrMaxDistance;
+    d.ssrThickness   = mPostFx.ssrThickness;
+    d.ssrRoughnessCutoff = mPostFx.ssrRoughnessCutoff;
+    d.ssrIntensity   = mPostFx.ssrIntensity;
     d.refractions    = mPostFx.refractions;
     return d;
 }
