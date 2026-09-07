@@ -15,6 +15,11 @@
 //    generation instead of maintaining an LRU we would have to get right.
 //  * survive doubt. Every failure path ends in "delete the directory, run cold".
 #include "EnginePrivate.h"
+// JAHSHAKA_ENGINE_BUILD_ID: a hash of this library's own sources, regenerated
+// on every BUILD (irisgl/cmake/EngineBuildId.cmake) rather than at configure
+// time — an incremental edit to OgreEngine.cpp changes what the generated
+// shaders mean and must therefore invalidate the cache (LIGHTING_FIX fix 10).
+#include "jahshaka_engine_build_id.h"
 
 #include <OgreGpuProgramManager.h>
 #include <OgreHlmsDiskCache.h>

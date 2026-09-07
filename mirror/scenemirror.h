@@ -272,6 +272,19 @@ public:
     void setGridColours(const jahshaka::engine::Colour &minor,
                         const jahshaka::engine::Colour &major);
 
+    /// THE GI VOLUME OVERLAY (LIGHTING_FIX fix 9). Draws the two boxes
+    /// `Scene::giStatus()` reports — the lit (voxel) volume and, in the hybrid,
+    /// the reflection-probe region — as editor-helper wireframes.
+    ///
+    /// It exists because the lit volume is the single most consequential thing
+    /// in a GI scene that a user cannot see: an object outside it gets no
+    /// bounce and no VCT ambient, and the only symptom is "that corner looks
+    /// wrong". Off by default; `editor.setOverlays({giVolume: true})` is the
+    /// verb, and the boxes carry kHelperBit so they can never appear in a probe
+    /// capture or a shadow map. Draws nothing at all while GI is off.
+    void setGiVolumeOverlay(bool visible);
+    bool giVolumeOverlay() const { return mGiVolumeVisible; }
+
     /// The legacy Preetham "realistic" sky, CPU-baked to an equirect image —
     /// exactly realisticsky.frag's math per direction. Public for tests.
     /// CPU bake of the analytic (Preetham) sky into an equirect image.
@@ -516,6 +529,7 @@ private:
     jahshaka::engine::TextureId iconTextureFor(const QString &path);
     void syncHighlight();
     void syncGrid();
+    void syncGiVolume();
     jahshaka::engine::MeshId wireMeshFor(int kind);
     /// The per-sync document walk. Takes a RAW node and iterates children
     /// through iris::graph rather than through SceneNode::children(), which
@@ -759,6 +773,14 @@ private:
     jahshaka::engine::NodeId mGridNode = 0, mGridMinorNode = 0, mGridMajorNode = 0;
     jahshaka::engine::MeshId mGridMinorMesh = 0, mGridMajorMesh = 0;
     jahshaka::engine::MaterialId mGridMinorMaterial = 0, mGridMajorMaterial = 0;
+    // The GI volume overlay: one node per box, rebuilt only when the reported
+    // bounds actually move (a GI rebuild is rare; this sync runs every frame).
+    bool mGiVolumeVisible = false;
+    jahshaka::engine::NodeId mGiVolLitNode = 0, mGiVolProbeNode = 0;
+    jahshaka::engine::MeshId mGiVolLitMesh = 0, mGiVolProbeMesh = 0;
+    jahshaka::engine::MaterialId mGiVolLitMaterial = 0, mGiVolProbeMaterial = 0;
+    jahshaka::engine::Vec3 mGiVolLitMin, mGiVolLitMax, mGiVolProbeMin, mGiVolProbeMax;
+    bool mGiVolBuilt = false;
     iris::SceneNodePtr mHighlighted;
     /// One highlight shell per mesh under the highlighted node: selecting an
     /// asset's root outlines the whole subtree. Pooled and reused across frames.

@@ -47,6 +47,51 @@ void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
     float sh[27] = { 0 };
     for (int c = 0; c < 3; ++c) { sh[c] = c0[c]; sh[3 + c] = c1[c]; }
     setAmbientSh(sh);
+    // ...but VCT gets the RADIANCE pair, not the 1/pi one (LIGHTING_FIX fix 3).
+    // The scale factor above exists to reproduce HlmsPbs' own pi discrepancy
+    // between its AmbientFixed and AmbientHemisphere paths; VctLighting has no
+    // such split — its ambient is added to the cone-trace result as plain
+    // radiance (`light.xyz += ambient * light.w`, Vct_piece_ps.any) — so pushing
+    // the darkened value there would make a VCT scene's ambient pi times darker
+    // than the same scene without VCT. setAmbientSh has already recorded the
+    // (possibly scaled) SH-derived pair; overwrite it with the true one.
+    mAmbientRadiance[0] = upper;
+    mAmbientRadiance[1] = lower;
+    applyVctAmbient();
+}
+
+// THE VCT AMBIENT (LIGHTING_FIX fix 3 / F-V1). Ogre's VctLighting is born with
+// both hemispheres at BLACK (OgreVctLighting.cpp:106-107) and nothing in this
+// engine ever set them, so every surface inside a VCT volume lost the scene's
+// ambient entirely: the PBS ambient pieces are wrapped in
+// `if( vctSpecular.w == 0 )` — "only use ambient lighting if the object is
+// outside any VCT probe" (AmbientLighting_piece_ps.any) — and the replacement
+// inside the volume is VctLighting's own pair. Zero in, zero out. It is also
+// why probe captures came out brighter than the world they sampled (F-V3): the
+// capture pass and the main pass disagreed about the ambient term.
+//
+// ALWAYS A GENUINE PAIR. `VctLighting::needsAmbientHemisphere()` is a memcmp of
+// the two colours (OgreVctLighting.cpp:1010-1013) and its result becomes the
+// `vct_ambient_sphere` shader property (OgreHlmsPbs.cpp:1777) — so an ambient
+// whose upper and lower happen to be equal for one frame of a colour drag
+// compiles a DIFFERENT shader for that frame and back again on the next. The
+// epsilon below costs nothing visually (it is 1e-6 of radiance) and pins the
+// variant, which is worth far more than the exactness it gives up.
+void OgreScene::applyVctAmbient() {
+    if (!mVctLighting) return;
+    JAH_TRY {
+        static const float kHemiEpsilon = 1e-6f;
+        const Colour &u = mAmbientRadiance[0], &l = mAmbientRadiance[1];
+        mVctLighting->setAmbient(
+            Ogre::ColourValue(u.r, u.g, u.b + kHemiEpsilon, 1.0f),
+            Ogre::ColourValue(l.r, l.g, l.b, 1.0f));
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: vct ambient upper " + std::to_string(u.r) + "," + std::to_string(u.g) +
+                "," + std::to_string(u.b) + " lower " + std::to_string(l.r) + "," +
+                std::to_string(l.g) + "," + std::to_string(l.b) + " hemi=" +
+                (mVctLighting->needsAmbientHemisphere() ? "1" : "0"));
+    } JAH_CATCH(mError, );
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
@@ -81,6 +126,13 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         // already gathered from another source of information".
         const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
         mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, 1.0f, 0u);
+        // The VCT arm's own copy of the same ambient, in RADIANCE units — which
+        // for an SH push (the sky path) is what the coefficients already are.
+        // f(n) = c0 + c1 * n.y, so the poles are c0 +- c1. setAmbient overwrites
+        // this afterwards with its unscaled pair; see applyVctAmbient.
+        mAmbientRadiance[0] = Colour(sh[0] + sh[3], sh[1] + sh[4], sh[2] + sh[5], 1.0f);
+        mAmbientRadiance[1] = Colour(sh[0] - sh[3], sh[1] - sh[4], sh[2] - sh[5], 1.0f);
+        applyVctAmbient();
     } JAH_CATCH(mError, );
 }
 
@@ -277,7 +329,31 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         // broken — the overexposure it fixed was side-lit faces, not the scale.)
         L->setPowerScale(d.intensity * Ogre::Math::PI);
         if (d.type != LightType::Directional) {
-            L->setAttenuationBasedOnRadius(std::max(d.range, 0.01f), 0.01f);
+            // THE AUTHORED RANGE IS THE RANGE (LIGHTING_FIX fix 4 / F-A1..A4).
+            //
+            // This used to be `setAttenuationBasedOnRadius(range, 0.01f)`, which
+            // takes the range as the radius of the falloff CURVE and then solves
+            // for the distance at which the light dims to 1% — and that distance
+            // is 14.1 times the number the user typed (OgreLight.cpp:194-217:
+            // q = 0.5/r^2, threshold 0.01 => mRange = sqrt(199) * r). So a light
+            // authored at range 5 lit out to 70 units, the Forward+ cut-off sat
+            // 14x too far away, and the range wire the editor draws at 5 was a
+            // decoration rather than a statement about the picture.
+            //
+            // Same curve, range authored: keep Ogre's own constants (the shader
+            // hardcodes the 0.5 numerator, so the curve must keep its 0.5
+            // constant term) and set mRange to R directly.
+            //
+            // KNOWN AND ACCEPTED CONSEQUENCE: the Forward+ fade now ramps across
+            // [0, R] instead of [0, 14.1R], so mid-range brightness drops
+            // measurably — the fade at d = R/2 goes from ~0.96 to 0.5. Any
+            // scene authored against the old 14x reach is dimmer and must be
+            // re-lit. MEASURED on the 203-suite gate: no shipped pixel suite
+            // moved, because every one of them lights with a DIRECTIONAL light,
+            // whose branch this does not touch. lights.falloff is the suite
+            // that pins the new curve.
+            const float r = std::max(d.range, 0.01f);
+            L->setAttenuation(r, 0.5f, 0.0f, 0.5f / (r * r));
         } else {
             // Ogre's default attenuation (const 0.5, quad 0.5) is never used to
             // SHADE a directional light, but Instant Radiosity attenuates its
@@ -287,9 +363,24 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             L->setAttenuation(std::numeric_limits<Ogre::Real>::max(), 1.0f, 0.0f, 0.0f);
         }
         if (d.type == LightType::Spot) {
-            const float outer = std::max(1.0f, std::min(d.spotAngleDegrees, 179.0f));
-            const float inner = outer * (1.0f - std::min(std::max(d.spotSoftness, 0.0f), 0.99f));
-            L->setSpotlightRange(Ogre::Degree(inner), Ogre::Degree(outer), 1.0f);
+            // HALF ANGLE IN, FULL ANGLE OUT (LIGHTING_FIX fix 5 / F-S1).
+            // `spotAngleDegrees` is the half angle — the document's meaning
+            // since forever, and the one the editor's cone wire is built from —
+            // while `setSpotlightRange` wants the full apex angle. Doubling here
+            // is the whole of the fix: without it every spot rendered a cone
+            // half the width of the wire drawn around it.
+            //
+            // Clamped to [1, 85] BEFORE doubling, i.e. a full cone in [2, 170].
+            // 85 rather than 89: past ~90 of half angle
+            // `getSpotlightTanHalfAngle()` runs away and Forward+ falls back to
+            // its conservative OBB test for the light (OgreForwardClustered.cpp:
+            // 632), and a >170 degree "spot" is a point light with extra cost.
+            const float halfDeg = std::min(std::max(d.spotAngleDegrees, 1.0f), 85.0f);
+            const float outerFull = 2.0f * halfDeg;
+            const float innerFull =
+                outerFull * (1.0f - std::min(std::max(d.spotSoftness, 0.0f), 0.99f));
+            L->setSpotlightRange(Ogre::Degree(innerFull), Ogre::Degree(outerFull),
+                                 std::max(d.spotFalloff, 0.0f));
         }
 
         // IES profile and area-light mask: assigned ONLY when the requested path

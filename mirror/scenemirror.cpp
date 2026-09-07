@@ -163,6 +163,7 @@ bool sameLight(const LightDesc &a, const LightDesc &b)
            a.colour.b == b.colour.b && a.colour.a == b.colour.a &&
            a.intensity == b.intensity && a.range == b.range &&
            a.spotAngleDegrees == b.spotAngleDegrees && a.spotSoftness == b.spotSoftness &&
+           a.spotFalloff == b.spotFalloff &&
            a.castShadows == b.castShadows &&
            a.rectWidth == b.rectWidth && a.rectHeight == b.rectHeight &&
            a.doubleSided == b.doubleSided && a.accurate == b.accurate &&
@@ -229,6 +230,14 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
     if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
     mGridBuiltSpacing = -1.0f;
+    // The GI volume overlay's two boxes (fix 9): same discipline as the grid.
+    if (mGiVolLitNode)   { mTarget->removeNode(mGiVolLitNode);   mGiVolLitNode = 0; }
+    if (mGiVolProbeNode) { mTarget->removeNode(mGiVolProbeNode); mGiVolProbeNode = 0; }
+    if (mGiVolLitMesh)   { mTarget->destroyMesh(mGiVolLitMesh);   mGiVolLitMesh = 0; }
+    if (mGiVolProbeMesh) { mTarget->destroyMesh(mGiVolProbeMesh); mGiVolProbeMesh = 0; }
+    if (mGiVolLitMaterial)   { mTarget->destroyMaterial(mGiVolLitMaterial);   mGiVolLitMaterial = 0; }
+    if (mGiVolProbeMaterial) { mTarget->destroyMaterial(mGiVolProbeMaterial); mGiVolProbeMaterial = 0; }
+    mGiVolBuilt = false;
     mHighlighted.clear();
     for (HighlightShell &s : mHighlightShells) if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
@@ -856,6 +865,90 @@ void SceneMirror::syncGrid()
         mGridBuiltExtent = mGridExtent;
     }
     mTarget->setNodeVisible(mGridNode, true);
+}
+
+// ---- the GI volume overlay (LIGHTING_FIX fix 9) -----------------------------
+
+void SceneMirror::setGiVolumeOverlay(bool visible)
+{
+    mGiVolumeVisible = visible;
+}
+
+namespace {
+/// The 12 edges of an axis-aligned box, as line-mesh vertex pairs.
+std::vector<Vec3> boxEdges(const Vec3 &mn, const Vec3 &mx)
+{
+    const Vec3 c[8] = {
+        Vec3(mn.x, mn.y, mn.z), Vec3(mx.x, mn.y, mn.z),
+        Vec3(mx.x, mn.y, mx.z), Vec3(mn.x, mn.y, mx.z),
+        Vec3(mn.x, mx.y, mn.z), Vec3(mx.x, mx.y, mn.z),
+        Vec3(mx.x, mx.y, mx.z), Vec3(mn.x, mx.y, mx.z) };
+    static const int e[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
+                                  {0,4},{1,5},{2,6},{3,7} };
+    std::vector<Vec3> pts;
+    pts.reserve(24);
+    for (const auto &pair : e) { pts.push_back(c[pair[0]]); pts.push_back(c[pair[1]]); }
+    return pts;
+}
+bool sameBox(const Vec3 &a0, const Vec3 &a1, const Vec3 &b0, const Vec3 &b1)
+{
+    return a0.x == b0.x && a0.y == b0.y && a0.z == b0.z &&
+           a1.x == b1.x && a1.y == b1.y && a1.z == b1.z;
+}
+bool degenerateBox(const Vec3 &mn, const Vec3 &mx)
+{
+    return !(mx.x > mn.x) || !(mx.y > mn.y) || !(mx.z > mn.z);
+}
+}  // namespace
+
+void SceneMirror::syncGiVolume()
+{
+    if (!mTarget) return;
+    // Nothing to draw, and nothing to ASK: giStatus() is cheap but it is still
+    // a call per frame, so the toggle short-circuits before it.
+    if (!mGiVolumeVisible) {
+        if (mGiVolBuilt) {
+            if (mGiVolLitNode)   mTarget->setNodeVisible(mGiVolLitNode, false);
+            if (mGiVolProbeNode) mTarget->setNodeVisible(mGiVolProbeNode, false);
+        }
+        return;
+    }
+    const jahshaka::engine::GiStatus st = mTarget->giStatus();
+    const bool haveLit = st.mode != jahshaka::engine::GiMode::Off &&
+                         !degenerateBox(st.boundsMin, st.boundsMax);
+    const bool haveProbe = haveLit && !degenerateBox(st.probeRegionMin, st.probeRegionMax);
+
+    if (!mGiVolLitNode) {
+        mGiVolLitNode = mTarget->createNode();
+        mGiVolProbeNode = mTarget->createNode();
+        if (!mGiVolLitNode || !mGiVolProbeNode) return;
+        // EDITOR HELPERS, marked at creation: these boxes describe where GI
+        // happens and must never be captured BY it.
+        mTarget->setNodeHelper(mGiVolLitNode, true);
+        mTarget->setNodeHelper(mGiVolProbeNode, true);
+        // Unlit, depth-tested, blended — the same treatment as the grid, so a
+        // box behind geometry reads as behind it.
+        mGiVolLitMaterial   = mTarget->createUnlitMaterial(Colour(0.35f, 0.85f, 1.0f, 0.65f), true);
+        mGiVolProbeMaterial = mTarget->createUnlitMaterial(Colour(1.0f, 0.75f, 0.25f, 0.65f), true);
+        mGiVolBuilt = true;
+    }
+
+    const auto rebuild = [&](NodeId node, MeshId &mesh, MaterialId material,
+                             const Vec3 &mn, const Vec3 &mx,
+                             Vec3 &cachedMin, Vec3 &cachedMax, bool have) {
+        if (!have) { mTarget->setNodeVisible(node, false); return; }
+        if (!mesh || !sameBox(mn, mx, cachedMin, cachedMax)) {
+            if (mesh) { mTarget->detachMesh(node); mTarget->destroyMesh(mesh); mesh = 0; }
+            mesh = mTarget->createLineMesh(boxEdges(mn, mx), false);
+            if (mesh) mTarget->attachMesh(node, mesh, material);
+            cachedMin = mn; cachedMax = mx;
+        }
+        mTarget->setNodeVisible(node, mesh != 0);
+    };
+    rebuild(mGiVolLitNode, mGiVolLitMesh, mGiVolLitMaterial,
+            st.boundsMin, st.boundsMax, mGiVolLitMin, mGiVolLitMax, haveLit);
+    rebuild(mGiVolProbeNode, mGiVolProbeMesh, mGiVolProbeMaterial,
+            st.probeRegionMin, st.probeRegionMax, mGiVolProbeMin, mGiVolProbeMax, haveProbe);
 }
 
 MeshId SceneMirror::wireMeshFor(int kind)
@@ -1915,6 +2008,7 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     d.range = light->distance;
     d.spotAngleDegrees = light->spotCutOff;
     d.spotSoftness = light->spotCutOffSoftness;
+    d.spotFalloff = light->spotFalloff;
     d.rectWidth = light->rectWidth;
     d.rectHeight = light->rectHeight;
     d.doubleSided = light->doubleSided;
@@ -3017,6 +3111,36 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 if (!l.isNull()) h << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo);
             lightSig = h.h;
         }
+        // ---- RE-FIT ON EXIT (LIGHTING_FIX fix 2) ---------------------------
+        //
+        // A light moving is not the only thing that invalidates a GI solve: an
+        // OBJECT leaving the lit volume does too, and it was the one nothing
+        // watched. Raise a cube above the auto-fitted volume and it kept the
+        // lighting it had at the old height for ever — until the user happened
+        // to nudge a light, at which point the volume re-fitted and everything
+        // "mysteriously" fixed itself. That workaround is the bug report.
+        //
+        // The engine answers the question as a SIGNATURE, not a flag, precisely
+        // so it can ride this machinery unchanged: it is 0 while everything is
+        // inside the volume, and while an object is outside it changes on every
+        // frame the object moves. Folded in beside the light signature, that
+        // gives the same two behaviours the debounce already guarantees for a
+        // dragged light — a continuous drag re-arms the window every frame and
+        // costs no rebuilds, and letting go costs exactly one.
+        //
+        // (Not folded in for Instant Radiosity: its signature is the ONE driving
+        // light by design, and IR's area of interest is re-derived from the same
+        // bounds on every re-trace anyway.)
+        const bool vctLike = gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid;
+        // The raw light term is kept so the post-refresh re-read below can
+        // recombine it with a FRESH escape term rather than re-hashing an
+        // already-combined value (which would never match the next frame's).
+        const quint64 lightSigRaw = lightSig;
+        const auto combine = [&](quint64 light, quint64 escape) {
+            if (!vctLike) return light;
+            Hasher h; h << light << escape; return h.h;
+        };
+        if (vctLike) lightSig = combine(lightSigRaw, mTarget->giEscapeSignature());
         if (!mGiPushed || !same(gi, mLastGi)) {
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
@@ -3082,12 +3206,21 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 ++mGiStableFrames;
             }
 
+            // A re-solve RE-FITS the volume, so the escape term it may have been
+            // armed by is 0 again the moment it returns. Re-reading the
+            // signature after the rebuild and adopting it is what keeps "move a
+            // cube out of the volume" costing ONE re-solve instead of two (the
+            // second being the signature changing back).
+            const auto adoptSignature = [&]() {
+                if (vctLike) mGiLightSignature = combine(lightSigRaw, mTarget->giEscapeSignature());
+            };
             if (explicitRefresh) {
                 mGiRefreshSerialSeen = mSource->giRefreshSerial;
                 mGiPendingRefresh = false;
                 mGiStableFrames = 0;
                 mTarget->refreshGlobalIllumination();
                 ++mGiRefreshCount;
+                adoptSignature();
             } else if (mGiPendingRefresh &&
                        (mGiStableFrames >= kGiStableFrames ||
                         mGiPendingTimer.elapsed() >= kGiStableMs)) {
@@ -3095,6 +3228,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 mGiStableFrames = 0;
                 mTarget->refreshGlobalIllumination();
                 ++mGiRefreshCount;
+                adoptSignature();
             } else if (mGiPendingRefresh) {
                 // Still moving: the cheap path, rate-limited.
                 if (++mGiFramesSinceLightOnly >= kGiLightOnlyEveryN) {
@@ -3137,6 +3271,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         pr.background = view->background();
         mTarget->setPlanarReflections(pr);
     }
+    // THE GI VOLUME OVERLAY GOES LAST, and it belongs HERE rather than in
+    // sync() (LIGHTING_FIX fix 9): it draws what `Scene::giStatus()` reports,
+    // and giStatus only reports this frame's answer after the GI push above.
+    // Driven from sync() it was a frame behind — visibly so in gi.overlay,
+    // where switching GI off left the box on screen for one more frame.
+    syncGiVolume();
 }
 
 iris::LightNode *SceneMirror::resolveGiLight() const

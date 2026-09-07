@@ -1101,6 +1101,7 @@ public:
     bool setGlobalIllumination(const GiParams &p) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
+    unsigned long long giEscapeSignature() const override;
     bool refreshGiLighting() override;
     void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
     bool nodeGiBoundsExcluded(NodeId id) const override;
@@ -1513,6 +1514,14 @@ public:
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
     void updateGiTracking(const Ogre::Vector3 &camPos);
+    /// Re-derives the Forward+ clustered depth-slice range from this camera and
+    /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
+    /// hysteretic — `setForwardClustered` recreates the grid buffers, so it must
+    /// never run per frame.
+    void updateForwardPlusRanges(const Ogre::Camera *cam);
+    /// How many lights this scene holds that Forward+ has to fit into its
+    /// per-cell budget, and the budget itself (F-F2). See RenderStats.
+    void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const;
 private:
     void rebuildGi();
     /// Voxelizes the scene's PBR items over computeGiBounds at quality-mapped
@@ -1535,8 +1544,19 @@ private:
     /// Voxel volume resolution per axis for the current quality.
     unsigned giVoxelResolution() const;
     /// The GI items' world AABBs after the exclude flag and the extent-outlier
-    /// rejection: the one place that decides which objects define the lit world.
+    /// trimming: the one place that decides which objects define the lit world.
     std::vector<Ogre::Aabb> giItemBounds() const;
+    /// Records (or clears) mGiAutoVolume after a rebuild. `fitted` is what the
+    /// AUTO path resolved; a hand-typed bounds box clears the record instead.
+    void noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic);
+    /// True when the document typed a bounds box by hand (min != max).
+    bool giBoundsExplicit() const;
+    /// True when the scene holds a light VctLighting's injection pass collects.
+    /// Drives the auto-multiplier guard — see the note on the definition.
+    bool hasVctLights() const;
+    /// Pushes mAmbientRadiance into the VCT arm (no-op without one). Called on
+    /// every ambient change and whenever the arm is (re)built.
+    void applyVctAmbient();
     /// Where the reflection probes live: the free space inside `litVolume`.
     /// See the long-form argument on the definition — handing the padded voxel
     /// volume here instead is what made P4's finding-2 reflections go black.
@@ -1648,6 +1668,30 @@ private:
     /// nothing built.
     Ogre::Aabb mGiLitVolume    = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     Ogre::Aabb mGiProbeRegion  = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+    /// The last volume the AUTO fit resolved (never a hand-typed one), kept
+    /// across rebuilds for two jobs that both need "what is lit right now":
+    /// giItemBounds' hysteresis floor — an item this box covered is never
+    /// trimmed by the outlier ramp, which is what makes adding an object
+    /// incapable of collapsing a live scene's volume — and giEscapeSignature,
+    /// which arms the mirror's debounced re-fit when an item leaves it. Invalid
+    /// until the first successful auto rebuild; cleared whenever the user takes
+    /// over with explicit bounds or switches GI off.
+    Ogre::Aabb mGiAutoVolume   = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+    bool       mGiAutoVolumeValid = false;
+    /// How many GI items the last giItemBounds() call saw. Read by
+    /// noteGiAutoVolume: a fit over fewer than two items is not a population,
+    /// and must not arm the hysteresis floor.
+    mutable size_t mGiLastItemCount = 0;
+    /// The scene's ambient hemisphere pair in RADIANCE units — what VctLighting
+    /// wants, which is NOT what setAmbient hands the SH path in the flat case
+    /// (that one carries HlmsPbs' 1/pi). [0] = upper, [1] = lower.
+    Colour     mAmbientRadiance[2] = { Colour(0, 0, 0, 1), Colour(0, 0, 0, 1) };
+    /// The Forward+ depth-slice range currently in force, and the frame counter
+    /// that rate-limits re-deriving it (fix 8). Seeded with the values
+    /// createScene passes to setForwardClustered.
+    float      mFwdPlusMin = 2.0f;
+    float      mFwdPlusMax = 50.0f;
+    unsigned   mFwdPlusTick = 0;
     /// Same contract for the two probe-capture options (P3a/P3b): what the last
     /// buildPcc RESOLVED, after GiToggle::Auto consulted the quality dial and
     /// after the shadow half checked that a shadow node exists to recalculate.
