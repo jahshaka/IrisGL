@@ -59,8 +59,6 @@ PbrMaterial::PbrMaterial()
     // that mapping - Background is drawn before the sky. Using Opaque here.
     setRenderLayer(RenderLayer::Opaque);
 
-    useIbl              = false;
-    iblIntensity        = 1.0f;
 
     createProperties();
 }
@@ -159,7 +157,6 @@ void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
 void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; }
 void PbrMaterial::setTextureScale(float s)   { textureScale = s; }
 
-void PbrMaterial::setIblIntensity(float intensity) { iblIntensity = intensity; }
 
 // Empty path clears the slot; a missing file yields a null texture, which the
 // set*Map functions treat as "no map" rather than failing.

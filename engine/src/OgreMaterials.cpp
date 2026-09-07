@@ -310,6 +310,24 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
     } JAH_CATCH(mError, false);
 }
 
+std::string OgreScene::dumpMaterial(MaterialId id) const {
+    auto it = mMaterials.find(id);
+    if (it == mMaterials.end()) { mError = "dumpMaterial: unknown material"; return {}; }
+    JAH_TRY {
+        auto *hlms = hlmsFor(it->second);
+        auto *db = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
+        if (!db) { mError = "dumpMaterial: the material has no datablock"; return {}; }
+        // A null listener is fine — HlmsJson substitutes its own default
+        // (OgreHlmsJson.cpp:147-153). This reads the LIVE datablock, so what
+        // comes back is the state after every clamp, guard and idempotency
+        // rule in applyPbr, which is the entire point of the verb.
+        Ogre::HlmsJson json(mRoot->getHlmsManager(), nullptr);
+        Ogre::String out;
+        json.saveMaterial(db, out, Ogre::BLANKSTRING);
+        return std::string(out.c_str());
+    } JAH_CATCH(mError, {});
+}
+
 bool OgreScene::destroyMaterial(MaterialId id) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;

@@ -105,7 +105,6 @@ public:
 
     void setTextureScale(float scale);
 
-    void setIblIntensity(float intensity);
 
     // Applies a value by property name, bridging the editor-facing `properties`
     // list onto the real fields. Without this, editing a property in the panel
@@ -199,8 +198,6 @@ public:
 
     float  textureScale;
 
-    bool   useIbl;
-    float  iblIntensity;
 
 private:
     PbrMaterial();

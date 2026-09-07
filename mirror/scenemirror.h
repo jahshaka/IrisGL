@@ -56,6 +56,12 @@ public:
     /// The engine node mirroring a document node, or 0.
     jahshaka::engine::NodeId engineNode(const iris::SceneNode *node) const;
 
+    /// The engine MATERIAL the mirror created for a document node, or 0.
+    /// DIAGNOSTIC use (Scene::dumpMaterial): the answer to "what did the
+    /// backend datablock actually end up holding" needs the id the mirror
+    /// pushed to, and nothing outside the mirror knows it.
+    jahshaka::engine::MaterialId engineMaterial(const iris::SceneNode *node) const;
+
     /// Points `view`'s camera where the document camera is looking.
     void applyCamera(iris::CameraNodePtr camera, jahshaka::engine::View *view);
     /// Points `view`'s picture-in-picture inset at a document camera

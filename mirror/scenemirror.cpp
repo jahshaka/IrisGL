@@ -293,6 +293,13 @@ NodeId SceneMirror::engineNode(const iris::SceneNode *node) const
     return it == mEntries.constEnd() ? 0 : it->node;
 }
 
+MaterialId SceneMirror::engineMaterial(const iris::SceneNode *node) const
+{
+    if (!node) return 0;
+    auto it = mEntries.constFind(node);
+    return it == mEntries.constEnd() ? 0 : it->material;
+}
+
 int SceneMirror::sync()
 {
     if (!mSource || !mSource->getRootNode()) return 0;
