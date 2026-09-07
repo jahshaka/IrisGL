@@ -27,7 +27,10 @@
 //
 // There is therefore NO per-object "not in reflections" flag here, and there
 // cannot be one in Ogre's polarity (its visibility test is any-bit-set, so a
-// mask cannot express exclusion — EnginePrivate.h). The one case the two
+// mask cannot express exclusion — EnginePrivate.h). What a mask CAN express is
+// an INCLUDE channel, and that is how editor helpers stay out: they carry
+// kHelperBit instead of kVisibleBit, and the reflection pass asks for
+// kVisibleBit (buildWorkspace below, 2026-09-07). The one case the two
 // mechanisms above do NOT cover is a TWO-SIDED reflector: nothing is culled by
 // winding, and a slab thick enough to have geometry behind the clip plane paints
 // its whole RTT with itself. armReflector refuses those.
@@ -125,13 +128,28 @@ void buildWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspaceDe
         pass->mStoreActionColour[0] = Ogre::StoreAction::StoreOrResolve;
         pass->mStoreActionDepth   = Ogre::StoreAction::DontCare;
         pass->mStoreActionStencil = Ogre::StoreAction::DontCare;
-        // Overlays out by RENDER QUEUE (see kReflectLastRQ). NOT by visibility
-        // mask: the pass keeps the default RESERVED_VISIBILITY_FLAGS, because
-        // Ogre's test is any-bit-set and every object we draw carries
-        // kVisibleBit — a mask here can only turn the reflection OFF wholesale,
-        // never single objects out of it (a `~kNoReflectBit` mask lived here
-        // until 2026-09-06 and was measurably a no-op). The mirror's own
-        // exclusion is the reflected camera's clip plane; see the file header.
+        // EDITOR HELPERS OUT OF REFLECTIONS (2026-09-07 fix wave; the same
+        // statement the probe captures and the shadow node already make).
+        //
+        // The premise of what stood here — "a mask can only turn the reflection
+        // off wholesale, because every object we draw carries kVisibleBit" — is
+        // FALSE for helpers, and it is false by design: helpers carry kHelperBit
+        // *INSTEAD OF* kVisibleBit (OgreScene::itemVisibilityFlags, and the
+        // include-channel argument in EnginePrivate.h), precisely so a pass can
+        // ask for real geometry only. The ground grid, the light icons, the
+        // range wires and the camera bodies were therefore being rendered INTO
+        // every planar mirror — an editor helper reflected in the scene the user
+        // is composing.
+        //
+        // kVisibleBit alone, exactly like JahshakaPcc.compositor's probe faces
+        // (`visibility_mask 0x1`) and JahshakaShadowNode (OgreEngine.cpp's
+        // createShadowNodeWithSettings). What the earlier note got RIGHT and is
+        // kept: an exclude bit (`~kNoReflectBit`) cannot work, because Ogre's
+        // test is any-bit-set — per-object exclusion needs its own include
+        // channel, not a cleared bit.
+        pass->setVisibilityMask(kVisibleBit);
+        // Overlays out by RENDER QUEUE as well (see kReflectLastRQ): the mask
+        // above covers helpers, this covers the on-top overlay queue.
         pass->mFirstRQ = 0u;
         pass->mLastRQ  = kReflectLastRQ;
         // Ogre's own overlay set (the stats readout / loading cover) out too —
