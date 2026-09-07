@@ -744,6 +744,18 @@ struct GiParams {
     float     probeSnapDeviation = 0.05f;
     float     probeSnapSidesMin  = 0.25f;
     float     probeSnapSidesMax  = 0.25f;
+    /// DYNAMIC PROBES (REFLECTIONS_ADOPTION_SPEC.md P5a). How many of the grid's
+    /// probes re-capture the scene LIVE, instead of keeping the contents they
+    /// were built with. The N probes nearest the tracked camera are the ones
+    /// chosen, and the choice follows the camera as it moves.
+    ///
+    /// 0 (the default) is the shipped behaviour: every probe static, reflections
+    /// frozen at build time until something asks for a refresh. Raising it is a
+    /// real per-frame cost — each dynamic probe re-renders SIX faces of the whole
+    /// scene plus an IBL mip chain, EVERY frame — so it is off by default and the
+    /// number is a budget, not a quality dial. Clamped to the live probe count;
+    /// `GiStatus::dynamicProbeCount` reports what was actually achieved.
+    int       dynamicProbes = 0;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
@@ -790,6 +802,11 @@ struct GiStatus {
     /// shadow node to recalculate. False in every mode but the hybrid.
     bool   probeHdr = false;
     bool   probeShadows = false;
+    /// How many probes are currently NON-STATIC, i.e. re-capturing the scene
+    /// every frame (REFLECTIONS_ADOPTION_SPEC.md P5a). The RESOLVED figure:
+    /// `GiParams::dynamicProbes` clamped to the probes that actually exist, and
+    /// 0 whenever the probe arm did not build. 0 in every mode but the hybrid.
+    int    dynamicProbeCount = 0;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

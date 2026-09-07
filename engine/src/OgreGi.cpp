@@ -137,6 +137,11 @@ GiStatus OgreScene::giStatus() const {
         // shadow half additionally falls back when there is no shadow node.
         st.probeHdr     = mPcc && mPccHdr;
         st.probeShadows = mPcc && mPccShadowed;
+        // RESOLVED, like the two above: the request is clamped to the probes
+        // that exist, and it is only ACTED ON once a view has pushed a tracked
+        // camera position (updateGiTracking), so this reads 0 for the frame
+        // between the rebuild and the first tracking update.
+        st.dynamicProbeCount = mPcc ? int(mPccDynamic.size()) : 0;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -706,7 +711,91 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
     JAH_TRY {
         mGiCamera->setPosition(camPos);
         mPcc->setUpdatedTrackedDataFromCamera(mGiCamera);
+        updateDynamicProbes(camPos);
     } JAH_CATCH(mError, );
+}
+
+// DYNAMIC PROBES (REFLECTIONS_ADOPTION_SPEC.md P5a) — the nearest N probes to
+// the tracked camera re-capture the scene every frame; the rest keep the
+// contents they were built with. Default 0, i.e. today's all-static grid.
+//
+// WHAT THE PIN ACTUALLY SUPPORTS, verified by this lane before designing (the
+// spec listed the per-probe API as unproven, §10):
+//
+//  * `CubemapProbe::setStatic(bool)` is public, and in AUTOMATIC mode it is
+//    CHEAP despite its "this call is not cheap" doc comment: that warning is
+//    about the manual path, where setTextureParams destroys and recreates the
+//    probe's own cube texture and workspace. In automatic mode the same
+//    function takes the other branch and only assigns mStatic/mDirty and calls
+//    switchInternalProbeStaticValue (OgreCubemapProbe.cpp:318-375). Probes
+//    share ONE bind texture (the cube array) in this mode, so no texture slot
+//    is acquired or released by the flip — the spec's `_acquire/_releaseTextureSlot`
+//    route is for having MORE probes than slots, which is a different feature
+//    and is not what this needs.
+//
+//  * `ParallaxCorrectedCubemapAuto::updateSceneGraph` (its FrameListener hook)
+//    collects a probe for re-render when
+//        ( areaLS.contains( trackedPos ) && !probe->mStatic ) || probe->mDirty
+//    (OgreParallaxCorrectedCubemapAuto.cpp:328-346). So upstream's own
+//    dynamic-probe rule is "the probe you are STANDING IN re-renders", which is
+//    not the same thing as "the probes nearest you" — a mirror across the room
+//    is shaded by the probes containing IT, not the one containing the camera,
+//    and those would never refresh. Hence we drive the choice ourselves and set
+//    `mDirty` (a public field, and the same one upstream's updateAllDirtyProbes
+//    uses) on the N we picked. `_updateRender`'s assert is `mDirty || !mStatic`,
+//    so both halves are satisfied either way.
+//
+//  * `mNumIterations = 1` for a dynamic probe, as upstream's header advises.
+//    It is not an iteration COUNT in automatic mode: it selects WHICH of the
+//    two per-frame stages renders the probe. Above 1 the probe renders in
+//    `updateExpensiveCollectedDirtyProbes`, which wraps EACH probe in its own
+//    `_beginFrameOnce`/`_endFrameOnce` pair; at 1 it renders in `updateRender`,
+//    inline with the rest of the frame's workspaces. The second is what a
+//    per-frame probe wants.
+//
+// The probe's SHAPE is not touched: buildEnd's depth-readback shrink-fit ran
+// once at build time and stays, so a dynamic probe keeps the parallax box P1a
+// fought for and only its cubemap CONTENT is re-rendered.
+void OgreScene::updateDynamicProbes(const Ogre::Vector3 &camPos) {
+    const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+    const size_t want = size_t(std::max(0, mGi.dynamicProbes));
+    if (!want && !mPccDynamic.size()) return;      // the common case: nothing to do
+
+    // Nearest N by distance from the tracked position to the probe's INFLUENCE
+    // AREA centre (not the camera position it captures from): the area is what
+    // decides which pixels the probe shades, so it is what "nearest" should
+    // mean for a viewer walking around.
+    const size_t n = std::min(want, probes.size());
+    std::vector<std::pair<float, size_t>> ranked;
+    ranked.reserve(probes.size());
+    for (size_t i = 0; i < probes.size(); ++i)
+        ranked.emplace_back((probes[i]->getArea().mCenter - camPos).squaredLength(), i);
+    std::partial_sort(ranked.begin(), ranked.begin() + std::ptrdiff_t(n), ranked.end());
+
+    std::vector<size_t> chosen;
+    chosen.reserve(n);
+    for (size_t k = 0; k < n; ++k) chosen.push_back(ranked[k].second);
+    std::sort(chosen.begin(), chosen.end());
+
+    if (chosen != mPccDynamic) {
+        // Only the SET changing costs anything — a camera moving inside one
+        // probe's neighbourhood re-flips nothing.
+        for (size_t i : mPccDynamic)
+            if (i < probes.size() && !std::binary_search(chosen.begin(), chosen.end(), i)) {
+                probes[i]->setStatic(true);
+                probes[i]->mNumIterations = kProbeIterationsStatic;
+            }
+        for (size_t i : chosen)
+            if (!std::binary_search(mPccDynamic.begin(), mPccDynamic.end(), i)) {
+                probes[i]->setStatic(false);
+                probes[i]->mNumIterations = 1u;
+            }
+        mPccDynamic = chosen;
+    }
+    // ...and every frame, ask for the re-render. See the header note: relying on
+    // upstream's area-containment rule alone would refresh only the probe the
+    // camera stands in.
+    for (size_t i : mPccDynamic) probes[i]->mDirty = true;
 }
 
 void OgreScene::rebuildGi() {
@@ -845,6 +934,9 @@ void OgreScene::rebuildVct() {
 void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     mPccHdr = mPccShadowed = false;
+    // The indices name probes that are about to be (re)created — every rebuild
+    // starts from an all-static grid and the next updateGiTracking re-picks.
+    mPccDynamic.clear();
     // Our own probe workspace (media/Hlms/Jahshaka/JahshakaPcc.compositor):
     // per-face scene render + PCC depth compression + IBL specular mips — the
     // sample's LocalCubemapsProbeWorkspace, with the sample's shadow node behind
@@ -975,13 +1067,66 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // probes themselves are placed perfectly. Widening the window to ~32 voxels
     // restores them, but that is the hybrid abandoning its own judgement, so it
     // is NOT the default. gi.pcc_bounds' header records the numbers.
-    const float minDist = std::max(0.25f, diag * 0.05f);
+    float minDist = std::max(0.25f, diag * 0.05f);
+    // ...AND THE TEST IS INVERTED WHEN THE PROBES ARE LIVE (P5a). This is the
+    // finding of the dynamic-probe half, and it is not a tuning choice — the
+    // feature does not work at all without it.
+    //
+    // The blend above asks "do the probe and the voxel volume agree about where
+    // this reflection lands?", and hands the pixel to VCT when they do not. That
+    // question assumes both halves are equally current, which is true for a
+    // STATIC grid: both were built from the same scene at the same moment. A
+    // DYNAMIC probe breaks the assumption on purpose. It re-captures the scene
+    // every frame; the voxel volume is only re-voxelized by a full re-solve. So
+    // the instant an object MOVES — which is the only reason to turn dynamic
+    // probes on — the probe knows and the voxels do not, the two disagree
+    // exactly where the movement is, and the disagreement is settled in favour
+    // of the half that is out of date. In a sealed room VCT's specular answer is
+    // black, so the mirror does not merely lag: it goes BLACK precisely where the
+    // moving object should appear.
+    //
+    // MEASURED IN-LANE (gi.dynamic_probes' room; a green slab sliding across the
+    // red wall the mirror reflects; four live probes; the probe grid, the shapes
+    // and the geometry all identical, ONLY this window changing):
+    //     window x1 (shipped static value)   mirror r 0.000 g 0.000   <- black
+    //     window x2, x3, x4, x8, x20         mirror r 0.059 g 1.000   <- the slab
+    // and with the probes STATIC the same slide leaves the mirror at r 1.000
+    // g 0.059, i.e. showing the wall the slab is now covering. The three
+    // readings are the whole argument: static is stale, dynamic-with-the-old-
+    // window is broken, dynamic-with-this-window is right.
+    //
+    // So when any probe is live the window becomes the probe region's own
+    // diagonal, which makes the test always pass INSIDE the region: a probe that
+    // covers the pixel wins, and VCT keeps everything the probes do not cover
+    // (probeFade is 0 there, so nothing changes outside). The rule reads as one
+    // sentence — "the fresher of the two answers wins, and with dynamic probes
+    // on that is always the probe" — which is exactly the judgement the static
+    // case makes in the other direction. Note the sweep above found NO gradient
+    // between x2 and x20: the disagreement is either inside the window or it is
+    // not, so there is no honest number to tune between them and the principled
+    // extreme is the one to take.
+    //
+    // WHAT IT COSTS, stated rather than hidden: rough surfaces inside the region
+    // take their environment from the probes instead of from cone tracing while
+    // dynamic probes are on, so a scene's ROUGH pixels change when the author
+    // raises dynamicProbes above 0 even if nothing moves (measured on the same
+    // room's floor pixel: 0.000 -> 0.059/1.000/0.059). The mirror-sharp pixels
+    // do not move. Nothing changes for a scene at the default of 0.
+    //
+    // THE REFINEMENT THIS IS NOT (recorded, not built — it needs upstream): the
+    // honest version of this rule is PER PROBE, since only the dynamic probes
+    // are fresher than the voxels. `pccVctMinDistance` is a single pass
+    // constant, and making it per-probe means a new field in the probe const
+    // buffer plus the shader that reads it — an upstream change on both sides,
+    // which §9 of the spec makes a stop-and-report rather than a lane decision.
+    if (mGi.dynamicProbes > 0) minDist = std::max(minDist, diag);
     hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, minDist, minDist * 2.0f);
 }
 
 void OgreScene::teardownVct() {
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     mPccHdr = mPccShadowed = false;
+    mPccDynamic.clear();
     if (sVctBindingOwner == this) {
         hlmsPbs(mRoot)->setParallaxCorrectedCubemap(nullptr);
         hlmsPbs(mRoot)->setVctLighting(nullptr);

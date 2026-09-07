@@ -219,6 +219,14 @@ public:
     float giProbeSnapDeviation = 0.05f;  // shrink-fit snap-back tolerances: the pin's
     float giProbeSnapSidesMin = 0.25f;   // own ctor defaults, made explicit and ours
     float giProbeSnapSidesMax = 0.25f;
+    /// DYNAMIC PROBES (REFLECTIONS_ADOPTION_SPEC.md P5a). How many of the
+    /// hybrid's reflection probes re-capture the scene live, nearest the camera
+    /// first. 0 (the default, and what every existing document reads back as)
+    /// is the shipped all-static grid: reflections are frozen at build time.
+    /// Each live probe costs six full scene renders plus an IBL mip chain PER
+    /// FRAME, which is why this is a budget the author opts into rather than
+    /// something the quality dial moves.
+    int giDynamicProbes = 0;
     /// MONOTONIC, never serialized: bumped by world.refreshGi() and by the
     /// Refresh button (REFLECTIONS_ADOPTION_SPEC.md P1d). The mirror compares it
     /// against the value it last acted on and re-solves the engine's GI once per

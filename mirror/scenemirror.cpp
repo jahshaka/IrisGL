@@ -3080,6 +3080,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeSnapDeviation = mSource->giProbeSnapDeviation;
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
+        gi.dynamicProbes = mSource->giDynamicProbes;   // P5a
         iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
         gi.irLight = driver ? engineNode(driver) : 0;
         const auto same = [](const GiParams &a, const GiParams &b) {
@@ -3092,6 +3093,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                    a.probeSnapDeviation == b.probeSnapDeviation &&
                    a.probeSnapSidesMin == b.probeSnapSidesMin &&
                    a.probeSnapSidesMax == b.probeSnapSidesMax &&
+                   a.dynamicProbes == b.dynamicProbes &&
                    a.boundsMin.x == b.boundsMin.x && a.boundsMin.y == b.boundsMin.y &&
                    a.boundsMin.z == b.boundsMin.z && a.boundsMax.x == b.boundsMax.x &&
                    a.boundsMax.y == b.boundsMax.y && a.boundsMax.z == b.boundsMax.z;

@@ -1533,6 +1533,10 @@ private:
     /// FREE SPACE from computeProbeRegion, NOT the voxel volume — and binds it
     /// with distance-blended VCT specular (PccVctMinDistance).
     void buildPcc(const Ogre::Aabb &region);
+    /// Keeps the N probes nearest `camPos` non-static and dirty, so they
+    /// re-capture the scene every frame (P5a). Called from updateGiTracking;
+    /// a no-op when GiParams::dynamicProbes is 0 and nothing is dynamic.
+    void updateDynamicProbes(const Ogre::Vector3 &camPos);
     /// The visibility flags an Item attached to `n` must carry, given the
     /// material's unlit-ness and the node's helper designation. THE one place
     /// the bit scheme is applied to geometry.
@@ -1697,6 +1701,17 @@ private:
     /// after the shadow half checked that a shadow node exists to recalculate.
     bool mPccHdr      = false;
     bool mPccShadowed = false;
+    /// Indices (into mPcc->getProbes()) of the probes currently flipped
+    /// NON-STATIC, i.e. re-capturing the scene every frame (P5a). Empty unless
+    /// GiParams::dynamicProbes > 0. Rebuilt from scratch with the probe grid —
+    /// the indices name probes that a teardown destroys.
+    std::vector<size_t> mPccDynamic;
+    /// `CubemapProbe::mNumIterations` as the pin's constructor leaves it
+    /// (OgreCubemapProbe.cpp:73). A dynamic probe is put on 1 instead; this is
+    /// what a probe goes back to when it stops being dynamic. See
+    /// updateDynamicProbes for what the value actually selects in automatic
+    /// mode (a render STAGE, not an iteration count).
+    static const unsigned kProbeIterationsStatic = 8u;
     /// Live decals in THIS scene. The SceneManager-level atlas binding is
     /// driven off the count (see refreshDecalBindings).
     unsigned            mDecalCount = 0;
