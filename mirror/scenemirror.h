@@ -267,8 +267,18 @@ public:
     /// character needs a bigger one, or the "floor" is smaller than the thing
     /// standing on it. Changing it rebuilds the grid meshes on the next sync.
     void setGridExtent(float extent);
+    /// Where the FLOOR grid sits on the Y axis, in world units. The default
+    /// (-0.01) tucks it just under the ground plane every scene ships (y≈0),
+    /// so in a perspective view the floor occludes it cleanly instead of
+    /// z-fighting. That is exactly wrong for a TOP or BOTTOM view, where the
+    /// ground then hides the grid completely (owner report 2026-09-07): those
+    /// views ask for a small POSITIVE offset so the grid draws over the
+    /// ground. Only the Floor plane uses it — the vertical planes pass
+    /// through the origin. Applied on the next sync().
+    void setGridFloorOffset(float offsetY);
     /// Grid line colours (minor, major). Alpha is the line's opacity. The
-    /// editor keeps its blue-grey default; the avatar preview asks for white.
+    /// editor keeps its blue-grey default; the avatar preview asks for white,
+    /// and the canonical axis views ask for a per-plane tint.
     void setGridColours(const jahshaka::engine::Colour &minor,
                         const jahshaka::engine::Colour &major);
 
@@ -749,6 +759,8 @@ private:
     bool  mGridVisible = false;
     GridPlane mGridPlane = GridPlane::Floor;
     GridPlane mGridBuiltPlane = GridPlane::Floor;
+    float mGridFloorOffset = -0.01f;        // see setGridFloorOffset
+    float mGridBuiltFloorOffset = -0.01f;   // what the node transform carries
     float mGridSpacing = 1.0f;
     float mGridExtent = 100.0f;
     float mGridBuiltSpacing = -1.0f;                            // what the meshes were built for
