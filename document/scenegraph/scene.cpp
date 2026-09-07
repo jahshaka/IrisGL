@@ -138,6 +138,11 @@ Scene::Scene()
     // amount that puts mid-grey back where it was; it is a starting point the
     // auto-exposure then works from, not a fixed offset.
     exposure = 0.6f;
+    // The adaptation window, verbatim from what the engine hard-coded before
+    // the document could say anything about it (PostFxDesc's own defaults), so
+    // a scene written before this field existed grades identically.
+    exposureMin = -2.5f;
+    exposureMax = 2.5f;
     bloomEnabled = false;
     bloomThreshold = 5.0f;
     ssaoEnabled = false;

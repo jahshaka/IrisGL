@@ -1,5 +1,7 @@
 #pragma once
 // Engine-neutral value types. NOTHING here may reference Ogre, Qt or GL.
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -589,6 +591,21 @@ struct CameraDesc {
     /// The authored aspect (width / height), used only when constrainAspect.
     float aspect = 16.0f / 9.0f;
 
+    /// THE WIDE-ASPECT FOV CLAMP (owner report 2026-09-07). `fovDegrees` is
+    /// VERTICAL, so the HORIZONTAL angle it produces grows with the target's
+    /// aspect: the default 45-degree explorer is 75 degrees wide at 16:9 and
+    /// 118 degrees wide at 32:9 — a fisheye nobody asked for, on exactly the
+    /// monitors people buy to see more of a scene.
+    ///
+    /// A positive value caps the HORIZONTAL angle at that many degrees: past
+    /// the aspect where the cap first bites, the vertical angle is narrowed to
+    /// hold it (verticalFovForHorizontalCap below). Zero — the DEFAULT — is
+    /// off, which is what every AUTHORED camera gets: a scene camera's angle is
+    /// a deliberate lens choice and the engine must not second-guess it. Only
+    /// the two FREE cameras (the editor explorer, the player's fly camera) set
+    /// it, and only they can, because only their hosts know they are free.
+    float maxHorizontalFovDegrees = 0.0f;
+
     bool operator==(const CameraDesc &o) const {
         return position.x == o.position.x && position.y == o.position.y &&
                position.z == o.position.z &&
@@ -596,10 +613,38 @@ struct CameraDesc {
                orientation.z == o.orientation.z && orientation.w == o.orientation.w &&
                fovDegrees == o.fovDegrees && nearClip == o.nearClip && farClip == o.farClip &&
                orthographic == o.orthographic && orthoSize == o.orthoSize &&
-               constrainAspect == o.constrainAspect && aspect == o.aspect;
+               constrainAspect == o.constrainAspect && aspect == o.aspect &&
+               maxHorizontalFovDegrees == o.maxHorizontalFovDegrees;
     }
     bool operator!=(const CameraDesc &o) const { return !(*this == o); }
 };
+
+/// The vertical angle of view that holds the HORIZONTAL angle at `hfovCapDeg`
+/// for a target of `aspect` (width / height) — CameraDesc::maxHorizontalFov.
+///
+///     hfov = 2 * atan( tan(vfov/2) * aspect )
+///     vfov = 2 * atan( tan(hfovCap/2) / aspect )
+///
+/// The clamp only ever NARROWS: below the aspect where the cap bites (about
+/// 16:9 for a 95-degree cap on a 45-degree lens) the authored vertical angle is
+/// already inside it and is returned BIT-IDENTICALLY — no arithmetic runs at
+/// all, which is what lets a 16:9 pixel suite stay byte-exact. Free (a
+/// non-positive cap or aspect) is likewise the identity.
+///
+/// A free function, in the header, deliberately: this is the whole of the
+/// policy, and a suite can drive it across an aspect sweep with no engine at
+/// all (tests/cameras' fov_clamp case).
+inline float verticalFovForHorizontalCap(float vfovDeg, float aspect, float hfovCapDeg) {
+    if (!(hfovCapDeg > 0.0f) || !(aspect > 0.0f) || !(vfovDeg > 0.0f)) return vfovDeg;
+    const float kDegToRad = 3.14159265358979323846f / 180.0f;
+    const float capHalf = std::min(hfovCapDeg, 179.0f) * 0.5f * kDegToRad;
+    const float haveHalf = std::min(vfovDeg, 179.0f) * 0.5f * kDegToRad;
+    // The horizontal angle this vertical angle actually produces here.
+    const float haveHorizontalHalf = std::atan(std::tan(haveHalf) * aspect);
+    if (haveHorizontalHalf <= capHalf) return vfovDeg;   // inside the cap: untouched
+    const float wantHalf = std::atan(std::tan(capHalf) / aspect);
+    return std::max(1.0f, wantHalf * 2.0f / kDegToRad);
+}
 
 /// THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7): a second camera's view of
 /// the SAME scene, composited into a rectangle of this View's target.
@@ -1128,6 +1173,30 @@ struct PostFxDesc {
     /// that samples the opaque result. Costs nothing when no material is.
     bool  refractions = false;
 
+    /// THE SECONDARY-SURFACE TONEMAP (owner report 2026-09-07, fix wave item 6).
+    ///
+    /// The problem: everything that is NOT the main viewport — thumbnails,
+    /// material and asset previews, screenshots, the PiP inset — renders the
+    /// scene's raw linear radiance straight into an 8-bit target. A world the
+    /// viewport grades filmically therefore photographs BLOWN OUT: a bright
+    /// light clips to flat white in the thumbnail while the viewport, which
+    /// tonemaps, shows the highlight rolled off.
+    ///
+    /// The fix cannot simply be `hdr = true`, because Ogre's HDR node is
+    /// AUTO-exposed: it reduces the frame's luminance through four downscales
+    /// into a 1x1 texture and then ADAPTS towards it over frames, weighted by
+    /// wall-clock time. On a surface that renders two frames and reads them
+    /// back, "the exposure it happened to reach" is not a value anybody can
+    /// assert, and the material parameters it rides on are PROCESS-GLOBAL.
+    ///
+    /// `tonemapFixed` is the deterministic form: the same filmic curve, the
+    /// same node, but the whole luminance-reduction chain is REPLACED by a
+    /// per-frame clear of the 1x1 exposure texture to a constant derived from
+    /// `exposure` alone. Same picture for the same scene, every time, on any
+    /// machine — and cheaper than the auto path (five quads and four textures
+    /// fewer). Ignored unless `hdr`.
+    bool  tonemapFixed = false;
+
     /// THE offscreen opt-in. Offscreen Views ignore every flag above unless this
     /// is set, because their exact colours are what thumbnails, previews and the
     /// pixel suites assert. Two callers set it, both deliberately: a screenshot
@@ -1142,6 +1211,7 @@ struct PostFxDesc {
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
                ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
                ssr == o.ssr && refractions == o.refractions &&
+               tonemapFixed == o.tonemapFixed &&
                allowOffscreen == o.allowOffscreen;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }

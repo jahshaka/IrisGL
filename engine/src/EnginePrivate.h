@@ -232,6 +232,11 @@ struct ChainDesc {
     // ---- Effects (phases 3-7). Every one of them is OFF on offscreen views by
     //      construction: OgreView::chainDesc() clears them (POST_CHAIN_SPEC §7.3).
     bool  hdr = false;              ///< RGBA16F scene target + filmic tonemap
+    /// The DETERMINISTIC form of `hdr` (PostFxDesc::tonemapFixed): same node,
+    /// same curve, but the auto-exposure reduction is replaced by a constant.
+    /// A GRAPH change — five quads and four textures fewer — so it is part of
+    /// sameShape().
+    bool  tonemapFixed = false;
     float exposure = 0.0f;          ///< stops; the auto-exposure midpoint
     float exposureMin = -2.5f;
     float exposureMax = 2.5f;
