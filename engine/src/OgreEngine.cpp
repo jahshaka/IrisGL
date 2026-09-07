@@ -1005,6 +1005,17 @@ bool OgreEngine::renderStats(RenderStats &out) const {
             // Reset by the render system at the start of every frame.
             out.incompletePsoRequests = (unsigned)rs->getIncompletePsoRequestsCounter();
         }
+        // ---- the Forward+ light census (LIGHTING_FIX fix 8 / F-F2). The
+        // WORST case across the live scenes, because a per-cell overflow is a
+        // property of one scene and this struct is process-wide.
+        for (const auto &s : mScenes) {
+            unsigned lights = 0u, budget = 0u;
+            s->forwardPlusLightCensus(lights, budget);
+            if (lights > out.forwardPlusLights) out.forwardPlusLights = lights;
+            out.forwardPlusBudget = budget;
+        }
+        out.forwardPlusOverBudget = out.forwardPlusLights > out.forwardPlusBudget
+                                        ? out.forwardPlusLights - out.forwardPlusBudget : 0u;
         return true;
     }
     // Not JAH_CATCH: this verb is const and the error sink is not. Nothing here
@@ -1260,6 +1271,53 @@ void OgreEngine::ensureHlms() {
     // GGX-prefiltered sky reflection cubemap instead.
     static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS))
         ->setAmbientLightMode(Ogre::HlmsPbs::AmbientSh);
+    {
+        // LIGHT-COUNT BUDGETS (LIGHTING_FIX fix 7 / F-L1, F-L2). Both of these
+        // exist for one reason: an EDITOR changes its light list constantly, and
+        // by default every such change is a shader recompile of the whole scene.
+        //
+        //  * setMaxNonCasterDirectionalLights(4). Ogre's default is 0, which
+        //    means "hardcode the exact count into the shader" — so adding or
+        //    removing a directional light recompiles every PBS shader in the
+        //    scene. Upstream's own note: "There is little to no performance
+        //    impact for setting this value higher than you need... you'll pay
+        //    the price of [what you have] (but the RAM price of 4)"
+        //    (OgreHlms.h:695-714). Four is the editor's realistic ceiling for
+        //    fill lights that cast nothing.
+        //  * setStaticBranchingLights(true). Same disease for shadow-casting
+        //    spot and point lights: the permutation key is the COMBINATION
+        //    (3 spot + 5 point is a different shader set from 4 + 4), and
+        //    static branching collapses that (setProperty( LightsPoint, 0 ),
+        //    OgreHlms.cpp:3673-3675).
+        //
+        //    ITS DOCUMENTED PRECONDITION IS MET HERE: "All point and spot
+        //    lights must share the same hlms_shadowmap atlas" (OgreHlms.h:733).
+        //    buildShadowNode puts every ShadowParam on atlasId 0 — one atlas,
+        //    always, for both shadow nodes we define.
+        //
+        //    WHAT IT DOES NOT BUY, A/B-MEASURED on this pin by lights.hygiene
+        //    (engine built with and without these two calls):
+        //        add + remove 3 non-caster directionals: 6 compiles -> 0
+        //        4 spot<->point swaps at a constant count: 4 compiles -> 2
+        //        toggling a spot's cast-shadows:          2 compiles -> 2
+        //    So the shadow-caster half is a HALVING, not an elimination:
+        //    `hlms_num_shadow_map_lights` is set to the live count
+        //    unconditionally (OgreHlms.cpp:3270-3273) and only an extra FLAG is
+        //    gated on static branching, so the TOTAL number of casters is still
+        //    part of the shader key. Zero compiles on a cast-shadows toggle is
+        //    NOT achievable here without an upstream change.
+        //
+        //    IT IS ALSO A SHADING CHANGE, not just a compile-count one:
+        //    HlmsPbs::setStaticBranchingLights forces
+        //    setShadowReceiversInPixelShader(true) (OgreHlmsPbs.cpp:3839), so
+        //    light vectors are computed per pixel rather than interpolated from
+        //    the vertex shader — strictly more correct, and slightly different.
+        //    MEASURED CONSEQUENCE: none. The full 203-suite gate, pixel suites
+        //    included, moved not one pixel.
+        auto *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+        pbs->setMaxNonCasterDirectionalLights(4u);
+        pbs->setStaticBranchingLights(true);
+    }
     // Fog: append the per-scene fog colour + height parameters to every PBS pass
     // buffer (the exponential distance term itself comes from the scene's
     // AtmosphereNpr — OgreFog.cpp). Unlit gets no listener: gizmos, wires and
@@ -1432,8 +1490,32 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution) {
     params.push_back(p);
     p.atlasStart[0].y = R + H + R;
     params.push_back(p);
+    // SHADOW HYGIENE (LIGHTING_FIX fix 6 / F-D1, F-D2). Two arguments, both
+    // defaulted by upstream to values that are wrong for an EDITOR:
+    //
+    //  * visibilityMask = kVisibleBit. The default is
+    //    RESERVED_VISIBILITY_FLAGS, i.e. everything — so the ground grid, the
+    //    light range wires, the light icons and every other editor helper were
+    //    rendered into the shadow atlas and cast shadows on the scene. Worse
+    //    than the wasted draws: helpers are part of
+    //    `getCurrentCastersBox()`, so a range wire 100 units across inflated
+    //    the caster AABB the PSSM setup fits its splits to, and every shadow in
+    //    the scene lost resolution to empty air. Helpers carry kHelperBit
+    //    INSTEAD OF kVisibleBit (see the visibility-bit block at the top of
+    //    EnginePrivate.h), so naming kVisibleBit here removes them from the
+    //    atlas and from the caster box in one argument — which is also why
+    //    "nudge a light and the whole world re-fits its shadows" stops
+    //    happening.
+    //  * numStableSplits = 2. Upstream's default of 0 recomputes both split
+    //    distances from the caster box every frame, so a caster entering or
+    //    leaving the view re-quantises the shadow map and the visible edges
+    //    crawl. Two stable splits pin the near ones — the ones a user is
+    //    looking at — and leave the far split free to follow the scene.
     Ogre::ShadowNodeHelper::createShadowNodeWithSettings(
-        cm, mRoot->getRenderSystem()->getCapabilities(), name, params, false);
+        cm, mRoot->getRenderSystem()->getCapabilities(), name, params,
+        false /*useEsm*/, 1024u /*pointLightCubemapResolution*/,
+        0.95f /*pssmLambda*/, 1.0f /*splitPadding*/, 0.125f /*splitBlend*/,
+        0.313f /*splitFade*/, 2u /*numStableSplits*/, kVisibleBit /*visibilityMask*/);
 }
 
 void OgreEngine::applyShadowFilter() {

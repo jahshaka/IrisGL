@@ -477,6 +477,23 @@ public:
     /// without this nothing, not even a pixel test, could tell the difference.
     /// Cheap: reads live pointers, renders nothing.
     virtual GiStatus    giStatus() const = 0;
+    /// "Has any object LEFT the volume that is currently lit?" — 0 when every
+    /// GI item is inside it, otherwise a hash of the escapees' quantized world
+    /// AABBs (LIGHTING_FIX fix 2).
+    ///
+    /// A HASH, NOT A BOOL, and that is the whole design. The host debounces
+    /// expensive re-solves by watching a signature: it restarts a stability
+    /// window whenever the value changes and re-solves once it has held still.
+    /// A bool would stay true for the entire duration of a drag, so the window
+    /// would either fire on every frame of it or never fire at all. A hash of
+    /// WHERE the escapee is changes on each frame the object moves and freezes
+    /// the moment the user lets go — one re-solve per gesture, which is exactly
+    /// the contract a light's transform signature already has. Zero when GI is
+    /// off, when nothing has been built yet, and whenever the document typed
+    /// its own bounds box (then the volume is the user's statement, not a fit).
+    ///
+    /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
+    virtual unsigned long long giEscapeSignature() const = 0;
     /// "This object must not define WHERE global illumination happens"
     /// (REFLECTIONS_ADOPTION_SPEC.md P1a). The object still voxelizes and still
     /// bounces light — it is only kept out of the two AABB reductions, the lit

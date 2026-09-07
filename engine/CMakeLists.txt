@@ -59,28 +59,44 @@ execute_process(COMMAND git ls-tree HEAD thirdparty/ogre-next
 string(APPEND _fp_blob "pin:${_ogre_pin};")
 string(SHA256 _ogre_patch_series "${_fp_blob}")
 
-set(_engine_blob "")
-foreach(_s IN LISTS JAHSHAKA_ENGINE_SOURCES)
-    file(SHA256 "${_s}" _h)
-    string(APPEND _engine_blob "${_h};")
-endforeach()
-foreach(_s include/jahshaka/engine/Engine.h include/jahshaka/engine/Types.h)
-    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${_s}" _h)
-    string(APPEND _engine_blob "${_h};")
-endforeach()
-string(SHA256 _engine_build_id "${_engine_blob}")
-# Exported so tests/engine's sanitised copy of the same sources compiles with
-# the same fingerprint terms (it builds JAHSHAKA_ENGINE_SOURCES directly).
-set(JAHSHAKA_ENGINE_BUILD_ID "${_engine_build_id}" PARENT_SCOPE)
+# JAHSHAKA_ENGINE_BUILD_ID IS GENERATED AT BUILD TIME, not here (LIGHTING_FIX
+# fix 10 / F5). It used to be a configure-time `file(SHA256 ...)` fold, which
+# could not do the one job it exists for: editing OgreEngine.cpp does not re-run
+# CMake, so the term stayed identical across exactly the edits that change what
+# the generated shaders MEAN, and the cache from the previous build looked
+# perfectly valid. A custom command re-hashes the same file list on every build
+# and writes the value into a generated header; `copy_if_different` inside the
+# script keeps an unchanged value from cascading a rebuild.
+set(JAHSHAKA_ENGINE_BUILD_ID_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Engine.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Types.h)
+set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADERS})
+set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(_build_id_header "${JAHSHAKA_ENGINE_BUILD_ID_DIR}/jahshaka_engine_build_id.h")
+file(MAKE_DIRECTORY "${JAHSHAKA_ENGINE_BUILD_ID_DIR}")
+string(REPLACE ";" "|" _build_id_inputs_arg "${_build_id_inputs}")
+add_custom_command(
+    OUTPUT "${_build_id_header}"
+    COMMAND ${CMAKE_COMMAND}
+            "-DJAH_BUILD_ID_SOURCES=${_build_id_inputs_arg}"
+            "-DJAH_BUILD_ID_OUT=${_build_id_header}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
+    DEPENDS ${_build_id_inputs} "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
+    COMMENT "Hashing the engine sources for the shader-cache fingerprint"
+    VERBATIM)
+add_custom_target(JahshakaEngineBuildId DEPENDS "${_build_id_header}")
+# Exported so tests/engine's sanitised (ASan) copy of the same sources compiles
+# against the same generated header rather than a second, stale value.
+set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${JAHSHAKA_ENGINE_BUILD_ID_DIR}" PARENT_SCOPE)
 set(JAHSHAKA_OGRE_PATCH_SERIES "${_ogre_patch_series}" PARENT_SCOPE)
 
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
+add_dependencies(JahshakaEngine JahshakaEngineBuildId)
 target_compile_definitions(JahshakaEngine PRIVATE
-    JAHSHAKA_ENGINE_BUILD_ID="${_engine_build_id}"
     JAHSHAKA_OGRE_PATCH_SERIES="${_ogre_patch_series}")
 target_include_directories(JahshakaEngine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${JAHSHAKA_ENGINE_BUILD_ID_DIR})
 # OgreNext is PRIVATE on purpose: Ogre must not leak into Studio's include path.
 target_link_libraries(JahshakaEngine PRIVATE OgreNext)
 if(UNIX AND NOT APPLE)

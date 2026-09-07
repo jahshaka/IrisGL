@@ -55,17 +55,31 @@ public:
 	float shadowAlpha;
 
     /**
-     * Spotlight cutoff angle in degrees.
-     * This parameter is only used if the light is a spotlight
+     * Spotlight cutoff HALF angle in degrees: the angle between the light's
+     * axis and the edge of its cone. The editor's cone wire is drawn from it
+     * (radius = range * tan(spotCutOff)) and the renderer doubles it to get
+     * the full apex angle Ogre wants. Range 1..85.
      */
     float spotCutOff;
 
     /**
-     * Spotlight's softness
-     * This is added to the spotlight's outer radius to give more
-     * smooth cutoff edges
+     * Spotlight's softness, 0..1. The bright core is the outer cone with this
+     * fraction taken off it: inner = outer * (1 - softness). 0 is a hard edge,
+     * 1 is all penumbra and no core.
+     *
+     * It defaulted to 1.0 on this 0..1 parameter until LIGHTING_FIX fix 5 —
+     * i.e. every spot ever created had a 1%-wide bright core and was penumbra
+     * everywhere else, which is why spots read as vague smudges.
      */
     float spotCutOffSoftness;
+
+    /**
+     * The penumbra's falloff exponent (Ogre's `falloff`): 1 = linear across the
+     * penumbra, higher concentrates the light towards the core. Never
+     * authorable before LIGHTING_FIX fix 5, which is why it reads 1.0 in every
+     * document written before it.
+     */
+    float spotFalloff;
 
     /**
      * Area-light rectangle dimensions in world units (LightType::Area only).

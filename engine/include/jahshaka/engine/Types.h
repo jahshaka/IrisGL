@@ -461,8 +461,25 @@ struct LightDesc {
     Colour    colour = Colour(1.0f, 1.0f, 1.0f);
     float     intensity = 1.0f;        // radiometric scale (Jahshaka's "intensity")
     float     range = 10.0f;           // point/spot falloff distance
-    float     spotAngleDegrees = 30.0f;    // outer cone
-    float     spotSoftness = 0.1f;         // 0..1, inner = outer * (1 - softness)
+    /// The spot cone's HALF angle, in degrees — the angle between the light's
+    /// axis and the cone's edge, which is what the document has always stored
+    /// and what the editor's cone wire is drawn from
+    /// (`radius = range * tan(spotCutOff)`, scenemirror.cpp).
+    ///
+    /// It is NOT what Ogre's `Light::setSpotlightRange` takes: that one wants
+    /// the FULL apex angle. Passing the half angle straight through (which this
+    /// boundary did until LIGHTING_FIX fix 5) rendered every spot at half the
+    /// cone the editor drew — the classic "the light does not fill its wire"
+    /// report. The doubling lives in OgreScene::setLight, once.
+    float     spotAngleDegrees = 30.0f;
+    /// 0..1. The bright core as a fraction pulled off the outer cone:
+    /// innerFull = outerFull * (1 - softness). 0 = hard edge, 0.99 = almost all
+    /// penumbra. Values outside the range are clamped, not honoured.
+    float     spotSoftness = 0.1f;
+    /// The penumbra's exponent, Ogre's `falloff` argument. 1 = linear across the
+    /// penumbra (the only value this engine used before it was authorable);
+    /// higher concentrates the light towards the core.
+    float     spotFalloff = 1.0f;
     bool      castShadows = true;          // ignored for Area (backend cannot shadow them)
     // Area lights only: a rectangle spanning the node's local X (width) and
     // Z (height), emitting down -Y like every other light type here.
@@ -1156,6 +1173,29 @@ struct RenderStats {
     /// means somebody turned the deadline on, and would be the first thing to
     /// look at if thumbnails ever came back half-drawn.
     unsigned           incompletePsoRequests = 0;
+
+    /// FORWARD+ LIGHT CENSUS (LIGHTING_FIX fix 8 / F-F2) — the WORST case
+    /// across the live scenes, because a cell overflow belongs to one scene and
+    /// this struct is process-wide.
+    ///
+    /// Forward+ bins lights into screen-space cells and DROPS SILENTLY once a
+    /// cell is full: `if( numLightsInCell->lightCount[0] < mLightsPerCell )`
+    /// with no else, three times over (OgreForwardClustered.cpp:479/618/759).
+    /// Nothing counts the drops and nothing exposes the per-cell counts, so an
+    /// exact "lights lost this frame" cannot be reported without patching Ogre
+    /// — deliberately not done for a diagnostic.
+    ///
+    /// What these three DO say, exactly: `forwardPlusLights` is how many lights
+    /// the busiest scene puts through the clustered list at all (everything
+    /// except directionals, which ride the pass buffer); `forwardPlusBudget` is
+    /// the per-cell capacity they compete for. `forwardPlusOverBudget` is the
+    /// excess, and it is a NECESSARY condition for a drop, not a sufficient
+    /// one: zero PROVES no light was dropped anywhere, non-zero means a cell
+    /// that saw every light would have dropped that many and the scene is worth
+    /// looking at.
+    unsigned           forwardPlusLights = 0;
+    unsigned           forwardPlusBudget = 0;
+    unsigned           forwardPlusOverBudget = 0;
 };
 
 /// A CENSUS of everything alive behind the boundary (fps audit F11).

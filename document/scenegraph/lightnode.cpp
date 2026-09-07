@@ -45,6 +45,12 @@ QList<Property*> LightNode::getProperties()
     props.append(prop);
 
     prop = new FloatProperty();
+    prop->displayName = "Spot Falloff";
+    prop->name = "spotFalloff";
+    prop->value = spotFalloff;
+    props.append(prop);
+
+    prop = new FloatProperty();
     prop->displayName = "Rect Width";
     prop->name = "rectWidth";
     prop->value = rectWidth;
@@ -125,6 +131,8 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return spotCutOff;
     if(valueName == "spotCutOffSoftness")
         return spotCutOffSoftness;
+    if(valueName == "spotFalloff")
+        return spotFalloff;
     if(valueName == "rectWidth")
         return rectWidth;
     if(valueName == "rectHeight")
@@ -171,6 +179,7 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "distance")          { distance = value.toFloat();          return true; }
     if (valueName == "spotCutOff")        { spotCutOff = value.toFloat();        return true; }
     if (valueName == "spotCutOffSoftness"){ spotCutOffSoftness = value.toFloat();return true; }
+    if (valueName == "spotFalloff")       { spotFalloff = value.toFloat();       return true; }
     if (valueName == "rectWidth")         { rectWidth = value.toFloat();         return true; }
     if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return true; }
     if (valueName == "lightType")         { setLightType(static_cast<LightType>(value.toInt())); return true; }
@@ -205,6 +214,8 @@ void LightNode::updateAnimation(float time)
             spotCutOff = animation->getFloatPropertyAnim("spotCutOff")->getValue(time);
         if(animation->hasPropertyAnim("spotCutOffSoftness"))
             spotCutOffSoftness = animation->getFloatPropertyAnim("spotCutOffSoftness")->getValue(time);
+        if(animation->hasPropertyAnim("spotFalloff"))
+            spotFalloff = animation->getFloatPropertyAnim("spotFalloff")->getValue(time);
         if(animation->hasPropertyAnim("rectWidth"))
             rectWidth = animation->getFloatPropertyAnim("rectWidth")->getValue(time);
         if(animation->hasPropertyAnim("rectHeight"))
@@ -224,7 +235,12 @@ LightNode::LightNode()
     color = QColor(255, 255, 255);
     intensity = 1.0f;
     spotCutOff = 30.0f;
-    spotCutOffSoftness = 1.0f;
+    // 0..1, and it was 1.0 here for years — a full-width penumbra with a 1%
+    // bright core on EVERY spot ever created (LIGHTING_FIX fix 5 / F-S2). 0.15
+    // is a narrow, deliberate soft edge, which is what "softness" was meant to
+    // mean and what the 0..1 UI row now offers.
+    spotCutOffSoftness = 0.15f;
+    spotFalloff = 1.0f;
 
     rectWidth = 1.0f;
     rectHeight = 1.0f;
@@ -254,6 +270,7 @@ SceneNodePtr LightNode::createDuplicate()
 	light->distance = this->distance;
 	light->spotCutOff = this->spotCutOff;
 	light->spotCutOffSoftness = this->spotCutOffSoftness;
+	light->spotFalloff = this->spotFalloff;
 	light->rectWidth = this->rectWidth;
 	light->rectHeight = this->rectHeight;
 	light->doubleSided = this->doubleSided;

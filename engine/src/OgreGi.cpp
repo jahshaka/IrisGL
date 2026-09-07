@@ -34,6 +34,10 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
         case GiMode::Off:
             teardownGi();
             mGi = p;
+            // Switching GI off is the user's own "start over": the hysteresis
+            // floor forgets what used to be lit, so switching back on fits the
+            // scene as it is now rather than as it was.
+            noteGiAutoVolume(Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO), false);
             return true;
 
         case GiMode::InstantRadiosity: {
@@ -107,7 +111,7 @@ bool OgreScene::refreshGiLighting() {
         mSceneMgr->updateSceneGraph();
         const Ogre::uint32 extraBounces =
             Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-        mVctLighting->update(mSceneMgr, extraBounces);
+        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights());
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -180,23 +184,63 @@ Ogre::Light *OgreScene::markGiLight(NodeId requested) {
 
 // The GI-participating items' world AABBs, AFTER the two document-driven
 // filters: the per-node "exclude from GI bounds" flag, and the extent-outlier
-// rejection below. Everything that reasons about the shape of the lit world
+// TRIMMING below. Everything that reasons about the shape of the lit world
 // starts here so that the lit volume and the probe region can never disagree
 // about which objects define it.
 //
-// OUTLIER REJECTION (REFLECTIONS_ADOPTION_SPEC.md P1a.1): take each item's
-// LARGEST world-AABB extent, take the median of those, and drop items whose
-// largest extent is more than 4x the median. The case it exists for is the one
-// every default scene has: a ground plane 200 units across sitting under a
-// handful of 1-2 unit primitives. Unioning it puts the voxel volume and the
-// probe grid over 40,000 square units of empty air — the "basic cubemap" look
-// GI_SPEC blamed on probe count. The median (not the mean) is what makes one
-// enormous object unable to drag the threshold up to cover itself.
+// WHY ANY OF THIS EXISTS. Every default scene has a ground plane 200 units
+// across under a handful of 1-2 unit primitives. Unioning it puts the voxel
+// volume and the probe grid over 40,000 square units of empty air — the "basic
+// cubemap" look GI_SPEC blamed on probe count — so an enormous piece of
+// scenery must not be allowed to define the lit world on its own.
 //
-// It only runs with FOUR items or more: below that "the median" is not a
-// statement about a population, and a three-object scene where one object is
-// genuinely the subject would lose it. The document's explicit exclude flag is
-// the deterministic escape hatch when the heuristic guesses wrong either way.
+// WHAT WAS WRONG WITH THE FIRST ATTEMPT (the owner's regression, rig-measured
+// 2026-09-07). It took the MEDIAN largest extent and DROPPED every item more
+// than 4x it, and only ran at four items or more. Both halves are cliffs:
+//   * a drop is binary, so an item goes from defining the volume to not
+//     existing between one rebuild and the next;
+//   * the median is an order statistic, so ONE added object can move it by a
+//     factor of five (extents [1,1,10,10] -> median 5.5, all kept; add one more
+//     1 -> median 1, both tens dropped);
+//   * and the "four items or more" gate is itself a cliff by construction —
+//     the scene's fourth mesh changed the answer by two orders of magnitude
+//     (measured: 3 cubes -> y +-17, 4 cubes -> y +-1.1).
+// The visible symptom is a scene going dark, or losing its bounce, because a
+// user added an object.
+//
+// THE REPLACEMENT — trim, never drop; and never shrink below what is already
+// lit. Three properties, each one killing one of the cliffs above:
+//
+//  1. A SMOOTH POPULATION SCALE. The reference size is the GEOMETRIC MEAN of
+//     the items' largest extents, not the median. log(scale) is an arithmetic
+//     mean, so adding one item moves it by (log e - log scale)/(n+1): bounded,
+//     and it never jumps the way an order statistic does.
+//  2. A CONTINUOUS PER-ITEM WEIGHT, not a verdict. w = 1 while the item is at
+//     most kOutlierSoftStart scales big, 0 once it is kOutlierSoftEnd scales
+//     big, smoothstep in LOG space between. An item's contribution is then
+//     lerp(item clipped into the content region, item's own AABB, w) — a box
+//     that morphs continuously from trimmed to whole. At w = 1 the result is
+//     byte-identical to the plain union, which is the overwhelmingly common
+//     case and returns early.
+//  3. A HYSTERESIS FLOOR. An item that the PREVIOUS auto-resolved lit volume
+//     already covered is never trimmed, whatever its weight. This is what makes
+//     "add one object" incapable of collapsing a live scene's volume: the
+//     ground that was lit stays lit. It resets when GI is switched off and on,
+//     when the scene's bounds are typed by hand, and when the item is removed
+//     or flagged out of the bounds — every deliberate user action still gets a
+//     fresh, tight fit.
+//     ITS ONE QUALIFIER, and it is load-bearing (see noteGiAutoVolume): the
+//     floor only remembers a fit made over a real POPULATION, two items or
+//     more. A scene holding nothing but a ground plane has nothing to be an
+//     outlier against, so the ground IS the volume — recording that would pin
+//     the default editor scene's thousand-unit ground for the session. The
+//     guarantee is therefore the narrower, honest one: ONCE A SCENE HAS
+//     CONTENT, adding more content can never collapse its lit volume.
+//
+// The document's explicit per-node exclude flag remains the deterministic
+// escape hatch, and it runs BEFORE all of this: an excluded item is not in the
+// population, cannot be protected by the hysteresis floor, and therefore still
+// shrinks the volume the instant it is flagged.
 std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     std::vector<Ogre::Aabb> all;
     all.reserve(mNodes.size());
@@ -206,34 +250,208 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         if (kv.second.giBoundsExcluded) continue;
         all.push_back(const_cast<Ogre::Item *>(item)->getWorldAabbUpdated());
     }
-    if (all.size() < 4u) return all;
+    // One item IS the scene; there is no population to be an outlier against.
+    mGiLastItemCount = all.size();
+    if (all.size() < 2u) return all;
 
-    std::vector<float> extents;
-    extents.reserve(all.size());
-    for (const Ogre::Aabb &a : all) {
-        const Ogre::Vector3 s = a.getSize();
-        extents.push_back(std::max(std::max(s.x, s.y), s.z));
+    const size_t n = all.size();
+    std::vector<float> extents(n);
+    double logSum = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const Ogre::Vector3 s = all[i].getSize();
+        extents[i] = std::max(std::max(std::max(s.x, s.y), s.z), 1e-4f);
+        logSum += std::log(double(extents[i]));
     }
-    std::vector<float> sorted = extents;
-    std::sort(sorted.begin(), sorted.end());
-    const size_t n = sorted.size();
-    const float median = (n % 2u) ? sorted[n / 2u]
-                                  : 0.5f * (sorted[n / 2u - 1u] + sorted[n / 2u]);
-    if (median <= 0.0f) return all;          // degenerate (all points) — keep everything
-    const float limit = median * 4.0f;
+    const float scale = float(std::exp(logSum / double(n)));
+    if (!(scale > 0.0f)) return all;      // degenerate (all points) — keep everything
 
-    std::vector<Ogre::Aabb> kept;
-    kept.reserve(all.size());
-    for (size_t i = 0; i < all.size(); ++i)
-        if (extents[i] <= limit) kept.push_back(all[i]);
-    // Never return nothing: if the filter somehow ate the whole scene the plain
-    // union is a worse answer than no answer at all.
-    return kept.empty() ? all : kept;
+    // The weight ramp, in log space so it is scale-invariant.
+    static const float kOutlierSoftStart = 4.0f;    // content up to here
+    static const float kOutlierSoftEnd   = 16.0f;   // pure scenery beyond here
+    const float logStart = std::log(kOutlierSoftStart);
+    const float logSpan  = std::log(kOutlierSoftEnd) - logStart;
+
+    // The hysteresis floor (property 3): items the previous auto volume covered.
+    const bool havePrev = mGiAutoVolumeValid;
+    const Ogre::Vector3 prevMin = mGiAutoVolume.getMinimum();
+    const Ogre::Vector3 prevMax = mGiAutoVolume.getMaximum();
+    const auto coveredByPrev = [&](const Ogre::Aabb &a) {
+        if (!havePrev) return false;
+        const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
+        return mn.x >= prevMin.x && mn.y >= prevMin.y && mn.z >= prevMin.z &&
+               mx.x <= prevMax.x && mx.y <= prevMax.y && mx.z <= prevMax.z;
+    };
+
+    std::vector<float> w(n, 1.0f);
+    bool anyTrimmed = false;
+    for (size_t i = 0; i < n; ++i) {
+        const float t = (std::log(extents[i] / scale) - logStart) / logSpan;
+        if (t <= 0.0f) continue;                                  // content: w = 1
+        const float c = std::min(t, 1.0f);
+        w[i] = 1.0f - (c * c * (3.0f - 2.0f * c));                // smoothstep
+        if (coveredByPrev(all[i])) { w[i] = 1.0f; continue; }     // already lit: keep it whole
+        if (w[i] < 1.0f) anyTrimmed = true;
+    }
+    if (!anyTrimmed) return all;      // the common case: the plain union, untouched
+
+    // THE CONTENT CORE: every item at its weight, an outlier collapsing towards
+    // its own centre rather than vanishing. Continuous in w by construction —
+    // and GEOMETRICALLY so, for the same reason the final morph below is: a
+    // linear collapse leaves 2.4% of a 200-unit ground still measuring 5 units,
+    // which would then define the "content" it is supposed to be excluded from.
+    // kCoreFloor is a FRACTION of the item's own size rather than an absolute,
+    // so the shape of the ramp does not depend on the scene's units.
+    static const float kCoreFloor = 1e-3f;
+    Ogre::Vector3 coreMin(1e30f), coreMax(-1e30f);
+    for (size_t i = 0; i < n; ++i) {
+        const Ogre::Vector3 c = all[i].mCenter;
+        const float shrink = std::pow(kCoreFloor, 1.0f - w[i]);
+        const Ogre::Vector3 h = all[i].mHalfSize * shrink;
+        coreMin.makeFloor(c - h); coreMax.makeCeil(c + h);
+    }
+    // THE REGION an outlier is trimmed into: the core plus half of itself
+    // again, so the floor a scene stands on keeps the patch under (and around)
+    // the content and loses only the empty acres.
+    static const float kRegionGrow = 0.5f;
+    const Ogre::Vector3 grow = (coreMax - coreMin) * (kRegionGrow * 0.5f);
+    const Ogre::Vector3 regionMin = coreMin - grow, regionMax = coreMax + grow;
+
+    std::vector<Ogre::Aabb> out;
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        const Ogre::Vector3 mn = all[i].getMinimum(), mx = all[i].getMaximum();
+        if (w[i] >= 1.0f) { out.push_back(all[i]); continue; }
+        // The trimmed box...
+        Ogre::Vector3 tmn = mn, tmx = mx;
+        tmn.makeCeil(regionMin);  tmx.makeFloor(regionMax);
+        for (size_t ax = 0; ax < 3u; ++ax)
+            if (tmn[ax] > tmx[ax]) {                 // wholly outside the region
+                const float c = all[i].mCenter[ax];  // ...keep it as a point there
+                tmn[ax] = tmx[ax] = std::min(std::max(c, regionMin[ax]), regionMax[ax]);
+            }
+        // ...morphed back towards the whole one by w. The SIZE is interpolated
+        // GEOMETRICALLY, not linearly, and that is not decoration: this
+        // interpolates between a 2-unit box and a 200-unit one, and a linear
+        // blend spends most of its travel near the large end (at w = 0.02 a
+        // linear blend of 200 still measures 4 units of ground, i.e. twice the
+        // content). Geometrically the RATIO moves smoothly instead, which is
+        // exactly the quantity "no order-of-magnitude collapse" is about —
+        // measured on the ground-plus-N-cubes table, the same step went from
+        // 6.5x to 1.1x. Centres move linearly: they are bounded by the region
+        // either way, and a geometric mean of a coordinate is meaningless.
+        Ogre::Vector3 fmn, fmx;
+        for (size_t ax = 0; ax < 3u; ++ax) {
+            const float tc = 0.5f * (tmn[ax] + tmx[ax]), th = 0.5f * (tmx[ax] - tmn[ax]);
+            const float fc = all[i].mCenter[ax],         fh = all[i].mHalfSize[ax];
+            const float c = tc + (fc - tc) * w[i];
+            const float eps = 1e-4f;
+            const float h = std::exp(std::log(std::max(th, eps)) * (1.0f - w[i]) +
+                                     std::log(std::max(fh, eps)) * w[i]);
+            fmn[ax] = c - h; fmx[ax] = c + h;
+        }
+        out.push_back(Ogre::Aabb::newFromExtents(fmn, fmx));
+    }
+    return out;
+}
+
+// Does any GI item's world AABB lie (even partly) OUTSIDE the volume that is
+// currently lit? Returns a signature rather than a bool: 0 when everything is
+// covered, otherwise a hash of the escaping items' quantized AABBs.
+//
+// WHY A SIGNATURE (LIGHTING_FIX fix 2). The mirror already knows how to debounce
+// "something changed that needs a re-solve": it compares a signature every
+// frame, restarts a stability window whenever it differs, and re-solves once the
+// value has held still. A bool cannot drive that — it stays true for the whole
+// of a drag, so the window would either fire mid-drag every time or never. A
+// hash of WHERE the escapee is changes on every frame of a drag (window keeps
+// restarting, no per-frame rebuilds) and stops changing when the user lets go
+// (exactly one re-solve). It is the same contract a light transform already has.
+//
+// Quantized to 1/64 of the lit volume's size so that sub-voxel jitter (a
+// physics body settling, an animation's idle sway) cannot keep the window open
+// forever.
+unsigned long long OgreScene::giEscapeSignature() const {
+    if (mGi.mode == GiMode::Off) return 0ull;
+    if (!mGiAutoVolumeValid) return 0ull;      // nothing resolved yet, or hand-typed bounds
+    const Ogre::Vector3 vmn = mGiAutoVolume.getMinimum(), vmx = mGiAutoVolume.getMaximum();
+    const Ogre::Vector3 size = vmx - vmn;
+    const float quantum = std::max(std::max(std::max(size.x, size.y), size.z) / 64.0f, 1e-4f);
+    unsigned long long h = 1469598103934665603ull;      // FNV-1a
+    const auto fold = [&h](unsigned long long v) {
+        h ^= v; h *= 1099511628211ull;
+    };
+    for (const auto &kv : mNodes) {
+        const Ogre::Item *item = kv.second.item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        if (kv.second.giBoundsExcluded) continue;
+        const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
+        const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
+        if (mn.x >= vmn.x && mn.y >= vmn.y && mn.z >= vmn.z &&
+            mx.x <= vmx.x && mx.y <= vmx.y && mx.z <= vmx.z) continue;
+        fold((unsigned long long)kv.first);
+        for (size_t ax = 0; ax < 3u; ++ax) {
+            fold((unsigned long long)(long long)std::floor(mn[ax] / quantum));
+            fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
+        }
+    }
+    return h == 1469598103934665603ull ? 0ull : h;      // untouched hash == nothing escaped
+}
+
+// A SCENE WITH NO LIGHTS AT ALL BREAKS VctLighting's AUTO MULTIPLIER, and after
+// LIGHTING_FIX fix 3 that is visible rather than academic. `update()`'s
+// auto-multiplier pass takes the maximum radiance over the scene's lights, then
+// inverts it (OgreVctLighting.cpp:952-956): with no lights the maximum is 0, the
+// inverse is infinity, `mInvBakingMultiplier` comes out 0, and the shader's
+// `blendWeight = blendFade * blend * multiplier` is 0 — so the VCT arm
+// contributes NOTHING. That used to be invisible (nothing to contribute), but
+// the ambient now rides the same multiplier, and the PBS ambient pieces are
+// switched off inside a VCT volume, so an ambient-lit scene with no lights went
+// BLACK the moment VCT was enabled. Passing autoMultiplier = false falls back to
+// `mBakingMultiplier` (1.0), which is the right answer when there is nothing to
+// normalise against. Upstream behaviour, reported, worked around here.
+bool OgreScene::hasVctLights() const {
+    for (const auto &kv : mNodes) {
+        const Ogre::Light *l = kv.second.light;
+        if (!l) continue;
+        switch (l->getType()) {
+        case Ogre::Light::LT_DIRECTIONAL: case Ogre::Light::LT_POINT:
+        case Ogre::Light::LT_SPOTLIGHT:   case Ogre::Light::LT_AREA_APPROX:
+        case Ogre::Light::LT_AREA_LTC:    return true;
+        default: break;
+        }
+    }
+    return false;
+}
+
+void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
+    mGiAutoVolume = fitted;
+    // THE FLOOR ONLY REMEMBERS A REAL POPULATION, and this qualifier is the
+    // difference between a useful hysteresis and a broken heuristic.
+    //
+    // A scene with ONE GI item has nothing to be an outlier against, so
+    // giItemBounds keeps it whole and the volume is that object — for the
+    // DEFAULT EDITOR SCENE that object is the ground, and the volume is a
+    // thousand units across. Recording that as "what is already lit" would
+    // protect the ground for the rest of the session: every cube the user then
+    // added would be lit inside a 1000-unit voxel volume, which is the state
+    // the trimming exists to prevent (caught by scripting.e2e.gi_bounds, which
+    // measured exactly that: extent 1088 where it expects < 30).
+    //
+    // So the floor guarantees the narrower, honest thing: ONCE A SCENE HAS
+    // CONTENT, adding more content can never collapse its lit volume. The very
+    // first object to appear in an empty-but-for-scenery scene legitimately
+    // re-centres the volume onto it, and that is the heuristic working.
+    mGiAutoVolumeValid = automatic && mGiLastItemCount >= 2u;
+}
+
+bool OgreScene::giBoundsExplicit() const {
+    const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
+    return a.x != b.x || a.y != b.y || a.z != b.z;
 }
 
 bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
     const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
-    if (a.x != b.x || a.y != b.y || a.z != b.z) {
+    if (giBoundsExplicit()) {
         mn = Ogre::Vector3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
         mx = Ogre::Vector3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
         return true;
@@ -391,6 +609,98 @@ void OgreScene::applyPendingGi() {
     } JAH_CATCH(mError, );
 }
 
+// FORWARD+ DEPTH SLICES (LIGHTING_FIX fix 8 / F-F1).
+//
+// `setForwardClustered`'s last two arguments are the near and far ends of the
+// LOGARITHMIC depth-slice distribution the clustered grid uses: 24 slices are
+// spread between them, and lights are binned into the slice their depth falls
+// in. They were hardcoded at 2 and 50 — numbers from the sample this engine's
+// scene setup was written against. In a scene 8 units across, 22 of the 24
+// slices sit behind everything that exists and the whole scene shares two
+// cells' worth of depth resolution; in a scene 400 units across, everything
+// past 50 shares the last slice. Either way the per-cell light list is far
+// longer than it needs to be, which is what makes the 96-light budget bite.
+//
+// So it is derived from the camera and the scene's own extent instead. Two
+// things keep it honest:
+//   * RATE LIMIT. The call recreates the grid buffers (and, on a light-slot
+//     change, would recompile shaders), so it is considered once every
+//     kFwdPlusEveryNFrames frames, never per frame.
+//   * HYSTERESIS. Even then it only re-applies when the wanted range is at
+//     least 2x away from the one in force. A camera dollying smoothly must not
+//     rebuild anything; a camera that has actually changed scale must.
+void OgreScene::updateForwardPlusRanges(const Ogre::Camera *cam) {
+    static const unsigned kFwdPlusEveryNFrames = 30u;
+    // The default 2..50 ratio, kept: 24 log slices over 25x is the shape
+    // upstream's sample tuned, and only its ABSOLUTE placement was wrong.
+    static const float kRangeRatio = 25.0f;
+    if (!cam) return;
+    if (++mFwdPlusTick < kFwdPlusEveryNFrames) return;
+    mFwdPlusTick = 0;
+    JAH_TRY {
+        Ogre::Vector3 mn(1e30f), mx(-1e30f);
+        size_t count = 0;
+        for (auto &kv : mNodes) {
+            Ogre::Item *item = kv.second.item;
+            if (!item || !(item->getVisibilityFlags() & kVisibleBit)) continue;
+            const Ogre::Aabb a = item->getWorldAabbUpdated();
+            mn.makeFloor(a.getMinimum()); mx.makeCeil(a.getMaximum());
+            ++count;
+        }
+        if (!count) return;                 // an empty scene keeps whatever it has
+        const Ogre::Vector3 camPos = cam->getDerivedPosition();
+        // The far end: the distance to the furthest corner of what exists.
+        float far2 = 0.0f;
+        for (int c = 0; c < 8; ++c) {
+            const Ogre::Vector3 corner((c & 1) ? mx.x : mn.x,
+                                       (c & 2) ? mx.y : mn.y,
+                                       (c & 4) ? mx.z : mn.z);
+            far2 = std::max(far2, (corner - camPos).squaredLength());
+        }
+        const float wantMax = std::min(std::max(std::sqrt(far2), 1.0f),
+                                       float(cam->getFarClipDistance()));
+        const float wantMin = std::max(wantMax / kRangeRatio,
+                                       float(cam->getNearClipDistance()) * 2.0f);
+        if (!(wantMax > wantMin)) return;
+        const bool maxMoved = wantMax > mFwdPlusMax * 2.0f || wantMax < mFwdPlusMax * 0.5f;
+        const bool minMoved = wantMin > mFwdPlusMin * 2.0f || wantMin < mFwdPlusMin * 0.5f;
+        if (!maxMoved && !minMoved) return;
+        // Every other argument is byte-identical to createScene's call: only the
+        // range moves, so no shader property (and therefore no shader) changes.
+        mSceneMgr->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, 8, wantMin, wantMax);
+        mFwdPlusMin = wantMin; mFwdPlusMax = wantMax;
+    } JAH_CATCH(mError, );
+}
+
+// THE FORWARD+ LIGHT CENSUS (fix 8 / F-F2) — and an honest statement of what it
+// can and cannot see.
+//
+// What Forward+ actually does when a cell fills up is drop the light silently:
+// `if( numLightsInCell->lightCount[0] < mLightsPerCell )` with no else branch,
+// three times over in OgreForwardClustered.cpp (lines 479, 618, 759). There is
+// no counter behind it and no accessor for the per-cell counts, so an EXACT
+// "lights dropped this frame" number cannot be produced without patching
+// upstream — which is a whole-tree engine rebuild for a diagnostic, and was
+// left out of this lane deliberately.
+//
+// What CAN be said exactly is the necessary condition: a cell can only overflow
+// if the scene holds more Forward+ lights than the per-cell budget in the first
+// place. So this reports the scene's count of lights that go through the
+// clustered list at all (everything except directionals, which ride the pass
+// buffer) and the budget they compete for. `lights > budget` means drops are
+// possible and the scene should be looked at; `lights <= budget` is a proof
+// that nothing was dropped.
+void OgreScene::forwardPlusLightCensus(unsigned &lights, unsigned &budget) const {
+    lights = 0u;
+    budget = 96u;      // the lightsPerCell argument createScene passes
+    for (const auto &kv : mNodes) {
+        const Ogre::Light *l = kv.second.light;
+        if (!l) continue;
+        if (l->getType() == Ogre::Light::LT_DIRECTIONAL) continue;
+        ++lights;
+    }
+}
+
 void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
     if (!mPcc || !mGiCamera) return;
     JAH_TRY {
@@ -412,6 +722,7 @@ void OgreScene::rebuildGi() {
     // outside the sphere so nearby geometry occludes correctly.
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
     mGiLitVolume = aabb;
+    noteGiAutoVolume(aabb, !giBoundsExplicit());
     mInstantRadiosity->mAoI.clear();
     mInstantRadiosity->mAoI.push_back(
         Ogre::InstantRadiosity::AreaOfInterest(aabb, aabb.getRadius() * 2.0f));
@@ -495,7 +806,12 @@ void OgreScene::rebuildVct() {
     const Ogre::uint32 extraBounces =
         Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
     mVctLighting->setAllowMultipleBounces(extraBounces > 0u);
-    mVctLighting->update(mSceneMgr, extraBounces);
+    // The scene's ambient, BEFORE the first update(): the pair is read when the
+    // probe const buffer is filled, and a volume built with black hemispheres
+    // shows a black ambient for the frame between build and the next ambient
+    // push. See applyVctAmbient (OgreScene.cpp) for why it is a genuine pair.
+    applyVctAmbient();
+    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights());
 
     hlmsPbs(mRoot)->setVctLighting(mVctLighting);
     sVctBindingOwner = this;
@@ -512,6 +828,11 @@ void OgreScene::rebuildVct() {
         // applyReflectionToAll is a no-op walk when there is no sky reflection.
         applyReflectionToAll();
     }
+    // LAST, not beside `mGiLitVolume = aabb` above: computeProbeRegion calls
+    // giItemBounds again, and the hysteresis floor inside it must see the same
+    // record the lit volume was fitted against or the two could disagree about
+    // which items exist.
+    noteGiAutoVolume(aabb, !giBoundsExplicit());
 
     if (std::getenv("JAHSHAKA_GI_DEBUG"))
         Ogre::LogManager::getSingleton().logMessage(
