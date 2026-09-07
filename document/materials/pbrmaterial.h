@@ -56,6 +56,9 @@ public:
     void setNormalMap(Texture2DPtr tex);
     void setNormalFactor(float factor);
 
+    // --- shading model (HLMS_ADOPTION P4a) ---
+    void setShadingModel(int model);        // 0 lit, 1 unlit
+
     // --- clear coat / BRDF / shadow + lightmap switches (HLMS_ADOPTION P1) ---
     void setClearCoat(float coat);
     void setClearCoatRoughness(float roughness);
@@ -132,6 +135,15 @@ public:
     /// rows when this is false (D-P1b) and the engine does not apply them.
     static bool brdfSupportsClearCoat(int index);
 
+    /// The shading-model vocabulary, in `shadingModel` index order — the same
+    /// one-table discipline as brdfNames().
+    static const QVector<const char *> &shadingModelNames();
+    /// The property names an UNLIT material cannot honour, so the panel can grey
+    /// them out with a reason instead of letting a user discover that half the
+    /// rows do nothing. Every entry is justified in the ShadingModel comment in
+    /// the engine's Types.h — this list and that comment are the same claim.
+    static const QVector<QString> &rowsUnusedWhenUnlit();
+
     QColor baseColor;
     float  baseColorFactor;
     bool   useBaseColorMap;
@@ -167,6 +179,22 @@ public:
     /// coming back to Default restores the coat.
     float  clearCoat;
     float  clearCoatRoughness;
+
+    /// Which shading FAMILY renders this material: 0 = Lit (metallic-roughness
+    /// PBR), 1 = Unlit (flat colour). HLMS_ADOPTION P4a.
+    ///
+    /// This is not one more knob on one pipeline — the renderer has two
+    /// material families and switching costs a destroy/recreate of the whole
+    /// backend material, which is why the mirror routes it through its own
+    /// engine verb. What Unlit gives up is listed on rowsUnusedWhenUnlit() and
+    /// argued in the engine's ShadingModel comment; the values it cannot use
+    /// are KEPT here, so switching back restores them.
+    ///
+    /// ONE REFUSAL WORTH KNOWING ABOUT: a material used by a RIGGED mesh cannot
+    /// become Unlit. The Unlit family cannot skin, so the character would stand
+    /// at its bind pose while the animation played on — silently. The engine
+    /// refuses the switch by name and the document keeps its Lit value.
+    int    shadingModel;
 
     /// The shading BRDF, as an INDEX into PbrMaterial::brdfNames() — never the
     /// renderer's own enum value. Ogre's PbsBrdf is a bitfield and a document

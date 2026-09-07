@@ -128,7 +128,26 @@ public:
     virtual bool        updateMeshVertices(MeshId, const std::vector<float> &positions,
                                            const std::vector<float> &normals) = 0;
     virtual MaterialId  createPbrMaterial(const PbrParams &) = 0;
+    /// Re-applies every parameter EXCEPT the shading model — see
+    /// setShadingModel for why that one is a separate, atomic call.
     virtual bool        setPbrMaterial(MaterialId, const PbrParams &) = 0;
+    /// Moves a material between the LIT and UNLIT shading families
+    /// (HLMS_ADOPTION P4a). See ShadingModel in Types.h for what Unlit costs.
+    ///
+    /// ATOMIC, and it has to be: the two families are different backend
+    /// material types, so this destroys the backend material, builds a new one
+    /// in the other family from the parameters and textures already pushed, and
+    /// RE-ATTACHES every renderable that referenced it. The MaterialId is
+    /// preserved on purpose — the host's own material identity is referenced by
+    /// every node, and a switch that minted a new id would be a rewrite of the
+    /// host's scene rather than a property change.
+    ///
+    /// REFUSES (lastError(), nothing changed) when the material is used by any
+    /// node carrying a rig: the Unlit family cannot skin, and an unlit rigged
+    /// mesh renders welded to its bind pose while the character animates away
+    /// from it — silently. Idempotent: setting the model it already has
+    /// succeeds and touches nothing.
+    virtual bool        setShadingModel(MaterialId, ShadingModel) = 0;
     virtual bool        destroyMaterial(MaterialId) = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
     /// text. Empty (lastError()) for an unknown material.

@@ -273,10 +273,96 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     }
 }
 
+// The UNLIT shading model (HLMS_ADOPTION P4a). This is the whole of what the
+// Unlit family can honour from PbrParams, and the shortness IS the feature:
+// there is no lighting term to feed metalness, roughness, normals, emissive,
+// clear coat, a BRDF or shadow reception into. Those values are not consumed
+// and not destroyed — the document keeps them, the panel greys them out with a
+// reason, and switching back to Lit brings them all back.
+void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
+    // The alpha modes that mean something without lighting. Glass and
+    // Refractive are defined ENTIRELY by what light does at the surface (glass
+    // keeps its specular while its diffuse fades; refraction bends what is
+    // behind it) so on Unlit they degrade to a plain alpha blend rather than
+    // pretending. Additive and Modulate are already unlit-leaning by design.
+    const bool blended = p.alphaMode == PbrAlphaMode::Blend ||
+                         p.alphaMode == PbrAlphaMode::Glass ||
+                         p.alphaMode == PbrAlphaMode::Refractive ||
+                         p.alphaMode == PbrAlphaMode::Additive;
+    const float alpha = blended ? p.alpha : 1.0f;
+    db->setUseColour(true);
+    db->setColour(Ogre::ColourValue(p.albedo.r, p.albedo.g, p.albedo.b, alpha));
+
+    if (p.alphaMode == PbrAlphaMode::Cutout) {
+        // Same sense as the PBS path: the template discards when
+        // `threshold CMP alpha`, so GREATER discards alpha below the cutoff.
+        db->setAlphaTest(Ogre::CMPF_GREATER);
+        db->setAlphaTestThreshold(p.alphaCutoff);
+    } else {
+        db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
+    }
+
+    // Blendblock and macroblock are managed idempotently in BOTH directions,
+    // the same discipline applyPbr uses: this runs on every changed push.
+    {
+        Ogre::HlmsBlendblock want = *db->getBlendblock();
+        if (p.alphaMode == PbrAlphaMode::Additive) {
+            want.mSeparateBlend = false;
+            want.mSourceBlendFactor      = Ogre::SBF_SOURCE_ALPHA;
+            want.mDestBlendFactor        = Ogre::SBF_ONE;
+            want.mSourceBlendFactorAlpha = Ogre::SBF_SOURCE_ALPHA;
+            want.mDestBlendFactorAlpha   = Ogre::SBF_ONE;
+        } else if (p.alphaMode == PbrAlphaMode::Modulate) {
+            want.setBlendType(Ogre::SBT_MODULATE);
+        } else if (blended) {
+            want.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
+        } else {
+            want.setBlendType(Ogre::SBT_REPLACE);
+        }
+        const Ogre::HlmsBlendblock &cur = *db->getBlendblock();
+        if (want.mSourceBlendFactor != cur.mSourceBlendFactor ||
+            want.mDestBlendFactor != cur.mDestBlendFactor ||
+            want.mSourceBlendFactorAlpha != cur.mSourceBlendFactorAlpha ||
+            want.mDestBlendFactorAlpha != cur.mDestBlendFactorAlpha ||
+            want.mSeparateBlend != cur.mSeparateBlend)
+            db->setBlendblock(want);
+    }
+    {
+        Ogre::HlmsMacroblock macro = *db->getMacroblock();
+        const Ogre::CullingMode wantCull = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        // Anything that blends must not write depth — it cannot occlude what it
+        // is blending over. Modulate blends too even though it ignores alpha.
+        const bool wantDepthWrite = !blended && p.alphaMode != PbrAlphaMode::Modulate;
+        if (macro.mCullMode != wantCull || macro.mDepthWrite != wantDepthWrite) {
+            macro.mCullMode = wantCull;
+            macro.mDepthWrite = wantDepthWrite;
+            db->setMacroblock(macro);
+        }
+    }
+}
+
 // ---- Materials ----
 MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
     JAH_TRY {
-        MaterialRec rec; rec.datablockName = processUniqueName("pbr");
+        MaterialRec rec;
+        rec.params = p;
+        // The shading model is honoured AT CREATION, so a scene full of saved
+        // Unlit materials builds them in the right family directly instead of
+        // creating a Pbs datablock and immediately destroying it.
+        if (p.shadingModel == ShadingModel::Unlit) {
+            rec.datablockName = processUniqueName("unlitpbr");
+            rec.unlit = true;          // no GI, and hlmsFor picks HlmsUnlit
+            rec.shadingUnlit = true;   // ...but it is scene geometry, not an overlay
+            auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(
+                mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
+            auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsUnlit->createDatablock(
+                Ogre::IdString(rec.datablockName), rec.datablockName,
+                Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
+            applyUnlit(db, p);
+            mMaterials[++mNextMaterialId] = rec;
+            return mNextMaterialId;
+        }
+        rec.datablockName = processUniqueName("pbr");
         rec.refractive = p.alphaMode == PbrAlphaMode::Refractive;
         auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->createDatablock(
@@ -293,11 +379,27 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
 bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
-    if (it->second.unlit) { mError = "setPbrMaterial: material is unlit"; return false; }
+    // An OVERLAY unlit material (grid, gizmo, outline) has no PBR parameters at
+    // all. A material whose SHADING MODEL is Unlit does — it just renders them
+    // through the other family.
+    if (it->second.unlit && !it->second.shadingUnlit) {
+        mError = "setPbrMaterial: material is unlit"; return false;
+    }
     JAH_TRY {
-        auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
-        auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->getDatablock(Ogre::IdString(it->second.datablockName)));
-        if (!db) return false;
+        // p.shadingModel is IGNORED here, by design: a family switch destroys
+        // the datablock and re-attaches every renderable, which cannot happen
+        // inside a per-frame parameter push. setShadingModel owns it, and the
+        // host calls that first (the model term is in PbrParams::operator== so
+        // the host's change-guard notices).
+        auto *hlms = hlmsFor(it->second);
+        auto *raw = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
+        if (!raw) return false;
+        it->second.params = p;
+        if (it->second.shadingUnlit) {
+            applyUnlit(static_cast<Ogre::HlmsUnlitDatablock *>(raw), p);
+            return true;   // an unlit material is never refractive
+        }
+        auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
         applyPbr(db, p, mRefractionsActive);
         // An alpha-mode change moves the item between render queues, and the
         // items already exist: re-file them or a material turned refractive
@@ -306,6 +408,105 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         const bool wasRefractive = it->second.refractive;
         it->second.refractive = p.alphaMode == PbrAlphaMode::Refractive;
         if (wasRefractive != it->second.refractive) refileItems(id, it->second);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+// THE FAMILY SWITCH (HLMS_ADOPTION P4a §6.2). Destroy, recreate in the other
+// family, re-attach — and the MaterialId survives, because the host's scene
+// refers to it from every node.
+bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
+    auto it = mMaterials.find(id);
+    if (it == mMaterials.end()) { mError = "setShadingModel: unknown material"; return false; }
+    MaterialRec &rec = it->second;
+    if (rec.unlit && !rec.shadingUnlit) {
+        // Grids, gizmos, wires and the selection outline are unlit as a POLICY;
+        // they are not PBR materials and have no shading model to set.
+        mError = "setShadingModel: this is an overlay material, not a PBR material";
+        return false;
+    }
+    const bool wantUnlit = model == ShadingModel::Unlit;
+    if (wantUnlit == rec.shadingUnlit) return true;   // idempotent, touches nothing
+
+    // RULE 5, and it is a REFUSAL rather than a fallback: HlmsUnlit's
+    // calculateHashForPreCreate hard-zeroes Skeleton and BonesPerVertex, so an
+    // unlit rigged mesh renders welded to its bind pose — a second, solid body
+    // standing where the character used to be, with no error anywhere. The
+    // outline path solved the same problem by staying on HlmsPbs
+    // (createOutlineMaterial); a USER material cannot, because unlit is the
+    // thing being asked for.
+    //
+    // The test is the NODE's live skeleton, not "the mesh has a rig bound":
+    // several nodes may share one mesh and only some of them attach it through
+    // attachSkinnedMesh, and an unrigged node using rigged GEOMETRY has nothing
+    // to lose here.
+    if (wantUnlit) {
+        for (const auto &kv : mNodes) {
+            if (kv.second.materialRef != id) continue;
+            if (hasSkeleton(kv.first)) {
+                mError = "setShadingModel: the Unlit shading model cannot skin, and this "
+                         "material is used by a rigged mesh (it would render at its bind "
+                         "pose) — remove the rig or use a different material";
+                return false;
+            }
+        }
+    }
+
+    JAH_TRY {
+        // BEFORE the datablock pointer dies: VctMaterial caches its conversions
+        // by raw datablock pointer, and a recycled address would alias.
+        invalidateGiCaches();
+
+        // Remember who was rendering with this material, then take the
+        // renderables down. attachMesh below rebuilds each one from scratch,
+        // which is also what re-applies the render-queue and GI-visibility
+        // rules for the NEW family.
+        std::vector<std::pair<NodeId, MeshId>> attached;
+        for (auto &kv : mNodes) {
+            if (kv.second.materialRef != id || !kv.second.meshRef) continue;
+            attached.emplace_back(kv.first, kv.second.meshRef);
+            detachItem(kv.first, kv.second);
+        }
+
+        Ogre::Hlms *oldHlms = hlmsFor(rec);
+        if (oldHlms->getDatablock(Ogre::IdString(rec.datablockName)))
+            oldHlms->destroyDatablock(Ogre::IdString(rec.datablockName));
+
+        // A FRESH NAME, not the old one reused. Datablock names are IdStrings
+        // in a per-Hlms registry and also key the shader cache's per-datablock
+        // state; minting a new one makes "this name, in this family, means this
+        // content" true by construction instead of relying on destroy/create
+        // ordering inside one frame.
+        rec.shadingUnlit = wantUnlit;
+        rec.unlit = wantUnlit;
+        rec.pbsBacked = false;
+        rec.refractive = !wantUnlit && rec.params.alphaMode == PbrAlphaMode::Refractive;
+        rec.datablockName = processUniqueName(wantUnlit ? "unlitpbr" : "pbr");
+        rec.params.shadingModel = model;
+
+        if (wantUnlit) {
+            auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(
+                mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
+            auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsUnlit->createDatablock(
+                Ogre::IdString(rec.datablockName), rec.datablockName,
+                Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
+            applyUnlit(db, rec.params);
+        } else {
+            auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(
+                mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+            auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->createDatablock(
+                Ogre::IdString(rec.datablockName), rec.datablockName,
+                Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
+            db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+            applyPbr(db, rec.params, mRefractionsActive);
+            if (mReflectionTex) db->setTexture(Ogre::PBSM_REFLECTION, mReflectionTex);
+        }
+        // The maps the host already pushed are the host's state, not the
+        // datablock's: re-bind them or a switch would silently strip every
+        // texture until something happened to push them again.
+        bindTrackedTextures(rec);
+
+        for (const auto &na : attached) attachMesh(na.first, na.second, id);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -625,15 +826,19 @@ bool OgreScene::destroyTexture(TextureId id) {
         // stops being latent the moment reclaimUnused frees one.
         for (auto &kv : mMaterials) {
             MaterialRec &m = kv.second;
-            if (m.unlit) continue;
+            // Overlay materials (grid, gizmo, outline) hold no tracked maps. A
+            // material whose SHADING MODEL is Unlit does — it is a PBR material.
+            if (m.unlit && !m.shadingUnlit) continue;
+            bool hit = false;
             for (size_t s = 0; s < kPbrTextureSlotCount; ++s) {
                 if (m.boundTextures[s] != id) continue;
                 m.boundTextures[s] = 0;
-                auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
-                    hlmsFor(m)->getDatablock(Ogre::IdString(m.datablockName)));
-                if (db) db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(PbrTextureSlot(s))),
-                                       (Ogre::TextureGpu *)nullptr);
+                hit = true;
             }
+            // Re-bind from the (now cleared) record rather than clearing one
+            // unit: on Unlit the mapping from slot to unit is not one-to-one,
+            // and one code path owning it is what keeps the two families honest.
+            if (hit) bindTrackedTextures(m);
         }
         if (!it->second.path.empty()) {
             const std::string key = textureKey(it->second.path, it->second.decal,
@@ -658,27 +863,74 @@ Ogre::PbsTextureTypes OgreScene::pbsSlotOf(PbrTextureSlot slot) {
     return Ogre::PBSM_DIFFUSE;
 }
 
+// The sampler every material map is bound with.
+//
+// Anisotropy must stay 1 while min/mag/mip are FO_LINEAR: Ogre warns, and
+// NVIDIA ignores the mismatch, but Metal (MoltenVK) applies maxAnisotropy
+// regardless of filter mode and averages the whole texture into every texel
+// (caught by pbr_texture_scale_tiles_uvs on the first macOS run). Real
+// anisotropic filtering = FO_ANISOTROPIC on all three filters plus a
+// pixel-suite recalibration — a deliberate visual change, not a default.
+static Ogre::HlmsSamplerblock materialSamplerblock() {
+    Ogre::HlmsSamplerblock sampler;
+    sampler.mU = Ogre::TAM_WRAP; sampler.mV = Ogre::TAM_WRAP;
+    sampler.mMaxAnisotropy = 1; sampler.mMipFilter = Ogre::FO_LINEAR;
+    return sampler;
+}
+
+void OgreScene::bindTrackedTextures(const MaterialRec &rec) {
+    auto *raw = hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
+    if (!raw) return;
+    const Ogre::HlmsSamplerblock sampler = materialSamplerblock();
+    auto textureOf = [this](TextureId id) -> Ogre::TextureGpu * {
+        if (!id) return nullptr;
+        auto tit = mTextures.find(id);
+        return tit == mTextures.end() ? nullptr : tit->second.texture;
+    };
+    if (rec.shadingUnlit) {
+        // The Unlit family has 16 texture units, all of them plain colour
+        // layers — there is no normal/roughness/metalness/emissive input to
+        // map the other four slots onto. Unit 0 multiplies the datablock
+        // colour, which is exactly base colour x base-colour map. The other
+        // four TextureIds stay in the record, unbound, so switching back to
+        // Lit restores every map the user authored.
+        auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(raw);
+        Ogre::TextureGpu *tex = textureOf(rec.boundTextures[size_t(PbrTextureSlot::Albedo)]);
+        db->setTexture(Ogre::uint8(0), tex, tex ? &sampler : nullptr);
+        return;
+    }
+    auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
+    for (size_t s = 0; s < kPbrTextureSlotCount; ++s) {
+        Ogre::TextureGpu *tex = textureOf(rec.boundTextures[s]);
+        db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(PbrTextureSlot(s))), tex,
+                       tex ? &sampler : nullptr);
+    }
+}
+
 bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId texId) {
     auto mit = mMaterials.find(mat);
-    if (mit == mMaterials.end() || mit->second.unlit) { mError = "setPbrTexture: not a PBR material"; return false; }
-    Ogre::TextureGpu *tex = nullptr;
-    if (texId) { auto tit = mTextures.find(texId); if (tit == mTextures.end()) { mError = "setPbrTexture: unknown texture"; return false; } tex = tit->second.texture; }
+    if (mit == mMaterials.end() || (mit->second.unlit && !mit->second.shadingUnlit)) {
+        mError = "setPbrTexture: not a PBR material"; return false;
+    }
+    if (texId && mTextures.find(texId) == mTextures.end()) {
+        mError = "setPbrTexture: unknown texture"; return false;
+    }
     JAH_TRY {
-        auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsFor(mit->second)->getDatablock(Ogre::IdString(mit->second.datablockName)));
-        if (!db) return false;
-        const Ogre::PbsTextureTypes unit = pbsSlotOf(slot);
-        // Remember the binding so destroyTexture can undo it (see there).
+        // Remember the binding first: it is what destroyTexture undoes, what a
+        // shading-model switch rebuilds from, and — on Unlit — the record of a
+        // map the family cannot show but the document still owns.
         mit->second.boundTextures[size_t(slot)] = texId;
-        Ogre::HlmsSamplerblock sampler;
-        sampler.mU = Ogre::TAM_WRAP; sampler.mV = Ogre::TAM_WRAP;
-        // Anisotropy must stay 1 while min/mag/mip are FO_LINEAR: Ogre warns, and
-        // NVIDIA ignores the mismatch, but Metal (MoltenVK) applies maxAnisotropy
-        // regardless of filter mode and averages the whole texture into every
-        // texel (caught by pbr_texture_scale_tiles_uvs on the first macOS run).
-        // Real anisotropic filtering = FO_ANISOTROPIC on all three filters plus a
-        // pixel-suite recalibration — a deliberate visual change, not a default.
-        sampler.mMaxAnisotropy = 1; sampler.mMipFilter = Ogre::FO_LINEAR;
-        db->setTexture(static_cast<Ogre::uint8>(unit), tex, &sampler);
+        if (!hlmsFor(mit->second)->getDatablock(Ogre::IdString(mit->second.datablockName)))
+            return false;
+        // An Unlit material only has somewhere to put Albedo; binding the whole
+        // tracked set keeps that decision in ONE place.
+        if (mit->second.shadingUnlit) { bindTrackedTextures(mit->second); return true; }
+        auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
+            hlmsFor(mit->second)->getDatablock(Ogre::IdString(mit->second.datablockName)));
+        Ogre::TextureGpu *tex = nullptr;
+        if (texId) tex = mTextures.find(texId)->second.texture;
+        const Ogre::HlmsSamplerblock sampler = materialSamplerblock();
+        db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(slot)), tex, &sampler);
         return true;
     } JAH_CATCH(mError, false);
 }

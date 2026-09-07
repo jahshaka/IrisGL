@@ -37,6 +37,10 @@ PbrMaterial::PbrMaterial()
     // the clear-coat shader blocks entirely and its BRDF/shadow/lightmap
     // setters early-return, so an existing scene's generated shader text — and
     // therefore its pixels — is unchanged by this feature existing.
+    // HLMS_ADOPTION P4a. Lit is the default for the same reason: it is the
+    // family every existing material is already in, so the row's existence
+    // cannot move a pixel of shipped content.
+    shadingModel        = 0;      // Lit
     clearCoat           = 0.0f;
     clearCoatRoughness  = 0.0f;
     brdf                = 0;      // Default
@@ -98,6 +102,7 @@ void PbrMaterial::setNormalMap(Texture2DPtr tex)
 
 void PbrMaterial::setNormalFactor(float factor)     { normalFactor = factor; }
 
+void PbrMaterial::setShadingModel(int model)            { shadingModel = model; }
 void PbrMaterial::setClearCoat(float coat)              { clearCoat = coat; }
 void PbrMaterial::setClearCoatRoughness(float r)        { clearCoatRoughness = r; }
 void PbrMaterial::setBrdf(int index)                    { brdf = index; }
@@ -142,6 +147,48 @@ bool PbrMaterial::brdfSupportsClearCoat(int index)
     return brdfEngineName(index).startsWith(QStringLiteral("Default"));
 }
 
+// The shading-model vocabulary. Two values today; the index is the stored value
+// and is permanent, exactly like brdfNames().
+const QVector<const char *> &PbrMaterial::shadingModelNames()
+{
+    static const QVector<const char *> kNames = { "Lit", "Unlit" };
+    return kNames;
+}
+
+// WHAT UNLIT CANNOT DO, as a list the UI can act on rather than prose a user has
+// to discover. Each entry is a renderer fact, not a policy:
+//   metallic/roughness/normal/emissive + their maps  no lighting term consumes
+//                                                    them; the Unlit family has
+//                                                    no such inputs at all
+//   roughness bounds                                 remap of a value nothing reads
+//   brdf, clearCoat, clearCoatRoughness              a BRDF is the lighting model
+//   receiveShadows                                   nothing to receive INTO (an
+//                                                    unlit item still occludes
+//                                                    the shadow map — it casts)
+//   textureScale                                     UV tiling rides a shader
+//                                                    piece belonging to the PBS
+//                                                    family; the Unlit family's
+//                                                    animation-matrix equivalent
+//                                                    is deliberately out of v1
+//                                                    (decision D-P4a)
+// The VALUES are untouched — the panel greys the rows, the document keeps them,
+// and switching back to Lit restores every one.
+const QVector<QString> &PbrMaterial::rowsUnusedWhenUnlit()
+{
+    static const QVector<QString> kRows = {
+        QStringLiteral("metallic"), QStringLiteral("roughness"),
+        QStringLiteral("roughnessLowerBound"), QStringLiteral("roughnessUpperBound"),
+        QStringLiteral("normalFactor"),
+        QStringLiteral("emissiveColor"), QStringLiteral("emissiveIntensity"),
+        QStringLiteral("brdf"), QStringLiteral("clearCoat"), QStringLiteral("clearCoatRoughness"),
+        QStringLiteral("receiveShadows"), QStringLiteral("emissiveAsLightmap"),
+        QStringLiteral("textureScale"),
+        QStringLiteral("normalMap"), QStringLiteral("metallicMap"),
+        QStringLiteral("roughnessMap"), QStringLiteral("emissiveMap"),
+    };
+    return kRows;
+}
+
 void PbrMaterial::setEmissiveColor(QColor color)        { emissiveColor = color; }
 void PbrMaterial::setEmissiveIntensity(float intensity) { emissiveIntensity = intensity; }
 
@@ -183,6 +230,7 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "refractionStrength") refractionStrength = value.toFloat();
     else if (name == "clearCoat")          clearCoat          = value.toFloat();
     else if (name == "clearCoatRoughness") clearCoatRoughness = value.toFloat();
+    else if (name == "shadingModel")       shadingModel       = value.toInt();
     else if (name == "brdf")               brdf               = value.toInt();
     else if (name == "receiveShadows")     receiveShadows     = value.toBool();
     else if (name == "emissiveAsLightmap") emissiveAsLightmap = value.toBool();
@@ -336,6 +384,18 @@ void PbrMaterial::createProperties()
     refractProp->maxValue    = 1.0f;
     refractProp->value       = refractionStrength;
     properties.append(refractProp);
+
+    // ---- HLMS_ADOPTION P4a: the shading model ----
+    // FIRST of the shading rows, because it constrains more of the panel than
+    // anything else does: on Unlit, thirteen of the rows below have nothing to
+    // reach (rowsUnusedWhenUnlit) and the panel greys them out.
+    auto shadingProp         = new ListProperty;
+    shadingProp->id          = id++;
+    shadingProp->displayName = "Shading Model";
+    shadingProp->name        = "shadingModel";
+    for (const char *n : shadingModelNames()) shadingProp->labels << QString::fromLatin1(n);
+    shadingProp->value       = shadingModel;
+    properties.append(shadingProp);
 
     // ---- HLMS_ADOPTION P1: the cheap PBS knobs ----
     // The BRDF picker comes FIRST because it constrains the two coat rows: the

@@ -206,6 +206,19 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
     if (nit == mNodes.end()) { mError = "attachSkinnedMesh: unknown node"; return false; }
     if (mit == mMeshes.end()) { mError = "attachSkinnedMesh: unknown mesh"; return false; }
     if (tit == mMaterials.end()) { mError = "attachSkinnedMesh: unknown material"; return false; }
+    // The other half of setShadingModel's rule 5 (HLMS_ADOPTION P4a): that verb
+    // refuses to make a RIGGED mesh's material unlit; this refuses to rig a mesh
+    // whose material ALREADY is. Both exist because the Unlit family hard-zeroes
+    // the skeleton properties when it hashes a renderable, so the failure is a
+    // character standing at its bind pose with no error anywhere.
+    // Overlay unlit materials (the non-skinnable selection outline) are
+    // deliberately not covered — createOutlineMaterial(skinnable) already picks
+    // the family that can skin, and nothing rigs the others.
+    if (tit->second.shadingUnlit) {
+        mError = "attachSkinnedMesh: the material's shading model is Unlit, which cannot "
+                 "skin — the mesh would render at its bind pose";
+        return false;
+    }
     if (rig.bones.empty()) { mError = "attachSkinnedMesh: the rig has no bones"; return false; }
     if (rig.id.empty()) { mError = "attachSkinnedMesh: the rig has no id"; return false; }
     if (!mit->second.hasSkinData) {

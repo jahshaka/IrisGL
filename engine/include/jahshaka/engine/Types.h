@@ -201,6 +201,42 @@ enum class PbrAlphaMode {
                ///< without it the material renders as Glass.
 };
 
+/// Which SHADING FAMILY a material renders through (HLMS_ADOPTION P4a).
+///
+/// This is not a knob on one pipeline — it selects between two different
+/// backend material families with different datablock types, so changing it
+/// means DESTROYING and RECREATING the backend material. That is why it has its
+/// own atomic verb (Scene::setShadingModel) instead of riding setPbrMaterial:
+/// every renderable using the material has to be re-attached, and half of that
+/// done is a scene with objects rendering nothing.
+///
+/// WHAT UNLIT COSTS, all VERIFIED against the backend rather than assumed:
+///   * no lighting of any kind — that IS the model; the surface renders its
+///     base colour (times its base-colour map) exactly as authored;
+///   * NO SKINNING. The Unlit family hard-zeroes the skeleton properties when
+///     it hashes a renderable, so a rigged mesh would render welded to its bind
+///     pose while the character animates away from it. setShadingModel REFUSES
+///     Unlit on a material any rigged mesh uses, by name;
+///   * no normal / roughness / metalness / emissive maps (the family has no
+///     such inputs). The values stay on the document, so switching back to Lit
+///     restores them;
+///   * no fog (our fog piece is a library folder of the PBS family only), no
+///     global illumination (unlit surfaces neither bounce nor occlude), and
+///     nothing to receive a shadow into;
+///   * NO UV TILING. uvScale rides a custom shader piece that belongs to the
+///     PBS family; the Unlit family has a per-texture-unit animation matrix
+///     that could carry it, and wiring that up is deliberately NOT in v1
+///     (decision D-P4a). An Unlit material's uvScale does nothing — say so in
+///     the UI, do not let a user discover it;
+///   * Glass and Refractive alpha modes have no meaning without lighting and
+///     fall back to a plain alpha blend.
+/// An Unlit item still OCCLUDES the shadow map (it is ordinary geometry to the
+/// shadow pass) — it casts, it just cannot receive.
+enum class ShadingModel {
+    Lit,   ///< the metallic-roughness PBR family — everything above works
+    Unlit  ///< flat colour; the constraint list above applies in full
+};
+
 /// Metallic-roughness PBR parameters — Jahshaka's material model, sized to what
 /// the backend's PBR pipeline can honour. Emissive arrives with any intensity
 /// already folded in (colour * intensity). Roughness remap bounds are applied by
@@ -259,6 +295,18 @@ struct PbrParams {
     /// or it tints the lightmap.
     bool   emissiveAsLightmap = false;
 
+    /// Which shading FAMILY renders this material (HLMS_ADOPTION P4a). See
+    /// ShadingModel for the full constraint list.
+    ///
+    /// createPbrMaterial honours this and builds the material in the right
+    /// family straight away. setPbrMaterial DELIBERATELY IGNORES IT: switching
+    /// families destroys and recreates the backend material and re-attaches
+    /// every renderable, which is Scene::setShadingModel's job and must not
+    /// happen inside a per-frame parameter push. It lives on this struct so a
+    /// host with a change-guard (`operator==`) NOTICES the switch — that is
+    /// what tells the host to call the switch verb.
+    ShadingModel shadingModel = ShadingModel::Lit;
+
     /// "Is this the same material state I last pushed?" — the guard a host with
     /// a per-frame push loop needs. Exact comparison (see Colour::operator==):
     /// a tolerance here would let a dragged slider stop reaching the backend.
@@ -270,7 +318,8 @@ struct PbrParams {
                refractionStrength == o.refractionStrength &&
                clearCoat == o.clearCoat && clearCoatRoughness == o.clearCoatRoughness &&
                brdf == o.brdf && receiveShadows == o.receiveShadows &&
-               emissiveAsLightmap == o.emissiveAsLightmap;
+               emissiveAsLightmap == o.emissiveAsLightmap &&
+               shadingModel == o.shadingModel;
     }
     bool operator!=(const PbrParams &o) const { return !(*this == o); }
 };

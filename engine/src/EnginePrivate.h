@@ -966,6 +966,7 @@ public:
     bool destroyMesh(MeshId id) override;
     MaterialId createPbrMaterial(const PbrParams &p) override;
     bool setPbrMaterial(MaterialId id, const PbrParams &p) override;
+    bool setShadingModel(MaterialId id, ShadingModel model) override;
     bool destroyMaterial(MaterialId id) override;
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
@@ -1219,6 +1220,15 @@ private:
         /// rigged shell has to be a Pbs datablock with the colour as emissive).
         /// Only hlmsFor and setUnlitMaterial care.
         bool pbsBacked = false;
+        /// The mirror image of `pbsBacked`, and the P4a addition: a real PBR
+        /// MATERIAL whose SHADING MODEL is Unlit. `unlit` is also true for it
+        /// (no GI, and hlmsFor must pick HlmsUnlit), but unlike an overlay it
+        /// is scene geometry: it keeps the normal render queue, it is what
+        /// setPbrMaterial/setPbrTexture write to, and its parameters live in
+        /// `params` so the family switch can rebuild it.
+        ///
+        /// Invariant: shadingUnlit => unlit && !pbsBacked.
+        bool shadingUnlit = false;
         bool onTop = false;
         /// PbrAlphaMode::Refractive. Refractive items must render in the chain's
         /// OWN pass (kRefractiveRenderQueue) — Ogre's words: "the compositor
@@ -1233,6 +1243,12 @@ private:
         /// fault later. Latent until something actually reclaims textures —
         /// which the mirror now does.
         TextureId boundTextures[kPbrTextureSlotCount] = { 0, 0, 0, 0, 0 };
+        /// The parameters LAST APPLIED to this material (PBR materials only).
+        /// setShadingModel destroys the datablock and builds a new one in the
+        /// other family, and it takes no parameters — it rebuilds from this.
+        /// Without it a family switch would silently reset the material to the
+        /// defaults until the host happened to push again.
+        PbrParams params;
     };
     struct TextureRec {
         Ogre::TextureGpu *texture = nullptr;
@@ -1290,6 +1306,17 @@ private:
     /// glass — see setRefractionsActive for why that is not optional.
     static void applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
                          bool refractionsActive);
+    /// The UNLIT half of applyPbr (HLMS_ADOPTION P4a): the subset of PbrParams
+    /// the Unlit family can actually honour — base colour, alpha and its mode,
+    /// two-sidedness. Everything else is dropped, deliberately and visibly
+    /// (see ShadingModel in Types.h; the panel disables the rows this cannot
+    /// carry rather than letting a user discover them).
+    static void applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p);
+    /// (Re-)binds whatever `rec.boundTextures` says onto the material's CURRENT
+    /// datablock — the step that makes a family switch keep its maps. The Unlit
+    /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
+    /// in the record so switching back to Lit restores them.
+    void bindTrackedTextures(const MaterialRec &rec);
     /// Builds (or finds) the in-memory v1 skeleton `rig` translates to and hands
     /// the resulting SkeletonDef to `mesh`. v1 is a BUILD-TIME SCAFFOLD ONLY —
     /// SkeletonDef has exactly one constructor and it takes a v1::Skeleton

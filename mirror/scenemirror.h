@@ -327,6 +327,17 @@ private:
         /// frame; it just does not have to PUSH.
         jahshaka::engine::PbrParams lastPbr;
         bool pbrPushed = false;
+        /// The shading model last ATTEMPTED for `material` (-1 = never). Its own
+        /// field because the switch is its own engine verb: the two shading
+        /// families are different backend material types, so a switch destroys
+        /// the backend material, rebuilds it and re-attaches every renderable —
+        /// not something a per-frame parameter push may do.
+        ///
+        /// "ATTEMPTED", not "pushed", and that is deliberate — the same shape as
+        /// `planarReflector` above. The engine REFUSES Unlit on a material a
+        /// rigged mesh uses (the family cannot skin), and a refusal the mirror
+        /// forgot would be retried, and re-reported, sixty times a second.
+        int shadingModelPushed = -1;
         quint64 textureSignature = 0;                // which files are bound; re-sync on change
         bool texturesPushed = false;                 // ...and whether anything was ever pushed
         /// The engine texture ids this entry's material has bound right now, so
@@ -558,6 +569,9 @@ public:
     static bool toPbrParams(iris::Material *material, jahshaka::engine::PbrParams &out);
     /// Records that this material is refractive, for the chain's Auto mode.
     void noteRefractive(const jahshaka::engine::PbrParams &p);
+    /// Re-arms the per-Item state the mirror owns after the engine re-created
+    /// the renderables of every node using `material` (a shading-model switch).
+    void onMaterialItemsRebuilt(jahshaka::engine::MaterialId material);
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
     /// Fills everything but the texture ids (those need the atlas).
     static jahshaka::engine::DecalDesc toDecalDesc(iris::DecalNode *decal);

@@ -300,6 +300,21 @@ MaterialId SceneMirror::engineMaterial(const iris::SceneNode *node) const
     return it == mEntries.constEnd() ? 0 : it->material;
 }
 
+/// A shading-model switch re-creates the RENDERABLES of every node using the
+/// material, behind the mirror's back. Everything attachMesh sets itself
+/// (visibility bits, render queue, static bounds, the reflector plane) is
+/// correct on the new Item — but per-Item state the MIRROR owns is not, and
+/// there is exactly one: the query flags behind `pickable`. A new Item is born
+/// with Ogre's default query mask, so an unpickable object would quietly become
+/// clickable again after a switch. Forgetting one push is why this is a named
+/// function next to the switch and not a line inside it.
+void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
+{
+    if (!material) return;
+    for (auto it = mEntries.begin(); it != mEntries.end(); ++it)
+        if (it->material == material) it->pickablePushed = -1;
+}
+
 int SceneMirror::sync()
 {
     if (!mSource || !mSource->getRootNode()) return 0;
@@ -1144,6 +1159,7 @@ void SceneMirror::visit(iris::SceneNode *node)
                 mReclaimPending = true;   // the old mesh/material may now be unreferenced
                 e.texturesPushed = false;
                 e.pbrPushed = false;
+                e.shadingModelPushed = -1;   // a NEW engine material may be in either family
                 e.pickablePushed = -1;   // a NEW Item carries the default query mask
                 syncTextures(e, material);
             }
@@ -1169,6 +1185,23 @@ void SceneMirror::visit(iris::SceneNode *node)
             // hash recompute for every renderable in the scene.
             const MaterialSync &ms = materialSyncFor(material);
             if (ms.hasPbr) {
+                // THE SHADING-MODEL SWITCH GOES FIRST, and it is not part of
+                // the parameter push (HLMS_ADOPTION P4a): the two families are
+                // different backend material types, so the engine destroys the
+                // material, rebuilds it in the other family from the parameters
+                // and maps it already holds, and re-attaches every renderable.
+                // setPbrMaterial deliberately ignores the model term, so
+                // pushing params first would write them into a datablock about
+                // to be thrown away.
+                const int wantModel = int(ms.pbr.shadingModel);
+                if (e.shadingModelPushed != wantModel) {
+                    // Attempted-not-pushed: a refusal (Unlit on a rigged mesh)
+                    // must not be retried every frame. The next real CHANGE
+                    // tries again, exactly like the planar-reflector flag.
+                    e.shadingModelPushed = wantModel;
+                    if (mTarget->setShadingModel(e.material, ms.pbr.shadingModel))
+                        onMaterialItemsRebuilt(e.material);
+                }
                 if (!e.pbrPushed || !(ms.pbr == e.lastPbr)) {
                     if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
                         e.lastPbr = ms.pbr;
@@ -1762,6 +1795,11 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         // index and never as the renderer's enum value: the index is a document
         // convention and the enum is a renderer bitfield, and the boundary
         // should carry neither. PbrMaterial::brdfEngineName is the one table.
+        // HLMS_ADOPTION P4a. The model term rides PbrParams so the change-guard
+        // NOTICES a switch; applying it is a separate, atomic engine call (see
+        // the visit() branch) because the two families are different backend
+        // material types and the switch re-attaches every renderable.
+        out.shadingModel = pbr->shadingModel == 1 ? ShadingModel::Unlit : ShadingModel::Lit;
         out.brdf               = iris::PbrMaterial::brdfEngineName(pbr->brdf).toStdString();
         out.clearCoat          = pbr->clearCoat;
         out.clearCoatRoughness = pbr->clearCoatRoughness;
