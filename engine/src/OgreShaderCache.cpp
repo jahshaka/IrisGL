@@ -421,6 +421,14 @@ void ShaderCache::wipe() const {
     while (dirent *e = readdir(d)) {
         const std::string name = e->d_name;
         if (name == "." || name == ".." || name == kLockFile) continue;
+        // A recorded warm-up SET (*.set — the host parks warmup.set here) is
+        // user intent, not fingerprint-derived data: the permutations it names
+        // are exactly what a fresh cache should be warmed WITH. Wiping it
+        // alongside the cache meant the one scenario the startup warm-up gate
+        // exists for — replaying the set against a cold cache after an engine
+        // update — could never occur (threading-P2 lane finding, 2026-09-07:
+        // every post-update launch silently lost its content warm-up).
+        if (name.size() > 4 && name.compare(name.size() - 4, 4, ".set") == 0) continue;
         ::unlink(path(name).c_str());
     }
     closedir(d);
