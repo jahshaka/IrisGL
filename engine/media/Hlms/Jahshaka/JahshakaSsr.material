@@ -1,0 +1,164 @@
+// Jahshaka's screen-space reflection materials (POST_CHAIN_SPEC.md §4.1 row
+// "SSR" and §8 phase 6). Two full-screen quads:
+//
+//   Jahshaka/SsrRayMarch   depth + G-buffer normals + G-buffer roughness ->
+//                          (hit uv, distance fade, confidence).  Runs at the
+//                          ray buffer's resolution, which the chain sets to
+//                          half the view at ssr == 1 and full at ssr == 2.
+//   Jahshaka/SsrResolve    that + the previous frame's linear colour ->
+//                          (reflected radiance, confidence).  Always full
+//                          resolution: HlmsPbs OGRE_Load2Ds it at the fragment
+//                          coordinate, so the texture has to match the view.
+//
+// The vertex programs are Ogre's own (2.0/scripts/materials/Common/Quad.program,
+// already staged and registered): QuadCameraDir_vs is the one that puts the
+// view-space far corner in `cameraDir`, which is how the march reconstructs a
+// position from depth without an inverse projection per pixel.
+//
+// Everything the C++ pushes per frame is listed in default_params with a value
+// that is SAFE, not merely plausible: a confidence of zero everywhere is
+// today's picture, so a frame rendered before OgreChain's updateSsr has run
+// looks like SSR is off rather than like a bug.
+
+//-----------------------------------------------------------------------------
+// Ray march
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/SsrRayMarch_ps_GLSL glsl
+{
+	source JahSsrRayMarch_ps.glsl
+	default_params
+	{
+		param_named depthTexture			int 0
+		param_named gBufNormals				int 1
+		param_named gBufShadowRoughness		int 2
+	}
+}
+
+fragment_program Jahshaka/SsrRayMarch_ps_VK glslvk
+{
+	source JahSsrRayMarch_ps.glsl
+}
+
+fragment_program Jahshaka/SsrRayMarch_ps unified
+{
+	delegate Jahshaka/SsrRayMarch_ps_GLSL
+	delegate Jahshaka/SsrRayMarch_ps_VK
+}
+
+material Jahshaka/SsrRayMarch
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/QuadCameraDir_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/SsrRayMarch_ps
+			{
+				// The march's own target size, for the checkerboard jitter.
+				param_named_auto	rayBufferRes	viewport_size
+
+				// All four are overwritten every frame by chain::updateSsr.
+				// maxDistance 0 marches nowhere, i.e. no reflection: the safe
+				// value, not a pretty one.
+				param_named			projectionParams			float2	0 1
+				param_named			rayParams					float4	0 0.5 48 0.35
+				param_named			viewToTextureSpaceMatrix	matrix4x4 1 0 0 0  0 1 0 0  0 0 1 0  0 0 0 1
+			}
+
+			texture_unit depthTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+
+			texture_unit gBufNormals
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+
+			texture_unit gBufShadowRoughness
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Resolve
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/SsrResolve_ps_GLSL glsl
+{
+	source JahSsrResolve_ps.glsl
+	default_params
+	{
+		param_named rayTexture				int 0
+		param_named gBufShadowRoughness		int 1
+		param_named prevFrame				int 2
+	}
+}
+
+fragment_program Jahshaka/SsrResolve_ps_VK glslvk
+{
+	source JahSsrResolve_ps.glsl
+}
+
+fragment_program Jahshaka/SsrResolve_ps unified
+{
+	delegate Jahshaka/SsrResolve_ps_GLSL
+	delegate Jahshaka/SsrResolve_ps_VK
+}
+
+material Jahshaka/SsrResolve
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/SsrResolve_ps
+			{
+				// texture_size 0 is the RAY buffer, whose resolution the chain
+				// changes with the quality row — read it from the texture
+				// rather than pushing it and risking the two disagreeing.
+				param_named_auto	rayBufferRes	texture_size 0
+				// Intensity 0 = no reflection, the safe pre-update value.
+				param_named			resolveParams	float4	0.35 0 0 0
+			}
+
+			texture_unit rayTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+
+			texture_unit gBufShadowRoughness
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+
+			texture_unit prevFrame
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}
