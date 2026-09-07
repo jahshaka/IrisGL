@@ -12,6 +12,17 @@
 // are excluded from captures via rq_last, which is EXCLUSIVE
 // (CompositorPassSceneDef::mLastRQ, "Last Render Queue ID to render. Not
 // inclusive") — so 200 already drops everything from 200 upward.
+//
+// LATENT, DELIBERATELY NOT HANDLED — the DPM fallback (F14,
+// REFLECTIONS_ADOPTION_SPEC.md §3): ParallaxCorrectedCubemapAuto falls back to
+// Dual Paraboloid Mapping when the render system reports no cube-map ARRAY
+// support (OgreParallaxCorrectedCubemapAuto.cpp, the RSC_TEXTURE_CUBE_MAP_ARRAY
+// test in the ctor). Every target we ship on — desktop Vulkan and MoltenVK —
+// reports the capability, so DPM never engages here. If it ever did, this
+// workspace would keep running the ibl_specular pass redundantly, because none
+// of our passes carry an `execution_mask` / `viewport_modifier_mask` the way
+// the upstream sample's DPM-aware compositors do. Out of scope to exercise;
+// recorded so the next reader does not rediscover it as a bug.
 
 abstract target jah_pcc_cubemap_face
 {

@@ -72,6 +72,22 @@ void OgreScene::refreshGlobalIllumination() {
     } JAH_CATCH(mError, );
 }
 
+GiStatus OgreScene::giStatus() const {
+    GiStatus st;
+    st.mode = mGi.mode;
+    JAH_TRY {
+        if (mPcc) st.probeCount = int(mPcc->getProbes().size());
+        // "Bound" means the process-wide HlmsPbs is sampling THIS scene's arm.
+        // Both halves are checked against our own pointers rather than against
+        // sVctBindingOwner alone: the owner flag says who bound last, these say
+        // what the shader will actually read this frame.
+        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+        st.pccBound = mPcc && pbs->getParallaxCorrectedCubemap() == mPcc;
+        st.vctBound = mVctLighting && pbs->getVctLighting() == mVctLighting;
+    } JAH_CATCH(mError, st);
+    return st;
+}
+
 // ---- GI internals ----
 Ogre::Light *OgreScene::markGiLight(NodeId requested) {
     Ogre::Light *chosen = nullptr;

@@ -421,6 +421,12 @@ public:
     /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
     /// in milliseconds at editor quality; callers may invoke this per edit.
     virtual void        refreshGlobalIllumination() = 0;
+    /// What GI actually ACHIEVED, as opposed to what was requested — probe
+    /// count and whether the probe/VCT bindings are live on this scene. The
+    /// hybrid can degrade to plain VCT (a missing probe workspace definition);
+    /// without this nothing, not even a pixel test, could tell the difference.
+    /// Cheap: reads live pointers, renders nothing.
+    virtual GiStatus    giStatus() const = 0;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is

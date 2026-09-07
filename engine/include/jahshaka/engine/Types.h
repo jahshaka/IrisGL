@@ -665,6 +665,31 @@ struct GiParams {
     int       pccProbesX = 3, pccProbesY = 2, pccProbesZ = 3;
 };
 
+/// What GI is ACHIEVING, as opposed to what GiParams requested — the same
+/// "the renderer beats the request" contract as View::sampleCount() and
+/// Scene::activePlanarReflectors().
+///
+/// It exists because the hybrid could silently degrade: a missing probe
+/// workspace definition made buildPcc log a line and return, leaving the scene
+/// rendering as plain VCT with every caller (and every test) still believing it
+/// had probe reflections (REFLECTIONS_ADOPTION_SPEC.md §3, finding F12). Read
+/// this after setGlobalIllumination to assert the hybrid actually armed.
+struct GiStatus {
+    /// The mode currently in force (what the scene last accepted).
+    GiMode mode = GiMode::Off;
+    /// Live parallax-corrected cubemap probes. In VctPccHybrid this is the
+    /// clamped grid product (pccProbesX * pccProbesY * pccProbesZ); 0 in every
+    /// other mode, and 0 in the hybrid when the probe arm failed to build.
+    int    probeCount = 0;
+    /// Whether THIS scene's probe grid is the one bound to the process-wide
+    /// HlmsPbs — i.e. whether probe reflections are actually being sampled.
+    /// False when the hybrid degraded to plain VCT, and false when another
+    /// scene took the binding over (the sVctBindingOwner rule).
+    bool   pccBound = false;
+    /// Whether this scene owns the process-wide VCT lighting binding.
+    bool   vctBound = false;
+};
+
 // ---- Fog (scene-level) ------------------------------------------------------
 /// EXPONENTIAL distance fog, plus an optional height-varying layer of the same
 /// colour. Both layers absorb, so their transmittances multiply:
