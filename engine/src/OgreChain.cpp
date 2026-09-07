@@ -58,6 +58,7 @@
 // readbacks. The planar-reflection pass (OgrePlanar.cpp) sets it false too,
 // even though its RQ range already excludes 254 — the guarantee must not
 // depend on an RQ constant somebody may widen later.
+#include <cmath>
 #include "EnginePrivate.h"
 
 
@@ -98,6 +99,26 @@ constexpr const char *kRt0        = "jahRt0";
 constexpr const char *kResolvedRt = "jahResolvedRt";
 /// Auto-exposure: a 1x1 luminance history that survives frames (keep_content),
 /// and the 64/16/4/1 reduction chain that feeds it.
+/// The constant HDR/FinalToneMapping samples in place of a measured exposure
+/// (ChainDesc::tonemapFixed). Its shader multiplies the scene by this value
+/// before the filmic curve, so it IS the exposure.
+///
+/// Derived to agree with the auto path rather than invented: the automatic
+/// chain computes `1024 * e^(exposure - 2) / e^(mean log(luminance * 1024))`
+/// (DownScale03_SumLumEnd_ps.glsl). Substituting a GREY CARD for the
+/// measurement — luminance 0.18, the photographic mid-grey — collapses the
+/// denominator to 0.18 * 1024 and the whole expression to
+///
+///     e^(exposure - 2) / 0.18
+///
+/// which at the scene default exposure of +0.6 is 1.37 against the ~1.2 an
+/// ordinary lit scene measures. A thumbnail therefore grades within a few
+/// percent of the viewport it is a thumbnail OF, and does it identically on
+/// every machine and in every frame.
+inline float fixedInverseLuminance(float exposure) {
+    return std::exp(exposure - 2.0f) / 0.18f;
+}
+
 constexpr const char *kOldLum  = "jahOldLum";
 constexpr const char *kLum     = "jahLum";
 constexpr const char *kLumIter0 = "jahLumIter0";
@@ -267,6 +288,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     // Only what changes the GRAPH. Exposure, bloom threshold, AO power and the
     // like are uniforms — pushing them must never rebuild a workspace.
     return a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
+           a.tonemapFixed == b.tonemapFixed &&
            a.letterbox == b.letterbox &&
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
@@ -481,14 +503,20 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         addTex(n, kResolvedRt, Ogre::PFG_RGBA16_FLOAT);
 
     if (desc.hdr) {
-        // keep_content: the 1x1 luminance history is read next frame, so it must
-        // NOT be DiscardableContent.
-        auto *td = addTex(n, kOldLum, Ogre::PFG_R16_FLOAT, 1u, 1u);
-        td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+        // THE FIXED-EXPOSURE VARIANT (PostFxDesc::tonemapFixed) drops the whole
+        // luminance reduction: no history to adapt from, no 64/16/4 downscale
+        // ladder. Only the 1x1 texture the tonemapper samples survives, and it
+        // is CLEARED to a constant every frame instead of being computed.
+        if (!desc.tonemapFixed) {
+            // keep_content: the 1x1 luminance history is read next frame, so it
+            // must NOT be DiscardableContent.
+            auto *td = addTex(n, kOldLum, Ogre::PFG_R16_FLOAT, 1u, 1u);
+            td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+            addTex(n, kLumIter0, Ogre::PFG_R16_FLOAT, 64u, 64u);
+            addTex(n, kLumIter1, Ogre::PFG_R16_FLOAT, 16u, 16u);
+            addTex(n, kLumIter2, Ogre::PFG_R16_FLOAT, 4u, 4u);
+        }
         addTex(n, kLum,      Ogre::PFG_R16_FLOAT, 1u, 1u);
-        addTex(n, kLumIter0, Ogre::PFG_R16_FLOAT, 64u, 64u);
-        addTex(n, kLumIter1, Ogre::PFG_R16_FLOAT, 16u, 16u);
-        addTex(n, kLumIter2, Ogre::PFG_R16_FLOAT, 4u, 4u);
         // R10G10B10A2 rather than FP16: the pin's own note says FP16 bloom
         // buffers cost 0.748 ms on an HD 7770 at 1080p for no visible gain.
         {
@@ -608,7 +636,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     // Auto-exposure history must start at something finite or the first frame
     // reads NaN out of an undefined 1x1 target.
-    if (desc.hdr) {
+    if (desc.hdr && !desc.tonemapFixed) {
         Ogre::CompositorTargetDef *t = n->addTargetPass(kOldLum);
         t->setNumPasses(1);
         auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -761,8 +789,23 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         sceneResult = kAoApplied;
     }
 
-    // HDR: luminance reduction, bloom, tonemap.
+    // HDR: exposure (measured or fixed), bloom, tonemap.
     if (desc.hdr) {
+      if (desc.tonemapFixed) {
+        // THE CONSTANT EXPOSURE, written where the reduction would have written
+        // it. HDR/FinalToneMapping samples this 1x1 texture as `fInvLumAvg` and
+        // multiplies the scene by it before the filmic curve, so clearing it to
+        // a value IS setting the exposure — the identical shader path, with a
+        // number nobody has to measure. Every frame (no mNumInitialPasses): the
+        // texture is Discardable and a stale read would be undefined memory.
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kLum);
+        t->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+        const float invLum = fixedInverseLuminance(desc.exposure);
+        c->setAllClearColours(Ogre::ColourValue(invLum, invLum, invLum, invLum));
+        c->mViewportModifierMask = 0x00;   // a 1x1 texture is never inset
+        c->mProfilingId = "Jahshaka fixed exposure";
+      } else {
         {
             auto *q = addQuad(n, kLumIter0, "HDR/DownScale01_SumLumStart", "Jahshaka HDR luminance start");
             q->addQuadTextureSource(0, sceneResult);
@@ -784,6 +827,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             auto *q = addQuad(n, kOldLum, "Ogre/Copy/1xFP32", "Jahshaka HDR luminance history");
             q->addQuadTextureSource(0, kLum);
         }
+      }
+        // BLOOM RUNS FOR BOTH EXPOSURE FORMS, and so does its stand-in clear:
+        // HDR/FinalToneMapping samples the bloom buffer unconditionally, so
+        // kBlur0 must be written whichever way the exposure was arrived at.
         if (desc.bloom) {
             {
                 auto *q = addQuad(n, kBlur0, "HDR/BrightPass_Start", "Jahshaka bloom bright pass");

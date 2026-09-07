@@ -275,6 +275,14 @@ public:
     bool  hdrEnabled;        ///< float scene target + filmic tonemap + auto exposure
     float exposure;          ///< auto-exposure midpoint; used as e^(exposure-2),
                              ///< so +0.69 is one doubling (NOT stops)
+    /// The WINDOW auto-exposure may adapt within, around `exposure`. Both
+    /// engine fields (PostFxDesc::exposureMin/Max) existed and were pushed at
+    /// their hard-coded defaults; the document could not say otherwise, so the
+    /// World > Post Process section could not offer them (fix wave 2026-09-07,
+    /// item 8). Setting min == max PINS the exposure — the deterministic
+    /// setting, and the one the secondary-surface tonemap uses.
+    float exposureMin;
+    float exposureMax;
     bool  bloomEnabled;      ///< highlight bloom; rides the HDR node, needs hdrEnabled
     float bloomThreshold;    ///< where the bright pass starts, in tonemapper units
     bool  ssaoEnabled;
