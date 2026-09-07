@@ -149,7 +149,6 @@ set(SRCS
     import/materialhelper.cpp
     document/scenegraph/particlesystemnode.cpp
     core/math/mathhelper.cpp
-    document/materials/custommaterial.cpp
     document/materials/pbrmaterial.cpp
     document/materials/postprocessmanager.cpp
     document/animation/propertyanim.cpp
@@ -215,7 +214,6 @@ set (HEADERS
     core/ziphelper.h
     document/scenegraph/particlesystemnode.h
     document/scenegraph/iviewsource.h
-    document/materials/custommaterial.h
     document/materials/pbrmaterial.h
     document/materials/postprocess.h
     document/materials/postprocessmanager.h

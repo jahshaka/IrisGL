@@ -86,7 +86,6 @@ public:
     int meshIndex;
 
     MaterialPtr material;
-    MaterialPtr customMaterial;
 
     FaceCullingMode faceCullingMode;
 
@@ -184,10 +183,6 @@ public:
 
     MaterialPtr getMaterial() {
         return material;
-    }
-
-    MaterialPtr getCustomMaterial() {
-        return customMaterial;
     }
 
     // not needed because this guy likes public members...

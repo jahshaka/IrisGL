@@ -33,8 +33,6 @@ namespace iris
 class PbrMaterial : public Material
 {
 public:
-    // NOTE: declared here, not inherited -- the Material base class has no
-    // `properties` list; only CustomMaterial declares one (custommaterial.h:32).
 
     static PbrMaterialPtr create()
     {

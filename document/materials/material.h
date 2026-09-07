@@ -48,8 +48,22 @@ public:
     QMap<QString, Texture2DPtr> textures;
 
     // Editor-facing parameter list. Declared on the base so any material can be
-    // rendered by the material property panel, not just CustomMaterial.
+    // rendered by the material property panel.
     QList<Property*> properties;
+
+    /// Display name, and the asset/preset GUID this material came from.
+    ///
+    /// Both used to live on CustomMaterial ALONE, which is why "the base
+    /// Material carries no name" turns up as an apology in several places — a
+    /// PbrMaterial simply could not be named, so panels, exporters and the
+    /// scripting surface had to special-case which class they were holding.
+    /// With one material class (HLMS_ADOPTION P4b) they belong here.
+    QString name;
+    QString guid;
+    void    setName(const QString &n) { name = n; }
+    QString getName() const { return name; }
+    void    setGuid(const QString &g) { guid = g; }
+    QString getGuid() const { return guid; }
 
     // Applies a value by property name. Virtual so the property panel and the
     // scene reader can drive any material without knowing its concrete type.
@@ -64,9 +78,10 @@ public:
         // Was left uninitialised. RenderList copies this straight onto the render
         // item (renderlist.cpp:39), so a material that never called
         // setRenderLayer() carried a garbage layer into the render list.
-        // CustomMaterial masked it by always setting one; DefaultMaterial and any
-        // new subclass did not. Default to the layer CustomMaterial uses for
-        // "opaque", so an unconfigured material sorts with ordinary geometry.
+        // The retired CustomMaterial masked it by always setting one;
+        // DefaultMaterial and any new subclass did not. Default to the layer it
+        // used for "opaque", so an unconfigured material sorts with ordinary
+        // geometry.
         renderLayer = RenderLayer::Background;
     }
 

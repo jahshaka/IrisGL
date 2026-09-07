@@ -27,7 +27,6 @@
 #include "irisgl/document/materials/material.h"
 #include "irisgl/document/materials/pbrmaterial.h"
 #include "irisgl/document/materials/defaultmaterial.h"
-#include "irisgl/document/materials/custommaterial.h"
 #include "irisgl/core/properties/property.h"
 #include "irisgl/core/math/trs.h"
 #include "irisgl/document/assets/texture2d.h"
@@ -1620,8 +1619,10 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
 {
     PbrParams p;
     if (!material || !toPbrParams(material, p)) {
-        // Unknown material kinds (CustomMaterial shader graphs, matcap, glass...) get
-        // one shared neutral material until they have an engine equivalent.
+        // A material class the mirror cannot translate gets one shared neutral
+        // material. Since HLMS_ADOPTION P4b the document holds PbrMaterials and
+        // the legacy DefaultMaterial only, so this is a guard rather than a
+        // path anything shipped takes.
         if (!mDefaultMaterial) {
             PbrParams d; d.albedo = Colour(0.8f, 0.8f, 0.8f); d.metalness = 0.0f; d.roughness = 0.6f;
             mDefaultMaterial = mTarget->createPbrMaterial(d);
@@ -1707,19 +1708,12 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
         if (tit != material->textures.constEnd() && tit.value() && !tit.value()->source.isEmpty())
             ms.binds.push_back({ sl.slot, tit.value()->source, sl.srgb });
     }
-    if (auto *custom = dynamic_cast<iris::CustomMaterial *>(material)) {
-        for (iris::Property *prop : custom->properties) {
-            if (!prop || prop->type != iris::PropertyType::Texture) continue;
-            const QString path = prop->getValue().toString();
-            if (path.isEmpty()) continue;
-            if (prop->name == "diffuseTexture" || prop->name == "baseColorMap" || prop->name == "albedoMap")
-                ms.binds.push_back({ PbrTextureSlot::Albedo, path, true });
-            else if (prop->name == "normalTexture" || prop->name == "normalMap")
-                ms.binds.push_back({ PbrTextureSlot::Normal, path, false });
-            else if (prop->name == "emissiveMap")
-                ms.binds.push_back({ PbrTextureSlot::Emissive, path, true });
-        }
-    }
+    // (The CustomMaterial branch that scraped texture PATHS out of a shader
+    // material's Property rows died with the class itself, HLMS_ADOPTION P4b.
+    // Every material the document can hold is a PbrMaterial now, and a
+    // PbrMaterial's maps arrive through `textures` above — the reader converts
+    // a legacy `diffuseTexture` value into a real baseColorMap at load, which
+    // is where that translation belongs.)
     // Which slot gets which file, as one hash: the whole job of this number is
     // to let a mesh conclude "unchanged" in one comparison.
     Hasher hs;
@@ -1807,41 +1801,12 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.emissiveAsLightmap = pbr->emissiveAsLightmap;
         return true;
     }
-    if (auto *custom = dynamic_cast<iris::CustomMaterial *>(material)) {
-        // Effects-module materials (Default/Flat/... .shader): read the properties the
-        // shader graph exposes. Colour → albedo, shininess → roughness. Textures are
-        // bound by syncTextures() from the texture properties.
-        bool haveColour = false, haveRoughness = false; float shininess = 20.0f;
-        out.albedo = Colour(0.8f, 0.8f, 0.8f); out.metalness = 0.0f; out.emissive = Colour(0, 0, 0);
-        for (iris::Property *prop : custom->properties) {
-            if (!prop) continue;
-            const QVariant v = prop->getValue();
-            if (prop->type == iris::PropertyType::Color &&
-                (prop->name == "diffuseColor" || prop->name == "color" || prop->name == "albedo" || prop->name == "baseColor")) {
-                const QColor c = v.value<QColor>();
-                out.albedo = Colour(c.redF(), c.greenF(), c.blueF(), 1.0f); haveColour = true;
-            } else if (prop->type == iris::PropertyType::Float && prop->name == "shininess") {
-                shininess = v.toFloat();
-            } else if (prop->type == iris::PropertyType::Float && (prop->name == "roughness" || prop->name == "roughnessFactor")) {
-                out.roughness = v.toFloat(); haveRoughness = true;
-            } else if (prop->type == iris::PropertyType::Float && (prop->name == "metallic" || prop->name == "metalness")) {
-                out.metalness = v.toFloat();
-            } else if (prop->type == iris::PropertyType::Float && prop->name == "textureScale") {
-                out.uvScale = v.toFloat();
-            }
-        }
-        if (!haveRoughness) {
-            // Only DERIVE roughness from shininess when the material carries no
-            // real roughness. This line used to run unconditionally, stamping
-            // over any read value — and since assimp encodes glTF roughness as
-            // shininess = (1-r)^2*1000, the 128 clamp turned every reasonably
-            // smooth imported material into a roughness-0.1 near-mirror.
-            const float shin = std::max(0.0f, std::min(shininess, 128.0f));
-            out.roughness = 1.0f - std::sqrt(shin / 128.0f) * 0.9f;
-        }
-        (void)haveColour;
-        return true;
-    }
+    // (The CustomMaterial branch that scraped diffuseColor/shininess/... out of
+    // a shader material's Property rows is GONE with the class, HLMS_ADOPTION
+    // P4b. Its conversion was not lost: it moved to LOAD time, in
+    // src/io/builtinmaterials.cpp, where it runs once and produces a real
+    // PbrMaterial instead of running per material per frame and producing an
+    // approximation the panel could not show.)
     if (auto *def = dynamic_cast<iris::DefaultMaterial *>(material)) {
         // Legacy Blinn-Phong material: diffuse -> albedo, shininess -> roughness.
         const QColor c = def->getDiffuseColor();

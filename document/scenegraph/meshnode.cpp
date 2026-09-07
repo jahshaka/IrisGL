@@ -33,7 +33,6 @@ For more information see the LICENSE file
 
 #include "document/assets/vertexlayout.h"
 #include "document/materials/defaultmaterial.h"
-#include "document/materials/custommaterial.h"
 #include "import/materialhelper.h"
 #include "document/animation/animableproperty.h"
 #include "document/animation/animation.h"
