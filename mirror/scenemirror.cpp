@@ -768,6 +768,13 @@ void SceneMirror::setGridExtent(float extent)
     mGridExtent = std::min(std::max(extent, 1.0f), 100000.0f);
 }
 
+void SceneMirror::setGridFloorOffset(float offsetY)
+{
+    // A hand's breadth either side of the floor is all this is for; a large
+    // value would put the "ground grid" in the air.
+    mGridFloorOffset = std::min(std::max(offsetY, -1.0f), 1.0f);
+}
+
 void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
 {
     if (mGridMinorColour.r == minor.r && mGridMinorColour.g == minor.g &&
@@ -817,15 +824,18 @@ void SceneMirror::syncGrid()
         mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
         mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
     }
-    if (freshNode || mGridBuiltPlane != mGridPlane) {
+    if (freshNode || mGridBuiltPlane != mGridPlane ||
+        mGridBuiltFloorOffset != mGridFloorOffset) {
         // The mesh is authored in XZ; the node rotates it into the plane that
-        // faces the requesting view. Floor sits a hair below y=0 so geometry
-        // resting on the plane (the default ground is at +1e-4) occludes it
-        // cleanly instead of z-fighting; the vertical planes pass through the
-        // origin — they are alignment aids for the orthographic views and
-        // nothing habitually coexists at exactly x=0 / z=0.
+        // faces the requesting view. Floor sits at mGridFloorOffset — by
+        // default a hair BELOW y=0, so geometry resting on the plane (the
+        // default ground is at +1e-4) occludes it cleanly instead of
+        // z-fighting; a top/bottom view flips that sign, or the ground hides
+        // the grid entirely (setGridFloorOffset). The vertical planes pass
+        // through the origin — they are alignment aids for the orthographic
+        // views and nothing habitually coexists at exactly x=0 / z=0.
         static const float s = 0.70710678f;   // sin/cos 45°: a 90° rotation
-        Vec3 pos(0, -0.01f, 0);
+        Vec3 pos(0, mGridFloorOffset, 0);
         Quat rot;                             // Floor: identity
         switch (mGridPlane) {
         case GridPlane::FrontXY: pos = Vec3(); rot = Quat(s, 0, 0, s); break;
@@ -834,6 +844,7 @@ void SceneMirror::syncGrid()
         }
         mTarget->setNodeTransform(mGridNode, pos, rot, Vec3(1, 1, 1));
         mGridBuiltPlane = mGridPlane;
+        mGridBuiltFloorOffset = mGridFloorOffset;
     }
     if (mGridBuiltSpacing != mGridSpacing || mGridBuiltExtent != mGridExtent) {
         if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
