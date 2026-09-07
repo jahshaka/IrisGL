@@ -494,6 +494,16 @@ public:
     ///
     /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
     virtual unsigned long long giEscapeSignature() const = 0;
+    /// "Has any GI geometry MOVED?" — a quantized hash of every GI item's world
+    /// AABB (FIX WAVE B3). Same contract and the same debounce as
+    /// giEscapeSignature and the host's light-transform signature: it changes on
+    /// every frame of a drag and freezes when the drag stops, so a host that
+    /// watches it spends the CHEAP paths during the gesture and exactly one full
+    /// re-solve at the end of it. Stateless — reading it twice in a frame is
+    /// free of side effects. Zero only when GI is off.
+    ///
+    /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
+    virtual unsigned long long giGeometrySignature() const = 0;
     /// "This object must not define WHERE global illumination happens"
     /// (REFLECTIONS_ADOPTION_SPEC.md P1a). The object still voxelizes and still
     /// bounces light — it is only kept out of the two AABB reductions, the lit

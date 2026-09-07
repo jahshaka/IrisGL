@@ -1102,6 +1102,7 @@ public:
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
     unsigned long long giEscapeSignature() const override;
+    unsigned long long giGeometrySignature() const override;
     bool refreshGiLighting() override;
     void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
     bool nodeGiBoundsExcluded(NodeId id) const override;
@@ -1543,10 +1544,36 @@ private:
     /// FREE SPACE from computeProbeRegion, NOT the voxel volume — and binds it
     /// with distance-blended VCT specular (PccVctMinDistance).
     void buildPcc(const Ogre::Aabb &region);
-    /// Keeps the N probes nearest `camPos` non-static and dirty, so they
-    /// re-capture the scene every frame (P5a). Called from updateGiTracking;
-    /// a no-op when GiParams::dynamicProbes is 0 and nothing is dynamic.
-    void updateDynamicProbes(const Ogre::Vector3 &camPos);
+    /// Clamps every probe's fitted PARALLAX SHAPE into `region`, per axis
+    /// (FIX WAVE defect A2). buildEnd's 1x1 averaged depth readback overshoots
+    /// badly whenever anything stands between a probe and the wall behind it,
+    /// and a parallax box larger than the free space the grid was fitted to is
+    /// never right. See the long-form argument on the definition.
+    void clampProbeShapesToRegion(const Ogre::Aabb &region);
+    /// Spends this frame's probe-update budget: picks the probes to re-capture
+    /// and raises `mDirty` on them (FIX WAVE B2). Called from updateGiTracking
+    /// with the AUTHORITATIVE camera position; a no-op at budget 0.
+    void updateProbeBudget(const Ogre::Vector3 &camPos);
+    /// Refreshes mGiItemAabbs and fills mGiMovedBoxes with what moved since the
+    /// last call (FIX WAVE B3, engine half). Called once per frame from
+    /// updateProbeBudget; NOT from giGeometrySignature, which is stateless.
+    void scanGiMovement();
+    /// The movement quantum for one item's world AABB (a 64th of its own
+    /// largest extent), and "did this AABB move by at least that much?". Shared
+    /// by giGeometrySignature and scanGiMovement so the mirror's debounce and
+    /// the probe round-robin can never disagree about what moved.
+    static float giAabbQuantum(const Ogre::Aabb &a);
+    static bool  giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after);
+    /// The VCT light-injection ray-march step scale to use (FIX WAVE B5): the
+    /// document's at-rest value, raised on the cheap in-motion re-injection.
+    float giRayMarchStepScale(bool inMotion) const;
+    /// THE REUSE ARM (FIX WAVE B4). Re-runs the EXISTING voxelizer and lighting
+    /// over the live scene instead of tearing the arm down and building a new
+    /// one, and re-dirties the probes without re-running the placement pass.
+    /// Refuses (returns false, caller falls back to rebuildVct) whenever
+    /// anything the arm holds a raw pointer into may have died since the build,
+    /// or the probe region moved enough that the shapes must be re-derived.
+    bool refreshVctFast();
     /// The visibility flags an Item attached to `n` must carry, given the
     /// material's unlit-ness and the node's helper designation. THE one place
     /// the bit scheme is applied to geometry.
@@ -1711,17 +1738,41 @@ private:
     /// after the shadow half checked that a shadow node exists to recalculate.
     bool mPccHdr      = false;
     bool mPccShadowed = false;
-    /// Indices (into mPcc->getProbes()) of the probes currently flipped
-    /// NON-STATIC, i.e. re-capturing the scene every frame (P5a). Empty unless
-    /// GiParams::dynamicProbes > 0. Rebuilt from scratch with the probe grid —
-    /// the indices name probes that a teardown destroys.
-    std::vector<size_t> mPccDynamic;
-    /// `CubemapProbe::mNumIterations` as the pin's constructor leaves it
-    /// (OgreCubemapProbe.cpp:73). A dynamic probe is put on 1 instead; this is
-    /// what a probe goes back to when it stops being dynamic. See
-    /// updateDynamicProbes for what the value actually selects in automatic
-    /// mode (a render STAGE, not an iteration count).
-    static const unsigned kProbeIterationsStatic = 8u;
+    /// THE PROBE ROUND-ROBIN (FIX WAVE B2). One entry per probe, rebuilt with
+    /// the grid. `sweepPending` is true while the probe still owes this sweep an
+    /// update — the sweep set refills when it empties, which is what makes
+    /// "every probe within ceil(probes / budget) frames" a guarantee rather than
+    /// a hope. `framesSinceUpdate` and the moved-cover test only decide the
+    /// ORDER inside a sweep.
+    struct ProbeSlot {
+        bool     sweepPending = true;
+        unsigned framesSinceUpdate = 0;
+    };
+    std::vector<ProbeSlot> mProbeSlots;
+    /// How many probes updateProbeBudget dirtied on the LAST frame it ran, and
+    /// the resolved per-frame budget (the request clamped to the grid). Reported
+    /// by giStatus so a caller can see what the renderer actually spends.
+    int mProbeUpdatesPerFrame = 0;
+    /// Whether the last full refresh took the reuse arm (B4). Reported by
+    /// giStatus; cleared by every from-scratch build.
+    bool mGiReusedLastRefresh = false;
+    /// World AABBs of the GI items as of the last movement scan, keyed by node.
+    /// The scan is what feeds the "covers a moved AABB" term of the round-robin
+    /// priority and the movement half of the GI signature (B3).
+    std::unordered_map<NodeId, Ogre::Aabb> mGiItemAabbs;
+    /// The AABBs that moved on the most recent scan (union of each mover's old
+    /// and new box), in world space. Rebuilt every scan; empty when still.
+    std::vector<Ogre::Aabb> mGiMovedBoxes;
+    /// Bumped whenever anything the GI arms hold RAW POINTERS INTO may have
+    /// died — every invalidateGiCaches call site (B4). The reuse arm refuses to
+    /// re-run an existing voxelizer across a bump, which is what keeps the
+    /// "always from scratch" rule's guarantee (InstantRadiosity::freeMemory's
+    /// cache keys, VctMaterial's datablock-pointer cache) exactly as strong.
+    unsigned long long mGiDestroyGeneration = 0;
+    unsigned long long mGiBuiltGeneration   = ~0ull;   // no build yet
+    /// The NodeIds handed to the live VctVoxelizer, so the reuse arm can add the
+    /// items created since the build. Cleared with the arm.
+    std::vector<NodeId> mVctItemIds;
     /// Live decals in THIS scene. The SceneManager-level atlas binding is
     /// driven off the count (see refreshDecalBindings).
     unsigned            mDecalCount = 0;
@@ -1769,6 +1820,9 @@ public:
 
     const std::string &name() const override;
     Scene *scene() const override;
+    /// The same pointer, unerased — Engine::renderOneFrame groups views by the
+    /// scene they draw (the authoritative-view rule on updateGi).
+    OgreScene *ogreScene() const { return mScene; }
 
     bool setScene(Scene *scene) override;
 
@@ -1910,7 +1964,17 @@ public:
     /// are depth-sorted against it (matters for alpha-blended sets).
     void updateParticles();
     /// Feeds the camera position to the scene's GI (PCC probe blending tracks
-    /// the viewer in hybrid mode).
+    /// the viewer in hybrid mode) and re-derives the Forward+ depth range.
+    ///
+    /// AUTHORITATIVE VIEWS ONLY (FIX WAVE B2/F7): both jobs are per SCENE, not
+    /// per view, and both are stateful — the probe round-robin spends a
+    /// per-frame budget and the Forward+ range carries hysteresis. Two views
+    /// sharing a scene (the editor and the player, an editor and a preview) used
+    /// to run this twice a frame with two different camera positions, which
+    /// spends the budget twice and makes the priority depend on view order.
+    /// Engine::renderOneFrame picks ONE view per scene — the first enabled
+    /// on-screen one, falling back to the first enabled — and calls this only
+    /// there.
     void updateGi();
     /// Per-frame maintenance of everything derived from the TARGET's size:
     /// the letterbox rectangle and the inset's. Free when neither is in use.
