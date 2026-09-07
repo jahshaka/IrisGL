@@ -668,6 +668,13 @@ enum class GiMode {
 /// voxel resolution, probe grid).
 enum class GiQuality { Low, Medium, High };
 
+/// A three-state knob whose default answer is "whatever the quality dial says".
+/// Used by the hybrid's two expensive probe-capture options
+/// (REFLECTIONS_ADOPTION_SPEC.md P3a/P3b): both derive from GiQuality::High by
+/// default, and both can be pinned either way independently of it — which is
+/// what lets a suite measure ONE of them at a time instead of measuring "High".
+enum class GiToggle { Auto, Off, On };
+
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
     GiMode    mode    = GiMode::Off;
@@ -684,6 +691,42 @@ struct GiParams {
     /// Hybrid only: reflection-probe counts along each world axis of the GI
     /// bounds (the parallax-corrected cubemap grid). Clamped to 1..8 per axis.
     int       pccProbesX = 3, pccProbesY = 2, pccProbesZ = 3;
+
+    // ---- Probe capture options (hybrid only; REFLECTIONS_ADOPTION_SPEC P3) ----
+    /// HDR probe captures — PFG_RGBA16_FLOAT instead of PFG_RGBA8_UNORM_SRGB.
+    /// The main chain renders RGBA16_FLOAT, so an LDR probe clips every
+    /// highlight BEFORE the IBL convolution that blurs it across the mip chain;
+    /// in a room the lamps and windows ARE the reflection content. Costs 2x the
+    /// probe VRAM (High/512: ~151 -> ~302 MB at 18 probes), which is why Auto
+    /// means "on at GiQuality::High only".
+    GiToggle  probeHdr = GiToggle::Auto;
+    /// Shadowed probe captures — the probe's six face renders run the scene's
+    /// shadow node with `recalculate`, so the reflection contains the room's
+    /// shadows instead of a uniformly lit room. Multiplies each face render by
+    /// the shadow pass count; Auto means "on at GiQuality::High only". Falls
+    /// back silently to the unshadowed capture when no shadow node exists (a
+    /// headless engine has none) — GiStatus reports what actually happened.
+    GiToggle  probeShadows = GiToggle::Auto;
+    /// How far each probe's influence volume is stretched past its 1/N share of
+    /// the probe region, so neighbours blend instead of showing a hard seam.
+    /// 1.0 = no overlap (visible seams), the pin's own ctor default is 1.5, and
+    /// upstream's sample ships 1.25 — which is ours (P3c): less probe-count
+    /// pressure on the Forward+ cubemap slots for blending that is already
+    /// smooth. Valid range (0, inf).
+    float     probeOverlap = 1.25f;
+    /// Probe shrink-fit snapping, applied uniformly to all three axes. After
+    /// the depth readback re-fits each probe to the geometry around it, a face
+    /// that landed within this RELATIVE error of the probe region snaps back
+    /// out to it — the cure for "the wall itself has no reflection" when the
+    /// fit stops a hair short of it. `snapSidesMin/Max` are the same idea for
+    /// probes sitting on the region's own faces/corners, where a much larger
+    /// error is safe (upstream reasons about it at length in
+    /// PccPerPixelGridPlacement::setSnapSides). These were never set before —
+    /// they are the pin's ctor defaults, now OURS and explicit, so an upstream
+    /// bump cannot move probe placement without a diff saying so.
+    float     probeSnapDeviation = 0.05f;
+    float     probeSnapSidesMin  = 0.25f;
+    float     probeSnapSidesMax  = 0.25f;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
@@ -723,6 +766,13 @@ struct GiStatus {
     /// but the hybrid.
     Vec3   probeRegionMin;
     Vec3   probeRegionMax;
+    /// What the probe captures RESOLVED to (REFLECTIONS_ADOPTION_SPEC P3a/P3b),
+    /// as opposed to what GiParams::probeHdr/probeShadows asked for: both are
+    /// GiToggle::Auto by default, so the request alone never says what happened,
+    /// and `probeShadows` additionally falls back to false when the scene has no
+    /// shadow node to recalculate. False in every mode but the hybrid.
+    bool   probeHdr = false;
+    bool   probeShadows = false;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

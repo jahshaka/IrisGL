@@ -2963,6 +2963,18 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.pccProbesX = qBound(1, qRound(mSource->giPccGrid.x()), 8);
         gi.pccProbesY = qBound(1, qRound(mSource->giPccGrid.y()), 8);
         gi.pccProbesZ = qBound(1, qRound(mSource->giPccGrid.z()), 8);
+        // Probe-capture knobs (REFLECTIONS_ADOPTION_SPEC P3). The two toggles
+        // travel as the document's tri-state int; anything outside -1..1 is a
+        // corrupt document and reads as Auto.
+        const auto toggle = [](int v) {
+            return v == 0 ? GiToggle::Off : (v == 1 ? GiToggle::On : GiToggle::Auto);
+        };
+        gi.probeHdr = toggle(mSource->giProbeHdr);
+        gi.probeShadows = toggle(mSource->giProbeShadows);
+        gi.probeOverlap = mSource->giProbeOverlap;
+        gi.probeSnapDeviation = mSource->giProbeSnapDeviation;
+        gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
+        gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
         iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
         gi.irLight = driver ? engineNode(driver) : 0;
         const auto same = [](const GiParams &a, const GiParams &b) {
@@ -2970,6 +2982,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                    a.numBounces == b.numBounces &&
                    a.pccProbesX == b.pccProbesX && a.pccProbesY == b.pccProbesY &&
                    a.pccProbesZ == b.pccProbesZ &&
+                   a.probeHdr == b.probeHdr && a.probeShadows == b.probeShadows &&
+                   a.probeOverlap == b.probeOverlap &&
+                   a.probeSnapDeviation == b.probeSnapDeviation &&
+                   a.probeSnapSidesMin == b.probeSnapSidesMin &&
+                   a.probeSnapSidesMax == b.probeSnapSidesMax &&
                    a.boundsMin.x == b.boundsMin.x && a.boundsMin.y == b.boundsMin.y &&
                    a.boundsMin.z == b.boundsMin.z && a.boundsMax.x == b.boundsMax.x &&
                    a.boundsMax.y == b.boundsMax.y && a.boundsMax.z == b.boundsMax.z;

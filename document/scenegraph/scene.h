@@ -207,6 +207,18 @@ public:
     int giNumBounces;          // 1..4
     bool giAutoRefresh;        // editor: re-solve automatically on edits
     iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
+    // Hybrid probe-capture knobs (REFLECTIONS_ADOPTION_SPEC.md P3). Integrator
+    // knobs, not quality-dial rows: they reach the engine through world.gi only
+    // (SPEC §6 — "the panel stays the quality dial"). The two toggles are
+    // TRI-STATE ints matching jahshaka::engine::GiToggle — -1 auto (derived
+    // from giQuality), 0 off, 1 on — so a scene can pin either without pinning
+    // the whole quality tier.
+    int giProbeHdr = -1;          // HDR probe captures (RGBA16F); auto = High only
+    int giProbeShadows = -1;      // shadowed probe captures; auto = High only
+    float giProbeOverlap = 1.25f; // probe influence overlap (upstream's sample value)
+    float giProbeSnapDeviation = 0.05f;  // shrink-fit snap-back tolerances: the pin's
+    float giProbeSnapSidesMin = 0.25f;   // own ctor defaults, made explicit and ours
+    float giProbeSnapSidesMax = 0.25f;
     /// MONOTONIC, never serialized: bumped by world.refreshGi() and by the
     /// Refresh button (REFLECTIONS_ADOPTION_SPEC.md P1d). The mirror compares it
     /// against the value it last acted on and re-solves the engine's GI once per

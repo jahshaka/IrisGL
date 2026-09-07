@@ -415,12 +415,50 @@ void OgreScene::destroyReflection() {
 
 void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 
+// THE ENV-PROBE SLOT HAS ONE OCCUPANT (found the hard way, 2026-09-07, the
+// reflections P3/P6 lane; it is why `reflectionTexForDatablocks()` exists at all
+// rather than every site just reading mReflectionTex).
+//
+// The PBS pixel shader has exactly ONE env-probe texture, `texEnvProbeMap`. An
+// automatic ParallaxCorrectedCubemap — which is what the VCT+PCC hybrid builds —
+// fills it from the PASS with a cube ARRAY of probes. A datablock that also
+// carries its own PBSM_REFLECTION cubemap makes HlmsPbs's `canUseManualProbe`
+// true, which SUPPRESSES `use_parallax_correct_cubemaps` while the pass property
+// `hlms_enable_cubemaps_auto` stays set, and the generated shader then fails to
+// compile in three separate places (measured, in this order, each one revealed
+// by fixing the one before it):
+//   * `toProbeLocalSpace` / `localCorrect` — declared only under
+//     use_parallax_correct_cubemaps, called by the auto path;
+//   * `vctSpecPosVS` — declared and passed to computeVctProbe under the same
+//     property, read by the auto path's getPccVctBlendWeight;
+//   * `SampleEnvProbe` in CubemapGlobal — no OGRE_SampleLevelF16 overload takes
+//     a textureCubeArray.
+// The third one is the one that decides the fix: the manual cubemap is not
+// merely undeclared in that permutation, it is UNSAMPLEABLE, because the slot
+// holds an array. Upstream cannot serve both and no patch of ours would change
+// that; the two are mutually exclusive by construction in this pin.
+//
+// So while auto PCC is bound WE do not bind the IBL cubemap. Nothing is lost
+// visually: the probe captures are full scene renders that include the sky, so
+// the probes ARE the environment — sharper than the single global cubemap was,
+// because they are parallax-corrected to the room. rebuildVct/teardownVct call
+// applyReflectionToAll() so the binding follows the hybrid up and down.
+//
+// Before this, picking VCT+Probes on any scene with a sky produced a shader that
+// did not compile — i.e. objects that did not draw at all — and it was invisible
+// to every suite because no suite combined the two. `gi.pcc_mirror`'s sky case
+// is the fence; it goes black without this.
+Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
+    return mPcc ? nullptr : mReflectionTex;
+}
+
 void OgreScene::applyReflectionToAllImpl() {
     auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
+    Ogre::TextureGpu *tex = reflectionTexForDatablocks();
     for (auto &kv : mMaterials) {
         if (kv.second.unlit) continue;
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->getDatablock(Ogre::IdString(kv.second.datablockName)));
-        if (db) db->setTexture(Ogre::PBSM_REFLECTION, mReflectionTex);
+        if (db) db->setTexture(Ogre::PBSM_REFLECTION, tex);
     }
 }
 

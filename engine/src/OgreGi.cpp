@@ -16,6 +16,17 @@ static Ogre::HlmsPbs *hlmsPbs(Ogre::Root *root) {
     return static_cast<Ogre::HlmsPbs *>(root->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
 }
 
+/// GiToggle::Auto defers to the quality dial; Off/On pin it either way. Exists
+/// so a suite can measure HDR probes and shadowed probes ONE AT A TIME instead
+/// of measuring "GiQuality::High", which changes three things at once.
+static bool resolveToggle(GiToggle t, bool autoValue) {
+    switch (t) {
+    case GiToggle::Off: return false;
+    case GiToggle::On:  return true;
+    case GiToggle::Auto: default: return autoValue;
+    }
+}
+
 bool OgreScene::setGlobalIllumination(const GiParams &p) {
     JAH_TRY {
         switch (p.mode) {
@@ -118,6 +129,10 @@ GiStatus OgreScene::giStatus() const {
         st.boundsMax      = toV(mGiLitVolume.getMaximum());
         st.probeRegionMin = toV(mGiProbeRegion.getMinimum());
         st.probeRegionMax = toV(mGiProbeRegion.getMaximum());
+        // RESOLVED, not requested: both default to GiToggle::Auto, and the
+        // shadow half additionally falls back when there is no shadow node.
+        st.probeHdr     = mPcc && mPccHdr;
+        st.probeShadows = mPcc && mPccShadowed;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -491,6 +506,11 @@ void OgreScene::rebuildVct() {
     if (mGi.mode == GiMode::VctPccHybrid) {
         mGiProbeRegion = computeProbeRegion(aabb);
         buildPcc(mGiProbeRegion);
+        // The probe grid now owns the shader's one env-probe slot, so the IBL
+        // cubemap must come OFF every datablock — see the long note at
+        // OgreScene::reflectionTexForDatablocks (OgreSky.cpp). Unconditional:
+        // applyReflectionToAll is a no-op walk when there is no sky reflection.
+        applyReflectionToAll();
     }
 
     if (std::getenv("JAHSHAKA_GI_DEBUG"))
@@ -503,17 +523,40 @@ void OgreScene::rebuildVct() {
 
 void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    mPccHdr = mPccShadowed = false;
     // Our own probe workspace (media/Hlms/Jahshaka/JahshakaPcc.compositor):
     // per-face scene render + PCC depth compression + IBL specular mips — the
-    // sample's LocalCubemapsProbeWorkspace minus its shadow node.
+    // sample's LocalCubemapsProbeWorkspace, with the sample's shadow node behind
+    // a quality gate (P3b) rather than always-on.
     if (!cm->hasWorkspaceDefinition("JahshakaPccProbeWorkspace")) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: PCC probe workspace missing; hybrid renders as plain VCT");
         return;
     }
+    // SHADOWED CAPTURES (REFLECTIONS_ADOPTION_SPEC.md P3b). Two ways this can be
+    // asked for and refused, and neither may take the hybrid down with it: the
+    // shadowed workspace definition could be missing (an old staged media tree),
+    // and the shadow NODE definition could be missing (a headless engine never
+    // builds it — OgreEngine::createShadowNode runs only on the pixels path).
+    // Ogre resolves the pass's shadow node at workspace instantiation and THROWS
+    // when it is absent, so both are checked here, before the instantiation, and
+    // the answer is recorded for giStatus rather than logged and forgotten.
+    const bool wantShadows = resolveToggle(mGi.probeShadows, mGi.quality == GiQuality::High);
+    const char *probeWorkspace = "JahshakaPccProbeWorkspace";
+    if (wantShadows) {
+        if (cm->hasWorkspaceDefinition("JahshakaPccProbeWorkspaceShadows") &&
+            cm->hasShadowNodeDefinition(OgreView::kShadowNodeName)) {
+            probeWorkspace = "JahshakaPccProbeWorkspaceShadows";
+            mPccShadowed = true;
+        } else {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: shadowed probe captures requested but no shadow node is "
+                "defined; capturing unshadowed");
+        }
+    }
     mPcc = new Ogre::ParallaxCorrectedCubemapAuto(
         Ogre::Id::generateNewId<Ogre::ParallaxCorrectedCubemapAuto>(),
-        mRoot, mSceneMgr, cm->getWorkspaceDefinition("JahshakaPccProbeWorkspace"));
+        mRoot, mSceneMgr, cm->getWorkspaceDefinition(probeWorkspace));
 
     if (!mGiCamera) mGiCamera = mSceneMgr->createCamera(processUniqueName("giPccCamera"));
     mGiCamera->setPosition(aabb.mCenter);
@@ -525,7 +568,20 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     placement.setParallaxCorrectedCubemapAuto(mPcc);
     placement.setNumProbes(numProbes);
     placement.setFullRegion(aabb);
-    placement.setOverlap(Ogre::Vector3(1.5f));
+    // PLACEMENT KNOBS (P3c). All three were previously left at the pin's ctor
+    // defaults — overlap 1.5 by inheritance rather than by choice, and the snap
+    // tolerances never touched at all. They are now OURS and set explicitly, so
+    // an upstream default change shows up as a diff instead of as moved probes.
+    // The overlap default is 1.25 (upstream's own sample's value): fewer probe
+    // volumes over each point, which is cheaper on the Forward+ cubemap slots.
+    // Its old workaround value is worth naming — before ogre-patch 0017, MORE
+    // overlapping probes meant a DARKER reflection (the count division), so a
+    // large overlap was quietly paying for itself in the wrong currency. With
+    // 0017 the choice is purely about blend smoothness.
+    placement.setOverlap(Ogre::Vector3(std::max(0.01f, mGi.probeOverlap)));
+    placement.setSnapDeviationError(Ogre::Vector3(std::max(0.0f, mGi.probeSnapDeviation)));
+    placement.setSnapSides(Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMin)),
+                           Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMax)));
 
     // Quality -> probe face resolution (the probe render + memory knob).
     Ogre::uint32 probeRes = 256u;
@@ -534,8 +590,19 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     case GiQuality::Medium: probeRes = 256u; break;
     case GiQuality::High:   probeRes = 512u; break;
     }
+    // HDR PROBES (P3a). The main chain renders PFG_RGBA16_FLOAT (OgreChain.cpp),
+    // so an LDR probe target clamps every value above 1.0 at CAPTURE time — i.e.
+    // before the IBL convolution spreads a highlight across the mip chain, which
+    // is exactly the moment the extra range is worth having. Everything
+    // downstream is format-generic: the DepthCompressor writes its packed depth
+    // into alpha (never sRGB-encoded either way, and more precise as float), and
+    // buildEnd reads it back through TextureBox::getColourAt with the bind
+    // texture's own format. The cost is 2x the probe VRAM, hence the High gate.
+    mPccHdr = resolveToggle(mGi.probeHdr, mGi.quality == GiQuality::High);
+    const Ogre::PixelFormatGpu probeFormat =
+        mPccHdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM_SRGB;
     const float diag = aabb.getSize().length();
-    placement.buildStart(probeRes, mGiCamera, Ogre::PFG_RGBA8_UNORM_SRGB,
+    placement.buildStart(probeRes, mGiCamera, probeFormat,
                          std::max(0.02f, diag * 0.001f), std::max(1.0f, diag * 2.0f));
     placement.buildEnd();   // reads probe depth back and re-fits probe shapes
 
@@ -553,7 +620,11 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
         };
         lm.logMessage("Jahshaka GI: PCC region " + toS(aabb.getMinimum()) + " .. " +
                       toS(aabb.getMaximum()) + " grid " + std::to_string(numProbes[0]) + "x" +
-                      std::to_string(numProbes[1]) + "x" + std::to_string(numProbes[2]));
+                      std::to_string(numProbes[1]) + "x" + std::to_string(numProbes[2]) +
+                      " res " + std::to_string(probeRes) +
+                      (mPccHdr ? " RGBA16F" : " RGBA8_SRGB") +
+                      (mPccShadowed ? " shadowed" : " unshadowed") +
+                      " overlap " + Ogre::StringConverter::toString(mGi.probeOverlap));
         const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
         for (size_t i = 0; i < probes.size(); ++i) {
             const Ogre::CubemapProbe *p = probes[i];
@@ -589,6 +660,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
 
 void OgreScene::teardownVct() {
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+    mPccHdr = mPccShadowed = false;
     if (sVctBindingOwner == this) {
         hlmsPbs(mRoot)->setParallaxCorrectedCubemap(nullptr);
         hlmsPbs(mRoot)->setVctLighting(nullptr);
@@ -601,6 +673,9 @@ void OgreScene::teardownVct() {
     delete mVctLighting;  mVctLighting = nullptr;
     delete mVctVoxelizer; mVctVoxelizer = nullptr;
     if (mGiCamera) { mSceneMgr->destroyCamera(mGiCamera); mGiCamera = nullptr; }
+    // ...and back ON now that the slot is free again (the mirror of the call in
+    // rebuildVct). Ordered after `delete mPcc` because the helper reads it.
+    applyReflectionToAll();
 }
 
 void OgreScene::teardownIr() {

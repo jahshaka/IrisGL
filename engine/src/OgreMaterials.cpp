@@ -370,7 +370,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
             Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
         db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
         applyPbr(db, p, mRefractionsActive);
-        if (mReflectionTex) db->setTexture(Ogre::PBSM_REFLECTION, mReflectionTex);
+        if (Ogre::TextureGpu *rt = reflectionTexForDatablocks()) db->setTexture(Ogre::PBSM_REFLECTION, rt);
         mMaterials[++mNextMaterialId] = rec;
         return mNextMaterialId;
     } JAH_CATCH(mError, 0);
@@ -499,7 +499,7 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
                 Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
             db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
             applyPbr(db, rec.params, mRefractionsActive);
-            if (mReflectionTex) db->setTexture(Ogre::PBSM_REFLECTION, mReflectionTex);
+            if (Ogre::TextureGpu *rt = reflectionTexForDatablocks()) db->setTexture(Ogre::PBSM_REFLECTION, rt);
         }
         // The maps the host already pushed are the host's state, not the
         // datablock's: re-bind them or a switch would silently strip every

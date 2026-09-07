@@ -1334,6 +1334,9 @@ private:
     };
 
     void applyReflectionToAllImpl();
+    /// The IBL cubemap AS BOUND TO DATABLOCKS — null while automatic PCC owns
+    /// the shader's one env-probe slot (OgreSky.cpp, the long note there).
+    Ogre::TextureGpu *reflectionTexForDatablocks() const;
 public:
     /// Is a refraction pass present in EVERY view that draws this scene?
     ///
@@ -1645,6 +1648,11 @@ private:
     /// nothing built.
     Ogre::Aabb mGiLitVolume    = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     Ogre::Aabb mGiProbeRegion  = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+    /// Same contract for the two probe-capture options (P3a/P3b): what the last
+    /// buildPcc RESOLVED, after GiToggle::Auto consulted the quality dial and
+    /// after the shadow half checked that a shadow node exists to recalculate.
+    bool mPccHdr      = false;
+    bool mPccShadowed = false;
     /// Live decals in THIS scene. The SceneManager-level atlas binding is
     /// driven off the count (see refreshDecalBindings).
     unsigned            mDecalCount = 0;
