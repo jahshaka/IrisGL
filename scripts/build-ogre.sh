@@ -166,11 +166,60 @@ done
 # dirs deliberately NOT as SYSTEM), so `cmake --build` after this script picks
 # the rebuild up by itself. EVERY TREE MUST RE-RUN THIS SCRIPT after pulling the
 # commit that added the flag.
+#
+# OGRE_CONFIG_ENABLE_FINE_LIGHT_MASK_GRANULARITY=ON (LIGHT MASKS / lighting
+# channels: "this light only affects these objects"). Upstream's option
+# (ogre-next/CMakeLists.txt:573) defaults FALSE, which sets
+# OGRE_NO_FINE_LIGHT_MASK_GRANULARITY=1 in OgreBuildSettings.h and COMPILES THE
+# WHOLE FEATURE OUT: Light::setLightMask and MovableObject::setLightMask still
+# exist and still store, but nothing ever reads them -- HlmsPbs never writes the
+# mask into the light buffers (OgreHlmsPbs.cpp:2566/2644/2723/2832) nor the
+# object's mask into the per-draw const buffer (:3685), ForwardPlusBase never
+# writes it into the global light list (OgreForwardPlusBase.cpp:207), and the
+# hlms_fine_light_mask / hlms_forwardplus_fine_light_mask shader properties are
+# never set, so the generated shaders contain no test at all. The API is a
+# silent no-op. ON makes it real, for BOTH light paths: forward (directional +
+# shadow-casting + area approx + area LTC, HlmsPbs::setFineLightMaskGranularity)
+# and Forward+ clustered (ForwardPlusBase::setFineLightMaskGranularity) -- both
+# default to true once compiled in.
+#
+# COST, measured at the pin and bounded by construction: the light-buffer layout
+# does NOT change (the mask rides the unused .w of each light's view-space
+# position, and the ++ that skips it is compiled either way, see the #if blocks
+# above), so no buffer grows and no upload gets bigger. The per-draw const
+# buffer word at OgreHlmsPbs.cpp:3685 is likewise already reserved. What the
+# flag adds is one uint AND-test per light per pixel inside the lighting loops,
+# and only in the shader VARIANTS that get the property -- which is all of them
+# while granularity is on. Upstream's own option text says the impact "may vary
+# (may be slower, may be faster if you filter a lot of lights)".
+#
+# DEFAULTS ARE ALL-ON, so enabling changes no pixels: MovableObject's light mask
+# is born 0xFFFFFFFF (OgreMovableObject.cpp:60 msDefaultLightMask, actually
+# consulted at OgreObjectDataArrayMemoryManager.cpp:138 -- unlike query flags,
+# whose msDefaultQueryFlags is dead code at this pin) and so is every Light's.
+# `0xFFFFFFFF & 0xFFFFFFFF != 0` for every pair, so every light keeps affecting
+# every object until somebody masks something. There are NO reserved bits in the
+# light mask -- all 32 are ours.
+#
+# THIS FLIP IS NOT IN THE ABI COOKIE. generateAbiCookie() (OgreAbiUtils.h:58-98)
+# hashes the two threading macros but NOT OGRE_NO_FINE_LIGHT_MASK_GRANULARITY --
+# exactly like the component defines noted above. And the macro DOES change
+# member layout: it adds `bool mFineLightMaskGranularity` to both HlmsPbs
+# (OgreHlmsPbs.h:228) and ForwardPlusBase (OgreForwardPlusBase.h:154). So a
+# consumer compiled against the old OgreBuildSettings.h and linked against a
+# flag-ON engine is SILENTLY mismatched, not loudly aborted. What saves us is
+# the same thing that saves the component pins: Studio's cmake/IncludeOgre.cmake
+# adds Ogre's include dirs deliberately NOT as SYSTEM, so the -MD depfiles track
+# the installed OgreBuildSettings.h and `cmake --build` rebuilds every Ogre-
+# including TU by itself after this script re-runs. EVERY TREE MUST RE-RUN THIS
+# SCRIPT after pulling the commit that added this flag -- and unlike the
+# threading flag, forgetting is not self-announcing.
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DOGRE_SHADER_COMPILATION_THREADING_MODE=2 \
+  -DOGRE_CONFIG_ENABLE_FINE_LIGHT_MASK_GRANULARITY=ON \
   $PLATFORM_FLAGS -DOGRE_BUILD_RENDERSYSTEM_VULKAN=ON \
   -DOGRE_VULKAN_WINDOW_NULL=ON \
   -DOGRE_BUILD_COMPONENT_HLMS_PBS=ON -DOGRE_BUILD_COMPONENT_HLMS_UNLIT=ON \
@@ -230,6 +279,27 @@ if grep -qE '^[[:space:]]*#define[[:space:]]+OGRE_SHADER_THREADING_BACKWARDS_COM
     echo "Almost always a stale CMake cache in $SRC/build: delete it and re-run this" >&2
     echo "script. Do NOT ignore this — the build would otherwise succeed and run with" >&2
     echo "single-threaded shader compilation (SPECS/THREADING_ADOPTION_SPEC.md P1)." >&2
+    exit 1
+fi
+
+# FINE LIGHT MASK GRANULARITY, on the INSTALL side (light masks / lighting
+# channels). Strictly louder than the threading guard above, because this flag
+# is NOT in the ABI cookie (see the long note beside the configure line): a
+# stale cache, or a tree that simply never re-ran this script, produces an
+# engine where Light::setLightMask and MovableObject::setLightMask compile,
+# link, run, and store — and are read by nothing. Every light keeps lighting
+# every object, the editor's channel checkboxes do nothing at all, and the only
+# symptom is a feature that quietly is not there. The installed header is the
+# only honest witness (ogre-next/CMake/ConfigureBuild.cmake:156-157 is what
+# translates the option into this macro).
+if ! grep -qE '^[[:space:]]*#define[[:space:]]+OGRE_NO_FINE_LIGHT_MASK_GRANULARITY[[:space:]]+0' "$_bs"; then
+    echo "OGRE_NO_FINE_LIGHT_MASK_GRANULARITY is not 0 in $_bs —" >&2
+    echo "the -DOGRE_CONFIG_ENABLE_FINE_LIGHT_MASK_GRANULARITY=ON argument above did not" >&2
+    echo "take. Almost always a stale CMake cache in $SRC/build: delete it and re-run" >&2
+    echo "this script. Do NOT ignore this — the build would otherwise succeed and run" >&2
+    echo "with light masks silently compiled out (setLightMask becomes a no-op, and" >&2
+    echo "every per-object lighting channel in the editor stops filtering anything)." >&2
+    grep -n "FINE_LIGHT_MASK" "$_bs" >&2 || true
     exit 1
 fi
 unset _bs

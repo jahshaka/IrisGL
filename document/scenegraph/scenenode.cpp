@@ -460,6 +460,26 @@ QList<Property*> SceneNode::getProperties()
     boolProp->value = pickable;
     props.append(boolProp);
 
+    // LIGHTING CHANNELS as a plain 32-bit row.
+    //
+    // THE ROW IS SIGNED AND THAT IS THE POINT: `int(0xFFFFFFFF)` is -1, so the
+    // default reads as -1 = "every channel", which is exactly what Unity's
+    // culling mask has spelled for fifteen years. The alternative (slicing the
+    // byte the checkboxes edit into its own row) would make node.property and
+    // node.properties disagree about what "lightMask" means, and would give a
+    // script no way to reach the upper 24 bits at all. IntProperty cannot hold
+    // an unsigned 32-bit value; the bit pattern is preserved exactly either
+    // way, and `node.lightMask` / `node.setLightMask` are the unsigned
+    // spelling for callers who prefer it.
+    //
+    // min/max stay 0/0, which the reflection layer reports as UNBOUNDED
+    // (nodeapi's row doc) — a bitmask has no meaningful slider range.
+    auto intProp = new IntProperty();
+    intProp->displayName = "Lighting Channels";
+    intProp->name = "lightMask";
+    intProp->value = static_cast<int>(lightMask);
+    props.append(intProp);
+
     return props;
 }
 
@@ -474,6 +494,8 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     if (valueName == "planarReflector") return getPlanarReflector();
     if (valueName == "giBoundsExcluded") return getGiBoundsExcluded();
     if (valueName == "pickable")   return isPickable();
+    // Signed, matching the row above: -1 is "all channels".
+    if (valueName == "lightMask")  return static_cast<int>(lightMask);
 
     return QVariant();
 }
@@ -491,6 +513,18 @@ bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "planarReflector") { setPlanarReflector(value.toBool());     return true; }
     if (valueName == "giBoundsExcluded") { setGiBoundsExcluded(value.toBool());   return true; }
     if (valueName == "pickable")   { setPickable(value.toBool());                return true; }
+    // Accepts BOTH spellings of the same 32 bits: -1 (the signed row this node
+    // reflects) and 4294967295 (what an unsigned-minded caller will send).
+    // toInt() alone would turn the latter into 0 with ok=false — i.e. "no
+    // channels at all" — which is the exact opposite of what was asked for, so
+    // the wide read is not a nicety.
+    if (valueName == "lightMask") {
+        bool ok = false;
+        const qlonglong wide = value.toLongLong(&ok);
+        if (!ok) return false;
+        setLightMask(static_cast<quint32>(wide & 0xFFFFFFFFll));
+        return true;
+    }
     return false;
 }
 
@@ -742,6 +776,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	node->pickable		= this->pickable;
 	node->planarReflector = this->planarReflector;
 	node->giBoundsExcluded = this->giBoundsExcluded;
+	node->lightMask		= this->lightMask;
 	node->attached		= this->attached;
 	// Whether a character can walk into the copy (AVATAR_LOCOMOTION_SPEC §6.3).
 	// The constructor already set the TYPE default; this carries the user's

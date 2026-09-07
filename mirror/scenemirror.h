@@ -341,6 +341,14 @@ private:
         /// geometry is (re-)attached, because the flags live on the Item and a
         /// new Item is born with the default mask.
         int pickablePushed = -1;
+        /// The LIGHTING CHANNEL mask last pushed onto this node's engine
+        /// objects, and whether one ever was. Unlike the query flags above this
+        /// does NOT need re-pushing when geometry is re-attached: the engine
+        /// keeps the mask on its own node record and re-applies it to every
+        /// Item it builds (OgreScene::setNodeLightMask's contract), precisely
+        /// so a material swap cannot silently un-mask an object.
+        quint32 lightMaskPushed = 0xFFFFFFFFu;
+        bool    lightMaskEverPushed = false;
         /// The sync() this entry was last reached by. See mSyncStamp.
         quint32 lastSeen = 0;
         bool hasMesh  = false;

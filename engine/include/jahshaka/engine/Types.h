@@ -512,6 +512,18 @@ struct LightDesc {
     /// rescales whatever image it is given to the pool's resolution and
     /// generates the full mip chain the diffuse term needs.
     std::string texturePath;
+
+    /// LIGHTING CHANNELS, light side (Scene::setNodeLightMask is the object
+    /// side). This light lights an object when `lightMask & object mask` is
+    /// non-zero; both default to all-ones, so out of the box every light lights
+    /// every object. All 32 bits are the host's — the engine reserves none.
+    ///
+    /// It filters DIRECT light only, from every path (directional, shadow
+    /// casting, Forward+ clustered, area approx and area LTC). It does NOT
+    /// filter shadow CASTING (a masked-off object still renders into this
+    /// light's shadow map) and it does NOT filter this light's GI bounce.
+    /// Scene::setNodeLightMask carries the full contract.
+    unsigned  lightMask = 0xFFFFFFFFu;
 };
 
 /// A projected-texture decal attached to a node (DECALS_SPEC.md §5.2).

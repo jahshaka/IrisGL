@@ -289,6 +289,29 @@ public:
     // its normal are all derived from the mesh's own bounds.
     bool planarReflector = false;
 
+    // LIGHTING CHANNELS (light masks — "this light only affects these
+    // objects", Unreal's lighting channels / Unity's culling mask).
+    //
+    // ONE field with ONE meaning on every node: the set of lighting channels
+    // this node PARTICIPATES IN. On a LightNode that reads as "the channels
+    // this light illuminates"; on geometry it reads as "the channels this
+    // object is lit by". The renderer's test is the same either way —
+    // `light.lightMask & object.lightMask` non-zero — so there is no reason for
+    // two fields, and Unreal spells it the same way for the same reason.
+    //
+    // 32 bits, none reserved, all-ones by default: every light lights every
+    // object until somebody says otherwise, which is why turning the feature on
+    // moves no pixel in any existing scene. The editor presents the low EIGHT
+    // as named channel checkboxes; the upper 24 are reachable through
+    // `node.setLightMask` for anyone who wants them, and are preserved by the
+    // 8-channel UI rather than cleared.
+    //
+    // What it does NOT do (the renderer's limits, not ours, and the panel says
+    // so): it filters DIRECT light only. A masked-off object still casts a
+    // shadow from that light (the shadow map is one texture for all receivers)
+    // and still receives its GI bounce.
+    quint32 lightMask = 0xFFFFFFFFu;
+
     // GI BOUNDS EXCLUSION (REFLECTIONS_ADOPTION_SPEC.md P1a.2): "this object
     // must not decide WHERE global illumination happens". It still voxelizes
     // and still bounces light; it is only kept out of the two AABB reductions
@@ -498,6 +521,20 @@ public:
 
     bool isPickable() {
         return pickable;
+    }
+
+    /// Sets the node's lighting channels (see `lightMask` above). No bit is
+    /// special and 0 is legal — a light on no channels lights nothing, and an
+    /// object on no channels is lit by nothing but ambient/GI, which is a
+    /// perfectly good thing to ask for. The mirror pushes it: the light side as
+    /// part of the LightDesc, the object side onto the node's Item.
+    void setLightMask(quint32 mask) {
+        lightMask = mask;
+        notifyChanged(NodeChange::Flags);
+    }
+
+    quint32 getLightMask() const {
+        return lightMask;
     }
 
     void setShadowCastingEnabled(bool val) {

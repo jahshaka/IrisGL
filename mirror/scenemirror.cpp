@@ -167,7 +167,8 @@ bool sameLight(const LightDesc &a, const LightDesc &b)
            a.castShadows == b.castShadows &&
            a.rectWidth == b.rectWidth && a.rectHeight == b.rectHeight &&
            a.doubleSided == b.doubleSided && a.accurate == b.accurate &&
-           a.iesProfilePath == b.iesProfilePath && a.texturePath == b.texturePath;
+           a.iesProfilePath == b.iesProfilePath && a.texturePath == b.texturePath &&
+           a.lightMask == b.lightMask;
 }
 }
 
@@ -1226,6 +1227,7 @@ void SceneMirror::visit(iris::SceneNode *node)
         if (!e.node) return;
         e.visiblePushed = -1;      // force one visibility application
         e.pickablePushed = -1;     // ...and one query-flag application
+        e.lightMaskEverPushed = false;   // ...and one lighting-channel application
     }
 
     e.docNode = node;
@@ -1247,6 +1249,19 @@ void SceneMirror::visit(iris::SceneNode *node)
     if (e.pickablePushed != wantPickable) {
         iris::graph::setPickable(node->graphNode(), wantPickable != 0);
         e.pickablePushed = wantPickable;
+    }
+
+    // LIGHTING CHANNELS, object side. Change-guarded like everything else in
+    // this walk; the engine holds the value and re-applies it to any Item it
+    // rebuilds, so this never has to be re-pushed on a material or mesh swap.
+    // A LIGHT node runs through here too and that is harmless — it has no Item,
+    // so the engine simply records the mask (the light's own copy goes out in
+    // the LightDesc below).
+    const quint32 wantLightMask = node->getLightMask();
+    if (!e.lightMaskEverPushed || e.lightMaskPushed != wantLightMask) {
+        mTarget->setNodeLightMask(e.node, wantLightMask);
+        e.lightMaskPushed = wantLightMask;
+        e.lightMaskEverPushed = true;
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
@@ -2033,6 +2048,10 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&
                     light->shadowMap && light->shadowMap->shadowType != iris::ShadowMapType::None;
+    // LIGHTING CHANNELS, light side. The document field is on SceneNode (one
+    // field, one meaning, both ends of the test) — the light's copy says which
+    // channels it illuminates.
+    d.lightMask = light->getLightMask();
     return d;
 }
 

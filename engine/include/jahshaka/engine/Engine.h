@@ -514,6 +514,35 @@ public:
     virtual void        setNodeHelper(NodeId, bool) = 0;
     virtual bool        nodeHelper(NodeId) const = 0;
 
+    /// LIGHTING CHANNELS, object side (LightDesc::lightMask is the light side).
+    ///
+    /// A light lights an object when `light.lightMask & object.lightMask` is
+    /// non-zero. Both are born 0xFFFFFFFF, so by default every light lights
+    /// every object and nothing here costs anything. There are NO reserved bits
+    /// — all 32 are the host's to spend (unlike the visibility/query flags,
+    /// where the engine owns specific bits).
+    ///
+    /// WHAT IT DOES AND DOES NOT COVER, at this engine pin:
+    ///   * it filters DIRECT lighting from every light path — directional,
+    ///     shadow-casting, Forward+ clustered point/spot, and both area kinds;
+    ///   * it does NOT filter SHADOW CASTING. A masked-off object still renders
+    ///     into that light's shadow map and therefore still casts a shadow onto
+    ///     objects the light does light. The caster pass has no access to the
+    ///     receiver's mask (the shadow map is one texture shared by every
+    ///     receiver), so this is a property of shadow mapping, not an omission;
+    ///   * it does NOT filter INDIRECT light. GI (Instant Radiosity VPLs, VCT)
+    ///     bakes/propagates before the mask is consulted, so a masked-off object
+    ///     still receives that light's bounce.
+    ///   * it applies to the node's ITEM (mesh geometry). Billboards and
+    ///     particle systems are not masked: PFX2 definitions are POOLED and
+    ///     shared between nodes, so a per-node mask on a def would leak.
+    ///
+    /// Applies immediately, survives an Item rebuild (the engine re-applies it
+    /// on attach), and is remembered for a node whose geometry has not arrived
+    /// yet. Not inherited: set it on every node that carries geometry.
+    virtual void        setNodeLightMask(NodeId, unsigned mask) = 0;
+    virtual unsigned    nodeLightMask(NodeId) const = 0;
+
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is
     /// free; a CHANGE rebuilds the whole arm (render targets, cameras, private

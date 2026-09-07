@@ -687,6 +687,12 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
         // line meshes must neither bounce nor occlude the radiosity rays.
         n.item->setVisibilityFlags(itemVisibilityFlags(n, tit->second.unlit));
+        // LIGHTING CHANNELS: the Item is BORN with Ogre's all-ones default, so
+        // this only matters for a node whose mask was set before its geometry
+        // arrived — or whose Item this very call is REBUILDING after a material
+        // swap. Without it a masked object silently goes back to being lit by
+        // everything the moment its material changes.
+        n.item->setLightMask(n.lightMask);
         // Render-queue policy (POST_CHAIN_SPEC.md §6): on-top overlays go in the
         // chain's overlay pass, refractive items in its refraction pass, and
         // everything else stays on Ogre's default queue.

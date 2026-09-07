@@ -246,6 +246,24 @@ bool OgreScene::nodeHelper(NodeId id) const {
     return it != mNodes.end() && it->second.helper;
 }
 
+void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    // Remembered even when nothing is attached yet: attachMesh applies it to
+    // the Item it creates, which is also what makes the mask survive the Item
+    // rebuild a material swap performs.
+    it->second.lightMask = Ogre::uint32(mask);
+    if (it->second.item) it->second.item->setLightMask(Ogre::uint32(mask));
+    // Deliberately NOT pushed to billboards or particle systems: a PFX2
+    // definition is pooled and shared between nodes (mParticleDefPool), so a
+    // per-node mask on one would silently mask every node recycling it.
+}
+
+unsigned OgreScene::nodeLightMask(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it == mNodes.end() ? 0xFFFFFFFFu : unsigned(it->second.lightMask);
+}
+
 void OgreScene::setNodeVisible(NodeId id, bool visible) {
     JAH_TRY {
         auto it = mNodes.find(id);
@@ -300,6 +318,12 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         }
         L->setDiffuseColour(toOgre(d.colour));
         L->setSpecularColour(toOgre(d.colour));
+        // LIGHTING CHANNELS, light side. Free at the default (all ones), and
+        // read by nothing at all unless the engine was built with
+        // OGRE_CONFIG_ENABLE_FINE_LIGHT_MASK_GRANULARITY=ON — which
+        // build-ogre.sh passes and guards on the installed OgreBuildSettings.h,
+        // because a stale install turns this line into a silent no-op.
+        L->setLightMask(Ogre::uint32(d.lightMask));
         // Ogre-Next cannot render shadows for area lights (and our shadow node
         // only lists directional/point/spot); never mark them casters.
         L->setCastShadows(d.type == LightType::Area ? false : d.castShadows);

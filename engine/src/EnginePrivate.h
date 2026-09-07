@@ -1107,6 +1107,8 @@ public:
     bool nodeGiBoundsExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
     bool nodeHelper(NodeId id) const override;
+    void setNodeLightMask(NodeId id, unsigned mask) override;
+    unsigned nodeLightMask(NodeId id) const override;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
@@ -1205,6 +1207,14 @@ private:
         /// icons, range wires — things the user must see but a reflection probe
         /// must not capture. Carries kHelperBit instead of kVisibleBit.
         bool                      helper = false;
+        /// LIGHTING CHANNELS, object side (Scene::setNodeLightMask). Kept here
+        /// rather than read back off the Item because the Item is REBUILT on
+        /// every attachMesh/attachSkinnedMesh (a material swap destroys and
+        /// recreates it) and because a host may set the mask before any
+        /// geometry exists — both cases would silently lose it otherwise.
+        /// Ogre's own default (MovableObject::msDefaultLightMask, and it is
+        /// genuinely consulted at OgreObjectDataArrayMemoryManager.cpp:138).
+        Ogre::uint32              lightMask = 0xFFFFFFFFu;
         /// Whether the attached material is UNLIT, recorded at attach time.
         /// Needed because the helper flag can be toggled after the fact and the
         /// item's own flags cannot answer it once kVisibleBit is gone: a helper
