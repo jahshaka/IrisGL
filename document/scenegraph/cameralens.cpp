@@ -99,6 +99,17 @@ float verticalFovDegFromHorizontal(float horizontalFov, float aspect)
     return float(rad2deg(2.0 * std::atan(t)));
 }
 
+float verticalFovDegForHorizontalCap(float verticalFovDeg, float aspect, float hfovCapDeg)
+{
+    // Every degenerate input is the identity — "no cap" must cost nothing and
+    // must not perturb a single bit of the projection it does not apply to.
+    if (!(hfovCapDeg > 0.0f) || !(aspect > 0.0f) || !(verticalFovDeg > 0.0f))
+        return verticalFovDeg;
+    if (horizontalFovDeg(verticalFovDeg, aspect) <= hfovCapDeg)
+        return verticalFovDeg;      // already inside the cap: untouched, bit for bit
+    return std::max(1.0f, verticalFovDegFromHorizontal(hfovCapDeg, aspect));
+}
+
 float diagonalFovDeg(float verticalFovDeg, float aspect)
 {
     const double a = aspect > 0.0f ? double(aspect) : 1.0;
