@@ -917,6 +917,50 @@ struct GiStatus {
     /// under JAHSHAKA_GI_DEBUG.
     Vec3   probeShapeMin;
     Vec3   probeShapeMax;
+    /// THE PER-PROBE LOCALITY CHECK (2026-09-07 fix wave, defect 2b) — and the
+    /// reason the union above is NOT a self-check.
+    ///
+    /// The union is clamped into the probe region by construction, so "the union
+    /// is inside the region" is a tautology that can never fire: it stayed
+    /// perfectly healthy while every probe in the Grand Showroom had been given
+    /// the SAME whole-room parallax box and the metals flickered black. What
+    /// matters is per probe and RELATIVE: how far each probe's fitted box
+    /// reaches past its own cell (its 1/N share of the region), as a multiple of
+    /// that cell's half-extent, worst axis.
+    ///
+    ///   `worstProbeShapeCellRatio` — the largest such multiple in the grid.
+    ///   1.0 means "exactly its own cell"; the fit is ALLOWED to reach further,
+    ///   because a probe legitimately sees the whole room's walls, up to
+    ///   kProbeShapeCellAllowance (OgreGi.cpp).
+    ///   `probesExceedingCell`     — how many probes are past that allowance.
+    ///   Non-zero is a defect, not a tuning matter: the shrink-fit has returned
+    ///   a box unrelated to the space the probe is responsible for.
+    ///
+    /// Both are 0 in every mode but the hybrid, and 0 when no probe was placed.
+    float  worstProbeShapeCellRatio = 0.0f;
+    int    probesExceedingCell = 0;
+    /// How many probes the REGION CLAMP had to correct at the last build — how
+    /// many times `PccPerPixelGridPlacement`'s shrink-fit returned a parallax
+    /// box that was not inside the space the grid was fitted to. It fits from
+    /// ONE 1x1 AVERAGED depth value per cube face, which is only meaningful
+    /// when every face sees a wall; put a column, a partition or a parked car
+    /// in the room and the average means nothing (measured on the shipped Grand
+    /// Showroom: boxes reaching +-23.7 units in a room spanning +-12.25). A
+    /// high count is not itself an artifact — the clamp corrects it — but it is
+    /// the honest signal that the fit is not doing the work in this scene, and
+    /// unlike the union check above it CAN fire.
+    int    probesClampedToRegion = 0;
+    /// The Forward+ per-cell CUBEMAP PROBE budget in force for this scene.
+    ///
+    /// `ForwardClustered::collectObjsForSlice` writes probes into a cluster cell
+    /// only while the cell's count is below this, and drops the rest SILENTLY
+    /// (OgreForwardClustered.cpp:291-298). A dropped probe means the pixels in
+    /// that cell find no probe covering them and the hybrid hands them to cone
+    /// tracing, which in an interior is black — the "hard-edged black rectangles
+    /// crawling over the metals" defect of 2026-09-07. The engine therefore
+    /// grows this budget to hold the probe grid it just built; a value BELOW
+    /// `probeCount` means cells can still drop probes.
+    int    cubemapProbeSlotsPerCell = 0;
     /// Whether the LAST full refresh re-used the existing voxel arm instead of
     /// tearing it down and building a new one (FIX WAVE B4). False after a
     /// from-scratch build, which is what every mode change, quality change and

@@ -27,6 +27,38 @@ static bool resolveToggle(GiToggle t, bool autoValue) {
     }
 }
 
+// HOW FAR A PROBE'S PARALLAX BOX MAY REACH PAST ITS OWN CELL, as a multiple of
+// that cell's half-extent, before it is reported as a defect
+// (GiStatus::probesExceedingCell, 2026-09-07 fix wave defect 2b).
+//
+// WHY IT IS NOT 1. The parallax box is a PROXY FOR THE GEOMETRY THE CUBEMAP
+// CAPTURED, not a region of influence: a probe standing in a room legitimately
+// sees that room's far wall, so its box legitimately reaches several cells away.
+// The number that IS wrong is a box unrelated to any surface — the shrink-fit
+// returning twice the room because one 1x1 averaged depth sample per face was
+// meaningless. So the allowance is generous enough for "this probe can see the
+// whole room" on the grids we ship (an 8-wide grid's corner probe needs ~7.5
+// half-cells to reach the far wall, and the clamp keeps it inside the region
+// anyway) and tight enough that a fit which escaped the room is caught.
+static const float kProbeShapeCellAllowance = 8.0f;
+
+/// How far this probe's fitted SHAPE reaches past its own AREA (its share of
+/// the probe region), as a multiple of the area's half-extent — worst axis,
+/// worst side. 1.0 = exactly its own cell.
+static float probeShapeCellRatio(const Ogre::CubemapProbe *p) {
+    const Ogre::Aabb area = p->getArea();
+    const Ogre::Aabb shape = p->getProbeShape();
+    const Ogre::Vector3 c = area.mCenter, h = area.mHalfSize;
+    const Ogre::Vector3 smn = shape.getMinimum(), smx = shape.getMaximum();
+    float worst = 0.0f;
+    for (size_t ax = 0; ax < 3u; ++ax) {
+        const float half = std::max(h[ax], 1e-4f);
+        worst = std::max(worst, (c[ax] - smn[ax]) / half);
+        worst = std::max(worst, (smx[ax] - c[ax]) / half);
+    }
+    return worst;
+}
+
 bool OgreScene::setGlobalIllumination(const GiParams &p) {
     JAH_TRY {
         switch (p.mode) {
@@ -261,6 +293,7 @@ GiStatus OgreScene::giStatus() const {
         // camera position (updateGiTracking), so this reads 0 for the frame
         // between the rebuild and the first tracking update.
         st.probeUpdatesPerFrame = mPcc ? mProbeUpdatesPerFrame : 0;
+        st.cubemapProbeSlotsPerCell = int(mCubemapProbeSlots);
         if (mPcc) {
             const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
             if (!probes.empty()) {
@@ -271,6 +304,16 @@ GiStatus OgreScene::giStatus() const {
                 }
                 st.probeShapeMin = toV(smn);
                 st.probeShapeMax = toV(smx);
+                // THE PER-PROBE LOCALITY CHECK (Types.h says why the union above
+                // cannot be one). Measured against the probe's own AREA, which
+                // is its share of the region — the same box updateProbeBudget
+                // calls "the space this probe is responsible for".
+                for (const Ogre::CubemapProbe *p : probes) {
+                    const float r = probeShapeCellRatio(p);
+                    if (r > st.worstProbeShapeCellRatio) st.worstProbeShapeCellRatio = r;
+                    if (r > kProbeShapeCellAllowance) ++st.probesExceedingCell;
+                }
+                st.probesClampedToRegion = mProbesClampedToRegion;
             }
         }
         st.reusedLastRefresh = mGiReusedLastRefresh;
@@ -805,6 +848,7 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
     const Ogre::Vector3 rmn = padded.getMinimum(), rmx = padded.getMaximum();
     const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
     const bool debug = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
+    mProbesClampedToRegion = 0;
     for (size_t i = 0; i < probes.size(); ++i) {
         Ogre::CubemapProbe *p = probes[i];
         const Ogre::Aabb shape = p->getProbeShape();
@@ -827,6 +871,14 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
             if (cmn[ax] != smn[ax] || cmx[ax] != smx[ax]) changed = true;
         }
         if (!changed) continue;
+        // COUNTED, not just logged (2026-09-07). Every clamp here is a probe
+        // whose depth-readback shrink-fit came back with a box outside the
+        // space the grid was fitted to — i.e. one 1x1 averaged sample per cube
+        // face that meant nothing, which is what a room with anything standing
+        // in it produces. giStatus reports the count so "the fit is degenerate
+        // in this scene" is a number the author can see, instead of a fact
+        // buried behind an environment variable.
+        ++mProbesClampedToRegion;
         const Ogre::Aabb area = p->getArea();
         const Ogre::Aabb clamped = Ogre::Aabb::newFromExtents(cmn, cmx);
         p->set(cam, Ogre::Aabb(area.mCenter, area.mHalfSize / kSetPadding),
@@ -938,9 +990,47 @@ void OgreScene::updateForwardPlusRanges(const Ogre::Camera *cam) {
         if (!maxMoved && !minMoved) return;
         // Every other argument is byte-identical to createScene's call: only the
         // range moves, so no shader property (and therefore no shader) changes.
-        mSceneMgr->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, 8, wantMin, wantMax);
-        mFwdPlusMin = wantMin; mFwdPlusMax = wantMax;
+        applyForwardClustered(wantMin, wantMax);
     } JAH_CATCH(mError, );
+}
+
+void OgreScene::applyForwardClustered(float minDistance, float maxDistance) {
+    if (!mSceneMgr) return;
+    // WHAT MUST BE RE-ASSERTED AFTER THIS CALL: setForwardClustered destroys and
+    // recreates the ForwardClustered object, so anything set ON that object goes
+    // with it. Instant Radiosity's VPLs ride the Forward+ list through
+    // `setEnableVpls`, which is exactly such a setting — re-armed here so a
+    // range update or a probe-budget growth cannot silently switch the bounce
+    // off. (Found while fixing the probe budget, 2026-09-07: the range update
+    // has been recreating this object every time the camera changed scale since
+    // fix 8, and IR's VPL flag has been going with it.)
+    mSceneMgr->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, mCubemapProbeSlots,
+                                   minDistance, maxDistance);
+    if (mInstantRadiosity && mSceneMgr->getForwardPlus())
+        mSceneMgr->getForwardPlus()->setEnableVpls(true);
+    mFwdPlusMin = minDistance; mFwdPlusMax = maxDistance;
+}
+
+bool OgreScene::ensureCubemapProbeSlots(size_t probeCount) {
+    // Quantised, so a grid edit that does not cross a step costs nothing, and
+    // capped, because the buffer is uploaded every frame.
+    Ogre::uint32 want = kCubemapProbeSlotsDefault;
+    while (want < probeCount && want < kCubemapProbeSlotsMax) want *= 2u;
+    if (probeCount > kCubemapProbeSlotsMax) {
+        // Honest about the one case this cannot cover: a user-chosen grid past
+        // the ceiling can still overflow a cell, and the symptom is the black
+        // rectangles this budget exists to remove. Said out loud rather than
+        // discovered again.
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: " + std::to_string(probeCount) + " probes exceed the Forward+ per-cell "
+            "cubemap budget of " + std::to_string(kCubemapProbeSlotsMax) +
+            "; cells that see more than that will drop probes (dark patches on reflective "
+            "surfaces). Use a smaller probe grid.");
+    }
+    if (want <= mCubemapProbeSlots) return false;   // monotonic: never pay the recompile twice
+    mCubemapProbeSlots = want;
+    applyForwardClustered(mFwdPlusMin, mFwdPlusMax);
+    return true;
 }
 
 // THE FORWARD+ LIGHT CENSUS (fix 8 / F-F2) — and an honest statement of what it
@@ -1422,6 +1512,13 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // decides how many probes render at all.
     for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mNumIterations = 1u;
     mProbeSlots.assign(mPcc->getProbes().size(), ProbeSlot());
+    // THE FORWARD+ PER-CELL PROBE BUDGET MUST HOLD THIS GRID
+    // (EnginePrivate.h kCubemapProbeSlotsDefault has the measurement and the
+    // upstream anchor). Done HERE, right after the probes exist and before the
+    // first frame that shades through them, because a cell that overflows
+    // silently drops probes and paints black rectangles on every reflective
+    // surface it covers.
+    ensureCubemapProbeSlots(mPcc->getProbes().size());
 
     // Diagnostic: JAHSHAKA_GI_DEBUG=1 dumps where every probe ENDED UP. This is
     // the only window onto PccPerPixelGridPlacement's depth-readback shrink-fit,
@@ -1543,6 +1640,7 @@ void OgreScene::teardownVct() {
     mPccHdr = mPccShadowed = false;
     mProbeSlots.clear();
     mProbeUpdatesPerFrame = 0;
+    mProbesClampedToRegion = 0;
     mVctItemIds.clear();
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;

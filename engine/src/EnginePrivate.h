@@ -182,6 +182,44 @@ constexpr Ogre::uint32 kHelperBit      = 1u << 3;
 // cap: decals beyond this in one cluster cell are dropped farthest-first.
 constexpr Ogre::uint32 kDecalsPerCell = 8u;
 
+// FORWARD+ CUBEMAP-PROBE SLOTS PER CELL — the budget a scene starts with, and
+// the ceiling a probe grid may raise it to.
+//
+// THE DEFECT THIS EXISTS FOR (owner report 2026-09-07: "hard-edged black
+// rectangles crawling over the Showroom's metals"). Per-pixel PCC is culled
+// through the Forward+ cluster grid, and
+// `ForwardClustered::collectObjsForSlice` writes a probe into a cell only while
+// `numLightsInCell->objCount[objType] < currObjsPerCell`
+// (OgreForwardClustered.cpp:291-298) — past the budget the probe is SILENTLY
+// DROPPED, per cell, in scene order. A cluster cell is a frustum chunk spanning
+// a whole logarithmic depth slice, so it is large in world space; the shipped
+// Grand Showroom's 4x2x4 grid gives every probe an influence area of about
+// 7.3 x 4.1 x 7.3 units at a 5.9-unit spacing, and one far cell routinely
+// intersects a dozen of them. The pixels whose own probe was dropped fall
+// through to VCT cone tracing, which inside a sealed room is black — hence
+// hard-edged, SCREEN-AXIS-ALIGNED rectangles that move with the camera and
+// cannot be tuned away by any GI knob.
+//
+// MEASURED, on the shipped Grand Showroom at the rig's camera
+// (position 1.5, 5, -11), fraction of hard-black pixels in two fixed boxes on
+// the chrome spheres, everything else identical:
+//     8 slots per cell   0.742 / 0.298      <- the owner's black rectangles
+//     32 slots per cell  0.000 / 0.000      <- gone, at every camera tested
+//
+// So the budget is DERIVED FROM THE GRID (OgreScene::ensureCubemapProbeSlots):
+// a cell can never intersect more probes than exist, so a budget at least the
+// probe count cannot drop one. It is quantised (8/16/32/64) and only ever grows
+// within a scene's life, because changing it moves the Forward+ hlms property
+// offsets and recompiles those shaders once — a scene that re-arms the same
+// grid must not pay that twice.
+//
+// COST, stated: the grid buffer is cells x objsPerCell x uint16 and is uploaded
+// every frame. At 16x8x24 = 3072 cells, each extra slot is +6 KiB per frame, so
+// 8 -> 32 is +144 KiB and the 64 ceiling is +336 KiB. Runtime cost is nil: the
+// shader loops over the probes a cell ACTUALLY holds, not over the budget.
+constexpr Ogre::uint32 kCubemapProbeSlotsDefault = 8u;
+constexpr Ogre::uint32 kCubemapProbeSlotsMax     = 64u;
+
 // ---------------------------------------------------------------------------
 // Particles (PARTICLES_FX2_SPEC.md). The HARD per-definition quota ceiling for
 // every scene: setHighestPossibleQuota is called with this at scene creation,
@@ -1565,6 +1603,17 @@ private:
     /// and a parallax box larger than the free space the grid was fitted to is
     /// never right. See the long-form argument on the definition.
     void clampProbeShapesToRegion(const Ogre::Aabb &region);
+    /// Re-applies Forward+ clustering with the CURRENT budgets and the given
+    /// depth-slice range. One funnel, so the two call sites (the range update
+    /// and the probe-budget growth) cannot drift apart in their other seven
+    /// arguments — they did not, and the way to keep it that way is to have one
+    /// place where the arguments are written.
+    void applyForwardClustered(float minDistance, float maxDistance);
+    /// Grows the Forward+ per-cell cubemap-probe budget to hold `probeCount`
+    /// (kCubemapProbeSlotsDefault says why). Returns true if the budget moved —
+    /// which costs one Forward+ shader recompile, so it is deliberately
+    /// quantised and monotonic.
+    bool ensureCubemapProbeSlots(size_t probeCount);
     /// Spends this frame's probe-update budget: picks the probes to re-capture
     /// and raises `mDirty` on them (FIX WAVE B2). Called from updateGiTracking
     /// with the AUTHORITATIVE camera position; a no-op at budget 0.
@@ -1748,6 +1797,16 @@ private:
     float      mFwdPlusMin = 2.0f;
     float      mFwdPlusMax = 50.0f;
     unsigned   mFwdPlusTick = 0;
+    /// The Forward+ per-cell CUBEMAP PROBE budget currently in force
+    /// (kCubemapProbeSlotsDefault above says why it moves). Grows with the
+    /// probe grid, never shrinks while the scene lives.
+    Ogre::uint32 mCubemapProbeSlots = kCubemapProbeSlotsDefault;
+    /// How many probes the region clamp had to correct at the last buildPcc —
+    /// i.e. how many times the 1x1 averaged-depth shrink-fit came back with a
+    /// box that was not inside the space the grid was fitted to. Reported by
+    /// giStatus, because "the fit is degenerate in this scene" is a fact about
+    /// the scene the author can act on (GiStatus::probesClampedToRegion).
+    int mProbesClampedToRegion = 0;
     /// Same contract for the two probe-capture options (P3a/P3b): what the last
     /// buildPcc RESOLVED, after GiToggle::Auto consulted the quality dial and
     /// after the shadow half checked that a shadow node exists to recalculate.
