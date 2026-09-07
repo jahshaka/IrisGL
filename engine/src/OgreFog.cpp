@@ -31,6 +31,7 @@
 namespace jahshaka { namespace engine { namespace detail {
 
 std::map<const Ogre::SceneManager *, FogState> FogHlmsListener::sFogState;   // render thread only
+std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sSceneTime;  // render thread only
 
 FogHlmsListener gFogListener;
 
@@ -38,8 +39,26 @@ void FogHlmsListener::registerScene(const Ogre::SceneManager *sm, const FogState
     sFogState[sm] = p;
 }
 
+void FogHlmsListener::unregisterFog(const Ogre::SceneManager *sm) {
+    sFogState.erase(sm);
+}
+
 void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     sFogState.erase(sm);
+    // The clock table is keyed by SceneManager POINTER, and Ogre recycles those
+    // addresses — a scene destroyed and another created would otherwise inherit
+    // a stale time. Cleared here rather than in setFog's disable branch: this
+    // one is the scene's teardown (OgreScene.cpp), that one is "fog off".
+    sSceneTime.erase(sm);
+}
+
+void FogHlmsListener::setSceneTime(const Ogre::SceneManager *sm, float seconds) {
+    sSceneTime[sm] = seconds;
+}
+
+float FogHlmsListener::sceneTime(const Ogre::SceneManager *sm) {
+    const auto it = sSceneTime.find(sm);
+    return it == sSceneTime.end() ? 0.0f : it->second;
 }
 
 FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
@@ -52,8 +71,11 @@ FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
 Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool /*casterPass*/,
                                                 bool, Ogre::SceneManager *) const {
     // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
-    // than the buffer (it is, whenever fog is off), never longer.
-    return 8u * sizeof(float);
+    // than the buffer (it is, whenever fog is off), never longer. The last four
+    // are the shader clock (HLMS_ADOPTION P5) — declared only by materials that
+    // carry a generated piece, written always, because this hook cannot know
+    // which materials the pass will draw.
+    return 12u * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool, bool,
@@ -72,6 +94,13 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = p.heightFalloff;
     *passBufferPtr++ = p.heightLevel;
     *passBufferPtr++ = cameraY;
+    *passBufferPtr++ = 0.0f;
+    // The clock. Four floats so the struct stays 16-byte aligned like every
+    // other member of a std140 buffer; x is seconds, yzw are reserved for the
+    // things a generated piece will want next (frame index, delta, a seed).
+    *passBufferPtr++ = sceneTime(sceneManager);
+    *passBufferPtr++ = 0.0f;
+    *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = 0.0f;
     return passBufferPtr;
 }
@@ -110,7 +139,7 @@ void OgreScene::setFog(const FogDesc &desc) {
         // fog code is not compiled into the shader at all. Every offscreen pixel
         // suite depends on this.
         destroyAtmosphere();
-        FogHlmsListener::unregisterScene(mSceneMgr);
+        FogHlmsListener::unregisterFog(mSceneMgr);
         return;
     }
     ensureAtmosphere();

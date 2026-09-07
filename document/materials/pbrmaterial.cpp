@@ -204,6 +204,12 @@ void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
 void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; }
 void PbrMaterial::setTextureScale(float s)   { textureScale = s; }
 
+// The generated-piece paths are stored, never opened here: the renderer's
+// boundary registers the file's directory with its resource system and reads
+// it, and nothing in the document model has any business parsing shader source.
+void PbrMaterial::setCustomPiecePixel(const QString& path)  { customPiecePixel = path; }
+void PbrMaterial::setCustomPieceVertex(const QString& path) { customPieceVertex = path; }
+
 
 // Empty path clears the slot; a missing file yields a null texture, which the
 // set*Map functions treat as "no map" rather than failing.
@@ -234,6 +240,8 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "brdf")               brdf               = value.toInt();
     else if (name == "receiveShadows")     receiveShadows     = value.toBool();
     else if (name == "emissiveAsLightmap") emissiveAsLightmap = value.toBool();
+    else if (name == "customPiecePixel")   customPiecePixel   = value.toString();
+    else if (name == "customPieceVertex")  customPieceVertex  = value.toString();
 
     // Texture properties arrive as a path, matching how CustomMaterial::setValue
     // is driven from the material presets.

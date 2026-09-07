@@ -36,12 +36,43 @@
 // hlms_fog, which removes every line of this file from the generated shader — the
 // bit-exact "no fog" the offscreen pixel suites depend on.
 
-@property( hlms_fog )
-
+// THE PASS-BUFFER EXTENSION, and it is ONE piece for two features (the parser
+// fails the whole shader on a duplicate piece NAME, so there can only ever be
+// one definition of this in the tree — see the emitter's allowed-piece list,
+// HLMS_ADOPTION_SPEC section 7.4). NOTE, and the file says so above: an
+// at-directive inside a comment is EXECUTED, so this block spells the
+// directives out in words.
+//
+// LAYOUT IS THE WHOLE GAME HERE. One pass buffer is shared by every material in
+// a pass; each shader declares its OWN view of it, and those views must agree
+// on every offset up to the last field a shader reads. FogHlmsListener writes
+// all 12 floats unconditionally, so the field ORDER below is fixed:
+//   [0..3]  fog colour + height density   (declared only when the fog is on)
+//   [4..7]  fog height terms              (   ditto   )
+//   [8..11] the shader clock              (declared only for materials that
+//                                          carry a generated piece)
+// A material with a piece therefore has to declare PADDING for the fog fields
+// when the fog is off, or its clock would read the fog colour.
+//
+// `jah_shader_clock` is OUR OWN datablock property (setCustomProperties in
+// OgreMaterials.cpp), set only on materials that carry a generated shader
+// piece. That property gate is what keeps every other material's generated
+// source BYTE-IDENTICAL to a build where none of this existed.
 @piece( custom_passBuffer )
-	float4 jahFogColour;	// rgb = fog colour (linear), w = height-layer density (0 = off)
-	float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w unused
+	@property( hlms_fog )
+		float4 jahFogColour;	// rgb = fog colour (linear), w = height-layer density (0 = off)
+		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w unused
+	@end
+	@property( jah_shader_clock )
+		@property( !hlms_fog )
+			float4 jahFogColourUnused;
+			float4 jahFogHeightUnused;
+		@end
+		float4 jahClock;		// x = seconds since the host's clock started; yzw reserved
+	@end
 @end
+
+@property( hlms_fog )
 
 // Replace upstream's per-vertex sky evaluation with the authored colour. Redefinition
 // needs the undef first (the parser rejects a duplicate piece) and needs this folder

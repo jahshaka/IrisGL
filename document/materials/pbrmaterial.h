@@ -106,6 +106,25 @@ public:
 
     void setTextureScale(float scale);
 
+    // --- generated shader pieces (HLMS_ADOPTION P5) ---
+    //
+    // Absolute paths to the GLSL the shader-graph emitter produced for this
+    // material, one per shader stage, empty when the graph is baked instead.
+    //
+    // These are a CACHE REFERENCE, not content: the file lives in the per-user
+    // shader-piece cache under a name that is a hash of its own bytes, the
+    // GRAPH is the source of truth, and a missing file simply means "emit it
+    // again". They are written into the scene like a baked-map path is, so an
+    // opened project renders its animated materials before the graph has been
+    // touched — and the emitter rewrites both if it ever disagrees.
+    //
+    // WHY PER-USER AND NOT IN THE PROJECT: the renderer's shader disk cache
+    // throws away EVERY cached shader if one referenced piece file is missing,
+    // so project-local pieces would mean opening project B discarded every
+    // shader project A compiled. One stable directory keeps them all valid.
+    void setCustomPiecePixel(const QString& path);
+    void setCustomPieceVertex(const QString& path);
+
 
     // Applies a value by property name, bridging the editor-facing `properties`
     // list onto the real fields. Without this, editing a property in the panel
@@ -193,6 +212,12 @@ public:
     /// at its bind pose while the animation played on — silently. The engine
     /// refuses the switch by name and the document keeps its Lit value.
     int    shadingModel;
+
+    /// Generated shader pieces (HLMS_ADOPTION P5) — absolute paths into the
+    /// per-user piece cache, empty for an ordinary baked material. See the
+    /// setters above for why these are a cache reference rather than content.
+    QString customPiecePixel;
+    QString customPieceVertex;
 
     /// The shading BRDF, as an INDEX into PbrMaterial::brdfNames() — never the
     /// renderer's own enum value. Ogre's PbsBrdf is a bitfield and a document

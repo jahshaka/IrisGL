@@ -149,6 +149,42 @@ public:
     /// succeeds and touches nothing.
     virtual bool        setShadingModel(MaterialId, ShadingModel) = 0;
     virtual bool        destroyMaterial(MaterialId) = 0;
+    /// Binds a GENERATED shader piece to one material (HLMS_ADOPTION P5).
+    /// `path` is an absolute path to a piece file; its directory is registered
+    /// with the backend's resource system on first use. An EMPTY path clears
+    /// the binding for that stage. Returns false (lastError()) for an unknown
+    /// material, an unreadable file, or a material in the Unlit family.
+    ///
+    /// FILE FORM ONLY, and that is a decision rather than an omission: the
+    /// backend's from-memory form cannot be disk-cached (it cannot prove the
+    /// cached shader still matches the source), so a from-memory piece would
+    /// recompile every material on every launch. Callers must therefore write
+    /// the piece to disk first — and should name it by a hash OF ITS CONTENT,
+    /// because the backend treats "same filename, different content" as a hard
+    /// error, and content-addressed names make that impossible by construction.
+    ///
+    /// The material keeps the binding across a shading-model switch or a
+    /// parameter push; only an empty path (or destroying the material) removes
+    /// it. A material with no piece bound generates BYTE-IDENTICAL shader
+    /// source to one from a build where this verb did not exist — the backend
+    /// only sets the piece property when a piece id is non-zero.
+    virtual bool        setMaterialCustomPiece(MaterialId, const std::string &path,
+                                               CustomPieceStage) = 0;
+    /// THE SHADER CLOCK this scene's generated pieces read (HLMS_ADOPTION P5).
+    /// Seconds, and the HOST owns it: a paused editor, a scrubbed timeline and
+    /// a deterministic test each render exactly the frame they ask for, because
+    /// nothing in the engine advances this by itself.
+    ///
+    /// Scene-wide rather than per-material for two reasons, one of them
+    /// structural: the vertex shader has NO material buffer in this backend's
+    /// PBR template, so a per-material clock could never reach a vertex piece;
+    /// and "time" is the same number for every material in a frame anyway. It
+    /// costs one float in the pass constant buffer and one write per pass — no
+    /// shader is ever rebuilt by it.
+    ///
+    /// Materials with no generated piece do not read it and are unaffected.
+    virtual void        setShaderTime(float seconds) = 0;
+    virtual float       shaderTime() const = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
     /// text. Empty (lastError()) for an unknown material.
     ///

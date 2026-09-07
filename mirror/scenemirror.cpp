@@ -360,6 +360,17 @@ int SceneMirror::sync()
     // or when an entry's reference to one CHANGES — every such site arms the
     // flag, and only then does the sweep run.
     if (mReclaimPending) { reclaimUnused(); mReclaimPending = false; }
+    // THE SHADER CLOCK (HLMS_ADOPTION P5), and only when something reads it.
+    // The host owns the number: mShaderTimeOverride is what a deterministic
+    // test or a scrubbed timeline sets; otherwise it is wall-clock seconds
+    // since the first frame that needed one.
+    if (mAnyCustomPiece) {
+        if (mShaderTimeOverride >= 0.0f) mTarget->setShaderTime(mShaderTimeOverride);
+        else {
+            if (!mShaderClock.isValid()) mShaderClock.start();
+            mTarget->setShaderTime(float(mShaderClock.nsecsElapsed()) * 1e-9f);
+        }
+    }
     syncClips();
     syncHighlight();
     syncGrid();
@@ -1633,8 +1644,37 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
     auto it = mMaterials.constFind(material);
     if (it != mMaterials.constEnd()) return it.value();
     MaterialId id = mTarget->createPbrMaterial(p);
-    if (id) mMaterials.insert(material, id);
+    if (id) {
+        mMaterials.insert(material, id);
+        syncCustomPieces(material, id);
+    }
     return id;
+}
+
+/// GENERATED SHADER PIECES (HLMS_ADOPTION P5). A graph material carries the
+/// paths of the GLSL its own graph was lowered into; this is where they reach
+/// the renderer.
+///
+/// Bound ONCE, at material creation, and deliberately not re-pushed per frame:
+/// the paths are content-addressed, so "the graph changed" always means "a
+/// different path", which means a different document material or a re-push
+/// through the same route. Binding also flushes the material's renderables, so
+/// doing it per frame would rebuild every shader every frame.
+void SceneMirror::syncCustomPieces(iris::Material *material, MaterialId id)
+{
+    auto *pbr = dynamic_cast<iris::PbrMaterial *>(material);
+    if (!pbr) return;
+    if (pbr->customPiecePixel.isEmpty() && pbr->customPieceVertex.isEmpty()) return;
+    if (!pbr->customPiecePixel.isEmpty())
+        mTarget->setMaterialCustomPiece(id, pbr->customPiecePixel.toStdString(),
+                                        CustomPieceStage::PixelPreLights);
+    if (!pbr->customPieceVertex.isEmpty())
+        mTarget->setMaterialCustomPiece(id, pbr->customPieceVertex.toStdString(),
+                                        CustomPieceStage::VertexPreTransform);
+    // One scene-wide clock, pushed from here on because a piece exists to read
+    // it. A scene with no generated piece never calls setShaderTime at all —
+    // which is the point: nothing about a piece-less scene changes.
+    mAnyCustomPiece = true;
 }
 
 /// Refraction "Auto" (POST_CHAIN_SPEC §9.5) needs to know whether the scene HAS

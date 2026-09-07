@@ -731,11 +731,29 @@ public:
     /// The per-scene fog table. OgreScene::setFog registers, the scene teardown
     /// unregisters, preparePassBuffer looks up.
     static void     registerScene(const Ogre::SceneManager *sm, const FogState &p);
+    /// Fog OFF for a scene that still exists (setFog(enabled=false)).
+    static void     unregisterFog(const Ogre::SceneManager *sm);
+    /// The scene itself is going away: drops everything keyed by this manager.
     static void     unregisterScene(const Ogre::SceneManager *sm);
     static FogState lookup(const Ogre::SceneManager *sm);
 
+    /// THE SHADER CLOCK (HLMS_ADOPTION P5), riding the same pass-buffer
+    /// extension. A separate table from the fog because it is live whether or
+    /// not the scene has fog — and because the two are unrelated features that
+    /// happen to share the one custom_passBuffer piece a shader may define.
+    ///
+    /// Why the PASS buffer and not a per-material value: the vertex shader has
+    /// no material buffer at all in this template (`material` is a pixel-shader
+    /// #define onto a const-buffer array), so a per-material clock could never
+    /// reach a vertex piece. One float in the pass buffer reaches both stages,
+    /// costs one write per pass instead of one per material, and is the same
+    /// number for every material in a frame — which is what "time" means.
+    static void  setSceneTime(const Ogre::SceneManager *sm, float seconds);
+    static float sceneTime(const Ogre::SceneManager *sm);
+
 private:
     static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
+    static std::map<const Ogre::SceneManager *, float>    sSceneTime;  // render thread only
 };
 extern FogHlmsListener gFogListener;
 
@@ -968,6 +986,10 @@ public:
     bool setPbrMaterial(MaterialId id, const PbrParams &p) override;
     bool setShadingModel(MaterialId id, ShadingModel model) override;
     bool destroyMaterial(MaterialId id) override;
+    bool setMaterialCustomPiece(MaterialId id, const std::string &path,
+                                CustomPieceStage stage) override;
+    void setShaderTime(float seconds) override;
+    float shaderTime() const override;
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool detachMesh(NodeId id) override;
@@ -1249,6 +1271,12 @@ private:
         /// Without it a family switch would silently reset the material to the
         /// defaults until the host happened to push again.
         PbrParams params;
+        /// The generated shader pieces bound to this material, per stage
+        /// (HLMS_ADOPTION P5): absolute file paths, empty for "none". Kept for
+        /// the same reason `params` is — setShadingModel builds a NEW datablock
+        /// and would otherwise silently drop the piece.
+        std::string customPiece[2];
+
     };
     struct TextureRec {
         Ogre::TextureGpu *texture = nullptr;
@@ -1317,6 +1345,16 @@ private:
     /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
     /// in the record so switching back to Lit restores them.
     void bindTrackedTextures(const MaterialRec &rec);
+    /// The same job for generated shader pieces (HLMS_ADOPTION P5): re-applies
+    /// `rec.customPiece` onto the material's CURRENT datablock, so a family
+    /// switch back to Lit renders the graph again instead of the plain surface
+    /// underneath it.
+    void bindTrackedPieces(const MaterialRec &rec);
+    /// Sets or clears `jah_shader_clock` — our datablock property gating the
+    /// pass-buffer clock's DECLARATION — to match whether `rec` carries a
+    /// generated piece. The whole pixel-suite isolation contract rests on this
+    /// being false for every material that has none.
+    static void applyClockProperty(Ogre::HlmsPbsDatablock *db, const MaterialRec &rec);
     /// Builds (or finds) the in-memory v1 skeleton `rig` translates to and hands
     /// the resulting SkeletonDef to `mesh`. v1 is a BUILD-TIME SCAFFOLD ONLY —
     /// SkeletonDef has exactly one constructor and it takes a v1::Skeleton
@@ -1503,6 +1541,15 @@ private:
     /// Our slot enum -> Ogre's PBSM_* unit.
     static Ogre::PbsTextureTypes pbsSlotOf(PbrTextureSlot slot);
     std::set<std::string> mTextureDirs;
+    /// Directories already registered with the resource group for generated
+    /// shader pieces (HLMS_ADOPTION P5). One entry in practice — the per-user
+    /// piece cache — but the set keeps re-registration cheap and idempotent.
+    std::set<std::string> mPieceDirs;
+    /// The scene's shader clock in seconds (HLMS_ADOPTION P5). Mirrored into
+    /// FogHlmsListener's per-SceneManager table, which is what the render
+    /// thread reads; this copy exists so shaderTime() can answer without
+    /// touching render-thread state.
+    float mShaderTime = 0.0f;
     /// SceneManager::getSkyMethod() never reflects the method actually set
     /// (upstream's setSky forgets to assign mSkyMethod), so remember it.
     bool              mSkyIsEquirect = false;

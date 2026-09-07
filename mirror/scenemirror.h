@@ -214,6 +214,13 @@ public:
     /// hull); true = the on-top polygon wireframe.
     void setHighlightWireframe(bool on);
     bool highlightWireframe() const { return mHighlightWireframe; }
+    /// Pins the shader clock generated pieces read (HLMS_ADOPTION P5) to an
+    /// exact number of seconds; a NEGATIVE value hands it back to the wall
+    /// clock. This is what makes an animated graph material reproducible —
+    /// a suite that renders at t = 0.25 gets the same pixels every run, and a
+    /// scrubbed timeline can drive the surface from its own playhead.
+    void setShaderTimeOverride(float seconds) { mShaderTimeOverride = seconds; }
+    float shaderTimeOverride() const { return mShaderTimeOverride; }
     /// Light helpers: an icon billboard (sun/bulb/spotlight) at every document
     /// light, plus a wire shape in the light's colour. The attenuation volume
     /// (point rings / spot cone, sized by the light's range) shows only for the
@@ -628,6 +635,16 @@ private:
     };
     QHash<iris::Material *, MaterialSync> mMaterialSync;
     const MaterialSync &materialSyncFor(iris::Material *material);
+    /// Binds a graph material's generated shader pieces (HLMS_ADOPTION P5).
+    void syncCustomPieces(iris::Material *material, jahshaka::engine::MaterialId id);
+    /// True once any mirrored material has carried a generated piece: the gate
+    /// on pushing the shader clock at all, so a scene without one is untouched.
+    bool mAnyCustomPiece = false;
+    /// The host's clock for generated pieces. Negative = use the wall clock
+    /// below; a test or a timeline sets an exact value through
+    /// setShaderTimeOverride so a frame is reproducible.
+    float mShaderTimeOverride = -1.0f;
+    QElapsedTimer mShaderClock;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
     iris::SocketResolver     mSockets;
