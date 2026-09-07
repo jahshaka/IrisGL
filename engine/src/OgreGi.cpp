@@ -82,9 +82,124 @@ void OgreScene::refreshGlobalIllumination() {
     JAH_TRY {
         if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity)
             rebuildGi();
-        else if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid)
-            rebuildVct();
+        else if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
+            // THE REUSE ARM FIRST (FIX WAVE B4). It refuses in exactly the cases
+            // the from-scratch rule exists for, and rebuildVct is what happens
+            // then — so this line can only make a refresh cheaper, never wrong.
+            if (!refreshVctFast()) rebuildVct();
+        }
     } JAH_CATCH(mError, );
+}
+
+// THE REUSE ARM (FIX WAVE B4) — what makes a settling drag affordable.
+//
+// `rebuildVct` is deliberately from-scratch, and the reason is not caution: the
+// VctVoxelizer keeps raw `Item*` until removeAllItems and VctMaterial caches its
+// conversions by raw datablock POINTER across builds, so a recycled address
+// after a destroy would alias silently (the InstantRadiosity::freeMemory class
+// of bug this file's header records). But that argument is about DESTRUCTION,
+// and a refresh triggered by an object MOVING destroys nothing at all.
+//
+// So the engine counts destructions instead of assuming them. Every site that
+// can invalidate what the GI arms point into already funnels through
+// `invalidateGiCaches` BEFORE the pointer dies (destroyNode, detachItem,
+// destroyMesh, destroyMaterial, setMaterialShading, destroyTexture, the light
+// path); that function now bumps `mGiDestroyGeneration`. When the generation the
+// arm was BUILT at is still current, nothing it holds can have died, and:
+//
+//   * the voxelizer re-runs on itself — `build()` re-derives its mesh buffers,
+//     re-buckets the items at their CURRENT world transforms and re-dispatches
+//     the voxelization compute jobs, reusing the same voxel textures whenever
+//     the resolution is unchanged (OgreVctVoxelizer.cpp createVoxelTextures'
+//     early-out) — which also means VctLighting's TextureGpuListener
+//     registrations stay pointed at the same textures;
+//   * items CREATED since the build are added first. Growth is safe for the same
+//     reason: a new Item cannot alias a dead one that never died;
+//   * the probes keep their shapes and are simply re-dirtied. Re-running
+//     PccPerPixelGridPlacement would mean `setEnabled(false)`/`setEnabled(true)`
+//     — destroying and recreating every probe, its workspace and the cube array
+//     — plus six face renders per probe and a GPU readback, which is the bulk of
+//     what a refresh costs.
+//
+// It REFUSES, and takes the full rebuild, when the probe REGION moved: the
+// shapes were derived from that region and no longer describe the space. That
+// is the honest reading of "probe shapes only re-derive when the geometry
+// changed" — small edits inside a room keep the room, so they keep the shapes.
+bool OgreScene::refreshVctFast() {
+    if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
+    if (!mVctVoxelizer || !mVctLighting) return false;
+    if (mGiCachesDirty) return false;                  // a flush is already owed; it rebuilds
+    if (mGiBuiltGeneration != mGiDestroyGeneration) return false;   // something may have died
+    if (mGi.mode == GiMode::VctPccHybrid && !mPcc) return false;
+
+    Ogre::Vector3 mn, mx;
+    if (!computeGiBounds(mn, mx)) return false;
+    const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
+    // "Materially the same box", relative to its own size so it is scale-free.
+    static const float kReuseEpsilon = 0.02f;
+    const auto sameBox = [](const Ogre::Aabb &a, const Ogre::Aabb &b) {
+        const Ogre::Vector3 scale = a.getSize() + b.getSize();
+        const float tol = std::max(std::max(std::max(scale.x, scale.y), scale.z) * kReuseEpsilon,
+                                   1e-4f);
+        const Ogre::Vector3 dc = a.mCenter - b.mCenter, dh = a.mHalfSize - b.mHalfSize;
+        for (size_t ax = 0; ax < 3u; ++ax)
+            if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) return false;
+        return true;
+    };
+    Ogre::Aabb region = mGiProbeRegion;
+    if (mGi.mode == GiMode::VctPccHybrid) {
+        region = computeProbeRegion(aabb);
+        if (!sameBox(region, mGiProbeRegion)) return false;   // shapes must be re-derived
+    }
+
+    JAH_TRY {
+        // Items born since the build. Nothing can have DIED (the generation says
+        // so), so the voxelizer's item list only ever grows on this path.
+        for (auto &kv : mNodes) {
+            Ogre::Item *item = kv.second.item;
+            if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+            if (std::find(mVctItemIds.begin(), mVctItemIds.end(), kv.first) != mVctItemIds.end())
+                continue;
+            mVctVoxelizer->addItem(item, false);
+            mVctItemIds.push_back(kv.first);
+        }
+        // World transforms first: the voxelizer reads them, and the whole reason
+        // this call exists is that something moved.
+        mSceneMgr->updateSceneGraph();
+        if (!sameBox(aabb, mGiLitVolume)) {
+            mVctVoxelizer->setRegionToVoxelize(false, aabb);
+            mVctVoxelizer->dividideOctants(1u, 1u, 1u);
+        }
+        mVctVoxelizer->build(mSceneMgr);
+        applyVctAmbient();
+        const Ogre::uint32 extraBounces =
+            Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
+        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+                             giRayMarchStepScale(false));
+        mGiLitVolume = aabb;
+        mGiProbeRegion = region;
+        noteGiAutoVolume(aabb, !giBoundsExplicit());
+        // NOT re-bound to HlmsPbs, deliberately. `rebuildVct` takes the
+        // process-wide binding because a BUILD is a statement about which
+        // scene's GI the shader should sample; a refresh is not. If another
+        // scene took the binding over in the meantime, a background scene
+        // re-solving its own geometry must not snatch it back — and giStatus's
+        // vctBound/pccBound go on reporting the truth either way.
+        // The probe CONTENTS are stale (the scene moved), the SHAPES are not.
+        // Dirty every probe and restart the sweep, so the budget spends itself on
+        // a grid that all needs the same thing.
+        if (mPcc) {
+            const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+            for (size_t i = 0; i < probes.size(); ++i) probes[i]->mDirty = true;
+            for (ProbeSlot &s : mProbeSlots) s.sweepPending = true;
+        }
+        mGiReusedLastRefresh = true;
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: refresh REUSED the voxel arm (" +
+                std::to_string(mVctItemIds.size()) + " items, probes re-dirtied)");
+        return true;
+    } JAH_CATCH(mError, false);
 }
 
 // The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2). VERIFIED AGAINST
@@ -111,7 +226,11 @@ bool OgreScene::refreshGiLighting() {
         mSceneMgr->updateSceneGraph();
         const Ogre::uint32 extraBounces =
             Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights());
+        // IN MOTION, by definition: this path only runs while the mirror's
+        // stability window is open, i.e. while something is being dragged. B5's
+        // coarser ray march is charged here and nowhere else.
+        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+                             giRayMarchStepScale(true));
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -141,7 +260,20 @@ GiStatus OgreScene::giStatus() const {
         // that exist, and it is only ACTED ON once a view has pushed a tracked
         // camera position (updateGiTracking), so this reads 0 for the frame
         // between the rebuild and the first tracking update.
-        st.dynamicProbeCount = mPcc ? int(mPccDynamic.size()) : 0;
+        st.probeUpdatesPerFrame = mPcc ? mProbeUpdatesPerFrame : 0;
+        if (mPcc) {
+            const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+            if (!probes.empty()) {
+                Ogre::Vector3 smn(1e30f), smx(-1e30f);
+                for (const Ogre::CubemapProbe *p : probes) {
+                    smn.makeFloor(p->getProbeShape().getMinimum());
+                    smx.makeCeil(p->getProbeShape().getMaximum());
+                }
+                st.probeShapeMin = toV(smn);
+                st.probeShapeMax = toV(smx);
+            }
+        }
+        st.reusedLastRefresh = mGiReusedLastRefresh;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -536,11 +668,33 @@ unsigned OgreScene::giVoxelResolution() const {
 // still governs the extent, and a user who types the room's interior gets the
 // room's interior), and then pull each of the six faces in to the nearest
 // ENCLOSING slab — the floor, the ceiling, the walls. An item counts as a wall
-// for a direction when it lies wholly on that side of the hull's centre and
-// spans at least half of the hull on both other axes; furniture and the subject
-// of the scene fail that test and are ignored. In an open scene no wall is
-// found on most axes and the tight hull stands, which is the right answer
-// there.
+// for a direction when it (1) lies wholly on that side of the hull's centre,
+// (2) spans at least half of the hull on both other axes, and (3) HAS ITS OUTER
+// FACE AT THE HULL'S FACE. Furniture and the subject of the scene fail (2); a
+// free-standing partition in the middle of the room fails (3). In an open scene
+// no wall is found on most axes and the tight hull stands, which is the right
+// answer there.
+//
+// CONDITION (3) IS THE FIX FOR THE MIRROR ROOM'S BLACK REFLECTIONS (FIX WAVE
+// defect A1, 2026-09-07; found by the debug-runner on the shipped sample).
+// Without it, "wall-like" meant nothing more than "big and off-centre", so the
+// sample's free-standing MirrorPanel — a 5.2 x 3.0 x 0.24 slab standing at
+// z = -2.2 in the MIDDLE of a room whose walls are at z = +-5.25 — qualified as
+// the room's -Z wall and truncated the probe region at its own face (measured:
+// probeRegionMin.z came back EQUAL to the panel's zMax to five decimals). Every
+// probe was then placed and shrink-fitted inside a region that stopped a third
+// of the way across the room, the parallax boxes that came out of buildEnd
+// disagreed with the voxel volume by more than the hybrid's trust window, and
+// `getPccVctBlendWeight` handed those pixels to VCT — black, in a sealed room.
+// The defect needs no thin panel to appear, only a big enough object standing
+// clear of the walls: any partition, screen, counter or bookcase would do it.
+//
+// The epsilon is RELATIVE (kWallFaceEpsilon of the hull's own extent on that
+// axis) rather than absolute, so it is scale-invariant, and it is generous
+// enough for the case that would otherwise regress: a floor slab wider than the
+// room leaves the side walls' outer faces a little inside the hull. A wall stops
+// counting as one when it stands further in than a tenth of the room; the
+// MirrorPanel stands 30% in.
 //
 // KNOWN LIMIT, documented rather than papered over: a room imported as ONE
 // hollow mesh has an AABB that IS its outer shell, and no axis-aligned test can
@@ -562,8 +716,16 @@ Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume) const {
     const Ogre::Vector3 centre = (hullMin + hullMax) * 0.5f;
     const Ogre::Vector3 hullSize = hullMax - hullMin;
 
+    // How far a slab's outer face may sit inside the hull's face and still be
+    // read as part of the enclosure, as a fraction of the hull's extent on that
+    // axis. Measured against both cases it has to separate: a room whose floor
+    // overhangs its walls (wall faces ~7% in — must still count) and the Mirror
+    // Room's free-standing panel (~30% in — must not).
+    static const float kWallFaceEpsilon = 0.1f;
+
     for (size_t ax = 0; ax < 3u; ++ax) {
         const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+        const float faceEps = std::max(hullSize[ax] * kWallFaceEpsilon, 1e-4f);
         float nearestMax = hullMax[ax];      // the +axis face, pulled inwards
         float nearestMin = hullMin[ax];      // the -axis face, pulled inwards
         for (const Ogre::Aabb &a : items) {
@@ -577,13 +739,109 @@ Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume) const {
                 return (hi - lo) >= hullSize[k] * 0.5f;
             };
             if (!covers(o1) || !covers(o2)) continue;
-            if (amn[ax] > centre[ax] && amn[ax] < nearestMax) nearestMax = amn[ax];
-            if (amx[ax] < centre[ax] && amx[ax] > nearestMin) nearestMin = amx[ax];
+            // ...AND its OUTER face is the hull's face (condition 3, the A1 fix
+            // — see the header). `>=`/`<=` rather than a two-sided band: a slab
+            // reaching PAST the clamped hull (a wall outside user-typed bounds)
+            // is still a wall.
+            if (amn[ax] > centre[ax] && amn[ax] < nearestMax && amx[ax] >= hullMax[ax] - faceEps)
+                nearestMax = amn[ax];
+            if (amx[ax] < centre[ax] && amx[ax] > nearestMin && amn[ax] <= hullMin[ax] + faceEps)
+                nearestMin = amx[ax];
         }
         // Only accept the pull if it leaves a real volume behind.
         if (nearestMin < nearestMax) { mn[ax] = nearestMin; mx[ax] = nearestMax; }
     }
     return Ogre::Aabb::newFromExtents(mn, mx);
+}
+
+// THE PARALLAX SHAPE CANNOT BE BIGGER THAN THE SPACE THE PROBES LIVE IN
+// (FIX WAVE defect A2, 2026-09-07).
+//
+// `PccPerPixelGridPlacement::buildEnd` shrink-fits every probe from ONE 1x1
+// AVERAGED depth value per cube face: `0.5 * fDist / fApproxDist`, where
+// fApproxDist is measured to the region box (OgrePccPerPixelGridPlacement.cpp,
+// processProbeDepth). Averaging one ratio over a 90-degree face is only well
+// behaved when the face sees a wall. Put anything between the probe and the
+// wall — the Grand Showroom's columns, a partition, a parked car — and the
+// average is pulled towards the NEAR object on some faces and towards the
+// FAR wall on others, and the reconstructed box comes out far larger than the
+// room: measured on the shipped Showroom, shapes reaching +-23.68 units in a
+// room spanning +-12.25.
+//
+// Downstream that is not a soft error. `getPccVctBlendWeight` compares the hit
+// the oversized parallax box reconstructs against the VCT cone hit, finds them
+// further apart than the trust window, and hands the pixel to cone tracing —
+// which in an interior is black. The artifact is hard-edged and quantized to
+// the Forward+ cluster grid, because the trust test flips per cluster cell,
+// which is exactly how the owner saw it: black rectangles crawling over the
+// metal as the camera moves.
+//
+// A parallax box larger than the probe REGION is never right — the region IS
+// the free space the grid was fitted to, and the fix for the region itself
+// (P1a's computeProbeRegion, plus A1 above) is what makes that statement true.
+// So every fitted shape is clamped into it, per axis. This does not fight the
+// shrink-fit: a shape that fits inside the region is untouched, which is the
+// case for every probe in a plain empty room.
+//
+// Ogre's own bookkeeping is respected rather than poked around: the shape is
+// re-published through `CubemapProbe::set`, keeping the probe's camera
+// position, influence AREA, inner region and orientation exactly as the
+// placement left them. `set` re-applies its own 1.005 padding to whatever it is
+// handed, so both boxes are un-padded on the way in and the values that land in
+// the probe are exactly the intended ones. It also raises `mDirty`, so the
+// clamped probes re-capture on the next frame, which is what we want anyway.
+void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
+    if (!mPcc) return;
+    static const float kSetPadding = 1.005f;    // CubemapProbe::set's own padding
+    // The clamp target is the region grown slightly. Clamping to the region
+    // EXACTLY puts a box face on the floor plane the region was pulled in to,
+    // and a parallax ray that leaves a surface lying in its own box face
+    // reprojects at ~zero distance: measured on the Grand Showroom, an exact
+    // clamp stippled the polished floor (min luminance 0.320 -> 0.260 with
+    // visible scan-line noise). Upstream pads its own fit by 1% for the same
+    // reason (OgrePccPerPixelGridPlacement.cpp "// Padding").
+    static const float kClampPad = 1.05f;
+    const Ogre::Aabb padded(region.mCenter, region.mHalfSize * kClampPad);
+    const Ogre::Vector3 rmn = padded.getMinimum(), rmx = padded.getMaximum();
+    const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+    const bool debug = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
+    for (size_t i = 0; i < probes.size(); ++i) {
+        Ogre::CubemapProbe *p = probes[i];
+        const Ogre::Aabb shape = p->getProbeShape();
+        Ogre::Vector3 smn = shape.getMinimum(), smx = shape.getMaximum();
+        Ogre::Vector3 cmn = smn, cmx = smx;
+        cmn.makeCeil(rmn); cmx.makeFloor(rmx);
+        // Degenerate only if the fit ran off the region entirely on some axis.
+        // Keep a real box there rather than an inverted one: the probe's own
+        // camera position is inside the region by construction, so collapsing
+        // onto it is the honest fallback.
+        const Ogre::Vector3 cam = p->getProbeCameraPos();
+        bool changed = false, degenerate = false;
+        for (size_t ax = 0; ax < 3u; ++ax) {
+            if (!(cmn[ax] < cmx[ax])) {
+                const float c = std::min(std::max(cam[ax], rmn[ax]), rmx[ax]);
+                const float h = std::max((rmx[ax] - rmn[ax]) * 0.01f, 1e-3f);
+                cmn[ax] = std::max(c - h, rmn[ax]); cmx[ax] = std::min(c + h, rmx[ax]);
+                degenerate = true;
+            }
+            if (cmn[ax] != smn[ax] || cmx[ax] != smx[ax]) changed = true;
+        }
+        if (!changed) continue;
+        const Ogre::Aabb area = p->getArea();
+        const Ogre::Aabb clamped = Ogre::Aabb::newFromExtents(cmn, cmx);
+        p->set(cam, Ogre::Aabb(area.mCenter, area.mHalfSize / kSetPadding),
+               p->getAreaInnerRegion(), p->getOrientation(),
+               Ogre::Aabb(clamped.mCenter, clamped.mHalfSize / kSetPadding));
+        if (debug) {
+            const auto toS = [](const Ogre::Vector3 &v) {
+                return Ogre::StringConverter::toString(v);
+            };
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI:  probe " + std::to_string(i) + " shape CLAMPED to region: " +
+                toS(smn) + " .. " + toS(smx) + "  ->  " + toS(cmn) + " .. " + toS(cmx) +
+                (degenerate ? "  (fit had left the region on some axis)" : ""));
+        }
+    }
 }
 
 void OgreScene::invalidateGiCaches() {
@@ -601,6 +859,14 @@ void OgreScene::invalidateGiCaches() {
     if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid)
         mGiCachesDirty = true;   // VCT never dereferences stale keys: the flush
                                  // rebuilds the whole arm from scratch
+    // THE DESTRUCTION GENERATION (FIX WAVE B4). Bumped unconditionally, and
+    // unconditionally is the point: every caller of this function either
+    // destroys something the GI arms hold a raw pointer into, or wants a
+    // from-scratch rebuild for its own reasons. Being conservative here costs a
+    // full rebuild that could have been a reuse; being clever here costs heap
+    // corruption. The counter is the ONLY thing standing between the reuse arm
+    // and the rule this file's header spends a paragraph on.
+    ++mGiDestroyGeneration;
 }
 
 void OgreScene::applyPendingGi() {
@@ -711,91 +977,214 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
     JAH_TRY {
         mGiCamera->setPosition(camPos);
         mPcc->setUpdatedTrackedDataFromCamera(mGiCamera);
-        updateDynamicProbes(camPos);
+        updateProbeBudget(camPos);
     } JAH_CATCH(mError, );
 }
 
-// DYNAMIC PROBES (REFLECTIONS_ADOPTION_SPEC.md P5a) — the nearest N probes to
-// the tracked camera re-capture the scene every frame; the rest keep the
-// contents they were built with. Default 0, i.e. today's all-static grid.
+// THE GEOMETRY MOVEMENT SCAN (FIX WAVE B3, engine half).
 //
-// WHAT THE PIN ACTUALLY SUPPORTS, verified by this lane before designing (the
-// spec listed the per-probe API as unproven, §10):
+// Walks the GI items once and records which of them MOVED since the last scan,
+// as the union of each mover's old and new world AABB. Two consumers, both of
+// them cheap paths: the probe round-robin below (a probe whose parallax shape
+// contains a moved box goes to the front of the sweep) and — through the
+// separate, stateless giGeometrySignature() — the mirror's debounce.
 //
-//  * `CubemapProbe::setStatic(bool)` is public, and in AUTOMATIC mode it is
-//    CHEAP despite its "this call is not cheap" doc comment: that warning is
-//    about the manual path, where setTextureParams destroys and recreates the
-//    probe's own cube texture and workspace. In automatic mode the same
-//    function takes the other branch and only assigns mStatic/mDirty and calls
-//    switchInternalProbeStaticValue (OgreCubemapProbe.cpp:318-375). Probes
-//    share ONE bind texture (the cube array) in this mode, so no texture slot
-//    is acquired or released by the flip — the spec's `_acquire/_releaseTextureSlot`
-//    route is for having MORE probes than slots, which is a different feature
-//    and is not what this needs.
-//
-//  * `ParallaxCorrectedCubemapAuto::updateSceneGraph` (its FrameListener hook)
-//    collects a probe for re-render when
-//        ( areaLS.contains( trackedPos ) && !probe->mStatic ) || probe->mDirty
-//    (OgreParallaxCorrectedCubemapAuto.cpp:328-346). So upstream's own
-//    dynamic-probe rule is "the probe you are STANDING IN re-renders", which is
-//    not the same thing as "the probes nearest you" — a mirror across the room
-//    is shaded by the probes containing IT, not the one containing the camera,
-//    and those would never refresh. Hence we drive the choice ourselves and set
-//    `mDirty` (a public field, and the same one upstream's updateAllDirtyProbes
-//    uses) on the N we picked. `_updateRender`'s assert is `mDirty || !mStatic`,
-//    so both halves are satisfied either way.
-//
-//  * `mNumIterations = 1` for a dynamic probe, as upstream's header advises.
-//    It is not an iteration COUNT in automatic mode: it selects WHICH of the
-//    two per-frame stages renders the probe. Above 1 the probe renders in
-//    `updateExpensiveCollectedDirtyProbes`, which wraps EACH probe in its own
-//    `_beginFrameOnce`/`_endFrameOnce` pair; at 1 it renders in `updateRender`,
-//    inline with the rest of the frame's workspaces. The second is what a
-//    per-frame probe wants.
-//
-// The probe's SHAPE is not touched: buildEnd's depth-readback shrink-fit ran
-// once at build time and stays, so a dynamic probe keeps the parallax box P1a
-// fought for and only its cubemap CONTENT is re-rendered.
-void OgreScene::updateDynamicProbes(const Ogre::Vector3 &camPos) {
-    const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
-    const size_t want = size_t(std::max(0, mGi.dynamicProbes));
-    if (!want && !mPccDynamic.size()) return;      // the common case: nothing to do
-
-    // Nearest N by distance from the tracked position to the probe's INFLUENCE
-    // AREA centre (not the camera position it captures from): the area is what
-    // decides which pixels the probe shades, so it is what "nearest" should
-    // mean for a viewer walking around.
-    const size_t n = std::min(want, probes.size());
-    std::vector<std::pair<float, size_t>> ranked;
-    ranked.reserve(probes.size());
-    for (size_t i = 0; i < probes.size(); ++i)
-        ranked.emplace_back((probes[i]->getArea().mCenter - camPos).squaredLength(), i);
-    std::partial_sort(ranked.begin(), ranked.begin() + std::ptrdiff_t(n), ranked.end());
-
-    std::vector<size_t> chosen;
-    chosen.reserve(n);
-    for (size_t k = 0; k < n; ++k) chosen.push_back(ranked[k].second);
-    std::sort(chosen.begin(), chosen.end());
-
-    if (chosen != mPccDynamic) {
-        // Only the SET changing costs anything — a camera moving inside one
-        // probe's neighbourhood re-flips nothing.
-        for (size_t i : mPccDynamic)
-            if (i < probes.size() && !std::binary_search(chosen.begin(), chosen.end(), i)) {
-                probes[i]->setStatic(true);
-                probes[i]->mNumIterations = kProbeIterationsStatic;
-            }
-        for (size_t i : chosen)
-            if (!std::binary_search(mPccDynamic.begin(), mPccDynamic.end(), i)) {
-                probes[i]->setStatic(false);
-                probes[i]->mNumIterations = 1u;
-            }
-        mPccDynamic = chosen;
+// The comparison is QUANTIZED to a 64th of the lit volume for the same reason
+// giEscapeSignature is: sub-voxel jitter (a physics body settling, an idle
+// animation's sway) must not read as movement for ever. An item seen for the
+// FIRST time is recorded, not reported — appearing is not moving, and the
+// arrival is already in the signature.
+void OgreScene::scanGiMovement() {
+    mGiMovedBoxes.clear();
+    size_t live = 0;
+    for (auto &kv : mNodes) {
+        Ogre::Item *item = kv.second.item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        ++live;
+        const Ogre::Aabb a = item->getWorldAabbUpdated();
+        auto it = mGiItemAabbs.find(kv.first);
+        if (it == mGiItemAabbs.end()) { mGiItemAabbs.emplace(kv.first, a); continue; }
+        if (!giAabbMoved(it->second, a)) continue;
+        Ogre::Aabb moved = it->second;
+        moved.merge(a);
+        mGiMovedBoxes.push_back(moved);
+        it->second = a;
     }
-    // ...and every frame, ask for the re-render. See the header note: relying on
-    // upstream's area-containment rule alone would refresh only the probe the
-    // camera stands in.
-    for (size_t i : mPccDynamic) probes[i]->mDirty = true;
+    // Destroyed nodes leave entries behind. Bounded by the scene either way, but
+    // a long editing session should not pay for every object it ever deleted.
+    if (mGiItemAabbs.size() > live * 2u + 16u) {
+        mGiItemAabbs.clear();
+        for (auto &kv : mNodes) {
+            Ogre::Item *item = kv.second.item;
+            if (item && (item->getVisibilityFlags() & kGiGeometryBit))
+                mGiItemAabbs.emplace(kv.first, item->getWorldAabbUpdated());
+        }
+    }
+}
+
+// THE PROBE UPDATE BUDGET (FIX WAVE B2) — what replaced P5a's "keep the nearest
+// N probes live for ever".
+//
+// The budget is a RATE: `GiParams::updateBudget` probe re-captures per frame,
+// spent on the probes that need them most. Three things make that work, and all
+// three are corrections to the shipped dynamic-probe design:
+//
+//  1. mDirty ONLY, never setStatic. Upstream's collect rule is
+//     `( areaLS.contains( trackedPos ) && !mStatic ) || mDirty`
+//     (OgreParallaxCorrectedCubemapAuto.cpp:328-346), so raising the PUBLIC
+//     mDirty field is sufficient on its own — the same field
+//     updateAllDirtyProbes uses, cleared by updateRender after the capture.
+//     Flipping mStatic was not: `setStatic` runs `switchInternalProbeStaticValue`,
+//     which destroys and recreates the probe's INTERNAL scene node in the other
+//     memory manager (F9). Probes therefore stay static for their whole lives
+//     and nothing reparents anything.
+//
+//  2. mNumIterations = 1 on EVERY probe (set once, in buildPcc). In automatic
+//     mode it is not an iteration count: above 1 a dirty probe renders in
+//     `updateExpensiveCollectedDirtyProbes`, which wraps EACH probe in its own
+//     `_beginFrameOnce`/`_endFrameOnce`; at 1 it renders inline in `updateRender`
+//     with the frame's other workspaces. A budgeted probe wants the second.
+//
+//  3. A SWEEP, so the budget is a guarantee and not a heuristic. Every probe
+//     carries "still owes this sweep an update"; the sweep refills when it
+//     empties. So the whole grid refreshes within ceil(probes / budget) frames
+//     no matter what the priority prefers — the property gi.budget pins — and
+//     the priority (staleness x proximity x covers-a-moved-AABB) only decides
+//     the ORDER within a sweep, which is where it matters: the probes the viewer
+//     is looking at and the ones a moving object is inside come first.
+//
+// Called once per scene per frame, from the AUTHORITATIVE view only (F7): the
+// engine picks one on-screen view per scene in renderOneFrame, because two views
+// sharing a scene used to drive the tracker twice a frame with two different
+// camera positions — which is both double the probe work and a priority that
+// depends on view order.
+void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
+    const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+    const size_t n = probes.size();
+    if (mProbeSlots.size() != n) mProbeSlots.assign(n, ProbeSlot());
+    const int budget = std::max(0, mGi.updateBudget);
+    mProbeUpdatesPerFrame = std::min(budget, int(n));
+    if (!n || !budget) return;          // paused: nothing dirtied, nothing scanned
+
+    scanGiMovement();
+
+    bool anyPending = false;
+    for (const ProbeSlot &s : mProbeSlots) if (s.sweepPending) { anyPending = true; break; }
+    if (!anyPending) for (ProbeSlot &s : mProbeSlots) s.sweepPending = true;
+
+    // How much a probe covering something that just moved may jump the queue.
+    // It cannot break the sweep guarantee (it only reorders within one), so the
+    // value is about responsiveness, not correctness.
+    static const float kMovedBoost = 8.0f;
+    const float diag = std::max(mGiProbeRegion.getSize().length(), 1e-3f);
+
+    std::vector<std::pair<float, size_t>> ranked;   // (-score, index): sorts ascending
+    ranked.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        ++mProbeSlots[i].framesSinceUpdate;
+        if (!mProbeSlots[i].sweepPending) continue;
+        const float d = (probes[i]->getArea().mCenter - camPos).length();
+        const float proximity = 1.0f / (1.0f + d / diag);
+        // The probe's AREA, not its SHAPE. The shape is the parallax box, and
+        // since A2 clamps every one of those into the probe region they all
+        // contain everything — a "covers what moved" test against them would be
+        // true for every probe and would discriminate nothing (measured: the
+        // budget-1 sweep picked a probe on the far side of the room while the
+        // mover sat in front of the mirror). The AREA is the probe's share of
+        // the region, which is exactly "the space this probe is responsible
+        // for", and it is per probe.
+        bool covers = false;
+        for (const Ogre::Aabb &b : mGiMovedBoxes)
+            if (probes[i]->getArea().intersects(b)) { covers = true; break; }
+        const float score = float(mProbeSlots[i].framesSinceUpdate) * proximity *
+                            (covers ? kMovedBoost : 1.0f);
+        ranked.emplace_back(-score, i);
+    }
+    const size_t take = std::min(size_t(budget), ranked.size());
+    std::partial_sort(ranked.begin(), ranked.begin() + std::ptrdiff_t(take), ranked.end());
+    for (size_t k = 0; k < take; ++k) {
+        const size_t i = ranked[k].second;
+        probes[i]->mDirty = true;
+        mProbeSlots[i].sweepPending = false;
+        mProbeSlots[i].framesSinceUpdate = 0;
+    }
+}
+
+// THE MOVEMENT TERM OF THE GI SIGNATURE (FIX WAVE B3, mirror half).
+//
+// A quantized hash of every GI item's world AABB — the same shape as the light
+// signature the mirror already debounces on, and deliberately STATELESS so that
+// calling it cannot disturb the movement scan above (the two ran into each other
+// in an earlier draft: whichever consumer looked first consumed the movement).
+//
+// What it buys: geometry that moves now ARMS the mirror's stability window like
+// a dragged light does, so the CHEAP paths run during the drag — the probes the
+// object is inside re-capture on their next turn in the sweep, and the lights are
+// re-injected into the voxels every kGiLightOnlyEveryN frames — and exactly ONE
+// full re-solve lands when the movement stops. Before this, moving an object
+// changed nothing at all until somebody pressed Refresh.
+//
+// Quantized to a 64th of the ITEM'S OWN largest extent, for giEscapeSignature's
+// reason: a settling physics body or an idle sway must not hold the mirror's
+// stability window open for ever.
+//
+// PER ITEM, not per lit volume, and that is a correction rather than a taste:
+// quantizing against the lit volume makes the signature change when the VOLUME
+// changes, and the volume changes the moment GI first builds — so an idle scene
+// spent one spurious re-solve immediately after arming (caught by gi.coalesce's
+// "20 idle frames cost nothing at all"). An item's own size is a property of the
+// item, so the hash of a still scene is still whatever the volume does.
+unsigned long long OgreScene::giGeometrySignature() const {
+    if (mGi.mode == GiMode::Off) return 0ull;
+    unsigned long long h = 1469598103934665603ull;      // FNV-1a
+    const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
+    for (const auto &kv : mNodes) {
+        const Ogre::Item *item = kv.second.item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
+        const float quantum = giAabbQuantum(a);
+        const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
+        fold((unsigned long long)kv.first);
+        for (size_t ax = 0; ax < 3u; ++ax) {
+            fold((unsigned long long)(long long)std::floor(mn[ax] / quantum));
+            fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
+        }
+    }
+    return h;
+}
+
+// The movement quantum for one item, and the test that uses it. Shared by the
+// signature above and the engine-side movement scan so the two can never
+// disagree about what counts as having moved.
+float OgreScene::giAabbQuantum(const Ogre::Aabb &a) {
+    const Ogre::Vector3 s = a.getSize();
+    return std::max(std::max(std::max(s.x, s.y), s.z) / 64.0f, 1e-4f);
+}
+
+bool OgreScene::giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after) {
+    const float quantum = std::max(giAabbQuantum(before), giAabbQuantum(after));
+    const Ogre::Vector3 dc = after.mCenter - before.mCenter;
+    const Ogre::Vector3 dh = after.mHalfSize - before.mHalfSize;
+    for (size_t ax = 0; ax < 3u; ++ax)
+        if (std::fabs(dc[ax]) >= quantum || std::fabs(dh[ax]) >= quantum) return true;
+    return false;
+}
+
+// VCT light injection ray-marches towards each light to work out what is
+// shadowed, and `rayMarchStepScale` is how coarsely (FIX WAVE B5). Upstream:
+// bigger is faster and starts losing shadows; below 1.0 trips an assert.
+//
+// The document's value is the AT-REST one and defaults to 1.0, i.e. nothing
+// changes for a scene that never touches it. The engine raises it on ONE path:
+// the cheap re-injection that runs every few frames WHILE something is being
+// dragged (refreshGiLighting). That injection exists so bounced light follows
+// the drag; it is replaced by a full re-solve the moment the drag stops, so
+// spending less time on it is exactly the right trade — and it is the only
+// place in the engine where "this answer is about to be thrown away" is true.
+float OgreScene::giRayMarchStepScale(bool inMotion) const {
+    static const float kMotionRayMarchStepScale = 2.0f;
+    const float rest = std::max(1.0f, mGi.rayMarchStepScale);
+    return inMotion ? std::max(rest, kMotionRayMarchStepScale) : rest;
 }
 
 void OgreScene::rebuildGi() {
@@ -876,11 +1265,13 @@ void OgreScene::rebuildVct() {
     mVctVoxelizer->setRegionToVoxelize(false, aabb);
 
     size_t itemCount = 0;
+    mVctItemIds.clear();
     for (auto &kv : mNodes) {
         Ogre::Item *item = kv.second.item;
         // PBR items only — the same set IR traces (never sky/overlays/billboards).
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         mVctVoxelizer->addItem(item, false);
+        mVctItemIds.push_back(kv.first);     // what the reuse arm compares against (B4)
         ++itemCount;
     }
     if (!itemCount) { teardownVct(); return; }   // stay armed; next churn re-flags
@@ -900,10 +1291,15 @@ void OgreScene::rebuildVct() {
     // shows a black ambient for the frame between build and the next ambient
     // push. See applyVctAmbient (OgreScene.cpp) for why it is a genuine pair.
     applyVctAmbient();
-    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights());
+    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+                         giRayMarchStepScale(false));
 
     hlmsPbs(mRoot)->setVctLighting(mVctLighting);
     sVctBindingOwner = this;
+    // What this arm was built AT (B4): the reuse path re-runs it only while the
+    // count still matches, i.e. while nothing it points into can have died.
+    mGiBuiltGeneration = mGiDestroyGeneration;
+    mGiReusedLastRefresh = false;
 
     mGiLitVolume = aabb;
     // The probe grid gets its OWN region — the free space, not the padded voxel
@@ -934,9 +1330,10 @@ void OgreScene::rebuildVct() {
 void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     mPccHdr = mPccShadowed = false;
-    // The indices name probes that are about to be (re)created — every rebuild
-    // starts from an all-static grid and the next updateGiTracking re-picks.
-    mPccDynamic.clear();
+    // The slots name probes that are about to be (re)created; the first
+    // updateProbeBudget after the build re-sizes and re-fills them.
+    mProbeSlots.clear();
+    mProbeUpdatesPerFrame = 0;
     // Our own probe workspace (media/Hlms/Jahshaka/JahshakaPcc.compositor):
     // per-face scene render + PCC depth compression + IBL specular mips — the
     // sample's LocalCubemapsProbeWorkspace, with the sample's shadow node behind
@@ -1018,6 +1415,13 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     placement.buildStart(probeRes, mGiCamera, probeFormat,
                          std::max(0.02f, diag * 0.001f), std::max(1.0f, diag * 2.0f));
     placement.buildEnd();   // reads probe depth back and re-fits probe shapes
+    clampProbeShapesToRegion(aabb);
+    // EVERY probe renders in the INLINE stage from now on (B2 point 2). Set once,
+    // here, rather than flipped as probes come and go: in automatic mode this
+    // selects a render stage, not an amount of work, and the budget already
+    // decides how many probes render at all.
+    for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mNumIterations = 1u;
+    mProbeSlots.assign(mPcc->getProbes().size(), ProbeSlot());
 
     // Diagnostic: JAHSHAKA_GI_DEBUG=1 dumps where every probe ENDED UP. This is
     // the only window onto PccPerPixelGridPlacement's depth-readback shrink-fit,
@@ -1119,14 +1523,29 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // constant, and making it per-probe means a new field in the probe const
     // buffer plus the shader that reads it — an upstream change on both sides,
     // which §9 of the spec makes a stop-and-report rather than a lane decision.
-    if (mGi.dynamicProbes > 0) minDist = std::max(minDist, diag);
+    //
+    // WHAT THE FIX WAVE CHANGED HERE (B1/B2): the gate used to be
+    // `dynamicProbes > 0`, a knob that defaulted to 0, so this inversion was
+    // opt-in and almost nobody saw it. The realtime budget model defaults to 1,
+    // so it is now the SHIPPED look for every hybrid scene that has not paused
+    // GI — and that is stated loudly here, in the panel's tooltip and in the
+    // spec rather than discovered later. The freshness gap the inversion papers
+    // over is narrowed by B3 (a moving object re-dirties the probes that cover
+    // it and re-injects the lights on the cheap cadence, so the voxels are much
+    // less stale than they used to be during a drag), and the principled
+    // per-probe fix is still upstream's to make.
+    if (mGi.updateBudget > 0) minDist = std::max(minDist, diag);
     hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, minDist, minDist * 2.0f);
 }
 
 void OgreScene::teardownVct() {
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     mPccHdr = mPccShadowed = false;
-    mPccDynamic.clear();
+    mProbeSlots.clear();
+    mProbeUpdatesPerFrame = 0;
+    mVctItemIds.clear();
+    mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
+    mGiReusedLastRefresh = false;
     if (sVctBindingOwner == this) {
         hlmsPbs(mRoot)->setParallaxCorrectedCubemap(nullptr);
         hlmsPbs(mRoot)->setVctLighting(nullptr);

@@ -816,18 +816,45 @@ struct GiParams {
     float     probeSnapDeviation = 0.05f;
     float     probeSnapSidesMin  = 0.25f;
     float     probeSnapSidesMax  = 0.25f;
-    /// DYNAMIC PROBES (REFLECTIONS_ADOPTION_SPEC.md P5a). How many of the grid's
-    /// probes re-capture the scene LIVE, instead of keeping the contents they
-    /// were built with. The N probes nearest the tracked camera are the ones
-    /// chosen, and the choice follows the camera as it moves.
+    /// THE GI UPDATE BUDGET (FIX WAVE B1/B2, 2026-09-07) — how many probe
+    /// UPDATES the renderer may spend per frame. It replaces P5a's
+    /// `dynamicProbes` ("keep the nearest N live for ever") and the document's
+    /// old giAutoRefresh flag, which were two spellings of the same question.
     ///
-    /// 0 (the default) is the shipped behaviour: every probe static, reflections
-    /// frozen at build time until something asks for a refresh. Raising it is a
-    /// real per-frame cost — each dynamic probe re-renders SIX faces of the whole
-    /// scene plus an IBL mip chain, EVERY frame — so it is off by default and the
-    /// number is a budget, not a quality dial. Clamped to the live probe count;
-    /// `GiStatus::dynamicProbeCount` reports what was actually achieved.
-    int       dynamicProbes = 0;
+    /// A RATE, not a subset. Each frame the engine dirties the `updateBudget`
+    /// highest-priority probes that still owe the current sweep an update, and
+    /// refills the sweep when it empties — so every probe in the grid re-captures
+    /// within ceil(probeCount / updateBudget) frames, whatever the priority does.
+    /// Priority (staleness x proximity to the tracked camera x covers-something-
+    /// that-just-moved) only decides the ORDER inside a sweep, which is what puts
+    /// the probes the viewer can see, and the ones the moving object is inside,
+    /// at the front of it.
+    ///
+    /// 0 = PAUSED: no probe re-captures, and the mirror stops auto-refreshing GI
+    /// as well (it is the same "GI is frozen" intent). That is the pre-fix-wave
+    /// shipped behaviour, kept as one switch.
+    ///
+    /// 1 (the default) is a realtime editor: one probe face-set per frame,
+    /// measured at ~2.1 ms in a Debug build at Medium quality (256px faces).
+    /// Raising it buys latency at a linear cost. `GiStatus::probeUpdatesPerFrame`
+    /// reports the resolved figure (clamped to the probes that exist).
+    ///
+    /// LOUD CONSEQUENCE, because it changes the picture: while this is above 0
+    /// the PCC/VCT trust window is inverted (P5a's finding — see the long note in
+    /// OgreGi.cpp buildPcc). Probes are fresher than the voxel volume by
+    /// construction once they re-capture, so a probe that covers a pixel wins it,
+    /// and ROUGH surfaces inside the probe region take their environment from the
+    /// probes instead of from cone tracing. Mirror-sharp pixels do not move.
+    int       updateBudget = 1;
+    /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5). Upstream:
+    /// "bigger values means the shadow raymarching during light injection is
+    /// faster, but may cause glitches if too high (areas that are supposed to be
+    /// shadowed won't be shadowed)"; below 1.0 trips an assert, so 1.0 is the
+    /// floor as well as the default. The engine RAISES it on the cheap in-motion
+    /// re-injection path only (see OgreScene::giRayMarchStepScale) — a re-inject
+    /// that happens every few frames of a drag is allowed to be coarse; the
+    /// re-solve that lands when the drag stops is not.
+    float     rayMarchStepScale = 1.0f;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
@@ -874,11 +901,28 @@ struct GiStatus {
     /// shadow node to recalculate. False in every mode but the hybrid.
     bool   probeHdr = false;
     bool   probeShadows = false;
-    /// How many probes are currently NON-STATIC, i.e. re-capturing the scene
-    /// every frame (REFLECTIONS_ADOPTION_SPEC.md P5a). The RESOLVED figure:
-    /// `GiParams::dynamicProbes` clamped to the probes that actually exist, and
-    /// 0 whenever the probe arm did not build. 0 in every mode but the hybrid.
-    int    dynamicProbeCount = 0;
+    /// How many probes the renderer re-captures per frame — the RESOLVED
+    /// `GiParams::updateBudget`, clamped to the probes that actually exist, and
+    /// 0 whenever the probe arm did not build (FIX WAVE B1/B2). 0 in every mode
+    /// but the hybrid. Every probe still refreshes within
+    /// ceil(probeCount / this) frames; see GiParams::updateBudget.
+    int    probeUpdatesPerFrame = 0;
+    /// The UNION of every probe's fitted PARALLAX SHAPE — the boxes the shader
+    /// reprojects reflection rays onto (FIX WAVE A2). Equal corners in every
+    /// mode but the hybrid, and in the hybrid it must lie inside
+    /// probeRegionMin/Max: a parallax box bigger than the free space the grid
+    /// was fitted to makes the hybrid's trust test reject the probe and hand the
+    /// pixel to cone tracing, which in an interior is black. The union is what
+    /// giStatus can carry in constant size; the per-probe boxes go to the log
+    /// under JAHSHAKA_GI_DEBUG.
+    Vec3   probeShapeMin;
+    Vec3   probeShapeMax;
+    /// Whether the LAST full refresh re-used the existing voxel arm instead of
+    /// tearing it down and building a new one (FIX WAVE B4). False after a
+    /// from-scratch build, which is what every mode change, quality change and
+    /// post-destruction flush still does. Exposed because the difference is a
+    /// factor of several in refresh cost and is otherwise invisible.
+    bool   reusedLastRefresh = false;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

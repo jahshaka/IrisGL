@@ -524,8 +524,36 @@ void OgreEngine::renderOneFrame() {
                 }
             }
         }
+        // ONE AUTHORITATIVE VIEW PER SCENE (FIX WAVE B2 / finding F7). The GI
+        // tracker's work is per SCENE and stateful — it spends a per-frame probe
+        // budget and carries the Forward+ range hysteresis — while `mViews` can
+        // hold several views of the SAME scene (the editor and the player share
+        // one; a preview dock is another). Running it once per view spent the
+        // budget as many times as there were views and let the last camera in
+        // the list decide the probe priority. The rule matches the post chain's
+        // "primary on-screen view owns the globals": the first ENABLED on-screen
+        // view of a scene wins, and an all-offscreen scene falls back to its
+        // first enabled view so headless suites still track.
+        std::vector<std::pair<OgreScene *, OgreView *>> giDriver;
+        giDriver.reserve(mViews.size());
+        const auto driverSlot = [&giDriver](OgreScene *s) -> OgreView ** {
+            for (auto &kv : giDriver)
+                if (kv.first == s) return &kv.second;
+            giDriver.emplace_back(s, nullptr);
+            return &giDriver.back().second;
+        };
+        for (int pass = 0; pass < 2; ++pass)          // 0: on-screen, 1: the fallback
+            for (auto &v : mViews) {
+                if (!v->isEnabled() || !v->ogreScene()) continue;
+                if (pass == 0 && v->isOffscreen()) continue;
+                OgreView **slot = driverSlot(v->ogreScene());
+                if (!*slot) *slot = v.get();
+            }
         for (auto &v : mViews) {
-            v->applyPendingResize(); v->updateParticles(); v->updateGi();
+            const bool authoritative = v->isEnabled() && v->ogreScene() &&
+                                       *driverSlot(v->ogreScene()) == v.get();
+            v->applyPendingResize(); v->updateParticles();
+            if (authoritative) v->updateGi();
             // Both ends of the planar-reflection wiring move between frames (the
             // scene rebuilds its arm on a parameter change, the view recreates
             // its camera on setScene), so the listener is re-synced rather than

@@ -3173,7 +3173,8 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeSnapDeviation = mSource->giProbeSnapDeviation;
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
-        gi.dynamicProbes = mSource->giDynamicProbes;   // P5a
+        gi.updateBudget = qMax(0, mSource->giUpdateBudget);        // FIX WAVE B1
+        gi.rayMarchStepScale = qMax(1.0f, mSource->giRayMarchStepScale);   // B5
         iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
         gi.irLight = driver ? engineNode(driver) : 0;
         const auto same = [](const GiParams &a, const GiParams &b) {
@@ -3186,7 +3187,8 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                    a.probeSnapDeviation == b.probeSnapDeviation &&
                    a.probeSnapSidesMin == b.probeSnapSidesMin &&
                    a.probeSnapSidesMax == b.probeSnapSidesMax &&
-                   a.dynamicProbes == b.dynamicProbes &&
+                   a.updateBudget == b.updateBudget &&
+                   a.rayMarchStepScale == b.rayMarchStepScale &&
                    a.boundsMin.x == b.boundsMin.x && a.boundsMin.y == b.boundsMin.y &&
                    a.boundsMin.z == b.boundsMin.z && a.boundsMax.x == b.boundsMax.x &&
                    a.boundsMax.y == b.boundsMax.y && a.boundsMax.z == b.boundsMax.z;
@@ -3242,15 +3244,45 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // recombine it with a FRESH escape term rather than re-hashing an
         // already-combined value (which would never match the next frame's).
         const quint64 lightSigRaw = lightSig;
-        const auto combine = [&](quint64 light, quint64 escape) {
+        // ---- THE MOVEMENT TERM (FIX WAVE B3) --------------------------------
+        //
+        // Third term, same shape and the same debounce as the other two: a
+        // quantized hash of every GI item's world AABB. Before it, MOVING
+        // geometry changed nothing at all — the panel's own Refresh tooltip said
+        // so out loud ("moving objects does not do this automatically") — because
+        // the only cheap answer available was "re-solve every frame of the drag".
+        // There are cheap answers now: the probes covering the mover re-capture
+        // on their next turn in the engine's per-frame budget, and the lights are
+        // re-injected into the voxels on the kGiLightOnlyEveryN cadence. So
+        // geometry gets the treatment lights already had: the cheap paths during
+        // the gesture, exactly one full re-solve when it stops.
+        //
+        // Folded into the SAME signature rather than given its own gate, so that
+        // moving a light and moving a box during one drag still cost one
+        // re-solve between them rather than two.
+        const auto combine = [&](quint64 light, quint64 escape, quint64 geometry) {
             if (!vctLike) return light;
-            Hasher h; h << light << escape; return h.h;
+            Hasher h; h << light << escape << geometry; return h.h;
         };
-        if (vctLike) lightSig = combine(lightSigRaw, mTarget->giEscapeSignature());
+        if (vctLike)
+            lightSig = combine(lightSigRaw, mTarget->giEscapeSignature(),
+                               mTarget->giGeometrySignature());
+        // The engine's half of the signature is read from DERIVED world AABBs,
+        // and those are only correct once something has run updateSceneGraph —
+        // which, on the very first sync, is the GI build itself. Reading it
+        // before the push therefore hashes the items at their birth transforms
+        // and the next frame looks like a scene-wide move: one spurious
+        // re-solve, 15 frames after every arm (caught by gi.coalesce's "20 idle
+        // frames cost nothing at all"). So the push adopts the signature AFTER
+        // it pushes, exactly as the two refresh branches below already do.
+        const auto readEngineSignature = [&]() {
+            return combine(lightSigRaw, mTarget->giEscapeSignature(),
+                           mTarget->giGeometrySignature());
+        };
         if (!mGiPushed || !same(gi, mLastGi)) {
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
-            mGiLightSignature = lightSig;
+            mGiLightSignature = readEngineSignature();
             mGiPushed = true;
             mGiPendingRefresh = false;
             mGiStableFrames = 0;
@@ -3290,12 +3322,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             const bool explicitRefresh = mSource->giRefreshSerial != mGiRefreshSerialSeen;
 
             if (sigChanged) {
-                if (mSource->giAutoRefresh) {
-                    // The remembered signature is only advanced while Auto
-                    // Refresh is ON, exactly as before this phase: with it off
-                    // the mirror is not tracking lights at all, so turning it
-                    // back on must notice the moves that happened meanwhile
-                    // rather than adopting them silently.
+                if (mSource->giUpdateBudget > 0) {
+                    // The remembered signature is only advanced while the budget
+                    // is above zero, exactly as it was only advanced while Auto
+                    // Refresh was ON: with GI paused the mirror is not tracking
+                    // the scene at all, so un-pausing must notice the moves that
+                    // happened meanwhile rather than adopting them silently.
                     mGiLightSignature = lightSig;
                     // Both gates measure STABILITY, so both restart on every
                     // change: a drag that keeps changing the signature never
@@ -3318,7 +3350,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // cube out of the volume" costing ONE re-solve instead of two (the
             // second being the signature changing back).
             const auto adoptSignature = [&]() {
-                if (vctLike) mGiLightSignature = combine(lightSigRaw, mTarget->giEscapeSignature());
+                if (vctLike) mGiLightSignature = readEngineSignature();
             };
             if (explicitRefresh) {
                 mGiRefreshSerialSeen = mSource->giRefreshSerial;

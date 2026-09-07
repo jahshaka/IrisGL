@@ -205,7 +205,27 @@ public:
     iris::Vec3 giBoundsMax;
     QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
     int giNumBounces;          // 1..4
-    bool giAutoRefresh;        // editor: re-solve automatically on edits
+    /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
+    /// renderer may spend per frame, and the single "is GI live?" switch.
+    ///
+    /// It replaces two fields that were asking the same question from opposite
+    /// ends: `giAutoRefresh` (a bool: may the mirror re-solve when the scene
+    /// changes?) and `giDynamicProbes` (an int: how many probes stay live?).
+    /// Their combination had four states and only two of them meant anything.
+    ///
+    ///   0 = PAUSED. No probe re-captures and nothing auto-re-solves; GI shows
+    ///       whatever it last built until world.refreshGi() asks for more. This
+    ///       is exactly the old `giAutoRefresh = false`.
+    ///   1 = the default, and a realtime editor: one probe's six faces per
+    ///       frame (~2.1 ms Debug at Medium), so a grid of 18 probes is fully
+    ///       refreshed in 18 frames and the probes covering whatever just moved
+    ///       go first.
+    ///   N = spend more per frame for less latency; the cost is linear.
+    ///
+    /// Documents written before the fix wave carry `giAutoRefresh` instead and
+    /// map onto it (false -> 0, true -> 1); readers that still speak the old
+    /// spelling (world.settings' `autoRefresh`) report `budget > 0`.
+    int giUpdateBudget = 1;
     iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
     // Hybrid probe-capture knobs (REFLECTIONS_ADOPTION_SPEC.md P3). Integrator
     // knobs, not quality-dial rows: they reach the engine through world.gi only
@@ -219,14 +239,12 @@ public:
     float giProbeSnapDeviation = 0.05f;  // shrink-fit snap-back tolerances: the pin's
     float giProbeSnapSidesMin = 0.25f;   // own ctor defaults, made explicit and ours
     float giProbeSnapSidesMax = 0.25f;
-    /// DYNAMIC PROBES (REFLECTIONS_ADOPTION_SPEC.md P5a). How many of the
-    /// hybrid's reflection probes re-capture the scene live, nearest the camera
-    /// first. 0 (the default, and what every existing document reads back as)
-    /// is the shipped all-static grid: reflections are frozen at build time.
-    /// Each live probe costs six full scene renders plus an IBL mip chain PER
-    /// FRAME, which is why this is a budget the author opts into rather than
-    /// something the quality dial moves.
-    int giDynamicProbes = 0;
+    /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5).
+    /// Integrator knob, verb-only (`world.gi({rayMarchStepScale})`), floor 1.0:
+    /// bigger marches faster and starts losing contact shadows in the bounce,
+    /// and upstream asserts below 1.0. The engine raises it on its own for the
+    /// cheap in-motion re-injection only.
+    float giRayMarchStepScale = 1.0f;
     /// MONOTONIC, never serialized: bumped by world.refreshGi() and by the
     /// Refresh button (REFLECTIONS_ADOPTION_SPEC.md P1d). The mirror compares it
     /// against the value it last acted on and re-solves the engine's GI once per
