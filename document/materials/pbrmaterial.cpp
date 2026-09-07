@@ -43,9 +43,6 @@ PbrMaterial::PbrMaterial()
     receiveShadows      = true;
     emissiveAsLightmap  = false;
 
-    useOcclusionMap     = false;
-    occlusionFactor     = 1.0f;
-
     emissiveColor       = QColor(0, 0, 0);
     emissiveIntensity   = 0.0f;
     useEmissiveMap      = false;
@@ -147,14 +144,6 @@ bool PbrMaterial::brdfSupportsClearCoat(int index)
     return brdfEngineName(index).startsWith(QStringLiteral("Default"));
 }
 
-void PbrMaterial::setOcclusionMap(Texture2DPtr tex)
-{
-    if (!!tex) { useOcclusionMap = true;  addTexture("u_occlusionMap", tex); }
-    else       { useOcclusionMap = false; removeTexture("u_occlusionMap"); }
-}
-
-void PbrMaterial::setOcclusionFactor(float factor)  { occlusionFactor = factor; }
-
 void PbrMaterial::setEmissiveColor(QColor color)        { emissiveColor = color; }
 void PbrMaterial::setEmissiveIntensity(float intensity) { emissiveIntensity = intensity; }
 
@@ -186,7 +175,6 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "metallic")          metallicFactor    = value.toFloat();
     else if (name == "roughness")         roughnessFactor   = value.toFloat();
     else if (name == "normalFactor")      normalFactor      = value.toFloat();
-    else if (name == "occlusionFactor")   occlusionFactor   = value.toFloat();
     else if (name == "emissiveColor")     emissiveColor     = value.value<QColor>();
     else if (name == "emissiveIntensity") emissiveIntensity = value.toFloat();
     else if (name == "alpha")             alpha             = value.toFloat();
@@ -208,7 +196,6 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "metallicMap")   setMetallicMap(loadTexture(value.toString()));
     else if (name == "roughnessMap")  setRoughnessMap(loadTexture(value.toString()));
     else if (name == "normalMap")     setNormalMap(loadTexture(value.toString()));
-    else if (name == "occlusionMap")  setOcclusionMap(loadTexture(value.toString()));
     else if (name == "emissiveMap")   setEmissiveMap(loadTexture(value.toString()));
 
     // keep the Property object in step so the panel and the field agree
@@ -260,15 +247,6 @@ void PbrMaterial::createProperties()
     normalProp->maxValue    = 2.0f;
     normalProp->value       = normalFactor;
     properties.append(normalProp);
-
-    auto occlusionProp         = new FloatProperty;
-    occlusionProp->id          = id++;
-    occlusionProp->displayName = "Occlusion";
-    occlusionProp->name        = "occlusionFactor";
-    occlusionProp->minValue    = 0.0f;
-    occlusionProp->maxValue    = 1.0f;
-    occlusionProp->value       = occlusionFactor;
-    properties.append(occlusionProp);
 
     auto emissiveColProp         = new ColorProperty;
     emissiveColProp->id          = id++;
@@ -422,7 +400,6 @@ void PbrMaterial::createProperties()
         { "Normal Map",     "normalMap"    },
         { "Metallic Map",   "metallicMap"  },
         { "Roughness Map",  "roughnessMap" },
-        { "Occlusion Map",  "occlusionMap" },
         { "Emissive Map",   "emissiveMap"  },
     };
     for (const auto &m : kMaps) {

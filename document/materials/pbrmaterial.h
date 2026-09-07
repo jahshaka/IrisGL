@@ -63,9 +63,32 @@ public:
     void setReceiveShadows(bool receive);
     void setEmissiveAsLightmap(bool asLightmap);
 
-    // --- occlusion / emissive ---
-    void setOcclusionMap(Texture2DPtr tex);
-    void setOcclusionFactor(float factor);
+    // --- emissive ---
+    //
+    // THERE IS NO OCCLUSION ROW, and its absence is deliberate (HLMS_ADOPTION
+    // P2). The renderer has no ambient-occlusion input at all — not "not wired
+    // up yet", none: there is not one `occlusion` reference in the whole PBS
+    // component. We shipped the full authoring chain anyway (a slider, a map
+    // row, a graph socket, a per-texel bake up to 4096 squared, a PNG in the
+    // user's project) and the mirror dropped every bit of it. Authoring AO
+    // cost real bake time and produced nothing.
+    //
+    // IF YOU WANT AO TODAY: bake it into the base-colour map at import. The
+    // import pipeline already owns a bake step and glTF's occlusionTexture
+    // arrives there.
+    //
+    // THE CORRECT FUTURE FIX, if AO is ever worth its price: a carrier texture
+    // in one of HlmsPbs' free detail slots plus an @undefpiece/@piece override
+    // of DoAmbientLighting from our own Hlms library folder. It cannot be done
+    // from the custom_ps_preLights hook — the SH ambient term only lands in
+    // pixelData inside DoAmbientLighting, ~50 lines AFTER that hook, and the
+    // only later hook is already taken by our fog piece. That override is a
+    // permanent divergence-flavoured artifact to own forever, in the same
+    // class as the fog piece: defensible, not free.
+    //
+    // Readers stay tolerant of `occlusionFactor` / `occlusionMap` in old
+    // files — they are simply undeclared names now, and every reader skips
+    // those. No migration exists or is needed.
     void setEmissiveColor(QColor color);
     void setEmissiveIntensity(float intensity);
     void setEmissiveMap(Texture2DPtr tex);
@@ -161,9 +184,6 @@ public:
     /// instead of self-illumination added on top. Needs an emissive map; the
     /// emissive colour should be white or it tints the lightmap.
     bool   emissiveAsLightmap;
-
-    bool   useOcclusionMap;
-    float  occlusionFactor;
 
     QColor emissiveColor;
     float  emissiveIntensity;

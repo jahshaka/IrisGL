@@ -166,10 +166,19 @@ struct ClipState {
 using TextureId = unsigned int;
 enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides with X11's macro
 
-/// PBR texture slots. NOTE: there is deliberately NO Occlusion slot — the Ogre
-/// backend (HlmsPbs) has no dedicated ambient-occlusion input, so the document's
-/// occlusionMap/occlusionFactor are documented as unsupported rather than faked
-/// (bake AO into the base colour map at import time if it matters).
+/// PBR texture slots. There is NO Occlusion slot, and since HLMS_ADOPTION P2
+/// there is no occlusion row on the document side either: the backend has no
+/// ambient-occlusion input AT ALL (not one `occlusion` reference in its whole
+/// PBS component), so an AO map, factor, graph socket and per-texel bake all
+/// existed to be dropped here. They are gone rather than "documented as
+/// unsupported" — a knob that costs bake time and does nothing is worse than
+/// an absent one.
+///
+/// Bake AO into the base-colour map at import if it matters. The reachable
+/// engine-side alternative — a carrier texture in a free detail slot plus an
+/// @undefpiece override of DoAmbientLighting from our Hlms library folder — is
+/// costed and deferred (see PbrMaterial's header for why the cheaper
+/// custom_ps_preLights hook cannot do it).
 enum class PbrTextureSlot { Albedo, Normal, Metalness, Roughness, Emissive };
 
 /// How PbrParams::alpha / alphaCutoff are interpreted (glTF's OPAQUE/MASK/BLEND,

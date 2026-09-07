@@ -1646,8 +1646,10 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     ms.hasPbr = toPbrParams(material, ms.pbr);
 
     // Document slot name -> engine slot. PbrMaterial and DefaultMaterial naming.
-    // PbrMaterial's "u_occlusionMap" is deliberately NOT mapped: the engine has no
-    // ambient-occlusion slot (HlmsPbs limitation, see engine Types.h).
+    // There is no occlusion entry because there is no occlusion ROW any more
+    // (HLMS_ADOPTION P2): the engine has no ambient-occlusion slot, so the
+    // document stopped pretending to have one. An old file's "u_occlusionMap"
+    // simply matches nothing here, which is what tolerance looks like.
     struct Slot { QLatin1StringView name; PbrTextureSlot slot; bool srgb; };
     static const Slot kSlots[] = {
         { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
