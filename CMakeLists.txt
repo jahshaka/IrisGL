@@ -143,7 +143,6 @@ set(SRCS
     document/materials/material.cpp
     core/geometry/trimesh.cpp
     document/assets/vertexlayout.cpp
-    document/assets/shader.cpp
     document/scenegraph/shadowmap.cpp
     document/animation/animation.cpp
     document/animation/keyframeset.cpp
@@ -206,7 +205,6 @@ set (HEADERS
     core/geometry/trimesh.h
     core/math/mathhelper.h
     irisglfwd.h
-    document/assets/shader.h
     irisgl.h
     core/math/intersectionhelper.h
     document/animation/keyframeset.h

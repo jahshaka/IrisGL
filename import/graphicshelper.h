@@ -43,8 +43,6 @@ namespace iris
 class GraphicsHelper
 {
 public:
-    static QString loadAndProcessShader(QString shaderPath);
-
     /**
      * Loads all meshes from mesh file
      * Useful for loading a mesh file containing multiple meshes

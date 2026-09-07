@@ -63,7 +63,6 @@ public:
 
 	MaterialPtr duplicate() override;
 
-	static CustomMaterialPtr createFromShader(iris::ShaderPtr shader);
 	static CustomMaterialPtr createFromShaderPath(const QString& shaderPath);
 	static CustomMaterialPtr createFromShaderJson(const QJsonObject& shaderObj);
 

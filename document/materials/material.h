@@ -36,15 +36,14 @@ struct MaterialTexture {
 
 // Document-side material base: a property bag, texture map and render states.
 // The GL half (shader program binding, uniform upload) died with the legacy
-// renderer at step 14 - the engine mirror translates these fields into engine
-// materials.
+// renderer at step 14; the GLSL SOURCE half followed it at HLMS_ADOPTION P3
+// (2026-09-07) - nothing ever read the stored text back, so the carrier
+// (iris::Shader), the include-expanding loader and app/shaders/ are gone.
+// The engine mirror translates these fields into engine materials.
 class Material
 {
 public:
     int renderLayer;
-	// Shader source text (shadergraph / .effect files); never compiled here.
-	ShaderPtr shader;
-	ShaderPtr shadowShader;
 
     QMap<QString, Texture2DPtr> textures;
 
@@ -83,9 +82,9 @@ public:
 	void setDepthState(const iris::DepthState& depthState);
 	iris::RenderStates getRenderState() { return renderStates; }
 
-	void setShader(ShaderPtr shader);
-	void setShadowShader(ShaderPtr shader);
-
+	// Preprocessor-define flags (only "SKINNING_ENABLED", set by MeshNode).
+	// They used to be forwarded to the GLSL carrier; with that gone nothing
+	// reads them back. Kept as a bare set - recorded debt, not a capability.
 	bool isFlagEnabled(QString flag);
 	void enableFlag(QString flag);
 	void disableFlag(QString flag);
@@ -104,14 +103,9 @@ public:
      */
     void removeTexture(QString name);
 
-    // Loads the two files as shader source text and stores them on `shader`.
-    void createProgramFromShaderSource(QString vsFile, QString fsFile);
-
 	virtual MaterialPtr duplicate() {
 		return MaterialPtr(new Material());
 	}
-
-	static MaterialPtr fromShader(ShaderPtr shader);
 
 protected:
 	QSet<QString> flags;
