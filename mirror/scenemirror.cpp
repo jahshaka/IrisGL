@@ -11,6 +11,7 @@
 
 #include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/scene.h"
+#include "irisgl/document/scenegraph/skybake.h"
 #include "irisgl/document/scenegraph/scenenode.h"
 #include "irisgl/document/scenegraph/meshnode.h"
 #include "irisgl/document/scenegraph/lightnode.h"
@@ -3643,31 +3644,15 @@ void SceneMirror::applySky(View *view)
         } else if (kind == SkyKind::Gradient) {
             // Legacy gradientsky.frag is a pure vertical 3-stop ramp: bake it into a
             // narrow equirect strip (row 0 = zenith) and reuse the equirect sky path.
-            const float middle = qBound(0.01f, mSource->gradientOffset, 0.99f);
-            const QColor top = mSource->gradientTop, mid = mSource->gradientMid, bot = mSource->gradientBot;
-            const int H = 256, W = 4;
-            std::vector<unsigned char> px(size_t(W) * H * 4u);
-            for (int r = 0; r < H; ++r) {
-                const float offset = 1.0f - float(r) / (H - 1);   // 1 at the top row
-                float t; const QColor *c0, *c1;
-                if (offset <= middle) { t = offset / middle;                 c0 = &bot; c1 = &mid; }
-                else                  { t = (offset - middle) / (1 - middle); c0 = &mid; c1 = &top; }
-                const unsigned char rr = (unsigned char)qBound(0.0f, (c0->redF()   + (c1->redF()   - c0->redF())   * t) * 255.0f, 255.0f);
-                const unsigned char gg = (unsigned char)qBound(0.0f, (c0->greenF() + (c1->greenF() - c0->greenF()) * t) * 255.0f, 255.0f);
-                const unsigned char bb = (unsigned char)qBound(0.0f, (c0->blueF()  + (c1->blueF()  - c0->blueF())  * t) * 255.0f, 255.0f);
-                for (int x = 0; x < W; ++x) {
-                    unsigned char *p = &px[(size_t(r) * W + x) * 4u];
-                    p[0] = rr; p[1] = gg; p[2] = bb; p[3] = 255;
-                }
-            }
-            mSkyFaceTextures[0] = mTarget->createTexture(W, H, px.data(), true);
+            // The ramp itself is bakeGradientSky — shared with the glTF exporter,
+            // which used to carry its own copy of it (re-audit F10).
+            const QImage strip = iris::bakeGradientSky(mSource->gradientTop, mSource->gradientMid,
+                                                       mSource->gradientBot, mSource->gradientOffset);
+            mSkyFaceTextures[0] = strip.isNull() ? 0
+                : mTarget->createTexture(unsigned(strip.width()), unsigned(strip.height()),
+                                         strip.constBits(), true);
             mTarget->setSky(mSkyFaceTextures[0] ? SkyMode::Equirectangular : SkyMode::NoSky, mSkyFaceTextures[0]);
-            if (mSkyFaceTextures[0]) {
-                QImage strip(W, H, QImage::Format_RGBA8888);
-                for (int r = 0; r < H; ++r)
-                    std::memcpy(strip.scanLine(r), &px[size_t(r) * W * 4u], size_t(W) * 4u);
-                applySkyReflection(strip);
-            }
+            if (mSkyFaceTextures[0]) applySkyReflection(strip);
         } else if (kind == SkyKind::Realistic) {
             // Legacy realisticsky.frag (Preetham-style scattering), CPU-baked to
             // an equirect image and pushed through the same sky path as gradient.

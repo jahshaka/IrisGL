@@ -26,6 +26,7 @@ For more information see the LICENSE file
 
 #include "document/physics/environment.h"
 #include "core/math/intersectionhelper.h"
+#include <cmath>
 
 #include <QtMultimedia/QMediaPlayer>
 // #include <QtMultimedia/QMediaPlaylist>
@@ -193,6 +194,9 @@ Scene::Scene()
     // sky-driven ambient: on by default (owner decision, VISUAL_PARITY item 3b)
     ambientFromSky = true;
 
+    // nothing is driven by the sky's sun until a light is linked (re-audit F5)
+    sunLightGuid = QString();
+
 	gradientTop = QColor(255, 0, 0);
 	gradientMid = QColor(0, 255, 0);
 	gradientBot = QColor(0, 0, 255);
@@ -355,6 +359,37 @@ void Scene::setAmbientMusicVolume(float volume)
     // mediaPlayer->setVolume(volume);
 }
 
+bool Scene::applySunCoupling()
+{
+    if (sunLightGuid.isEmpty()) return false;
+    // Only the analytic sky has a sun. A scene that switches to a colour or
+    // image sky keeps the LINK (switching back resumes it) but stops driving.
+    if (skyType != SkyType::REALISTIC) return false;
+
+    auto node = nodes.value(sunLightGuid);
+    if (!node) return false;
+    auto light = node.dynamicCast<LightNode>();
+    if (!light) return false;
+
+    // The light travels FROM the sun TOWARDS the scene, and a document light
+    // emits down its local -Y (LightNode::getLightDir) — so the rotation is the
+    // one that takes -Y onto that direction.
+    const iris::Vec3 sun(skyRealistic.sunPosX, skyRealistic.sunPosY, skyRealistic.sunPosZ);
+    if (sun.lengthSquared() < 1e-6f) return false;
+    const iris::Vec3 travel = -sun.normalized();
+    const iris::Quat want = iris::Quat::rotationTo(iris::Vec3(0.0f, -1.0f, 0.0f), travel);
+
+    // Cheap to call every frame: an unchanged sun re-pushes nothing, so a
+    // linked light is still freely keyable/animatable on every OTHER channel.
+    const iris::Quat have = light->getGlobalRotation();
+    const float dot = std::fabs(have.x() * want.x() + have.y() * want.y()
+                              + have.z() * want.z() + have.scalar() * want.scalar());
+    if (dot > 0.9999995f) return false;
+
+    light->setGlobalRot(want);
+    return true;
+}
+
 void Scene::updateSceneAnimation(float time)
 {
     animTime = time;
@@ -370,6 +405,10 @@ void Scene::update(float dt)
 		return;
 
 	time += dt < 0 ? 0 : dt;
+
+    // SUN COUPLING (re-audit F5): before anything reads a transform this frame,
+    // so the mirror, the gizmos and the shadow pass all see the same rotation.
+    applySunCoupling();
 
     // POSSESSION, first half (AVATAR_LOCOMOTION_SPEC §8.4): the possessed
     // avatar is the ONE consumer of the gameplay input state, and its intent is
