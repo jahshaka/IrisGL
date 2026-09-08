@@ -675,11 +675,10 @@ inline float verticalFovForHorizontalCap(float vfovDeg, float aspect, float hfov
 ///   * the inset workspace must be LAST on the target, and there is no reorder
 ///     API — every rebuild of the main workspace re-appends it, so the inset is
 ///     removed and re-added after each one (OgreView::attachWorkspace);
-///   * its colour LOADs (a Clear on Vulkan is full-target and would wipe the
-///     main frame) and its depth CLEARs (Load leaves the main view's depth
-///     occluding 92% of the inset — a correctness requirement, not a saving);
-///   * because the colour Loads, the inset needs its OWN BACKGROUND: an unlit
-///     quad pass at the rect, before the scene pass;
+///   * everything it writes ON THE WINDOW must LOAD colour (a Clear on Vulkan
+///     is full-target and would wipe the main frame), and the inset needs its
+///     OWN BACKGROUND for the same reason: a loaded attachment shows the main
+///     image wherever the inset draws nothing;
 ///   * addWorkspace's vpModifierMask defaults to 0x00, which silently makes the
 ///     rect inert — it is passed 0xFF;
 ///   * the main chain's final pass must keep MSAA samples AND resolve them
@@ -687,9 +686,29 @@ inline float verticalFovForHorizontalCap(float vfovDeg, float aspect, float hfov
 ///   * cameras are POOLED and destroyed AFTER the workspace that names them
 ///     (the other order segfaults on the next frame).
 ///
+/// ROUTE C, since the inset learned to grade (`tonemap`, CAMERAS_SPEC §7.2):
+/// the scene pass no longer draws into the window at all. It renders into a
+/// LOCAL texture sized from the inset's rectangle — its own depth, its own
+/// clear, its own colour space — and a QUAD composites that texture into the
+/// window at the rect, either through `HDR/FinalToneMapping` (graded) or
+/// through `Ogre/Copy/4xFP32` (not). Three consequences worth stating:
+///   * the local texture is sized by FRACTION of the target, so it follows a
+///     window resize for free and a RECT MOVE costs nothing; only a rect
+///     RESIZE re-creates it (OgreView::applyPip, checked in whole pixels so a
+///     steady inset never rebuilds anything — View::pipGeneration proves it);
+///   * the camera's aspect is set EXPLICITLY from the rectangle.
+///     setAutoAspectRatio would take the LOCAL TEXTURE's aspect instead, which
+///     is the same number only by construction and stops being one the moment
+///     the texture is rounded up to whole pixels;
+///   * the inset's own background is graded with it — the swatch goes through
+///     the same tonemapping quad, so the letterbox bars around a constrained
+///     shot cannot disagree with the background inside it.
+///
 /// COST: a second cull and a second render of everything the inset camera sees.
-/// The spike measured +0.33 ms/frame CPU on a trivial scene. It is off unless a
-/// host asks for it, and the editor asks only while a camera is selected.
+/// The spike measured +0.33 ms/frame CPU on a trivial scene, plus (Route C) one
+/// texture the size of the inset and two quads over its rectangle. It is off
+/// unless a host asks for it, and the editor asks only while a camera is
+/// selected.
 ///
 /// IGNORED ON OFFSCREEN VIEWS unless `allowOffscreen` — the same guarantee, in
 /// the same single place, as PostFxDesc and ViewOverlayDesc. Thumbnails,
@@ -713,10 +732,37 @@ struct ViewPipDesc {
     /// PostFxDesc::allowOffscreen and ViewOverlayDesc::allowOffscreen.
     bool allowOffscreen = false;
 
+    /// GRADE THE INSET (CAMERAS_SPEC §7.2 Route C, POST_CHAIN_SPEC §14).
+    ///
+    /// The inset does not render into the window any more: it renders into a
+    /// LOCAL texture (RGBA16F while this is on) and is composited through the
+    /// SAME `HDR/FinalToneMapping` quad the main chain uses. Without it a view
+    /// whose chain tonemaps showed a RAW linear inset beside a graded main
+    /// image — everything above 1.0 clipped to flat white while the viewport
+    /// rolled the same highlight off. That is item 6's fourth consumer, and
+    /// this is the same secondary-surface answer the thumbnails got.
+    ///
+    /// A host sets it from the description the view's own chain resolved to
+    /// (`PostFxDesc::hdr`), so the inset grades exactly when the main view
+    /// does. It is a SHAPE flag: flipping it rebuilds the inset's workspace.
+    bool tonemap = false;
+    /// The inset's exposure, on the chain's natural-log axis (the same units
+    /// and the same meaning as PostFxDesc::exposure, NOT stops).
+    ///
+    /// ALWAYS FIXED, never measured: the auto path's luminance reduction rides
+    /// PROCESS-GLOBAL material parameters and a wall-clock adaptation, which on
+    /// a second surface is neither assertable nor per-camera. So the inset uses
+    /// the fixed-exposure form of the same tonemapper (POST_CHAIN_SPEC §14), and
+    /// this number IS its grade — which is what makes a PIPPED camera's own
+    /// exposure visible in the inset without touching the main view. Live: a
+    /// change rewrites one clear colour, never a rebuild.
+    float exposure = 0.0f;
+
     bool operator==(const ViewPipDesc &o) const {
         return enabled == o.enabled && camera == o.camera && left == o.left && top == o.top &&
                width == o.width && height == o.height && background == o.background &&
-               allowOffscreen == o.allowOffscreen;
+               allowOffscreen == o.allowOffscreen && tonemap == o.tonemap &&
+               exposure == o.exposure;
     }
     bool operator!=(const ViewPipDesc &o) const { return !(*this == o); }
 };

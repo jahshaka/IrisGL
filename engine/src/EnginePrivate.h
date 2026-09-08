@@ -351,6 +351,12 @@ struct ChainHandles {
     /// definition and only resetNumPassesLeft() puts it back). Null unless the
     /// chain has the automatic HDR exposure.
     Ogre::CompositorPassClearDef *exposureSeed = nullptr;
+    /// The 1x1 clear that IS the exposure in the FIXED tonemap form
+    /// (ChainDesc::tonemapFixed — POST_CHAIN_SPEC §14). Null unless the chain
+    /// has it. Handed back because PostFxDesc::exposure is deliberately NOT
+    /// part of ChainDesc::sameShape: changing it must not rebuild a workspace,
+    /// so somebody has to rewrite this clear instead — OgreView::applyFixedExposure.
+    Ogre::CompositorPassClearDef *fixedExposure = nullptr;
 };
 
 /// Creates the node definitions and the workspace definition `desc` describes,
@@ -373,28 +379,53 @@ std::string sceneNodeDefName(const std::string &workspaceDef);
 
 // ---- The picture-in-picture inset (CAMERAS_SPEC §7.7) ----------------------
 /// What buildPip hands back so the view can move the inset without rebuilding
-/// anything: the letterbox rect lives on the SCENE pass's own mVpRect, which
-/// Ogre re-reads from the definition on every execute
+/// anything: the rect lives on the COMPOSITE quad's own mVpRect, which Ogre
+/// re-reads from the definition on every execute
 /// (CompositorPass::setRenderPassDescToCurrent), so writing it between frames
 /// is live. The fill quad keeps the full [0,1] rect and therefore always paints
 /// the whole inset — background plus bars.
 struct PipHandles {
+    /// The scene pass. It targets the inset's LOCAL texture (Route C), so its
+    /// viewport is the whole texture and it takes NO viewport modifier — the
+    /// rect it renders is expressed once, in the texture's size.
     Ogre::CompositorPassSceneDef *scenePass = nullptr;
     /// The clear pass that paints the inset's background swatch. Its colour is
     /// read per execute too, so pushing a new background never rebuilds either.
     Ogre::CompositorPassClearDef *fill = nullptr;
+    /// The quad that puts the inset ON the window — tonemapping it on the way
+    /// (ViewPipDesc::tonemap) or copying it straight. Its mVpRect is the INNER
+    /// rectangle, i.e. the letterbox, written live by OgreView::applyPip.
+    Ogre::CompositorPassDef      *composite = nullptr;
+    /// The 1x1 exposure clear the tonemapping form samples as `fInvLumAvg`.
+    /// Null when the inset is not graded. Live: setPipExposure rewrites it.
+    Ogre::CompositorPassClearDef *exposure = nullptr;
 };
 
 /// Builds the inset's node + workspace definitions under `workspaceDef`.
 ///
-/// The shape is the spike's, and every line of it is a finding (see
-/// ViewPipDesc): quad fill (Load colour, so the main frame survives) then one
-/// scene pass with Load on colour, CLEAR on depth, shadows OFF and the overlay
-/// render queues excluded — an inset is "what the camera sees", not a second
-/// copy of the editor's gizmos, and the camera BODY that put the inset on
-/// screen must not appear inside it.
+/// The shape is the spike's plus Route C's local texture, and every line of it
+/// is a finding (see ViewPipDesc): the scene renders into a LOCAL texture sized
+/// `texWidthFactor` x `texHeightFactor` of the target (its own depth, cleared;
+/// shadows OFF; the overlay render queues excluded — an inset is "what the
+/// camera sees", not a second copy of the editor's gizmos, and the camera BODY
+/// that put the inset on screen must not appear inside it), and two quads then
+/// paint the window: the background swatch over the OUTER rect and the inset
+/// itself over the INNER one, both LOADing colour so the main frame survives.
+///
+/// When `pip.tonemap` is set both quads run `HDR/FinalToneMapping` — the SAME
+/// material, in the same fixed-exposure form, as the main chain's tonemap
+/// (POST_CHAIN_SPEC §14): the local texture is RGBA16F, a 1x1 exposure texture
+/// is cleared to the constant the shader multiplies by, and the bloom input the
+/// shader samples unconditionally is cleared to black. Grading the swatch too
+/// is deliberate: the letterbox bars must not disagree with the background
+/// inside the shot.
 void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDesc &pip,
+              float texWidthFactor, float texHeightFactor,
               std::vector<std::string> &nodeDefsOut, PipHandles &handlesOut);
+/// The colour a fixed-exposure clear must carry for `exposure` (chain units).
+/// The one conversion, shared by the main chain, the inset and every live
+/// rewrite of either — see the derivation at fixedInverseLuminance.
+Ogre::ColourValue fixedExposureColour(float exposure);
 /// Tears down what buildPip made, including its datablock.
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles);
@@ -2103,11 +2134,15 @@ public:
     // ---- The picture-in-picture inset (CAMERAS_SPEC §7.7) ------------------
     void setPip(const ViewPipDesc &d) override;
     const ViewPipDesc &pip() const override;
+    unsigned pipGeneration() const override;
     /// Is this view ENTITLED to draw an inset at all? On-screen always;
     /// offscreen only with ViewPipDesc::allowOffscreen. The determinism law's
     /// single gate, in the same shape as overlaysAllowed() and chainDesc()'s
     /// post-fx early-out.
     bool pipAllowed() const;
+    /// Whether the inset actually TONEMAPS: what the host asked for AND whether
+    /// this view's own chain grades at all (see the note at the definition).
+    bool pipTonemapEffective() const;
     /// Is this view ENTITLED to draw the process HUD at all? On-screen always;
     /// offscreen only with ViewOverlayDesc::allowOffscreen. Decided in the same
     /// one place as the post chain's offscreen guarantee (chainDesc()), and
@@ -2193,6 +2228,9 @@ public:
     /// Per-frame maintenance of everything derived from the TARGET's size:
     /// the letterbox rectangle and the inset's. Free when neither is in use.
     void applyLetterboxAndPip();
+    /// Pushes PostFxDesc::exposure into the FIXED tonemap's clear (§14). Live;
+    /// never a rebuild, and a no-op unless the chain has the fixed form.
+    void applyFixedExposure();
     /// Writes the letterbox's inner rectangle onto the chain's inset passes and
     /// the bar/background colours (CAMERAS_SPEC §7.4). Live; never a rebuild.
     void applyLetterbox();
@@ -2262,6 +2300,12 @@ private:
     /// The camera goes LAST: a pass holds a raw Camera* and destroying it first
     /// segfaults on the next frame (spike T6).
     void destroyPip();
+    /// The inset's LOCAL texture size as FRACTIONS of the target (Route C).
+    /// Derived from the inner rect — i.e. from the requested rectangle and, if
+    /// the camera constrains its aspect, from the letterbox inside it — so the
+    /// texture has the shape the composite quad will stretch it into and a
+    /// square in the world stays square in the inset.
+    void pipTexFactors(float &widthFactor, float &heightFactor) const;
 
 
     Ogre::Root                *mRoot;
@@ -2305,6 +2349,20 @@ private:
     std::string                mPipWorkspaceDef;
     std::vector<std::string>   mPipNodeDefs;
     chain::PipHandles          mPipHandles;
+    /// The fractions the inset's local texture was BUILT with, and the shape
+    /// flag it was built for. applyPip compares the size these produce at the
+    /// current target size against the size the current rect wants, IN WHOLE
+    /// PIXELS: equal means the texture is already right, which is what keeps a
+    /// steady inset (and a plain window resize — the texture is a fraction, so
+    /// it follows one for free) from rebuilding anything per frame.
+    float                      mPipTexWidthFactor = 0.0f, mPipTexHeightFactor = 0.0f;
+    bool                       mPipTexTonemap = false;
+    /// The TARGET size the inset was built against. A change means the window
+    /// resized, and the inset is rebuilt for it — see applyPip for the
+    /// validation error that made this necessary rather than tidy.
+    unsigned                   mPipTargetW = 0, mPipTargetH = 0;
+    /// See View::pipGeneration.
+    unsigned                   mPipGeneration = 0;
     /// What chain::build handed back for THIS view's main chain — today the
     /// letterbox's inset passes and its background swatch.
     chain::ChainHandles        mChainHandles;

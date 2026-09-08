@@ -79,6 +79,14 @@ public:
     /// in `desc.camera` from the document node, the same translation
     /// applyCamera does for the main view.
     ///
+    /// It also fills in the inset's GRADE — whether the shot is tonemapped and
+    /// at what exposure — by laying the PIPPED camera's own exposure and post
+    /// overrides over the world's description (CAMERA_LENS_SPEC §4/§5's
+    /// substitution, over the world value applyEnvironment recorded). So a
+    /// camera's own look appears in its preview and NOWHERE ELSE: nothing here
+    /// touches the view's post description. Call applyEnvironment first (hosts
+    /// already do, every frame) so the world's half is current.
+    ///
     /// A null camera or `desc.enabled == false` switches the inset OFF, which
     /// the engine guarantees is byte-exact (no workspace, no trace). Cheap to
     /// call every frame: an unchanged value never reaches the backend.
@@ -777,6 +785,14 @@ private:
     /// not as a dangling pointer.
     std::vector<std::pair<const jahshaka::engine::View *, QWeakPointer<iris::CameraNode>>>
         mDrivingCameras;
+    /// THE WORLD'S post description as applyEnvironment last built it, BEFORE
+    /// the driving camera was layered over it. The picture-in-picture inset is
+    /// a different camera's shot, so it grades from this and lays the PIPPED
+    /// camera over it (applyPip) — inheriting the view's description instead
+    /// would give the pipped camera whatever exposure the camera driving the
+    /// MAIN view happened to ask for. Scene-level, so one value serves every
+    /// view: the fields it carries (hdr, exposure) come from the document.
+    jahshaka::engine::PostFxDesc mWorldPostFx;
     /// Which sky the engine currently shows, and a 64-bit hash of the values it
     /// was built from. Two fields rather than one string because applySky
     /// DISPATCHES on the kind (and the realistic-bake debounce asks "was the
