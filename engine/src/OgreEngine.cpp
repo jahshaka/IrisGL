@@ -1310,6 +1310,14 @@ void OgreEngine::ensureHlms() {
         mRoot->getHlmsManager()->registerHlms(
             OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
+    // The pass-buffer listener needs to know when an irradiance field is bound
+    // — not for the DDGI intensity (that is per scene) but for the FOUR-FLOAT
+    // ALIGNMENT PAD that corrects the size upstream's IrradianceField block
+    // under-reports (FogHlmsListener::ifdAlignFloats says why). Asking HlmsPbs
+    // itself, rather than mirroring the state in a flag of ours, is what makes
+    // the pad and the shader property that declares it impossible to disagree.
+    FogHlmsListener::setPbs(
+        static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)));
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;
     // Scene::setAmbient converts the flat/hemisphere pair exactly). The mode is a
     // property of the HlmsPbs INSTANCE, not of a scene, so it cannot be chosen
@@ -1457,6 +1465,14 @@ void OgreEngine::registerCommonMaterials() {
                                "Compute/Tools", "Compute/Tools/Any", "Compute/Tools/GLSL",
                                "Compute/Tools/HLSL", "Compute/Tools/Metal",
                                "Compute/Algorithms/IBL",
+                               // DDGI's five compute jobs (GI_UNIFIED_SPEC §4
+                               // P1). ONE location, flat folder — the .any
+                               // pieces sit beside the per-syntax shaders, like
+                               // IBL's. `IrradianceFields/Visualizer` is staged
+                               // beside it but deliberately NOT registered: it
+                               // is upstream's debug probe-sphere material and
+                               // we never draw it.
+                               "Compute/Algorithms/IrradianceFields",
                                // Post chain (POST_CHAIN_SPEC.md §4.1). The Vulkan
                                // (glslvk) programs source the SAME .glsl files as
                                // the GL ones, so GLSL is the folder that matters;

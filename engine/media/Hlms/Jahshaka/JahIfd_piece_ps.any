@@ -1,0 +1,146 @@
+// Jahshaka's DDGI diffuse INTENSITY — the one thing upstream's IrradianceField
+// has no knob for (GI_UNIFIED_SPEC.md §4 P1 / addendum item 2).
+//
+// WHY THIS FILE EXISTS. Binding an IrradianceField makes HlmsPbs set
+// `VctDisableDiffuse` (OgreHlmsPbs.cpp:1784-1788): DDGI does not ADD to voxel
+// cone tracing's diffuse, it REPLACES it — and the P0 spike measured the
+// replacement at ~13x dimmer than the (over-bright, leak-prone) VCT diffuse it
+// takes over from. Every scene therefore gets markedly darker the moment the
+// field binds, and `IrradianceFieldSettings` carries nothing to scale it with.
+// So the scalar is OURS, applied at the last line of upstream's own piece, and
+// it rides the pass buffer (a const-buffer write, never a shader rebuild) so
+// the author can turn the dial without a recompile.
+//
+// WHY A WHOLE-PIECE COPY RATHER THAN A HOOK. There is no hook: the insert order
+// is `applyVoxelConeTracing` -> `applyIrradianceField` -> `forwardPlusDoCubemaps`
+// (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any:911-913), and the field's
+// contribution is accumulated into `pixelData.envColourD` inside the piece's
+// last statement. Anything that ran later would scale the probe/cubemap terms
+// too. The Hlms parser rejects a duplicate piece NAME, so the pattern is the one
+// JahFog_piece_vs_piece_ps.any already uses for `DoAtmosphereNprSky`: UNDEF the
+// piece, then define it again — from a library folder that is loaded LAST
+// (OgreEngine::ensureHlms appends Hlms/Jahshaka after upstream's Pbs paths, so
+// the original has been collected by the time this file is parsed).
+//
+// THE BODY IS UPSTREAM'S, VERBATIM, save the final multiply. It is duplicated
+// code and that is a maintenance cost we pay deliberately, guarded rather than
+// trusted: irisgl/engine/CMakeLists.txt hashes
+// Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any at configure time and
+// FAILS the configure when upstream's body changes, so a pin bump cannot leave
+// this copy silently stale (re-sync the body, re-apply the multiply, update the
+// hash). No Ogre patch is involved anywhere in this route.
+//
+// CAUTION, the same one JahFog and JahVct carry, and this file cost the lane a
+// full test run by ignoring it: the Hlms parser does NOT respect // comments —
+// an at-directive written inside a comment is EXECUTED, and a stray parenthesis
+// after one is a syntax error that silently drops every definition in the file
+// (the shader still compiles; it just uses upstream's piece, so the symptom is
+// "my override does nothing"). Every directive is therefore named in WORDS
+// above, never written with its at-sign.
+//
+// SCOPE: the whole file is gated on the `irradiance_field` property, which
+// HlmsPbs sets only while a field is bound. With no field bound (every scene
+// that has not opted in, which in P1 is all of them by default) not one line of
+// this file reaches the generated shader, and undefining a piece that was never
+// defined is a no-op.
+
+@property( irradiance_field )
+
+@undefpiece( applyIrradianceField )
+@piece( applyIrradianceField )
+
+	// ifdGridPos in range [0; mNumProbes)
+	float3 ifdGridPos =
+		transformPos3( inPs.pos.xyz, //
+					   passBuf.irradianceField.viewToIrradianceFieldRow0,
+					   passBuf.irradianceField.viewToIrradianceFieldRow1,
+					   passBuf.irradianceField.viewToIrradianceFieldRow2 );
+
+	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
+	float3 ifdSpaceNormal = normalize( transformDir3( pixelData.normal, //
+									   passBuf.irradianceField.viewToIrradianceFieldRow0,
+									   passBuf.irradianceField.viewToIrradianceFieldRow1,
+									   passBuf.irradianceField.viewToIrradianceFieldRow2 ) );
+
+	// ifdAlpha is how far from the floor( ifdGridPos ). on [0, 1] for each axis.
+	float3 ifdAlpha = saturate( fract( ifdGridPos ) );
+
+	float3 ifdIrradiance = float3( 0, 0, 0 );
+	float sumIfdWeight = 0;
+
+	// Iterate over adjacent probe cage
+	for( int i = 0; i < 8; ++i )
+	{
+		// Compute the offset grid coord and clamp to the probe grid boundary
+		// Offset = 0 or 1 along each axis
+		float3 probeOffset = float3( int3( i, i >> 1, i >> 2 ) & int3( 1, 1, 1 ) );
+		float3 probeOrigin = ifdGridProbeOrigin + probeOffset;
+
+		IrfProbeIndex probeIdx =
+			getProbeIdx( probeOrigin, passBuf.irradianceField.numProbesAggregated.xy );
+
+		float3 dir = probeOrigin - ifdGridPos;
+		float r = length( dir );
+		dir *= 1.0 / r;
+
+		// Ignore probes that are behind us, but don't black them out completely
+		// as detailed surface may otherwise have very few probes ppointing at it
+		float weight;
+		weight = dot( dir, ifdSpaceNormal ) * 200.0;
+		weight = saturate( weight ) + 0.2;
+
+		// Compute the trilinear weights based on the grid cell vertex to smoothly
+		// transition between probes. Avoid ever going entirely to zero because that
+		// will cause problems at the border probes.
+		// We're using 1-a when offset = 0 and a when offset = 1.
+		float3 trilinear;
+		trilinear.x = probeOffset.x < 1 ? ( 1.0 - ifdAlpha.x ) : ifdAlpha.x;
+		trilinear.y = probeOffset.y < 1 ? ( 1.0 - ifdAlpha.y ) : ifdAlpha.y;
+		trilinear.z = probeOffset.z < 1 ? ( 1.0 - ifdAlpha.z ) : ifdAlpha.z;
+
+		// Visibility (Chebyshev)
+		float2 ifdDepthUV = getIrradianceFieldXY(
+			-dir, probeIdx, passBuf.irradianceField.depthBorderedRes,
+			passBuf.irradianceField.depthFullWidth, passBuf.irradianceField.depthInvFullResolution );
+		float2 temp = OGRE_SampleLevel( ifdDepth, ifdSampler, ifdDepthUV, 0 ).xy;
+		float mean = temp.x;
+		float meanSq = temp.y;
+		if( r > mean )
+		{
+			float variance = abs( mean * mean - meanSq ) + 1e-6;
+			float dev = ( r - mean );
+			float chebyshevWeight = variance / ( variance + dev * dev );
+			chebyshevWeight = max( chebyshevWeight * chebyshevWeight * chebyshevWeight, 0.0 );
+
+			weight *= chebyshevWeight;
+		}
+
+		// Avoid zero weight
+		weight = max( 0.000001, weight );
+
+		const float crushThreshold = 0.2;
+		if (weight < crushThreshold) {
+			weight *= weight * weight * (1.0 / (crushThreshold*crushThreshold));
+		}
+
+		weight *= trilinear.x * trilinear.y * trilinear.z;
+
+		float2 ifdColourUV = getIrradianceFieldXY(
+			ifdSpaceNormal, probeIdx, passBuf.irradianceField.irradBorderedRes,
+			passBuf.irradianceField.irradFullWidth, passBuf.irradianceField.irradInvFullResolution );
+
+		float3 irrColour = OGRE_SampleLevel( ifdColour, ifdSampler, ifdColourUV, 0 ).xyz;
+		ifdIrradiance += irrColour * weight;
+		sumIfdWeight += weight;
+	}
+
+	// THE ONE LINE THAT IS NOT UPSTREAM'S. Upstream writes
+	//     pixelData.envColourD.xyz += ifdIrradiance * ( 1.0 / sumIfdWeight );
+	// and we scale that by jahIfd.x, the DDGI diffuse intensity the host writes
+	// into the pass buffer (JahshakaEngine's FogHlmsListener; the default is
+	// calibrated against the pre-DDGI VCT diffuse, GiParams::ddgiIntensity).
+	// 1.0 reproduces upstream exactly.
+	pixelData.envColourD.xyz += ifdIrradiance * ( passBuf.jahIfd.x / sumIfdWeight );
+@end
+
+@end

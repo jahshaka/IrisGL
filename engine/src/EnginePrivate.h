@@ -73,6 +73,7 @@
 #include <InstantRadiosity/OgreInstantRadiosity.h>
 #include <Vct/OgreVctVoxelizer.h>
 #include <Vct/OgreVctLighting.h>
+#include <IrradianceField/OgreIrradianceField.h>
 #include <Cubemaps/OgreParallaxCorrectedCubemapAuto.h>
 #include <Cubemaps/OgrePccPerPixelGridPlacement.h>
 // Fog rides Ogre's Atmosphere component: we take its exponential fog + brightness
@@ -843,9 +844,9 @@ struct FogState {
 
 class FogHlmsListener final : public Ogre::HlmsListener {
 public:
-    Ogre::uint32 getPassBufferSize(const Ogre::CompositorShadowNode *, bool /*casterPass*/,
+    Ogre::uint32 getPassBufferSize(const Ogre::CompositorShadowNode *, bool casterPass,
                                    bool, Ogre::SceneManager *) const override;
-    float *preparePassBuffer(const Ogre::CompositorShadowNode *, bool, bool,
+    float *preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
                              Ogre::SceneManager *sceneManager, float *passBufferPtr) override;
 
     /// The per-scene fog table. OgreScene::setFog registers, the scene teardown
@@ -871,9 +872,46 @@ public:
     static void  setSceneTime(const Ogre::SceneManager *sm, float seconds);
     static float sceneTime(const Ogre::SceneManager *sm);
 
+    /// THE DDGI DIFFUSE INTENSITY (GI_UNIFIED_SPEC.md §4 P1), riding the same
+    /// pass-buffer extension for the same reason the clock does: it is read by
+    /// a piece of ours inside the PIXEL shader, once per pass, and it must be
+    /// changeable without a shader rebuild.
+    ///
+    /// It exists because binding an IrradianceField sets `VctDisableDiffuse`:
+    /// DDGI REPLACES voxel-cone diffuse rather than adding to it, ~13x dimmer
+    /// (P0 spike §3), and upstream's IrradianceFieldSettings has no intensity
+    /// knob. media/Hlms/Jahshaka/JahIfd_piece_ps.any multiplies upstream's
+    /// accumulated irradiance by this. 1.0 = upstream's own brightness.
+    /// Defaults to GiParams::ddgiIntensity's default so a scene that never
+    /// pushes one still reads a sane value.
+    static void  setIfdIntensity(const Ogre::SceneManager *sm, float intensity);
+    static float ifdIntensity(const Ogre::SceneManager *sm);
+
+    /// THE IRRADIANCE-FIELD PASS-BUFFER ALIGNMENT, and it is a correctness fix
+    /// rather than a feature — see the long note on the definition
+    /// (OgreFog.cpp). Upstream's `IrradianceField::getConstBufferSize()`
+    /// UNDER-REPORTS its own block by one float4: it declares 20 floats and
+    /// `fillConstBufferData` writes 24, which is also what the shader's
+    /// `IrradianceField` struct declares. HlmsPbs advances the write pointer by
+    /// the reported 20, so whatever this listener writes next lands FOUR FLOATS
+    /// EARLY, on top of the field's own irradiance-atlas parameters. The fix is
+    /// four floats of leading padding whenever a field is bound to a non-caster
+    /// pass, matched by a padding member in the shader piece.
+    ///
+    /// Global, not per scene, because the binding is: HlmsPbs is a singleton
+    /// and sets `irradiance_field` for EVERY scene's pass while any field is
+    /// bound. The listener therefore asks HlmsPbs itself rather than keeping a
+    /// mirror that could drift.
+    static void setPbs(Ogre::HlmsPbs *pbs);
+
 private:
+    /// 4 while a field is bound and this is not a shadow-caster pass (the two
+    /// conditions HlmsPbs itself uses to emit the block), 0 otherwise.
+    static Ogre::uint32 ifdAlignFloats(bool casterPass);
+    static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
     static std::map<const Ogre::SceneManager *, float>    sSceneTime;  // render thread only
+    static std::map<const Ogre::SceneManager *, float>    sIfdIntensity;  // render thread only
 };
 extern FogHlmsListener gFogListener;
 
@@ -1643,6 +1681,45 @@ private:
     /// FREE SPACE from computeProbeRegion, NOT the voxel volume — and binds it
     /// with distance-blended VCT specular (PccVctMinDistance).
     void buildPcc(const Ogre::Aabb &region);
+
+    // ---- DDGI: the IrradianceField arm (GI_UNIFIED_SPEC.md §4 P1) ---------
+    // Built INSIDE the VCT arm and owned by it: the field cone-traces
+    // mVctLighting's volume, holds a raw pointer to it, and binds its voxel
+    // textures on every update — so it lives strictly inside that pointer's
+    // lifetime (P0 spike §8) and dies FIRST in teardownVct.
+
+    /// True when this scene should have a field: the toggle resolves on AND the
+    /// mode is one that produces a VctLighting to feed it.
+    bool ddgiWanted() const;
+    /// Creates + initializes the field over the CURRENT voxel volume, converges
+    /// it in one dispatch, binds it to HlmsPbs and takes the process-wide
+    /// binding. No-op (and unbinds) when ddgiWanted() is false. Called at the
+    /// end of rebuildVct and of refreshVctFast — a VCT (re)build invalidates the
+    /// field entirely, which upstream answers with re-initialize, not reset.
+    void buildIrradianceField();
+    /// Unbinds (if this scene owns the binding) and destroys the field. Called
+    /// first in teardownVct, and by buildIrradianceField before it rebuilds.
+    void teardownIrradianceField();
+    /// Spends the frame's convergence budget on an in-flight re-converge.
+    /// No-op when the field is converged, when there is no field, or when the
+    /// update budget is 0 (paused). Called once a frame from updateGiTracking.
+    void updateIrradianceField();
+    /// Per-axis PROBE COUNTS for a field over `size`, each a power of two
+    /// (upstream only ASSERTS that, and the assert is compiled out of our
+    /// release engine) and together kIfdTotalProbes. Fitted from the volume's
+    /// ASPECT: upstream's 32x8x32 default bands visibly on a room-shaped volume
+    /// because the Y spacing is twice the X/Z one (P0 spike §9b).
+    static void ifdProbeCounts(const Ogre::Vector3 &size, Ogre::uint32 outCounts[3]);
+    /// The probes-per-frame a re-converge may spend, given the update budget —
+    /// clamped to the engine's dispatch rule. THE CLAMP IS MANDATORY, not
+    /// defensive: `numRays = ppf * depthRes^2 * raysPerPixel` under
+    /// `threadsPerGroup` dispatches ZERO work groups, which throws out of
+    /// HlmsCompute::compileShader and terminates the process, and the assert
+    /// that would have caught it is compiled out of a release-built Ogre
+    /// (P0 spike §4). Returns 0 for a paused budget, meaning "do not call
+    /// update() at all".
+    static Ogre::uint32 ifdProbesPerFrame(const Ogre::IrradianceFieldSettings &settings,
+                                          int updateBudget, Ogre::uint32 totalProbes);
     /// Clamps every probe's fitted PARALLAX SHAPE into `region`, per axis
     /// (FIX WAVE defect A2). buildEnd's 1x1 averaged depth readback overshoots
     /// badly whenever anything stands between a probe and the wall behind it,
@@ -1809,6 +1886,22 @@ private:
     Ogre::VctLighting                *mVctLighting  = nullptr;
     Ogre::ParallaxCorrectedCubemapAuto *mPcc        = nullptr;
     Ogre::Camera                     *mGiCamera     = nullptr;   // PCC build + tracking
+    /// The DDGI field, owned, null unless GiParams::ddgi resolved on over a
+    /// live VCT arm. Dies BEFORE mVctLighting (it holds that pointer).
+    Ogre::IrradianceField            *mIfd          = nullptr;
+    /// Convergence bookkeeping. `IrradianceField` counts processed probes
+    /// internally and exposes nothing, so the engine keeps its own count —
+    /// which it needs anyway to know when a re-converge has finished and to
+    /// keep every dispatch a whole multiple of the batch size (the last batch
+    /// of an uneven split is where the zero-work-group abort lives).
+    Ogre::uint32                      mIfdTotalProbes     = 0;
+    Ogre::uint32                      mIfdProbesDone      = 0;
+    Ogre::uint32                      mIfdProbesPerFrame  = 0;
+    /// The smallest batch that still dispatches at least one compute work
+    /// group. Below it, `HlmsCompute::compileShader` throws at frame time and
+    /// nothing catches it (spike §4) — so it is a floor the engine enforces,
+    /// not a number it reports.
+    Ogre::uint32                      mIfdMinProbes       = 0;
     bool mRefractionsActive = false;   // see setRefractionsActive
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
