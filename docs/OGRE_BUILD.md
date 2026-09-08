@@ -215,7 +215,31 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the rotation noise — a dithered sky, ~45% too dark, under any chain with SSAO.
     Ogre's own tutorial scene has no sky, which is why upstream never saw it.
 
+    (0012-0018 landed with later lanes — SMAA per-delegate viewport size, the FIFO
+    latest-ready present mode, the overlay TextArea font load, the atomic id
+    generator, the Forward+ light-collection warm-up, PCC hybrid probe weighting
+    and the pass-light range fade. Each patch file documents itself.)
+
+19. **0019-ssao-orthographic-position-reconstruction** — the same class of defect
+    as 0011 and in the same three shaders: `getScreenSpacePos` (and the two blurs'
+    `getLinearDepth`) assume a PERSPECTIVE frustum. The quad's interpolated
+    view-space far corner is a ray only for one — OgreFrustum.cpp:884 takes
+    ratio = 1 for PT_ORTHOGRAPHIC, so an ortho frustum's far corners have the same
+    xy as its near ones — and `getProjectionParamsAB` returns a pair for which
+    `B / (d - A)` is 1/t rather than t (OgreFrustum.cpp:128-141). Under an
+    orthographic camera the reconstructed positions therefore MOVE WITH THE
+    CAMERA: pan an editor's top/front/side view and the contact shadowing crawls
+    over a scene that is not moving. The patch branches on a `jahOrthoParams`
+    uniform the host pushes from the camera's projection type
+    (chain::updateSsao); the perspective path is byte-for-byte unchanged. Jahshaka
+    fixed the identical defect in its own SSR marcher at the same time
+    (irisgl/engine/media/Hlms/Jahshaka/JahSsrRayMarch_ps.glsl), which is not a
+    patch because that shader is ours.
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011) need no Ogre rebuild — the Studio build stages the media
-straight from the submodule — but the patch loop must have run in that tree.
+patches (0003/0009/0011/0019) need no Ogre rebuild — the Studio build stages the
+media straight from the submodule — but the patch loop must have run in that tree,
+and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
+`jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant
+raises on an unknown name), which is the loud failure that stale media deserves.

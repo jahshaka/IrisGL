@@ -1,0 +1,114 @@
+diff --git a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl
+--- a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl
+@@ -21,6 +21,11 @@
+ 	uniform vec2 noiseScale;
+ 	uniform mat4 projection;
+ 
++	// Jahshaka local patch (orthoview lane, ogre-patch 0019): x = 1 when the
++	// camera is ORTHOGRAPHIC. See the branch below - none of this file's
++	// position reconstruction is valid under an ortho frustum without it.
++	uniform vec4 jahOrthoParams;
++
+ 	uniform vec4 sampleDirs[64];
+ vulkan( }; )
+ 
+@@ -30,6 +35,36 @@
+ vec3 getScreenSpacePos(vec2 uv, vec3 cameraNormal)
+ {
+ 	float fDepth = texture( vkSampler2D( depthTexture, samplerState0 ), uv ).x;
++
++	// Jahshaka local patch (upstream-reportable): AN ORTHOGRAPHIC CAMERA
++	// RECONSTRUCTS DIFFERENTLY, and without this branch it reconstructs a
++	// position that MOVES WITH THE CAMERA.
++	//
++	// `cameraNormal` is the quad's interpolated view-space far corner
++	// (VIEW_SPACE_CORNERS). For a perspective frustum that is a RAY through
++	// the pixel, so scaling it by the depth fraction lands on the surface. For
++	// an orthographic one it is not a ray at all: OgreFrustum.cpp:884 takes
++	// ratio = 1, so the far corners have the SAME xy as the near ones and that
++	// xy already IS this pixel's view-space xy, at every depth. Scaling it by
++	// depth makes the reconstructed position slide as the camera pans - which
++	// in an editor's top/front/side view reads as the contact shadowing (and,
++	// through the same defect in screen-space reflections, the highlights)
++	// crawling over a scene that is not moving.
++	//
++	// The depth pair is the other half. `Frustum::getProjectionParamsAB`
++	// returns a pair for which `B / (d - A)` is 1/t for an ortho frustum
++	// (OgreFrustum.cpp:128-141), and MINUS 1/t without reverse depth, so the
++	// expression is inverted and taken absolute - reverse-Z safe by
++	// construction. The host multiplies B by the far plane for an ortho camera
++	// exactly as it divides it for a perspective one, so both branches hand
++	// back the same [0,1] fraction of the far plane and everything downstream
++	// (the range check, the sample comparison, the blur weights) is unchanged.
++	if( jahOrthoParams.x > 0.5 )
++	{
++		float orthoDepth = abs( (fDepth - projectionParams.x) / projectionParams.y );
++		return vec3( cameraNormal.xy, cameraNormal.z * orthoDepth );
++	}
++
+ 	float linearDepth = projectionParams.y / (fDepth - projectionParams.x);
+ 	return (cameraNormal * linearDepth);
+ }
+diff --git a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurH_ps.glsl b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurH_ps.glsl
+--- a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurH_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurH_ps.glsl
+@@ -15,6 +15,11 @@
+ vulkan( layout( ogre_P0 ) uniform Params { )
+ 	uniform vec4 texelSize;
+ 	uniform vec2 projectionParams;
++
++	// Jahshaka local patch (orthoview lane, ogre-patch 0019): x = 1 when the
++	// camera is ORTHOGRAPHIC. See the branch below - none of this file's
++	// position reconstruction is valid under an ortho frustum without it.
++	uniform vec4 jahOrthoParams;
+ vulkan( }; )
+ 
+ const float offsets[9] = float[9]( -8.0, -6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0, 8.0 );
+@@ -25,6 +30,15 @@
+ float getLinearDepth(vec2 uv)
+ {
+ 	float fDepth = texture( vkSampler2D( depthTexture, samplerState ), uv ).x;
++	// Jahshaka local patch (orthoview lane): the ORTHO pair is the reciprocal
++	// of this one - same reasoning, and the same two lines, as
++	// SSAO_HS_ps.glsl's getScreenSpacePos. It matters HERE because the blur
++	// weight is 1/|depth difference|: read the wrong way round, an ortho
++	// frame's differences collapse toward zero, every weight becomes equal,
++	// and the depth-aware blur silently degrades into a box blur that smears
++	// the occlusion across every silhouette.
++	if( jahOrthoParams.x > 0.5 )
++		return abs( (fDepth - projectionParams.x) / projectionParams.y );
+ 	float linearDepth = projectionParams.y / (fDepth - projectionParams.x);
+ 	return linearDepth;
+ }
+diff --git a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurV_ps.glsl b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurV_ps.glsl
+--- a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurV_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_BlurV_ps.glsl
+@@ -14,6 +14,11 @@
+ vulkan( layout( ogre_P0 ) uniform Params { )
+ 	uniform vec4 texelSize;
+ 	uniform vec2 projectionParams;
++
++	// Jahshaka local patch (orthoview lane, ogre-patch 0019): x = 1 when the
++	// camera is ORTHOGRAPHIC. See the branch below - none of this file's
++	// position reconstruction is valid under an ortho frustum without it.
++	uniform vec4 jahOrthoParams;
+ vulkan( }; )
+ 
+ const float offsets[9] = float[9]( -8.0, -6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0, 8.0 );
+@@ -24,6 +29,15 @@
+ float getLinearDepth(vec2 uv)
+ {
+ 	float fDepth = texture( vkSampler2D( depthTexture, samplerState ), uv ).x;
++	// Jahshaka local patch (orthoview lane): the ORTHO pair is the reciprocal
++	// of this one - same reasoning, and the same two lines, as
++	// SSAO_HS_ps.glsl's getScreenSpacePos. It matters HERE because the blur
++	// weight is 1/|depth difference|: read the wrong way round, an ortho
++	// frame's differences collapse toward zero, every weight becomes equal,
++	// and the depth-aware blur silently degrades into a box blur that smears
++	// the occlusion across every silhouette.
++	if( jahOrthoParams.x > 0.5 )
++		return abs( (fDepth - projectionParams.x) / projectionParams.y );
+ 	float linearDepth = projectionParams.y / (fDepth - projectionParams.x);
+ 	return linearDepth;
+ }

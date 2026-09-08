@@ -28,6 +28,14 @@
 //  * The G-buffer normal is right-handed (HlmsPbs writes `pixelData.normal`
 //    straight out), so its z is negated on the way in. Same line, same reason,
 //    as the sample's.
+//  * THE PROJECTION IS NOT ASSUMED PERSPECTIVE (orthoview lane). Everything
+//    above describes a perspective frustum, where the interpolated corner is a
+//    RAY and depth is a reciprocal. Under an ORTHOGRAPHIC camera neither is
+//    true: the corner is a constant view-space offset and depth is linear in
+//    distance. `orthoParams.x` selects between the two, and the two places it
+//    matters are the depth helper and the origin. Without the branch the ray
+//    origin collapses and the whole reflection slides with the camera in a
+//    top/front/side view — see the block comments at each site.
 //  * DEPTH LINEARIZATION IS REVERSE-Z SAFE. `projectionParams` comes from
 //    Camera::getProjectionParamsAB(), which branches on
 //    RenderSystem::isReverseDepth() (OgreFrustum.cpp:108) — Vulkan's default
@@ -65,13 +73,33 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 rayParams;					// x maxDistance, y thickness, z steps, w roughness cutoff
 	uniform vec4 rayBufferRes;				// auto viewport_size: xy = this target's pixels
 	uniform mat4 viewToTextureSpaceMatrix;
+	// x = 1 for an ORTHOGRAPHIC camera, 0 otherwise; y = the far plane, which
+	// is the scale that turns the normalized corner back into view-space xy.
+	// chain::updateSsr pushes both every frame; see the ORTHOGRAPHIC note above.
+	uniform vec4 orthoParams;
 vulkan( }; )
 
 vulkan_layout( location = 0 )
 out vec4 fragColour;
 
-float jahLinearDepth( float d )
+// VIEW-SPACE DISTANCE FROM THE DEPTH BUFFER, both projections.
+//
+// PERSPECTIVE is the reciprocal form documented at the top of this file:
+// `B / (d - A)` is metres with and without reverse Z.
+//
+// ORTHOGRAPHIC needs its own line because an ortho depth buffer is LINEAR in
+// distance, and `Frustum::getProjectionParamsAB()` returns a different pair
+// entirely for it (OgreFrustum.cpp:128-141): B is -1/(far-near) and the same
+// expression evaluates to 1/t, the RECIPROCAL of the distance — and to MINUS
+// 1/t without reverse depth. Inverting it recovers t, and the absolute value is
+// what makes the line reverse-Z safe without the shader having to know which
+// convention the render system chose. No new uniform is needed for the depth:
+// the pair the chain already pushes carries it, once it is read the right way
+// round.
+float jahViewDistance( float d )
 {
+	if( orthoParams.x > 0.5 )
+		return abs( ( d - projectionParams.x ) / projectionParams.y );
 	return projectionParams.y / ( d - projectionParams.x );
 }
 
@@ -111,8 +139,34 @@ void main()
 	normalVS = normalize( normalVS );
 	normalVS.z = -normalVS.z;					// right-handed G-buffer -> left-handed march
 
-	const vec3 origin	 = inPs.cameraDir * jahLinearDepth( rawDepth );
-	const vec3 toSurface = normalize( origin );
+	// THE ORIGIN AND THE VIEW VECTOR, and the whole reason this shader knows
+	// what a projection is.
+	//
+	// PERSPECTIVE: `cameraDir` IS a ray (the far corner over the far plane), so
+	// scaling it by the distance lands on the surface, and the direction from
+	// the eye to that surface is the same vector normalized.
+	//
+	// ORTHOGRAPHIC: it is NOT a ray. An ortho frustum's far corners have the
+	// same xy as its near ones (OgreFrustum.cpp:884 takes ratio = 1 for
+	// PT_ORTHOGRAPHIC), so `cameraDir.xy * farPlane` is this pixel's view-space
+	// xy AT EVERY DEPTH and must not be scaled by distance — scaling it is
+	// exactly the defect this branch fixes: the reconstructed position slid
+	// with the camera, so the reflections slid with a pan of an axis view even
+	// though the projection had not moved. And every pixel of an ortho frame
+	// looks the same way, so the view vector is a constant, not a per-pixel
+	// direction. (In this left-handed space +z is away from the eye.)
+	vec3 origin;
+	vec3 toSurface;
+	if( orthoParams.x > 0.5 )
+	{
+		origin	  = vec3( inPs.cameraDir.xy * orthoParams.y, jahViewDistance( rawDepth ) );
+		toSurface = vec3( 0.0, 0.0, 1.0 );
+	}
+	else
+	{
+		origin	  = inPs.cameraDir * jahViewDistance( rawDepth );
+		toSurface = normalize( origin );
+	}
 	const vec3 rayDir	 = reflect( toSurface, normalVS );
 
 	const float maxDistance = rayParams.x;
@@ -154,7 +208,7 @@ void main()
 		const float sceneRaw = jahSceneDepthAt( uv );
 		if( sceneRaw > 0.0 && sceneRaw < 1.0 )
 		{
-			const float sceneZ = jahLinearDepth( sceneRaw );
+			const float sceneZ = jahViewDistance( sceneRaw );
 			const float diff   = p.z - sceneZ;
 			// diff > 0: the ray is BEHIND the surface at that pixel, i.e. it
 			// crossed it. diff < thickness: the surface is not so far in front
@@ -177,7 +231,7 @@ void main()
 					const vec3	q	= origin + rayDir * mid;
 					const vec4	hq	= viewToTextureSpaceMatrix * vec4( q, 1.0 );
 					const vec2	quv = hq.xy / hq.w;
-					const float qz	= jahLinearDepth( jahSceneDepthAt( quv ) );
+					const float qz	= jahViewDistance( jahSceneDepthAt( quv ) );
 					if( q.z > qz )
 					{
 						hi = mid;
