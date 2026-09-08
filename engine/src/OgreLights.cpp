@@ -266,4 +266,31 @@ void shutdown() {
 }
 
 }  // namespace lightextras
+
+// ---------------------------------------------------------------------------
+// The shadow-atlas demand (SHADOW_TOOLING_SPEC.md §4.1)
+// ---------------------------------------------------------------------------
+// Counted from the BACKEND lights rather than from a mirrored description, so
+// it says what the renderer will actually be asked for. Two exclusions, both
+// structural: a directional light rides the PSSM block (it never competes for a
+// focused map) and an area light can never cast at all.
+//
+// One trap, recorded rather than worked around: while a shadow node sorts its
+// lights it temporarily flips `setCastShadows(false)` on every light fixed to a
+// static map and restores it afterwards (OgreCompositorShadowNode.cpp:512-519).
+// Reading getCastShadows() between those two lines would under-count. This runs
+// from renderOneFrame BEFORE Root::renderOneFrame, which is outside that window.
+unsigned OgreScene::countLocalShadowCasters(std::vector<NodeId> *out) const {
+    unsigned n = 0;
+    for (const auto &entry : mNodes) {
+        const Ogre::Light *l = entry.second.light;
+        if (!l || !l->getCastShadows()) continue;
+        const Ogre::Light::LightTypes t = l->getType();
+        if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) continue;
+        ++n;
+        if (out) out->push_back(entry.first);
+    }
+    return n;
+}
+
 }}}  // namespace jahshaka::engine::detail

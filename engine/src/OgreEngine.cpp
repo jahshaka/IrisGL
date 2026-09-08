@@ -526,6 +526,13 @@ void OgreEngine::renderOneFrame() {
         // request cannot complete; drainTextureStreaming is the same drain with
         // a no-progress deadline and a diagnostic. See its definition.
         drainTextureStreaming();
+        // HOW MANY SHADOW MAPS THIS FRAME NEEDS (SHADOW_TOOLING_SPEC.md §4.1).
+        // At the top of the frame, before any per-view work, because growing
+        // the atlas drops and recreates every workspace that names the shadow
+        // node — the same operation a Shadow Quality change performs, and the
+        // same place it is safe. Debounced and growth-only, so a steady scene
+        // pays one light-list walk per frame and nothing else.
+        deriveShadowMapCount();
         // ONE AUTHORITATIVE VIEW PER SCENE (FIX WAVE B2 / finding F7). The GI
         // tracker's work is per SCENE and stateful — it spends a per-frame probe
         // budget and carries the Forward+ range hysteresis — while `mViews` can

@@ -319,6 +319,19 @@ public:
     // 0 = Hard (PCF 2x2), 1 = Soft (4x4), 2 = VerySoft (6x6).
     int shadowFilterTier;
 
+    // HOW MANY POINT/SPOT LIGHTS MAY HOLD A SHADOW MAP AT ONCE
+    // (SPECS/SHADOW_TOOLING_SPEC.md §4.1). The renderer's atlas has room for a
+    // fixed number of focused maps and Ogre fills them with the casters closest
+    // to the camera, dropping the rest SILENTLY — which is why a scene with
+    // three shadow-casting lamps used to show two shadows, and which two
+    // changed as the camera moved.
+    //
+    // This is the CEILING the engine may grow to, not an allocation: the engine
+    // counts the scene's casters and steps the count {2, 4, 8, 16} up to this
+    // value. 0 = Auto, i.e. follow the World Mode tier's row, exactly as
+    // shadowResolution's 0 does.
+    int shadowMapBudget;
+
     // Particle simulation clock (PARTICLES_FX2_SPEC.md §10.3). 1 = real time,
     // 0 = frozen, 2 = double speed. The DOCUMENT owns the clock and the ENGINE
     // simulates — the same split the animation migration settled on.

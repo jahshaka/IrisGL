@@ -1611,6 +1611,62 @@ struct RenderStats {
     unsigned           forwardPlusOverBudget = 0;
 };
 
+/// One SHADOW-MAP SLOT, as the renderer currently holds it
+/// (`world.shadowStatus()`). A slot is a LIGHT's place in the atlas, not a
+/// texture rectangle: slot 0 is the directional light and owns all three PSSM
+/// splits, and slots 1..N are the focused point/spot maps, one light each.
+/// That is Ogre's own bookkeeping (CompositorShadowNode::getShadowCastingLights
+/// is indexed by light, not by map), and reporting anything else here would
+/// mean inventing a second numbering the engine does not use.
+struct ShadowMapInfo {
+    unsigned slot = 0;        ///< 0 = the directional/PSSM slot, 1..N the focused maps
+    NodeId   node = 0;        ///< the light occupying it, 0 when the slot is empty or foreign
+    bool     isStatic = false;///< tied to that light with a static map (LightDesc::shadowStatic)
+    bool     dirty = false;   ///< a static map scheduled to re-render on the next frame
+    bool     pssm = false;    ///< the directional slot (three splits) rather than a focused map
+};
+
+/// WHAT THE SHADOW ATLAS ACTUALLY IS, as opposed to what was asked for
+/// (SPECS/SHADOW_TOOLING_SPEC.md §7) — the shape `GiStatus` established: a
+/// readback of what the renderer ACHIEVED, cheap enough to poll, and the only
+/// way anything (a panel, a test, a script) can tell "this light has no shadow
+/// map" from "this light casts no shadow".
+///
+/// PROCESS-WIDE, like the resolution and the filter: there is one atlas.
+struct ShadowStatus {
+    /// False when there is no atlas to describe — a headless engine, or before
+    /// the first view exists. Every number below is then zero.
+    bool     live = false;
+    unsigned resolution = 0;     ///< the base size the layout derives from
+    unsigned maps = 0;           ///< TEXTURE rectangles in the atlas: pssmSplits + focusedMaps
+    unsigned pssmSplits = 0;     ///< always 3 here: one directional light, three splits
+    unsigned focusedMaps = 0;    ///< point/spot maps the atlas has room for
+    /// LIGHT slots — 1 (the directional/PSSM set) + focusedMaps, and the length
+    /// of `mapped`. Not the same number as `maps`: three of the rectangles
+    /// belong to one light.
+    unsigned lightSlots = 0;
+    /// Shadow-casting point/spot lights in the scenes being drawn — the demand
+    /// the count is derived from. `casters > focusedMaps` is the exceeded case.
+    unsigned casters = 0;
+    unsigned budget = 0;         ///< the EFFECTIVE ceiling (resolution-capped)
+    unsigned requestedBudget = 0;///< what the host asked for before the cap
+    unsigned atlasWidth = 0, atlasHeight = 0;
+    /// The atlas texture's own bytes (D32). NOT included: the point-light cube
+    /// scratch (1024^2 x 6 R32F + depth, ~48 MB), which is allocated once for
+    /// any point caster and does not grow with the map count.
+    unsigned long long atlasBytes = 0;
+    /// Every light SLOT the live shadow node holds, in slot order.
+    std::vector<ShadowMapInfo> mapped;
+    /// Shadow-casting point/spot lights with NO map this frame — the lights
+    /// whose shadows are silently missing. Empty is the healthy state.
+    std::vector<NodeId> unmapped;
+    /// Shadow-node passes the last frame executed, and how many of those were a
+    /// static map re-rendering. A static map that never dirties contributes
+    /// zero: that is what "renders once" means, measurably.
+    unsigned shadowPassesLastFrame = 0;
+    unsigned staticMapRendersLastFrame = 0;
+};
+
 /// A CENSUS of everything alive behind the boundary (fps audit F11).
 /// A POD, exactly like RenderStats — `app.engineObjects()` is this struct.
 ///

@@ -133,6 +133,9 @@ Scene::Scene()
     // shadow filter: -1 = Auto, i.e. the softest quality any shadow-casting
     // light asked for (the historical derivation)
     shadowFilterTier = -1;
+
+    // shadow-map budget: 0 = Auto, i.e. take the World Mode tier's value
+    shadowMapBudget = 0;
     particleTimeScale = 1.0f;
 
     // Post chain: everything off. A scene only gets effects when the user picks

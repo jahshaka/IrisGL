@@ -1360,6 +1360,20 @@ public:
     /// node, whose DEFINITION cannot be replaced while anything references it.
     /// Returns true when the arm was actually dropped (caller re-adds).
     bool dropPlanarForShadowRebuild();
+    /// The SAME contract for the hybrid's reflection-probe arm, and the fix for
+    /// SHADOW_TOOLING_SPEC.md risk R3: when the probe captures are SHADOWED,
+    /// every probe workspace instantiates JahshakaShadowNode too, so deleting
+    /// the definition under them leaves live CompositorShadowNodes pointing at
+    /// freed memory. Reproduced as a SEGV in Hlms::preparePassHashBase
+    /// (tests/shadow, mode r3) before this existed. Returns true when the arm
+    /// was dropped and the caller must call the recreate below.
+    bool dropGiForShadowRebuild();
+    void recreateGiAfterShadowRebuild();
+    /// This scene's shadow-casting POINT and SPOT lights — the input to the
+    /// derived focused-map count (SHADOW_TOOLING_SPEC.md §4.1). Directional
+    /// lights ride the PSSM block and area lights can never cast, so neither
+    /// counts. Fills `out` with the node ids when it is non-null.
+    unsigned countLocalShadowCasters(std::vector<NodeId> *out) const;
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -2524,12 +2538,27 @@ public:
     /// the same teardown order the engine's destructor honours.
     void setShadowResolution(unsigned pixels) override;
     unsigned shadowResolution() const override;
+    void setShadowMapBudget(unsigned maps) override;
+    unsigned shadowMapBudget() const override;
+    ShadowStatus shadowStatus() const override;
 
     /// THE ATLAS REBUILD (OgreShadow.cpp): swaps resolution and/or focused-map
     /// count by dropping every workspace that instantiates the shadow node,
     /// replacing the definitions and re-creating them. Returns true when a
     /// rebuild actually happened.
     bool rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps);
+    /// The EFFECTIVE budget: what the host asked for (setShadowMapBudget),
+    /// clamped to the engine's hard maximum and to what the current
+    /// resolution can afford — 16 maps at 1024, 8 at 2048, 4 at 4096, 2 at
+    /// 8192 (SHADOW_TOOLING_SPEC.md §4.2's VRAM table; the packer would
+    /// otherwise hand back a silently smaller atlas at the big sizes).
+    unsigned effectiveShadowMapBudget() const;
+    /// Called once per frame from renderOneFrame: counts the shadow-casting
+    /// point/spot lights of the scenes being drawn, steps the allocation up
+    /// {2,4,8,16} and rebuilds the atlas when it has to grow. NEVER shrinks
+    /// within a session (owner decision D4) and never runs on a frame that
+    /// would be the first of a burst — see the definition.
+    void deriveShadowMapCount();
     /// What the atlas currently HAS: `mShadowMapCount` focused maps at
     /// `mShadowResolution`. Read by shadowStatus() and by the derivation.
     unsigned shadowMapCount() const { return mShadowMapCount; }
@@ -2649,6 +2678,29 @@ private:
     /// exactly, so a scene with at most two shadow casters renders the same
     /// bytes it always did (SHADOW_TOOLING_SPEC.md §4.1).
     unsigned        mShadowMapCount = 2;
+    /// What the host asked the atlas to be allowed to grow to. Eight is the
+    /// engine's own default because the tier that matters (High, 2048) is
+    /// eight; the resolution cap in effectiveShadowMapBudget() is what keeps a
+    /// 4096 or 8192 atlas from taking the number literally.
+    unsigned        mShadowMapBudget = 8;
+    /// Derivation bookkeeping: the count the last few frames asked for and how
+    /// many frames in a row have asked for it. A scene LOADS its lights over
+    /// many frames, and each rebuild drops and recreates every workspace that
+    /// names the shadow node — so the growth waits for the light list to settle
+    /// instead of hitching once per lamp.
+    unsigned        mDerivedShadowMapWant = 0;
+    unsigned        mDerivedShadowMapFrames = 0;
+    /// The last caster count reported as over budget, so the warning is logged
+    /// once per count and not once per frame.
+    unsigned        mWarnedShadowCasters = 0;
+    /// Frames the derived count must hold still before the atlas is rebuilt.
+    static constexpr unsigned kShadowDeriveDebounceFrames = 3u;
+    /// Filled by the shadow-pass counter (ShadowPassCounter): how many passes
+    /// the shadow node ran last frame, and how many of those were a STATIC map
+    /// re-rendering. The second number is what makes "a static map renders
+    /// once" a measurement rather than a claim.
+    unsigned        mShadowPassesLastFrame = 0;
+    unsigned        mStaticShadowRendersLastFrame = 0;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     /// EngineConfig::vsync, then whatever setVsync() last said. Read at every
     /// window creation (createView + the MSAA-recreate hook), so the pacing
@@ -2699,7 +2751,11 @@ private:
     /// which case it has already logged the pending textures by name.
     bool drainTextureStreaming(double *msSpent = nullptr);
     Ogre::AbiCookie mAbiCookie{};
-    std::string     mBackendName, mMediaDir, mLastError;
+    std::string     mBackendName, mMediaDir;
+    /// MUTABLE because the const readbacks (shadowStatus) report backend
+    /// failures through the same channel as everything else: a status call that
+    /// threw must not look like a status call that found nothing.
+    mutable std::string mLastError;
     ShaderCache     mShaderCache;
     /// The process's recorded permutation set (SHADER_CACHE_SPEC §2.7b).
     /// PROCESS-wide because Ogre's analyze() accumulates and its entries are

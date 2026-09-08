@@ -2052,4 +2052,32 @@ void OgreScene::teardownGi() {
     teardownVct();
 }
 
+// ---------------------------------------------------------------------------
+// The shadow-atlas rebuild's GI half (SHADOW_TOOLING_SPEC.md risk R3)
+// ---------------------------------------------------------------------------
+// A shadow-node DEFINITION cannot be deleted while anything instantiates it,
+// and the hybrid's shadowed probe captures do: each probe workspace names
+// JahshakaShadowNode (buildPcc above), so the probe arm holds live
+// CompositorShadowNodes exactly like a view's workspace does. Before this
+// existed, changing the shadow resolution with hybrid GI at high quality left
+// those instances pointing at freed definition memory and the next frame died
+// inside Hlms::preparePassHashBase — reproduced as a SEGV by tests/shadow's r3
+// mode. It could only ever fire on a Shadow Quality change; the derived map
+// count (which grows when a lamp is added) would have made it routine.
+//
+// The teardown is the whole VCT arm, not just the probes, because that is the
+// only honest granularity here: rebuildVct's own comment is the reason (raw
+// Item* and datablock-pointer caches make anything but from-scratch an aliasing
+// risk), and this path runs on a Shadow Quality change or an atlas growth — not
+// per frame.
+bool OgreScene::dropGiForShadowRebuild() {
+    if (!mPcc || !mPccShadowed) return false;
+    JAH_TRY { teardownVct(); } JAH_CATCH(mError, false);
+    return true;
+}
+
+void OgreScene::recreateGiAfterShadowRebuild() {
+    JAH_TRY { rebuildVct(); } JAH_CATCH(mError, );
+}
+
 }}}  // namespace jahshaka::engine::detail

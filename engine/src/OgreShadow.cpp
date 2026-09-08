@@ -405,6 +405,11 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps) {
         std::vector<OgreScene *> planarRebuilt;
         for (auto &s : mScenes)
             if (s->dropPlanarForShadowRebuild()) planarRebuilt.push_back(s.get());
+        // ...and the hybrid's SHADOWED probe captures, which instantiate the
+        // same node inside each probe workspace (risk R3 — a SEGV, reproduced).
+        std::vector<OgreScene *> giRebuilt;
+        for (auto &s : mScenes)
+            if (s->dropGiForShadowRebuild()) giRebuilt.push_back(s.get());
         if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
             cm->removeShadowNodeDefinition(OgreView::kShadowNodeName);
         if (cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
@@ -412,9 +417,179 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps) {
         createShadowNode();
         for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
         for (OgreScene *s : planarRebuilt) s->recreatePlanarAfterShadowRebuild();
+        for (OgreScene *s : giRebuilt) s->recreateGiAfterShadowRebuild();
         ok = true;
     } JAH_CATCH(mLastError, false);
     return ok;
+}
+
+// ---------------------------------------------------------------------------
+// The derived count (SHADOW_TOOLING_SPEC.md §4.1)
+// ---------------------------------------------------------------------------
+void OgreEngine::setShadowMapBudget(unsigned maps) {
+    const unsigned want = std::min(kMaxShadowMaps, std::max(2u, maps));
+    if (want == mShadowMapBudget) return;
+    mShadowMapBudget = want;
+    // Lowering the budget does NOT shrink an atlas that already grew (owner
+    // decision D4: never shrink in-session). It takes effect the next time the
+    // count would have grown, and shadowStatus() reports it immediately.
+    mDerivedShadowMapWant = 0;
+    mDerivedShadowMapFrames = 0;
+    mWarnedShadowCasters = 0;
+}
+
+unsigned OgreEngine::shadowMapBudget() const { return mShadowMapBudget; }
+
+unsigned OgreEngine::effectiveShadowMapBudget() const {
+    // The resolution cap. It is not a policy preference — it is the packer's
+    // arithmetic stated up front: at a 4096 base only 14 maps fit inside a
+    // 16384^2 texture at all, and 8 of them already cost 672 MB. The tiers the
+    // host ships (2/4/8/8 at 512/1024/2048/2048) sit inside these numbers, so
+    // the cap only ever bites a hand-set resolution.
+    unsigned cap = 2u;
+    if (mShadowResolution <= 1024u)      cap = kMaxShadowMaps;
+    else if (mShadowResolution <= 2048u) cap = 8u;
+    else if (mShadowResolution <= 4096u) cap = 4u;
+    return std::max(2u, std::min(std::min(mShadowMapBudget, cap), kMaxShadowMaps));
+}
+
+namespace {
+/// {2, 4, 8, 16}: the step allocation. Head-room is free in shader terms (Ogre
+/// keys its permutations on ACTIVE casters, OgreHlms.cpp:3268-3300), and each
+/// step costs one rebuild, so a scene that grows a lamp at a time pays at most
+/// three rebuilds for its whole session instead of one per lamp.
+unsigned stepShadowMapCount(unsigned casters) {
+    if (casters <= 2u) return 2u;
+    if (casters <= 4u) return 4u;
+    if (casters <= 8u) return 8u;
+    return kMaxShadowMaps;
+}
+}   // namespace
+
+void OgreEngine::deriveShadowMapCount() {
+    if (!mHlmsRegistered || mHeadless) return;
+    // What the frame is about to draw — the same set the frame loop updates, so
+    // a preview scene nobody is looking at cannot force the editor's atlas to
+    // grow.
+    std::vector<OgreScene *> scenes;
+    scenesFeedingEnabledViews(scenes);
+    unsigned casters = 0;
+    for (OgreScene *s : scenes) casters = std::max(casters, s->countLocalShadowCasters(nullptr));
+
+    const unsigned budget = effectiveShadowMapBudget();
+    const unsigned want = std::min(stepShadowMapCount(casters), budget);
+
+    // THE EXCEEDED CASE, said out loud once. Ogre's own behaviour (keep the
+    // closest casters, drop the rest) is unchanged; what changes is that it
+    // stops being silent. The host repeats it in the World panel and through
+    // shadowStatus().
+    if (casters > budget && casters != mWarnedShadowCasters) {
+        mWarnedShadowCasters = casters;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka shadows: " + Ogre::StringConverter::toString(casters) +
+            " shadow-casting point/spot lights but only " +
+            Ogre::StringConverter::toString(budget) +
+            " shadow maps are budgeted; the farthest lights render no shadow. "
+            "Raise the Shadow Map Budget or turn off Cast Shadows on distant lights.");
+    } else if (casters <= budget) {
+        mWarnedShadowCasters = 0;
+    }
+
+    if (want <= mShadowMapCount) {          // never shrink in-session (D4)
+        mDerivedShadowMapWant = 0;
+        mDerivedShadowMapFrames = 0;
+        return;
+    }
+    // DEBOUNCE. A scene loads its lights over many frames and every rebuild
+    // drops and recreates every workspace that names the shadow node; waiting
+    // for the demand to hold still turns "one hitch per lamp" into one hitch.
+    if (want != mDerivedShadowMapWant) {
+        mDerivedShadowMapWant = want;
+        mDerivedShadowMapFrames = 1u;
+        return;
+    }
+    if (++mDerivedShadowMapFrames < kShadowDeriveDebounceFrames) return;
+    mDerivedShadowMapWant = 0;
+    mDerivedShadowMapFrames = 0;
+    Ogre::LogManager::getSingleton().logMessage(
+        "Jahshaka shadows: growing the atlas to " + Ogre::StringConverter::toString(want) +
+        " focused shadow maps for " + Ogre::StringConverter::toString(casters) + " casters");
+    rebuildShadowAtlas(mShadowResolution, want);
+}
+
+// ---------------------------------------------------------------------------
+// The readback
+// ---------------------------------------------------------------------------
+ShadowStatus OgreEngine::shadowStatus() const {
+    ShadowStatus st;
+    st.requestedBudget = mShadowMapBudget;
+    if (!mHlmsRegistered || mHeadless) return st;   // live stays false
+    JAH_TRY {
+        st.resolution = mShadowResolution;
+        st.budget = effectiveShadowMapBudget();
+        st.pssmSplits = 3u;
+        st.focusedMaps = mShadowMapCount;
+        st.maps = st.pssmSplits + st.focusedMaps;
+        const ShadowAtlasPlan plan = planShadowAtlas(
+            mShadowResolution, mShadowMapCount,
+            std::min(16384u, unsigned(mRoot->getRenderSystem()->getCapabilities()
+                                          ? mRoot->getRenderSystem()->getCapabilities()->getMaximumResolution2D()
+                                          : 16384u)));
+        st.atlasWidth = plan.width;
+        st.atlasHeight = plan.height;
+        st.atlasBytes = plan.bytes();
+        st.focusedMaps = plan.focusedMaps;
+        st.maps = st.pssmSplits + st.focusedMaps;
+        st.lightSlots = 1u + st.focusedMaps;
+        st.live = true;
+        st.shadowPassesLastFrame = mShadowPassesLastFrame;
+        st.staticMapRendersLastFrame = mStaticShadowRendersLastFrame;
+
+        // The demand, and who actually holds a map. The mapping is per WORKSPACE
+        // (CompositorShadowNode is instance state), so it is read from the first
+        // enabled view that has one — the editor's view in practice.
+        std::vector<OgreScene *> scenes;
+        scenesFeedingEnabledViews(scenes);
+        std::vector<NodeId> casters;
+        OgreScene *primary = nullptr;
+        for (OgreScene *s : scenes) {
+            std::vector<NodeId> ids;
+            s->countLocalShadowCasters(&ids);
+            if (ids.size() > casters.size()) { casters = ids; primary = s; }
+        }
+        st.casters = unsigned(casters.size());
+
+        const Ogre::CompositorShadowNode *node = nullptr;
+        for (const auto &v : mViews) {
+            if (!v->isEnabled()) continue;
+            if (const Ogre::CompositorShadowNode *n = v->shadowNodeInstance()) { node = n; break; }
+        }
+        if (node && primary) {
+            const Ogre::LightClosestArray &lights = node->getShadowCastingLights();
+            std::vector<NodeId> seen;
+            for (size_t i = 0; i < lights.size(); ++i) {
+                ShadowMapInfo info;
+                info.slot = unsigned(i);
+                info.pssm = (i == 0);   // light 0 is the directional PSSM set
+                if (lights[i].light) {
+                    info.node = primary->nodeOfLight(lights[i].light);
+                    info.isStatic = lights[i].isStatic;
+                    info.dirty = lights[i].isDirty;
+                    if (info.node) seen.push_back(info.node);
+                }
+                st.mapped.push_back(info);
+            }
+            for (NodeId c : casters)
+                if (std::find(seen.begin(), seen.end(), c) == seen.end()) st.unmapped.push_back(c);
+        } else {
+            // No live workspace to ask (nothing is drawing this scene yet): the
+            // demand is still worth reporting, and every caster beyond the
+            // allocation is by definition unmapped.
+            for (size_t i = st.focusedMaps; i < casters.size(); ++i)
+                st.unmapped.push_back(casters[i]);
+        }
+    } JAH_CATCH(mLastError, st);
+    return st;
 }
 
 }}}   // namespace jahshaka::engine::detail

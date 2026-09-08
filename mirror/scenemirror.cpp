@@ -3020,6 +3020,17 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                                     : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
         if (wanted > 0 && engine->shadowResolution() != wanted)
             engine->setShadowResolution(wanted);
+        // Shadow-map BUDGET (SHADOW_TOOLING_SPEC.md §4.1). Unlike the size,
+        // there is nothing to derive from the lights here: the engine does that
+        // itself, per frame, from the light list it is about to draw. This
+        // pushes the CEILING only — the World Mode's tier value, or whatever
+        // the scene pinned. 0 (Auto with no tier resolved) leaves the engine's
+        // own default alone.
+        const unsigned budget = mSource->shadowMapBudget > 0
+                                    ? unsigned(qBound(2, mSource->shadowMapBudget, 16))
+                                    : 0u;
+        if (budget > 0 && engine->shadowMapBudget() != budget)
+            engine->setShadowMapBudget(budget);
     }
     // Ambient. Historically the flat World-panel colour, twice (the engine
     // viewport used to hardcode the hemisphere — the panel no-op'd). With a sky
