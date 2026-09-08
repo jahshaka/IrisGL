@@ -1,0 +1,45 @@
+--- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+@@ -160,6 +160,14 @@
+                 if( extensionName == VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME )
+                     enabledExtensions.push_back(
+                         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME );
++#ifdef VK_KHR_portability_enumeration
++                // Portability drivers (MoltenVK on macOS) are hidden by the loader
++                // unless this extension + the matching create flag are used;
++                // vkCreateInstance otherwise fails with VK_ERROR_INCOMPATIBLE_DRIVER.
++                // Availability-gated: no-op on conformant desktop drivers.
++                if( extensionName == VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME )
++                    enabledExtensions.push_back( VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME );
++#endif
+             }
+ 
+             // Enable supported layers we may want
+@@ -281,6 +289,14 @@
+             createInfo.ppEnabledLayerNames = enabledLayers.begin();
+             createInfo.enabledExtensionCount = static_cast<uint32>( enabledExtensions.size() );
+             createInfo.ppEnabledExtensionNames = enabledExtensions.begin();
++#ifdef VK_KHR_portability_enumeration
++            // Must accompany VK_KHR_portability_enumeration (see extension loop above).
++            for( const char *ext : enabledExtensions )
++            {
++                if( !strcmp( ext, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME ) )
++                    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
++            }
++#endif
+ 
+             // Workaround: skip following code on Android as it causes crash in vkCreateInstance() on
+             // Android Emulator 35.1.4, macOS 14.4.1, M1 Pro, despite declared support for rev.10
+@@ -940,6 +956,12 @@
+                 deviceExtensions.push_back( VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME );
+             else if( extensionName == VK_AMD_SHADER_TRINARY_MINMAX_EXTENSION_NAME )
+                 deviceExtensions.push_back( VK_AMD_SHADER_TRINARY_MINMAX_EXTENSION_NAME );
++            // Portability drivers (MoltenVK): the spec REQUIRES enabling this
++            // extension when the physical device advertises it
++            // (VUID-VkDeviceCreateInfo-pProperties-04451). String literal on
++            // purpose: the name macro lives behind VK_ENABLE_BETA_EXTENSIONS.
++            else if( extensionName == "VK_KHR_portability_subset" )
++                deviceExtensions.push_back( "VK_KHR_portability_subset" );
+         }
+ 
+         deviceExtensions.push_back( VK_KHR_SWAPCHAIN_EXTENSION_NAME );

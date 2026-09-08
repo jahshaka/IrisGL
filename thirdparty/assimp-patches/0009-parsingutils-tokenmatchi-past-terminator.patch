@@ -1,0 +1,43 @@
+ParsingUtils: TokenMatchI must not step past the buffer terminator
+
+Backport of upstream assimp commit 23fac9e7 ("don't step past the terminator in
+TokenMatchI", PR #6737) -- merged after our pinned release tag v6.0.5.
+
+The bug
+-------
+    if (!ASSIMP_strincmp(token, in, len) && IsSpaceOrNewLine(in[len])) {
+        in += len + 1;
+
+`IsSpaceOrNewLine` is true for '\0', so a token sitting at the very end of the
+buffer matched and then advanced the cursor ONE PAST the terminator -- the
+parser then reads whatever follows the allocation. TokenMatchI is used by the
+text importers we compile (OBJ/MTL and Collada-adjacent parsing helpers) on
+file content.
+
+The fix
+-------
+Advance past the delimiter only when there is a delimiter; otherwise stop on
+the terminator.
+
+Documented deviation from upstream: the test/unit/Common/utParsingUtils.cpp
+hunk is dropped (ASSIMP_BUILD_TESTS is OFF in irisgl/CMakeLists.txt, so assimp's
+own test tree is never compiled). Our coverage for this class of fix is
+tests/importer.
+
+diff --git a/include/assimp/ParsingUtils.h b/include/assimp/ParsingUtils.h
+--- a/include/assimp/ParsingUtils.h
++++ b/include/assimp/ParsingUtils.h
+@@ -257,7 +257,12 @@ AI_FORCE_INLINE bool TokenMatch(char_t *&in, const char *token, unsigned int len
+ /// @return true if token was found, false if not.
+ AI_FORCE_INLINE bool TokenMatchI(const char *&in, const char *token, unsigned int len) {
+     if (!ASSIMP_strincmp(token, in, len) && IsSpaceOrNewLine(in[len])) {
+-        in += len + 1;
++        if (in[len] != '\0') {
++            in += len + 1;
++        } else {
++            // If EOF after the token make sure we don't go past end of buffer
++            in += len;
++        }
+         return true;
+     }
+     return false;

@@ -1,0 +1,26 @@
+diff --git a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl
+index 2840d981e..2bc477138 100644
+--- a/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/Tutorial_SSAO/GLSL/SSAO_HS_ps.glsl
+@@ -48,6 +48,21 @@ vec3 getRandomVec(vec2 uv)
+ 
+ void main()
+ {
++	// Jahshaka local patch (upstream-reportable): reject the far plane.
++	// Nothing was rendered there, so there is no geometry to occlude and the
++	// normals G-buffer was never written for those pixels (a sky quad writes
++	// colour only) - the 64-tap march then compares a uniform depth against
++	// itself, which is a knife edge, and returns ~half occlusion modulated
++	// by the rotation noise. In a scene with a SKY that reads as dither noise
++	// over the whole sky, ~45% darker. The tutorial's own scene has no sky,
++	// so upstream never saw it. Both extremes are tested, so this is correct
++	// with and without reverse depth (Vulkan defaults to reverse: far == 0).
++	float jahRawDepth = texture( vkSampler2D( depthTexture, samplerState0 ), inPs.uv0 ).x;
++	if( jahRawDepth <= 0.0 || jahRawDepth >= 1.0 )
++	{
++		fragColour = 1.0;   // fully unoccluded
++		return;
++	}
+     vec3 viewPosition = getScreenSpacePos(inPs.uv0, inPs.cameraDir);
+     //vec3 viewNormal = reconstructNormal(viewPosition);
+ 	vec3 viewNormal = normalize( texture( vkSampler2D( gBuf_normals, samplerState0 ),inPs.uv0 ).xyz * 2.0 - 1.0 );

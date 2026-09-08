@@ -1,0 +1,18 @@
+/**************************************************************************
+This file is part of IrisGL
+http://www.irisgl.org
+Copyright (c) 2016-2026 EXEDOS LLC (www.exedos.com)
+
+This is free software: you may copy, redistribute
+and/or modify it under the terms of the MIT License
+
+For more information see the LICENSE file
+*************************************************************************/
+
+#ifndef IRISGL_H
+#define IRISGL_H
+
+#include "irisglfwd.h"
+
+
+#endif // IRISGL_H

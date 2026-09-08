@@ -1,0 +1,229 @@
+// Jahshaka's PCC probe-render workspace (GI_SPEC.md phase 3, the VCT+PCC hybrid).
+// ParallaxCorrectedCubemapAuto instantiates this once per reflection probe: six
+// scene renders into the cubemap faces, each followed by PCC/DepthCompressor
+// (packs view depth into the alpha channel — PccPerPixelGridPlacement::buildEnd
+// reads it back to shrink-fit each probe's shape to the geometry around it),
+// and finally the IBL specular mip chain the PBS shader samples by roughness.
+//
+// TWO WORKSPACES, and buildPcc picks between them (REFLECTIONS_ADOPTION_SPEC
+// P3b): `JahshakaPccProbeWorkspace` captures UNSHADOWED, as v1 always did, and
+// `JahshakaPccProbeWorkspaceShadows` runs the scene's shadow node in every face
+// pass. They are duplicated rather than parameterised because a compositor
+// script has no way to make a pass's shadow node conditional; the ONLY
+// difference between the two abstract face targets below is the `shadows` line,
+// so any edit to one belongs in the other.
+// On-top overlays (selection outlines, gizmo geometry, render queue 210),
+// refractive items (RQ 200, reserved) and PCC's own helper geometry (RQ 250+)
+// are excluded from captures via rq_last, which is EXCLUSIVE
+// (CompositorPassSceneDef::mLastRQ, "Last Render Queue ID to render. Not
+// inclusive") — so 200 already drops everything from 200 upward.
+//
+// LATENT, DELIBERATELY NOT HANDLED — the DPM fallback (F14,
+// REFLECTIONS_ADOPTION_SPEC.md §3): ParallaxCorrectedCubemapAuto falls back to
+// Dual Paraboloid Mapping when the render system reports no cube-map ARRAY
+// support (OgreParallaxCorrectedCubemapAuto.cpp, the RSC_TEXTURE_CUBE_MAP_ARRAY
+// test in the ctor). Every target we ship on — desktop Vulkan and MoltenVK —
+// reports the capability, so DPM never engages here. If it ever did, this
+// workspace would keep running the ibl_specular pass redundantly, because none
+// of our passes carry an `execution_mask` / `viewport_modifier_mask` the way
+// the upstream sample's DPM-aware compositors do. Out of scope to exercise;
+// recorded so the next reader does not rediscover it as a bug.
+
+abstract target jah_pcc_cubemap_face
+{
+	pass render_scene
+	{
+		load
+		{
+			all				clear
+			clear_colour	0 0 0 1
+		}
+		store
+		{
+			// Depth must survive for the compressor pass below.
+			depth			store
+			stencil			dont_care
+		}
+		overlays			off
+		camera_cubemap_reorient true
+
+		// EDITOR HELPERS OUT OF REFLECTIONS (REFLECTIONS_ADOPTION_SPEC.md P1b).
+		// 0x1 is kVisibleBit (EnginePrivate.h). Every real object carries it;
+		// editor helpers — the ground grid at RQ 10, the light-icon billboards
+		// at RQ 15, range wires, camera helpers — carry kHelperBit (0x8)
+		// INSTEAD, so they fail this pass's any-bit test and stop being baked
+		// into every probe. Gizmos and selection outlines at RQ 210 were already
+		// out via rq_last. This is the ONLY pass in the whole program that sets
+		// an explicit visibility_mask; the main chain's all-ones default is what
+		// keeps helpers drawing in the viewport. ANY future pass that sets one
+		// must include 0x8 or helpers vanish from it.
+		visibility_mask 0x1
+
+		rq_first	0
+		rq_last		200
+
+		profiling_id "Jahshaka PCC probe face"
+	}
+}
+
+// The SHADOWED twin (REFLECTIONS_ADOPTION_SPEC.md P3b, quality High). Identical
+// to jah_pcc_cubemap_face except for the `shadows` line — keep them in step.
+//
+// `JahshakaShadowNode` is the programmatic PSSM+focused atlas OgreEngine builds
+// via ShadowNodeHelper at Hlms registration (EnginePrivate.h kShadowNodeName),
+// i.e. it exists before any scene does — EXCEPT in a headless engine, which
+// never renders pixels and never builds it. Ogre resolves a pass's shadow node
+// when the workspace INSTANTIATES and throws if it is missing, so buildPcc
+// checks for the definition and falls back to the unshadowed workspace rather
+// than letting the hybrid die; Scene::giStatus().probeShadows reports which one
+// actually ran.
+//
+// `recalculate` is not optional here and upstream's sample says why
+// (Samples/Media/2.0/scripts/Compositors/LocalCubemaps.compositor): Ogre cannot
+// tell that a cubemap face pass looks at the world from somewhere new, so
+// without it every one of the six faces reuses whatever shadow maps the last
+// main-chain render left behind — the room's shadows as seen from the editor
+// camera, baked into a reflection taken from somewhere else entirely.
+abstract target jah_pcc_cubemap_face_shadows
+{
+	pass render_scene
+	{
+		load
+		{
+			all				clear
+			clear_colour	0 0 0 1
+		}
+		store
+		{
+			depth			store
+			stencil			dont_care
+		}
+		overlays			off
+		camera_cubemap_reorient true
+
+		visibility_mask 0x1
+
+		rq_first	0
+		rq_last		200
+
+		shadows JahshakaShadowNode recalculate
+
+		profiling_id "Jahshaka PCC probe face (shadowed)"
+	}
+}
+
+abstract target jah_pcc_depth_compress
+{
+	pass render_quad
+	{
+		store
+		{
+			depth	dont_care
+			stencil	dont_care
+		}
+
+		quad_normals	camera_far_corners_view_space
+		material		PCC/DepthCompressor
+
+		input			0 depthTexture
+
+		camera_cubemap_reorient true
+
+		profiling_id "Jahshaka PCC depth compress"
+	}
+}
+
+compositor_node JahshakaPccProbeRendererNode
+{
+	in 0 cubemap
+	in 1 ibl_output
+
+	texture depthTexture	target_width target_height PFG_D32_FLOAT
+
+	rtv cubemap_customRtv
+	{
+		colour	cubemap
+		depth	depthTexture
+	}
+	rtv cubemap_noDepth
+	{
+		colour		cubemap
+		depth_pool	0
+	}
+
+	target cubemap_customRtv	+X : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		+X : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-X : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		-X : jah_pcc_depth_compress { }
+	target cubemap_customRtv	+Y : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		+Y : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-Y : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		-Y : jah_pcc_depth_compress { }
+	target cubemap_customRtv	+Z : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		+Z : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-Z : jah_pcc_cubemap_face { }
+	target cubemap_noDepth		-Z : jah_pcc_depth_compress
+	{
+		pass ibl_specular
+		{
+			input cubemap
+			output ibl_output
+
+			profiling_id "Jahshaka PCC IBL specular"
+		}
+	}
+}
+
+workspace JahshakaPccProbeWorkspace
+{
+	connect_external 0 JahshakaPccProbeRendererNode 0
+	connect_external 1 JahshakaPccProbeRendererNode 1
+}
+
+// The shadowed twin. Same graph, shadowed face target.
+compositor_node JahshakaPccProbeRendererNodeShadows
+{
+	in 0 cubemap
+	in 1 ibl_output
+
+	texture depthTexture	target_width target_height PFG_D32_FLOAT
+
+	rtv cubemap_customRtv
+	{
+		colour	cubemap
+		depth	depthTexture
+	}
+	rtv cubemap_noDepth
+	{
+		colour		cubemap
+		depth_pool	0
+	}
+
+	target cubemap_customRtv	+X : jah_pcc_cubemap_face_shadows { }
+	target cubemap_noDepth		+X : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-X : jah_pcc_cubemap_face_shadows { }
+	target cubemap_noDepth		-X : jah_pcc_depth_compress { }
+	target cubemap_customRtv	+Y : jah_pcc_cubemap_face_shadows { }
+	target cubemap_noDepth		+Y : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-Y : jah_pcc_cubemap_face_shadows { }
+	target cubemap_noDepth		-Y : jah_pcc_depth_compress { }
+	target cubemap_customRtv	+Z : jah_pcc_cubemap_face_shadows { }
+	target cubemap_noDepth		+Z : jah_pcc_depth_compress { }
+	target cubemap_customRtv	-Z : jah_pcc_cubemap_face_shadows { }
+	target cubemap_noDepth		-Z : jah_pcc_depth_compress
+	{
+		pass ibl_specular
+		{
+			input cubemap
+			output ibl_output
+
+			profiling_id "Jahshaka PCC IBL specular"
+		}
+	}
+}
+
+workspace JahshakaPccProbeWorkspaceShadows
+{
+	connect_external 0 JahshakaPccProbeRendererNodeShadows 0
+	connect_external 1 JahshakaPccProbeRendererNodeShadows 1
+}
