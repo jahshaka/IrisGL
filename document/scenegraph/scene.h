@@ -408,6 +408,22 @@ public:
 	// sharper sun disc on big displays (VISUAL_PARITY_SPEC item 1).
 	int skyBakeResolution;
 
+	// SUN COUPLING (VISUAL_PARITY re-audit F5): the guid of the DIRECTIONAL
+	// light the realistic sky's sun drives. Empty (the default) = nothing is
+	// driven and every light keeps its authored rotation.
+	//
+	// An explicit guid on the SCENE, not a "driven by sky" flag on the light:
+	// the coupling is a property of the world (there is exactly one sun), the
+	// Database/no-Globals law wants explicit guids, and a guid survives the
+	// scene-graph adoption unchanged — a per-light flag would have to be
+	// re-homed with the light and would need a "which one wins" rule the
+	// moment two lights carried it.
+	//
+	// applySunCoupling() is what enforces it; it runs from Scene::update()
+	// every frame, so the light follows the sun wherever the sun is moved from
+	// (panel, script verb, keyframe).
+	QString sunLightGuid;
+
 	// Sky-driven ambient/diffuse IBL (VISUAL_PARITY_SPEC item 3b). ON by owner
 	// decision: with a textured/analytic sky the ambient hemisphere colours come
 	// from the sky itself (cosine-weighted upper/lower averages) instead of the
@@ -428,6 +444,17 @@ public:
 	QMap<QString, QJsonObject> skyData;
 
 	void setWorldGravity(float gravity);
+
+	/// Points the light named by `sunLightGuid` down the realistic sky's sun
+	/// direction (VISUAL_PARITY re-audit F5). No-op when nothing is linked, the
+	/// guid names no live light, the linked node is not a light, or the sky is
+	/// not the realistic one — the analytic sky is the only sky with a sun.
+	///
+	/// Document lights emit down their local -Y (LightNode::getLightDir), so
+	/// the rotation built here is the one that takes -Y onto the vector FROM
+	/// the sun TOWARDS the scene. Returns true when it actually changed the
+	/// light's rotation, which is what makes it cheap to call every frame.
+	bool applySunCoupling();
 
     QString skyBoxTextures[6];
 
