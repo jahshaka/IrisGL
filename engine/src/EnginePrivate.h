@@ -179,6 +179,53 @@ constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
 constexpr Ogre::uint32 kHelperBit      = 1u << 3;
 
+// ---------------------------------------------------------------------------
+// THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
+// ---------------------------------------------------------------------------
+// The values the shadow-node definition is built from. They were arguments to
+// ShadowNodeHelper::createShadowNodeWithSettings until the definition became
+// ours; keeping them named (and here, beside the visibility bits the atlas also
+// depends on) is what makes a diff against upstream's helper readable.
+//
+// numStableSplits = 2 (upstream defaults to 0): the two near PSSM splits — the
+// ones a user is looking at — stop re-quantising every time a caster enters or
+// leaves the view, which is what makes shadow edges stop crawling.
+constexpr Ogre::uint32 kPointLightCubemapResolution = 1024u;
+constexpr float        kShadowXyPadding   = 1.5f;      ///< upstream's default
+constexpr float        kPssmLambda        = 0.95f;
+constexpr float        kPssmSplitPadding  = 1.0f;
+constexpr float        kPssmSplitBlend    = 0.125f;
+constexpr float        kPssmSplitFade     = 0.313f;
+constexpr Ogre::uint32 kPssmStableSplits  = 2u;
+/// The engine's hard ceiling on focused (point/spot) shadow maps, whatever a
+/// host asks for (SHADOW_TOOLING_SPEC D1). The bound is VRAM and shadow passes,
+/// not the pass buffer — a mapped caster costs ~112 B there.
+constexpr unsigned     kMaxShadowMaps     = 16u;
+
+/// One shadow map's rectangle inside the atlas, in texels.
+struct ShadowMapRect { unsigned x = 0, y = 0, w = 0, h = 0; };
+
+/// WHERE EVERY SHADOW MAP SITS. Built by planShadowAtlas() and consumed by
+/// OgreEngine::buildShadowNode; also what `world.shadowStatus()` reports.
+struct ShadowAtlasPlan {
+    unsigned width = 0, height = 0;      ///< the atlas texture, in texels
+    unsigned resolution = 0;             ///< R: the base size the plan derives from
+    unsigned focusedMaps = 0;            ///< focused maps actually placed
+    ShadowMapRect pssm[3];               ///< split 0 at R x R, splits 1-2 at R/2
+    std::vector<ShadowMapRect> focused;  ///< R x R each, column-packed
+    /// D32 depth, so four bytes per texel. The cube scratch (1024^2 x 6 R32F +
+    /// its depth, ~48 MB) is NOT counted here: it is allocated once for any
+    /// point caster and does not grow with the map count.
+    unsigned long long bytes() const {
+        return 4ull * (unsigned long long)width * (unsigned long long)height;
+    }
+};
+
+/// Packs `focusedMaps` R x R maps plus the 1.5R PSSM header into the smallest
+/// atlas that respects `maxDim` on both axes. Pure arithmetic — no Ogre state —
+/// so the layout can be unit-tested without a device (OgreShadow.cpp).
+ShadowAtlasPlan planShadowAtlas(unsigned baseResolution, unsigned focusedMaps, unsigned maxDim);
+
 // Forward+ clustered decal budget PER CELL (DECALS_SPEC D5). Not a scene-wide
 // cap: decals beyond this in one cluster cell are dropped farthest-first.
 constexpr Ogre::uint32 kDecalsPerCell = 8u;
@@ -1317,6 +1364,13 @@ public:
 
     Ogre::SceneManager *sceneManager() const;
 
+    /// The backend light behind a document node id, and the reverse lookup.
+    /// Both exist for the shadow-map work (SHADOW_TOOLING_SPEC.md §4.3): the
+    /// forward one to hand a light to setLightFixedToShadowMap, the reverse to
+    /// name in `world.shadowStatus()` the lights the atlas actually mapped.
+    Ogre::Light *ogreLight(NodeId node) const;
+    NodeId nodeOfLight(const Ogre::Light *light) const;
+
     /// Releases everything in dependency order. Safe to call twice. Called by
     /// Engine::destroyScene and by the Engine destructor BEFORE Root dies.
     void destroy();
@@ -2172,6 +2226,14 @@ public:
     /// re-adds), then swaps the definition, then calls the restore below.
     bool dropWorkspaceForShadowRebuild();
     void recreateWorkspaceAfterShadowRebuild();
+    /// This view's LIVE shadow-node instance, or null when it has no workspace,
+    /// no shadows, or the workspace has not instantiated the node yet.
+    ///
+    /// It is per WORKSPACE, not per definition (CompositorShadowNode holds the
+    /// fixed-light table and the static-map dirty flags), which is exactly why
+    /// anything that assigns static shadow maps has to reach every view that
+    /// draws — see OgreEngine::applyStaticShadowMaps.
+    Ogre::CompositorShadowNode *shadowNodeInstance() const;
     bool isEnabled() const override;
     unsigned width()  const override;
     unsigned height() const override;
@@ -2463,6 +2525,16 @@ public:
     void setShadowResolution(unsigned pixels) override;
     unsigned shadowResolution() const override;
 
+    /// THE ATLAS REBUILD (OgreShadow.cpp): swaps resolution and/or focused-map
+    /// count by dropping every workspace that instantiates the shadow node,
+    /// replacing the definitions and re-creating them. Returns true when a
+    /// rebuild actually happened.
+    bool rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps);
+    /// What the atlas currently HAS: `mShadowMapCount` focused maps at
+    /// `mShadowResolution`. Read by shadowStatus() and by the derivation.
+    unsigned shadowMapCount() const { return mShadowMapCount; }
+
+
     /// Ogre::Mesh::msOptimizeForShadowMapping — a plain process-wide static,
     /// read by buildMeshV2 when it decides whether to give a mesh its own
     /// position-only shadow VAOs (POST_CHAIN_SPEC.md §11).
@@ -2522,13 +2594,20 @@ private:
     /// Staged from Samples/Media/2.0/scripts/materials/Common next to the Hlms data.
     void registerCommonMaterials();
     /// One shadow node for the process: PSSM (3 splits) for the first directional
-    /// light and focused maps for the next two point/spot lights, in one atlas.
-    /// Mirrors Ogre's ShadowMapFromCode sample. Views opt in with setShadows(true).
-    /// Also creates the half-resolution twin the planar-reflection pass uses.
+    /// light and `mShadowMapCount` focused maps for the closest point/spot
+    /// lights, all in ONE atlas. Views opt in with setShadows(true). Also
+    /// creates the half-resolution twin the planar-reflection pass uses.
     void createShadowNode();
-    /// The shared body: one PSSM + two focused maps in one atlas derived from
-    /// `baseResolution`, registered under `name`.
-    void buildShadowNode(const char *name, unsigned baseResolution);
+    /// The shared body (OgreShadow.cpp): one PSSM block + `focusedMaps` focused
+    /// maps packed into one atlas derived from `baseResolution`, registered
+    /// under `name`. Built from the public compositor-definition API rather than
+    /// ShadowNodeHelper — see the head of OgreShadow.cpp for why.
+    void buildShadowNode(const char *name, unsigned baseResolution, unsigned focusedMaps);
+    /// Which of the two clear-quad materials writes the far plane on this
+    /// backend (reverse depth or not). OgreShadow.cpp.
+    const char *shadowClearMaterialName() const;
+    /// The colour the point-light cube faces clear to, by upstream's own rule.
+    Ogre::ColourValue shadowClearColour() const;
 
     /// Maps the neutral enum onto HlmsPbs. PCF only: ExponentialShadowMaps is
     /// deliberately NOT used for VerySoft — ESM needs an ESM-compatible shadow
@@ -2564,6 +2643,12 @@ private:
     LogBridge *mLogBridge = nullptr;
     ShadowFilter    mShadowFilter = ShadowFilter::Soft;
     unsigned        mShadowResolution = 2048;
+    /// FOCUSED (point/spot) shadow maps the atlas currently has room for —
+    /// what `buildShadowNode` was last built with. Two is the historical value
+    /// and the floor: at two, planShadowAtlas reproduces the old strip layout
+    /// exactly, so a scene with at most two shadow casters renders the same
+    /// bytes it always did (SHADOW_TOOLING_SPEC.md §4.1).
+    unsigned        mShadowMapCount = 2;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     /// EngineConfig::vsync, then whatever setVsync() last said. Read at every
     /// window creation (createView + the MSAA-recreate hook), so the pacing

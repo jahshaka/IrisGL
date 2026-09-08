@@ -13,6 +13,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreMesh.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreMaterials.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSky.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShadow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgrePlanar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreParticles.cpp

@@ -470,6 +470,22 @@ bool OgreScene::removeLight(NodeId id) {
 
 Ogre::SceneManager *OgreScene::sceneManager() const { return mSceneMgr; }
 
+// The light behind a node id, and the id behind a light. The reverse lookup is
+// a linear walk on purpose: it runs once per shadow map per status readback (at
+// most 19 entries), never per frame, and a second index would be one more thing
+// releaseNode has to keep honest.
+Ogre::Light *OgreScene::ogreLight(NodeId node) const {
+    auto it = mNodes.find(node);
+    return it == mNodes.end() ? nullptr : it->second.light;
+}
+
+NodeId OgreScene::nodeOfLight(const Ogre::Light *light) const {
+    if (!light) return 0;
+    for (const auto &entry : mNodes)
+        if (entry.second.light == light) return entry.first;
+    return 0;
+}
+
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
     JAH_TRY {
