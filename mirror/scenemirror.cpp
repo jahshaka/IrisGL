@@ -2962,6 +2962,14 @@ void SceneMirror::invalidateEnvironment()
     mGiPushed = false;
 }
 
+// CAMERA_LENS_SPEC §4/§5. Defined beside applyCamera, where the whole model is
+// written out, and declared here because applyEnvironment builds the post
+// description a beat earlier in the frame and must substitute the same values —
+// see the comment at the call site for why doing it in only one of the two
+// places rebuilds the compositor twice a frame.
+static bool cameraOverridesAnything(const iris::CameraNodePtr &camera);
+static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx);
+
 void SceneMirror::applyEnvironment(View *view, Engine *engine)
 {
     if (!mSource || !view) return;
@@ -3109,6 +3117,27 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // is accumulated by sync() the same way mAnyShadowCaster is.
         fx.refractions    = mSource->refractionsMode == 2 ||
                             (mSource->refractionsMode == 1 && mAnyRefractive);
+        // THE DRIVING CAMERA'S OWN LOOK, layered over the world's
+        // (CAMERA_LENS_SPEC §4/§5 — applyCameraPostFx documents the model).
+        //
+        // IT HAS TO HAPPEN HERE AS WELL AS IN applyCamera, and the reason is
+        // performance rather than taste: hosts call applyEnvironment and then
+        // applyCamera every frame, and an enable-flag difference between the
+        // two descriptions is a WORKSPACE REBUILD. Pushing the world's flags
+        // here and the camera's a moment later would rebuild the chain TWICE
+        // PER FRAME for as long as a camera with a bloom override was driving.
+        // Substituting here makes the steady state one stable description that
+        // the engine's own "same value is free" check drops on arrival, and
+        // applyCamera's push then only ever does anything on the frame the
+        // camera actually changed.
+        //
+        // The record is a frame old (applyCamera writes it after this runs), so
+        // a CUT grades one frame late — 16 ms, and applyCamera corrects it in
+        // the same frame anyway. A view seen for the FIRST time has no record
+        // at all and gets the world's description, which is exactly right: the
+        // camera has not been applied to it yet.
+        if (const iris::CameraNodePtr driving = drivingCameraFor(view))
+            if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
         view->setPostFx(fx);
     }
     // Fog panel: exponential distance fog (+ optional height layer) on lit
@@ -3993,6 +4022,140 @@ static CameraDesc toCameraDesc(const iris::CameraNodePtr &camera)
     return c;
 }
 
+// ---------------------------------------------------------------------------
+// THE PER-CAMERA LOOK (CAMERA_LENS_SPEC §4/§5).
+//
+// A scene camera may carry its own EXPOSURE (a mode plus stops) and its own
+// POST OVERRIDES (a tri-state map over the world's values). `applyCameraPostFx`
+// below is the ONE function that resolves either of them, over whatever
+// description the world produced for the view being drawn.
+//
+// IT IS CALLED FROM TWO PLACES, and the pair is deliberate:
+//   * applyEnvironment, where the world's PostFxDesc is built — so the value
+//     the engine receives is already final and STABLE frame to frame. That is
+//     not tidiness: an enable-flag difference is a workspace rebuild, and a
+//     world description followed a moment later by a camera description that
+//     disagreed with it would rebuild the compositor twice every frame;
+//   * applyCamera, right after the active-camera seam has decided which camera
+//     is driving — so a CUT, a first frame, or a one-shot screenshot view that
+//     applyEnvironment had no record for still grades correctly, immediately.
+// In the steady state the second push is the same value as the first and the
+// engine drops it for free.
+//
+// RESOLUTION IS PER VIEW, which is why the driving camera is remembered per
+// view (noteDrivingCamera): the editor viewport, the player and a screenshot's
+// throwaway view are served by ONE mirror, and a mirror-level "the driving
+// camera" would hand the last camera applied anywhere to all of them.
+//
+// IT COSTS NOTHING when the camera says nothing: cameraOverridesAnything is
+// false and the world's description is passed through untouched, bit for bit —
+// which is what the byte-identical offscreen negative in tests/cameras asserts.
+//
+// THE DETERMINISM LAW is not re-implemented here and must not be: an offscreen
+// view discards the whole post description inside the engine unless a caller
+// deliberately opted in (PostFxDesc::allowOffscreen, Types.h). Thumbnails,
+// previews and every pixel suite are therefore untouchable by construction, and
+// `screenshot({camera, postFx:true})` gets the camera's grade through the same
+// substitution because it opts in AFTER this runs.
+bool SceneMirror::noteDrivingCamera(const View *view, const iris::CameraNodePtr &camera)
+{
+    // A tiny bounded LRU rather than a map: screenshot views are created and
+    // destroyed per call, so an unbounded per-view table would grow forever
+    // with keys that can never be looked up again. Eight is more views than any
+    // host has ever had at once, and a stale View key is only ever COMPARED —
+    // nothing here dereferences one.
+    //
+    // The CAMERA is held WEAKLY, and that is not caution for its own sake: the
+    // entry is read back a frame later by applyEnvironment, which needs the
+    // node's fields. A camera deleted between the two calls would otherwise be
+    // a read-after-free with a one-frame window — small, real, and exactly the
+    // kind of thing that turns up once a month in a crash log.
+    constexpr int kMaxTracked = 8;
+    for (auto &entry : mDrivingCameras) {
+        if (entry.first != view) continue;
+        // QWeakPointer has no data() — lock and compare, which also makes a
+        // camera that DIED since the last frame read as a change (it is one).
+        const bool changed = entry.second.toStrongRef().data() != camera.data();
+        entry.second = camera.toWeakRef();
+        return changed;
+    }
+    if (int(mDrivingCameras.size()) >= kMaxTracked) mDrivingCameras.erase(mDrivingCameras.begin());
+    mDrivingCameras.emplace_back(view, camera.toWeakRef());
+    // The FIRST camera a view is ever given is not a cut: there is no previous
+    // shot to cut from, and re-seeding the exposure history on the first frame
+    // would change the opening frames of every view that ever existed.
+    return false;
+}
+
+iris::CameraNodePtr SceneMirror::drivingCameraFor(const View *view) const
+{
+    for (const auto &entry : mDrivingCameras)
+        if (entry.first == view) return entry.second.toStrongRef();
+    return iris::CameraNodePtr();
+}
+
+static bool cameraOverridesAnything(const iris::CameraNodePtr &camera)
+{
+    if (!camera) return false;
+    return camera->exposureMode != iris::CameraExposureMode::Inherit ||
+           !camera->postOverrides.isEmpty();
+}
+
+/// Applies the camera's exposure block and override map over `fx`.
+static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
+{
+    // ---- §4, exposure. STOPS in the document, the chain's natural-log axis
+    // here, converted in ONE place (iris::lens::exposureStopsToChain).
+    if (camera->exposureMode != iris::CameraExposureMode::Inherit) {
+        fx.exposure = iris::lens::exposureStopsToChain(camera->exposure);
+        if (camera->exposureMode == iris::CameraExposureMode::Manual) {
+            // min == max pins the shader's clamp, which is what makes the grade
+            // a NUMBER instead of a measurement. The pin is a constant and not
+            // the exposure — see iris::lens::manualExposureClamp for why using
+            // the exposure would make one authored stop move the picture by two.
+            fx.exposureMin = fx.exposureMax = iris::lens::manualExposureClamp();
+        } else {
+            fx.exposureMin = iris::lens::exposureStopsToChain(camera->exposureMin);
+            fx.exposureMax = iris::lens::exposureStopsToChain(camera->exposureMax);
+            if (fx.exposureMax < fx.exposureMin) std::swap(fx.exposureMin, fx.exposureMax);
+        }
+    }
+
+    // ---- §5, the tri-state overrides. Absent = inherit, so every branch below
+    // is guarded by hasPostOverride and the world's value survives otherwise.
+    const auto num = [&camera](const char *id, float &field) {
+        const QVariant v = camera->postOverride(QLatin1String(id));
+        if (v.isValid()) field = v.toFloat();
+    };
+    const auto flag = [&camera](const char *id, bool &field) {
+        const QVariant v = camera->postOverride(QLatin1String(id));
+        if (v.isValid()) field = v.toInt() != 0;
+    };
+    const auto whole = [&camera](const char *id, int &field) {
+        const QVariant v = camera->postOverride(QLatin1String(id));
+        if (v.isValid()) field = v.toInt();
+    };
+    flag("hdr", fx.hdr);
+    flag("bloom", fx.bloom);
+    num("bloomThreshold", fx.bloomThreshold);
+    flag("ssao", fx.ssao);
+    num("ssaoPower", fx.ssaoPower);
+    num("ssaoRadius", fx.ssaoRadius);
+    // SMAA accepts only "off" from a camera (the document refuses anything
+    // else): a per-camera PRESET would be a shader recompile on every cut.
+    whole("smaa", fx.smaaPreset);
+    whole("ssr", fx.ssr);
+    // Refraction is the world's three-state mode (0 off / 1 auto / 2 always) on
+    // the document side but a BOOL by the time it reaches the view — the "auto"
+    // resolution against mAnyRefractive has already happened. So a camera
+    // override of 1 (auto) must not be read as "on": it means "whatever the
+    // world just resolved", which is precisely what leaving fx alone does.
+    {
+        const QVariant v = camera->postOverride(QLatin1String("refractions"));
+        if (v.isValid() && v.toInt() != 1) fx.refractions = v.toInt() == 2;
+    }
+}
+
 void SceneMirror::applyPip(iris::CameraNodePtr camera, View *view, const ViewPipDesc &desc)
 {
     if (!view) return;
@@ -4058,6 +4221,16 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float maxH
     // in any preview whose viewpoint happens to be a scene node. Recorded here
     // because this function is "the ONLY way a View's camera moves" (Engine.h),
     // so it is the one place that always knows.
+    //
+    // IS THIS A CUT, FOR THIS VIEW? Recorded first, and deliberately NOT as
+    // `mViewCamera != camera`: that field is mirror-wide, and one mirror serves
+    // several views (the viewport, a screenshot's throwaway view, the
+    // player's). Two views showing two different cameras would flip it every
+    // frame and read as a cut every frame — which would pin the auto exposure
+    // to its seed forever. The answer has to be per view, so it is remembered
+    // per view, and applyEnvironment reads the same record next frame.
+    const bool cut = noteDrivingCamera(view, camera);
+
     if (mViewCamera != camera.data()) {
         mViewCamera = camera.data();
         // ...and hide its helpers NOW rather than at the next sync. Hosts call
@@ -4067,6 +4240,31 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float maxH
         // whole image. Cheap: one hash lookup on a change only.
         auto it = mEntries.find(mViewCamera);
         if (it != mEntries.end() && it->wireNode) mTarget->setNodeVisible(it->wireNode, false);
+    }
+
+    // THE CAMERA'S OWN LOOK (CAMERA_LENS_SPEC §4/§5) — the second of the two
+    // call sites the model documents; in the steady state applyEnvironment has
+    // already pushed exactly this value and the engine drops the repeat. What
+    // this one is FOR is the frames applyEnvironment could not get right: the
+    // cut, the first frame, and a one-shot screenshot view it had no record of.
+    // Nothing happens, and nothing is pushed, for a camera that overrides
+    // nothing.
+    if (cameraOverridesAnything(camera)) {
+        PostFxDesc fx = view->postFx();   // the world's, as applyEnvironment left it
+        applyCameraPostFx(camera, fx);
+        view->setPostFx(fx);
+        // A CUT IS NOT A LIGHTING CHANGE. The chain's auto exposure adapts at
+        // ~75%/s, so without this a cut to a differently exposed camera fades
+        // over one to two seconds — including a MANUAL one, whose clamp pins
+        // what is measured but not what the history holds. Re-seeded AFTER the
+        // new description is pushed, because the seed is derived from it.
+        if (cut) view->resetExposureHistory();
+    } else if (cut) {
+        // Cutting AWAY from an overriding camera to one that inherits: the
+        // world's description is already back on the view (applyEnvironment
+        // pushes it every frame), but the history still holds the old camera's
+        // grade. Same re-seed, same reason.
+        view->resetExposureHistory();
     }
 
     CameraDesc desc = toCameraDesc(camera);

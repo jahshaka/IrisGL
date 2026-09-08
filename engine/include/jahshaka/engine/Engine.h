@@ -658,6 +658,27 @@ public:
     virtual void setPostFx(const PostFxDesc &) = 0;
     virtual const PostFxDesc &postFx() const = 0;
 
+    /// CUT THE EXPOSURE INSTEAD OF FADING IT (CAMERA_LENS_SPEC §4).
+    ///
+    /// The HDR chain's automatic exposure is a TEMPORAL filter: a 1x1 history
+    /// texture that converges on the measured luminance at ~75% per second, so
+    /// a cut from one camera to another with a different exposure re-adapts
+    /// over a visible one to two seconds. That is right for a light coming on
+    /// and wrong for a CUT — a camera change is a new shot, not a new lighting
+    /// condition, and even a MANUAL exposure fades across one (the clamp pins
+    /// what the chain measures, not what the history holds).
+    ///
+    /// This re-seeds that history from the view's CURRENT exposure setting, so
+    /// the next frame starts at the new grade instead of arriving at it. Call
+    /// it AFTER pushing the new camera's post description, and only on a cut:
+    /// calling it while a slider moves would turn a ramp into a series of
+    /// steps.
+    ///
+    /// A NO-OP unless this view's chain has the automatic HDR exposure — no
+    /// HDR, a fixed tonemap, an offscreen view with no chain, or no workspace
+    /// yet: nothing to re-seed, no error.
+    virtual void resetExposureHistory() = 0;
+
     /// The engine-drawn overlay for this View (STATS_OVERLAY_SPEC.md §5.1):
     /// a corner stats readout and/or a full-view loading cover.
     ///
