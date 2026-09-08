@@ -903,6 +903,37 @@ struct GiParams {
     /// a scene may want the trim; clamped to [0, 64], and 0 is a legitimate
     /// "field bound, contributing nothing" for A/B measurement.
     float     ddgiIntensity = 1.0f;
+    /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Rayon ambient fix's one dial
+    /// (GI_UNIFIED_SPEC.md ADDENDUM CORRECTION; the mechanism is documented at
+    /// length on media/Hlms/Jahshaka/JahIfd_piece_ps.any).
+    ///
+    /// WHAT IT RESTORES. Inside a VCT volume the shader's own ambient term is
+    /// gated off (`if( vctSpecular.w == 0 )`, a gate upstream commented the
+    /// volume test out of, so it never fires). The only live ambient was the
+    /// cone-traced diffuse's `ambient * escapeFraction`, and binding a field
+    /// deletes that branch — so with DDGI on, ambient light inside the volume
+    /// came from nowhere: 15-25% darker mid-ground on OPEN scenes, sealed rooms
+    /// unaffected. This scales the replacement: the scene's SH ambient times a
+    /// sky-visibility fraction read out of the field's OWN depth atlas (one tap
+    /// per cage probe along the surface normal; a probe whose ray left the
+    /// volume without hitting anything votes "sky").
+    ///
+    /// 1.0 is the honest reconstruction and the default. 0 removes the term
+    /// entirely — through a UNIFORM shader branch, so it is also exactly "DDGI
+    /// as it behaved before this fix", which is what makes the A/B in
+    /// gi.ddgi_ambient (and the sealed-room invariance assertion) possible.
+    /// Above 1 it is a stylistic sky-fill trim, like ddgiIntensity is for the
+    /// bounce; clamped to [0, 8].
+    ///
+    /// It is DELIBERATELY not folded into ddgiIntensity: that one scales
+    /// bounced light and this one scales ambient, they are different integrals,
+    /// and folding them would make "turn the fix off" impossible without also
+    /// turning the field's own contribution off.
+    ///
+    /// Ignored when no field is bound (nothing to correct: outside a VCT scene
+    /// the shader's ambient is live, and inside one without a field the cone
+    /// diffuse still carries it).
+    float     ddgiAmbient = 1.0f;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same

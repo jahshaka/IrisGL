@@ -32,7 +32,7 @@ namespace jahshaka { namespace engine { namespace detail {
 
 std::map<const Ogre::SceneManager *, FogState> FogHlmsListener::sFogState;   // render thread only
 std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sSceneTime;  // render thread only
-std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sIfdIntensity;  // render thread only
+std::map<const Ogre::SceneManager *, FogHlmsListener::IfdState> FogHlmsListener::sIfdState;  // render thread only
 Ogre::HlmsPbs                                 *FogHlmsListener::sPbs = nullptr;
 
 FogHlmsListener gFogListener;
@@ -52,7 +52,7 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     // a stale time. Cleared here rather than in setFog's disable branch: this
     // one is the scene's teardown (OgreScene.cpp), that one is "fog off".
     sSceneTime.erase(sm);
-    sIfdIntensity.erase(sm);
+    sIfdState.erase(sm);
 }
 
 void FogHlmsListener::setSceneTime(const Ogre::SceneManager *sm, float seconds) {
@@ -64,17 +64,25 @@ float FogHlmsListener::sceneTime(const Ogre::SceneManager *sm) {
     return it == sSceneTime.end() ? 0.0f : it->second;
 }
 
-void FogHlmsListener::setIfdIntensity(const Ogre::SceneManager *sm, float intensity) {
-    sIfdIntensity[sm] = intensity;
+void FogHlmsListener::setIfdState(const Ogre::SceneManager *sm, const IfdState &state) {
+    sIfdState[sm] = state;
 }
 
-float FogHlmsListener::ifdIntensity(const Ogre::SceneManager *sm) {
-    const auto it = sIfdIntensity.find(sm);
-    // Not "1.0" and not "0": a scene that has a field bound but never pushed an
-    // intensity (impossible today — the arm writes it before it binds) must
-    // still render at the calibrated brightness rather than at upstream's raw
-    // one. GiParams is the single source of that number.
-    return it == sIfdIntensity.end() ? GiParams().ddgiIntensity : it->second;
+FogHlmsListener::IfdState FogHlmsListener::ifdState(const Ogre::SceneManager *sm) {
+    const auto it = sIfdState.find(sm);
+    if (it != sIfdState.end()) return it->second;
+    // Not zeros: a scene that has a field bound but never pushed state
+    // (impossible today — the arm writes it before it binds) must still render
+    // at the calibrated brightness rather than at upstream's raw one. GiParams
+    // is the single source of both numbers. The probe counts stay 0, which
+    // makes the sky-visibility threshold 0 and every depth sample "sky" — so
+    // the ambient dial is what has to be trusted to be 0 in that state, and it
+    // is: the arm writes the counts and the dial in the same call.
+    IfdState fallback;
+    const GiParams defaults;
+    fallback.intensity = defaults.ddgiIntensity;
+    fallback.ambient = 0.0f;
+    return fallback;
 }
 
 FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
@@ -136,10 +144,11 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
     // than the buffer (it is, whenever fog is off), never longer. Four for the
     // shader clock (HLMS_ADOPTION P5) — declared only by materials that carry a
-    // generated piece — and four for the DDGI intensity (GI_UNIFIED P1),
-    // declared only while an IrradianceField is bound. Both written always,
-    // because this hook cannot know which materials the pass will draw, and
-    // sixteen unconditional bytes are cheaper than a size that varies per pass.
+    // generated piece — and four for the DDGI block (GI_UNIFIED P1 and the
+    // ambient fix), declared only while an IrradianceField is bound. Both
+    // written always, because this hook cannot know which materials the pass
+    // will draw, and sixteen unconditional bytes are cheaper than a size that
+    // varies per pass.
     // Plus the irradiance-field alignment pad, which is the one thing here that
     // MUST vary per pass (see ifdAlignFloats above).
     return (16u + ifdAlignFloats(casterPass)) * sizeof(float);
@@ -176,13 +185,18 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = 0.0f;
-    // The DDGI diffuse intensity, same four-float alignment rule. Read by
+    // The DDGI block, same four-float alignment rule. Read by
     // media/Hlms/Jahshaka/JahIfd_piece_ps.any, which only exists in the
-    // generated shader while an IrradianceField is bound.
-    *passBufferPtr++ = ifdIntensity(sceneManager);
-    *passBufferPtr++ = 0.0f;
-    *passBufferPtr++ = 0.0f;
-    *passBufferPtr++ = 0.0f;
+    // generated shader while an IrradianceField is bound: x scales the field's
+    // irradiance, y scales the ambient sky-visibility term (0 removes it
+    // through a uniform branch), zw are the field's Y and Z probe counts, which
+    // upstream's own IrradianceField block does not carry and the visibility
+    // threshold needs.
+    const IfdState ifd = ifdState(sceneManager);
+    *passBufferPtr++ = ifd.intensity;
+    *passBufferPtr++ = ifd.ambient;
+    *passBufferPtr++ = ifd.numProbesY;
+    *passBufferPtr++ = ifd.numProbesZ;
     return passBufferPtr;
 }
 

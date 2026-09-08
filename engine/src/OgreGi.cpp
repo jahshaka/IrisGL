@@ -1931,9 +1931,17 @@ void OgreScene::buildIrradianceField() {
         mIfd->update(mIfdTotalProbes);
         mIfdProbesDone = mIfdTotalProbes;
 
-        // Our intensity scalar reaches the shader through the pass buffer.
-        FogHlmsListener::setIfdIntensity(mSceneMgr,
-                                         std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f)));
+        // Our two scalars, and the two probe counts the shader's sky-visibility
+        // threshold needs but upstream's own IrradianceField block does not
+        // carry, reach the shader through the pass buffer.
+        {
+            FogHlmsListener::IfdState st;
+            st.intensity  = std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f));
+            st.ambient    = std::max(0.0f, std::min(mGi.ddgiAmbient, 8.0f));
+            st.numProbesY = float(settings.mNumProbes[1]);
+            st.numProbesZ = float(settings.mNumProbes[2]);
+            FogHlmsListener::setIfdState(mSceneMgr, st);
+        }
         // The process-wide binding, under the same discipline as VctLighting's
         // (this scene is already sVctBindingOwner — rebuildVct took it).
         hlmsPbs(mRoot)->setIrradianceField(mIfd);
@@ -1946,7 +1954,8 @@ void OgreScene::buildIrradianceField() {
                 std::to_string(settings.mNumProbes[2]) + " (" + std::to_string(total) +
                 " probes) over " + Ogre::StringConverter::toString(origin) + " size " +
                 Ogre::StringConverter::toString(size) + ", intensity " +
-                std::to_string(mGi.ddgiIntensity) + ", re-converge " +
+                std::to_string(mGi.ddgiIntensity) + ", ambient " +
+                std::to_string(mGi.ddgiAmbient) + ", re-converge " +
                 std::to_string(mIfdProbesPerFrame) + " probes/frame");
     } JAH_CATCH(mError, );
 }
