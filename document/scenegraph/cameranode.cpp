@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include <QPoint>
 #include <QtMath>
 
+#include <algorithm>
 #include <cmath>
 
 #include "core/math/mathhelper.h"
@@ -23,6 +24,111 @@ For more information see the LICENSE file
 
 namespace iris
 {
+
+// ---- CAMERA_LENS_SPEC §5: the per-camera post-override key table ----------
+//
+// THE DOCUMENT OWNS THIS LIST because the document is what stores the values;
+// Studio's worldmodes tables are the panel/verb view of the same set (the on/off
+// rows from postFxRowIds(), the continuous ones from postFxParams()) and
+// tests/cameras asserts the two agree, so a row added there without a key here
+// fails a suite instead of silently going nowhere.
+//
+// WHAT IS DELIBERATELY MISSING, and why:
+//   * exposure / exposureMin / exposureMax — the camera has a §4 exposure BLOCK
+//     with a mode, in stops. Two dials for one value is worse than one.
+//   * antiAliasing (MSAA) and the SMAA PRESET — both are shader recompiles
+//     (chain::initHdrMsaa / initSmaa), i.e. a hitch, and a per-camera value
+//     would hitch on every cut. A camera may still turn SMAA OFF, which is
+//     compositor shape and free, so `smaa` is here as an Enum that accepts only
+//     the off value; the preset stays world-level by decision, not by omission.
+//   * `ssr` is here, and inert until the world row that owns it reports
+//     available — the same contract POST_CHAIN_SPEC §9.2 gives the world row.
+static const CameraPostKey kPostKeys[] = {
+    { "hdr",            CameraPostKeyType::Toggle },
+    { "bloom",          CameraPostKeyType::Toggle },
+    { "bloomThreshold", CameraPostKeyType::Number },
+    { "ssao",           CameraPostKeyType::Toggle },
+    { "ssaoPower",      CameraPostKeyType::Number },
+    { "ssaoRadius",     CameraPostKeyType::Number },
+    { "smaa",           CameraPostKeyType::Enum   },
+    { "ssr",            CameraPostKeyType::Enum   },
+    { "refractions",    CameraPostKeyType::Enum   },
+};
+
+const CameraPostKey *cameraPostKeys(int &count)
+{
+    count = int(sizeof(kPostKeys) / sizeof(kPostKeys[0]));
+    return kPostKeys;
+}
+
+const CameraPostKey *cameraPostKey(const QString &id)
+{
+    for (const CameraPostKey &k : kPostKeys)
+        if (id == QLatin1String(k.id)) return &k;
+    return nullptr;
+}
+
+bool CameraNode::hasPostOverride(const QString &id) const
+{
+    return postOverrides.contains(id);
+}
+
+QVariant CameraNode::postOverride(const QString &id) const
+{
+    const auto it = postOverrides.constFind(id);
+    if (it == postOverrides.constEnd()) return QVariant();
+    const CameraPostKey *key = cameraPostKey(id);
+    if (!key) return QVariant();
+    return key->type == CameraPostKeyType::Number ? QVariant(it->toDouble())
+                                                  : QVariant(it->toInt());
+}
+
+bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
+{
+    const CameraPostKey *key = cameraPostKey(id);
+    if (!key) return false;
+    switch (key->type) {
+    case CameraPostKeyType::Number: {
+        bool ok = false;
+        const double v = value.toDouble(&ok);
+        if (!ok) return false;
+        postOverrides.insert(id, v);
+        return true;
+    }
+    case CameraPostKeyType::Toggle: {
+        // A toggle takes a bool or the 0/1 an int row uses — both spellings
+        // reach here (a checkbox writes one, the row table the other).
+        if (value.typeId() == QMetaType::Bool) {
+            postOverrides.insert(id, value.toBool() ? 1 : 0);
+            return true;
+        }
+        bool ok = false;
+        const int v = value.toInt(&ok);
+        if (!ok || (v != 0 && v != 1)) return false;
+        postOverrides.insert(id, v);
+        return true;
+    }
+    case CameraPostKeyType::Enum: {
+        bool ok = false;
+        const int v = value.toInt(&ok);
+        if (!ok) return false;
+        // THE ONE CROSS-KEY RULE the table cannot express (see kPostKeys):
+        // a camera may switch SMAA OFF, but not to another PRESET — that is a
+        // shader recompile and would hitch on every cut.
+        if (id == QLatin1String("smaa") && v >= 0) return false;
+        postOverrides.insert(id, v);
+        return true;
+    }
+    }
+    return false;
+}
+
+bool CameraNode::clearPostOverride(const QString &id)
+{
+    if (!postOverrides.contains(id)) return false;
+    postOverrides.remove(id);
+    return true;
+}
 
 QList<Property*> CameraNode::getProperties()
 {
@@ -208,6 +314,48 @@ QList<Property*> CameraNode::getProperties()
     boolProp->value = bodyVisible;
     props.append(boolProp);
 
+    // ---- CAMERA_LENS_SPEC §4, the exposure block -------------------------
+    // Keyable like everything else in this list, and for the same reason: an
+    // exposure ramp across a shot is a keyframed float, with no animation code.
+
+    intProp = new IntProperty();
+    intProp->displayName = "Exposure Mode";
+    intProp->name = "exposureMode";
+    intProp->value = static_cast<int>(exposureMode);
+    props.append(intProp);
+
+    prop = new FloatProperty();
+    prop->displayName = "Exposure (stops)";
+    prop->name = "exposure";
+    prop->value = exposure;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Exposure Min (stops)";
+    prop->name = "exposureMin";
+    prop->value = exposureMin;
+    props.append(prop);
+
+    prop = new FloatProperty();
+    prop->displayName = "Exposure Max (stops)";
+    prop->name = "exposureMax";
+    prop->value = exposureMax;
+    props.append(prop);
+
+    // postOverrides is deliberately NOT a row, the same way focusTarget is not:
+    // an override is TRI-STATE and this list has no way to say "inherit" — a
+    // float row would silently mean "overridden with the inherited value" the
+    // moment anything wrote it, and a keyframe on it could never go back. The
+    // tri-state surface is the camera panel and camera.postFx.
+    //
+    // The map IS reachable through get/setPropertyValue as "postFx.<key>" (a
+    // null clears), which is what makes every override write UNDOABLE through
+    // the one generic SetNodePropertyCommand instead of a command class per
+    // row. node.setProperty does not reach it, because that verb validates
+    // against THIS list — deliberately, and asserted in cameras.e2e.postfx.
+    // RECORDED LIMITATION: per-camera override VALUES are therefore not
+    // keyframeable in this phase. The exposure block above is.
+
     // focusTarget is deliberately NOT a row: it is a node GUID, and the
     // property list is the keyable/panel surface — there is no widget type for
     // a node reference and nothing sensible to interpolate between two guids.
@@ -252,6 +400,16 @@ QVariant CameraNode::getPropertyValue(QString valueName)
     if (valueName == "fStop")           return fStop;
     if (valueName == "outputHeight")    return outputHeight;
     if (valueName == "bodyVisible")     return bodyVisible;
+    // CAMERA_LENS_SPEC §4.
+    if (valueName == "exposureMode")    return static_cast<int>(exposureMode);
+    if (valueName == "exposure")        return exposure;
+    if (valueName == "exposureMin")     return exposureMin;
+    if (valueName == "exposureMax")     return exposureMax;
+    // CAMERA_LENS_SPEC §5: "postFx.<key>" reads the OVERRIDE and nothing else —
+    // an invalid QVariant means "inherited", which is exactly the information a
+    // caller needs and the reason this is not a plain float.
+    if (valueName.startsWith(QLatin1String("postFx.")))
+        return postOverride(valueName.mid(7));
 
     return SceneNode::getPropertyValue(valueName);
 }
@@ -319,6 +477,35 @@ bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
     // without wedging the machine on the offscreen path.
     if (valueName == "outputHeight")  { outputHeight = qBound(1, value.toInt(), 16384); return true; }
     if (valueName == "bodyVisible")   { bodyVisible = value.toBool();                return true; }
+
+    // CAMERA_LENS_SPEC §4. The window stays ordered — the one cross-row rule,
+    // and the same one world.postFx enforces on the scene's copy.
+    if (valueName == "exposureMode") {
+        const int m = value.toInt();
+        exposureMode = (m == static_cast<int>(CameraExposureMode::Auto))   ? CameraExposureMode::Auto
+                     : (m == static_cast<int>(CameraExposureMode::Manual)) ? CameraExposureMode::Manual
+                                                                           : CameraExposureMode::Inherit;
+        return true;
+    }
+    if (valueName == "exposure")    { exposure = value.toFloat();    return true; }
+    if (valueName == "exposureMin") {
+        exposureMin = value.toFloat();
+        if (exposureMax < exposureMin) std::swap(exposureMin, exposureMax);
+        return true;
+    }
+    if (valueName == "exposureMax") {
+        exposureMax = value.toFloat();
+        if (exposureMax < exposureMin) std::swap(exposureMin, exposureMax);
+        return true;
+    }
+    // CAMERA_LENS_SPEC §5. A null (or invalid) value CLEARS the override —
+    // "inherit" has to be expressible through the same door that sets, or a
+    // script could turn an override on and never off.
+    if (valueName.startsWith(QLatin1String("postFx."))) {
+        const QString key = valueName.mid(7);
+        if (!value.isValid() || value.isNull()) return clearPostOverride(key);
+        return setPostOverride(key, value);
+    }
 
     return SceneNode::setPropertyValue(valueName, value);
 }
@@ -613,6 +800,14 @@ SceneNodePtr CameraNode::createDuplicate()
 	camera->fStop = this->fStop;
 	camera->outputHeight = this->outputHeight;
 	camera->bodyVisible = this->bodyVisible;
+	// CAMERA_LENS_SPEC §4/§5: the exposure block and the override map. The map
+	// is copied WHOLE — a duplicate that inherited what the original overrode
+	// would grade differently, which is precisely what a duplicate must not do.
+	camera->exposureMode = this->exposureMode;
+	camera->exposure = this->exposure;
+	camera->exposureMin = this->exposureMin;
+	camera->exposureMax = this->exposureMax;
+	camera->postOverrides = this->postOverrides;
 
 	return camera;
 }

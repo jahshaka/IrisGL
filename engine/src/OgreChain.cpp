@@ -723,6 +723,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // first frame is already about right and adaptation only trims it.
         c->setAllClearColours(Ogre::ColourValue(1.0f, 1.0f, 1.0f, 1.0f));
         c->mProfilingId = "Jahshaka HDR luminance seed";
+        // Handed back so a CAMERA CUT can re-seed the history rather than let
+        // it fade across the cut (CAMERA_LENS_SPEC §4 / R4 —
+        // OgreView::resetExposureHistory). The build-time value stays 1.0: it
+        // is what every existing frame was built on, and the derived seed is
+        // only for a cut, where we know which exposure we are cutting TO.
+        handlesOut.exposureSeed = c;
     }
 
     // -----------------------------------------------------------------------
@@ -1802,25 +1808,51 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
             Ogre::Vector4(desc.ssrRoughnessCutoff, desc.ssrIntensity, 0.0f, 0.0f));
 }
 
-// ---- The per-frame push ---------------------------------------------------
-void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                  unsigned viewWidth, unsigned viewHeight) {
+// ---- The per-frame push, in its two halves --------------------------------
+// See the declarations in EnginePrivate.h for why the split exists at all.
+
+void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
+    if (desc.hdr && gHdrMsaaSamples != desc.samples) {
+        initHdrMsaa(desc.samples);
+        gHdrMsaaSamples = desc.samples;
+    }
+    if (desc.smaaPreset >= 0) initSmaa(root, desc.smaaPreset);
+}
+
+void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
+                      unsigned viewWidth, unsigned viewHeight) {
     if (desc.hdr) {
-        if (gHdrMsaaSamples != desc.samples) {
-            initHdrMsaa(desc.samples);
-            gHdrMsaaSamples = desc.samples;
-        }
         setExposure(desc.exposure, desc.exposureMin, desc.exposureMax);
         if (desc.bloom) setBloomThreshold(desc.bloomThreshold, desc.bloomThreshold + 2.0f);
     }
     if (desc.ssao) {
+        // initSsao is idempotent and process-wide (the hemisphere kernel and the
+        // rotation-noise tile are camera-independent by construction), so the
+        // per-view path may call it: the FIRST view to want AO builds it.
         initSsao(root);
         updateSsao(camera, unsigned(float(viewWidth) * desc.ssaoScale),
                    unsigned(float(viewHeight) * desc.ssaoScale),
                    desc.ssaoRadius, desc.ssaoPower);
     }
-    if (desc.smaaPreset >= 0) initSmaa(root, desc.smaaPreset);
     if (desc.ssr > 0) updateSsr(camera, desc);
+}
+
+float exposureSeed(float exposure) {
+    // The SAME grey-card constant the fixed tonemap uses (fixedInverseLuminance
+    // above, whose derivation is written out there). One formula, two callers:
+    // the deterministic secondary-surface grade, and the camera-cut re-seed.
+    return fixedInverseLuminance(exposure);
+}
+
+void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *) {
+    if (!mRoot || !mView) return;
+    // THE WHOLE MECHANISM, in three lines. Ogre fires this immediately before
+    // THIS workspace's passes execute (CompositorWorkspace::_update), and the
+    // material parameters these writes land in are read at pass execute time —
+    // so two workspaces in one frame can carry two different exposures even
+    // though the materials themselves are process-wide singletons.
+    applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
+                     mView->width(), mView->height());
 }
 
 }   // namespace chain

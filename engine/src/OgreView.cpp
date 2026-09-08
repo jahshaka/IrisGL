@@ -7,6 +7,12 @@
 // on every execute, so that is a live viewport change with no rebuild.
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <Compositor/Pass/PassClear/OgreCompositorPassClearDef.h>
+// resetExposureHistory reaches the SEED PASS INSTANCE (not just its definition):
+// the clear colour Vulkan actually uses lives in the pass' RenderPassDescriptor,
+// and "run once more" is a call on the instance.
+#include <Compositor/OgreCompositorNode.h>
+#include <Compositor/Pass/OgreCompositorPass.h>
+#include <OgreRenderPassDescriptor.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -271,6 +277,40 @@ void OgreView::setPostFx(const PostFxDesc &fx) {
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }
 
+void OgreView::resetExposureHistory() {
+    // NOTHING TO RE-SEED unless the automatic exposure is actually in the graph:
+    // the seed pass only exists for `hdr && !tonemapFixed` (chain::build), and
+    // an offscreen view without allowOffscreen has no chain at all.
+    if (!mWorkspace || !mChainHandles.exposureSeed) return;
+    const ChainDesc d = chainDesc();
+    if (!d.hdr || d.tonemapFixed) return;
+    const float seed = chain::exposureSeed(d.exposure);
+    const Ogre::ColourValue colour(seed, seed, seed, seed);
+    JAH_TRY {
+        // The DEFINITION's colour is what a future rebuild will use; the live
+        // RenderPassDescriptor is what THIS pass instance clears with (Vulkan
+        // caches the VkClearValue, which is why setClearColour is a virtual and
+        // not a field write). Both, so a re-seed survives a rebuild that happens
+        // to land in the same frame.
+        mChainHandles.exposureSeed->setAllClearColours(colour);
+        for (Ogre::CompositorNode *n : mWorkspace->getNodeSequence()) {
+            if (!n) continue;
+            for (Ogre::CompositorPass *p : n->_getPasses()) {
+                if (!p || p->getDefinition() != mChainHandles.exposureSeed) continue;
+                if (Ogre::RenderPassDescriptor *rpd = p->getRenderPassDesc())
+                    rpd->setClearColour(colour);
+                // The seed is `mNumInitialPasses = 1` — it has already been
+                // spent, once, when the workspace was built. This is what puts
+                // it back, and it is the whole reason the pass is reachable
+                // from here (verified in the pin: CompositorPass's ctor takes
+                // mNumPassesLeft from the definition and only this call resets
+                // it, so the spec's R4 "seeds at workspace build" claim is TRUE).
+                p->resetNumPassesLeft();
+            }
+        }
+    } JAH_CATCH(mError, );
+}
+
 OgreView::~OgreView() { destroy(); }
 
 const std::string &OgreView::name() const { return mName; }
@@ -344,6 +384,30 @@ bool OgreView::detachWorkspace() {
         mWorkspace = nullptr;
         return true;
     } JAH_CATCH(mError, false);
+}
+
+void OgreView::syncGlobalsListener() {
+    // THE ARMING RULE, and it is what preserves the determinism law for free:
+    // chainDesc() has already cleared every effect for an offscreen view that
+    // did not opt in, so anyEffect() is false there and no listener is ever
+    // created — a thumbnail cannot be reached by this mechanism even in
+    // principle.
+    const bool wanted = mEnabled && mScene && mCamera && chainDesc().anyEffect();
+    if (!wanted) {
+        if (mGlobalsListener) {
+            removeWorkspaceListener(mGlobalsListener.get());
+            mGlobalsListener.reset();
+        }
+        return;
+    }
+    if (!mGlobalsListener) {
+        mGlobalsListener.reset(new chain::ViewGlobalsListener());
+        // Through the seam, so it survives every workspace rebuild — which is
+        // constant here: an enable-flag change to the post chain IS a rebuild.
+        addWorkspaceListener(mGlobalsListener.get());
+    }
+    mGlobalsListener->mRoot = mRoot;
+    mGlobalsListener->mView = this;
 }
 
 void OgreView::addWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {

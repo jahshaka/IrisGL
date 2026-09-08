@@ -342,6 +342,14 @@ struct ChainHandles {
     /// The clear that fills the tiny background swatch the inner-rect quad
     /// copies. Its colour is the view's background, pushed live.
     Ogre::CompositorPassClearDef *letterboxSwatch = nullptr;
+    /// The one-shot clear that SEEDS the HDR auto-exposure history
+    /// (CAMERA_LENS_SPEC §4, the camera-cut hook). It carries
+    /// `mNumInitialPasses = 1`, so it executes once per workspace instantiation
+    /// and never again — which is the spec's unverified R4 claim, VERIFIED here
+    /// in the pin (CompositorPass's ctor takes mNumPassesLeft from the
+    /// definition and only resetNumPassesLeft() puts it back). Null unless the
+    /// chain has the automatic HDR exposure.
+    Ogre::CompositorPassClearDef *exposureSeed = nullptr;
 };
 
 /// Creates the node definitions and the workspace definition `desc` describes,
@@ -443,10 +451,48 @@ void initSmaa(Ogre::Root *root, int preset);
 /// ScreenSpaceReflections::update — the matrix surgery there is not obvious and
 /// is not ours to reinvent.
 void updateSsr(Ogre::Camera *camera, const ChainDesc &desc);
-/// One call per frame from the primary view: recompiles what changed and pushes
-/// every per-frame uniform the enabled effects need.
-void applyGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                  unsigned viewWidth, unsigned viewHeight);
+// ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
+//
+// This was ONE function, `applyGlobals`, called once a frame from the primary
+// on-screen view. It is two because the halves have DIFFERENT NATURAL SCOPES,
+// and pretending
+// otherwise was two defects at once (POST_CHAIN_SPEC §7.4's "the first enabled
+// on-screen view owns the globals, then break"):
+//
+//   * the RECOMPILE half — the MSAA resolve weights and the SMAA preset — is a
+//     shader reload. It cannot be per view without hitching on every camera cut
+//     and every page switch, so it stays exactly where it was: pushed once a
+//     frame from the primary on-screen view, debounced on "did the value
+//     change" inside each helper. That is a DECISION, recorded, not a
+//     limitation to engineer around.
+//
+//   * the CHEAP half — exposure, the bloom threshold, the AO kernel's camera
+//     terms, the SSR march's matrices — is a handful of setNamedConstant
+//     writes, and every one of them is a property of the view being drawn. Run
+//     from a per-View CompositorWorkspaceListener's workspacePreUpdate it takes
+//     effect for THAT workspace's passes in the same frame (spike R1, measured
+//     on screen and offscreen), which fixes two pre-existing defects outright:
+//     two on-screen views no longer fight over one exposure, and SSAO no longer
+//     marches the FIRST view's projection in the second view's frame.
+void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
+void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
+                      unsigned viewWidth, unsigned viewHeight);
+
+/// The seed value the HDR adaptation history holds for a given exposure — the
+/// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
+/// re-seeded history starts exactly where a deterministic grade would land.
+float exposureSeed(float exposure);
+
+/// One per View, owned by it, registered through OgreView::addWorkspaceListener
+/// so it survives every workspace rebuild (the planar listener's shape).
+/// Pushes `applyViewGlobals` for its own view, immediately before that view's
+/// workspace updates.
+class ViewGlobalsListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    void workspacePreUpdate(Ogre::CompositorWorkspace *) override;
+    Ogre::Root *mRoot = nullptr;
+    OgreView   *mView = nullptr;
+};
 }   // namespace chain
 
 // ---------------------------------------------------------------------------
@@ -1956,6 +2002,7 @@ public:
 
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
+    void resetExposureHistory() override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
     const ViewOverlayDesc &overlay() const override;
@@ -2082,6 +2129,13 @@ public:
     /// Registration itself rides addWorkspaceListener, so the listener survives
     /// every workspace rebuild — that is the seam this feature was waiting for.
     void syncPlanarListener();
+    /// Arms or disarms this view's POST-CHAIN GLOBALS listener (CAMERA_LENS_SPEC
+    /// §4). Armed while the view is enabled and its chain has any effect, so
+    /// the view pushes ITS OWN exposure / bloom threshold / AO projection to
+    /// its own workspace's passes; disarmed otherwise, which is what makes a
+    /// view with no chain cost exactly nothing. Same idempotent once-a-frame
+    /// contract as syncPlanarListener, and registered through the same seam.
+    void syncGlobalsListener();
     /// Releases workspace, camera, workspace definitions and the window/texture.
     /// Safe to call twice. Called by Engine::destroyView and by the Engine
     /// destructor BEFORE Root dies.
@@ -2133,6 +2187,10 @@ private:
     /// Owned; registered through addWorkspaceListener while the bound scene has
     /// planar reflections armed. Null until the first frame that needs it.
     std::unique_ptr<planar::WorkspaceListener> mPlanarListener;
+    /// Owned; registered the same way while this view's chain has effects
+    /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
+    /// preview and pixel suite, by construction.
+    std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
     unsigned                   mWorkspaceGeneration = 0;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a

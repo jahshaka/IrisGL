@@ -327,6 +327,15 @@ public:
     static bool integrateSkyAmbientSh(const QImage &equirect, float shOut[27]);
 
 private:
+    /// Records which camera is driving `view` and answers "did it CHANGE" — the
+    /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
+    /// first time a view is seen: an opening frame is not a cut.
+    bool noteDrivingCamera(const jahshaka::engine::View *view, const iris::CameraNodePtr &camera);
+    /// The camera last recorded as driving `view`, or null (never seen, or the
+    /// node has since been deleted). Read by applyEnvironment, which builds the
+    /// view's post description a beat BEFORE applyCamera runs.
+    iris::CameraNodePtr drivingCameraFor(const jahshaka::engine::View *view) const;
+
     struct Entry {
         jahshaka::engine::NodeId node = 0;
         /// The DOCUMENT's Ogre scene node this entry adopted (opaque —
@@ -757,6 +766,17 @@ private:
     /// see applyCamera. Raw pointer, compared only for identity; the document
     /// owns it and a stale value can only ever fail to match.
     const iris::CameraNode *mViewCamera = nullptr;
+    /// PER VIEW, which mViewCamera cannot be: one mirror serves the viewport, a
+    /// screenshot's throwaway view and the player's, so "did the driving camera
+    /// change" is only answerable per view (CAMERA_LENS_SPEC §4, the camera-cut
+    /// re-seed). A bounded LRU — see noteDrivingCamera — because those views
+    /// come and go. Both pointers are compared only for identity and are never
+    /// dereferenced.
+    /// WEAK on the camera: the entry outlives the call that wrote it and is
+    /// dereferenced a frame later, so a deleted camera must read as "gone" and
+    /// not as a dangling pointer.
+    std::vector<std::pair<const jahshaka::engine::View *, QWeakPointer<iris::CameraNode>>>
+        mDrivingCameras;
     /// Which sky the engine currently shows, and a 64-bit hash of the values it
     /// was built from. Two fields rather than one string because applySky
     /// DISPATCHES on the kind (and the realistic-bake debounce asks "was the

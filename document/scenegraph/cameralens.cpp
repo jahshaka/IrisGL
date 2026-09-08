@@ -23,6 +23,8 @@ namespace lens
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+/// One photographic stop on the post chain's natural-log exposure axis.
+constexpr double kLn2 = 0.69314718055994530942;
 
 inline double deg2rad(double d) { return d * kPi / 180.0; }
 inline double rad2deg(double r) { return r * 180.0 / kPi; }
@@ -207,6 +209,33 @@ float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float ne
     const float focal = stereoFocalLength > 0.0f ? stereoFocalLength : 1.0f;
     const float scale = nearDist > 0.0f ? (nearDist / focal) : 1.0f;
     return shiftFromNearOffset(frustumOffset * scale, halfExtent);
+}
+
+// ---- exposure (CAMERA_LENS_SPEC §4) ---------------------------------------
+
+float exposureStopsToChain(float stops)
+{
+    // One stop is a doubling, and the chain's axis is natural-log, so a stop is
+    // ln 2 of it. Anchored so that zero stops is the default world grade.
+    return kExposureAnchorChain + stops * float(kLn2);
+}
+
+float exposureChainToStops(float chain)
+{
+    return (chain - kExposureAnchorChain) / float(kLn2);
+}
+
+float manualExposureClamp()
+{
+    // 7.5 - ln(1024 * 0.18). Derived, not typed: see the header for why this
+    // exact number is what makes manual exposure agree with the deterministic
+    // tonemap constant e^(E-2)/0.18.
+    return 7.5f - float(std::log(1024.0 * 0.18));
+}
+
+float exposureMultiplier(float chainExposure)
+{
+    return float(std::exp(double(chainExposure) - 2.0) / 0.18);
 }
 
 float smoothTowards(float current, float target, float speed, float dt)

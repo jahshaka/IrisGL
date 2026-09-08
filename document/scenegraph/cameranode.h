@@ -19,6 +19,8 @@ For more information see the LICENSE file
 #include "document/scenegraph/cameralens.h"
 #include "document/scenegraph/scenenode.h"
 
+#include <QJsonObject>
+
 
 namespace iris
 {
@@ -46,6 +48,49 @@ enum class CameraFocusMode {
 	Track,
 	Off
 };
+
+/// How this camera's EXPOSURE is decided (CAMERA_LENS_SPEC §4).
+///
+/// `Inherit` — the default, and the only value that changes nothing: the world's
+/// own exposure settings reach the view untouched, exactly as they did before
+/// per-camera exposure existed. `Auto` and `Manual` both SUBSTITUTE this
+/// camera's block for the world's while this camera is the one driving a view
+/// (piloted, played through, or the subject of an opted-in screenshot);
+/// `Manual` additionally pins the adaptation clamp so the grade is a number and
+/// not a measurement (iris::lens::manualExposureClamp explains the pin).
+///
+/// NEVER on a thumbnail, a preview or a pixel suite: those render through
+/// OFFSCREEN views, which discard the whole post description unless a caller
+/// deliberately opts in (PostFxDesc::allowOffscreen). The determinism law is
+/// enforced in the engine, in one place, so nothing here has to remember it.
+enum class CameraExposureMode {
+	Inherit,
+	Auto,
+	Manual
+};
+
+/// The per-camera post-process override keys, and what kind of value each one
+/// holds (CAMERA_LENS_SPEC §5). THE DOCUMENT IS THE AUTHORITY on which keys
+/// exist, because the document is what stores them; Studio's row tables
+/// (services/worldmodes.h) are the panel/verb view of the same set and a test
+/// asserts the two agree.
+///
+/// The three exposure ids the world's parameter table also carries — exposure,
+/// exposureMin, exposureMax — are DELIBERATELY ABSENT: a camera's exposure is
+/// the §4 block above (stops, with a mode), not an override slot, and having
+/// both would be two dials for one value.
+enum class CameraPostKeyType { Toggle, Enum, Number };
+
+struct CameraPostKey {
+	const char *id;
+	CameraPostKeyType type;
+};
+
+/// The table, and its size. Stable order: the panel and the verbs report it
+/// as-is.
+const CameraPostKey *cameraPostKeys(int &count);
+/// The entry with this id, or null.
+const CameraPostKey *cameraPostKey(const QString &id);
 
 class CameraNode : public SceneNode
 {
@@ -188,6 +233,54 @@ public:
     /// (phase 2). Like every editor helper it is hidden in play/game view.
     bool bodyVisible;
 
+    // ---- CAMERA_LENS_SPEC §4: the exposure block -------------------------
+    //
+    // STOPS, all three of them, and the conversion into the post chain's own
+    // natural-log axis happens ONCE, at the mirror, through
+    // iris::lens::exposureStopsToChain. Nothing in the document ever holds a
+    // chain-unit exposure: the world's `Scene::exposure` does (it is the value
+    // the chain has always taken), the camera's does not, and mixing them up is
+    // the one mistake this pair of units invites.
+
+    /// Inherit (default) / Auto / Manual. Inherit is bit-for-bit "as if this
+    /// block did not exist".
+    CameraExposureMode exposureMode;
+    /// The exposure, in STOPS. 0 is the default world grade; +1 is one
+    /// doubling. In Manual mode it IS the exposure; in Auto it is the midpoint
+    /// the adaptation works around.
+    float exposure;
+    /// The window automatic exposure may adapt within, in stops, on the same
+    /// axis. Ignored in Manual mode (which pins the clamp to a fixed reference
+    /// instead — see iris::lens::manualExposureClamp for why that is not the
+    /// exposure value). Kept ordered by the writers: min <= max.
+    float exposureMin;
+    float exposureMax;
+
+    // ---- CAMERA_LENS_SPEC §5: per-camera post overrides ------------------
+
+    /// TRI-STATE, one key at a time: a key PRESENT here overrides the world's
+    /// value while this camera drives a view; a key ABSENT inherits. There is
+    /// no blend weight and there will not be one — our post is compositor
+    /// SHAPE (a workspace rebuild), not a float anybody can cross-fade, and a
+    /// weight that silently snapped at 0.5 would lie (§2, "REJECTED — would
+    /// lie"). UE's own bOverride model is the same shape.
+    ///
+    /// Keys are `cameraPostKeys()` and nothing else; values are ints for the
+    /// Toggle/Enum kinds and doubles for Number. Written through
+    /// setPostOverride, which refuses anything else — a QJsonObject read from a
+    /// file is sanitised the same way by the reader.
+    QJsonObject postOverrides;
+
+    /// Is this key overridden, and what does it say? `postOverride` returns an
+    /// invalid QVariant when the key is absent (i.e. inherited).
+    bool hasPostOverride(const QString &id) const;
+    QVariant postOverride(const QString &id) const;
+    /// Records an override. Returns false for an unknown key or a value the key
+    /// cannot hold; a valid write always replaces whatever was there.
+    bool setPostOverride(const QString &id, const QVariant &value);
+    /// Drops an override (back to inherit). False when there was none.
+    bool clearPostOverride(const QString &id);
+
     iris::Mat4 viewMatrix;
     iris::Mat4 projMatrix;
 
@@ -318,6 +411,15 @@ private:
         focusPlaneVisible = false;
         outputHeight = 1080;
         bodyVisible = true;
+        // CAMERA_LENS_SPEC §4/§5 defaults. Inherit + an empty override map is
+        // the "this block does not exist" state, so a camera made today pushes
+        // exactly the post description a camera made yesterday did.
+        exposureMode = CameraExposureMode::Inherit;
+        exposure = 0.0f;
+        // +-3.5 stops: a window close to the world's own default (+-2.5 on the
+        // chain's axis) and a round number in the unit the camera speaks.
+        exposureMin = -3.5f;
+        exposureMax = 3.5f;
 		// Was left indeterminate (only setProjection() wrote it): any consumer
 		// of a camera that never called setProjection read garbage — the engine
 		// mirror rendered preview cameras ORTHOGRAPHIC when the garbage came up

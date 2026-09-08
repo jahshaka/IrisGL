@@ -209,6 +209,59 @@ float ogreFrustumOffset(float shiftFraction, float halfExtent, float nearDist,
 float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float nearDist,
                                  float stereoFocalLength);
 
+// ---- EXPOSURE (CAMERA_LENS_SPEC §4) ---------------------------------------
+//
+// THE DOCUMENT STORES STOPS. The post chain does not: Ogre's HDR auto-exposure
+// material takes `(1024 * e^(E-2), 7.5 - max, 7.5 - min)` and its shader
+// computes
+//
+//     multiplier = 1024 * e^(E-2) / e^( clamp( meanLogLuma, 7.5-max, 7.5-min ) )
+//     history    = mix( multiplier, history, 0.25 ^ dt )        // ~75%/s
+//
+// (DownScale03_SumLumEnd_ps.glsl, verified in the pin). So `E` lives on a
+// NATURAL-LOG axis — one photographic stop is ln 2 of it — and the window
+// bounds live on the same axis but describe MEASURED LUMINANCE, not exposure.
+// Both conversions are here, as pure functions, because they are the one place
+// the two unit systems meet and every number they produce is asserted against a
+// hand computation in tests/cameras.
+//
+// THE ANCHOR. `stops = 0` has to mean something, and the honest choice is "the
+// grade a default world already has": iris::Scene's own default exposure is
+// +0.6 in chain units (the value the World panel documents as "what puts
+// mid-grey back where it was when HDR comes on"). So zero stops on a camera IS
+// the default world exposure, and +1 stop is one doubling from there.
+constexpr float kExposureAnchorChain = 0.6f;
+
+/// stops -> the chain's `E`, and back. Exact inverses.
+float exposureStopsToChain(float stops);
+float exposureChainToStops(float chain);
+
+/// THE MANUAL PIN, and why it is a CONSTANT rather than the exposure value.
+///
+/// Setting min == max pins the shader's clamp, which is what makes manual
+/// exposure possible at all. But pinning it TO THE EXPOSURE would make the
+/// exposure appear twice in the same expression (`e^(E-2) / e^(7.5-E)`), so one
+/// authored stop would move the picture by two — a silently wrong dial. Pinning
+/// the clamp to a fixed reference instead leaves `multiplier ∝ e^E`, i.e.
+/// exactly one stop per stop.
+///
+/// WHICH reference: the one that makes manual exposure agree with the
+/// deterministic tonemap the secondary surfaces already use
+/// (PostFxDesc::tonemapFixed, whose constant is `e^(E-2) / 0.18` — a grey card
+/// standing in for the measurement). Solving
+/// `1024 / e^(7.5 - pin) = 1 / 0.18` gives `pin = 7.5 - ln(1024 * 0.18)`, so a
+/// manually exposed viewport and a thumbnail of the same world at the same
+/// exposure grade IDENTICALLY. Nothing about that is a coincidence to preserve
+/// by luck — it is why this number is derived here and not typed in.
+float manualExposureClamp();
+
+/// The multiplier the tonemapper ends up applying for a chain exposure `E`
+/// under the manual pin (and the value the auto path converges to on a
+/// grey-card scene): `e^(E-2) / 0.18`. Used to re-seed the adaptation history
+/// on a camera cut, and asserted against the chain's own fixed-exposure
+/// constant.
+float exposureMultiplier(float chainExposure);
+
 /// Exponential smoothing toward a target, framerate-independent:
 ///     out = target + (current - target) * exp(-speed * dt)
 /// Speed <= 0 or a non-positive dt snaps. Used by focus tracking (P2) and kept

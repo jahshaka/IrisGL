@@ -561,6 +561,12 @@ void OgreEngine::renderOneFrame() {
             // its camera on setScene), so the listener is re-synced rather than
             // hooked up once. Idempotent and cheap when nothing changed.
             v->syncPlanarListener();
+            // The post chain's PER-VIEW tuning (CAMERA_LENS_SPEC §4). Same
+            // shape and same reason as the planar listener above: both ends
+            // move between frames (the chain rebuilds on every enable-flag
+            // change, the camera is recreated on setScene), so the listener is
+            // re-synced rather than hooked up once.
+            v->syncGlobalsListener();
             // The inset's rectangles are derived from the TARGET's aspect
             // (a normalised rect is not a pixel rect), so a resize that never
             // touched ViewPipDesc still moves the letterbox. Re-derived here,
@@ -569,17 +575,29 @@ void OgreEngine::renderOneFrame() {
             v->applyLetterboxAndPip();
         }
         for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar(); }
-        // The post chain's tuning lives in MaterialManager singletons — exposure,
-        // bloom threshold, the AO kernel and the SMAA preset are per PROCESS even
-        // though the enable flags are per view (POST_CHAIN_SPEC.md §7.4). The rule
-        // is "the primary on-screen view owns the globals": the first enabled
-        // on-screen view whose chain has effects. Offscreen views never qualify —
-        // their chainDesc() has every effect off by construction.
+        // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
+        // applyGlobals in two). The MSAA resolve weights and the SMAA preset
+        // are SHADER RELOADS — a hitch — so they cannot be per view without
+        // hitching on every camera cut and every page switch. They keep the
+        // rule POST_CHAIN_SPEC §7.4 wrote: "the primary on-screen view owns the
+        // globals", i.e. the first enabled view whose chain has effects, and
+        // each helper debounces on "did the value actually change".
+        //
+        // Everything CHEAP that used to ride along here — exposure, the bloom
+        // threshold, the AO kernel's camera terms, the SSR march's matrices —
+        // is now pushed per view by chain::ViewGlobalsListener, from that
+        // view's own workspacePreUpdate. That is what ended the two defects
+        // this loop used to cause: two on-screen views fighting over one
+        // exposure, and SSAO marching the first view's projection in the
+        // second view's frame.
+        //
+        // Offscreen views never qualify — their chainDesc() has every effect
+        // off by construction unless the caller deliberately opted in.
         for (auto &v : mViews) {
             if (!v->isEnabled()) continue;
             const ChainDesc d = v->chainDesc();
-            if (!d.anyEffect()) continue;   // offscreen views only qualify if they opted in
-            chain::applyGlobals(mRoot, v->camera(), d, v->width(), v->height());
+            if (!d.anyEffect()) continue;
+            chain::applyRecompileGlobals(mRoot, d);
             break;
         }
         // THE SCENES THIS FRAME BELONGS TO (THREADING_ADOPTION_SPEC.md P3).
