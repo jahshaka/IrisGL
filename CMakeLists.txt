@@ -160,6 +160,7 @@ set(SRCS
     document/animation/locomotion.cpp
     document/assets/skeleton.cpp
     document/scenegraph/scene.cpp
+    document/scenegraph/skybake.cpp
     document/scenegraph/scenenode.cpp
     document/scenegraph/nodegraph.cpp
     document/scenegraph/scenepicking.cpp
@@ -227,6 +228,7 @@ set (HEADERS
     document/animation/locomotion.h
     core/math/trs.h
     document/scenegraph/scene.h
+    document/scenegraph/skybake.h
     document/scenegraph/scenenode.h
     document/scenegraph/nodegraph.h
     document/scenegraph/scenepicking.h
