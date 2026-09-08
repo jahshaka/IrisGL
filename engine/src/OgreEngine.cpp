@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <thread>
 
 namespace jahshaka { namespace engine {
@@ -519,13 +520,12 @@ void OgreEngine::renderOneFrame() {
         // EVERY RENDER PATH FUNNELS THROUGH HERE: the driver tick, thumbnails,
         // asset scenes, the warm-up gate and the selftest all call
         // renderOneFrame. That is what makes one call enough.
-        if (mRoot) {
-            if (Ogre::RenderSystem *rs = mRoot->getRenderSystem()) {
-                if (Ogre::TextureGpuManager *tm = rs->getTextureGpuManager()) {
-                    if (!tm->isDoneStreaming()) tm->waitForStreamingCompletion();
-                }
-            }
-        }
+        //
+        // AND IT IS BOUNDED (defect 2026-09-08). It used to be
+        // `waitForStreamingCompletion()`, whose loop can never end if a load
+        // request cannot complete; drainTextureStreaming is the same drain with
+        // a no-progress deadline and a diagnostic. See its definition.
+        drainTextureStreaming();
         // ONE AUTHORITATIVE VIEW PER SCENE (FIX WAVE B2 / finding F7). The GI
         // tracker's work is per SCENE and stateful — it spends a per-frame probe
         // budget and carries the Forward+ range hysteresis — while `mViews` can
@@ -788,12 +788,137 @@ bool OgreEngine::texturesDoneStreaming() const {
     return tm ? tm->isDoneStreaming() : true;
 }
 
-double OgreEngine::waitForTextureLoads() {
+namespace {
+/// Textures the manager has not finished preparing, and (optionally) the first
+/// few of them written out for a log line.
+///
+/// MAIN THREAD ONLY, and only between `_update()` calls — which is where both
+/// callers sit. `mEntries` is written by createTexture/destroyTexture, both of
+/// which are main-thread verbs of ours; the streaming and multiload workers
+/// never touch the map (they carry a TextureGpu* in the request), so reading it
+/// here needs no lock we are able to take anyway.
+size_t countPendingTextures(Ogre::TextureGpuManager *tm, std::string *namesOut) {
+    static const size_t kMaxNames = 8u;
+    size_t pending = 0;
+    for (const auto &kv : tm->getEntries()) {
+        Ogre::TextureGpu *t = kv.second.texture;
+        if (!t || t->isDataReady()) continue;
+        ++pending;
+        if (!namesOut || pending > kMaxNames) continue;
+        if (!namesOut->empty()) *namesOut += ", ";
+        *namesOut += kv.second.name.empty() ? std::string("<unnamed>") : kv.second.name;
+        *namesOut += " (group=";
+        *namesOut += kv.second.resourceGroup.empty() ? std::string("<NONE>")
+                                                     : kv.second.resourceGroup;
+        *namesOut += ", residency=";
+        switch (t->getResidencyStatus()) {
+        case Ogre::GpuResidency::OnStorage:     *namesOut += "OnStorage"; break;
+        case Ogre::GpuResidency::OnSystemRam:   *namesOut += "OnSystemRam"; break;
+        case Ogre::GpuResidency::Resident:      *namesOut += "Resident"; break;
+        default:                                *namesOut += "?"; break;
+        }
+        *namesOut += ", pendingChanges=";
+        *namesOut += std::to_string(unsigned(t->getPendingResidencyChanges()));
+        *namesOut += t->isManualTexture() ? ", manual)" : ", from-file)";
+    }
+    return pending;
+}
+}   // namespace
+
+bool OgreEngine::drainTextureStreaming(double *msSpent) {
+    // THE BOUNDED DRAIN — what `waitForStreamingCompletion` should have been.
+    //
+    // Upstream's version (OgreTextureGpuManager.cpp:3619-3645) is this same
+    // loop with `mRequestToMainThreadEvent.wait()` where the sleep is. That
+    // wait has NO timeout, so a load request that no worker will ever complete
+    // parks the UI thread for the life of the process: measured 2026-09-08,
+    // twelve minutes inside a GLB import's thumbnail render, every TxtreLoad
+    // and TexStream worker idle. The trigger was ours and is fixed at source
+    // (the SSAO noise texture, OgreChain.cpp initSsao) — this is the guard that
+    // makes the NEXT one a slow frame and a log line instead of a dead app.
+    //
+    // THE BUDGET IS A NO-PROGRESS BUDGET. `_update(true)` is the same call
+    // upstream makes and does the same work (it swaps the worker's command
+    // buffer, executes it, recycles staging textures); as long as the pending
+    // set keeps shrinking the deadline keeps moving, so a hundred-texture scene
+    // on a slow disk waits as long as it needs to. Only a set that has not
+    // moved at all for `mTextureWaitBudgetMs` expires.
+    //
+    // GIVING UP IS LOUD AND IT IS FINAL. The pending textures are logged by
+    // name, group and residency — the group is there because a blank one is
+    // exactly the defect that caused this — and `mTextureWaitBroken` latches,
+    // so the frame after does not pay the budget again. A host that wants to
+    // fail rather than continue reads textureWaitTimeouts().
+    //
+    // JAH_TEXTURE_WAIT_FAULT IS A TEST HOOK, and it exists because the failure
+    // this guards against cannot be provoked any other way: the trigger that
+    // produced it (a group-less texture) kills the decode WORKER before the
+    // main thread can time anything, so a suite that wanted to prove the give-up
+    // path works has nothing to reach for. With the flag set the drain simply
+    // never agrees that it is finished, which is precisely what a stuck queue
+    // looks like from in here — the deadline, the diagnostic and the latch then
+    // run exactly as they would in the wild. Off unless the env var is set.
+    if (msSpent) *msSpent = 0.0;
     Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
-    if (!tm || tm->isDoneStreaming()) return 0.0;
+    if (!tm) return true;
+    if (mTextureWaitBroken || mTextureWaitBudgetMs == 0u) return tm->isDoneStreaming();
+    if (!mTextureWaitFault && tm->isDoneStreaming()) return true;
+
+    Ogre::VaoManager *vao = mRoot->getRenderSystem()->getVaoManager();
     const auto t0 = std::chrono::steady_clock::now();
-    tm->waitForStreamingCompletion();
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const auto elapsedMs = [&t0]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+            .count();
+    };
+    const double budget = double(mTextureWaitBudgetMs);
+    size_t bestPending = std::numeric_limits<size_t>::max();
+    double lastProgressMs = 0.0;
+    double lastPollMs = -1000.0;
+    bool ok = true;
+
+    for (;;) {
+        const bool workerDone = tm->_update(true);
+        if (!mTextureWaitFault && workerDone && tm->isDoneStreaming()) break;
+
+        const double now = elapsedMs();
+        // The pending census is O(textures in the process) — poll it every
+        // 250 ms rather than every iteration. Below that interval the loop is
+        // two mutex acquisitions and a millisecond of sleep.
+        if (now - lastPollMs >= 250.0) {
+            lastPollMs = now;
+            const size_t pending = countPendingTextures(tm, nullptr);
+            if (pending < bestPending) { bestPending = pending; lastProgressMs = now; }
+        }
+        if (now - lastProgressMs >= budget) {
+            std::string names;
+            const size_t pending = countPendingTextures(tm, &names);
+            Ogre::LogManager::getSingleton().logMessage(
+                "ERROR: texture streaming made no progress for " +
+                    std::to_string(unsigned(budget)) + " ms and the frame stopped waiting. " +
+                    std::to_string(unsigned(pending)) + " texture(s) still pending: " +
+                    (names.empty() ? std::string("<none nameable>") : names) +
+                    ". Rendering continues WITHOUT them; this is a defect, not a slow disk "
+                    "(the budget only expires when the pending set stops shrinking).",
+                Ogre::LML_CRITICAL);
+            mTextureWaitBroken = true;
+            ++mTextureWaitTimeouts;
+            ok = false;
+            break;
+        }
+        if (vao) vao->_update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    const double spent = elapsedMs();
+    if (spent > mTextureWaitWorstMs) mTextureWaitWorstMs = spent;
+    if (msSpent) *msSpent = spent;
+    return ok;
+}
+
+double OgreEngine::waitForTextureLoads() {
+    double ms = 0.0;
+    drainTextureStreaming(&ms);
+    return ms;
 }
 
 unsigned long long OgreEngine::textureLoadRequests() const {
@@ -1427,6 +1552,20 @@ void OgreEngine::ensureHlms() {
             mMultiLoadThreads = threads;
         }
     }
+    // THE WAIT'S NO-PROGRESS BUDGET. The default (8 s) is a member initialiser,
+    // not set here, so that a frame rendered before this point still waits; what
+    // happens HERE is the env override, read once, beside the pool it belongs
+    // with. 8 s is absurd for a healthy queue and short enough that a broken one
+    // is a hitch and not a hang: the budget only starts counting once the
+    // pending set STOPS shrinking, so no amount of real work can reach it (see
+    // drainTextureStreaming). 0 disables the wait, which is a measurement mode
+    // and not a supported one.
+    if (const char *forced = std::getenv("JAH_TEXTURE_WAIT_MS")) {
+        const long n = std::strtol(forced, nullptr, 10);
+        mTextureWaitBudgetMs = unsigned(std::max(0l, std::min(600000l, n)));
+    }
+    if (const char *fault = std::getenv("JAH_TEXTURE_WAIT_FAULT"))
+        mTextureWaitFault = (std::strtol(fault, nullptr, 10) != 0);
     // The texture cache (configured beside the shader cache in init(); it shares
     // that directory and its lifetime, with its own manifest and its own simpler
     // validity key — I-5). Loaded HERE, after the Hlms exists and before

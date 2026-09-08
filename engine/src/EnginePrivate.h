@@ -2425,6 +2425,9 @@ public:
     double waitForTextureLoads() override;
     unsigned long long textureLoadRequests() const override;
     unsigned textureMultiLoadThreads() const override;
+    unsigned textureWaitTimeouts() const override { return mTextureWaitTimeouts; }
+    double textureWaitWorstMs() const override { return mTextureWaitWorstMs; }
+    unsigned textureWaitBudgetMs() const override { return mTextureWaitBudgetMs; }
     unsigned textureMetadataCacheEntries() const override;
     unsigned textureChannelCacheEntries() const override;
     bool saveTextureCache() override;
@@ -2576,6 +2579,40 @@ private:
     /// thread does every decode, which is Ogre's default and what
     /// JAH_TEXTURE_MULTILOAD=0 restores at run time.
     unsigned        mMultiLoadThreads = 0;
+
+    // ---- THE TEXTURE WAIT'S WATCHDOG (defect 2026-09-08) -------------------
+    //
+    // `waitForStreamingCompletion` is an UNBOUNDED loop around
+    // `mRequestToMainThreadEvent.wait()` (OgreTextureGpuManager.cpp:3634): if a
+    // load request is raised that no worker will ever complete, the UI thread
+    // parks in it forever. That is not hypothetical — it was measured, twelve
+    // minutes deep, on a GLB import's thumbnail render. `drainTextureStreaming`
+    // replaces the call with the same drain and a NO-PROGRESS deadline, so the
+    // worst case is a slow frame and a loud log instead of a dead application.
+    //
+    // The budget is a NO-PROGRESS budget, not a total one: a genuinely large
+    // load that keeps finishing textures keeps extending it, so a slow disk can
+    // never trip it. JAH_TEXTURE_WAIT_MS overrides it (0 disables the wait
+    // entirely — a measurement escape hatch, not a supported mode).
+    /// 8 s by default AT BIRTH, not at Hlms registration: a frame can be
+    /// rendered before the env override is read, and a zero here would mean
+    /// "do not wait at all" on exactly those frames.
+    unsigned        mTextureWaitBudgetMs = 8000u;
+    unsigned        mTextureWaitTimeouts = 0;
+    double          mTextureWaitWorstMs = 0.0;
+    /// Latched by the first timeout: after that the frame stops waiting at all.
+    /// A wait that has already proven it cannot finish must not be paid for
+    /// once per frame — the app would still be unusable, just noisily so.
+    bool            mTextureWaitBroken = false;
+    /// JAH_TEXTURE_WAIT_FAULT: the drain never agrees that it is finished. The
+    /// only way to prove the give-up path, because the real trigger kills a
+    /// decode worker before the main thread can time anything.
+    bool            mTextureWaitFault = false;
+
+    /// Drains the texture streaming queues, bounded. Returns true when the
+    /// queues really did empty; false when the no-progress budget expired, in
+    /// which case it has already logged the pending textures by name.
+    bool drainTextureStreaming(double *msSpent = nullptr);
     Ogre::AbiCookie mAbiCookie{};
     std::string     mBackendName, mMediaDir, mLastError;
     ShaderCache     mShaderCache;

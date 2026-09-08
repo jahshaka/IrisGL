@@ -981,6 +981,37 @@ public:
     /// for measurement — see the A/B protocol in THREADING_ADOPTION_SPEC G2-c.
     virtual unsigned textureMultiLoadThreads() const = 0;
 
+    // ---- The texture wait's watchdog (defect 2026-09-08) ------------------
+    //
+    // THE CONTRACT OF THE WAIT, stated where hosts can read it: waiting for
+    // texture streaming CANNOT block the caller indefinitely. The backend's own
+    // `waitForStreamingCompletion` can and did — a load request that no worker
+    // will ever complete parked a UI thread for twelve minutes — so both wait
+    // paths here (`waitForTextureLoads` and the one at the head of
+    // `renderOneFrame`) run a bounded drain instead: they keep draining while
+    // the pending set SHRINKS, and give up when it has not moved for
+    // `textureWaitBudgetMs`. Giving up is loud (the pending textures are logged
+    // by name) and it is remembered — a host or a suite can assert on it.
+    //
+    // A HEALTHY RUN NEVER TRIPS THIS. The budget is a no-progress budget, so a
+    // slow disk or a hundred-texture scene extends it indefinitely; only a
+    // stalled queue expires it.
+
+    /// How many times a bounded wait gave up. MUST be 0 in a healthy process:
+    /// any non-zero value means textures were left unfinished and at least one
+    /// frame was drawn without them.
+    virtual unsigned textureWaitTimeouts() const = 0;
+
+    /// The longest single bounded wait this process has performed, in ms.
+    /// A timing observation, not a budget — useful for a suite that wants to
+    /// say "the import path never blocked the UI for more than N ms".
+    virtual double textureWaitWorstMs() const = 0;
+
+    /// The resolved no-progress budget (ms). Set once at engine init from
+    /// JAH_TEXTURE_WAIT_MS, default 8000. 0 means the wait is disabled
+    /// entirely, which is a measurement mode and not a supported one.
+    virtual unsigned textureWaitBudgetMs() const = 0;
+
     /// Rows in the backend's texture METADATA cache (P2 item 6): resolution,
     /// format, mipmaps and pool per texture path, remembered across launches so
     /// the main thread can reserve the right pool slice before the worker has
