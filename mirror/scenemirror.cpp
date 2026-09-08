@@ -508,7 +508,28 @@ void SceneMirror::syncHighlight()
         iris::MeshNode *meshNode = targets[i].first;
         const MeshId m = targets[i].second;
         HighlightShell &s = mHighlightShells[i];
-        if (!s.node) s.node = mTarget->createNode();
+        if (!s.node) {
+            s.node = mTarget->createNode();
+            // AT BIRTH, like every other helper in this file (the light wires
+            // at :706, the grid, the camera bodies): the selection shell is
+            // EDITOR FURNITURE, and without the flag itemVisibilityFlags gives
+            // it kVisibleBit at RQ 10 — i.e. it becomes scene geometry to the
+            // planar-reflection RTT (mask kVisibleBit, RQ 0..199) and to the
+            // PCC probe faces (visibility_mask 0x1, rq_last 200). The reflected
+            // pass inverts vertex winding, so the back-face-only inverted hull
+            // renders SOLID there: selecting the Mirror Room's panel flooded it
+            // gold through the planar RTT, and the sphere through its probe
+            // capture (owner report 2026-09-08).
+            //
+            // Marked here rather than after attachMesh because shells are
+            // POOLED and re-attached to different meshes — the same trap
+            // OgreParticles.cpp:200 records for the icons: one uncorrected
+            // frame is one polluted capture. The main chain sets no explicit
+            // visibility mask, so the user still sees the outline; the shadow
+            // node masks to kVisibleBit, so the shell stops casting — which is
+            // what an outline should do.
+            if (s.node) mTarget->setNodeHelper(s.node, true);
+        }
         if (!s.node) continue;
 
         // A SKINNED target needs a shell that follows the pose. The shell is a
