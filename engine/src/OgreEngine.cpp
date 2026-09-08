@@ -21,6 +21,10 @@ namespace jahshaka { namespace engine {
 namespace detail {
 namespace {
 
+#ifndef JAHSHAKA_OGRE_PLUGIN_SUFFIX
+#define JAHSHAKA_OGRE_PLUGIN_SUFFIX ""
+#endif
+
 /// The one live engine in this process. Ogre::Root is a Singleton: a second
 /// `new Root` asserts, so create() refuses while this is set.
 OgreEngine *gLiveEngine = nullptr;
@@ -102,7 +106,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         const char *plugin = cfg.headless      ? "RenderSystem_NULL"
                              : (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
                                                                 : "RenderSystem_GL3Plus";
-        mRoot->loadPlugin(cfg.pluginDir + "/" + plugin, false, nullptr);
+        mRoot->loadPlugin(cfg.pluginDir + "/" + plugin + JAHSHAKA_OGRE_PLUGIN_SUFFIX,
+                  false, nullptr);
         // ParticleFX2: the SIMULATION half of the particle system. Its core
         // (definitions, instances, the manager, BillboardSet2) lives in
         // OgreNextMain and needs no plugin — but every emitter and affector
@@ -116,7 +121,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // non-particle feature work without it. setParticleSystem reports the
         // failure through lastError() instead of taking the whole engine down.
         try {
-            mRoot->loadPlugin(cfg.pluginDir + "/Plugin_ParticleFX2", false, nullptr);
+            mRoot->loadPlugin(cfg.pluginDir + "/Plugin_ParticleFX2" +
+                              JAHSHAKA_OGRE_PLUGIN_SUFFIX, false, nullptr);
             mHasParticleFX2 = true;
         } catch (const Ogre::Exception &e) {
             Ogre::LogManager::getSingleton().logMessage(

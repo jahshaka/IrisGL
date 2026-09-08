@@ -801,7 +801,7 @@ private:
     std::string mDir, mFingerprint, mMediaDir, mAppBuildId;
     bool        mEnabled = false;
     bool        mWriter = false;      ///< we hold the single-writer lock
-    int         mLockFd = -1;
+    std::intptr_t mLockFd = -1;
     unsigned    mExpectedShaders = 0; ///< from the manifest of the last saved run
     long long   mLastSavedUnixMs = 0;
     bool        mPipelineLoaded = false, mMicrocodeLoaded = false;

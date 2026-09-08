@@ -58,7 +58,7 @@ endif()
 foreach(_p IN LISTS _patches)
     get_filename_component(_base "${_p}" NAME)
 
-    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${_p}"
+    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace --reverse --check "${_p}"
                     WORKING_DIRECTORY "${SRC}"
                     RESULT_VARIABLE _reversible
                     OUTPUT_QUIET ERROR_QUIET)
@@ -67,7 +67,7 @@ foreach(_p IN LISTS _patches)
         continue()
     endif()
 
-    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --check "${_p}"
+    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace --check "${_p}"
                     WORKING_DIRECTORY "${SRC}"
                     RESULT_VARIABLE _appliable
                     OUTPUT_QUIET ERROR_QUIET)
@@ -80,7 +80,7 @@ foreach(_p IN LISTS _patches)
             "  source in place.")
     endif()
 
-    execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${_p}"
+    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace "${_p}"
                     WORKING_DIRECTORY "${SRC}"
                     RESULT_VARIABLE _applied
                     ERROR_VARIABLE _err)

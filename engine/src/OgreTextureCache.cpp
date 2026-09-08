@@ -26,7 +26,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
-#include <unistd.h>
 
 namespace jahshaka { namespace engine {
 namespace detail {
@@ -129,9 +128,9 @@ bool TextureCache::writeManifest(const std::vector<FileRec> &files) const {
 
 void TextureCache::wipe() const {
     if (mDir.empty()) return;
-    ::unlink(path(kManifestFile).c_str());
-    ::unlink(path(kMetaFile).c_str());
-    ::unlink(path(kChannelFile).c_str());
+    std::remove(path(kManifestFile).c_str());
+    std::remove(path(kMetaFile).c_str());
+    std::remove(path(kChannelFile).c_str());
 }
 
 // ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ enum class SceneNodeType {
 };
 
 class PhysicsProperty;
-class Property;
+struct Property;
 class Animation;
 class PropertyAnim;
 typedef QSharedPointer<Animation> AnimationPtr;
@@ -729,10 +729,7 @@ public:
 
 protected:
     /// THE funnel. Every mutator calls it before (or instead of) forwarding.
-    void notifyChanged(NodeChange what)
-    {
-        if (sChangeObserver) sChangeObserver(this, what);
-    }
+    void notifyChanged(NodeChange what);
 
 private:
     void setScene(ScenePtr scene);

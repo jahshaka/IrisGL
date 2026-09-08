@@ -49,6 +49,11 @@ SceneNode::ChangeObserver SceneNode::sChangeObserver = nullptr;
 
 void SceneNode::setChangeObserver(ChangeObserver observer) { sChangeObserver = observer; }
 
+void SceneNode::notifyChanged(NodeChange what)
+{
+    if (sChangeObserver) sChangeObserver(this, what);
+}
+
 SceneNode::SceneNode()
 {
     sceneNodeType = SceneNodeType::Empty;

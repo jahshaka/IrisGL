@@ -93,7 +93,8 @@ set(JAHSHAKA_OGRE_PATCH_SERIES "${_ogre_patch_series}" PARENT_SCOPE)
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
 target_compile_definitions(JahshakaEngine PRIVATE
-    JAHSHAKA_OGRE_PATCH_SERIES="${_ogre_patch_series}")
+    JAHSHAKA_OGRE_PATCH_SERIES="${_ogre_patch_series}"
+    JAHSHAKA_OGRE_PLUGIN_SUFFIX="${OGRE_NEXT_PLUGIN_SUFFIX}")
 target_include_directories(JahshakaEngine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${JAHSHAKA_ENGINE_BUILD_ID_DIR})

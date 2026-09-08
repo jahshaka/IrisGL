@@ -7,7 +7,7 @@
 namespace iris
 {
 
-class Property;
+struct Property;
 
 // Document-side post-process settings: a name plus a property bag, serialized
 // by SceneWriter. The GL processing passes died with the legacy renderer.

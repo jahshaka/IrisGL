@@ -49,7 +49,7 @@ class Animation;
 class FloatKeyFrame;
 class PbrMaterial;
 class PickingResult;
-class Property;
+struct Property;
 class PostProcess;
 class PostProcessManager;
 class PropertyAnim;

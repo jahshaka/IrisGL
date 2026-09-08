@@ -32,16 +32,27 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <dirent.h>
-#include <fcntl.h>
 #include <fstream>
 #include <functional>
 #include <sstream>
 #include <thread>
+#include <algorithm>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <algorithm>
+#endif
 
 namespace jahshaka { namespace engine {
 namespace detail {
@@ -81,25 +92,42 @@ long long nowUnixMs() {
 /// Names are hashed alongside contents so a RENAME counts as a change.
 std::string hashTree(const std::string &dir) {
     std::vector<std::string> names;
-    // Iterative walk; no <filesystem> because the engine still targets C++17 on
-    // toolchains where <filesystem> needs an extra link library on some hosts.
+#ifdef _WIN32
     std::vector<std::string> pending{dir};
     while (!pending.empty()) {
-        const std::string cur = pending.back();
+        const std::string current = pending.back();
         pending.pop_back();
-        DIR *d = opendir(cur.c_str());
-        if (!d) continue;
-        while (dirent *e = readdir(d)) {
-            const std::string name = e->d_name;
+        WIN32_FIND_DATAA entry {};
+        HANDLE handle = FindFirstFileA((current + "/*").c_str(), &entry);
+        if (handle == INVALID_HANDLE_VALUE) continue;
+        do {
+            const std::string name = entry.cFileName;
             if (name == "." || name == "..") continue;
-            const std::string full = cur + "/" + name;
-            struct stat st {};
-            if (::stat(full.c_str(), &st) != 0) continue;
-            if (S_ISDIR(st.st_mode)) pending.push_back(full);
-            else                     names.push_back(full);
-        }
-        closedir(d);
+            const std::string full = current + "/" + name;
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) pending.push_back(full);
+            else names.push_back(full);
+        } while (FindNextFileA(handle, &entry));
+        FindClose(handle);
     }
+#else
+    std::vector<std::string> pending{dir};
+    while (!pending.empty()) {
+        const std::string current = pending.back();
+        pending.pop_back();
+        DIR *directory = opendir(current.c_str());
+        if (!directory) continue;
+        while (dirent *entry = readdir(directory)) {
+            const std::string name = entry->d_name;
+            if (name == "." || name == "..") continue;
+            const std::string full = current + "/" + name;
+            struct stat status {};
+            if (::stat(full.c_str(), &status) != 0) continue;
+            if (S_ISDIR(status.st_mode)) pending.push_back(full);
+            else names.push_back(full);
+        }
+        closedir(directory);
+    }
+#endif
     std::sort(names.begin(), names.end());   // readdir order is not stable
     std::string blob;
     for (const std::string &n : names) {
@@ -113,18 +141,32 @@ std::string hashTree(const std::string &dir) {
 unsigned long long dirBytes(const std::string &dir, unsigned *fileCount) {
     unsigned long long total = 0;
     unsigned files = 0;
-    DIR *d = opendir(dir.c_str());
-    if (!d) { if (fileCount) *fileCount = 0; return 0; }
-    while (dirent *e = readdir(d)) {
-        const std::string name = e->d_name;
+#ifdef _WIN32
+    WIN32_FIND_DATAA entry {};
+    HANDLE handle = FindFirstFileA((dir + "/*").c_str(), &entry);
+    if (handle != INVALID_HANDLE_VALUE) {
+        do {
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            total += (static_cast<unsigned long long>(entry.nFileSizeHigh) << 32) |
+                     entry.nFileSizeLow;
+            ++files;
+        } while (FindNextFileA(handle, &entry));
+        FindClose(handle);
+    }
+#else
+    DIR *directory = opendir(dir.c_str());
+    if (!directory) { if (fileCount) *fileCount = 0; return 0; }
+    while (dirent *entry = readdir(directory)) {
+        const std::string name = entry->d_name;
         if (name == "." || name == "..") continue;
-        struct stat st {};
-        if (::stat((dir + "/" + name).c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
-            total += static_cast<unsigned long long>(st.st_size);
+        struct stat status {};
+        if (::stat((dir + "/" + name).c_str(), &status) == 0 && S_ISREG(status.st_mode)) {
+            total += static_cast<unsigned long long>(status.st_size);
             ++files;
         }
     }
-    closedir(d);
+    closedir(directory);
+#endif
     if (fileCount) *fileCount = files;
     return total;
 }
@@ -164,37 +206,71 @@ bool readWholeFile(const std::string &p, std::vector<char> &out) {
 
 bool mkpath(const std::string &dir) {
     if (dir.empty()) return false;
-    std::string acc;
-    size_t i = 0;
-    if (dir[0] == '/') { acc = "/"; i = 1; }
-    while (i <= dir.size()) {
-        const size_t slash = dir.find('/', i);
-        const std::string part = dir.substr(i, slash == std::string::npos ? std::string::npos : slash - i);
+#ifdef _WIN32
+    std::string normalized = dir;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::string path;
+    size_t index = 0;
+    if (normalized.size() >= 2 && normalized[1] == ':') {
+        path = normalized.substr(0, 2);
+        index = 2;
+    }
+    if (index < normalized.size() && normalized[index] == '/') {
+        path += "/";
+        ++index;
+    }
+    while (index <= normalized.size()) {
+        const size_t slash = normalized.find('/', index);
+        const std::string part = normalized.substr(index, slash - index);
         if (!part.empty()) {
-            acc += part;
-            if (::mkdir(acc.c_str(), 0755) != 0 && errno != EEXIST) return false;
-            acc += "/";
+            if (!path.empty() && path.back() != '/') path += "/";
+            path += part;
+            if (!CreateDirectoryA(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+                return false;
         }
         if (slash == std::string::npos) break;
-        i = slash + 1;
+        index = slash + 1;
     }
     return true;
+#else
+    std::string path;
+    size_t index = 0;
+    if (dir[0] == '/') { path = "/"; index = 1; }
+    while (index <= dir.size()) {
+        const size_t slash = dir.find('/', index);
+        const std::string part = dir.substr(index, slash - index);
+        if (!part.empty()) {
+            path += part;
+            if (::mkdir(path.c_str(), 0755) != 0 && errno != EEXIST) return false;
+            path += "/";
+        }
+        if (slash == std::string::npos) break;
+        index = slash + 1;
+    }
+    return true;
+#endif
 }
 
 bool writeAtomic(const std::string &dir, const std::string &name,
                  const void *data, size_t len) {
     const std::string tmp = dir + "/" + name + ".tmp";
     {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return false;
-        if (len && !f.write(static_cast<const char *>(data), static_cast<std::streamsize>(len))) return false;
-        f.flush();
-        if (!f) return false;
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        if (!file) return false;
+        if (len && !file.write(static_cast<const char *>(data), static_cast<std::streamsize>(len))) return false;
+        file.flush();
+        if (!file) return false;
     }
+    const std::string target = dir + "/" + name;
+#ifdef _WIN32
+    return MoveFileExA(tmp.c_str(), target.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
     const int fd = ::open(tmp.c_str(), O_RDONLY);
     if (fd >= 0) { ::fsync(fd); ::close(fd); }
-    if (::rename(tmp.c_str(), (dir + "/" + name).c_str()) != 0) { ::unlink(tmp.c_str()); return false; }
+    if (::rename(tmp.c_str(), target.c_str()) != 0) { ::unlink(tmp.c_str()); return false; }
     return true;
+#endif
 }
 
 }   // namespace cachefile
@@ -334,17 +410,36 @@ std::string ShaderCache::path(const std::string &name) const { return mDir + "/"
 // lock must NEVER fail a run: the loser reads the cache and declines to write.
 bool ShaderCache::acquireLock() {
     if (mLockFd >= 0) return mWriter;
+#ifdef _WIN32
+    HANDLE handle = CreateFileA(path(kLockFile).c_str(), GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    OVERLAPPED overlapped {};
+    mWriter = LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                         0, 1, 0, &overlapped) != 0;
+    if (mWriter) mLockFd = reinterpret_cast<std::intptr_t>(handle);
+    else CloseHandle(handle);
+#else
     mLockFd = ::open(path(kLockFile).c_str(), O_RDWR | O_CREAT, 0644);
     if (mLockFd < 0) return false;
     struct flock fl {};
     fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET;
     mWriter = (::fcntl(mLockFd, F_SETLK, &fl) == 0);
+#endif
     if (!mWriter) logLine("another process holds the writer lock — read-only for this run");
     return mWriter;
 }
 
 void ShaderCache::releaseLock() {
-    if (mLockFd >= 0) { ::close(mLockFd); mLockFd = -1; }
+    if (mLockFd >= 0) {
+#ifdef _WIN32
+    CloseHandle(reinterpret_cast<HANDLE>(mLockFd));
+#else
+    ::close(static_cast<int>(mLockFd));
+#endif
+        mLockFd = -1;
+    }
     mWriter = false;
 }
 
@@ -421,6 +516,18 @@ bool ShaderCache::readVerified(const Entry &e, std::vector<char> &out) const {
 }
 
 void ShaderCache::wipe() const {
+#ifdef _WIN32
+    WIN32_FIND_DATAA entry {};
+    HANDLE handle = FindFirstFileA((mDir + "/*").c_str(), &entry);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    do {
+        const std::string name = entry.cFileName;
+        if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY || name == kLockFile) continue;
+        if (name.size() > 4 && name.compare(name.size() - 4, 4, ".set") == 0) continue;
+        DeleteFileA(path(name).c_str());
+    } while (FindNextFileA(handle, &entry));
+    FindClose(handle);
+#else
     DIR *d = opendir(mDir.c_str());
     if (!d) return;
     while (dirent *e = readdir(d)) {
@@ -437,6 +544,7 @@ void ShaderCache::wipe() const {
         ::unlink(path(name).c_str());
     }
     closedir(d);
+#endif
 }
 
 bool ShaderCache::clear() {
@@ -689,7 +797,7 @@ bool ShaderCache::save(Ogre::Root *root) {
             s->close();
         }
         const bool ok = readWholeFile(scratch, out);
-        ::unlink(scratch.c_str());
+        std::remove(scratch.c_str());
         return ok;
     };
 
