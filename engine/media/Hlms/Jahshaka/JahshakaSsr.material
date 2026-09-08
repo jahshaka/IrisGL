@@ -138,6 +138,9 @@ material Jahshaka/SsrResolve
 				// changes with the quality row — read it from the texture
 				// rather than pushing it and risking the two disagreeing.
 				param_named_auto	rayBufferRes	texture_size 0
+				// texture_size 2 is the COLOUR HISTORY, whose texel size the
+				// firefly clamp's neighbourhood taps are measured in.
+				param_named_auto	prevFrameRes	texture_size 2
 				// Intensity 0 = no reflection, the safe pre-update value.
 				param_named			resolveParams	float4	0.35 0 0 0
 			}
