@@ -293,4 +293,31 @@ unsigned OgreScene::countLocalShadowCasters(std::vector<NodeId> *out) const {
     return n;
 }
 
+void OgreScene::staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>> &out) const {
+    for (const auto &entry : mNodes) {
+        const Node &n = entry.second;
+        if (!n.light || !n.lightShadowStatic || !n.light->getCastShadows()) continue;
+        const Ogre::Light::LightTypes t = n.light->getType();
+        // Directional lights follow the camera through PSSM and area lights
+        // never cast: "static" is meaningless for both, and upstream says so
+        // (OgreCompositorShadowNode.h:298). Ignored, never refused — the
+        // document keeps the flag through a light-type change.
+        if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) continue;
+        out.emplace_back(entry.first, n.light);
+    }
+    // Stable by node id: the slot a light lands in must not depend on the
+    // iteration order of a map that a node insertion can rehash.
+    std::sort(out.begin(), out.end(),
+              [](const std::pair<NodeId, Ogre::Light *> &a,
+                 const std::pair<NodeId, Ogre::Light *> &b) { return a.first < b.first; });
+}
+
+void OgreScene::dirtyStaticShadows() { mStaticShadowsDirty = true; }
+
+bool OgreScene::takeStaticShadowsDirty() {
+    const bool was = mStaticShadowsDirty;
+    mStaticShadowsDirty = false;
+    return was;
+}
+
 }}}  // namespace jahshaka::engine::detail

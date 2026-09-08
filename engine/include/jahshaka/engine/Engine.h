@@ -477,6 +477,21 @@ public:
     /// without this nothing, not even a pixel test, could tell the difference.
     /// Cheap: reads live pointers, renders nothing.
     virtual GiStatus    giStatus() const = 0;
+
+    /// "SOMETHING A STATIC SHADOW MAP CAN SEE HAS CHANGED" — re-render this
+    /// scene's static shadow maps on the next frame
+    /// (SPECS/SHADOW_TOOLING_SPEC.md §4.3, LightDesc::shadowStatic).
+    ///
+    /// The engine dirties them ITSELF when a light moves or any of its
+    /// parameters change, and when geometry is attached, detached or destroyed.
+    /// What it cannot see is a CASTER MOVING: the document owns the scene graph
+    /// and writes transforms into it directly, so a moved mesh reaches the
+    /// renderer without passing through any engine call. The host tells us
+    /// instead (SceneMirror watches the document's transform-write counter).
+    ///
+    /// Cheap and idempotent: it sets one flag. Calling it every frame is legal
+    /// and simply makes every static map cost exactly what a dynamic one costs.
+    virtual void        dirtyStaticShadows() = 0;
     /// "Has any object LEFT the volume that is currently lit?" — 0 when every
     /// GI item is inside it, otherwise a hash of the escapees' quantized world
     /// AABBs (LIGHTING_FIX fix 2).
@@ -1111,6 +1126,11 @@ public:
     /// map, and which shadow-casting lights got none. Cheap (reads live
     /// pointers, renders nothing); `live == false` on a headless engine.
     virtual ShadowStatus shadowStatus() const = 0;
+
+    /// Re-render EVERY static shadow map in every scene, once, on the next
+    /// frame — the "I do not know what changed" button, and the shadow twin of
+    /// refreshGi(). Returns false when there is nothing to refresh.
+    virtual bool refreshShadows() = 0;
 
     /// Shadow-caster geometry optimization — see EngineConfig::optimizeShadowMeshes.
     /// PROCESS-WIDE and consumed when a mesh is BUILT: changing it re-decides the

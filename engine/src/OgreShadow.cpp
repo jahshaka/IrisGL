@@ -592,4 +592,152 @@ ShadowStatus OgreEngine::shadowStatus() const {
     return st;
 }
 
+// ---------------------------------------------------------------------------
+// Static shadow maps (SHADOW_TOOLING_SPEC.md §4.3)
+// ---------------------------------------------------------------------------
+// A static map is rendered ONCE and then skipped until it is dirtied: Ogre's
+// `_shouldUpdateShadowMapIdx` returns false for a clean static slot, which
+// skips its scene pass, its six cube faces, its DPSM copy — and, because our
+// definition clears per map rather than per atlas, its CLEAR as well. That last
+// one is the whole reason phase 0 existed: with upstream's whole-atlas clear the
+// contents would be wiped every frame and "not re-rendering" would mean "black".
+//
+// THE SLOT RULE (F7, OgreCompositorShadowNode.h:308-317). Fixed lights are tied
+// to the END of the focused range and Ogre's distance sort fills from the front,
+// so a static light never steals the slot the sort was about to use, and the
+// dynamic casters keep the closest-first behaviour they always had.
+//
+// PER WORKSPACE, NOT PER DEFINITION (F8). mShadowMapCastingLights and the dirty
+// flags are instance state, so every view's shadow node has to be told
+// separately — and a workspace recreated by an atlas rebuild starts empty,
+// which the "assign when it differs" test below picks up on the next frame.
+
+/// The shadow-node pass counter. Counts passes whose parent node IS the shadow
+/// node, per shadow-map index, so "a static map rendered this frame" is a
+/// measurement and not an inference.
+class OgreEngine::ShadowPassCounter final : public Ogre::CompositorWorkspaceListener {
+public:
+    void workspacePreUpdate(Ogre::CompositorWorkspace *) override { reset(); }
+    void passPreExecute(Ogre::CompositorPass *pass) override {
+        const Ogre::CompositorNode *node = pass->getParentNode();
+        if (!node || node->getName() != Ogre::IdString(OgreView::kShadowNodeName)) return;
+        ++mTotal;
+        const Ogre::uint32 idx = pass->getDefinition()->mShadowMapIdx;
+        if (idx < kMaxTrackedMaps) ++mPerMap[idx];
+    }
+    void reset() { mTotal = 0; for (unsigned &c : mPerMap) c = 0; }
+    unsigned total() const { return mTotal; }
+    unsigned perMap(unsigned idx) const { return idx < kMaxTrackedMaps ? mPerMap[idx] : 0u; }
+
+private:
+    static constexpr unsigned kMaxTrackedMaps = 3u + kMaxShadowMaps;
+    unsigned mTotal = 0;
+    unsigned mPerMap[kMaxTrackedMaps] = { 0 };
+};
+
+void OgreEngine::detachShadowCounter() {
+    if (mShadowCounterView && mShadowCounter)
+        mShadowCounterView->removeWorkspaceListener(mShadowCounter);
+    mShadowCounterView = nullptr;
+    delete mShadowCounter;
+    mShadowCounter = nullptr;
+}
+
+bool OgreEngine::refreshShadows() {
+    if (!mHlmsRegistered || mHeadless) return false;
+    bool any = false;
+    for (auto &s : mScenes) { s->dirtyStaticShadows(); any = true; }
+    mRefreshShadowsPending = any;
+    return any;
+}
+
+void OgreEngine::applyStaticShadowMaps() {
+    if (!mHlmsRegistered || mHeadless) return;
+    JAH_TRY {
+        // The counter rides the first enabled view that has a shadow node —
+        // the same "one view speaks for the process" rule the HUD and the post
+        // chain's recompile globals use. It is re-attached rather than hooked
+        // up once because a view's workspace is dropped and recreated by every
+        // atlas rebuild, and addWorkspaceListener is a no-op on repeat.
+        if (!mShadowCounter) mShadowCounter = new ShadowPassCounter();
+        OgreView *counterView = nullptr;
+
+        std::vector<OgreScene *> scenes;
+        scenesFeedingEnabledViews(scenes);
+        // Consume each scene's dirty flag ONCE for the whole frame, before the
+        // per-view loop: two views of the same scene must not make the second
+        // one miss the dirty (or, worse, dirty a map that has already been
+        // re-rendered this frame).
+        std::vector<std::pair<OgreScene *, bool>> dirty;
+        dirty.reserve(scenes.size());
+        for (OgreScene *s : scenes) dirty.emplace_back(s, s->takeStaticShadowsDirty());
+        mRefreshShadowsPending = false;
+
+        unsigned staticSlots = 0;
+        for (auto &v : mViews) {
+            if (!v->isEnabled() || !v->ogreScene()) continue;
+            Ogre::CompositorShadowNode *node = v->shadowNodeInstance();
+            if (!node) continue;
+            if (!counterView) counterView = v.get();
+
+            OgreScene *scene = v->ogreScene();
+            bool sceneDirty = false;
+            for (const auto &d : dirty) if (d.first == scene) sceneDirty = d.second;
+
+            std::vector<std::pair<NodeId, Ogre::Light *>> statics;
+            scene->staticShadowLights(statics);
+            // Never more static lights than there are focused maps, and never
+            // ALL of them: a scene where every caster is static would leave the
+            // dynamic sort nothing to work with, which is legal but surprising
+            // — the cap is the map count itself, and the lights that do not fit
+            // simply stay dynamic (reported through shadowStatus).
+            if (statics.size() > mShadowMapCount) statics.resize(mShadowMapCount);
+            staticSlots = std::max(staticSlots, unsigned(statics.size()));
+
+            const Ogre::LightClosestArray &held = node->getShadowCastingLights();
+            // Walk the focused slots from the BACK, handing out the last ones to
+            // the static lights in order (F7).
+            for (unsigned i = 0; i < mShadowMapCount; ++i) {
+                const unsigned slot = mShadowMapCount - i;      // light slot: 1..N
+                if (slot >= held.size() + 1u) continue;
+                const unsigned mapIdx = slot + 2u;              // 3 PSSM splits first
+                Ogre::Light *want = i < statics.size() ? statics[i].second : nullptr;
+                const bool isStatic = held[slot].isStatic;
+                Ogre::Light *have = isStatic ? held[slot].light : nullptr;
+                if (want != have) {
+                    // setLightFixedToShadowMap(idx, null) releases the slot back
+                    // to the dynamic sort; with a light it also marks it dirty,
+                    // which is why this must only run when the ASSIGNMENT
+                    // changed — calling it every frame would keep the map
+                    // permanently dirty and save nothing at all.
+                    node->setLightFixedToShadowMap(mapIdx, want);
+                } else if (want && sceneDirty) {
+                    // includeLinked=false: our maps clear individually, so one
+                    // dirty map does not oblige its atlas neighbours to redraw
+                    // (which is exactly what upstream's whole-atlas clear WOULD
+                    // have obliged, and why upstream defaults it to true).
+                    node->setStaticShadowMapDirty(mapIdx, false);
+                }
+            }
+        }
+
+        // Attribute last frame's counts. The per-map numbers were collected by
+        // the listener during the PREVIOUS frame, so this reads them before the
+        // next workspacePreUpdate resets them.
+        mShadowPassesLastFrame = mShadowCounter->total();
+        unsigned staticRenders = 0;
+        for (unsigned i = 0; i < staticSlots; ++i) {
+            const unsigned mapIdx = mShadowMapCount - i + 2u;
+            staticRenders += mShadowCounter->perMap(mapIdx);
+        }
+        mStaticShadowRendersLastFrame = staticRenders;
+
+        if (counterView != mShadowCounterView) {
+            if (mShadowCounterView) mShadowCounterView->removeWorkspaceListener(mShadowCounter);
+            mShadowCounterView = counterView;
+        }
+        if (mShadowCounterView) mShadowCounterView->addWorkspaceListener(mShadowCounter);
+    } JAH_CATCH(mLastError, );
+}
+
 }}}   // namespace jahshaka::engine::detail

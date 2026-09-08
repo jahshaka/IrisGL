@@ -483,6 +483,22 @@ struct LightDesc {
     /// higher concentrates the light towards the core.
     float     spotFalloff = 1.0f;
     bool      castShadows = true;          // ignored for Area (backend cannot shadow them)
+    /// STATIC SHADOW MAP (SPECS/SHADOW_TOOLING_SPEC.md §4.3): render this
+    /// light's shadow map ONCE and keep it until something invalidates it,
+    /// instead of re-rendering it every frame. For a point light that is six
+    /// cube-face passes plus a copy saved per frame — the single biggest
+    /// shadow saving available for a lamp that does not move.
+    ///
+    /// The engine invalidates it on its own when the light moves or any of its
+    /// parameters change; the HOST must call Scene::dirtyStaticShadows()
+    /// whenever the geometry the light sees moves, is attached or is removed
+    /// (SceneMirror does). Engine::refreshShadows() re-renders every static map
+    /// once, for the "I do not know what changed" case.
+    ///
+    /// IGNORED for directional lights (PSSM follows the camera) and for area
+    /// lights (which never cast). Ignored, not refused: a host that stores the
+    /// flag per light must not lose it when a light's type changes.
+    bool      shadowStatic = false;
     // Area lights only: a rectangle spanning the node's local X (width) and
     // Z (height), emitting down -Y like every other light type here.
     float     rectWidth = 1.0f;

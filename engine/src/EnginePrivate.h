@@ -1374,6 +1374,19 @@ public:
     /// lights ride the PSSM block and area lights can never cast, so neither
     /// counts. Fills `out` with the node ids when it is non-null.
     unsigned countLocalShadowCasters(std::vector<NodeId> *out) const;
+    /// The scene's STATIC shadow casters, in a stable order (node id), and the
+    /// backend lights behind them. The engine ties these to the LAST focused
+    /// slots and leaves the front of the range to Ogre's dynamic sort —
+    /// upstream's ordering rule (OgreCompositorShadowNode.h:308-317).
+    void staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>> &out) const;
+    /// "Something a static shadow map can see has changed." Sets a scene-level
+    /// flag the engine turns into setStaticShadowMapDirty on the next frame.
+    /// V1 IS DELIBERATELY COARSE: one flag for the whole scene, not per light —
+    /// a per-light range test is the recorded follow-up, and a static map that
+    /// is dirtied every frame costs exactly what a dynamic one costs, so being
+    /// wrong here is slow, never incorrect.
+    void dirtyStaticShadows() override;
+    bool takeStaticShadowsDirty();
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -1402,6 +1415,11 @@ private:
         bool             owned = true;
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
+        /// LightDesc::shadowStatic as last pushed. Kept on the record rather
+        /// than read back off the Ogre light because Ogre has no such concept:
+        /// "static" lives in the compositor shadow node, per workspace, and
+        /// this is the engine's own memory of what the host asked for.
+        bool             lightShadowStatic = false;
         Ogre::SceneNode *lightNode = nullptr;   // internal child: -Y (document) -> -Z (Ogre)
         // What is CURRENTLY assigned to `light`, so the per-frame setLight can
         // do nothing when nothing changed. Both assignments are expensive the
@@ -2064,6 +2082,10 @@ private:
     /// Same contract for the two probe-capture options (P3a/P3b): what the last
     /// buildPcc RESOLVED, after GiToggle::Auto consulted the quality dial and
     /// after the shadow half checked that a shadow node exists to recalculate.
+    /// "Something a static shadow map can see changed" — consumed once per
+    /// frame by OgreEngine::applyStaticShadowMaps. Starts TRUE so the first
+    /// frame after a light becomes static renders its map.
+    bool mStaticShadowsDirty = true;
     bool mPccHdr      = false;
     bool mPccShadowed = false;
     /// THE PROBE ROUND-ROBIN (FIX WAVE B2). One entry per probe, rebuilt with
@@ -2541,6 +2563,16 @@ public:
     void setShadowMapBudget(unsigned maps) override;
     unsigned shadowMapBudget() const override;
     ShadowStatus shadowStatus() const override;
+    bool refreshShadows() override;
+    /// Ties every scene's static lights to the END of the focused-map range and
+    /// dirties them when the scene says so. Runs once per frame, from
+    /// renderOneFrame, for EVERY workspace that instantiates the shadow node —
+    /// the fixed-light table and the dirty flags are per INSTANCE, not per
+    /// definition (SHADOW_TOOLING_SPEC.md F8).
+    void applyStaticShadowMaps();
+    /// Unhooks and destroys the shadow-pass counter. Called by ~OgreEngine
+    /// BEFORE the views go, so the listener never outlives its workspace.
+    void detachShadowCounter();
 
     /// THE ATLAS REBUILD (OgreShadow.cpp): swaps resolution and/or focused-map
     /// count by dropping every workspace that instantiates the shadow node,
@@ -2701,6 +2733,18 @@ private:
     /// once" a measurement rather than a claim.
     unsigned        mShadowPassesLastFrame = 0;
     unsigned        mStaticShadowRendersLastFrame = 0;
+    /// Set by refreshShadows(): dirty every scene's static maps next frame.
+    bool            mRefreshShadowsPending = false;
+    /// The per-frame shadow-pass counter (defined in OgreShadow.cpp), held as
+    /// a RAW pointer for the LogBridge reason: a unique_ptr member would
+    /// instantiate its deleter in ~OgreEngine (OgreEngine.cpp), where the type
+    /// is incomplete. Created lazily by applyStaticShadowMaps and destroyed by
+    /// detachShadowCounter(), both of which live in the TU where it is complete.
+    class ShadowPassCounter;
+    ShadowPassCounter *mShadowCounter = nullptr;
+    /// The view the counter is currently attached to, so it moves with the
+    /// primary view instead of counting a dead workspace's passes.
+    OgreView       *mShadowCounterView = nullptr;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     /// EngineConfig::vsync, then whatever setVsync() last said. Read at every
     /// window creation (createView + the MSAA-recreate hook), so the pacing

@@ -533,6 +533,10 @@ void OgreEngine::renderOneFrame() {
         // same place it is safe. Debounced and growth-only, so a steady scene
         // pays one light-list walk per frame and nothing else.
         deriveShadowMapCount();
+        // ...and which of those maps are STATIC (SHADOW_TOOLING_SPEC.md §4.3).
+        // After the derivation, because a rebuild replaces the very
+        // CompositorShadowNode instances the assignments live on.
+        applyStaticShadowMaps();
         // ONE AUTHORITATIVE VIEW PER SCENE (FIX WAVE B2 / finding F7). The GI
         // tracker's work is per SCENE and stateful — it spends a per-frame probe
         // budget and carries the Forward+ range hysteresis — while `mViews` can
@@ -1275,6 +1279,9 @@ void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
 }
 
 OgreEngine::~OgreEngine() {
+    // The shadow-pass counter is a listener on a live workspace: unhook it
+    // before anything that owns a workspace starts dying.
+    detachShadowCounter();
     // Save the shader cache FIRST, while every Ogre singleton the three layers
     // read is still alive and before a single view or scene has been torn down.
     // This is the primary save point (SHADER_CACHE_SPEC §4.4): a clean quit is

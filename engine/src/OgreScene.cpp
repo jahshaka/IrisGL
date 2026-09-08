@@ -446,6 +446,14 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
                 n.lightMaskPath = wantMask;
             }
         }
+        // STATIC SHADOW MAPS (SHADOW_TOOLING_SPEC.md §4.3). setLight is called
+        // on CHANGE ONLY by the mirror, so reaching this line at all means one
+        // of this light's parameters moved — which is one of the invalidation
+        // rules. Dirtying the whole scene's static maps is the coarse v1: it
+        // costs a re-render of maps that did not need one, never a wrong
+        // picture.
+        n.lightShadowStatic = d.shadowStatic;
+        dirtyStaticShadows();
         // Lights shine down their node's -Y once attached (document convention).
         return true;
     } JAH_CATCH(mError, false);
@@ -464,6 +472,8 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.lightMaskPath.clear();
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         invalidateGiCaches();   // a vanished light must stop bouncing (VCT re-injects)
+        it->second.lightShadowStatic = false;
+        dirtyStaticShadows();   // its slot goes back to the dynamic sort
         return true;
     } JAH_CATCH(mError, false);
 }

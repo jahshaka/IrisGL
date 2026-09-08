@@ -56,6 +56,10 @@ public:
     /// The engine node mirroring a document node, or 0.
     jahshaka::engine::NodeId engineNode(const iris::SceneNode *node) const;
 
+    /// The document transform-write counter as of the last sync — the change
+    /// key for "a caster moved" (static shadow maps, SHADOW_TOOLING_SPEC §4.3).
+    quint64 mLastTransformWrites = 0;
+
     /// The engine MATERIAL the mirror created for a document node, or 0.
     /// DIAGNOSTIC use (Scene::dumpMaterial): the answer to "what did the
     /// backend datablock actually end up holding" needs the id the mirror
