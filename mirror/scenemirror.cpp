@@ -4200,14 +4200,14 @@ void SceneMirror::applyPip(iris::CameraNodePtr camera, View *view, const ViewPip
     view->setPip(d);
 }
 
-void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float maxHorizontalFovDeg)
+void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float framingAspect)
 {
     if (!camera || !view) return;
 
     // The camera the HOST handed over, before any substitution below. The
-    // wide-aspect FOV cap describes THAT camera ("mine, a free explorer"), so
-    // if the active-camera seam swaps in an AUTHORED camera the cap must not
-    // follow: an authored lens is a deliberate choice and stays exactly as
+    // wide-aspect framing hold describes THAT camera ("mine, a free explorer"),
+    // so if the active-camera seam swaps in an AUTHORED camera the hold must
+    // not follow: an authored lens is a deliberate choice and stays exactly as
     // authored, at every aspect (owner rule, 2026-09-07).
     const iris::CameraNode *hostCamera = camera.data();
 
@@ -4295,11 +4295,11 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float maxH
     }
 
     CameraDesc desc = toCameraDesc(camera);
-    // The WIDE-ASPECT CLAMP is the HOST's statement about the camera it just
-    // handed over ("this one is a free explorer"), not a property of the
+    // The WIDE-ASPECT FRAMING HOLD is the HOST's statement about the camera it
+    // just handed over ("this one is a free explorer"), not a property of the
     // document node — a camera the user authored keeps its lens whoever renders
     // it — so it is applied HERE and not inside toCameraDesc, which applyPip
-    // also uses and which must never cap an authored camera's inset.
-    desc.maxHorizontalFovDegrees = (camera.data() == hostCamera) ? maxHorizontalFovDeg : 0.0f;
+    // also uses and which must never hold an authored camera's inset.
+    desc.framingAspect = (camera.data() == hostCamera) ? framingAspect : 0.0f;
     view->setCamera(desc);
 }
