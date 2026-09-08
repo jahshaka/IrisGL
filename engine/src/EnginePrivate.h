@@ -2585,6 +2585,10 @@ public:
     /// Unhooks and destroys the shadow-pass counter. Called by ~OgreEngine
     /// BEFORE the views go, so the listener never outlives its workspace.
     void detachShadowCounter();
+    /// Called by destroyView BEFORE the view dies: unhooks the shadow-pass
+    /// counter if it was riding that view. Lives in OgreShadow.cpp because the
+    /// counter type is incomplete everywhere else.
+    void noteViewDestroyed(OgreView *view);
 
     /// THE ATLAS REBUILD (OgreShadow.cpp): swaps resolution and/or focused-map
     /// count by dropping every workspace that instantiates the shadow node,

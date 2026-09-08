@@ -472,6 +472,13 @@ void OgreEngine::destroyView(View *view) {
     if (!view) return;
     for (auto it = mViews.begin(); it != mViews.end(); ++it) {
         if (it->get() != view) continue;
+        // THE SHADOW-PASS COUNTER RIDES A VIEW (SHADOW_TOOLING_SPEC.md §4.3),
+        // and this is where that view can die. Unhook it here or the next
+        // frame's applyStaticShadowMaps dereferences a freed OgreView to
+        // detach a listener from it — found by ASan on test_engine_asan's
+        // shadow_resolution_rebuilds_the_atlas, which destroys views while the
+        // counter is attached.
+        noteViewDestroyed(it->get());
         (*it)->destroy();
         mViews.erase(it);
         return;

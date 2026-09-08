@@ -17,6 +17,26 @@ index d9d50fbf4..a2c267e31 100644
  
                      const uint16 lightProfileIdx = light->getLightProfileIdx();
  
+diff --git a/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any
+index 3d32eaf30..34902ba0f 100644
+--- a/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any
+@@ -22,7 +22,14 @@ struct Light
+ 	float4 diffuse;		//.w contains numNonCasterDirectionalLights
+ 	float3 specular;
+ @property( hlms_num_shadow_map_lights )
+-	float3 attenuation;
++	// Jahshaka patch 0018: was float3. The 4th float was ALWAYS there --
++	// a vec3 occupies 16 bytes in std140, in an HLSL cbuffer and in Metal,
++	// which is why HlmsPbs::preparePassBuffer has always written a padding
++	// float after the quadratic term. It now writes 1 / range there (the
++	// same value ForwardPlusBase writes into its own light buffer), so the
++	// pass lights can apply the same range fade Forward+ applies. Naming
++	// the component changes no layout.
++	float4 attenuation;	//.w contains 1 / attenuation range
+ 	//Spotlights:
+ 	//  spotDirection.xyz is direction
+ 	//  spotParams.xyz contains falloff params
 diff --git a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
 index 48247f1af..af29c3d52 100644
 --- a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any

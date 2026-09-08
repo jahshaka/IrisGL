@@ -643,6 +643,17 @@ void OgreEngine::detachShadowCounter() {
     mShadowCounter = nullptr;
 }
 
+void OgreEngine::noteViewDestroyed(OgreView *view) {
+    // THE COUNTER RIDES A VIEW, and this is where that view can die. Without
+    // this the next frame's applyStaticShadowMaps dereferences a freed OgreView
+    // to detach its listener — found by ASan on test_engine_asan's
+    // shadow_resolution_rebuilds_the_atlas, which destroys views while the
+    // counter is attached.
+    if (!view || view != mShadowCounterView) return;
+    if (mShadowCounter) view->removeWorkspaceListener(mShadowCounter);
+    mShadowCounterView = nullptr;
+}
+
 bool OgreEngine::refreshShadows() {
     if (!mHlmsRegistered || mHeadless) return false;
     bool any = false;
@@ -739,7 +750,15 @@ void OgreEngine::applyStaticShadowMaps() {
         mStaticShadowRendersLastFrame = staticRenders;
 
         if (counterView != mShadowCounterView) {
-            if (mShadowCounterView) mShadowCounterView->removeWorkspaceListener(mShadowCounter);
+            // BELT AND BRACES over noteViewDestroyed's unhook: only ever detach
+            // from a view that is still in mViews. A raw view pointer held
+            // across frames is exactly the shape of the use-after-free ASan
+            // caught here once, and the check costs a walk of a handful of
+            // views.
+            bool stillAlive = false;
+            for (const auto &v : mViews) if (v.get() == mShadowCounterView) stillAlive = true;
+            if (mShadowCounterView && stillAlive)
+                mShadowCounterView->removeWorkspaceListener(mShadowCounter);
             mShadowCounterView = counterView;
         }
         if (mShadowCounterView) mShadowCounterView->addWorkspaceListener(mShadowCounter);
