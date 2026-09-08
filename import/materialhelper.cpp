@@ -2,9 +2,15 @@
 #include <QDir>
 #include <QUuid>
 #include <QFileInfo>
+#include <QDateTime>
 #include <QDebug>
 #include <QImageWriter>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QtConcurrent>
+#include <algorithm>
+#include <cmath>
 #include "document/materials/defaultmaterial.h"
 #include "document/assets/texture2d.h"
 
@@ -365,11 +371,232 @@ QImage MaterialHelper::loadGLBEmbeddedTexture(const aiScene *scene,
 }
 
 
+// ---------------------------------------------------------------------------
+// glTF SOURCE FACTS (GLB material-import fix, 2026-09-08)
+// ---------------------------------------------------------------------------
+// WHY THE FILE IS RE-READ HERE, when assimp already parsed it.
+//
+// assimp flattens every glTF material onto one flat key set, and it writes the
+// metallic-roughness keys UNCONDITIONALLY from its own struct defaults —
+// glTF2Importer.cpp ImportMaterial adds AI_MATKEY_METALLIC_FACTOR and
+// AI_MATKEY_ROUGHNESS_FACTOR (defaults 1.0 / 1.0) and a white AI_MATKEY_BASE_COLOR
+// even for a material whose JSON has no `pbrMetallicRoughness` object at all.
+// So "assimp reported a metallic factor" does not mean "the file said metallic",
+// and the importer's `if (hasMetallic) metallicFactor = metallic` therefore
+// imported a KHR_materials_pbrSpecularGlossiness model (which has no
+// metallic-roughness block by construction) as a FULL-METAL, FULL-ROUGH surface:
+// black, because a metal lit by nothing but punctual lights and no environment
+// reflects nothing. That is the "GLB importer loses the materials" report.
+//
+// The distinction exists only in the source JSON, so the source JSON is what we
+// read: the JSON chunk of a GLB, or the whole of a .gltf. Parsed ONCE per file
+// and cached — a 200-material model must not re-read the chunk 200 times.
+namespace {
+
+struct GltfMaterialFacts
+{
+    bool  valid                 = false;  ///< the facts below came from a real glTF material
+    bool  hasMetallicRoughness  = false;  ///< the JSON carries a `pbrMetallicRoughness` object
+    bool  hasSpecularGlossiness = false;  ///< ... a KHR_materials_pbrSpecularGlossiness extension
+    bool  unlit                 = false;  ///< ... a KHR_materials_unlit extension
+    // KHR_materials_pbrSpecularGlossiness values, with the extension's own defaults.
+    float diffuse[4]  = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float specular[3] = { 1.0f, 1.0f, 1.0f };
+    float glossiness  = 1.0f;
+};
+
+/// The JSON of a glTF asset: the first chunk of a GLB container, or the file
+/// itself for the .gltf form. Returns false for anything else (an .fbx, an
+/// .obj, a GLB whose header is damaged) — the caller then keeps assimp's view.
+bool readGltfJson(const QString &file, QJsonObject &out)
+{
+    if (file.isEmpty()) return false;
+    QFile f(file);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+
+    const QByteArray magic = f.read(4);
+    if (magic.size() < 4) return false;
+
+    QByteArray json;
+    if (magic == QByteArrayLiteral("glTF")) {
+        // GLB: 12-byte header (magic, version, length) then chunks of
+        // [uint32 length][uint32 type][payload]. The FIRST chunk is the JSON
+        // one by specification.
+        if (f.read(8).size() < 8) return false;               // version + total length
+        const QByteArray chunkHeader = f.read(8);
+        if (chunkHeader.size() < 8) return false;
+        const auto u32 = [](const QByteArray &b, int at) {
+            return quint32(quint8(b[at])) | (quint32(quint8(b[at+1])) << 8) |
+                   (quint32(quint8(b[at+2])) << 16) | (quint32(quint8(b[at+3])) << 24);
+        };
+        const quint32 chunkLen  = u32(chunkHeader, 0);
+        const quint32 chunkType = u32(chunkHeader, 4);
+        // 0x4E4F534A = 'JSON'. A 64 MB ceiling keeps a corrupt length from
+        // asking for a gigabyte: real glTF JSON chunks are far below it.
+        if (chunkType != 0x4E4F534A || chunkLen == 0 || chunkLen > 64u * 1024u * 1024u) return false;
+        json = f.read(qint64(chunkLen));
+        if (quint32(json.size()) != chunkLen) return false;
+    } else if (magic.trimmed().startsWith('{')) {
+        f.seek(0);
+        // A .gltf is text; the same 64 MB ceiling applies.
+        if (f.size() > 64ll * 1024 * 1024) return false;
+        json = f.readAll();
+    } else {
+        return false;
+    }
+
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(json, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
+    out = doc.object();
+    return true;
+}
+
+QVector<GltfMaterialFacts> parseGltfMaterials(const QString &sourceFile)
+{
+    QVector<GltfMaterialFacts> facts;
+    QJsonObject root;
+    if (!readGltfJson(sourceFile, root)) return facts;
+
+    const QJsonArray materials = root.value(QStringLiteral("materials")).toArray();
+    facts.reserve(materials.size());
+    for (const QJsonValue &value : materials) {
+        const QJsonObject m = value.toObject();
+        GltfMaterialFacts f;
+        f.valid = true;
+        f.hasMetallicRoughness = m.contains(QStringLiteral("pbrMetallicRoughness"));
+
+        const QJsonObject ext = m.value(QStringLiteral("extensions")).toObject();
+        f.unlit = ext.contains(QStringLiteral("KHR_materials_unlit"));
+
+        const QJsonObject sg =
+            ext.value(QStringLiteral("KHR_materials_pbrSpecularGlossiness")).toObject();
+        if (ext.contains(QStringLiteral("KHR_materials_pbrSpecularGlossiness"))) {
+            f.hasSpecularGlossiness = true;
+            const QJsonArray diffuse  = sg.value(QStringLiteral("diffuseFactor")).toArray();
+            const QJsonArray specular = sg.value(QStringLiteral("specularFactor")).toArray();
+            for (int i = 0; i < 4 && i < diffuse.size(); ++i)
+                f.diffuse[i] = float(diffuse.at(i).toDouble(1.0));
+            for (int i = 0; i < 3 && i < specular.size(); ++i)
+                f.specular[i] = float(specular.at(i).toDouble(1.0));
+            f.glossiness = float(sg.value(QStringLiteral("glossinessFactor")).toDouble(1.0));
+        }
+        facts.append(f);
+    }
+    return facts;
+}
+
+/// One-file cache. Imports run one model at a time per thread, and the entry is
+/// keyed by path + size + mtime so a re-imported (edited) file is re-read.
+const QVector<GltfMaterialFacts> &gltfFactsFor(const QString &sourceFile)
+{
+    struct Cache {
+        QString path;
+        qint64 size = -1;
+        qint64 modified = -1;
+        QVector<GltfMaterialFacts> facts;
+    };
+    static thread_local Cache cache;
+    static const QVector<GltfMaterialFacts> kEmpty;
+
+    if (sourceFile.isEmpty()) return kEmpty;
+    const QFileInfo info(sourceFile);
+    if (!info.isFile()) return kEmpty;
+    const qint64 size = info.size();
+    const qint64 modified = info.lastModified().toMSecsSinceEpoch();
+    if (cache.path != info.absoluteFilePath() || cache.size != size || cache.modified != modified) {
+        cache.path = info.absoluteFilePath();
+        cache.size = size;
+        cache.modified = modified;
+        cache.facts = parseGltfMaterials(sourceFile);
+    }
+    return cache.facts;
+}
+
+/// assimp keeps glTF materials in file order (glTF2Importer::ImportMaterials
+/// walks the asset's material array and appends a default material LAST when a
+/// mesh has none), so the aiMaterial's index into the scene is the index into
+/// the JSON array — for every index the JSON actually has.
+int materialIndexIn(const aiScene *scene, const aiMaterial *aiMat)
+{
+    if (!scene || !aiMat) return -1;
+    for (unsigned i = 0; i < scene->mNumMaterials; ++i)
+        if (scene->mMaterials[i] == aiMat) return int(i);
+    return -1;
+}
+
+GltfMaterialFacts factsForMaterial(const QString &sourceFile, const aiScene *scene,
+                                   const aiMaterial *aiMat)
+{
+    const QVector<GltfMaterialFacts> &all = gltfFactsFor(sourceFile);
+    const int index = materialIndexIn(scene, aiMat);
+    if (index < 0 || index >= all.size()) return GltfMaterialFacts();
+    return all.at(index);
+}
+
+} // namespace
+
+// The perceived-brightness measure the KHR_materials_pbrSpecularGlossiness
+// appendix uses (luma weights, applied to the SQUARES).
+static float perceivedBrightness(float r, float g, float b)
+{
+    return std::sqrt(0.299f * r * r + 0.587f * g * g + 0.114f * b * b);
+}
+
+void MaterialHelper::specularGlossinessToMetallicRoughness(const float diffuse[4],
+                                                           const float specular[3],
+                                                           float glossiness,
+                                                           QColor &baseColorOut,
+                                                           float &metallicOut,
+                                                           float &roughnessOut)
+{
+    // The conversion published with the extension itself ("Converting between
+    // workflows", KHR_materials_pbrSpecularGlossiness appendix B) — the same
+    // arithmetic Blender's and three.js's importers run, so a model converted
+    // here looks like it does everywhere else rather than like our guess.
+    constexpr float kDielectricSpecular = 0.04f;
+    constexpr float kEpsilon = 1e-6f;
+
+    const float specStrength = std::max(specular[0], std::max(specular[1], specular[2]));
+    const float oneMinusSpecStrength = 1.0f - specStrength;
+
+    const float diffuseBrightness  = perceivedBrightness(diffuse[0], diffuse[1], diffuse[2]);
+    const float specularBrightness = perceivedBrightness(specular[0], specular[1], specular[2]);
+
+    // Solve the quadratic that inverts the metallic-roughness specular term.
+    // A specular colour DARKER than a dielectric's fixed 4% cannot be metal at
+    // all, which is the whole of the tails-model case (specularFactor [0,0,0]).
+    float metallic = 0.0f;
+    if (specularBrightness >= kDielectricSpecular) {
+        const float a = kDielectricSpecular;
+        const float b = diffuseBrightness * oneMinusSpecStrength / (1.0f - kDielectricSpecular) +
+                        specularBrightness - 2.0f * kDielectricSpecular;
+        const float c = kDielectricSpecular - specularBrightness;
+        const float d = std::max(0.0f, b * b - 4.0f * a * c);
+        metallic = qBound(0.0f, (-b + std::sqrt(d)) / (2.0f * a), 1.0f);
+    }
+
+    float base[3];
+    for (int i = 0; i < 3; ++i) {
+        const float fromDiffuse = diffuse[i] * oneMinusSpecStrength /
+                                  (1.0f - kDielectricSpecular) / std::max(1.0f - metallic, kEpsilon);
+        const float fromSpecular = (specular[i] - kDielectricSpecular * (1.0f - metallic)) /
+                                   std::max(metallic, kEpsilon);
+        const float t = metallic * metallic;
+        base[i] = qBound(0.0f, fromDiffuse * (1.0f - t) + fromSpecular * t, 1.0f);
+    }
+
+    baseColorOut = QColor::fromRgbF(base[0], base[1], base[2], qBound(0.0f, diffuse[3], 1.0f));
+    metallicOut  = metallic;
+    roughnessOut = qBound(0.0f, 1.0f - glossiness, 1.0f);
+}
+
 void MaterialHelper::extractMaterialData(const aiScene *scene,
                     aiMaterial *aiMat,
                     QString assetPath,
                     MeshMaterialData& mat,
-                    const QString &writeDir)
+                    const QString &writeDir,
+                    const QString &sourceFile)
 {
     // Extraction output target: the pipeline's staging dir when given, else
     // (legacy) the source's own directory.
@@ -423,10 +650,12 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     }
 
     // ------------------------
-    // glTF 2.0 metallic-roughness (GLB importer fix phase 0). assimp reads
-    // baseColor/metallic/roughness factors and the texture bindings for glTF;
-    // the old importer discarded ALL of it and kept only the lossy
-    // roughness→shininess back-conversion (every GLB rendered near-mirror).
+    // glTF 2.0 SHADING INPUTS (importer fix phase 0; the material defects of
+    // 2026-09-08). assimp reads baseColor/metallic/roughness factors and the
+    // texture bindings for glTF; the old importer discarded ALL of it and kept
+    // only the lossy roughness→shininess back-conversion (every GLB rendered
+    // near-mirror). What it then got WRONG is which of assimp's values the file
+    // actually stated — see the GltfMaterialFacts comment above.
     // ------------------------
     auto resolveTex = [&](const QString& name, QString& outPath) {
         if (name.isEmpty()) { outPath.clear(); return; }
@@ -435,11 +664,33 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         loadEmbeddedTexture(scene, name, outDir, outPath, embedded);
     };
 
+    const GltfMaterialFacts facts = factsForMaterial(sourceFile, scene, aiMat);
+
     aiColor4D baseColor;
     float metallic = 1.0f, roughness = 1.0f;
     const bool hasBaseColor = aiMat->Get(AI_MATKEY_BASE_COLOR, baseColor) == AI_SUCCESS;
     const bool hasMetallic  = aiMat->Get(AI_MATKEY_METALLIC_FACTOR, metallic) == AI_SUCCESS;
     const bool hasRoughness = aiMat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS;
+
+    // Spec-gloss and unlit, read from the file when we have it and from
+    // assimp's flattened keys otherwise (a .gltf we failed to parse, or a
+    // non-glTF format whose importer sets them — assimp only ever writes
+    // AI_MATKEY_GLOSSINESS_FACTOR for a real spec-gloss material).
+    float glossiness = 1.0f;
+    const bool assimpSpecGloss =
+        aiMat->Get(AI_MATKEY_GLOSSINESS_FACTOR, glossiness) == AI_SUCCESS;
+    int shadingModel = 0;
+    const bool assimpUnlit =
+        aiMat->Get(AI_MATKEY_SHADING_MODEL, shadingModel) == AI_SUCCESS &&
+        shadingModel == aiShadingMode_Unlit;
+
+    const bool specGloss = facts.valid ? facts.hasSpecularGlossiness : assimpSpecGloss;
+    // THE LOAD-BEARING LINE. For a glTF source, "the file has a
+    // pbrMetallicRoughness block" is a FILE fact, never assimp's always-present
+    // keys; for anything else assimp's keys are all there is.
+    const bool metalRoughBlock = facts.valid ? facts.hasMetallicRoughness
+                                             : (hasMetallic || hasRoughness);
+    mat.unlit = facts.valid ? facts.unlit : assimpUnlit;
 
     const QString baseTexName = getAiMaterialTexture(aiMat, aiTextureType_BASE_COLOR);
     resolveTex(baseTexName, mat.baseColorTexture);
@@ -452,15 +703,69 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     QString mrPath;
     resolveTex(mrName, mrPath);
 
-    mat.hasPbr = hasBaseColor || hasMetallic || hasRoughness ||
+    // Any glTF material is a PBR material, whichever workflow it was authored
+    // in — including one that states no workflow at all, which lands on the
+    // dielectric defaults in MeshMaterialData rather than on the legacy
+    // Blinn-Phong conversion.
+    mat.hasPbr = facts.valid || specGloss || metalRoughBlock ||
                  !baseTexName.isEmpty() || !mrName.isEmpty();
-    if (hasBaseColor)
+
+    if (specGloss && !metalRoughBlock) {
+        // KHR_materials_pbrSpecularGlossiness. The values come from the file
+        // when we parsed it; otherwise from assimp, which maps diffuseFactor
+        // onto COLOR_DIFFUSE and specularFactor onto COLOR_SPECULAR.
+        float diffuse[4]  = { 1.0f, 1.0f, 1.0f, 1.0f };
+        float specular[3] = { 1.0f, 1.0f, 1.0f };
+        float gloss = glossiness;
+        if (facts.valid) {
+            for (int i = 0; i < 4; ++i) diffuse[i]  = facts.diffuse[i];
+            for (int i = 0; i < 3; ++i) specular[i] = facts.specular[i];
+            gloss = facts.glossiness;
+        } else {
+            aiColor4D d, s;
+            if (aiMat->Get(AI_MATKEY_COLOR_DIFFUSE, d) == AI_SUCCESS) {
+                diffuse[0] = d.r; diffuse[1] = d.g; diffuse[2] = d.b; diffuse[3] = d.a;
+            }
+            if (aiMat->Get(AI_MATKEY_COLOR_SPECULAR, s) == AI_SUCCESS) {
+                specular[0] = s.r; specular[1] = s.g; specular[2] = s.b;
+            }
+        }
+        specularGlossinessToMetallicRoughness(diffuse, specular, gloss,
+                                              mat.baseColorFactor,
+                                              mat.metallicFactor, mat.roughnessFactor);
+        // The specular-glossiness MAP has no metallic-roughness home (its RGB
+        // is a specular colour and its alpha a glossiness); binding it as
+        // either channel map would be a lie, so it is dropped and the
+        // converted constants stand. Recorded, not silent.
+        if (!mat.specularTexture.isEmpty()) {
+            aiString matName;
+            const QString named = aiMat->Get(AI_MATKEY_NAME, matName) == AI_SUCCESS
+                                      ? QString(matName.C_Str()) : QString();
+            warningSink() << QStringLiteral(
+                "specular-glossiness map on \"%1\" was not imported: the metallic-roughness "
+                "workflow has no channel for it (the converted constants are used instead)")
+                .arg(named.isEmpty() ? QStringLiteral("material") : named);
+        }
+    } else if (metalRoughBlock) {
+        // glTF semantics for a PRESENT block: an omitted metallicFactor IS 1.0
+        // and an omitted roughnessFactor IS 1.0. A metal car in a scene with no
+        // environment to reflect looks dark because that is what metal does,
+        // not because the import lost anything.
+        if (hasBaseColor)
+            mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, baseColor.r, 1.0f),
+                                                   qBound(0.0f, baseColor.g, 1.0f),
+                                                   qBound(0.0f, baseColor.b, 1.0f),
+                                                   qBound(0.0f, baseColor.a, 1.0f));
+        if (hasMetallic)  mat.metallicFactor  = metallic;
+        if (hasRoughness) mat.roughnessFactor = roughness;
+    } else if (hasBaseColor && !facts.valid) {
+        // A non-glTF source that reported a base colour but no workflow keeps
+        // the colour on the dielectric defaults.
         mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, baseColor.r, 1.0f),
                                                qBound(0.0f, baseColor.g, 1.0f),
                                                qBound(0.0f, baseColor.b, 1.0f),
                                                qBound(0.0f, baseColor.a, 1.0f));
-    if (hasMetallic)  mat.metallicFactor  = metallic;
-    if (hasRoughness) mat.roughnessFactor = roughness;
+    }
 
     waitForAllTextureSaves();
 

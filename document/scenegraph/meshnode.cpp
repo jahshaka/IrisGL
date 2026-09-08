@@ -278,7 +278,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -310,7 +310,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -425,7 +425,7 @@ MeshNode::loadAsSceneFragment(QString filePath,
         auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
         MeshMaterialData meshMat;
-        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
+        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
         auto mat = createMaterialFunc(meshObj, meshMat);
         if (!!mat) node->setMaterial(mat);
 
@@ -508,7 +508,7 @@ MeshNode::loadAsSceneFragment(
 		auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
 		MeshMaterialData meshMat;
-        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir);
+        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
 		auto mat = createMaterialFunc(meshObj, meshMat);
 		if (!!mat) node->setMaterial(mat);
 

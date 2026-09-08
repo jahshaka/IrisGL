@@ -54,14 +54,29 @@ struct MeshMaterialData
     bool hasEmbeddedHightTexture = false;
 
     // glTF 2.0 metallic-roughness, read at import (GLB importer fix phase 0).
-    // hasPbr is true when the source material carried any pbrMetallicRoughness
-    // data; importers then build an iris::PbrMaterial from these instead of
-    // faking a legacy Blinn-Phong material out of assimp's lossy
-    // shininess back-conversion.
+    // hasPbr is true when the source material is a PBR one at all — any glTF
+    // material qualifies, in whichever workflow it was authored; importers then
+    // build an iris::PbrMaterial from these instead of faking a legacy
+    // Blinn-Phong material out of assimp's lossy shininess back-conversion.
+    //
+    // THE DEFAULTS ARE A POLICY, and they are DIELECTRIC (2026-09-08).
+    // glTF says an omitted `metallicFactor` inside a PRESENT
+    // `pbrMetallicRoughness` block is 1.0, and the importer honours that
+    // exactly (a metallic car imports as metal and looks dark in a scene with
+    // nothing to reflect — physics, not a defect). But a material that states
+    // NO workflow at all — no metallic-roughness block and no
+    // KHR_materials_pbrSpecularGlossiness — is not a statement that it is a
+    // mirror; reading it as one is how models imported black. Such a material,
+    // and any importer that fills none of these in, lands here: a plain
+    // dielectric, half rough, which is the only defensible "unknown surface".
     bool hasPbr = false;
     QColor baseColorFactor = QColor(255, 255, 255, 255);
-    float metallicFactor = 1.0f;
-    float roughnessFactor = 1.0f;
+    float metallicFactor = 0.0f;
+    float roughnessFactor = 0.5f;
+    /// KHR_materials_unlit: the source says this surface is NOT lit. Imports as
+    /// PbrMaterial shadingModel 1 (the engine's Unlit family) — see
+    /// BuiltinMaterials::fromMeshData for what carries the colour there.
+    bool unlit = false;
     QString baseColorTexture;
     QString metallicTexture;    // split from the packed MR map (blue channel)
     QString roughnessTexture;   // split from the packed MR map (green channel)

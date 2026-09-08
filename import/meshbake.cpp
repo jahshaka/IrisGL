@@ -52,7 +52,10 @@ namespace
 #define JAHSHAKA_MESH_BAKE_PRODUCER_ID "dev"
 #endif
 
-constexpr int kFormatVersion = 1;
+// v2 (2026-09-08): materials carry `unlit`, and the shading factors changed
+// MEANING — a v1 blob recorded the full-metal misreading of every spec-gloss
+// and block-less glTF material, so v1 bakes must be re-baked, not replayed.
+constexpr int kFormatVersion = 2;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -120,7 +123,7 @@ void writeMaterial(QDataStream &s, const MeshMaterialData &m)
       << m.nodeName;
     s << qint32(m.hasEmbeddedDiffTexture) << qint32(m.hasEmbeddedSpecularTexture)
       << qint32(m.hasEmbeddedNormalTexture) << qint32(m.hasEmbeddedHightTexture);
-    s << qint32(m.hasPbr);
+    s << qint32(m.hasPbr) << qint32(m.unlit);
     writeColor(s, m.baseColorFactor);
     s << float(m.metallicFactor) << float(m.roughnessFactor);
     s << m.baseColorTexture << m.metallicTexture << m.roughnessTexture << m.emissiveTexture;
@@ -136,13 +139,14 @@ MeshMaterialData readMaterial(QDataStream &s)
     s >> m.shininess;
     s >> m.diffuseTexture >> m.specularTexture >> m.normalTexture >> m.hightTexture
       >> m.nodeName;
-    qint32 e0, e1, e2, e3, pbr;
-    s >> e0 >> e1 >> e2 >> e3 >> pbr;
+    qint32 e0, e1, e2, e3, pbr, unlit;
+    s >> e0 >> e1 >> e2 >> e3 >> pbr >> unlit;
     m.hasEmbeddedDiffTexture = e0;
     m.hasEmbeddedSpecularTexture = e1;
     m.hasEmbeddedNormalTexture = e2;
     m.hasEmbeddedHightTexture = e3;
     m.hasPbr = pbr;
+    m.unlit = unlit;
     m.baseColorFactor = readColor(s);
     s >> m.metallicFactor >> m.roughnessFactor;
     s >> m.baseColorTexture >> m.metallicTexture >> m.roughnessTexture >> m.emissiveTexture;
@@ -564,7 +568,7 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         MeshMaterialData data;
         if (aiMatIndex < scene->mNumMaterials)
             MaterialHelper::extractMaterialData(scene, scene->mMaterials[aiMatIndex],
-                                                dir, data, extractDir);
+                                                dir, data, extractDir, filePath);
         // TEXTURE REFERENCES ARE REDUCED TO BARE FILE NAMES, for two reasons.
         // (1) Determinism: extractMaterialData resolves embedded textures to
         //     paths inside a per-run staging directory, so keeping them would
