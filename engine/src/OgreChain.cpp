@@ -169,6 +169,18 @@ constexpr const char *kDepthNoMsaa  = "jahDepthNoMsaa";
 /// full-target and would wipe the main frame) and a loaded attachment shows the
 /// main image wherever the inset's scene draws nothing.
 constexpr const char *kPipFill = "jahPipFill";
+/// THE INSET'S OWN SCENE TARGET (CAMERAS_SPEC §7.2 Route C). RGBA16F while the
+/// inset is graded, so the linear radiance above 1.0 survives to the tonemapper
+/// exactly as it does in the main chain's kRt0; plain UNORM otherwise. It is
+/// sized as a FRACTION of the view's target — the fraction the inset's INNER
+/// rectangle occupies — which is what makes a window resize free and a square
+/// in the world square in the inset.
+constexpr const char *kPipScene = "jahPipScene";
+/// The inset's 1x1 fixed exposure and its (always black) bloom input: the two
+/// textures HDR/FinalToneMapping samples besides the scene. Both exist only
+/// while the inset is graded. See addFixedExposureClear.
+constexpr const char *kPipLum   = "jahPipLum";
+constexpr const char *kPipBloom = "jahPipBloom";
 /// The LETTERBOX background swatch (CAMERAS_SPEC §7.4): the same trick as
 /// kPipFill, for the same reason. A letterboxed view clears its whole target to
 /// the BAR colour (a Vulkan clear is full-target, which is exactly what bars
@@ -279,6 +291,49 @@ Ogre::CompositorPassQuadDef *addQuad(Ogre::CompositorNodeDef *n, const char *tar
     q->mStoreActionDepth = Ogre::StoreAction::DontCare;
     q->mStoreActionStencil = Ogre::StoreAction::DontCare;
     q->mProfilingId = profilingId;
+    return q;
+}
+
+/// THE FIXED EXPOSURE, in one place (POST_CHAIN_SPEC §14).
+///
+/// HDR/FinalToneMapping samples a 1x1 texture as `fInvLumAvg` and multiplies
+/// the scene by it before the filmic curve, so CLEARING that texture to a value
+/// IS setting the exposure — the identical shader path, with a number nobody
+/// has to measure. Every frame (no mNumInitialPasses): the texture is
+/// Discardable and a stale read would be undefined memory. The viewport
+/// modifier is cleared because a 1x1 texture is never inset.
+///
+/// Shared by the main chain's tonemapFixed form and by the PICTURE-IN-PICTURE
+/// inset, which is a secondary surface and therefore always fixed: §14's whole
+/// argument is that an auto-exposed second surface is not a value anybody can
+/// assert, and the inset must additionally be able to carry a PIPPED CAMERA's
+/// own exposure without the main view moving.
+Ogre::CompositorPassClearDef *addFixedExposureClear(Ogre::CompositorNodeDef *n,
+                                                    const char *lumTex, float exposure) {
+    Ogre::CompositorTargetDef *t = n->addTargetPass(lumTex);
+    t->setNumPasses(1);
+    auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+    const float invLum = fixedInverseLuminance(exposure);
+    c->setAllClearColours(Ogre::ColourValue(invLum, invLum, invLum, invLum));
+    c->mViewportModifierMask = 0x00;   // a 1x1 texture is never inset
+    c->mProfilingId = "Jahshaka fixed exposure";
+    return c;
+}
+
+/// THE TONEMAP QUAD, in one place: the main chain's composite into the LDR
+/// image and the inset's composite into the window are the SAME material with
+/// the same three inputs, and there must never be a second tonemapper in this
+/// engine (POST_CHAIN_SPEC §14 — the whole point of the secondary-surface work
+/// is that a thumbnail, a screenshot and an inset grade like the viewport).
+/// Callers override load/store actions and the profiling id; nothing else.
+Ogre::CompositorPassQuadDef *addTonemapQuad(Ogre::CompositorNodeDef *n, const char *target,
+                                            const char *sceneTex, const char *lumTex,
+                                            const char *bloomTex) {
+    auto *q = addQuad(n, target, "HDR/FinalToneMapping", "Jahshaka HDR tonemap");
+    q->addQuadTextureSource(0, sceneTex);
+    q->addQuadTextureSource(1, lumTex);
+    q->addQuadTextureSource(2, bloomTex);
+    q->mStoreActionColour[0] = Ogre::StoreAction::Store;
     return q;
 }
 
@@ -993,18 +1048,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     if (desc.hdr) {
       if (desc.tonemapFixed) {
         // THE CONSTANT EXPOSURE, written where the reduction would have written
-        // it. HDR/FinalToneMapping samples this 1x1 texture as `fInvLumAvg` and
-        // multiplies the scene by it before the filmic curve, so clearing it to
-        // a value IS setting the exposure — the identical shader path, with a
-        // number nobody has to measure. Every frame (no mNumInitialPasses): the
-        // texture is Discardable and a stale read would be undefined memory.
-        Ogre::CompositorTargetDef *t = n->addTargetPass(kLum);
-        t->setNumPasses(1);
-        auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
-        const float invLum = fixedInverseLuminance(desc.exposure);
-        c->setAllClearColours(Ogre::ColourValue(invLum, invLum, invLum, invLum));
-        c->mViewportModifierMask = 0x00;   // a 1x1 texture is never inset
-        c->mProfilingId = "Jahshaka fixed exposure";
+        // it (addFixedExposureClear says why, once, for both surfaces that use
+        // it — this chain and the picture-in-picture inset).
+        handlesOut.fixedExposure = addFixedExposureClear(n, kLum, desc.exposure);
       } else {
         {
             auto *q = addQuad(n, kLumIter0, "HDR/DownScale01_SumLumStart", "Jahshaka HDR luminance start");
@@ -1067,11 +1113,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     const char *ldrTarget = desc.smaaPreset >= 0 ? kLdr : kTargetChannel;
     {
         if (desc.hdr) {
-            auto *q = addQuad(n, ldrTarget, "HDR/FinalToneMapping", "Jahshaka HDR tonemap");
-            q->addQuadTextureSource(0, sceneResult);
-            q->addQuadTextureSource(1, kLum);
-            q->addQuadTextureSource(2, kBlur0);
-            q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            addTonemapQuad(n, ldrTarget, sceneResult, kLum, kBlur0);
         } else {
             auto *q = addQuad(n, ldrTarget, "Ogre/Copy/4xFP32", "Jahshaka composite");
             q->addQuadTextureSource(0, sceneResult);
@@ -1371,33 +1413,48 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 }
 
 // ---------------------------------------------------------------------------
-// THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7). Design notes and the full
-// list of spike findings this obeys live on ViewPipDesc (Types.h); what follows
-// is only what is specific to the graph.
+// THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7), ROUTE C. Design notes and
+// the full list of spike findings this obeys live on ViewPipDesc (Types.h);
+// what follows is only what is specific to the graph.
 //
-// TWO PASSES, ONE TARGET — the view's own window/RTT, connected exactly like
-// the main chain's:
+// WHY ROUTE C AND NOT THE SCENE PASS STRAIGHT INTO THE WINDOW. The inset used
+// to render into the window itself, after the main chain had already TONEMAPPED
+// it. A view whose chain grades therefore showed a raw linear inset beside a
+// graded main image: everything above 1.0 flat white, while the same highlight
+// rolled off two centimetres to the left. That is POST_CHAIN_SPEC §14's fourth
+// consumer — the same defect the thumbnails, the project tiles and the
+// screenshots had, and it gets the same answer: the secondary surface renders
+// into a target of its own and goes through the SAME tonemapper, in its
+// deterministic fixed-exposure form. It also buys the thing the lens program
+// could not have: a PIPPED CAMERA'S OWN EXPOSURE, visible in the inset and
+// nowhere else, because the inset's exposure is now a number of its own.
 //
-//   1. PASS_QUAD, the inset's BACKGROUND. It cannot be a clear: Vulkan hard-
-//      codes a clear's renderArea to the whole attachment
-//      (OgreVulkanRenderPassDescriptor.cpp:945), so a PASS_CLEAR here would
-//      wipe the main frame, which is exactly what the colour Load exists to
-//      preserve. A quad respects the viewport and the scissor, so it paints the
-//      inset rect and nothing else.
+// THE GRAPH — one local scene texture, three or five passes:
 //
-//      The quad's material is an HLMS datablock, not a low-level material
-//      (CompositorPassQuadDef::mMaterialIsHlms; CompositorPassQuad rebinds it
-//      on every execute, so sharing Ogre's one fullscreen rectangle between
-//      quad passes is safe). That buys a solid colour with NO new shader and no
-//      new media — HlmsUnlit's colour path is already compiled for the loading
-//      cover's fill panel. Depth off, cull none, opaque, exactly like that one.
+//   1. PASS_CLEAR on a 4x4 swatch (kPipFill), the inset's BACKGROUND colour.
+//      A clear's renderArea IS the whole attachment on Vulkan
+//      (OgreVulkanRenderPassDescriptor.cpp:945), which is exactly right on a
+//      texture of our own and exactly wrong on the window — hence a swatch
+//      plus a quad rather than a clear at the rect.
 //
-//   2. PASS_SCENE, the inset itself:
-//        colour LOAD   — the main frame is already in the attachment and only
-//                        the rect may change;
-//        depth  CLEAR  — the spike's other finding, and a CORRECTNESS one: with
-//                        Load the main view's depth buffer occludes 92% of the
-//                        inset;
+//   2. PASS_CLEAR on the 1x1 exposure texture and on the (black) bloom input,
+//      when the inset is graded — the two other inputs HDR/FinalToneMapping
+//      samples. Both through addFixedExposureClear / the same material the
+//      main chain uses; there is exactly one tonemapper in this engine.
+//
+//   3. PASS_SCENE into the LOCAL TEXTURE (kPipScene):
+//        colour CLEAR  — to the inset's background, which is now legal and free:
+//                        the target is ours, so a full-target clear is the whole
+//                        inset and nothing else;
+//        depth  CLEAR  — the spike's correctness finding, now trivially true:
+//                        the local texture has its own depth buffer, so the main
+//                        view's depth cannot occlude the inset at all;
+//        NO VIEWPORT MODIFIER — mViewportModifierMask is cleared. The workspace
+//                        modifier places passes at the inset RECT, which is
+//                        right for the window and wrong for a texture that IS
+//                        the inset: applying it twice would draw the shot into
+//                        a third of a texture that is already a third of the
+//                        view. This is the one line that carries Route C.
 //        shadows OFF   — shadow nodes are per workspace, so a shadowed inset is
 //                        a second full shadow set every frame (§7.2);
 //        RQ [0, kOverlayRenderQueue) — an inset shows THE SHOT: no gizmos, no
@@ -1409,10 +1466,27 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 //                        already defined as "the overlay queue" (OgreMaterials'
 //                        renderQueueFor).
 //
-// Both store colour with kMultiWorkspaceStore: this workspace is last, so its
-// resolve is the one that reaches the screen, and it must still keep the
-// samples in case anything is ever added after it.
+//   4. TWO QUADS ONTO THE WINDOW, both LOADing colour so the main frame
+//      survives: the swatch over the OUTER rect (the background, and the
+//      letterbox bars around a constrained shot) and the local texture over the
+//      INNER one. Both run the same material — HDR/FinalToneMapping when the
+//      inset is graded, Ogre/Copy/4xFP32 when it is not — so the bars cannot
+//      disagree with the background inside the shot. Ogre's own low-level
+//      materials, not Hlms datablocks: at this pin CompositorPassQuadDef::
+//      mMaterialIsHlms routes through RenderQueue::renderSingleObject, whose
+//      fillBuffersFor overload BOTH desktop Hlms implementations answer with
+//      "Trying to use slow-path on a desktop implementation" (OgreHlmsUnlit.cpp
+//      :971 / OgreHlmsPbs.cpp) — an exception per frame and an inset that never
+//      appears. The compositor rebinds a quad material's textures on every
+//      execute, so three passes sharing one material is designed-for.
+//
+// The LAST window pass stores colour with kMultiWorkspaceStore: this workspace
+// is last, so its resolve is the one that reaches the screen, and it must still
+// keep the samples in case anything is ever added after it. Nothing about the
+// main view's store/load semantics changes — the inset still only ever LOADs
+// the window and never clears it.
 void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDesc &pip,
+              float texWidthFactor, float texHeightFactor,
               std::vector<std::string> &nodeDefsOut, PipHandles &handlesOut) {
     Ogre::CompositorManager2 *cm = root->getCompositorManager2();
     handlesOut = PipHandles();
@@ -1421,18 +1495,40 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
     Ogre::CompositorNodeDef *n = cm->addNodeDefinition(nodeName);
     nodeDefsOut.push_back(nodeName);
     n->addTextureSourceName(kTargetChannel, 0, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
-    n->setNumLocalTextureDefinitions(1);
-    // A 4x4 swatch, cleared to the inset's background and then copied over the
-    // rect. Its FORMAT is deliberately the same plain UNORM the offscreen views
-    // use, which is also what makes the copy land on the same value as a clear
-    // would: both write the linear value the caller asked for, and an sRGB
-    // window encodes both of them identically on the way in.
-    addTex(n, kPipFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
-    n->setNumTargetPass(2);
 
-    {   // The swatch. A clear's renderArea IS the whole target on Vulkan, which
-        // is precisely why it cannot be used on the view — but on a 4x4 texture
-        // of our own that is exactly what we want.
+    const bool graded = pip.tonemap;
+    n->setNumLocalTextureDefinitions(graded ? 4u : 2u);
+    // The swatch. Its FORMAT is deliberately the same plain UNORM the offscreen
+    // views use, which is also what makes the copy land on the same value a
+    // clear would write: both carry the linear value the caller asked for, and
+    // an sRGB window encodes both of them identically on the way in.
+    addTex(n, kPipFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
+    {
+        // THE INSET'S SCENE TARGET. Sized by FRACTION of the view's target, and
+        // the fraction is the INNER rect's — the composite quad stretches this
+        // texture across exactly that rectangle, so any other shape would be a
+        // stretch (a square in the world would stop being square in the inset).
+        // Fractions rather than pixels because Ogre re-derives them on every
+        // target resize: a window drag moves the inset for free, and only a
+        // change to the RECT's size re-creates anything (OgreView::applyPip).
+        auto *td = addTex(n, kPipScene,
+                          graded ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM,
+                          0u, 0u, texWidthFactor, texHeightFactor);
+        td->depthBufferId = 1u;          // the inset's OWN depth: a scene pass needs one
+        td->fsaa = "1";                  // the inset is composited, never resolved
+        syncRtvDepth(n, kPipScene, td);
+    }
+    if (graded) {
+        addTex(n, kPipLum,   Ogre::PFG_R16_FLOAT, 1u, 1u);
+        // The bloom input the tonemapper samples unconditionally. 4x4 and black:
+        // the inset does not bloom (a secondary surface is a photograph of the
+        // content, not of the scene's quality tier — §14), and the shader's
+        // bilinear read of a flat black texture costs nothing.
+        addTex(n, kPipBloom, Ogre::PFG_R10G10B10A2_UNORM, 4u, 4u);
+    }
+    n->setNumTargetPass(graded ? 6u : 4u);
+
+    {   // The background swatch.
         Ogre::CompositorTargetDef *t = n->addTargetPass(kPipFill);
         t->setNumPasses(1);
         auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -1447,51 +1543,77 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
         c->mProfilingId = "Jahshaka PiP fill swatch";
         handlesOut.fill = c;
     }
+    if (graded) {
+        handlesOut.exposure = addFixedExposureClear(n, kPipLum, pip.exposure);
+        handlesOut.exposure->mProfilingId = "Jahshaka PiP exposure";
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kPipBloom);
+        t->setNumPasses(1);
+        auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
+        c->setAllClearColours(Ogre::ColourValue(0.0f, 0.0f, 0.0f, 1.0f));
+        c->mViewportModifierMask = 0x00;
+        c->mProfilingId = "Jahshaka PiP bloom disabled";
+    }
+    {   // The inset, into its own texture.
+        Ogre::CompositorTargetDef *t = n->addTargetPass(kPipScene);
+        t->setNumPasses(1);
+        auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+        p->setAllClearColours(toOgre(pip.background));
+        p->setAllLoadActions(Ogre::LoadAction::Clear);
+        p->mClearDepth = 1.0f;
+        p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        p->mStoreActionDepth     = Ogre::StoreAction::DontCare;
+        p->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+        // THE ROUTE C LINE (see the note above): this pass renders the WHOLE of
+        // a texture that is already the size of the inset.
+        p->mViewportModifierMask = 0x00;
+        p->mFirstRQ = 0u;
+        p->mLastRQ  = kOverlayRenderQueue;    // no gizmos, wires, grid or camera bodies
+        p->mIncludeOverlays = false;          // see kIncludeOverlaysNote
+        p->mShadowNode = Ogre::IdString();    // §7.2: the inset ships shadows OFF
+        p->mProfilingId = "Jahshaka PiP scene";
+        handlesOut.scenePass = p;
+    }
     {
-        Ogre::CompositorTargetDef *t = n->addTargetPass(kTargetChannel);
-        t->setNumPasses(2);
-        {   // The background, as a COPY rather than a clear (see above) and as a
-            // low-level material rather than an Hlms datablock: at this pin
-            // CompositorPassQuadDef::mMaterialIsHlms routes through
-            // RenderQueue::renderSingleObject, whose fillBuffersFor overload
-            // BOTH desktop Hlms implementations answer with
-            // "Trying to use slow-path on a desktop implementation"
-            // (OgreHlmsUnlit.cpp:971 / OgreHlmsPbs.cpp) — an exception per
-            // frame and an inset that never appears. Ogre's own
-            // Ogre/Copy/4xFP32 is already staged, already used by this chain's
-            // composite pass, and samples with point filtering and clamp, so a
-            // 4x4 swatch reads back as one flat colour.
-            auto *q = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
-            q->mMaterialName = "Ogre/Copy/4xFP32";
-            q->addQuadTextureSource(0, kPipFill);
+        // TWO TARGET PASSES ON THE WINDOW, not one target pass with two passes:
+        // addQuad/addTonemapQuad each open their own (the main chain does the
+        // same thing where its composite and its overlay pass both land on the
+        // target). They execute in declaration order, which is the order they
+        // must paint in.
+        const auto onWindow = [](Ogre::CompositorPassDef *q) {
             q->mLoadActionColour[0] = Ogre::LoadAction::Load;   // keep the main frame
             q->mLoadActionDepth     = Ogre::LoadAction::DontCare;
             q->mLoadActionStencil   = Ogre::LoadAction::DontCare;
-            q->mStoreActionColour[0] = Ogre::StoreAction::Store;
-            q->mStoreActionDepth     = Ogre::StoreAction::DontCare;
-            q->mStoreActionStencil   = Ogre::StoreAction::DontCare;
-            q->mProfilingId = "Jahshaka PiP fill";
-        }
-        {
-            auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
-            p->mLoadActionColour[0] = Ogre::LoadAction::Load;
-            p->mLoadActionDepth     = Ogre::LoadAction::Clear;   // correctness, not thrift
-            p->mLoadActionStencil   = Ogre::LoadAction::DontCare;
-            p->mClearDepth = 1.0f;
-            p->mStoreActionColour[0] = kMultiWorkspaceStore;
-            p->mStoreActionDepth     = Ogre::StoreAction::DontCare;
-            p->mStoreActionStencil   = Ogre::StoreAction::DontCare;
-            p->mFirstRQ = 0u;
-            p->mLastRQ  = kOverlayRenderQueue;    // no gizmos, wires, grid or camera bodies
-            p->mIncludeOverlays = false;          // see kIncludeOverlaysNote
-            p->mShadowNode = Ogre::IdString();    // §7.2: the inset ships shadows OFF
-            p->mProfilingId = "Jahshaka PiP scene";
-            handlesOut.scenePass = p;
-        }
+            q->mStoreActionDepth    = Ogre::StoreAction::DontCare;
+            q->mStoreActionStencil  = Ogre::StoreAction::DontCare;
+        };
+        const auto windowQuad = [&](const char *source, const char *profilingId) {
+            Ogre::CompositorPassQuadDef *q;
+            if (graded) {
+                q = addTonemapQuad(n, kTargetChannel, source, kPipLum, kPipBloom);
+            } else {
+                q = addQuad(n, kTargetChannel, "Ogre/Copy/4xFP32", profilingId);
+                q->addQuadTextureSource(0, source);
+            }
+            q->mProfilingId = profilingId;
+            onWindow(q);
+            return q;
+        };
+        // The background (and the bars), over the OUTER rect...
+        windowQuad(kPipFill, "Jahshaka PiP fill")
+            ->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        // ...then the shot itself, over the INNER one (written live by applyPip).
+        handlesOut.composite = windowQuad(kPipScene, graded ? "Jahshaka PiP tonemap"
+                                                            : "Jahshaka PiP composite");
+        handlesOut.composite->mStoreActionColour[0] = kMultiWorkspaceStore;
     }
 
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
     workDef->connectExternal(0, n->getName(), 0);
+}
+
+Ogre::ColourValue fixedExposureColour(float exposure) {
+    const float invLum = fixedInverseLuminance(exposure);
+    return Ogre::ColourValue(invLum, invLum, invLum, invLum);
 }
 
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,

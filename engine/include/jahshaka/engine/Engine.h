@@ -711,12 +711,23 @@ public:
     /// still reports what the host asked for.
     ///
     /// Cheap to call with an unchanged value (hosts may push per frame), and
-    /// cheap to MOVE: changing only the rect or the camera is a live viewport
-    /// modifier / camera write, never a workspace rebuild (workspaceGeneration
-    /// does not move). Turning the inset on or off does build/tear its
-    /// workspace — that is the one structural change here.
+    /// cheap to MOVE: changing only the rect's POSITION, the camera or the
+    /// exposure is a live viewport modifier / camera / clear-colour write,
+    /// never a workspace rebuild (neither workspaceGeneration nor
+    /// pipGeneration moves). Three things are structural, and only three:
+    /// turning the inset on or off, flipping `tonemap`, and RESIZING the rect
+    /// (Route C's local texture is sized from it — see ViewPipDesc).
     virtual void setPip(const ViewPipDesc &) = 0;
     virtual const ViewPipDesc &pip() const = 0;
+    /// How many times the INSET's own workspace has been created — the
+    /// counterpart of workspaceGeneration for the second workspace, and the
+    /// number that proves a steady inset costs nothing structural per frame.
+    /// It moves when the inset is switched on, when its local texture has to
+    /// be re-sized (a rect resize or a `tonemap` flip), and each time the main
+    /// workspace is rebuilt (the inset must be re-appended to stay LAST on the
+    /// target — there is no reorder API). Never on a rect MOVE, a camera move
+    /// or an exposure change. 0 while there is no inset.
+    virtual unsigned pipGeneration() const = 0;
     /// How many times this View has (re)built its compositor workspace — the
     /// structurally expensive operation behind setShadows(), setBackground(),
     /// resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts

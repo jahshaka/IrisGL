@@ -3137,6 +3137,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // the same frame anyway. A view seen for the FIRST time has no record
         // at all and gets the world's description, which is exactly right: the
         // camera has not been applied to it yet.
+        // THE WORLD'S OWN DESCRIPTION, before any camera is layered over it.
+        // The picture-in-picture inset needs exactly this and not what the view
+        // ends up with: the inset is a DIFFERENT camera's shot, so inheriting
+        // the MAIN view's camera grade would hand the pipped camera the driving
+        // camera's exposure (applyPip layers the pipped camera over this).
+        mWorldPostFx = fx;
         if (const iris::CameraNodePtr driving = drivingCameraFor(view))
             if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
         view->setPostFx(fx);
@@ -4167,6 +4173,30 @@ void SceneMirror::applyPip(iris::CameraNodePtr camera, View *view, const ViewPip
         return;
     }
     d.camera = toCameraDesc(camera);
+
+    // THE INSET'S GRADE (CAMERAS_SPEC §7.2 Route C / POST_CHAIN_SPEC §14).
+    //
+    // The same substitution the lens program built, at the same one function,
+    // over the WORLD's description rather than the view's: the inset renders
+    // the PIPPED camera, so its exposure and its post overrides are the ones
+    // that decide how the inset looks — and they decide it for the inset ONLY,
+    // because they never reach view->setPostFx. That is the whole per-camera
+    // preview: a camera at -2 stops darkens its own inset and leaves the main
+    // viewport exactly where it was.
+    //
+    // What survives the trip is what a secondary surface can honour: WHETHER
+    // the shot is tonemapped (fx.hdr — so the inset grades exactly when the
+    // main view's chain does, and a camera that overrides `hdr` decides it for
+    // its own preview) and the EXPOSURE it is tonemapped at. Bloom, AO, SMAA
+    // and SSR are not a second post chain's worth of machinery for a 200-pixel
+    // rectangle, and §14 makes the same call for thumbnails: a preview is a
+    // photograph of the content, not of the scene's quality tier.
+    {
+        PostFxDesc fx = mWorldPostFx;
+        applyCameraPostFx(camera, fx);
+        d.tonemap  = fx.hdr;
+        d.exposure = fx.exposure;
+    }
     view->setPip(d);
 }
 

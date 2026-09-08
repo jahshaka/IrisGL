@@ -109,6 +109,65 @@ const ViewOverlayDesc &OgreView::overlay() const { return mOverlay; }
 // THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7). The graph shape and every
 // spike finding behind it: ViewPipDesc (Types.h) and chain::buildPip.
 
+namespace {
+/// WRITES A CLEAR COLOUR THAT IS ALREADY ON THE GPU'S BOOKS.
+///
+/// A pass definition's colour is what a FUTURE rebuild will use; the live
+/// RenderPassDescriptor is what THIS pass instance clears with (Vulkan caches
+/// the VkClearValue, which is why setClearColour is a virtual and not a field
+/// write). Both, always — a rewrite that happens in the same frame as a rebuild
+/// must survive either order. Extracted from resetExposureHistory, which found
+/// this the hard way and is now one of three callers.
+void writeLiveClearColour(Ogre::CompositorWorkspace *workspace,
+                          Ogre::CompositorPassClearDef *def,
+                          const Ogre::ColourValue &colour) {
+    if (!def) return;
+    def->setAllClearColours(colour);
+    if (!workspace) return;
+    for (Ogre::CompositorNode *n : workspace->getNodeSequence()) {
+        if (!n) continue;
+        for (Ogre::CompositorPass *p : n->_getPasses()) {
+            if (!p || p->getDefinition() != def) continue;
+            if (Ogre::RenderPassDescriptor *rpd = p->getRenderPassDesc())
+                rpd->setClearColour(colour);
+        }
+    }
+}
+}   // namespace
+
+/// THE FIXED EXPOSURE, PUSHED LIVE (POST_CHAIN_SPEC §14).
+///
+/// `PostFxDesc::exposure` is deliberately not part of ChainDesc::sameShape — a
+/// grade change must never rebuild a compositor workspace. In the AUTOMATIC
+/// form that is free (the exposure is a material parameter the globals listener
+/// pushes), but in the FIXED form the exposure IS a clear colour baked into the
+/// graph at build time, so nothing moved it afterwards: a view that changed its
+/// exposure while tonemapFixed was on kept the grade it was built with until
+/// something else rebuilt the chain. Found while building the inset's own grade
+/// (which needs exactly this), fixed here for both.
+void OgreView::applyFixedExposure() {
+    if (!mChainHandles.fixedExposure) return;
+    const ChainDesc d = chainDesc();
+    if (!d.hdr || !d.tonemapFixed) return;
+    JAH_TRY {
+        writeLiveClearColour(mWorkspace, mChainHandles.fixedExposure,
+                             chain::fixedExposureColour(d.exposure));
+    } JAH_CATCH(mError, );
+}
+
+bool OgreView::pipTonemapEffective() const {
+    // THE INSET GRADES EXACTLY WHEN THIS VIEW'S CHAIN DOES, and the AND is the
+    // guarantee rather than a precaution: a graded inset on an ungraded surface
+    // is the same mismatch, in the same frame, that Route C exists to remove —
+    // it would simply have swapped which half was wrong. A host asks for the
+    // grade (ViewPipDesc::tonemap, resolved from the world and the PIPPED
+    // camera); the view's own chain decides whether the surface it is painting
+    // on is graded at all. An offscreen view without PostFxDesc::allowOffscreen
+    // has no chain by construction (chainDesc's early-out), so a thumbnail that
+    // somehow acquired an inset gets a raw one — consistent with its raw frame.
+    return mPip.tonemap && chainDesc().hdr;
+}
+
 bool OgreView::pipAllowed() const {
     // THE determinism law's single gate, in the same shape and the same place
     // as overlaysAllowed() and chainDesc()'s post-fx early-out: an offscreen
@@ -127,6 +186,14 @@ void OgreView::setPip(const ViewPipDesc &d) {
     // MOVING previewed camera (animated, socketed, possessed, dragged) tore
     // down and re-added the compositor workspace once per frame, because the
     // desc carries the pose and the old code called syncPip on any change.
+    //
+    // ROUTE C's `tonemap` IS a graph change (an RGBA16F target, an exposure
+    // texture, a different composite material) but it is not tested here: the
+    // effective value depends on this view's chain as well as on the desc
+    // (pipTonemapEffective), so applyPip — which runs immediately below and
+    // once per frame — owns that comparison for both of its inputs. `exposure`
+    // is a clear colour applyPip rewrites live, which is what lets a pipped
+    // camera's grade be animated without rebuilding a workspace per frame.
     const bool shapeChanged = d.enabled != mPip.enabled ||
                               d.allowOffscreen != mPip.allowOffscreen;
     mPip = d;
@@ -143,7 +210,18 @@ void OgreView::syncPip() {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
         if (mPipWorkspaceDef.empty()) {
             mPipWorkspaceDef = mName + "/PipWorkspace";
-            chain::buildPip(mRoot, mPipWorkspaceDef, mPip, mPipNodeDefs, mPipHandles);
+            // THE LOCAL TEXTURE'S SIZE IS DECIDED HERE, once per build, from the
+            // rect the inset currently has (Route C). applyPip re-derives the
+            // same fractions every frame and rebuilds only when the WHOLE-PIXEL
+            // size they produce has actually changed — a moving inset, a moving
+            // camera and a window resize all leave this alone.
+            pipTexFactors(mPipTexWidthFactor, mPipTexHeightFactor);
+            mPipTexTonemap = pipTonemapEffective();
+            mPipTargetW = width(); mPipTargetH = height();
+            ViewPipDesc built = mPip;
+            built.tonemap = mPipTexTonemap;
+            chain::buildPip(mRoot, mPipWorkspaceDef, built, mPipTexWidthFactor,
+                            mPipTexHeightFactor, mPipNodeDefs, mPipHandles);
         }
         if (!mPipCamera) {
             // POOLED, and created with isVisible = false: an idle camera costs
@@ -172,7 +250,23 @@ void OgreView::syncPip() {
             // inset would render full-screen over the main view with no error
             // of any kind (spike, correction 3).
             /*vpModifierMask*/ 0xFF, /*executionMask*/ 0xFF);
+        ++mPipGeneration;               // see View::pipGeneration
     } JAH_CATCH(mError, );
+}
+
+unsigned OgreView::pipGeneration() const { return mPipGeneration; }
+
+void OgreView::pipTexFactors(float &widthFactor, float &heightFactor) const {
+    const unsigned tw = width(), th = height();
+    const float targetAspect = th ? float(tw) / float(th) : 1.0f;
+    float outer[4], inner[4];
+    chain::pipRects(mPip, targetAspect, outer, inner);
+    // The INNER rect, i.e. what the composite quad will stretch the texture
+    // across. Taking the OUTER one instead would letterbox a shot into a
+    // texture of the wrong shape and then stretch it back — the exact
+    // distortion the explicit camera aspect below exists to avoid.
+    widthFactor  = std::max(0.001f, inner[2]);
+    heightFactor = std::max(0.001f, inner[3]);
 }
 
 void OgreView::destroyPip() {
@@ -204,52 +298,98 @@ void OgreView::applyPip() {
     if (!mPipWorkspace || !mPipCamera) return;
     JAH_TRY {
         const CameraDesc &c = mPip.camera;
-        mPipCamera->setPosition(toOgre(c.position));
-        mPipCamera->setOrientation(
-            Ogre::Quaternion(c.orientation.w, c.orientation.x, c.orientation.y, c.orientation.z));
-        mPipCamera->setNearClipDistance(std::max(c.nearClip, 0.001f));
-        mPipCamera->setFarClipDistance(std::max(c.farClip, c.nearClip + 0.01f));
 
         const unsigned tw = width(), th = height();
         const float targetAspect = th ? float(tw) / float(th) : 1.0f;
         float outer[4], inner[4];
         chain::pipRects(mPip, targetAspect, outer, inner);
 
+        // ---- HAZARD 3 (POST_CHAIN_SPEC §14): the rects move LIVE, the local
+        // texture does not follow. It is sized as a FRACTION of the target, so
+        // a MOVE and a window RESIZE are both free — Ogre re-derives a
+        // fraction-sized texture whenever the target changes size. Only a
+        // change to the inset's own SIZE (the preference, a camera whose
+        // constrained aspect re-letterboxes the rect, a `tonemap` flip) needs a
+        // new texture, and this compares the sizes IN WHOLE PIXELS: what the
+        // texture already is against what the rect now wants. Equal is the
+        // steady state and costs one ceilf per frame; different rebuilds the
+        // inset's node ONCE and re-adds its workspace LAST, through the same
+        // syncPip every other rebuild goes through (there is no reorder API).
+        const auto texPixels = [](float factor, unsigned n) {
+            return (unsigned)std::max(1.0f, std::ceil(factor * float(n)));
+        };
+        //
+        // THE TARGET'S OWN SIZE IS IN THE TEST TOO, and it is not belt and
+        // braces. Ogre re-creates a fraction-sized local texture when the final
+        // target changes size (CompositorWorkspace::_update's resize block) —
+        // but the SECOND workspace on a window is not re-analyzed with it, and
+        // the barrier for the recreated texture is then issued INSIDE the
+        // frame's open render pass: "vkCmdPipelineBarrier(): Barriers cannot be
+        // set during subpass 0 ... with no self-dependency", twice, on the
+        // first frames after a window resize (measured under
+        // VK_LAYER_KHRONOS_validation; zero with the inset off, zero on the
+        // pre-Route-C inset, which had no local texture to re-create). Building
+        // the inset again is the honest fix and it is nearly free: a resize
+        // already rebuilds the swapchain and every resizable texture in the
+        // frame. It stays a REBUILD-ON-CHANGE, never a per-frame rebuild.
+        const bool sizeMoved =
+            texPixels(mPipTexWidthFactor, tw)  != texPixels(std::max(0.001f, inner[2]), tw) ||
+            texPixels(mPipTexHeightFactor, th) != texPixels(std::max(0.001f, inner[3]), th) ||
+            mPipTargetW != tw || mPipTargetH != th ||
+            mPipTexTonemap != pipTonemapEffective();
+        if (sizeMoved) {
+            destroyPip();
+            syncPip();
+            if (!mPipWorkspace || !mPipCamera) return;
+        }
+
+        mPipCamera->setPosition(toOgre(c.position));
+        mPipCamera->setOrientation(
+            Ogre::Quaternion(c.orientation.w, c.orientation.x, c.orientation.y, c.orientation.z));
+        mPipCamera->setNearClipDistance(std::max(c.nearClip, 0.001f));
+        mPipCamera->setFarClipDistance(std::max(c.farClip, c.nearClip + 0.01f));
+
+        // The aspect the inset is actually SHOWN at: the inner rect's, in
+        // pixels (a normalised rect is not a pixel rect).
+        const float rectAspect = (inner[3] * float(th)) > 0.0f
+            ? (inner[2] * float(tw)) / (inner[3] * float(th)) : 1.0f;
+
         if (c.orthographic) {
             mPipCamera->setProjectionType(Ogre::PT_ORTHOGRAPHIC);
-            const float rectAspect = (inner[3] * th) > 0.0f
-                ? (inner[2] * float(tw)) / (inner[3] * float(th)) : 1.0f;
             mPipCamera->setOrthoWindow(2.0f * c.orthoSize * rectAspect, 2.0f * c.orthoSize);
         } else {
             mPipCamera->setProjectionType(Ogre::PT_PERSPECTIVE);
             mPipCamera->setFOVy(Ogre::Degree(std::max(1.0f, std::min(c.fovDegrees, 179.0f))));
         }
-        // LETTERBOX (§7.4). setAutoAspectRatio would make the camera adopt the
-        // INNER rect's aspect every frame, which is right by accident but only
-        // because we computed the inner rect from `aspect` in the first place;
-        // freezing it is the honest statement and it is what keeps a world
-        // square square (spike T5: 32x32 px with it, 32x54 without).
-        mPipCamera->setAutoAspectRatio(!c.constrainAspect);
-        if (c.constrainAspect && c.aspect > 0.0f) mPipCamera->setAspectRatio(c.aspect);
+        // THE ASPECT IS EXPLICIT, ALWAYS (Route C). It used to be automatic
+        // unless the camera constrained itself, which was right by accident:
+        // the camera rendered straight into the window and Ogre's automatic
+        // aspect is the VIEWPORT's. It now renders into a local texture, and
+        // setAutoAspectRatio would take THAT texture's aspect — the same number
+        // only by construction, and not the same number at all once the texture
+        // is rounded up to whole pixels. So it is set from the rectangle the
+        // inset is shown at, and a constrained camera pins its authored value
+        // (which is what the inner rect was computed from in the first place —
+        // spike T5: a world square is 32x32 px with this and 32x54 without).
+        mPipCamera->setAutoAspectRatio(false);
+        mPipCamera->setAspectRatio(c.constrainAspect && c.aspect > 0.0f ? c.aspect : rectAspect);
         // The inset is the same lens: a shifted camera is shifted in its own
         // preview too. The aspect here is the INNER rect's, not the target's.
-        {
-            const float rectAspect = (c.constrainAspect && c.aspect > 0.0f) ? c.aspect
-                : ((inner[3] * th) > 0.0f ? (inner[2] * float(tw)) / (inner[3] * float(th)) : 1.0f);
-            applyLensShift(mPipCamera, c, rectAspect);
-        }
+        applyLensShift(mPipCamera, c, c.constrainAspect && c.aspect > 0.0f ? c.aspect : rectAspect);
 
-        // LIVE, both of them — no rebuild, spike T3. The workspace modifier
-        // places (and scissors) every pass of the inset node at the OUTER rect;
-        // the scene pass's own mVpRect then pulls it in to the INNER one, which
-        // Ogre re-reads from the definition on every execute
+        // LIVE, all of it — no rebuild, spike T3. The workspace modifier places
+        // (and scissors) every window pass of the inset node at the OUTER rect;
+        // the COMPOSITE quad's own mVpRect then pulls it in to the INNER one,
+        // which Ogre re-reads from the definition on every execute
         // (CompositorPass::setRenderPassDescToCurrent). The fill quad keeps
         // [0,1] and therefore paints the whole outer rect: background where the
-        // two rects agree, letterbox bars where they do not.
+        // two rects agree, letterbox bars where they do not. The SCENE pass
+        // takes no modifier at all — it owns a texture that is already the
+        // inset (buildPip's Route C note).
         mPipWorkspace->setViewportModifier(
             Ogre::Vector4(outer[0], outer[1], outer[2], outer[3]));
-        if (mPipHandles.scenePass) {
-            auto &vp = mPipHandles.scenePass->mVpRect[0];
+        if (mPipHandles.composite) {
+            auto &vp = mPipHandles.composite->mVpRect[0];
             // width  = passWidth * outerWidth  -> passWidth = innerWidth / outerWidth
             // left   = passLeft  + outerLeft   -> passLeft  = innerLeft  - outerLeft
             vp.mVpLeft   = inner[0] - outer[0];
@@ -262,6 +402,11 @@ void OgreView::applyPip() {
             vp.mVpScissorHeight = vp.mVpHeight;
         }
         if (mPipHandles.fill) mPipHandles.fill->setAllClearColours(toOgre(mPip.background));
+        // The grade, live: one clear colour, never a rebuild (ViewPipDesc) —
+        // through the writer that also touches the pass INSTANCE, because the
+        // colour Vulkan uses is the one cached in its RenderPassDescriptor.
+        writeLiveClearColour(mPipWorkspace, mPipHandles.exposure,
+                             chain::fixedExposureColour(mPip.exposure));
     } JAH_CATCH(mError, );
 }
 
@@ -273,6 +418,9 @@ void OgreView::setPostFx(const PostFxDesc &fx) {
     // Only a SHAPE change rebuilds. Exposure, bloom threshold, AO power and the
     // SMAA preset are uniforms or shader reloads, not graph edits.
     if (!ChainDesc::sameShape(before, after)) rebuildWorkspaceDef();
+    // ...and the one thing that is NOT a shape change but still lives in the
+    // graph: the fixed tonemap's exposure clear.
+    applyFixedExposure();
 }
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }
@@ -287,18 +435,11 @@ void OgreView::resetExposureHistory() {
     const float seed = chain::exposureSeed(d.exposure);
     const Ogre::ColourValue colour(seed, seed, seed, seed);
     JAH_TRY {
-        // The DEFINITION's colour is what a future rebuild will use; the live
-        // RenderPassDescriptor is what THIS pass instance clears with (Vulkan
-        // caches the VkClearValue, which is why setClearColour is a virtual and
-        // not a field write). Both, so a re-seed survives a rebuild that happens
-        // to land in the same frame.
-        mChainHandles.exposureSeed->setAllClearColours(colour);
+        writeLiveClearColour(mWorkspace, mChainHandles.exposureSeed, colour);
         for (Ogre::CompositorNode *n : mWorkspace->getNodeSequence()) {
             if (!n) continue;
             for (Ogre::CompositorPass *p : n->_getPasses()) {
                 if (!p || p->getDefinition() != mChainHandles.exposureSeed) continue;
-                if (Ogre::RenderPassDescriptor *rpd = p->getRenderPassDesc())
-                    rpd->setClearColour(colour);
                 // The seed is `mNumInitialPasses = 1` — it has already been
                 // spent, once, when the workspace was built. This is what puts
                 // it back, and it is the whole reason the pass is reachable
