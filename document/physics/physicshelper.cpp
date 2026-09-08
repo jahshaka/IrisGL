@@ -4,6 +4,8 @@
 #include "core/geometry/trimesh.h"
 #include "document/physics/environment.h"
 
+#include <QDebug>
+
 namespace iris
 {
 
@@ -57,6 +59,26 @@ iris::Vec3 PhysicsHelper::vec3FromBtVector3(btVector3 vector)
 	return iris::Vec3(vector.getX(), vector.getY(), vector.getZ());
 }
 
+namespace {
+
+/// The body PhysicsCollisionShape::None builds: a btEmptyShape at the node's
+/// transform. It is also the DEGRADED result for a mesh-shaped body on a node
+/// that carries no mesh geometry (see createPhysicsBody): the body still
+/// exists — constraints, hashBodies and the transform sync keep resolving —
+/// it simply collides with nothing, which is exactly what "no geometry" means.
+void buildEmptyShapeBody(const btTransform &transform, btScalar mass,
+                         btCollisionShape *&shape, btMotionState *&motionState,
+                         btRigidBody *&body)
+{
+    shape = new btEmptyShape();
+    motionState = new btDefaultMotionState(transform);
+    btRigidBody::btRigidBodyConstructionInfo info(mass, motionState, shape);
+    body = new btRigidBody(info);
+    body->setCenterOfMassTransform(transform);
+}
+
+}  // namespace
+
 // Every `new` below lands in `owned` — the body's shape, a compound's child
 // shapes and the btTriangleMesh interfaces behind the mesh shapes. Bullet owns
 // none of them (deep audit 2026-09, area 4 F3: they leaked, once per body, per
@@ -72,8 +94,23 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
     transform.setIdentity();
 	transform.setFromOpenGLMatrix(sceneNode->getGlobalTransform().constData());
 
-    auto meshNode = sceneNode.staticCast<iris::MeshNode>();
-    auto rot = meshNode->getGlobalRotation().toVector4D();
+    // A1.4 (ENGINEERING_DEBT_SPEC addendum item 4). This was an unguarded
+    // `sceneNode.staticCast<iris::MeshNode>()` on ANY node carrying
+    // `isPhysicsBody`. The UI only sets that flag on meshes — but the LOAD
+    // path does not: SceneReader reads "physicsObject" for every node kind it
+    // deserializes (scenereader.cpp), so a hand-authored or third-party scene
+    // that flags a light, a camera or an empty as a physics body reached the
+    // mesh-only branches below and read a MeshNode member off an object that
+    // never had one.
+    //
+    // Nothing the shape-independent code needs is MeshNode's: transform,
+    // rotation and scale are all SceneNode's, and they are read from
+    // `sceneNode` now. Only the three geometry shapes need the real mesh, and
+    // they degrade to an empty shape when it is not there.
+    const auto meshNode = sceneNode.dynamicCast<iris::MeshNode>();
+    const bool hasMeshGeometry = !meshNode.isNull() && !meshNode->getMesh().isNull()
+                                 && meshNode->getMesh()->getTriMesh() != nullptr;
+    auto rot = sceneNode->getGlobalRotation().toVector4D();
 
     btQuaternion quat;
     quat.setX(rot.x());
@@ -96,12 +133,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setOrigin(pos);
             transform.setRotation(quat);
 
-            shape = new btEmptyShape();
-            motionState = new btDefaultMotionState(transform);
-            
-            btRigidBody::btRigidBodyConstructionInfo info(mass, motionState, shape);
-            body = new btRigidBody(info);
-            body->setCenterOfMassTransform(transform);
+            buildEmptyShapeBody(transform, mass, shape, motionState, body);
 
             break;
         }
@@ -114,7 +146,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             float rad = 1.0;
 
             shape = new btSphereShape(rad);
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(sceneNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 
@@ -137,7 +169,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setRotation(quat);
 
             shape = new btStaticPlaneShape(btVector3(0, 1, 0), 0.f);
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(sceneNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 
@@ -159,7 +191,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setRotation(quat);
 
             shape = new btBoxShape(btVector3(1, 1, 1));
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(sceneNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 
@@ -179,6 +211,14 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
         case static_cast<int>(PhysicsCollisionShape::ConvexHull) : {
             transform.setOrigin(pos);
             transform.setRotation(quat);
+
+            if (!hasMeshGeometry) {
+                qWarning("PhysicsHelper: '%s' asks for a convex-hull body but carries no mesh "
+                         "geometry — building an empty shape instead",
+                         qUtf8Printable(sceneNode->getName()));
+                buildEmptyShapeBody(transform, mass, shape, motionState, body);
+                break;
+            }
 
             // https://www.gamedev.net/forums/topic/691208-build-a-convex-hull-from-a-given-mesh-in-bullet/
             // https://pybullet.org/Bullet/phpBB3/viewtopic.php?t=11342
@@ -202,7 +242,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             delete hull;
             delete tmpShape;
 
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(sceneNode->getLocalScale()));
 
             motionState = new btDefaultMotionState(transform);
 
@@ -223,13 +263,21 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setOrigin(pos);
             transform.setRotation(quat);
 
+            if (!hasMeshGeometry) {
+                qWarning("PhysicsHelper: '%s' asks for a triangle-mesh body but carries no mesh "
+                         "geometry — building an empty shape instead",
+                         qUtf8Printable(sceneNode->getName()));
+                buildEmptyShapeBody(transform, mass, shape, motionState, body);
+                break;
+            }
+
             // convert triangle mesh into convex shape
 
             auto triMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(meshNode->getMesh());
             owned.meshInterfaces.append(triMesh);   // outlives the shape below
 
             shape = new btConvexTriangleMeshShape(triMesh, true);
-            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(meshNode->getLocalScale()));
+            shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(sceneNode->getLocalScale()));
             shape->setMargin(margin);
             motionState = new btDefaultMotionState(transform);
 
@@ -247,12 +295,22 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 
 		case static_cast<int>(PhysicsCollisionShape::Compound) : {
 
-			auto rootTransformInverse = meshNode->getGlobalTransform().inverted();
+			auto rootTransformInverse = sceneNode->getGlobalTransform().inverted();
 
 			std::function<void(btCollisionShape*, const SceneNodePtr)> createTriangleMeshAndAddToShape =
 				[&](btCollisionShape *baseShape, const SceneNodePtr node)
 			{
-				auto childMeshNode = node.staticCast<iris::MeshNode>();
+				// Same guard as the root's (A1.4): buildCompoundShape selects on the
+				// node TYPE, and a node whose type says Mesh can still be a MeshNode
+				// with no mesh loaded — or, from a hand-authored file, not a MeshNode
+				// at all. A child that carries no geometry contributes nothing.
+				auto childMeshNode = node.dynamicCast<iris::MeshNode>();
+				if (childMeshNode.isNull() || childMeshNode->getMesh().isNull()
+				    || !childMeshNode->getMesh()->getTriMesh()) {
+					qWarning("PhysicsHelper: compound child '%s' carries no mesh geometry — skipped",
+					         qUtf8Printable(node->getName()));
+					return;
+				}
 				auto *childTriMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh());
 				owned.meshInterfaces.append(childTriMesh);
 				auto childShape = new btConvexTriangleMeshShape(childTriMesh, true);
@@ -287,6 +345,19 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 			shape->setMargin(margin);
 
 			transform.setFromOpenGLMatrix(sceneNode->getGlobalTransform().constData());
+
+			// Every child was skipped (no mesh geometry anywhere in the subtree):
+			// an empty compound's AABB is the inverted initial one, so its inertia
+			// tensor is meaningless. Degrade like the other geometry shapes.
+			if (static_cast<btCompoundShape *>(shape)->getNumChildShapes() == 0) {
+				delete shape;
+				shape = nullptr;
+				qWarning("PhysicsHelper: '%s' asks for a compound body but no node in its subtree "
+				         "carries mesh geometry — building an empty shape instead",
+				         qUtf8Printable(sceneNode->getName()));
+				buildEmptyShapeBody(transform, mass, shape, motionState, body);
+				break;
+			}
 
 			motionState = new btDefaultMotionState(transform);
 

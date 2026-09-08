@@ -593,35 +593,65 @@ bool Scene::detachFromSocket(const SceneNodePtr &node)
     return true;
 }
 
+namespace {
+
+/// Removes `node` from a typed registry keyed by guid.
+///
+/// A1.5 (ENGINEERING_DEBT_SPEC addendum item 5). Every branch of removeNode
+/// used to say `hash.remove(hash.key(ptr))` — a REVERSE lookup, a linear scan
+/// over the hash's values, four of them per removed node, on a container
+/// addNode fills keyed by exactly the guid we already hold. Worse, when the
+/// node was not registered at all `QHash::key()` returns a default-constructed
+/// QString and `remove("")` then evicted whatever unrelated entry happened to
+/// be keyed with the empty string.
+///
+/// The guid lookup is O(1) and is the registered case. The reverse lookup
+/// survives only as the fallback for a node whose guid was changed AFTER
+/// addNode registered it (nothing in the tree does that today — every
+/// setGUID call site runs before the node is added — but the old code
+/// tolerated it, and this is what "no behaviour change" means here); the
+/// empty-key eviction does not survive, because it was a bug.
+template <typename Hash, typename Ptr>
+void removeRegistered(Hash &hash, const QString &guid, const Ptr &node)
+{
+    if (hash.remove(guid) > 0) return;
+    const QString stale = hash.key(node);
+    if (!stale.isEmpty()) hash.remove(stale);
+}
+
+}  // namespace
+
 void Scene::removeNode(SceneNodePtr node)
 {
+    const QString guid = node->getGUID();
+
     if (node->sceneNodeType == SceneNodeType::Light) {
-        lights.remove(lights.key(node.staticCast<iris::LightNode>()));
+        removeRegistered(lights, guid, node.staticCast<iris::LightNode>());
     }
 
     if (node->sceneNodeType == SceneNodeType::Decal) {
-        decals.remove(decals.key(node.staticCast<iris::DecalNode>()));
+        removeRegistered(decals, guid, node.staticCast<iris::DecalNode>());
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
-        meshes.remove(meshes.key(node.staticCast<iris::MeshNode>()));
+        removeRegistered(meshes, guid, node.staticCast<iris::MeshNode>());
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
-        particleSystems.remove(particleSystems.key(node.staticCast<iris::ParticleSystemNode>()));
+        removeRegistered(particleSystems, guid, node.staticCast<iris::ParticleSystemNode>());
     }
 
     if (node->sceneNodeType == SceneNodeType::Camera) {
-        cameras.remove(node->getGUID());
+        cameras.remove(guid);
         // Deleting the ACTIVE camera falls back to the free viewer rather than
         // leaving a guid that resolves to nothing. Undo re-adds the node with
         // the same guid, so re-pointing play at it is one setActiveCamera —
         // but a play that happens in between must not render through a dead
         // pointer's last transform.
-        if (activeCameraGuid == node->getGUID()) activeCameraGuid.clear();
+        if (activeCameraGuid == guid) activeCameraGuid.clear();
     }
 
-	nodes.remove(node->getGUID());
+	nodes.remove(guid);
     // The node stops riding anything. Whatever was riding IT keeps its bucket:
     // the owner simply stops resolving (SocketResolver counts it as stale
     // and moves nothing), so an UNDO of the delete — which re-adds the same
