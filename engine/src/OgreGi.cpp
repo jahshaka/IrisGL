@@ -1753,9 +1753,12 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
 bool OgreScene::ddgiWanted() const {
     // Fed by VctLighting: there is nothing to build without a voxel volume.
     if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
-    // Auto = "the quality tier decides", and no Rayon tier exists yet
-    // (GI_UNIFIED P2 owns that row) — so Auto is OFF, which is what keeps every
-    // already-serialized scene rendering exactly as it did before P1 landed.
+    // Auto = "the quality tier decides", and the tier is resolved DOCUMENT-SIDE
+    // (GI_UNIFIED P2: the Rayon tier writes a concrete 0/1 through into
+    // Scene::giDdgi, the same write-through every other tiered field uses), so
+    // what reaches the engine as Auto is a scene no tier has ever touched —
+    // OFF, which is what keeps every already-serialized scene rendering exactly
+    // as it did before P1 landed.
     return resolveToggle(mGi.ddgi, false);
 }
 

@@ -872,10 +872,12 @@ struct GiParams {
     /// over from, which is what makes `ddgiIntensity` a trim rather than a
     /// correction.
     ///
-    /// GiToggle::Auto means "let the quality tier decide" and resolves to OFF in
-    /// this phase, because there is no Rayon tier yet (GI_UNIFIED P2 owns that
-    /// row). Auto being off is what makes every already-serialized scene render
-    /// exactly as it did before this feature existed.
+    /// GiToggle::Auto means "let the quality tier decide", and the deciding
+    /// happens DOCUMENT-SIDE: the Rayon tier (GI_UNIFIED P2) writes a concrete
+    /// on/off through into the document field the mirror pushes here, so Auto
+    /// reaching the engine means "no tier was ever applied to this scene" and
+    /// resolves to OFF — which is what makes every already-serialized scene
+    /// render exactly as it did before this feature existed.
     ///
     /// Ignored outside GiMode::Vct / GiMode::VctPccHybrid: the field is fed by
     /// VctLighting, so there is nothing to build without a voxel volume. A

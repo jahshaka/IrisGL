@@ -247,9 +247,12 @@ public:
     float giRayMarchStepScale = 1.0f;
     /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
     /// TRI-STATE, like giProbeHdr/giProbeShadows and for the same reason: -1
-    /// auto (the quality tier decides — and no tier exists yet, so auto reads
-    /// OFF), 0 off, 1 on. Auto being off is what makes every scene serialized
-    /// before this field existed render exactly as it did.
+    /// auto, 0 off, 1 on. The Rayon tier (GI_UNIFIED_SPEC P2) RESOLVES it
+    /// document-side and writes a concrete 0/1 through, exactly like giMode and
+    /// giQuality (services/worldmodes.h — a backing field is always the
+    /// resolved value), so -1 survives only in a scene no tier has ever been
+    /// applied to; the engine reads that as OFF, which is what makes every
+    /// scene serialized before this field existed render exactly as it did.
     /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
     int giDdgi = -1;
     /// The DDGI diffuse INTENSITY. Ours, not upstream's: binding a field turns
@@ -260,6 +263,22 @@ public:
     /// knob exists because the two terms are different integrals and a scene may
     /// want to trim one against the other.
     float giDdgiIntensity = 1.0f;
+    /// RAYON — the user-facing quality tier for realtime global illumination
+    /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.
+    ///
+    /// It is a REQUEST, never a second source of truth: the tier resolves
+    /// WRITE-THROUGH into giMode / giQuality / giDdgi (services/worldmodes.cpp,
+    /// applyRayon) exactly the way a World Mode resolves into its rows, so the
+    /// mirror, the serializer, the engine and every existing verb keep reading
+    /// the one field they always read. A field the user pinned deviates from
+    /// the tier and survives tier switches, which is what makes the panel's
+    /// Advanced section safe.
+    ///
+    /// WHETHER RAYON IS ON is `giMode != OFF` and nothing else — there is no
+    /// second enable flag to disagree with the renderer. This field keeps the
+    /// quality the scene would come back at, so turning Rayon off and on is not
+    /// destructive. New scenes are born Epic (owner decision D2).
+    int giTier = 3;
     /// MONOTONIC, never serialized: bumped by world.refreshGi() and by the
     /// Refresh button (REFLECTIONS_ADOPTION_SPEC.md P1d). The mirror compares it
     /// against the value it last acted on and re-solves the engine's GI once per
