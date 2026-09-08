@@ -80,6 +80,26 @@ ChainDesc OgreView::chainDesc() const {
     d.ssrRoughnessCutoff = mPostFx.ssrRoughnessCutoff;
     d.ssrIntensity   = mPostFx.ssrIntensity;
     d.refractions    = mPostFx.refractions;
+    // ---- THE ORTHOGRAPHIC GATE ---------------------------------------------
+    // SSR AND SSAO ARE PERSPECTIVE-ONLY AS SHIPPED, and under an orthographic
+    // camera they are not merely approximate, they are INVALID: both
+    // reconstruct a view-space position as `cameraDir * linearDepth`, and an
+    // ortho frustum's normalized far corner carries no ray at all
+    // (OgreFrustum.cpp:884 takes `ratio = 1` for PT_ORTHOGRAPHIC, so the far
+    // corners have the SAME xy as the near ones and the "direction" collapses
+    // to a constant offset). What the user saw is exactly that: in a top/front/
+    // side view the reconstructed positions move with the camera even though
+    // the projection does not, so the reflections and the contact shadowing
+    // SLIDE while panning — the owner report this gate answers.
+    //
+    // The world settings are untouched: this is a property of the CAMERA the
+    // view is currently drawing through, so a perspective view of the same
+    // scene keeps every effect it had, and switching a viewport to an axis view
+    // and back is a pure shape change (see setCamera).
+    if (mCameraDesc.orthographic) {
+        d.ssao = false;
+        d.ssr  = 0;
+    }
     return d;
 }
 
@@ -594,13 +614,16 @@ void OgreView::detachScene() {
 void OgreView::setCamera(const CameraDesc &c) {
     JAH_TRY {
         if (!mCamera) return;
-        // The LETTERBOX is a graph change (extra passes + inset viewports), so
-        // it goes through the same "only a shape change rebuilds" rule as the
-        // post chain: the flag flipping rebuilds, everything else — including
-        // the authored aspect and the camera's whole pose — is free.
-        const bool wasLetterboxed = chainDesc().letterbox;
+        // TWO CAMERA PROPERTIES REACH THE GRAPH: the LETTERBOX (extra passes
+        // and inset viewports) and the ORTHOGRAPHIC GATE in chainDesc() (which
+        // clears SSR and SSAO for an axis view). Both go through the same "only
+        // a shape change rebuilds" rule as the post chain, and through the same
+        // comparison setPostFx uses rather than a second hand-written test —
+        // everything else, including the authored aspect and the camera's whole
+        // pose, is free.
+        const ChainDesc before = chainDesc();
         mCameraDesc = c;
-        if (chainDesc().letterbox != wasLetterboxed) rebuildWorkspaceDef();
+        if (!ChainDesc::sameShape(before, chainDesc())) rebuildWorkspaceDef();
         applyLetterbox();
         mCamera->setPosition(toOgre(c.position));
         mCamera->setOrientation(Ogre::Quaternion(c.orientation.w, c.orientation.x, c.orientation.y, c.orientation.z));
