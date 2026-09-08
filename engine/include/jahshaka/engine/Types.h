@@ -855,6 +855,52 @@ struct GiParams {
     /// that happens every few frames of a drag is allowed to be coarse; the
     /// re-solve that lands when the drag stops is not.
     float     rayMarchStepScale = 1.0f;
+    /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
+    ///
+    /// On, and in a VCT mode, the engine builds an `Ogre::IrradianceField` over
+    /// the SAME voxel volume VCT already lit (Majercik et al.: octahedral
+    /// irradiance + depth-visibility probes, cone-traced out of VctLighting) and
+    /// binds it to HlmsPbs. It is a DIFFUSE layer only: VCT keeps the specular
+    /// cones, the probes/planar/SSR keep everything they had.
+    ///
+    /// THE ONE THING TO KNOW BEFORE TURNING IT ON: binding a field makes
+    /// HlmsPbs set `VctDisableDiffuse`, so DDGI REPLACES the voxel-cone diffuse
+    /// rather than adding to it. The replacement is smooth and leak-resistant
+    /// where the cone-traced term blew out corners, and — once the pass-buffer
+    /// alignment defect this lane found is corrected (FogHlmsListener::
+    /// ifdAlignFloats) — it lands within about 15% of the brightness it takes
+    /// over from, which is what makes `ddgiIntensity` a trim rather than a
+    /// correction.
+    ///
+    /// GiToggle::Auto means "let the quality tier decide" and resolves to OFF in
+    /// this phase, because there is no Rayon tier yet (GI_UNIFIED P2 owns that
+    /// row). Auto being off is what makes every already-serialized scene render
+    /// exactly as it did before this feature existed.
+    ///
+    /// Ignored outside GiMode::Vct / GiMode::VctPccHybrid: the field is fed by
+    /// VctLighting, so there is nothing to build without a voxel volume. A
+    /// DDGI-only mode is deliberately NOT offered — with no VCT bound the
+    /// shader's ambient gate (`@property(vct_num_probes) if(vctSpecular.w==0)`)
+    /// disappears and the sky/flat ambient would be counted twice on top of the
+    /// field's own diffuse (P0 spike §5, measured).
+    GiToggle  ddgi = GiToggle::Auto;
+    /// The DDGI diffuse INTENSITY — ours, not upstream's (IrradianceFieldSettings
+    /// has no such knob; ours rides the pass buffer into
+    /// media/Hlms/Jahshaka/JahIfd_piece_ps.any, so changing it is a const-buffer
+    /// write and never a shader rebuild).
+    ///
+    /// 1.0 is upstream's raw brightness, and it is also the CALIBRATED default:
+    /// measured on the gi.modes room, the field's red bounce at 1.0 is 0.145
+    /// against the VCT diffuse's 0.169 that it replaces — 86%, the same visual
+    /// class, no trim needed. (The P0 spike's "~13x dimmer" reading was an
+    /// artifact of the pass-buffer misalignment described on
+    /// FogHlmsListener::ifdAlignFloats, which was collapsing every irradiance
+    /// lookup onto one texel; it is corrected here and the number does not
+    /// survive it. GI_UNIFIED_SPEC addendum item 2 should be read with that in
+    /// mind.) The knob stays because the two terms are different integrals and
+    /// a scene may want the trim; clamped to [0, 64], and 0 is a legitimate
+    /// "field bound, contributing nothing" for A/B measurement.
+    float     ddgiIntensity = 1.0f;
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
@@ -967,6 +1013,31 @@ struct GiStatus {
     /// post-destruction flush still does. Exposed because the difference is a
     /// factor of several in refresh cost and is otherwise invisible.
     bool   reusedLastRefresh = false;
+
+    // ---- DDGI / IrradianceField (GI_UNIFIED_SPEC.md §4 P1) ----------------
+    // Same "what it ACHIEVED" contract as pccBound above: `GiParams::ddgi` is
+    // the request, and it can be refused for reasons the caller cannot see (no
+    // VCT volume to feed the field, no IFD media staged, a construction that
+    // threw). These four are what the shader is actually doing.
+
+    /// The process-wide HlmsPbs is sampling THIS scene's irradiance field.
+    bool   ifdBound = false;
+    /// Probes in the field (the product of the three per-axis counts). 0 when
+    /// there is no field.
+    int    ifdProbes = 0;
+    /// Every probe in the field has been integrated at least once since the
+    /// last build or reset. A bound field is ALWAYS converged on the frame it
+    /// binds (the build converges it in one dispatch); this reads false only
+    /// while a progressive re-converge after `refreshGiLighting` is in flight.
+    bool   ifdConverged = false;
+    /// Probes the field is re-integrating per frame while a re-converge is in
+    /// flight — the resolved figure, derived from `GiParams::updateBudget` and
+    /// then clamped to the engine's dispatch rule (see OgreGi.cpp
+    /// ifdProbesPerFrame: a dispatch of fewer rays than one thread group is an
+    /// UNCAUGHT THROW in a release-built engine, so the clamp is mandatory).
+    /// 0 when the budget is 0 (paused: nothing re-converges) or when there is
+    /// no field.
+    int    ifdProbesPerFrame = 0;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

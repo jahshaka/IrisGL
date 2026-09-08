@@ -3204,6 +3204,15 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
         gi.updateBudget = qMax(0, mSource->giUpdateBudget);        // FIX WAVE B1
         gi.rayMarchStepScale = qMax(1.0f, mSource->giRayMarchStepScale);   // B5
+        // DDGI (GI_UNIFIED_SPEC.md §4 P1): the same tri-state travel as the
+        // probe toggles, plus our own intensity scalar. Both ride the CHANGE
+        // debounce below like every other GI field — the intensity included,
+        // deliberately: it is a const-buffer write in the engine, but the only
+        // channel into the engine is setGlobalIllumination, and a knob that
+        // rebuilt sometimes and not others would be worse than one that always
+        // does (recorded as a P2 tuning item, with the panel).
+        gi.ddgi = toggle(mSource->giDdgi);
+        gi.ddgiIntensity = qBound(0.0f, mSource->giDdgiIntensity, 64.0f);
         iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
         gi.irLight = driver ? engineNode(driver) : 0;
         const auto same = [](const GiParams &a, const GiParams &b) {
@@ -3218,6 +3227,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                    a.probeSnapSidesMax == b.probeSnapSidesMax &&
                    a.updateBudget == b.updateBudget &&
                    a.rayMarchStepScale == b.rayMarchStepScale &&
+                   a.ddgi == b.ddgi && a.ddgiIntensity == b.ddgiIntensity &&
                    a.boundsMin.x == b.boundsMin.x && a.boundsMin.y == b.boundsMin.y &&
                    a.boundsMin.z == b.boundsMin.z && a.boundsMax.x == b.boundsMax.x &&
                    a.boundsMax.y == b.boundsMax.y && a.boundsMax.z == b.boundsMax.z;

@@ -32,6 +32,8 @@ namespace jahshaka { namespace engine { namespace detail {
 
 std::map<const Ogre::SceneManager *, FogState> FogHlmsListener::sFogState;   // render thread only
 std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sSceneTime;  // render thread only
+std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sIfdIntensity;  // render thread only
+Ogre::HlmsPbs                                 *FogHlmsListener::sPbs = nullptr;
 
 FogHlmsListener gFogListener;
 
@@ -50,6 +52,7 @@ void FogHlmsListener::unregisterScene(const Ogre::SceneManager *sm) {
     // a stale time. Cleared here rather than in setFog's disable branch: this
     // one is the scene's teardown (OgreScene.cpp), that one is "fog off".
     sSceneTime.erase(sm);
+    sIfdIntensity.erase(sm);
 }
 
 void FogHlmsListener::setSceneTime(const Ogre::SceneManager *sm, float seconds) {
@@ -61,6 +64,19 @@ float FogHlmsListener::sceneTime(const Ogre::SceneManager *sm) {
     return it == sSceneTime.end() ? 0.0f : it->second;
 }
 
+void FogHlmsListener::setIfdIntensity(const Ogre::SceneManager *sm, float intensity) {
+    sIfdIntensity[sm] = intensity;
+}
+
+float FogHlmsListener::ifdIntensity(const Ogre::SceneManager *sm) {
+    const auto it = sIfdIntensity.find(sm);
+    // Not "1.0" and not "0": a scene that has a field bound but never pushed an
+    // intensity (impossible today — the arm writes it before it binds) must
+    // still render at the calibrated brightness rather than at upstream's raw
+    // one. GiParams is the single source of that number.
+    return it == sIfdIntensity.end() ? GiParams().ddgiIntensity : it->second;
+}
+
 FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
     FogState p;
     const auto it = sFogState.find(sm);
@@ -68,18 +84,76 @@ FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
     return p;
 }
 
-Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool /*casterPass*/,
-                                                bool, Ogre::SceneManager *) const {
-    // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
-    // than the buffer (it is, whenever fog is off), never longer. The last four
-    // are the shader clock (HLMS_ADOPTION P5) — declared only by materials that
-    // carry a generated piece, written always, because this hook cannot know
-    // which materials the pass will draw.
-    return 12u * sizeof(float);
+void FogHlmsListener::setPbs(Ogre::HlmsPbs *pbs) { sPbs = pbs; }
+
+// THE IRRADIANCE-FIELD ALIGNMENT COMPENSATION — an UPSTREAM DEFECT worked
+// around from our side, and the only reason DDGI can share a pass buffer with
+// this listener at all.
+//
+// `IrradianceField::getConstBufferSize()` returns `sizeof(float) * (4*3 + 4 + 4)`
+// = 80 bytes (OgreIrradianceField.cpp:770). But the struct
+// `fillConstBufferData` writes through — and the `IrradianceField` struct the
+// generated shader declares (Hlms/Pbs/Any/IrradianceField_piece_ps.any's
+// uniform block) — is 96 bytes: a float4x3, then THREE float4s
+// (numProbesAggregated + 2 padding, the depth pair, the irradiance pair). The
+// last one is missing from the size. So HlmsPbs:
+//
+//   * reserves 16 bytes too few for the pass buffer, and
+//   * advances the write pointer by 20 floats after a 24-float write,
+//
+// which puts THIS listener's first float4 on top of the field's irradiance
+// atlas parameters (irradBorderedRes / irradFullWidth / irradInvFullResolution).
+// The symptom is not a crash: the irradiance UVs collapse to texel 0 and DDGI
+// contributes an almost-black constant, which reads as "the technique is
+// broken" rather than as a buffer bug. Measured exactly that way in this lane.
+//
+// The compensation is to RESERVE four extra floats and then SKIP them —
+// deliberately not to write them. The shader declares nothing extra: its
+// IrradianceField struct already occupies those four floats, and they already
+// hold the values fillConstBufferData put there. Writing anything (even zeros)
+// would reproduce the defect. With the skip, the CPU and the shader agree from
+// the field's first float to our last, and the reservation finally covers the
+// field's real write — upstream's own samples, which attach no listener at all,
+// still overrun their pass-buffer map by those 16 bytes.
+//
+// Conditions match HlmsPbs's own exactly (OgreHlmsPbs.cpp:1784, inside
+// `if(!casterPass)`): a bound field, and not a shadow-caster pass. A caster
+// pass neither sets the property nor fills the block, so it must get no
+// padding either.
+//
+// FOR UPSTREAM (reported by this lane; belongs in SPECS/OGRE_UPSTREAM_ISSUES.md
+// once the lead files it): the one-line fix is `4u*3u + 4u + 4u + 4u`. We do not
+// patch it — a patch here would move the engine ABI and force a build-ogre.sh
+// rerun on every tree, for something a host-side four-float skip fixes
+// completely.
+Ogre::uint32 FogHlmsListener::ifdAlignFloats(bool casterPass) {
+    if (casterPass || !sPbs) return 0u;
+    return sPbs->getIrradianceField() ? 4u : 0u;
 }
 
-float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool, bool,
+Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool casterPass,
+                                                bool, Ogre::SceneManager *) const {
+    // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
+    // than the buffer (it is, whenever fog is off), never longer. Four for the
+    // shader clock (HLMS_ADOPTION P5) — declared only by materials that carry a
+    // generated piece — and four for the DDGI intensity (GI_UNIFIED P1),
+    // declared only while an IrradianceField is bound. Both written always,
+    // because this hook cannot know which materials the pass will draw, and
+    // sixteen unconditional bytes are cheaper than a size that varies per pass.
+    // Plus the irradiance-field alignment pad, which is the one thing here that
+    // MUST vary per pass (see ifdAlignFloats above).
+    return (16u + ifdAlignFloats(casterPass)) * sizeof(float);
+}
+
+float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
                                           Ogre::SceneManager *sceneManager, float *passBufferPtr) {
+    // SKIP the four floats upstream's IrradianceField block wrote but did not
+    // count — SKIP, never write: `fillConstBufferData` already put the field's
+    // irradiance-atlas parameters there, and zeroing them collapses every
+    // irradiance UV onto texel 0 (measured: DDGI goes to an almost-black
+    // constant). The shader declares nothing for them; its IrradianceField
+    // struct already occupies them, which is exactly the discrepancy.
+    passBufferPtr += ifdAlignFloats(casterPass);
     const FogState p = lookup(sceneManager);
     // The height layer integrates from the CAMERA's altitude, so the shader needs
     // it; this hook runs inside HlmsPbs::preparePassBuffer, where the camera of
@@ -99,6 +173,13 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     // other member of a std140 buffer; x is seconds, yzw are reserved for the
     // things a generated piece will want next (frame index, delta, a seed).
     *passBufferPtr++ = sceneTime(sceneManager);
+    *passBufferPtr++ = 0.0f;
+    *passBufferPtr++ = 0.0f;
+    *passBufferPtr++ = 0.0f;
+    // The DDGI diffuse intensity, same four-float alignment rule. Read by
+    // media/Hlms/Jahshaka/JahIfd_piece_ps.any, which only exists in the
+    // generated shader while an IrradianceField is bound.
+    *passBufferPtr++ = ifdIntensity(sceneManager);
     *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = 0.0f;

@@ -113,6 +113,8 @@ Scene::Scene()
     giNumBounces = 1;
     giUpdateBudget = 1;         // one probe re-capture per frame (FIX WAVE B1)
     giPccGrid = iris::Vec3(3, 2, 3);
+    giDdgi = -1;                // auto = off until the Rayon tier lands (P2)
+    giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
 
     // anti-aliasing is opt-in like GI: off (1 sample) by default
     antiAliasing = 1;

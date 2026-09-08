@@ -245,6 +245,21 @@ public:
     /// and upstream asserts below 1.0. The engine raises it on its own for the
     /// cheap in-motion re-injection only.
     float giRayMarchStepScale = 1.0f;
+    /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
+    /// TRI-STATE, like giProbeHdr/giProbeShadows and for the same reason: -1
+    /// auto (the quality tier decides — and no tier exists yet, so auto reads
+    /// OFF), 0 off, 1 on. Auto being off is what makes every scene serialized
+    /// before this field existed render exactly as it did.
+    /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
+    int giDdgi = -1;
+    /// The DDGI diffuse INTENSITY. Ours, not upstream's: binding a field turns
+    /// the voxel-cone diffuse OFF and replaces it with the probes' — which is
+    /// smoother and leak-free — and upstream's IrradianceFieldSettings carries
+    /// no brightness knob at all. 1.0 is the renderer's raw value and the
+    /// calibrated default (measured at 86% of the VCT diffuse it replaces); the
+    /// knob exists because the two terms are different integrals and a scene may
+    /// want to trim one against the other.
+    float giDdgiIntensity = 1.0f;
     /// MONOTONIC, never serialized: bumped by world.refreshGi() and by the
     /// Refresh button (REFLECTIONS_ADOPTION_SPEC.md P1d). The mirror compares it
     /// against the value it last acted on and re-solves the engine's GI once per

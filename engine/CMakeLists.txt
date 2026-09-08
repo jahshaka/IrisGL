@@ -128,6 +128,19 @@ set(OGRE_NEXT_SMAA_MATERIALS_DIR "${_ogre_media_root}/2.0/scripts/materials/Tuto
 set(OGRE_NEXT_VCT_MEDIA_DIR "${_ogre_media_root}/VCT")
 set(OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR "${_ogre_media_root}/Compute/Tools")
 set(OGRE_NEXT_IBL_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IBL")
+# The DDGI (IrradianceField) compute jobs — GI_UNIFIED_SPEC.md §4 P1. Five jobs
+# (GenFromVct, depth + colour integration, two border mirrors) plus their .any
+# pieces and the generation compositor, ~120K. `Visualizer/` travels with the
+# folder (copy_directory) but is deliberately NOT registered as a resource
+# location: it is upstream's debug probe-sphere material, which we do not draw.
+#
+# ORDINARY MEDIA STAGING, and the distinction matters (P0 spike finding 1,
+# correcting the spec's own bullet): this is NOT the patch-0009/0017 class. The
+# files are upstream's, unpatched, copied from OGRE_NEXT_SOURCE by the normal
+# build step — a `cmake --build` picks them up and no tree has to re-run
+# build-ogre.sh. A tree that has not rebuilt simply has no IFD media, and DDGI
+# then fails LOUD (the compute jobs are missing) instead of rendering wrong.
+set(OGRE_NEXT_IFD_MEDIA_DIR "${_ogre_media_root}/Compute/Algorithms/IrradianceFields")
 # The overlay font (STATS_OVERLAY_SPEC §9.3 — patch-0009 class: staged from the
 # SOURCE tree, so EVERY tree and every worktree re-stages, and a tree that has
 # not rebuilt has no font and therefore no stats readout and no loading cover).
@@ -143,7 +156,7 @@ file(GLOB_RECURSE _hlms_inputs CONFIGURE_DEPENDS
      "${OGRE_NEXT_HDR_MATERIALS_DIR}/*" "${OGRE_NEXT_SSAO_MATERIALS_DIR}/*"
      "${OGRE_NEXT_SMAA_MATERIALS_DIR}/*"
      "${OGRE_NEXT_VCT_MEDIA_DIR}/*" "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}/*"
-     "${OGRE_NEXT_IBL_MEDIA_DIR}/*"
+     "${OGRE_NEXT_IBL_MEDIA_DIR}/*" "${OGRE_NEXT_IFD_MEDIA_DIR}/*"
      "${CMAKE_CURRENT_SOURCE_DIR}/media/Hlms/Jahshaka/*")
 list(APPEND _hlms_inputs "${OGRE_NEXT_DEBUGPACK_ZIP}")
 add_custom_command(OUTPUT "${_hlms_stamp}"
@@ -164,6 +177,7 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_VCT_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/VCT"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMPUTE_TOOLS_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Tools"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IBL_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IBL"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_IFD_MEDIA_DIR}" "${JAHSHAKA_MEDIA_DIR}/Compute/Algorithms/IrradianceFields"
     # The overlay font. `cmake -E tar` extracts named members, so only the three
     # files we ship land in bin/media/packs/DebugPack — which is exactly the
     # directory OgreEngine::registerCommonMaterials adds as a resource location
@@ -178,6 +192,39 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     DEPENDS ${_hlms_inputs}
     COMMENT "Staging Ogre-Next Hlms templates into bin/media/Hlms")
 add_custom_target(JahshakaEngineMedia DEPENDS "${_hlms_stamp}")
+
+# --- The DDGI piece copy, guarded rather than trusted ------------------------
+# media/Hlms/Jahshaka/JahIfd_piece_ps.any carries a VERBATIM copy of upstream's
+# `applyIrradianceField` body with one line changed (our diffuse-intensity
+# multiply — GI_UNIFIED_SPEC.md §4 P1 / addendum 2; there is no hook to do it
+# from, since the field's contribution is accumulated inside that piece's last
+# statement and anything later would scale the probe and cubemap terms too).
+#
+# A copy of upstream code is a liability exactly once: at a pin bump, silently.
+# So the configure hashes the original. When upstream's body changes, this FAILS
+# LOUD with the two-minute fix attached, instead of leaving DDGI rendering last
+# year's math. The escape hatch is for the person doing the re-sync, and it is
+# deliberately a cache variable so nobody sets it by accident.
+set(JAH_IFD_UPSTREAM_PIECE
+    "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/IrradianceField_piece_ps.any")
+set(JAH_IFD_UPSTREAM_SHA256 "e6e1ddd1c833af2b3d2c3a811d3367334954bc705bfb7fe28045aa4308d993a1"
+    CACHE STRING "sha256 of the upstream IrradianceField piece our copy was taken from")
+option(JAH_IFD_PIECE_HASH_OK
+       "Acknowledge that media/Hlms/Jahshaka/JahIfd_piece_ps.any has been re-synced against a \
+changed upstream IrradianceField piece" OFF)
+if(EXISTS "${JAH_IFD_UPSTREAM_PIECE}")
+    file(SHA256 "${JAH_IFD_UPSTREAM_PIECE}" _jah_ifd_sha)
+    if(NOT _jah_ifd_sha STREQUAL JAH_IFD_UPSTREAM_SHA256 AND NOT JAH_IFD_PIECE_HASH_OK)
+        message(FATAL_ERROR
+            "Ogre-Next's IrradianceField_piece_ps.any has CHANGED upstream.\n"
+            "  expected ${JAH_IFD_UPSTREAM_SHA256}\n"
+            "  found    ${_jah_ifd_sha}\n"
+            "irisgl/engine/media/Hlms/Jahshaka/JahIfd_piece_ps.any holds a copy of that piece's "
+            "body with one line changed (the DDGI diffuse intensity). Re-sync the body, re-apply "
+            "the multiply on the final envColourD line, set JAH_IFD_UPSTREAM_SHA256 to the new "
+            "hash — or configure once with -DJAH_IFD_PIECE_HASH_OK=ON if you have already done so.")
+    endif()
+endif()
 add_dependencies(JahshakaEngine JahshakaEngineMedia)
 
 # Compile-time DEFAULTS for the host. The engine never reads these; the host puts

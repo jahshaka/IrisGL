@@ -42,6 +42,42 @@ static bool resolveToggle(GiToggle t, bool autoValue) {
 // anyway) and tight enough that a fit which escaped the room is caught.
 static const float kProbeShapeCellAllowance = 8.0f;
 
+// ---- DDGI (GI_UNIFIED_SPEC.md §4 P1) constants ---------------------------
+
+// HOW MANY PROBES A FIELD HAS, total. A power of two, because the per-axis
+// counts must each be one (upstream asserts it, and the assert is compiled out
+// of our release engine) and the aspect fit below splits this budget between
+// the axes by handing out one doubling at a time.
+//
+// 8192 is upstream's own default count (32x8x32) and the number the P0 spike
+// measured everything at: 14.25 MB of atlas (2.00 MB irradiance R10G10B10A2 +
+// 12.25 MB depth RG32F at depthRes 12), ~5 ms of GPU work to converge once,
+// ~0.8 ms/frame CHEAPER than plain VCT once bound. Deliberately NOT tiered off
+// GiQuality in this phase: the quality dial already moves the voxel resolution
+// the field is fed FROM, and a probe-count row belongs to the Rayon tier table
+// (GI_UNIFIED P2) rather than to a second, quietly different meaning of "High".
+static const Ogre::uint32 kIfdTotalProbes = 8192u;
+
+// The DEPTH probe resolution and the irradiance one. Upstream's defaults, kept
+// because they are what the spike measured and because depthRes is the VRAM
+// knob (86% of the atlas bytes) — moving it is a tuning decision with a
+// measurement attached, not a default to drift.
+static const Ogre::uint8 kIfdDepthRes  = 12u;
+static const Ogre::uint8 kIfdIrradRes  = 6u;
+static const Ogre::uint16 kIfdRaysPerPixel = 1u;
+
+// HOW FAST A RE-CONVERGE RUNS, in "field fractions per frame" at update budget
+// 1. The P0 spike's cost table is the argument for converging FAST rather than
+// trickling: the incremental cost of update() at any batch size from 8 to 2048
+// probes was below the noise floor (<=0.1 ms), and the whole field converges in
+// about 5 ms of GPU work — next to the ~2.1 ms a SINGLE live PCC probe costs.
+// So a budget-1 scene re-converges its diffuse in 8 frames (~0.6 ms/frame)
+// instead of spreading a barely-measurable cost over hundreds of them and
+// showing stale bounce for two seconds. Higher budgets scale it linearly, and
+// the batch is rounded UP to a power of two so it always divides the field.
+static const Ogre::uint32 kIfdConvergeFrames = 8u;
+
+
 /// How far this probe's fitted SHAPE reaches past its own AREA (its share of
 /// the probe region), as a multiple of the area's half-extent — worst axis,
 /// worst side. 1.0 = exactly its own cell.
@@ -225,6 +261,14 @@ bool OgreScene::refreshVctFast() {
             for (size_t i = 0; i < probes.size(); ++i) probes[i]->mDirty = true;
             for (ProbeSlot &s : mProbeSlots) s.sweepPending = true;
         }
+        // The DDGI field is re-INITIALIZED, not reset, on this path. The reuse
+        // arm keeps the VctLighting OBJECT but re-voxelizes underneath it and
+        // may have moved the volume (setRegionToVoxelize above), and the field's
+        // grid is a function of that volume's origin and size — a reset would
+        // leave the probes describing a box that no longer exists. Upstream's
+        // own rule, in its own words: minor changes to VctLighting -> reset(),
+        // major -> initialize() again.
+        buildIrradianceField();
         mGiReusedLastRefresh = true;
         if (std::getenv("JAHSHAKA_GI_DEBUG"))
             Ogre::LogManager::getSingleton().logMessage(
@@ -263,6 +307,24 @@ bool OgreScene::refreshGiLighting() {
         // coarser ray march is charged here and nowhere else.
         mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
                              giRayMarchStepScale(true));
+        // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
+        // object, same voxel textures, same field geometry — only the radiance
+        // in the volume changed. reset() re-arms the integration counter and
+        // does NOT clear the atlases, so the probes re-converge progressively
+        // over the previous converged data and the room never flashes black.
+        //
+        // At a PAUSED budget nothing would ever spend that counter down, so a
+        // reset there would freeze the field half-updated for ever; the field
+        // is converged inline instead. (The mirror only runs this path while
+        // the budget is above 0, so this is the belt to that braces.)
+        if (mIfd) {
+            mIfd->reset();
+            mIfdProbesDone = 0u;
+            if (!mIfdProbesPerFrame) {
+                mIfd->update(mIfdTotalProbes);
+                mIfdProbesDone = mIfdTotalProbes;
+            }
+        }
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -317,6 +379,12 @@ GiStatus OgreScene::giStatus() const {
             }
         }
         st.reusedLastRefresh = mGiReusedLastRefresh;
+        // DDGI, reported the same way pccBound/vctBound are: against the live
+        // HlmsPbs pointer, not against what was requested or who bound last.
+        st.ifdBound          = mIfd && pbs->getIrradianceField() == mIfd;
+        st.ifdProbes         = int(mIfdTotalProbes);
+        st.ifdConverged      = mIfd && mIfdProbesDone >= mIfdTotalProbes;
+        st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -1063,6 +1131,13 @@ void OgreScene::forwardPlusLightCensus(unsigned &lights, unsigned &budget) const
 }
 
 void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
+    // The DDGI half runs FIRST and unconditionally: it is scene-fitted, so it
+    // needs no camera at all, and it must run in plain VCT mode too — where
+    // there is no PCC and the probe half below returns immediately. (Both
+    // halves are driven once a frame, from the ONE authoritative view of the
+    // scene: OgreEngine::renderOneFrame picks it, for the same reason the probe
+    // budget must not be spent once per view.)
+    updateIrradianceField();
     if (!mPcc || !mGiCamera) return;
     JAH_TRY {
         mGiCamera->setPosition(camPos);
@@ -1409,6 +1484,14 @@ void OgreScene::rebuildVct() {
     // which items exist.
     noteGiAutoVolume(aabb, !giBoundsExplicit());
 
+    // The DDGI layer, over the volume this build just lit. After the VCT
+    // binding (it takes the same process-wide ownership) and after the PCC
+    // build (the field is diffuse-only; the probes keep the specular they had).
+    // A no-op — including a teardown of any previous field — when the toggle is
+    // off, which is what makes `rebuildVct` the single place the arm's shape is
+    // decided.
+    buildIrradianceField();
+
     if (std::getenv("JAHSHAKA_GI_DEBUG"))
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: voxelized " + std::to_string(itemCount) + " items at " +
@@ -1635,7 +1718,289 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, minDist, minDist * 2.0f);
 }
 
+// ===========================================================================
+// DDGI — Ogre's IrradianceField as the diffuse GI layer (GI_UNIFIED_SPEC.md
+// §4 P1; the P0 spike that gates it: spikes/ddgi-vulkan/FINDINGS.md).
+//
+// WHAT IT IS. Majercik et al.'s Dynamic Diffuse GI: a grid of probes, each
+// storing octahedrally-mapped irradiance plus a depth-variance map used as a
+// Chebyshev visibility test. A pixel reads the eight probes of its cell, and
+// the depth test is what stops a probe on the far side of a wall from lighting
+// it — the leak the cone-traced diffuse term could not avoid. Ours is the
+// VCT-FED path: the probes are integrated by cone-tracing the voxel volume
+// VctLighting already lit, so DDGI costs no second scene representation.
+//
+// WHAT IT REPLACES, and this is the fact to carry: binding a field makes
+// HlmsPbs set `VctDisableDiffuse` (OgreHlmsPbs.cpp:1784-1788). The field does
+// not ADD to the voxel-cone diffuse — it TAKES OVER from it. Measured on the
+// spike's closed room, the pure-indirect term goes from a mean 84/54/56 (VCT,
+// with a blown-out 1.0 in the dark corner where it leaks) to 6.4/3.3/4.0
+// (DDGI, smooth and plausible): the right SHAPE roughly 13x too dim, because
+// upstream never scales it. `GiParams::ddgiIntensity` is our answer, applied in
+// media/Hlms/Jahshaka/JahIfd_piece_ps.any.
+//
+// WHERE IT LIVES IN THE LIFECYCLE. Inside the VCT arm and strictly within
+// VctLighting's lifetime: the field holds that pointer and binds its voxel
+// textures on every update. So it is built at the end of a VCT (re)build, it
+// dies FIRST in teardownVct, and the only thing that may re-use an existing
+// field is the light-only cheap path (`refreshGiLighting`), which leaves the
+// VctLighting object in place and merely re-injects — upstream's `reset()`
+// case exactly. `reset()` does not clear the atlases (spike §4 methodology),
+// which is a FEATURE here: a re-converge runs progressively over the previous
+// converged data, so a light drag never flashes the room black.
+// ===========================================================================
+
+bool OgreScene::ddgiWanted() const {
+    // Fed by VctLighting: there is nothing to build without a voxel volume.
+    if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
+    // Auto = "the quality tier decides", and no Rayon tier exists yet
+    // (GI_UNIFIED P2 owns that row) — so Auto is OFF, which is what keeps every
+    // already-serialized scene rendering exactly as it did before P1 landed.
+    return resolveToggle(mGi.ddgi, false);
+}
+
+void OgreScene::ifdProbeCounts(const Ogre::Vector3 &size, Ogre::uint32 outCounts[3]) {
+    // THE FIT (spike §9b). Upstream's default is a fixed 32x8x32, which over a
+    // room-shaped volume leaves the Y probes at 1.13 m apart against 0.56 m on
+    // X and Z — and the coarse axis BANDS, visibly, in the indirect term. The
+    // grid must therefore come from the volume's aspect, not from a constant.
+    //
+    // Every axis count must be a power of two: upstream only OGRE_ASSERT_LOWs
+    // it (OgreIrradianceField.h:96) and that assert is compiled out of our
+    // release-built engine, and `getDepthProbeFullResolution` additionally
+    // assumes the TOTAL is one (it takes ctz32 of it). So the fit hands out the
+    // total's 13 doublings one at a time, each to whichever axis currently has
+    // the coarsest spacing: the greedy "make the three spacings as equal as
+    // possible" solution, and a power of two per axis by construction.
+    //
+    // Every axis starts at 2, never 1: the shader reads a CAGE of eight probes
+    // (grid position, then +1 on each axis), so a single-probe axis would index
+    // past the field's own row. And no axis may exceed 128, which stops a
+    // pathologically flat volume from collapsing the grid into a line.
+    float extent[3] = { std::max(std::fabs(size.x), 1e-4f),
+                        std::max(std::fabs(size.y), 1e-4f),
+                        std::max(std::fabs(size.z), 1e-4f) };
+    Ogre::uint32 n[3] = { 2u, 2u, 2u };
+    Ogre::uint32 spent = 3u;                     // the three seed doublings
+    const Ogre::uint32 doublings = Ogre::Bitwise::ctz32(kIfdTotalProbes);   // 13 at 8192
+    const Ogre::uint32 kMaxPerAxis = 128u;
+    // TIE-BREAK ORDER X, Z, Y, and it decides the shape of every room-shaped
+    // volume. 13 doublings across 3 axes cannot come out even, so ONE axis
+    // always ends up at double the others' spacing; this chooses which. On a
+    // wide, shallow room (18 x 9 x 18) plain left-to-right order gives
+    // 32x16x16 — X and Z have the SAME extent and get different densities,
+    // which bands across depth. Preferring the horizontal axes on a tie gives
+    // 32x8x32: symmetric in the plane the viewer moves through, with the coarse
+    // axis vertical, where indirect light varies least (and which is the shape
+    // upstream's own default picked). A genuinely tall volume still wins Y the
+    // doublings on merit — 9 x 18 x 9 fits 16x32x16, spacing equal on all three.
+    static const int kAxisOrder[3] = { 0, 2, 1 };
+    while (spent < doublings) {
+        int best = -1;
+        float worstSpacing = -1.0f;
+        for (int i = 0; i < 3; ++i) {
+            const int ax = kAxisOrder[i];
+            if (n[ax] >= kMaxPerAxis) continue;
+            const float spacing = extent[ax] / float(n[ax]);
+            if (spacing > worstSpacing) { worstSpacing = spacing; best = ax; }
+        }
+        if (best < 0) break;                     // every axis capped (cannot happen at 8192)
+        n[best] *= 2u;
+        ++spent;
+    }
+    outCounts[0] = n[0]; outCounts[1] = n[1]; outCounts[2] = n[2];
+}
+
+Ogre::uint32 OgreScene::ifdProbesPerFrame(const Ogre::IrradianceFieldSettings &settings,
+                                          int updateBudget, Ogre::uint32 totalProbes) {
+    // Paused is paused (GiParams::updateBudget == 0): no re-converge, and — the
+    // reason this returns 0 rather than 1 — update() is then never called at
+    // all, which is the only way to be sure a zero-work-group dispatch cannot
+    // happen on the paused path.
+    if (updateBudget <= 0 || totalProbes == 0u) return 0u;
+
+    // Upstream's dispatch arithmetic, reproduced because the engine must obey
+    // it rather than hope (OgreIrradianceField::update, and spike §4):
+    //     rays        = ppf * depthRes^2 * raysPerPixel
+    //     tpg         = alignToNextMultiple( 128, raysPerIrradiancePixel )
+    //     workGroups  = rays / tpg              <-- INTEGER division
+    // `rays < tpg` therefore dispatches ZERO work groups, which throws inside
+    // HlmsCompute::compileShader and — uncaught, at frame time — terminates the
+    // process. The OGRE_ASSERT_LOW that would have caught it in a debug Ogre is
+    // compiled out of ours. `rays % tpg == 0` is the softer rule (a leftover
+    // silently mis-sizes the dispatch; measured harmless at this pin, obeyed
+    // anyway).
+    const Ogre::uint32 tpg =
+        Ogre::alignToNextMultiple<Ogre::uint32>(128u, settings.getNumRaysPerIrradiancePixel());
+    const Ogre::uint32 raysPerProbe = Ogre::uint32(settings.mDepthProbeResolution) *
+                                      settings.mDepthProbeResolution * settings.mNumRaysPerPixel;
+    if (!raysPerProbe) return 0u;
+
+    // The budget's meaning here: at budget 1 the field re-converges in
+    // kIfdConvergeFrames frames, and the cost scales linearly with the dial
+    // like every other GI budget. Rounded UP to a power of two so the batch
+    // always divides a power-of-two field exactly — which is what guarantees
+    // the LAST batch is the same size as every other one, and therefore that
+    // the crash floor below holds for every dispatch and not just the first.
+    Ogre::uint64 desired =
+        (Ogre::uint64(totalProbes) * Ogre::uint64(updateBudget) + kIfdConvergeFrames - 1u) /
+        kIfdConvergeFrames;
+    Ogre::uint32 ppf = 1u;
+    while (Ogre::uint64(ppf) < desired && ppf < totalProbes) ppf <<= 1u;
+    while (Ogre::uint64(ppf) * raysPerProbe < tpg && ppf < totalProbes) ppf <<= 1u;   // the floor
+    while (ppf < totalProbes && (Ogre::uint64(ppf) * raysPerProbe) % tpg != 0u) ppf <<= 1u;
+    if (ppf > totalProbes) ppf = totalProbes;
+    return ppf;
+}
+
+void OgreScene::buildIrradianceField() {
+    // Called on every VCT (re)build, including the ones that must DROP the
+    // field (the toggle went off, the mode left VCT, the arm failed to build).
+    if (!ddgiWanted() || !mVctLighting || !mVctVoxelizer) { teardownIrradianceField(); return; }
+
+    JAH_TRY {
+        Ogre::IrradianceFieldSettings settings;
+        settings.mNumRaysPerPixel        = kIfdRaysPerPixel;
+        settings.mDepthProbeResolution   = kIfdDepthRes;
+        settings.mIrradianceResolution   = kIfdIrradRes;
+        // SCENE-FITTED, NEVER CAMERA-CENTRED. The volume is the one the
+        // voxelizer was given — REFLECTIONS P5b measured a camera-centred GI
+        // volume deleting the bounce outright (floor 0.475 -> 0.353 = off), and
+        // that finding is the design constraint here, not a preference.
+        const Ogre::Vector3 origin = mVctVoxelizer->getVoxelOrigin();
+        const Ogre::Vector3 size   = mVctVoxelizer->getVoxelSize();
+        ifdProbeCounts(size, settings.mNumProbes);
+
+        // HOST-SIDE VALIDATION. settings.testValidity() is three OGRE_ASSERT_LOWs
+        // and our Ogre is built with them off, so the checks it would have made
+        // are made here — where a violation logs and declines instead of
+        // producing a mis-sized atlas nobody can explain later.
+        bool valid = settings.mIrradianceResolution <= settings.mDepthProbeResolution &&
+                     (settings.mDepthProbeResolution % settings.mIrradianceResolution) == 0u;
+        Ogre::uint32 total = 1u;
+        for (size_t i = 0; i < 3u; ++i) {
+            const Ogre::uint32 c = settings.mNumProbes[i];
+            if (!c || (c & (c - 1u)) != 0u) valid = false;
+            total *= c;
+        }
+        if (!valid || !total || (total & (total - 1u)) != 0u) {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: DDGI declined — invalid irradiance-field settings (" +
+                std::to_string(settings.mNumProbes[0]) + "x" +
+                std::to_string(settings.mNumProbes[1]) + "x" +
+                std::to_string(settings.mNumProbes[2]) + ")");
+            teardownIrradianceField();
+            return;
+        }
+
+        // Re-INITIALIZE an existing field rather than churning the object: the
+        // field is bound to HlmsPbs by POINTER, and initialize() re-creates the
+        // atlases for the new settings on its own. Upstream's own instruction
+        // for "major changes to VctLighting" is exactly this call.
+        if (!mIfd) mIfd = new Ogre::IrradianceField(mRoot, mSceneMgr);
+        mIfd->initialize(settings, origin, size, mVctLighting);
+        mIfdTotalProbes    = total;
+        mIfdProbesDone     = 0u;
+        mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
+        mIfdMinProbes      = 0u;
+        {
+            // The smallest batch that still dispatches at least one work group.
+            const Ogre::uint32 tpg = Ogre::alignToNextMultiple<Ogre::uint32>(
+                128u, settings.getNumRaysPerIrradiancePixel());
+            const Ogre::uint32 raysPerProbe = Ogre::uint32(settings.mDepthProbeResolution) *
+                                              settings.mDepthProbeResolution *
+                                              settings.mNumRaysPerPixel;
+            mIfdMinProbes = raysPerProbe ? Ogre::uint32((tpg + raysPerProbe - 1u) / raysPerProbe) : 1u;
+        }
+
+        // CONVERGE NOW, in one dispatch, BEFORE binding. Two reasons and both
+        // are load-bearing. (1) A freshly created atlas holds whatever the
+        // recycled VRAM held (the stale-VRAM fact, in its texture guise) — a
+        // bound half-converged field can therefore show another texture's
+        // contents, not black. (2) It makes "bound" and "converged" the same
+        // state for every caller and every pixel gate: a suite never has to
+        // guess how many frames a build needs. The whole field costs ~5 ms of
+        // GPU work once, against the ~2.1 ms a single live PCC probe costs
+        // every frame, so paying it at build time is not a trade worth making
+        // progressive (spike §6). Progressive convergence is kept for exactly
+        // the case it is right for: the light-only cheap path, which re-converges
+        // over the PREVIOUS converged atlas and so has nothing ugly to show.
+        mIfd->update(mIfdTotalProbes);
+        mIfdProbesDone = mIfdTotalProbes;
+
+        // Our intensity scalar reaches the shader through the pass buffer.
+        FogHlmsListener::setIfdIntensity(mSceneMgr,
+                                         std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f)));
+        // The process-wide binding, under the same discipline as VctLighting's
+        // (this scene is already sVctBindingOwner — rebuildVct took it).
+        hlmsPbs(mRoot)->setIrradianceField(mIfd);
+        sVctBindingOwner = this;
+
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: DDGI field " + std::to_string(settings.mNumProbes[0]) + "x" +
+                std::to_string(settings.mNumProbes[1]) + "x" +
+                std::to_string(settings.mNumProbes[2]) + " (" + std::to_string(total) +
+                " probes) over " + Ogre::StringConverter::toString(origin) + " size " +
+                Ogre::StringConverter::toString(size) + ", intensity " +
+                std::to_string(mGi.ddgiIntensity) + ", re-converge " +
+                std::to_string(mIfdProbesPerFrame) + " probes/frame");
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::teardownIrradianceField() {
+    mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = mIfdMinProbes = 0u;
+    if (!mIfd) return;
+    JAH_TRY {
+        // Pointer identity, not sVctBindingOwner: the owner flag says who bound
+        // last, this says what the shader is about to read. Unbinding someone
+        // else's field would be the takeover bug the VCT half already avoids.
+        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+        if (pbs->getIrradianceField() == mIfd) pbs->setIrradianceField(nullptr);
+        delete mIfd;
+    } JAH_CATCH(mError, );
+    mIfd = nullptr;
+}
+
+void OgreScene::updateIrradianceField() {
+    if (!mIfd || mIfdProbesDone >= mIfdTotalProbes) return;   // no field, or converged
+    // PAUSED (budget 0): nothing re-converges, and update() is not called at
+    // all — which is also what keeps the zero-work-group abort unreachable on
+    // this path.
+    if (!mIfdProbesPerFrame) return;
+    JAH_TRY {
+        const Ogre::uint32 remaining = mIfdTotalProbes - mIfdProbesDone;
+        const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, remaining);
+        // THE CRASH FLOOR, checked at the dispatch rather than trusted from the
+        // arithmetic that chose the batch. It cannot fire as things stand — the
+        // batch and the field are both powers of two, so the batch divides the
+        // field and every dispatch is a full batch — and it is here because the
+        // failure it guards is not a glitch but an uncaught throw at frame time
+        // that takes the process with it (spike §4; the guarding assert is
+        // compiled out of our Ogre). Declaring the field converged leaves a few
+        // probes on their previous data, which is wrong pixels; dispatching
+        // would be no pixels at all.
+        if (batch < mIfdMinProbes) {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: DDGI re-converge stopped " + std::to_string(remaining) +
+                " probes short — a batch of " + std::to_string(batch) +
+                " is below the dispatch floor of " + std::to_string(mIfdMinProbes));
+            mIfdProbesDone = mIfdTotalProbes;
+            return;
+        }
+        mIfd->update(batch);
+        mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + batch);
+    } JAH_CATCH(mError, );
+}
+
 void OgreScene::teardownVct() {
+    // THE DDGI FIELD DIES FIRST (spike §8, verified across all four shapes: GI
+    // off under a bound field, a refresh under one, a rebuild over a refreshed
+    // arm, and the Engine destroyed with one live). It holds a raw VctLighting*
+    // and binds that object's voxel textures on every update, and its own
+    // generation workspace lives in the SceneManager — so it must be gone
+    // before either. Unbinding it from HlmsPbs is part of the same call.
+    teardownIrradianceField();
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     mPccHdr = mPccShadowed = false;
     mProbeSlots.clear();

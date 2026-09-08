@@ -46,29 +46,44 @@
 // LAYOUT IS THE WHOLE GAME HERE. One pass buffer is shared by every material in
 // a pass; each shader declares its OWN view of it, and those views must agree
 // on every offset up to the last field a shader reads. FogHlmsListener writes
-// all 12 floats unconditionally, so the field ORDER below is fixed:
+// all 16 floats unconditionally, so the field ORDER below is fixed:
+// (While an irradiance field is bound the host SKIPS four floats before writing
+// any of this, because the renderer's own IrradianceField block under-reports
+// its size by exactly that much and its last float4 would otherwise be
+// overwritten. Nothing is declared here for those four: the shader's
+// IrradianceField struct already occupies them, which is the whole discrepancy.
+// The long argument is on FogHlmsListener::ifdAlignFloats, OgreFog.cpp.)
 //   [0..3]  fog colour + height density   (declared only when the fog is on)
 //   [4..7]  fog height terms              (   ditto   )
 //   [8..11] the shader clock              (declared only for materials that
 //                                          carry a generated piece)
+//   [12..15] the DDGI diffuse intensity   (declared only while an
+//                                          IrradianceField is bound)
 // A material with a piece therefore has to declare PADDING for the fog fields
-// when the fog is off, or its clock would read the fog colour.
+// when the fog is off, or its clock would read the fog colour — and the same
+// rule one field further out: anything declaring jahIfd must first declare
+// everything before it, which is why the clock's block is entered for the
+// field's sake too (its contents are then padding, never read).
 //
 // `jah_shader_clock` is OUR OWN datablock property (setCustomProperties in
 // OgreMaterials.cpp), set only on materials that carry a generated shader
-// piece. That property gate is what keeps every other material's generated
+// piece. `irradiance_field` is UPSTREAM's pass property, set by HlmsPbs only
+// while a field is bound. Both gates keep every other material's generated
 // source BYTE-IDENTICAL to a build where none of this existed.
 @piece( custom_passBuffer )
 	@property( hlms_fog )
 		float4 jahFogColour;	// rgb = fog colour (linear), w = height-layer density (0 = off)
 		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w unused
 	@end
-	@property( jah_shader_clock )
+	@property( jah_shader_clock || irradiance_field )
 		@property( !hlms_fog )
 			float4 jahFogColourUnused;
 			float4 jahFogHeightUnused;
 		@end
 		float4 jahClock;		// x = seconds since the host's clock started; yzw reserved
+	@end
+	@property( irradiance_field )
+		float4 jahIfd;			// x = DDGI diffuse intensity (JahIfd_piece_ps.any); yzw reserved
 	@end
 @end
 
