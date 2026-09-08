@@ -1755,13 +1755,47 @@ void initSsao(Ogre::Root *root) {
     // A 2x2 tile of random in-plane rotations, wrapped over the screen.
     Ogre::TextureGpuManager *tm = root->getRenderSystem()->getTextureGpuManager();
     if (!gSsaoNoise) {
+        // ManualTexture, AND THAT FLAG IS LOAD-BEARING TWICE. The Ogre sample
+        // this construction came from (Tutorial_SSAOGameState.cpp:247) passes
+        // `0` for the flags, and a texture with no flags is, to Ogre, a texture
+        // that comes FROM A FILE. Two consequences, both of which we shipped:
+        //
+        //   1. `_transitionTo(Resident)` only calls `notifyDataIsReady()` for a
+        //      MANUAL texture (OgreTextureGpu.cpp:597-602). Without the flag it
+        //      is never called, so `mDisplayTextureName` stays on the blank
+        //      dummy the ctor installed (OgreVulkanTextureGpu.cpp:62) and the
+        //      shader sampled a FLAT texture instead of the rotation tile —
+        //      SSAO ran with no per-pixel rotation at all. The upload below
+        //      landed in `mFinalTextureName` and was never read.
+        //   2. Any `unsafeScheduleTransitionTo(Resident)` on a non-manual
+        //      texture goes to the LOAD-FROM-FILE path
+        //      (OgreTextureGpu.cpp:146-163). We create this one with no
+        //      resource group, so that path builds a LoadRequest with a null
+        //      archive AND a null loading listener; the worker logs
+        //      "ERROR: Did you call createTexture with a valid resourceGroup?"
+        //      and then dereferences the null listener
+        //      (OgreTextureGpuManager.cpp:2745) — the SIGSEGV in
+        //      `_updateTextureMultiLoadWorkerThread` recorded in
+        //      SPECS/OGRE_UPSTREAM_ISSUES.md — or, when it does not crash,
+        //      leaves a request nothing will ever complete and the frame's
+        //      texture wait blocks forever.
+        //
+        // With the flag, `unsafeScheduleTransitionTo` transitions in place and
+        // never touches a worker, which is the same idiom every other
+        // hand-filled texture in this engine already uses (OgreSky.cpp:182,
+        // OgreMaterials.cpp:911).
         gSsaoNoise = tm->createTexture(processUniqueName("jahSsaoNoise"),
-                                       Ogre::GpuPageOutStrategy::SaveToSystemRam, 0,
+                                       Ogre::GpuPageOutStrategy::SaveToSystemRam,
+                                       Ogre::TextureFlags::ManualTexture,
                                        Ogre::TextureTypes::Type2D);
         gSsaoNoise->setResolution(2u, 2u);
         gSsaoNoise->setPixelFormat(Ogre::PFG_RGBA8_SNORM);
-        // Immediate transition, and NO notifyDataIsReady(): _transitionTo calls
-        // it itself, and a second call underflows mDataPreparationsPending.
+        // Immediate transition, and NO explicit notifyDataIsReady(): for a
+        // ManualTexture _transitionTo calls it itself, and a second call
+        // underflows mDataPreparationsPending (OgreScene::createTexture says
+        // the same thing at the same length). _setNextResidencyStatus is
+        // redundant for a manual texture — _transitionTo keeps the two in step
+        // — and is kept because it is free and it states the intent.
         gSsaoNoise->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
         gSsaoNoise->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
 
