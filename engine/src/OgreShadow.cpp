@@ -670,7 +670,13 @@ void OgreEngine::applyStaticShadowMaps() {
         // re-rendered this frame).
         std::vector<std::pair<OgreScene *, bool>> dirty;
         dirty.reserve(scenes.size());
-        for (OgreScene *s : scenes) dirty.emplace_back(s, s->takeStaticShadowsDirty());
+        for (OgreScene *s : scenes) {
+            // Rule 1 (the light moved) is checked here rather than pushed from
+            // outside, so a host that drives the engine directly still gets
+            // correct static shadows — see OgreScene::staticLightsMoved.
+            const bool moved = s->staticLightsMoved();
+            dirty.emplace_back(s, s->takeStaticShadowsDirty() || moved);
+        }
         mRefreshShadowsPending = false;
 
         unsigned staticSlots = 0;

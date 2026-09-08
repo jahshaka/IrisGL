@@ -1387,6 +1387,14 @@ public:
     /// wrong here is slow, never incorrect.
     void dirtyStaticShadows() override;
     bool takeStaticShadowsDirty();
+    /// Rule 1 of the invalidation list: "the light itself moved". The mirror
+    /// catches this in the app (any document transform write dirties the
+    /// scene), but a host driving the engine directly — a test, a preview, a
+    /// future tool — writes transforms through Scene::setNodeTransform and no
+    /// dirty would ever be raised. So the engine also watches the poses of its
+    /// OWN static lights: a handful of nodes, once a frame, compared as a hash.
+    /// Returns true when any of them moved since the last call.
+    bool staticLightsMoved();
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -2086,6 +2094,10 @@ private:
     /// frame by OgreEngine::applyStaticShadowMaps. Starts TRUE so the first
     /// frame after a light becomes static renders its map.
     bool mStaticShadowsDirty = true;
+    /// Per static light, a hash of its world pose as of the last check (see
+    /// staticLightsMoved). Entries for lights that stop being static are
+    /// dropped, so a light toggled off and on re-renders once.
+    std::map<NodeId, unsigned long long> mStaticLightPose;
     bool mPccHdr      = false;
     bool mPccShadowed = false;
     /// THE PROBE ROUND-ROBIN (FIX WAVE B2). One entry per probe, rebuilt with

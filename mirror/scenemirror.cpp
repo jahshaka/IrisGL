@@ -151,13 +151,16 @@ quint64 worldTrsSignatureMemo(iris::graph::NodeHandle h,
     return sig;
 }
 
+}   // namespace
+
 /// Field equality for LightDesc, so the mirror can push it on change only.
 /// Spelled out rather than hashed: the struct holds two std::strings, it is
 /// compared once per light per frame (not once per node), and an exact compare
 /// has no collision story to tell. Every field setLight reads is here — add a
 /// field to LightDesc and this must grow with it, or the new field silently
-/// stops reaching the engine after the first push.
-bool sameLight(const LightDesc &a, const LightDesc &b)
+/// stops reaching the engine after the first push (which is what the mirror
+/// suite pins).
+bool SceneMirror::sameLight(const LightDesc &a, const LightDesc &b)
 {
     return a.type == b.type &&
            a.colour.r == b.colour.r && a.colour.g == b.colour.g &&
@@ -170,7 +173,6 @@ bool sameLight(const LightDesc &a, const LightDesc &b)
            a.doubleSided == b.doubleSided && a.accurate == b.accurate &&
            a.iesProfilePath == b.iesProfilePath && a.texturePath == b.texturePath &&
            a.lightMask == b.lightMask;
-}
 }
 
 SceneMirror::SceneMirror(Scene *target) : mTarget(target)
@@ -3050,6 +3052,14 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // pushes the CEILING only — the World Mode's tier value, or whatever
         // the scene pinned. 0 (Auto with no tier resolved) leaves the engine's
         // own default alone.
+        // world.refreshShadows(): one re-render of every static shadow map per
+        // bump, the giRefreshSerial shape exactly (a serial, not a bool: two
+        // refreshes in one frame are still one re-render, and clearing is the
+        // mirror's job rather than the caller's).
+        if (mSource->shadowRefreshSerial != mShadowRefreshSerialSeen) {
+            mShadowRefreshSerialSeen = mSource->shadowRefreshSerial;
+            engine->refreshShadows();
+        }
         const unsigned budget = mSource->shadowMapBudget > 0
                                     ? unsigned(qBound(2, mSource->shadowMapBudget, 16))
                                     : 0u;

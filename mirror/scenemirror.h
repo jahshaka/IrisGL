@@ -56,6 +56,9 @@ public:
     /// The engine node mirroring a document node, or 0.
     jahshaka::engine::NodeId engineNode(const iris::SceneNode *node) const;
 
+    /// The shadow-refresh serial this mirror last acted on
+    /// (world.refreshShadows(); the giRefreshSerial shape).
+    quint64 mShadowRefreshSerialSeen = 0;
     /// The document transform-write counter as of the last sync — the change
     /// key for "a caster moved" (static shadow maps, SHADOW_TOOLING_SPEC §4.3).
     quint64 mLastTransformWrites = 0;
@@ -658,6 +661,12 @@ public:
     /// the renderables of every node using `material` (a shading-model switch).
     void onMaterialItemsRebuilt(jahshaka::engine::MaterialId material);
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
+    /// Field equality for LightDesc — the "push on change only" test. PUBLIC
+    /// and static so a suite can pin the invariant its own comment states: a
+    /// field added to LightDesc and forgotten here reaches the engine ONCE and
+    /// then silently never again.
+    static bool sameLight(const jahshaka::engine::LightDesc &a,
+                          const jahshaka::engine::LightDesc &b);
     /// Fills everything but the texture ids (those need the atlas).
     static jahshaka::engine::DecalDesc toDecalDesc(iris::DecalNode *decal);
     /// The document -> engine particle mapping (PARTICLES_FX2_SPEC §5), isolated

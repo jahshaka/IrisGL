@@ -312,6 +312,37 @@ void OgreScene::staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>>
                  const std::pair<NodeId, Ogre::Light *> &b) { return a.first < b.first; });
 }
 
+bool OgreScene::staticLightsMoved() {
+    std::vector<std::pair<NodeId, Ogre::Light *>> statics;
+    staticShadowLights(statics);
+    bool moved = false;
+    std::map<NodeId, unsigned long long> now;
+    for (const auto &sl : statics) {
+        const Ogre::Node *n = sl.second->getParentNode();
+        if (!n) continue;
+        // A CHANGE KEY, not a measurement: the quantised world pose folded into
+        // one integer. `_getDerivedPositionUpdated` is what makes it honest on
+        // the frame of the move — the cached value can be a frame stale, and a
+        // one-frame-late shadow while dragging a lamp is exactly the artifact
+        // this whole feature must not introduce.
+        const Ogre::Vector3 p = const_cast<Ogre::Node *>(n)->_getDerivedPositionUpdated();
+        const Ogre::Quaternion q = const_cast<Ogre::Node *>(n)->_getDerivedOrientationUpdated();
+        unsigned long long h = 1469598103934665603ull;
+        const float f[7] = { p.x, p.y, p.z, q.x, q.y, q.z, q.w };
+        for (float v : f) {
+            const long long q10 = (long long)std::llround(double(v) * 4096.0);
+            h ^= (unsigned long long)q10;
+            h *= 1099511628211ull;
+        }
+        now[sl.first] = h;
+        auto it = mStaticLightPose.find(sl.first);
+        if (it == mStaticLightPose.end() || it->second != h) moved = true;
+    }
+    if (now.size() != mStaticLightPose.size()) moved = true;
+    mStaticLightPose.swap(now);
+    return moved;
+}
+
 void OgreScene::dirtyStaticShadows() { mStaticShadowsDirty = true; }
 
 bool OgreScene::takeStaticShadowsDirty() {
