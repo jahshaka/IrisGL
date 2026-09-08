@@ -872,20 +872,36 @@ public:
     static void  setSceneTime(const Ogre::SceneManager *sm, float seconds);
     static float sceneTime(const Ogre::SceneManager *sm);
 
-    /// THE DDGI DIFFUSE INTENSITY (GI_UNIFIED_SPEC.md §4 P1), riding the same
-    /// pass-buffer extension for the same reason the clock does: it is read by
-    /// a piece of ours inside the PIXEL shader, once per pass, and it must be
-    /// changeable without a shader rebuild.
+    /// THE DDGI SHADER STATE (GI_UNIFIED_SPEC.md §4 P1 and the Rayon ambient
+    /// fix), riding the same pass-buffer extension for the same reason the
+    /// clock does: every member is read by a piece of ours inside the PIXEL
+    /// shader, once per pass, and all of it must be changeable without a shader
+    /// rebuild.
     ///
     /// It exists because binding an IrradianceField sets `VctDisableDiffuse`:
-    /// DDGI REPLACES voxel-cone diffuse rather than adding to it, ~13x dimmer
-    /// (P0 spike §3), and upstream's IrradianceFieldSettings has no intensity
-    /// knob. media/Hlms/Jahshaka/JahIfd_piece_ps.any multiplies upstream's
-    /// accumulated irradiance by this. 1.0 = upstream's own brightness.
-    /// Defaults to GiParams::ddgiIntensity's default so a scene that never
-    /// pushes one still reads a sane value.
-    static void  setIfdIntensity(const Ogre::SceneManager *sm, float intensity);
-    static float ifdIntensity(const Ogre::SceneManager *sm);
+    /// DDGI REPLACES voxel-cone diffuse rather than adding to it, and
+    /// upstream's IrradianceFieldSettings has no intensity knob.
+    /// media/Hlms/Jahshaka/JahIfd_piece_ps.any multiplies upstream's
+    /// accumulated irradiance by `intensity` (1.0 = upstream's own brightness)
+    /// and adds `ambient` x the sky visibility it derives from the depth atlas.
+    /// Defaults to GiParams' defaults so a scene that never pushes state still
+    /// reads sane values.
+    struct IfdState {
+        /// GiParams::ddgiIntensity, clamped.
+        float intensity = 1.0f;
+        /// GiParams::ddgiAmbient, clamped. 0 removes the ambient term through a
+        /// uniform branch — the A/B the gate needs.
+        float ambient = 1.0f;
+        /// The field's probe counts on Y and Z. Upstream's own render params
+        /// carry only Nx and Nx*Ny (OgreIrradianceField.cpp:812-813) and the
+        /// sky-visibility threshold needs all three axes, so the two missing
+        /// numbers ride our own float4 instead of a patch that would move the
+        /// engine ABI.
+        float numProbesY = 0.0f;
+        float numProbesZ = 0.0f;
+    };
+    static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
+    static IfdState ifdState(const Ogre::SceneManager *sm);
 
     /// THE IRRADIANCE-FIELD PASS-BUFFER ALIGNMENT, and it is a correctness fix
     /// rather than a feature — see the long note on the definition
@@ -911,7 +927,7 @@ private:
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
     static std::map<const Ogre::SceneManager *, float>    sSceneTime;  // render thread only
-    static std::map<const Ogre::SceneManager *, float>    sIfdIntensity;  // render thread only
+    static std::map<const Ogre::SceneManager *, IfdState> sIfdState;   // render thread only
 };
 extern FogHlmsListener gFogListener;
 

@@ -263,6 +263,18 @@ public:
     /// knob exists because the two terms are different integrals and a scene may
     /// want to trim one against the other.
     float giDdgiIntensity = 1.0f;
+    /// THE DDGI AMBIENT SKY-VISIBILITY STRENGTH — the Rayon ambient fix
+    /// (GI_UNIFIED_SPEC.md ADDENDUM CORRECTION). Inside a VCT volume the
+    /// shader's own ambient term is gated off and the cone diffuse carried it
+    /// instead; binding a field deletes that branch, so DDGI scenes lost their
+    /// ambient (15-25% darker mid-ground on OPEN scenes; sealed rooms
+    /// unaffected). The engine rebuilds it as the scene's SH ambient times a
+    /// sky-visibility fraction read out of the field's own depth atlas, and
+    /// this scales it: 1.0 = the honest reconstruction (default), 0 = the term
+    /// removed entirely (the pre-fix behaviour, kept as a real setting because
+    /// it is what makes the fix measurable). Only meaningful with a field
+    /// bound. Clamped to [0, 8] on the way to the engine.
+    float giDdgiAmbient = 1.0f;
     /// RAYON — the user-facing quality tier for realtime global illumination
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.
     ///

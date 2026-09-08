@@ -57,7 +57,7 @@
 //   [4..7]  fog height terms              (   ditto   )
 //   [8..11] the shader clock              (declared only for materials that
 //                                          carry a generated piece)
-//   [12..15] the DDGI diffuse intensity   (declared only while an
+//   [12..15] the DDGI block                (declared only while an
 //                                          IrradianceField is bound)
 // A material with a piece therefore has to declare PADDING for the fog fields
 // when the fog is off, or its clock would read the fog colour — and the same
@@ -83,7 +83,11 @@
 		float4 jahClock;		// x = seconds since the host's clock started; yzw reserved
 	@end
 	@property( irradiance_field )
-		float4 jahIfd;			// x = DDGI diffuse intensity (JahIfd_piece_ps.any); yzw reserved
+		float4 jahIfd;			// JahIfd_piece_ps.any: x = DDGI diffuse intensity,
+								// y = ambient sky-visibility strength, zw = the field's
+								// Y and Z probe counts (upstream's own block carries
+								// only Nx and Nx*Ny, and the visibility threshold
+								// needs all three axes)
 	@end
 @end
 

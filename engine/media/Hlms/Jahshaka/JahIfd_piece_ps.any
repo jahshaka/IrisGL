@@ -38,6 +38,75 @@
 // "my override does nothing"). Every directive is therefore named in WORDS
 // above, never written with its at-sign.
 //
+// THE SECOND THING THAT IS NOT UPSTREAM'S: THE AMBIENT SKY-VISIBILITY TERM
+// (the Rayon ambient fix; GI_UNIFIED_SPEC.md ADDENDUM CORRECTION, and the
+// ledger entries "Vct_piece_ps.any: volume-local ambient blend commented out"
+// and "IrradianceField nits" in SPECS/OGRE_UPSTREAM_ISSUES.md).
+//
+// THE GAP. Inside a VCT volume the PBS ambient term is dead: every ambient
+// piece is wrapped in `if( vctSpecular.w == 0 )` and upstream commented the
+// volume-local blend out, hardcoding blend = 1.0, so vctSpecular.w is never
+// zero and DoAmbientLighting can never fire while VctLighting is bound. The
+// only live ambient in a VCT scene was the cone-traced diffuse's own
+// `light.xyz += ambient * light.w` — ambient times the ESCAPE FRACTION of its
+// cones, i.e. ambient weighted by how much sky the surface can see. Binding an
+// irradiance field sets VctDisableDiffuse, which deletes that whole branch, and
+// the field's own generation job computes the same escape fraction and THROWS
+// IT AWAY (IrradianceFieldGenFromVct_piece_cs.any: `alpha` is local to
+// voxelConeTraceDiff and never returned). So with DDGI on, ambient light inside
+// the volume comes from nowhere: measured as a 15-25% darker mid-ground on open
+// scenes, and correctly zero in sealed rooms, which is why it reads as "flat"
+// rather than as "broken".
+//
+// THE PROXY, and why it is a proxy. We cannot recover the cones' escape
+// fraction (it is thrown away inside a compute job we do not patch), but the
+// field's DEPTH atlas already answers the same question per direction: it
+// stores, per probe and per octahedral direction, the distance the generation
+// ray travelled, in probe-grid units. A ray that hit nothing exits the march at
+// the loop's own limit (`while( dist < 1.414213562f && alpha < 0.95 )`) and its
+// stored distance is therefore `1.414213562 * dot( abs( dir ), numProbes )` —
+// the exact expression the job uses to convert march distance into the units
+// the pixel shader compares against. Anything shorter means the ray hit
+// geometry. So one extra depth tap per cage probe, taken along the SAME
+// direction the irradiance lookup already uses (the surface normal in field
+// space), classifies that probe as "sees sky along the normal" or not, and the
+// cage's own weights turn eight binary answers into a smooth visibility
+// fraction. Ambient times that fraction is the term the cone diffuse used to
+// add.
+//
+// WHY THE DEPTH TEXEL IS UNAMBIGUOUS HERE. At our settings (OgreGi.cpp:
+// depthRes 12, raysPerPixel 1) a depth texel is ONE ray, not an average of
+// several, so the comparison is against a single march and not against a mean
+// that mixes hits with misses. The lookup direction and the generating ray
+// agree by construction: the writer places ray (x,y) at the CENTRE of its depth
+// texel (uvOct = (x + 0.5) / depthRes) and `getIrradianceFieldXY` maps an
+// encoded direction to exactly that coordinate, so the bilinear tap blends the
+// rays that bracket our direction. Raising mNumRaysPerPixel would make the
+// texel a mean and blunt this test — a constant to re-derive against, recorded
+// beside kIfdRaysPerPixel.
+//
+// WHAT IT IS NOT. It is ONE direction per probe, not a cosine-weighted
+// hemisphere integral: a surface whose normal escapes but whose hemisphere is
+// half blocked (the inside of a wall corner facing the sky) is over-lit
+// relative to the term it stands in for. The lane MEASURED that case rather
+// than assuming it away (gi.ddgi_ambient case 3) and the number is in the
+// build record; more taps per probe is the recorded follow-up if it ever
+// matters. It is also gated on `ambient_sh` — the only ambient mode this
+// engine ever sets (OgreEngine::ensureHlms forces HlmsPbs::AmbientSh), so the
+// hemisphere and fixed branches of DoAmbientLighting are unreachable here and
+// deliberately not reproduced; an engine that stopped forcing AmbientSh would
+// silently lose this term rather than get a wrong one. The MONOCHROME SH
+// variant is excluded for the same reason and one more: its irradianceSH
+// returns a scalar, so the term would not even compile there.
+//
+// THE DIAL is `GiParams::ddgiAmbient`, riding jahIfd.y beside the intensity, and
+// 0 turns the whole term off through a UNIFORM branch — so "DDGI without the
+// fix" is not a rebuild, it is a const-buffer write, which is what lets the
+// suite A/B it and what makes the sealed-room invariance assertion meaningful.
+// jahIfd.zw carry the field's Y and Z probe counts, which upstream's own render
+// params do NOT contain (only Nx and Nx*Ny reach the shader,
+// OgreIrradianceField.cpp:812-813) and the threshold above needs all three.
+//
 // SCOPE: the whole file is gated on the `irradiance_field` property, which
 // HlmsPbs sets only while a field is bound. With no field bound (every scene
 // that has not opted in, which in P1 is all of them by default) not one line of
@@ -67,6 +136,10 @@
 
 	float3 ifdIrradiance = float3( 0, 0, 0 );
 	float sumIfdWeight = 0;
+@property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
+	// The cage-weighted count of probes that see sky along this normal. Ours.
+	float ifdSkyVis = 0;
+@end
 
 	// Iterate over adjacent probe cage
 	for( int i = 0; i < 8; ++i )
@@ -132,15 +205,56 @@
 		float3 irrColour = OGRE_SampleLevel( ifdColour, ifdSampler, ifdColourUV, 0 ).xyz;
 		ifdIrradiance += irrColour * weight;
 		sumIfdWeight += weight;
+
+@property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
+		// OURS: one extra depth tap, along the direction the colour lookup just
+		// used. The branch is UNIFORM (jahIfd.y is a pass constant), so with the
+		// dial at 0 not one instruction of this executes and the frame is
+		// bit-identical to a build without the term.
+		if( passBuf.jahIfd.y > 0.0 )
+		{
+			float2 ifdVisUV = getIrradianceFieldXY(
+				ifdSpaceNormal, probeIdx, passBuf.irradianceField.depthBorderedRes,
+				passBuf.irradianceField.depthFullWidth,
+				passBuf.irradianceField.depthInvFullResolution );
+			float ifdVisDepth = OGRE_SampleLevel( ifdDepth, ifdSampler, ifdVisUV, 0 ).x;
+			// The generation job's own conversion, reproduced: a ray that never
+			// hit anything leaves the march at 1.414213562 in volume-local units
+			// and is stored scaled by dot( abs( dir ), numProbes ). numProbes.z
+			// is not in upstream's render params, so the host sends Y and Z on
+			// jahIfd.zw; numProbesAggregated.x is Nx.
+			float3 ifdNumProbes = float3( passBuf.irradianceField.numProbesAggregated.x,
+										  passBuf.jahIfd.z, passBuf.jahIfd.w );
+			float ifdEscape = 1.414213562 * dot( abs( ifdSpaceNormal ), ifdNumProbes );
+			ifdSkyVis += ifdVisDepth >= ifdEscape ? weight : 0.0;
+		}
+@end
 	}
 
-	// THE ONE LINE THAT IS NOT UPSTREAM'S. Upstream writes
+	// THE FIRST LINE THAT IS NOT UPSTREAM'S. Upstream writes
 	//     pixelData.envColourD.xyz += ifdIrradiance * ( 1.0 / sumIfdWeight );
 	// and we scale that by jahIfd.x, the DDGI diffuse intensity the host writes
 	// into the pass buffer (JahshakaEngine's FogHlmsListener; the default is
 	// calibrated against the pre-DDGI VCT diffuse, GiParams::ddgiIntensity).
 	// 1.0 reproduces upstream exactly.
 	pixelData.envColourD.xyz += ifdIrradiance * ( passBuf.jahIfd.x / sumIfdWeight );
+
+@property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
+	// AND THE AMBIENT THE VOLUME SWALLOWED, times the sky visibility above.
+	// envColourD ONLY: the VCT specular path still adds its own ambient to
+	// envColourS (Vct_piece_ps.any's specular branch), and touching that would
+	// count it twice. The world-space normal transform is the one
+	// DoAmbientLighting uses (AmbientLighting_piece_ps.any:66-67) — the
+	// left-handed cubemap frame with X flipped — because irradianceSH's
+	// coefficients are stored in that frame.
+	if( passBuf.jahIfd.y > 0.0 )
+	{
+		float3 ifdWsNormal = mul( passBuf.invViewMatCubemap, pixelData.normal );
+		ifdWsNormal.x = -ifdWsNormal.x;
+		pixelData.envColourD.xyz += irradianceSH( ifdWsNormal PASSBUF_ARG ) *
+									( passBuf.jahIfd.y * ifdSkyVis / sumIfdWeight );
+	}
+@end
 @end
 
 @end
