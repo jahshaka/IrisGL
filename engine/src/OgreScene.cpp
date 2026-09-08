@@ -492,6 +492,9 @@ void OgreScene::destroy() {
         destroySky();   // also unbinds + destroys the reflection cubemap
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         mNodes.clear();
+        // The helper overlay queue's depth anchor: an entity in this
+        // SceneManager's memory manager, so it dies before the manager does.
+        releaseQueueDepthAnchor();
         for (auto &kv : mMaterials) {
             Ogre::Hlms *hlms = hlmsFor(kv.second);
             if (hlms->getDatablock(Ogre::IdString(kv.second.datablockName)))

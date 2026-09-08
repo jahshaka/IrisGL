@@ -254,6 +254,54 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
 
+// ---------------------------------------------------------------------------
+// THE HELPER OVERLAY QUEUE (2026-09-08, the grey/blurred light icons).
+//
+// A BillboardSet2 draws ONLY from a queue whose mode is PARTICLE_SYSTEM, and
+// upstream sets exactly one: 15 (RenderQueue's constructor,
+// kParticleSystemDefaultRenderQueueId). 15 is inside the OPAQUE pass, so a
+// light icon was tonemapped, bloomed, ambient-occluded and edge-detected along
+// with the scene — white read back as ~24% grey with a smeared glyph, which is
+// the defect. Every other helper (wires, gizmo, grid) already avoids that by
+// living at kOverlayRenderQueue, which the chain draws AFTER the post chain.
+//
+// So the engine declares a SECOND particle-system queue, inside the overlay
+// pass's range: 211. The mode is per SceneManager (RenderQueue::
+// setRenderQueueMode), so it costs nothing until a scene asks for it —
+// OgreScene::ensureHelperOverlayQueue, called by the first Overlay-layer
+// billboard set. Real emitters stay at 15: they are scene content and MUST be
+// graded with the scene.
+//
+// AND THE TRAP THAT COMES WITH IT — kQueueDepthAnchorRenderQueue below.
+constexpr Ogre::uint8 kHelperOverlayRenderQueue = 211;
+
+// WHY AN INVISIBLE OBJECT HAS TO EXIST AT 212.
+//
+// SceneManager::cullFrustum runs the particle-system branch inside a loop whose
+// bounds are clamped, per ENTITY memory manager, to that manager's used depth:
+//     firstRq = min(pass.firstRq, memoryManager->getNumRenderQueues())
+//     lastRq  = min(pass.lastRq,  memoryManager->getNumRenderQueues())
+// and getNumRenderQueues() is "highest render queue holding an ENTITY, plus
+// one" (OgreObjectMemoryManager.cpp:197). Billboard sets do NOT count: they
+// live in the particle-system-def memory manager, which is not in
+// mEntitiesMemoryManagerCulledList at all. So a particle queue is visited only
+// while some ITEM sits at or above it.
+//
+// This is why RQ 15 has always worked without anyone noticing the rule: every
+// Camera is an entity at RQ 110 (OgreFrustum.cpp:51), so the depth is >= 111 in
+// any scene that renders at all. Nothing of ours lives above the overlay queue
+// (210), so a helper queue at 211 would be silently skipped — icons would
+// simply never draw, in exactly the scenes with no gizmo on screen.
+//
+// The anchor is one MovableObject with no renderables and visibility flags 0,
+// created once per scene beside the helper queue. It is never drawn in any
+// pass, it holds the entity depth at 213, and it costs one SIMD cull slot.
+// (The alternative was an Ogre patch to make the particle branch independent of
+// the entity managers — the honest upstream fix, and recorded as a finding —
+// but it changes cull code every pass runs, for a defect a 20-line object
+// closes here.)
+constexpr Ogre::uint8 kQueueDepthAnchorRenderQueue = 212;
+
 /// How many entries PbrTextureSlot has (Albedo..Emissive). The enum is a plain
 /// public enum with no sentinel, and MaterialRec indexes an array by it.
 constexpr size_t kPbrTextureSlotCount = 5;
@@ -1222,7 +1270,9 @@ public:
 
     // ---- Textures ----
     TextureId loadTexture(const std::string &path, bool srgb) override;
-    TextureId createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb) override;
+    TextureId createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb,
+                            bool mipmaps = false) override;
+    unsigned  textureMipmaps(TextureId) const override;
     bool destroyTexture(TextureId id) override;
     bool setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId texId) override;
 
@@ -1240,7 +1290,8 @@ public:
     // exactly how the document simulates. Requires
     // Hlms::_setHasParticleFX2Plugin(true) before shaders are built (ensureHlms).
     bool createBillboardSet(NodeId id, TextureId texId, bool additiveBlend,
-                            unsigned capacity) override;
+                            unsigned capacity,
+                            BillboardLayer layer = BillboardLayer::Scene) override;
     bool setBillboards(NodeId id, const BillboardInstance *data, size_t count) override;
     bool destroyBillboardSet(NodeId id) override;
 
@@ -1646,6 +1697,14 @@ private:
     /// Frees a node's billboard set and its datablock, in that order (the set
     /// references the datablock until it is destroyed). Safe to call twice.
     void releaseBillboards(Node &n);
+    /// Arms this scene's helper overlay queue (kHelperOverlayRenderQueue): puts
+    /// the queue into PARTICLE_SYSTEM mode and creates the depth anchor that
+    /// makes the culler visit it. Idempotent; called by the first Overlay-layer
+    /// billboard set, so a scene that never draws a helper icon pays nothing.
+    void ensureHelperOverlayQueue();
+    /// Destroys the depth anchor. Must run while the SceneManager is alive (the
+    /// object unregisters from its entity memory manager).
+    void releaseQueueDepthAnchor();
     /// Detaches and destroys the node's ParticleSystem2 instance, hides the def
     /// and parks it on mParticleDefPool (there is no destroyParticleSystemDef),
     /// and destroys the datablock the def referenced. Safe to call twice; must
@@ -2063,6 +2122,12 @@ private:
     /// Every def this scene ever created, for the def-accumulation measurement
     /// the particle gates print (PARTICLES_FX2_SPEC §3.2). Never shrinks.
     unsigned            mParticleDefsCreated = 0;
+    /// The helper overlay queue's one-time setup (kHelperOverlayRenderQueue):
+    /// whether the queue mode has been switched on this scene's RenderQueue,
+    /// and the invisible entity that keeps the culler reaching that queue
+    /// (kQueueDepthAnchorRenderQueue explains why it must exist).
+    bool                mHelperOverlayQueueReady = false;
+    Ogre::MovableObject *mQueueDepthAnchor = nullptr;
     TextureId           mNextTextureId = 0;
     NodeId              mNextId = 0;
     MeshId              mNextMeshId = 0;

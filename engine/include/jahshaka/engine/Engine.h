@@ -309,8 +309,21 @@ public:
     /// loaded twice returns the same id. 0 on failure (lastError()).
     virtual TextureId   loadTexture(const std::string &path, bool srgb) = 0;
     /// A texture from RGBA8 pixels in memory (top-left origin, width*height*4 bytes).
-    virtual TextureId   createTexture(unsigned width, unsigned height, const unsigned char *rgba, bool srgb) = 0;
+    ///
+    /// `mipmaps` builds the whole chain (box-filtered on the CPU, at upload
+    /// time) instead of the single level these textures used to get. Ask for it
+    /// whenever the image will be seen MINIFIED: a light icon's source glyph is
+    /// 640x640 and lands on ~30 screen pixels, and with one level the sampler
+    /// point-samples 1 texel in 400 — which is the sparkling, broken-edged
+    /// "blurred" glyph of the 2026-09-08 owner report. Costs a third more
+    /// memory and a few hundred microseconds, once, per icon.
+    virtual TextureId   createTexture(unsigned width, unsigned height, const unsigned char *rgba,
+                                      bool srgb, bool mipmaps = false) = 0;
     virtual bool        destroyTexture(TextureId) = 0;
+    /// How many mip levels the texture actually has (1 = base only, 0 = no such
+    /// texture). The diagnostic half of `mipmaps` above: a chain that silently
+    /// stopped being built is invisible in a still frame and obvious here.
+    virtual unsigned    textureMipmaps(TextureId) const = 0;
     /// Binds (or, with 0, clears) a texture slot on a PBR material.
     virtual bool        setPbrTexture(MaterialId, PbrTextureSlot, TextureId) = 0;
 
@@ -364,9 +377,16 @@ public:
     // positions are WORLD-space — the document simulates in world space.
     /// Creates (or replaces) the node's billboard set: up to `capacity` quads,
     /// textured by `texture` (0 = untextured white), additive (src-alpha, one) or
-    /// alpha-blended. Depth test on, depth write off, drawn after opaques.
+    /// alpha-blended.
+    ///
+    /// `layer` decides WHERE in the frame it lands (BillboardLayer):
+    ///   * Scene   — depth test on, depth write off, drawn with the opaques and
+    ///               graded by every post effect. What an emitter wants.
+    ///   * Overlay — no depth test, drawn in the on-top overlay pass AFTER the
+    ///               post chain. What an editor helper (the light icons) wants.
     virtual bool createBillboardSet(NodeId, TextureId texture, bool additiveBlend,
-                                    unsigned capacity) = 0;
+                                    unsigned capacity,
+                                    BillboardLayer layer = BillboardLayer::Scene) = 0;
     /// Replaces the set's instances each frame; count above capacity is clamped.
     virtual bool setBillboards(NodeId, const BillboardInstance *, size_t count) = 0;
     /// Removes the node's billboard set (removeNode does this too). KEPT as the

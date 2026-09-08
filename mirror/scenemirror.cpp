@@ -1188,6 +1188,16 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
 // rides the wireNode so the light-wires toggle and node teardown govern it, but
 // instance positions are world-space (the set hangs off the engine's static
 // root). Engine-side only: document picking never sees it.
+//
+// IT IS AN OVERLAY, LIKE THE GIZMO (owner report 2026-09-08: "the light icons
+// are grey and blurred"). Two independent causes, one per line below:
+//   * BillboardLayer::Overlay draws the glyph in the on-top overlay pass, AFTER
+//     the post chain, instead of inside the opaque pass where the tonemapper
+//     turned a white icon into ~24% grey, bloom bled the scene into it and SMAA
+//     smeared its edges;
+//   * the icon texture asks for a MIP CHAIN: the shipped sun glyph is 640x640
+//     and covers about thirty screen pixels, so a single level meant sampling
+//     one texel in four hundred — sparkle, not detail.
 void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
 {
     if (!e.wireNode) return;
@@ -1205,7 +1215,8 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
         }
     }
     if (!e.hasIcon || e.iconSignature != path) {
-        if (!mTarget->createBillboardSet(e.wireNode, iconTextureFor(path), false, 1))
+        if (!mTarget->createBillboardSet(e.wireNode, iconTextureFor(path), false, 1,
+                                         jahshaka::engine::BillboardLayer::Overlay))
             return;
         e.hasIcon = true;
         e.iconSignature = path;
@@ -1265,7 +1276,11 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     uchar *bits = img.bits();
     const qsizetype n = img.width() * qsizetype(img.height());
     for (qsizetype i = 0; i < n; ++i) { bits[i * 4 + 0] = 255; bits[i * 4 + 1] = 255; bits[i * 4 + 2] = 255; }
-    TextureId id = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()), img.constBits(), true);
+    // MIPMAPPED (the second half of the 2026-09-08 icon fix): these images are
+    // always seen minified — a 640x640 glyph at ~30 pixels — and the base level
+    // alone aliases into a sparkling mess. The chain is built once, here.
+    TextureId id = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()),
+                                          img.constBits(), true, /*mipmaps*/ true);
     mIconTextures.insert(path, id);   // cache failures (0) too: don't retry every frame
     return id;
 }

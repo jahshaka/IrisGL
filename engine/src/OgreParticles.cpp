@@ -14,9 +14,13 @@
 //     SceneManager::updateSceneGraph on every renderOneFrame. Nothing in
 //     Jahshaka integrates a particle any more.
 //
-// Both render through the same PFX2 vertex path (RQ 15, geometry generated in
-// the vertex shader from a read-only buffer, quads always camera-facing), and
-// both need Hlms::_setHasParticleFX2Plugin(true) before shaders are built.
+// Both render through the same PFX2 vertex path (geometry generated in the
+// vertex shader from a read-only buffer, quads always camera-facing), and both
+// need Hlms::_setHasParticleFX2Plugin(true) before shaders are built. RQ 15 is
+// where PFX2 puts them and where scene content BELONGS (graded with the scene);
+// an Overlay-layer billboard set — the light icons, and nothing else today —
+// is moved to kHelperOverlayRenderQueue so the post chain cannot grade it (the
+// whole argument is in EnginePrivate.h beside that constant).
 // Only the second needs Plugin_ParticleFX2 loaded: the emitter and affector
 // FACTORIES live in the plugin, the rest lives in OgreNextMain.
 //
@@ -151,7 +155,7 @@ void fillInterpStages(const float *srcTimes, const T *srcValues, unsigned count,
 }  // namespace
 
 bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlend,
-                                   unsigned capacity) {
+                                   unsigned capacity, BillboardLayer layer) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "createBillboardSet: unknown node"; return false; }
     Ogre::TextureGpu *tex = nullptr;
@@ -163,12 +167,22 @@ bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlen
     JAH_TRY {
         Node &n = it->second;
         releaseBillboards(n);
+        const bool overlay = layer == BillboardLayer::Overlay;
+        if (overlay) ensureHelperOverlayQueue();
         // Legacy particle pass: depth test on, depth write off; additive is
         // (SRC_ALPHA, ONE), otherwise plain alpha blending.
+        //
+        // AN OVERLAY SET IS DEPTH-TEST-FREE, exactly like createUnlitMaterial's
+        // on-top variant. Two reasons, and either alone is sufficient: the
+        // lead's decision that a helper icon reads like the gizmo (you can
+        // always see the light you are editing, even inside a wall), and the
+        // post chain's overlay pass LOADS DEPTH AS DontCare (OgreChain.cpp) —
+        // there is no scene depth left in that pass to test against, so a
+        // depth-tested overlay would be testing undefined contents.
         const std::string dbName = processUniqueName("billboards");
         auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
         Ogre::HlmsMacroblock macro;
-        macro.mDepthCheck = true; macro.mDepthWrite = false; macro.mCullMode = Ogre::CULL_NONE;
+        macro.mDepthCheck = !overlay; macro.mDepthWrite = false; macro.mCullMode = Ogre::CULL_NONE;
         Ogre::HlmsBlendblock blend;
         if (additiveBlend) {
             blend.mSourceBlendFactor = Ogre::SBF_SOURCE_ALPHA;
@@ -183,10 +197,22 @@ bool OgreScene::createBillboardSet(NodeId id, TextureId texId, bool additiveBlen
         if (tex) {
             Ogre::HlmsSamplerblock sampler;
             sampler.mU = Ogre::TAM_CLAMP; sampler.mV = Ogre::TAM_CLAMP;
+            // All three filters spelled out: a mip CHAIN (createTexture's
+            // `mipmaps`, which the light icons ask for) is only worth building
+            // if the sampler is allowed to walk it, and the trilinear pair is
+            // what stops a 640px glyph from sparkling at 30 screen pixels.
+            sampler.mMinFilter = Ogre::FO_LINEAR;
+            sampler.mMagFilter = Ogre::FO_LINEAR;
             sampler.mMipFilter = Ogre::FO_LINEAR;
             db->setTexture(0, tex, &sampler);
         }
         Ogre::BillboardSet *set = mSceneMgr->createBillboardSet2();
+        // THE QUEUE IS THE WHOLE FIX (kHelperOverlayRenderQueue). A set is born
+        // at 15 — inside the opaque pass, i.e. graded — and setRenderQueueGroup
+        // is the only way out; the mode of the destination queue was armed by
+        // ensureHelperOverlayQueue above, because a BillboardSet2 is drawn ONLY
+        // from a PARTICLE_SYSTEM-mode queue.
+        if (overlay) set->setRenderQueueGroup(kHelperOverlayRenderQueue);
         set->setParticleQuota(std::max(1u, capacity));   // aligned up internally
         // Legacy rotates the quad's vertices around the view axis (not the UVs).
         set->setRotationType(Ogre::ParticleRotationType::Vertex);
@@ -243,6 +269,68 @@ bool OgreScene::destroyBillboardSet(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.billboards) return false;
     JAH_TRY { releaseBillboards(it->second); return true; } JAH_CATCH(mError, false);
+}
+
+// ---- The helper overlay queue (kHelperOverlayRenderQueue) -----------------
+
+namespace {
+/// The depth anchor. It has no renderables, no bounds and no visibility bits:
+/// its whole job is to OCCUPY a render queue above the helper overlay queue in
+/// the scene's entity memory manager, because SceneManager::cullFrustum clamps
+/// every pass's queue range to that manager's used depth before it ever asks
+/// whether a queue is a particle queue (the full argument sits beside
+/// kQueueDepthAnchorRenderQueue in EnginePrivate.h).
+///
+/// Deliberately NOT attached to a SceneNode: an unattached MovableObject reads
+/// the memory manager's dummy transform, which is exactly what upstream's
+/// dummy node exists for, and attaching to the static root would drag in the
+/// static-flag rules for no benefit.
+class QueueDepthAnchor final : public Ogre::MovableObject {
+public:
+    QueueDepthAnchor(Ogre::IdType id, Ogre::ObjectMemoryManager *mm, Ogre::SceneManager *sm)
+        : Ogre::MovableObject(id, mm, sm, kQueueDepthAnchorRenderQueue) {
+        setVisibilityFlags(0u);          // fails every pass's any-bit test, forever
+        setCastShadows(false);
+        // A POINT at the origin, not Aabb::BOX_NULL. Upstream's null box carries
+        // -infinity half-extents (OgreAabb.cpp:39) and setLocalAabb derives the
+        // object's radius from it, so every frame's SIMD bounds update would
+        // carry an infinity through this slot for no reason. Nothing ever reads
+        // these bounds — the visibility flags exclude the object from every
+        // cull, and it has no renderables to draw — so the cheapest finite
+        // value is the right one.
+        setLocalAabb(Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO));
+    }
+    const Ogre::String &getMovableType() const override {
+        static const Ogre::String kType = "JahQueueDepthAnchor";
+        return kType;
+    }
+};
+}   // namespace
+
+void OgreScene::ensureHelperOverlayQueue() {
+    if (mHelperOverlayQueueReady) return;
+    // PER SCENE MANAGER: RenderQueue belongs to the SceneManager, so arming the
+    // mode here cannot leak into a scene that draws no helpers.
+    mSceneMgr->getRenderQueue()->setRenderQueueMode(kHelperOverlayRenderQueue,
+                                                   Ogre::RenderQueue::PARTICLE_SYSTEM);
+    // THE DYNAMIC manager, deliberately: the cull loop visits a particle queue
+    // once per entity memory manager deep enough to reach it, so putting the
+    // anchor in exactly one of the two is also what keeps the helper sets from
+    // being added — and blended — twice. Nothing of ours is static above 210.
+    if (!mQueueDepthAnchor) {
+        mQueueDepthAnchor = new QueueDepthAnchor(
+            Ogre::Id::generateNewId<Ogre::MovableObject>(),
+            &mSceneMgr->_getEntityMemoryManager(Ogre::SCENE_DYNAMIC), mSceneMgr);
+    }
+    // LAST, so a throw on the way here leaves the scene able to try again.
+    mHelperOverlayQueueReady = true;
+}
+
+void OgreScene::releaseQueueDepthAnchor() {
+    // ~MovableObject unregisters the slot from the entity memory manager, so
+    // this must happen while the SceneManager is still alive.
+    delete mQueueDepthAnchor;
+    mQueueDepthAnchor = nullptr;
 }
 
 void OgreScene::releaseBillboards(Node &n) {
