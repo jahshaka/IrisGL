@@ -101,15 +101,21 @@ float verticalFovDegFromHorizontal(float horizontalFov, float aspect)
     return float(rad2deg(2.0 * std::atan(t)));
 }
 
-float verticalFovDegForHorizontalCap(float verticalFovDeg, float aspect, float hfovCapDeg)
+float verticalFovDegForFramingAspect(float verticalFovDeg, float aspect, float framingAspect)
 {
-    // Every degenerate input is the identity — "no cap" must cost nothing and
+    // Every degenerate input is the identity — "no hold" must cost nothing and
     // must not perturb a single bit of the projection it does not apply to.
-    if (!(hfovCapDeg > 0.0f) || !(aspect > 0.0f) || !(verticalFovDeg > 0.0f))
+    if (!(framingAspect > 0.0f) || !(aspect > 0.0f) || !(verticalFovDeg > 0.0f))
         return verticalFovDeg;
-    if (horizontalFovDeg(verticalFovDeg, aspect) <= hfovCapDeg)
-        return verticalFovDeg;      // already inside the cap: untouched, bit for bit
-    return std::max(1.0f, verticalFovDegFromHorizontal(hfovCapDeg, aspect));
+    // AT OR BELOW the framing aspect nothing happens, and the test is an exact
+    // float comparison of two aspects rather than a round trip through degrees:
+    // the common case must be the identity by CONSTRUCTION, not by tolerance.
+    if (aspect <= framingAspect)
+        return verticalFovDeg;      // inside the hold: untouched, bit for bit
+    // Hold the horizontal extent the shot has at `framingAspect`, and solve for
+    // the vertical angle that produces it on this wider frame.
+    return std::max(1.0f, verticalFovDegFromHorizontal(
+                              horizontalFovDeg(verticalFovDeg, framingAspect), aspect));
 }
 
 float diagonalFovDeg(float verticalFovDeg, float aspect)

@@ -64,15 +64,17 @@ public:
 
     /// Points `view`'s camera where the document camera is looking.
     ///
-    /// `maxHorizontalFovDeg` is the WIDE-ASPECT FOV CLAMP (owner report
-    /// 2026-09-07, jahshaka::engine::CameraDesc::maxHorizontalFovDegrees):
-    /// zero — the default — leaves the authored vertical angle alone, which is
-    /// what every AUTHORED camera gets. Only a host that knows it is pushing a
-    /// FREE camera (the editor explorer, the player's fly camera) passes a cap,
-    /// and past roughly 16:9 the vertical angle narrows to hold the horizontal
-    /// one there instead of letting an ultra-wide window fisheye the shot.
+    /// `framingAspect` is the WIDE-ASPECT FRAMING HOLD (owner report
+    /// 2026-09-07, re-scoped 2026-09-08;
+    /// jahshaka::engine::CameraDesc::framingAspect): zero — the default —
+    /// leaves the authored vertical angle alone, which is what every AUTHORED
+    /// camera gets. Only a host that knows it is pushing a FREE camera (the
+    /// editor explorer, the player's fly camera) passes one, and only ABOVE
+    /// that aspect does the vertical angle narrow — to hold the horizontal
+    /// extent the shot has there — instead of letting an ultra-wide window
+    /// fisheye it. At or below it the shot is untouched, bit for bit.
     void applyCamera(iris::CameraNodePtr camera, jahshaka::engine::View *view,
-                     float maxHorizontalFovDeg = 0.0f);
+                     float framingAspect = 0.0f);
     /// Points `view`'s picture-in-picture inset at a document camera
     /// (CAMERAS_SPEC D3, phase 2c). `desc` carries everything but the camera —
     /// the rect, the inset's background, the offscreen opt-in — and this fills

@@ -108,17 +108,18 @@ float verticalFovDegFromHorizontal(float horizontalFovDeg, float aspect);
 /// The corner-to-corner angle, from the vertical one and the aspect.
 float diagonalFovDeg(float verticalFovDeg, float aspect);
 
-/// THE WIDE-ASPECT FOV CAP, document side: the VERTICAL angle that holds the
-/// HORIZONTAL angle at `hfovCapDeg` on a frame of this aspect.
+/// THE WIDE-ASPECT FRAMING HOLD, document side: the VERTICAL angle that keeps
+/// this camera's HORIZONTAL extent at the one it has on a frame of
+/// `framingAspect`, when the real frame is WIDER than that.
 ///
 /// THE SAME POLICY THE ENGINE APPLIES WHEN IT DRAWS
-/// (jahshaka::engine::verticalFovForHorizontalCap, engine/Types.h — the two are
+/// (jahshaka::engine::verticalFovForFramingAspect, engine/Types.h — the two are
 /// deliberately NOT shared, because a document header may not include an engine
 /// one; the arithmetic below is the same pair of identities this file already
 /// exports, so there is no second formula, only a second call site):
 ///
-///     hfov = 2 * atan( tan(vfov/2) * aspect )     [horizontalFovDeg]
-///     vfov = 2 * atan( tan(cap/2) / aspect )      [verticalFovDegFromHorizontal]
+///     h  = 2 * atan( tan(v/2) * framingAspect )   [horizontalFovDeg]
+///     v' = 2 * atan( tan(h/2) / aspect )          [verticalFovDegFromHorizontal]
 ///
 /// WHY THE DOCUMENT NEEDS IT AT ALL (owner report 2026-09-07, defect: clicking
 /// a sphere in the Grand Showroom on a wide window selects a column behind it).
@@ -128,16 +129,24 @@ float diagonalFovDeg(float verticalFovDeg, float aspect);
 /// (ScenePicker::screenSegment). Two different frusta means the ray misses by
 /// more the further the click is from the centre: measured on the Showroom's
 /// 75-degree camera at 3184x536, a sphere DRAWN at x = 2829 picked a column
-/// eleven units behind it. So the cap is a property of the camera
-/// (CameraNode::horizontalFovCap), and this is the one function both the
+/// eleven units behind it. So the hold is a property of the camera
+/// (CameraNode::framingAspect), and this is the one function both the
 /// projection and any other document-side consumer go through.
 ///
-/// The clamp only ever NARROWS: a vertical angle already inside the cap is
-/// returned BIT-IDENTICALLY, with no arithmetic at all, which is what keeps
-/// every existing 16:9 projection (and every pixel assertion built on one)
-/// exactly as it was. A non-positive cap, aspect or angle is likewise the
-/// identity — off is free.
-float verticalFovDegForHorizontalCap(float verticalFovDeg, float aspect, float hfovCapDeg);
+/// WHY AN ASPECT AND NOT A DEGREE CAP (owner-blocking defect, 2026-09-08). The
+/// first version of this function capped the HORIZONTAL angle at a fixed 95
+/// degrees, which a 75-degree lens exceeds at 1.42:1 — so the Grand Showroom
+/// rendered zoomed in (63 degrees vertical, not 75) on every monitor wider
+/// than 3:2 and "imported assets have the wrong scale" was this. A degree cap
+/// cannot say "leave ordinary windows alone" because ordinary depends on the
+/// lens; an aspect can, and the identity below it is EXACT.
+///
+/// The hold only ever NARROWS, and only STRICTLY ABOVE the framing aspect: at
+/// or below it the angle is returned BIT-IDENTICALLY, with no arithmetic at
+/// all, which is what keeps every existing 16:9 projection (and every pixel
+/// assertion built on one) exactly as it was. A non-positive framing aspect,
+/// aspect or angle is likewise the identity — off is free.
+float verticalFovDegForFramingAspect(float verticalFovDeg, float aspect, float framingAspect);
 
 /// sqrt(w^2 + h^2) — the physical sensor diagonal, squeeze-free.
 float sensorDiagonalMm(float sensorWidth, float sensorHeight);

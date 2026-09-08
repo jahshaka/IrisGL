@@ -591,20 +591,38 @@ struct CameraDesc {
     /// The authored aspect (width / height), used only when constrainAspect.
     float aspect = 16.0f / 9.0f;
 
-    /// THE WIDE-ASPECT FOV CLAMP (owner report 2026-09-07). `fovDegrees` is
-    /// VERTICAL, so the HORIZONTAL angle it produces grows with the target's
-    /// aspect: the default 45-degree explorer is 75 degrees wide at 16:9 and
-    /// 118 degrees wide at 32:9 — a fisheye nobody asked for, on exactly the
-    /// monitors people buy to see more of a scene.
+    /// THE WIDE-ASPECT FRAMING HOLD (owner report 2026-09-07; RE-SCOPED
+    /// 2026-09-08, see below). `fovDegrees` is VERTICAL, so the HORIZONTAL
+    /// angle it produces grows with the target's aspect: the default 45-degree
+    /// explorer is 75 degrees wide at 16:9 and 118 degrees wide at 32:9 — a
+    /// fisheye nobody asked for, on exactly the monitors people buy to see more
+    /// of a scene.
     ///
-    /// A positive value caps the HORIZONTAL angle at that many degrees: past
-    /// the aspect where the cap first bites, the vertical angle is narrowed to
-    /// hold it (verticalFovForHorizontalCap below). Zero — the DEFAULT — is
-    /// off, which is what every AUTHORED camera gets: a scene camera's angle is
-    /// a deliberate lens choice and the engine must not second-guess it. Only
-    /// the two FREE cameras (the editor explorer, the player's fly camera) set
-    /// it, and only they can, because only their hosts know they are free.
-    float maxHorizontalFovDegrees = 0.0f;
+    /// A positive value is THE ASPECT THIS CAMERA'S FRAMING IS HELD AT. At or
+    /// below it NOTHING HAPPENS — `fovDegrees` reaches setFOVy bit-for-bit, so
+    /// the picture is exactly the one a camera that never heard of this field
+    /// produces. Above it the vertical angle narrows just enough to keep the
+    /// HORIZONTAL extent the shot had at that aspect
+    /// (verticalFovForFramingAspect below), which is the fisheye fix, scoped to
+    /// the ultra-wide and full-screen cases it was always about.
+    ///
+    /// WHY AN ASPECT AND NOT A DEGREE CAP (the 2026-09-08 owner-blocking
+    /// defect). This field first shipped as `maxHorizontalFovDegrees`, a FIXED
+    /// 95: any camera whose horizontal angle exceeded 95 had its vertical angle
+    /// re-derived, and a 75-degree lens crosses 95 horizontal at 1.42:1 — so
+    /// the shipped Grand Showroom rendered at 63 degrees vertical instead of 75
+    /// on EVERY ordinary monitor, and every imported asset looked too big. A
+    /// degree cap cannot express "leave ordinary windows alone", because what
+    /// counts as ordinary depends on the camera's own lens. An aspect can: the
+    /// hold point is the same 16:9 for a 30-degree lens and a 90-degree one,
+    /// and identity below it is exact rather than approximate.
+    ///
+    /// Zero — the DEFAULT — is off, which is what every AUTHORED camera gets: a
+    /// scene camera's angle is a deliberate lens choice and the engine must not
+    /// second-guess it. Only the two FREE cameras (the editor explorer, the
+    /// player's fly camera) set it, and only they can, because only their hosts
+    /// know they are free.
+    float framingAspect = 0.0f;
 
     /// LENS SHIFT (CAMERA_LENS_SPEC §3), as a FRACTION OF THE FRAME: +0.5 in X
     /// slides the image half a frame to the right without rotating the camera.
@@ -628,36 +646,40 @@ struct CameraDesc {
                fovDegrees == o.fovDegrees && nearClip == o.nearClip && farClip == o.farClip &&
                orthographic == o.orthographic && orthoSize == o.orthoSize &&
                constrainAspect == o.constrainAspect && aspect == o.aspect &&
-               maxHorizontalFovDegrees == o.maxHorizontalFovDegrees &&
+               framingAspect == o.framingAspect &&
                lensShiftX == o.lensShiftX && lensShiftY == o.lensShiftY;
     }
     bool operator!=(const CameraDesc &o) const { return !(*this == o); }
 };
 
-/// The vertical angle of view that holds the HORIZONTAL angle at `hfovCapDeg`
-/// for a target of `aspect` (width / height) — CameraDesc::maxHorizontalFov.
+/// The vertical angle of view that holds this camera's HORIZONTAL extent at
+/// the one it has on a frame of `framingAspect` — CameraDesc::framingAspect.
 ///
-///     hfov = 2 * atan( tan(vfov/2) * aspect )
-///     vfov = 2 * atan( tan(hfovCap/2) / aspect )
+///     tan(v'/2) = tan(v/2) * framingAspect / aspect     when aspect > framingAspect
+///     v'        = v                                     otherwise, EXACTLY
 ///
-/// The clamp only ever NARROWS: below the aspect where the cap bites (about
-/// 16:9 for a 95-degree cap on a 45-degree lens) the authored vertical angle is
-/// already inside it and is returned BIT-IDENTICALLY — no arithmetic runs at
-/// all, which is what lets a 16:9 pixel suite stay byte-exact. Free (a
-/// non-positive cap or aspect) is likewise the identity.
+/// The first line is the two standard cross-axis identities composed and
+/// simplified — hold h, solve for v:
+///
+///     h  = 2 * atan( tan(v/2) * framingAspect )    the extent being held
+///     v' = 2 * atan( tan(h/2) / aspect )           the angle that holds it
+///
+/// The hold only ever NARROWS, and only STRICTLY ABOVE the framing aspect: on
+/// a 16:9 hold every 16:10, 3:2, 4:3 and 16:9 target takes the early return
+/// and the authored angle is passed through with NO ARITHMETIC AT ALL, which
+/// is what lets every existing 16:9 pixel assertion stay byte-exact (the
+/// aspect comparison is exact; a degree-cap round trip was not). Free (a
+/// non-positive framing aspect or aspect) is likewise the identity.
 ///
 /// A free function, in the header, deliberately: this is the whole of the
 /// policy, and a suite can drive it across an aspect sweep with no engine at
-/// all (tests/cameras' fov_clamp case).
-inline float verticalFovForHorizontalCap(float vfovDeg, float aspect, float hfovCapDeg) {
-    if (!(hfovCapDeg > 0.0f) || !(aspect > 0.0f) || !(vfovDeg > 0.0f)) return vfovDeg;
+/// all (tests/cameras' framing-hold case).
+inline float verticalFovForFramingAspect(float vfovDeg, float aspect, float framingAspect) {
+    if (!(framingAspect > 0.0f) || !(aspect > 0.0f) || !(vfovDeg > 0.0f)) return vfovDeg;
+    if (aspect <= framingAspect) return vfovDeg;   // inside the hold: untouched, bit for bit
     const float kDegToRad = 3.14159265358979323846f / 180.0f;
-    const float capHalf = std::min(hfovCapDeg, 179.0f) * 0.5f * kDegToRad;
     const float haveHalf = std::min(vfovDeg, 179.0f) * 0.5f * kDegToRad;
-    // The horizontal angle this vertical angle actually produces here.
-    const float haveHorizontalHalf = std::atan(std::tan(haveHalf) * aspect);
-    if (haveHorizontalHalf <= capHalf) return vfovDeg;   // inside the cap: untouched
-    const float wantHalf = std::atan(std::tan(capHalf) / aspect);
+    const float wantHalf = std::atan(std::tan(haveHalf) * (framingAspect / aspect));
     return std::max(1.0f, wantHalf * 2.0f / kDegToRad);
 }
 

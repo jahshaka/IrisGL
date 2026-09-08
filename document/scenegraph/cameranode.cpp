@@ -565,10 +565,11 @@ void CameraNode::updateCameraMatrices()
     projMatrix.setToIdentity();
 
     if ((projMode == CameraProjection::Perspective)) {
-        // THE WIDE-ASPECT FOV CAP (see `hfovCapDegrees`). Uncapped — every
-        // authored camera, and every host that never sets one — this returns
-        // `angle` itself with no arithmetic, so the matrix below is bit-for-bit
-        // the one this function has always produced.
+        // THE WIDE-ASPECT FRAMING HOLD (see `framingAspectRatio`). With no
+        // hold — every authored camera, and every host that never sets one —
+        // and on any window at or below the hold aspect, this returns `angle`
+        // itself with no arithmetic, so the matrix below is bit-for-bit the one
+        // this function has always produced.
         const float fov = effectiveFovDegrees();
         if (lensShiftX == 0.0f && lensShiftY == 0.0f) {
             projMatrix.perspective(fov, aspectRatio, nearClip, farClip);
@@ -607,11 +608,11 @@ void CameraNode::setFieldOfViewDegrees(float fov)
     authorMode = CameraAuthorMode::Degrees;
 }
 
-void CameraNode::setHorizontalFovCap(float capDegrees)
+void CameraNode::setFramingAspect(float aspect)
 {
-    const float cap = capDegrees > 0.0f ? capDegrees : 0.0f;
-    if (cap == hfovCapDegrees) return;
-    hfovCapDegrees = cap;
+    const float hold = aspect > 0.0f ? aspect : 0.0f;
+    if (hold == framingAspectRatio) return;
+    framingAspectRatio = hold;
     // Re-derive NOW. The host sets this once when it adopts the camera, and the
     // very next thing that happens may be a pick (screenSegment re-derives too,
     // but the player's mouse controller reads projMatrix straight).
@@ -620,7 +621,7 @@ void CameraNode::setHorizontalFovCap(float capDegrees)
 
 float CameraNode::effectiveFovDegrees() const
 {
-    return iris::lens::verticalFovDegForHorizontalCap(angle, aspectRatio, hfovCapDegrees);
+    return iris::lens::verticalFovDegForFramingAspect(angle, aspectRatio, framingAspectRatio);
 }
 
 // ---- the lens <-> angle binding (CAMERAS_SPEC §2) -------------------------

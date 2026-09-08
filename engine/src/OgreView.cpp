@@ -621,16 +621,17 @@ void OgreView::setCamera(const CameraDesc &c) {
             mCamera->setOrthoWindow(2.0f * c.orthoSize * aspect, 2.0f * c.orthoSize);
         } else {
             mCamera->setProjectionType(Ogre::PT_PERSPECTIVE);
-            // THE WIDE-ASPECT CLAMP (CameraDesc::maxHorizontalFovDegrees). The
+            // THE WIDE-ASPECT FRAMING HOLD (CameraDesc::framingAspect). The
             // aspect is the REAL target's, read here and not cached, for the
             // same reason the ortho branch above reads it: a window mid-resize
             // must project through the size it actually has. A camera with no
-            // cap (every authored one) takes the identity path and its
+            // hold (every authored one) — and every camera on a target at or
+            // below its framing aspect — takes the identity path and its
             // fovDegrees reaches setFOVy bit-for-bit unchanged.
             const unsigned tw = width(), th = height();
             const float targetAspect = th ? float(tw) / float(th) : 1.0f;
-            const float fov = verticalFovForHorizontalCap(c.fovDegrees, targetAspect,
-                                                          c.maxHorizontalFovDegrees);
+            const float fov = verticalFovForFramingAspect(c.fovDegrees, targetAspect,
+                                                          c.framingAspect);
             mCamera->setFOVy(Ogre::Degree(std::max(1.0f, std::min(fov, 179.0f))));
         }
         // §7.4: setAutoAspectRatio is ON for every ordinary view (the image
