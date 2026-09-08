@@ -35,11 +35,31 @@ public:
     /// embedded texture files and the split metallic/roughness maps; empty
     /// means beside the source (legacy behavior — never right for read-only
     /// sources; the import pipeline always passes a staging dir).
+    /// `sourceFile` is the MODEL FILE itself (assetPath is only its
+    /// directory). glTF/GLB material import needs it: assimp cannot say which
+    /// PBR block a material actually carried — it reports metallic-roughness
+    /// factors for every glTF material whether the file stated them or not —
+    /// so the source JSON is re-read (once per file, cached) to tell a
+    /// spec-gloss, an unlit and a block-less material apart from a real
+    /// metallic-roughness one. Empty keeps the assimp-only reading.
     static void extractMaterialData(const aiScene *scene,
                                     aiMaterial *aiMat,
                                     QString assetPath,
                                     MeshMaterialData& mat,
-                                    const QString &writeDir = QString());
+                                    const QString &writeDir = QString(),
+                                    const QString &sourceFile = QString());
+
+    /// KHR_materials_pbrSpecularGlossiness → metallic-roughness, the
+    /// conversion published in the extension's own appendix (the same one
+    /// Blender and three.js run). `diffuse` is RGBA, `specular` RGB, all in
+    /// 0..1 linear; the alpha rides through onto the base colour.
+    /// Public because the import suite asserts the formula on known inputs.
+    static void specularGlossinessToMetallicRoughness(const float diffuse[4],
+                                                      const float specular[3],
+                                                      float glossiness,
+                                                      QColor& baseColorOut,
+                                                      float& metallicOut,
+                                                      float& roughnessOut);
     /// Image type from the leading magic bytes ("jpg", "png", "dds", "gif",
     /// "bmp", "webp", "tif", "ktx"), or an empty string when unrecognized.
     /// Public: importers and tests use it to keep written extensions honest.
