@@ -113,8 +113,13 @@ Scene::Scene()
     giNumBounces = 1;
     giUpdateBudget = 1;         // one probe re-capture per frame (FIX WAVE B1)
     giPccGrid = iris::Vec3(3, 2, 3);
-    giDdgi = -1;                // auto = off until the Rayon tier lands (P2)
+    giDdgi = -1;                // auto: no tier has been applied to this scene yet
     giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
+    // The Rayon quality tier this scene comes back at when GI is switched on
+    // (GI_UNIFIED_SPEC P2, owner decision D2 — new scenes are Epic). GI itself
+    // stays OFF here: a bare document renders nothing until a tier is applied,
+    // which is what the editor's new-scene path and the reader do.
+    giTier = 3;
 
     // anti-aliasing is opt-in like GI: off (1 sample) by default
     antiAliasing = 1;
