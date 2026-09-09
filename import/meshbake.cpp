@@ -55,7 +55,14 @@ namespace
 // v2 (2026-09-08): materials carry `unlit`, and the shading factors changed
 // MEANING — a v1 blob recorded the full-metal misreading of every spec-gloss
 // and block-less glTF material, so v1 bakes must be re-baked, not replayed.
-constexpr int kFormatVersion = 2;
+// v3 (2026-09-09): `nodeName` left MeshMaterialData. It was never written by an
+// importer and never read by anything — this serializer was its ONLY mention in
+// the tree — but it occupied a length-prefixed string in every material record,
+// so removing it is a layout change. (The producer id already covers this file,
+// so an existing bake would have been rebuilt anyway; the bump makes the reason
+// legible in the header instead of only in a hash.) Shading factors and their
+// meaning are UNCHANGED from v2.
+constexpr int kFormatVersion = 3;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -119,8 +126,7 @@ void writeMaterial(QDataStream &s, const MeshMaterialData &m)
     writeColor(s, m.ambientColor);
     writeColor(s, m.emissionColor);
     s << float(m.shininess);
-    s << m.diffuseTexture << m.specularTexture << m.normalTexture << m.hightTexture
-      << m.nodeName;
+    s << m.diffuseTexture << m.specularTexture << m.normalTexture << m.hightTexture;
     s << qint32(m.hasEmbeddedDiffTexture) << qint32(m.hasEmbeddedSpecularTexture)
       << qint32(m.hasEmbeddedNormalTexture) << qint32(m.hasEmbeddedHightTexture);
     s << qint32(m.hasPbr) << qint32(m.unlit);
@@ -137,8 +143,7 @@ MeshMaterialData readMaterial(QDataStream &s)
     m.ambientColor = readColor(s);
     m.emissionColor = readColor(s);
     s >> m.shininess;
-    s >> m.diffuseTexture >> m.specularTexture >> m.normalTexture >> m.hightTexture
-      >> m.nodeName;
+    s >> m.diffuseTexture >> m.specularTexture >> m.normalTexture >> m.hightTexture;
     qint32 e0, e1, e2, e3, pbr, unlit;
     s >> e0 >> e1 >> e2 >> e3 >> pbr >> unlit;
     m.hasEmbeddedDiffTexture = e0;
