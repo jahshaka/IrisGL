@@ -1,0 +1,101 @@
+From: jahshaka <jahshaka@gmail.com>
+Subject: [PATCH 0024] HlmsPbs: orthographic view direction (hlms_ortho_camera)
+
+SOURCE + MEDIA (every tree must rerun build-ogre.sh; Studio restages the media).
+
+HlmsPbs computes the pixel's view direction as normalize( -inPs.pos ): the
+direction from the surface to a PINHOLE at the view-space origin. That is only
+true of a perspective camera. Under an orthographic projection every pixel looks
+straight down -Z, so the direction back to the eye is +Z for every fragment -
+and with the perspective form NdotV, the Fresnel term, every light's half vector
+and the environment/probe reflection lookup all vary with the fragment's SCREEN
+position, which is why highlights and reflections slide across a static scene
+when an editor's top/front/side view pans (owner report; the orthoview lane
+made SSR/SSAO ortho-correct with patch 0019, this closes the PBS half).
+
+The fix is a pass property, `hlms_ortho_camera`, set in HlmsPbs::preparePassHash
+BEFORE Hlms::preparePassHashBase (so it is part of the pass hash) from the
+rendering camera's projection type, and a compile-time branch in the
+LightingHeader piece that takes viewDir = (0, 0, 1) under it. Zero per-pixel
+cost. Caster passes are excluded on purpose: the caster shader never computes
+viewDir and directional shadow cameras are orthographic, so the property would
+only double the caster permutations for nothing.
+
+COST: the PBS pixel permutation space doubles along one axis - a scene first
+seen in an axis view compiles a second set of pixel shaders (measured by the
+riders lane, numbers in its report and OGRE_BUILD.md). The Jahshaka shader
+cache fingerprint covers the staged Hlms tree, so every cache invalidates once.
+
+diff --git a/Components/Hlms/Pbs/include/OgreHlmsPbs.h b/Components/Hlms/Pbs/include/OgreHlmsPbs.h
+--- a/Components/Hlms/Pbs/include/OgreHlmsPbs.h
++++ b/Components/Hlms/Pbs/include/OgreHlmsPbs.h
+@@ -698,6 +698,9 @@
+ 
+         static const IdString UseEnvProbeMap;
+         static const IdString NeedsViewDir;
++        /// Jahshaka patch 0024: the rendering camera is orthographic (see
++        /// preparePassHash); the pixel shader then takes viewDir = +Z.
++        static const IdString OrthoCamera;
+         static const IdString NeedsReflDir;
+         static const IdString NeedsEnvBrdf;
+ 
+diff --git a/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp b/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
+--- a/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
++++ b/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
+@@ -217,6 +217,7 @@
+ 
+     const IdString PbsProperty::UseEnvProbeMap = IdString( "use_envprobe_map" );
+     const IdString PbsProperty::NeedsViewDir = IdString( "needs_view_dir" );
++    const IdString PbsProperty::OrthoCamera = IdString( "hlms_ortho_camera" );
+     const IdString PbsProperty::NeedsReflDir = IdString( "needs_refl_dir" );
+     const IdString PbsProperty::NeedsEnvBrdf = IdString( "needs_env_brdf" );
+ 
+@@ -1849,6 +1850,22 @@
+         if( mOptimizationStrategy == LowerGpuOverhead )
+             setProperty( kNoTid, PbsProperty::LowerGpuOverhead, 1 );
+ 
++        // Jahshaka patch 0024: an ORTHOGRAPHIC rendering camera gets its own pass
++        // property, so 800.PixelShader_piece_ps.any can take viewDir = +Z instead
++        // of normalize( -inPs.pos ) (which assumes a pinhole at the origin and
++        // makes every view-dependent term slide with the fragment's screen
++        // position under an ortho pan). Set BEFORE preparePassHashBase so it is
++        // part of the pass hash, like every property above it. Caster passes are
++        // left alone: a directional shadow camera is orthographic too, but the
++        // caster shader never computes viewDir, and doubling the caster
++        // permutation space for a property nothing reads would be pure cost.
++        if( !casterPass )
++        {
++            const Camera *renderingCamera = sceneManager->getCamerasInProgress().renderingCamera;
++            if( renderingCamera && renderingCamera->getProjectionType() == PT_ORTHOGRAPHIC )
++                setProperty( kNoTid, PbsProperty::OrthoCamera, 1 );
++        }
++
+         HlmsCache retVal =
+             Hlms::preparePassHashBase( shadowNode, casterPass, dualParaboloid, sceneManager );
+ 
+diff --git a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
+--- a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
+@@ -450,7 +450,21 @@
+ 	//Everything's in Camera space
+ 	@property( needs_view_dir )
+ 		@property( !hlms_instanced_stereo )
+-			pixelData.viewDir	= midf3_c( normalize( -inPs.pos ) );
++			@property( hlms_ortho_camera )
++				// JAHSHAKA patch 0024 - ORTHOGRAPHIC VIEW DIRECTION. normalize( -inPs.pos )
++				// is the direction from the surface to a PINHOLE at the view-space origin;
++				// an orthographic camera has no pinhole, every pixel looks straight down
++				// -Z, so the direction back to the eye is +Z for every fragment. With the
++				// perspective form under an ortho projection, NdotV, the Fresnel term, the
++				// half vector of every light and the reflection lookup all vary with the
++				// fragment's position on SCREEN, so a pan slides the highlights and probe
++				// reflections across a scene that is not moving. Set by HlmsPbs::
++				// preparePassHash from the rendering camera's projection type, so it is
++				// a compile-time branch: zero per-pixel cost, one more pass property.
++				pixelData.viewDir	= midf3_c( float3( 0.0, 0.0, 1.0 ) );
++			@else
++				pixelData.viewDir	= midf3_c( normalize( -inPs.pos ) );
++			@end
+ 		@else
+ 			if( gl_FragCoord.x > passBuf.rightEyePixelStartX )
+ 				pixelData.viewDir = midf3_c( normalize( -inPs.pos + passBuf.leftToRightView.xyz ) );
