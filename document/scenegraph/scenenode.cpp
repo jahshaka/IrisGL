@@ -792,6 +792,11 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 		copy->setParams(this->avatarMovement->params());
 		node->setAvatarComponent(copy);
 	}
+	// THE AVATAR LINK travels with the copy: duplicating an instance of an
+	// avatar asset gives you a SECOND INSTANCE of the same asset, not an
+	// orphan. (Instances share the project's version — the per-instance
+	// override is a later stage, AVATAR_ASSET_SPEC §11.)
+	node->avatarLink = this->avatarLink;
 	// THE LOCOMOTION STATE MACHINE, deep-copied for the same reason: the asset
 	// and the role bindings travel with the copy (they are the character's
 	// authoring), but the CLOCK does not — a duplicate starts at its entry
