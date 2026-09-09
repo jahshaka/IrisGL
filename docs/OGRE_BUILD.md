@@ -246,9 +246,36 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     in order of landing.
 
 
+21. **0021-vct-anisotropic-escape-fraction** — anisotropic voxel cone tracing
+    (every Jahshaka GI quality above Low: `anisotropic = quality != Low`,
+    OgreGi.cpp) saturates its cone alpha against the cone's OWN starting surface:
+    the per-axis textures are front-to-back composited along their axis
+    (AnisotropicMipVctStep1), so a one-voxel-thick floor reads as alpha 1.0 along
+    ±Y at every coarser mip however little of the cell it fills — right for a ray
+    crossing the cell, wrong for the diffuse cone that starts on that floor and
+    re-enters its own cell as the footprint grows. The escape fraction that
+    weights the ambient (`light.w`, computeVctProbe) collapses: measured on an
+    open floor, isotropic keeps 93% of the ambient, anisotropic kept 4%
+    (SPECS/OGRE_UPSTREAM_ISSUES.md, "Anisotropic VCT cone tracing saturates
+    alpha"). The patch adds a second accumulator, `escapeAlpha`, that in the
+    anisotropic loop takes the MIN of the three axis composites ONE MIP FINER
+    than the colour samples (the axis textures are half-res, so `lodLevel` there
+    is already a mip coarser than the isotropic march at the same distance) and
+    that the ambient escape weight reads; colour/alpha accumulation (the bounce)
+    is untouched, and the isotropic path computes the identical expression, so
+    isotropic pixels are byte-for-byte unchanged. Measured: 4% → 65% of the raw
+    ambient on the open floor — deliberately short of isotropic's 93%, because
+    the exact route (the main texture's own isotropic mip alpha, which
+    VctLighting builds in anisotropic mode above 32³) was measured at 95% AND
+    restores the isotropic march's leak through one-voxel walls: the Mirror Room
+    and Showroom samples flooded +46/+51 of 255 at Medium and clipped, where this
+    patch moves them +7 (the isotropic march's own leak there is +14). Three
+    alpha fetches per step in the anisotropic diffuse cones; frame cost under
+    the noise floor. Media-only (Vct_piece_ps.any).
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019) need no Ogre rebuild — the Studio build stages the
+patches (0003/0009/0011/0019/0021) need no Ogre rebuild — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant
