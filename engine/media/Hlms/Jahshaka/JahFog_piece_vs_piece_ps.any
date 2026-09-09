@@ -192,5 +192,14 @@
 	#define UV_NORMAL(x) JAH_UV_XFORM(x)
 	#define UV_SPECULAR(x) JAH_UV_XFORM(x)
 	#define UV_ROUGHNESS(x) JAH_UV_XFORM(x)
+	// A LIGHTMAP rides the emissive slot (emissiveAsLightmap) and is authored in
+	// UV space, never tiled: the material's tiling must not touch it (bake-
+	// foundations audit F1, 2026-09-09). Off the property, the emissive map is a
+	// map like the others and tiles with them.
+	@property( !emissive_as_lightmap )
 	#define UV_EMISSIVE(x) JAH_UV_XFORM(x)
+	@end
+	@property( emissive_as_lightmap )
+	#define UV_EMISSIVE(x) (x)
+	@end
 @end

@@ -1,0 +1,48 @@
+From: jahshaka <jahshaka@gmail.com>
+Subject: [PATCH 0022] HlmsPbs: geometric specular anti-aliasing for normal-mapped surfaces
+
+MEDIA-ONLY (Studio restages media; every tree needs the patch loop). Folds the
+screen-space variance of the final shading normal into the GGX alpha (Kaplanyan
+2016; Unity HDRP / Unreal defaults 0.25 / 0.18), gated on normal_map_tex so
+untextured normals and flat maps are bit-identical. Cures the mip-collapse glints
+("white dots") on low-roughness normal-mapped materials at distance. Toksvig is
+not available on this pin: getTSNormal reconstructs Z so |n| is always 1.
+
+--- a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
+@@ -843,6 +843,35 @@
+ 			@property( normal_map )
+ 				pixelData.normal = normalize( mul( TBN, pixelData.normal ) );
+ 			@end
++			@property( normal_map_tex )
++				// JAHSHAKA patch 0022 - GEOMETRIC SPECULAR ANTI-ALIASING (Kaplanyan 2016,
++				// the Unity HDRP / Unreal runtime form). A normal map's detail collapses
++				// through its mip chain while the roughness does not widen to match, so a
++				// low-roughness normal-mapped surface sparkles at distance (the owner's
++				// 'white dots'). The screen-space derivatives of the FINAL shading normal
++				// measure how fast it turns across a pixel; that variance is folded into
++				// the GGX alpha. Zero on a flat surface with a flat map (bit-identical),
++				// gated on normal_map_tex so untextured normals never move. Constants are
++				// Unity's defaults: screen-space variance 0.25, threshold 0.18.
++				{
++					midf3 jahNddx = midf3_c( OGRE_ddx( pixelData.normal ) );
++					midf3 jahNddy = midf3_c( OGRE_ddy( pixelData.normal ) );
++					midf jahVariance = _h( 0.25 ) * ( dot( jahNddx, jahNddx ) + dot( jahNddy, jahNddy ) );
++					midf jahKernel = min( _h( 2.0 ) * jahVariance, _h( 0.18 ) );
++					if( jahKernel > _h( 0.0 ) )
++					{
++					@property( perceptual_roughness )
++						// pixelData.roughness is the GGX alpha here.
++						pixelData.roughness = sqrt( pixelData.roughness * pixelData.roughness + jahKernel );
++					@else
++						// pixelData.roughness is perceptual: alpha = r*r.
++						midf jahAlpha = pixelData.roughness * pixelData.roughness;
++						pixelData.roughness = sqrt( sqrt( jahAlpha * jahAlpha + jahKernel ) );
++					@end
++						pixelData.roughness = min( pixelData.roughness, _h( 1.0 ) );
++					}
++				}
++			@end
+ 
+ 			@insertpiece( DoDirectionalShadowMaps )
+ 

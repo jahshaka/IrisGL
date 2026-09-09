@@ -235,6 +235,16 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     fixed the identical defect in its own SSR marcher at the same time
     (irisgl/engine/media/Hlms/Jahshaka/JahSsrRayMarch_ps.glsl), which is not a
     patch because that shader is ours.
+22. **0022-geometric-specular-antialiasing** — MEDIA-only (`800.PixelShader_piece_ps.any`).
+    Folds the screen-space variance of the final shading normal into the GGX alpha
+    (Kaplanyan 2016; Unity HDRP / Unreal runtime form, constants 0.25 / 0.18), gated on
+    `normal_map_tex` so untextured normals and flat maps stay bit-identical. Cures the
+    mip-collapse glints ("white dots") on low-roughness normal-mapped surfaces at
+    distance. Toksvig is impossible on this pin: `getTSNormal` reconstructs Z so the
+    sampled normal is always unit length. 0020 (samples config-dialog override) and 0021
+    (VCT anisotropic escape fraction) are in flight on other lanes; numbers are claimed
+    in order of landing.
+
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
