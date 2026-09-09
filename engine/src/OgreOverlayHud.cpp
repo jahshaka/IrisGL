@@ -91,9 +91,16 @@ void build(Ogre::Root *) {}
 void attach(Ogre::SceneManager *) {}
 void detach(Ogre::SceneManager *) {}
 void apply(const ViewOverlayDesc &, const RenderStats &, unsigned, unsigned) {}
+void setAtlasTiles(std::vector<AtlasTileDesc>) {}
 void hide() {}
 void afterFrame() {}
-void destroySystem() {}
+void destroySystem() {
+    // The tiles' datablocks belong to HlmsUnlit and their panels to the
+    // OverlayManager; both die below. Unbinding first keeps the "no datablock
+    // outlives its texture" rule true through teardown as well.
+    if (gBuilt) unbindAtlasTiles();
+    gAtlasTiles.clear();
+    gPendingTiles.clear();}
 
 #else
 
@@ -185,6 +192,26 @@ Ogre::v1::OverlayContainer   *gRoot     = nullptr;
 Ogre::v1::PanelOverlayElement *gFill    = nullptr;
 Ogre::HlmsUnlitDatablock     *gFillDb   = nullptr;
 Caption gTitle, gSubtitle, gStats, gStatsDrop;
+
+// ---- the shadow-atlas inspector (SHADOW_TOOLING_SPEC.md §4.4) --------------
+// One Panel + one Caption per shadow map, created LAZILY the first time the
+// overlay is asked for and reused afterwards. The panels bind Unlit datablocks
+// that hold the ATLAS TEXTURE with a UV crop (Ogre's animation matrix), which
+// is upstream's own recipe in ShadowMapDebuggingGameState.
+//
+// THE TEXTURE POINTER DIES WITH THE WORKSPACE, so the datablocks are re-bound
+// from the live shadow node every time the overlay is applied, and unbound the
+// moment the overlay is off — a datablock holding a destroyed TextureGpu is a
+// crash, not a wrong picture.
+constexpr const char *kAtlasDbPrefix = "Jahshaka/OverlayAtlas";
+struct AtlasTile {
+    Ogre::v1::PanelOverlayElement *panel = nullptr;
+    Ogre::HlmsUnlitDatablock      *db    = nullptr;
+    Caption                        caption;
+};
+std::vector<AtlasTile> gAtlasTiles;
+bool gAtlasBound = false;
+
 bool    gBuilt = false;
 Colour  gFillColour{ -1.0f, -1.0f, -1.0f, -1.0f };   // never a real colour: forces the first push
 
@@ -339,8 +366,63 @@ void detach(Ogre::SceneManager *sm) {
 }
 
 // ---------------------------------------------------------------------------
+namespace { std::vector<AtlasTileDesc> gPendingTiles; }
+
+void setAtlasTiles(std::vector<AtlasTileDesc> tiles) { gPendingTiles = std::move(tiles); }
+
+namespace {
+/// Unbinds every tile datablock from the atlas texture. MANDATORY whenever the
+/// overlay stops drawing or the tiles change: an HlmsUnlitDatablock holding a
+/// TextureGpu that its workspace has destroyed is a crash the next time
+/// anything touches the datablock, and shadow-node workspaces are destroyed and
+/// re-created by every atlas rebuild.
+void unbindAtlasTiles() {
+    for (AtlasTile &t : gAtlasTiles) {
+        if (t.db) t.db->setTexture(uint8_t(0), (Ogre::TextureGpu *)nullptr);
+        if (t.panel) t.panel->hide();
+        t.caption.hide();
+    }
+    gAtlasBound = false;
+}
+
+/// Creates the Nth tile (panel + datablock + caption) on first use. Element
+/// names carry a leading digit for the alphabetical draw order the rest of this
+/// HUD relies on.
+AtlasTile &atlasTile(size_t i, Ogre::Root *root) {
+    while (gAtlasTiles.size() <= i) {
+        const size_t n = gAtlasTiles.size();
+        AtlasTile t;
+        Ogre::v1::OverlayManager &om = Ogre::v1::OverlayManager::getSingleton();
+        const std::string dbName = std::string(kAtlasDbPrefix) + std::to_string(n);
+        auto *unlit = static_cast<Ogre::HlmsUnlit *>(
+            root->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
+        Ogre::HlmsMacroblock mb;
+        mb.mDepthCheck = false;
+        mb.mDepthWrite = false;
+        mb.mCullMode   = Ogre::CULL_NONE;
+        Ogre::HlmsBlendblock bb;
+        t.db = static_cast<Ogre::HlmsUnlitDatablock *>(
+            unlit->createDatablock(dbName, dbName, mb, bb, Ogre::HlmsParamVec()));
+        t.panel = static_cast<Ogre::v1::PanelOverlayElement *>(
+            om.createOverlayElement("Panel", "Jahshaka/Hud/5Atlas" + std::to_string(n)));
+        t.panel->setMaterialName(dbName);
+        t.panel->setTransparent(false);
+        t.panel->hide();
+        gRoot->addChild(t.panel);
+        const std::string capName = "Jahshaka/Hud/6AtlasCap" + std::to_string(n);
+        t.caption.bind(makeText(om, capName.c_str()));
+        gAtlasTiles.push_back(t);
+    }
+    return gAtlasTiles[i];
+}
+}   // namespace
+
 void hide() {
-    if (gBuilt && gOverlay) gOverlay->hide();
+    if (!gBuilt) return;
+    // The tiles hold LIVE compositor textures; a hidden overlay must not keep
+    // them alive-by-reference into the next workspace rebuild.
+    if (gAtlasBound) unbindAtlasTiles();
+    if (gOverlay) gOverlay->hide();
 }
 
 void apply(const ViewOverlayDesc &desc, const RenderStats &stats,
@@ -395,6 +477,54 @@ void apply(const ViewOverlayDesc &desc, const RenderStats &stats,
         gSubtitle.hide();
     }
 
+    // ---- the shadow-atlas inspector ---------------------------------------
+    // A row of thumbnails along the BOTTOM, PSSM splits first, each showing the
+    // rectangle of the atlas that map owns. The datablocks are re-bound every
+    // apply(): the texture belongs to a workspace that any atlas rebuild
+    // destroys and re-creates (SHADOW_TOOLING_SPEC.md §4.4).
+    if (desc.shadowAtlas && !gPendingTiles.empty()) {
+        Ogre::Root *root = Ogre::Root::getSingletonPtr();
+        const size_t n = gPendingTiles.size();
+        // Square tiles across the bottom, with a caption line under each. Sized
+        // in PIXELS and converted, like every other measurement in this file.
+        const float pad = 6.0f / w;
+        const float tileW = std::min(0.16f, (1.0f - pad * float(n + 1)) / float(n));
+        const float tileH = tileW * w / h;                 // square on screen
+        const float capH  = rel(11.0f);
+        const float top   = 1.0f - tileH - capH - 12.0f / h;
+        for (size_t i = 0; i < n; ++i) {
+            const AtlasTileDesc &td = gPendingTiles[i];
+            AtlasTile &tile = atlasTile(i, root);
+            if (tile.db) {
+                tile.db->setTexture(uint8_t(0), td.tex);
+                // The UV crop, upstream's recipe: an animation matrix that
+                // scales the unit quad's UVs down to this map's rectangle.
+                Ogre::Matrix4 uv = Ogre::Matrix4::IDENTITY;
+                uv[0][0] = td.u1 - td.u0;
+                uv[1][1] = td.v1 - td.v0;
+                uv[0][3] = td.u0;
+                uv[1][3] = td.v0;
+                tile.db->setEnableAnimationMatrix(uint8_t(0), true);
+                tile.db->setAnimationMatrix(uint8_t(0), uv);
+            }
+            const float x = pad + float(i) * (tileW + pad);
+            tile.panel->setPosition(x, top);
+            tile.panel->setDimensions(tileW, tileH);
+            tile.panel->show();
+            tile.caption.element()->setCharHeight(capH);
+            tile.caption.element()->setPosition(x, top + tileH + 2.0f / h);
+            tile.caption.set(td.label);
+            tile.caption.show();
+        }
+        for (size_t i = n; i < gAtlasTiles.size(); ++i) {
+            gAtlasTiles[i].panel->hide();
+            gAtlasTiles[i].caption.hide();
+        }
+        gAtlasBound = true;
+    } else if (gAtlasBound) {
+        unbindAtlasTiles();
+    }
+
     // ---- the stats readout -------------------------------------------------
     if (desc.stats) {
         std::string text;
@@ -446,6 +576,9 @@ void afterFrame() {
     gSubtitle.afterFrame();
     gStatsDrop.afterFrame();
     gStats.afterFrame();
+    // The atlas tile captions ride the same one-shot: they are STATIC strings
+    // ("M3 point static"), which is exactly the shape the trap kills.
+    for (AtlasTile &t : gAtlasTiles) t.caption.afterFrame();
 }
 
 void destroySystem() {

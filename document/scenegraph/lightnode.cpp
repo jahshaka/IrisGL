@@ -105,6 +105,12 @@ QList<Property*> LightNode::getProperties()
     props.append(intProp);
 
     auto boolProp = new BoolProperty();
+    boolProp->displayName = "Static Shadow";
+    boolProp->name = "shadowStatic";
+    boolProp->value = shadowMap->staticMap;
+    props.append(boolProp);
+
+    boolProp = new BoolProperty();
     boolProp->displayName = "Double Sided";
     boolProp->name = "doubleSided";
     boolProp->value = doubleSided;
@@ -149,6 +155,8 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return getShadowMapResolution();
     if(valueName == "shadowBias")
         return shadowMap->bias;
+    if(valueName == "shadowStatic")
+        return shadowMap->staticMap;
     if(valueName == "doubleSided")
         return doubleSided;
     if(valueName == "accurate")
@@ -189,6 +197,11 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "shadowMapType")     { setShadowMapType(static_cast<ShadowMapType>(value.toInt())); return true; }
     if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return true; }
     if (valueName == "shadowBias")        { shadowMap->bias = value.toFloat();   return true; }
+    // STATIC SHADOW MAP. Accepted on every light type — the renderer is the
+    // one that decides it means nothing for a directional or an area light,
+    // and a document that refused to store it would lose the setting when a
+    // light's type is switched back and forth.
+    if (valueName == "shadowStatic")      { shadowMap->staticMap = value.toBool(); return true; }
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return true; }
     if (valueName == "accurate")          { accurate = value.toBool();           return true; }
     if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return true; }

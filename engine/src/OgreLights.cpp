@@ -266,4 +266,110 @@ void shutdown() {
 }
 
 }  // namespace lightextras
+
+// ---------------------------------------------------------------------------
+// The shadow-atlas demand (SHADOW_TOOLING_SPEC.md §4.1)
+// ---------------------------------------------------------------------------
+// Counted from the BACKEND lights rather than from a mirrored description, so
+// it says what the renderer will actually be asked for. Two exclusions, both
+// structural: a directional light rides the PSSM block (it never competes for a
+// focused map) and an area light can never cast at all.
+//
+// One trap, recorded rather than worked around: while a shadow node sorts its
+// lights it temporarily flips `setCastShadows(false)` on every light fixed to a
+// static map and restores it afterwards (OgreCompositorShadowNode.cpp:512-519).
+// Reading getCastShadows() between those two lines would under-count. This runs
+// from renderOneFrame BEFORE Root::renderOneFrame, which is outside that window.
+unsigned OgreScene::countLocalShadowCasters(std::vector<NodeId> *out) const {
+    unsigned n = 0;
+    // OVER THE LIGHT INDEX, NOT OVER mNodes: this runs once per drawn scene per
+    // FRAME, and walking every node of a big scene to find its handful of
+    // lights is exactly the kind of per-frame cost this engine keeps measuring
+    // and removing.
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;
+        const Ogre::Light *l = it->second.light;
+        if (!l || !l->getCastShadows()) continue;
+        const Ogre::Light::LightTypes t = l->getType();
+        if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) continue;
+        ++n;
+        if (out) out->push_back(id);
+    }
+    return n;
+}
+
+void OgreScene::staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>> &out) const {
+    for (NodeId id : mLightNodes) {          // the light index, not every node
+        auto entryIt = mNodes.find(id);
+        if (entryIt == mNodes.end()) continue;
+        const auto &entry = *entryIt;
+        const Node &n = entry.second;
+        if (!n.light || !n.lightShadowStatic || !n.light->getCastShadows()) continue;
+        const Ogre::Light::LightTypes t = n.light->getType();
+        // Directional lights follow the camera through PSSM and area lights
+        // never cast: "static" is meaningless for both, and upstream says so
+        // (OgreCompositorShadowNode.h:298). Ignored, never refused — the
+        // document keeps the flag through a light-type change.
+        if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) continue;
+        out.emplace_back(entry.first, n.light);
+    }
+    // Stable by node id: the slot a light lands in must not depend on the
+    // iteration order of a map that a node insertion can rehash.
+    std::sort(out.begin(), out.end(),
+              [](const std::pair<NodeId, Ogre::Light *> &a,
+                 const std::pair<NodeId, Ogre::Light *> &b) { return a.first < b.first; });
+}
+
+bool OgreScene::staticLightsMoved() {
+    std::vector<std::pair<NodeId, Ogre::Light *>> statics;
+    staticShadowLights(statics);
+    bool moved = false;
+    std::map<NodeId, unsigned long long> now;
+    for (const auto &sl : statics) {
+        const Ogre::Node *n = sl.second->getParentNode();
+        if (!n) continue;
+        // A CHANGE KEY, not a measurement: the quantised world pose folded into
+        // one integer. `_getDerivedPositionUpdated` is what makes it honest on
+        // the frame of the move — the cached value can be a frame stale, and a
+        // one-frame-late shadow while dragging a lamp is exactly the artifact
+        // this whole feature must not introduce.
+        const Ogre::Vector3 p = const_cast<Ogre::Node *>(n)->_getDerivedPositionUpdated();
+        const Ogre::Quaternion q = const_cast<Ogre::Node *>(n)->_getDerivedOrientationUpdated();
+        unsigned long long h = 1469598103934665603ull;
+        const float f[7] = { p.x, p.y, p.z, q.x, q.y, q.z, q.w };
+        for (float v : f) {
+            const long long q10 = (long long)std::llround(double(v) * 4096.0);
+            h ^= (unsigned long long)q10;
+            h *= 1099511628211ull;
+        }
+        now[sl.first] = h;
+        auto it = mStaticLightPose.find(sl.first);
+        if (it == mStaticLightPose.end() || it->second != h) moved = true;
+    }
+    if (now.size() != mStaticLightPose.size()) moved = true;
+    mStaticLightPose.swap(now);
+    return moved;
+}
+
+bool OgreScene::hasStaticShadowLights() const {
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;
+        const Node &n = it->second;
+        if (!n.light || !n.lightShadowStatic || !n.light->getCastShadows()) continue;
+        const Ogre::Light::LightTypes t = n.light->getType();
+        if (t == Ogre::Light::LT_POINT || t == Ogre::Light::LT_SPOTLIGHT) return true;
+    }
+    return false;
+}
+
+void OgreScene::dirtyStaticShadows() { mStaticShadowsDirty = true; }
+
+bool OgreScene::takeStaticShadowsDirty() {
+    const bool was = mStaticShadowsDirty;
+    mStaticShadowsDirty = false;
+    return was;
+}
+
 }}}  // namespace jahshaka::engine::detail

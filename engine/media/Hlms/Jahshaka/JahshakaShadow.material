@@ -1,0 +1,83 @@
+// The per-map shadow-atlas clear quads (SPECS/SHADOW_TOOLING_SPEC.md §4.3).
+// Two variants of one shader: the render system decides which one the shadow
+// node's clear passes name (OgreShadow.cpp, shadowClearMaterialName()).
+//
+// GLSL + Vulkan only, like Jahshaka/Ssr* beside this file: those are the two
+// syntaxes this engine ever builds (macOS runs Vulkan through MoltenVK, not
+// the Metal render system).
+
+fragment_program Jahshaka/ShadowMapClear_ps_GLSL glsl
+{
+	source JahShadowClear_ps.glsl
+}
+fragment_program Jahshaka/ShadowMapClear_ps_VK glslvk
+{
+	source JahShadowClear_ps.glsl
+}
+fragment_program Jahshaka/ShadowMapClear_ps unified
+{
+	delegate Jahshaka/ShadowMapClear_ps_GLSL
+	delegate Jahshaka/ShadowMapClear_ps_VK
+}
+
+fragment_program Jahshaka/ShadowMapClearRev_ps_GLSL glsl : Jahshaka/ShadowMapClear_ps_GLSL
+{
+	preprocessor_defines REVERSE_DEPTH=1
+}
+fragment_program Jahshaka/ShadowMapClearRev_ps_VK glslvk : Jahshaka/ShadowMapClear_ps_VK
+{
+	preprocessor_defines REVERSE_DEPTH=1
+}
+fragment_program Jahshaka/ShadowMapClearRev_ps unified
+{
+	delegate Jahshaka/ShadowMapClearRev_ps_GLSL
+	delegate Jahshaka/ShadowMapClearRev_ps_VK
+}
+
+// Depth writes on, depth test always passing, no colour output at all: the
+// shadow atlas is a depth-only target (PFG_D32_FLOAT with an explicit RTV), so
+// a pass that wrote colour would not match the render pass. This is exactly the
+// shape of Ogre/DPSM/CubeToDpsm, which writes this same atlas.
+material Jahshaka/ShadowMapClear
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowMapClear_ps
+			{
+			}
+		}
+	}
+}
+
+material Jahshaka/ShadowMapClearRev
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowMapClearRev_ps
+			{
+			}
+		}
+	}
+}

@@ -965,6 +965,16 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
 }
 
 void OgreScene::invalidateGiCaches() {
+    // EVERY STRUCTURAL CHANGE TO THE SCENE FUNNELS THROUGH HERE — a mesh
+    // attached or detached, a node destroyed, a material or texture replaced,
+    // a light removed — which makes it the one place static shadow maps can be
+    // invalidated for "the geometry changed" without inventing a second funnel
+    // (SHADOW_TOOLING_SPEC.md §4.3, rule 4). What it does NOT cover is a caster
+    // MOVING: the document writes transforms straight into the shared scene
+    // graph, so no engine call happens at all — that is the host's
+    // dirtyStaticShadows(), which SceneMirror drives from the document's
+    // transform-write counter.
+    mStaticShadowsDirty = true;
     if (mInstantRadiosity) {
         // The cache FREE must happen NOW, while the dying mesh/texture is still
         // alive: InstantRadiosity::freeMemory dereferences its cache KEYS
@@ -2050,6 +2060,34 @@ void OgreScene::teardownIr() {
 void OgreScene::teardownGi() {
     teardownIr();
     teardownVct();
+}
+
+// ---------------------------------------------------------------------------
+// The shadow-atlas rebuild's GI half (SHADOW_TOOLING_SPEC.md risk R3)
+// ---------------------------------------------------------------------------
+// A shadow-node DEFINITION cannot be deleted while anything instantiates it,
+// and the hybrid's shadowed probe captures do: each probe workspace names
+// JahshakaShadowNode (buildPcc above), so the probe arm holds live
+// CompositorShadowNodes exactly like a view's workspace does. Before this
+// existed, changing the shadow resolution with hybrid GI at high quality left
+// those instances pointing at freed definition memory and the next frame died
+// inside Hlms::preparePassHashBase — reproduced as a SEGV by tests/shadow's r3
+// mode. It could only ever fire on a Shadow Quality change; the derived map
+// count (which grows when a lamp is added) would have made it routine.
+//
+// The teardown is the whole VCT arm, not just the probes, because that is the
+// only honest granularity here: rebuildVct's own comment is the reason (raw
+// Item* and datablock-pointer caches make anything but from-scratch an aliasing
+// risk), and this path runs on a Shadow Quality change or an atlas growth — not
+// per frame.
+bool OgreScene::dropGiForShadowRebuild() {
+    if (!mPcc || !mPccShadowed) return false;
+    JAH_TRY { teardownVct(); } JAH_CATCH(mError, false);
+    return true;
+}
+
+void OgreScene::recreateGiAfterShadowRebuild() {
+    JAH_TRY { rebuildVct(); } JAH_CATCH(mError, );
 }
 
 }}}  // namespace jahshaka::engine::detail

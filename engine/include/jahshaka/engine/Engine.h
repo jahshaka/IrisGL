@@ -497,6 +497,21 @@ public:
     /// without this nothing, not even a pixel test, could tell the difference.
     /// Cheap: reads live pointers, renders nothing.
     virtual GiStatus    giStatus() const = 0;
+
+    /// "SOMETHING A STATIC SHADOW MAP CAN SEE HAS CHANGED" — re-render this
+    /// scene's static shadow maps on the next frame
+    /// (SPECS/SHADOW_TOOLING_SPEC.md §4.3, LightDesc::shadowStatic).
+    ///
+    /// The engine dirties them ITSELF when a light moves or any of its
+    /// parameters change, and when geometry is attached, detached or destroyed.
+    /// What it cannot see is a CASTER MOVING: the document owns the scene graph
+    /// and writes transforms into it directly, so a moved mesh reaches the
+    /// renderer without passing through any engine call. The host tells us
+    /// instead (SceneMirror watches the document's transform-write counter).
+    ///
+    /// Cheap and idempotent: it sets one flag. Calling it every frame is legal
+    /// and simply makes every static map cost exactly what a dynamic one costs.
+    virtual void        dirtyStaticShadows() = 0;
     /// "Has any object LEFT the volume that is currently lit?" — 0 when every
     /// GI item is inside it, otherwise a hash of the escapees' quantized world
     /// AABBs (LIGHTING_FIX fix 2).
@@ -1107,6 +1122,35 @@ public:
     /// Clamped to [256, 8192]. Default: 2048.
     virtual void setShadowResolution(unsigned pixels) = 0;
     virtual unsigned shadowResolution() const = 0;
+
+    /// HOW MANY POINT/SPOT LIGHTS MAY HAVE A SHADOW MAP AT ONCE
+    /// (SPECS/SHADOW_TOOLING_SPEC.md §4.1). The atlas holds one PSSM block for
+    /// the closest directional light plus N focused maps, and Ogre fills those
+    /// N slots with the casters closest to the camera and silently drops the
+    /// rest — so before this existed, a scene with three shadow-casting lamps
+    /// had one lamp with no shadow, and WHICH lamp changed as the camera moved.
+    ///
+    /// This is a CEILING, not an allocation: the engine derives the count from
+    /// the scenes it draws, steps it {2, 4, 8, 16} and only grows (VRAM is
+    /// returned when the process ends, and a rebuild costs every workspace that
+    /// names the shadow node). Empty maps cost no shader permutation — Ogre
+    /// counts ACTIVE casters — so head-room is free until a light fills it.
+    ///
+    /// Clamped to [2, 16], and clamped again by the resolution: 16 maps at a
+    /// 4096 base do not fit inside the 16384 texture limit. `shadowStatus()`
+    /// reports what survived both clamps. Default 8.
+    virtual void setShadowMapBudget(unsigned maps) = 0;
+    virtual unsigned shadowMapBudget() const = 0;
+
+    /// What the shadow atlas ACTUALLY is: its layout, which light holds which
+    /// map, and which shadow-casting lights got none. Cheap (reads live
+    /// pointers, renders nothing); `live == false` on a headless engine.
+    virtual ShadowStatus shadowStatus() const = 0;
+
+    /// Re-render EVERY static shadow map in every scene, once, on the next
+    /// frame — the "I do not know what changed" button, and the shadow twin of
+    /// refreshGi(). Returns false when there is nothing to refresh.
+    virtual bool refreshShadows() = 0;
 
     /// Shadow-caster geometry optimization — see EngineConfig::optimizeShadowMeshes.
     /// PROCESS-WIDE and consumed when a mesh is BUILT: changing it re-decides the

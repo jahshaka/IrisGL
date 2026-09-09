@@ -472,6 +472,13 @@ void OgreEngine::destroyView(View *view) {
     if (!view) return;
     for (auto it = mViews.begin(); it != mViews.end(); ++it) {
         if (it->get() != view) continue;
+        // THE SHADOW-PASS COUNTER RIDES A VIEW (SHADOW_TOOLING_SPEC.md §4.3),
+        // and this is where that view can die. Unhook it here or the next
+        // frame's applyStaticShadowMaps dereferences a freed OgreView to
+        // detach a listener from it — found by ASan on test_engine_asan's
+        // shadow_resolution_rebuilds_the_atlas, which destroys views while the
+        // counter is attached.
+        noteViewDestroyed(it->get());
         (*it)->destroy();
         mViews.erase(it);
         return;
@@ -526,6 +533,17 @@ void OgreEngine::renderOneFrame() {
         // request cannot complete; drainTextureStreaming is the same drain with
         // a no-progress deadline and a diagnostic. See its definition.
         drainTextureStreaming();
+        // HOW MANY SHADOW MAPS THIS FRAME NEEDS (SHADOW_TOOLING_SPEC.md §4.1).
+        // At the top of the frame, before any per-view work, because growing
+        // the atlas drops and recreates every workspace that names the shadow
+        // node — the same operation a Shadow Quality change performs, and the
+        // same place it is safe. Debounced and growth-only, so a steady scene
+        // pays one light-list walk per frame and nothing else.
+        deriveShadowMapCount();
+        // ...and which of those maps are STATIC (SHADOW_TOOLING_SPEC.md §4.3).
+        // After the derivation, because a rebuild replaces the very
+        // CompositorShadowNode instances the assignments live on.
+        applyStaticShadowMaps();
         // ONE AUTHORITATIVE VIEW PER SCENE (FIX WAVE B2 / finding F7). The GI
         // tracker's work is per SCENE and stateful — it spends a per-frame probe
         // budget and carries the Forward+ range hysteresis — while `mViews` can
@@ -649,6 +667,13 @@ void OgreEngine::renderOneFrame() {
             if (owner) {
                 RenderStats stats;
                 renderStats(stats);
+                // The shadow-atlas inspector's data (SHADOW_TOOLING_SPEC.md
+                // §4.4). Collected HERE and not in the HUD because it lives
+                // inside a compositor node, which the overlay code cannot and
+                // should not reach; and collected only when the overlay asks,
+                // because it touches a live workspace.
+                hud::setAtlasTiles(owner->overlay().shadowAtlas ? collectAtlasTiles()
+                                                                : std::vector<hud::AtlasTileDesc>());
                 hud::apply(owner->overlay(), stats, owner->width(), owner->height());
             } else {
                 hud::hide();
@@ -1004,42 +1029,8 @@ float OgreEngine::fixedFrameDelta() const {
     return float(Ogre::ControllerManager::getSingleton().getFrameDelay());
 }
 
-void OgreEngine::setShadowFilter(ShadowFilter f) {
-    mShadowFilter = f;
-    if (mHlmsRegistered) applyShadowFilter();
-    // else: applied by ensureHlms() once the Hlms exists.
-}
-
-ShadowFilter OgreEngine::shadowFilter() const { return mShadowFilter; }
-
-void OgreEngine::setShadowResolution(unsigned pixels) {
-    const unsigned res = std::min(8192u, std::max(256u, pixels));
-    if (res == mShadowResolution) return;
-    mShadowResolution = res;
-    if (!mHlmsRegistered) return;   // first createShadowNode() picks it up
-    JAH_TRY {
-        Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-        std::vector<OgreView *> rebuilt;
-        for (auto &v : mViews)
-            if (v->dropWorkspaceForShadowRebuild()) rebuilt.push_back(v.get());
-        // The planar-reflection arm instantiates the HALF-resolution shadow node
-        // in each of its private workspaces, so it holds the same kind of
-        // reference a view's workspace does and must be dropped for the same
-        // reason. Scenes whose reflections do not use shadows report false.
-        std::vector<OgreScene *> planarRebuilt;
-        for (auto &s : mScenes)
-            if (s->dropPlanarForShadowRebuild()) planarRebuilt.push_back(s.get());
-        if (cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
-            cm->removeShadowNodeDefinition(OgreView::kShadowNodeName);
-        if (cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
-            cm->removeShadowNodeDefinition(OgreView::kReflectShadowNodeName);
-        createShadowNode();
-        for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
-        for (OgreScene *s : planarRebuilt) s->recreatePlanarAfterShadowRebuild();
-    } JAH_CATCH(mLastError, );
-}
-
-unsigned OgreEngine::shadowResolution() const { return mShadowResolution; }
+// Shadow filter and resolution (and the atlas rebuild they trigger) live in
+// OgreShadow.cpp, beside the definition builder they drive.
 
 void OgreEngine::setShadowMeshOptimization(bool on) { Ogre::Mesh::msOptimizeForShadowMapping = on; }
 bool OgreEngine::shadowMeshOptimization() const { return Ogre::Mesh::msOptimizeForShadowMapping; }
@@ -1302,6 +1293,9 @@ void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
 }
 
 OgreEngine::~OgreEngine() {
+    // The shadow-pass counter is a listener on a live workspace: unhook it
+    // before anything that owns a workspace starts dying.
+    detachShadowCounter();
     // Save the shader cache FIRST, while every Ogre singleton the three layers
     // read is still alive and before a single view or scene has been torn down.
     // This is the primary save point (SHADER_CACHE_SPEC §4.4): a clean quit is
@@ -1652,87 +1646,22 @@ void OgreEngine::registerCommonMaterials() {
 void OgreEngine::createShadowNode() {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     if (!cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
-        buildShadowNode(OgreView::kShadowNodeName, mShadowResolution);
+        buildShadowNode(OgreView::kShadowNodeName, mShadowResolution, mShadowMapCount,
+                        mShadowPerMapClears);
     // The planar-reflection pass's own atlas, at HALF resolution. Definitions
     // are free — the VRAM is only allocated where a workspace instantiates one,
     // which for reflections is one atlas PER BUDGET SLOT. At the default 2048 a
     // shared full-resolution node would cost ~56 MB per slot; half is ~14 MB,
     // and nobody has ever measured shadow-map resolution inside a mirror.
-    if (!cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
-        buildShadowNode(OgreView::kReflectShadowNodeName, std::max(256u, mShadowResolution / 2u));
-}
-
-void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution) {
-    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-    // The whole atlas derives from one base size (Engine::setShadowResolution):
-    // PSSM split 0 and the two focused maps at R, further splits at R/2 —
-    // exactly the historical 2048/1024 layout, scaled.
-    const Ogre::uint32 R = baseResolution;
-    const Ogre::uint32 H = std::max(128u, R / 2u);
-    Ogre::ShadowNodeHelper::ShadowParamVec params;
-    Ogre::ShadowNodeHelper::ShadowParam p;
-    memset(&p, 0, sizeof(p));
-    p.technique = Ogre::SHADOWMAP_PSSM;
-    p.numPssmSplits = 3u;
-    p.resolution[0].x = R; p.resolution[0].y = R;
-    for (size_t i = 1u; i < 4u; ++i) { p.resolution[i].x = H; p.resolution[i].y = H; }
-    p.atlasStart[0].x = 0u; p.atlasStart[0].y = 0u;
-    p.atlasStart[1].x = 0u; p.atlasStart[1].y = R;
-    p.atlasStart[2].x = H;  p.atlasStart[2].y = R;
-    p.supportedLightTypes = 0u;
-    p.addLightType(Ogre::Light::LT_DIRECTIONAL);
-    params.push_back(p);
-    // Two focused maps for point/spot lights (dual-paraboloid for point). Needs
-    // the 'Ogre/DPSM/CubeToDpsm' material from the staged common scripts.
-    p.technique = Ogre::SHADOWMAP_FOCUSED;
-    p.resolution[0].x = R; p.resolution[0].y = R;
-    p.atlasStart[0].x = 0u; p.atlasStart[0].y = R + H;
-    p.supportedLightTypes = 0u;
-    p.addLightType(Ogre::Light::LT_POINT);
-    p.addLightType(Ogre::Light::LT_SPOTLIGHT);
-    params.push_back(p);
-    p.atlasStart[0].y = R + H + R;
-    params.push_back(p);
-    // SHADOW HYGIENE (LIGHTING_FIX fix 6 / F-D1, F-D2). Two arguments, both
-    // defaulted by upstream to values that are wrong for an EDITOR:
     //
-    //  * visibilityMask = kVisibleBit. The default is
-    //    RESERVED_VISIBILITY_FLAGS, i.e. everything — so the ground grid, the
-    //    light range wires, the light icons and every other editor helper were
-    //    rendered into the shadow atlas and cast shadows on the scene. Worse
-    //    than the wasted draws: helpers are part of
-    //    `getCurrentCastersBox()`, so a range wire 100 units across inflated
-    //    the caster AABB the PSSM setup fits its splits to, and every shadow in
-    //    the scene lost resolution to empty air. Helpers carry kHelperBit
-    //    INSTEAD OF kVisibleBit (see the visibility-bit block at the top of
-    //    EnginePrivate.h), so naming kVisibleBit here removes them from the
-    //    atlas and from the caster box in one argument — which is also why
-    //    "nudge a light and the whole world re-fits its shadows" stops
-    //    happening.
-    //  * numStableSplits = 2. Upstream's default of 0 recomputes both split
-    //    distances from the caster box every frame, so a caster entering or
-    //    leaving the view re-quantises the shadow map and the visible edges
-    //    crawl. Two stable splits pin the near ones — the ones a user is
-    //    looking at — and leave the far split free to follow the scene.
-    Ogre::ShadowNodeHelper::createShadowNodeWithSettings(
-        cm, mRoot->getRenderSystem()->getCapabilities(), name, params,
-        false /*useEsm*/, 1024u /*pointLightCubemapResolution*/,
-        0.95f /*pssmLambda*/, 1.0f /*splitPadding*/, 0.125f /*splitBlend*/,
-        0.313f /*splitFade*/, 2u /*numStableSplits*/, kVisibleBit /*visibilityMask*/);
-}
-
-void OgreEngine::applyShadowFilter() {
-    JAH_TRY {
-        auto *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-        if (!pbs) return;
-        Ogre::HlmsPbs::ShadowFilter f = Ogre::HlmsPbs::PCF_4x4;
-        switch (mShadowFilter) {
-        case ShadowFilter::Hard:     f = Ogre::HlmsPbs::PCF_2x2; break;
-        case ShadowFilter::Soft:     f = Ogre::HlmsPbs::PCF_4x4; break;
-        case ShadowFilter::VerySoft: f = Ogre::HlmsPbs::PCF_6x6; break;
-        }
-        pbs->setShadowSettings(f);
-    } JAH_CATCH(mLastError, );
+    // It keeps TWO focused maps whatever the main atlas grew to: a reflection
+    // is a secondary picture, and the count is what costs passes.
+    //
+    // ...and it never needs per-map clears: a reflection's shadow maps are all
+    // dynamic (fixed-light assignments are applied to the VIEW workspaces only).
+    if (!cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
+        buildShadowNode(OgreView::kReflectShadowNodeName,
+                        std::max(256u, mShadowResolution / 2u), 2u, false);
 }
 
 }  // namespace detail

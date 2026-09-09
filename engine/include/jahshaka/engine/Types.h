@@ -498,6 +498,22 @@ struct LightDesc {
     /// higher concentrates the light towards the core.
     float     spotFalloff = 1.0f;
     bool      castShadows = true;          // ignored for Area (backend cannot shadow them)
+    /// STATIC SHADOW MAP (SPECS/SHADOW_TOOLING_SPEC.md §4.3): render this
+    /// light's shadow map ONCE and keep it until something invalidates it,
+    /// instead of re-rendering it every frame. For a point light that is six
+    /// cube-face passes plus a copy saved per frame — the single biggest
+    /// shadow saving available for a lamp that does not move.
+    ///
+    /// The engine invalidates it on its own when the light moves or any of its
+    /// parameters change; the HOST must call Scene::dirtyStaticShadows()
+    /// whenever the geometry the light sees moves, is attached or is removed
+    /// (SceneMirror does). Engine::refreshShadows() re-renders every static map
+    /// once, for the "I do not know what changed" case.
+    ///
+    /// IGNORED for directional lights (PSSM follows the camera) and for area
+    /// lights (which never cast). Ignored, not refused: a host that stores the
+    /// flag per light must not lose it when a light's type changes.
+    bool      shadowStatic = false;
     // Area lights only: a rectangle spanning the node's local X (width) and
     // Z (height), emitting down -Y like every other light type here.
     float     rectWidth = 1.0f;
@@ -1626,6 +1642,62 @@ struct RenderStats {
     unsigned           forwardPlusOverBudget = 0;
 };
 
+/// One SHADOW-MAP SLOT, as the renderer currently holds it
+/// (`world.shadowStatus()`). A slot is a LIGHT's place in the atlas, not a
+/// texture rectangle: slot 0 is the directional light and owns all three PSSM
+/// splits, and slots 1..N are the focused point/spot maps, one light each.
+/// That is Ogre's own bookkeeping (CompositorShadowNode::getShadowCastingLights
+/// is indexed by light, not by map), and reporting anything else here would
+/// mean inventing a second numbering the engine does not use.
+struct ShadowMapInfo {
+    unsigned slot = 0;        ///< 0 = the directional/PSSM slot, 1..N the focused maps
+    NodeId   node = 0;        ///< the light occupying it, 0 when the slot is empty or foreign
+    bool     isStatic = false;///< tied to that light with a static map (LightDesc::shadowStatic)
+    bool     dirty = false;   ///< a static map scheduled to re-render on the next frame
+    bool     pssm = false;    ///< the directional slot (three splits) rather than a focused map
+};
+
+/// WHAT THE SHADOW ATLAS ACTUALLY IS, as opposed to what was asked for
+/// (SPECS/SHADOW_TOOLING_SPEC.md §7) — the shape `GiStatus` established: a
+/// readback of what the renderer ACHIEVED, cheap enough to poll, and the only
+/// way anything (a panel, a test, a script) can tell "this light has no shadow
+/// map" from "this light casts no shadow".
+///
+/// PROCESS-WIDE, like the resolution and the filter: there is one atlas.
+struct ShadowStatus {
+    /// False when there is no atlas to describe — a headless engine, or before
+    /// the first view exists. Every number below is then zero.
+    bool     live = false;
+    unsigned resolution = 0;     ///< the base size the layout derives from
+    unsigned maps = 0;           ///< TEXTURE rectangles in the atlas: pssmSplits + focusedMaps
+    unsigned pssmSplits = 0;     ///< always 3 here: one directional light, three splits
+    unsigned focusedMaps = 0;    ///< point/spot maps the atlas has room for
+    /// LIGHT slots — 1 (the directional/PSSM set) + focusedMaps, and the length
+    /// of `mapped`. Not the same number as `maps`: three of the rectangles
+    /// belong to one light.
+    unsigned lightSlots = 0;
+    /// Shadow-casting point/spot lights in the scenes being drawn — the demand
+    /// the count is derived from. `casters > focusedMaps` is the exceeded case.
+    unsigned casters = 0;
+    unsigned budget = 0;         ///< the EFFECTIVE ceiling (resolution-capped)
+    unsigned requestedBudget = 0;///< what the host asked for before the cap
+    unsigned atlasWidth = 0, atlasHeight = 0;
+    /// The atlas texture's own bytes (D32). NOT included: the point-light cube
+    /// scratch (1024^2 x 6 R32F + depth, ~48 MB), which is allocated once for
+    /// any point caster and does not grow with the map count.
+    unsigned long long atlasBytes = 0;
+    /// Every light SLOT the live shadow node holds, in slot order.
+    std::vector<ShadowMapInfo> mapped;
+    /// Shadow-casting point/spot lights with NO map this frame — the lights
+    /// whose shadows are silently missing. Empty is the healthy state.
+    std::vector<NodeId> unmapped;
+    /// Shadow-node passes the last frame executed, and how many of those were a
+    /// static map re-rendering. A static map that never dirties contributes
+    /// zero: that is what "renders once" means, measurably.
+    unsigned shadowPassesLastFrame = 0;
+    unsigned staticMapRendersLastFrame = 0;
+};
+
 /// A CENSUS of everything alive behind the boundary (fps audit F11).
 /// A POD, exactly like RenderStats — `app.engineObjects()` is this struct.
 ///
@@ -1760,14 +1832,26 @@ struct ViewOverlayDesc {
     /// PostFxDesc::allowOffscreen. Only the engine suite sets it.
     bool allowOffscreen = false;
 
+    /// THE SHADOW-ATLAS INSPECTOR (SPECS/SHADOW_TOOLING_SPEC.md §4.4): a strip
+    /// of thumbnails along the bottom of the view, one per shadow map, showing
+    /// what the renderer actually rasterised into each rectangle of the atlas,
+    /// captioned with the light it belongs to and whether its map is static.
+    ///
+    /// A DIAGNOSTIC, not a feature: never persisted, off in every offscreen
+    /// view unless allowOffscreen, and process-wide like the rest of this HUD —
+    /// it shows the atlas the PRIMARY view rendered, so a second on-screen view
+    /// displays the same tiles.
+    bool shadowAtlas = false;
+
     /// True when this desc asks for anything to be drawn at all.
-    bool anything() const { return stats || cover != Cover::None; }
+    bool anything() const { return stats || shadowAtlas || cover != Cover::None; }
 
     bool operator==(const ViewOverlayDesc &o) const {
         return stats == o.stats && corner == o.corner && scale == o.scale &&
                colour == o.colour && lines == o.lines && cover == o.cover &&
                coverTitle == o.coverTitle && coverSubtitle == o.coverSubtitle &&
-               coverFill == o.coverFill && allowOffscreen == o.allowOffscreen;
+               coverFill == o.coverFill && allowOffscreen == o.allowOffscreen &&
+               shadowAtlas == o.shadowAtlas;
     }
     bool operator!=(const ViewOverlayDesc &o) const { return !(*this == o); }
 };

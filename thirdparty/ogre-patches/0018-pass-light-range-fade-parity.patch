@@ -1,0 +1,83 @@
+diff --git a/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp b/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
+index d9d50fbf4..a2c267e31 100644
+--- a/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
++++ b/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
+@@ -2592,7 +2592,13 @@ namespace Ogre
+                     *light0BufferPtr++ = attenRange;
+                     *light0BufferPtr++ = attenLinear;
+                     *light0BufferPtr++ = attenQuadratic;
+-                    ++light0BufferPtr;
++                    // Jahshaka patch 0018: .w = 1 / range, exactly as
++                    // ForwardPlusBase::collectLights
++                    // writes it (OgreForwardPlusBase.cpp), so pass-buffer lights
++                    // can apply the same range fade the Forward+ ones do and a
++                    // light does not change brightness when it wins a shadow map.
++                    // It was padding before; nothing else reads light0Buf's .w.
++                    *light0BufferPtr++ = attenRange > Real( 0.0 ) ? 1.0f / attenRange : 0.0f;
+ 
+                     const uint16 lightProfileIdx = light->getLightProfileIdx();
+ 
+diff --git a/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any
+index 3d32eaf30..34902ba0f 100644
+--- a/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Main/500.Structs_piece_vs_piece_ps.any
+@@ -22,7 +22,14 @@ struct Light
+ 	float4 diffuse;		//.w contains numNonCasterDirectionalLights
+ 	float3 specular;
+ @property( hlms_num_shadow_map_lights )
+-	float3 attenuation;
++	// Jahshaka patch 0018: was float3. The 4th float was ALWAYS there --
++	// a vec3 occupies 16 bytes in std140, in an HLSL cbuffer and in Metal,
++	// which is why HlmsPbs::preparePassBuffer has always written a padding
++	// float after the quadratic term. It now writes 1 / range there (the
++	// same value ForwardPlusBase writes into its own light buffer), so the
++	// pass lights can apply the same range fade Forward+ applies. Naming
++	// the component changes no layout.
++	float4 attenuation;	//.w contains 1 / attenuation range
+ 	//Spotlights:
+ 	//  spotDirection.xyz is direction
+ 	//  spotParams.xyz contains falloff params
+diff --git a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
+index 48247f1af..af29c3d52 100644
+--- a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
+@@ -553,6 +553,9 @@
+ 							  midf3_c( light0Buf.lights[light_idx].specular ),
+ 							  pixelData PASSBUF_ARG )@insertpiece( DarkenWithShadowPoint_cur_shadow_map );
+ 			midf atten = midf_c( 1.0 / (0.5 + (light0Buf.lights[light_idx].attenuation.y + light0Buf.lights[light_idx].attenuation.z * fDistance) * fDistance ) );
++			@property( hlms_forward_fade_attenuation_range )	// Jahshaka patch 0018
++				atten *= midf_c( max( (light0Buf.lights[light_idx].attenuation.x - fDistance) * light0Buf.lights[light_idx].attenuation.w, 0.0f ) );
++			@end
+ 			finalColour += tmpColour * atten;
+ 		}
+ 		cur_shadow_map++;
+@@ -568,6 +571,9 @@
+ 							  midf3_c( light0Buf.lights[@n].specular ),
+ 							  pixelData PASSBUF_ARG )@insertpiece( DarkenWithShadowPoint );
+ 			midf atten = midf_c( 1.0 / (0.5 + (light0Buf.lights[@n].attenuation.y + light0Buf.lights[@n].attenuation.z * fDistance) * fDistance ) );
++			@property( hlms_forward_fade_attenuation_range )	// Jahshaka patch 0018
++				atten *= midf_c( max( (light0Buf.lights[@n].attenuation.x - fDistance) * light0Buf.lights[@n].attenuation.w, 0.0f ) );
++			@end
+ 			finalColour += tmpColour * atten;
+ 		}
+ 	@end
+@@ -603,6 +609,9 @@
+ 							  midf3_c( light0Buf.lights[light_idx].specular ),
+ 							  pixelData PASSBUF_ARG )@insertpiece( DarkenWithShadow_cur_shadow_map );
+ 			midf atten = midf_c( 1.0 / (0.5 + (light0Buf.lights[light_idx].attenuation.y + light0Buf.lights[light_idx].attenuation.z * fDistance) * fDistance ) );
++			@property( hlms_forward_fade_attenuation_range )	// Jahshaka patch 0018
++				atten *= midf_c( max( (light0Buf.lights[light_idx].attenuation.x - fDistance) * light0Buf.lights[light_idx].attenuation.w, 0.0f ) );
++			@end
+ 			finalColour += tmpColour * (atten * spotAtten);
+ 		}
+ 		cur_shadow_map++;
+@@ -637,6 +646,9 @@
+ 							  midf3_c( light0Buf.lights[@n].specular ),
+ 							  pixelData PASSBUF_ARG )@insertpiece( DarkenWithShadow );
+ 			midf atten = midf_c( 1.0 / (0.5 + (light0Buf.lights[@n].attenuation.y + light0Buf.lights[@n].attenuation.z * fDistance) * fDistance ) );
++			@property( hlms_forward_fade_attenuation_range )	// Jahshaka patch 0018
++				atten *= midf_c( max( (light0Buf.lights[@n].attenuation.x - fDistance) * light0Buf.lights[@n].attenuation.w, 0.0f ) );
++			@end
+ 			finalColour += tmpColour * (atten * spotAtten);
+ 		}
+ 	@end

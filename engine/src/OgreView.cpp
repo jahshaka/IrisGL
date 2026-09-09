@@ -760,6 +760,15 @@ void OgreView::recreateWorkspaceAfterShadowRebuild() {
     attachWorkspace();
 }
 
+// The LIVE shadow node this view's workspace instantiated. `findShadowNode`
+// does not create one (unlike findOrCreateShadowNode), so a view whose chain
+// carries no shadow node — shadows off, or a chain phase that never names it —
+// answers null instead of allocating an atlas.
+Ogre::CompositorShadowNode *OgreView::shadowNodeInstance() const {
+    if (!mWorkspace || !mShadows) return nullptr;
+    return mWorkspace->findShadowNode(Ogre::IdString(kShadowNodeName));
+}
+
 bool OgreView::isEnabled() const { return mEnabled; }
 
 // The ACHIEVED size, exactly like sampleCount() reports the achieved sample

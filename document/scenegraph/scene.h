@@ -298,6 +298,11 @@ public:
     /// still be one re-solve, and because a bool would need a clearer — which is
     /// the mirror's job, not the caller's.
     quint64 giRefreshSerial = 0;
+    /// The SAME shape for static shadow maps (SHADOW_TOOLING_SPEC.md §4.3):
+    /// monotonic, never serialized, bumped by world.refreshShadows(). The
+    /// mirror compares it against the value it last acted on and asks the
+    /// renderer to re-render every static shadow map once per bump.
+    quint64 shadowRefreshSerial = 0;
 
     // anti-aliasing: MSAA sample count for the scene's viewport — 1 (off), 2, 4
     // or 8 (rendered by the engine viewport only; the driver may clamp).
@@ -318,6 +323,19 @@ public:
     // own. -1 = Auto (derive from the lights, the historical behaviour);
     // 0 = Hard (PCF 2x2), 1 = Soft (4x4), 2 = VerySoft (6x6).
     int shadowFilterTier;
+
+    // HOW MANY POINT/SPOT LIGHTS MAY HOLD A SHADOW MAP AT ONCE
+    // (SPECS/SHADOW_TOOLING_SPEC.md §4.1). The renderer's atlas has room for a
+    // fixed number of focused maps and Ogre fills them with the casters closest
+    // to the camera, dropping the rest SILENTLY — which is why a scene with
+    // three shadow-casting lamps used to show two shadows, and which two
+    // changed as the camera moved.
+    //
+    // This is the CEILING the engine may grow to, not an allocation: the engine
+    // counts the scene's casters and steps the count {2, 4, 8, 16} up to this
+    // value. 0 = Auto, i.e. follow the World Mode tier's row, exactly as
+    // shadowResolution's 0 does.
+    int shadowMapBudget;
 
     // Particle simulation clock (PARTICLES_FX2_SPEC.md §10.3). 1 = real time,
     // 0 = frozen, 2 = double speed. The DOCUMENT owns the clock and the ENGINE

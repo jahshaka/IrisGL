@@ -151,13 +151,16 @@ quint64 worldTrsSignatureMemo(iris::graph::NodeHandle h,
     return sig;
 }
 
+}   // namespace
+
 /// Field equality for LightDesc, so the mirror can push it on change only.
 /// Spelled out rather than hashed: the struct holds two std::strings, it is
 /// compared once per light per frame (not once per node), and an exact compare
 /// has no collision story to tell. Every field setLight reads is here — add a
 /// field to LightDesc and this must grow with it, or the new field silently
-/// stops reaching the engine after the first push.
-bool sameLight(const LightDesc &a, const LightDesc &b)
+/// stops reaching the engine after the first push (which is what the mirror
+/// suite pins).
+bool SceneMirror::sameLight(const LightDesc &a, const LightDesc &b)
 {
     return a.type == b.type &&
            a.colour.r == b.colour.r && a.colour.g == b.colour.g &&
@@ -165,12 +168,11 @@ bool sameLight(const LightDesc &a, const LightDesc &b)
            a.intensity == b.intensity && a.range == b.range &&
            a.spotAngleDegrees == b.spotAngleDegrees && a.spotSoftness == b.spotSoftness &&
            a.spotFalloff == b.spotFalloff &&
-           a.castShadows == b.castShadows &&
+           a.castShadows == b.castShadows && a.shadowStatic == b.shadowStatic &&
            a.rectWidth == b.rectWidth && a.rectHeight == b.rectHeight &&
            a.doubleSided == b.doubleSided && a.accurate == b.accurate &&
            a.iesProfilePath == b.iesProfilePath && a.texturePath == b.texturePath &&
            a.lightMask == b.lightMask;
-}
 }
 
 SceneMirror::SceneMirror(Scene *target) : mTarget(target)
@@ -356,6 +358,25 @@ int SceneMirror::sync()
     // Per-material work is memoised for the duration of this walk (see
     // MaterialSync): every mesh node sharing a material used to pay for it.
     mMaterialSync.clear();
+    // STATIC SHADOW MAPS, rule 3 (SHADOW_TOOLING_SPEC.md §4.3): "a caster
+    // moved". The renderer cannot see it — the document writes transforms
+    // straight into the shared scene graph — so the mirror watches the graph's
+    // own transform-write counter and tells the engine when ANY transform in
+    // the process changed since the last sync. One relaxed atomic load a frame.
+    //
+    // COARSE ON PURPOSE (v1): any write dirties every static map in the scene,
+    // including a write to a helper wire or to a node the light cannot see. The
+    // per-light range test is the recorded follow-up; being wrong here costs a
+    // re-render, never a wrong picture. It does mean an ANIMATION or a physics
+    // sim makes static maps cost exactly what dynamic ones cost — which is the
+    // honest answer, since in those frames the shadows really are moving.
+    if (mTarget) {
+        const quint64 writes = quint64(iris::graph::transformWrites());
+        if (writes != mLastTransformWrites) {
+            mLastTransformWrites = writes;
+            mTarget->dirtyStaticShadows();
+        }
+    }
     mAnyShadowCaster = false;
     mAnyRefractive = false;
     mShadowFilter = ShadowFilter::Hard;
@@ -2157,6 +2178,11 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&
                     light->shadowMap && light->shadowMap->shadowType != iris::ShadowMapType::None;
+    // Static shadow map (SHADOW_TOOLING_SPEC.md §4.3). Pushed for every light
+    // type — the engine decides that it means nothing for directional and area
+    // lights, and a mirror that filtered it here would make the document field
+    // and the engine's view of it disagree for no gain.
+    d.shadowStatic = light->shadowMap && light->shadowMap->staticMap;
     // LIGHTING CHANNELS, light side. The document field is on SceneNode (one
     // field, one meaning, both ends of the test) — the light's copy says which
     // channels it illuminates.
@@ -3056,6 +3082,25 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                                     : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
         if (wanted > 0 && engine->shadowResolution() != wanted)
             engine->setShadowResolution(wanted);
+        // Shadow-map BUDGET (SHADOW_TOOLING_SPEC.md §4.1). Unlike the size,
+        // there is nothing to derive from the lights here: the engine does that
+        // itself, per frame, from the light list it is about to draw. This
+        // pushes the CEILING only — the World Mode's tier value, or whatever
+        // the scene pinned. 0 (Auto with no tier resolved) leaves the engine's
+        // own default alone.
+        // world.refreshShadows(): one re-render of every static shadow map per
+        // bump, the giRefreshSerial shape exactly (a serial, not a bool: two
+        // refreshes in one frame are still one re-render, and clearing is the
+        // mirror's job rather than the caller's).
+        if (mSource->shadowRefreshSerial != mShadowRefreshSerialSeen) {
+            mShadowRefreshSerialSeen = mSource->shadowRefreshSerial;
+            engine->refreshShadows();
+        }
+        const unsigned budget = mSource->shadowMapBudget > 0
+                                    ? unsigned(qBound(2, mSource->shadowMapBudget, 16))
+                                    : 0u;
+        if (budget > 0 && engine->shadowMapBudget() != budget)
+            engine->setShadowMapBudget(budget);
     }
     // Ambient. Historically the flat World-panel colour, twice (the engine
     // viewport used to hardcode the hemisphere — the panel no-op'd). With a sky

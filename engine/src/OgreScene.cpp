@@ -304,6 +304,8 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             n.lightNode->setOrientation(Ogre::Quaternion(Ogre::Radian(-Ogre::Math::HALF_PI), Ogre::Vector3::UNIT_X));
             n.light = mSceneMgr->createLight();
             n.lightNode->attachObject(n.light);
+            if (std::find(mLightNodes.begin(), mLightNodes.end(), id) == mLightNodes.end())
+                mLightNodes.push_back(id);   // the light index (see EnginePrivate.h)
         }
         Ogre::Light *L = n.light;
         switch (d.type) {
@@ -446,6 +448,14 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
                 n.lightMaskPath = wantMask;
             }
         }
+        // STATIC SHADOW MAPS (SHADOW_TOOLING_SPEC.md §4.3). setLight is called
+        // on CHANGE ONLY by the mirror, so reaching this line at all means one
+        // of this light's parameters moved — which is one of the invalidation
+        // rules. Dirtying the whole scene's static maps is the coarse v1: it
+        // costs a re-render of maps that did not need one, never a wrong
+        // picture.
+        n.lightShadowStatic = d.shadowStatic;
+        dirtyStaticShadows();
         // Lights shine down their node's -Y once attached (document convention).
         return true;
     } JAH_CATCH(mError, false);
@@ -458,17 +468,37 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.light->detachFromParent();
         mSceneMgr->destroyLight(it->second.light);
         it->second.light = nullptr;
+        mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id),
+                          mLightNodes.end());
         // A recreated light starts with no profile and no mask: forget what the
         // dead one carried, or the next setLight would skip re-assigning it.
         it->second.lightProfilePath.clear();
         it->second.lightMaskPath.clear();
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         invalidateGiCaches();   // a vanished light must stop bouncing (VCT re-injects)
+        it->second.lightShadowStatic = false;
+        dirtyStaticShadows();   // its slot goes back to the dynamic sort
         return true;
     } JAH_CATCH(mError, false);
 }
 
 Ogre::SceneManager *OgreScene::sceneManager() const { return mSceneMgr; }
+
+// The light behind a node id, and the id behind a light. The reverse lookup is
+// a linear walk on purpose: it runs once per shadow map per status readback (at
+// most 19 entries), never per frame, and a second index would be one more thing
+// releaseNode has to keep honest.
+Ogre::Light *OgreScene::ogreLight(NodeId node) const {
+    auto it = mNodes.find(node);
+    return it == mNodes.end() ? nullptr : it->second.light;
+}
+
+NodeId OgreScene::nodeOfLight(const Ogre::Light *light) const {
+    if (!light) return 0;
+    for (const auto &entry : mNodes)
+        if (entry.second.light == light) return entry.first;
+    return 0;
+}
 
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
@@ -618,7 +648,10 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
-    if (n.light) { n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr; }
+    if (n.light) {
+        n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr;
+        mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id), mLightNodes.end());
+    }
     if (n.lightNode) { mSceneMgr->destroySceneNode(n.lightNode); n.lightNode = nullptr; }
     // Same for the decal's internal child. Note releaseDecal only tears the
     // objects down; the SceneManager's atlas bindings are refreshed by the
