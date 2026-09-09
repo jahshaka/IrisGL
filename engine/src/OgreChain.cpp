@@ -173,15 +173,33 @@ constexpr const char *kLdr      = "jahLdr";
 constexpr const char *kSmaaEdges = "jahSmaaEdges";
 constexpr const char *kSmaaBlend = "jahSmaaBlend";
 /// THE LOOKS STAGE'S PING-PONG PAIR (POST_LOOKS_SPEC.md §4.2). Two full-res
-/// sRGB targets, the SAME format as kLdr, shared by every look in the stack:
-/// look i reads one and writes the other, and the LAST look writes the window.
+/// targets shared by every look in the stack: look i reads one and writes the
+/// other, and the LAST look writes the window.
 /// kLookB exists only from the second look on — a one-look stack is
 /// kLookA -> window and needs no second buffer.
 ///
-/// sRGB, and it matters: the round trip sRGB-decode-on-sample /
-/// sRGB-encode-on-store is exact for all 256 values (the encode rounds to
-/// nearest, the decode is a table), which is what lets a look at amount 0 be
-/// BYTE-IDENTICAL to no look at all rather than merely close.
+/// PLAIN UNORM, NOT sRGB — and this was MEASURED, not assumed. kLdr next door
+/// IS sRGB, because SMAA wants perceptual space for edge detection, and copying
+/// that choice here was wrong twice over:
+///
+///   1. IT LOST A BIT. The composite quad writes a DISPLAY-REFERRED value into
+///      this buffer; an sRGB attachment encodes it as though it were linear and
+///      the next shader's fetch decodes it back — an 8-bit round trip through a
+///      curve the value was never in. Measured on tests/looks' fixture: 5834 of
+///      16384 pixels came back off by exactly 1/255, so "a look at amount 0 is
+///      byte-identical to no look" failed for EVERY look in the catalogue while
+///      every shader was correct.
+///   2. IT WAS THE WRONG SPACE. These looks run on the TONEMAPPED image and
+///      every one of them says so: Posterize bends gamma about display values,
+///      the Film Grade pivots contrast about 0.5 = mid grey, Desaturate uses
+///      broadcast luma weights. An sRGB attachment hands the shader a
+///      LINEARISED value, where 0.5 is not mid grey at all (it is ~0.74 of the
+///      display range) and every one of those constants means something else.
+///
+/// UNORM is what the composite writes into when there are no looks — the window
+/// and the offscreen RTT are both plain UNORM — so the stage is a lossless
+/// pass-through of exactly the picture the chain already produced.
+
 /// THE OVERLAY PASSES' VISIBILITY MASK (POST_LOOKS_SPEC.md §5.3), and the AND
 /// with RESERVED_VISIBILITY_FLAGS is LOAD-BEARING rather than tidy.
 ///
@@ -824,8 +842,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // The looks stage's ping-pong (POST_LOOKS_SPEC §4.2). Declared BEFORE
         // SMAA's textures purely for reading order; neither depends on the
         // other, and a stack with SMAA off still needs kLookA.
-        addTex(n, kLookA, Ogre::PFG_RGBA8_UNORM_SRGB);
-        if (desc.looks.size() > 1) addTex(n, kLookB, Ogre::PFG_RGBA8_UNORM_SRGB);
+        addTex(n, kLookA, Ogre::PFG_RGBA8_UNORM);
+        if (desc.looks.size() > 1) addTex(n, kLookB, Ogre::PFG_RGBA8_UNORM);
     }
 
     if (desc.smaaPreset >= 0) {
