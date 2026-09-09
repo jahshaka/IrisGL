@@ -1569,6 +1569,29 @@ void OgreEngine::ensureHlms() {
     applyShadowFilter();   // replaces Ogre's PCF_3x3 default with ours (Soft = 4x4)
     if (!pixels) return;   // the rest is rendering-only — see the top of this function
     registerCommonMaterials();
+    // BLUE NOISE FOR ALPHA HASHING (MATERIAL_GAPS_SPEC A-3). The hashing piece
+    // falls back to an ALU white-noise hash unless HlmsManager::mBlueNoise is
+    // set (Hlms/Common/Any/AlphaHashing_piece_ps.any:8-25 picks the branch on
+    // the `hlms_blue_noise` property, which HlmsPbs/HlmsUnlit set from
+    // getBlueNoiseTexture()) — so every hashed surface and every hashed
+    // particle in this tree has been dithering with the worse noise since
+    // hashing existed. Nothing but this call was missing: the PNG it wants is
+    // already staged (media/2.0/scripts/materials/Common/LDR_R_0.png), in a
+    // folder registerCommonMaterials just registered and initialised.
+    //
+    // AFTER registerCommonMaterials, therefore, and not beside registerHlms:
+    // the load is AUTODETECT_RESOURCE_GROUP_NAME, which only finds the file
+    // once its location has been added and the group initialised.
+    //
+    // NON-FATAL by construction, the way the upstream sample writes it: a media
+    // tree without the PNG must degrade to the ALU hash, not refuse to boot.
+    try {
+        mRoot->getHlmsManager()->loadBlueNoise();
+    } catch (Ogre::Exception &e) {
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: blue-noise texture not loaded, alpha hashing falls back to the ALU "
+            "hash: " + e.getFullDescription(), Ogre::LML_CRITICAL);
+    }
     // After the resource groups are initialised (the .fontdef has been parsed by
     // now) and after HlmsUnlit exists (overlay elements bind Unlit datablocks):
     // build the overlay's elements and pay the freetype rasterization once,

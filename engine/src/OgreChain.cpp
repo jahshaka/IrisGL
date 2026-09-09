@@ -1853,8 +1853,19 @@ void destroySsao(Ogre::Root *root) {
     if (!noise || !root) return;
     try {
         if (Ogre::Pass *pass = materialPass("SSAO/HS")) {
-            if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("noiseTexture"))
-                tu->setTexture(nullptr);
+            if (Ogre::TextureUnitState *tu = pass->getTextureUnitState("noiseTexture")) {
+                // UNBIND BY EMPTY NAME, never setTexture(nullptr): that
+                // overload THROWS on a null pointer ("Texture Pointer is
+                // empty.", OgreTextureUnitState.cpp:231) and Ogre's exception
+                // constructor LOGS at LML_CRITICAL before it is thrown. The
+                // catch below swallowed the throw, so the only symptom was an
+                // ItemIdentityException in every shutdown log — three sightings
+                // before anyone read it as ours. setTextureName(BLANKSTRING)
+                // does exactly what was wanted: cleanFramePtrs() removes this
+                // unit from the TextureGpu's listener list and the empty name
+                // returns early with the slot cleared.
+                tu->setTextureName(Ogre::BLANKSTRING);
+            }
         }
     } catch (...) {}
     root->getRenderSystem()->getTextureGpuManager()->destroyTexture(noise);
