@@ -48,6 +48,24 @@ void GraphicsHelper::loadAllMeshesAndAnimationsFromFile(
     }
 }
 
+QMap<QString, SkeletalAnimationPtr> GraphicsHelper::loadAnimationsFromClipFile(const QString &filePath,
+                                                                              QString *error)
+{
+    if (error) error->clear();
+    Assimp::Importer importer;
+    const aiScene *scene =
+        importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::ClipNamesOnly);
+    if (!scene) {
+        if (error) {
+            *error = QString::fromUtf8(importer.GetErrorString());
+            if (error->isEmpty()) *error = QStringLiteral("the file could not be read");
+        }
+        return {};
+    }
+    if (scene->mNumAnimations == 0) return {};
+    return Mesh::extractAnimations(scene, filePath);
+}
+
 QList<MeshPtr> GraphicsHelper::loadAllMeshesFromAssimpScene(const aiScene *scene)
 {
     QList<MeshPtr> meshes;

@@ -86,6 +86,19 @@ public:
 
 
     static QList<MeshPtr> loadAllMeshesFromAssimpScene(const aiScene* scene);
+
+    /**
+     * Reads a file for its animation CLIPS only (ImportFlags::ClipNamesOnly —
+     * no geometry post-processing, the file's unit factor still applied so the
+     * translation keys match a character parsed with the canonical preset).
+     * Returns the clips uniquified the way Mesh::extractAnimations uniquifies
+     * them. An unreadable file returns an empty map and sets *error (never
+     * empty); a readable file with no animation returns an empty map and an
+     * empty *error. Studio's clip readers go through here so that assimp stays
+     * an irisgl-private import dependency.
+     */
+    static QMap<QString, SkeletalAnimationPtr> loadAnimationsFromClipFile(const QString &filePath,
+                                                                          QString *error = nullptr);
 };
 
 }
