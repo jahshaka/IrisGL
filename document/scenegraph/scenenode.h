@@ -277,6 +277,30 @@ public:
     AvatarLocomotion *locomotion() const { return avatarLocomotion.data(); }
     void setLocomotionComponent(const AvatarLocomotionPtr &component);
 
+    // ---- THE AVATAR LINK (AVATAR_ASSET_SPEC §5.4) -------------------------
+    //
+    // Which avatar ASSET this wrapper is an instance of, and WHICH VERSION of
+    // it the instance last resolved. Both are needed: the guid says what to
+    // re-resolve, and the version says whether anything has changed since —
+    // a scene saved against an older version re-resolves on load, and one
+    // already on the project's current pin costs nothing.
+    //
+    // A VALUE member, not a pointer like the two components: it is two short
+    // strings, it has no behaviour to own, and every path that reads it wants
+    // to ask a question rather than run something. An UNLINKED wrapper (an
+    // `avatar.spawn` on a plain Object guid — the scratch-avatar path, D10)
+    // leaves it empty and behaves exactly as it always has.
+    struct AvatarLink
+    {
+        QString asset;     ///< the Avatar asset's guid
+        QString version;   ///< the definition oid this instance last resolved
+        QString name;      ///< the definition's name at that version
+        bool isLinked() const { return !asset.isEmpty(); }
+    };
+    AvatarLink avatarLink;
+
+    bool isLinkedAvatar() const { return avatarLink.isLinked(); }
+
     PhysicsProperty physicsProperty;
 
     bool pickable;
