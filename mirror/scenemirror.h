@@ -856,7 +856,13 @@ private:
     /// END of sync, after removeMissing has dropped the entries of deleted
     /// nodes — the map below is keyed by document node pointer.
     void sweepStaleRiders();
-    /// Takes one rider off its bone (if it is on one) and forgets it.
+    /// Takes EVERY rider off its bone — the document's graph is leaving this
+    /// scene manager (setSource, evacuateEngineObjects), and a node hanging off
+    /// one of its TagPoints would not travel with the tree.
+    void releaseAllRiders();
+    /// Takes one rider off its bone (if it is on one) and forgets it. The pose
+    /// it was last resolved to is baked into its local under its document
+    /// parent, UNLESS the caller has written that local since the last sync.
     void releaseRider(iris::SceneNode *rider);
     /// What the engine was last asked for, per rider — so an unchanged socket
     /// costs one comparison and no engine call.
@@ -864,6 +870,33 @@ private:
         jahshaka::engine::NodeId owner = 0;
         QString bone;
         quint64 offsetKey = 0;
+        /// THE AUTHORED LOCAL, kept across a spell on the fallback path.
+        ///
+        /// With no engine rig to hang a tag on, a rider is driven the old way:
+        /// its WORLD transform is written every sync. That write lands in the
+        /// very field D4 gave a new meaning to — the rider's local, which is now
+        /// its offset FROM the socket — so a rider that spent one sync on the
+        /// fallback (every socketed node does, between the document attaching it
+        /// and the walk rigging its owner) would come out of it carrying a world
+        /// transform as its socket offset, and ride two units above the bone
+        /// forever. The authored value is snapshotted on the way in and restored
+        /// when the tag arms.
+        bool fallbackDriven = false;
+        iris::Vec3 authoredPos;
+        iris::Quat authoredRot;
+        iris::Vec3 authoredScale{1, 1, 1};
+        /// The rider's local TRS as of the last sync that looked at it. What it
+        /// is FOR: when the attachment goes away, the rider "keeps the pose it
+        /// was last resolved to" — so its world transform is baked into its new
+        /// local under its document parent. But a caller that detaches and then
+        /// PLACES the node ("detach is also how you put something where a bone
+        /// was, and then move it") writes its local before the next sync, and
+        /// baking the old world over that write would silently lose it. So the
+        /// bake happens only when the local is still the one the mirror last
+        /// saw: an explicit write wins.
+        iris::Vec3 lastLocalPos;
+        iris::Quat lastLocalRot;
+        iris::Vec3 lastLocalScale{1, 1, 1};
     };
     QHash<const iris::SceneNode *, RiderState> mBoneRiders;
     /// The riders the reconciler saw this sync — what the end-of-sync sweep

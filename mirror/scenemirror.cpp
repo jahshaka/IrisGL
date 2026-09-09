@@ -211,7 +211,14 @@ SceneMirror::~SceneMirror()
 void SceneMirror::setSource(iris::ScenePtr scene)
 {
     mCharacterRigs.clear();
-    mBoneRiders.clear();
+    // THE RIDERS COME OFF THEIR BONES FIRST, and this is not tidiness: a rider's
+    // Ogre parent is a TagPoint of THIS engine scene, so a rider left on one is
+    // not a child of anything the DOCUMENT tree contains — and the unbinding
+    // below walks that tree to take the document out of the engine's scene
+    // manager. A rider skipped there is a node left behind in a scene manager
+    // the caller is about to destroy, and the document node holding its handle
+    // faults at its own destruction (found by sockets.render's teardown).
+    releaseAllRiders();
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
     // The outgoing document leaves the engine's scene manager before anything
@@ -287,6 +294,10 @@ void SceneMirror::setSource(iris::ScenePtr scene)
 
 void SceneMirror::evacuateEngineObjects()
 {
+    // Same reason as in setSource: the document's graph is about to migrate out
+    // of this scene manager, and a rider hanging off one of its TagPoints would
+    // not travel with it.
+    releaseAllRiders();
     // The document's graph is about to migrate out of our manager: everything
     // we attached to its nodes must go first, while those nodes still exist.
     // (The 2026-09-05 player→editor faults: particle systems and the planar
@@ -3241,6 +3252,16 @@ int SceneMirror::reconcileSockets()
                     ++mSocketDangling;
                     continue;
                 }
+                // The write below lands in the rider's LOCAL, which since D4 is
+                // its offset from the socket — so the authored value is kept
+                // first and restored the moment a tag can be armed.
+                RiderState &st = mBoneRiders[rider];
+                if (!st.fallbackDriven) {
+                    st.fallbackDriven = true;
+                    st.authoredPos = rider->getLocalPos();
+                    st.authoredRot = rider->getLocalRot();
+                    st.authoredScale = rider->getLocalScale();
+                }
                 rider->setGlobalTransform(world);
                 rider->update(0.0f);
                 ++riding;
@@ -3286,6 +3307,18 @@ int SceneMirror::reconcileSockets()
                 state.owner = ownerId;
                 state.bone = socket->boneName;
                 state.offsetKey = key;
+                // Out of the fallback: the world transform the fallback wrote
+                // into this node's local is not a socket offset, and the tag
+                // would ride it. The authored local goes back.
+                if (state.fallbackDriven) {
+                    state.fallbackDriven = false;
+                    rider->setLocalPos(state.authoredPos);
+                    rider->setLocalRot(state.authoredRot);
+                    rider->setLocalScale(state.authoredScale);
+                }
+                state.lastLocalPos = rider->getLocalPos();
+                state.lastLocalRot = rider->getLocalRot();
+                state.lastLocalScale = rider->getLocalScale();
             } else if (state.offsetKey != key) {
                 mTarget->setBoneAttachmentOffset(riderId, toVec3(socket->position),
                                                  toQuat(socket->rotation), toVec3(socket->scale));
@@ -3293,6 +3326,11 @@ int SceneMirror::reconcileSockets()
                 state.owner = ownerId;
                 state.bone = socket->boneName;
             }
+            // What the rider's local is, as of this sync — the reference the
+            // release compares against (see RiderState::lastLocal*).
+            state.lastLocalPos = rider->getLocalPos();
+            state.lastLocalRot = rider->getLocalRot();
+            state.lastLocalScale = rider->getLocalScale();
             ++riding;
         }
     }
@@ -3300,6 +3338,16 @@ int SceneMirror::reconcileSockets()
     // The stale half is NOT done here — see sweepStaleRiders, which runs at the
     // END of sync for a reason that cost a SEGV to find.
     return riding;
+}
+
+void SceneMirror::releaseAllRiders()
+{
+    if (!mTarget || mBoneRiders.isEmpty()) return;
+    const QList<const iris::SceneNode *> riders = mBoneRiders.keys();
+    for (const iris::SceneNode *rider : riders)
+        releaseRider(const_cast<iris::SceneNode *>(rider));   // reads the row, then removes it
+    mBoneRiders.clear();
+    mRidersSeen.clear();
 }
 
 void SceneMirror::sweepStaleRiders()
@@ -3317,24 +3365,53 @@ void SceneMirror::sweepStaleRiders()
     // after a socketed prop was deleted, which is exactly the crash the
     // "rider deleted mid-ride" case in sockets.tags reproduces.
     if (!mTarget || mBoneRiders.isEmpty()) return;
-    for (auto it = mBoneRiders.begin(); it != mBoneRiders.end();) {
-        if (mRidersSeen.contains(it.key())) { ++it; continue; }
-        iris::SceneNode *rider = const_cast<iris::SceneNode *>(it.key());
-        it = mBoneRiders.erase(it);
-        releaseRider(rider);
-    }
+    // COLLECT FIRST, RELEASE AFTER: releaseRider READS this rider's record (the
+    // local TRS the mirror last saw, which is how "the caller placed it since"
+    // is decided) and removes it itself. Erasing the row here first threw that
+    // record away and made every release look like "nothing was written", which
+    // silently overwrote a transform the caller had just set.
+    QVector<iris::SceneNode *> stale;
+    for (auto it = mBoneRiders.constBegin(); it != mBoneRiders.constEnd(); ++it)
+        if (!mRidersSeen.contains(it.key())) stale.append(const_cast<iris::SceneNode *>(it.key()));
+    for (iris::SceneNode *rider : stale) releaseRider(rider);
 }
 
 void SceneMirror::releaseRider(iris::SceneNode *rider)
 {
     if (!rider || !mTarget) return;
+    const iris::SceneNodePtr parent = rider->getParent();
+
+    // DID THE CALLER PLACE IT since the last sync? "Detaching is also how you
+    // put something where a bone was" — and then move it — so an explicit write
+    // wins over the pose-keeping bake below. Captured BEFORE anything touches
+    // the node: the engine's own detach re-expresses the local so that the world
+    // is preserved, which would overwrite exactly the write being looked for.
+    const iris::Vec3 callerPos = rider->getLocalPos(), callerScale = rider->getLocalScale();
+    const iris::Quat callerRot = rider->getLocalRot();
+    bool placedByCaller = false;
+    {
+        const auto st = mBoneRiders.constFind(rider);
+        if (st != mBoneRiders.constEnd()) {
+            const auto differs = [](float a, float b) { return std::fabs(double(a) - double(b)) > 1e-5; };
+            placedByCaller =
+                differs(callerPos.x(), st->lastLocalPos.x()) ||
+                differs(callerPos.y(), st->lastLocalPos.y()) ||
+                differs(callerPos.z(), st->lastLocalPos.z()) ||
+                differs(callerScale.x(), st->lastLocalScale.x()) ||
+                differs(callerScale.y(), st->lastLocalScale.y()) ||
+                differs(callerScale.z(), st->lastLocalScale.z()) ||
+                differs(callerRot.x(), st->lastLocalRot.x()) ||
+                differs(callerRot.y(), st->lastLocalRot.y()) ||
+                differs(callerRot.z(), st->lastLocalRot.z()) ||
+                differs(callerRot.scalar(), st->lastLocalRot.scalar());
+        }
+    }
+
     const auto entry = mEntries.constFind(rider);
     if (entry != mEntries.constEnd() && entry->node) {
-        // Back under the DOCUMENT parent's engine node when there is one; the
-        // engine falls back to the scene root, which is where a rider whose
-        // parent is the document root belongs anyway.
+        // Off the bone: the engine re-homes the node under whatever parent it
+        // can name and re-expresses the pose it last rendered with.
         jahshaka::engine::NodeId parentId = 0;
-        const iris::SceneNodePtr parent = rider->getParent();
         if (!parent.isNull()) {
             const auto pe = mEntries.constFind(parent.data());
             if (pe != mEntries.constEnd()) parentId = pe->node;
@@ -3343,6 +3420,27 @@ void SceneMirror::releaseRider(iris::SceneNode *rider)
     }
     iris::graph::clearSocketRider(rider->graphNode());
     mBoneRiders.remove(rider);
+
+    // ...AND BACK INTO THE DOCUMENT TREE, in Ogre's hierarchy and not only in
+    // the shadow bookkeeping. The engine can only re-home the node under a node
+    // it has an id for, and the document's ROOT is not mirrored (the walk starts
+    // at its children) — so a rider whose parent is the root would be left as a
+    // sibling of the document tree instead of inside it. That is invisible until
+    // the document MIGRATES (a mirror unbinding, an editor/player swap), which
+    // walks the tree from its root: the stray node stays behind in a scene
+    // manager the caller is about to destroy, and the document node holding its
+    // handle faults at its own destruction. sockets.render's teardown found it.
+    const iris::Mat4 world = rider->getGlobalTransform();
+    if (!parent.isNull() && rider->graphNode() && parent->graphNode() &&
+        iris::graph::parentOf(rider->graphNode()) != parent->graphNode())
+        iris::graph::attach(parent->graphNode(), rider->graphNode(), -1);
+    if (placedByCaller) {
+        rider->setLocalPos(callerPos);
+        rider->setLocalRot(callerRot);
+        rider->setLocalScale(callerScale);
+    } else {
+        rider->setGlobalTransform(world);   // "it keeps the pose it was last resolved to"
+    }
 }
 
 namespace {
