@@ -26,9 +26,13 @@
 //     registerCommonMaterials stages on every pixels-path engine.
 //
 // The shadowed variant is the JahshakaPcc P3b shape: chosen only when the
-// scene's shadow node exists (OgreGi.cpp checks hasShadowNodeDefinition before
+// PROBE shadow node exists (OgreGi.cpp checks hasShadowNodeDefinition before
 // instantiating, because Ogre resolves the pass's shadow node at workspace
-// creation and THROWS when it is absent).
+// creation and THROWS when it is absent). It names `JahshakaProbeShadowNode`
+// (EnginePrivate.h kProbeShadowNodeName — the main layout at a quarter of the
+// resolution, four lamp maps at most) and not the view's atlas for the reason JahshakaPcc
+// .compositor gives: a shadow node is instantiated per workspace, and this
+// workspace is instantiated per probe.
 
 abstract target jah_ifd_cubemap_face
 {
@@ -72,7 +76,7 @@ abstract target jah_ifd_cubemap_face_shadows
 		visibility_mask 0x1
 		rq_first	0
 		rq_last		200
-		shadows JahshakaShadowNode recalculate
+		shadows JahshakaProbeShadowNode recalculate
 		profiling_id "Jahshaka IFD raster probe face (shadowed)"
 	}
 }

@@ -170,7 +170,7 @@ const char *OgreEngine::shadowClearMaterialName() const
 // The definition
 // ---------------------------------------------------------------------------
 void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsigned focusedMaps,
-                                 bool perMapClears)
+                                 bool perMapClears, unsigned cubeResolution)
 {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();
@@ -179,8 +179,12 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     if (maxDim == 0u) maxDim = 16384u;
     maxDim = std::min(maxDim, 16384u);
 
-    const ShadowAtlasPlan plan =
-        planShadowAtlas(baseResolution, std::max(2u, focusedMaps), maxDim);
+    // `focusedMaps` is taken LITERALLY: every caller passes >= 2 today
+    // (rebuildShadowAtlas clamps, and two is the floor the N == 2 layout
+    // guarantee rests on); 0 is a valid PSSM-only node — R x 1.5R, no focused
+    // column, no scratch cube — kept because it is the shape the probe node's
+    // A/B was measured against (OgreView::kProbeShadowNodeName).
+    const ShadowAtlasPlan plan = planShadowAtlas(baseResolution, focusedMaps, maxDim);
     const unsigned N = plan.focusedMaps;
 
     Ogre::CompositorShadowNodeDef *def = cm->addShadowNodeDefinition(name);
@@ -189,7 +193,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     // The atlas: one depth texture with an explicit RTV, exactly as the helper
     // declares it (a depth format + NO_POOL_EXPLICIT_RTV is what makes the
     // shadow maps SAMPLEABLE depth rather than a pooled depth buffer).
-    def->setNumLocalTextureDefinitions(2u);   // atlas0 + tmpCubemap
+    def->setNumLocalTextureDefinitions(N ? 2u : 1u);   // atlas0 (+ tmpCubemap)
     const Ogre::String atlasName = "atlas0";
     {
         Ogre::TextureDefinitionBase::TextureDefinition *texDef = def->addTextureDefinition(atlasName);
@@ -204,12 +208,14 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         rtv->setForTextureDefinition(atlasName, texDef);
     }
     // The point-light scratch cubemap (six faces rendered, then copied into the
-    // light's rectangle of the atlas as a dual-paraboloid map).
+    // light's rectangle of the atlas as a dual-paraboloid map). Only when a
+    // focused map exists to copy into: at the historical 1024 it is 24 MB PER
+    // NODE INSTANCE whatever the atlas resolution (the probe node passes R/2).
     const Ogre::String cubeName = "tmpCubemap";
-    {
+    if (N) {
         Ogre::TextureDefinitionBase::TextureDefinition *texDef = def->addTextureDefinition(cubeName);
-        texDef->width  = kPointLightCubemapResolution;
-        texDef->height = kPointLightCubemapResolution;
+        texDef->width  = std::max(64u, cubeResolution);
+        texDef->height = std::max(64u, cubeResolution);
         texDef->depthOrSlices = 6u;
         texDef->textureType = Ogre::TextureTypes::TypeCube;
         texDef->format = Ogre::PFG_R32_FLOAT;
@@ -442,6 +448,8 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, b
             cm->removeShadowNodeDefinition(OgreView::kShadowNodeName);
         if (cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
             cm->removeShadowNodeDefinition(OgreView::kReflectShadowNodeName);
+        if (cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName))
+            cm->removeShadowNodeDefinition(OgreView::kProbeShadowNodeName);
         createShadowNode();
         for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
         for (OgreScene *s : planarRebuilt) s->recreatePlanarAfterShadowRebuild();
