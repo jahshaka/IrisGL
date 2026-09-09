@@ -4278,6 +4278,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.ddgi = toggle(mSource->giDdgi);
         gi.ddgiIntensity = qBound(0.0f, mSource->giDdgiIntensity, 64.0f);
         gi.ddgiAmbient = qBound(0.0f, mSource->giDdgiAmbient, 8.0f);
+        // The probe source (rayon2 S3): -1 auto, 0 voxel, 1 raster.
+        gi.ddgiSource = mSource->giDdgiSource == 0 ? GiSource::Voxel
+                      : (mSource->giDdgiSource == 1 ? GiSource::Raster : GiSource::Auto);
         iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
         gi.irLight = driver ? engineNode(driver) : 0;
         const auto same = [](const GiParams &a, const GiParams &b) {
@@ -4293,7 +4296,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                    a.updateBudget == b.updateBudget &&
                    a.rayMarchStepScale == b.rayMarchStepScale &&
                    a.ddgi == b.ddgi && a.ddgiIntensity == b.ddgiIntensity &&
-                   a.ddgiAmbient == b.ddgiAmbient &&
+                   a.ddgiAmbient == b.ddgiAmbient && a.ddgiSource == b.ddgiSource &&
                    a.boundsMin.x == b.boundsMin.x && a.boundsMin.y == b.boundsMin.y &&
                    a.boundsMin.z == b.boundsMin.z && a.boundsMax.x == b.boundsMax.x &&
                    a.boundsMax.y == b.boundsMax.y && a.boundsMax.z == b.boundsMax.z;

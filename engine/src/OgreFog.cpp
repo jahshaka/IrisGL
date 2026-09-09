@@ -151,7 +151,8 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // varies per pass.
     // Plus the irradiance-field alignment pad, which is the one thing here that
     // MUST vary per pass (see ifdAlignFloats above).
-    return (16u + ifdAlignFloats(casterPass)) * sizeof(float);
+    // Plus the second DDGI float4 (jahIfd2: the raster escape vector).
+    return (20u + ifdAlignFloats(casterPass)) * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -197,6 +198,13 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = ifd.ambient;
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
+    // jahIfd2 (rayon2 S3): xyz = the raster source's escape vector, w = 1 while
+    // the probes are raster-fed. The shader branches UNIFORMLY on w, so a
+    // voxel-fed field computes the same expression it always did.
+    *passBufferPtr++ = ifd.escapeX;
+    *passBufferPtr++ = ifd.escapeY;
+    *passBufferPtr++ = ifd.escapeZ;
+    *passBufferPtr++ = ifd.rasterSource;
     return passBufferPtr;
 }
 

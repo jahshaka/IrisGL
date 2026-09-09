@@ -1161,6 +1161,16 @@ enum class GiQuality { Low, Medium, High };
 /// default, and both can be pinned either way independently of it — which is
 /// what lets a suite measure ONE of them at a time instead of measuring "High".
 enum class GiToggle { Auto, Off, On };
+/// WHERE THE IRRADIANCE FIELD'S PROBES GET THEIR LIGHT (GI_UNIFIED_SPEC.md P3,
+/// "A2"). `Voxel` cone-traces the VCT volume the field sits over — cheap,
+/// voxelization-bound, blind to anything the voxelizer did not bake (a skinned
+/// character animates inside a static voxel of itself). `Raster` renders a
+/// 32x32 cubemap per probe from the live scene instead — six real scene
+/// renders per probe, under the same update budget, and it sees skinned and
+/// animated geometry exactly as the viewport does. `Auto` is the tier's
+/// choice, which is Voxel at every tier (Epic included): Raster is an
+/// opt-in under the Advanced disclosure, never a default.
+enum class GiSource { Auto, Voxel, Raster };
 
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
@@ -1284,6 +1294,13 @@ struct GiParams {
     /// disappears and the sky/flat ambient would be counted twice on top of the
     /// field's own diffuse (P0 spike §5, measured).
     GiToggle  ddgi = GiToggle::Auto;
+    /// The field's probe SOURCE (GiSource above). Ignored while `ddgi` resolves
+    /// off. Raster still needs the VCT volume built (the shader's ambient gate
+    /// rides `vct_num_probes`, P0 §5) — it only changes what FEEDS the probes.
+    /// A raster field is never born dark: it is converged from the voxel volume
+    /// first and re-sourced in place, so its atlases start from the voxel
+    /// answer and the raster captures overwrite it under the budget.
+    GiSource  ddgiSource = GiSource::Auto;
     /// The DDGI diffuse INTENSITY — ours, not upstream's (IrradianceFieldSettings
     /// has no such knob; ours rides the pass buffer into
     /// media/Hlms/Jahshaka/JahIfd_piece_ps.any, so changing it is a const-buffer
@@ -1469,6 +1486,12 @@ struct GiStatus {
     /// 0 when the budget is 0 (paused: nothing re-converges) or when there is
     /// no field.
     int    ifdProbesPerFrame = 0;
+    /// What is FEEDING the probes right now: GiSource::Voxel or GiSource::Raster
+    /// (never Auto — this is the resolution, not the request), Voxel when
+    /// there is no field. Raster can be refused (no raster compositor staged)
+    /// and then reads Voxel while `GiParams::ddgiSource` says Raster: the same
+    /// "asked for it, did not get it" reading as ifdBound.
+    GiSource ifdSource = GiSource::Voxel;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

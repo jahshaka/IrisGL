@@ -1,0 +1,164 @@
+// JahshakaIfdRaster.compositor -- the RASTER-FED irradiance field's probe
+// capture (GI_UNIFIED_SPEC.md P3 "A2", rayon2 S3). Ogre's IrradianceFieldRaster
+// wants a workspace NAME with two external channels: 0 = the colour cubemap
+// (32x32, RasterParams::mPixelFormat), 1 = the R32F depth cubemap it converts
+// to the octahedral depth atlas (CubemapToIfd). Upstream's own script
+// (Samples/Media/2.0/scripts/Compositors/IrradianceFieldRaster.compositor)
+// names LocalCubemapsShadowNode, which we do not define, so this is ours, on the
+// JahshakaPcc.compositor pattern:
+//
+//   * visibility_mask 0x1 = kVisibleBit ONLY. Editor helpers (grid, light
+//     icons, range wires, camera helpers, gizmos) carry kHelperBit INSTEAD of
+//     kVisibleBit (EnginePrivate.h), so they drop out of every probe capture
+//     no matter how wide IrradianceFieldRaster::renderProbes forces the
+//     SceneManager's mask (it forces 0xffffffff; the pass mask governs the
+//     user bits through _getCombinedVisibilityMask).
+//   * rq 0..200: our sky (RQ 0, kVisibleBit) IS captured -- a raster probe
+//     that can see the sky carries the sky's light, which is why the ambient
+//     proxy is switched off for a raster field while a sky is bound; the
+//     on-top overlays (210/211) and the distortion channel (220) are excluded
+//     by RANGE, the second fence behind the mask.
+//   * clear black: a probe that sees nothing carries nothing (the ambient
+//     proxy fills that in when no sky is bound), and depth stays at the far
+//     plane, which is exactly what the S1 escape threshold reads as a miss.
+//   * the depth quad copies the face's D32 depth into the R32F cubemap face
+//     with upstream's own Ogre/Copy/4xFP32 (Common/Copyback.material), which
+//     registerCommonMaterials stages on every pixels-path engine.
+//
+// The shadowed variant is the JahshakaPcc P3b shape: chosen only when the
+// scene's shadow node exists (OgreGi.cpp checks hasShadowNodeDefinition before
+// instantiating, because Ogre resolves the pass's shadow node at workspace
+// creation and THROWS when it is absent).
+
+abstract target jah_ifd_cubemap_face
+{
+	pass render_scene
+	{
+		load
+		{
+			all				clear
+			clear_colour	0 0 0 1
+		}
+		store
+		{
+			depth			store
+			stencil			dont_care
+		}
+		overlays			off
+		camera_cubemap_reorient true
+		visibility_mask 0x1
+		rq_first	0
+		rq_last		200
+		profiling_id "Jahshaka IFD raster probe face"
+	}
+}
+
+abstract target jah_ifd_cubemap_face_shadows
+{
+	pass render_scene
+	{
+		load
+		{
+			all				clear
+			clear_colour	0 0 0 1
+		}
+		store
+		{
+			depth			store
+			stencil			dont_care
+		}
+		overlays			off
+		camera_cubemap_reorient true
+		visibility_mask 0x1
+		rq_first	0
+		rq_last		200
+		shadows JahshakaShadowNode recalculate
+		profiling_id "Jahshaka IFD raster probe face (shadowed)"
+	}
+}
+
+abstract target jah_ifd_depth_to_cubemap
+{
+	pass render_quad
+	{
+		load
+		{
+			all		dont_care
+		}
+		store
+		{
+			depth	dont_care
+			stencil	dont_care
+		}
+		material		Ogre/Copy/4xFP32
+		input			0 depthTexture
+		camera_cubemap_reorient true
+		profiling_id "Jahshaka IFD raster depth copy"
+	}
+}
+
+compositor_node JahshakaIfdRasterNode
+{
+	in 0 cubemap
+	in 1 cubemap_depth
+
+	texture depthTexture	target_width target_height PFG_D32_FLOAT
+
+	rtv cubemap_customRtv
+	{
+		colour	cubemap
+		depth	depthTexture
+	}
+
+	target cubemap_customRtv	+X : jah_ifd_cubemap_face { }
+	target cubemap_depth		+X : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	-X : jah_ifd_cubemap_face { }
+	target cubemap_depth		-X : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	+Y : jah_ifd_cubemap_face { }
+	target cubemap_depth		+Y : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	-Y : jah_ifd_cubemap_face { }
+	target cubemap_depth		-Y : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	+Z : jah_ifd_cubemap_face { }
+	target cubemap_depth		+Z : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	-Z : jah_ifd_cubemap_face { }
+	target cubemap_depth		-Z : jah_ifd_depth_to_cubemap { }
+}
+
+compositor_node JahshakaIfdRasterNodeShadows
+{
+	in 0 cubemap
+	in 1 cubemap_depth
+
+	texture depthTexture	target_width target_height PFG_D32_FLOAT
+
+	rtv cubemap_customRtv
+	{
+		colour	cubemap
+		depth	depthTexture
+	}
+
+	target cubemap_customRtv	+X : jah_ifd_cubemap_face_shadows { }
+	target cubemap_depth		+X : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	-X : jah_ifd_cubemap_face_shadows { }
+	target cubemap_depth		-X : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	+Y : jah_ifd_cubemap_face_shadows { }
+	target cubemap_depth		+Y : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	-Y : jah_ifd_cubemap_face_shadows { }
+	target cubemap_depth		-Y : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	+Z : jah_ifd_cubemap_face_shadows { }
+	target cubemap_depth		+Z : jah_ifd_depth_to_cubemap { }
+	target cubemap_customRtv	-Z : jah_ifd_cubemap_face_shadows { }
+	target cubemap_depth		-Z : jah_ifd_depth_to_cubemap { }
+}
+
+workspace JahshakaIfdRasterWorkspace
+{
+	connect_external 0 JahshakaIfdRasterNode 0
+	connect_external 1 JahshakaIfdRasterNode 1
+}
+
+workspace JahshakaIfdRasterWorkspaceShadows
+{
+	connect_external 0 JahshakaIfdRasterNodeShadows 0
+	connect_external 1 JahshakaIfdRasterNodeShadows 1
+}

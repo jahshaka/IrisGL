@@ -276,6 +276,12 @@ public:
     /// it is what makes the fix measurable). Only meaningful with a field
     /// bound. Clamped to [0, 8] on the way to the engine.
     float giDdgiAmbient = 1.0f;
+    /// WHERE THE FIELD'S PROBES GET THEIR LIGHT (GI_UNIFIED_SPEC.md P3 "A2"):
+    /// -1 auto (the tier's choice — voxel at every tier), 0 voxel cone tracing,
+    /// 1 rasterised probe captures (six 32x32 scene renders per probe, under the
+    /// same update budget; sees skinned/animated geometry the voxels cannot).
+    /// An Advanced-only knob; never tier-written, so it has no registry row.
+    int giDdgiSource = -1;
     /// RAYON — the user-facing quality tier for realtime global illumination
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.
     ///
