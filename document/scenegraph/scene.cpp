@@ -9,6 +9,7 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
+#include "assimp/scene.h"
 #include "core/math/mat4.h"
 #include "core/math/quat.h"
 #include "core/math/vec.h"

@@ -20,7 +20,6 @@ For more information see the LICENSE file
 #include "core/geometry/boundingsphere.h"
 #include "core/geometry/aabb.h"
 
-#include "assimp/scene.h"
 
 namespace iris
 {

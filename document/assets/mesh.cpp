@@ -490,3 +490,67 @@ BoundingSphere Mesh::calculateBoundingSphere(const aiMesh *mesh)
 }
 
 }
+
+// Moved out of mesh.h (ENGINEERING_DEBT L4 part 2, 2026-09-09) so the header no
+// longer needs assimp's complete aiScene: the public header forward-declares it.
+QMap<QString, iris::SkeletalAnimationPtr> iris::Mesh::extractAnimations(const aiScene *scene, QString source)
+{
+    QMap<QString, SkeletalAnimationPtr> anims;
+
+    for (unsigned i = 0; i<scene->mNumAnimations; i++) {
+        auto anim = scene->mAnimations[i];
+
+        // Key times are stored in SECONDS (SKELETAL_PLAYBACK_SPEC S2):
+        // assimp gives raw ticks + mTicksPerSecond (1000 for glTF/FBX,
+        // 24/30 for many FBX/Collada exports; 0 means "unknown" — assimp's
+        // documented convention is to assume 25). The old code stored raw
+        // ticks and compensated with a `length > 60 → time × 1000` hack in
+        // SceneNode::updateAnimation, which mis-played any non-ms clip.
+        const double ticksPerSecond =
+            anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 25.0;
+
+        // Clip names are kept and made unique (SKELETAL_PLAYBACK_SPEC S1).
+        // The old code collapsed a clip named after its first channel to ""
+        // — multiple clips then overwrote one QMap key, and saved
+        // {source, name} references could never resolve on reload.
+        auto animName = QString(anim->mName.C_Str());
+        if (animName.isEmpty())
+            animName = QString("clip %1").arg(i);
+        const QString baseName = animName;
+        for (int suffix = 2; anims.contains(animName); ++suffix)
+            animName = baseName + QString(" %1").arg(suffix);
+
+        auto skelAnim = SkeletalAnimation::create();
+        skelAnim->name = animName;
+        skelAnim->source = source;
+
+        for (unsigned j = 0; j<anim->mNumChannels; j++) {
+            auto nodeAnim = anim->mChannels[j];
+
+            auto nodeName = QString(nodeAnim->mNodeName.C_Str());
+            auto boneAnim = new BoneAnimation();
+
+            // extract tracks (tick → second conversion at the source)
+            for (unsigned k = 0; k<nodeAnim->mNumPositionKeys; k++) {
+                auto key = nodeAnim->mPositionKeys[k];
+                boneAnim->posKeys->addKey(iris::Vec3(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
+            }
+
+            for (unsigned k = 0; k<nodeAnim->mNumRotationKeys; k++) {
+                auto key = nodeAnim->mRotationKeys[k];
+                boneAnim->rotKeys->addKey(iris::Quat(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
+            }
+
+            for (unsigned k = 0; k<nodeAnim->mNumScalingKeys; k++) {
+                auto key = nodeAnim->mScalingKeys[k];
+                boneAnim->scaleKeys->addKey(iris::Vec3(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
+            }
+
+            skelAnim->addBoneAnimation(nodeName, boneAnim);
+        }
+
+        anims.insert(animName, skelAnim);
+    }
+
+    return anims;
+}

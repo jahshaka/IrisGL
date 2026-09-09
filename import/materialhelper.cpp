@@ -1,3 +1,4 @@
+#include "assimp/scene.h"
 #include "import/materialhelper.h"
 #include <QDir>
 #include <QUuid>

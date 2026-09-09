@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef MATERIALHELPER_H
 #define MATERIALHELPER_H
 
+#include "assimp/scene.h"
 #include <QColor>
 #include <QFuture>
 #include <QStringList>
