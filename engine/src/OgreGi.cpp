@@ -200,6 +200,13 @@ static float probeShapeCellRatio(const Ogre::CubemapProbe *p) {
     return worst;
 }
 
+bool OgreScene::setGiDynamicProbes(int extraPerFrame) {
+    mGi.dynamicProbes = std::min(std::max(extraPerFrame, 0), 8);
+    // updateProbeBudget re-resolves mDynamicProbes from mGi next frame; nothing
+    // built (voxels, probes, the field) depends on the value.
+    return mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid;
+}
+
 bool OgreScene::setGlobalIllumination(const GiParams &p) {
     JAH_TRY {
         switch (p.mode) {

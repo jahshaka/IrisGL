@@ -1569,6 +1569,7 @@ public:
     // scenes' geometry outside the voxel volume samples nothing (cones exit the
     // volume and add no light), so previews/thumbnails stay sane in practice.
     bool setGlobalIllumination(const GiParams &p) override;
+    bool setGiDynamicProbes(int extraPerFrame) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
     unsigned long long giEscapeSignature() const override;

@@ -595,6 +595,14 @@ public:
     /// document saved with a future mode keeps loading). Instant Radiosity is
     /// per-scene: its virtual point lights live in this scene only.
     virtual bool        setGlobalIllumination(const GiParams &) = 0;
+    /// The one GI knob that costs nothing to change: GiParams::dynamicProbes is
+    /// read per frame by the probe budget pass and by nothing that is BUILT, so
+    /// a change to it alone must not go through setGlobalIllumination (which
+    /// re-voxelizes and re-captures every probe). Code review 2026-09-10: the
+    /// Advanced slider re-voxelized the scene on every drag tick. Returns false
+    /// only without a live GI arm (nothing to update; the next full push
+    /// carries the value).
+    virtual bool        setGiDynamicProbes(int extraPerFrame) = 0;
     /// Re-runs the active GI solution against the scene's current state (the
     /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
     /// in milliseconds at editor quality; callers may invoke this per edit.

@@ -4430,6 +4430,15 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             return combine(lightSigRaw, mTarget->giEscapeSignature(),
                            mTarget->giGeometrySignature());
         };
+        // A dynamicProbes-ONLY change takes the cheap path (code review
+        // 2026-09-10): the full push re-voxelizes and re-captures every probe,
+        // and the Advanced slider emits per drag tick.
+        GiParams onlyDynamic = gi;
+        onlyDynamic.dynamicProbes = mLastGi.dynamicProbes;
+        if (mGiPushed && !same(gi, mLastGi) && same(onlyDynamic, mLastGi)) {
+            mTarget->setGiDynamicProbes(gi.dynamicProbes);
+            mLastGi.dynamicProbes = gi.dynamicProbes;
+        }
         if (!mGiPushed || !same(gi, mLastGi)) {
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
