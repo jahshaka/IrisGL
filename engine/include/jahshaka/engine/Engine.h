@@ -234,7 +234,24 @@ public:
     /// are out of range or cyclic, or a rig with more than 256 bones (which is
     /// attached UNSKINNED at bind pose, with a warning, rather than crashing).
     /// Bone ORDER is free — the index is what the vertex data names.
-    virtual bool        attachSkinnedMesh(NodeId, MeshId, MaterialId, const SkeletonDesc &) = 0;
+    ///
+    /// `blendToRig` is the PER-PIECE REMAP (AVATAR_RIG_PERF_SPEC §3.1): entry
+    /// `i` is the rig bone the mesh's blend index `i` names. Null (the default)
+    /// means the identity — the mesh's blend indices ARE rig indices, which is
+    /// what a single-piece character has and what every caller did before the
+    /// union rig existed, byte for byte. A character whose pieces are SUBSETS
+    /// of one rig passes a map per piece: the piece keeps its own compact blend
+    /// indices, every piece binds the SAME rig (the precondition for sharing a
+    /// SkeletonInstance at all), and the backend streams only the mapped bones
+    /// per draw instead of the whole rig per piece.
+    ///
+    /// The map lives on the MESH, so two nodes sharing a mesh asset must pass
+    /// the same map; a different one is refused (lastError()). Entries must
+    /// name bones of `rig`, and the mesh's blend indices must fall inside the
+    /// map.
+    virtual bool        attachSkinnedMesh(NodeId, MeshId, MaterialId, const SkeletonDesc &,
+                                          const unsigned short *blendToRig = nullptr,
+                                          size_t blendToRigCount = 0) = 0;
     /// True when the node carries a GPU-skinned mesh with a live rig.
     virtual bool        hasSkeleton(NodeId) const = 0;
     /// The node's bone names, in rig index order. Empty when it has no rig.

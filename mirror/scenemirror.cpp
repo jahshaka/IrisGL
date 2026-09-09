@@ -9,6 +9,8 @@
 #include <cmath>
 #include <type_traits>
 
+#include <QSet>
+
 #include "irisgl/document/scenegraph/nodegraph.h"
 #include "irisgl/document/scenegraph/scene.h"
 #include "irisgl/document/scenegraph/skybake.h"
@@ -208,6 +210,7 @@ SceneMirror::~SceneMirror()
 
 void SceneMirror::setSource(iris::ScenePtr scene)
 {
+    mCharacterRigs.clear();
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
     // The outgoing document leaves the engine's scene manager before anything
@@ -289,6 +292,9 @@ void SceneMirror::evacuateEngineObjects()
     // pass reading nodes the migration had already destroyed.)
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
+    // The derived character rigs are keyed by document node; the document's
+    // graph is leaving, so they are worth exactly nothing now.
+    mCharacterRigs.clear();
     for (HighlightShell &s : mHighlightShells)
         if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
@@ -395,8 +401,13 @@ int SceneMirror::sync()
 
 MeshId SceneMirror::engineMesh(iris::Mesh *mesh) const
 {
-    auto it = mMeshes.constFind(mesh);
-    return it == mMeshes.constEnd() ? 0 : it.value();
+    // The cache is keyed by (mesh, rig id) — one document mesh can back two
+    // engine meshes when two characters resolve it to different rigs. This
+    // DIAGNOSTIC answer is the first match; callers that need the mesh a
+    // particular NODE is drawing read that node's entry instead.
+    for (auto it = mMeshes.constBegin(); it != mMeshes.constEnd(); ++it)
+        if (it.key().first == mesh) return it.value();
+    return 0;
 }
 
 void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
@@ -437,8 +448,14 @@ void SceneMirror::collectHighlightMeshes(iris::SceneNode *node,
     if (!node || !node->isVisible()) return;
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto meshNode = static_cast<iris::MeshNode *>(node);
-        if (iris::Mesh *mesh = meshNode->mesh.data())
-            if (MeshId m = engineMesh(mesh)) out.emplace_back(meshNode, m);
+        // The engine mesh THIS NODE is drawing, from its own entry — not a
+        // lookup by document mesh, which since the character rig can answer with
+        // a sibling character's copy of the same asset (mMeshes is keyed by
+        // (mesh, rig id)).
+        if (meshNode->mesh.data()) {
+            const auto ent = mEntries.constFind(node);
+            if (ent != mEntries.constEnd() && ent->mesh) out.emplace_back(meshNode, ent->mesh);
+        }
     }
     const int n = node->childCount();
     for (int i = 0; i < n; ++i)
@@ -1386,30 +1403,74 @@ void SceneMirror::visit(iris::SceneNode *node)
         // node changed the document and nothing else, which is why the mesh
         // picker in the properties panel is commented out and why the material
         // preview replaced whole nodes to change its subject.
-        if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh)) {
-            MeshId m = meshFor(mesh);
+        // A character whose piece set changed has a NEW union rig (a new id and
+        // a new blend-index map), and a piece attached to the old one has to
+        // re-attach onto it — the engine mesh for the new rig is a different
+        // cache entry, so nothing has to be destroyed here.
+        bool rigStale = false;
+        if (e.gpuSkinned && e.characterHost) {
+            const auto cr = mCharacterRigs.constFind(e.characterHost);
+            rigStale = cr == mCharacterRigs.constEnd() || cr->epoch != e.characterEpoch;
+        }
+        if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh || rigStale)) {
             MaterialId mat = materialFor(material);
             bool attached = false;
             e.gpuSkinned = false;
             e.boneCount = 0;
-            if (m && mat && !e.skeleton.isNull()) {
+            MeshId m = 0;
+            if (mat && !e.skeleton.isNull()) {
                 // GPU skinning: a SEPARATE entry point, because the engine has to
                 // know the mesh is skinned before the renderable exists —
                 // attaching first and rigging later yields a silently unskinned
                 // character.
+                //
+                // THE CHARACTER RIG (AVATAR_RIG_PERF_SPEC §3.1) is resolved
+                // first, because it decides BOTH the rig this piece binds and
+                // which engine mesh backs it: a piece of a multi-piece character
+                // binds the character's UNION rig with its own blend-index
+                // remap, and a lone piece binds its own rig with no map at all —
+                // byte for byte what every rigged node did before this program.
+                iris::SkeletonPtr rigSkeleton = e.skeleton;
+                QVector<unsigned short> blendToRig;
+                const iris::SceneNode *host = nullptr;
+                quint32 epoch = 0;
+                if (const CharacterRig *cr = characterRigFor(node)) {
+                    const auto map = cr->remaps.constFind(e.skeleton.data());
+                    if (map != cr->remaps.constEnd()) {
+                        rigSkeleton = cr->rig;
+                        blendToRig = map.value();
+                        host = cr->host;
+                        epoch = cr->epoch;
+                    }
+                }
                 SkeletonDesc rig;
-                if (toSkeletonDesc(e.skeleton, rig) &&
-                    mTarget->attachSkinnedMesh(e.node, m, mat, rig)) {
-                    attached = true;
-                    e.gpuSkinned = true;
-                    e.boneCount = rig.bones.size();
-                    e.rigId = rig.id;
-                    e.clipSignature.clear();     // force a clip re-attach
+                if (toSkeletonDesc(rigSkeleton, rig)) {
+                    m = meshFor(mesh, QString::fromStdString(rig.id));
+                    if (m && mTarget->attachSkinnedMesh(
+                                 e.node, m, mat, rig,
+                                 blendToRig.isEmpty() ? nullptr : blendToRig.constData(),
+                                 size_t(blendToRig.size()))) {
+                        attached = true;
+                        e.gpuSkinned = true;
+                        e.rigSkeleton = rigSkeleton;
+                        e.blendToRig = blendToRig;
+                        e.characterHost = host;
+                        e.characterEpoch = epoch;
+                        e.boneCount = rig.bones.size();
+                        e.rigId = rig.id;
+                        e.clipSignature.clear();     // force a clip re-attach
+                    }
                 }
             }
             // Anything the engine would not rig (an over-limit rig, a mesh whose
             // bone buffers went missing) still renders — at bind pose, unskinned.
             // One renderer, never two.
+            if (!attached) {
+                e.rigSkeleton.reset();
+                e.blendToRig.clear();
+                e.characterHost = nullptr;
+                m = meshFor(mesh);
+            }
             if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
             if (attached) {
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
@@ -1430,6 +1491,9 @@ void SceneMirror::visit(iris::SceneNode *node)
             e.meshPtr = nullptr;
             e.gpuSkinned = false;
             e.boneCount = 0;
+            e.rigSkeleton.reset();
+            e.blendToRig.clear();
+            e.characterHost = nullptr;
             e.pbrPushed = false;
             e.texturesPushed = false;
             e.boundTextures.clear();
@@ -1848,16 +1912,24 @@ void SceneMirror::releaseEntry(Entry &e)
 
 void SceneMirror::removeMissing()
 {
+    bool droppedRigged = false;
     for (auto it = mEntries.begin(); it != mEntries.end();) {
         if (it->lastSeen == mSyncStamp) { ++it; continue; }
+        droppedRigged = droppedRigged || it->gpuSkinned;
         releaseEntry(*it);
         it = mEntries.erase(it);
     }
+    // A character that lost a piece has a stale union cached against a host
+    // node that may itself be gone. Dropping the derived rigs costs one walk
+    // per character on the next skinned attach and nothing at all otherwise —
+    // and the cache is only ever consulted at attach time.
+    if (droppedRigged) mCharacterRigs.clear();
 }
 
-MeshId SceneMirror::meshFor(iris::Mesh *mesh)
+MeshId SceneMirror::meshFor(iris::Mesh *mesh, const QString &rigId)
 {
-    auto it = mMeshes.constFind(mesh);
+    const QPair<iris::Mesh *, QString> key(mesh, rigId);
+    auto it = mMeshes.constFind(key);
     if (it != mMeshes.constEnd()) return it.value();
     MeshData data;
     if (!toMeshData(mesh, data)) return 0;
@@ -1882,7 +1954,7 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh)
         data.blendWeights = bw;
     }
     MeshId id = mTarget->createMesh(data);
-    if (id) mMeshes.insert(mesh, id);
+    if (id) mMeshes.insert(key, id);
     return id;
 }
 
@@ -2424,6 +2496,180 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
     return true;
 }
 
+namespace {
+
+/// Two bind matrices are ONE bone when they agree to within a hair. The
+/// tolerance is absolute and generous by rig standards (a millimetre at scene
+/// scale): what it must catch is a piece rigged in a DIFFERENT space, not
+/// float noise from two exporters writing the same pose.
+bool bindAgrees(const iris::Mat4 &a, const iris::Mat4 &b)
+{
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            if (std::fabs(double(a(r, c)) - double(b(r, c))) > 1e-4) return false;
+    return true;
+}
+
+}  // namespace
+
+bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
+                                     iris::SkeletonPtr &out, QVector<int> *excludedOut,
+                                     QString *why)
+{
+    out.reset();
+    if (excludedOut) excludedOut->clear();
+    const auto fail = [&](const QString &msg) { if (why) *why = msg; return false; };
+    if (pieces.size() < 2) return fail("fewer than two pieces");
+
+    struct BoneRec {
+        iris::Mat4 meshSpace, invMeshSpace;
+        QSet<QString> ancestors;     ///< every ancestor ANY piece named, transitively
+    };
+    QHash<QString, BoneRec> recs;
+    int merged = 0;
+
+    // BIGGEST PIECE FIRST, and that is not cosmetic: a bone's bind pose comes
+    // from the first piece that carries it, so whichever piece is merged first
+    // becomes the REFERENCE every other piece is checked against. Merging in
+    // document order would let one 2-bone piece rigged in a foreign space
+    // exclude the body and everything that agrees with it. Ordering by bone
+    // count (ties by document order, so it stays deterministic) makes the
+    // character's largest piece the reference, which is the one a disagreement
+    // should be measured against.
+    QVector<int> mergeOrder;
+    mergeOrder.reserve(pieces.size());
+    for (int i = 0; i < pieces.size(); ++i) mergeOrder.append(i);
+    std::stable_sort(mergeOrder.begin(), mergeOrder.end(), [&](int a, int b) {
+        const int na = pieces[a].isNull() ? 0 : pieces[a]->bones.size();
+        const int nb = pieces[b].isNull() ? 0 : pieces[b]->bones.size();
+        return na > nb;
+    });
+
+    for (int p : mergeOrder) {
+        const iris::SkeletonPtr &sk = pieces[p];
+        if (sk.isNull() || sk->bones.isEmpty()) {
+            if (excludedOut) excludedOut->append(p);
+            continue;
+        }
+        // ONE bind pose per bone or no union for this piece. Checked BEFORE
+        // anything is merged, so a disagreeing piece leaves no trace.
+        bool agrees = true;
+        for (const iris::BonePtr &b : sk->bones) {
+            if (b.isNull()) { agrees = false; break; }
+            const auto it = recs.constFind(b->name);
+            if (it != recs.constEnd() && !bindAgrees(it->meshSpace, b->meshSpacePoseMatrix)) {
+                agrees = false;
+                break;
+            }
+        }
+        if (!agrees) {
+            qWarning("SceneMirror: a rig piece disagrees with its siblings about a shared "
+                     "bone's bind pose; it keeps its own rig");
+            if (excludedOut) excludedOut->append(p);
+            continue;
+        }
+        for (const iris::BonePtr &b : sk->bones) {
+            const bool fresh = !recs.contains(b->name);
+            BoneRec &r = recs[b->name];
+            if (fresh) {
+                r.meshSpace = b->meshSpacePoseMatrix;
+                r.invMeshSpace = b->inverseMeshSpacePoseMatrix;
+            }
+            // The piece's own chain: every bone above this one THAT THIS PIECE
+            // carries. Different pieces carry different subsets, so the union of
+            // the chains is what the character's real ancestry is.
+            for (iris::Bone *up = b->parentBone.data(); up; up = up->parentBone.data()) {
+                if (up->name == b->name) break;       // defensive: a self-parent
+                r.ancestors.insert(up->name);
+            }
+        }
+        ++merged;
+    }
+    if (merged < 2) return fail("fewer than two pieces agreed");
+
+    // Ancestry has to be TRANSITIVELY closed before depths mean anything: a
+    // piece carrying only {head, root} tells us root is above head, and another
+    // carrying {head, neck} tells us neck is; only together do they say
+    // root is above neck.
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto it = recs.begin(); it != recs.end(); ++it) {
+            const QSet<QString> direct = it->ancestors;
+            for (const QString &a : direct) {
+                const auto ar = recs.constFind(a);
+                if (ar == recs.constEnd()) continue;
+                for (const QString &up : ar->ancestors) {
+                    if (up == it.key()) return fail("the pieces describe a cyclic rig");
+                    if (!it->ancestors.contains(up)) { it->ancestors.insert(up); changed = true; }
+                }
+            }
+        }
+    }
+
+    // The PARENT is the deepest ancestor: with the closure above, "deepest"
+    // is simply "the one with the most ancestors of its own", and a tie means
+    // two pieces disagree about the hierarchy rather than describing subsets of
+    // one — which is a refusal, not a guess.
+    QHash<QString, QString> parentOf;
+    for (auto it = recs.constBegin(); it != recs.constEnd(); ++it) {
+        QString best;
+        int bestDepth = -1, ties = 0;
+        for (const QString &a : it->ancestors) {
+            const auto ar = recs.constFind(a);
+            if (ar == recs.constEnd()) continue;
+            const int d = ar->ancestors.size();
+            if (d > bestDepth) { best = a; bestDepth = d; ties = 1; }
+            else if (d == bestDepth) ++ties;
+        }
+        if (ties > 1) return fail("the pieces disagree about a bone's parent");
+        if (!best.isEmpty()) parentOf.insert(it.key(), best);
+    }
+
+    // CANONICAL ORDER (depth, then name) — the reason the union hashes the same
+    // id whatever order the pieces were visited in.
+    QHash<QString, int> depth;
+    for (auto it = recs.constBegin(); it != recs.constEnd(); ++it)
+        depth.insert(it.key(), it->ancestors.size());
+    QVector<QString> order;
+    order.reserve(recs.size());
+    for (auto it = recs.constBegin(); it != recs.constEnd(); ++it) order.append(it.key());
+    std::sort(order.begin(), order.end(), [&](const QString &a, const QString &b) {
+        const int da = depth.value(a), db = depth.value(b);
+        return da != db ? da < db : a < b;
+    });
+
+    auto rig = iris::Skeleton::create();
+    for (const QString &name : order) {
+        const BoneRec &rec = *recs.constFind(name);
+        auto bone = iris::Bone::create(name);
+        bone->meshSpacePoseMatrix = rec.meshSpace;
+        bone->inverseMeshSpacePoseMatrix = rec.invMeshSpace;
+        rig->addBone(bone);
+    }
+    for (const QString &name : order) {
+        const auto pit = parentOf.constFind(name);
+        if (pit == parentOf.constEnd()) continue;
+        rig->getBone(pit.value())->addChild(rig->getBone(name));
+    }
+    out = rig;
+    return true;
+}
+
+bool SceneMirror::rigRemap(const iris::SkeletonPtr &piece, const iris::SkeletonPtr &rig,
+                           QVector<unsigned short> &out)
+{
+    out.clear();
+    if (piece.isNull() || rig.isNull()) return false;
+    out.reserve(piece->bones.size());
+    for (const iris::BonePtr &b : piece->bones) {
+        if (b.isNull()) return false;
+        const auto it = rig->boneMap.constFind(b->name);
+        if (it == rig->boneMap.constEnd()) { out.clear(); return false; }
+        out.append((unsigned short)it.value());
+    }
+    return true;
+}
+
 bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string &rigId,
                              ClipDesc &out)
 {
@@ -2574,9 +2820,98 @@ const iris::AvatarLocomotion *locomotionHostOf(iris::SceneNode *node)
 
 }  // namespace
 
+const iris::SceneNode *SceneMirror::characterHostOf(iris::SceneNode *node) const
+{
+    if (!node) return nullptr;
+    // The clip host first: it is the node the character's clips live on and the
+    // root of the subtree their channels address, so it is exactly "the
+    // character" for every imported model that carries an animation.
+    if (iris::SceneNode *host = clipHostOf(node)) return host;
+    // No clips anywhere above: the pieces' common PARENT is the character. Not
+    // the scene root, though — two unrelated single-piece characters dropped
+    // side by side are not one character, and unioning their rigs would merge
+    // two strangers' skeletons into one 130-bone rig that neither of them is.
+    const iris::SceneNodePtr parent = node->getParent();
+    if (parent.isNull()) return nullptr;
+    if (!mSource.isNull() && parent.data() == mSource->getRootNode().data()) return nullptr;
+    return parent.data();
+}
+
+const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *piece)
+{
+    const iris::SceneNode *host = characterHostOf(piece);
+    if (!host) return nullptr;
+
+    // The character's skinned pieces, in document order — a walk of the host's
+    // subtree, which sees every piece whether or not it has been mirrored yet.
+    // That matters: the union has to be COMPLETE the first time any piece
+    // attaches, or the pieces that attached early would all need a re-attach.
+    QVector<iris::SkeletonPtr> skels;
+    quint64 sig = 1469598103934665603ull;
+    const auto hashPtr = [&sig](const void *p) {
+        quint64 v = quint64(quintptr(p));
+        for (int i = 0; i < 8; ++i) { sig ^= (v & 0xFF); sig *= 1099511628211ull; v >>= 8; }
+    };
+    QVector<iris::SceneNode *> stack;
+    stack.append(const_cast<iris::SceneNode *>(host));
+    for (int i = 0; i < stack.size(); ++i) {
+        iris::SceneNode *n = stack[i];
+        if (n->getSceneNodeType() == iris::SceneNodeType::Mesh) {
+            auto *mn = static_cast<iris::MeshNode *>(n);
+            if (!mn->skeleton.isNull()) { skels.append(mn->skeleton); hashPtr(mn->skeleton.data()); }
+        }
+        const int cn = n->childCount();
+        for (int k = 0; k < cn; ++k) if (iris::SceneNode *c = n->childAt(k)) stack.append(c);
+    }
+    if (skels.size() < 2) {                       // a lone piece keeps its own rig
+        mCharacterRigs.remove(host);
+        return nullptr;
+    }
+
+    CharacterRig &rec = mCharacterRigs[host];
+    if (rec.signature == sig && !rec.rig.isNull()) return &rec;
+
+    iris::SkeletonPtr rig;
+    QVector<int> excluded;
+    QString why;
+    if (!buildUnionSkeleton(skels, rig, &excluded, &why)) {
+        qWarning("SceneMirror: '%s' keeps per-piece rigs (%s)",
+                 qUtf8Printable(const_cast<iris::SceneNode *>(host)->getName()),
+                 qUtf8Printable(why));
+        const quint32 epoch = rec.epoch + 1;      // pieces on the old union must re-attach
+        rec = CharacterRig();
+        rec.host = host;
+        rec.signature = sig;
+        rec.epoch = epoch;
+        return nullptr;
+    }
+    SkeletonDesc desc;
+    if (!toSkeletonDesc(rig, desc)) { mCharacterRigs.remove(host); return nullptr; }
+
+    CharacterRig fresh;
+    fresh.host = host;
+    fresh.signature = sig;
+    fresh.rig = rig;
+    fresh.rigId = desc.id;
+    // The epoch only moves when the derived rig really CHANGED: a piece whose
+    // entry was released and re-adopted must not drag the whole character
+    // through a re-attach because a pointer moved.
+    fresh.epoch = rec.epoch + (rec.rigId == fresh.rigId ? 0 : 1);
+    for (int i = 0; i < skels.size(); ++i) {
+        if (excluded.contains(i)) continue;
+        QVector<unsigned short> map;
+        if (rigRemap(skels[i], rig, map)) fresh.remaps.insert(skels[i].data(), map);
+    }
+    rec = fresh;
+    return &rec;
+}
+
 void SceneMirror::attachClipsFor(Entry &e)
 {
-    if (!e.gpuSkinned || !e.docNode || e.skeleton.isNull()) return;
+    // THE RIG SKELETON, not the piece's own: bone TRACK indices are resolved
+    // against the rig the engine holds, which for a piece of a multi-piece
+    // character is the character union (AVATAR_RIG_PERF_SPEC §3.1).
+    if (!e.gpuSkinned || !e.docNode || e.rigSkeleton.isNull()) return;
     iris::SceneNode *host = clipHostOf(e.docNode);
 
     // The signature covers everything that can change what the engine should be
@@ -2639,7 +2974,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     for (int i = 0; i < clips.size(); ++i) {
         QString err;
         if (!iris::ClipExtractor::extract(host->sharedFromThis(), e.docNode->sharedFromThis(),
-                                          e.skeleton, clips[i]->getSkeletalAnimation(),
+                                          e.rigSkeleton, clips[i]->getSkeletalAnimation(),
                                           clips[i]->getName(), clips[i]->getLength(),
                                           nullptr, extracted[i], &err)) {
             qWarning("SceneMirror: clip '%s' did not translate: %s",
@@ -2721,8 +3056,8 @@ void SceneMirror::attachClipsFor(Entry &e)
 bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::Mat4> &out) const
 {
     if (!mTarget) return false;
-    if (!e.gpuSkinned || e.skeleton.isNull() || !e.docNode) return false;
-    const QList<iris::BonePtr> &bones = e.skeleton->bones;
+    if (!e.gpuSkinned || e.rigSkeleton.isNull() || !e.docNode) return false;
+    const QList<iris::BonePtr> &bones = e.rigSkeleton->bones;
     if (bones.isEmpty() || size_t(bones.size()) != e.boneCount) return false;
     // The three scratch buffers are MEMBERS, not locals: this used to run once
     // per bone-overlay refresh, and now it runs every frame for every rig that
@@ -2746,15 +3081,15 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
     // hash per bone per frame for a relationship that is fixed by the rig. The
     // cache is keyed on the skeleton pointer and the bone count, so a
     // re-imported rig rebuilds it.
-    if (e.boneParentsOwner != e.skeleton.data() || e.boneParents.size() != n) {
+    if (e.boneParentsOwner != e.rigSkeleton.data() || e.boneParents.size() != n) {
         e.boneParents.assign(n, -1);
         for (size_t i = 0; i < n; ++i) {
             if (bones[int(i)]->parentBone.isNull()) continue;
-            const auto pit = e.skeleton->boneMap.constFind(bones[int(i)]->parentBone->name);
-            if (pit != e.skeleton->boneMap.constEnd() && size_t(pit.value()) != i)
+            const auto pit = e.rigSkeleton->boneMap.constFind(bones[int(i)]->parentBone->name);
+            if (pit != e.rigSkeleton->boneMap.constEnd() && size_t(pit.value()) != i)
                 e.boneParents[i] = pit.value();
         }
-        e.boneParentsOwner = e.skeleton.data();
+        e.boneParentsOwner = e.rigSkeleton.data();
     }
     // ...and the FK itself is a member function, not a recursive
     // std::function: the closure captured six references, which is past

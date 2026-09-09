@@ -1250,7 +1250,8 @@ public:
 
     // ---- Rigs: GPU skinning (GPU_SKINNING_SPEC; impl in OgreSkeleton.cpp) ----
     bool attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
-                           const SkeletonDesc &rig) override;
+                           const SkeletonDesc &rig, const unsigned short *blendToRig,
+                           size_t blendToRigCount) override;
     bool followSkeleton(NodeId follower, NodeId source) override;
     /// Copies every follower's pose from its source. Once per rendered frame,
     /// AFTER the frame, so the poses copied are the ones just drawn.
@@ -1491,6 +1492,14 @@ private:
         bool hasSkinData = false;
         unsigned maxBlendIndex = 0;
         std::string rigId;
+        /// The SubMesh's blend index -> rig bone index map as we wrote it
+        /// (AVATAR_RIG_PERF_SPEC §3.1). Empty means "identity, rig.bones long" —
+        /// which is what every mesh got before the union rig existed. Kept here
+        /// because the map lives on the SUBMESH, i.e. per MESH: two nodes that
+        /// share a mesh asset share the map, so a second attach asking for a
+        /// DIFFERENT map has to be refused rather than silently re-target the
+        /// first node's weights.
+        std::vector<Ogre::uint16> blendToRig;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
@@ -1657,7 +1666,8 @@ private:
     /// SkeletonDef has exactly one constructor and it takes a v1::Skeleton
     /// (OgreSkeletonDef.h:145); nothing v1 reaches the render path (v1 meshes
     /// render NOTHING on Vulkan, and geometry stays in our v2 buffers).
-    bool bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig);
+    bool bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig,
+                       const unsigned short *blendToRig, size_t blendToRigCount);
     /// Assembles the in-memory v1 skeleton a SkeletonDesc translates to, under
     /// `resName`. Shared by the rig def and every CLIP def, because a clip def
     /// built from anything but the node's own rig indexes the wrong blocks in

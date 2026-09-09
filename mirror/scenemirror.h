@@ -168,6 +168,54 @@ public:
     /// Static and public for tests.
     static bool toSkeletonDesc(const iris::SkeletonPtr &skeleton,
                                jahshaka::engine::SkeletonDesc &out);
+
+    // ---- The CHARACTER rig (AVATAR_RIG_PERF_SPEC §3.1, decision D5 = U2) ----
+    //
+    // An imported character is several skinned pieces (body, head, eyes, hair)
+    // and `Mesh::extractSkeleton` gives each piece a rig of ITS OWN BONES, in
+    // ITS OWN ORDER — five pieces, five rigs, five SkeletonDefs, five
+    // SkeletonInstances. Ogre refuses to let two Items share a SkeletonInstance
+    // unless their meshes name the SAME skeleton (OgreItem.cpp:249-254), so
+    // sharing is not merely unhelpful on per-piece rigs, it is illegal. The
+    // prerequisite is ONE rig per CHARACTER — the union of the pieces' bones in
+    // a canonical order — plus a per-piece blend-index remap, which Ogre already
+    // has a slot for (SubMesh::mBlendIndexToBoneIndexMap) and which pays for
+    // itself even without sharing: HlmsPbs streams the MAP per draw, so a
+    // compacted map streams the piece's own bones instead of the whole rig.
+    //
+    // MIRROR-SIDE, not document-side (D5's U2): no file format changes, the
+    // pieces keep their own skeletons and their own blend indices, and the
+    // union is derived — so a re-import or a document edit cannot leave a stale
+    // character rig on disk.
+
+    /// The UNION of several pieces' rigs, as one iris::Skeleton.
+    ///
+    /// Bones are merged BY NAME. A bone's bind pose comes from the first piece
+    /// that carries it, and a piece that disagrees about a shared bone's bind
+    /// pose is EXCLUDED from the union (its index is appended to `excluded`)
+    /// rather than silently averaged — it keeps its own rig and its own
+    /// instance, which is slower and correct.
+    ///
+    /// The hierarchy is rebuilt from what the pieces together know: a piece
+    /// records the nearest ancestor IT carries, so the union takes, for each
+    /// bone, the DEEPEST of the ancestors any piece named. Bone ORDER is
+    /// canonical (depth, then name) precisely so the union does not depend on
+    /// which piece was visited first — the rig id is a structure hash, and an
+    /// order that depended on visit order would make the same character hash
+    /// two different rigs on two different loads.
+    ///
+    /// False when fewer than two pieces merged, when the pieces' hierarchies
+    /// disagree, or when the result would be cyclic. A single-piece character
+    /// therefore keeps its own rig BYTE FOR BYTE — the negative gate.
+    static bool buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
+                                   iris::SkeletonPtr &out,
+                                   QVector<int> *excluded = nullptr,
+                                   QString *why = nullptr);
+    /// `out[i]` = the index in `rig` of the piece's bone `i` — the blend-index
+    /// map `attachSkinnedMesh` takes. False when the rig does not carry one of
+    /// the piece's bones (which is what the union guarantees it does).
+    static bool rigRemap(const iris::SkeletonPtr &piece, const iris::SkeletonPtr &rig,
+                         QVector<unsigned short> &out);
     // toBonePoses is GONE with the document's clip evaluator: there is no
     // document-computed pose to convert any more. The engine holds the pose;
     // Scene::bonePoses reads it back (and boneWorldTransforms below turns that
@@ -489,6 +537,23 @@ private:
         // of one character animate independently — on the GPU each node's Item
         // carries its own SkeletonInstance, so they also LOOK different.
         iris::SkeletonPtr skeleton;
+        /// The skeleton the ENGINE rig was actually built from: this piece's own
+        /// `skeleton` for a lone piece, the CHARACTER UNION for a piece of a
+        /// multi-piece character (AVATAR_RIG_PERF_SPEC §3.1). Everything that
+        /// speaks the engine's bone indices — the clip extraction, the bone
+        /// read-back, the socket FK — reads THIS, not `skeleton`, because those
+        /// indices are the union's.
+        iris::SkeletonPtr rigSkeleton;
+        /// This piece's blend index -> union bone index map, empty for a piece
+        /// whose rig is its own (the identity).
+        QVector<unsigned short> blendToRig;
+        /// The character this piece belongs to and the union epoch it attached
+        /// with. A character whose piece set changes (a re-import adding a
+        /// piece with new bones) gets a NEW union, and every piece already
+        /// attached to the old one has to re-attach — the epoch is how a piece
+        /// notices without re-deriving the union every frame.
+        const iris::SceneNode *characterHost = nullptr;
+        quint32 characterEpoch = 0;
         bool gpuSkinned = false;                     // the engine accepted the rig
         size_t boneCount = 0;
         /// Each bone's PARENT INDEX, resolved once per rig instead of by a
@@ -650,7 +715,7 @@ private:
     void recordCubeAmbientSh(const QImage faces[6]);
     /// Clears the recorded sky ambient (no sky, or a single-colour sky).
     void clearSkyAmbient();
-    jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh);
+    jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh, const QString &rigId = QString());
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
     void syncTextures(Entry &e, iris::Material *material);
     jahshaka::engine::TextureId textureFor(const QString &path, bool srgb);
@@ -739,6 +804,34 @@ private:
     float         mFocusDt = 0.0f;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
+    /// One character's union rig, derived and cached (AVATAR_RIG_PERF_SPEC
+    /// §3.1). Keyed by the CHARACTER HOST — the nearest ancestor carrying a
+    /// skeletal clip, or the pieces' common parent when there is none.
+    struct CharacterRig {
+        /// The pieces' skeleton pointers, in document order, hashed: the union
+        /// is re-derived only when the character's piece set really changes.
+        quint64 signature = 0;
+        /// Bumped whenever the derived rig id changes. Entries compare it.
+        quint32 epoch = 0;
+        const iris::SceneNode *host = nullptr;   ///< the key, for the entries
+        iris::SkeletonPtr rig;              ///< null = this character has one piece
+        std::string rigId;                  ///< the union's SkeletonDesc id
+        /// Per PIECE skeleton: its blend index -> union bone index map. A piece
+        /// missing from this map is one the union excluded; it keeps its own rig.
+        QHash<const iris::Skeleton *, QVector<unsigned short>> remaps;
+    };
+    QHash<const iris::SceneNode *, CharacterRig> mCharacterRigs;
+    /// The character a piece belongs to: the nearest ancestor-or-self carrying a
+    /// skeletal clip (the same walk clip translation uses), or the piece's own
+    /// parent when the character has no clips at all. Null when that parent is
+    /// the scene ROOT — two unrelated single-piece characters dropped side by
+    /// side in a scene are not one character, and unioning their rigs would
+    /// merge two strangers' skeletons.
+    const iris::SceneNode *characterHostOf(iris::SceneNode *node) const;
+    /// The character rig for a piece, derived if needed. Null when the piece is
+    /// alone (or was excluded from the union) — then it keeps its own rig.
+    const CharacterRig *characterRigFor(iris::SceneNode *piece);
+
     iris::SocketResolver     mSockets;
     /// Counts every setClipStates call this mirror makes (clipStatePushes()).
     quint64                  mClipStatePushes = 0;
@@ -772,7 +865,16 @@ private:
     /// needs a stable identity ON iris::Mesh/iris::Material (a monotonic
     /// generation counter or the asset guid); neither type has one today, and
     /// adding one is a document-model change, not a mirror change.
-    QHash<iris::Mesh *, jahshaka::engine::MeshId> mMeshes;
+    ///
+    /// KEYED BY (mesh, RIG ID) since the character rig landed
+    /// (AVATAR_RIG_PERF_SPEC §3.1). An Ogre Mesh holds exactly ONE SkeletonDef
+    /// and exactly one blend-index map (they live on the SubMesh), so one engine
+    /// mesh cannot serve two different rigs — and two characters CAN legitimately
+    /// share a document mesh asset while resolving to different union rigs (one
+    /// has a hair piece, the other does not). The rig id is empty for every
+    /// unskinned mesh, so nothing but skinned content is affected: an unskinned
+    /// mesh is cached exactly as it was.
+    QHash<QPair<iris::Mesh *, QString>, jahshaka::engine::MeshId> mMeshes;
     // (A second `mPoseScratch` lived here, unused since the document's pose PUSH
     // was retired with its clip evaluator — deleted rather than shadowed by the
     // read-back scratch above, which is a live buffer with the same name.)

@@ -136,13 +136,35 @@ Ogre::v1::SkeletonPtr OgreScene::buildV1Skeleton(const std::string &resName,
 }
 
 // ---------------------------------------------------------------------------
-bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
+bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig,
+                              const unsigned short *blendToRig, size_t blendToRigCount) {
+    // The map we are being asked to write. An absent map is the IDENTITY over
+    // the whole rig — today's behaviour, byte for byte.
+    std::vector<Ogre::uint16> wanted;
+    if (blendToRig && blendToRigCount) {
+        wanted.assign(blendToRig, blendToRig + blendToRigCount);
+    } else {
+        wanted.reserve(rig.bones.size());
+        for (size_t i = 0; i < rig.bones.size(); ++i) wanted.push_back(Ogre::uint16(i));
+    }
+
     if (!meshRec.rigId.empty()) {
         // A mesh holds exactly one SkeletonDef. Re-binding the same rig is a
         // no-op; a different one would silently re-target every weight.
-        if (meshRec.rigId == rig.id) return true;
-        mError = "attachSkinnedMesh: the mesh is already bound to a different rig";
-        return false;
+        if (meshRec.rigId != rig.id) {
+            mError = "attachSkinnedMesh: the mesh is already bound to a different rig";
+            return false;
+        }
+        // ...and exactly one blend-index map, because the map is a SubMesh
+        // member. Two nodes on one mesh asset therefore have to agree about it:
+        // rewriting it here would re-target the OTHER node's weights on its next
+        // draw, with nothing anywhere saying so.
+        if (meshRec.blendToRig != wanted) {
+            mError = "attachSkinnedMesh: the mesh is already bound to this rig with a "
+                     "different blend-index map";
+            return false;
+        }
+        return true;
     }
 
     const std::string resName = rigResourceName(rig.id);
@@ -172,17 +194,24 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
         return false;
     }
 
-    // The renderable's blend index -> bone index map. IDENTITY: our document's
-    // blend indices already name bones by rig index, and HlmsPbs streams one 3x4
+    // The renderable's blend index -> bone index map. HlmsPbs streams one 3x4
     // matrix per entry of this map per draw (OgreHlmsPbs.cpp:3558-3566), in map
-    // order. `_buildBoneIndexMap` would compact it to the bones actually used,
-    // but that needs mBoneAssignments, which needs a full vertex-buffer readback
-    // and rewrite (SubMesh2.cpp:243-245) — we already know the answer.
+    // order — so the map is both the TRANSLATION of the mesh's blend indices and
+    // the per-pass bone COST of this renderable.
+    //
+    // Identity when the caller passed no map: our document's blend indices then
+    // already name bones by rig index (a single-piece character, and every
+    // caller before the union rig). A piece of a MULTI-PIECE character passes
+    // its own map instead: the union rig is the character's, the piece's blend
+    // indices stay compact and piece-local, and this is where the two meet.
+    // Ogre's own `_buildBoneIndexMap` would compact the map for us, but it needs
+    // mBoneAssignments — a full vertex-buffer readback and rewrite
+    // (SubMesh2.cpp:243-245) — and the caller already knows the answer.
     Ogre::SubMesh *sub = meshRec.mesh->getSubMesh(0);
     sub->mBlendIndexToBoneIndexMap.clear();
-    sub->mBlendIndexToBoneIndexMap.reserve(rig.bones.size());
-    for (size_t i = 0; i < rig.bones.size(); ++i)
-        sub->mBlendIndexToBoneIndexMap.push_back(static_cast<unsigned short>(i));
+    sub->mBlendIndexToBoneIndexMap.reserve(wanted.size());
+    for (Ogre::uint16 b : wanted) sub->mBlendIndexToBoneIndexMap.push_back(b);
+    meshRec.blendToRig = wanted;
 
     meshRec.rigId = rig.id;
     RigRec &rec = mRigs[rig.id];
@@ -199,7 +228,8 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
 
 // ---------------------------------------------------------------------------
 bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
-                                  const SkeletonDesc &rig) {
+                                  const SkeletonDesc &rig, const unsigned short *blendToRig,
+                                  size_t blendToRigCount) {
     auto nit = mNodes.find(id);
     auto mit = mMeshes.find(meshId);
     auto tit = mMaterials.find(matId);
@@ -242,9 +272,20 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         attachMesh(id, meshId, matId);
         return false;
     }
-    if (mit->second.maxBlendIndex >= rig.bones.size()) {
+    // WITH a map the mesh's blend indices index the MAP, not the rig, so the
+    // range check moves to the map's length and every entry of the map is then
+    // checked against the rig. Without one the two are the same array.
+    const size_t indexSpace = (blendToRig && blendToRigCount) ? blendToRigCount : rig.bones.size();
+    if (mit->second.maxBlendIndex >= indexSpace) {
         mError = "attachSkinnedMesh: the mesh references a bone the rig does not have";
         return false;
+    }
+    if (blendToRig && blendToRigCount) {
+        for (size_t i = 0; i < blendToRigCount; ++i) {
+            if (blendToRig[i] < rig.bones.size()) continue;
+            mError = "attachSkinnedMesh: the blend-index map names a bone the rig does not have";
+            return false;
+        }
     }
     if (!rigHierarchyIsSane(rig)) {
         mError = "attachSkinnedMesh: rig parent indices are out of range or cyclic";
@@ -252,7 +293,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
     }
 
     JAH_TRY {
-        if (!bindRigToMesh(mit->second, rig)) return false;
+        if (!bindRigToMesh(mit->second, rig, blendToRig, blendToRigCount)) return false;
 
         Node &n = nit->second;
         detachItem(id, n);
