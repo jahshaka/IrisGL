@@ -211,6 +211,7 @@ SceneMirror::~SceneMirror()
 void SceneMirror::setSource(iris::ScenePtr scene)
 {
     mCharacterRigs.clear();
+    mBoneRiders.clear();
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
     // The outgoing document leaves the engine's scene manager before anything
@@ -293,8 +294,10 @@ void SceneMirror::evacuateEngineObjects()
     for (Entry &e : mEntries) releaseEntry(e);
     mEntries.clear();
     // The derived character rigs are keyed by document node; the document's
-    // graph is leaving, so they are worth exactly nothing now.
+    // graph is leaving, so they are worth exactly nothing now. Same for the
+    // socket riders: those keys are document nodes too.
     mCharacterRigs.clear();
+    mBoneRiders.clear();
     for (HighlightShell &s : mHighlightShells)
         if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
@@ -400,6 +403,9 @@ int SceneMirror::sync()
     syncClips();
     syncHighlight();
     syncGrid();
+    // AFTER removeMissing: a rider deleted from the document is a dangling key
+    // in the reconciler's map until its entry is released (see the function).
+    sweepStaleRiders();
     return mVisited;
 }
 
@@ -1920,6 +1926,11 @@ void SceneMirror::removeMissing()
     for (auto it = mEntries.begin(); it != mEntries.end();) {
         if (it->lastSeen == mSyncStamp) { ++it; continue; }
         droppedRigged = droppedRigged || it->gpuSkinned;
+        // A node that has left the document must leave the rider bookkeeping
+        // with it: the map is keyed by the document node POINTER, and the
+        // reconciler's sweep would otherwise call getParent() on a freed node.
+        // (The engine frees the tag itself when the node is released.)
+        mBoneRiders.remove(it.key());
         releaseEntry(*it);
         it = mEntries.erase(it);
     }
@@ -3197,7 +3208,8 @@ int SceneMirror::reconcileSockets()
     mSocketDangling = 0;
     int riding = 0;
     const QHash<QString, QList<iris::SceneNodePtr>> &attachments = mSource->socketAttachments;
-    QSet<const iris::SceneNode *> seen;
+    mRidersSeen.clear();
+    QSet<const iris::SceneNode *> &seen = mRidersSeen;
 
     for (auto it = attachments.constBegin(); it != attachments.constEnd(); ++it) {
         const QList<iris::SceneNodePtr> &attached = it.value();
@@ -3285,17 +3297,32 @@ int SceneMirror::reconcileSockets()
         }
     }
 
-    // Anything we armed that the document no longer attaches comes off its bone
+    // The stale half is NOT done here — see sweepStaleRiders, which runs at the
+    // END of sync for a reason that cost a SEGV to find.
+    return riding;
+}
+
+void SceneMirror::sweepStaleRiders()
+{
+    // ANYTHING WE ARMED THAT THE DOCUMENT NO LONGER ATTACHES comes off its bone
     // and back under its document parent, at the pose it last rendered with —
     // "it keeps its last pose", which is what the socket API promises for a
     // stale attachment.
+    //
+    // AND IT RUNS AT THE END OF sync(), AFTER removeMissing. `mBoneRiders` is
+    // keyed by document node POINTER (the reconciler needs the node, not an id),
+    // and a rider that was DELETED from the document is a freed pointer in that
+    // map until removeMissing drops it. Sweeping at the top of sync — where the
+    // reconciler itself runs — therefore dereferenced a destroyed node the frame
+    // after a socketed prop was deleted, which is exactly the crash the
+    // "rider deleted mid-ride" case in sockets.tags reproduces.
+    if (!mTarget || mBoneRiders.isEmpty()) return;
     for (auto it = mBoneRiders.begin(); it != mBoneRiders.end();) {
-        if (seen.contains(it.key())) { ++it; continue; }
+        if (mRidersSeen.contains(it.key())) { ++it; continue; }
         iris::SceneNode *rider = const_cast<iris::SceneNode *>(it.key());
         it = mBoneRiders.erase(it);
         releaseRider(rider);
     }
-    return riding;
 }
 
 void SceneMirror::releaseRider(iris::SceneNode *rider)

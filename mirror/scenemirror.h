@@ -852,6 +852,10 @@ private:
     /// tag points equal to the DOCUMENT's socket attachments, instead of moving
     /// riders itself every frame. Returns how many riders are being driven.
     int reconcileSockets();
+    /// Frees the tags of riders the document no longer attaches. Runs at the
+    /// END of sync, after removeMissing has dropped the entries of deleted
+    /// nodes — the map below is keyed by document node pointer.
+    void sweepStaleRiders();
     /// Takes one rider off its bone (if it is on one) and forgets it.
     void releaseRider(iris::SceneNode *rider);
     /// What the engine was last asked for, per rider — so an unchanged socket
@@ -862,6 +866,9 @@ private:
         quint64 offsetKey = 0;
     };
     QHash<const iris::SceneNode *, RiderState> mBoneRiders;
+    /// The riders the reconciler saw this sync — what the end-of-sync sweep
+    /// measures "stale" against. A member so the steady state allocates nothing.
+    QSet<const iris::SceneNode *> mRidersSeen;
     int                      mSocketDangling = 0;
 
     iris::SocketResolver     mSockets;
