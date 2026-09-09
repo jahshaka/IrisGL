@@ -227,6 +227,15 @@ public:
     /// map onto it (false -> 0, true -> 1); readers that still speak the old
     /// spelling (world.settings' `autoRefresh`) report `budget > 0`.
     int giUpdateBudget = 1;
+    /// DYNAMIC REFLECTION PROBES — Epic's column of the Rayon tier table
+    /// (GI_UNIFIED_SPEC.md §2, owner option (b) 2026-09-09). Extra probe
+    /// re-captures per frame, on top of giUpdateBudget, reserved for probes
+    /// covering geometry that MOVED this frame, so a mover's reflection follows
+    /// it frame by frame instead of waiting for the sweep. 0 = the sweep alone
+    /// (Low/Medium/High); Epic writes 2. Free at rest (no mover, nothing
+    /// spent). Tier-written through the `giDynamicProbes` registry row, so an
+    /// explicit edit PINS it like giNumBounces. Hybrid only. 0..8.
+    int giDynamicProbes = 0;
     iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
     // Hybrid probe-capture knobs (REFLECTIONS_ADOPTION_SPEC.md P3). Integrator
     // knobs, not quality-dial rows: they reach the engine through world.gi only
@@ -252,8 +261,11 @@ public:
     /// document-side and writes a concrete 0/1 through, exactly like giMode and
     /// giQuality (services/worldmodes.h — a backing field is always the
     /// resolved value), so -1 survives only in a scene no tier has ever been
-    /// applied to; the engine reads that as OFF, which is what makes every
-    /// scene serialized before this field existed render exactly as it did.
+    /// applied to. The engine reads a bare -1 as OFF; the reader never lets one
+    /// reach it, because a document without a tier DERIVES one and -1 then
+    /// means "the derived tier decides" (worldmodes::deriveRayonFromDocument,
+    /// owner option (b) 2026-09-09: Medium and High are DDGI-fed, so the
+    /// shipped vct+medium samples come up with the field on).
     /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
     int giDdgi = -1;
     /// The DDGI diffuse INTENSITY. Ours, not upstream's: binding a field turns
@@ -277,7 +289,9 @@ public:
     /// bound. Clamped to [0, 8] on the way to the engine.
     float giDdgiAmbient = 1.0f;
     /// WHERE THE FIELD'S PROBES GET THEIR LIGHT (GI_UNIFIED_SPEC.md P3 "A2"):
-    /// -1 auto (the tier's choice — voxel at every tier), 0 voxel cone tracing,
+    /// -1 auto (the tier's choice — voxel at every tier, Epic included; the
+    /// raster feed costs 3.4-9 ms per probe in Debug, rayon2 S3, which is no
+    /// default for anyone), 0 voxel cone tracing,
     /// 1 rasterised probe captures (six 32x32 scene renders per probe, under the
     /// same update budget; sees skinned/animated geometry the voxels cannot).
     /// An Advanced-only knob; never tier-written, so it has no registry row.
@@ -286,8 +300,8 @@ public:
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.
     ///
     /// It is a REQUEST, never a second source of truth: the tier resolves
-    /// WRITE-THROUGH into giMode / giQuality / giDdgi (services/worldmodes.cpp,
-    /// applyRayon) exactly the way a World Mode resolves into its rows, so the
+    /// WRITE-THROUGH into giMode / giQuality / giDdgi / giNumBounces /
+    /// giDynamicProbes (services/worldmodes.cpp, setRayon) exactly the way a World Mode resolves into its rows, so the
     /// mirror, the serializer, the engine and every existing verb keep reading
     /// the one field they always read. A field the user pinned deviates from
     /// the tier and survives tier switches, which is what makes the panel's

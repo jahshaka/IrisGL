@@ -4308,6 +4308,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
         gi.updateBudget = qMax(0, mSource->giUpdateBudget);        // FIX WAVE B1
+        gi.dynamicProbes = qBound(0, mSource->giDynamicProbes, 8);  // Epic's column
         gi.rayMarchStepScale = qMax(1.0f, mSource->giRayMarchStepScale);   // B5
         // DDGI (GI_UNIFIED_SPEC.md §4 P1): the same tri-state travel as the
         // probe toggles, plus our own intensity scalar. Both ride the CHANGE
@@ -4335,6 +4336,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                    a.probeSnapSidesMin == b.probeSnapSidesMin &&
                    a.probeSnapSidesMax == b.probeSnapSidesMax &&
                    a.updateBudget == b.updateBudget &&
+                   a.dynamicProbes == b.dynamicProbes &&
                    a.rayMarchStepScale == b.rayMarchStepScale &&
                    a.ddgi == b.ddgi && a.ddgiIntensity == b.ddgiIntensity &&
                    a.ddgiAmbient == b.ddgiAmbient && a.ddgiSource == b.ddgiSource &&

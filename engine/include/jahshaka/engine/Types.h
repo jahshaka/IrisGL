@@ -1267,6 +1267,26 @@ struct GiParams {
     /// and ROUGH surfaces inside the probe region take their environment from the
     /// probes instead of from cone tracing. Mirror-sharp pixels do not move.
     int       updateBudget = 1;
+    /// DYNAMIC REFLECTION PROBES — Epic's column of the Rayon tier table
+    /// (GI_UNIFIED_SPEC.md §2; owner decision 2026-09-09, option (b)).
+    ///
+    /// How many EXTRA probe re-captures per frame the renderer may spend, on
+    /// top of `updateBudget`, on probes whose area covers geometry that MOVED
+    /// this frame (the same movement scan the sweep priority reads). The sweep
+    /// is a guarantee about every probe; this is a reservation for the ones a
+    /// moving object is inside, so its reflection follows it frame by frame
+    /// instead of waiting for the sweep to come round again. 0 (the default)
+    /// is the sweep alone — the shipped High behaviour. It costs NOTHING while
+    /// the scene is still (no moved box, no candidate), and at most this many
+    /// probe captures per frame while something moves. Clamped to 0..8 and to
+    /// the probes that exist; `GiStatus::dynamicProbes` reports the resolution
+    /// and `GiStatus::dynamicProbeUpdates` how many it actually spent on the
+    /// last frame.
+    ///
+    /// NOT the retired P5a `dynamicProbes` ("keep the nearest N probes live
+    /// for ever", replaced by the budget above): that one re-captured at rest;
+    /// this one re-captures only what moved. Hybrid only; ignored elsewhere.
+    int       dynamicProbes = 0;
     /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5). Upstream:
     /// "bigger values means the shadow raymarching during light injection is
     /// faster, but may cause glitches if too high (areas that are supposed to be
@@ -1414,6 +1434,13 @@ struct GiStatus {
     /// but the hybrid. Every probe still refreshes within
     /// ceil(probeCount / this) frames; see GiParams::updateBudget.
     int    probeUpdatesPerFrame = 0;
+    /// The RESOLVED `GiParams::dynamicProbes` — clamped to 0..8 and to the
+    /// probes that exist, 0 whenever the probe arm did not build or the budget
+    /// is paused (a paused scene re-captures nothing, moved or not) — and how
+    /// many extra re-captures that reservation actually spent on the LAST frame
+    /// (0 while nothing moves: the column is free at rest, by construction).
+    int    dynamicProbes = 0;
+    int    dynamicProbeUpdates = 0;
     /// The UNION of every probe's fitted PARALLAX SHAPE — the boxes the shader
     /// reprojects reflection rays onto (FIX WAVE A2). Equal corners in every
     /// mode but the hybrid, and in the hybrid it must lie inside
