@@ -1994,7 +1994,12 @@ private:
     /// arm itself is being torn down and rebuilt.
     void disarmAllReflectors();
 
+    /// The scene node behind an id, or null. PUBLIC since P2b: a View that
+    /// rides its camera on a node (setCameraNode) needs exactly this one lookup
+    /// and nothing else of the scene's internals.
+public:
     Ogre::SceneNode *node(NodeId id) const;
+private:
     /// Ids are monotonic per scene and never reused.
     NodeId track(const Node &n);
 
@@ -2214,6 +2219,8 @@ public:
     OgreScene *ogreScene() const { return mScene; }
 
     bool setScene(Scene *scene) override;
+    bool setCameraNode(NodeId node) override;
+    NodeId cameraNode() const override { return mCameraNode; }
 
     /// Unbinds the scene: workspace and camera go, the scene itself survives.
     void detachScene();
@@ -2515,6 +2522,10 @@ private:
     /// it beyond the Ogre camera itself: the letterbox flag (a graph change)
     /// and its rectangle (re-derived on every resize).
     CameraDesc                 mCameraDesc;
+    /// The scene node the camera RIDES (setCameraNode, AVATAR_RIG_PERF_SPEC
+    /// §4.6). 0 = the camera is positioned from mCameraDesc, which is what
+    /// every view has done since step 5.
+    NodeId                     mCameraNode = 0;
     unsigned                   mWidth, mHeight;
     Colour                     mBackground;
     bool                       mEnabled = true;

@@ -457,6 +457,38 @@ OgreView::~OgreView() { destroy(); }
 const std::string &OgreView::name() const { return mName; }
 Scene *OgreView::scene() const { return mScene; }
 
+bool OgreView::setCameraNode(NodeId node) {
+    JAH_TRY {
+        if (!mCamera) { mError = "setCameraNode: this view has no camera yet"; return false; }
+        if (!node) {
+            if (!mCameraNode) return true;
+            mCameraNode = 0;
+            // Back onto the scene root, and back to the pushed pose — the
+            // description is still the last one the host sent.
+            mCamera->detachFromParent();
+            mScene->sceneManager()->getRootSceneNode(Ogre::SCENE_DYNAMIC)->attachObject(mCamera);
+            mCamera->setPosition(toOgre(mCameraDesc.position));
+            mCamera->setOrientation(Ogre::Quaternion(mCameraDesc.orientation.w,
+                                                     mCameraDesc.orientation.x,
+                                                     mCameraDesc.orientation.y,
+                                                     mCameraDesc.orientation.z));
+            return true;
+        }
+        if (!mScene) { mError = "setCameraNode: this view has no scene"; return false; }
+        Ogre::SceneNode *target = mScene->node(node);
+        if (!target) { mError = "setCameraNode: unknown node in this view's scene"; return false; }
+        if (mCameraNode == node && mCamera->getParentSceneNode() == target) return true;
+        mCamera->detachFromParent();
+        target->attachObject(mCamera);
+        // The camera's own local transform is the IDENTITY: the node carries the
+        // pose, exactly as the pushed description used to.
+        mCamera->setPosition(Ogre::Vector3::ZERO);
+        mCamera->setOrientation(Ogre::Quaternion::IDENTITY);
+        mCameraNode = node;
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
 bool OgreView::setScene(Scene *scene) {
     JAH_TRY {
         if (!scene) { detachScene(); return true; }
@@ -586,6 +618,8 @@ void OgreView::detachScene() {
         destroyPip();
         if (mCamera && mScene && mScene->sceneManager()) mScene->sceneManager()->destroyCamera(mCamera);
         mCamera = nullptr;
+        // The camera rode a node of the scene that is going away.
+        mCameraNode = 0;
         mScene  = nullptr;
         mFramesPresented = 0;
     } JAH_CATCH(mError, );
@@ -602,8 +636,14 @@ void OgreView::setCamera(const CameraDesc &c) {
         mCameraDesc = c;
         if (chainDesc().letterbox != wasLetterboxed) rebuildWorkspaceDef();
         applyLetterbox();
-        mCamera->setPosition(toOgre(c.position));
-        mCamera->setOrientation(Ogre::Quaternion(c.orientation.w, c.orientation.x, c.orientation.y, c.orientation.z));
+        // THE POSE, unless the camera is RIDING A NODE (setCameraNode): then the
+        // node is the pose and these two fields are stale by definition — they
+        // were read outside the frame, and the node resolves inside it.
+        if (!mCameraNode) {
+            mCamera->setPosition(toOgre(c.position));
+            mCamera->setOrientation(Ogre::Quaternion(c.orientation.w, c.orientation.x,
+                                                     c.orientation.y, c.orientation.z));
+        }
         mCamera->setNearClipDistance(std::max(c.nearClip, 0.001f));
         mCamera->setFarClipDistance(std::max(c.farClip, c.nearClip + 0.01f));
         if (c.orthographic) {

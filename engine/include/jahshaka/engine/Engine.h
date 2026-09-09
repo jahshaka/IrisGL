@@ -714,6 +714,25 @@ public:
     /// Full camera state in one call (step 5). The document camera is pushed
     /// through this every frame. This is the ONLY way to move a View's camera.
     virtual void setCamera(const CameraDesc &) = 0;
+    /// Rides the view's camera ON a scene node, instead of positioning it from
+    /// the pushed CameraDesc (AVATAR_RIG_PERF_SPEC §4.6, phase P2b).
+    ///
+    /// WHY IT EXISTS. A CameraDesc is filled from the camera node's world
+    /// transform read BEFORE the frame, so a camera on a socket is one frame
+    /// behind the bone it rides even though the rider NODE is exact — the tag
+    /// point resolves inside the frame, the desc was read outside it. Attaching
+    /// Ogre's camera to that node closes the gap: the camera derives its
+    /// transform from the node hierarchy, tag points included, in the frame that
+    /// renders.
+    ///
+    /// While a camera node is set, setCamera's POSITION and ORIENTATION are
+    /// ignored (the node is the pose); every other field — the lens, the clip
+    /// planes, the projection, the letterbox, the shift — still applies.
+    /// `node = 0` returns the camera to the pushed pose. The node must belong to
+    /// this view's scene.
+    virtual bool setCameraNode(NodeId node) = 0;
+    /// The node the camera rides, or 0.
+    virtual NodeId cameraNode() const = 0;
     /// Clear colour behind the scene (the document's flat sky colour). Cheap to
     /// call with the same value; a change rebuilds the view's compositor workspace.
     virtual void setBackground(const Colour &) = 0;

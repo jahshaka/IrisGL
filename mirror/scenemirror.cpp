@@ -4948,4 +4948,21 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float fram
     // also uses and which must never hold an authored camera's inset.
     desc.framingAspect = (camera.data() == hostCamera) ? framingAspect : 0.0f;
     view->setCamera(desc);
+
+    // A CAMERA ON A SOCKET RIDES ITS NODE (AVATAR_RIG_PERF_SPEC §4.6, P2b).
+    //
+    // The description above carries the camera's world transform as it was
+    // BEFORE this frame — which for a socketed camera is a bone pose from the
+    // last frame, because tag points resolve inside the frame. The rider NODE is
+    // exact; the desc is not. Attaching the engine's camera to that node closes
+    // the last frame of lag for a first-person avatar, and does nothing at all
+    // for every other camera: the binding is armed ONLY while the camera is
+    // socketed, and dropped the moment it is not (so a camera the user takes off
+    // a head goes straight back to the pushed pose).
+    jahshaka::engine::NodeId ride = 0;
+    if (!camera->socketOwnerGuid.isEmpty()) {
+        const auto it = mEntries.constFind(camera.data());
+        if (it != mEntries.constEnd()) ride = it->node;
+    }
+    if (view->cameraNode() != ride) view->setCameraNode(ride);
 }
