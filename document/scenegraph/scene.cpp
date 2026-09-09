@@ -582,6 +582,16 @@ bool Scene::attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
     unregisterSocketAttachment(node);
     node->setSocketAttachment(ownerGuid, socketName);
     registerSocketAttachment(node);
+    // ON THE SOCKET, not "wherever it happened to be, offset by the socket"
+    // (AVATAR_RIG_PERF_SPEC decision D4). A rider's local transform is now
+    // RELATIVE TO THE SOCKET and it sticks — which is what lets a user nudge a
+    // sword in a hand — so attaching has to start from the socket itself, or a
+    // prop placed across the room would ride the hand from across the room.
+    // (Before D4 nothing had to zero it: the resolver overwrote the rider's
+    // WORLD transform every frame, so its local meant nothing while attached.)
+    node->setLocalPos(Vec3(0, 0, 0));
+    node->setLocalRot(Quat());
+    node->setLocalScale(Vec3(1, 1, 1));
     return true;
 }
 
