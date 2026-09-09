@@ -1379,6 +1379,9 @@ public:
     /// slots and leaves the front of the range to Ogre's dynamic sort —
     /// upstream's ordering rule (OgreCompositorShadowNode.h:308-317).
     void staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>> &out) const;
+    /// "Is there anything static to do here at all?" — the early-out on the
+    /// per-frame path, which for every scene shipped today answers no.
+    bool hasStaticShadowLights() const;
     /// "Something a static shadow map can see has changed." Sets a scene-level
     /// flag the engine turns into setStaticShadowMapDirty on the next frame.
     /// V1 IS DELIBERATELY COARSE: one flag for the whole scene, not per light —
@@ -2094,6 +2097,17 @@ private:
     /// frame by OgreEngine::applyStaticShadowMaps. Starts TRUE so the first
     /// frame after a light becomes static renders its map.
     bool mStaticShadowsDirty = true;
+    /// THE LIGHT INDEX. Node ids that currently carry an Ogre::Light, kept so
+    /// the two per-frame shadow walks (countLocalShadowCasters and
+    /// staticShadowLights) iterate LIGHTS instead of every node in the scene.
+    /// It is maintained where lights are born and die — setLight, removeLight,
+    /// releaseNode — and a stale entry is tolerated by both readers (they skip
+    /// a node whose light is gone), so it can never be worse than a hint.
+    ///
+    /// It exists because the walks were measurable: with them iterating mNodes,
+    /// gi.coalesce's 60-frame light drag failed 3 runs in 6 (the wall-clock
+    /// re-inject debounce shifted); with the index it passes, like the base.
+    std::vector<NodeId> mLightNodes;
     /// Per static light, a hash of its world pose as of the last check (see
     /// staticLightsMoved). Entries for lights that stop being static are
     /// dropped, so a light toggled off and on re-renders once.
@@ -2594,7 +2608,7 @@ public:
     /// count by dropping every workspace that instantiates the shadow node,
     /// replacing the definitions and re-creating them. Returns true when a
     /// rebuild actually happened.
-    bool rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps);
+    bool rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, bool perMapClears);
     /// The EFFECTIVE budget: what the host asked for (setShadowMapBudget),
     /// clamped to the engine's hard maximum and to what the current
     /// resolution can afford — 16 maps at 1024, 8 at 2048, 4 at 4096, 2 at
@@ -2679,7 +2693,13 @@ private:
     /// maps packed into one atlas derived from `baseResolution`, registered
     /// under `name`. Built from the public compositor-definition API rather than
     /// ShadowNodeHelper — see the head of OgreShadow.cpp for why.
-    void buildShadowNode(const char *name, unsigned baseResolution, unsigned focusedMaps);
+    /// `perMapClears` picks the clear strategy: false = upstream's ONE
+    /// whole-atlas PASS_CLEAR (cheapest, and what every scene without a static
+    /// shadow map wants), true = one clear QUAD per map, which is what lets a
+    /// static map survive its neighbours being redrawn. The engine rebuilds the
+    /// node when the answer changes.
+    void buildShadowNode(const char *name, unsigned baseResolution, unsigned focusedMaps,
+                         bool perMapClears);
     /// Which of the two clear-quad materials writes the far plane on this
     /// backend (reverse depth or not). OgreShadow.cpp.
     const char *shadowClearMaterialName() const;
@@ -2731,6 +2751,10 @@ private:
     /// eight; the resolution cap in effectiveShadowMapBudget() is what keeps a
     /// 4096 or 8192 atlas from taking the number literally.
     unsigned        mShadowMapBudget = 8;
+    /// Whether the CURRENT shadow node clears per map (see buildShadowNode).
+    /// False until a static shadow map exists anywhere in the process, so a
+    /// scene that never uses the feature executes upstream's pass list exactly.
+    bool            mShadowPerMapClears = false;
     /// Derivation bookkeeping: the count the last few frames asked for and how
     /// many frames in a row have asked for it. A scene LOADS its lights over
     /// many frames, and each rebuild drops and recreates every workspace that
@@ -2761,6 +2785,13 @@ private:
     /// The view the counter is currently attached to, so it moves with the
     /// primary view instead of counting a dead workspace's passes.
     OgreView       *mShadowCounterView = nullptr;
+    /// The counter is OPT-IN (see applyStaticShadowMaps): a workspace listener
+    /// costs a callback per compositor pass per frame, so it runs only while
+    /// somebody reads shadowStatus() or a static shadow map exists. `mutable`
+    /// because shadowStatus() is const and asking is what arms it — the
+    /// RenderStats::metricsRecording pattern.
+    mutable bool    mShadowStatusPolled = false;
+    bool            mShadowStaticSeen = false;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     /// EngineConfig::vsync, then whatever setVsync() last said. Read at every
     /// window creation (createView + the MSAA-recreate hook), so the pacing

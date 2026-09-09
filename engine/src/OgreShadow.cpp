@@ -169,7 +169,8 @@ const char *OgreEngine::shadowClearMaterialName() const
 // ---------------------------------------------------------------------------
 // The definition
 // ---------------------------------------------------------------------------
-void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsigned focusedMaps)
+void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsigned focusedMaps,
+                                 bool perMapClears)
 {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     Ogre::RenderSystem *rs = mRoot->getRenderSystem();
@@ -246,23 +247,47 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         addMap(1u + i, 0u, plan.focused[i], Ogre::SHADOWMAP_FOCUSED, 1u);
 
     // ---- the passes ---------------------------------------------------
-    //   per map: one clear quad                                   (3 + N)
+    //   the clears: ONE whole-atlas clear, or one quad per map     (1 or 3 + N)
     //   PSSM:    one scene pass per split                         (3)
     //   focused: one scene pass (spot) + 6 cube faces + 1 copy     (N * 8)
-    def->setNumTargetPass(numMaps + 3u + N * 8u);
+    def->setNumTargetPass((perMapClears ? numMaps : 1u) + 3u + N * 8u);
 
     const Ogre::uint8 directionalMask = Ogre::uint8(1u << Ogre::Light::LT_DIRECTIONAL);
     const Ogre::uint8 pointMask       = Ogre::uint8(1u << Ogre::Light::LT_POINT);
     const Ogre::uint8 spotMask        = Ogre::uint8(1u << Ogre::Light::LT_SPOTLIGHT);
     const char *clearMaterial = shadowClearMaterialName();
 
-    // (a) THE PER-MAP CLEARS, first, in map order. Each one is gated by
+    // (a) THE CLEAR. Upstream's ONE whole-atlas clear while no shadow map in
+    //     this process is static, and one QUAD PER MAP once one is — because
+    //     the quads are not free and, until a user ticks Static Shadow, they
+    //     buy nothing.
+    //
+    //     MEASURED, which is why this is a switch and not a constant
+    //     (gi.coalesce, 2026-09-09): three quads over the PSSM block (2048^2 +
+    //     two 1024^2 of depth writes) every frame, where a hardware fast-clear
+    //     had covered the whole atlas, delayed the frame enough to flip a
+    //     neighbouring GI suite's frame-phase 3 times in 6 runs. With this
+    //     switch a scene that uses no static maps executes exactly upstream's
+    //     pass list again, and the suite is 6/6.
+    //
+    //     The engine rebuilds the node when the answer changes (the same
+    //     drop-swap-recreate a Shadow Quality change costs), so the quads exist
+    //     exactly in the sessions that need them.
+    if (!perMapClears) {
+        Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
+        target->setNumPasses(1u);
+        Ogre::CompositorPassDef *passDef = target->addPass(Ogre::PASS_CLEAR);
+        Ogre::CompositorPassClearDef *clr = static_cast<Ogre::CompositorPassClearDef *>(passDef);
+        clr->setAllClearColours(shadowClearColour());
+        clr->mClearDepth = 1.0f;
+    }
+    // (a2) THE PER-MAP CLEARS, in map order. Each one is gated by
     //     CompositorNode::_update on ITS OWN map index: it runs when the map
     //     holds a light and that light is dynamic or a dirty static
     //     (_shouldUpdateShadowMapIdx), which is precisely the frames in which
     //     the map is about to be re-rendered. A static map that is clean is
     //     neither cleared nor drawn, so its contents survive — the whole point.
-    for (unsigned m = 0u; m < numMaps; ++m) {
+    for (unsigned m = 0u; perMapClears && m < numMaps; ++m) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(m < 3u ? directionalMask
                                                        : Ogre::uint8(pointMask | spotMask));
@@ -371,7 +396,7 @@ void OgreEngine::applyShadowFilter() {
 void OgreEngine::setShadowResolution(unsigned pixels) {
     const unsigned res = std::min(8192u, std::max(256u, pixels));
     if (res == mShadowResolution) return;
-    rebuildShadowAtlas(res, mShadowMapCount);
+    rebuildShadowAtlas(res, mShadowMapCount, mShadowPerMapClears);
 }
 
 unsigned OgreEngine::shadowResolution() const { return mShadowResolution; }
@@ -385,12 +410,15 @@ unsigned OgreEngine::shadowResolution() const { return mShadowResolution; }
 ///
 /// Returns false when nothing was done (values unchanged, or no Hlms yet — in
 /// which case the first createShadowNode() will pick the new values up).
-bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps) {
+bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, bool clears) {
     const unsigned res = std::min(8192u, std::max(256u, resolution));
     const unsigned maps = std::min(kMaxShadowMaps, std::max(2u, focusedMaps));
-    if (res == mShadowResolution && maps == mShadowMapCount && mHlmsRegistered) return false;
+    if (res == mShadowResolution && maps == mShadowMapCount && clears == mShadowPerMapClears &&
+        mHlmsRegistered)
+        return false;
     mShadowResolution = res;
     mShadowMapCount = maps;
+    mShadowPerMapClears = clears;
     if (!mHlmsRegistered) return false;   // first createShadowNode() picks it up
     bool ok = false;
     JAH_TRY {
@@ -514,7 +542,7 @@ void OgreEngine::deriveShadowMapCount() {
     Ogre::LogManager::getSingleton().logMessage(
         "Jahshaka shadows: growing the atlas to " + Ogre::StringConverter::toString(want) +
         " focused shadow maps for " + Ogre::StringConverter::toString(casters) + " casters");
-    rebuildShadowAtlas(mShadowResolution, want);
+    rebuildShadowAtlas(mShadowResolution, want, mShadowPerMapClears);
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +552,12 @@ ShadowStatus OgreEngine::shadowStatus() const {
     ShadowStatus st;
     st.requestedBudget = mShadowMapBudget;
     if (!mHlmsRegistered || mHeadless) return st;   // live stays false
+    // ASKING TURNS THE COUNTERS ON, exactly like RenderStats::metricsRecording:
+    // the shadow-pass listener is not free (a callback per compositor pass per
+    // frame), so it only runs while somebody is reading it or while a static
+    // map exists. The FIRST call therefore reports 0 passes; every call after a
+    // rendered frame reports the truth.
+    mShadowStatusPolled = true;
     JAH_TRY {
         st.resolution = mShadowResolution;
         st.budget = effectiveShadowMapBudget();
@@ -670,11 +704,50 @@ void OgreEngine::applyStaticShadowMaps() {
         // chain's recompile globals use. It is re-attached rather than hooked
         // up once because a view's workspace is dropped and recreated by every
         // atlas rebuild, and addWorkspaceListener is a no-op on repeat.
-        if (!mShadowCounter) mShadowCounter = new ShadowPassCounter();
+        // THE COUNTER IS OPT-IN, and that is a performance decision, not a
+        // preference (found by gi.coalesce, 2026-09-09). A
+        // CompositorWorkspaceListener is called back for EVERY compositor pass
+        // of EVERY frame, and a GI scene has a lot of passes: attaching it
+        // unconditionally put a virtual call plus an IdString compare on the
+        // render path of every scene in the process, for numbers almost nobody
+        // reads. It measurably moved a neighbouring suite's frame-phase.
+        //
+        // So it rides the RenderStats::metricsRecording pattern this engine
+        // already uses: recording starts when something asks (shadowStatus())
+        // or when there is something to measure (a static map exists), and
+        // stops again when neither holds.
+        const bool wantCounter = mShadowStatusPolled || mShadowStaticSeen;
+        if (wantCounter && !mShadowCounter) mShadowCounter = new ShadowPassCounter();
         OgreView *counterView = nullptr;
 
         std::vector<OgreScene *> scenes;
         scenesFeedingEnabledViews(scenes);
+
+        // THE EARLY OUT, and the reason it exists: this function is on the
+        // render path of EVERY frame of every scene in the process, and the
+        // overwhelmingly common case is "no light in this process has a static
+        // shadow map" — every scene shipped today. In that case there is
+        // nothing to assign, nothing to dirty and nothing to count, and the
+        // work below (a walk of the views, findShadowNode per view, the fixed
+        // -light table per view) is pure overhead. `mShadowStaticSeen` keeps
+        // one frame of memory so the LAST static light's slot is still released
+        // properly before the early-out engages.
+        bool anyStatic = false;
+        for (OgreScene *s : scenes) if (s->hasStaticShadowLights()) { anyStatic = true; break; }
+        // THE CLEAR STRATEGY FOLLOWS THE NEED. Per-map clear quads exist to let
+        // a static map survive; until one exists they are pure cost (measured —
+        // see buildShadowNode). The first static light in the process rebuilds
+        // the node with them, which is the same hitch a Shadow Quality change
+        // costs and happens once.
+        if (anyStatic != mShadowPerMapClears)
+            rebuildShadowAtlas(mShadowResolution, mShadowMapCount, anyStatic);
+        if (!anyStatic && !mShadowStaticSeen && !mShadowStatusPolled) {
+            for (OgreScene *s : scenes) s->takeStaticShadowsDirty();
+            mShadowPassesLastFrame = 0;
+            mStaticShadowRendersLastFrame = 0;
+            return;
+        }
+
         // Consume each scene's dirty flag ONCE for the whole frame, before the
         // per-view loop: two views of the same scene must not make the second
         // one miss the dirty (or, worse, dirty a map that has already been
@@ -691,12 +764,14 @@ void OgreEngine::applyStaticShadowMaps() {
         mRefreshShadowsPending = false;
 
         unsigned staticSlots = 0;
+        bool sawStatic = false;
         for (auto &v : mViews) {
             if (!v->isEnabled() || !v->ogreScene()) continue;
             Ogre::CompositorShadowNode *node = v->shadowNodeInstance();
             if (!node) continue;
-            if (!counterView) counterView = v.get();
+            if (!counterView && wantCounter) counterView = v.get();
 
+            if (!wantCounter) counterView = nullptr;
             OgreScene *scene = v->ogreScene();
             bool sceneDirty = false;
             for (const auto &d : dirty) if (d.first == scene) sceneDirty = d.second;
@@ -710,6 +785,7 @@ void OgreEngine::applyStaticShadowMaps() {
             // simply stay dynamic (reported through shadowStatus).
             if (statics.size() > mShadowMapCount) statics.resize(mShadowMapCount);
             staticSlots = std::max(staticSlots, unsigned(statics.size()));
+            if (!statics.empty()) sawStatic = true;
 
             const Ogre::LightClosestArray &held = node->getShadowCastingLights();
             // Walk the focused slots from the BACK, handing out the last ones to
@@ -738,16 +814,23 @@ void OgreEngine::applyStaticShadowMaps() {
             }
         }
 
+        mShadowStaticSeen = sawStatic;
+
         // Attribute last frame's counts. The per-map numbers were collected by
         // the listener during the PREVIOUS frame, so this reads them before the
         // next workspacePreUpdate resets them.
-        mShadowPassesLastFrame = mShadowCounter->total();
-        unsigned staticRenders = 0;
-        for (unsigned i = 0; i < staticSlots; ++i) {
-            const unsigned mapIdx = mShadowMapCount - i + 2u;
-            staticRenders += mShadowCounter->perMap(mapIdx);
+        if (mShadowCounter) {
+            mShadowPassesLastFrame = mShadowCounter->total();
+            unsigned staticRenders = 0;
+            for (unsigned i = 0; i < staticSlots; ++i) {
+                const unsigned mapIdx = mShadowMapCount - i + 2u;
+                staticRenders += mShadowCounter->perMap(mapIdx);
+            }
+            mStaticShadowRendersLastFrame = staticRenders;
+        } else {
+            mShadowPassesLastFrame = 0;
+            mStaticShadowRendersLastFrame = 0;
         }
-        mStaticShadowRendersLastFrame = staticRenders;
 
         if (counterView != mShadowCounterView) {
             // BELT AND BRACES over noteViewDestroyed's unhook: only ever detach
@@ -761,7 +844,11 @@ void OgreEngine::applyStaticShadowMaps() {
                 mShadowCounterView->removeWorkspaceListener(mShadowCounter);
             mShadowCounterView = counterView;
         }
-        if (mShadowCounterView) mShadowCounterView->addWorkspaceListener(mShadowCounter);
+        if (mShadowCounterView && mShadowCounter)
+            mShadowCounterView->addWorkspaceListener(mShadowCounter);
+        // Nothing wants the numbers any more: unhook and let the render path go
+        // back to costing nothing.
+        if (!wantCounter && mShadowCounter) detachShadowCounter();
     } JAH_CATCH(mLastError, );
 }
 

@@ -282,19 +282,28 @@ void shutdown() {
 // from renderOneFrame BEFORE Root::renderOneFrame, which is outside that window.
 unsigned OgreScene::countLocalShadowCasters(std::vector<NodeId> *out) const {
     unsigned n = 0;
-    for (const auto &entry : mNodes) {
-        const Ogre::Light *l = entry.second.light;
+    // OVER THE LIGHT INDEX, NOT OVER mNodes: this runs once per drawn scene per
+    // FRAME, and walking every node of a big scene to find its handful of
+    // lights is exactly the kind of per-frame cost this engine keeps measuring
+    // and removing.
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;
+        const Ogre::Light *l = it->second.light;
         if (!l || !l->getCastShadows()) continue;
         const Ogre::Light::LightTypes t = l->getType();
         if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) continue;
         ++n;
-        if (out) out->push_back(entry.first);
+        if (out) out->push_back(id);
     }
     return n;
 }
 
 void OgreScene::staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>> &out) const {
-    for (const auto &entry : mNodes) {
+    for (NodeId id : mLightNodes) {          // the light index, not every node
+        auto entryIt = mNodes.find(id);
+        if (entryIt == mNodes.end()) continue;
+        const auto &entry = *entryIt;
         const Node &n = entry.second;
         if (!n.light || !n.lightShadowStatic || !n.light->getCastShadows()) continue;
         const Ogre::Light::LightTypes t = n.light->getType();
@@ -341,6 +350,18 @@ bool OgreScene::staticLightsMoved() {
     if (now.size() != mStaticLightPose.size()) moved = true;
     mStaticLightPose.swap(now);
     return moved;
+}
+
+bool OgreScene::hasStaticShadowLights() const {
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;
+        const Node &n = it->second;
+        if (!n.light || !n.lightShadowStatic || !n.light->getCastShadows()) continue;
+        const Ogre::Light::LightTypes t = n.light->getType();
+        if (t == Ogre::Light::LT_POINT || t == Ogre::Light::LT_SPOTLIGHT) return true;
+    }
+    return false;
 }
 
 void OgreScene::dirtyStaticShadows() { mStaticShadowsDirty = true; }

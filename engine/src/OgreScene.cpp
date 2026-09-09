@@ -304,6 +304,8 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             n.lightNode->setOrientation(Ogre::Quaternion(Ogre::Radian(-Ogre::Math::HALF_PI), Ogre::Vector3::UNIT_X));
             n.light = mSceneMgr->createLight();
             n.lightNode->attachObject(n.light);
+            if (std::find(mLightNodes.begin(), mLightNodes.end(), id) == mLightNodes.end())
+                mLightNodes.push_back(id);   // the light index (see EnginePrivate.h)
         }
         Ogre::Light *L = n.light;
         switch (d.type) {
@@ -466,6 +468,8 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.light->detachFromParent();
         mSceneMgr->destroyLight(it->second.light);
         it->second.light = nullptr;
+        mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id),
+                          mLightNodes.end());
         // A recreated light starts with no profile and no mask: forget what the
         // dead one carried, or the next setLight would skip re-assigning it.
         it->second.lightProfilePath.clear();
@@ -641,7 +645,10 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
-    if (n.light) { n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr; }
+    if (n.light) {
+        n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr;
+        mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id), mLightNodes.end());
+    }
     if (n.lightNode) { mSceneMgr->destroySceneNode(n.lightNode); n.lightNode = nullptr; }
     // Same for the decal's internal child. Note releaseDecal only tears the
     // objects down; the SceneManager's atlas bindings are refreshed by the

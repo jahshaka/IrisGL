@@ -1639,7 +1639,8 @@ void OgreEngine::registerCommonMaterials() {
 void OgreEngine::createShadowNode() {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     if (!cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
-        buildShadowNode(OgreView::kShadowNodeName, mShadowResolution, mShadowMapCount);
+        buildShadowNode(OgreView::kShadowNodeName, mShadowResolution, mShadowMapCount,
+                        mShadowPerMapClears);
     // The planar-reflection pass's own atlas, at HALF resolution. Definitions
     // are free — the VRAM is only allocated where a workspace instantiates one,
     // which for reflections is one atlas PER BUDGET SLOT. At the default 2048 a
@@ -1648,9 +1649,12 @@ void OgreEngine::createShadowNode() {
     //
     // It keeps TWO focused maps whatever the main atlas grew to: a reflection
     // is a secondary picture, and the count is what costs passes.
+    //
+    // ...and it never needs per-map clears: a reflection's shadow maps are all
+    // dynamic (fixed-light assignments are applied to the VIEW workspaces only).
     if (!cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
         buildShadowNode(OgreView::kReflectShadowNodeName,
-                        std::max(256u, mShadowResolution / 2u), 2u);
+                        std::max(256u, mShadowResolution / 2u), 2u, false);
 }
 
 }  // namespace detail
