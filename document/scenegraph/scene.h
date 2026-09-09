@@ -537,6 +537,14 @@ public:
      */
     int outlineWidth;
     QColor outlineColor;
+    /// The PRIMARY member's outline colour (EDITOR_MULTISELECT_SPEC D4 b, the
+    /// Blender rule: the active object reads brighter than the rest of the
+    /// selection). Only meaningful with MORE THAN ONE node selected — with a
+    /// single selection there is nothing to distinguish, so the mirror draws
+    /// `outlineColor` and a one-node selection is pixel-identical to what it
+    /// was before this field existed. Invalid = "never set", and the mirror
+    /// then lightens `outlineColor` itself.
+    QColor outlinePrimaryColor;
 
 	// time counter to pass to shaders that do time-based animation
 	float time;
@@ -757,6 +765,13 @@ public:
      * @param color
      */
     void setOutlineColor(QColor color);
+
+    /**
+     * Sets the colour the PRIMARY member of a multi-selection is outlined in.
+     * An invalid colour restores the derived default (a lightened outlineColor).
+     * @param color
+     */
+    void setOutlinePrimaryColor(QColor color);
 
     void cleanup();
 

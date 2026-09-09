@@ -190,8 +190,11 @@ Scene::Scene()
 
     // selection outline: width in Preferences units (SceneMirror maps it to the
     // inverted-hull scale as 1 + width/150); colour stays invalid = "never set",
-    // the mirror then falls back to the historical selection yellow
+    // the mirror then falls back to the historical selection yellow. The
+    // primary colour is invalid by the same rule and is derived from the
+    // outline colour when nobody sets one.
     outlineWidth = 3;
+    outlinePrimaryColor = QColor();
 
     // sky init
     skyType = SkyType::SINGLE_COLOR;
@@ -818,6 +821,11 @@ void Scene::setOutlineWidth(int width)
 void Scene::setOutlineColor(QColor color)
 {
     outlineColor = color;
+}
+
+void Scene::setOutlinePrimaryColor(QColor color)
+{
+    outlinePrimaryColor = color;
 }
 
 Scene::~Scene()
