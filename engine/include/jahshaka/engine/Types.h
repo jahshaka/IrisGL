@@ -757,6 +757,19 @@ struct ParticleSystemDesc {
     bool      additive = true;     ///< (src-alpha, one); false = alpha blending
     bool      alphaHash = true;    ///< order-independent transparency for alpha blending
                                    ///< (ignored when `additive`, which needs no sorting)
+    /// A DISTORTION emitter (POST_LOOKS_SPEC §5.3 4b): the particles draw no
+    /// colour at all — they are rendered into the view's distortion field and
+    /// warp whatever is behind them (heat haze, shock rings, a jet's exhaust).
+    /// `texture` is then read as the DISPLACEMENT map, exactly as a
+    /// ShadingModel::Distortion material reads its normal-map slot (R/G
+    /// remapped to [-1,1]), and each particle's colour ALPHA is its strength
+    /// (the emitter's colour range and any colour ramp fade it over life).
+    /// `additive` and `alphaHash` are ignored: the field is always alpha
+    /// blended. A distortion emitter is invisible to every pass but the
+    /// distortion pass, so with no distortion in the view's post chain the
+    /// frame is byte-identical to the emitter not existing. It is a TOPOLOGY
+    /// property: flipping it rebuilds the definition.
+    bool      distortion = false;
     ParticleOrientation orientation = ParticleOrientation::Point;
     Vec3      commonDirection{0, 0, 1}, commonUp{0, 1, 0};   ///< *Common orientations only
     std::vector<ParticleEmitterDesc>  emitters;

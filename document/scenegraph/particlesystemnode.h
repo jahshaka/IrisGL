@@ -159,6 +159,13 @@ public:
     /// Alpha-blended systems only: stochastic (order-independent) transparency.
     /// Ignored when `useAdditive`, which needs no sorting at all.
     bool alphaHash;
+    /// A DISTORTION emitter (POST_LOOKS_SPEC §5.3 4b): the particles draw no
+    /// colour; they warp what is behind them through the view's distortion
+    /// pass, reading `texture` as the displacement map and each particle's
+    /// colour alpha as its strength. Needs the world's distortion post effect
+    /// on to show at all. A rendering-mode flag like `useAdditive`, which it
+    /// overrides — and NOT part of any preset: a recipe leaves it alone.
+    bool distortion;
 
     /// The preset this emitter was last stamped from, purely so the UI can show
     /// it. Editing any field afterwards does NOT reset it to Custom — the

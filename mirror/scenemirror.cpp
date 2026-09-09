@@ -1885,6 +1885,7 @@ ParticleSystemDesc SceneMirror::toParticleDesc(iris::ParticleSystemNode *ps, Tex
     d.texture = tex;
     d.additive = ps->useAdditive;
     d.alphaHash = ps->alphaHash;
+    d.distortion = ps->distortion;
     d.orientation = toEngineOrientation(ps->orientation);
 
     ParticleEmitterDesc e;
@@ -1930,7 +1931,7 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     // is what "no allocation" above did NOT mean.)
     Hasher hs;
     hs << texPath << int(ps->shape) << int(ps->orientation)
-       << ps->useAdditive << ps->alphaHash << ps->randomRotation
+       << ps->useAdditive << ps->alphaHash << ps->distortion << ps->randomRotation
        << ps->dissipate << ps->dissipateInv
        << ps->particlesPerSecond << ps->speed << ps->speedError
        << ps->lifeLength << ps->lifeError << ps->particleScale

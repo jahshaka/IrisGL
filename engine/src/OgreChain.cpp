@@ -1167,9 +1167,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // ---- DISTORTION (POST_LOOKS_SPEC.md §5.3) -------------------------------
     //
     // Two passes. The first draws every distortion object into its own RGBA8
-    // target through render queue 220 and NOTHING ELSE — the range is one queue
-    // wide and the visibility mask is kDistortionBit, so it is impossible for a
-    // stray renderable to end up in the displacement field. It borrows the
+    // target through render queues 220 (items) and 221 (distortion PARTICLES,
+    // POST_LOOKS 4b — a PFX2 def can only be drawn from a PARTICLE_SYSTEM-mode
+    // queue, so the emitters get one of their own) and NOTHING ELSE — the range
+    // is two queues wide and the visibility mask is kDistortionBit, so it is
+    // impossible for a stray renderable to end up in the displacement field. It borrows the
     // scene's depth buffer (LOAD, never written) so haze behind a wall is
     // occluded exactly as the sample's `depth_pool 2` does it.
     //
@@ -1201,7 +1203,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // these objects cast nothing anyway.
             p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
             p->mFirstRQ = kDistortionRenderQueue;
-            p->mLastRQ  = Ogre::uint8(kDistortionRenderQueue + 1u);
+            p->mLastRQ  = Ogre::uint8(kDistortionParticleRenderQueue + 1u);
             p->mVisibilityMask = kDistortionBit;
             p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka distortion field";

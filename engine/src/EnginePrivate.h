@@ -337,6 +337,15 @@ constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
 // ride it — so the overlay passes carry an explicit visibility mask instead
 // (kDistortionBit above).
 constexpr Ogre::uint8 kDistortionRenderQueue = 220;
+/// DISTORTION PARTICLES (POST_LOOKS 4b): a PFX2 def can only be drawn from a
+/// PARTICLE_SYSTEM-mode queue, and 220 holds ITEMS, so distortion emitters get
+/// the next queue up, armed in particle mode beside the helper queue
+/// (OgreScene::ensureHelperOverlayQueue). The distortion pass draws
+/// [kDistortionRenderQueue, kDistortionParticleRenderQueue] — two queues, one
+/// field — and its kDistortionBit mask keeps everything else out. The queue
+/// depth anchor sits here too (kQueueDepthAnchorRenderQueue): one anchor serves
+/// 211 and 221, never two.
+constexpr Ogre::uint8 kDistortionParticleRenderQueue = 221;
 
 // ---------------------------------------------------------------------------
 // THE HELPER OVERLAY QUEUE (2026-09-08, the grey/blurred light icons).
@@ -379,12 +388,21 @@ constexpr Ogre::uint8 kHelperOverlayRenderQueue = 211;
 //
 // The anchor is one MovableObject with no renderables and visibility flags 0,
 // created once per scene beside the helper queue. It is never drawn in any
-// pass, it holds the entity depth at 213, and it costs one SIMD cull slot.
+// pass, it holds the entity depth at 222, and it costs one SIMD cull slot.
 // (The alternative was an Ogre patch to make the particle branch independent of
 // the entity managers — the honest upstream fix, and recorded as a finding —
 // but it changes cull code every pass runs, for a defect a 20-line object
 // closes here.)
-constexpr Ogre::uint8 kQueueDepthAnchorRenderQueue = 212;
+//
+// ONE ANCHOR, AT THE TOPMOST PARTICLE QUEUE. It sat at 212 while 211 was the
+// only particle queue above the overlay; the distortion-particle queue at 221
+// (POST_LOOKS 4b) moved it to 221 — the clamp is "highest entity queue plus
+// one", so an anchor at 221 covers 211 and 221 alike. Never add a second
+// anchor: the cull loop visits a particle queue once per entity memory manager
+// deep enough to reach it, and two anchors in two managers would draw every
+// helper set twice (the spike measured 0 px of difference between the anchor at
+// 221 and a second one, and a second one is exactly the double-draw trap).
+constexpr Ogre::uint8 kQueueDepthAnchorRenderQueue = kDistortionParticleRenderQueue;
 
 /// How many entries PbrTextureSlot has. The enum carries its own `Count`
 /// sentinel since the detail slots landed (MATERIAL_GAPS_SPEC GAP 2); this name
@@ -1656,6 +1674,10 @@ private:
         Ogre::ParticleSystemDef  *particleDef = nullptr;
         Ogre::ParticleSystem2    *particleSystem = nullptr;
         std::string               particleTopology;   // the pool key this def answers to
+        /// Whether the live def is a DISTORTION emitter, so the visibility
+        /// pushes (setNodeVisible / setNodeHelper) hand it kDistortionBit and
+        /// never kVisibleBit — the def is what _addToRenderQueue tests.
+        bool                      particleDistortion = false;
         /// What setNodeVisible was last told. Kept because PFX2 objects do not
         /// live under the node in Ogre's graph (they hang off the STATIC root),
         /// so no visibility cascade reaches them and a system created or
@@ -1705,6 +1727,11 @@ private:
         int      orientation = 0;
         bool     additive = true;
         bool     alphaHash = false;
+        /// ParticleSystemDesc::distortion. Frozen with the def on purpose: a
+        /// distortion def lives in kDistortionParticleRenderQueue with
+        /// kDistortionBit and a displacement datablock, and a recycled def
+        /// must never hand that to an ordinary emitter (or the reverse).
+        bool     distortion = false;
         std::vector<int> emitterShapes;   // ParticleEmitterShape per emitter, in order
         std::vector<int> affectorKinds;   // ParticleAffectorDesc::Kind per affector, in order
         std::string key() const;
@@ -1941,6 +1968,9 @@ private:
     /// whose texture is a screen-space displacement field and whose colour
     /// alpha is the strength. See the definition for why each block is set.
     static void applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p);
+    /// The visibility bits a node's PFX2 def carries when visible:
+    /// kDistortionBit for a distortion emitter, else helper/visible.
+    static Ogre::uint32 particleVisibilityBits(const Node &n);
     /// (Re-)binds whatever `rec.boundTextures` says onto the material's CURRENT
     /// datablock — the step that makes a family switch keep its maps. The Unlit
     /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
