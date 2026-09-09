@@ -92,6 +92,7 @@
 #include <OgreTechnique.h>
 #include <OgrePass.h>
 #include <OgreGpuProgram.h>
+#include <OgreVisibilityFlags.h>
 #include <OgreGpuProgramParams.h>
 #include <OgrePixelFormatGpuUtils.h>
 #include <OgreTextureUnitState.h>
@@ -181,6 +182,26 @@ constexpr const char *kSmaaBlend = "jahSmaaBlend";
 /// sRGB-encode-on-store is exact for all 256 values (the encode rounds to
 /// nearest, the decode is a table), which is what lets a look at amount 0 be
 /// BYTE-IDENTICAL to no look at all rather than merely close.
+/// THE OVERLAY PASSES' VISIBILITY MASK (POST_LOOKS_SPEC.md §5.3), and the AND
+/// with RESERVED_VISIBILITY_FLAGS is LOAD-BEARING rather than tidy.
+///
+/// Ogre builds a pass's effective mask as
+///     (viewportMask & sceneMask) | (viewportMask & ~RESERVED_VISIBILITY_FLAGS)
+/// (SceneManager::cullFrustum), and RESERVED is `~(LAYER_SHADOW_CASTER |
+/// LAYER_VISIBILITY)` — the low 30 bits. A raw `~kDistortionBit` therefore
+/// carries BOTH layer bits into the second term, and the cull test
+/// (`objectFlags & sceneFlags != 0`) then passes on LAYER_VISIBILITY alone —
+/// i.e. the mask would exclude nothing at all, silently. Ogre's own
+/// `setVisibilityMask` setter does this AND for exactly this reason; the
+/// definition field is public and does not.
+/// (A function and not a constant: RESERVED_VISIBILITY_FLAGS is an extern
+/// `const uint32` in OgreMovableObject.cpp, not a compile-time value, and
+/// restating its bit pattern here would be the exact class of copy this comment
+/// is about.)
+inline Ogre::uint32 overlayVisibilityMask() {
+    return Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS & ~kDistortionBit;
+}
+
 /// DISTORTION (POST_LOOKS_SPEC.md §5.3). Two textures: the displacement field
 /// the distortion objects render into, and the warped copy of the scene.
 ///
@@ -573,7 +594,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // smear of pale blue. Masking it out costs nothing and is what makes
             // the PASSTHROUGH shape — thumbnails, previews, every pixel suite —
             // byte-identical in a scene that contains one.
-            p->mVisibilityMask = ~kDistortionBit;
+            p->mVisibilityMask = overlayVisibilityMask();
             // THE ONE pass in the whole engine allowed to draw Ogre's overlay
             // set — and only when this view is entitled to it (see
             // kIncludeOverlaysNote and ChainDesc::overlays).
@@ -1402,7 +1423,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // the distortion objects have ALREADY been drawn, into their own target,
         // and drawing them again over the composited frame would show the
         // displacement map itself.
-        p->mVisibilityMask = ~kDistortionBit;
+        p->mVisibilityMask = overlayVisibilityMask();
         // The effect shape's copy of THE ONE overlay-bearing pass — same rule
         // as the passthrough shape's (kIncludeOverlaysNote).
         p->mIncludeOverlays = desc.overlays;
