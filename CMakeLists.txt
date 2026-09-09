@@ -159,6 +159,7 @@ set(SRCS
     document/animation/clipextractor.cpp
     document/animation/locomotion.cpp
     document/assets/skeleton.cpp
+    document/assets/avatardefinition.cpp
     document/scenegraph/scene.cpp
     document/scenegraph/skybake.cpp
     document/scenegraph/scenenode.cpp
@@ -223,6 +224,7 @@ set (HEADERS
     document/animation/propertyanim.h
     document/animation/animableproperty.h
     document/assets/skeleton.h
+    document/assets/avatardefinition.h
     document/animation/skeletalanimation.h
     document/animation/clipextractor.h
     document/animation/locomotion.h
