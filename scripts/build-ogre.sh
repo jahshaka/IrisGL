@@ -214,6 +214,25 @@ done
 # including TU by itself after this script re-runs. EVERY TREE MUST RE-RUN THIS
 # SCRIPT after pulling the commit that added this flag -- and unlike the
 # threading flag, forgetting is not self-announcing.
+# Ogre's own 2.0 samples (Sample_PbsMaterials, Sample_LocalCubemaps, ...) are
+# OFF by default, FOREVER: nothing in Studio links them, and they cost ~40 s and
+# a few hundred MB in EVERY tree and EVERY worktree (the engine build is
+# per-tree, owner decree 2026-09-06). Opt in with OGRE_SAMPLES=1 in the ONE tree
+# doing side-by-side comparison work -- see SPECS/OGRE_SAMPLES_TAB_SPEC.md §7.
+#   OGRE_SAMPLES=1 ./irisgl/scripts/build-ogre.sh
+# Binaries land in $SRC/build/bin beside the generated resources2.cfg/plugins.cfg,
+# whose paths point at the SOURCE tree -- so they must be run with that directory
+# as the cwd, and they are NOT installed: OGRE_INSTALL_SAMPLES defaults TRUE
+# upstream and would copy binaries + media into the prefix this script prunes.
+# Missing SDL2 does not fail the build (Samples/2.0/CMakeLists.txt:15-18 prints
+# "Could not find dependency for samples: SDL2" and skips), which is what makes
+# the flag safe on the no-Homebrew macOS toolchain.
+SAMPLE_FLAGS="-DOGRE_BUILD_SAMPLES2=OFF"
+if [ "${OGRE_SAMPLES:-0}" = "1" ]; then
+    echo "OGRE_SAMPLES=1: building Ogre's 2.0 samples into $SRC/build/bin (not installed)."
+    SAMPLE_FLAGS="-DOGRE_BUILD_SAMPLES2=ON -DOGRE_INSTALL_SAMPLES=OFF -DOGRE_INSTALL_SAMPLES_SOURCE=OFF"
+fi
+
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
@@ -229,7 +248,7 @@ cmake -S "$SRC" -B "$SRC/build" -G Ninja \
   -DOGRE_BUILD_COMPONENT_PROPERTY=ON -DOGRE_BUILD_COMPONENT_OVERLAY=ON \
   -DOGRE_BUILD_COMPONENT_PAGING=OFF -DOGRE_BUILD_COMPONENT_VOLUME=OFF \
   -DOGRE_BUILD_COMPONENT_DEAR_IMGUI=OFF \
-  -DOGRE_BUILD_SAMPLES2=OFF -DOGRE_BUILD_TESTS=OFF -DOGRE_BUILD_TOOLS=ON
+  $SAMPLE_FLAGS -DOGRE_BUILD_TESTS=OFF -DOGRE_BUILD_TOOLS=ON
 
 # libshaderc gotcha: a missing dep silently drops the Vulkan RenderSystem while
 # configure still exits 0. Fail loudly instead.
