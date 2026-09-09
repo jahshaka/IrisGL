@@ -176,8 +176,35 @@ void main()
 					const float mid = ( lo + hi ) * 0.5;
 					const vec3	q	= origin + rayDir * mid;
 					const vec4	hq	= viewToTextureSpaceMatrix * vec4( q, 1.0 );
+					// THE VALIDITY GUARDS THE COARSE MARCH HAS AND THIS LOOP DID NOT,
+					// which is how a refinement could WORSEN a good hit:
+					//  * hq.w <= 0 is a point behind the eye, and hq.xy / hq.w is then
+					//    a plausible-looking coordinate on the wrong side of the
+					//    projection.
+					//  * a midpoint that projects OFF SCREEN, or onto a pixel the
+					//    depth buffer never wrote (the sky, at either reverse-Z
+					//    extreme), has no depth to compare against: jahLinearDepth of
+					//    a cleared depth is not a distance, and `q.z > qz` then reads
+					//    as a crossing about half the time. Near a silhouette that is
+					//    exactly the bad case — the refinement walks the hit off the
+					//    object it found and onto the background, and the resolve
+					//    fetches the previous frame there.
+					// Both bail out with `refined` still at the last COARSE hit, which
+					// is always a real one: the only thing lost is the sub-step
+					// polish, and the only thing gained is that the reflection points
+					// at something the ray actually met.
+					if( hq.w <= 0.0 )
+						break;
 					const vec2	quv = hq.xy / hq.w;
-					const float qz	= jahLinearDepth( jahSceneDepthAt( quv ) );
+					if( quv.x < 0.0 || quv.x > 1.0 || quv.y < 0.0 || quv.y > 1.0 )
+						break;
+					const float qRaw = jahSceneDepthAt( quv );
+					if( qRaw <= 0.0 || qRaw >= 1.0 )
+					{
+						lo = mid;					// nothing there: not a crossing
+						continue;
+					}
+					const float qz	= jahLinearDepth( qRaw );
 					if( q.z > qz )
 					{
 						hi = mid;
