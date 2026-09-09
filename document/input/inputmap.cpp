@@ -78,11 +78,24 @@ void InputMap::resetToDefaults()
     // Y is FORWARD (+1 = forward, matching the spec's "W/S = +Y/−Y"); the
     // camera-relative rotation of this vector is possession's job (Stage 3),
     // never the producer's.
+    //
+    // THE ARROWS ARE BOUND TOO (owner decision 2026-09-09). The EDITOR's fly
+    // moved off W/A/S/D onto the arrow cluster, freeing the letters for tool
+    // shortcuts; the PLAYER deliberately kept both spellings, because a player
+    // is a game surface and a hand arriving from the editor's arrows must not
+    // have to change grip to walk. They are ordinary bindings on the one Move
+    // action, so `input.bindings()` lists them, `input.bind` replaces them and
+    // `input.resetBindings` brings them back — an alias table would have been
+    // a second, invisible source of truth.
     mBindings[int(InputAction::Move)] = {
-        { Qt::Key_W,  0.f, +1.f },
-        { Qt::Key_S,  0.f, -1.f },
-        { Qt::Key_A, -1.f,  0.f },
-        { Qt::Key_D, +1.f,  0.f },
+        { Qt::Key_W,     0.f, +1.f },
+        { Qt::Key_S,     0.f, -1.f },
+        { Qt::Key_A,    -1.f,  0.f },
+        { Qt::Key_D,    +1.f,  0.f },
+        { Qt::Key_Up,    0.f, +1.f },
+        { Qt::Key_Down,  0.f, -1.f },
+        { Qt::Key_Left, -1.f,  0.f },
+        { Qt::Key_Right,+1.f,  0.f },
     };
     // Look is the mouse. An empty key list here is the DEFAULT, not "unbound"
     // — a user may still bind keys to it (arrow-key look) and they will sum

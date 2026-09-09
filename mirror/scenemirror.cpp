@@ -472,16 +472,18 @@ void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
 
 // ---- selection highlight -------------------------------------------------------
 
-void SceneMirror::setHighlightedNode(iris::SceneNodePtr node)
-{
-    mHighlighted.clear();
-    if (node) mHighlighted.append(node);
-}
-
-void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes)
+void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
+                                      const iris::SceneNodePtr &primary)
 {
     mHighlighted.clear();
     for (const auto &n : nodes) if (n) mHighlighted.append(n);
+    // The primary only counts when it is actually IN the list: the viewport
+    // filters the World root and the built-in ground out of the highlight, and
+    // a primary that was filtered away must not colour somebody else's shell.
+    mHighlightPrimary.clear();
+    if (primary)
+        for (const auto &n : mHighlighted)
+            if (n.data() == primary.data()) { mHighlightPrimary = primary; break; }
 }
 
 bool SceneMirror::isHighlighted(const iris::SceneNode *node) const
@@ -501,8 +503,8 @@ void SceneMirror::setHighlightWireframe(bool on)
 /// construction (and two atomic refcount ops) per node per frame to hand back
 /// what `childAt` already returns raw — audit F9. `getMesh()` was the same
 /// mistake one level down: it returns a MeshPtr BY VALUE.
-void SceneMirror::collectHighlightMeshes(iris::SceneNode *node,
-                                         std::vector<std::pair<iris::MeshNode *, MeshId>> &out)
+void SceneMirror::collectHighlightMeshes(iris::SceneNode *node, bool primary,
+                                         std::vector<HighlightTarget> &out)
 {
     if (!node || !node->isVisible()) return;
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
@@ -513,13 +515,14 @@ void SceneMirror::collectHighlightMeshes(iris::SceneNode *node,
         // (mesh, rig id)).
         if (meshNode->mesh.data()) {
             const auto ent = mEntries.constFind(node);
-            if (ent != mEntries.constEnd() && ent->mesh) out.emplace_back(meshNode, ent->mesh);
+            if (ent != mEntries.constEnd() && ent->mesh)
+                out.push_back(HighlightTarget{ meshNode, ent->mesh, primary });
         }
     }
     const int n = node->childCount();
     for (int i = 0; i < n; ++i)
         if (iris::SceneNode *c = node->childAt(i))
-            collectHighlightMeshes(c, out);
+            collectHighlightMeshes(c, primary, out);
 }
 
 void SceneMirror::syncHighlight()
@@ -528,8 +531,14 @@ void SceneMirror::syncHighlight()
     // an asset's ROOT (or any group) outlines the whole asset, not just one part.
     // The scratch vector is a MEMBER: this is a per-frame walk, and a local
     // vector re-allocated its storage on every frame with a selection.
-    std::vector<std::pair<iris::MeshNode *, MeshId>> &targets = mHighlightTargets;
+    std::vector<HighlightTarget> &targets = mHighlightTargets;
     targets.clear();
+    // The PRIMARY's brighter outline (D4 b) only exists in a MULTI-selection:
+    // with one node selected there is no "the others" to contrast against, and
+    // making the lone selection change colour would move every pixel
+    // app.selection_outline measures. One member = one colour, exactly as
+    // before.
+    const bool distinguishPrimary = mHighlighted.size() > 1 && !mHighlightPrimary.isNull();
     // N ROOTS: the same subtree walk, once per member of the set. Duplicates
     // cannot appear — a member whose ancestor is also selected contributes
     // meshes the ancestor already contributed — so they are dropped here rather
@@ -537,12 +546,14 @@ void SceneMirror::syncHighlight()
     // shell pool that never settles).
     for (const auto &highlighted : mHighlighted) {
         const size_t before = targets.size();
-        collectHighlightMeshes(highlighted.data(), targets);
+        const bool primary =
+            distinguishPrimary && highlighted.data() == mHighlightPrimary.data();
+        collectHighlightMeshes(highlighted.data(), primary, targets);
         for (size_t i = targets.size(); i > before; --i) {
             const size_t idx = i - 1;
             bool dup = false;
             for (size_t k = 0; k < before; ++k)
-                if (targets[k].first == targets[idx].first) { dup = true; break; }
+                if (targets[k].node == targets[idx].node) { dup = true; break; }
             if (dup) targets.erase(targets.begin() + long(idx));
         }
     }
@@ -573,31 +584,63 @@ void SceneMirror::syncHighlight()
     const Colour kSelection = pref.isValid()
         ? Colour(float(pref.redF()), float(pref.greenF()), float(pref.blueF()))
         : Colour(1.0f, 0.85f, 0.1f);
-    MaterialId mat;
-    if (mHighlightWireframe) {
-        if (!mHighlightMaterial)
-            mHighlightMaterial = mTarget->createUnlitMaterial(kSelection, false, true);   // on top, wireframe
-        mat = mHighlightMaterial;
-    } else {
-        if (!mOutlineMaterial)
-            mOutlineMaterial = mTarget->createOutlineMaterial(kSelection);
-        mat = mOutlineMaterial;
-    }
-    // Live colour changes (preference edited with a selection active): both
-    // highlight materials are unlit, so one setter updates each in place.
-    if (pref != mHighlightColourApplied) {
+    // THE PRIMARY'S COLOUR (D4 b). An explicit preference wins; with none, the
+    // secondary colour is lifted HALFWAY TO WHITE, which is "lighter" for every
+    // hue including the dark ones (QColor::lighter multiplies HSV value and
+    // does nothing at all to a colour whose value is already 255 — the shipped
+    // default #3498db is close enough to that to matter).
+    const QColor primaryPref = mSource ? mSource->outlinePrimaryColor : QColor();
+    const Colour kPrimary = [&]() -> Colour {
+        if (primaryPref.isValid())
+            return Colour(float(primaryPref.redF()), float(primaryPref.greenF()),
+                          float(primaryPref.blueF()));
+        return Colour(kSelection.r + (1.0f - kSelection.r) * 0.5f,
+                      kSelection.g + (1.0f - kSelection.g) * 0.5f,
+                      kSelection.b + (1.0f - kSelection.b) * 0.5f);
+    }();
+    // Live colour changes (preference edited with a selection active): every
+    // highlight material is unlit, so one setter updates each in place. The
+    // primary's derived default follows the SECONDARY colour, so a change to
+    // either key has to re-push both families.
+    if (pref != mHighlightColourApplied || primaryPref != mHighlightPrimaryColourApplied) {
         mHighlightColourApplied = pref;
+        mHighlightPrimaryColourApplied = primaryPref;
         if (mHighlightMaterial) mTarget->setUnlitMaterial(mHighlightMaterial, kSelection);
         if (mOutlineMaterial)   mTarget->setUnlitMaterial(mOutlineMaterial, kSelection);
         if (mOutlineSkinnedMaterial) mTarget->setUnlitMaterial(mOutlineSkinnedMaterial, kSelection);
+        if (mHighlightPrimaryMaterial)
+            mTarget->setUnlitMaterial(mHighlightPrimaryMaterial, kPrimary);
+        if (mOutlinePrimaryMaterial)
+            mTarget->setUnlitMaterial(mOutlinePrimaryMaterial, kPrimary);
+        if (mOutlinePrimarySkinnedMaterial)
+            mTarget->setUnlitMaterial(mOutlinePrimarySkinnedMaterial, kPrimary);
     }
-    if (!mat) return;
+    // The material a target's shell wants, made on first use. Four flavours
+    // (wireframe / hull) x (secondary / primary), plus the two skinned hulls,
+    // and none of them is created by a scene that never asks for it.
+    const auto materialFor = [&](bool primary, bool skinned) -> MaterialId {
+        const Colour &colour = primary ? kPrimary : kSelection;
+        if (mHighlightWireframe && !skinned) {
+            MaterialId &slot = primary ? mHighlightPrimaryMaterial : mHighlightMaterial;
+            if (!slot) slot = mTarget->createUnlitMaterial(colour, false, true);  // on top, wireframe
+            return slot;
+        }
+        if (skinned) {
+            MaterialId &slot = primary ? mOutlinePrimarySkinnedMaterial : mOutlineSkinnedMaterial;
+            if (!slot) slot = mTarget->createOutlineMaterial(colour, true);
+            return slot;
+        }
+        MaterialId &slot = primary ? mOutlinePrimaryMaterial : mOutlineMaterial;
+        if (!slot) slot = mTarget->createOutlineMaterial(colour);
+        return slot;
+    };
     // One pooled shell per target mesh; extra shells from a previous (larger)
     // selection are hidden, not destroyed.
     if (mHighlightShells.size() < targets.size()) mHighlightShells.resize(targets.size());
     for (size_t i = 0; i < targets.size(); ++i) {
-        iris::MeshNode *meshNode = targets[i].first;
-        const MeshId m = targets[i].second;
+        iris::MeshNode *meshNode = targets[i].node;
+        const MeshId m = targets[i].mesh;
+        const bool primary = targets[i].primary;
         HighlightShell &s = mHighlightShells[i];
         if (!s.node) {
             s.node = mTarget->createNode();
@@ -643,19 +686,16 @@ void SceneMirror::syncHighlight()
         const auto ent = mEntries.constFind(meshNode);
         const bool skinned = ent != mEntries.constEnd() && ent->gpuSkinned && ent->node;
         const NodeId master = skinned ? ent->node : NodeId(0);
-        MaterialId shellMat = mat;
-        if (skinned) {
-            if (!mOutlineSkinnedMaterial)
-                mOutlineSkinnedMaterial = mTarget->createOutlineMaterial(kSelection, true);
-            if (mOutlineSkinnedMaterial) shellMat = mOutlineSkinnedMaterial;
-        }
+        const MaterialId shellMat = materialFor(primary, skinned);
+        if (!shellMat) continue;
         if (s.mesh != m || s.wireframe != mHighlightWireframe || s.skinned != skinned
-            || s.master != master) {
+            || s.master != master || s.primary != primary) {
             if (mTarget->attachMesh(s.node, m, shellMat)) {
                 s.mesh = m;
                 s.wireframe = mHighlightWireframe;
                 s.skinned = skinned;
                 s.master = master;
+                s.primary = primary;
                 // The pairing is remembered engine-side, so a re-attach on
                 // either end re-arms it by itself.
                 mTarget->followSkeleton(s.node, master);   // 0 master = stop following

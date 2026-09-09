@@ -299,14 +299,28 @@ public:
     /// The engine mesh already created for a document mesh, or 0.
     jahshaka::engine::MeshId engineMesh(iris::Mesh *mesh) const;
 
-    /// Selection highlight: the node's mesh drawn again as an on-top wireframe.
-    void setHighlightedNode(iris::SceneNodePtr node);
     /// The whole selected SET (EDITOR_MULTISELECT_SPEC §2.3). The shell walk
     /// was always N-mesh — one shell per mesh under the highlighted node — so
     /// N ROOTS is the same walk started N times; the pooling, the reclaim and
-    /// the skinned-silhouette handling are untouched. One colour for every
-    /// member (D4 a).
-    void setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes);
+    /// the skinned-silhouette handling are untouched.
+    ///
+    /// `primary` is the set's PRIMARY member (D4 b, the Blender rule): its
+    /// shells carry `scene->outlinePrimaryColor` — brighter — while the rest
+    /// carry `scene->outlineColor`. It is passed EXPLICITLY rather than read
+    /// off the front of `nodes` because the viewport filters the set before it
+    /// gets here (the World root and the built-in ground never outline), so
+    /// "first in the list" and "the primary" are not the same node.
+    ///
+    /// The two colours are used only when the set has MORE THAN ONE member: a
+    /// single selection has nothing to distinguish and stays pixel-identical to
+    /// what it was before the primary colour existed (app.selection_outline's
+    /// gate is written against exactly that).
+    ///
+    /// The single-node overload this replaced (`setHighlightedNode`) had no
+    /// callers left after the multi-select program and is deleted rather than
+    /// kept as a second way to say the same thing.
+    void setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
+                             const iris::SceneNodePtr &primary = iris::SceneNodePtr());
     /// Whether this node is IN the highlighted set (the light/camera wires ask,
     /// and equality against one node stopped being the right question).
     bool isHighlighted(const iris::SceneNode *node) const;
@@ -1091,6 +1105,9 @@ private:
     bool mGiVolBuilt = false;
     /// The highlighted SET, primary first. Empty = nothing selected.
     QList<iris::SceneNodePtr> mHighlighted;
+    /// The set's PRIMARY member, or null. Only distinguishes a colour when the
+    /// set has more than one member (see setHighlightedNodes).
+    iris::SceneNodePtr mHighlightPrimary;
     /// One highlight shell per mesh under the highlighted node: selecting an
     /// asset's root outlines the whole subtree. Pooled and reused across frames.
     struct HighlightShell {
@@ -1103,6 +1120,11 @@ private:
         /// GPU-skinned, or whose engine node was rebuilt, needs a re-attach.
         bool skinned = false;
         jahshaka::engine::NodeId master = 0;
+        /// Whether the shell currently carries the PRIMARY (brighter) material.
+        /// Part of the shell's identity for the same reason `skinned` is: a
+        /// pooled shell that moves between the primary and a secondary needs a
+        /// re-attach, not just a transform push.
+        bool primary = false;
         /// Whether the engine currently shows this shell. setNodeVisible is not
         /// free and the answer changes only when the selection does.
         bool shown = false;
@@ -1114,20 +1136,36 @@ private:
         bool transformPushed = false;
     };
     std::vector<HighlightShell> mHighlightShells;
+    /// One entry per mesh the highlight has to shell, and which HALF of the
+    /// selection it came from — `primary` picks the brighter material.
+    struct HighlightTarget {
+        iris::MeshNode *node = nullptr;
+        jahshaka::engine::MeshId mesh = 0;
+        bool primary = false;
+    };
     /// syncHighlight's per-frame target list. A member so the walk over the
     /// selected subtree reuses its storage instead of allocating a vector a
     /// frame.
-    std::vector<std::pair<iris::MeshNode *, jahshaka::engine::MeshId>> mHighlightTargets;
-    void collectHighlightMeshes(iris::SceneNode *node,
-                                std::vector<std::pair<iris::MeshNode *, jahshaka::engine::MeshId>> &out);
+    std::vector<HighlightTarget> mHighlightTargets;
+    void collectHighlightMeshes(iris::SceneNode *node, bool primary,
+                                std::vector<HighlightTarget> &out);
+    /// The four highlight materials, indexed by (primary, skinned/wireframe).
+    /// They are created lazily — a scene that never multi-selects never builds
+    /// the primary pair, and a scene with no rigged mesh never builds the
+    /// skinned ones.
     jahshaka::engine::MaterialId mHighlightMaterial = 0;   // wireframe (on top)
     jahshaka::engine::MaterialId mOutlineMaterial = 0;     // inverted hull
     /// The same hull for SKINNED targets: HlmsUnlit cannot skin, so a rigged
     /// character's silhouette is a Pbs datablock with the colour as emissive,
     /// sharing the character's own skeleton instance (see syncHighlight).
     jahshaka::engine::MaterialId mOutlineSkinnedMaterial = 0;
+    /// ...and the PRIMARY member's three (D4 b).
+    jahshaka::engine::MaterialId mHighlightPrimaryMaterial = 0;
+    jahshaka::engine::MaterialId mOutlinePrimaryMaterial = 0;
+    jahshaka::engine::MaterialId mOutlinePrimarySkinnedMaterial = 0;
     bool mHighlightWireframe = false;
     QColor mHighlightColourApplied;                        // what the materials show now
+    QColor mHighlightPrimaryColourApplied;                 // ...and the primary's
     // Strongest shadow quality any shadow-casting light asked for, from the last
     // sync(); pushed engine-wide by applyEnvironment (see comment there).
     jahshaka::engine::ShadowFilter mShadowFilter = jahshaka::engine::ShadowFilter::Hard;
