@@ -1076,6 +1076,13 @@ public:
     /// Defaults to GiParams' defaults so a scene that never pushes state still
     /// reads sane values.
     struct IfdState {
+        /// THE ESCAPE VECTOR FOR THE RASTER SOURCE (rayon2 S3), jahIfd2.xyz, and
+        /// jahIfd2.w = 1 while it applies. The voxel path's threshold stays the
+        /// shader's own expression (byte-identical); a raster field stores
+        /// misses at camera-far x dot(|dir|, probesPerUnit), so the host sends
+        /// far x scale x probesPerUnit and the shader takes dot(A(d), this).
+        float escapeX = 0.0f, escapeY = 0.0f, escapeZ = 0.0f;
+        float rasterSource = 0.0f;
         /// GiParams::ddgiIntensity, clamped.
         float intensity = 1.0f;
         /// GiParams::ddgiAmbient, clamped. 0 removes the ambient term through a
@@ -1277,6 +1284,10 @@ unsigned    decalAtlasCapacity();
 bool        releaseDecalTexture(Ogre::TextureGpuManager *tm, DecalMap kind, Ogre::TextureGpu *tex);
 
 // ---------------------------------------------------------------------------
+/// OgreGi.cpp: Ogre::IrradianceField with the protected surface a source
+/// switch needs (see there). Forward-declared here, defined beside its use.
+class JahIrradianceField;
+
 class OgreScene final : public Scene {
 public:
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
@@ -2088,6 +2099,16 @@ private:
     /// last call (FIX WAVE B3, engine half). Called once per frame from
     /// updateProbeBudget; NOT from giGeometrySignature, which is stateless.
     void scanGiMovement();
+    /// rayon2 S3 — the raster probe source. resolveSource: GiParams::ddgiSource
+    /// with Auto = Voxel at every tier. applyRasterSource: re-sources a just
+    /// converged voxel field to the raster workspace in place (refused, logged,
+    /// when the workspace or patch 0023's media is missing). pushIfdState: the
+    /// pass-buffer block (JahIfd_piece_ps.any) for the current source.
+    GiSource      resolveSource() const;
+    void          applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
+                                    const Ogre::Vector3 &origin, const Ogre::Vector3 &size);
+    void          pushIfdState(const Ogre::IrradianceFieldSettings &settings);
+    static Ogre::uint32 ifdRasterProbesPerFrame(int updateBudget, Ogre::uint32 totalProbes);
     /// The movement quantum for one item's world AABB (a 64th of its own
     /// largest extent), and "did this AABB move by at least that much?". Shared
     /// by giGeometrySignature and scanGiMovement so the mirror's debounce and
@@ -2239,8 +2260,22 @@ private:
     Ogre::ParallaxCorrectedCubemapAuto *mPcc        = nullptr;
     Ogre::Camera                     *mGiCamera     = nullptr;   // PCC build + tracking
     /// The DDGI field, owned, null unless GiParams::ddgi resolved on over a
-    /// live VCT arm. Dies BEFORE mVctLighting (it holds that pointer).
-    Ogre::IrradianceField            *mIfd          = nullptr;
+    /// live VCT arm. Dies BEFORE mVctLighting (it holds that pointer). Held
+    /// DERIVED-typed: ~IrradianceField is non-virtual (OGRE_UPSTREAM_ISSUES),
+    /// and the derived class is what re-sources the field in place.
+    JahIrradianceField               *mIfd          = nullptr;
+    /// What is feeding the probes (GiStatus::ifdSource): Raster only once the
+    /// field has been re-sourced to the raster workspace, Voxel otherwise.
+    GiSource                          mIfdSource    = GiSource::Voxel;
+    /// The raster camera's far plane in world units (misses store exactly it,
+    /// scaled per axis by probes-per-unit); 0 while the source is voxel.
+    float                             mIfdRasterFar = 0.0f;
+    /// The rig-activity epoch the raster field last converged against
+    /// (mRigPoseEpoch below moves whenever a pose or clip time is pushed).
+    unsigned long long                mIfdRigEpochSeen = 0;
+    /// True once scanGiMovement ran this frame (the raster re-arm and the probe
+    /// budget both consume mGiMovedBoxes; whoever runs first scans).
+    bool                              mGiMovementScanned = false;
     /// Convergence bookkeeping. `IrradianceField` counts processed probes
     /// internally and exposes nothing, so the engine keeps its own count —
     /// which it needs anyway to know when a re-converge has finished and to
@@ -2347,6 +2382,11 @@ private:
     /// The AABBs that moved on the most recent scan (union of each mover's old
     /// and new box), in world space. Rebuilt every scan; empty when still.
     std::vector<Ogre::Aabb> mGiMovedBoxes;
+    /// Bumped by setBonePoses and by setClipStates when a clip's time or
+    /// enable changed: a rig posed in place moves no AABB (Items keep their
+    /// bind-pose bounds), so the movement scan cannot see it, and this is what
+    /// the raster field re-arms on instead.
+    unsigned long long mRigPoseEpoch = 0;
     /// Bumped whenever anything the GI arms hold RAW POINTERS INTO may have
     /// died — every invalidateGiCaches call site (B4). The reuse arm refuses to
     /// re-run an existing voxelizer across a bump, which is what keeps the

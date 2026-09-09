@@ -88,6 +88,9 @@
 								// Y and Z probe counts (upstream's own block carries
 								// only Nx and Nx*Ny, and the visibility threshold
 								// needs all three axes)
+		float4 jahIfd2;			// JahIfd_piece_ps.any: xyz = the RASTER source's escape
+								// vector (camera far x probes per unit, calibrated),
+								// w = 1 while the probes are raster-fed, 0 for voxel
 	@end
 @end
 

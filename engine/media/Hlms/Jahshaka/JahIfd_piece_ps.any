@@ -293,7 +293,17 @@
 				// The integrated escape distance for this tap's lobe (header,
 				// item 1), then the Chebyshev test at it (item 2).
 				float3 ifdVisA = float3( 0.396, 0.396, 0.396 ) + 0.275 * ifdTapDir * ifdTapDir;
-				float ifdVisEscape = 1.414213562 * ifdVisEscapeScale * dot( ifdVisA, ifdNumProbes );
+				// THE SOURCE DECIDES THE UNIT (rayon2 S3). A voxel-fed probe stores a
+				// miss at the march limit, 1.414 x dot( |dir|, numProbes ); a
+				// raster-fed probe (IrradianceFieldRaster, CubemapToIfd) stores it
+				// at the capture camera's FAR plane x dot( |dir|, probes per unit ),
+				// so the host sends far x scale x probesPerUnit on jahIfd2.xyz. The
+				// branch is UNIFORM (jahIfd2.w is a pass constant) and the voxel
+				// expression is untouched, which is what keeps voxel-fed frames
+				// byte-identical.
+				float ifdVisEscape = passBuf.jahIfd2.w > 0.5 ?
+									 dot( ifdVisA, passBuf.jahIfd2.xyz ) :
+									 1.414213562 * ifdVisEscapeScale * dot( ifdVisA, ifdNumProbes );
 				float ifdVisU = ifdVisMoments.x / ifdVisEscape;
 				float ifdVisV = ifdVisMoments.y / ( ifdVisEscape * ifdVisEscape );
 				float ifdVisVar = max( ifdVisV - ifdVisU * ifdVisU, 0.0 );

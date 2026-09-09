@@ -263,9 +263,22 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     alpha fetches per step in the anisotropic diffuse cones; frame cost under
     the noise floor. Media-only (Vct_piece_ps.any).
 
+23. **0023-ifd-raster-depth-grid-units** — the raster-fed IrradianceField
+    (`IrradianceFieldRaster`, the path Jahshaka's `ddgiSource: raster` uses)
+    writes its depth atlas in world units times the probe COUNT, while the pixel
+    shader's Chebyshev visibility test compares against probe-GRID distances and
+    the voxel path stores grid units. For any field larger than one unit per axis
+    the stored depth dwarfs every cage distance, `r > mean` never fires and every
+    probe reads unoccluded — the leak fix DDGI exists for is absent on the raster
+    path. The patch adds an `invFieldSize` param to the CubemapToIfd job
+    (default 1 = upstream's behaviour byte for byte) that the host sets to
+    1 / the field's enlarged size per axis. Media-only. (22 is the lead's
+    geometric-specular-antialiasing patch, landed on a later base than this
+    lane's; numbered around it.)
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021) need no Ogre rebuild — the Studio build stages the
+patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant

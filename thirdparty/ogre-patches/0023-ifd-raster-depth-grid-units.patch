@@ -1,0 +1,121 @@
+Jahshaka local patch 0023 (upstream-reportable): the raster-fed IrradianceField
+stores probe depths in WORLD units scaled by the probe COUNT, while the pixel
+shader's Chebyshev visibility test compares them against PROBE-GRID distances.
+
+IrradianceFieldRaster_piece_cs.any (CubemapToIfd) writes
+`dist = dot( abs( linearDepth * samplingDir ), p_numProbes )` -- linearDepth is
+in world units (projection params of the capture camera). The voxel path
+(IrradianceFieldGenFromVct) multiplies a distance in the volume's [0,1] space by
+numProbes, which IS grid units, and IrradianceField_piece_ps.any compares the
+atlas against `length( probeOrigin - ifdGridPos )`, also grid units. So the
+raster atlas is off by the field's size per axis: for any field larger than one
+unit the stored depth dwarfs every cage distance, `r > mean` never fires, and
+every probe reads as unoccluded -- the leak fix DDGI exists for is absent on the
+raster path (Jahshaka: 32x8x32 probes over an 18x9x18 volume = 18x too far).
+
+Fix: a new `invFieldSize` float3 param on the CubemapToIfd job (default 1,1,1,
+which reproduces upstream's behaviour byte for byte) multiplied in, so a host
+that sets it to 1 / the field's (enlarged) size per axis gets grid units.
+Suggested upstream C++: IrradianceFieldRaster::createWorkspace sets it from
+mCreator->mFieldSize beside mNumProbesParam. Jahshaka sets it host-side on the
+shared job before every raster update (OgreGi.cpp, JahIrradianceField).
+
+MEDIA-ONLY (Samples/Media/Compute/Algorithms/IrradianceFields/): no Ogre
+rebuild, every tree runs the patch loop. Verified: `git apply --check` against
+the pristine pin, `--reverse --check` after applying. Ledger: entry 23 in
+irisgl/docs/OGRE_BUILD.md.
+
+diff --git a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceField.material.json b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceField.material.json
+index 2a03aef7f..09f7cfc20 100644
+--- a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceField.material.json
++++ b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceField.material.json
+@@ -141,7 +141,8 @@
+             [
+                 ["probeIdx",            [0],        "uint"],
+                 ["projectionParams",    [1, 1],     "float"],
+-                ["numProbes",           [0, 0, 0],  "float"]
++                ["numProbes",           [0, 0, 0],  "float"],
++                ["invFieldSize",        [1, 1, 1],  "float"]
+             ],
+ 
+             "params_glsl" :
+diff --git a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.glsl b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.glsl
+index f0126d605..45562e0a5 100644
+--- a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.glsl
++++ b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.glsl
+@@ -9,11 +9,13 @@ vulkan( layout( ogre_P0 ) uniform Params { )
+ 	uniform uint probeIdx;
+ 	uniform float2 projectionParams;
+ 	uniform float3 numProbes;
++	uniform float3 invFieldSize;	// Jahshaka patch 0023
+ vulkan( }; )
+ 
+ #define p_probeIdx			probeIdx
+ #define p_projectionParams	projectionParams
+ #define p_numProbes			numProbes
++#define p_invFieldSize		invFieldSize
+ 
+ vulkan( layout( ogre_s0 ) uniform sampler bilinearSampler );
+ 
+diff --git a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.hlsl b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.hlsl
+index 8b178d882..1b4a2f35e 100644
+--- a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.hlsl
++++ b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.hlsl
+@@ -8,10 +8,12 @@
+ uniform uint probeIdx;
+ uniform float2 projectionParams;
+ uniform float3 numProbes;
++uniform float3 invFieldSize;	// Jahshaka patch 0023
+ 
+ #define p_probeIdx			probeIdx
+ #define p_projectionParams	projectionParams
+ #define p_numProbes			numProbes
++#define p_invFieldSize		invFieldSize
+ 
+ SamplerState bilinearSampler	: register(s0);
+ 
+diff --git a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.metal b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.metal
+index 2b48e15ca..ef52424d5 100644
+--- a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.metal
++++ b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_cs.metal
+@@ -8,11 +8,13 @@ struct Params
+ 	uint probeIdx;
+ 	float2 projectionParams;
+ 	float3 numProbes;
++	float3 invFieldSize;	// Jahshaka patch 0023
+ };
+ 
+ #define p_probeIdx			p.probeIdx
+ #define p_projectionParams	p.projectionParams
+ #define p_numProbes			p.numProbes
++#define p_invFieldSize		p.invFieldSize
+ 
+ @insertpiece( HeaderCS )
+ 
+diff --git a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_piece_cs.any b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_piece_cs.any
+index f898965a6..1f8df92d2 100644
+--- a/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_piece_cs.any
++++ b/Samples/Media/Compute/Algorithms/IrradianceFields/IrradianceFieldRaster_piece_cs.any
+@@ -109,7 +109,21 @@
+ 					linearDepth = p_projectionParams.y / (dist - p_projectionParams.x);
+ 
+ 					// Put dist in the same space it will be evaluted in during the pixel shader
+-					dist = dot( abs( linearDepth * samplingDir ), p_numProbes.xyz );
++					//
++					// Jahshaka patch 0023 (upstream-reportable): linearDepth is in WORLD
++					// units, but the pixel shader's Chebyshev test compares this against a
++					// distance in PROBE-GRID units (length( probeOrigin - ifdGridPos )),
++					// and the voxel path stores exactly that: its march distance is in the
++					// volume's [0,1] space, so `dist * dot( |dir|, numProbes )` is grid
++					// units. Multiplying a world distance by the probe COUNT is grid units
++					// only for a field whose size is one unit per axis; for any other field
++					// the stored depth is off by the field's size per axis, the `r > mean`
++					// test never fires, and every probe reads as unoccluded -- the leak
++					// fix DDGI exists for is gone on the raster path. p_invFieldSize is the
++					// per-axis 1 / fieldSize (the enlarged one the field integrates over);
++					// its default of 1 reproduces upstream's behaviour byte for byte, and
++					// a host that sets it gets grid units.
++					dist = dot( abs( linearDepth * samplingDir ), p_numProbes.xyz * p_invFieldSize.xyz );
+ 
+ 					depthData.x += dist;
+ 					depthData.y += dist * dist;

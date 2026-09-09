@@ -391,6 +391,10 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
             // otherwise, and the per-track key cache searches both directions —
             // so the same t gives the same pose in any order, forever. addTime
             // is deliberately not reachable from this boundary.
+            // rayon2 S3: a raster-fed irradiance field re-arms on pose changes,
+            // and a clip's time moving IS a pose change the AABB scan cannot
+            // see (Items keep their bind-pose bounds).
+            if (sa.getCurrentTime() != st->time || !sa.getEnabled()) ++mRigPoseEpoch;
             sa.setTime(st->time);
             if (!sa.getEnabled()) sa.setEnabled(true);
         }
