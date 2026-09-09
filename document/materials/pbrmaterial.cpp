@@ -151,7 +151,7 @@ bool PbrMaterial::brdfSupportsClearCoat(int index)
 // and is permanent, exactly like brdfNames().
 const QVector<const char *> &PbrMaterial::shadingModelNames()
 {
-    static const QVector<const char *> kNames = { "Lit", "Unlit" };
+    static const QVector<const char *> kNames = { "Lit", "Unlit", "Distortion" };
     return kNames;
 }
 
@@ -186,6 +186,35 @@ const QVector<QString> &PbrMaterial::rowsUnusedWhenUnlit()
         QStringLiteral("normalMap"), QStringLiteral("metallicMap"),
         QStringLiteral("roughnessMap"), QStringLiteral("emissiveMap"),
     };
+    return kRows;
+}
+
+// WHAT DISTORTION CANNOT DO (SPECS/POST_LOOKS_SPEC.md §5.2). A far shorter list
+// than Unlit's, because a distortion material has no SURFACE at all: it draws
+// no colour anywhere, it writes a screen-space displacement field that the
+// renderer then warps the image behind it by. THREE rows survive, and they are
+// the whole authoring surface:
+//   normalMap       the displacement field — a tangent-space normal map IS one
+//                   once R and G are read as a signed offset, which is why the
+//                   existing picker is reused rather than a sixth slot invented
+//   opacity         the material's own STRENGTH, multiplied by the world's
+//                   Distortion Strength
+//   twoSided        as always: whether the back faces of the volume displace too
+// Everything else — the base colour and its map, every PBR term, the BRDF, the
+// coat, shadows, tiling — is untouched on the document and greyed in the panel.
+const QVector<QString> &PbrMaterial::rowsUnusedWhenDistortion()
+{
+    static const QVector<QString> kRows = [] {
+        QVector<QString> rows = rowsUnusedWhenUnlit();
+        // ...minus the normal map, which is the one thing Distortion DOES read.
+        rows.removeAll(QStringLiteral("normalMap"));
+        rows.removeAll(QStringLiteral("normalFactor"));
+        // ...plus everything an unlit surface still shows and this does not.
+        rows << QStringLiteral("baseColor") << QStringLiteral("baseColorFactor")
+             << QStringLiteral("baseColorMap") << QStringLiteral("alphaMode")
+             << QStringLiteral("alphaCutoff") << QStringLiteral("castShadows");
+        return rows;
+    }();
     return kRows;
 }
 

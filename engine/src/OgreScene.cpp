@@ -216,8 +216,13 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
 // Ogre's any-bit test cannot express an exclude bit (EnginePrivate.h's block).
 // Only lit (PBR) surfaces get kGiGeometryBit: unlit overlays, wires and line
 // meshes must neither bounce nor occlude GI rays.
-Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit) {
+Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion) {
     n.materialUnlit = unlit;          // remembered for applyNodeVisibilityFlags
+    n.materialDistortion = distortion;
+    // DISTORTION WINS OVER EVERYTHING, including the helper flag: the item
+    // writes a screen-space displacement field, and the only pass in this
+    // engine that may draw it is the distortion pass (kDistortionBit's note).
+    if (distortion) return kDistortionBit;
     if (n.helper) return kHelperBit;
     return unlit ? kVisibleBit : (kVisibleBit | kGiGeometryBit);
 }
@@ -227,7 +232,8 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     // lit mesh that is marked helper and then unmarked gets its kGiGeometryBit
     // back. Reading it off the item's CURRENT flags could not do that: a helper
     // carries kHelperBit alone.
-    if (n.item) n.item->setVisibilityFlags(itemVisibilityFlags(n, n.materialUnlit));
+    if (n.item) n.item->setVisibilityFlags(
+                    itemVisibilityFlags(n, n.materialUnlit, n.materialDistortion));
     const Ogre::uint32 on = n.helper ? kHelperBit : kVisibleBit;
     if (n.billboards) n.billboards->setVisibilityFlags(n.visible ? on : 0u);
     if (n.particleDef) n.particleDef->setVisibilityFlags(n.visible ? on : 0u);

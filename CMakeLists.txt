@@ -160,6 +160,7 @@ set(SRCS
     document/animation/locomotion.cpp
     document/assets/skeleton.cpp
     document/assets/avatardefinition.cpp
+    document/scenegraph/looks.cpp
     document/scenegraph/scene.cpp
     document/scenegraph/skybake.cpp
     document/scenegraph/scenenode.cpp
@@ -229,6 +230,7 @@ set (HEADERS
     document/animation/clipextractor.h
     document/animation/locomotion.h
     core/math/trs.h
+    document/scenegraph/looks.h
     document/scenegraph/scene.h
     document/scenegraph/skybake.h
     document/scenegraph/scenenode.h

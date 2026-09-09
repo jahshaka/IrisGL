@@ -1106,6 +1106,9 @@ private:
     /// chain's "Auto" refraction mode (POST_CHAIN_SPEC.md §9.5); recomputed
     /// every sync() exactly like mAnyShadowCaster.
     bool mAnyRefractive = false;
+    /// ...and the same question for the DISTORTION shading model, driving the
+    /// chain's "Auto" distortion mode (POST_LOOKS_SPEC.md §5.3).
+    bool mAnyDistortion = false;
     // Largest shadow-map resolution any shadow-casting light asked for, from the
     // last sync(); pushed engine-wide by applyEnvironment (the engine's atlas is
     // global, like the filter — rebuild is expensive, so only on change).

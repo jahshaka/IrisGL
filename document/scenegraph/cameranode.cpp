@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #include "core/math/mat4.h"
 #include "core/math/vec.h"
 #include "document/scenegraph/cameranode.h"
+#include "document/scenegraph/looks.h"
 
 #include <QPoint>
 #include <QtMath>
@@ -53,6 +54,23 @@ static const CameraPostKey kPostKeys[] = {
     { "smaa",           CameraPostKeyType::Enum   },
     { "ssr",            CameraPostKeyType::Enum   },
     { "refractions",    CameraPostKeyType::Enum   },
+    // Distortion, the same three-state mode as refractions and resolved the
+    // same way in the mirror (POST_LOOKS_SPEC.md §5.3), plus its strength.
+    { "distortion",       CameraPostKeyType::Enum   },
+    { "distortionStrength", CameraPostKeyType::Number },
+    // THE LOOKS STACK (POST_LOOKS_SPEC.md §4.1, decision D4). A WHOLE-STACK
+    // replacement and not one key per look parameter: the world's stack is an
+    // ORDERED LIST, and a sparse per-parameter override over an ordered list
+    // has no defined meaning the moment the world reorders or removes an entry.
+    // Present = this camera's stack replaces the world's while it drives a
+    // view; absent = inherit. An override to the EMPTY array is meaningful and
+    // is how a camera says "no looks at all" over a world that has them.
+    //
+    // It is NOT a recompile-class setting (unlike the SMAA preset next door):
+    // changing the stack rebuilds the compositor, which is cheap, and does not
+    // recompile a shader — so a cut to a camera with its own looks does not
+    // hitch.
+    { "looks",          CameraPostKeyType::Stack  },
 };
 
 const CameraPostKey *cameraPostKeys(int &count)
@@ -79,8 +97,19 @@ QVariant CameraNode::postOverride(const QString &id) const
     if (it == postOverrides.constEnd()) return QVariant();
     const CameraPostKey *key = cameraPostKey(id);
     if (!key) return QVariant();
+    // A Stack key has no scalar reading, and returning something plausible
+    // (a count? true?) would be a trap for every caller of this function —
+    // applyCameraPostFx's num/flag/whole helpers all go through here.
+    if (key->type == CameraPostKeyType::Stack) return QVariant();
     return key->type == CameraPostKeyType::Number ? QVariant(it->toDouble())
                                                   : QVariant(it->toInt());
+}
+
+QJsonArray CameraNode::postOverrideStack(const QString &id) const
+{
+    const CameraPostKey *key = cameraPostKey(id);
+    if (!key || key->type != CameraPostKeyType::Stack) return QJsonArray();
+    return postOverrides.value(id).toArray();
 }
 
 bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
@@ -106,6 +135,24 @@ bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
         const int v = value.toInt(&ok);
         if (!ok || (v != 0 && v != 1)) return false;
         postOverrides.insert(id, v);
+        return true;
+    }
+    case CameraPostKeyType::Stack: {
+        // Whatever spelling arrives — a QJsonArray from the reader, a
+        // QVariantList from a script — is normalised by the document's ONE
+        // validator, exactly as the world's stack is. Anything that is not a
+        // list at all is refused; an empty list is legal and MEANS something
+        // (this camera has no looks, over a world that does).
+        QJsonArray stack;
+        if (value.canConvert<QJsonArray>() && value.metaType().id() == QMetaType::QJsonArray)
+            stack = value.toJsonArray();
+        else if (value.metaType().id() == QMetaType::QVariantList)
+            stack = QJsonArray::fromVariantList(value.toList());
+        else if (value.metaType().id() == QMetaType::QJsonValue && value.toJsonValue().isArray())
+            stack = value.toJsonValue().toArray();
+        else
+            return false;
+        postOverrides.insert(id, normalizeLookStack(stack));
         return true;
     }
     case CameraPostKeyType::Enum: {
@@ -408,8 +455,19 @@ QVariant CameraNode::getPropertyValue(QString valueName)
     // CAMERA_LENS_SPEC §5: "postFx.<key>" reads the OVERRIDE and nothing else —
     // an invalid QVariant means "inherited", which is exactly the information a
     // caller needs and the reason this is not a plain float.
-    if (valueName.startsWith(QLatin1String("postFx.")))
-        return postOverride(valueName.mid(7));
+    if (valueName.startsWith(QLatin1String("postFx."))) {
+        const QString key = valueName.mid(7);
+        // The one STACK key (`looks`) reads back as a list — postOverride is
+        // scalar by contract and returns invalid for it, which would read as
+        // "inherited" and be wrong. Absent still reads as invalid, so the
+        // tri-state survives (POST_LOOKS_SPEC §7 R8).
+        const CameraPostKey *k = cameraPostKey(key);
+        if (k && k->type == CameraPostKeyType::Stack) {
+            if (!postOverrides.contains(key)) return QVariant();
+            return postOverrideStack(key).toVariantList();
+        }
+        return postOverride(key);
+    }
 
     return SceneNode::getPropertyValue(valueName);
 }

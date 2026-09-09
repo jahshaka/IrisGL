@@ -100,6 +100,17 @@ ChainDesc OgreView::chainDesc() const {
     d.ssrRoughnessCutoff = mPostFx.ssrRoughnessCutoff;
     d.ssrIntensity   = mPostFx.ssrIntensity;
     d.refractions    = mPostFx.refractions;
+    // DISTORTION (POST_LOOKS_SPEC §5.3), below the offscreen early-out with the
+    // rest: a distortion object is invisible in the passthrough shape anyway (it
+    // carries kDistortionBit instead of kVisibleBit and lives at RQ 220, which
+    // no passthrough pass draws), so an offscreen view renders exactly what it
+    // rendered before this existed.
+    d.distortion     = mPostFx.distortion;
+    d.distortionStrength = mPostFx.distortionStrength;
+    // THE LOOKS STACK (POST_LOOKS_SPEC §4). Below the offscreen early-out, so
+    // an offscreen view carries no looks unless it deliberately opted in — a
+    // thumbnail is a photograph of the CONTENT, not of the scene's look (§8).
+    d.looks          = mPostFx.looks;
     // ---- THE ORTHOGRAPHIC FALLBACK ------------------------------------------
     // SSR and SSAO both reconstruct a view-space position from depth, and both
     // used to do it in a way that is only valid for a perspective frustum —

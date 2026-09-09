@@ -6,6 +6,10 @@ namespace jahshaka { namespace engine { namespace detail {
 
 Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
     if (m.onTop)      return kOverlayRenderQueue;      // gizmos, wires, always-on-top
+    // POST_LOOKS_SPEC §5.3: a distortion object is not scene colour at all — it
+    // writes a screen-space displacement into the chain's own target, in its own
+    // pass, at a queue above every other scene range.
+    if (m.distortion) return kDistortionRenderQueue;
     if (m.refractive) return kRefractiveRenderQueue;   // the chain's refraction pass
     return 10u;                                        // Ogre's default for normal items
 }
@@ -341,6 +345,62 @@ void OgreScene::applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
     }
 }
 
+// THE DISTORTION DATABLOCK (POST_LOOKS_SPEC.md §5.2 decision D3).
+//
+// An HlmsUnlit datablock whose TEXTURE is a screen-space displacement field and
+// whose COLOUR ALPHA is the material's own strength — upstream's Distortion
+// sample's shape exactly (Tutorial_DistortionGameState.cpp), because the
+// arithmetic in the compose quad depends on it:
+//
+//   * the map goes on texture unit 0, taken from the material's NORMAL slot
+//     (bindTrackedTextures does the binding; this only configures the block).
+//     A tangent-space normal map IS a displacement field once R and G are
+//     remapped from [0,1] to [-1,1], which is why the slot is reused rather
+//     than a sixth one invented;
+//   * `setUseColour(true)` with alpha = the strength, so the blend below writes
+//     `map * strength` into the distortion target;
+//   * SRC_ALPHA / ONE_MINUS_SRC_ALPHA over a target cleared to (0.5, 0.5, 0, 0),
+//     i.e. "no displacement". Overlapping emitters therefore blend rather than
+//     the last one winning, and a zero-strength material writes the clear
+//     colour back — which is what makes strength 0 byte-identical;
+//   * depth check ON, depth write OFF: haze behind a wall is occluded (the
+//     pass borrows the scene's depth buffer), and two hazes do not z-fight.
+//
+// Nothing else on the material means anything here: there is no lighting, so
+// there is no albedo, no metalness, no roughness and no BRDF. The panel hides
+// those rows rather than letting a user discover it (PbrMaterial::
+// rowsUnusedWhenDistortion).
+void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p) {
+    db->setUseColour(true);
+    // The alpha IS the strength. Clamped, not because the shader would break
+    // above 1 but because a strength of 40 is not an authoring intent the
+    // blend below can represent.
+    db->setColour(Ogre::ColourValue(1.0f, 1.0f, 1.0f,
+                                    p.alpha < 0.0f ? 0.0f : (p.alpha > 1.0f ? 1.0f : p.alpha)));
+    db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
+    {
+        Ogre::HlmsBlendblock want = *db->getBlendblock();
+        want.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
+        const Ogre::HlmsBlendblock &cur = *db->getBlendblock();
+        if (want.mSourceBlendFactor != cur.mSourceBlendFactor ||
+            want.mDestBlendFactor != cur.mDestBlendFactor ||
+            want.mSourceBlendFactorAlpha != cur.mSourceBlendFactorAlpha ||
+            want.mDestBlendFactorAlpha != cur.mDestBlendFactorAlpha ||
+            want.mSeparateBlend != cur.mSeparateBlend)
+            db->setBlendblock(want);
+    }
+    {
+        Ogre::HlmsMacroblock macro = *db->getMacroblock();
+        const Ogre::CullingMode wantCull = p.twoSided ? Ogre::CULL_NONE : Ogre::CULL_CLOCKWISE;
+        if (macro.mCullMode != wantCull || macro.mDepthWrite || !macro.mDepthCheck) {
+            macro.mCullMode = wantCull;
+            macro.mDepthCheck = true;
+            macro.mDepthWrite = false;
+            db->setMacroblock(macro);
+        }
+    }
+}
+
 // ---- Materials ----
 MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
     JAH_TRY {
@@ -349,16 +409,20 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
         // The shading model is honoured AT CREATION, so a scene full of saved
         // Unlit materials builds them in the right family directly instead of
         // creating a Pbs datablock and immediately destroying it.
-        if (p.shadingModel == ShadingModel::Unlit) {
-            rec.datablockName = processUniqueName("unlitpbr");
+        if (p.shadingModel == ShadingModel::Unlit ||
+            p.shadingModel == ShadingModel::Distortion) {
+            const bool distortion = p.shadingModel == ShadingModel::Distortion;
+            rec.datablockName = processUniqueName(distortion ? "distort" : "unlitpbr");
             rec.unlit = true;          // no GI, and hlmsFor picks HlmsUnlit
             rec.shadingUnlit = true;   // ...but it is scene geometry, not an overlay
+            rec.distortion = distortion;
             auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(
                 mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
             auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsUnlit->createDatablock(
                 Ogre::IdString(rec.datablockName), rec.datablockName,
                 Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
-            applyUnlit(db, p);
+            if (distortion) applyDistortion(db, p);
+            else            applyUnlit(db, p);
             mMaterials[++mNextMaterialId] = rec;
             return mNextMaterialId;
         }
@@ -396,7 +460,9 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         if (!raw) return false;
         it->second.params = p;
         if (it->second.shadingUnlit) {
-            applyUnlit(static_cast<Ogre::HlmsUnlitDatablock *>(raw), p);
+            auto *udb = static_cast<Ogre::HlmsUnlitDatablock *>(raw);
+            if (it->second.distortion) applyDistortion(udb, p);
+            else                       applyUnlit(udb, p);
             return true;   // an unlit material is never refractive
         }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
@@ -425,8 +491,16 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         mError = "setShadingModel: this is an overlay material, not a PBR material";
         return false;
     }
-    const bool wantUnlit = model == ShadingModel::Unlit;
-    if (wantUnlit == rec.shadingUnlit) return true;   // idempotent, touches nothing
+    // THREE families now (POST_LOOKS_SPEC.md §5.2): Lit, Unlit and Distortion.
+    // The last two share a datablock TYPE (HlmsUnlit) and nothing else — a
+    // distortion item goes to its own render queue, carries its own visibility
+    // bit and configures its blocks differently — so the switch is still a full
+    // destroy/recreate/re-attach in both directions, and `wantUnlit` below means
+    // "in the HlmsUnlit family", not "the Unlit shading model".
+    const bool wantDistortion = model == ShadingModel::Distortion;
+    const bool wantUnlit = model == ShadingModel::Unlit || wantDistortion;
+    if (wantUnlit == rec.shadingUnlit && wantDistortion == rec.distortion)
+        return true;   // idempotent, touches nothing
 
     // RULE 5, and it is a REFUSAL rather than a fallback: HlmsUnlit's
     // calculateHashForPreCreate hard-zeroes Skeleton and BonesPerVertex, so an
@@ -440,6 +514,8 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
     // several nodes may share one mesh and only some of them attach it through
     // attachSkinnedMesh, and an unrigged node using rigged GEOMETRY has nothing
     // to lose here.
+    // (Distortion is in the same family and inherits the same refusal — a rigged
+    // haze volume would write its displacement at the bind pose.)
     if (wantUnlit) {
         for (const auto &kv : mNodes) {
             if (kv.second.materialRef != id) continue;
@@ -479,9 +555,11 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         // ordering inside one frame.
         rec.shadingUnlit = wantUnlit;
         rec.unlit = wantUnlit;
+        rec.distortion = wantDistortion;
         rec.pbsBacked = false;
         rec.refractive = !wantUnlit && rec.params.alphaMode == PbrAlphaMode::Refractive;
-        rec.datablockName = processUniqueName(wantUnlit ? "unlitpbr" : "pbr");
+        rec.datablockName = processUniqueName(wantDistortion ? "distort"
+                                                            : (wantUnlit ? "unlitpbr" : "pbr"));
         rec.params.shadingModel = model;
 
         if (wantUnlit) {
@@ -490,7 +568,8 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
             auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsUnlit->createDatablock(
                 Ogre::IdString(rec.datablockName), rec.datablockName,
                 Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
-            applyUnlit(db, rec.params);
+            if (wantDistortion) applyDistortion(db, rec.params);
+            else                applyUnlit(db, rec.params);
         } else {
             auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(
                 mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
@@ -686,7 +765,8 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
         // line meshes must neither bounce nor occlude the radiosity rays.
-        n.item->setVisibilityFlags(itemVisibilityFlags(n, tit->second.unlit));
+        n.item->setVisibilityFlags(
+            itemVisibilityFlags(n, tit->second.unlit, tit->second.distortion));
         // LIGHTING CHANNELS: the Item is BORN with Ogre's all-ones default, so
         // this only matters for a node whose mask was set before its geometry
         // arrived — or whose Item this very call is REBUILDING after a material
@@ -1084,8 +1164,16 @@ void OgreScene::bindTrackedTextures(const MaterialRec &rec) {
         // colour, which is exactly base colour x base-colour map. The other
         // four TextureIds stay in the record, unbound, so switching back to
         // Lit restores every map the user authored.
+        //
+        // A DISTORTION material reads the NORMAL slot instead, into the same
+        // unit 0 (POST_LOOKS_SPEC.md §5.2): what it wants there is a
+        // tangent-space normal map, read as a screen-space displacement, and
+        // reusing the panel's existing Normal picker is the whole reason the
+        // authoring shape is a shading model rather than a new node type.
         auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(raw);
-        Ogre::TextureGpu *tex = textureOf(rec.boundTextures[size_t(PbrTextureSlot::Albedo)]);
+        Ogre::TextureGpu *tex = textureOf(
+            rec.boundTextures[size_t(rec.distortion ? PbrTextureSlot::Normal
+                                                    : PbrTextureSlot::Albedo)]);
         db->setTexture(Ogre::uint8(0), tex, tex ? &sampler : nullptr);
         return;
     }
