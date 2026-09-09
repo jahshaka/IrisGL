@@ -19,6 +19,7 @@
 #include <QColor>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QList>
 #include <QImage>
 #include <QSet>
 #include <utility>
@@ -300,6 +301,15 @@ public:
 
     /// Selection highlight: the node's mesh drawn again as an on-top wireframe.
     void setHighlightedNode(iris::SceneNodePtr node);
+    /// The whole selected SET (EDITOR_MULTISELECT_SPEC §2.3). The shell walk
+    /// was always N-mesh — one shell per mesh under the highlighted node — so
+    /// N ROOTS is the same walk started N times; the pooling, the reclaim and
+    /// the skinned-silhouette handling are untouched. One colour for every
+    /// member (D4 a).
+    void setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes);
+    /// Whether this node is IN the highlighted set (the light/camera wires ask,
+    /// and equality against one node stopped being the right question).
+    bool isHighlighted(const iris::SceneNode *node) const;
 
     /// Selection highlight look: false (default) = silhouette outline (inverted
     /// hull); true = the on-top polygon wireframe.
@@ -1060,7 +1070,8 @@ private:
     jahshaka::engine::MaterialId mGiVolLitMaterial = 0, mGiVolProbeMaterial = 0;
     jahshaka::engine::Vec3 mGiVolLitMin, mGiVolLitMax, mGiVolProbeMin, mGiVolProbeMax;
     bool mGiVolBuilt = false;
-    iris::SceneNodePtr mHighlighted;
+    /// The highlighted SET, primary first. Empty = nothing selected.
+    QList<iris::SceneNodePtr> mHighlighted;
     /// One highlight shell per mesh under the highlighted node: selecting an
     /// asset's root outlines the whole subtree. Pooled and reused across frames.
     struct HighlightShell {
