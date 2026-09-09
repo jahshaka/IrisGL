@@ -127,8 +127,28 @@ option(BUILD_CPU_DEMOS                          "" OFF)
 option(BUILD_EXTRAS                             "" OFF)
 option(BUILD_UNIT_TESTS                         "" OFF)
 
+# VENDORED-DEPENDENCY LINK POLICY (ENGINEERING_DEBT L4, lead 2026-09-09): bullet3
+# and zip are STATIC, always, and position-independent (they link into the shared
+# libIrisGL). Why it has to be said: bullet's own `OPTION(BUILD_SHARED_LIBS ... OFF)`
+# runs under CMP0077 OLD (its cmake_minimum_required is 2.4.3). On a CLEAN configure
+# that option() discarded our normal variable (bullet came out .a); on a RE-configure
+# the cache entry already existed, the normal variable survived, and bullet came out
+# .so — the link type flipped with configure HISTORY, libIrisGL silently gained three
+# runtime .so deps, and the macOS bundle contents depended on how the tree had been
+# configured (ADDENDUM 4). Pinning CMP0077 to NEW for the vendored subtrees means a
+# normal variable is never clobbered by a vendored option(); saying OFF here means
+# the answer is the same on every configure. assimp stays SHARED (decided above,
+# baked at its add_subdirectory): it is the one vendored library the app loads as a
+# runtime dependency by design.
+set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+set(_jah_outer_shared_libs "${BUILD_SHARED_LIBS}")
+set(_jah_outer_pic "${CMAKE_POSITION_INDEPENDENT_CODE}")
+set(BUILD_SHARED_LIBS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory_with_folder("Dependencies/Bullet" thirdparty/bullet3)
 add_subdirectory_with_folder("Dependencies/Zip" thirdparty/zip)
+set(BUILD_SHARED_LIBS "${_jah_outer_shared_libs}")
+set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
 set(SRCS
     document/assets/mesh.cpp
