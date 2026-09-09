@@ -425,6 +425,44 @@ public:
     virtual bool        shareSkeleton(NodeId follower, NodeId source) = 0;
     /// True when this node's Item is rendering from another node's instance.
     virtual bool        sharesSkeleton(NodeId) const = 0;
+
+    // ---- Bone attachments: engine TAG POINTS (AVATAR_RIG_PERF_SPEC §4) ----
+    /// Hangs `rider`'s node off `owner`'s bone, through an engine TagPoint whose
+    /// local transform is `offset` (position/rotation/scale, in BONE space).
+    ///
+    /// ZERO LAG, which is the whole point: Ogre resolves tag points INSIDE the
+    /// threaded scene update, after the skeletons it reads
+    /// (updateAllTransforms -> updateAllAnimations -> updateAllTagPoints), so a
+    /// camera or a sword on a bone is in the right place in the frame that
+    /// renders it. The host's alternative — read the pose back, run FK, write
+    /// world transforms — is one frame late by construction and costs a
+    /// read-back per rigged node per frame.
+    ///
+    /// The rider keeps its OWN local transform, now RELATIVE TO THE SOCKET: the
+    /// tag is the socket, and the node under it is where the user nudged the
+    /// sword.
+    ///
+    /// Refuses: an owner with no rig, a bone the rig has not, a rider that is
+    /// the owner, and a rider that is an ANCESTOR of the owner (a circular
+    /// dependency, which Ogre calls "undefined, probably very wonky").
+    ///
+    /// NOTE for readers between frames: a tag point's world transform is the one
+    /// the LAST RENDERED FRAME produced. Ogre cannot resolve a tag on demand
+    /// (TagPoint::updateFromParentImpl is `assert(false)`), so
+    /// iris::graph::globalTransform reads the cached transform for a tagged
+    /// node — identical latency to the read-back path this replaces, while the
+    /// RENDER is exact.
+    virtual bool attachToBone(NodeId rider, NodeId owner, const std::string &bone,
+                              const Vec3 &position, const Quat &rotation, const Vec3 &scale) = 0;
+    /// Takes the rider off its bone and puts it back under `parent` (0 = the
+    /// scene root), keeping the world transform it had at the last rendered
+    /// frame — the fail-soft path when a socket, a bone or an owner goes away.
+    virtual bool detachFromBone(NodeId rider, NodeId parent) = 0;
+    /// Re-writes the tag's local transform — the socket was edited.
+    virtual bool setBoneAttachmentOffset(NodeId rider, const Vec3 &position,
+                                         const Quat &rotation, const Vec3 &scale) = 0;
+    /// The owner this rider is attached to, or 0 — and the bone, through `bone`.
+    virtual NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const = 0;
     /// A line list (pairs of points) or, with `strip`, a connected polyline.
     /// Attach with attachMesh like any mesh. One pixel wide.
     virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip) = 0;

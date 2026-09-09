@@ -3151,13 +3151,171 @@ bool SceneMirror::boneWorldTransforms(iris::SceneNode *node, QHash<QString, iris
 
 int SceneMirror::resolveSockets()
 {
-    // Read the pose the last rendered frame produced, then move whatever rides
-    // it — which is why this runs at the TOP of sync(), before the walk that
-    // pushes transforms to the engine. The one-frame lag is inherent (see
-    // document/scenegraph/socket.h) and is not worth an extra engine update to
-    // close.
+    // THE RECONCILER (AVATAR_RIG_PERF_SPEC §4.2). This used to be a per-frame
+    // RESOLVER: read every rigged owner's pose back from the engine, run FK over
+    // it on the CPU, and write each rider's world transform — one frame late by
+    // construction, and paid every frame by every character carrying a socket.
+    //
+    // Now the ENGINE does it: a rider hangs off a TagPoint on the owner's bone,
+    // which Ogre resolves inside its threaded update, in the frame that renders
+    // (updateAllTagPoints). So the per-frame socket cost on our side is ZERO and
+    // this function only has to keep the engine's arrangement equal to the
+    // document's — arm a tag when an attachment appears, move it when the socket
+    // is edited, free it when anything goes away.
+    //
+    // The bind-pose fallback stays exactly as it was for an owner with no live
+    // engine rig (a headless run, a character the walk has not rigged yet):
+    // those riders are still moved by writing their world transform.
     if (!mSource) return 0;
-    return mSockets.resolve(mSource.data());
+    if (!mTarget) return mSockets.resolve(mSource.data());
+    return reconcileSockets();
+}
+
+namespace {
+
+/// A cheap key for a socket's offset — the reconciler pushes a new offset only
+/// when the numbers really moved.
+quint64 offsetKeyOf(const iris::Socket &socket)
+{
+    quint64 h = 1469598103934665603ull;
+    const auto mix = [&h](float f) {
+        quint32 bits;
+        std::memcpy(&bits, &f, sizeof(bits));
+        for (int i = 0; i < 4; ++i) { h ^= (bits & 0xFF); h *= 1099511628211ull; bits >>= 8; }
+    };
+    mix(socket.position.x()); mix(socket.position.y()); mix(socket.position.z());
+    mix(socket.rotation.x()); mix(socket.rotation.y()); mix(socket.rotation.z());
+    mix(socket.rotation.scalar());
+    mix(socket.scale.x()); mix(socket.scale.y()); mix(socket.scale.z());
+    return h;
+}
+
+}  // namespace
+
+int SceneMirror::reconcileSockets()
+{
+    mSocketDangling = 0;
+    int riding = 0;
+    const QHash<QString, QList<iris::SceneNodePtr>> &attachments = mSource->socketAttachments;
+    QSet<const iris::SceneNode *> seen;
+
+    for (auto it = attachments.constBegin(); it != attachments.constEnd(); ++it) {
+        const QList<iris::SceneNodePtr> &attached = it.value();
+        if (attached.isEmpty()) continue;
+        const iris::SceneNodePtr ownerNode = mSource->nodes.value(it.key());
+        iris::MeshNode *owner = (!ownerNode.isNull() &&
+                                 ownerNode->getSceneNodeType() == iris::SceneNodeType::Mesh)
+                                    ? static_cast<iris::MeshNode *>(ownerNode.data())
+                                    : nullptr;
+        // Is there a LIVE ENGINE RIG to hang a tag on? Without one (a headless
+        // run, a character the walk has not rigged yet) the riders take the
+        // document path below, at the bind pose — unchanged behaviour.
+        const auto ownerEntry = owner ? mEntries.constFind(owner) : mEntries.constEnd();
+        const bool rigged = ownerEntry != mEntries.constEnd() && ownerEntry->gpuSkinned &&
+                            ownerEntry->node;
+
+        for (const iris::SceneNodePtr &riderPtr : attached) {
+            iris::SceneNode *rider = riderPtr.data();
+            if (!rider) { ++mSocketDangling; continue; }
+            const iris::Socket *socket = owner ? owner->findSocket(rider->socketName) : nullptr;
+            if (!socket) { ++mSocketDangling; releaseRider(rider); continue; }
+            seen.insert(rider);
+
+            if (!rigged) {
+                releaseRider(rider);        // it may have been on a tag a moment ago
+                iris::Mat4 world;
+                if (!iris::socketWorldTransform(owner, rider->socketName,
+                                                iris::BonePoseSource(), world)) {
+                    ++mSocketDangling;
+                    continue;
+                }
+                rider->setGlobalTransform(world);
+                rider->update(0.0f);
+                ++riding;
+                continue;
+            }
+
+            const auto riderEntry = mEntries.constFind(rider);
+            if (riderEntry == mEntries.constEnd() || !riderEntry->node) {
+                // Not mirrored yet — the walk that follows this call creates it
+                // and the next sync arms it. Not a dangle.
+                continue;
+            }
+            const jahshaka::engine::NodeId riderId = riderEntry->node;
+            const jahshaka::engine::NodeId ownerId = ownerEntry->node;
+            const quint64 key = offsetKeyOf(*socket);
+
+            // CHANGE-GUARDED AGAINST THE ENGINE, not against a mirror latch: the
+            // engine frees a tag by itself whenever the owner's skeleton is
+            // replaced (an Item re-created, a share armed or dropped), and a
+            // latch would then believe in an attachment that no longer exists.
+            std::string actualBone;
+            const jahshaka::engine::NodeId actualOwner =
+                mTarget->boneAttachment(riderId, &actualBone);
+            const bool armed = actualOwner == ownerId &&
+                               actualBone == socket->boneName.toStdString();
+            RiderState &state = mBoneRiders[rider];
+            if (!armed) {
+                // The rider keeps its place in the DOCUMENT hierarchy — the
+                // socket API's promise — through the graph layer's shadow
+                // parent, registered BEFORE the tag so no reader ever sees a
+                // TagPoint as a parent.
+                const iris::SceneNodePtr parent = rider->getParent();
+                if (!parent.isNull())
+                    iris::graph::setSocketRider(rider->graphNode(), parent->graphNode());
+                if (!mTarget->attachToBone(riderId, ownerId, socket->boneName.toStdString(),
+                                           toVec3(socket->position), toQuat(socket->rotation),
+                                           toVec3(socket->scale))) {
+                    iris::graph::clearSocketRider(rider->graphNode());
+                    mBoneRiders.remove(rider);
+                    ++mSocketDangling;
+                    continue;
+                }
+                state.owner = ownerId;
+                state.bone = socket->boneName;
+                state.offsetKey = key;
+            } else if (state.offsetKey != key) {
+                mTarget->setBoneAttachmentOffset(riderId, toVec3(socket->position),
+                                                 toQuat(socket->rotation), toVec3(socket->scale));
+                state.offsetKey = key;
+                state.owner = ownerId;
+                state.bone = socket->boneName;
+            }
+            ++riding;
+        }
+    }
+
+    // Anything we armed that the document no longer attaches comes off its bone
+    // and back under its document parent, at the pose it last rendered with —
+    // "it keeps its last pose", which is what the socket API promises for a
+    // stale attachment.
+    for (auto it = mBoneRiders.begin(); it != mBoneRiders.end();) {
+        if (seen.contains(it.key())) { ++it; continue; }
+        iris::SceneNode *rider = const_cast<iris::SceneNode *>(it.key());
+        it = mBoneRiders.erase(it);
+        releaseRider(rider);
+    }
+    return riding;
+}
+
+void SceneMirror::releaseRider(iris::SceneNode *rider)
+{
+    if (!rider || !mTarget) return;
+    const auto entry = mEntries.constFind(rider);
+    if (entry != mEntries.constEnd() && entry->node) {
+        // Back under the DOCUMENT parent's engine node when there is one; the
+        // engine falls back to the scene root, which is where a rider whose
+        // parent is the document root belongs anyway.
+        jahshaka::engine::NodeId parentId = 0;
+        const iris::SceneNodePtr parent = rider->getParent();
+        if (!parent.isNull()) {
+            const auto pe = mEntries.constFind(parent.data());
+            if (pe != mEntries.constEnd()) parentId = pe->node;
+        }
+        mTarget->detachFromBone(entry->node, parentId);
+    }
+    iris::graph::clearSocketRider(rider->graphNode());
+    mBoneRiders.remove(rider);
 }
 
 namespace {

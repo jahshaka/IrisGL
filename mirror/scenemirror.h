@@ -270,6 +270,10 @@ public:
     /// sync(); public so a headless suite can step it explicitly. Returns how
     /// many nodes moved.
     int resolveSockets();
+    /// How many socket attachments did NOT resolve on the last sync — a stale
+    /// owner, a removed socket, a bone a re-import renamed. Diagnostic only:
+    /// a dangling attachment leaves its rider exactly where it was.
+    int lastSocketDangling() const { return mSocketDangling; }
     /// The socket resolver, for tests and for hosts that want the stale
     /// count. Its pose source is installed by this mirror's constructor.
     iris::SocketResolver &socketResolver() { return mSockets; }
@@ -843,6 +847,22 @@ private:
     /// The per-sync grouping scratch: character host -> its mirrored pieces.
     /// A MEMBER so the steady state allocates nothing.
     QHash<const iris::SceneNode *, QVector<Entry *>> mShareGroups;
+
+    /// THE SOCKET RECONCILER (AVATAR_RIG_PERF_SPEC §4.2): keeps the ENGINE's
+    /// tag points equal to the DOCUMENT's socket attachments, instead of moving
+    /// riders itself every frame. Returns how many riders are being driven.
+    int reconcileSockets();
+    /// Takes one rider off its bone (if it is on one) and forgets it.
+    void releaseRider(iris::SceneNode *rider);
+    /// What the engine was last asked for, per rider — so an unchanged socket
+    /// costs one comparison and no engine call.
+    struct RiderState {
+        jahshaka::engine::NodeId owner = 0;
+        QString bone;
+        quint64 offsetKey = 0;
+    };
+    QHash<const iris::SceneNode *, RiderState> mBoneRiders;
+    int                      mSocketDangling = 0;
 
     iris::SocketResolver     mSockets;
     /// Counts every setClipStates call this mirror makes (clipStatePushes()).

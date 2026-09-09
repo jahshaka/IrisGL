@@ -110,7 +110,11 @@
 // Forward-declared rather than included so the pass-def headers stay where they
 // belong — inside the .cpp files that build passes.
 namespace Ogre { class CompositorPassSceneDef; class CompositorPassClearDef;
-                 class CompositorPassQuadDef; class CompositorPassDef; }
+                 class CompositorPassQuadDef; class CompositorPassDef;
+                 // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
+                 // holds a TagPoint*, and only OgreSockets.cpp does anything
+                 // with one.
+                 class TagPoint; }
 
 namespace jahshaka { namespace engine {
 // The backend's own namespace: these types and helpers are shared between the
@@ -1255,6 +1259,12 @@ public:
     bool followSkeleton(NodeId follower, NodeId source) override;
     bool shareSkeleton(NodeId follower, NodeId source) override;
     bool sharesSkeleton(NodeId id) const override;
+    bool attachToBone(NodeId rider, NodeId owner, const std::string &bone,
+                      const Vec3 &position, const Quat &rotation, const Vec3 &scale) override;
+    bool detachFromBone(NodeId rider, NodeId parent) override;
+    bool setBoneAttachmentOffset(NodeId rider, const Vec3 &position, const Quat &rotation,
+                                 const Vec3 &scale) override;
+    NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const override;
     /// Copies every follower's pose from its source. Once per rendered frame,
     /// AFTER the frame, so the poses copied are the ones just drawn.
     void applySkeletonFollowers();
@@ -1425,6 +1435,17 @@ private:
         /// re-arms it. Anything else would make sharesSkeleton() lie.
         NodeId               shareSource = 0;
         std::vector<NodeId>  shareFollowers;
+        /// BONE ATTACHMENT (attachToBone, AVATAR_RIG_PERF_SPEC §4): the engine
+        /// TagPoint this node's scene node hangs from, the node that owns the
+        /// bone, and the bone's name. One tag per RIDER (a tag shared by the
+        /// riders of one socket is a later optimisation; riders per socket are
+        /// one to three and a TagPoint is a node).
+        Ogre::TagPoint      *boneTag = nullptr;
+        NodeId               boneOwner = 0;
+        std::string          boneName;
+        /// The riders hanging off THIS node's bones, so an owner that dies (or
+        /// loses its rig) can free them before its skeleton goes.
+        std::vector<NodeId>  boneRiders;
         // Billboard set (particles): uniquely owned; freed by releaseBillboards
         // BEFORE the scene manager dies (its _destroy needs the live VaoManager).
         // Decal (DECALS_SPEC): the Decal rides an internal child node whose
@@ -1650,6 +1671,12 @@ private:
     void releaseShareFollowers(NodeId id, Node &n);
     /// Forgets this node's sharing pairings in both directions (releaseNode).
     void dropShareFollowers(NodeId id, Node &n);
+    /// Frees this node's TagPoint and puts its scene node back under `parent`
+    /// (0 = the scene root) at the transform it last rendered with.
+    void releaseBoneTag(NodeId id, Node &n, NodeId parent);
+    /// Detaches every rider hanging off this node's bones — before the rig, the
+    /// Item or the node dies. Riders land under the scene root, fail-soft.
+    void releaseBoneRiders(NodeId id, Node &n);
     /// One follower's bone-local transforms, copied from its source.
     void copySkeletonPose(Node &follower, Node &source);
     /// Every node that HAS followers, so the per-frame copy costs the number of

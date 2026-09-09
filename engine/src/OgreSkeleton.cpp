@@ -572,6 +572,10 @@ bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
         // would dangle. A follower carries no clips at all — it renders from the
         // master's pose — and the host re-attaches them if it ever un-shares.
         mClips.erase(followerId);
+        // ...and anything riding THIS node's bones: the instance those tags
+        // point into is about to be released (AVATAR_RIG_PERF_SPEC §4). The
+        // host re-arms them against whatever the node holds afterwards.
+        releaseBoneRiders(followerId, f);
         f.item->useSkeletonInstanceFrom(s.item);
         f.shareSource = sourceId;
         if (std::find(s.shareFollowers.begin(), s.shareFollowers.end(), followerId) ==
@@ -619,6 +623,7 @@ void OgreScene::unshareFollower(NodeId followerId, Node &f, Node *master) {
                 keep[i].scale = Vec3(sc.x, sc.y, sc.z);
             }
         }
+        releaseBoneRiders(followerId, f);   // same reason as at share time
         f.item->stopUsingSkeletonInstanceFromMaster();
         // Same reason as at share time, from the other side: a fresh instance
         // means any cached clip pointers for this node name the OLD one.
