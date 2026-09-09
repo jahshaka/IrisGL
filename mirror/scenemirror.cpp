@@ -393,6 +393,10 @@ int SceneMirror::sync()
             mTarget->setShaderTime(float(mShaderClock.nsecsElapsed()) * 1e-9f);
         }
     }
+    // SHARING BEFORE CLIPS (AVATAR_RIG_PERF_SPEC §3.4): a follower carries no
+    // clips at all, so which pieces are followers has to be settled before the
+    // clip pass decides who to push.
+    syncSkeletonSharing();
     syncClips();
     syncHighlight();
     syncGrid();
@@ -2912,6 +2916,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     // against the rig the engine holds, which for a piece of a multi-piece
     // character is the character union (AVATAR_RIG_PERF_SPEC §3.1).
     if (!e.gpuSkinned || !e.docNode || e.rigSkeleton.isNull()) return;
+    if (e.shareMaster) return;                  // a follower carries no clips
     iris::SceneNode *host = clipHostOf(e.docNode);
 
     // The signature covers everything that can change what the engine should be
@@ -3155,6 +3160,110 @@ int SceneMirror::resolveSockets()
     return mSockets.resolve(mSource.data());
 }
 
+namespace {
+
+/// Two nodes are in the SAME PLACE when their world transforms agree. The
+/// tolerance is loose enough for the float noise two identical TRS compositions
+/// can produce and far tighter than any authored offset.
+bool sameWorld(const iris::Mat4 &a, const iris::Mat4 &b)
+{
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            if (std::fabs(double(a(r, c)) - double(b(r, c))) > 1e-4) return false;
+    return true;
+}
+
+}  // namespace
+
+void SceneMirror::syncSkeletonSharing()
+{
+    // THE SECOND HALF of the character rig (AVATAR_RIG_PERF_SPEC §3.4): the
+    // pieces of one character render from ONE SkeletonInstance, so the pose is
+    // evaluated once and the clips are pushed once, instead of once per piece.
+    //
+    // WHO MAY SHARE. Ogre's shared bones carry the MASTER's node transform
+    // (OgreItem.h:200-205), so a piece may only share while it sits exactly
+    // where the master does — which is what an imported character's pieces do
+    // (§0.4: every piece at identity under the model root). A user who MOVES a
+    // piece un-shares it on the next sync and it goes back to its own instance,
+    // correct and slower; moving it back re-shares it.
+    //
+    // Everything here is CHANGE-GUARDED against the engine's own answer
+    // (sharesSkeleton), not against a mirror-side latch, because the engine
+    // drops a share by itself whenever an Item is re-created — a material swap,
+    // a mesh swap — and a latch would then believe in a share that no longer
+    // exists.
+    if (!mTarget || mEntries.isEmpty()) return;
+
+    mShareGroups.clear();
+    for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
+        Entry &e = *it;
+        // `characterHost` is set only for a piece that took a UNION rig, which
+        // is exactly the multi-piece case: a single-piece character has nothing
+        // to share and pays nothing here.
+        if (!e.gpuSkinned || !e.node || !e.characterHost || !e.docNode) continue;
+        mShareGroups[e.characterHost].append(&e);
+    }
+
+    for (auto g = mShareGroups.begin(); g != mShareGroups.end(); ++g) {
+        QVector<Entry *> &group = g.value();
+        if (group.size() < 2) continue;
+        // THE MASTER: the piece with the most bones of its own (the body, on a
+        // real character), tie-broken by NAME so the choice is deterministic
+        // across runs and machines — the alternative is a pointer order, and a
+        // master that changes between two identical loads would change which
+        // node the whole character renders from.
+        Entry *master = group[0];
+        for (Entry *e : group) {
+            if (e->blendToRig.size() > master->blendToRig.size()) { master = e; continue; }
+            if (e->blendToRig.size() == master->blendToRig.size() &&
+                e->docNode->getName() < master->docNode->getName())
+                master = e;
+        }
+        // A master that is itself sharing (its geometry changed and the group
+        // re-formed around it) has to be freed first — sharing is not chained.
+        if (mTarget->sharesSkeleton(master->node)) {
+            mTarget->shareSkeleton(master->node, 0);
+            master->shareMaster = 0;
+            master->clipSignature.clear();      // it owns its clips again
+            master->lastClipPush.clear();
+        }
+        const iris::Mat4 masterWorld = master->docNode->getGlobalTransform();
+
+        for (Entry *e : group) {
+            if (e == master) continue;
+            const bool eligible = e->rigId == master->rigId &&
+                                  sameWorld(e->docNode->getGlobalTransform(), masterWorld);
+            const bool shared = mTarget->sharesSkeleton(e->node);
+            if (eligible && (!shared || e->shareMaster != master->node)) {
+                if (mTarget->shareSkeleton(e->node, master->node)) {
+                    e->shareMaster = master->node;
+                    // A follower holds NO clips (the engine drops them when the
+                    // instance goes): forget what we think it has, so that if it
+                    // ever un-shares the clip pass re-attaches from scratch.
+                    e->clipSignature.clear();
+                    e->clipMap.clear();
+                    e->clipIdMap.clear();
+                    e->clipNameMap.clear();
+                    e->lastClipPush.clear();
+                } else {
+                    e->shareMaster = 0;
+                }
+            } else if (!eligible && shared) {
+                mTarget->shareSkeleton(e->node, 0);
+                e->shareMaster = 0;
+                e->clipSignature.clear();       // it needs its own clips again
+                e->clipMap.clear();
+                e->clipIdMap.clear();
+                e->clipNameMap.clear();
+                e->lastClipPush.clear();
+            } else {
+                e->shareMaster = shared ? master->node : 0;
+            }
+        }
+    }
+}
+
 void SceneMirror::syncClips()
 {
     // The per-frame animation cost, all of it: one small struct PER ENABLED CLIP
@@ -3193,6 +3302,11 @@ void SceneMirror::syncClips()
     for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
         Entry &e = *it;
         if (!e.gpuSkinned || !e.docNode) continue;
+        // A FOLLOWER renders from the master's instance: it has no animation
+        // state of its own, and the engine refuses clip calls on it by design
+        // (AVATAR_RIG_PERF_SPEC §3.3). This is the row §1 removes — one push per
+        // CHARACTER instead of one per piece.
+        if (e.shareMaster) continue;
         attachClipsFor(e);
         if (e.clipMap.isEmpty()) continue;
 

@@ -99,6 +99,14 @@ const OgreScene::RigRec *OgreScene::rigOf(NodeId id) const {
 
 // ---------------------------------------------------------------------------
 bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
+    // A FOLLOWER's skeleton IS the master's instance (AVATAR_RIG_PERF_SPEC
+    // §3.3): a second clip set enabled on it would double-drive the whole
+    // character, and attachClips' own "nothing may be playing" guard would then
+    // start refusing the MASTER. Clips belong to the node that owns the rig.
+    if (sharesSkeleton(id)) {
+        mError = "attachClips: this node shares another node's skeleton — attach on the source";
+        return false;
+    }
     Ogre::SkeletonInstance *skel = skeletonOf(id);
     if (!skel) { mError = "attachClips: the node has no rig"; return false; }
     if (!clips && count) { mError = "attachClips: null clips"; return false; }
@@ -298,6 +306,10 @@ std::vector<std::string> OgreScene::clipNames(NodeId id) const {
 
 // ---------------------------------------------------------------------------
 bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) {
+    if (sharesSkeleton(id)) {
+        mError = "setClipStates: this node shares another node's skeleton — drive the source";
+        return false;
+    }
     Ogre::SkeletonInstance *skel = skeletonOf(id);
     if (!skel) { mError = "setClipStates: the node has no rig"; return false; }
     if (!states && count) { mError = "setClipStates: null states"; return false; }
@@ -388,6 +400,10 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
 
 // ---------------------------------------------------------------------------
 bool OgreScene::setBoneManual(NodeId id, const std::string &bone, bool manual) {
+    if (sharesSkeleton(id)) {
+        mError = "setBoneManual: this node shares another node's skeleton — mark it on the source";
+        return false;
+    }
     Ogre::SkeletonInstance *skel = skeletonOf(id);
     if (!skel) { mError = "setBoneManual: the node has no rig"; return false; }
     JAH_TRY {

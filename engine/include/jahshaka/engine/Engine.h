@@ -398,6 +398,33 @@ public:
     /// The pairing is REMEMBERED across re-attaches on either end, and drops
     /// itself when either node goes away. Passing source = 0 stops following.
     virtual bool        followSkeleton(NodeId follower, NodeId source) = 0;
+    /// SHARING, which is the other thing entirely (AVATAR_RIG_PERF_SPEC §3.2):
+    /// `follower` renders from `source`'s SkeletonInstance — Ogre's
+    /// Item::useSkeletonInstanceFrom — so the pose is evaluated ONCE for both,
+    /// clips are pushed once, and a character made of five skinned pieces costs
+    /// one animation update instead of five.
+    ///
+    /// THE PRICE, and it is not negotiable: the shared bones carry the SOURCE's
+    /// node transform, so the follower renders WHERE THE SOURCE IS. Its own
+    /// scene node still decides its culling AABB and nothing else. Share only
+    /// pieces whose world transform equals the source's — the caller keeps them
+    /// equal, or does not share.
+    ///
+    /// Both ends must be rigged to the SAME rig (Ogre throws on a skeleton-name
+    /// mismatch; this refuses before it does). Also refused: a node sharing with
+    /// itself, a source that is itself a follower, a follower that has followers
+    /// of its own, and an unrigged end.
+    ///
+    /// `source = 0` stops sharing: the follower gets its own instance back,
+    /// carrying the pose it was rendering, re-attached to its own node.
+    ///
+    /// The share is LIVE STATE, not an intent: any re-attach on either end
+    /// (a material swap, a mesh swap) drops it — safely, in the one order that
+    /// does not hand the master's rig a null parent node — and the host re-arms
+    /// it on the next sync.
+    virtual bool        shareSkeleton(NodeId follower, NodeId source) = 0;
+    /// True when this node's Item is rendering from another node's instance.
+    virtual bool        sharesSkeleton(NodeId) const = 0;
     /// A line list (pairs of points) or, with `strip`, a connected polyline.
     /// Attach with attachMesh like any mesh. One pixel wide.
     virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip) = 0;

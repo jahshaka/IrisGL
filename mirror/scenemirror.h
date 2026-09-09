@@ -554,6 +554,11 @@ private:
         /// notices without re-deriving the union every frame.
         const iris::SceneNode *characterHost = nullptr;
         quint32 characterEpoch = 0;
+        /// The engine node whose SkeletonInstance this piece is rendering from,
+        /// or 0 when it owns its own (AVATAR_RIG_PERF_SPEC §3.4). A follower is
+        /// skipped by the clip pass — it has no animation state of its own — so
+        /// this is what turns five clip pushes per character into one.
+        jahshaka::engine::NodeId shareMaster = 0;
         bool gpuSkinned = false;                     // the engine accepted the rig
         size_t boneCount = 0;
         /// Each bone's PARENT INDEX, resolved once per rig instead of by a
@@ -831,6 +836,13 @@ private:
     /// The character rig for a piece, derived if needed. Null when the piece is
     /// alone (or was excluded from the union) — then it keeps its own rig.
     const CharacterRig *characterRigFor(iris::SceneNode *piece);
+    /// Arms (and disarms) skeleton sharing for every multi-piece character in
+    /// the scene — §3.4. Runs once per sync, BEFORE syncClips, and does nothing
+    /// at all in a scene with no multi-piece character.
+    void syncSkeletonSharing();
+    /// The per-sync grouping scratch: character host -> its mirrored pieces.
+    /// A MEMBER so the steady state allocates nothing.
+    QHash<const iris::SceneNode *, QVector<Entry *>> mShareGroups;
 
     iris::SocketResolver     mSockets;
     /// Counts every setClipStates call this mirror makes (clipStatePushes()).

@@ -1253,6 +1253,8 @@ public:
                            const SkeletonDesc &rig, const unsigned short *blendToRig,
                            size_t blendToRigCount) override;
     bool followSkeleton(NodeId follower, NodeId source) override;
+    bool shareSkeleton(NodeId follower, NodeId source) override;
+    bool sharesSkeleton(NodeId id) const override;
     /// Copies every follower's pose from its source. Once per rendered frame,
     /// AFTER the frame, so the poses copied are the ones just drawn.
     void applySkeletonFollowers();
@@ -1409,6 +1411,20 @@ private:
         /// goes away takes its pairings with it.
         NodeId               skeletonSource = 0;
         std::vector<NodeId>  skeletonFollowers;
+        /// SKELETON SHARING (shareSkeleton, AVATAR_RIG_PERF_SPEC §3.2): the node
+        /// whose SkeletonInstance this node's Item is actually rendering from,
+        /// and the nodes rendering from this one's. A DIFFERENT relationship
+        /// from the pose FOLLOWING above and deliberately kept apart: following
+        /// copies bone locals once a frame and leaves both nodes in charge of
+        /// their own transforms; sharing means there is ONE instance, evaluated
+        /// once, whose bones carry the MASTER's node transform — which is why
+        /// only pieces that sit exactly where the master does may share.
+        ///
+        /// `shareSource` is the LIVE Ogre state, not an intent: it is dropped
+        /// the moment the share is undone (a detach on either end), and the host
+        /// re-arms it. Anything else would make sharesSkeleton() lie.
+        NodeId               shareSource = 0;
+        std::vector<NodeId>  shareFollowers;
         // Billboard set (particles): uniquely owned; freed by releaseBillboards
         // BEFORE the scene manager dies (its _destroy needs the live VaoManager).
         // Decal (DECALS_SPEC): the Decal rides an internal child node whose
@@ -1625,6 +1641,15 @@ private:
     /// Forgets this node's pose-following pairings in both directions — the
     /// node itself is going away (releaseNode).
     void dropSkeletonFollowers(NodeId id, Node &n);
+    /// Undoes one follower's SHARE, leaving it on its OWN instance, posed and
+    /// PARENTED. Ogre leaves the fresh instance parentless
+    /// (OgreItem.cpp:266-280), so the Item is re-attached to its node, which is
+    /// the only thing that re-points it (MovableObject::_notifyAttached).
+    void unshareFollower(NodeId followerId, Node &f, Node *master);
+    /// Un-shares every follower of `id` — before its Item or its node dies.
+    void releaseShareFollowers(NodeId id, Node &n);
+    /// Forgets this node's sharing pairings in both directions (releaseNode).
+    void dropShareFollowers(NodeId id, Node &n);
     /// One follower's bone-local transforms, copied from its source.
     void copySkeletonPose(Node &follower, Node &source);
     /// Every node that HAS followers, so the per-frame copy costs the number of
