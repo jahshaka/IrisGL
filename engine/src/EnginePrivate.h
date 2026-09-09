@@ -2543,6 +2543,11 @@ private:
     /// the resolved per-frame budget (the request clamped to the grid). Reported
     /// by giStatus so a caller can see what the renderer actually spends.
     int mProbeUpdatesPerFrame = 0;
+    /// The resolved `GiParams::dynamicProbes` reservation and how many extra
+    /// moved-covering re-captures it spent on the last frame (Epic's column;
+    /// see updateProbeBudget). Both reported by giStatus.
+    int mDynamicProbes = 0;
+    int mDynamicProbeUpdates = 0;
     /// Whether the last full refresh took the reuse arm (B4). Reported by
     /// giStatus; cleared by every from-scratch build.
     bool mGiReusedLastRefresh = false;
