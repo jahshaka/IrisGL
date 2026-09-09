@@ -48,6 +48,7 @@ static const CameraPostKey kPostKeys[] = {
     { "hdr",            CameraPostKeyType::Toggle },
     { "bloom",          CameraPostKeyType::Toggle },
     { "bloomThreshold", CameraPostKeyType::Number },
+    { "bloomKnee",      CameraPostKeyType::Number },
     { "ssao",           CameraPostKeyType::Toggle },
     { "ssaoPower",      CameraPostKeyType::Number },
     { "ssaoRadius",     CameraPostKeyType::Number },

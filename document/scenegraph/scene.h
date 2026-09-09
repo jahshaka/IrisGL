@@ -368,6 +368,11 @@ public:
     float exposureMax;
     bool  bloomEnabled;      ///< highlight bloom; rides the HDR node, needs hdrEnabled
     float bloomThreshold;    ///< where the bright pass starts, in tonemapper units
+    /// How WIDE the ramp above that threshold is (ADDENDUM A-6). A width, not a
+    /// second absolute threshold: the renderer clamps an inverted pair back up,
+    /// so an absolute row could offer a state it silently refuses. 2.0 is what
+    /// the engine hard-coded before this existed.
+    float bloomKnee;
     bool  ssaoEnabled;
     float ssaoScale;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower;         ///< contrast of the occlusion term

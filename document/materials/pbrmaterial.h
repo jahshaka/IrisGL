@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include "document/materials/material.h"
 #include "core/properties/property.h"
 #include <QColor>
+#include <QHash>
 #include <QList>
 #include <QVector>
 
@@ -56,6 +57,25 @@ public:
 
     // --- shading model (HLMS_ADOPTION P4a) ---
     void setShadingModel(int model);        // 0 lit, 1 unlit
+
+    // --- detail layers (MATERIAL_GAPS_SPEC GAP 2) ---
+    /// HOW MANY detail layers a material carries. Mirrors the engine boundary's
+    /// kDetailLayerCount (jahshaka/engine/Types.h) — the document is the side
+    /// that must not silently carry more than the renderer can bind, and this
+    /// header cannot include the engine's (Studio's document layer never links
+    /// it). A static_assert in the mirror keeps the two honest.
+    static constexpr int kDetailLayers = 2;
+    void setDetailMap(int layer, Texture2DPtr tex);
+    void setDetailNormalMap(int layer, Texture2DPtr tex);
+    void setDetailWeightMap(Texture2DPtr tex);
+
+    // --- specular / fresnel workflow (MATERIAL_GAPS_SPEC GAP 1) ---
+    void setWorkflow(int workflow);         // 0 metallic, 1 specular, 2 specular-as-fresnel
+    void setSpecularColor(QColor color);
+    void setIor(float ior);
+    void setFresnelColor(QColor color);
+    void setUseFresnelColor(bool use);
+    void setSeparateFresnel(bool separate);
 
     // --- clear coat / BRDF / shadow + lightmap switches (HLMS_ADOPTION P1) ---
     void setClearCoat(float coat);
@@ -175,6 +195,41 @@ public:
     /// The shading-model vocabulary, in `shadingModel` index order — the same
     /// one-table discipline as brdfNames().
     static const QVector<const char *> &shadingModelNames();
+
+    /// The WORKFLOW vocabulary, in `workflow` index order. Same one-table rule
+    /// as brdfNames()/shadingModelNames(): the panel's labels, the mirror's
+    /// index -> engine mapping and anyone reporting the row read this.
+    static const QVector<const char *> &workflowNames();
+    /// The display name of the SHARED metallic/specular map row for a workflow.
+    /// PBSM_METALLIC and PBSM_SPECULAR are ONE renderer texture slot
+    /// reinterpreted by the workflow, so the document has one `metallicMap`
+    /// key and the panel has to say which meaning is live — otherwise a user
+    /// binds a coloured specular map to a material reading it as monochrome
+    /// metalness (MATERIAL_GAPS_SPEC I-4). Also drives the map's COLOUR SPACE:
+    /// metalness is linear data, a specular map is an sRGB colour.
+    static const char *sharedMapDisplayName(int workflow);
+    /// Is the shared metallic/specular map an sRGB COLOUR in this workflow?
+    /// False (linear) on Metallic, true on the two Specular workflows — the
+    /// renderer's own suggestUsingSRGB says exactly this
+    /// (OgreHlmsPbsDatablock.cpp:1059-1074).
+    static bool sharedMapIsSrgb(int workflow);
+    /// The property names a METALLIC material cannot honour (the fresnel rows),
+    /// and the one a SPECULAR material cannot (metallic factor) — the same
+    /// grey-out affordance rowsUnusedWhenUnlit() provides, for the same reason:
+    /// a knob that silently does nothing is worse than a disabled one.
+    static const QVector<QString> &rowsUnusedWhenMetallic();
+    static const QVector<QString> &rowsUnusedWhenSpecular();
+
+    /// The THIRTEEN detail blend-mode names, in the renderer's own index order.
+    /// Same one-table rule as brdfNames(): the enum row's labels, the verbs'
+    /// vocabulary and the index the mirror sends are all this list.
+    static const QVector<const char *> &detailBlendNames();
+    /// The flat row names for one detail layer: `detail0Map`, `detail0Blend`,
+    /// … The rows are FLAT and not an array because the property model is a
+    /// flat list of named rows — the panel renders it, material.set writes it,
+    /// the reader skips absent names and the graph baker targets it by key.
+    /// Ugly in a header, correct in all four places (MATERIAL_GAPS_SPEC §3.4).
+    static QString detailRow(int layer, const char *suffix);
     /// The property names an UNLIT material cannot honour, so the panel can grey
     /// them out with a reason instead of letting a user discover that half the
     /// rows do nothing. Every entry is justified in the ShadingModel comment in
@@ -237,6 +292,109 @@ public:
     /// at its bind pose while the animation played on — silently. The engine
     /// refuses the switch by name and the document keeps its Lit value.
     int    shadingModel;
+
+    // ---- Specular / fresnel workflow (MATERIAL_GAPS_SPEC GAP 1) ----------
+
+    /// Which of the renderer's three PBR workflows shades this material, as an
+    /// INDEX into workflowNames(): 0 Metallic (the default, and what every
+    /// existing material is), 1 Specular, 2 Specular-as-Fresnel.
+    ///
+    /// The renderer's OWN default is Specular; Metallic is ours, applied by an
+    /// explicit call at every material-creation site since the engine existed.
+    /// So 0 here is not "unset", it is the value the whole library already has,
+    /// and a file with no `workflow` key loads as Metallic and renders exactly
+    /// as it did.
+    ///
+    /// NO NEW TEXTURE SLOT: the renderer's metallic and specular texture units
+    /// are the SAME unit, reinterpreted by the workflow, so `metallicMap`
+    /// carries a monochrome metalness map on Metallic and a specular map on
+    /// the other two. sharedMapDisplayName()/sharedMapIsSrgb() are how the
+    /// panel and the mirror say which.
+    int    workflow;
+
+    /// kS, the specular colour — a multiplier on the specular response.
+    /// Meaningful in EVERY workflow, metallic included (the renderer's own
+    /// header says so); white is inert and is the default.
+    QColor specularColor;
+
+    /// Index of refraction, the authoring front-end for F0: the renderer
+    /// computes F0 = ((1-ior)/(1+ior))². 1.5 is window glass. Honoured only in
+    /// the two Specular workflows — stored, serialized and kept on a Metallic
+    /// material so a workflow switch restores it, the same "values survive the
+    /// switch" rule clear coat follows.
+    float  ior;
+    /// F0 DIRECTLY, used instead of `ior` when `useFresnelColor` is set. The
+    /// escape hatch for an F0 no single IOR expresses — a coloured metal's
+    /// specular, or KHR_materials_specular's specularColorFactor on import.
+    QColor fresnelColor;
+    bool   useFresnelColor;
+    /// false = one scalar F0 shared by RGB (the cheaper shader permutation),
+    /// true = a per-channel F0. Changing it recompiles the material's shader
+    /// (the fresnel term changes size), so it is not a slider.
+    bool   separateFresnel;
+
+    // ---- Detail layers (MATERIAL_GAPS_SPEC GAP 2) ------------------------
+    //
+    // A detail layer is a second diffuse map blended into the base colour by
+    // one of thirteen modes, optionally with its own normal map, its own UV
+    // offset/scale and its own weight. Fields on the SAME renderer material,
+    // not a second material model.
+    //
+    // AN UNAUTHORED LAYER IS FREE: with no map, (0,0) offset, (1,1) scale and
+    // weight 1, the renderer sets no shader property for it at all — so every
+    // existing material's shader, and therefore its pixels and its thumbnail,
+    // are byte-identical to before these rows existed.
+    //
+    // DETAIL TILING IS PER-LAYER AND DELIBERATELY NOT `textureScale`
+    // (D-5/§3.3): textureScale rides our own shader piece, which redefines
+    // only the five BASE-map UV macros. Extending it to the detail macros would
+    // grow a divergent shader artifact we own forever, for a strictly worse
+    // knob than the renderer's own per-layer offsetScale.
+    struct DetailLayer {
+        QString map;            ///< the layer's diffuse map (a resolved path)
+        QString normalMap;      ///< optional; needs tangents on the mesh
+        int     blend = 0;      ///< index into detailBlendNames()
+        float   offsetU = 0.0f, offsetV = 0.0f;
+        float   scaleU  = 1.0f, scaleV  = 1.0f;
+        float   weight = 1.0f;         ///< scales diffuse AND normal together
+        float   normalWeight = 1.0f;   ///< the layer's normal strength
+    };
+    DetailLayer detail[kDetailLayers];
+    /// One mask whose R/G/B/A channels scale layers 0/1/2/3. A single texture,
+    /// not per layer — that is the renderer's shape (PBSM_DETAIL_WEIGHT).
+    QString detailWeightMap;
+
+    // ---- Sampler control (ADDENDUM A-2) ----------------------------------
+    //
+    // Every map used to be sampled with one hard-coded state: wrap, linear,
+    // anisotropy 1. Those are still the defaults, so an unauthored material is
+    // sampled exactly as it always was and no pixel suite moves.
+    //
+    // ANISOTROPY IS ALL-OR-NOTHING at the renderer: it forces the count back
+    // to 1 unless min, mag AND mip filters are all anisotropic, so the engine
+    // switches all three together and this is a plain count. 1 / 2 / 4 / 8 /16.
+    // MACOS: the anisotropic route has never run on MoltenVK (which once
+    // applied maxAnisotropy with LINEAR filters and averaged whole textures);
+    // a non-1 default stays refused until a Mac session verifies it.
+    float anisotropy;
+    /// Per-map addressing, as an INDEX into addressModeNames(): 0 Wrap (the
+    /// default and what every map has always had), 1 Clamp, 2 Mirror, 3 Border.
+    /// Per MAP rather than per material because the detail layers need it that
+    /// way — a tiled detail layer over a clamped base map is the ordinary case.
+    /// Row names are `<mapRow>Address`: baseColorMapAddress, normalMapAddress,
+    /// detail0MapAddress, …
+    static const QVector<const char *> &addressModeNames();
+    /// The `<mapRow>Address` row name for a map row, and the map rows in
+    /// slot order. ONE table: the panel, the verbs and the mirror read it.
+    static QString addressRow(const QString &mapRow);
+    static const QVector<QString> &mapRowNames();
+    /// The address index for a map row (0 = Wrap when unset).
+    int addressFor(const QString &mapRow) const { return mapAddress.value(mapRow, 0); }
+    void setAddressFor(const QString &mapRow, int mode) { mapAddress[mapRow] = mode; }
+    /// Row -> address index. A hash rather than N declared fields because the
+    /// row NAMES are already the slot vocabulary (mapRowNames) and a second
+    /// spelling of them is how a picker and a renderer drift apart.
+    QHash<QString, int> mapAddress;
 
     /// Generated shader pieces (HLMS_ADOPTION P5) — absolute paths into the
     /// per-user piece cache, empty for an ordinary baked material. See the

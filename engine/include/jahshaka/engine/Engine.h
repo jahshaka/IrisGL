@@ -349,6 +349,33 @@ public:
     /// memory and a few hundred microseconds, once, per icon.
     virtual TextureId   createTexture(unsigned width, unsigned height, const unsigned char *rgba,
                                       bool srgb, bool mipmaps = false) = 0;
+    /// A CUBEMAP from six square, same-size, same-format face textures, in
+    /// WORLD-AXIS order (+X, -X, +Y, -Y, +Z, -Z) with image row 0 at the top —
+    /// exactly what setSkyReflection takes, and built by the SAME code, so the
+    /// left-handed remap the backend's cubemap lookups need is applied once and
+    /// in one place (the 2026-09-03 fact: getting this wrong silently mirrors
+    /// every reflection). Returns a TextureId the caller owns and destroys.
+    ///
+    /// Its use today is a per-material reflection override (ADDENDUM A-5):
+    /// `setPbrTexture(mat, PbrTextureSlot::Reflection, id)`.
+    virtual TextureId   createCubemap(const TextureId faces[6]) = 0;
+    /// REPLACE the pixels of an existing texture, same size, same format
+    /// (ADDENDUM A-1). The upload path createTexture already is, re-run — the
+    /// staging texture comes from and returns to a pool, so a per-frame call is
+    /// not an allocation.
+    ///
+    /// createTexture-BORN IDS ONLY. A file-loaded texture takes its format, mip
+    /// count and colour space from the file and is POOLED, so writing into one
+    /// would change every material that loaded that path; a decal-atlas slice is
+    /// shared process-wide and refcounted, which is worse. Both are refused by
+    /// name. A different size is refused too — a Vulkan texture cannot resize;
+    /// destroy and create.
+    ///
+    /// ORDERING: the upload records into the OPEN command buffer, ahead of this
+    /// frame's draws, so the new pixels RENDER with no flush. `flushCommands()`
+    /// is required only before READING this texture back in the same frame.
+    virtual bool        updateTexture(TextureId, unsigned width, unsigned height,
+                                      const unsigned char *rgba) = 0;
     virtual bool        destroyTexture(TextureId) = 0;
     /// How many mip levels the texture actually has (1 = base only, 0 = no such
     /// texture). The diagnostic half of `mipmaps` above: a chain that silently

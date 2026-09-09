@@ -41,6 +41,17 @@ PbrMaterial::PbrMaterial()
     // family every existing material is already in, so the row's existence
     // cannot move a pixel of shipped content.
     shadingModel        = 0;      // Lit
+    // MATERIAL_GAPS_SPEC GAP 1. Metallic is what every material in the library
+    // already is (the engine applied it unconditionally at every creation
+    // site), and every other value here is inert in that workflow — white kS
+    // is a no-op multiplier, and ior/fresnelColor/separateFresnel are not read
+    // at all. So the rows existing cannot move a pixel of shipped content.
+    workflow            = 0;      // Metallic
+    specularColor       = QColor(255, 255, 255);
+    ior                 = 1.5f;   // window glass; F0 = 0.04
+    fresnelColor        = QColor(10, 10, 10);   // ~0.04 linear, the dielectric F0
+    useFresnelColor     = false;
+    separateFresnel     = false;
     clearCoat           = 0.0f;
     clearCoatRoughness  = 0.0f;
     brdf                = 0;      // Default
@@ -61,6 +72,13 @@ PbrMaterial::PbrMaterial()
     textureOffsetU      = 0.0f;
     textureOffsetV      = 0.0f;
     textureRotation     = 0.0f;
+
+    // ADDENDUM A-2. Both defaults are the values every map was hard-coded to
+    // before the rows existed, so an existing material samples identically.
+    anisotropy          = 1.0f;
+    // mapAddress is left EMPTY, not filled with zeros: absent means Wrap
+    // (addressFor's default), which is also what an old file with no address
+    // keys reads as, so the two agree without a migration.
 
     // Opaque geometry. NOTE: CustomMaterial maps its "opaque" string to
     // RenderLayer::Background (custommaterial.cpp:296), which looks like a bug in
@@ -107,6 +125,87 @@ void PbrMaterial::setNormalMap(Texture2DPtr tex)
 void PbrMaterial::setNormalFactor(float factor)     { normalFactor = factor; }
 
 void PbrMaterial::setShadingModel(int model)            { shadingModel = model; }
+void PbrMaterial::setWorkflow(int w)                    { workflow = w; }
+
+// The renderer's detail texture units are bound from `textures` like every
+// other map, under the sampler names the mirror's slot table reads.
+void PbrMaterial::setDetailMap(int layer, Texture2DPtr tex)
+{
+    if (layer < 0 || layer >= kDetailLayers) return;
+    const QString key = QStringLiteral("u_detail%1Map").arg(layer);
+    if (!!tex) { detail[layer].map = tex->source; addTexture(key, tex); }
+    else       { detail[layer].map.clear();       removeTexture(key); }
+}
+
+void PbrMaterial::setDetailNormalMap(int layer, Texture2DPtr tex)
+{
+    if (layer < 0 || layer >= kDetailLayers) return;
+    const QString key = QStringLiteral("u_detail%1NormalMap").arg(layer);
+    if (!!tex) { detail[layer].normalMap = tex->source; addTexture(key, tex); }
+    else       { detail[layer].normalMap.clear();       removeTexture(key); }
+}
+
+void PbrMaterial::setDetailWeightMap(Texture2DPtr tex)
+{
+    if (!!tex) { detailWeightMap = tex->source; addTexture(QStringLiteral("u_detailWeightMap"), tex); }
+    else       { detailWeightMap.clear();       removeTexture(QStringLiteral("u_detailWeightMap")); }
+}
+
+const QVector<const char *> &PbrMaterial::addressModeNames()
+{
+    // Index is the stored value and is permanent, like every other enum row.
+    static const QVector<const char *> kNames = { "Wrap", "Clamp", "Mirror", "Border" };
+    return kNames;
+}
+
+QString PbrMaterial::addressRow(const QString &mapRow)
+{
+    return mapRow + QStringLiteral("Address");
+}
+
+// EVERY MAP ROW, in the order the panel shows them. The one list the address
+// rows, the panel and the mirror's slot mapping are all generated from — a
+// second spelling of these names is how a picker and a renderer drift apart.
+const QVector<QString> &PbrMaterial::mapRowNames()
+{
+    static const QVector<QString> kRows = [] {
+        QVector<QString> rows = {
+            QStringLiteral("baseColorMap"), QStringLiteral("normalMap"),
+            QStringLiteral("metallicMap"),  QStringLiteral("roughnessMap"),
+            QStringLiteral("emissiveMap"),
+        };
+        for (int i = 0; i < kDetailLayers; ++i) {
+            rows << detailRow(i, "Map");
+            rows << detailRow(i, "NormalMap");
+        }
+        rows << QStringLiteral("detailWeightMap");
+        return rows;
+    }();
+    return kRows;
+}
+
+QString PbrMaterial::detailRow(int layer, const char *suffix)
+{
+    return QStringLiteral("detail%1%2").arg(layer).arg(QLatin1String(suffix));
+}
+
+// THE THIRTEEN BLEND MODES, in the renderer's own index order
+// (OgreHlmsPbsPrerequisites.h PbsBlendModes). Index is the stored value and is
+// permanent — the renderer's order, not ours to reshuffle.
+const QVector<const char *> &PbrMaterial::detailBlendNames()
+{
+    static const QVector<const char *> kNames = {
+        "NormalNonPremul", "NormalPremul", "Add", "Subtract", "Multiply",
+        "Multiply2x", "Screen", "Overlay", "Lighten", "Darken",
+        "GrainExtract", "GrainMerge", "Difference"
+    };
+    return kNames;
+}
+void PbrMaterial::setSpecularColor(QColor color)        { specularColor = color; }
+void PbrMaterial::setIor(float v)                       { ior = v; }
+void PbrMaterial::setFresnelColor(QColor color)         { fresnelColor = color; }
+void PbrMaterial::setUseFresnelColor(bool use)          { useFresnelColor = use; }
+void PbrMaterial::setSeparateFresnel(bool separate)     { separateFresnel = separate; }
 void PbrMaterial::setClearCoat(float coat)              { clearCoat = coat; }
 void PbrMaterial::setClearCoatRoughness(float r)        { clearCoatRoughness = r; }
 void PbrMaterial::setBrdf(int index)                    { brdf = index; }
@@ -157,6 +256,52 @@ const QVector<const char *> &PbrMaterial::shadingModelNames()
 {
     static const QVector<const char *> kNames = { "Lit", "Unlit", "Distortion" };
     return kNames;
+}
+
+// The workflow vocabulary. Index is the stored value and is permanent, exactly
+// like brdfNames(). "Specular (Fresnel)" is what most PBRs simply call
+// "specular" — the renderer's own header says so — so it is worth the longer
+// label rather than shipping two rows a user cannot tell apart.
+const QVector<const char *> &PbrMaterial::workflowNames()
+{
+    static const QVector<const char *> kNames = { "Metallic", "Specular",
+                                                  "Specular (Fresnel)" };
+    return kNames;
+}
+
+const char *PbrMaterial::sharedMapDisplayName(int workflow)
+{
+    return workflow == 0 ? "Metallic Map" : "Specular Map";
+}
+
+bool PbrMaterial::sharedMapIsSrgb(int workflow)
+{
+    // Metalness is DATA (linear); a specular map is a COLOUR (sRGB). The
+    // renderer's suggestUsingSRGB agrees, and because the two are one texture
+    // unit the same file can legitimately be wanted in both colour spaces —
+    // which is why both texture caches key on the sRGB flag now
+    // (MATERIAL_GAPS_SPEC I-2).
+    return workflow != 0;
+}
+
+// The fresnel rows are not read at all in the metallic workflow (metalness and
+// F0 share one float in the renderer, and applyPbr writes exactly one of them),
+// and the metallic factor is not read in the two specular workflows. Grey them
+// out rather than let a user drag a slider that reaches nothing. The VALUES are
+// untouched either way, so switching workflow restores them.
+const QVector<QString> &PbrMaterial::rowsUnusedWhenMetallic()
+{
+    static const QVector<QString> kRows = {
+        QStringLiteral("ior"), QStringLiteral("fresnelColor"),
+        QStringLiteral("useFresnelColor"), QStringLiteral("separateFresnel"),
+    };
+    return kRows;
+}
+
+const QVector<QString> &PbrMaterial::rowsUnusedWhenSpecular()
+{
+    static const QVector<QString> kRows = { QStringLiteral("metallic") };
+    return kRows;
 }
 
 // WHAT UNLIT CANNOT DO, as a list the UI can act on rather than prose a user has
@@ -287,6 +432,27 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "clearCoat")          clearCoat          = value.toFloat();
     else if (name == "clearCoatRoughness") clearCoatRoughness = value.toFloat();
     else if (name == "shadingModel")       shadingModel       = value.toInt();
+    else if (name == "workflow")           workflow           = value.toInt();
+    else if (name == "specularColor")      specularColor      = value.value<QColor>();
+    else if (name == "ior")                ior                = value.toFloat();
+    else if (name == "fresnelColor")       fresnelColor       = value.value<QColor>();
+    else if (name == "useFresnelColor")    useFresnelColor    = value.toBool();
+    else if (name == "separateFresnel")    separateFresnel    = value.toBool();
+    else if (name == "detailWeightMap")    setDetailWeightMap(loadTexture(value.toString()));
+    else if (name == "anisotropy") {
+        // THE ROW IS AN ENUM ("Off", "2x", "4x", "8x", "16x") and its stored
+        // value is the INDEX; the field is the COUNT the renderer wants, which
+        // is 1 << index. Keeping the row an enum rather than a free float is
+        // deliberate: the renderer accepts only powers of two up to the
+        // device's limit, and a slider that silently snapped would be exactly
+        // the "does something else than it says" surface these rows exist to
+        // avoid. Scripts write the NAME ("8x"); material.set refuses anything
+        // that is not in the vocabulary rather than coercing it.
+        anisotropy = float(1 << qBound(0, value.toInt(), 4));
+    }
+    else if (name.endsWith(QLatin1String("Address")) &&
+             mapRowNames().contains(name.left(name.size() - 7)))
+        mapAddress[name.left(name.size() - 7)] = value.toInt();
     else if (name == "brdf")               brdf               = value.toInt();
     else if (name == "receiveShadows")     receiveShadows     = value.toBool();
     else if (name == "emissiveAsLightmap") emissiveAsLightmap = value.toBool();
@@ -300,6 +466,27 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "roughnessMap")  setRoughnessMap(loadTexture(value.toString()));
     else if (name == "normalMap")     setNormalMap(loadTexture(value.toString()));
     else if (name == "emissiveMap")   setEmissiveMap(loadTexture(value.toString()));
+
+    // ---- detail layers: flat rows, one branch (MATERIAL_GAPS_SPEC §3.4) ----
+    // `detail<N><Suffix>` for N in [0, kDetailLayers). Parsed rather than
+    // enumerated so raising kDetailLayers needs no edit here.
+    else if (name.startsWith(QLatin1String("detail")) && name.size() > 7 &&
+             name.at(6).isDigit()) {
+        const int layer = name.at(6).digitValue();
+        const QString suffix = name.mid(7);
+        if (layer >= 0 && layer < kDetailLayers) {
+            DetailLayer &d = detail[layer];
+            if      (suffix == QLatin1String("Map"))          setDetailMap(layer, loadTexture(value.toString()));
+            else if (suffix == QLatin1String("NormalMap"))    setDetailNormalMap(layer, loadTexture(value.toString()));
+            else if (suffix == QLatin1String("Blend"))        d.blend        = value.toInt();
+            else if (suffix == QLatin1String("OffsetU"))      d.offsetU      = value.toFloat();
+            else if (suffix == QLatin1String("OffsetV"))      d.offsetV      = value.toFloat();
+            else if (suffix == QLatin1String("ScaleU"))       d.scaleU       = value.toFloat();
+            else if (suffix == QLatin1String("ScaleV"))       d.scaleV       = value.toFloat();
+            else if (suffix == QLatin1String("Weight"))       d.weight       = value.toFloat();
+            else if (suffix == QLatin1String("NormalWeight")) d.normalWeight = value.toFloat();
+        }
+    }
 
     // keep the Property object in step so the panel and the field agree
     for (auto prop : properties) {
@@ -483,6 +670,60 @@ void PbrMaterial::createProperties()
     refractProp->value       = refractionStrength;
     properties.append(refractProp);
 
+    // ---- MATERIAL_GAPS_SPEC GAP 1: the workflow ----
+    // Before the shading model, because it renames a MAP row ("Metallic Map"
+    // <-> "Specular Map", sharedMapDisplayName) and greys three others.
+    auto workflowProp         = new ListProperty;
+    workflowProp->id          = id++;
+    workflowProp->displayName = "Workflow";
+    workflowProp->name        = "workflow";
+    for (const char *n : workflowNames()) workflowProp->labels << QString::fromLatin1(n);
+    workflowProp->value       = workflow;
+    properties.append(workflowProp);
+
+    // kS. Meaningful in EVERY workflow (white = inert), so it is not on either
+    // unused-rows list.
+    auto specColProp         = new ColorProperty;
+    specColProp->id          = id++;
+    specColProp->displayName = "Specular Color";
+    specColProp->name        = "specularColor";
+    specColProp->value       = specularColor;
+    properties.append(specColProp);
+
+    // 1.0 (vacuum, F0 = 0) to 3.0 (diamond is 2.42): the authoring range that
+    // covers every real dielectric. F0 = ((1-ior)/(1+ior))^2.
+    auto iorProp         = new FloatProperty;
+    iorProp->id          = id++;
+    iorProp->displayName = "Index of Refraction";
+    iorProp->name        = "ior";
+    iorProp->minValue    = 1.0f;
+    iorProp->maxValue    = 3.0f;
+    iorProp->value       = ior;
+    properties.append(iorProp);
+
+    auto useFresnelProp         = new BoolProperty;
+    useFresnelProp->id          = id++;
+    useFresnelProp->displayName = "Use Fresnel Color";
+    useFresnelProp->name        = "useFresnelColor";
+    useFresnelProp->value       = useFresnelColor;
+    properties.append(useFresnelProp);
+
+    auto fresnelColProp         = new ColorProperty;
+    fresnelColProp->id          = id++;
+    fresnelColProp->displayName = "Fresnel Color (F0)";
+    fresnelColProp->name        = "fresnelColor";
+    fresnelColProp->value       = fresnelColor;
+    properties.append(fresnelColProp);
+
+    // Not a slider: flipping it changes the size of the renderer's fresnel term
+    // and recompiles the material's shader.
+    auto sepFresnelProp         = new BoolProperty;
+    sepFresnelProp->id          = id++;
+    sepFresnelProp->displayName = "Per-Channel Fresnel";
+    sepFresnelProp->name        = "separateFresnel";
+    sepFresnelProp->value       = separateFresnel;
+    properties.append(sepFresnelProp);
+
     // ---- HLMS_ADOPTION P4a: the shading model ----
     // FIRST of the shading rows, because it constrains more of the panel than
     // anything else does: on Unlit, thirteen of the rows below have nothing to
@@ -553,6 +794,9 @@ void PbrMaterial::createProperties()
     static const MapDef kMaps[] = {
         { "Base Color Map", "baseColorMap" },
         { "Normal Map",     "normalMap"    },
+        // The display name here is the METALLIC-workflow one; the panel
+        // relabels this row from sharedMapDisplayName() when the workflow is
+        // Specular (one renderer texture unit, two meanings — I-4).
         { "Metallic Map",   "metallicMap"  },
         { "Roughness Map",  "roughnessMap" },
         { "Emissive Map",   "emissiveMap"  },
@@ -563,6 +807,99 @@ void PbrMaterial::createProperties()
         texProp->displayName = m.display;
         texProp->name        = m.name;
         properties.append(texProp);
+    }
+
+    // ---- MATERIAL_GAPS_SPEC GAP 2: the detail layers ---------------------
+    // FLAT ROWS, one group per layer, generated from kDetailLayers so raising
+    // the count is a constant change. Every default here is the renderer's own
+    // no-op value: no map, blend index 0, offset (0,0), scale (1,1), weights 1
+    // — at which the renderer sets NO shader property for the layer at all, so
+    // this section existing cannot move an existing material's pixels.
+    for (int layer = 0; layer < kDetailLayers; ++layer) {
+        const QString label = QStringLiteral("Detail %1 ").arg(layer);
+
+        auto mapProp         = new TextureProperty;
+        mapProp->id          = id++;
+        mapProp->displayName = label + QStringLiteral("Map");
+        mapProp->name        = detailRow(layer, "Map");
+        properties.append(mapProp);
+
+        auto nmProp         = new TextureProperty;
+        nmProp->id          = id++;
+        nmProp->displayName = label + QStringLiteral("Normal Map");
+        nmProp->name        = detailRow(layer, "NormalMap");
+        properties.append(nmProp);
+
+        auto blendProp         = new ListProperty;
+        blendProp->id          = id++;
+        blendProp->displayName = label + QStringLiteral("Blend");
+        blendProp->name        = detailRow(layer, "Blend");
+        for (const char *n : detailBlendNames()) blendProp->labels << QString::fromLatin1(n);
+        blendProp->value       = detail[layer].blend;
+        properties.append(blendProp);
+
+        // Offset and scale are FOUR float rows rather than two Vec2s: the panel
+        // renders Vec2 rows, but material.set, the reader and the graph baker
+        // all address rows by a single name with a scalar value, and a Vec2 key
+        // would be the one row a script could not write like the others.
+        struct Scalar { const char *suffix; const char *label; float value; float lo; float hi; };
+        const Scalar scalars[] = {
+            { "OffsetU",      "Offset U",      detail[layer].offsetU,      -8.0f, 8.0f },
+            { "OffsetV",      "Offset V",      detail[layer].offsetV,      -8.0f, 8.0f },
+            { "ScaleU",       "Scale U",       detail[layer].scaleU,        0.0f, 32.0f },
+            { "ScaleV",       "Scale V",       detail[layer].scaleV,        0.0f, 32.0f },
+            { "Weight",       "Weight",        detail[layer].weight,        0.0f, 1.0f },
+            { "NormalWeight", "Normal Weight", detail[layer].normalWeight,  0.0f, 2.0f },
+        };
+        for (const Scalar &sc : scalars) {
+            auto p         = new FloatProperty;
+            p->id          = id++;
+            p->displayName = label + QString::fromLatin1(sc.label);
+            p->name        = detailRow(layer, sc.suffix);
+            p->minValue    = sc.lo;
+            p->maxValue    = sc.hi;
+            p->value       = sc.value;
+            properties.append(p);
+        }
+    }
+
+    // ONE mask for every layer: its R/G/B/A channels scale layers 0/1/2/3.
+    // That is the renderer's shape (PBSM_DETAIL_WEIGHT), not a simplification.
+    auto detailWeightProp         = new TextureProperty;
+    detailWeightProp->id          = id++;
+    detailWeightProp->displayName = "Detail Weight Map";
+    detailWeightProp->name        = "detailWeightMap";
+    properties.append(detailWeightProp);
+
+    // ---- ADDENDUM A-2: sampler control -----------------------------------
+    // One anisotropy dial for the material, and one addressing row per MAP —
+    // generated from mapRowNames() so a new map slot gets its address row for
+    // free. Every default is the value the maps were hard-coded to, so this
+    // section existing cannot change how an existing material samples.
+    auto anisoProp         = new ListProperty;
+    anisoProp->id          = id++;
+    anisoProp->displayName = "Anisotropic Filtering";
+    anisoProp->name        = "anisotropy";
+    anisoProp->labels      = { "Off", "2x", "4x", "8x", "16x" };
+    // Stored as the COUNT (1/2/4/8/16) and shown as a label, so the row's
+    // value is the number the renderer wants. The list index is log2.
+    {
+        int idx = 0;
+        for (int i = 0, v = 1; i < 5; ++i, v *= 2) if (int(anisotropy) >= v) idx = i;
+        anisoProp->value = idx;
+    }
+    properties.append(anisoProp);
+
+    for (const QString &mapRow : mapRowNames()) {
+        auto addrProp         = new ListProperty;
+        addrProp->id          = id++;
+        // "Base Color Map Address" would be a fifth column of noise; the row
+        // sits directly under its map and says only what it varies.
+        addrProp->displayName = QStringLiteral("  Address");
+        addrProp->name        = addressRow(mapRow);
+        for (const char *n : addressModeNames()) addrProp->labels << QString::fromLatin1(n);
+        addrProp->value       = addressFor(mapRow);
+        properties.append(addrProp);
     }
 }
 

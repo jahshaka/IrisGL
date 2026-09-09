@@ -473,8 +473,17 @@ private:
         /// area 5 — the engine guards that now too). The property panel can
         /// change these values any frame, so the mirror still has to LOOK every
         /// frame; it just does not have to PUSH.
-        jahshaka::engine::PbrParams lastPbr;
-        bool pbrPushed = false;
+        /// (The per-ENTRY copy of the last-pushed PbrParams is GONE. It was
+        /// redundant by construction — `material` is the ENGINE material id,
+        /// shared by every entry using the same document material, and the
+        /// params come from the per-material memo — so N entries each kept
+        /// their own copy and each ran a full compare per frame to let one of
+        /// them push. Harmless while PbrParams was small; the workflow, detail
+        /// and sampler rows grew it ~2.2x and a.sync_dynamic@50000 doubled
+        /// (83.7 -> 182.2 ms, measured against the base build; the idle paths
+        /// did not move, which is what localised it). The guard now lives in
+        /// mPbrPushed, keyed by the engine material id: one copy and one
+        /// compare per MATERIAL per sync instead of per NODE.)
         /// The shading model last ATTEMPTED for `material` (-1 = never). Its own
         /// field because the switch is its own engine verb: the two shading
         /// families are different backend material types, so a switch destroys
@@ -814,6 +823,16 @@ private:
         std::vector<TextureBind>      binds;
     };
     QHash<iris::Material *, MaterialSync> mMaterialSync;
+    /// The PBR state last PUSHED to each engine material, and the guard that
+    /// keeps setPbrMaterial off the per-frame path. Keyed by engine MaterialId
+    /// because that is what the push targets; engine ids are never reused (the
+    /// counter only increments), so a destroyed material cannot inherit a stale
+    /// record — it is dropped in reclaimUnused anyway.
+    struct PbrPush {
+        jahshaka::engine::PbrParams params;
+        bool pushed = false;
+    };
+    QHash<jahshaka::engine::MaterialId, PbrPush> mPbrPushed;
     const MaterialSync &materialSyncFor(iris::Material *material);
     /// Binds a graph material's generated shader pieces (HLMS_ADOPTION P5).
     void syncCustomPieces(iris::Material *material, jahshaka::engine::MaterialId id);

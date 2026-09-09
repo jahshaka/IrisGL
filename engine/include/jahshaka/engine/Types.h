@@ -203,7 +203,54 @@ enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides wit
 /// @undefpiece override of DoAmbientLighting from our Hlms library folder — is
 /// costed and deferred (see PbrMaterial's header for why the cheaper
 /// custom_ps_preLights hook cannot do it).
-enum class PbrTextureSlot { Albedo, Normal, Metalness, Roughness, Emissive };
+/// HOW MANY DETAIL LAYERS a material can carry (MATERIAL_GAPS_SPEC GAP 2, D-2).
+///
+/// The backend has FOUR (PBSM_DETAIL0..3 + PBSM_DETAIL0_NM..3_NM). We ship TWO,
+/// and everything downstream is sized from this constant so raising it to 4 is
+/// a one-line change: the slot enum, the array on PbrParams, the tracked-texture
+/// record, the document rows, the panel section and the verbs all count from it.
+///
+/// WHY TWO AND NOT FOUR: base 5 + reflection 1 + detail 9 = 15 = every PBS
+/// texture slot there is. Four layers consumes the lot, and the two the header
+/// of pbrmaterial.h reserves as the future AO-carrier / graph-texture-carrier
+/// slots are exactly the ones layers 2 and 3 would take (I-5). Two covers the
+/// Marble port and essentially all real use; four is available the day someone
+/// needs it and is willing to spend the AO carrier on it.
+constexpr unsigned kDetailLayerCount = 2;
+
+/// PBR texture slots. There is NO Occlusion slot, and since HLMS_ADOPTION P2
+/// there is no occlusion row on the document side either: the backend has no
+/// ambient-occlusion input AT ALL (not one `occlusion` reference in its whole
+/// PBS component), so an AO map, factor, graph socket and per-texel bake all
+/// existed to be dropped here. They are gone rather than "documented as
+/// unsupported" — a knob that costs bake time and does nothing is worse than
+/// an absent one.
+///
+/// DETAIL SLOTS (GAP 2): Detail0..N-1 are the detail DIFFUSE layers (each
+/// blended into the base colour by its own blend mode), Detail0Nm.. their
+/// normal companions, and DetailWeight a single mask whose R/G/B/A channels
+/// scale layers 0/1/2/3 respectively. The ORDER of the enum is load-bearing
+/// only in that pbsSlotOf switches on it; the array on MaterialRec is sized
+/// from Count.
+///
+/// The Metalness slot is the backend's SHARED metallic/specular unit — one
+/// texture reinterpreted by PbrParams::workflow (GAP 1), not two slots.
+enum class PbrTextureSlot {
+    Albedo, Normal, Metalness, Roughness, Emissive,
+    Detail0, Detail1,          ///< kDetailLayerCount of these
+    Detail0Nm, Detail1Nm,      ///< ...and their normal companions
+    DetailWeight,              ///< R->layer0, G->layer1, B->2, A->3
+    /// PER-MATERIAL REFLECTION CUBEMAP (ADDENDUM A-5). Overrides the scene's
+    /// global IBL cubemap for this material only. Unset = the global one.
+    ///
+    /// GATED THE SAME WAY THE GLOBAL ONE IS: while automatic PCC is bound (the
+    /// VCT+Probes hybrid) the shader's ONE env-probe slot holds a cube ARRAY
+    /// and a manual cubemap makes the generated shader UNCOMPILABLE — measured,
+    /// 2026-09-07, the long note in OgreSky.cpp. So the override goes dark with
+    /// the global one, through the same function.
+    Reflection,
+    Count
+};
 
 /// Where a GENERATED shader piece is spliced into the backend's shader
 /// (HLMS_ADOPTION P5). Two values, because two hook points is what the graph
@@ -399,6 +446,125 @@ struct PbrParams {
     /// what tells the host to call the switch verb.
     ShadingModel shadingModel = ShadingModel::Lit;
 
+    // ---- Specular / fresnel workflows (MATERIAL_GAPS_SPEC GAP 1) ----------
+    // Deliberately grouped at the END of the struct, after every pre-existing
+    // member, so this block reads as one addition.
+
+    /// Which of the backend's three PBR workflows shades this material.
+    ///
+    /// The BACKEND's own default is Specular; Metallic is OURS, applied by an
+    /// explicit call at every creation site since the engine existed, so
+    /// Metallic stays the default here and an unauthored material is
+    /// bit-for-bit what it was before this member existed.
+    ///
+    /// THE WORKFLOW REINTERPRETS ONE TEXTURE SLOT, it does not add one:
+    /// PBSM_SPECULAR and PBSM_METALLIC are the same unit at the pin
+    /// (OgreHlmsPbsPrerequisites.h), so PbrTextureSlot::Metalness carries a
+    /// monochrome metalness map in Metallic and a (possibly coloured) specular
+    /// map in the other two. Its COLOUR SPACE changes with the workflow —
+    /// see the sRGB note on textureKey.
+    enum class Workflow {
+        Metallic,           ///< metalness/roughness — glTF core, our default
+        Specular,           ///< kS from the specular map/colour (legacy spec-gloss)
+        SpecularAsFresnel   ///< the specular value addresses F0 — "specular" in most PBRs
+    };
+    Workflow workflow = Workflow::Metallic;
+
+    // ---- Detail layers (MATERIAL_GAPS_SPEC GAP 2) -------------------------
+    //
+    // A detail layer is a second (third...) diffuse map blended into the base
+    // colour by one of thirteen blend modes, optionally with its own normal
+    // map, its own UV offset/scale and its own weight. It is FIELDS ON THE SAME
+    // DATABLOCK, not a second material model.
+    //
+    // AN UNAUTHORED LAYER COSTS NOTHING, structurally rather than by luck: with
+    // no texture bound, (0,0,1,1) offsets and weight 1, setDetailMapProperties
+    // sets no shader property at all (OgreHlmsPbs.cpp:637-693) — so the
+    // generated shader of every material in the tree is byte-identical to what
+    // it was before this feature existed.
+    //
+    // THE ONE THING THAT IS NOT FREE: setDetailMapBlendMode affects the shader
+    // hash EVEN WITH NO DETAIL MAP BOUND (its own header says so). Leaving
+    // blend at the default index 0 is free; the engine change-guards it anyway
+    // because the host pushes every frame.
+    struct DetailLayer {
+        /// Which of the backend's thirteen blend modes composites this layer's
+        /// diffuse into what is under it. Index into the backend's own
+        /// PbsBlendModes order — see kDetailBlendNames for the vocabulary.
+        unsigned blend = 0;             ///< NormalNonPremul, the neutral default
+        float offsetU = 0.0f, offsetV = 0.0f;   ///< per-layer UV offset
+        float scaleU  = 1.0f, scaleV  = 1.0f;   ///< per-layer UV scale (the DETAIL tiling knob)
+        float weight = 1.0f;            ///< scales diffuse AND normal together
+        float normalWeight = 1.0f;      ///< the layer's normal strength
+
+        bool operator==(const DetailLayer &o) const {
+            return blend == o.blend && offsetU == o.offsetU && offsetV == o.offsetV &&
+                   scaleU == o.scaleU && scaleV == o.scaleV &&
+                   weight == o.weight && normalWeight == o.normalWeight;
+        }
+        bool operator!=(const DetailLayer &o) const { return !(*this == o); }
+    };
+    DetailLayer detail[kDetailLayerCount];
+
+    // ---- Sampler control (ADDENDUM A-2) ------------------------------------
+    //
+    // Every PBR map was bound with ONE hard-coded samplerblock: wrap in U and V,
+    // linear min/mag/mip, anisotropy 1. Both halves of that are now authorable.
+    //
+    // THE ANISOTROPY RULE IS ABSOLUTE, and it is the backend's, not ours:
+    // HlmsManager forces maxAnisotropy back to 1 AND LOGS unless min, mag AND
+    // mip filters are ALL FO_ANISOTROPIC (OgreHlmsManager.cpp:306-311). So a
+    // value above 1 switches all three filters together — the engine does that,
+    // the host just asks for a number. (Vulkan then clamps to the device's
+    // maxSamplerAnisotropy.) NOT the same thing as the MoltenVK defect the old
+    // samplerblock comment records: THAT was aniso > 1 with LINEAR filters,
+    // which is exactly the combination the backend refuses anyway.
+    float anisotropy = 1.0f;    ///< 1 (off) / 2 / 4 / 8 / 16
+
+    /// How a texture coordinate outside [0,1] is resolved, per slot.
+    enum class AddressMode { Wrap, Clamp, Mirror, Border };
+    /// Per-slot addressing. Wrap everywhere is what every map has always had,
+    /// so an unauthored material's samplers are bit-for-bit what they were.
+    /// PER SLOT and not per material because the detail layers need it that
+    /// way: a tiled detail layer over a clamped base map is the ordinary case
+    /// (§3.3/§3.5 — this is the per-layer wrap those need).
+    AddressMode address[size_t(PbrTextureSlot::Count)] = {};
+
+    /// The thirteen blend-mode names, in the BACKEND'S OWN INDEX ORDER. ONE
+    /// table: the document's enum row labels, the verbs' vocabulary and the
+    /// index this struct carries all read it, so a picker cannot disagree with
+    /// what renders (the PUBLISH_AUDIT #4 lesson). Inline in the header on
+    /// purpose — Studio's document layer and the mirror both need it, and
+    /// neither links the engine's Ogre-private translation units.
+    static const std::vector<std::string> &detailBlendNames() {
+        static const std::vector<std::string> kNames = {
+            "NormalNonPremul", "NormalPremul", "Add", "Subtract", "Multiply",
+            "Multiply2x", "Screen", "Overlay", "Lighten", "Darken",
+            "GrainExtract", "GrainMerge", "Difference"
+        };
+        return kNames;
+    }
+
+    /// kS, the specular colour. Meaningful in EVERY workflow including
+    /// Metallic (the backend's own header says so) — white is inert.
+    Colour specularColour = Colour(1.0f, 1.0f, 1.0f);
+
+    /// Index of refraction, the authoring front-end for F0: the backend
+    /// computes F0 = ((1-ior)/(1+ior))². 1.5 is window glass and the neutral
+    /// default. Honoured only in the two Specular* workflows; stored (and
+    /// serialized) on a Metallic material so switching workflow restores it,
+    /// the same "values survive the switch" rule clear coat follows.
+    float ior = 1.5f;
+    /// F0 DIRECTLY, when `useFresnelColour` is set — the escape hatch for
+    /// authored/imported F0 that no single IOR expresses (a coloured metal's
+    /// specular, KHR_materials_specular's specularColorFactor).
+    Colour fresnelColour = Colour(0.04f, 0.04f, 0.04f);
+    bool   useFresnelColour = false;
+    /// false = one scalar F0 for RGB (the cheaper shader permutation),
+    /// true = per-channel F0. A CHANGE flushes renderables (the fresnel term
+    /// changes size), so it is a hash input, not a constant-buffer value.
+    bool   separateFresnel = false;
+
     /// "Is this the same material state I last pushed?" — the guard a host with
     /// a per-frame push loop needs. Exact comparison (see Colour::operator==):
     /// a tolerance here would let a dragged slider stop reaching the backend.
@@ -417,9 +583,25 @@ struct PbrParams {
                clearCoat == o.clearCoat && clearCoatRoughness == o.clearCoatRoughness &&
                brdf == o.brdf && receiveShadows == o.receiveShadows &&
                emissiveAsLightmap == o.emissiveAsLightmap &&
-               shadingModel == o.shadingModel;
+               shadingModel == o.shadingModel &&
+               workflow == o.workflow && specularColour == o.specularColour &&
+               ior == o.ior && fresnelColour == o.fresnelColour &&
+               useFresnelColour == o.useFresnelColour &&
+               separateFresnel == o.separateFresnel &&
+               detailLayersEqual(o) && anisotropy == o.anisotropy && addressEqual(o);
     }
     bool operator!=(const PbrParams &o) const { return !(*this == o); }
+private:
+    bool detailLayersEqual(const PbrParams &o) const {
+        for (unsigned i = 0; i < kDetailLayerCount; ++i)
+            if (detail[i] != o.detail[i]) return false;
+        return true;
+    }
+    bool addressEqual(const PbrParams &o) const {
+        for (size_t i = 0; i < size_t(PbrTextureSlot::Count); ++i)
+            if (address[i] != o.address[i]) return false;
+        return true;
+    }
 };
 
 /// One camera-facing textured quad in a node's billboard set (Scene::setBillboards).
@@ -490,7 +672,27 @@ struct ParticleAffectorDesc {
         Rotator,        ///< random start angle + spin speed
         LinearForce,    ///< a constant acceleration: gravity, buoyancy, wind
         Turbulence,     ///< random velocity perturbation (DirectionRandomiser)
-        DeflectorPlane  ///< bounce off an infinite plane
+        DeflectorPlane, ///< bounce off an infinite plane
+        // ---- ADDENDUM A-4: the four the plugin registers and we never used.
+        // (The plugin has TEN affector factories; we mapped six, and the audit's
+        // "6/9" counted the two colour faders as one.)
+        /// Per-second colour DELTAS, in two stages: `colourAdjust1` until a
+        /// particle has `colourSwitchAt` seconds of life left, `colourAdjust2`
+        /// after. Covers the plugin's plain ColourFader as well — it IS this
+        /// affector with adjust2 == adjust1 — so there is one kind, not two.
+        /// Different from ColourKeys: keys REPLACE the colour at authored life
+        /// fractions, a fade ADDS a rate to whatever the colour currently is.
+        ColourFade,
+        /// Colour over life sampled from row 0 of an IMAGE — the classic fire
+        /// ramp. NOT a TextureId: the affector loads by NAME through
+        /// ResourceGroupManager::AUTODETECT, so the engine registers the file's
+        /// directory as a resource location first (the idiom OgreLights and
+        /// OgreDecals already use for the same reason).
+        ColourRamp,
+        /// A size RATE: additive units per second, or multiplicative
+        /// `rate^dt` when `scaleMultiply` is set. Different from ScaleKeys,
+        /// which authors absolute sizes at life fractions.
+        ScaleRate
     };
     Kind kind = Kind::LinearForce;
 
@@ -521,6 +723,28 @@ struct ParticleAffectorDesc {
     /// DeflectorPlane.
     Vec3  planePoint{0, 0, 0}, planeNormal{0, 1, 0};
     float bounce = 1.0f;
+
+    // ---- ADDENDUM A-4 ----------------------------------------------------
+    /// ColourFade: per-second deltas, stage 1 then stage 2, plus the clamps.
+    /// Both stages default to ZERO, which is the neutral value — an affector
+    /// with no authored fade does nothing at all.
+    Colour colourAdjust1{0, 0, 0, 0};
+    Colour colourAdjust2{0, 0, 0, 0};
+    /// Switch to stage 2 when the particle has this much life LEFT, in
+    /// seconds. 0 = never switch (stage 1 for the whole life).
+    float  colourSwitchAt = 0.0f;
+    Colour colourMin{0, 0, 0, 0};
+    Colour colourMax{1, 1, 1, 1};
+
+    /// ColourRamp: an absolute path to a 1-D ramp image. Row 0 is sampled
+    /// across the particle's life.
+    std::string colourRampPath;
+
+    /// ScaleRate: units per second (additive) or the per-second factor
+    /// (multiplicative). 1.0 with `scaleMultiply` and 0.0 without are both
+    /// neutral.
+    float scaleRate = 0.0f;
+    bool  scaleMultiply = false;
 };
 
 /// A complete particle system for one node. Changing a scalar (rate, colour keys,
@@ -1592,6 +1816,15 @@ struct PostFxDesc {
     /// Where the bright pass starts, in the tonemapper's units. High values read
     /// as highlight bloom; low values as a haze filter.
     float bloomThreshold = 5.0f;
+    /// The WIDTH of the bright pass's ramp, above `bloomThreshold`: below the
+    /// threshold nothing blooms, above threshold+knee everything does, and in
+    /// between the contribution ramps up. The backend's own control is two
+    /// ABSOLUTE thresholds (min, full); a width is the same control expressed
+    /// so it CANNOT INVERT — the backend clamps `full <= min` back up, and a
+    /// second absolute row would let the panel offer a state the renderer
+    /// silently refuses. 2.0 is what the caller hard-coded before this row
+    /// existed, so the default is byte-identical (ADDENDUM A-6).
+    float bloomKnee = 2.0f;
     /// Screen-space ambient occlusion. Adds a normals G-buffer to the main pass.
     bool  ssao = false;
     /// AO buffer resolution, as a factor of the view (0.5 or 1.0). The tap count
@@ -1710,7 +1943,8 @@ struct PostFxDesc {
     bool operator==(const PostFxDesc &o) const {
         return hdr == o.hdr && exposure == o.exposure && exposureMin == o.exposureMin &&
                exposureMax == o.exposureMax && bloom == o.bloom &&
-               bloomThreshold == o.bloomThreshold && ssao == o.ssao &&
+               bloomThreshold == o.bloomThreshold && bloomKnee == o.bloomKnee &&
+               ssao == o.ssao &&
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
                ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrMaxDistance == o.ssrMaxDistance &&
