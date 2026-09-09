@@ -81,6 +81,35 @@ struct MeshMaterialData
     QString metallicTexture;    // split from the packed MR map (blue channel)
     QString roughnessTexture;   // split from the packed MR map (green channel)
     QString emissiveTexture;
+
+    // ---- Specular / fresnel workflows (MATERIAL_GAPS_SPEC GAP 1) ----------
+    //
+    // The renderer has three PBR workflows, so a source authored in one of the
+    // two SPECULAR ones no longer has to be converted to metallic-roughness to
+    // arrive. The conversion (specularGlossinessToMetallicRoughness) is still
+    // here and still correct — it is now the FALLBACK, for targets that cannot
+    // carry a workflow (web export), not the import path.
+    //
+    // 0 Metallic (the default, and what a metallic-roughness glTF is),
+    // 1 Specular (legacy KHR_materials_pbrSpecularGlossiness — native, lossless),
+    // 2 Specular-as-Fresnel (KHR_materials_specular — the pin's own docs call
+    //   this "what most PBRs mean by specular").
+    int    workflow = 0;
+    /// kS. From KHR_materials_specular's specularFactor, or a spec-gloss
+    /// material's specularFactor. White is inert.
+    QColor specularFactor = QColor(255, 255, 255, 255);
+    /// F0 straight from KHR_materials_specular's specularColorFactor. Only
+    /// meaningful with `useFresnelColor`; otherwise `ior` supplies F0.
+    QColor fresnelFactor = QColor(10, 10, 10, 255);
+    bool   useFresnelColor = false;
+    /// KHR_materials_ior. 1.5 is the extension's own default and ours.
+    float  ior = 1.5f;
+    /// The SPECULAR / spec-gloss map. It binds to the renderer's shared
+    /// metallic/specular texture unit — the same unit metallicTexture uses —
+    /// so exactly one of the two is ever set, decided by `workflow`. Before
+    /// the workflow switch existed this map had no home at all and was dropped
+    /// with a warning.
+    QString specularMapTexture;
 };
 
 enum class PrimitiveMode

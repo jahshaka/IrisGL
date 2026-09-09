@@ -194,7 +194,7 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
     // One hash lookup, not a scan of every texture the scene holds — the index
     // namespaces decal slices by kind exactly so this stays correct.
     {
-        auto hit = mTextureIndex.find(textureKey(path, true, kind));
+        auto hit = mTextureIndex.find(textureKey(path, true, kind, /*srgb=*/false));
         if (hit != mTextureIndex.end()) return hit->second;
     }
 

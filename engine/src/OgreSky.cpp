@@ -146,6 +146,48 @@ bool OgreScene::setSkyReflection(const TextureId faces[6]) {
     } JAH_CATCH(mError, false);
 }
 
+// ADDENDUM A-5: a cubemap the HOST owns, from six world-axis faces.
+//
+// Deliberately the SAME builder setSkyReflection uses: the backend samples
+// cubemaps LEFT-HANDED, so world-axis faces need a face swap plus per-axis
+// mirroring (buildCubeFromWorldFaces' table). A second copy of that remap is
+// how every reflection in the scene ends up silently mirrored — the 2026-09-03
+// finding, from when the sky itself had the bug.
+//
+// Plain ManualTexture flags and its own mip chain: this cube is SAMPLED, never
+// rendered into, so it needs neither RenderToTexture nor the IBL specular
+// convolution's AllowAutomipmaps. A shorter mip chain than the global cube's
+// samples clamped under `_notifyIblSpecMipmap`'s process-wide count — acceptable
+// and noted, not measured.
+TextureId OgreScene::createCubemap(const TextureId faces[6]) {
+    JAH_TRY {
+        Ogre::TextureGpu *tex[6];
+        for (int i = 0; i < 6; ++i) {
+            auto it = mTextures.find(faces[i]);
+            if (it == mTextures.end() || !it->second.texture) {
+                mError = "createCubemap: unknown face texture"; return 0;
+            }
+            tex[i] = it->second.texture;
+        }
+        for (int i = 0; i < 6; ++i) waitForTextureResident(tex[i]);
+        for (int i = 0; i < 6; ++i)
+            if (tex[i]->getWidth() != tex[0]->getWidth() ||
+                tex[i]->getHeight() != tex[0]->getWidth() ||
+                tex[i]->getPixelFormat() != tex[0]->getPixelFormat()) {
+                mError = "createCubemap: the six faces must be square, the same size "
+                         "and the same format";
+                return 0;
+            }
+        Ogre::TextureGpu *cube = buildCubeFromWorldFaces(tex, "matcube", 0, true);
+        if (!cube) return 0;   // mError set
+        TextureRec rec;
+        rec.texture = cube;
+        rec.path = "";      // pixel-born: never deduplicated, the caller owns it
+        rec.srgb = false;   // the faces decide; the cube copies their format
+        return trackTexture(rec);
+    } JAH_CATCH(mError, 0);
+}
+
 void OgreScene::tuneSkyRenderable() {
     Ogre::Rectangle2D *sky = mSceneMgr->getSky();
     if (!sky) return;
@@ -454,11 +496,15 @@ Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
 
 void OgreScene::applyReflectionToAllImpl() {
     auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
-    Ogre::TextureGpu *tex = reflectionTexForDatablocks();
     for (auto &kv : mMaterials) {
         if (kv.second.unlit) continue;
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->getDatablock(Ogre::IdString(kv.second.datablockName)));
-        if (db) db->setTexture(Ogre::PBSM_REFLECTION, tex);
+        // PER MATERIAL now (ADDENDUM A-5): a material with its own reflection
+        // cubemap keeps it here, and one without gets the global IBL cube —
+        // and BOTH go dark under automatic PCC, because reflectionTexFor
+        // carries that gate. This loop used to compute one answer for the whole
+        // scene, which is exactly what an override cannot survive.
+        if (db) db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(kv.second));
     }
 }
 

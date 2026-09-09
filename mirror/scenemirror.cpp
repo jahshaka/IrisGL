@@ -1761,6 +1761,50 @@ std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *p
         out.push_back(a);
     }
 
+    // 4b. ADDENDUM A-4: colour FADE (per-second deltas) and colour RAMP (an
+    //     image sampled across life). Both write particle colour, as does
+    //     colourKeys — so they are exclusive by construction here: keys already
+    //     won at step 1, and the ramp wins over the fade. Emitted only when
+    //     non-neutral, the same rule turbulence follows below.
+    const bool haveFade = (ps->colourFade1.isValid() && ps->colourFade1.alpha() +
+                           ps->colourFade1.red() + ps->colourFade1.green() +
+                           ps->colourFade1.blue() != 0) ||
+                          (ps->colourFade2.isValid() && ps->colourFade2.alpha() +
+                           ps->colourFade2.red() + ps->colourFade2.green() +
+                           ps->colourFade2.blue() != 0);
+    if (!ps->colourRampImage.isEmpty()) {
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::ColourRamp;
+        a.colourRampPath = ps->colourRampImage.toStdString();
+        out.push_back(a);
+    } else if (haveFade) {
+        // A QColor cannot carry a NEGATIVE delta, and a fade-out is exactly
+        // that, so the components are read as SIGNED rates in [-1, 1] around
+        // 0.5: 0 is -1/s, 128 is 0, 255 is +1/s. The panel says so on the row.
+        const auto rate = [](const QColor &c) {
+            return Colour(float(c.redF()) * 2.0f - 1.0f, float(c.greenF()) * 2.0f - 1.0f,
+                          float(c.blueF()) * 2.0f - 1.0f, float(c.alphaF()) * 2.0f - 1.0f);
+        };
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::ColourFade;
+        a.colourAdjust1 = ps->colourFade1.isValid() ? rate(ps->colourFade1) : Colour(0, 0, 0, 0);
+        // With no second stage authored, stage 2 == stage 1: that IS the
+        // plugin's plain ColourFader, which is why there is one kind not two.
+        a.colourAdjust2 = ps->colourFade2.isValid() ? rate(ps->colourFade2) : a.colourAdjust1;
+        a.colourSwitchAt = std::max(0.0f, ps->colourFadeSwitch);
+        out.push_back(a);
+    }
+
+    // 4c. ADDENDUM A-4: a size RATE. Neutral is 0 additive / 1 multiplicative.
+    if ((!ps->scaleRateMultiply && ps->scaleRate != 0.0f) ||
+        (ps->scaleRateMultiply && ps->scaleRate != 1.0f && ps->scaleRate > 0.0f)) {
+        ParticleAffectorDesc a;
+        a.kind = ParticleAffectorDesc::Kind::ScaleRate;
+        a.scaleRate = ps->scaleRate;
+        a.scaleMultiply = ps->scaleRateMultiply;
+        out.push_back(a);
+    }
+
     // 5. Turbulence LAST, and only when asked for: DirectionRandomiser draws a
     //    random per particle even at randomness 0 and its own source calls it
     //    "not very SIMD-friendly", so an unused one is not free.
@@ -2068,7 +2112,17 @@ void SceneMirror::noteRefractive(const PbrParams &p)
 
 TextureId SceneMirror::textureFor(const QString &path, bool srgb)
 {
-    auto it = mTextures.constFind(path);
+    // KEYED BY COLOUR SPACE, not by path alone. `srgb` decides the engine
+    // texture's pixel format, so a path-only key handed the FIRST caller's
+    // colour space to every later one: bind one file as a base colour (sRGB)
+    // and again as a roughness map (linear) and the second silently sampled
+    // the sRGB texture. Latent while every slot had a fixed flag; per-material
+    // workflows (the shared metallic/specular slot changes colour space with
+    // the workflow) and detail layers (diffuse sRGB, normal linear, same file
+    // legal in both) make it reachable. The engine's own dedup index carries
+    // the same term — both caches, one fix (MATERIAL_GAPS_SPEC I-2).
+    const QString key = (srgb ? QStringLiteral("s|") : QStringLiteral("l|")) + path;
+    auto it = mTextures.constFind(key);
     if (it != mTextures.constEnd()) return it.value();
     // Qt resources are not files the engine can read. This test used to be
     // QFileInfo::exists() alone, whose comment claimed to cover them and did
@@ -2083,7 +2137,7 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
     if (path.startsWith(QLatin1Char(':'))) return 0;
     if (!QFileInfo::exists(path)) return 0;
     TextureId id = mTarget->loadTexture(path.toStdString(), srgb);
-    if (id) mTextures.insert(path, id);
+    if (id) mTextures.insert(key, id);
     return id;
 }
 
@@ -2110,6 +2164,11 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // (HLMS_ADOPTION P2): the engine has no ambient-occlusion slot, so the
     // document stopped pretending to have one. An old file's "u_occlusionMap"
     // simply matches nothing here, which is what tolerance looks like.
+    //
+    // DETAIL LAYERS (MATERIAL_GAPS_SPEC GAP 2) join it with the colour-space
+    // rule that makes I-2's cache-key fix load-bearing: a detail DIFFUSE map is
+    // an sRGB colour and a detail NORMAL map is linear data, and nothing stops
+    // a user binding the same file to both.
     struct Slot { QLatin1StringView name; PbrTextureSlot slot; bool srgb; };
     static const Slot kSlots[] = {
         { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
@@ -2119,13 +2178,34 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
         { QLatin1StringView("u_metallicMap"),   PbrTextureSlot::Metalness, false },
         { QLatin1StringView("u_roughnessMap"),  PbrTextureSlot::Roughness, false },
         { QLatin1StringView("u_emissiveMap"),   PbrTextureSlot::Emissive,  true  },
+        { QLatin1StringView("u_detail0Map"),       PbrTextureSlot::Detail0,      true  },
+        { QLatin1StringView("u_detail1Map"),       PbrTextureSlot::Detail1,      true  },
+        { QLatin1StringView("u_detail0NormalMap"), PbrTextureSlot::Detail0Nm,    false },
+        { QLatin1StringView("u_detail1NormalMap"), PbrTextureSlot::Detail1Nm,    false },
+        // The weight MASK is data (per-channel scalars), never a colour.
+        { QLatin1StringView("u_detailWeightMap"),  PbrTextureSlot::DetailWeight, false },
     };
+    static_assert(int(iris::PbrMaterial::kDetailLayers) == int(kDetailLayerCount),
+                  "the document and the engine boundary must agree on how many "
+                  "detail layers exist — this table is written out per layer");
+    // The SHARED metallic/specular unit changes COLOUR SPACE with the workflow
+    // (MATERIAL_GAPS_SPEC I-4): metalness is linear data, a specular map is an
+    // sRGB colour, and PBSM_METALLIC/PBSM_SPECULAR are one renderer texture
+    // unit. sharedMapIsSrgb() is the one table both the panel and this read.
+    // Both texture caches now key on the flag (I-2), so the same file bound
+    // here and as a linear map elsewhere is two engine textures, correctly.
+    bool sharedSrgb = false;
+    if (auto *pbrMat = dynamic_cast<iris::PbrMaterial *>(material))
+        sharedSrgb = iris::PbrMaterial::sharedMapIsSrgb(pbrMat->workflow);
+
     // Resolve every candidate path: the textures map (Texture2D::source), then
     // shader-graph texture properties (a file path in the property value).
     for (const Slot &sl : kSlots) {
         auto tit = material->textures.constFind(sl.name);
         if (tit != material->textures.constEnd() && tit.value() && !tit.value()->source.isEmpty())
-            ms.binds.push_back({ sl.slot, tit.value()->source, sl.srgb });
+            ms.binds.push_back({ sl.slot,
+                                 tit.value()->source,
+                                 sl.slot == PbrTextureSlot::Metalness ? sharedSrgb : sl.srgb });
     }
     // (The CustomMaterial branch that scraped texture PATHS out of a shader
     // material's Property rows died with the class itself, HLMS_ADOPTION P4b.
@@ -2137,7 +2217,10 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // to let a mesh conclude "unchanged" in one comparison.
     Hasher hs;
     hs << quint32(ms.binds.size());
-    for (const TextureBind &b : ms.binds) hs << int(b.slot) << b.path;
+    // The COLOUR SPACE is part of the signature: a workflow switch rebinds the
+    // same file in the other space, and without the flag here the entry would
+    // conclude "unchanged" and keep sampling the old one.
+    for (const TextureBind &b : ms.binds) hs << int(b.slot) << b.path << quint32(b.srgb ? 1 : 0);
     ms.textureSignature = hs.h;
 
     return *mMaterialSync.insert(material, ms);
@@ -2153,8 +2236,11 @@ void SceneMirror::syncTextures(Entry &e, iris::Material *material)
     e.textureSignature = signature;
     e.texturesPushed = true;
     mReclaimPending = true;
-    bool bound[5] = { false, false, false, false, false };
-    TextureId boundIds[5] = { 0, 0, 0, 0, 0 };
+    // Sized from the SLOT ENUM, not from a literal 5 — the detail slots
+    // (GAP 2) made a hardcoded count a silent truncation.
+    constexpr int kSlotCount = int(PbrTextureSlot::Count);
+    bool bound[kSlotCount] = {};
+    TextureId boundIds[kSlotCount] = {};
     for (const TextureBind &b : binds) {
         if (bound[int(b.slot)]) continue;
         TextureId t = textureFor(b.path, b.srgb);
@@ -2163,11 +2249,12 @@ void SceneMirror::syncTextures(Entry &e, iris::Material *material)
             boundIds[int(b.slot)] = t;
         }
     }
-    for (int i = 0; i < 5; ++i) if (!bound[i]) mTarget->setPbrTexture(e.material, PbrTextureSlot(i), 0);
+    for (int i = 0; i < kSlotCount; ++i)
+        if (!bound[i]) mTarget->setPbrTexture(e.material, PbrTextureSlot(i), 0);
     // What reclaimUnused needs: the IDS, not the paths. A world switch or a
     // material edit that drops a map leaves the engine texture referenced by
     // nobody, and before this the mirror simply never freed one.
-    e.boundTextures.assign(boundIds, boundIds + 5);
+    e.boundTextures.assign(boundIds, boundIds + kSlotCount);
     e.boundTextures.erase(std::remove(e.boundTextures.begin(), e.boundTextures.end(), TextureId(0)),
                           e.boundTextures.end());
 }
@@ -2218,6 +2305,66 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.clearCoatRoughness = pbr->clearCoatRoughness;
         out.receiveShadows     = pbr->receiveShadows;
         out.emissiveAsLightmap = pbr->emissiveAsLightmap;
+        // MATERIAL_GAPS_SPEC GAP 1. The workflow crosses as the engine's own
+        // enum (a three-value boundary vocabulary, not the document's index and
+        // not the renderer's), and every fresnel value crosses UNCONDITIONALLY
+        // even on a metallic material: the engine's applyPbr is the one place
+        // that decides which of metalness/fresnel is legal to write, because
+        // they are the same float in the datablock (I-1). Sending them all and
+        // branching once, there, is what keeps that rule in ONE place.
+        out.workflow = pbr->workflow == 1 ? PbrParams::Workflow::Specular
+                     : pbr->workflow == 2 ? PbrParams::Workflow::SpecularAsFresnel
+                                          : PbrParams::Workflow::Metallic;
+        const QColor sc = pbr->specularColor;
+        out.specularColour = Colour(sc.redF(), sc.greenF(), sc.blueF(), 1.0f);
+        out.ior = pbr->ior;
+        const QColor fc = pbr->fresnelColor;
+        out.fresnelColour = Colour(fc.redF(), fc.greenF(), fc.blueF(), 1.0f);
+        out.useFresnelColour = pbr->useFresnelColor;
+        out.separateFresnel  = pbr->separateFresnel;
+        // ADDENDUM A-2: the sampler state. Both defaults are what every map was
+        // hard-coded to, so an unauthored material's samplers are unchanged.
+        out.anisotropy = pbr->anisotropy;
+        {
+            // Document map ROW -> engine slot, in one place. The row names are
+            // the vocabulary (PbrMaterial::mapRowNames) and this is the only
+            // translation of them into slots.
+            static const struct { const char *row; PbrTextureSlot slot; } kAddrRows[] = {
+                { "baseColorMap",      PbrTextureSlot::Albedo },
+                { "normalMap",         PbrTextureSlot::Normal },
+                { "metallicMap",       PbrTextureSlot::Metalness },
+                { "roughnessMap",      PbrTextureSlot::Roughness },
+                { "emissiveMap",       PbrTextureSlot::Emissive },
+                { "detail0Map",        PbrTextureSlot::Detail0 },
+                { "detail1Map",        PbrTextureSlot::Detail1 },
+                { "detail0NormalMap",  PbrTextureSlot::Detail0Nm },
+                { "detail1NormalMap",  PbrTextureSlot::Detail1Nm },
+                { "detailWeightMap",   PbrTextureSlot::DetailWeight },
+            };
+            for (const auto &r : kAddrRows) {
+                const int mode = pbr->addressFor(QLatin1String(r.row));
+                out.address[size_t(r.slot)] =
+                    mode == 1 ? PbrParams::AddressMode::Clamp
+                  : mode == 2 ? PbrParams::AddressMode::Mirror
+                  : mode == 3 ? PbrParams::AddressMode::Border
+                              : PbrParams::AddressMode::Wrap;
+            }
+        }
+        // MATERIAL_GAPS_SPEC GAP 2: the detail layers' SCALARS (their maps ride
+        // the slot table above). Pushed unconditionally — every default here is
+        // the renderer's own no-op value, at which it sets no shader property
+        // for the layer at all.
+        for (int i = 0; i < iris::PbrMaterial::kDetailLayers; ++i) {
+            const auto &src = pbr->detail[i];
+            auto &dst = out.detail[i];
+            dst.blend        = unsigned(std::max(0, src.blend));
+            dst.offsetU      = src.offsetU;
+            dst.offsetV      = src.offsetV;
+            dst.scaleU       = src.scaleU;
+            dst.scaleV       = src.scaleV;
+            dst.weight       = src.weight;
+            dst.normalWeight = src.normalWeight;
+        }
         return true;
     }
     // (The CustomMaterial branch that scraped diffuseColor/shininess/... out of
@@ -3922,6 +4069,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         fx.exposureMax    = mSource->exposureMax;
         fx.bloom          = mSource->bloomEnabled;
         fx.bloomThreshold = mSource->bloomThreshold;
+        fx.bloomKnee      = mSource->bloomKnee;
         fx.ssao           = mSource->ssaoEnabled;
         fx.ssaoScale      = mSource->ssaoScale;
         fx.ssaoPower      = mSource->ssaoPower;
@@ -4957,6 +5105,7 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
     flag("hdr", fx.hdr);
     flag("bloom", fx.bloom);
     num("bloomThreshold", fx.bloomThreshold);
+    num("bloomKnee", fx.bloomKnee);
     flag("ssao", fx.ssao);
     num("ssaoPower", fx.ssaoPower);
     num("ssaoRadius", fx.ssaoRadius);

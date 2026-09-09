@@ -81,7 +81,58 @@ static void warnUnknownBrdfOnce(const std::string &name) {
 void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
                          bool refractionsActive) {
     db->setDiffuse(Ogre::Vector3(p.albedo.r, p.albedo.g, p.albedo.b));
-    db->setMetalness(p.metalness);
+    // ---- THE WORKFLOW, and the one rule that makes it safe ----------------
+    //
+    // setMetalness, setFresnel and setIndexOfRefraction ALL WRITE THE SAME
+    // FLOAT — mFresnelR (OgreHlmsPbsDatablock.cpp:578-583 vs :596-605). Each
+    // asserts the workflow it requires (:581, :590, :598) and our Ogre is built
+    // RelWithDebInfo, so NDEBUG compiles every one of those asserts out.
+    //
+    //   applyPbr MUST branch on the workflow and call EXACTLY ONE of
+    //   setMetalness / setFresnel, AFTER setWorkflow has been applied.
+    //
+    // Calling both in one push silently corrupts one with the other, with no
+    // diagnostic anywhere, and the next mirror frame does it again
+    // (MATERIAL_GAPS_SPEC I-1). setWorkflow first, because the setter that
+    // follows is only legal in the workflow that is already installed.
+    //
+    // setWorkflow itself compares before flushing (:567-571), so a per-frame
+    // push at an unchanged workflow costs nothing.
+    {
+        const Ogre::HlmsPbsDatablock::Workflows want =
+            p.workflow == PbrParams::Workflow::Specular
+                ? Ogre::HlmsPbsDatablock::SpecularWorkflow
+                : p.workflow == PbrParams::Workflow::SpecularAsFresnel
+                      ? Ogre::HlmsPbsDatablock::SpecularAsFresnelWorkflow
+                      : Ogre::HlmsPbsDatablock::MetallicWorkflow;
+        db->setWorkflow(want);
+        if (want == Ogre::HlmsPbsDatablock::MetallicWorkflow) {
+            db->setMetalness(p.metalness);
+        } else {
+            // F0. setFresnel flushes renderables only when the scalar<->vec3
+            // SIZE changes (:596-618), so pushing an unchanged value per frame
+            // is free; the value itself rides the const buffer.
+            //
+            // Two authoring routes, one setter: an explicit F0 colour wins,
+            // otherwise the IOR is converted with the backend's own formula
+            // (setIndexOfRefraction forwards to setFresnel after computing
+            // ((1-ior)/(1+ior))²). We call setFresnel directly in both cases so
+            // there is ONE call site to reason about, and clamp the IOR away
+            // from the -1 singularity.
+            Ogre::Vector3 f0;
+            if (p.useFresnelColour) {
+                f0 = Ogre::Vector3(p.fresnelColour.r, p.fresnelColour.g, p.fresnelColour.b);
+            } else {
+                const float ior = std::max(1.0f, p.ior);
+                const float f = (1.0f - ior) / (1.0f + ior);
+                f0 = Ogre::Vector3(f * f);
+            }
+            db->setFresnel(f0, p.separateFresnel);
+        }
+    }
+    // kS works in EVERY workflow, metallic included (OgreHlmsPbsDatablock.h:441-447
+    // says so explicitly), so it sits outside the branch. White is inert.
+    db->setSpecular(Ogre::Vector3(p.specularColour.r, p.specularColour.g, p.specularColour.b));
     // Roughness 0 is reachable from the material slider, and HlmsPbs then logs
     // "Very low roughness values can cause NaNs in the pixel shader!" — once per
     // setRoughness, i.e. once per material PER FRAME while the mirror pushes.
@@ -256,6 +307,36 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
             db->setMacroblock(macro);
         }
     }
+    // ---- DETAIL LAYERS (MATERIAL_GAPS_SPEC GAP 2) -------------------------
+    //
+    // All four of the backend's detail setters are ALREADY guarded internally —
+    // they flush renderables only on a state TRANSITION (1 <-> not-1,
+    // default <-> not-default), which is better-behaved than setTwoSidedLighting.
+    // The change-guard here is still worth having for the same reason the
+    // two-sided one is: the host pushes changed materials every frame, and a
+    // scheduleConstBufferUpdate per layer per frame is pure cost at an
+    // unchanged value.
+    //
+    // AN UNAUTHORED LAYER IS FREE, and structurally so: at blend 0, offsets
+    // (0,0,1,1) and weights 1 the backend's setDetailMapProperties sets NO
+    // shader property at all, so a material that never touches these generates
+    // exactly the shader it generated before the feature existed.
+    for (unsigned i = 0; i < kDetailLayerCount; ++i) {
+        const PbrParams::DetailLayer &d = p.detail[i];
+        const Ogre::uint8 idx = static_cast<Ogre::uint8>(i);
+        const Ogre::PbsBlendModes blend = static_cast<Ogre::PbsBlendModes>(
+            std::min(d.blend, unsigned(Ogre::NUM_PBSM_BLEND_MODES) - 1u));
+        // The one detail setter that is NOT free at an unbound layer: the blend
+        // mode is a shader-hash input even with no detail map (its header says
+        // so). Guarded, and index 0 is the neutral value everything defaults to.
+        if (db->getDetailMapBlendMode(idx) != blend) db->setDetailMapBlendMode(idx, blend);
+        const Ogre::Vector4 os(d.offsetU, d.offsetV, d.scaleU, d.scaleV);
+        if (db->getDetailMapOffsetScale(idx) != os) db->setDetailMapOffsetScale(idx, os);
+        if (db->getDetailMapWeight(idx) != d.weight) db->setDetailMapWeight(idx, d.weight);
+        if (db->getDetailNormalWeight(idx) != d.normalWeight)
+            db->setDetailNormalWeight(idx, d.normalWeight);
+    }
+
     // Alpha-to-coverage on Cutout ONLY, and only when the target is actually
     // multisampled (A2cEnabledMsaaOnly): MSAA then dithers the hard alpha-test
     // edge into coverage samples instead of a 1px staircase. Free at 1x; a PSO
@@ -359,6 +440,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
                 Ogre::IdString(rec.datablockName), rec.datablockName,
                 Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
             applyUnlit(db, p);
+            rec.paramsPushed = true;   // the record now matches the live datablock
             mMaterials[++mNextMaterialId] = rec;
             return mNextMaterialId;
         }
@@ -368,9 +450,13 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p) {
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->createDatablock(
             Ogre::IdString(rec.datablockName), rec.datablockName,
             Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
-        db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+        // (The unconditional setWorkflow(MetallicWorkflow) that used to sit
+        // here is gone: applyPbr owns the workflow now and applies the one the
+        // params ask for. Metallic is still what an unauthored PbrParams says,
+        // so a datablock born here is what it always was.)
         applyPbr(db, p, mRefractionsActive);
-        if (Ogre::TextureGpu *rt = reflectionTexForDatablocks()) db->setTexture(Ogre::PBSM_REFLECTION, rt);
+        rec.paramsPushed = true;
+        if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
         mMaterials[++mNextMaterialId] = rec;
         return mNextMaterialId;
     } JAH_CATCH(mError, 0);
@@ -394,9 +480,30 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         auto *hlms = hlmsFor(it->second);
         auto *raw = hlms->getDatablock(Ogre::IdString(it->second.datablockName));
         if (!raw) return false;
+        // IDEMPOTENCY, engine side. The host pushes changed materials every
+        // frame and PbrParams::operator== is exactly the "same state?" question
+        // (its own contract), so an unchanged push does nothing at all —
+        // no const-buffer schedule, no macroblock/blendblock compare, no
+        // workflow compare. Every caller inherits it, not just the mirror
+        // (which has its own guard). mRefractionsActive is NOT part of the
+        // comparison and must not be: setRefractionsActive re-applies the
+        // affected datablocks itself, and it is the only thing that can change
+        // the answer for a fixed PbrParams.
+        if (it->second.paramsPushed && it->second.params == p) return true;
+        // SAMPLER STATE LIVES ON THE TEXTURE BINDING, not on the datablock's
+        // parameters, so a change to anisotropy or an address mode reaches the
+        // GPU only through a re-bind (A-2). Compared BEFORE the record is
+        // overwritten, and only re-bound when it actually moved: setTexture
+        // rebuilds the datablock's descriptor set.
+        const bool samplersMoved =
+            it->second.params.anisotropy != p.anisotropy ||
+            !std::equal(std::begin(it->second.params.address), std::end(it->second.params.address),
+                        std::begin(p.address));
         it->second.params = p;
+        it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
             applyUnlit(static_cast<Ogre::HlmsUnlitDatablock *>(raw), p);
+            if (samplersMoved) bindTrackedTextures(it->second);
             return true;   // an unlit material is never refractive
         }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
@@ -405,6 +512,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // items already exist: re-file them or a material turned refractive
         // keeps rendering in the opaque pass (as plain glass) until something
         // else happens to re-attach it.
+        if (samplersMoved) bindTrackedTextures(it->second);
         const bool wasRefractive = it->second.refractive;
         it->second.refractive = p.alphaMode == PbrAlphaMode::Refractive;
         if (wasRefractive != it->second.refractive) refileItems(id, it->second);
@@ -497,9 +605,11 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
             auto *db = static_cast<Ogre::HlmsPbsDatablock *>(hlmsPbs->createDatablock(
                 Ogre::IdString(rec.datablockName), rec.datablockName,
                 Ogre::HlmsMacroblock(), Ogre::HlmsBlendblock(), Ogre::HlmsParamVec()));
-            db->setWorkflow(Ogre::HlmsPbsDatablock::MetallicWorkflow);
+            // The workflow rides rec.params through applyPbr (see there): a
+            // family switch back to Lit restores the authored workflow, not
+            // an unconditional Metallic.
             applyPbr(db, rec.params, mRefractionsActive);
-            if (Ogre::TextureGpu *rt = reflectionTexForDatablocks()) db->setTexture(Ogre::PBSM_REFLECTION, rt);
+            if (Ogre::TextureGpu *rt = reflectionTexFor(rec)) db->setTexture(Ogre::PBSM_REFLECTION, rt);
         }
         // The maps the host already pushed are the host's state, not the
         // datablock's: re-bind them or a switch would silently strip every
@@ -722,9 +832,14 @@ bool OgreScene::detachMesh(NodeId id) {
 }
 
 // ---- Textures ----
-std::string OgreScene::textureKey(const std::string &path, bool decal, DecalMap kind) {
-    if (!decal) return path;
-    return "d" + std::to_string(int(kind)) + "|" + path;
+std::string OgreScene::textureKey(const std::string &path, bool decal, DecalMap kind,
+                                  bool srgb) {
+    // Decal slices: the POOL's format is fixed per kind (OgreDecals.cpp), so
+    // the kind prefix already separates them and srgb is not a free variable.
+    if (decal) return "d" + std::to_string(int(kind)) + "|" + path;
+    // Ordinary textures: the colour space is part of the identity. See the
+    // contract on the declaration (MATERIAL_GAPS_SPEC I-2).
+    return (srgb ? "s|" : "l|") + path;
 }
 
 TextureId OgreScene::trackTexture(const TextureRec &rec) {
@@ -733,7 +848,7 @@ TextureId OgreScene::trackTexture(const TextureRec &rec) {
     // Pixel-uploaded textures (createTexture) have no path and are never
     // deduplicated — the caller owns their identity.
     if (!rec.path.empty())
-        mTextureIndex.emplace(textureKey(rec.path, rec.decal, rec.decalKind), id);
+        mTextureIndex.emplace(textureKey(rec.path, rec.decal, rec.decalKind, rec.srgb), id);
     return id;
 }
 
@@ -768,7 +883,7 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
     // two namespaces apart (textureKey) — and turns what was a linear scan of
     // every texture in the scene into one hash lookup.
     {
-        auto hit = mTextureIndex.find(textureKey(path, false, DecalMap::Diffuse));
+        auto hit = mTextureIndex.find(textureKey(path, false, DecalMap::Diffuse, srgb));
         if (hit != mTextureIndex.end()) return hit->second;
     }
     const size_t slash = path.find_last_of("/\\");
@@ -849,7 +964,7 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
                 // rare. Keeping it synchronous costs nothing measurable and
                 // keeps this branch's ownership of `rgba` obvious.
                 tex->waitForData();
-                TextureRec rec; rec.texture = tex; rec.path = path;
+                TextureRec rec; rec.texture = tex; rec.path = path; rec.srgb = srgb;
                 return trackTexture(rec);
             }
         }
@@ -891,7 +1006,7 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
         // same shape as JAHSHAKA_SCENE_THREADS.
         tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
         if (detail::syncTextureLoads()) tex->waitForData();
-        TextureRec rec; rec.texture = tex; rec.path = path;
+        TextureRec rec; rec.texture = tex; rec.path = path; rec.srgb = srgb;
         return trackTexture(rec);
     } JAH_CATCH(mError, 0);
 }
@@ -962,30 +1077,88 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         // the caller's pixels; every level below is the box filter above, run
         // on the level ABOVE it, so the chain costs one pass over ~1.33x the
         // image and no re-reads of the source.
-        const unsigned levels = tex->getNumMipmaps();
-        std::vector<unsigned char> scratch, prev;
-        const unsigned char *levelData = rgba;
-        unsigned lw = w, lh = h;
-        for (unsigned mip = 0; mip < levels; ++mip) {
-            Ogre::StagingTexture *staging =
-                tm->getStagingTexture(lw, lh, 1u, 1u, tex->getPixelFormat());
-            staging->startMapRegion();
-            Ogre::TextureBox box = staging->mapRegion(lw, lh, 1u, 1u, tex->getPixelFormat());
-            for (unsigned y = 0; y < lh; ++y)
-                std::memcpy(box.at(0, y, 0), levelData + size_t(y) * lw * 4u, size_t(lw) * 4u);
-            staging->stopMapRegion();
-            staging->upload(box, tex, static_cast<Ogre::uint8>(mip), nullptr, nullptr, true);
-            tm->removeStagingTexture(staging);
-            if (mip + 1u >= levels) break;
-            unsigned nw = 0, nh = 0;
-            downsampleRgba(levelData, lw, lh, scratch, nw, nh);
-            prev.swap(scratch);
-            levelData = prev.data();
-            lw = nw; lh = nh;
-        }
-        TextureRec rec; rec.texture = tex; rec.path = "";
+        uploadRgbaLevels(tex, w, h, rgba);
+        TextureRec rec; rec.texture = tex; rec.path = ""; rec.srgb = srgb;
         return trackTexture(rec);
     } JAH_CATCH(mError, 0);
+}
+
+// THE UPLOAD, factored out of createTexture so updateTexture is literally the
+// same seven lines re-run (ADDENDUM A-1) rather than a second copy of them.
+//
+// LEVEL BY LEVEL, each through its own staging texture (upload() takes the mip
+// index; a staging texture is sized for one region). Level 0 is the caller's
+// pixels; every level below is the box filter above, run on the level ABOVE it,
+// so the chain costs one pass over ~1.33x the image and no re-reads of the
+// source. The staging textures come from and go back to the manager's pool
+// (OgreTextureGpuManager.cpp:758), so a per-frame call is not an allocation.
+void OgreScene::uploadRgbaLevels(Ogre::TextureGpu *tex, unsigned w, unsigned h,
+                                 const unsigned char *rgba) {
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    const unsigned levels = tex->getNumMipmaps();
+    std::vector<unsigned char> scratch, prev;
+    const unsigned char *levelData = rgba;
+    unsigned lw = w, lh = h;
+    for (unsigned mip = 0; mip < levels; ++mip) {
+        Ogre::StagingTexture *staging =
+            tm->getStagingTexture(lw, lh, 1u, 1u, tex->getPixelFormat());
+        staging->startMapRegion();
+        Ogre::TextureBox box = staging->mapRegion(lw, lh, 1u, 1u, tex->getPixelFormat());
+        for (unsigned y = 0; y < lh; ++y)
+            std::memcpy(box.at(0, y, 0), levelData + size_t(y) * lw * 4u, size_t(lw) * 4u);
+        staging->stopMapRegion();
+        staging->upload(box, tex, static_cast<Ogre::uint8>(mip), nullptr, nullptr, true);
+        tm->removeStagingTexture(staging);
+        if (mip + 1u >= levels) break;
+        unsigned nw = 0, nh = 0;
+        downsampleRgba(levelData, lw, lh, scratch, nw, nh);
+        prev.swap(scratch);
+        levelData = prev.data();
+        lw = nw; lh = nh;
+    }
+}
+
+// RE-UPLOAD into an existing texture (ADDENDUM A-1).
+//
+// createTexture-BORN IDS ONLY, and the dimensions must match. A file-loaded
+// texture's format, mip count and colour space come from the file and are
+// pooled (AutomaticBatching) — writing into one would change every material
+// that loaded that path, and a decal-atlas slice is shared PROCESS-WIDE and
+// refcounted, which is worse. A Vulkan texture cannot resize, so a different
+// size is destroy + create, not a silent reallocation (OgreView.cpp:623 says
+// the same about RTTs).
+//
+// ORDERING VS THE FRAME: the upload RECORDS into the OPEN command buffer, ahead
+// of this frame's draws, so no flush is needed for the new pixels to RENDER.
+// `flushCommands()` is needed only before a READBACK of this texture in the
+// same frame — the 2026-09-03 sky fact, where an AsyncTextureTicket issued
+// before the buffer was submitted read a destroyed texture's VRAM.
+bool OgreScene::updateTexture(TextureId id, unsigned w, unsigned h, const unsigned char *rgba) {
+    if (!w || !h || !rgba) { mError = "updateTexture: empty image"; return false; }
+    auto it = mTextures.find(id);
+    if (it == mTextures.end()) { mError = "updateTexture: unknown texture"; return false; }
+    TextureRec &rec = it->second;
+    if (!rec.texture) { mError = "updateTexture: the texture has no backing"; return false; }
+    if (rec.decal) {
+        mError = "updateTexture: this is a DECAL ATLAS SLICE, shared process-wide by every "
+                 "decal that loaded the same image — writing into it would change all of them";
+        return false;
+    }
+    if (!rec.path.empty()) {
+        mError = "updateTexture: this texture was loaded from a file (" + rec.path +
+                 "); its format, mip count and colour space come from that file. Only "
+                 "createTexture-born textures can be written to.";
+        return false;
+    }
+    if (rec.texture->getWidth() != w || rec.texture->getHeight() != h) {
+        mError = "updateTexture: size mismatch (a Vulkan texture cannot resize — destroy and "
+                 "create instead)";
+        return false;
+    }
+    JAH_TRY {
+        uploadRgbaLevels(rec.texture, w, h, rgba);
+        return true;
+    } JAH_CATCH(mError, false);
 }
 
 void OgreScene::releaseTextureRec(const TextureRec &rec) {
@@ -1026,7 +1199,7 @@ bool OgreScene::destroyTexture(TextureId id) {
         }
         if (!it->second.path.empty()) {
             const std::string key = textureKey(it->second.path, it->second.decal,
-                                               it->second.decalKind);
+                                               it->second.decalKind, it->second.srgb);
             auto ix = mTextureIndex.find(key);
             if (ix != mTextureIndex.end() && ix->second == id) mTextureIndex.erase(ix);
         }
@@ -1043,35 +1216,87 @@ unsigned OgreScene::textureMipmaps(TextureId id) const {
 }
 
 Ogre::PbsTextureTypes OgreScene::pbsSlotOf(PbrTextureSlot slot) {
+    static_assert(kDetailLayerCount <= 4,
+                  "HlmsPbs has exactly four detail layers (PBSM_DETAIL0..3)");
     switch (slot) {
     case PbrTextureSlot::Albedo:    return Ogre::PBSM_DIFFUSE;
     case PbrTextureSlot::Normal:    return Ogre::PBSM_NORMAL;
+    // PBSM_METALLIC and PBSM_SPECULAR are THE SAME UNIT at this pin; which one
+    // it means is PbrParams::workflow's answer, not this table's (GAP 1, I-4).
     case PbrTextureSlot::Metalness: return Ogre::PBSM_METALLIC;
     case PbrTextureSlot::Roughness: return Ogre::PBSM_ROUGHNESS;
     case PbrTextureSlot::Emissive:  return Ogre::PBSM_EMISSIVE;
+    // Detail layers (GAP 2). The backend's four diffuse and four normal detail
+    // units are contiguous, so the index arithmetic is safe and stays correct
+    // if kDetailLayerCount grows to 4.
+    case PbrTextureSlot::Detail0:      return Ogre::PBSM_DETAIL0;
+    case PbrTextureSlot::Detail1:      return Ogre::PBSM_DETAIL1;
+    case PbrTextureSlot::Detail0Nm:    return Ogre::PBSM_DETAIL0_NM;
+    case PbrTextureSlot::Detail1Nm:    return Ogre::PBSM_DETAIL1_NM;
+    case PbrTextureSlot::DetailWeight: return Ogre::PBSM_DETAIL_WEIGHT;
+    case PbrTextureSlot::Reflection:   return Ogre::PBSM_REFLECTION;
+    case PbrTextureSlot::Count:        break;
     }
     return Ogre::PBSM_DIFFUSE;
 }
 
-// The sampler every material map is bound with.
+// Is this slot a NORMAL map of any kind? A datablock with any normal map bound
+// throws at first draw if the renderable has no tangents
+// (OgreHlmsPbs.cpp:958-966), so the refusal has to know which slots count.
+static bool slotIsNormalMap(PbrTextureSlot slot) {
+    return slot == PbrTextureSlot::Normal || slot == PbrTextureSlot::Detail0Nm ||
+           slot == PbrTextureSlot::Detail1Nm;
+}
+
+// The sampler ONE material map is bound with (ADDENDUM A-2).
 //
-// Anisotropy must stay 1 while min/mag/mip are FO_LINEAR: Ogre warns, and
-// NVIDIA ignores the mismatch, but Metal (MoltenVK) applies maxAnisotropy
-// regardless of filter mode and averages the whole texture into every texel
-// (caught by pbr_texture_scale_tiles_uvs on the first macOS run). Real
-// anisotropic filtering = FO_ANISOTROPIC on all three filters plus a
-// pixel-suite recalibration — a deliberate visual change, not a default.
-static Ogre::HlmsSamplerblock materialSamplerblock() {
+// The defaults ARE the values every map used to be hard-coded to — wrap in U
+// and V, linear min/mag/mip, anisotropy 1 — so an unauthored material's
+// samplers are bit-for-bit what they were and every pixel suite is unmoved.
+//
+// ANISOTROPY IS ALL-OR-NOTHING, by the backend's rule and not ours:
+// HlmsManager forces maxAnisotropy back to 1 AND LOGS unless min, mag AND mip
+// are ALL FO_ANISOTROPIC (OgreHlmsManager.cpp:306-311). So a request above 1
+// switches all three together here rather than letting the host discover the
+// warning. That is ALSO not the MoltenVK defect the previous comment recorded:
+// that was aniso > 1 with LINEAR filters (pbr_texture_scale_tiles_uvs on the
+// first macOS run), which is the exact combination the backend refuses — Metal
+// applied it anyway and averaged the whole texture into every texel. A non-1
+// DEFAULT stays refused until a Mac session re-verifies; this is an
+// owner-visible dial, not a new default.
+static Ogre::TextureAddressingMode ogreAddress(PbrParams::AddressMode m) {
+    switch (m) {
+    case PbrParams::AddressMode::Clamp:  return Ogre::TAM_CLAMP;
+    case PbrParams::AddressMode::Mirror: return Ogre::TAM_MIRROR;
+    case PbrParams::AddressMode::Border: return Ogre::TAM_BORDER;
+    case PbrParams::AddressMode::Wrap:   break;
+    }
+    return Ogre::TAM_WRAP;
+}
+
+static Ogre::HlmsSamplerblock materialSamplerblock(
+    PbrParams::AddressMode address = PbrParams::AddressMode::Wrap,
+    float anisotropy = 1.0f) {
     Ogre::HlmsSamplerblock sampler;
-    sampler.mU = Ogre::TAM_WRAP; sampler.mV = Ogre::TAM_WRAP;
-    sampler.mMaxAnisotropy = 1; sampler.mMipFilter = Ogre::FO_LINEAR;
+    const Ogre::TextureAddressingMode mode = ogreAddress(address);
+    sampler.mU = mode; sampler.mV = mode; sampler.mW = mode;
+    sampler.mMipFilter = Ogre::FO_LINEAR;
+    // Clamp to the values the UI offers; anything else is a silent surprise.
+    const float aniso = std::max(1.0f, std::min(anisotropy, 16.0f));
+    sampler.mMaxAnisotropy = aniso;
+    if (aniso > 1.0f) {
+        sampler.mMinFilter = Ogre::FO_ANISOTROPIC;
+        sampler.mMagFilter = Ogre::FO_ANISOTROPIC;
+        sampler.mMipFilter = Ogre::FO_ANISOTROPIC;
+    }
     return sampler;
 }
 
 void OgreScene::bindTrackedTextures(const MaterialRec &rec) {
     auto *raw = hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
     if (!raw) return;
-    const Ogre::HlmsSamplerblock sampler = materialSamplerblock();
+    const Ogre::HlmsSamplerblock sampler =
+        materialSamplerblock(rec.params.address[0], rec.params.anisotropy);
     auto textureOf = [this](TextureId id) -> Ogre::TextureGpu * {
         if (!id) return nullptr;
         auto tit = mTextures.find(id);
@@ -1091,10 +1316,38 @@ void OgreScene::bindTrackedTextures(const MaterialRec &rec) {
     }
     auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
     for (size_t s = 0; s < kPbrTextureSlotCount; ++s) {
+        // THE REFLECTION SLOT IS NOT A PLAIN TRACKED BINDING (A-5). Its value
+        // is override-else-global-else-null, and the whole answer is gated on
+        // PCC — binding a manual cubemap while automatic PCC owns the shader's
+        // one env-probe slot makes the shader UNCOMPILABLE (OgreSky.cpp's long
+        // note). One function decides it for the override and the global alike.
+        if (PbrTextureSlot(s) == PbrTextureSlot::Reflection) {
+            db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(rec));
+            continue;
+        }
         Ogre::TextureGpu *tex = textureOf(rec.boundTextures[s]);
+        // PER SLOT: the addressing is a per-slot row (A-2), which is exactly
+        // what the detail layers need — a tiled detail map over a clamped base
+        // map is the ordinary case (§3.3/§3.5).
+        const Ogre::HlmsSamplerblock slotSampler =
+            materialSamplerblock(rec.params.address[s], rec.params.anisotropy);
         db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(PbrTextureSlot(s))), tex,
-                       tex ? &sampler : nullptr);
+                       tex ? &slotSampler : nullptr);
     }
+}
+
+// OVERRIDE-ELSE-GLOBAL-ELSE-NULL, all three gated by PCC (ADDENDUM A-5).
+// The successor to reflectionTexForDatablocks() as the ONE place that answers
+// "what cubemap does this material's env-probe slot hold" — every binding site
+// goes through it, so a PCC-binding change cannot leave an override behind.
+Ogre::TextureGpu *OgreScene::reflectionTexFor(const MaterialRec &rec) const {
+    if (mPcc) return nullptr;   // the slot holds a cube ARRAY; a manual cube cannot compile
+    const TextureId override_ = rec.boundTextures[size_t(PbrTextureSlot::Reflection)];
+    if (override_) {
+        auto it = mTextures.find(override_);
+        if (it != mTextures.end() && it->second.texture) return it->second.texture;
+    }
+    return mReflectionTex;
 }
 
 bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId texId) {
@@ -1102,8 +1355,44 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
     if (mit == mMaterials.end() || (mit->second.unlit && !mit->second.shadingUnlit)) {
         mError = "setPbrTexture: not a PBR material"; return false;
     }
+    if (slot >= PbrTextureSlot::Count) { mError = "setPbrTexture: bad slot"; return false; }
     if (texId && mTextures.find(texId) == mTextures.end()) {
         mError = "setPbrTexture: unknown texture"; return false;
+    }
+    // TANGENT REFUSAL (MATERIAL_GAPS_SPEC I-6). A datablock with ANY normal map
+    // — base or detail — makes calculateHashForPreCreate THROW on a renderable
+    // with no tangents (OgreHlmsPbs.cpp:958-966), at first draw, which is a
+    // whole lost frame rather than one wrong object.
+    //
+    // In THIS engine that cannot happen: buildMeshV2 generates tangents for
+    // every mesh it uploads when the source has none (OgreMesh.cpp:241-267), so
+    // there is no tangent-less v2 mesh to attach. The check is here anyway,
+    // against the items actually using this material, because the alternative
+    // failure mode is a thrown exception out of renderOneFrame — and if a mesh
+    // path is ever added that does not generate them, this says so by name
+    // instead of black-framing.
+    if (texId && slotIsNormalMap(slot)) {
+        Ogre::HlmsDatablock *want =
+            hlmsFor(mit->second)->getDatablock(Ogre::IdString(mit->second.datablockName));
+        for (const auto &kv : mNodes) {
+            Ogre::Item *item = kv.second.item;
+            if (!item || item->getMesh().isNull() || item->getNumSubItems() == 0) continue;
+            if (want && item->getSubItem(0)->getDatablock() != want) continue;
+            const Ogre::SubMesh *sub = item->getMesh()->getSubMesh(0);
+            if (!sub || sub->mVao[Ogre::VpNormal].empty()) continue;
+            bool tangents = false;
+            for (const Ogre::VertexBufferPacked *vb :
+                     sub->mVao[Ogre::VpNormal][0]->getVertexBuffers())
+                for (const Ogre::VertexElement2 &e : vb->getVertexElements())
+                    if (e.mSemantic == Ogre::VES_TANGENT) tangents = true;
+            if (!tangents) {
+                mError = "setPbrTexture: a normal map needs tangents, and mesh '" +
+                         std::string(item->getMesh()->getName().c_str()) +
+                         "' has none (the renderer throws at first draw, losing the "
+                         "whole frame)";
+                return false;
+            }
+        }
     }
     JAH_TRY {
         // Remember the binding first: it is what destroyTexture undoes, what a
@@ -1117,9 +1406,16 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         if (mit->second.shadingUnlit) { bindTrackedTextures(mit->second); return true; }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(
             hlmsFor(mit->second)->getDatablock(Ogre::IdString(mit->second.datablockName)));
+        if (slot == PbrTextureSlot::Reflection) {
+            // The record is already updated above; ask the one function.
+            db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(mit->second));
+            return true;
+        }
         Ogre::TextureGpu *tex = nullptr;
         if (texId) tex = mTextures.find(texId)->second.texture;
-        const Ogre::HlmsSamplerblock sampler = materialSamplerblock();
+        const Ogre::HlmsSamplerblock sampler =
+            materialSamplerblock(mit->second.params.address[size_t(slot)],
+                                 mit->second.params.anisotropy);
         db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(slot)), tex, &sampler);
         return true;
     } JAH_CATCH(mError, false);

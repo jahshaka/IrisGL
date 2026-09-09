@@ -2032,7 +2032,9 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
                       unsigned viewWidth, unsigned viewHeight) {
     if (desc.hdr) {
         setExposure(desc.exposure, desc.exposureMin, desc.exposureMax);
-        if (desc.bloom) setBloomThreshold(desc.bloomThreshold, desc.bloomThreshold + 2.0f);
+        if (desc.bloom)
+            setBloomThreshold(desc.bloomThreshold,
+                              desc.bloomThreshold + std::max(0.01f, desc.bloomKnee));
     }
     if (desc.ssao) {
         // initSsao is idempotent and process-wide (the hemisphere kernel and the

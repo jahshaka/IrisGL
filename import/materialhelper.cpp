@@ -403,6 +403,17 @@ struct GltfMaterialFacts
     float diffuse[4]  = { 1.0f, 1.0f, 1.0f, 1.0f };
     float specular[3] = { 1.0f, 1.0f, 1.0f };
     float glossiness  = 1.0f;
+    // ---- MATERIAL_GAPS_SPEC GAP 1: the two extensions the workflow switch
+    // makes importable NATIVELY instead of by conversion. Read from the file's
+    // own JSON for the same reason every other fact here is: assimp flattens
+    // KHR_materials_specular onto AI_MATKEY_COLOR_SPECULAR, which is also where
+    // spec-gloss lands and where a legacy Blinn material's specular lands, so
+    // the flattened keys cannot tell us WHICH extension was present.
+    bool  hasSpecularExt        = false;  ///< a KHR_materials_specular extension
+    float specularFactor        = 1.0f;   ///< its scalar strength (default 1)
+    float specularColorFactor[3] = { 1.0f, 1.0f, 1.0f };   ///< its F0 tint (default white)
+    bool  hasIor                = false;  ///< a KHR_materials_ior extension
+    float ior                   = 1.5f;   ///< its value (the extension's own default)
 };
 
 /// The JSON of a glTF asset: the first chunk of a GLB container, or the file
@@ -480,6 +491,24 @@ QVector<GltfMaterialFacts> parseGltfMaterials(const QString &sourceFile)
             for (int i = 0; i < 3 && i < specular.size(); ++i)
                 f.specular[i] = float(specular.at(i).toDouble(1.0));
             f.glossiness = float(sg.value(QStringLiteral("glossinessFactor")).toDouble(1.0));
+        }
+
+        // KHR_materials_specular and KHR_materials_ior. Note the exclusivity
+        // assimp imposes on its flattened view (specular OR spec-gloss, never
+        // both, glTF2Importer.cpp:297) is a property of ITS reader, not of the
+        // format — reading the JSON ourselves keeps the two independent.
+        if (ext.contains(QStringLiteral("KHR_materials_specular"))) {
+            const QJsonObject sp = ext.value(QStringLiteral("KHR_materials_specular")).toObject();
+            f.hasSpecularExt = true;
+            f.specularFactor = float(sp.value(QStringLiteral("specularFactor")).toDouble(1.0));
+            const QJsonArray colour = sp.value(QStringLiteral("specularColorFactor")).toArray();
+            for (int i = 0; i < 3 && i < colour.size(); ++i)
+                f.specularColorFactor[i] = float(colour.at(i).toDouble(1.0));
+        }
+        if (ext.contains(QStringLiteral("KHR_materials_ior"))) {
+            const QJsonObject io = ext.value(QStringLiteral("KHR_materials_ior")).toObject();
+            f.hasIor = true;
+            f.ior = float(io.value(QStringLiteral("ior")).toDouble(1.5));
         }
         facts.append(f);
     }
@@ -730,22 +759,50 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                 specular[0] = s.r; specular[1] = s.g; specular[2] = s.b;
             }
         }
-        specularGlossinessToMetallicRoughness(diffuse, specular, gloss,
-                                              mat.baseColorFactor,
-                                              mat.metallicFactor, mat.roughnessFactor);
-        // The specular-glossiness MAP has no metallic-roughness home (its RGB
-        // is a specular colour and its alpha a glossiness); binding it as
-        // either channel map would be a lie, so it is dropped and the
-        // converted constants stand. Recorded, not silent.
-        if (!mat.specularTexture.isEmpty()) {
-            aiString matName;
-            const QString named = aiMat->Get(AI_MATKEY_NAME, matName) == AI_SUCCESS
-                                      ? QString(matName.C_Str()) : QString();
-            warningSink() << QStringLiteral(
-                "specular-glossiness map on \"%1\" was not imported: the metallic-roughness "
-                "workflow has no channel for it (the converted constants are used instead)")
-                .arg(named.isEmpty() ? QStringLiteral("material") : named);
-        }
+        // NATIVE, NOT CONVERTED (MATERIAL_GAPS_SPEC §2.5). Spec-gloss IS the
+        // renderer's Specular workflow: diffuse -> base colour, specularFactor
+        // -> kS, roughness = 1 - glossiness, and the spec-gloss MAP finally has
+        // a home — the shared metallic/specular texture unit. The conversion to
+        // metallic-roughness below is still built and still correct; it is now
+        // the fallback for targets with no workflow concept (web export), which
+        // is the one place §2.6 keeps it.
+        mat.workflow = 1;   // Specular
+        mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, diffuse[0], 1.0f),
+                                               qBound(0.0f, diffuse[1], 1.0f),
+                                               qBound(0.0f, diffuse[2], 1.0f),
+                                               qBound(0.0f, diffuse[3], 1.0f));
+        mat.specularFactor  = QColor::fromRgbF(qBound(0.0f, specular[0], 1.0f),
+                                               qBound(0.0f, specular[1], 1.0f),
+                                               qBound(0.0f, specular[2], 1.0f));
+        // Glossiness is the inverse sense of roughness, exactly.
+        mat.roughnessFactor = qBound(0.0f, 1.0f - gloss, 1.0f);
+        mat.metallicFactor  = 0.0f;   // not read in this workflow; kept sane
+        mat.specularMapTexture = mat.specularTexture;
+    } else if (facts.valid && facts.hasSpecularExt) {
+        // KHR_materials_specular on a metallic-roughness base. The pin's own
+        // documentation calls SpecularAsFresnelWorkflow "what most PBRs mean by
+        // specular" (OgreHlmsPbsDatablock.h:227-230), and the extension's
+        // specularColorFactor IS an F0 tint, so it maps onto the fresnel colour
+        // rather than onto kS.
+        //
+        // NOT VERIFIED AGAINST A REFERENCE RENDERER (§9): the mapping follows
+        // the pin's documentation, not a measured comparison.
+        mat.workflow = 2;   // Specular-as-Fresnel
+        if (hasBaseColor)
+            mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, baseColor.r, 1.0f),
+                                                   qBound(0.0f, baseColor.g, 1.0f),
+                                                   qBound(0.0f, baseColor.b, 1.0f),
+                                                   qBound(0.0f, baseColor.a, 1.0f));
+        if (hasRoughness) mat.roughnessFactor = roughness;
+        const float sf = qBound(0.0f, facts.specularFactor, 1.0f);
+        mat.useFresnelColor = true;
+        mat.fresnelFactor = QColor::fromRgbF(
+            qBound(0.0f, facts.specularColorFactor[0] * sf, 1.0f),
+            qBound(0.0f, facts.specularColorFactor[1] * sf, 1.0f),
+            qBound(0.0f, facts.specularColorFactor[2] * sf, 1.0f));
+        mat.specularFactor = QColor(255, 255, 255);   // kS stays inert
+        mat.metallicFactor = 0.0f;
+        mat.specularMapTexture = mat.specularTexture;
     } else if (metalRoughBlock) {
         // glTF semantics for a PRESENT block: an omitted metallicFactor IS 1.0
         // and an omitted roughnessFactor IS 1.0. A metal car in a scene with no
@@ -765,6 +822,18 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
                                                qBound(0.0f, baseColor.g, 1.0f),
                                                qBound(0.0f, baseColor.b, 1.0f),
                                                qBound(0.0f, baseColor.a, 1.0f));
+    }
+
+    // KHR_materials_ior. Stored on every workflow — inert on a metallic
+    // material, but kept so a workflow switch in the editor restores it (the
+    // same "values survive the switch" rule clear coat follows). assimp's
+    // AI_MATKEY_REFRACTI is the fallback for a non-glTF source.
+    if (facts.valid && facts.hasIor) {
+        mat.ior = qBound(1.0f, facts.ior, 3.0f);
+    } else if (!facts.valid) {
+        float refracti = 0.0f;
+        if (aiMat->Get(AI_MATKEY_REFRACTI, refracti) == AI_SUCCESS && refracti > 1.0f)
+            mat.ior = qBound(1.0f, refracti, 3.0f);
     }
 
     waitForAllTextureSaves();

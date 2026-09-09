@@ -157,6 +157,7 @@ Scene::Scene()
     exposureMax = 2.5f;
     bloomEnabled = false;
     bloomThreshold = 5.0f;
+    bloomKnee = 2.0f;   // the width the engine used to hard-code (A-6)
     ssaoEnabled = false;
     ssaoScale = 1.0f;
     ssaoPower = 1.5f;

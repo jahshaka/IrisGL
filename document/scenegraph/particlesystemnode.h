@@ -120,6 +120,33 @@ public:
     /// = constant size, unless `dissipate`/`dissipateInv` synthesise a ramp.
     QVector<ParticleScaleKey> scaleKeys;
 
+    // ---- ADDENDUM A-4: the four affectors the renderer had and we did not --
+    //
+    // COLOUR OVER LIFE HAS TWO SOURCES AND THEY ARE EXCLUSIVE. `colourKeys`
+    // REPLACES the colour at authored life fractions; `colourFade1/2` ADD a
+    // per-second rate to whatever it currently is; `colourRampImage` replaces
+    // it from row 0 of an image. All three write the same value, in affector
+    // order, so the last one wins silently — the verbs refuse more than one and
+    // the panel treats them as one "colour over life" source.
+    /// Per-second colour deltas, stage 1 then stage 2. Both null = no fade
+    /// affector at all (the mirror omits it, the turbulence rule).
+    QColor colourFade1, colourFade2;
+    /// Switch to stage 2 when a particle has this many SECONDS of life left.
+    float colourFadeSwitch;
+    /// A 1-D ramp image sampled across life (the classic fire gradient). A
+    /// RESOLVED PATH, not a guid: the renderer's affector loads it by name
+    /// through the resource system, so the document resolves it like every
+    /// other bound asset and the engine registers its folder.
+    QString colourRampImage;
+    QString colourRampGuid;   ///< the library asset behind colourRampImage
+
+    /// Size RATE over life: units per second, or a per-second FACTOR when
+    /// `scaleRateMultiply`. 0 (additive) / 1 (multiplicative) are neutral and
+    /// the mirror then omits the affector. Distinct from `scaleKeys`, which
+    /// authors absolute sizes at life fractions.
+    float scaleRate;
+    bool  scaleRateMultiply;
+
     /// Random velocity perturbation each frame. 0 = off (and the engine then
     /// omits the affector entirely, which is not free to add).
     float turbulence;

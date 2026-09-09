@@ -353,9 +353,10 @@ constexpr Ogre::uint8 kHelperOverlayRenderQueue = 211;
 // closes here.)
 constexpr Ogre::uint8 kQueueDepthAnchorRenderQueue = 212;
 
-/// How many entries PbrTextureSlot has (Albedo..Emissive). The enum is a plain
-/// public enum with no sentinel, and MaterialRec indexes an array by it.
-constexpr size_t kPbrTextureSlotCount = 5;
+/// How many entries PbrTextureSlot has. The enum carries its own `Count`
+/// sentinel since the detail slots landed (MATERIAL_GAPS_SPEC GAP 2); this name
+/// stays because MaterialRec and every loop over the slots use it.
+constexpr size_t kPbrTextureSlotCount = size_t(PbrTextureSlot::Count);
 
 // ---------------------------------------------------------------------------
 // What shape of compositor chain a view wants. Phase 1 carries only what every
@@ -380,6 +381,7 @@ struct ChainDesc {
     float exposureMax = 2.5f;
     bool  bloom = false;            ///< rides the HDR node at ~zero marginal cost
     float bloomThreshold = 5.0f;    ///< bright-pass start, in the sample's units
+    float bloomKnee = 2.0f;         ///< ramp WIDTH above it (A-6); 2.0 = the old hard-coded value
     bool  ssao = false;
     float ssaoScale = 1.0f;         ///< AO buffer resolution factor (0.5 or 1.0)
     float ssaoPower = 1.5f;
@@ -1347,6 +1349,12 @@ public:
     TextureId loadTexture(const std::string &path, bool srgb) override;
     TextureId createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb,
                             bool mipmaps = false) override;
+    TextureId createCubemap(const TextureId faces[6]) override;
+    bool updateTexture(TextureId id, unsigned w, unsigned h, const unsigned char *rgba) override;
+    /// The staged RGBA upload (level 0 + the CPU-built mip chain), shared by
+    /// createTexture and updateTexture so there is one copy of it.
+    void uploadRgbaLevels(Ogre::TextureGpu *tex, unsigned w, unsigned h,
+                          const unsigned char *rgba);
     unsigned  textureMipmaps(TextureId) const override;
     bool destroyTexture(TextureId id) override;
     bool setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId texId) override;
@@ -1714,13 +1722,19 @@ private:
         /// texture leaves a stale pointer that only shows up as a GPU-side
         /// fault later. Latent until something actually reclaims textures —
         /// which the mirror now does.
-        TextureId boundTextures[kPbrTextureSlotCount] = { 0, 0, 0, 0, 0 };
+        TextureId boundTextures[kPbrTextureSlotCount] = {};
         /// The parameters LAST APPLIED to this material (PBR materials only).
         /// setShadingModel destroys the datablock and builds a new one in the
         /// other family, and it takes no parameters — it rebuilds from this.
         /// Without it a family switch would silently reset the material to the
         /// defaults until the host happened to push again.
         PbrParams params;
+        /// Has `params` actually been APPLIED to the live datablock? False for
+        /// one moment only — between createPbrMaterial filling the record and
+        /// the first push — which is why setPbrMaterial's idempotency guard
+        /// tests it as well as the value (a default-constructed PbrParams
+        /// equal to the first push must still reach the datablock once).
+        bool paramsPushed = false;
         /// The generated shader pieces bound to this material, per stage
         /// (HLMS_ADOPTION P5): absolute file paths, empty for "none". Kept for
         /// the same reason `params` is — setShadingModel builds a NEW datablock
@@ -1736,12 +1750,24 @@ private:
         /// TextureGpuManager::destroyTexture path.
         bool     decal = false;
         DecalMap decalKind = DecalMap::Diffuse;
+        /// The COLOUR SPACE the file was decoded into. Part of the dedup key:
+        /// the same file bound as a base colour (sRGB) and as a roughness or
+        /// detail-normal map (linear) is two different GPU textures, and
+        /// keying on the path alone handed the first one out for both
+        /// (MATERIAL_GAPS_SPEC I-2).
+        bool     srgb = false;
     };
 
     void applyReflectionToAllImpl();
     /// The IBL cubemap AS BOUND TO DATABLOCKS — null while automatic PCC owns
     /// the shader's one env-probe slot (OgreSky.cpp, the long note there).
     Ogre::TextureGpu *reflectionTexForDatablocks() const;
+    /// What ONE material's env-probe slot should hold: its own override cubemap
+    /// if it has one, else the scene's global IBL cube, and NULL for both while
+    /// automatic PCC is bound (ADDENDUM A-5). The single place that answers it,
+    /// so a PCC change cannot leave a per-material cubemap behind — which would
+    /// not merely look wrong, it would fail to compile the shader.
+    Ogre::TextureGpu *reflectionTexFor(const MaterialRec &rec) const;
 public:
     /// Is a refraction pass present in EVERY view that draws this scene?
     ///
@@ -2132,14 +2158,31 @@ private:
     /// different pools and handing one out for the other is silent corruption
     /// (loadTexture's comment). Kept in step by destroyTexture / destroy().
     std::unordered_map<std::string, TextureId> mTextureIndex;
-    /// The index key for a texture record: decal slices are namespaced by kind.
-    static std::string textureKey(const std::string &path, bool decal, DecalMap kind);
+    /// The index key for a texture record: decal slices are namespaced by kind,
+    /// and ordinary textures by COLOUR SPACE.
+    ///
+    /// The sRGB term is not cosmetic. `loadTexture(path, srgb)` decides the
+    /// pixel format from `srgb`, so the FIRST binding of a file used to fix its
+    /// colour space for the whole session: bind one image as a base colour and
+    /// again as a roughness map and the second read the sRGB texture, silently.
+    /// It was latent while every slot had a fixed flag; per-material workflows
+    /// (the metallic/specular slot changes colour space with the workflow) and
+    /// detail layers (diffuse sRGB, normal linear, same file legal in both)
+    /// make it reachable, so the flag is in the key (MATERIAL_GAPS_SPEC §2.3).
+    /// Decal slices are unaffected — their pool format is fixed by kind.
+    static std::string textureKey(const std::string &path, bool decal, DecalMap kind,
+                                  bool srgb);
     /// Registers a texture record: assigns the next id and indexes it by path.
     /// The ONLY way a TextureRec enters mTextures, so the index cannot drift.
     TextureId trackTexture(const TextureRec &rec);
     /// Our slot enum -> Ogre's PBSM_* unit.
     static Ogre::PbsTextureTypes pbsSlotOf(PbrTextureSlot slot);
     std::set<std::string> mTextureDirs;
+    /// Directories registered as resource locations for particle COLOUR RAMPS
+    /// (ADDENDUM A-4). The ColourImage affector loads by NAME through the
+    /// resource system, not by path, so its folder has to be a location first —
+    /// remembered here so a per-frame particle push does not re-add it.
+    std::set<std::string> mParticleRampDirs;
     /// Directories already registered with the resource group for generated
     /// shader pieces (HLMS_ADOPTION P5). One entry in practice — the per-user
     /// piece cache — but the set keeps re-registration cheap and idempotent.

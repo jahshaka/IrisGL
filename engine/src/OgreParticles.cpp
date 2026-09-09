@@ -91,6 +91,13 @@ const char *affectorFactoryName(ParticleAffectorDesc::Kind k) {
     case ParticleAffectorDesc::Kind::LinearForce:    return "LinearForce";
     case ParticleAffectorDesc::Kind::Turbulence:     return "DirectionRandomiser";
     case ParticleAffectorDesc::Kind::DeflectorPlane: return "DeflectorPlane";
+    // ADDENDUM A-4. Factory NAMES, from the plugin's own getName() overrides:
+    // ColourFader2 covers the plain ColourFader (it IS that affector with
+    // adjust2 == adjust1), and the scale-rate factory is spelled "Scaler",
+    // not "Scale" — the one name here that is not the obvious guess.
+    case ParticleAffectorDesc::Kind::ColourFade:     return "ColourFader2";
+    case ParticleAffectorDesc::Kind::ColourRamp:     return "ColourImage";
+    case ParticleAffectorDesc::Kind::ScaleRate:      return "Scaler";
     }
     return "LinearForce";
 }
@@ -589,6 +596,60 @@ void OgreScene::applyParticleValues(Node &n, const ParticleSystemDesc &d) {
             af->setParameter("plane_point",  vec3Param(a.planePoint));
             af->setParameter("plane_normal", vec3Param(a.planeNormal));
             af->setParameter("bounce",       realParam(a.bounce));
+            break;
+        // ---- ADDENDUM A-4 --------------------------------------------------
+        case ParticleAffectorDesc::Kind::ColourFade: {
+            // PER-SECOND DELTAS, not colours: this ADDS a rate to whatever the
+            // particle's colour currently is, where ColourKeys REPLACES it at
+            // authored life fractions. Both write particle colour, so the two
+            // are exclusive by convention on the document side.
+            const auto rate = [&](const char *name, float v) {
+                af->setParameter(name, realParam(v));
+            };
+            rate("red1",   a.colourAdjust1.r); rate("green1", a.colourAdjust1.g);
+            rate("blue1",  a.colourAdjust1.b); rate("alpha1", a.colourAdjust1.a);
+            rate("red2",   a.colourAdjust2.r); rate("green2", a.colourAdjust2.g);
+            rate("blue2",  a.colourAdjust2.b); rate("alpha2", a.colourAdjust2.a);
+            // "When the particle has this much time to live LEFT it switches to
+            // stage 2" — seconds remaining, not elapsed.
+            af->setParameter("state_change", realParam(std::max(0.0f, a.colourSwitchAt)));
+            af->setParameter("min_colour", colourParam(a.colourMin));
+            af->setParameter("max_colour", colourParam(a.colourMax));
+            break;
+        }
+        case ParticleAffectorDesc::Kind::ColourRamp: {
+            // NOT a TextureId: the affector loads the image BY NAME through
+            // ResourceGroupManager::AUTODETECT (OgreColourImageAffector2.cpp:95),
+            // so the file's DIRECTORY has to be a registered resource location
+            // first — the same idiom the IES profiles and the decal atlases use,
+            // and the reason this is a path on the desc rather than an id.
+            if (a.colourRampPath.empty()) break;
+            const size_t slash = a.colourRampPath.find_last_of("/\\");
+            const std::string dir = slash == std::string::npos
+                                        ? "." : a.colourRampPath.substr(0, slash);
+            const std::string file = slash == std::string::npos
+                                         ? a.colourRampPath : a.colourRampPath.substr(slash + 1);
+            Ogre::ResourceGroupManager &rgm = Ogre::ResourceGroupManager::getSingleton();
+            static const char *kGroup = "Jahshaka";
+            if (!rgm.resourceGroupExists(kGroup)) rgm.createResourceGroup(kGroup, false);
+            if (!mParticleRampDirs.count(dir)) {
+                rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
+                mParticleRampDirs.insert(dir);
+            }
+            if (!rgm.resourceExists(kGroup, file)) {
+                // Reported rather than thrown: a missing ramp must not take the
+                // whole particle push down.
+                mError = "particle colour ramp not found: " + a.colourRampPath;
+                break;
+            }
+            af->setParameter("image", file);
+            break;
+        }
+        case ParticleAffectorDesc::Kind::ScaleRate:
+            af->setParameter("rate", realParam(a.scaleRate));
+            // Additive units/second, or `rate^dt` per second when multiplying
+            // (OgreScaleAffector2.cpp:59-91).
+            af->setParameter("multiply_mode", a.scaleMultiply ? "true" : "false");
             break;
         }
     }

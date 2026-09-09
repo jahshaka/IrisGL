@@ -89,6 +89,7 @@ ChainDesc OgreView::chainDesc() const {
     // Bloom rides the HDR node; without HDR there is nothing to bright-pass.
     d.bloom          = mPostFx.bloom && mPostFx.hdr;
     d.bloomThreshold = mPostFx.bloomThreshold;
+    d.bloomKnee      = mPostFx.bloomKnee;
     d.ssao           = mPostFx.ssao;
     d.ssaoScale      = mPostFx.ssaoScale;
     d.ssaoPower      = mPostFx.ssaoPower;

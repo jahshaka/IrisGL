@@ -60,6 +60,16 @@ void ParticleSystemNode::resetAuthoringDefaults()
     colourKeys.clear();
     scaleKeys.clear();
     turbulence = 0.0f;
+    // ADDENDUM A-4. All four defaults are the NEUTRAL values, and the mirror
+    // omits an affector at its neutral value entirely (the turbulence rule),
+    // so these fields existing cannot change what an existing emitter draws.
+    colourFade1 = QColor(0, 0, 0, 0);
+    colourFade2 = QColor(0, 0, 0, 0);
+    colourFadeSwitch = 0.0f;
+    colourRampImage.clear();
+    colourRampGuid.clear();
+    scaleRate = 0.0f;
+    scaleRateMultiply = false;
     wind = iris::Vec3(0, 0, 0);
     rotationSpeedMin = rotationSpeedMax = 0.0f;
     orientation = ParticleOrientation::Billboard;
@@ -366,6 +376,12 @@ QList<Property*> ParticleSystemNode::getProperties()
     addFloat("Burst Duration",       "burstDuration",      burstDuration);
     addFloat("Burst Repeat Delay",   "burstRepeatDelay",   burstRepeatDelay);
     addFloat("Start Delay",          "startDelay",         startDelay);
+    // ADDENDUM A-4. The fade colours are per-second RATES encoded around
+    // 0.5 grey (0 = -1/s, 128 = 0, 255 = +1/s) — a QColor cannot carry a
+    // negative component and a fade-OUT is exactly that. Said on the row.
+    addFloat("Colour Fade Switch (s left)", "colourFadeSwitch", colourFadeSwitch);
+    addFloat("Scale Rate",           "scaleRate",          scaleRate);
+    addBool ("Scale Rate Multiplies","scaleRateMultiply",  scaleRateMultiply);
 
     auto *intProp = new IntProperty();
     intProp->displayName = "Max Particles";
@@ -387,6 +403,8 @@ QList<Property*> ParticleSystemNode::getProperties()
         p->displayName = display; p->name = name; p->value = value;
         props.append(p);
     };
+    addColour("Colour Fade 1 (rate)", "colourFade1", colourFade1);
+    addColour("Colour Fade 2 (rate)", "colourFade2", colourFade2);
     addColour("Emit Colour Start", "emitColourStart", emitColourStart);
     addColour("Emit Colour End",   "emitColourEnd",   emitColourEnd);
 
@@ -447,6 +465,12 @@ QVariant ParticleSystemNode::getPropertyValue(QString valueName)
     if (valueName == "wind")               return iris::toQt(wind);
     if (valueName == "emitColourStart")    return emitColourStart;
     if (valueName == "emitColourEnd")      return emitColourEnd;
+    if (valueName == "colourFade1")        return colourFade1;
+    if (valueName == "colourFade2")        return colourFade2;
+    if (valueName == "colourFadeSwitch")   return colourFadeSwitch;
+    if (valueName == "scaleRate")          return scaleRate;
+    if (valueName == "scaleRateMultiply")  return scaleRateMultiply;
+    if (valueName == "colourRamp")         return colourRampGuid;
 
     return SceneNode::getPropertyValue(valueName);
 }
@@ -482,7 +506,16 @@ bool ParticleSystemNode::setPropertyValue(QString valueName, const QVariant &val
     if (valueName == "wind")               { wind         = iris::fromQt(value.value<QVector3D>()); return true; }
     if (valueName == "emitColourStart")    { emitColourStart = value.value<QColor>(); return true; }
     if (valueName == "emitColourEnd")      { emitColourEnd   = value.value<QColor>(); return true; }
+    if (valueName == "colourFade1")        { colourFade1       = value.value<QColor>(); return true; }
+    if (valueName == "colourFade2")        { colourFade2       = value.value<QColor>(); return true; }
+    if (valueName == "colourFadeSwitch")   { colourFadeSwitch  = value.toFloat();   return true; }
+    if (valueName == "scaleRate")          { scaleRate         = value.toFloat();   return true; }
+    if (valueName == "scaleRateMultiply")  { scaleRateMultiply = value.toBool();    return true; }
     if (valueName == "texture")            return false;   // read-only, see getProperties()
+    // The colour RAMP is an asset BINDING, not a value: it needs a project pin
+    // and a CAS resolve, which is particles.setColourRamp's job — the same rule
+    // `texture` follows.
+    if (valueName == "colourRamp")         return false;
 
     return SceneNode::setPropertyValue(valueName, value);
 }
@@ -528,6 +561,14 @@ SceneNodePtr ParticleSystemNode::createDuplicate()
     ps->orientation         = this->orientation;
     ps->alphaHash           = this->alphaHash;
     ps->preset              = this->preset;
+    // ADDENDUM A-4.
+    ps->colourFade1         = this->colourFade1;
+    ps->colourFade2         = this->colourFade2;
+    ps->colourFadeSwitch    = this->colourFadeSwitch;
+    ps->colourRampImage     = this->colourRampImage;
+    ps->colourRampGuid      = this->colourRampGuid;
+    ps->scaleRate           = this->scaleRate;
+    ps->scaleRateMultiply   = this->scaleRateMultiply;
 
     return ps;
 }
