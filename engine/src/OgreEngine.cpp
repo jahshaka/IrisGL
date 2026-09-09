@@ -1195,6 +1195,50 @@ bool OgreEngine::renderStats(RenderStats &out) const {
     catch (...) { out = RenderStats(); return false; }
 }
 
+bool OgreEngine::textureMemory(std::vector<TextureMemoryEntry> &out) const {
+    out.clear();
+    if (!mRoot) return false;
+    JAH_TRY {
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        Ogre::TextureGpuManager *tm = rs ? rs->getTextureGpuManager() : nullptr;
+        if (!tm) return false;
+        // The same walk as TextureGpuManager::dumpMemoryUsage (which only
+        // knows how to print), row for row, so the two agree.
+        const Ogre::TextureGpuManager::ResourceEntryMap &entries = tm->getEntries();
+        out.reserve(entries.size());
+        for (const auto &kv : entries) {
+            const Ogre::TextureGpu *t = kv.second.texture;
+            if (!t) continue;
+            TextureMemoryEntry e;
+            e.name = t->getNameStr();
+            e.resource = t->getRealResourceNameStr();
+            e.width = t->getWidth();
+            e.height = t->getHeight();
+            e.depth = t->getDepth();
+            e.slices = t->getNumSlices();
+            e.mipmaps = t->getNumMipmaps();
+            e.msaa = t->getSampleDescription().getColourSamples();
+            e.format = Ogre::PixelFormatGpuUtils::toString(t->getPixelFormat());
+            e.bytes = t->getSizeBytes();
+            e.renderTarget = t->isRenderToTexture();
+            e.uav = t->isUav();
+            e.manual = t->_isManualTextureFlagPresent();
+            e.pooled = t->hasAutomaticBatching();
+            // GpuResidency::toString is declared but not exported by the pin.
+            switch (t->getResidencyStatus()) {
+            case Ogre::GpuResidency::OnStorage:   e.residency = "OnStorage"; break;
+            case Ogre::GpuResidency::OnSystemRam: e.residency = "OnSystemRam"; break;
+            case Ogre::GpuResidency::Resident:    e.residency = "Resident"; break;
+            default:                              e.residency = "Unknown"; break;
+            }
+            out.push_back(std::move(e));
+        }
+        return true;
+    }
+    // Const reader, like memoryStats: nothing here is worth a sink entry.
+    catch (...) { out.clear(); return false; }
+}
+
 bool OgreEngine::memoryStats(MemoryStats &out) const {
     out = MemoryStats();
     if (!mRoot) return false;

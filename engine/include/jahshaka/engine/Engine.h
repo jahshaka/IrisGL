@@ -1385,6 +1385,14 @@ public:
     /// The renderer's memory pools right now (MemoryStats says what each row
     /// is and who owns it). Cheap: reads the pool tables, renders nothing.
     virtual bool memoryStats(MemoryStats &out) const = 0;
+    /// Every texture the renderer's texture manager knows, one entry each,
+    /// UNSORTED (the host orders). The attribution behind
+    /// MemoryStats::gpuPoolCapacityBytes on Vulkan, where textures share the
+    /// pools: a default scene boots at ~3.2 GB of pool capacity and this is
+    /// how to see what (shadow atlases, GI volumes, the samples' images).
+    /// Cheap: walks the entry table, renders nothing. False only without a
+    /// backend.
+    virtual bool textureMemory(std::vector<TextureMemoryEntry> &out) const = 0;
     /// RECLAIM (riders lane R4): shrinks every scene manager's SIMD pools to
     /// what is live (SceneManager::shrinkToFitMemoryPools — the pools never
     /// shrink by themselves, they hold the high-water mark of nodes ever

@@ -3074,6 +3074,7 @@ public:
     bool objectCounts(ObjectCounts &out) const override;
     bool threading(EngineThreading &out) const override;
     bool memoryStats(MemoryStats &out) const override;
+    bool textureMemory(std::vector<TextureMemoryEntry> &out) const override;
     bool reclaimMemory(MemoryStats *before, MemoryStats *after) override;
     void setProfiling(bool on) override;
     bool profiling() const override { return mProfiling; }

@@ -2189,6 +2189,28 @@ struct MemoryStats {
     unsigned long long residentBytes = 0;         ///< the process RSS (Linux; 0 elsewhere)
 };
 
+/// ONE TEXTURE the renderer holds (app.textureMemory, lead 2026-09-09): the
+/// attribution behind MemoryStats::gpuPoolCapacityBytes when textures share
+/// the pools. `bytes` is the texture's own footprint (every mip, every
+/// slice, MSAA counted); a pooled texture (`pooled`) lives in a slice of a
+/// master array texture whose waste it does not carry. `residency` is the
+/// engine's word: "OnStorage" (declared, nothing on the GPU), "OnSystemRam",
+/// "Resident".
+struct TextureMemoryEntry {
+    std::string name;            ///< the alias the engine created it under
+    std::string resource;        ///< the file or resource name behind it ("" for RTTs / manual)
+    unsigned    width = 0, height = 0, depth = 0, slices = 0;
+    unsigned    mipmaps = 0;
+    unsigned    msaa = 1;
+    std::string format;          ///< pixel format name
+    unsigned long long bytes = 0;
+    bool        renderTarget = false;
+    bool        uav = false;
+    bool        manual = false;  ///< uploaded by us (TextureFlags::ManualTexture)
+    bool        pooled = false;  ///< AutomaticBatching: a slice of a pool master
+    std::string residency;
+};
+
 struct ObjectCounts {
     unsigned views = 0;         ///< live View objects (on-screen + offscreen)
     unsigned enabledViews = 0;  ///< of those, the ones renderOneFrame draws
