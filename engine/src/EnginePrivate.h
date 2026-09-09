@@ -1728,6 +1728,20 @@ private:
         /// fault later. Latent until something actually reclaims textures —
         /// which the mirror now does.
         TextureId boundTextures[kPbrTextureSlotCount] = {};
+        /// What bindTrackedTextures LAST WROTE to the datablock, per slot, and
+        /// whether it has ever written. The slot table went from 5 entries to
+        /// 11 (detail layers + reflection), so an unguarded re-bind now issues
+        /// SIX EXTRA setTexture calls per material — each dirtying the
+        /// datablock's descriptor set — for slots that are null and were
+        /// already null. Measured as +31% on e.first_sync@1000, the cold
+        /// scene-open path. Skipping unchanged slots removes it.
+        TextureId lastBoundTextures[kPbrTextureSlotCount] = {};
+        bool      everBound = false;
+        /// The sampler state those bindings were made with: a change to
+        /// anisotropy or an address mode (A-2) has to re-bind every slot even
+        /// when no texture moved, because the sampler rides the binding.
+        float     lastAnisotropy = 1.0f;
+        PbrParams::AddressMode lastAddress[kPbrTextureSlotCount] = {};
         /// The parameters LAST APPLIED to this material (PBR materials only).
         /// setShadingModel destroys the datablock and builds a new one in the
         /// other family, and it takes no parameters — it rebuilds from this.
@@ -1843,7 +1857,7 @@ private:
     /// datablock — the step that makes a family switch keep its maps. The Unlit
     /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
     /// in the record so switching back to Lit restores them.
-    void bindTrackedTextures(const MaterialRec &rec);
+    void bindTrackedTextures(MaterialRec &rec);   // records what it bound (see MaterialRec)
     /// The same job for generated shader pieces (HLMS_ADOPTION P5): re-applies
     /// `rec.customPiece` onto the material's CURRENT datablock, so a family
     /// switch back to Lit renders the graph again instead of the plain surface

@@ -263,6 +263,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mMaterials.clear();
     for (TextureId t : mTextures) mTarget->destroyTexture(t);
     mTextures.clear();
+    mPbrPushed.clear();
     for (TextureId t : mIconTextures) mTarget->destroyTexture(t);
     mIconTextures.clear();
     // Decal-atlas slices are a FIXED, process-wide budget (32 slices), and this
@@ -1518,7 +1519,6 @@ void SceneMirror::visit(iris::SceneNode *node)
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
                 mReclaimPending = true;   // the old mesh/material may now be unreferenced
                 e.texturesPushed = false;
-                e.pbrPushed = false;
                 e.shadingModelPushed = -1;   // a NEW engine material may be in either family
                 e.pickablePushed = -1;   // a NEW Item carries the default query mask
                 syncTextures(e, material);
@@ -1536,7 +1536,6 @@ void SceneMirror::visit(iris::SceneNode *node)
             e.rigSkeleton.reset();
             e.blendToRig.clear();
             e.characterHost = nullptr;
-            e.pbrPushed = false;
             e.texturesPushed = false;
             e.boundTextures.clear();
         } else if (e.hasMesh && e.material && material) {
@@ -1565,10 +1564,13 @@ void SceneMirror::visit(iris::SceneNode *node)
                     if (mTarget->setShadingModel(e.material, ms.pbr.shadingModel))
                         onMaterialItemsRebuilt(e.material);
                 }
-                if (!e.pbrPushed || !(ms.pbr == e.lastPbr)) {
+                // ONE COMPARE PER MATERIAL, not per node. See PbrPush in the
+                // header for what this replaced and why it mattered.
+                PbrPush &push = mPbrPushed[e.material];
+                if (!push.pushed || !(ms.pbr == push.params)) {
                     if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
-                        e.lastPbr = ms.pbr;
-                        e.pbrPushed = true;
+                        push.params = ms.pbr;
+                        push.pushed = true;
                     }
                 }
                 noteRefractive(ms.pbr);
@@ -1944,6 +1946,7 @@ void SceneMirror::reclaimUnused()
     }
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
+        mPbrPushed.remove(it.value());
         mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
     }
     // Textures, the third cache — and the one that was never reclaimed at all

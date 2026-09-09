@@ -614,6 +614,13 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         // The maps the host already pushed are the host's state, not the
         // datablock's: re-bind them or a switch would silently strip every
         // texture until something happened to push them again.
+        //
+        // AND THE RECORD IS RESET FIRST. The datablock this rebinds into is a
+        // BRAND NEW, BLANK one — the family switch destroyed the old — so the
+        // "what did I last write" guard is stale by construction here, and
+        // trusting it would skip every slot and leave the new material
+        // textureless. The one place that must defeat the guard.
+        rec.everBound = false;
         bindTrackedTextures(rec);
         // ...and the same for a generated piece: the new datablock is a blank
         // one, so a graph material that took a detour through Unlit would come
@@ -1328,7 +1335,7 @@ static Ogre::HlmsSamplerblock materialSamplerblock(
     return sampler;
 }
 
-void OgreScene::bindTrackedTextures(const MaterialRec &rec) {
+void OgreScene::bindTrackedTextures(MaterialRec &rec) {
     auto *raw = hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
     if (!raw) return;
     const Ogre::HlmsSamplerblock sampler =
@@ -1351,16 +1358,49 @@ void OgreScene::bindTrackedTextures(const MaterialRec &rec) {
         return;
     }
     auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
+    // ONLY WHAT CHANGED. The slot table is 11 entries now (base 5 + detail 5 +
+    // reflection); re-binding all of them unconditionally issued six setTexture
+    // calls per material for slots that were null and stayed null, each
+    // dirtying the datablock's descriptor set. +31% on e.first_sync@1000, the
+    // cold scene-open path, measured against the base build.
+    //
+    // A SAMPLER change re-binds everything even when no texture moved: the
+    // samplerblock rides the binding, so anisotropy and the address modes (A-2)
+    // only reach the GPU through setTexture.
+    const bool samplerMoved =
+        !rec.everBound || rec.lastAnisotropy != rec.params.anisotropy ||
+        !std::equal(std::begin(rec.lastAddress), std::end(rec.lastAddress),
+                    std::begin(rec.params.address));
     for (size_t s = 0; s < kPbrTextureSlotCount; ++s) {
         // THE REFLECTION SLOT IS NOT A PLAIN TRACKED BINDING (A-5). Its value
         // is override-else-global-else-null, and the whole answer is gated on
         // PCC — binding a manual cubemap while automatic PCC owns the shader's
         // one env-probe slot makes the shader UNCOMPILABLE (OgreSky.cpp's long
         // note). One function decides it for the override and the global alike.
+        // Its INPUT can move without boundTextures moving (a sky change, a PCC
+        // bind), so it is re-evaluated whenever anything else is — and
+        // applyReflectionToAll is what covers a change to the global cube.
         if (PbrTextureSlot(s) == PbrTextureSlot::Reflection) {
-            db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(rec));
+            // The reflection slot is the one exception to the blank-slot skip:
+            // its value is DERIVED (the scene's global cube), so "no override"
+            // does not mean "nothing to bind".
+            if (samplerMoved || rec.lastBoundTextures[s] != rec.boundTextures[s]) {
+                if (Ogre::TextureGpu *rt = reflectionTexFor(rec))
+                    db->setTexture(Ogre::PBSM_REFLECTION, rt);
+                else if (rec.everBound)
+                    db->setTexture(Ogre::PBSM_REFLECTION, nullptr);
+                rec.lastBoundTextures[s] = rec.boundTextures[s];
+            }
             continue;
         }
+        // A BLANK SLOT ON A BLANK DATABLOCK NEEDS NO CALL. `everBound` is false
+        // exactly when the datablock is brand new — created here, or rebuilt by
+        // the family switch — and a new datablock already holds null in every
+        // slot. Six of the eleven are null for a material with no detail maps,
+        // which is almost all of them, and this is the COLD path where nothing
+        // else can be skipped (e.first_sync).
+        if (!rec.everBound && rec.boundTextures[s] == 0) continue;
+        if (!samplerMoved && rec.lastBoundTextures[s] == rec.boundTextures[s]) continue;
         Ogre::TextureGpu *tex = textureOf(rec.boundTextures[s]);
         // PER SLOT: the addressing is a per-slot row (A-2), which is exactly
         // what the detail layers need — a tiled detail map over a clamped base
@@ -1369,7 +1409,12 @@ void OgreScene::bindTrackedTextures(const MaterialRec &rec) {
             materialSamplerblock(rec.params.address[s], rec.params.anisotropy);
         db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(PbrTextureSlot(s))), tex,
                        tex ? &slotSampler : nullptr);
+        rec.lastBoundTextures[s] = rec.boundTextures[s];
     }
+    rec.lastAnisotropy = rec.params.anisotropy;
+    std::copy(std::begin(rec.params.address), std::end(rec.params.address),
+              std::begin(rec.lastAddress));
+    rec.everBound = true;
 }
 
 // OVERRIDE-ELSE-GLOBAL-ELSE-NULL, all three gated by PCC (ADDENDUM A-5).
