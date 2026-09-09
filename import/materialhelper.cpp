@@ -452,11 +452,17 @@ bool readGltfJson(const QString &file, QJsonObject &out)
     return true;
 }
 
-QVector<GltfMaterialFacts> parseGltfMaterials(const QString &sourceFile)
+/// `isGltfOut` says whether the SOURCE is a glTF asset at all, which is not the
+/// same question as "did it declare any materials": a .glb whose meshes carry
+/// no material index has an empty `materials` array and would otherwise be
+/// indistinguishable from an .fbx here. factsForMaterial needs the difference.
+QVector<GltfMaterialFacts> parseGltfMaterials(const QString &sourceFile, bool *isGltfOut)
 {
     QVector<GltfMaterialFacts> facts;
+    if (isGltfOut) *isGltfOut = false;
     QJsonObject root;
     if (!readGltfJson(sourceFile, root)) return facts;
+    if (isGltfOut) *isGltfOut = true;
 
     const QJsonArray materials = root.value(QStringLiteral("materials")).toArray();
     facts.reserve(materials.size());
@@ -488,17 +494,19 @@ QVector<GltfMaterialFacts> parseGltfMaterials(const QString &sourceFile)
 
 /// One-file cache. Imports run one model at a time per thread, and the entry is
 /// keyed by path + size + mtime so a re-imported (edited) file is re-read.
-const QVector<GltfMaterialFacts> &gltfFactsFor(const QString &sourceFile)
+const QVector<GltfMaterialFacts> &gltfFactsFor(const QString &sourceFile, bool *isGltfOut)
 {
     struct Cache {
         QString path;
         qint64 size = -1;
         qint64 modified = -1;
+        bool isGltf = false;
         QVector<GltfMaterialFacts> facts;
     };
     static thread_local Cache cache;
     static const QVector<GltfMaterialFacts> kEmpty;
 
+    if (isGltfOut) *isGltfOut = false;
     if (sourceFile.isEmpty()) return kEmpty;
     const QFileInfo info(sourceFile);
     if (!info.isFile()) return kEmpty;
@@ -508,8 +516,9 @@ const QVector<GltfMaterialFacts> &gltfFactsFor(const QString &sourceFile)
         cache.path = info.absoluteFilePath();
         cache.size = size;
         cache.modified = modified;
-        cache.facts = parseGltfMaterials(sourceFile);
+        cache.facts = parseGltfMaterials(sourceFile, &cache.isGltf);
     }
+    if (isGltfOut) *isGltfOut = cache.isGltf;
     return cache.facts;
 }
 
@@ -528,10 +537,41 @@ int materialIndexIn(const aiScene *scene, const aiMaterial *aiMat)
 GltfMaterialFacts factsForMaterial(const QString &sourceFile, const aiScene *scene,
                                    const aiMaterial *aiMat)
 {
-    const QVector<GltfMaterialFacts> &all = gltfFactsFor(sourceFile);
+    bool isGltf = false;
+    const QVector<GltfMaterialFacts> &all = gltfFactsFor(sourceFile, &isGltf);
     const int index = materialIndexIn(scene, aiMat);
-    if (index < 0 || index >= all.size()) return GltfMaterialFacts();
-    return all.at(index);
+    if (index >= 0 && index < all.size()) return all.at(index);
+
+    // PAST THE END OF A REAL glTF: this is the material assimp SYNTHESIZED for
+    // meshes that declare none (the comment above materialIndexIn says it
+    // appends that one LAST), and it is the "a mesh with no material imports
+    // BLACK" report of 2026-09-08.
+    //
+    // The synthesized aiMaterial carries assimp's own struct defaults, which
+    // include AI_MATKEY_METALLIC_FACTOR = 1 and AI_MATKEY_ROUGHNESS_FACTOR = 1.
+    // With no file facts to consult, `metalRoughBlock` fell back to "assimp
+    // reported the keys" — always true — so the surface imported as FULL METAL,
+    // FULL ROUGH: black under punctual lights with nothing to reflect. That is
+    // the exact confusion the GltfMaterialFacts comment above exists to remove,
+    // reached through the one index the array does not cover.
+    //
+    // THE POLICY, and it is a policy rather than a reading of the spec:
+    // glTF says an undefined material IS metallic 1 / rough 1, but this tree
+    // has already decided (MeshMaterialData's "THE DEFAULTS ARE A POLICY, and
+    // they are DIELECTRIC") that a surface stating no workflow is not a
+    // statement that it is a mirror. A mesh with no material at all states
+    // less than any of them. So it is reported as a VALID glTF material that
+    // declares nothing — no metallic-roughness block, no spec-gloss, not unlit
+    // — and lands on the dielectric defaults: white, metallic 0, roughness 0.5.
+    if (isGltf) {
+        GltfMaterialFacts synthesized;
+        synthesized.valid = true;
+        return synthesized;
+    }
+
+    // Not a glTF at all (an .fbx, an .obj): assimp's flattened keys are all
+    // there is, exactly as before.
+    return GltfMaterialFacts();
 }
 
 } // namespace
