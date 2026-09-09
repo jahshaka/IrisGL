@@ -970,8 +970,21 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
         }
         Ogre::uint32 flags = Ogre::TextureFlags::AutomaticBatching;
         if (srgb) flags |= Ogre::TextureFlags::PrefersLoadingFromFileAsSRGB;
-        // Alias by full path so the same file name in two folders stays distinct.
-        Ogre::TextureGpu *tex = tm->createOrRetrieveTexture(file, path, Ogre::GpuPageOutStrategy::Discard,
+        // ALIAS BY FULL PATH **AND COLOUR SPACE** (MATERIAL_GAPS_SPEC I-2, the
+        // second half of it). The full path is what keeps the same file NAME in
+        // two folders distinct. The sRGB term is what keeps the same FILE in two
+        // colour spaces distinct — and it is load-bearing, not belt-and-braces:
+        // createOrRetrieveTexture's lookup key is the ALIAS
+        // (OgreTextureGpuManager.cpp:459 `IdString idName( aliasName )`), so
+        // without it a second load of the same path RETURNS THE FIRST
+        // TEXTURE — created with the first call's flags — and our own dedup
+        // index would hand out two TextureIds for one GPU texture in one colour
+        // space. Destroying either then invalidates the other.
+        //
+        // Found by texture_cache_keys_on_colour_space, which is what that test
+        // is for: fixing only our index left the backend still aliasing.
+        const std::string alias = (srgb ? "s|" : "l|") + path;
+        Ogre::TextureGpu *tex = tm->createOrRetrieveTexture(file, alias, Ogre::GpuPageOutStrategy::Discard,
                                                             flags, Ogre::TextureTypes::Type2D, kGroup,
                                                             Ogre::TextureFilter::TypeGenerateDefaultMipmaps);
         if (!tex) { mError = "loadTexture: could not create texture for " + path; return 0; }
