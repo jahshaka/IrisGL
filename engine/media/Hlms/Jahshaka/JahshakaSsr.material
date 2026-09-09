@@ -70,6 +70,10 @@ material Jahshaka/SsrRayMarch
 				param_named			projectionParams			float2	0 1
 				param_named			rayParams					float4	0 0.5 48 0.35
 				param_named			viewToTextureSpaceMatrix	matrix4x4 1 0 0 0  0 1 0 0  0 0 1 0  0 0 0 1
+				// x = 1 under an ORTHOGRAPHIC camera, y = the far plane. The
+				// safe default is the perspective path, which is what every
+				// frame before the migration took.
+				param_named			orthoParams					float4	0 1 0 0
 			}
 
 			texture_unit depthTexture

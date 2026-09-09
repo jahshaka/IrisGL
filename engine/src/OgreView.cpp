@@ -14,7 +14,27 @@
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <OgreRenderPassDescriptor.h>
 
+#include <cstdlib>
+#include <string>
+
 namespace jahshaka { namespace engine { namespace detail {
+
+namespace {
+/// FALSE only when JAH_ORTHO_POSTFX names "off" (or "0"): the screen-space
+/// effects then take the plain gate under an orthographic camera instead of
+/// their ortho branch. Read once — an environment variable is a boot-time
+/// choice, and a mid-run flip would change a workspace's shape behind a live
+/// view. See chainDesc().
+bool orthoPostFxAdapted() {
+    static const bool adapted = [] {
+        const char *v = std::getenv("JAH_ORTHO_POSTFX");
+        if (!v || !*v) return true;
+        const std::string s(v);
+        return !(s == "off" || s == "0" || s == "OFF" || s == "false");
+    }();
+    return adapted;
+}
+}   // namespace
 
 OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *texture,
                    const std::string &name, unsigned w, unsigned h, const Colour &background,
@@ -80,6 +100,31 @@ ChainDesc OgreView::chainDesc() const {
     d.ssrRoughnessCutoff = mPostFx.ssrRoughnessCutoff;
     d.ssrIntensity   = mPostFx.ssrIntensity;
     d.refractions    = mPostFx.refractions;
+    // ---- THE ORTHOGRAPHIC FALLBACK ------------------------------------------
+    // SSR and SSAO both reconstruct a view-space position from depth, and both
+    // used to do it in a way that is only valid for a perspective frustum —
+    // `cameraDir * linearDepth`, where an ortho frustum's far corner is not a
+    // ray at all (OgreFrustum.cpp:884 takes `ratio = 1` for PT_ORTHOGRAPHIC).
+    // Under an axis view the reconstructed positions therefore moved with the
+    // camera even though the projection did not, and the reflections and the
+    // contact shadowing SLID while panning — the owner report.
+    //
+    // Both shaders now BRANCH on the projection instead (JahSsrRayMarch_ps.glsl
+    // and ogre-patch 0019 for SSAO), so the effects are correct under an
+    // orthographic camera and stay on. THIS IS THE FALLBACK: one environment
+    // variable puts the plain gate back, for a driver on which the branch ever
+    // misbehaves. It is deliberately not a document row — the ortho branch is
+    // the shipped behaviour and a user has no way to reason about the choice —
+    // and it is read ONCE, so it cannot change under a running process.
+    //
+    // Either way it is a property of the CAMERA the view is drawing through,
+    // never of the world settings, so a perspective view of the same scene is
+    // untouched and switching a viewport into an axis view is a shape change
+    // (see setCamera).
+    if (mCameraDesc.orthographic && !orthoPostFxAdapted()) {
+        d.ssao = false;
+        d.ssr  = 0;
+    }
     return d;
 }
 
@@ -594,13 +639,16 @@ void OgreView::detachScene() {
 void OgreView::setCamera(const CameraDesc &c) {
     JAH_TRY {
         if (!mCamera) return;
-        // The LETTERBOX is a graph change (extra passes + inset viewports), so
-        // it goes through the same "only a shape change rebuilds" rule as the
-        // post chain: the flag flipping rebuilds, everything else — including
-        // the authored aspect and the camera's whole pose — is free.
-        const bool wasLetterboxed = chainDesc().letterbox;
+        // TWO CAMERA PROPERTIES REACH THE GRAPH: the LETTERBOX (extra passes
+        // and inset viewports) and the ORTHOGRAPHIC GATE in chainDesc() (which
+        // clears SSR and SSAO for an axis view). Both go through the same "only
+        // a shape change rebuilds" rule as the post chain, and through the same
+        // comparison setPostFx uses rather than a second hand-written test —
+        // everything else, including the authored aspect and the camera's whole
+        // pose, is free.
+        const ChainDesc before = chainDesc();
         mCameraDesc = c;
-        if (chainDesc().letterbox != wasLetterboxed) rebuildWorkspaceDef();
+        if (!ChainDesc::sameShape(before, chainDesc())) rebuildWorkspaceDef();
         applyLetterbox();
         mCamera->setPosition(toOgre(c.position));
         mCamera->setOrientation(Ogre::Quaternion(c.orientation.w, c.orientation.x, c.orientation.y, c.orientation.z));

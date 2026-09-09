@@ -1865,18 +1865,44 @@ void updateSsao(Ogre::Camera *camera, unsigned aoWidth, unsigned aoHeight,
     if (!camera) return;
     Ogre::Pass *pass = materialPass("SSAO/HS");
     if (!pass) return;
+    // THE DEPTH PAIR, and it is NOT the same arithmetic for the two projections
+    // (ogre-patch 0019's note; SSAO_HS_ps.glsl reads it through jahOrthoParams).
+    //
+    // PERSPECTIVE: `B / (d - A)` is metres, and B is DIVIDED by the far plane
+    // so what the shader gets is a [0,1] fraction of it — which is what makes
+    // `cameraDir * linearDepth` land on the surface, because the quad's corners
+    // are the UNNORMALIZED view-space far corners (VIEW_SPACE_CORNERS).
+    //
+    // ORTHOGRAPHIC: `Frustum::getProjectionParamsAB` returns a pair for which
+    // that same expression is 1/t rather than t (OgreFrustum.cpp:128-141), so
+    // the shader inverts it — and the normalisation therefore has to invert
+    // too: B is MULTIPLIED by the far plane so that `|(d - A) / B|` comes out
+    // as the same [0,1] fraction. One line each, and the reason the two are
+    // mirror images is that the ortho pair itself is.
+    const bool ortho = camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
     Ogre::Vector2 projAB = camera->getProjectionParamsAB();
-    projAB.y /= camera->getFarClipDistance();   // keeps linearDepth in [0,1]
+    if (ortho) projAB.y *= camera->getFarClipDistance();
+    else       projAB.y /= camera->getFarClipDistance();
     Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
     ps->setNamedConstant("projectionParams", projAB);
+    ps->setNamedConstant("jahOrthoParams",
+                         Ogre::Vector4(ortho ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f));
     ps->setNamedConstant("projection", camera->getProjectionMatrix());
     ps->setNamedConstant("kernelRadius", kernelRadius);
     // The noise tile is 2x2 and wraps: the scale is the AO buffer size over it.
     ps->setNamedConstant("noiseScale", Ogre::Vector2(float(aoWidth) / 2.0f,
                                                      float(aoHeight) / 2.0f));
+    // The blurs are DEPTH-AWARE (their weight is 1/|depth difference|), so they
+    // need the same pair read the same way round — otherwise an ortho frame's
+    // differences collapse toward zero and the separable blur silently degrades
+    // into a plain box, smearing AO across every silhouette.
     for (const char *blur : { "SSAO/BlurH", "SSAO/BlurV" }) {
-        if (Ogre::Pass *bp = materialPass(blur))
-            bp->getFragmentProgramParameters()->setNamedConstant("projectionParams", projAB);
+        if (Ogre::Pass *bp = materialPass(blur)) {
+            Ogre::GpuProgramParametersSharedPtr bps = bp->getFragmentProgramParameters();
+            bps->setNamedConstant("projectionParams", projAB);
+            bps->setNamedConstant("jahOrthoParams",
+                                  Ogre::Vector4(ortho ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f));
+        }
     }
     if (Ogre::Pass *ap = materialPass("SSAO/Apply"))
         ap->getFragmentProgramParameters()->setNamedConstant("powerScale", powerScale);
@@ -1965,6 +1991,18 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
     Ogre::GpuProgramParametersSharedPtr ps = march->getFragmentProgramParameters();
     ps->setNamedConstant("projectionParams", camera->getProjectionParamsAB());
     ps->setNamedConstant("viewToTextureSpaceMatrix", m);
+    // THE PROJECTION TYPE, because the march's whole reconstruction depends on
+    // it (JahSsrRayMarch_ps.glsl's ORTHOGRAPHIC note). The far plane rides
+    // along as the scale that turns the normalized corner back into view-space
+    // xy — the one number the shader cannot derive from what it already has.
+    // Deliberately a UNIFORM and not a shader property: it is uniform-coherent
+    // over the whole quad, costs nothing, and a permutation would recompile the
+    // marcher every time a viewport switched between an axis view and the
+    // perspective one.
+    ps->setNamedConstant(
+        "orthoParams",
+        Ogre::Vector4(camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC ? 1.0f : 0.0f,
+                      camera->getFarClipDistance(), 0.0f, 0.0f));
     // The step budget IS the quality row's other half: half-resolution rays get
     // 48 steps, full-resolution rays 96. Both are inside the shader's
     // compile-time loop bound of 128.
