@@ -688,6 +688,73 @@ void OgreEngine::noteViewDestroyed(OgreView *view) {
     mShadowCounterView = nullptr;
 }
 
+std::vector<hud::AtlasTileDesc> OgreEngine::collectAtlasTiles() const {
+    std::vector<hud::AtlasTileDesc> tiles;
+    if (!mHlmsRegistered || mHeadless) return tiles;
+    JAH_TRY {
+        // The first enabled view that actually has a shadow node — the same
+        // "one view speaks for the process" rule the HUD itself follows, and
+        // the reason the verb documents that a second on-screen view shows the
+        // first one's tiles.
+        const Ogre::CompositorShadowNode *node = nullptr;
+        for (const auto &v : mViews) {
+            if (!v->isEnabled()) continue;
+            if (const Ogre::CompositorShadowNode *n = v->shadowNodeInstance()) { node = n; break; }
+        }
+        if (!node) return tiles;
+        const Ogre::CompositorShadowNodeDef *def =
+            static_cast<const Ogre::CompositorShadowNodeDef *>(node->getDefinition());
+        if (!def) return tiles;
+        OgreScene *primary = nullptr;
+        {
+            std::vector<OgreScene *> scenes;
+            scenesFeedingEnabledViews(scenes);
+            if (!scenes.empty()) primary = scenes.front();
+        }
+        const Ogre::LightClosestArray &lights = node->getShadowCastingLights();
+        const size_t numMaps = def->getNumShadowTextureDefinitions();
+        for (size_t i = 0; i < numMaps; ++i) {
+            const Ogre::ShadowTextureDefinition *td = def->getShadowTextureDefinition(i);
+            if (!td) continue;
+            hud::AtlasTileDesc tile;
+            // getDefinedTexture is how upstream's own debug overlay reaches a
+            // shadow atlas (ShadowMapDebuggingGameState).
+            tile.tex = const_cast<Ogre::CompositorShadowNode *>(node)->getDefinedTexture(
+                td->getTextureName());
+            if (!tile.tex) continue;
+            tile.u0 = float(td->uvOffset.x);
+            tile.v0 = float(td->uvOffset.y);
+            tile.u1 = float(td->uvOffset.x + td->uvLength.x);
+            tile.v1 = float(td->uvOffset.y + td->uvLength.y);
+            // The caption says what the map IS, which is the whole point of the
+            // overlay: which light, and whether its content is static and
+            // therefore not being redrawn.
+            std::string label = "M" + std::to_string(i);
+            const size_t lightIdx = td->light;
+            if (lightIdx < lights.size() && lights[lightIdx].light) {
+                const Ogre::Light *l = lights[lightIdx].light;
+                switch (l->getType()) {
+                case Ogre::Light::LT_DIRECTIONAL: label += " sun s" + std::to_string(td->split); break;
+                case Ogre::Light::LT_POINT:       label += " point"; break;
+                case Ogre::Light::LT_SPOTLIGHT:   label += " spot"; break;
+                default:                          label += " ?"; break;
+                }
+                if (primary) {
+                    const NodeId n = primary->nodeOfLight(l);
+                    if (n) label += " #" + std::to_string((unsigned long long)n);
+                }
+                if (lights[lightIdx].isStatic)
+                    label += lights[lightIdx].isDirty ? " static*" : " static";
+            } else {
+                label += " empty";
+            }
+            tile.label = label;
+            tiles.push_back(tile);
+        }
+    } JAH_CATCH(mLastError, tiles);
+    return tiles;
+}
+
 bool OgreEngine::refreshShadows() {
     if (!mHlmsRegistered || mHeadless) return false;
     bool any = false;

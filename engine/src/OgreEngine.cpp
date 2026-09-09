@@ -667,6 +667,13 @@ void OgreEngine::renderOneFrame() {
             if (owner) {
                 RenderStats stats;
                 renderStats(stats);
+                // The shadow-atlas inspector's data (SHADOW_TOOLING_SPEC.md
+                // §4.4). Collected HERE and not in the HUD because it lives
+                // inside a compositor node, which the overlay code cannot and
+                // should not reach; and collected only when the overlay asks,
+                // because it touches a live workspace.
+                hud::setAtlasTiles(owner->overlay().shadowAtlas ? collectAtlasTiles()
+                                                                : std::vector<hud::AtlasTileDesc>());
                 hud::apply(owner->overlay(), stats, owner->width(), owner->height());
             } else {
                 hud::hide();

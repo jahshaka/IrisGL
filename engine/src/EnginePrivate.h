@@ -619,6 +619,19 @@ void detach(Ogre::SceneManager *sm);
 /// so the text is the same physical size whatever the viewport is.
 void apply(const ViewOverlayDesc &desc, const RenderStats &stats,
            unsigned viewWidth, unsigned viewHeight);
+/// THE SHADOW-ATLAS INSPECTOR's data, handed in by the engine because the HUD
+/// cannot reach a compositor node (SHADOW_TOOLING_SPEC.md §4.4). One entry per
+/// shadow map, in map order; `tex` is the LIVE atlas texture, which dies with
+/// its workspace — the HUD binds it for exactly one apply() and unbinds when
+/// the overlay goes off.
+struct AtlasTileDesc {
+    Ogre::TextureGpu *tex = nullptr;
+    float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;   ///< the map's UV rect
+    std::string label;                                   ///< "M3 point static"
+};
+/// Called by apply() through the engine: fills `out` with the current atlas.
+/// Empty = nothing to draw (no shadow node, or no view rendering shadows).
+void setAtlasTiles(std::vector<AtlasTileDesc> tiles);
 /// Hides everything (no eligible view this frame).
 void hide();
 /// THE ONE-SHOT RE-CAPTION, run right after Root::renderOneFrame — see
@@ -2599,6 +2612,10 @@ public:
     /// Unhooks and destroys the shadow-pass counter. Called by ~OgreEngine
     /// BEFORE the views go, so the listener never outlives its workspace.
     void detachShadowCounter();
+    /// One entry per shadow map of the LIVE shadow node — the atlas inspector's
+    /// data (SHADOW_TOOLING_SPEC.md §4.4). Empty when nothing is rendering
+    /// shadows. Defined in OgreShadow.cpp, beside the definition it describes.
+    std::vector<hud::AtlasTileDesc> collectAtlasTiles() const;
     /// Called by destroyView BEFORE the view dies: unhooks the shadow-pass
     /// counter if it was riding that view. Lives in OgreShadow.cpp because the
     /// counter type is incomplete everywhere else.

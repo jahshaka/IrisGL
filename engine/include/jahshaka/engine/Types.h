@@ -1817,14 +1817,26 @@ struct ViewOverlayDesc {
     /// PostFxDesc::allowOffscreen. Only the engine suite sets it.
     bool allowOffscreen = false;
 
+    /// THE SHADOW-ATLAS INSPECTOR (SPECS/SHADOW_TOOLING_SPEC.md §4.4): a strip
+    /// of thumbnails along the bottom of the view, one per shadow map, showing
+    /// what the renderer actually rasterised into each rectangle of the atlas,
+    /// captioned with the light it belongs to and whether its map is static.
+    ///
+    /// A DIAGNOSTIC, not a feature: never persisted, off in every offscreen
+    /// view unless allowOffscreen, and process-wide like the rest of this HUD —
+    /// it shows the atlas the PRIMARY view rendered, so a second on-screen view
+    /// displays the same tiles.
+    bool shadowAtlas = false;
+
     /// True when this desc asks for anything to be drawn at all.
-    bool anything() const { return stats || cover != Cover::None; }
+    bool anything() const { return stats || shadowAtlas || cover != Cover::None; }
 
     bool operator==(const ViewOverlayDesc &o) const {
         return stats == o.stats && corner == o.corner && scale == o.scale &&
                colour == o.colour && lines == o.lines && cover == o.cover &&
                coverTitle == o.coverTitle && coverSubtitle == o.coverSubtitle &&
-               coverFill == o.coverFill && allowOffscreen == o.allowOffscreen;
+               coverFill == o.coverFill && allowOffscreen == o.allowOffscreen &&
+               shadowAtlas == o.shadowAtlas;
     }
     bool operator!=(const ViewOverlayDesc &o) const { return !(*this == o); }
 };
