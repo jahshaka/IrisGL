@@ -792,6 +792,21 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // part in static subtrees.
         const Ogre::SceneMemoryMgrTypes cls =
             n.node && n.node->isStatic() ? Ogre::SCENE_STATIC : Ogre::SCENE_DYNAMIC;
+        // TANGENT REFUSAL (MATERIAL_GAPS_SPEC I-6), O(1) and once per attach.
+        // A datablock with ANY normal map — base or detail — makes
+        // calculateHashForPreCreate THROW on a renderable with no tangents
+        // (OgreHlmsPbs.cpp:958-966) at first draw, which loses the WHOLE FRAME,
+        // not one object. buildMeshV2 generates tangents for every mesh it
+        // uploads when the source has none (OgreMesh.cpp:241-267), so this
+        // cannot fire today; it is here so that a mesh path which ever stops
+        // generating them says so by name instead of black-framing.
+        if (!mit->second.hasTangents && materialUsesNormalMap(tit->second)) {
+            mError = "attachMesh: mesh '" + mit->second.name +
+                     "' has no tangents and material " + std::to_string(matId) +
+                     " binds a normal map (the renderer throws at first draw, "
+                     "losing the whole frame)";
+            return false;
+        }
         n.item = mSceneMgr->createItem(mit->second.mesh, cls);
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
@@ -1261,6 +1276,14 @@ static bool slotIsNormalMap(PbrTextureSlot slot) {
            slot == PbrTextureSlot::Detail1Nm;
 }
 
+// Does this material bind a normal map in ANY slot? Read off the tracked
+// bindings, which is O(slots) and needs no Ogre call at all.
+bool OgreScene::materialUsesNormalMap(const MaterialRec &rec) {
+    for (size_t s = 0; s < kPbrTextureSlotCount; ++s)
+        if (rec.boundTextures[s] && slotIsNormalMap(PbrTextureSlot(s))) return true;
+    return false;
+}
+
 // The sampler ONE material map is bound with (ADDENDUM A-2).
 //
 // The defaults ARE the values every map used to be hard-coded to — wrap in U
@@ -1372,41 +1395,19 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
     if (texId && mTextures.find(texId) == mTextures.end()) {
         mError = "setPbrTexture: unknown texture"; return false;
     }
-    // TANGENT REFUSAL (MATERIAL_GAPS_SPEC I-6). A datablock with ANY normal map
-    // — base or detail — makes calculateHashForPreCreate THROW on a renderable
-    // with no tangents (OgreHlmsPbs.cpp:958-966), at first draw, which is a
-    // whole lost frame rather than one wrong object.
+    // TANGENT REFUSAL (MATERIAL_GAPS_SPEC I-6) is NOT here — it lives in
+    // attachMesh, against a flag cached on the mesh at build time.
     //
-    // In THIS engine that cannot happen: buildMeshV2 generates tangents for
-    // every mesh it uploads when the source has none (OgreMesh.cpp:241-267), so
-    // there is no tangent-less v2 mesh to attach. The check is here anyway,
-    // against the items actually using this material, because the alternative
-    // failure mode is a thrown exception out of renderOneFrame — and if a mesh
-    // path is ever added that does not generate them, this says so by name
-    // instead of black-framing.
-    if (texId && slotIsNormalMap(slot)) {
-        Ogre::HlmsDatablock *want =
-            hlmsFor(mit->second)->getDatablock(Ogre::IdString(mit->second.datablockName));
-        for (const auto &kv : mNodes) {
-            Ogre::Item *item = kv.second.item;
-            if (!item || item->getMesh().isNull() || item->getNumSubItems() == 0) continue;
-            if (want && item->getSubItem(0)->getDatablock() != want) continue;
-            const Ogre::SubMesh *sub = item->getMesh()->getSubMesh(0);
-            if (!sub || sub->mVao[Ogre::VpNormal].empty()) continue;
-            bool tangents = false;
-            for (const Ogre::VertexBufferPacked *vb :
-                     sub->mVao[Ogre::VpNormal][0]->getVertexBuffers())
-                for (const Ogre::VertexElement2 &e : vb->getVertexElements())
-                    if (e.mSemantic == Ogre::VES_TANGENT) tangents = true;
-            if (!tangents) {
-                mError = "setPbrTexture: a normal map needs tangents, and mesh '" +
-                         std::string(item->getMesh()->getName().c_str()) +
-                         "' has none (the renderer throws at first draw, losing the "
-                         "whole frame)";
-                return false;
-            }
-        }
-    }
+    // It WAS here, and it cost 2.1 SECONDS OF BOOT: this verb runs once per
+    // texture per material on the load path, and the check walked EVERY node in
+    // the scene introspecting VAO vertex declarations. O(nodes x normal-map
+    // binds) on the hot path, to guard a condition buildMeshV2 already makes
+    // impossible. Caught by app.watchdog_stall, which saw a 2094 ms stall
+    // before the test had asked for one.
+    //
+    // attachMesh is the right place: it is once per node, it has the mesh and
+    // the material in hand, and the flag it reads is computed when the mesh is
+    // uploaded rather than re-derived per call.
     JAH_TRY {
         // Remember the binding first: it is what destroyTexture undoes, what a
         // shading-model switch rebuilds from, and — on Unlit — the record of a

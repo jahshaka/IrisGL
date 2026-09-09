@@ -80,6 +80,11 @@ MeshId OgreScene::createLineMesh(const std::vector<Vec3> &points, bool strip) {
     if (points.size() < 2) { mError = "createLineMesh: need at least 2 points"; return 0; }
     JAH_TRY {
         MeshRec rec; rec.name = processUniqueName("lines");
+        // LINE MESHES CARRY NO TANGENTS (position/normal/uv only, below). They
+        // are overlay geometry — grid, wires, gizmos — and never wear a
+        // normal-mapped PBR material, but attachMesh's I-6 refusal reads this
+        // flag rather than assuming, so it has to be honest.
+        rec.hasTangents = false;
         const size_t nv = points.size();
         struct V { float px, py, pz, nx, ny, nz, u, v; };
         V *verts = reinterpret_cast<V *>(OGRE_MALLOC_SIMD(sizeof(V) * nv, Ogre::MEMCATEGORY_GEOMETRY));

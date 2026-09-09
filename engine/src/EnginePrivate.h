@@ -1644,6 +1644,11 @@ private:
         // vertex declaration, so attachSkinnedMesh may bind a rig to it. A mesh
         // carries at most ONE rig (Ogre::Mesh holds one SkeletonDef); `rigId` is
         // the SkeletonDesc::id that was bound, empty until one is.
+        /// Does the uploaded vertex declaration carry VES_TANGENT? Computed
+        /// once, when the mesh is built, because the alternative — deriving it
+        /// per texture bind by walking every node's VAO — cost 2.1 s of boot
+        /// (MATERIAL_GAPS_SPEC I-6, caught by app.watchdog_stall).
+        bool hasTangents = true;
         bool hasSkinData = false;
         unsigned maxBlendIndex = 0;
         std::string rigId;
@@ -2175,6 +2180,8 @@ private:
     /// Registers a texture record: assigns the next id and indexes it by path.
     /// The ONLY way a TextureRec enters mTextures, so the index cannot drift.
     TextureId trackTexture(const TextureRec &rec);
+    /// Does this material bind a normal map in any slot (I-6's cheap half)?
+    static bool materialUsesNormalMap(const MaterialRec &rec);
     /// Our slot enum -> Ogre's PBSM_* unit.
     static Ogre::PbsTextureTypes pbsSlotOf(PbrTextureSlot slot);
     std::set<std::string> mTextureDirs;
