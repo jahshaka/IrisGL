@@ -485,8 +485,22 @@ namespace chain {
 /// view owns and die with chain::destroy.
 struct ChainHandles {
     /// Every pass that must be confined to the INNER rectangle: the scene
-    /// passes and the quad that paints the inner background.
+    /// passes and the quad that paints the inner background. These take the
+    /// rectangle as VIEWPORT and scissor both — a scene pass projects into its
+    /// viewport, so the viewport IS the shot.
     std::vector<Ogre::CompositorPassDef *> insetPasses;
+    /// Every full-resolution POST quad of the letterboxed chain (SSAO apply,
+    /// distortion compose, the SSR history copy, tonemap/composite, the three
+    /// SMAA quads, every look). These take the rectangle as SCISSOR ONLY: the
+    /// viewport stays the whole target so the quad's 0..1 UVs still map the
+    /// source texture 1:1 onto the destination — an inset viewport would
+    /// squeeze the full image into the rectangle — while the scissor rejects
+    /// every fragment in the bars before it is shaded. Each pass also CLEARS
+    /// its target (a Vulkan clear is full-attachment, whatever the scissor),
+    /// so the bars of every intermediate and of the window are pure black
+    /// at no fill cost. The Unreal model: post processing runs on the shot,
+    /// never on the bars (riders lane R2, owner decision 2026-09-09).
+    std::vector<Ogre::CompositorPassDef *> scissorPasses;
     /// The clear that fills the tiny background swatch the inner-rect quad
     /// copies. Its colour is the view's background, pushed live.
     Ogre::CompositorPassClearDef *letterboxSwatch = nullptr;

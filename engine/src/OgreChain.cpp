@@ -496,6 +496,23 @@ namespace {
 /// which passes take it.
 void inset(ChainHandles &h, Ogre::CompositorPassDef *p) { h.insetPasses.push_back(p); }
 
+/// Confines a full-resolution POST quad to the letterbox's inner rectangle by
+/// SCISSOR alone (ChainHandles::scissorPasses has the argument), and makes the
+/// quad CLEAR its target to opaque black first so the bars of that target —
+/// which the scissor now leaves unwritten — are defined, and black. A Vulkan
+/// load-op clear covers the whole attachment regardless of the scissor
+/// (OgreVulkanRenderPassDescriptor.cpp: renderArea is the full target), so
+/// this costs nothing per pixel. Quads that already clear to their own value
+/// (the SMAA edge and weight passes clear to transparent) keep it: `clear` is
+/// false for them and only the scissor is recorded.
+void scissor(ChainHandles &h, Ogre::CompositorPassQuadDef *q, bool clear = true) {
+    if (clear) {
+        q->mLoadActionColour[0] = Ogre::LoadAction::Clear;
+        q->mClearColour[0] = kLetterboxBars;
+    }
+    h.scissorPasses.push_back(q);
+}
+
 /// The letterbox prologue on `target` (CAMERAS_SPEC §7.4): one quad pass that
 /// CLEARS the whole target to the bar colour — a Vulkan clear ignores the
 /// viewport and covers the whole attachment, which for once is exactly what is
@@ -1028,7 +1045,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // LETTERBOX (§7.4) goes on the SCENE target, not on the window: the
         // bars have to be inside the image the post chain then tonemaps and
         // composites, or the composite quad would stretch a letterboxed image
-        // back out over them.
+        // back out over them. And the post chain itself runs on the INNER
+        // RECTANGLE ONLY — every full-resolution quad below is `scissor`ed to
+        // it (ChainHandles::scissorPasses): bloom cannot glow into the bars,
+        // no look grades them, and no fill is spent on them. The bars are
+        // black by construction at every stage, which is what a letterbox is.
         if (desc.letterbox) addLetterboxPrologue(n, desc, sceneTarget, handlesOut);
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
         t->setNumPasses(1);
@@ -1191,6 +1212,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->addQuadTextureSource(0, sceneResult);
             q->addQuadTextureSource(1, kDistortionRt);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            if (desc.letterbox) scissor(handlesOut, q);
         }
         sceneResult = kDistorted;
     }
@@ -1207,6 +1229,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         auto *q = addQuad(n, kSsrPrev, "Ogre/Copy/4xFP32", "Jahshaka SSR history");
         q->addQuadTextureSource(0, sceneResult);
         q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        if (desc.letterbox) scissor(handlesOut, q);
     }
 
     // SSAO: half-res depth downsample -> AO march -> separable blur (which is
@@ -1245,6 +1268,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->addQuadTextureSource(0, kAoBlurV);
             q->addQuadTextureSource(1, sceneResult);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            // (The half-res AO helpers above are NOT scissored: their bar
+            // pixels feed the blur kernels of the inner rect's border rows,
+            // and a relative scissor on a reduced target truncates by a row.)
+            if (desc.letterbox) scissor(handlesOut, q);
         }
         sceneResult = kAoApplied;
     }
@@ -1327,13 +1354,19 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // (or, with looks and no SMAA, straight into the looks stage's input).
     const char *ldrTarget = desc.smaaPreset >= 0 ? kLdr : aaTarget;
     {
+        Ogre::CompositorPassQuadDef *q = nullptr;
         if (desc.hdr) {
-            addTonemapQuad(n, ldrTarget, sceneResult, kLum, kBlur0);
+            q = addTonemapQuad(n, ldrTarget, sceneResult, kLum, kBlur0);
         } else {
-            auto *q = addQuad(n, ldrTarget, "Ogre/Copy/4xFP32", "Jahshaka composite");
+            q = addQuad(n, ldrTarget, "Ogre/Copy/4xFP32", "Jahshaka composite");
             q->addQuadTextureSource(0, sceneResult);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
+        // The bloom composite lives in this quad (FinalToneMapping samples
+        // kBlur0), so this is also what keeps a bright shot from glowing into
+        // the bars. (The luminance and bloom ladders are not scissored: a
+        // relative scissor on a 1x1 luminance target truncates to no pixels.)
+        if (desc.letterbox) scissor(handlesOut, q);
     }
 
     // SMAA: edge detection, blending weights, neighbourhood blend.
@@ -1360,6 +1393,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->setAllLoadActions(Ogre::LoadAction::Clear);
             q->setAllClearColours(Ogre::ColourValue(0, 0, 0, 0));
             q->mProfilingId = "Jahshaka SMAA edges";
+            if (desc.letterbox) scissor(handlesOut, q, /*clear*/ false);   // keeps its own clear
         }
         {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSmaaBlend);
@@ -1383,6 +1417,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->mLoadActionDepth = Ogre::LoadAction::Load;
             q->mLoadActionStencil = Ogre::LoadAction::Load;
             q->mProfilingId = "Jahshaka SMAA weights";
+            if (desc.letterbox) scissor(handlesOut, q, /*clear*/ false);   // keeps its own clear
             auto *off = static_cast<Ogre::CompositorPassStencilDef *>(t->addPass(Ogre::PASS_STENCIL));
             off->mStencilParams.enabled = false;
             off->mProfilingId = "Jahshaka SMAA stencil off";
@@ -1392,6 +1427,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->addQuadTextureSource(0, kLdr);
             q->addQuadTextureSource(1, kSmaaBlend);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            if (desc.letterbox) scissor(handlesOut, q);
         }
     }
 
@@ -1419,6 +1455,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             auto *q = addQuad(n, dst, lookMaterial(desc.looks[i].kind), "Jahshaka look");
             q->addQuadTextureSource(0, src);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            // A look grades the SHOT. The owner's report was the looks stage
+            // grading the bars (vignette rings, grain and scratches over
+            // black), which is exactly what the scissor ends.
+            if (desc.letterbox) scissor(handlesOut, q);
         }
     }
 

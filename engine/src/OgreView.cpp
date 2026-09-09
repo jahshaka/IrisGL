@@ -796,7 +796,7 @@ void OgreView::applyLensShift(Ogre::Camera *camera, const CameraDesc &c, float a
 // on every resize and is written straight onto the pass definitions — which
 // Ogre re-reads on every execute, so this rebuilds nothing.
 void OgreView::applyLetterbox() {
-    if (mChainHandles.insetPasses.empty()) return;
+    if (mChainHandles.insetPasses.empty() && mChainHandles.scissorPasses.empty()) return;
     JAH_TRY {
         const unsigned w = width(), h = height();
         const float targetAspect = h ? float(w) / float(h) : 1.0f;
@@ -806,6 +806,14 @@ void OgreView::applyLetterbox() {
             auto &vp = p->mVpRect[0];
             vp.mVpLeft = inner[0]; vp.mVpTop = inner[1];
             vp.mVpWidth = inner[2]; vp.mVpHeight = inner[3];
+            vp.mVpScissorLeft = inner[0]; vp.mVpScissorTop = inner[1];
+            vp.mVpScissorWidth = inner[2]; vp.mVpScissorHeight = inner[3];
+        }
+        // The post quads: scissor only, viewport untouched (ChainHandles::
+        // scissorPasses says why). The rectangle is relative, so it is the
+        // same numbers whatever the quad's target resolution.
+        for (Ogre::CompositorPassDef *p : mChainHandles.scissorPasses) {
+            auto &vp = p->mVpRect[0];
             vp.mVpScissorLeft = inner[0]; vp.mVpScissorTop = inner[1];
             vp.mVpScissorWidth = inner[2]; vp.mVpScissorHeight = inner[3];
         }
