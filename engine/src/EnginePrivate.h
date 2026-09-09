@@ -100,6 +100,7 @@
 #include <exception>
 #include <limits>
 #include <map>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -693,6 +694,49 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
 /// re-seeded history starts exactly where a deterministic grade would land.
 float exposureSeed(float exposure);
+
+/// THE OPT-IN PASS PROFILER (riders lane R4, EngineConfig::profile). One per
+/// View, owned by it, registered through OgreView::addWorkspaceListener so it
+/// rides every workspace rebuild. Measures the CPU time between a pass's
+/// pre- and post-execute callbacks — what the render thread spent recording
+/// that pass, including any wait it did inside it (a texture wait, a PSO
+/// compile it blocked on) — keyed by the pass definition's profiling id, and
+/// logs one summary line per kFlushFrames frames to the engine log:
+///   [profile] view 'main' 120 frames, 4.83 ms/frame CPU in passes | Jahshaka
+///   opaque 2.10 (max 9.4) | Jahshaka overlays 0.61 (max 1.2) | ...
+/// sorted by total, top entries only. NOT GPU time — this pin has no timestamp
+/// query surface; that is upstream work and is recorded as such. When the
+/// profiler is off no instance exists, so the cost is exactly zero.
+class PassProfiler final : public Ogre::CompositorWorkspaceListener {
+public:
+    explicit PassProfiler(std::string viewName) : mView(std::move(viewName)) {}
+    void passPreExecute(Ogre::CompositorPass *) override {
+        mStart = std::chrono::steady_clock::now();
+    }
+    void passPosExecute(Ogre::CompositorPass *pass) override {
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - mStart).count();
+        const Ogre::CompositorPassDef *def = pass ? pass->getDefinition() : nullptr;
+        std::string key = def && !def->mProfilingId.empty() ? def->mProfilingId
+                                                             : std::string("(unnamed pass)");
+        Row &r = mRows[key];
+        r.ns += (unsigned long long)ns;
+        r.maxNs = std::max(r.maxNs, (unsigned long long)ns);
+        ++r.calls;
+    }
+    void workspacePosUpdate(Ogre::CompositorWorkspace *) override {
+        if (++mFrames >= kFlushFrames) flush();
+    }
+    /// Log whatever is accumulated (called on removal so a short run reports).
+    void flush();
+private:
+    static constexpr unsigned kFlushFrames = 120;
+    struct Row { unsigned long long ns = 0, maxNs = 0; unsigned calls = 0; };
+    std::string mView;
+    std::map<std::string, Row> mRows;
+    unsigned mFrames = 0;
+    std::chrono::steady_clock::time_point mStart{};
+};
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -2606,6 +2650,8 @@ public:
     /// The view does NOT own them: register at setup, unregister before the
     /// listener dies. Registering twice is a no-op.
     void addWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
+    /// Create/register (on) or flush+remove (off) this view's PassProfiler.
+    void setProfiling(bool on);
     void removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
     /// Counts completed workspace attachments. Neutral introspection (no Ogre
     /// type crosses the boundary) that lets hosts and tests see that a call was
@@ -2832,6 +2878,8 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
+    /// The opt-in pass profiler (chain::PassProfiler); null unless profiling.
+    std::unique_ptr<chain::PassProfiler> mProfiler;
     unsigned                   mWorkspaceGeneration = 0;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
@@ -3025,6 +3073,10 @@ public:
     bool renderStats(RenderStats &out) const override;
     bool objectCounts(ObjectCounts &out) const override;
     bool threading(EngineThreading &out) const override;
+    bool memoryStats(MemoryStats &out) const override;
+    bool reclaimMemory(MemoryStats *before, MemoryStats *after) override;
+    void setProfiling(bool on) override;
+    bool profiling() const override { return mProfiling; }
     bool saveShaderCache() override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
@@ -3227,6 +3279,9 @@ private:
     std::unique_ptr<Ogre::VertexFormatWarmUpStorage> mWarmUpSet;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
     std::vector<std::unique_ptr<OgreView>>  mViews;
+    /// EngineConfig::profile / setProfiling: views created while true get a
+    /// PassProfiler at birth.
+    bool mProfiling = false;
 };
 
 }  // namespace detail

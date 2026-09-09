@@ -5,6 +5,9 @@
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
 
+#include <set>
+#include <unistd.h>
+
 #include <OgreFrameStats.h>
 // The frame loop's clock. `Root::getTimer()` returns `Ogre::Timer *` and
 // OgreRoot.h forward-declares it only — the inlined FrameStats sample
@@ -49,6 +52,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
     mHeadless = cfg.headless;
+    mProfiling = cfg.profile;
     // The shader cache's fingerprint hashes the staged Hlms tree, so it is
     // configured as soon as the media directory is known — before Root, long
     // before anything could compile. The LOAD waits for ensureHlms().
@@ -396,6 +400,7 @@ View *OgreEngine::createView(const std::string &name,
         ensureHlms();
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
                                          background, mLastError));
+        if (mProfiling) mViews.back()->setProfiling(true);   // EngineConfig::profile / setProfiling
         OgreView *view = mViews.back().get();
         view->mRequestedSamples = mDefaultSamples;
 #ifdef __APPLE__
@@ -464,6 +469,7 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
         Ogre::TextureGpu *rtt = OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height);
         mViews.emplace_back(new OgreView(mRoot, nullptr, rtt, name, width, height,
                                          background, mLastError));
+        if (mProfiling) mViews.back()->setProfiling(true);   // EngineConfig::profile / setProfiling
         return mViews.back().get();
     } JAH_CATCH(mLastError, nullptr);
 }
@@ -1187,6 +1193,95 @@ bool OgreEngine::renderStats(RenderStats &out) const {
     // reads and one flag flip — so "false, and `out` is default" is the whole
     // contract.
     catch (...) { out = RenderStats(); return false; }
+}
+
+bool OgreEngine::memoryStats(MemoryStats &out) const {
+    out = MemoryStats();
+    if (!mRoot) return false;
+    JAH_TRY {
+        if (Ogre::RenderSystem *rs = mRoot->getRenderSystem()) {
+            if (Ogre::VaoManager *vao = rs->getVaoManager()) {
+                Ogre::VaoManager::MemoryStatsEntryVec entries;
+                size_t capacity = 0, freeBytes = 0;
+                bool includesTextures = false;
+                vao->getMemoryStats(entries, capacity, freeBytes, nullptr, includesTextures);
+                out.gpuPoolCapacityBytes = capacity;
+                out.gpuPoolFreeBytes = freeBytes;
+                out.gpuPoolsIncludeTextures = includesTextures;
+                // One entry per BLOCK; pools are the distinct (type, index) pairs.
+                std::set<std::pair<Ogre::uint32, Ogre::uint32>> pools;
+                for (const auto &e : entries) pools.insert({ e.poolType, e.poolIdx });
+                out.gpuPools = unsigned(pools.size());
+            }
+        }
+        auto walk = [&](Ogre::SceneManager *sm) {
+            if (!sm) return;
+            ++out.sceneManagers;
+            for (int i = 0; i < Ogre::NUM_SCENE_MEMORY_MANAGER_TYPES; ++i) {
+                const auto type = Ogre::SceneMemoryMgrTypes(i);
+                Ogre::NodeMemoryManager &nmm = sm->_getNodeMemoryManager(type);
+                const size_t depths = nmm.getNumDepths();
+                out.simdNodeDepths += unsigned(depths);
+                // The node pools' USED slots, per hierarchy depth: getFirstNode
+                // answers the count (the document's nodes are DETACHED roots in
+                // the staging manager — createSceneNode, no parent — so a walk
+                // from the Ogre root would miss every one of them).
+                for (size_t depth = 0; depth < depths; ++depth) {
+                    Ogre::Transform first;
+                    out.simdNodes += unsigned(nmm.getFirstNode(first, depth));
+                }
+                out.simdObjects += unsigned(sm->_getEntityMemoryManager(type).getTotalNumObjects());
+            }
+            out.simdObjects += unsigned(sm->_getLightMemoryManager().getTotalNumObjects());
+        };
+        for (const auto &s : mScenes) if (s) walk(s->sceneManager());
+        walk(mDocumentScene);
+#ifdef __linux__
+        if (FILE *f = std::fopen("/proc/self/statm", "r")) {
+            unsigned long size = 0, resident = 0;
+            if (std::fscanf(f, "%lu %lu", &size, &resident) == 2)
+                out.residentBytes = (unsigned long long)resident * (unsigned long long)sysconf(_SC_PAGESIZE);
+            std::fclose(f);
+        }
+#endif
+        return true;
+    }
+    // Not JAH_CATCH: const, like renderStats — nothing here can fail in a way
+    // worth a sink entry.
+    catch (...) { out = MemoryStats(); return false; }
+}
+
+bool OgreEngine::reclaimMemory(MemoryStats *before, MemoryStats *after) {
+    if (!mRoot) return false;
+    MemoryStats b;
+    memoryStats(b);
+    if (before) *before = b;
+    JAH_TRY {
+        for (const auto &s : mScenes)
+            if (s && s->sceneManager()) s->sceneManager()->shrinkToFitMemoryPools();
+        if (mDocumentScene) mDocumentScene->shrinkToFitMemoryPools();
+        // (No VaoManager call: cleanupEmptyPools() throws ERR_NOT_IMPLEMENTED at
+        // this pin, and the Vulkan VaoManager already returns an emptied pool
+        // to the driver from its own _update — MemoryStats explains.)
+        MemoryStats a;
+        memoryStats(a);
+        if (after) *after = a;
+        char buf[256];
+        std::snprintf(buf, sizeof buf,
+                      "Jahshaka: reclaimMemory — %u scene managers shrunk to fit; GPU pools "
+                      "%.1f MB (%.1f MB free) -> %.1f MB (%.1f MB free); RSS %.1f MB -> %.1f MB",
+                      a.sceneManagers, b.gpuPoolCapacityBytes / 1048576.0,
+                      b.gpuPoolFreeBytes / 1048576.0, a.gpuPoolCapacityBytes / 1048576.0,
+                      a.gpuPoolFreeBytes / 1048576.0, b.residentBytes / 1048576.0,
+                      a.residentBytes / 1048576.0);
+        Ogre::LogManager::getSingleton().logMessage(buf);
+        return true;
+    } JAH_CATCH(mLastError, false);
+}
+
+void OgreEngine::setProfiling(bool on) {
+    mProfiling = on;
+    for (const auto &v : mViews) if (v) v->setProfiling(on);
 }
 
 bool OgreEngine::objectCounts(ObjectCounts &out) const {

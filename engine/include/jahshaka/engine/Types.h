@@ -1654,6 +1654,15 @@ struct EngineConfig {
     /// validation error, an ABI complaint) actually happen. Setting it through
     /// Engine::setLogSink afterwards works too and misses exactly that window.
     EngineLogSink logSink;
+    /// OPT-IN PASS PROFILER (riders lane R4; `--profile` on the Studio command
+    /// line, Engine::setProfiling at runtime). Off by default and free when
+    /// off: no listener is registered on any workspace. On, every view logs
+    /// one summary line per ~120 frames to the engine log with the CPU
+    /// submission time of every compositor pass (avg / max per frame, by the
+    /// pass's profiling id) — the time the render thread spent recording that
+    /// pass, including any wait it did inside it. NOT GPU time: this pin has
+    /// no timestamp-query surface, so a GPU-side profile is upstream work.
+    bool        profile = false;
     /// Initial MSAA sample count for ON-SCREEN views (1 = off; 2/4/8 typical).
     /// Offscreen views (thumbnails, previews, tests) always start at 1 so their
     /// pixel readbacks stay exact — raise per view with View::setSampleCount.
@@ -2152,6 +2161,34 @@ struct ShadowStatus {
 /// one datablock map per Hlms type for the whole Root, so it counts across
 /// scenes by construction (and includes the backend's own defaults, which is
 /// why only its DELTA means anything).
+/// What the renderer's MEMORY POOLS hold (Engine::memoryStats, riders lane R4).
+/// Two halves with two different owners:
+///   * the GPU half is the VaoManager's buffer pools (every vertex/index/const
+///     buffer and, on Vulkan, every texture — `gpuPoolsIncludeTextures`),
+///     straight from VaoManager::getMemoryStats. `gpuPoolFreeBytes` is what is
+///     ALLOCATED FROM THE DRIVER and not handed out; a pool that becomes
+///     entirely free is returned to the driver by the Vulkan VaoManager on
+///     its own, a few frames later (deallocateEmptyVbos from _update — this
+///     pin's cleanupEmptyPools() THROWS ERR_NOT_IMPLEMENTED and is never
+///     called by this engine). Watch capacity fall after a project closes.
+///   * the SIMD half is the scene managers' SoA node/object pools, which grow
+///     to the high-water mark of nodes ever alive and only shrink on
+///     Engine::reclaimMemory (SceneManager::shrinkToFitMemoryPools). The pin
+///     exposes no byte count for them (the per-depth ArrayMemoryManagers are
+///     private), so the rows are the counts that drive them plus the
+///     process's resident set, which is where a shrink shows.
+struct MemoryStats {
+    unsigned long long gpuPoolCapacityBytes = 0;  ///< bytes the VaoManager holds from the driver
+    unsigned long long gpuPoolFreeBytes = 0;      ///< of which unused (fragmentation + empty pools)
+    unsigned           gpuPools = 0;              ///< pool count
+    bool               gpuPoolsIncludeTextures = false;
+    unsigned           sceneManagers = 0;         ///< walked: every Scene + the document staging manager
+    unsigned           simdNodes = 0;             ///< live scene nodes (both roots walked), summed — what the node pools hold
+    unsigned           simdObjects = 0;           ///< live objects in the entity + light SoA pools, summed
+    unsigned           simdNodeDepths = 0;        ///< node-hierarchy depth pools, summed (one SoA pool each)
+    unsigned long long residentBytes = 0;         ///< the process RSS (Linux; 0 elsewhere)
+};
+
 struct ObjectCounts {
     unsigned views = 0;         ///< live View objects (on-screen + offscreen)
     unsigned enabledViews = 0;  ///< of those, the ones renderOneFrame draws
