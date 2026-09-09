@@ -508,7 +508,28 @@ void SceneMirror::syncHighlight()
         iris::MeshNode *meshNode = targets[i].first;
         const MeshId m = targets[i].second;
         HighlightShell &s = mHighlightShells[i];
-        if (!s.node) s.node = mTarget->createNode();
+        if (!s.node) {
+            s.node = mTarget->createNode();
+            // AT BIRTH, like every other helper in this file (the light wires
+            // at :706, the grid, the camera bodies): the selection shell is
+            // EDITOR FURNITURE, and without the flag itemVisibilityFlags gives
+            // it kVisibleBit at RQ 10 — i.e. it becomes scene geometry to the
+            // planar-reflection RTT (mask kVisibleBit, RQ 0..199) and to the
+            // PCC probe faces (visibility_mask 0x1, rq_last 200). The reflected
+            // pass inverts vertex winding, so the back-face-only inverted hull
+            // renders SOLID there: selecting the Mirror Room's panel flooded it
+            // gold through the planar RTT, and the sphere through its probe
+            // capture (owner report 2026-09-08).
+            //
+            // Marked here rather than after attachMesh because shells are
+            // POOLED and re-attached to different meshes — the same trap
+            // OgreParticles.cpp:200 records for the icons: one uncorrected
+            // frame is one polluted capture. The main chain sets no explicit
+            // visibility mask, so the user still sees the outline; the shadow
+            // node masks to kVisibleBit, so the shell stops casting — which is
+            // what an outline should do.
+            if (s.node) mTarget->setNodeHelper(s.node, true);
+        }
         if (!s.node) continue;
 
         // A SKINNED target needs a shell that follows the pose. The shell is a
@@ -1188,6 +1209,16 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
 // rides the wireNode so the light-wires toggle and node teardown govern it, but
 // instance positions are world-space (the set hangs off the engine's static
 // root). Engine-side only: document picking never sees it.
+//
+// IT IS AN OVERLAY, LIKE THE GIZMO (owner report 2026-09-08: "the light icons
+// are grey and blurred"). Two independent causes, one per line below:
+//   * BillboardLayer::Overlay draws the glyph in the on-top overlay pass, AFTER
+//     the post chain, instead of inside the opaque pass where the tonemapper
+//     turned a white icon into ~24% grey, bloom bled the scene into it and SMAA
+//     smeared its edges;
+//   * the icon texture asks for a MIP CHAIN: the shipped sun glyph is 640x640
+//     and covers about thirty screen pixels, so a single level meant sampling
+//     one texel in four hundred — sparkle, not detail.
 void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
 {
     if (!e.wireNode) return;
@@ -1205,7 +1236,8 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
         }
     }
     if (!e.hasIcon || e.iconSignature != path) {
-        if (!mTarget->createBillboardSet(e.wireNode, iconTextureFor(path), false, 1))
+        if (!mTarget->createBillboardSet(e.wireNode, iconTextureFor(path), false, 1,
+                                         jahshaka::engine::BillboardLayer::Overlay))
             return;
         e.hasIcon = true;
         e.iconSignature = path;
@@ -1265,7 +1297,11 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     uchar *bits = img.bits();
     const qsizetype n = img.width() * qsizetype(img.height());
     for (qsizetype i = 0; i < n; ++i) { bits[i * 4 + 0] = 255; bits[i * 4 + 1] = 255; bits[i * 4 + 2] = 255; }
-    TextureId id = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()), img.constBits(), true);
+    // MIPMAPPED (the second half of the 2026-09-08 icon fix): these images are
+    // always seen minified — a 640x640 glyph at ~30 pixels — and the base level
+    // alone aliases into a sparkling mess. The chain is built once, here.
+    TextureId id = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()),
+                                          img.constBits(), true, /*mipmaps*/ true);
     mIconTextures.insert(path, id);   // cache failures (0) too: don't retry every frame
     return id;
 }

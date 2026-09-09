@@ -896,7 +896,42 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
     } JAH_CATCH(mError, 0);
 }
 
-TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb) {
+namespace {
+/// One box-filter step: halve `w` x `h` RGBA8 pixels (odd dimensions clamp, the
+/// standard "round down but never to zero" rule), straight (non-premultiplied)
+/// alpha. Deliberately CPU-side and deliberately simple:
+///   * it runs once per icon at load, not per frame;
+///   * GPU auto-mipmapping needs TextureFlags::AllowAutomipmaps plus a
+///     _autogenerateMipmaps() call inside a barrier solver, which is a whole
+///     new lifecycle on a ManualTexture whose upload path is already manual;
+///   * and a box filter is exactly right for the images that ask for it —
+///     white glyphs whose RGB is constant and whose only signal is alpha.
+void downsampleRgba(const unsigned char *src, unsigned w, unsigned h,
+                    std::vector<unsigned char> &dst, unsigned &outW, unsigned &outH) {
+    outW = std::max(1u, w / 2u);
+    outH = std::max(1u, h / 2u);
+    dst.resize(size_t(outW) * outH * 4u);
+    for (unsigned y = 0; y < outH; ++y) {
+        const unsigned y0 = std::min(y * 2u, h - 1u);
+        const unsigned y1 = std::min(y * 2u + 1u, h - 1u);
+        for (unsigned x = 0; x < outW; ++x) {
+            const unsigned x0 = std::min(x * 2u, w - 1u);
+            const unsigned x1 = std::min(x * 2u + 1u, w - 1u);
+            for (unsigned c = 0; c < 4u; ++c) {
+                const unsigned sum =
+                    unsigned(src[(size_t(y0) * w + x0) * 4u + c]) +
+                    unsigned(src[(size_t(y0) * w + x1) * 4u + c]) +
+                    unsigned(src[(size_t(y1) * w + x0) * 4u + c]) +
+                    unsigned(src[(size_t(y1) * w + x1) * 4u + c]);
+                dst[(size_t(y) * outW + x) * 4u + c] = static_cast<unsigned char>((sum + 2u) / 4u);
+            }
+        }
+    }
+}
+}   // namespace
+
+TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *rgba, bool srgb,
+                                   bool mipmaps) {
     if (!w || !h || !rgba) { mError = "createTexture: empty image"; return 0; }
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
@@ -910,7 +945,9 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         Ogre::TextureGpu *tex = tm->createTexture(name, Ogre::GpuPageOutStrategy::Discard,
                                                   Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
         tex->setResolution(w, h);
-        tex->setNumMipmaps(1u);
+        const Ogre::uint8 numMips =
+            mipmaps ? Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h) : 1u;
+        tex->setNumMipmaps(std::max<Ogre::uint8>(1u, numMips));
         tex->setPixelFormat(srgb ? Ogre::PFG_RGBA8_UNORM_SRGB : Ogre::PFG_RGBA8_UNORM);
         // IMMEDIATE residency (_transitionTo), and NO explicit notifyDataIsReady:
         // for a ManualTexture _transitionTo(Resident) calls notifyDataIsReady
@@ -920,13 +957,32 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         // downloadTexture under GI, Image2::convertFromTexture — spins in
         // waitForData forever (found by the GI churn test hanging).
         tex->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
-        Ogre::StagingTexture *staging = tm->getStagingTexture(w, h, 1u, 1u, tex->getPixelFormat());
-        staging->startMapRegion();
-        Ogre::TextureBox box = staging->mapRegion(w, h, 1u, 1u, tex->getPixelFormat());
-        for (unsigned y = 0; y < h; ++y) std::memcpy(box.at(0, y, 0), rgba + size_t(y) * w * 4u, size_t(w) * 4u);
-        staging->stopMapRegion();
-        staging->upload(box, tex, 0, nullptr, nullptr, true);
-        tm->removeStagingTexture(staging);
+        // LEVEL BY LEVEL, each through its own staging texture (upload() takes
+        // the mip index; a staging texture is sized for one region). Level 0 is
+        // the caller's pixels; every level below is the box filter above, run
+        // on the level ABOVE it, so the chain costs one pass over ~1.33x the
+        // image and no re-reads of the source.
+        const unsigned levels = tex->getNumMipmaps();
+        std::vector<unsigned char> scratch, prev;
+        const unsigned char *levelData = rgba;
+        unsigned lw = w, lh = h;
+        for (unsigned mip = 0; mip < levels; ++mip) {
+            Ogre::StagingTexture *staging =
+                tm->getStagingTexture(lw, lh, 1u, 1u, tex->getPixelFormat());
+            staging->startMapRegion();
+            Ogre::TextureBox box = staging->mapRegion(lw, lh, 1u, 1u, tex->getPixelFormat());
+            for (unsigned y = 0; y < lh; ++y)
+                std::memcpy(box.at(0, y, 0), levelData + size_t(y) * lw * 4u, size_t(lw) * 4u);
+            staging->stopMapRegion();
+            staging->upload(box, tex, static_cast<Ogre::uint8>(mip), nullptr, nullptr, true);
+            tm->removeStagingTexture(staging);
+            if (mip + 1u >= levels) break;
+            unsigned nw = 0, nh = 0;
+            downsampleRgba(levelData, lw, lh, scratch, nw, nh);
+            prev.swap(scratch);
+            levelData = prev.data();
+            lw = nw; lh = nh;
+        }
         TextureRec rec; rec.texture = tex; rec.path = "";
         return trackTexture(rec);
     } JAH_CATCH(mError, 0);
@@ -978,6 +1034,12 @@ bool OgreScene::destroyTexture(TextureId id) {
         mTextures.erase(it);
         return true;
     } JAH_CATCH(mError, false);
+}
+
+unsigned OgreScene::textureMipmaps(TextureId id) const {
+    auto it = mTextures.find(id);
+    if (it == mTextures.end() || !it->second.texture) return 0u;
+    return it->second.texture->getNumMipmaps();
 }
 
 Ogre::PbsTextureTypes OgreScene::pbsSlotOf(PbrTextureSlot slot) {

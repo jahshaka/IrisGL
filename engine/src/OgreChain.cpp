@@ -29,15 +29,30 @@
 // RENDER-QUEUE POLICY (§6):
 //   0            sky rectangle (OgreSky.cpp)
 //   10           normal items (Ogre's default), incl. depth-tested outlines
-//   15           PFX2 billboards
+//   15           PFX2 particles and scene-layer billboards
 //   [.. 199]     everything else opaque      <- the OPAQUE pass
 //   200          refractive items (phase 7)  <- the REFRACTIVE pass
 //   kOverlayRenderQueue (210)  on-top overlays: gizmos, wires, always-on-top
+//   211          helper overlay billboards: the light icons
+//   212          the helper queue's depth anchor (never drawn)
 //   [210 .. 254] the OVERLAY pass
 // Keeping the overlays in their own pass keeps a bright unlit gizmo out of the
 // SSAO normals G-buffer, out of the HDR luminance average and out of SMAA edge
 // detection. Ogre's RenderQueue constructor fixes the modes: [0,100) and
 // [200,225) are v2 FAST, so our v2 items can only live there.
+//
+// 211 IS THE 2026-09-08 ICON FIX and it needs no change in this file — the
+// overlay pass has always been [kOverlayRenderQueue, 255) and the opaque pass
+// has always stopped below it, so a billboard set moved to 211 lands in the
+// overlay pass by construction, and every pass that must NOT see helpers
+// already excludes it twice over (planar: rq_last 199 AND visibility_mask
+// kVisibleBit, OgrePlanar.cpp; probe faces: rq_last 200 AND visibility_mask
+// 0x1, JahshakaPcc.compositor; the PiP inset: rq_last kOverlayRenderQueue; the
+// shadow node: visibility_mask kVisibleBit). What DOES belong to this file is
+// the invariant: THE OVERLAY PASS'S RANGE MUST KEEP COVERING 211, and the
+// opaque/refractive/reflection ranges must keep stopping below it. The queue
+// itself, its PARTICLE_SYSTEM mode and the depth anchor the culler needs live
+// in EnginePrivate.h (kHelperOverlayRenderQueue) and OgreParticles.cpp.
 //
 // kIncludeOverlaysNote — THE mIncludeOverlays SWEEP (STATS_OVERLAY_SPEC §6.5).
 // Ogre's own overlay set (the engine-drawn stats readout and loading cover,

@@ -357,6 +357,21 @@ struct BillboardInstance {
     Colour colour = Colour(1.0f, 1.0f, 1.0f, 1.0f);   ///< multiplies the texture
 };
 
+/// WHICH LAYER a billboard set belongs to — scene content, or editor helper.
+///
+/// `Scene` is what a particle emitter is: geometry in the world, depth-tested
+/// against it, graded by every post effect the view runs (tonemap, bloom, SSAO,
+/// SMAA) exactly like the meshes around it.
+///
+/// `Overlay` is what a light ICON is: a helper the user must be able to READ.
+/// It draws in the same pass as the gizmo — after the whole post chain, with no
+/// depth test — so a white glyph stays white instead of being tonemapped to
+/// grey, bloomed into its neighbours and smeared by edge detection (the
+/// 2026-09-08 owner report: "the light icons are grey and blurred"). Pair it
+/// with Scene::setNodeHelper so the icon also stays out of reflections and
+/// probe captures.
+enum class BillboardLayer { Scene, Overlay };
+
 // ---- Particles (PARTICLES_FX2_SPEC.md): natively simulated particle systems ----
 // The host describes WHAT it wants; the engine owns every Ogre object behind it.
 // One authored node = one particle-system definition = one quota, one material,
