@@ -1,0 +1,159 @@
+Jahshaka local patch 0021 (upstream-reportable): anisotropic voxel cone tracing
+saturates its alpha against the cone's OWN starting surface, so the escape
+fraction that weights the ambient term (`light.w` in computeVctProbe,
+`light.xyz += ambient * light.w`) collapses at every anisotropic quality.
+
+Mechanism: the per-axis textures are front-to-back composited along their axis
+(AnisotropicMipVctStep1: a + b * (1 - a.a)), so a one-voxel-thick floor reads
+as alpha 1.0 along +/-Y at every coarser mip regardless of how little of the
+cell it fills. Correct for a ray crossing the cell; wrong for the diffuse cone
+that starts ON that floor and re-enters its own cell as the footprint grows.
+Measured (Jahshaka gi.ddgi_ambient, open floor, nothing above it, ambient only):
+isotropic keeps 93% of the ambient, anisotropic kept 4%.
+
+Fix: a second accumulator, `escapeAlpha`, that in the anisotropic loop takes the
+MIN of the three axis composites one mip finer than the colour samples (the
+axis textures are half-res, so lodLevel is already one mip coarser than the
+isotropic march at the same distance) and that the ambient escape weight reads
+instead of `alpha`. Colour/alpha accumulation (the bounce) is untouched; the
+isotropic path computes the identical expression, so isotropic pixels are
+byte-for-byte unchanged. In the cascaded path the next cascade's escapeAlpha
+starts from the previous cascade's colour alpha (signature unchanged) -- a small
+approximation only that path pays.
+
+Measured (open floor, % of the raw ambient): shipped anisotropic 4.3%; min3 at
+lodLevel 26.1%; min3 at lodLevel - 1 (this patch) 65.2%; the main texture's own
+isotropic mip alpha (exact, available when vct_enable_specular_sdf_quality) 94.6%
+-- REJECTED because it also restores the isotropic path's leak through one-voxel
+walls: sealed sample rooms went +46/+51 of 255 at Medium and clipped, where this
+patch moves them +7 (the isotropic march's own leak on those rooms is +14).
+
+MEDIA-ONLY (Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any): no Ogre rebuild, but
+every tree must run the patch loop -- Studio stages Hlms media from the source
+tree. Verified: `git apply --check` against the pristine pin, `--reverse --check`
+after applying. Rationale also in irisgl/docs/OGRE_BUILD.md, entry 21.
+
+diff --git a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+index 730be164a..a8a3f8f90 100644
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+@@ -47,6 +47,11 @@
+ 	{
+ 		float3 colour;
+ 		float alpha;
++		// Jahshaka patch 0021: the ESCAPE opacity -- how much of the cone made
++		// it out of the volume -- kept apart from `alpha` because under
++		// anisotropic tracing the two legitimately differ (see the loop).
++		// Identical to alpha on the isotropic path.
++		float escapeAlpha;
+ 		float lodLevel;
+ 		float3 posLS;
+ 	};
+@@ -90,6 +95,7 @@
+ 
+ 			float dist = vctInvResolution;
+ 			float alpha = startingAlpha;
++			float escapeAlpha = startingAlpha;	// Jahshaka patch 0021
+ 			float3 color = float3( 0.0, 0.0, 0.0 );
+ 
+ 			float diameter = max( vctInvResolution, 2.0 * tanHalfAngle * dist );
+@@ -180,6 +186,9 @@
+ 
+ 				color += sampleColour.xyz * a;     // Accumulate colour
+ 				alpha += a * sampleColour.w;       // Accumulate opacity
++				// Jahshaka patch 0021: same expression as alpha, so the isotropic
++				// path (which never enters the loop below) is unchanged.
++				escapeAlpha += ( 1.0f - escapeAlpha ) * sampleColour.w;
+ 				nextPosLS = posLS + dist * dirLS;  // Advance forward
+ 				// Calculate next LOD & next fwd step
+ 				diameter = max( vctInvResolution, 2.0 * tanHalfAngle * dist );
+@@ -227,6 +236,63 @@
+ 
+ 					color += sampleColour.xyz * a;     // Accumulate colour
+ 					alpha += a * sampleColour.w;       // Accumulate opacity
++
++					// Jahshaka patch 0021 (upstream-reportable): THE ESCAPE FRACTION
++					// UNDER ANISOTROPIC TRACING.
++					//
++					// Each axis texture is front-to-back COMPOSITED along its axis
++					// (AnisotropicMipVctStep1: a + b * (1 - a.a)), so a surface one
++					// voxel thick reads as alpha 1.0 along its own normal at EVERY
++					// coarser mip, no matter how little of the cell it fills. That
++					// is the right opacity for a ray crossing the cell -- and the
++					// wrong one for the cone that STARTS on that surface: as its
++					// footprint grows it re-enters the cell holding its own
++					// starting slab, the direction-weighted alpha above reaches
++					// 0.95 within a few steps, and the escape weight the ambient
++					// rides (`light.w`, computeVctProbe) collapses. Measured on an
++					// open floor with nothing above it: the isotropic march keeps
++					// 93% of the ambient, this one kept 4%.
++					//
++					// The colour/alpha accumulation is left exactly as it was (the
++					// bounce is not what is wrong); only the ESCAPE estimate
++					// changes: the MIN of the three axis composites, one mip FINER
++					// than the colour samples. The axis textures are half the main
++					// resolution (mip 0 of probeX is the 2x downsample of main mip
++					// 0), so lodLevel here is already one mip coarser than the
++					// isotropic march at the same distance, and that coarser
++					// footprint alone kept most of the loss (measured: min3 at
++					// lodLevel restores 26% of the ambient, at lodLevel - 1 65%).
++					// min3 is the cell's mean occupancy up to the compositing: a
++					// slab one layer thick in an N-layer cell composites to 1 along
++					// its normal and to ~1/N along the other two, a solid cell to 1
++					// on all three -- and because a + b - ab is never below the
++					// mean, it still UNDER-estimates the escape (65% of the raw
++					// ambient on an open floor against the isotropic path's 93%).
++					//
++					// THAT IS DELIBERATE. The exact route -- the main texture's own
++					// mip alpha at lodLevel, which VctLighting builds in anisotropic
++					// mode whenever vct_enable_specular_sdf_quality is set (volumes
++					// above 32^3) -- was measured too: 95% on the open floor, and
++					// the isotropic path's LEAK with it. Mean-occupancy alpha lets
++					// a cone escape through a one-voxel wall, so in a sealed room
++					// the "restored" ambient floods the floor: Jahshaka's Mirror
++					// Room and Showroom samples went +46 and +51 (of 255) at Medium
++					// and clipped, where this route moves them +7 -- less than the
++					// isotropic march's own +14 on the same rooms. Three alpha
++					// fetches per step, anisotropic diffuse cones only; measured
++					// frame cost under the noise floor at Medium and High.
++					float escapeLod = max( lodLevel - 1.0f, 0.0f );
++					float escapeX = OGRE_SampleLevel( probeX[probeIdx], probeSampler,
++													  sampleUVW + float3( isNegative.x, 0, 0 ),
++													  escapeLod ).w;
++					float escapeY = OGRE_SampleLevel( probeY[probeIdx], probeSampler,
++													  sampleUVW + float3( isNegative.y, 0, 0 ),
++													  escapeLod ).w;
++					float escapeZ = OGRE_SampleLevel( probeZ[probeIdx], probeSampler,
++													  sampleUVW + float3( isNegative.z, 0, 0 ),
++													  escapeLod ).w;
++					escapeAlpha += ( 1.0f - escapeAlpha ) * min( escapeX, min( escapeY, escapeZ ) );
++
+ 					dist += diameter * 0.5f;		   // Advance forward
+ 					nextPosLS = posLS + dist * dirLS;  // Advance forward
+ 					// Calculate next LOD & next fwd step
+@@ -242,6 +308,7 @@
+ 			VctResult result;
+ 			result.colour = color;
+ 			result.alpha = alpha;
++			result.escapeAlpha = escapeAlpha;	// Jahshaka patch 0021
+ 			result.lodLevel = lodLevel;
+ 			result.posLS = nextPosLS;
+ 
+@@ -389,13 +456,16 @@
+ 										 probeParams.fromPreviousProbeToNext[j - 1][0].w *
+ 										 ( 1.0 - result.alpha );
+ 						result.alpha += newRes.alpha;
++						result.escapeAlpha += newRes.escapeAlpha;	// Jahshaka patch 0021
+ 						result.lodLevel = newRes.lodLevel;
+ 						result.posLS = newRes.posLS;
+ 					}
+ 				@end
+ 
+ 				light.xyz += coneWeights[i] * result.colour;
+-				light.w += coneWeights[i] * ( 1.0f - min( 1.0f, result.alpha / 0.95f ) );
++				// Jahshaka patch 0021: the ambient escape weight reads the escape
++				// opacity (== result.alpha on the isotropic path).
++				light.w += coneWeights[i] * ( 1.0f - min( 1.0f, result.escapeAlpha / 0.95f ) );
+ 			}
+ 			@property( vct_ambient_hemisphere )
+ 				//Add ambient light after all cones have been weighted
