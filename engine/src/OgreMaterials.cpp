@@ -1,6 +1,7 @@
 // Materials (PBR, unlit, outline), textures and the mesh/material attachment
 // verbs that bind them onto a node.
 #include "EnginePrivate.h"
+#include <cmath>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -92,13 +93,44 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     db->setRoughness(std::max(p.roughness, 1e-4f));
     db->setEmissive(Ogre::Vector3(p.emissive.r, p.emissive.g, p.emissive.b));
     db->setNormalMapWeight(p.normalMapWeight);
-    // UV tiling: HlmsPbs has no UV transform for its base maps (only detail maps
-    // have offset/scale), so the scale rides in the datablock's user values and a
-    // custom_ps_uv_modifier_macros piece (JahFog_piece_vs_piece_ps.any, a library
-    // folder of HlmsPbs — no longer attached per datablock) multiplies every
-    // base-map lookup by material.userValue[0].xy. setUserValue only schedules a
-    // const-buffer update — scale edits never recompile shaders.
-    db->setUserValue(0, Ogre::Vector4(p.uvScale, p.uvScale, 1.0f, 1.0f));
+    // THE BASE-MAP UV TRANSFORM. HlmsPbs has no UV transform for its base maps
+    // (only detail layers get offset/scale), so it rides in the datablock's
+    // user values and our own custom_ps_uv_modifier_macros piece
+    // (JahFog_piece_vs_piece_ps.any, a library folder of HlmsPbs) applies it at
+    // every base-map lookup. setUserValue only schedules a const-buffer update
+    // — tiling, offset and rotation edits never recompile a shader.
+    //
+    // THE ROTATION IS PRE-RESOLVED HERE, NOT IN THE SHADER, and that is the
+    // whole trick. The authored form is
+    //     uv' = R * ((uv * s + o) - 0.5) + 0.5
+    // which the shader would have to evaluate with a centre round-trip that is
+    // NOT exact in floating point — so every material in every scene, almost
+    // all of them at rotation 0, would shift by an ulp and every existing pixel
+    // gate would be re-baselined for nothing. Distributing R instead gives
+    //     uv' = R * (uv * s) + b,    b = R * (o - 0.5) + 0.5
+    // with b computed once, on the CPU, in double. At the identity R is the
+    // 2x2 identity and b is exactly (0,0), so the shader computes
+    // uv*s + 0 — bit-for-bit what it computed before this existed.
+    //
+    //   userValue[0] = (sx, sy, bx, by)
+    //   userValue[1] = (m00, m01, m10, m11)  row-major R
+    {
+        const double kPi = 3.14159265358979323846;
+        const double th = double(p.uvRotation) * kPi / 180.0;
+        // Exact identity for the (overwhelmingly common) zero case: cos(0) is
+        // exactly 1 and sin(0) exactly 0 in IEEE, so no special case is needed
+        // for the matrix — but the bias needs the same care, and (0-0.5)+0.5
+        // IS exact in binary floating point, so it falls out too.
+        const double c = std::cos(th), sn = std::sin(th);
+        const double ox = double(p.uvOffset[0]) - 0.5;
+        const double oy = double(p.uvOffset[1]) - 0.5;
+        const double bx = c * ox - sn * oy + 0.5;
+        const double by = sn * ox + c * oy + 0.5;
+        db->setUserValue(0, Ogre::Vector4(p.uvScale[0], p.uvScale[1],
+                                          Ogre::Real(bx), Ogre::Real(by)));
+        db->setUserValue(1, Ogre::Vector4(Ogre::Real(c), Ogre::Real(-sn),
+                                          Ogre::Real(sn), Ogre::Real(c)));
+    }
     // Manage the macroblock ourselves: setTwoSidedLighting(changeMacroblock=true)
     // swaps culling to CULL_NONE when enabling but never restores it when
     // disabling, and applyPbr must be idempotent in both directions.

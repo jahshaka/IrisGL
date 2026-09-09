@@ -104,7 +104,27 @@ public:
                                           //   needs the viewport's refraction pass; see
                                           //   POST_CHAIN_SPEC.md phase 7)
 
-    void setTextureScale(float scale);
+    // --- UV transform for the five base maps (MATERIAL_UV_NODES_SPEC) ---
+    //
+    // ONE transform for the whole material, applied to every base-map lookup as
+    //     uv' = R(textureRotation) * ((uv * scale + offset) - 0.5) + 0.5
+    // rotating about the texture centre. The renderer carries it in the
+    // datablock's user values and OUR uv-modifier macro piece applies it, so
+    // editing any of these is a const-buffer update, never a shader rebuild.
+    //
+    // WHY PER-AXIS. `textureScale` was a single float for years, which cannot
+    // express the thing users reach for first — tiling a wall texture 4x
+    // horizontally and 1x vertically. setTextureScale(float) still exists and
+    // sets BOTH axes, which is what makes every file written before this
+    // (carrying only "textureScale") load as the uniform tiling it meant.
+    //
+    // DELIBERATELY NOT EXTENDED TO DETAIL MAPS: HlmsPbs gives detail layers
+    // their own offset/scale, and folding ours in on top would fight it
+    // (MATERIAL_GAPS_SPEC 3.3).
+    void setTextureScale(float scale);              ///< uniform: sets U and V
+    void setTextureScale(float u, float v);
+    void setTextureOffset(float u, float v);
+    void setTextureRotation(float degrees);
 
     // --- generated shader pieces (HLMS_ADOPTION P5) ---
     //
@@ -247,7 +267,21 @@ public:
     /// window. Ignored by every other alpha mode.
     float  refractionStrength;
 
+    /// Per-axis UV tiling. `textureScale` is the U axis and keeps its name so
+    /// every reader, serializer and script that predates the V axis still
+    /// means what it meant; `textureScaleV` defaults to matching it.
     float  textureScale;
+    float  textureScaleV;
+    float  textureOffsetU;
+    float  textureOffsetV;
+    /// Degrees, counter-clockwise, about the texture centre (0.5, 0.5).
+    /// WARNING, and it is documented rather than hidden: a rotation applied to
+    /// a NORMAL map rotates the lookup but NOT the tangent-space vector it
+    /// samples, on either the baked or the render-time route. The graph fold
+    /// refuses rotation when a Normal map is present for exactly this reason
+    /// (MATERIAL_UV_NODES_SPEC 3.3); a hand-set rotation on a normal-mapped
+    /// material is the user's own call.
+    float  textureRotation;
 
 
 private:

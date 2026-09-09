@@ -155,27 +155,42 @@
 
 @end
 
-// Jahshaka UV tiling — the document's PbrMaterial::textureScale. HlmsPbs has no
-// UV transform for its base maps (detail maps alone get offset/scale), so this
-// redefines Ogre's official UV-modifier macros (UvModifierMacros_piece_ps.any,
-// inserted at the top of every Pbs pixel shader) to multiply each base-map
-// lookup by the per-datablock user value that OgreScene::applyPbr writes with
-// setUserValue(0, ...). userValue lives in the material buffer: scale edits are
-// const-buffer updates, never shader rebuilds. Deliberately OUTSIDE the fog
-// property above: alpha-tested (Cutout) caster shaders sample the diffuse map
-// through UV_DIFFUSE with `material` in scope too, and must see the same tiling
-// as the colour pass or shadows detach from the silhouette. UV_SPECULAR covers
-// the metalness map (metallic workflow rides the specular texture slot). No AO
+// Jahshaka's base-map UV transform — the document's PbrMaterial texture
+// scale/offset/rotation. HlmsPbs has no UV transform for its base maps (detail
+// maps alone get offset/scale), so this redefines Ogre's official UV-modifier
+// macros (UvModifierMacros_piece_ps.any, inserted at the top of every Pbs pixel
+// shader) to transform each base-map lookup by the per-datablock user values
+// that OgreScene::applyPbr writes with setUserValue. userValue lives in the
+// material buffer: tiling, offset and rotation edits are const-buffer updates,
+// never shader rebuilds. Deliberately OUTSIDE the fog property above:
+// alpha-tested (Cutout) caster shaders sample the diffuse map through
+// UV_DIFFUSE with `material` in scope too, and must see the same transform as
+// the colour pass or shadows detach from the silhouette. UV_SPECULAR covers the
+// metalness map (metallic workflow rides the specular texture slot). No AO
 // macro exists — HlmsPbs has no AO input (see Types.h).
+//
+// THE FORM IS AFFINE ON PURPOSE:
+//     uv' = M * (uv * s) + b
+//   userValue[0].xy = s          the per-axis tiling
+//   userValue[0].zw = b          the bias, ALREADY including the rotation of
+//                                the offset about the texture centre
+//   userValue[1]    = M          row-major 2x2 rotation
+// The authored expression is R * ((uv*s + o) - 0.5) + 0.5; distributing R and
+// precomputing b = R*(o - 0.5) + 0.5 on the CPU is what keeps the untransformed
+// case EXACT — at the identity M is I and b is (0,0), so this reduces to
+// uv*s, bit-for-bit the expression that was here before rotation existed. A
+// shader-side centre round-trip would have shifted every material in every
+// scene by an ulp. See OgreMaterials.cpp applyPbr for the CPU half.
 @piece( custom_ps_uv_modifier_macros )
 	#undef UV_DIFFUSE
 	#undef UV_NORMAL
 	#undef UV_SPECULAR
 	#undef UV_ROUGHNESS
 	#undef UV_EMISSIVE
-	#define UV_DIFFUSE(x) ((x) * material.userValue[0].xy)
-	#define UV_NORMAL(x) ((x) * material.userValue[0].xy)
-	#define UV_SPECULAR(x) ((x) * material.userValue[0].xy)
-	#define UV_ROUGHNESS(x) ((x) * material.userValue[0].xy)
-	#define UV_EMISSIVE(x) ((x) * material.userValue[0].xy)
+	#define JAH_UV_XFORM(x) (float2( dot( material.userValue[1].xy, (x) * material.userValue[0].xy ), dot( material.userValue[1].zw, (x) * material.userValue[0].xy ) ) + material.userValue[0].zw)
+	#define UV_DIFFUSE(x) JAH_UV_XFORM(x)
+	#define UV_NORMAL(x) JAH_UV_XFORM(x)
+	#define UV_SPECULAR(x) JAH_UV_XFORM(x)
+	#define UV_ROUGHNESS(x) JAH_UV_XFORM(x)
+	#define UV_EMISSIVE(x) JAH_UV_XFORM(x)
 @end
