@@ -569,6 +569,28 @@ void OgreScene::detachItem(NodeId id, Node &n) {
     // Renderable". The reflector FLAG survives in mReflectors, so a node that is
     // given a new mesh re-arms in attachMesh.
     if (n.item) disarmReflector(id, n);
+    // AND BEFORE IT LEAVES ITS NODE: skeleton sharing (AVATAR_RIG_PERF_SPEC
+    // §3.3). `detachFromParent()` below ends in
+    // `mSkeletonInstance->setParentNode(nullptr)` (OgreMovableObject.cpp:155),
+    // and on a SLAVE that instance is the MASTER's — the whole character would
+    // render at the origin from the next frame. So a slave stops sharing first
+    // (getting its own instance, posed and re-parented), and a master hands
+    // every slave back its own instance before its Item goes anywhere. The
+    // pairing is NOT kept: the host re-arms sharing on its next sync, which is
+    // the same shape the mirror already has for every other engine-side fact.
+    // AND the riders on THIS node's bones (AVATAR_RIG_PERF_SPEC §4): a TagPoint
+    // points into a Bone of the Item's SkeletonInstance, which is about to be
+    // destroyed. They land under the scene root at the pose they last rendered
+    // with; the host re-arms them on its next sync, exactly as it re-arms a
+    // share.
+    if (n.item && !n.boneRiders.empty()) releaseBoneRiders(id, n);
+    if (n.item && (n.shareSource || !n.shareFollowers.empty())) {
+        releaseShareFollowers(id, n);
+        if (n.shareSource) {
+            auto sit = mNodes.find(n.shareSource);
+            unshareFollower(id, n, sit == mNodes.end() ? nullptr : &sit->second);
+        }
+    }
     // ANY Item, not just one with a mesh reference. It used to be
     // `n.item && n.meshRef`, so an Item whose bookkeeping had been lost — a
     // throw between createItem and the meshRef assignment is enough — was
@@ -645,6 +667,16 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // it (detachItem does NOT: an Item swap keeps them, so a re-attached
     // character still drags its silhouette along).
     dropSkeletonFollowers(id, n);
+    // ...and the SHARING pairings, which unlike the pose-following ones are
+    // live Ogre state: a master's node dying under its slaves would leave them
+    // reading a recycled SoA slot through Bone::_setNodeParent's raw pointer.
+    // (detachItem above has usually done this already; a node with no Item at
+    // all still has to have its bookkeeping dropped.)
+    dropShareFollowers(id, n);
+    // The node's own tag, and anything riding its bones (detachItem above has
+    // usually done the second half; a node with no Item never had one).
+    releaseBoneTag(id, n, 0);
+    releaseBoneRiders(id, n);
     if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.

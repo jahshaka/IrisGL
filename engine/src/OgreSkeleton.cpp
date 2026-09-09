@@ -136,13 +136,35 @@ Ogre::v1::SkeletonPtr OgreScene::buildV1Skeleton(const std::string &resName,
 }
 
 // ---------------------------------------------------------------------------
-bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
+bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig,
+                              const unsigned short *blendToRig, size_t blendToRigCount) {
+    // The map we are being asked to write. An absent map is the IDENTITY over
+    // the whole rig — today's behaviour, byte for byte.
+    std::vector<Ogre::uint16> wanted;
+    if (blendToRig && blendToRigCount) {
+        wanted.assign(blendToRig, blendToRig + blendToRigCount);
+    } else {
+        wanted.reserve(rig.bones.size());
+        for (size_t i = 0; i < rig.bones.size(); ++i) wanted.push_back(Ogre::uint16(i));
+    }
+
     if (!meshRec.rigId.empty()) {
         // A mesh holds exactly one SkeletonDef. Re-binding the same rig is a
         // no-op; a different one would silently re-target every weight.
-        if (meshRec.rigId == rig.id) return true;
-        mError = "attachSkinnedMesh: the mesh is already bound to a different rig";
-        return false;
+        if (meshRec.rigId != rig.id) {
+            mError = "attachSkinnedMesh: the mesh is already bound to a different rig";
+            return false;
+        }
+        // ...and exactly one blend-index map, because the map is a SubMesh
+        // member. Two nodes on one mesh asset therefore have to agree about it:
+        // rewriting it here would re-target the OTHER node's weights on its next
+        // draw, with nothing anywhere saying so.
+        if (meshRec.blendToRig != wanted) {
+            mError = "attachSkinnedMesh: the mesh is already bound to this rig with a "
+                     "different blend-index map";
+            return false;
+        }
+        return true;
     }
 
     const std::string resName = rigResourceName(rig.id);
@@ -172,17 +194,24 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
         return false;
     }
 
-    // The renderable's blend index -> bone index map. IDENTITY: our document's
-    // blend indices already name bones by rig index, and HlmsPbs streams one 3x4
+    // The renderable's blend index -> bone index map. HlmsPbs streams one 3x4
     // matrix per entry of this map per draw (OgreHlmsPbs.cpp:3558-3566), in map
-    // order. `_buildBoneIndexMap` would compact it to the bones actually used,
-    // but that needs mBoneAssignments, which needs a full vertex-buffer readback
-    // and rewrite (SubMesh2.cpp:243-245) — we already know the answer.
+    // order — so the map is both the TRANSLATION of the mesh's blend indices and
+    // the per-pass bone COST of this renderable.
+    //
+    // Identity when the caller passed no map: our document's blend indices then
+    // already name bones by rig index (a single-piece character, and every
+    // caller before the union rig). A piece of a MULTI-PIECE character passes
+    // its own map instead: the union rig is the character's, the piece's blend
+    // indices stay compact and piece-local, and this is where the two meet.
+    // Ogre's own `_buildBoneIndexMap` would compact the map for us, but it needs
+    // mBoneAssignments — a full vertex-buffer readback and rewrite
+    // (SubMesh2.cpp:243-245) — and the caller already knows the answer.
     Ogre::SubMesh *sub = meshRec.mesh->getSubMesh(0);
     sub->mBlendIndexToBoneIndexMap.clear();
-    sub->mBlendIndexToBoneIndexMap.reserve(rig.bones.size());
-    for (size_t i = 0; i < rig.bones.size(); ++i)
-        sub->mBlendIndexToBoneIndexMap.push_back(static_cast<unsigned short>(i));
+    sub->mBlendIndexToBoneIndexMap.reserve(wanted.size());
+    for (Ogre::uint16 b : wanted) sub->mBlendIndexToBoneIndexMap.push_back(b);
+    meshRec.blendToRig = wanted;
 
     meshRec.rigId = rig.id;
     RigRec &rec = mRigs[rig.id];
@@ -199,7 +228,8 @@ bool OgreScene::bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig) {
 
 // ---------------------------------------------------------------------------
 bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
-                                  const SkeletonDesc &rig) {
+                                  const SkeletonDesc &rig, const unsigned short *blendToRig,
+                                  size_t blendToRigCount) {
     auto nit = mNodes.find(id);
     auto mit = mMeshes.find(meshId);
     auto tit = mMaterials.find(matId);
@@ -242,9 +272,20 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         attachMesh(id, meshId, matId);
         return false;
     }
-    if (mit->second.maxBlendIndex >= rig.bones.size()) {
+    // WITH a map the mesh's blend indices index the MAP, not the rig, so the
+    // range check moves to the map's length and every entry of the map is then
+    // checked against the rig. Without one the two are the same array.
+    const size_t indexSpace = (blendToRig && blendToRigCount) ? blendToRigCount : rig.bones.size();
+    if (mit->second.maxBlendIndex >= indexSpace) {
         mError = "attachSkinnedMesh: the mesh references a bone the rig does not have";
         return false;
+    }
+    if (blendToRig && blendToRigCount) {
+        for (size_t i = 0; i < blendToRigCount; ++i) {
+            if (blendToRig[i] < rig.bones.size()) continue;
+            mError = "attachSkinnedMesh: the blend-index map names a bone the rig does not have";
+            return false;
+        }
     }
     if (!rigHierarchyIsSane(rig)) {
         mError = "attachSkinnedMesh: rig parent indices are out of range or cyclic";
@@ -252,7 +293,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
     }
 
     JAH_TRY {
-        if (!bindRigToMesh(mit->second, rig)) return false;
+        if (!bindRigToMesh(mit->second, rig, blendToRig, blendToRigCount)) return false;
 
         Node &n = nit->second;
         detachItem(id, n);
@@ -406,6 +447,12 @@ std::vector<std::string> OgreScene::boneNames(NodeId id) const {
 }
 
 bool OgreScene::setBonePoses(NodeId id, const BonePose *poses, size_t count) {
+    // A FOLLOWER's `skeletonOf` IS the master's instance, so a pose written here
+    // would silently move the whole character (AVATAR_RIG_PERF_SPEC §3.3).
+    if (sharesSkeleton(id)) {
+        mError = "setBonePoses: this node shares another node's skeleton — pose the source";
+        return false;
+    }
     Ogre::SkeletonInstance *skel = skeletonOf(id);
     if (!skel) { mError = "setBonePoses: the node has no rig"; return false; }
     if (!poses && count) { mError = "setBonePoses: null poses"; return false; }
@@ -446,6 +493,234 @@ bool OgreScene::boneMatrices(NodeId id, float *out, size_t count) const {
         }
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// ---------------------------------------------------------------------------
+// SKELETON SHARING (AVATAR_RIG_PERF_SPEC §3.2/§3.3).
+//
+// THE THREE TRAPS this code exists to avoid, each read out of the pinned engine
+// and each covered by a case in skeletal.share:
+//
+//  1. `MovableObject::_notifyAttached` ends with
+//     `mSkeletonInstance->setParentNode(parent)` (OgreMovableObject.cpp:155-156).
+//     On a SLAVE that instance is the MASTER's, so detaching a slave's Item —
+//     which our own detachItem does on every material or mesh swap — sets the
+//     shared instance's parent node to NULL and the whole character renders at
+//     the origin. Every path here therefore stops sharing BEFORE the Item
+//     leaves its node.
+//  2. `stopUsingSkeletonInstanceFromMaster` creates the fresh instance and
+//     never parents it (OgreItem.cpp:266-280). Re-attaching the Item to its own
+//     node is what re-points it, so that is what unshareFollower does.
+//  3. `Bone::_setNodeParent` keeps a raw SoA pointer into the parent node
+//     ("This Hack just works", OgreBone.cpp:214-226), so a master node that
+//     dies under its slaves leaves them reading recycled memory. Followers are
+//     released before the master's Item or node goes.
+//
+// And one behaviour that is not a trap but reads like one: `sharesSkeletonInstance()`
+// is refcount > 1, so it is true for the MASTER as well. Our bookkeeping
+// (`shareSource`) is what distinguishes "renders from somebody else's rig" from
+// "somebody else renders from mine".
+bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
+    auto fit = mNodes.find(followerId);
+    if (fit == mNodes.end()) { mError = "shareSkeleton: unknown follower node"; return false; }
+    Node &f = fit->second;
+
+    if (!sourceId) {                       // stop sharing
+        if (!f.shareSource) return true;
+        auto sit = mNodes.find(f.shareSource);
+        unshareFollower(followerId, f, sit == mNodes.end() ? nullptr : &sit->second);
+        return true;
+    }
+    if (followerId == sourceId) { mError = "shareSkeleton: a node cannot share with itself"; return false; }
+    auto sit = mNodes.find(sourceId);
+    if (sit == mNodes.end()) { mError = "shareSkeleton: unknown source node"; return false; }
+    Node &s = sit->second;
+    if (!f.item || !s.item) { mError = "shareSkeleton: both nodes need a renderable"; return false; }
+    if (!f.item->getSkeletonInstance() || !s.item->getSkeletonInstance()) {
+        mError = "shareSkeleton: both renderables must be skinned";
+        return false;
+    }
+    // NO CHAINS. A source that is itself a follower would work in Ogre (the
+    // instance is just refcounted) but it makes "un-share the master" a
+    // recursive lifetime problem for no gain — the host groups by character and
+    // always has a real master.
+    if (s.shareSource) { mError = "shareSkeleton: the source is itself sharing"; return false; }
+    if (!f.shareFollowers.empty()) {
+        mError = "shareSkeleton: the follower has followers of its own";
+        return false;
+    }
+    if (f.shareSource == sourceId) return true;                 // idempotent
+    // The SAME RIG or nothing: Ogre throws on a skeleton-name mismatch
+    // (OgreItem.cpp:249-254), and a throw across the boundary is not an answer.
+    // Our rig id IS that name (rigResourceName of MeshRec::rigId).
+    const auto fm = mMeshes.find(f.meshRef), sm = mMeshes.find(s.meshRef);
+    if (fm == mMeshes.end() || sm == mMeshes.end() || fm->second.rigId.empty() ||
+        fm->second.rigId != sm->second.rigId) {
+        mError = "shareSkeleton: the two nodes are rigged to different rigs";
+        return false;
+    }
+    // An existing share with somebody else goes first, cleanly.
+    if (f.shareSource) {
+        auto old = mNodes.find(f.shareSource);
+        unshareFollower(followerId, f, old == mNodes.end() ? nullptr : &old->second);
+    }
+    JAH_TRY {
+        // THE FOLLOWER'S CLIPS GO FIRST. ClipRec caches a float* into the
+        // instance's per-animation weight arrays and an index into its
+        // animation list (EnginePrivate.h ClipRec::weightPtr/index); the
+        // follower's instance is about to be released, so every one of those
+        // would dangle. A follower carries no clips at all — it renders from the
+        // master's pose — and the host re-attaches them if it ever un-shares.
+        mClips.erase(followerId);
+        // ...and anything riding THIS node's bones: the instance those tags
+        // point into is about to be released (AVATAR_RIG_PERF_SPEC §4). The
+        // host re-arms them against whatever the node holds afterwards.
+        releaseBoneRiders(followerId, f);
+        f.item->useSkeletonInstanceFrom(s.item);
+        f.shareSource = sourceId;
+        if (std::find(s.shareFollowers.begin(), s.shareFollowers.end(), followerId) ==
+            s.shareFollowers.end())
+            s.shareFollowers.push_back(followerId);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+bool OgreScene::sharesSkeleton(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it != mNodes.end() && it->second.shareSource != 0;
+}
+
+void OgreScene::unshareFollower(NodeId followerId, Node &f, Node *master) {
+    if (!f.shareSource) return;
+    const NodeId sourceId = f.shareSource;
+    f.shareSource = 0;
+    if (master) {
+        auto &list = master->shareFollowers;
+        list.erase(std::remove(list.begin(), list.end(), followerId), list.end());
+    } else if (sourceId) {
+        auto sit = mNodes.find(sourceId);
+        if (sit != mNodes.end()) {
+            auto &list = sit->second.shareFollowers;
+            list.erase(std::remove(list.begin(), list.end(), followerId), list.end());
+        }
+    }
+    if (!f.item || !f.item->sharesSkeletonInstance()) return;
+    JAH_TRY {
+        // The pose it was rendering, kept: `stopUsing...` hands back a fresh
+        // instance at the BIND pose, and a piece that popped to bind for one
+        // frame every time the editor swapped a material would be a visible
+        // defect rather than an optimisation.
+        std::vector<BonePose> keep;
+        Ogre::SkeletonInstance *shared = f.item->getSkeletonInstance();
+        if (shared) {
+            keep.resize(shared->getNumBones());
+            for (size_t i = 0; i < keep.size(); ++i) {
+                const Ogre::Bone *b = shared->getBone(i);
+                const Ogre::Vector3 p = b->getPosition(), sc = b->getScale();
+                const Ogre::Quaternion q = b->getOrientation();
+                keep[i].position = Vec3(p.x, p.y, p.z);
+                keep[i].rotation = Quat(q.x, q.y, q.z, q.w);
+                keep[i].scale = Vec3(sc.x, sc.y, sc.z);
+            }
+        }
+        releaseBoneRiders(followerId, f);   // same reason as at share time
+        f.item->stopUsingSkeletonInstanceFromMaster();
+        // Same reason as at share time, from the other side: a fresh instance
+        // means any cached clip pointers for this node name the OLD one.
+        mClips.erase(followerId);
+        // TRAP 2: the fresh instance has NO parent node. Re-attaching the Item
+        // to its own node is the only thing that gives it one
+        // (MovableObject::_notifyAttached) — and it is safe now, because the
+        // instance being re-parented is the follower's own.
+        if (f.node) {
+            f.item->detachFromParent();
+            f.node->attachObject(f.item);
+        }
+        Ogre::SkeletonInstance *own = f.item->getSkeletonInstance();
+        if (own && own->getNumBones() == keep.size()) {
+            for (size_t i = 0; i < keep.size(); ++i) {
+                Ogre::Bone *b = own->getBone(i);
+                b->setPosition(toOgre(keep[i].position));
+                b->setOrientation(Ogre::Quaternion(keep[i].rotation.w, keep[i].rotation.x,
+                                                   keep[i].rotation.y, keep[i].rotation.z));
+                b->setScale(toOgre(keep[i].scale));
+            }
+            // Every bone manual, exactly as attachSkinnedMesh leaves a fresh
+            // rig: without it the first update lerps this pose back to bind.
+            for (size_t i = 0; i < own->getNumBones(); ++i)
+                own->setManualBone(own->getBone(i), true);
+        }
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::releaseShareFollowers(NodeId id, Node &n) {
+    // A COPY: unshareFollower edits n.shareFollowers through the master pointer.
+    const std::vector<NodeId> followers = n.shareFollowers;
+    for (NodeId followerId : followers) {
+        auto fit = mNodes.find(followerId);
+        if (fit == mNodes.end()) continue;
+        if (fit->second.shareSource != id) continue;
+        unshareFollower(followerId, fit->second, &n);
+    }
+    n.shareFollowers.clear();
+}
+
+void OgreScene::dropShareFollowers(NodeId id, Node &n) {
+    releaseShareFollowers(id, n);
+    if (n.shareSource) {
+        auto sit = mNodes.find(n.shareSource);
+        if (sit != mNodes.end()) {
+            auto &list = sit->second.shareFollowers;
+            list.erase(std::remove(list.begin(), list.end(), id), list.end());
+        }
+        n.shareSource = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE MEASUREMENT SURFACE (AVATAR_RIG_PERF_SPEC §3.5).
+//
+// Both read OGRE's state rather than our bookkeeping, on purpose: the blend
+// index map IS what HlmsPbs streams (OgreHlmsPbs.cpp:3529-3566 walks
+// `indexMap`), and the SkeletonInstance pointer IS what updateAllAnimations
+// evaluates. A remap or a share that silently did not land therefore reads as
+// the OLD number here instead of as the number we meant.
+size_t OgreScene::streamedBoneCount(NodeId id) const {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end() || !it->second.item) return 0;
+    const Ogre::Item *item = it->second.item;
+    size_t n = 0;
+    for (size_t i = 0; i < item->getNumSubItems(); ++i) {
+        const Ogre::SubItem *sub = item->getSubItem(i);
+        if (!sub->hasSkeletonAnimation()) continue;
+        const Ogre::SubMesh *sm = sub->getSubMesh();
+        if (!sm) continue;
+        n += sm->mBlendIndexToBoneIndexMap.size();
+    }
+    return n;
+}
+
+RigStats OgreScene::rigStats() const {
+    RigStats out;
+    // DISTINCT instances, counted by pointer: two Items sharing one instance
+    // are one evaluation in updateAllAnimations, however the sharing was
+    // arranged, and a follower whose master went away is honestly its own again.
+    std::vector<const Ogre::SkeletonInstance *> seen;
+    for (const auto &kv : mNodes) {
+        const Node &n = kv.second;
+        if (!n.item) continue;
+        const Ogre::SkeletonInstance *skel = n.item->getSkeletonInstance();
+        if (!skel) continue;
+        ++out.rigged;
+        out.streamedBones += streamedBoneCount(kv.first);
+        if (std::find(seen.begin(), seen.end(), skel) == seen.end()) seen.push_back(skel);
+        // OUR bookkeeping, not Ogre's `sharesSkeletonInstance()`: that is
+        // refcount > 1, which is true of the MASTER too, and "shared" here means
+        // "renders from somebody else's instance".
+        if (n.shareSource) ++out.shared;
+    }
+    out.instances = seen.size();
+    return out;
 }
 
 }}}  // namespace jahshaka::engine::detail

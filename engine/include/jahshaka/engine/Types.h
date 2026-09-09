@@ -99,6 +99,28 @@ struct SkeletonDesc {
     std::vector<BoneDesc> bones;
 };
 
+/// What a scene's rigs COST right now (AVATAR_RIG_PERF_SPEC §3.5).
+///
+/// Every field is a number the rig-perf program makes a claim about, so every
+/// field is readable from a suite rather than inferred from a log:
+///
+///   rigged        nodes carrying a skinned renderable.
+///   instances     DISTINCT SkeletonInstances behind them — the count Ogre
+///                 evaluates in updateAllAnimations, i.e. one per PIECE until
+///                 pieces share, one per CHARACTER after.
+///   shared        nodes rendering from somebody else's instance
+///                 (`rigged - instances` unless a follower's master went away).
+///   streamedBones the bone matrices HlmsPbs streams per pass, summed over the
+///                 rigged nodes: each node contributes the length of its
+///                 blend-index map, which is the whole rig under the identity
+///                 map and only the piece's own bones under a compacted one.
+struct RigStats {
+    size_t rigged = 0;
+    size_t instances = 0;
+    size_t shared = 0;
+    size_t streamedBones = 0;
+};
+
 /// A posed bone: LOCAL to its parent bone (a root bone: local to the mesh node).
 /// This is absolute local TRS, not a delta from the bind pose.
 struct BonePose {

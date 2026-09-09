@@ -234,7 +234,24 @@ public:
     /// are out of range or cyclic, or a rig with more than 256 bones (which is
     /// attached UNSKINNED at bind pose, with a warning, rather than crashing).
     /// Bone ORDER is free — the index is what the vertex data names.
-    virtual bool        attachSkinnedMesh(NodeId, MeshId, MaterialId, const SkeletonDesc &) = 0;
+    ///
+    /// `blendToRig` is the PER-PIECE REMAP (AVATAR_RIG_PERF_SPEC §3.1): entry
+    /// `i` is the rig bone the mesh's blend index `i` names. Null (the default)
+    /// means the identity — the mesh's blend indices ARE rig indices, which is
+    /// what a single-piece character has and what every caller did before the
+    /// union rig existed, byte for byte. A character whose pieces are SUBSETS
+    /// of one rig passes a map per piece: the piece keeps its own compact blend
+    /// indices, every piece binds the SAME rig (the precondition for sharing a
+    /// SkeletonInstance at all), and the backend streams only the mapped bones
+    /// per draw instead of the whole rig per piece.
+    ///
+    /// The map lives on the MESH, so two nodes sharing a mesh asset must pass
+    /// the same map; a different one is refused (lastError()). Entries must
+    /// name bones of `rig`, and the mesh's blend indices must fall inside the
+    /// map.
+    virtual bool        attachSkinnedMesh(NodeId, MeshId, MaterialId, const SkeletonDesc &,
+                                          const unsigned short *blendToRig = nullptr,
+                                          size_t blendToRigCount = 0) = 0;
     /// True when the node carries a GPU-skinned mesh with a live rig.
     virtual bool        hasSkeleton(NodeId) const = 0;
     /// The node's bone names, in rig index order. Empty when it has no rig.
@@ -252,6 +269,19 @@ public:
     /// when the node has no rig or `count` misses the rig's bone count.
     /// The read-back surface for the pose: what proves GPU and CPU skinning agree.
     virtual bool        boneMatrices(NodeId, float *out, size_t count) const = 0;
+    /// How many bone matrices HlmsPbs streams for this node PER PASS: the
+    /// length of the renderable's blend-index map, which is the whole rig while
+    /// the map is the identity and only the piece's own bones once it is
+    /// compacted (AVATAR_RIG_PERF_SPEC §1 row 4). 0 when the node has no rig.
+    ///
+    /// A read of the real Ogre state, not of our intent: the map IS what the
+    /// shader is handed, so a remap that silently failed to land reads as the
+    /// old number here.
+    virtual size_t      streamedBoneCount(NodeId) const = 0;
+    /// What this scene's rigs cost right now (RigStats). The measurement
+    /// surface the rig-perf bench and its gates read; cheap enough to call per
+    /// frame, but nothing on the frame path calls it.
+    virtual RigStats    rigStats() const = 0;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC) ----
     /// Attaches clips to a node that already carries a rig. IDEMPOTENT per clip
@@ -368,6 +398,71 @@ public:
     /// The pairing is REMEMBERED across re-attaches on either end, and drops
     /// itself when either node goes away. Passing source = 0 stops following.
     virtual bool        followSkeleton(NodeId follower, NodeId source) = 0;
+    /// SHARING, which is the other thing entirely (AVATAR_RIG_PERF_SPEC §3.2):
+    /// `follower` renders from `source`'s SkeletonInstance — Ogre's
+    /// Item::useSkeletonInstanceFrom — so the pose is evaluated ONCE for both,
+    /// clips are pushed once, and a character made of five skinned pieces costs
+    /// one animation update instead of five.
+    ///
+    /// THE PRICE, and it is not negotiable: the shared bones carry the SOURCE's
+    /// node transform, so the follower renders WHERE THE SOURCE IS. Its own
+    /// scene node still decides its culling AABB and nothing else. Share only
+    /// pieces whose world transform equals the source's — the caller keeps them
+    /// equal, or does not share.
+    ///
+    /// Both ends must be rigged to the SAME rig (Ogre throws on a skeleton-name
+    /// mismatch; this refuses before it does). Also refused: a node sharing with
+    /// itself, a source that is itself a follower, a follower that has followers
+    /// of its own, and an unrigged end.
+    ///
+    /// `source = 0` stops sharing: the follower gets its own instance back,
+    /// carrying the pose it was rendering, re-attached to its own node.
+    ///
+    /// The share is LIVE STATE, not an intent: any re-attach on either end
+    /// (a material swap, a mesh swap) drops it — safely, in the one order that
+    /// does not hand the master's rig a null parent node — and the host re-arms
+    /// it on the next sync.
+    virtual bool        shareSkeleton(NodeId follower, NodeId source) = 0;
+    /// True when this node's Item is rendering from another node's instance.
+    virtual bool        sharesSkeleton(NodeId) const = 0;
+
+    // ---- Bone attachments: engine TAG POINTS (AVATAR_RIG_PERF_SPEC §4) ----
+    /// Hangs `rider`'s node off `owner`'s bone, through an engine TagPoint whose
+    /// local transform is `offset` (position/rotation/scale, in BONE space).
+    ///
+    /// ZERO LAG, which is the whole point: Ogre resolves tag points INSIDE the
+    /// threaded scene update, after the skeletons it reads
+    /// (updateAllTransforms -> updateAllAnimations -> updateAllTagPoints), so a
+    /// camera or a sword on a bone is in the right place in the frame that
+    /// renders it. The host's alternative — read the pose back, run FK, write
+    /// world transforms — is one frame late by construction and costs a
+    /// read-back per rigged node per frame.
+    ///
+    /// The rider keeps its OWN local transform, now RELATIVE TO THE SOCKET: the
+    /// tag is the socket, and the node under it is where the user nudged the
+    /// sword.
+    ///
+    /// Refuses: an owner with no rig, a bone the rig has not, a rider that is
+    /// the owner, and a rider that is an ANCESTOR of the owner (a circular
+    /// dependency, which Ogre calls "undefined, probably very wonky").
+    ///
+    /// NOTE for readers between frames: a tag point's world transform is the one
+    /// the LAST RENDERED FRAME produced. Ogre cannot resolve a tag on demand
+    /// (TagPoint::updateFromParentImpl is `assert(false)`), so
+    /// iris::graph::globalTransform reads the cached transform for a tagged
+    /// node — identical latency to the read-back path this replaces, while the
+    /// RENDER is exact.
+    virtual bool attachToBone(NodeId rider, NodeId owner, const std::string &bone,
+                              const Vec3 &position, const Quat &rotation, const Vec3 &scale) = 0;
+    /// Takes the rider off its bone and puts it back under `parent` (0 = the
+    /// scene root), keeping the world transform it had at the last rendered
+    /// frame — the fail-soft path when a socket, a bone or an owner goes away.
+    virtual bool detachFromBone(NodeId rider, NodeId parent) = 0;
+    /// Re-writes the tag's local transform — the socket was edited.
+    virtual bool setBoneAttachmentOffset(NodeId rider, const Vec3 &position,
+                                         const Quat &rotation, const Vec3 &scale) = 0;
+    /// The owner this rider is attached to, or 0 — and the bone, through `bone`.
+    virtual NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const = 0;
     /// A line list (pairs of points) or, with `strip`, a connected polyline.
     /// Attach with attachMesh like any mesh. One pixel wide.
     virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip) = 0;
@@ -634,6 +729,25 @@ public:
     /// Full camera state in one call (step 5). The document camera is pushed
     /// through this every frame. This is the ONLY way to move a View's camera.
     virtual void setCamera(const CameraDesc &) = 0;
+    /// Rides the view's camera ON a scene node, instead of positioning it from
+    /// the pushed CameraDesc (AVATAR_RIG_PERF_SPEC §4.6, phase P2b).
+    ///
+    /// WHY IT EXISTS. A CameraDesc is filled from the camera node's world
+    /// transform read BEFORE the frame, so a camera on a socket is one frame
+    /// behind the bone it rides even though the rider NODE is exact — the tag
+    /// point resolves inside the frame, the desc was read outside it. Attaching
+    /// Ogre's camera to that node closes the gap: the camera derives its
+    /// transform from the node hierarchy, tag points included, in the frame that
+    /// renders.
+    ///
+    /// While a camera node is set, setCamera's POSITION and ORIENTATION are
+    /// ignored (the node is the pose); every other field — the lens, the clip
+    /// planes, the projection, the letterbox, the shift — still applies.
+    /// `node = 0` returns the camera to the pushed pose. The node must belong to
+    /// this view's scene.
+    virtual bool setCameraNode(NodeId node) = 0;
+    /// The node the camera rides, or 0.
+    virtual NodeId cameraNode() const = 0;
     /// Clear colour behind the scene (the document's flat sky colour). Cheap to
     /// call with the same value; a change rebuilds the view's compositor workspace.
     virtual void setBackground(const Colour &) = 0;

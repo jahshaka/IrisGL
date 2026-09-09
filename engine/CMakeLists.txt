@@ -24,7 +24,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreTextureCache.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreLogBridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreOverlayHud.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
 # --- Shader-cache fingerprint terms (SHADER_CACHE_SPEC.md §4.2) --------------

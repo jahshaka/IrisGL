@@ -175,6 +175,54 @@ public:
     /// Static and public for tests.
     static bool toSkeletonDesc(const iris::SkeletonPtr &skeleton,
                                jahshaka::engine::SkeletonDesc &out);
+
+    // ---- The CHARACTER rig (AVATAR_RIG_PERF_SPEC §3.1, decision D5 = U2) ----
+    //
+    // An imported character is several skinned pieces (body, head, eyes, hair)
+    // and `Mesh::extractSkeleton` gives each piece a rig of ITS OWN BONES, in
+    // ITS OWN ORDER — five pieces, five rigs, five SkeletonDefs, five
+    // SkeletonInstances. Ogre refuses to let two Items share a SkeletonInstance
+    // unless their meshes name the SAME skeleton (OgreItem.cpp:249-254), so
+    // sharing is not merely unhelpful on per-piece rigs, it is illegal. The
+    // prerequisite is ONE rig per CHARACTER — the union of the pieces' bones in
+    // a canonical order — plus a per-piece blend-index remap, which Ogre already
+    // has a slot for (SubMesh::mBlendIndexToBoneIndexMap) and which pays for
+    // itself even without sharing: HlmsPbs streams the MAP per draw, so a
+    // compacted map streams the piece's own bones instead of the whole rig.
+    //
+    // MIRROR-SIDE, not document-side (D5's U2): no file format changes, the
+    // pieces keep their own skeletons and their own blend indices, and the
+    // union is derived — so a re-import or a document edit cannot leave a stale
+    // character rig on disk.
+
+    /// The UNION of several pieces' rigs, as one iris::Skeleton.
+    ///
+    /// Bones are merged BY NAME. A bone's bind pose comes from the first piece
+    /// that carries it, and a piece that disagrees about a shared bone's bind
+    /// pose is EXCLUDED from the union (its index is appended to `excluded`)
+    /// rather than silently averaged — it keeps its own rig and its own
+    /// instance, which is slower and correct.
+    ///
+    /// The hierarchy is rebuilt from what the pieces together know: a piece
+    /// records the nearest ancestor IT carries, so the union takes, for each
+    /// bone, the DEEPEST of the ancestors any piece named. Bone ORDER is
+    /// canonical (depth, then name) precisely so the union does not depend on
+    /// which piece was visited first — the rig id is a structure hash, and an
+    /// order that depended on visit order would make the same character hash
+    /// two different rigs on two different loads.
+    ///
+    /// False when fewer than two pieces merged, when the pieces' hierarchies
+    /// disagree, or when the result would be cyclic. A single-piece character
+    /// therefore keeps its own rig BYTE FOR BYTE — the negative gate.
+    static bool buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
+                                   iris::SkeletonPtr &out,
+                                   QVector<int> *excluded = nullptr,
+                                   QString *why = nullptr);
+    /// `out[i]` = the index in `rig` of the piece's bone `i` — the blend-index
+    /// map `attachSkinnedMesh` takes. False when the rig does not carry one of
+    /// the piece's bones (which is what the union guarantees it does).
+    static bool rigRemap(const iris::SkeletonPtr &piece, const iris::SkeletonPtr &rig,
+                         QVector<unsigned short> &out);
     // toBonePoses is GONE with the document's clip evaluator: there is no
     // document-computed pose to convert any more. The engine holds the pose;
     // Scene::bonePoses reads it back (and boneWorldTransforms below turns that
@@ -229,9 +277,22 @@ public:
     /// sync(); public so a headless suite can step it explicitly. Returns how
     /// many nodes moved.
     int resolveSockets();
+    /// How many socket attachments did NOT resolve on the last sync — a stale
+    /// owner, a removed socket, a bone a re-import renamed. Diagnostic only:
+    /// a dangling attachment leaves its rider exactly where it was.
+    int lastSocketDangling() const { return mSocketDangling; }
     /// The socket resolver, for tests and for hosts that want the stale
     /// count. Its pose source is installed by this mirror's constructor.
     iris::SocketResolver &socketResolver() { return mSockets; }
+    /// How many `setClipStates` calls this mirror has made since it was built
+    /// (AVATAR_RIG_PERF_SPEC §1 row 2, §3.5).
+    ///
+    /// The per-frame clip push is ONE engine call per skinned node, so a
+    /// character made of five skinned pieces costs five — which is the cost row
+    /// the rig-perf program removes by pushing once per CHARACTER. A counter
+    /// rather than a log line because the claim is a NUMBER: the bench records
+    /// it, and the gate asserts pushes-per-frame == characters.
+    quint64 clipStatePushes() const { return mClipStatePushes; }
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
     static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const iris::Mat4 &world);
     /// The engine mesh already created for a document mesh, or 0.
@@ -487,6 +548,28 @@ private:
         // of one character animate independently — on the GPU each node's Item
         // carries its own SkeletonInstance, so they also LOOK different.
         iris::SkeletonPtr skeleton;
+        /// The skeleton the ENGINE rig was actually built from: this piece's own
+        /// `skeleton` for a lone piece, the CHARACTER UNION for a piece of a
+        /// multi-piece character (AVATAR_RIG_PERF_SPEC §3.1). Everything that
+        /// speaks the engine's bone indices — the clip extraction, the bone
+        /// read-back, the socket FK — reads THIS, not `skeleton`, because those
+        /// indices are the union's.
+        iris::SkeletonPtr rigSkeleton;
+        /// This piece's blend index -> union bone index map, empty for a piece
+        /// whose rig is its own (the identity).
+        QVector<unsigned short> blendToRig;
+        /// The character this piece belongs to and the union epoch it attached
+        /// with. A character whose piece set changes (a re-import adding a
+        /// piece with new bones) gets a NEW union, and every piece already
+        /// attached to the old one has to re-attach — the epoch is how a piece
+        /// notices without re-deriving the union every frame.
+        const iris::SceneNode *characterHost = nullptr;
+        quint32 characterEpoch = 0;
+        /// The engine node whose SkeletonInstance this piece is rendering from,
+        /// or 0 when it owns its own (AVATAR_RIG_PERF_SPEC §3.4). A follower is
+        /// skipped by the clip pass — it has no animation state of its own — so
+        /// this is what turns five clip pushes per character into one.
+        jahshaka::engine::NodeId shareMaster = 0;
         bool gpuSkinned = false;                     // the engine accepted the rig
         size_t boneCount = 0;
         /// Each bone's PARENT INDEX, resolved once per rig instead of by a
@@ -648,7 +731,7 @@ private:
     void recordCubeAmbientSh(const QImage faces[6]);
     /// Clears the recorded sky ambient (no sky, or a single-colour sky).
     void clearSkyAmbient();
-    jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh);
+    jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh, const QString &rigId = QString());
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
     void syncTextures(Entry &e, iris::Material *material);
     jahshaka::engine::TextureId textureFor(const QString &path, bool srgb);
@@ -743,7 +826,100 @@ private:
     float         mFocusDt = 0.0f;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
+    /// One character's union rig, derived and cached (AVATAR_RIG_PERF_SPEC
+    /// §3.1). Keyed by the CHARACTER HOST — the nearest ancestor carrying a
+    /// skeletal clip, or the pieces' common parent when there is none.
+    struct CharacterRig {
+        /// The pieces' skeleton pointers, in document order, hashed: the union
+        /// is re-derived only when the character's piece set really changes.
+        quint64 signature = 0;
+        /// Bumped whenever the derived rig id changes. Entries compare it.
+        quint32 epoch = 0;
+        const iris::SceneNode *host = nullptr;   ///< the key, for the entries
+        iris::SkeletonPtr rig;              ///< null = this character has one piece
+        std::string rigId;                  ///< the union's SkeletonDesc id
+        /// Per PIECE skeleton: its blend index -> union bone index map. A piece
+        /// missing from this map is one the union excluded; it keeps its own rig.
+        QHash<const iris::Skeleton *, QVector<unsigned short>> remaps;
+    };
+    QHash<const iris::SceneNode *, CharacterRig> mCharacterRigs;
+    /// The character a piece belongs to: the nearest ancestor-or-self carrying a
+    /// skeletal clip (the same walk clip translation uses), or the piece's own
+    /// parent when the character has no clips at all. Null when that parent is
+    /// the scene ROOT — two unrelated single-piece characters dropped side by
+    /// side in a scene are not one character, and unioning their rigs would
+    /// merge two strangers' skeletons.
+    const iris::SceneNode *characterHostOf(iris::SceneNode *node) const;
+    /// The character rig for a piece, derived if needed. Null when the piece is
+    /// alone (or was excluded from the union) — then it keeps its own rig.
+    const CharacterRig *characterRigFor(iris::SceneNode *piece);
+    /// Arms (and disarms) skeleton sharing for every multi-piece character in
+    /// the scene — §3.4. Runs once per sync, BEFORE syncClips, and does nothing
+    /// at all in a scene with no multi-piece character.
+    void syncSkeletonSharing();
+    /// The per-sync grouping scratch: character host -> its mirrored pieces.
+    /// A MEMBER so the steady state allocates nothing.
+    QHash<const iris::SceneNode *, QVector<Entry *>> mShareGroups;
+
+    /// THE SOCKET RECONCILER (AVATAR_RIG_PERF_SPEC §4.2): keeps the ENGINE's
+    /// tag points equal to the DOCUMENT's socket attachments, instead of moving
+    /// riders itself every frame. Returns how many riders are being driven.
+    int reconcileSockets();
+    /// Frees the tags of riders the document no longer attaches. Runs at the
+    /// END of sync, after removeMissing has dropped the entries of deleted
+    /// nodes — the map below is keyed by document node pointer.
+    void sweepStaleRiders();
+    /// Takes EVERY rider off its bone — the document's graph is leaving this
+    /// scene manager (setSource, evacuateEngineObjects), and a node hanging off
+    /// one of its TagPoints would not travel with the tree.
+    void releaseAllRiders();
+    /// Takes one rider off its bone (if it is on one) and forgets it. The pose
+    /// it was last resolved to is baked into its local under its document
+    /// parent, UNLESS the caller has written that local since the last sync.
+    void releaseRider(iris::SceneNode *rider);
+    /// What the engine was last asked for, per rider — so an unchanged socket
+    /// costs one comparison and no engine call.
+    struct RiderState {
+        jahshaka::engine::NodeId owner = 0;
+        QString bone;
+        quint64 offsetKey = 0;
+        /// THE AUTHORED LOCAL, kept across a spell on the fallback path.
+        ///
+        /// With no engine rig to hang a tag on, a rider is driven the old way:
+        /// its WORLD transform is written every sync. That write lands in the
+        /// very field D4 gave a new meaning to — the rider's local, which is now
+        /// its offset FROM the socket — so a rider that spent one sync on the
+        /// fallback (every socketed node does, between the document attaching it
+        /// and the walk rigging its owner) would come out of it carrying a world
+        /// transform as its socket offset, and ride two units above the bone
+        /// forever. The authored value is snapshotted on the way in and restored
+        /// when the tag arms.
+        bool fallbackDriven = false;
+        iris::Vec3 authoredPos;
+        iris::Quat authoredRot;
+        iris::Vec3 authoredScale{1, 1, 1};
+        /// The rider's local TRS as of the last sync that looked at it. What it
+        /// is FOR: when the attachment goes away, the rider "keeps the pose it
+        /// was last resolved to" — so its world transform is baked into its new
+        /// local under its document parent. But a caller that detaches and then
+        /// PLACES the node ("detach is also how you put something where a bone
+        /// was, and then move it") writes its local before the next sync, and
+        /// baking the old world over that write would silently lose it. So the
+        /// bake happens only when the local is still the one the mirror last
+        /// saw: an explicit write wins.
+        iris::Vec3 lastLocalPos;
+        iris::Quat lastLocalRot;
+        iris::Vec3 lastLocalScale{1, 1, 1};
+    };
+    QHash<const iris::SceneNode *, RiderState> mBoneRiders;
+    /// The riders the reconciler saw this sync — what the end-of-sync sweep
+    /// measures "stale" against. A member so the steady state allocates nothing.
+    QSet<const iris::SceneNode *> mRidersSeen;
+    int                      mSocketDangling = 0;
+
     iris::SocketResolver     mSockets;
+    /// Counts every setClipStates call this mirror makes (clipStatePushes()).
+    quint64                  mClipStatePushes = 0;
     /// entryBoneWorldTransforms' scratch. Members because sockets made that
     /// function per-frame work (it used to run only when the bone overlay
     /// refreshed) — see the note at its assign() calls.
@@ -774,7 +950,16 @@ private:
     /// needs a stable identity ON iris::Mesh/iris::Material (a monotonic
     /// generation counter or the asset guid); neither type has one today, and
     /// adding one is a document-model change, not a mirror change.
-    QHash<iris::Mesh *, jahshaka::engine::MeshId> mMeshes;
+    ///
+    /// KEYED BY (mesh, RIG ID) since the character rig landed
+    /// (AVATAR_RIG_PERF_SPEC §3.1). An Ogre Mesh holds exactly ONE SkeletonDef
+    /// and exactly one blend-index map (they live on the SubMesh), so one engine
+    /// mesh cannot serve two different rigs — and two characters CAN legitimately
+    /// share a document mesh asset while resolving to different union rigs (one
+    /// has a hair piece, the other does not). The rig id is empty for every
+    /// unskinned mesh, so nothing but skinned content is affected: an unskinned
+    /// mesh is cached exactly as it was.
+    QHash<QPair<iris::Mesh *, QString>, jahshaka::engine::MeshId> mMeshes;
     // (A second `mPoseScratch` lived here, unused since the document's pose PUSH
     // was retired with its clip evaluator — deleted rather than shadowed by the
     // read-back scratch above, which is a live buffer with the same name.)

@@ -16,9 +16,11 @@ For more information see the LICENSE file
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/scenenode.h"
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include <QDebug>
@@ -291,8 +293,61 @@ void reconcileStatic(Ogre::SceneNode *n)
 /// a decal's projector box, a light's range wire). Those are not ours to
 /// destroy — the engine's releaseNode still holds raw pointers to them — so
 /// they are re-homed under their scene's root and left for it to clean up.
+/// THE SHADOW PARENTS (AVATAR_RIG_PERF_SPEC §4.3, decision D3 = H1).
+///
+/// A socket rider's REAL Ogre parent is a TagPoint on a bone; its DOCUMENT
+/// parent is whatever the outliner shows. Both are true at once, so both are
+/// stored: Ogre keeps the first, this map keeps the second, and every structural
+/// query below prefers the second.
+///
+/// Keyed by the rider's node; the reverse list keeps `childAt` O(1)-ish and, more
+/// importantly, ORDERED — the outliner is a list, and a list whose order came out
+/// of a hash would reshuffle itself between runs.
+std::unordered_map<Ogre::SceneNode *, Ogre::SceneNode *> gRiderParent;
+std::unordered_map<Ogre::SceneNode *, std::vector<Ogre::SceneNode *>> gParentRiders;
+
+inline Ogre::SceneNode *riderParentOf(Ogre::SceneNode *n)
+{
+    if (gRiderParent.empty()) return nullptr;
+    const auto it = gRiderParent.find(n);
+    return it == gRiderParent.end() ? nullptr : it->second;
+}
+
+inline const std::vector<Ogre::SceneNode *> *ridersOf(Ogre::SceneNode *n)
+{
+    if (gParentRiders.empty()) return nullptr;
+    const auto it = gParentRiders.find(n);
+    return it == gParentRiders.end() ? nullptr : &it->second;
+}
+
+void forgetRider(Ogre::SceneNode *rider)
+{
+    const auto it = gRiderParent.find(rider);
+    if (it == gRiderParent.end()) return;
+    const auto pit = gParentRiders.find(it->second);
+    if (pit != gParentRiders.end()) {
+        auto &list = pit->second;
+        list.erase(std::remove(list.begin(), list.end(), rider), list.end());
+        if (list.empty()) gParentRiders.erase(pit);
+    }
+    gRiderParent.erase(it);
+}
+
+/// A node is going away: it can be a rider, and it can be somebody's shadow
+/// parent — a parent whose riders outlive it would answer parentOf with a dead
+/// pointer.
+void forgetRiderRelations(Ogre::SceneNode *n)
+{
+    forgetRider(n);
+    const auto pit = gParentRiders.find(n);
+    if (pit == gParentRiders.end()) return;
+    for (Ogre::SceneNode *rider : pit->second) gRiderParent.erase(rider);
+    gParentRiders.erase(pit);
+}
+
 void destroyRecursive(Ogre::SceneNode *n)
 {
+    forgetRiderRelations(n);
     Ogre::SceneNode *sceneRoot = rootOf(n->getCreator());
     while (n->numChildren() > 0) {
         Ogre::SceneNode *c = static_cast<Ogre::SceneNode *>(n->getChild(0));
@@ -379,6 +434,11 @@ void shutdown()
     gStaging = nullptr;
     gStagingRoot = nullptr;
     gStagingIsOurs = false;
+    // The socket riders' shadow parents name nodes of a graph that is going
+    // away with the Root; keeping them would answer parentOf with dead pointers
+    // in the next process life (the suites boot several engines in one).
+    gRiderParent.clear();
+    gParentRiders.clear();
 }
 
 NodeHandle createNode(SceneHandle s, NodeHandle parent, SceneNode *owner)
@@ -410,21 +470,49 @@ SceneNode *ownerOf(NodeHandle n) { return (n && engineAlive()) ? ownerRaw(nd(n))
 NodeHandle parentOf(NodeHandle n)
 {
     if (!n || !engineAlive()) return nullptr;
+    // A SOCKET RIDER's Ogre parent is a bone's TagPoint, which is not a document
+    // node at all (ownerOf would answer null and the node would look orphaned).
+    // The document's answer is its shadow parent — "socketing is not a
+    // reparent" is a promise this is what keeps.
+    if (Ogre::SceneNode *shadow = riderParentOf(nd(n))) return wrap(shadow);
     Ogre::Node *p = nd(n)->getParent();
     return p ? wrap(static_cast<Ogre::SceneNode *>(p)) : nullptr;
 }
 
-std::size_t childCount(NodeHandle n) { return (n && engineAlive()) ? nd(n)->numChildren() : 0; }
+std::size_t childCount(NodeHandle n)
+{
+    if (!n || !engineAlive()) return 0;
+    std::size_t count = nd(n)->numChildren();
+    if (const auto *riders = ridersOf(nd(n))) count += riders->size();
+    return count;
+}
 
 NodeHandle childAt(NodeHandle n, std::size_t i)
 {
-    if (!n || !engineAlive() || i >= nd(n)->numChildren()) return nullptr;
-    return wrap(static_cast<Ogre::SceneNode *>(nd(n)->getChild(i)));
+    if (!n || !engineAlive()) return nullptr;
+    const std::size_t own = nd(n)->numChildren();
+    if (i < own) return wrap(static_cast<Ogre::SceneNode *>(nd(n)->getChild(i)));
+    // Riders come AFTER the real children, in registration order.
+    const auto *riders = ridersOf(nd(n));
+    if (!riders || i - own >= riders->size()) return nullptr;
+    return wrap((*riders)[i - own]);
 }
 
 int indexInParent(NodeHandle n)
 {
     if (!n || !engineAlive()) return -1;
+    if (Ogre::SceneNode *shadow = riderParentOf(nd(n))) {
+        // A rider sits after the parent's owned children, in the order it was
+        // registered — the same order childAt lists them in.
+        int owned = 0;
+        for (std::size_t i = 0; i < shadow->numChildren(); ++i)
+            if (ownerRaw(static_cast<Ogre::SceneNode *>(shadow->getChild(i)))) ++owned;
+        const auto *riders = ridersOf(shadow);
+        if (!riders) return -1;
+        for (std::size_t i = 0; i < riders->size(); ++i)
+            if ((*riders)[i] == nd(n)) return owned + int(i);
+        return -1;
+    }
     Ogre::Node *p = nd(n)->getParent();
     if (!p) return -1;
     // The DOCUMENT sibling index — engine-owned children (a light's -Y adapter,
@@ -448,6 +536,11 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     Ogre::SceneNode *p = nd(parent);
     Ogre::SceneNode *c = nd(child);
+    // A SOCKET RIDER is not in Ogre's hierarchy to move: re-parenting it in the
+    // DOCUMENT moves its shadow parent and leaves it on its bone. (Taking it off
+    // the socket is a socket operation — Scene::detachFromSocket — not a
+    // reparent, and the reconciler is what performs it.)
+    if (riderParentOf(c)) { setSocketRider(child, parent); return; }
     if (c->getParent()) c->getParent()->removeChild(c);
     // APPEND is the overwhelming majority (addChild passes -1) and must not pay
     // for the sibling-index machinery below: at a fan-out of k that scan is
@@ -490,6 +583,11 @@ NodeHandle detach(NodeHandle child)
     if (!engineAlive()) return child;
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     Ogre::SceneNode *c = nd(child);
+    // A rider taken out of the document hierarchy keeps riding its bone until
+    // the reconciler says otherwise; it simply stops being listed under a
+    // parent. (Its Ogre parent is the TagPoint, so the re-home below would tear
+    // it off the socket.)
+    if (riderParentOf(c)) { forgetRider(c); return child; }
     // Out of its parent and under its scene manager's root — NOT migrated to
     // the staging manager, which is what this used to do. A migration rebuilds
     // the whole subtree, which changes every handle in it, which makes the
@@ -579,6 +677,43 @@ NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent)
 }
 
 // ---- transforms -----------------------------------------------------------
+
+void setSocketRider(NodeHandle rider, NodeHandle documentParent)
+{
+    if (!rider || !engineAlive()) return;
+    std::lock_guard<std::recursive_mutex> lock(graphMutex());
+    Ogre::SceneNode *r = nd(rider);
+    if (!documentParent) { forgetRider(r); return; }
+    Ogre::SceneNode *p = nd(documentParent);
+    const auto it = gRiderParent.find(r);
+    if (it != gRiderParent.end()) {
+        if (it->second == p) return;                 // idempotent
+        forgetRider(r);
+    }
+    gRiderParent[r] = p;
+    gParentRiders[p].push_back(r);
+}
+
+void clearSocketRider(NodeHandle rider)
+{
+    if (!rider || !engineAlive()) return;
+    std::lock_guard<std::recursive_mutex> lock(graphMutex());
+    forgetRider(nd(rider));
+}
+
+NodeHandle socketRiderParent(NodeHandle rider)
+{
+    if (!rider || !engineAlive()) return nullptr;
+    Ogre::SceneNode *p = riderParentOf(nd(rider));
+    return p ? wrap(p) : nullptr;
+}
+
+bool isSocketRider(NodeHandle rider)
+{
+    return rider && engineAlive() && riderParentOf(nd(rider)) != nullptr;
+}
+
+std::size_t socketRiderCount() { return gRiderParent.size(); }
 
 Vec3 localPos(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getPosition()) : Vec3(); }
 Quat localRot(NodeHandle n) { return (n && engineAlive()) ? toIris(nd(n)->getOrientation()) : Quat(); }
@@ -698,6 +833,16 @@ Mat4 localTransform(NodeHandle n)
 Mat4 globalTransform(NodeHandle n)
 {
     if (!n || !engineAlive()) return Mat4();
+    // THE TAG BRANCH (AVATAR_RIG_PERF_SPEC §5.6). `_getFullTransformUpdated`
+    // walks to the root re-deriving as it goes, and a TagPoint cannot be
+    // re-derived on demand: `TagPoint::updateFromParentImpl` is a plain
+    // `assert(false)` (OgreTagPoint2.cpp:108-112). Our Ogre is built
+    // RelWithDebInfo, so today that assert compiles out and the walk silently
+    // returns the cached transform — a Debug-built Ogre would ABORT on the first
+    // `node.info` of a socketed camera. Reading the cache EXPLICITLY makes the
+    // semantics ("the pose the last rendered frame produced") a decision instead
+    // of an accident, and makes a Debug Ogre survivable.
+    if (isSocketRider(n)) return toIris(nd(n)->_getFullTransform());
     return toIris(nd(n)->_getFullTransformUpdated());
 }
 

@@ -110,7 +110,11 @@
 // Forward-declared rather than included so the pass-def headers stay where they
 // belong — inside the .cpp files that build passes.
 namespace Ogre { class CompositorPassSceneDef; class CompositorPassClearDef;
-                 class CompositorPassQuadDef; class CompositorPassDef; }
+                 class CompositorPassQuadDef; class CompositorPassDef;
+                 // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
+                 // holds a TagPoint*, and only OgreSockets.cpp does anything
+                 // with one.
+                 class TagPoint; }
 
 namespace jahshaka { namespace engine {
 // The backend's own namespace: these types and helpers are shared between the
@@ -1310,8 +1314,17 @@ public:
 
     // ---- Rigs: GPU skinning (GPU_SKINNING_SPEC; impl in OgreSkeleton.cpp) ----
     bool attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
-                           const SkeletonDesc &rig) override;
+                           const SkeletonDesc &rig, const unsigned short *blendToRig,
+                           size_t blendToRigCount) override;
     bool followSkeleton(NodeId follower, NodeId source) override;
+    bool shareSkeleton(NodeId follower, NodeId source) override;
+    bool sharesSkeleton(NodeId id) const override;
+    bool attachToBone(NodeId rider, NodeId owner, const std::string &bone,
+                      const Vec3 &position, const Quat &rotation, const Vec3 &scale) override;
+    bool detachFromBone(NodeId rider, NodeId parent) override;
+    bool setBoneAttachmentOffset(NodeId rider, const Vec3 &position, const Quat &rotation,
+                                 const Vec3 &scale) override;
+    NodeId boneAttachment(NodeId rider, std::string *bone = nullptr) const override;
     /// Copies every follower's pose from its source. Once per rendered frame,
     /// AFTER the frame, so the poses copied are the ones just drawn.
     void applySkeletonFollowers();
@@ -1319,6 +1332,8 @@ public:
     std::vector<std::string> boneNames(NodeId id) const override;
     bool setBonePoses(NodeId id, const BonePose *poses, size_t count) override;
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
+    size_t streamedBoneCount(NodeId id) const override;
+    RigStats rigStats() const override;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC; impl in OgreClips.cpp) ----
     bool attachClips(NodeId id, const ClipDesc *clips, size_t count) override;
@@ -1516,6 +1531,31 @@ private:
         /// goes away takes its pairings with it.
         NodeId               skeletonSource = 0;
         std::vector<NodeId>  skeletonFollowers;
+        /// SKELETON SHARING (shareSkeleton, AVATAR_RIG_PERF_SPEC §3.2): the node
+        /// whose SkeletonInstance this node's Item is actually rendering from,
+        /// and the nodes rendering from this one's. A DIFFERENT relationship
+        /// from the pose FOLLOWING above and deliberately kept apart: following
+        /// copies bone locals once a frame and leaves both nodes in charge of
+        /// their own transforms; sharing means there is ONE instance, evaluated
+        /// once, whose bones carry the MASTER's node transform — which is why
+        /// only pieces that sit exactly where the master does may share.
+        ///
+        /// `shareSource` is the LIVE Ogre state, not an intent: it is dropped
+        /// the moment the share is undone (a detach on either end), and the host
+        /// re-arms it. Anything else would make sharesSkeleton() lie.
+        NodeId               shareSource = 0;
+        std::vector<NodeId>  shareFollowers;
+        /// BONE ATTACHMENT (attachToBone, AVATAR_RIG_PERF_SPEC §4): the engine
+        /// TagPoint this node's scene node hangs from, the node that owns the
+        /// bone, and the bone's name. One tag per RIDER (a tag shared by the
+        /// riders of one socket is a later optimisation; riders per socket are
+        /// one to three and a TagPoint is a node).
+        Ogre::TagPoint      *boneTag = nullptr;
+        NodeId               boneOwner = 0;
+        std::string          boneName;
+        /// The riders hanging off THIS node's bones, so an owner that dies (or
+        /// loses its rig) can free them before its skeleton goes.
+        std::vector<NodeId>  boneRiders;
         // Billboard set (particles): uniquely owned; freed by releaseBillboards
         // BEFORE the scene manager dies (its _destroy needs the live VaoManager).
         // Decal (DECALS_SPEC): the Decal rides an internal child node whose
@@ -1599,6 +1639,14 @@ private:
         bool hasSkinData = false;
         unsigned maxBlendIndex = 0;
         std::string rigId;
+        /// The SubMesh's blend index -> rig bone index map as we wrote it
+        /// (AVATAR_RIG_PERF_SPEC §3.1). Empty means "identity, rig.bones long" —
+        /// which is what every mesh got before the union rig existed. Kept here
+        /// because the map lives on the SUBMESH, i.e. per MESH: two nodes that
+        /// share a mesh asset share the map, so a second attach asking for a
+        /// DIFFERENT map has to be refused rather than silently re-target the
+        /// first node's weights.
+        std::vector<Ogre::uint16> blendToRig;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
@@ -1724,6 +1772,21 @@ private:
     /// Forgets this node's pose-following pairings in both directions — the
     /// node itself is going away (releaseNode).
     void dropSkeletonFollowers(NodeId id, Node &n);
+    /// Undoes one follower's SHARE, leaving it on its OWN instance, posed and
+    /// PARENTED. Ogre leaves the fresh instance parentless
+    /// (OgreItem.cpp:266-280), so the Item is re-attached to its node, which is
+    /// the only thing that re-points it (MovableObject::_notifyAttached).
+    void unshareFollower(NodeId followerId, Node &f, Node *master);
+    /// Un-shares every follower of `id` — before its Item or its node dies.
+    void releaseShareFollowers(NodeId id, Node &n);
+    /// Forgets this node's sharing pairings in both directions (releaseNode).
+    void dropShareFollowers(NodeId id, Node &n);
+    /// Frees this node's TagPoint and puts its scene node back under `parent`
+    /// (0 = the scene root) at the transform it last rendered with.
+    void releaseBoneTag(NodeId id, Node &n, NodeId parent);
+    /// Detaches every rider hanging off this node's bones — before the rig, the
+    /// Item or the node dies. Riders land under the scene root, fail-soft.
+    void releaseBoneRiders(NodeId id, Node &n);
     /// One follower's bone-local transforms, copied from its source.
     void copySkeletonPose(Node &follower, Node &source);
     /// Every node that HAS followers, so the per-frame copy costs the number of
@@ -1765,7 +1828,8 @@ private:
     /// SkeletonDef has exactly one constructor and it takes a v1::Skeleton
     /// (OgreSkeletonDef.h:145); nothing v1 reaches the render path (v1 meshes
     /// render NOTHING on Vulkan, and geometry stays in our v2 buffers).
-    bool bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig);
+    bool bindRigToMesh(MeshRec &meshRec, const SkeletonDesc &rig,
+                       const unsigned short *blendToRig, size_t blendToRigCount);
     /// Assembles the in-memory v1 skeleton a SkeletonDesc translates to, under
     /// `resName`. Shared by the rig def and every CLIP def, because a clip def
     /// built from anything but the node's own rig indexes the wrong blocks in
@@ -2040,7 +2104,12 @@ private:
     /// arm itself is being torn down and rebuilt.
     void disarmAllReflectors();
 
+    /// The scene node behind an id, or null. PUBLIC since P2b: a View that
+    /// rides its camera on a node (setCameraNode) needs exactly this one lookup
+    /// and nothing else of the scene's internals.
+public:
     Ogre::SceneNode *node(NodeId id) const;
+private:
     /// Ids are monotonic per scene and never reused.
     NodeId track(const Node &n);
 
@@ -2279,6 +2348,8 @@ public:
     OgreScene *ogreScene() const { return mScene; }
 
     bool setScene(Scene *scene) override;
+    bool setCameraNode(NodeId node) override;
+    NodeId cameraNode() const override { return mCameraNode; }
 
     /// Unbinds the scene: workspace and camera go, the scene itself survives.
     void detachScene();
@@ -2588,6 +2659,10 @@ private:
     /// it beyond the Ogre camera itself: the letterbox flag (a graph change)
     /// and its rectangle (re-derived on every resize).
     CameraDesc                 mCameraDesc;
+    /// The scene node the camera RIDES (setCameraNode, AVATAR_RIG_PERF_SPEC
+    /// §4.6). 0 = the camera is positioned from mCameraDesc, which is what
+    /// every view has done since step 5.
+    NodeId                     mCameraNode = 0;
     unsigned                   mWidth, mHeight;
     Colour                     mBackground;
     bool                       mEnabled = true;

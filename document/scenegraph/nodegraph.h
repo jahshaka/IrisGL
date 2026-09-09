@@ -188,6 +188,32 @@ NodeHandle detach(NodeHandle child);
 /// static flag travel; attachments (which belong to the engine) do not.
 NodeHandle migrate(NodeHandle n, SceneHandle target, NodeHandle newParent);
 
+// ---- socket riders: the SHADOW PARENT (AVATAR_RIG_PERF_SPEC §4.3, D3 = H1) --
+//
+// A node attached to a socket hangs off an engine TAG POINT on a bone, so its
+// real Ogre parent is neither its document parent nor even a document node. The
+// socket API's contract is explicit that this is NOT a reparent — "it keeps its
+// place in the hierarchy" (node.attachToSocket) — and since the document graph
+// IS Ogre's graph, something has to carry that place. This is it: the graph
+// layer remembers each rider's DOCUMENT parent and answers parentOf/childAt/
+// childCount/indexInParent with it, while Ogre goes on drawing the node under
+// the bone.
+//
+// Riders are listed AFTER a parent's real children, in registration order. The
+// cost is one hash lookup on parentOf and on the child accessors of a parent
+// that HAS riders — scenes without sockets pay a single empty-map test.
+
+/// Records that `rider` is socket-attached and that the document says it still
+/// belongs under `documentParent`. Idempotent; a null parent clears it.
+void setSocketRider(NodeHandle rider, NodeHandle documentParent);
+/// Forgets the shadow parent (the rider came off its socket).
+void clearSocketRider(NodeHandle rider);
+/// The rider's document parent, or null when this node is not a rider.
+NodeHandle socketRiderParent(NodeHandle rider);
+bool isSocketRider(NodeHandle rider);
+/// How many riders are registered right now — a suite/diagnostic read.
+std::size_t socketRiderCount();
+
 // ---- transforms -----------------------------------------------------------
 
 Vec3 localPos(NodeHandle n);
@@ -224,6 +250,15 @@ Mat4 localTransform(NodeHandle n);
 /// inside a loop over the document (cache the matrix for the loop instead).
 /// Still the honest replacement for the old getGlobalTransform()
 /// double-writer (audit F2) — one owner, no second store.
+///
+/// A SOCKET RIDER is the exception, and it has to be: its parent is a TagPoint,
+/// and a tag point cannot be resolved on demand at all —
+/// `TagPoint::updateFromParentImpl` is a plain `assert(false)`
+/// (OgreTagPoint2.cpp:108-112), which our RelWithDebInfo Ogre compiles out into
+/// a silent no-op and a Debug-built Ogre would ABORT on. So a tagged node's
+/// world transform is read from the CACHE: the transform the last rendered
+/// frame produced. That is the same latency the old read-back socket resolver
+/// had for every reader, while the RENDER itself is now exact.
 Mat4 globalTransform(NodeHandle n);
 Vec3 globalPos(NodeHandle n);
 Quat globalRot(NodeHandle n);
