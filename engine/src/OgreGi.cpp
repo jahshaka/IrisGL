@@ -458,7 +458,7 @@ GiStatus OgreScene::giStatus() const {
         // RESOLVED, not requested: both default to GiToggle::Auto, and the
         // shadow half additionally falls back when there is no shadow node.
         st.probeHdr     = mPcc && mPccHdr;
-        st.probeShadows = mPcc && mPccShadowed;
+        st.probeShadows = (mPcc && mPccShadowed) || (mIfd && mIfdShadowed);   // either shadowed capture arm
         // RESOLVED, like the two above: the request is clamped to the probes
         // that exist, and it is only ACTED ON once a view has pushed a tracked
         // camera position (updateGiTracking), so this reads 0 for the frame
@@ -2192,13 +2192,19 @@ void OgreScene::applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
     }
     // Shadowed captures follow the same P3b rule as the reflection probes:
     // only when the PROBE shadow node exists (Ogre THROWS at workspace
-    // creation otherwise — and a raster probe workspace is one per probe, so
-    // it names the quarter-resolution probe node, never the view's), and only
-    // when the quality dial asks for them.
+    // creation otherwise), and only when the quality dial asks for them. The
+    // raster field owns ONE workspace (IrradianceFieldRaster::createWorkspace,
+    // the camera moves per probe), not one per probe — it names the
+    // quarter-resolution probe node because its faces are 32 px
+    // (ClosestPow2(kIfdDepthRes*2)): the view's 2048 atlas would be 80 MB of
+    // resolution no face can observe.
     const bool wantShadows = resolveToggle(mGi.probeShadows, mGi.quality == GiQuality::High);
+    mIfdShadowed = false;
     if (wantShadows && cm->hasWorkspaceDefinition("JahshakaIfdRasterWorkspaceShadows") &&
-        cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName))
+        cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName)) {
         workspace = "JahshakaIfdRasterWorkspaceShadows";
+        mIfdShadowed = true;
+    }
 
     Ogre::RasterParams rp;
     rp.mWorkspaceName = workspace;
@@ -2243,6 +2249,7 @@ void OgreScene::teardownIrradianceField() {
     mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = mIfdMinProbes = 0u;
     mIfdSource = GiSource::Voxel;
     mIfdRasterFar = 0.0f;
+    mIfdShadowed = false;
     if (!mIfd) return;
     JAH_TRY {
         // Pointer identity, not sVctBindingOwner: the owner flag says who bound
@@ -2364,8 +2371,8 @@ void OgreScene::teardownGi() {
 // The shadow-atlas rebuild's GI half (SHADOW_TOOLING_SPEC.md risk R3)
 // ---------------------------------------------------------------------------
 // A shadow-node DEFINITION cannot be deleted while anything instantiates it,
-// and the hybrid's shadowed probe captures do: each probe workspace names
-// JahshakaShadowNode (buildPcc above), so the probe arm holds live
+// and the shadowed probe captures do: each PCC probe workspace and the raster
+// field's one workspace name JahshakaProbeShadowNode, so the probe arm holds live
 // CompositorShadowNodes exactly like a view's workspace does. Before this
 // existed, changing the shadow resolution with hybrid GI at high quality left
 // those instances pointing at freed definition memory and the next frame died
@@ -2379,7 +2386,17 @@ void OgreScene::teardownGi() {
 // risk), and this path runs on a Shadow Quality change or an atlas growth — not
 // per frame.
 bool OgreScene::dropGiForShadowRebuild() {
-    if (!mPcc || !mPccShadowed) return false;
+    // BOTH shadowed arms hold live CompositorShadowNodes on the probe
+    // definition: the PCC probes (one workspace each) AND the raster
+    // IrradianceField (ONE workspace per field, kept for the field's whole
+    // life in IrradianceFieldRaster::mRenderWorkspace). VCT + DDGI-raster at
+    // High with no PCC reached here with mPcc null, returned false, and the
+    // atlas rebuild deleted the definition under the field's workspace: a
+    // use-after-free at the next raster sweep or at teardown
+    // (~CompositorNode reads mDefinition). Code review 2026-09-10.
+    const bool pccShadowed = mPcc && mPccShadowed;
+    const bool ifdShadowed = mIfd && mIfdShadowed;
+    if (!pccShadowed && !ifdShadowed) return false;
     JAH_TRY { teardownVct(); } JAH_CATCH(mError, false);
     return true;
 }

@@ -417,6 +417,7 @@ unsigned OgreEngine::shadowResolution() const { return mShadowResolution; }
 /// Returns false when nothing was done (values unchanged, or no Hlms yet — in
 /// which case the first createShadowNode() will pick the new values up).
 bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, bool clears) {
+    if (mHeadless) return false;   // no pixels, no atlases (the siblings gate the same way)
     const unsigned res = std::min(8192u, std::max(256u, resolution));
     const unsigned maps = std::min(kMaxShadowMaps, std::max(2u, focusedMaps));
     if (res == mShadowResolution && maps == mShadowMapCount && clears == mShadowPerMapClears &&

@@ -1601,7 +1601,8 @@ public:
     bool dropPlanarForShadowRebuild();
     /// The SAME contract for the hybrid's reflection-probe arm, and the fix for
     /// SHADOW_TOOLING_SPEC.md risk R3: when the probe captures are SHADOWED,
-    /// every probe workspace instantiates JahshakaShadowNode too, so deleting
+    /// every probe workspace (and the raster field's one) instantiates
+    /// JahshakaProbeShadowNode too, so deleting
     /// the definition under them leaves live CompositorShadowNodes pointing at
     /// freed memory. Reproduced as a SEGV in Hlms::preparePassHashBase
     /// (tests/shadow, mode r3) before this existed. Returns true when the arm
@@ -2528,6 +2529,9 @@ private:
     std::map<NodeId, unsigned long long> mStaticLightPose;
     bool mPccHdr      = false;
     bool mPccShadowed = false;
+    /// The raster IrradianceField's one workspace names the probe shadow node
+    /// (dropGiForShadowRebuild must tear the field down before an atlas rebuild).
+    bool mIfdShadowed = false;
     /// THE PROBE ROUND-ROBIN (FIX WAVE B2). One entry per probe, rebuilt with
     /// the grid. `sweepPending` is true while the probe still owes this sweep an
     /// update — the sweep set refills when it empties, which is what makes
@@ -3168,7 +3172,9 @@ private:
     /// Ogre's low-level material scripts (sky quad, DPSM shadow maps, depth utils).
     /// Staged from Samples/Media/2.0/scripts/materials/Common next to the Hlms data.
     void registerCommonMaterials();
-    /// One shadow node for the process: PSSM (3 splits) for the first directional
+    /// Three shadow nodes for the process (view / planar-reflect half-res /
+    /// probe-capture quarter-res — kShadowNodeName and siblings); the view's:
+    /// PSSM (3 splits) for the first directional
     /// light and `mShadowMapCount` focused maps for the closest point/spot
     /// lights, all in ONE atlas. Views opt in with setShadows(true). Also
     /// creates the half-resolution twin the planar-reflection pass uses and

@@ -30,9 +30,10 @@
 // instantiating, because Ogre resolves the pass's shadow node at workspace
 // creation and THROWS when it is absent). It names `JahshakaProbeShadowNode`
 // (EnginePrivate.h kProbeShadowNodeName — the main layout at a quarter of the
-// resolution, four lamp maps at most) and not the view's atlas for the reason JahshakaPcc
-// .compositor gives: a shadow node is instantiated per workspace, and this
-// workspace is instantiated per probe.
+// resolution, four lamp maps at most) and not the view's atlas because this
+// workspace's faces are 32 px (IrradianceFieldRaster: ClosestPow2(depthRes*2))
+// — the view's 2048 atlas is resolution no face can observe. ONE workspace per
+// field (the camera moves per probe), unlike the PCC probes' one-per-probe.
 
 abstract target jah_ifd_cubemap_face
 {
