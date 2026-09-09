@@ -471,7 +471,21 @@ void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
 
 void SceneMirror::setHighlightedNode(iris::SceneNodePtr node)
 {
-    mHighlighted = node;
+    mHighlighted.clear();
+    if (node) mHighlighted.append(node);
+}
+
+void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes)
+{
+    mHighlighted.clear();
+    for (const auto &n : nodes) if (n) mHighlighted.append(n);
+}
+
+bool SceneMirror::isHighlighted(const iris::SceneNode *node) const
+{
+    if (!node) return false;
+    for (const auto &n : mHighlighted) if (n.data() == node) return true;
+    return false;
 }
 
 void SceneMirror::setHighlightWireframe(bool on)
@@ -513,7 +527,22 @@ void SceneMirror::syncHighlight()
     // vector re-allocated its storage on every frame with a selection.
     std::vector<std::pair<iris::MeshNode *, MeshId>> &targets = mHighlightTargets;
     targets.clear();
-    if (mHighlighted) collectHighlightMeshes(mHighlighted.data(), targets);
+    // N ROOTS: the same subtree walk, once per member of the set. Duplicates
+    // cannot appear — a member whose ancestor is also selected contributes
+    // meshes the ancestor already contributed — so they are dropped here rather
+    // than growing two shells over one mesh (double-drawn outlines, and a
+    // shell pool that never settles).
+    for (const auto &highlighted : mHighlighted) {
+        const size_t before = targets.size();
+        collectHighlightMeshes(highlighted.data(), targets);
+        for (size_t i = targets.size(); i > before; --i) {
+            const size_t idx = i - 1;
+            bool dup = false;
+            for (size_t k = 0; k < before; ++k)
+                if (targets[k].first == targets[idx].first) { dup = true; break; }
+            if (dup) targets.erase(targets.begin() + long(idx));
+        }
+    }
     if (targets.empty()) {
         // ARM THE SWEEP ONLY ON A REAL TRANSITION (audit F4). This branch runs
         // on every frame with nothing selected — which is most frames — and it
@@ -787,8 +816,7 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
     }
     if (!e.wireNode) return;
 
-    const bool selected = mHighlighted &&
-                          mHighlighted.data() == static_cast<iris::SceneNode *>(camera);
+    const bool selected = isHighlighted(static_cast<iris::SceneNode *>(camera));
     const float fov     = camera->angle > 0.0f ? camera->angle : 45.0f;
     // The authored aspect when the camera constrains it, its own field otherwise
     // — and never zero, which would make the frustum a plane.
@@ -1196,8 +1224,7 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     // just the direction arrow. The directional arrow and the area rectangle
     // (the light's physical shape, not a falloff volume) stay on for every
     // light; icons are always-on with the helpers toggle.
-    const bool selected = mHighlighted &&
-                          mHighlighted.data() == static_cast<iris::SceneNode *>(light);
+    const bool selected = isHighlighted(static_cast<iris::SceneNode *>(light));
     int shape = kind;
     if (!selected) {
         if (kind == 1) shape = -1;        // point: rings are the falloff volume
