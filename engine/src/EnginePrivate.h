@@ -222,6 +222,25 @@ constexpr Ogre::uint32 kPssmStableSplits  = 2u;
 /// host asks for (SHADOW_TOOLING_SPEC D1). The bound is VRAM and shadow passes,
 /// not the pass buffer — a mapped caster costs ~112 B there.
 constexpr unsigned     kMaxShadowMaps     = 16u;
+/// The PROBE-CAPTURE shadow node's knobs (the third node, OgreView::
+/// kProbeShadowNodeName — the numbers behind them are at its declaration).
+/// Resolution: a quarter of the main atlas, floored at 256 (the engine's own
+/// floor) and capped at 512 = the largest reflection-probe face (OgreScene::
+/// buildPcc's quality table; a raster irradiance-field face is 32 px). A probe
+/// face is consumed through the IBL roughness mip chain, so a shadow edge
+/// sharper than the face itself is unobservable by construction — measured on
+/// the Showroom sample's reflections: 2048 and 1024 PSSM-only captures are
+/// byte-identical, and 512 differs from 1024 in well under 1% of pixels (the
+/// lamp maps, at R, are where the last halving shows). Focused maps: the
+/// derived count the main atlas has (so the lamps a probe sees are the lamps
+/// the view sees), capped at four — each map is one R x R rectangle per probe.
+/// Scratch cube: R / 2, the same ratio the main node has always used
+/// (2048 -> 1024).
+constexpr unsigned     kProbeShadowMaxResolution  = 512u;
+constexpr unsigned     kProbeShadowMaxFocusedMaps = 4u;
+inline unsigned probeShadowResolution(unsigned mainResolution) {
+    return std::min(kProbeShadowMaxResolution, std::max(256u, mainResolution / 4u));
+}
 
 /// One shadow map's rectangle inside the atlas, in texels.
 struct ShadowMapRect { unsigned x = 0, y = 0, w = 0, h = 0; };
@@ -2631,6 +2650,41 @@ public:
     /// Half resolution makes that ~14 MB, and a shadow seen in a mirror is the
     /// last place anyone measures shadow-map resolution.
     static constexpr const char *kReflectShadowNodeName = "JahshakaReflectShadowNode";
+    /// The THIRD shadow node: REFLECTION-PROBE CAPTURES ONLY — the PCC probe
+    /// workspace (media/Hlms/Jahshaka/JahshakaPcc.compositor, the `Shadows`
+    /// twin) and the irradiance-field raster workspace (JahshakaIfdRaster
+    /// .compositor). The same PSSM + focused layout as the main atlas at a
+    /// QUARTER of its resolution (probeShadowResolution(): 512 at the High
+    /// tier's 2048), the derived focused-map count capped at four, and a
+    /// scratch cube of R/2 instead of a fixed 1024 (kProbeShadowMaxResolution /
+    /// kProbeShadowMaxFocusedMaps above).
+    ///
+    /// WHY (lane-probeshadow, 2026-09-09, measured with app.textureMemory on
+    /// this box): ParallaxCorrectedCubemapAuto gives EVERY probe its own
+    /// workspace (OgreCubemapProbe.cpp initWorkspace), and a CompositorShadowNode
+    /// is per workspace, so with the probes naming kShadowNodeName an 18-probe
+    /// default scene instantiated 19 full atlases (2048x7168 D32 = 56 MB each,
+    /// 1064 MB) plus 21 point-light cubes (1024^2 x 6 R32F = 24 MB each,
+    /// 504 MB) — 1.6 GB of the 2.05 GB a default scene booted with. The
+    /// Showroom sample (32 probes, four focused maps) was 33 x 88 MB + 35 x 24 MB
+    /// = 3.7 GB of its 4.46 GB. With this node a probe costs a 512x1792 D32
+    /// atlas (3.5 MB, two focused maps; 5.5 MB with four) plus a 256^2 x 6 cube
+    /// (1.5 MB): the default scene boots at 700 MB of textures (was 2050), the
+    /// Showroom at 1103 MB (was 4463).
+    ///
+    /// WHY NOT PSSM-ONLY, which would be 6 MB a probe at 1024: the lamps'
+    /// shadows ARE visible in reflections. Measured on the Showroom (its three
+    /// shadow-casting lamps, 960x540 offscreen shot, mean |diff| per channel /
+    /// pixels differing by more than 8 against the full-atlas capture): PSSM-only
+    /// 5.4 / 13.8% — the spheres' shadow discs vanish from the neighbouring
+    /// chrome; this node 0.34 / 1.7%; and the resolution itself is invisible
+    /// (2048 vs 1024 vs 512 PSSM-only captures are byte-identical). The default
+    /// scene (no lamp casters) is byte-identical under every variant.
+    ///
+    /// The cost that remains is shader-side: the probe passes get their own
+    /// PBS variants (numShadowMapLights differs from the main view's), compiled
+    /// once and disk-cached, exactly like the reflect node's.
+    static constexpr const char *kProbeShadowNodeName = "JahshakaProbeShadowNode";
 
     // ---- The workspace seam (POST_CHAIN_SPEC.md; the planar-reflection lane
     //      depends on it) ---------------------------------------------------
@@ -3112,11 +3166,15 @@ private:
     /// One shadow node for the process: PSSM (3 splits) for the first directional
     /// light and `mShadowMapCount` focused maps for the closest point/spot
     /// lights, all in ONE atlas. Views opt in with setShadows(true). Also
-    /// creates the half-resolution twin the planar-reflection pass uses.
+    /// creates the half-resolution twin the planar-reflection pass uses and
+    /// the quarter-resolution probe-capture node (kProbeShadowNodeName).
     void createShadowNode();
     /// The shared body (OgreShadow.cpp): one PSSM block + `focusedMaps` focused
     /// maps packed into one atlas derived from `baseResolution`, registered
-    /// under `name`. Built from the public compositor-definition API rather than
+    /// under `name`. `focusedMaps` is taken literally (0 = PSSM only, and then
+    /// no point-light scratch cubemap is declared at all); `cubeResolution` is
+    /// that cube's face size — the historical 1024 unless a node says otherwise.
+    /// Built from the public compositor-definition API rather than
     /// ShadowNodeHelper — see the head of OgreShadow.cpp for why.
     /// `perMapClears` picks the clear strategy: false = upstream's ONE
     /// whole-atlas PASS_CLEAR (cheapest, and what every scene without a static
@@ -3124,7 +3182,8 @@ private:
     /// static map survive its neighbours being redrawn. The engine rebuilds the
     /// node when the answer changes.
     void buildShadowNode(const char *name, unsigned baseResolution, unsigned focusedMaps,
-                         bool perMapClears);
+                         bool perMapClears,
+                         unsigned cubeResolution = kPointLightCubemapResolution);
     /// Which of the two clear-quad materials writes the far plane on this
     /// backend (reverse depth or not). OgreShadow.cpp.
     const char *shadowClearMaterialName() const;

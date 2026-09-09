@@ -1824,6 +1824,19 @@ void OgreEngine::createShadowNode() {
     if (!cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
         buildShadowNode(OgreView::kReflectShadowNodeName,
                         std::max(256u, mShadowResolution / 2u), 2u, false);
+    // The PROBE-CAPTURE node (OgreView::kProbeShadowNodeName has the numbers):
+    // instantiated once PER REFLECTION PROBE by the PCC / raster-IFD probe
+    // workspaces, so it is the main atlas's layout at a quarter of the
+    // resolution (512 at High — the largest probe face), the same derived
+    // focused count capped at four, a scratch cube of R/2, and no per-map
+    // clears (a probe's maps are never static). It is rebuilt with the other
+    // two whenever the resolution or the derived count changes.
+    if (!cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName)) {
+        const unsigned probeRes = probeShadowResolution(mShadowResolution);
+        buildShadowNode(OgreView::kProbeShadowNodeName, probeRes,
+                        std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps), false,
+                        probeRes / 2u);
+    }
 }
 
 }  // namespace detail

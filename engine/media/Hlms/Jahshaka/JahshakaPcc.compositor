@@ -69,14 +69,22 @@ abstract target jah_pcc_cubemap_face
 // The SHADOWED twin (REFLECTIONS_ADOPTION_SPEC.md P3b, quality High). Identical
 // to jah_pcc_cubemap_face except for the `shadows` line — keep them in step.
 //
-// `JahshakaShadowNode` is the programmatic PSSM+focused atlas OgreEngine builds
-// via ShadowNodeHelper at Hlms registration (EnginePrivate.h kShadowNodeName),
-// i.e. it exists before any scene does — EXCEPT in a headless engine, which
-// never renders pixels and never builds it. Ogre resolves a pass's shadow node
-// when the workspace INSTANTIATES and throws if it is missing, so buildPcc
-// checks for the definition and falls back to the unshadowed workspace rather
-// than letting the hybrid die; Scene::giStatus().probeShadows reports which one
-// actually ran.
+// `JahshakaProbeShadowNode` is the PROBE-CAPTURE shadow node OgreEngine builds
+// programmatically at Hlms registration beside the view's atlas (EnginePrivate.h
+// kProbeShadowNodeName): the same PSSM + focused layout at a quarter of the
+// main resolution (512 at High), at most four point/spot maps and a small
+// scratch cube. It is named here — not the view's
+// `JahshakaShadowNode` — because Ogre instantiates a shadow node PER WORKSPACE
+// and ParallaxCorrectedCubemapAuto instantiates this workspace once per probe:
+// at the full atlas an 18-probe scene held 18 x (56 MB atlas + 24 MB point-light
+// cube) of shadow targets that no 512 px probe face could resolve (lane
+// probeshadow, 2026-09-09; the measurements are at the constant's declaration).
+// Like the view's node it exists before any scene does — EXCEPT in a headless
+// engine, which never renders pixels and never builds it. Ogre resolves a
+// pass's shadow node when the workspace INSTANTIATES and throws if it is
+// missing, so buildPcc checks for the definition and falls back to the
+// unshadowed workspace rather than letting the hybrid die;
+// Scene::giStatus().probeShadows reports which one actually ran.
 //
 // `recalculate` is not optional here and upstream's sample says why
 // (Samples/Media/2.0/scripts/Compositors/LocalCubemaps.compositor): Ogre cannot
@@ -106,7 +114,7 @@ abstract target jah_pcc_cubemap_face_shadows
 		rq_first	0
 		rq_last		200
 
-		shadows JahshakaShadowNode recalculate
+		shadows JahshakaProbeShadowNode recalculate
 
 		profiling_id "Jahshaka PCC probe face (shadowed)"
 	}

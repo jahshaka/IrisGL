@@ -1644,11 +1644,18 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // Ogre resolves the pass's shadow node at workspace instantiation and THROWS
     // when it is absent, so both are checked here, before the instantiation, and
     // the answer is recorded for giStatus rather than logged and forgotten.
+    //
+    // The node the shadowed workspace names is the PROBE node (OgreView::
+    // kProbeShadowNodeName — the main layout at a quarter of the resolution,
+    // four focused maps at most, an R/2 scratch cube), NOT the view's: Ogre
+    // instantiates a shadow node per workspace and this workspace is
+    // instantiated once per probe, which at the full atlas cost 80 MB per
+    // probe (the numbers are at the constant's declaration).
     const bool wantShadows = resolveToggle(mGi.probeShadows, mGi.quality == GiQuality::High);
     const char *probeWorkspace = "JahshakaPccProbeWorkspace";
     if (wantShadows) {
         if (cm->hasWorkspaceDefinition("JahshakaPccProbeWorkspaceShadows") &&
-            cm->hasShadowNodeDefinition(OgreView::kShadowNodeName)) {
+            cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName)) {
             probeWorkspace = "JahshakaPccProbeWorkspaceShadows";
             mPccShadowed = true;
         } else {
@@ -2139,11 +2146,13 @@ void OgreScene::applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
         return;
     }
     // Shadowed captures follow the same P3b rule as the reflection probes:
-    // only when the scene's shadow node exists (Ogre THROWS at workspace
-    // creation otherwise), and only when the quality dial asks for them.
+    // only when the PROBE shadow node exists (Ogre THROWS at workspace
+    // creation otherwise — and a raster probe workspace is one per probe, so
+    // it names the quarter-resolution probe node, never the view's), and only
+    // when the quality dial asks for them.
     const bool wantShadows = resolveToggle(mGi.probeShadows, mGi.quality == GiQuality::High);
     if (wantShadows && cm->hasWorkspaceDefinition("JahshakaIfdRasterWorkspaceShadows") &&
-        cm->hasShadowNodeDefinition(OgreView::kShadowNodeName))
+        cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName))
         workspace = "JahshakaIfdRasterWorkspaceShadows";
 
     Ogre::RasterParams rp;
