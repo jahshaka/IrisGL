@@ -816,6 +816,13 @@ iris::Vec3 CameraNode::calculatePickingDirection(int viewPortWidth, int viewPort
     return ray.toVector3D().normalized();
 }
 
+void CameraNode::remapOwnNodeReferences(const QHash<QString, QString> &guidMap)
+{
+    if (focusTarget.isEmpty()) return;
+    const auto it = guidMap.constFind(focusTarget);
+    if (it != guidMap.constEnd()) focusTarget = it.value();
+}
+
 SceneNodePtr CameraNode::createDuplicate()
 {
 	auto camera = iris::CameraNode::create();

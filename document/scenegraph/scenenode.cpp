@@ -745,18 +745,42 @@ SceneNodePtr SceneNode::duplicate()
     QHash<QString, QString> guidMap;
     auto node = duplicateInto(guidMap);
     if (!node) return node;
-    node->remapSocketOwners(guidMap);
+    node->remapNodeReferences(guidMap);
     return node;
 }
 
-void SceneNode::remapSocketOwners(const QHash<QString, QString> &guidMap)
+void SceneNode::remapNodeReferences(const QHash<QString, QString> &guidMap)
 {
-    if (!socketOwnerGuid.isEmpty()) {
-        const auto it = guidMap.constFind(socketOwnerGuid);
-        if (it != guidMap.constEnd()) socketOwnerGuid = it.value();
+    const auto through = [&](QString &field) {
+        if (field.isEmpty()) return;
+        const auto it = guidMap.constFind(field);
+        if (it != guidMap.constEnd()) field = it.value();
+    };
+
+    // A SOCKET RIDER: copying a character with a camera on its head must give
+    // the COPY's camera the COPY's head. An owner OUTSIDE the copied subtree
+    // keeps its guid — the "second camera on the same character" case.
+    through(socketOwnerGuid);
+
+    // PHYSICS CONSTRAINT ENDPOINTS (CLIPBOARD_SPEC §3.2, the recorded gap).
+    // Both ends name nodes by guid, and until now neither Duplicate nor Paste
+    // re-pointed them: a duplicated pair of constrained bodies stayed bolted to
+    // the ORIGINALS, so dragging the copy dragged the original's rig. Same rule
+    // as the socket owner — an endpoint outside the copy is deliberately left
+    // alone, because a constraint to a fixed anchor is a real authoring shape.
+    for (auto &constraint : physicsProperty.constraints) {
+        through(constraint.constraintFrom);
+        through(constraint.constraintTo);
     }
+
+    // Per-type references (a camera's focus target). Virtual rather than a
+    // dynamic_cast ladder here: this file must not know the subclasses, and a
+    // new node type with a node-guid field then cannot forget to be listed —
+    // it overrides one function beside the field it added.
+    remapOwnNodeReferences(guidMap);
+
     const int n = childCount();
-    for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->remapSocketOwners(guidMap);
+    for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->remapNodeReferences(guidMap);
 }
 
 SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
@@ -828,7 +852,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
     guidMap.insert(this->getGUID(), guid);
 
     // The attachment travels with the copy. Whether it points at the ORIGINAL
-    // owner or at the copy's own is decided by remapSocketOwners once the whole
+    // owner or at the copy's own is decided by remapNodeReferences once the whole
     // subtree is known — see the note on duplicateInto.
     node->setSocketAttachment(this->socketOwnerGuid, this->socketName);
 
