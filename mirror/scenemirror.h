@@ -758,6 +758,10 @@ private:
     /// how equirect/gradient/realistic skies get the IBL cubemap skies have.
     /// Also records the sky's ambient integral for applyEnvironment (item 3b).
     void applySkyReflection(const QImage &equirect);
+    /// The six world-axis faces of an equirect panorama as engine textures the
+    /// caller owns (and destroys). Shared by the sky's reflection cube and by
+    /// the per-material override, so one projection serves both.
+    bool buildEquirectCubeFaces(const QImage &equirect, jahshaka::engine::TextureId ids[6]);
     /// Cubemap skies do not go through applySkyReflection (the engine takes the
     /// six faces directly), so their ambient integral is taken from the face
     /// images: the same SH projection, per face texel.
@@ -768,6 +772,18 @@ private:
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
     void syncTextures(Entry &e, iris::Material *material);
     jahshaka::engine::TextureId textureFor(const QString &path, bool srgb);
+    /// The reflection SLOT takes a cubemap, so its bind cannot go through
+    /// textureFor: the six faces are built here (from the document texture's
+    /// own cube faces, or by projecting an equirect image the way the sky
+    /// does) and handed to Scene::createCubemap, which owns the left-handed
+    /// remap. Cached in mTextures like every other bind so reclaimUnused
+    /// frees it (ADDENDUM A-5).
+    jahshaka::engine::TextureId reflectionCubeFor(const QString &path);
+    /// LIVE TEXTURES (ADDENDUM A-1): one pass per sync that re-uploads only the
+    /// live textures whose document GENERATION moved since the last upload. A
+    /// still live texture costs one hash walk and one integer compare — no
+    /// engine call, no allocation, nothing per frame.
+    void syncLiveTextures();
     /// Reads a document material into PBR parameters. Public for tests.
 public:
     static bool toPbrParams(iris::Material *material, jahshaka::engine::PbrParams &out);
@@ -1008,6 +1024,10 @@ private:
     // read-back scratch above, which is a live buffer with the same name.)
     QHash<iris::Material *, jahshaka::engine::MaterialId> mMaterials;
     QHash<QString, jahshaka::engine::TextureId> mTextures;
+    /// For every LIVE entry of mTextures (same key), the document generation
+    /// its pixels were last uploaded from. A key is here only while its engine
+    /// texture is; reclaimUnused drops both together.
+    QHash<QString, quint64> mLiveGenerations;
     QHash<QString, jahshaka::engine::TextureId> mIconTextures;   // light icon glyphs (Qt resources)
     jahshaka::engine::MaterialId mDefaultMaterial = 0;
     bool mLightWires = true;

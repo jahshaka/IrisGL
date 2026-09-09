@@ -160,6 +160,7 @@ set(SRCS
     import/meshbake.cpp
     document/scenegraph/cameranode.cpp
     document/scenegraph/cameralens.cpp
+    document/assets/livetextures.cpp
     document/assets/texture2d.cpp
     document/materials/material.cpp
     core/geometry/trimesh.cpp
@@ -210,6 +211,7 @@ set (HEADERS
     document/animation/keyframeanimation.h
     document/scenegraph/lightnode.h
     document/scenegraph/decalnode.h
+    document/assets/livetextures.h
     document/assets/texture2d.h
     document/assets/texture.h
     document/scenegraph/shadowmap.h

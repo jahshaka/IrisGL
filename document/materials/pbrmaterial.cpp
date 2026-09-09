@@ -10,7 +10,9 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "document/materials/pbrmaterial.h"
+#include "document/assets/livetextures.h"
 #include "document/assets/texture2d.h"
+#include "core/logger.h"
 #include "core/properties/property.h"
 
 namespace iris
@@ -61,6 +63,7 @@ PbrMaterial::PbrMaterial()
     emissiveColor       = QColor(0, 0, 0);
     emissiveIntensity   = 0.0f;
     useEmissiveMap      = false;
+    useReflectionMap    = false;
 
     alpha               = 1.0f;
     alphaCutoff         = 0.5f;
@@ -378,6 +381,16 @@ void PbrMaterial::setEmissiveMap(Texture2DPtr tex)
     else       { useEmissiveMap = false; removeTexture("u_emissiveMap"); }
 }
 
+// ADDENDUM A-5. One more entry in `textures` under the sampler name the
+// mirror's slot table reads — the whole point of routing it through the same
+// map is that the override inherits the resolve, the cache, the reclaim and
+// the family switch every other map already has.
+void PbrMaterial::setReflectionMap(Texture2DPtr tex)
+{
+    if (!!tex) { useReflectionMap = true;  addTexture("u_reflectionMap", tex); }
+    else       { useReflectionMap = false; removeTexture("u_reflectionMap"); }
+}
+
 void PbrMaterial::setAlpha(float a)          { alpha = a; }
 void PbrMaterial::setAlphaCutoff(float c)    { alphaCutoff = c; }
 void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
@@ -403,6 +416,18 @@ void PbrMaterial::setCustomPieceVertex(const QString& path) { customPieceVertex 
 Texture2DPtr PbrMaterial::loadTexture(const QString& path)
 {
     if (path.isEmpty()) return Texture2DPtr();
+    // A LIVE REFERENCE ("live://<guid>") names pixels a producer owns for this
+    // session, not a file (MATERIAL_GAPS_SPEC A-1). A MISS IS ORDINARY and is
+    // not an error: it is what a scene saved by some other session, or a row
+    // hand-edited into a file, looks like — the slot simply stays empty, which
+    // is the same answer a missing file gets, and the material renders its
+    // base colour instead of crashing on a guid nobody can resolve.
+    if (LiveTextures::isLiveRef(path)) {
+        Texture2DPtr live = LiveTextures::find(path);
+        if (!live)
+            irisLog("live texture not in this session, slot left empty: " + path);
+        return live;
+    }
     return Texture2D::load(path);
 }
 
@@ -466,6 +491,7 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "roughnessMap")  setRoughnessMap(loadTexture(value.toString()));
     else if (name == "normalMap")     setNormalMap(loadTexture(value.toString()));
     else if (name == "emissiveMap")   setEmissiveMap(loadTexture(value.toString()));
+    else if (name == "reflectionMap") setReflectionMap(loadTexture(value.toString()));
 
     // ---- detail layers: flat rows, one branch (MATERIAL_GAPS_SPEC §3.4) ----
     // `detail<N><Suffix>` for N in [0, kDetailLayers). Parsed rather than
@@ -808,6 +834,18 @@ void PbrMaterial::createProperties()
         texProp->name        = m.name;
         properties.append(texProp);
     }
+
+    // ---- ADDENDUM A-5: the per-material reflection cubemap ---------------
+    // A row like any other map row, so the panel, the writer, the reader and
+    // material.set all get it for free — but deliberately NOT in mapRowNames(),
+    // which generates the addressing rows: a cube is sampled by direction and
+    // has no U/V wrap to vary. Empty by default, at which the material samples
+    // the scene's global reflection exactly as it always has.
+    auto reflectionProp         = new TextureProperty;
+    reflectionProp->id          = id++;
+    reflectionProp->displayName = "Reflection Cubemap";
+    reflectionProp->name        = "reflectionMap";
+    properties.append(reflectionProp);
 
     // ---- MATERIAL_GAPS_SPEC GAP 2: the detail layers ---------------------
     // FLAT ROWS, one group per layer, generated from kDetailLayers so raising

@@ -11,9 +11,11 @@ For more information see the LICENSE file
 
 #include "document/assets/texture2d.h"
 
+#include <QColor>
 #include <QImageReader>
 #include <QDebug>
 #include "core/logger.h"
+#include "document/assets/livetextures.h"
 
 namespace iris
 {
@@ -101,9 +103,40 @@ QSharedPointer<Texture2D> Texture2D::createCubeMap(QString negZ, QString posZ,
     return QSharedPointer<Texture2D>(tex);
 }
 
-QPixmap Texture2D::readData()
+// A LIVE texture (MATERIAL_GAPS_SPEC A-1). `source` carries the reference
+// form, not a path, so every existing consumer keeps working on a string:
+// the mirror's slot table sees a non-empty source, the writer sees a live
+// reference and skips the row, and a panel shows something meaningful.
+Texture2DPtr Texture2D::createLive(const QString &guid, const QString &name,
+                                   int width, int height, bool mipmaps)
 {
-    return QPixmap::fromImage(image);
+    if (guid.isEmpty() || width <= 0 || height <= 0) return Texture2DPtr();
+    QImage black(width, height, QImage::Format_RGBA8888);
+    black.fill(QColor(0, 0, 0, 255));
+
+    auto tex = new Texture2D();
+    tex->image           = black;
+    tex->live            = true;
+    tex->liveMips        = mipmaps;
+    tex->liveTextureGuid = guid;
+    tex->liveTextureName = name;
+    tex->source          = LiveTextures::refFor(guid);
+    // Generation 1, never 0: the mirror records 0 for "never uploaded", so a
+    // texture that has only ever held its birth pixels still gets its first
+    // upload rather than being mistaken for one already in sync.
+    tex->generation      = 1;
+    return QSharedPointer<Texture2D>(tex);
+}
+
+bool Texture2D::writeLive(const QImage &rgba)
+{
+    if (!live || rgba.isNull()) return false;
+    if (rgba.width() != image.width() || rgba.height() != image.height()) return false;
+    image = rgba.format() == QImage::Format_RGBA8888
+                ? rgba
+                : rgba.convertToFormat(QImage::Format_RGBA8888);
+    ++generation;
+    return true;
 }
 
 int Texture2D::getWidth()
