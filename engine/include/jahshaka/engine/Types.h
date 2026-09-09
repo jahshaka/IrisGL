@@ -333,8 +333,22 @@ struct PbrParams {
     float  alphaCutoff = 0.5f;   ///< Cutout mode threshold
     bool   twoSided    = false;  ///< draw and light both faces (no back-face culling)
     float  normalMapWeight = 1.0f;   ///< strength of the bound normal map
-    float  uvScale         = 1.0f;   ///< tiles every bound texture map (UV *= uvScale);
-                                     ///< the document's PbrMaterial::textureScale
+    /// THE BASE-MAP UV TRANSFORM, applied to every bound base map as
+    ///     uv' = R(uvRotation) * ((uv * uvScale + uvOffset) - 0.5) + 0.5
+    /// about the texture centre. HlmsPbs has no UV transform for its base maps
+    /// (only detail layers get one), so the backend carries this in the
+    /// datablock's free user values and our own uv-modifier macro piece applies
+    /// it — a const-buffer update, never a shader rebuild.
+    ///
+    /// The identity (scale 1, offset 0, rotation 0) is BIT-EXACT with an
+    /// untransformed lookup, deliberately: the shader form is a 2x2 matrix and
+    /// a precomputed bias, so at identity the matrix is I and the bias is
+    /// exactly zero. That is what lets this ride on every material at no
+    /// pixel cost. The document's PbrMaterial::textureScale/V, textureOffsetU/V
+    /// and textureRotation.
+    float  uvScale[2]      = { 1.0f, 1.0f };
+    float  uvOffset[2]     = { 0.0f, 0.0f };
+    float  uvRotation      = 0.0f;   ///< degrees, counter-clockwise
     /// Refractive mode only: how far the surface displaces what it samples from
     /// behind it. Roughly an index-of-refraction knob; 0 is a flat window.
     float  refractionStrength = 0.35f;
@@ -392,7 +406,13 @@ struct PbrParams {
         return albedo == o.albedo && metalness == o.metalness && roughness == o.roughness &&
                emissive == o.emissive && alphaMode == o.alphaMode && alpha == o.alpha &&
                alphaCutoff == o.alphaCutoff && twoSided == o.twoSided &&
-               normalMapWeight == o.normalMapWeight && uvScale == o.uvScale &&
+               normalMapWeight == o.normalMapWeight &&
+               // ELEMENT-WISE, deliberately: `uvScale == o.uvScale` on arrays
+               // compares the two ADDRESSES, which are never equal, and the
+               // guard would silently re-push every material every frame.
+               uvScale[0] == o.uvScale[0] && uvScale[1] == o.uvScale[1] &&
+               uvOffset[0] == o.uvOffset[0] && uvOffset[1] == o.uvOffset[1] &&
+               uvRotation == o.uvRotation &&
                refractionStrength == o.refractionStrength &&
                clearCoat == o.clearCoat && clearCoatRoughness == o.clearCoatRoughness &&
                brdf == o.brdf && receiveShadows == o.receiveShadows &&

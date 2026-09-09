@@ -2235,7 +2235,11 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.alpha           = pbr->alpha;
         out.alphaCutoff     = pbr->alphaCutoff;
         out.normalMapWeight = pbr->normalFactor;
-        out.uvScale         = pbr->textureScale;
+        out.uvScale[0]      = pbr->textureScale;   // U
+        out.uvScale[1]      = pbr->textureScaleV;
+        out.uvOffset[0]     = pbr->textureOffsetU;
+        out.uvOffset[1]     = pbr->textureOffsetV;
+        out.uvRotation      = pbr->textureRotation;
         out.twoSided        = pbr->renderStates.rasterState.cullMode == iris::CullMode::None;
         // HLMS_ADOPTION P1. The BRDF crosses as a NAME, never as the document's
         // index and never as the renderer's enum value: the index is a document
@@ -2269,7 +2273,8 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         const float shin = std::max(0.0f, std::min(def->getShininess(), 128.0f));
         out.roughness = 1.0f - std::sqrt(shin / 128.0f) * 0.9f;
         out.emissive  = Colour(0, 0, 0);
-        out.uvScale   = def->getTextureScale();
+        // The legacy material has one uniform scale and no offset/rotation.
+        out.uvScale[0] = out.uvScale[1] = def->getTextureScale();
         return true;
     }
     return false;

@@ -57,6 +57,10 @@ PbrMaterial::PbrMaterial()
     refractionStrength  = 0.35f;
 
     textureScale        = 1.0f;
+    textureScaleV       = 1.0f;
+    textureOffsetU      = 0.0f;
+    textureOffsetV      = 0.0f;
+    textureRotation     = 0.0f;
 
     // Opaque geometry. NOTE: CustomMaterial maps its "opaque" string to
     // RenderLayer::Background (custommaterial.cpp:296), which looks like a bug in
@@ -182,7 +186,9 @@ const QVector<QString> &PbrMaterial::rowsUnusedWhenUnlit()
         QStringLiteral("emissiveColor"), QStringLiteral("emissiveIntensity"),
         QStringLiteral("brdf"), QStringLiteral("clearCoat"), QStringLiteral("clearCoatRoughness"),
         QStringLiteral("receiveShadows"), QStringLiteral("emissiveAsLightmap"),
-        QStringLiteral("textureScale"),
+        QStringLiteral("textureScale"), QStringLiteral("textureScaleV"),
+        QStringLiteral("textureOffsetU"), QStringLiteral("textureOffsetV"),
+        QStringLiteral("textureRotation"),
         QStringLiteral("normalMap"), QStringLiteral("metallicMap"),
         QStringLiteral("roughnessMap"), QStringLiteral("emissiveMap"),
     };
@@ -231,7 +237,14 @@ void PbrMaterial::setAlpha(float a)          { alpha = a; }
 void PbrMaterial::setAlphaCutoff(float c)    { alphaCutoff = c; }
 void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
 void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; }
-void PbrMaterial::setTextureScale(float s)   { textureScale = s; }
+// The UNIFORM overload sets both axes: it is the one every caller written
+// before the V axis existed uses, and it has to keep meaning "tile the whole
+// thing this much" — including MaterialReader, which drives a loaded
+// "textureScale" number through setValue.
+void PbrMaterial::setTextureScale(float s)   { textureScale = s; textureScaleV = s; }
+void PbrMaterial::setTextureScale(float u, float v) { textureScale = u; textureScaleV = v; }
+void PbrMaterial::setTextureOffset(float u, float v) { textureOffsetU = u; textureOffsetV = v; }
+void PbrMaterial::setTextureRotation(float degrees)  { textureRotation = degrees; }
 
 // The generated-piece paths are stored, never opened here: the renderer's
 // boundary registers the file's directory with its resource system and reads
@@ -257,7 +270,15 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     else if (name == "emissiveColor")     emissiveColor     = value.value<QColor>();
     else if (name == "emissiveIntensity") emissiveIntensity = value.toFloat();
     else if (name == "alpha")             alpha             = value.toFloat();
-    else if (name == "textureScale")      textureScale      = value.toFloat();
+    // "textureScale" sets BOTH axes (see setTextureScale): a file or a script
+    // that only knows the old key means uniform tiling. "textureScaleV" then
+    // overrides V — and because both readers walk `properties` IN ORDER and V
+    // is registered after U, a new file's explicit pair always lands correctly.
+    else if (name == "textureScale")      setTextureScale(value.toFloat());
+    else if (name == "textureScaleV")     textureScaleV     = value.toFloat();
+    else if (name == "textureOffsetU")    textureOffsetU    = value.toFloat();
+    else if (name == "textureOffsetV")    textureOffsetV    = value.toFloat();
+    else if (name == "textureRotation")   textureRotation   = value.toFloat();
     else if (name == "roughnessLowerBound") roughnessLowerBound = value.toFloat();
     else if (name == "roughnessUpperBound") roughnessUpperBound = value.toFloat();
     else if (name == "alphaCutoff")       alphaCutoff       = value.toFloat();
@@ -355,14 +376,54 @@ void PbrMaterial::createProperties()
     alphaProp->value       = alpha;
     properties.append(alphaProp);
 
+    // The UV transform rows. ORDER MATTERS: "textureScale" sets both axes, so
+    // it has to be read before "textureScaleV" overrides V — both material
+    // readers iterate this list in order (SceneReader::readPbrMaterial,
+    // MaterialReader::parsePbrMaterial).
     auto scaleProp         = new FloatProperty;
     scaleProp->id          = id++;
-    scaleProp->displayName = "Texture Scale";
+    scaleProp->displayName = "Texture Scale U";
     scaleProp->name        = "textureScale";
     scaleProp->minValue    = 0.0f;
     scaleProp->maxValue    = 10.0f;
     scaleProp->value       = textureScale;
     properties.append(scaleProp);
+
+    auto scaleVProp         = new FloatProperty;
+    scaleVProp->id          = id++;
+    scaleVProp->displayName = "Texture Scale V";
+    scaleVProp->name        = "textureScaleV";
+    scaleVProp->minValue    = 0.0f;
+    scaleVProp->maxValue    = 10.0f;
+    scaleVProp->value       = textureScaleV;
+    properties.append(scaleVProp);
+
+    auto offsetUProp         = new FloatProperty;
+    offsetUProp->id          = id++;
+    offsetUProp->displayName = "Texture Offset U";
+    offsetUProp->name        = "textureOffsetU";
+    offsetUProp->minValue    = -10.0f;
+    offsetUProp->maxValue    = 10.0f;
+    offsetUProp->value       = textureOffsetU;
+    properties.append(offsetUProp);
+
+    auto offsetVProp         = new FloatProperty;
+    offsetVProp->id          = id++;
+    offsetVProp->displayName = "Texture Offset V";
+    offsetVProp->name        = "textureOffsetV";
+    offsetVProp->minValue    = -10.0f;
+    offsetVProp->maxValue    = 10.0f;
+    offsetVProp->value       = textureOffsetV;
+    properties.append(offsetVProp);
+
+    auto rotationProp         = new FloatProperty;
+    rotationProp->id          = id++;
+    rotationProp->displayName = "Texture Rotation";
+    rotationProp->name        = "textureRotation";
+    rotationProp->minValue    = -360.0f;
+    rotationProp->maxValue    = 360.0f;
+    rotationProp->value       = textureRotation;
+    properties.append(rotationProp);
 
     // Remap bounds for a sampled roughness map (see the field comment in the
     // header: lower > upper deliberately inverts a legacy gloss map).
