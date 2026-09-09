@@ -824,31 +824,53 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
             textureCache().note(path, components, compressed);
             if (components == 1 && !compressed) {
                 const Ogre::uint32 w = probe.getWidth(), h = probe.getHeight();
-                Ogre::Image2 *rgba = new Ogre::Image2();
-                rgba->createEmptyImage(w, h, 1u, Ogre::TextureTypes::Type2D,
-                                       srgb ? Ogre::PFG_RGBA8_UNORM_SRGB : Ogre::PFG_RGBA8_UNORM,
-                                       Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
+                // ON THE STACK, since the upload no longer hands ownership to
+                // Ogre (it used to: scheduleTransitionTo(..., autoDelete=true)
+                // deleted this for us).
+                Ogre::Image2 rgba;
+                rgba.createEmptyImage(w, h, 1u, Ogre::TextureTypes::Type2D,
+                                      srgb ? Ogre::PFG_RGBA8_UNORM_SRGB : Ogre::PFG_RGBA8_UNORM,
+                                      Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
                 for (Ogre::uint32 y = 0; y < h; ++y)
                     for (Ogre::uint32 x = 0; x < w; ++x) {
                         Ogre::ColourValue c = probe.getColourAt(x, y, 0);
                         c.g = c.b = c.r; c.a = 1.0f;
-                        rgba->setColourAt(c, x, y, 0);
+                        rgba.setColourAt(c, x, y, 0);
                     }
-                rgba->generateMipmaps(srgb, Ogre::Image2::FILTER_BILINEAR);
+                rgba.generateMipmaps(srgb, Ogre::Image2::FILTER_BILINEAR);
+                // MANUAL, because we filled it (the ManualTexture rule, learned
+                // from the SSAO noise texture in 2026-09-08's gate). This
+                // createTexture used to pass flags 0, which means "load me from
+                // a resource group" — and this texture has no resource group.
+                // It survived only because an Image2 was handed to
+                // scheduleTransitionTo, and every worker branch that would have
+                // dereferenced the null archive/listener happens to be guarded
+                // on `!loadRequest.image` (OgreTextureGpuManager.cpp:2856-2870).
+                // That is one `if` away from the SIGSEGV the noise texture hit,
+                // for a texture nothing about it needs to stream: with the flag
+                // `unsafeScheduleTransitionTo` transitions in place and no
+                // worker is involved at all.
+                //
+                // The MIPS ARE THE SAME MIPS. A manual texture may not be given
+                // an Image2 (OgreTextureGpu.cpp:152 asserts it), so the upload
+                // moves to Image2::uploadTo — which copies the very levels
+                // generateMipmaps just produced, bilinear filter and all. This
+                // is a change of transport, not of pixels.
                 Ogre::TextureGpu *tex = tm->createTexture(processUniqueName("gray"),
-                                                          Ogre::GpuPageOutStrategy::Discard, 0,
+                                                          Ogre::GpuPageOutStrategy::Discard,
+                                                          Ogre::TextureFlags::ManualTexture,
                                                           Ogre::TextureTypes::Type2D);
                 tex->setResolution(w, h);
-                tex->setNumMipmaps(rgba->getNumMipmaps());
-                tex->setPixelFormat(rgba->getPixelFormat());
-                tex->scheduleTransitionTo(Ogre::GpuResidency::Resident, rgba, true);   // deletes rgba
-                // THIS WAIT STAYS (THREADING_ADOPTION_SPEC.md P2 item 1). It is
-                // not a file-streaming request: the pixels are a CPU-built
-                // Image2 we own, passing one implies bSkipMultiload
-                // (OgreTextureGpu.h:405-418), and single-channel images are
-                // rare. Keeping it synchronous costs nothing measurable and
-                // keeps this branch's ownership of `rgba` obvious.
-                tex->waitForData();
+                tex->setNumMipmaps(rgba.getNumMipmaps());
+                tex->setPixelFormat(rgba.getPixelFormat());
+                // Immediate residency and NO notifyDataIsReady(): _transitionTo
+                // calls it itself for a manual texture, and a second call
+                // underflows mDataPreparationsPending so isDataReady() never
+                // turns true (OgreScene::createTexture, 40 lines down, tells the
+                // same story at the same length).
+                tex->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+                tex->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+                rgba.uploadTo(tex, 0, Ogre::uint8(rgba.getNumMipmaps() - 1u));
                 TextureRec rec; rec.texture = tex; rec.path = path;
                 return trackTexture(rec);
             }
