@@ -448,4 +448,47 @@ bool OgreScene::boneMatrices(NodeId id, float *out, size_t count) const {
     } JAH_CATCH(mError, false);
 }
 
+// ---------------------------------------------------------------------------
+// THE MEASUREMENT SURFACE (AVATAR_RIG_PERF_SPEC §3.5).
+//
+// Both read OGRE's state rather than our bookkeeping, on purpose: the blend
+// index map IS what HlmsPbs streams (OgreHlmsPbs.cpp:3529-3566 walks
+// `indexMap`), and the SkeletonInstance pointer IS what updateAllAnimations
+// evaluates. A remap or a share that silently did not land therefore reads as
+// the OLD number here instead of as the number we meant.
+size_t OgreScene::streamedBoneCount(NodeId id) const {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end() || !it->second.item) return 0;
+    const Ogre::Item *item = it->second.item;
+    size_t n = 0;
+    for (size_t i = 0; i < item->getNumSubItems(); ++i) {
+        const Ogre::SubItem *sub = item->getSubItem(i);
+        if (!sub->hasSkeletonAnimation()) continue;
+        const Ogre::SubMesh *sm = sub->getSubMesh();
+        if (!sm) continue;
+        n += sm->mBlendIndexToBoneIndexMap.size();
+    }
+    return n;
+}
+
+RigStats OgreScene::rigStats() const {
+    RigStats out;
+    // DISTINCT instances, counted by pointer: two Items sharing one instance
+    // are one evaluation in updateAllAnimations, however the sharing was
+    // arranged, and a follower whose master went away is honestly its own again.
+    std::vector<const Ogre::SkeletonInstance *> seen;
+    for (const auto &kv : mNodes) {
+        const Node &n = kv.second;
+        if (!n.item) continue;
+        const Ogre::SkeletonInstance *skel = n.item->getSkeletonInstance();
+        if (!skel) continue;
+        ++out.rigged;
+        out.streamedBones += streamedBoneCount(kv.first);
+        if (std::find(seen.begin(), seen.end(), skel) == seen.end()) seen.push_back(skel);
+        if (n.item->sharesSkeletonInstance()) ++out.shared;
+    }
+    out.instances = seen.size();
+    return out;
+}
+
 }}}  // namespace jahshaka::engine::detail

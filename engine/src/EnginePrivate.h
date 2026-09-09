@@ -1259,6 +1259,8 @@ public:
     std::vector<std::string> boneNames(NodeId id) const override;
     bool setBonePoses(NodeId id, const BonePose *poses, size_t count) override;
     bool boneMatrices(NodeId id, float *out, size_t count) const override;
+    size_t streamedBoneCount(NodeId id) const override;
+    RigStats rigStats() const override;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC; impl in OgreClips.cpp) ----
     bool attachClips(NodeId id, const ClipDesc *clips, size_t count) override;

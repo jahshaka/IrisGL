@@ -252,6 +252,19 @@ public:
     /// when the node has no rig or `count` misses the rig's bone count.
     /// The read-back surface for the pose: what proves GPU and CPU skinning agree.
     virtual bool        boneMatrices(NodeId, float *out, size_t count) const = 0;
+    /// How many bone matrices HlmsPbs streams for this node PER PASS: the
+    /// length of the renderable's blend-index map, which is the whole rig while
+    /// the map is the identity and only the piece's own bones once it is
+    /// compacted (AVATAR_RIG_PERF_SPEC §1 row 4). 0 when the node has no rig.
+    ///
+    /// A read of the real Ogre state, not of our intent: the map IS what the
+    /// shader is handed, so a remap that silently failed to land reads as the
+    /// old number here.
+    virtual size_t      streamedBoneCount(NodeId) const = 0;
+    /// What this scene's rigs cost right now (RigStats). The measurement
+    /// surface the rig-perf bench and its gates read; cheap enough to call per
+    /// frame, but nothing on the frame path calls it.
+    virtual RigStats    rigStats() const = 0;
 
     // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC) ----
     /// Attaches clips to a node that already carries a rig. IDEMPOTENT per clip

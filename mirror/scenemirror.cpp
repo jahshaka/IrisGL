@@ -2625,6 +2625,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     // pointer, so the engine refuses; disable everything first. (Found by
     // scripting.e2e.avatar the moment a cross-file clip was added: the
     // character froze at bind pose with one warning in the log.)
+    ++mClipStatePushes;
     mTarget->setClipStates(e.node, nullptr, 0);
 
     // The pivot composition, once per (rig, clip): §3.1's "compose then
@@ -2944,6 +2945,7 @@ void SceneMirror::syncClips()
         // is frozen at is the one the rig was created with.
         if (mClipPushScratch.isEmpty()) {
             if (!e.lastClipPush.isEmpty()) {
+                ++mClipStatePushes;
                 mTarget->setClipStates(e.node, nullptr, 0);
                 e.lastClipPush.clear();
             }
@@ -2983,6 +2985,7 @@ void SceneMirror::syncClips()
             s.weight = p.weight;
             s.looping = p.looping;
         }
+        ++mClipStatePushes;
         if (mTarget->setClipStates(e.node, mClipStateScratch.data(), mClipStateScratch.size()))
             e.lastClipPush = mClipPushScratch;
     }

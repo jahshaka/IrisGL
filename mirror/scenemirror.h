@@ -225,6 +225,15 @@ public:
     /// The socket resolver, for tests and for hosts that want the stale
     /// count. Its pose source is installed by this mirror's constructor.
     iris::SocketResolver &socketResolver() { return mSockets; }
+    /// How many `setClipStates` calls this mirror has made since it was built
+    /// (AVATAR_RIG_PERF_SPEC §1 row 2, §3.5).
+    ///
+    /// The per-frame clip push is ONE engine call per skinned node, so a
+    /// character made of five skinned pieces costs five — which is the cost row
+    /// the rig-perf program removes by pushing once per CHARACTER. A counter
+    /// rather than a log line because the claim is a NUMBER: the bench records
+    /// it, and the gate asserts pushes-per-frame == characters.
+    quint64 clipStatePushes() const { return mClipStatePushes; }
     /// Pushes a world matrix onto an engine node as TRS (used by overlays too).
     static void pushTransform(jahshaka::engine::Scene *scene, jahshaka::engine::NodeId node, const iris::Mat4 &world);
     /// The engine mesh already created for a document mesh, or 0.
@@ -731,6 +740,8 @@ private:
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.
     iris::SocketResolver     mSockets;
+    /// Counts every setClipStates call this mirror makes (clipStatePushes()).
+    quint64                  mClipStatePushes = 0;
     /// entryBoneWorldTransforms' scratch. Members because sockets made that
     /// function per-frame work (it used to run only when the bone overlay
     /// refreshed) — see the note at its assign() calls.
