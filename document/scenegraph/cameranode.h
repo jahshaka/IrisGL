@@ -19,6 +19,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/cameralens.h"
 #include "document/scenegraph/scenenode.h"
 
+#include <QJsonArray>
 #include <QJsonObject>
 
 
@@ -79,7 +80,13 @@ enum class CameraExposureMode {
 /// exposureMin, exposureMax — are DELIBERATELY ABSENT: a camera's exposure is
 /// the §4 block above (stops, with a mode), not an override slot, and having
 /// both would be two dials for one value.
-enum class CameraPostKeyType { Toggle, Enum, Number };
+/// Toggle = a bool stored as 0/1; Enum = an int from a fixed set; Number = a
+/// double; Stack = a WHOLE JSON ARRAY (POST_LOOKS_SPEC.md §4.1 / D4 — the looks
+/// stack is the only one, and it is a replacement rather than a value because
+/// an override over an ORDERED LIST is only well defined as one: a camera that
+/// overrode "radialBlur's centre" while the world removed Radial Blur would
+/// mean nothing).
+enum class CameraPostKeyType { Toggle, Enum, Number, Stack };
 
 struct CameraPostKey {
 	const char *id;
@@ -274,15 +281,23 @@ public:
     /// lie"). UE's own bOverride model is the same shape.
     ///
     /// Keys are `cameraPostKeys()` and nothing else; values are ints for the
-    /// Toggle/Enum kinds and doubles for Number. Written through
-    /// setPostOverride, which refuses anything else — a QJsonObject read from a
-    /// file is sanitised the same way by the reader.
+    /// Toggle/Enum kinds, doubles for Number, and a JSON ARRAY for the one
+    /// Stack key (`looks`). Written through setPostOverride, which refuses
+    /// anything else — a QJsonObject read from a file is sanitised the same way
+    /// by the reader.
     QJsonObject postOverrides;
 
     /// Is this key overridden, and what does it say? `postOverride` returns an
     /// invalid QVariant when the key is absent (i.e. inherited).
     bool hasPostOverride(const QString &id) const;
+    /// Number/Toggle/Enum keys only. A Stack key (`looks`) has no scalar
+    /// reading and returns an invalid QVariant here even when it is set — read
+    /// it with postOverrideStack, whose type is the honest one.
     QVariant postOverride(const QString &id) const;
+    /// The array a Stack key holds; empty when the key is absent (which is NOT
+    /// the same as an override to the EMPTY stack — use hasPostOverride to tell
+    /// "inherit the world's looks" from "this camera has none").
+    QJsonArray postOverrideStack(const QString &id) const;
     /// Records an override. Returns false for an unknown key or a value the key
     /// cannot hold; a valid write always replaces whatever was there.
     bool setPostOverride(const QString &id, const QVariant &value);

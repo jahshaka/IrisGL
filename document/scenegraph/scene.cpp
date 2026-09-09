@@ -164,6 +164,11 @@ Scene::Scene()
     smaaPreset = -1;
     ssrMode = 0;
     refractionsMode = 0;
+    // Distortion defaults to AUTO: the pass costs nothing until a scene holds a
+    // distortion material, so "off" would only mean a user who authored one had
+    // to find a switch to see it (POST_LOOKS_SPEC §5.3).
+    distortionMode = 1;
+    distortionStrength = 1.0f;
     // Planar reflections: -1/0/-1 = "follow the world mode" on all three. A
     // fresh scene in Custom mode therefore reflects nothing until a mode is
     // applied or the user marks a reflector — the feature is scene-capable by

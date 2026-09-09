@@ -182,6 +182,22 @@ constexpr Ogre::uint32 kVisibleBit     = 1u;
 constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
 constexpr Ogre::uint32 kHelperBit      = 1u << 3;
+// THE DISTORTION CHANNEL (POST_LOOKS_SPEC.md §5.3). A distortion item carries
+// this bit *INSTEAD OF* kVisibleBit — the same inversion trick kHelperBit uses,
+// and for a stronger reason: a distortion object must be drawn by EXACTLY ONE
+// pass in the whole engine (the distortion pass), and by nothing else, ever.
+// Its texture is a screen-space displacement field; drawn into a colour target
+// it is a smear of pale blue, drawn into a G-buffer it corrupts the normals of
+// whatever is behind it, and drawn into a thumbnail it is simply wrong.
+//
+// Carrying its own bit gets that for free everywhere a mask already exists (the
+// probe-face pass, the planar pass and the shadow node all test kVisibleBit),
+// and the two OVERLAY passes — the only passes whose render-queue range
+// contains 220 — mask it out explicitly. Every other pass in every workspace
+// excludes RQ 220 by RANGE, so the PASSTHROUGH shape never draws one at all and
+// thumbnails, previews and the pixel suites stay byte-identical without knowing
+// the feature exists.
+constexpr Ogre::uint32 kDistortionBit  = 1u << 4;
 
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
@@ -305,6 +321,23 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
 
+// THE DISTORTION QUEUE (POST_LOOKS_SPEC.md §5.3).
+//
+// Upstream's Distortion sample files these objects at RQ 16, which cannot work
+// here: every scene pass in this engine draws a CONTIGUOUS range starting at 0
+// — the SSR prepass, the opaque pass, the refractive pass, the probe-face
+// workspace — so a queue in the middle of it would be drawn by all of them, and
+// an HlmsUnlit displacement map written into the SSR prepass's normals G-buffer
+// is a defect with no error message.
+//
+// 220 is above every one of those ranges by construction and still inside
+// [200,225), the only other v2 FAST range (RenderQueue's constructor). The one
+// pass whose range contains it is the overlay pass [210,255], which cannot
+// shrink — Ogre's v1 overlay hook fires at RQ 254 and our HUD and loading cover
+// ride it — so the overlay passes carry an explicit visibility mask instead
+// (kDistortionBit above).
+constexpr Ogre::uint8 kDistortionRenderQueue = 220;
+
 // ---------------------------------------------------------------------------
 // THE HELPER OVERLAY QUEUE (2026-09-08, the grey/blurred light icons).
 //
@@ -391,6 +424,19 @@ struct ChainDesc {
     float ssrRoughnessCutoff = 0.35f;
     float ssrIntensity = 1.0f;
     bool  refractions = false;
+
+    // ---- Distortion (POST_LOOKS_SPEC.md §5.3) ----
+    /// The RESOLVED flag (the host has already answered "auto" against whether
+    /// the scene holds a distortion material). Adds one target and two passes.
+    bool  distortion = false;
+    /// Global multiplier on each material's own strength. A UNIFORM, not shape.
+    float distortionStrength = 1.0f;
+
+    // ---- The looks stack (POST_LOOKS_SPEC.md §4) ----
+    /// The resolved stack, in frame order — PostFxDesc::looks, copied. Only the
+    /// KIND SEQUENCE is graph shape (sameShape compares nothing else about it);
+    /// the parameters ride applyViewGlobals like every other tuning value.
+    std::vector<LookDesc> looks;
 
     // ---- Letterbox (CAMERAS_SPEC §7.4) ----
     /// Render the scene into an inner rectangle of the target instead of
@@ -1608,6 +1654,11 @@ private:
         /// every helper as unlit and a lit mesh would never get its GI bit back
         /// when the flag cleared.
         bool                      materialUnlit = false;
+        /// Whether the attached material's shading model is DISTORTION,
+        /// recorded at attach time for exactly the same reason materialUnlit is
+        /// (POST_LOOKS_SPEC.md §5.3): the item's own flags cannot answer it once
+        /// kVisibleBit is gone, and the helper flag can be toggled afterwards.
+        bool                      materialDistortion = false;
     };
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
@@ -1707,6 +1758,14 @@ private:
         /// scene pass must be set to render refractive objects in its own pass".
         /// Left in the opaque pass they render as ordinary glass, silently.
         bool refractive = false;
+        /// ShadingModel::Distortion (POST_LOOKS_SPEC.md §5.2). A THIRD family
+        /// alongside `shadingUnlit`, sharing its datablock type (HlmsUnlit) and
+        /// almost nothing else: the item goes to kDistortionRenderQueue, carries
+        /// kDistortionBit instead of kVisibleBit, and the datablock's colour
+        /// alpha is the material's own displacement strength.
+        ///
+        /// Invariant: distortion => unlit && shadingUnlit && !pbsBacked.
+        bool distortion = false;
         /// Which TextureId occupies each PbrTextureSlot right now (0 = none).
         /// The REVERSE of the binding, kept so destroyTexture can unbind a
         /// texture from every material holding it: an Ogre datablock keeps a
@@ -1808,6 +1867,10 @@ private:
     /// (see ShadingModel in Types.h; the panel disables the rows this cannot
     /// carry rather than letting a user discover them).
     static void applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p);
+    /// The DISTORTION datablock (POST_LOOKS_SPEC.md §5.2): an HlmsUnlit block
+    /// whose texture is a screen-space displacement field and whose colour
+    /// alpha is the strength. See the definition for why each block is set.
+    static void applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p);
     /// (Re-)binds whatever `rec.boundTextures` says onto the material's CURRENT
     /// datablock — the step that makes a family switch keep its maps. The Unlit
     /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
@@ -2044,7 +2107,11 @@ private:
     /// The visibility flags an Item attached to `n` must carry, given the
     /// material's unlit-ness and the node's helper designation. THE one place
     /// the bit scheme is applied to geometry.
-    Ogre::uint32 itemVisibilityFlags(Node &n, bool unlit);
+    /// The visibility bits an ITEM carries, from its NODE's helper flag and its
+    /// MATERIAL's family. `distortion` wins over everything: such an item is
+    /// drawn by exactly one pass in the engine and must be invisible to the
+    /// rest (kDistortionBit's note).
+    Ogre::uint32 itemVisibilityFlags(Node &n, bool unlit, bool distortion = false);
     /// Re-applies itemVisibilityFlags (and the billboard/particle equivalents)
     /// to whatever `n` currently carries. Needed because the helper flag can be
     /// set before or after the geometry is attached.

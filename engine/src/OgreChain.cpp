@@ -92,6 +92,7 @@
 #include <OgreTechnique.h>
 #include <OgrePass.h>
 #include <OgreGpuProgram.h>
+#include <OgreVisibilityFlags.h>
 #include <OgreGpuProgramParams.h>
 #include <OgrePixelFormatGpuUtils.h>
 #include <OgreTextureUnitState.h>
@@ -171,6 +172,67 @@ constexpr const char *kSsrPrev        = "jahSsrPrev";
 constexpr const char *kLdr      = "jahLdr";
 constexpr const char *kSmaaEdges = "jahSmaaEdges";
 constexpr const char *kSmaaBlend = "jahSmaaBlend";
+/// THE LOOKS STAGE'S PING-PONG PAIR (POST_LOOKS_SPEC.md §4.2). Two full-res
+/// targets shared by every look in the stack: look i reads one and writes the
+/// other, and the LAST look writes the window.
+/// kLookB exists only from the second look on — a one-look stack is
+/// kLookA -> window and needs no second buffer.
+///
+/// PLAIN UNORM, NOT sRGB — and this was MEASURED, not assumed. kLdr next door
+/// IS sRGB, because SMAA wants perceptual space for edge detection, and copying
+/// that choice here was wrong twice over:
+///
+///   1. IT LOST A BIT. The composite quad writes a DISPLAY-REFERRED value into
+///      this buffer; an sRGB attachment encodes it as though it were linear and
+///      the next shader's fetch decodes it back — an 8-bit round trip through a
+///      curve the value was never in. Measured on tests/looks' fixture: 5834 of
+///      16384 pixels came back off by exactly 1/255, so "a look at amount 0 is
+///      byte-identical to no look" failed for EVERY look in the catalogue while
+///      every shader was correct.
+///   2. IT WAS THE WRONG SPACE. These looks run on the TONEMAPPED image and
+///      every one of them says so: Posterize bends gamma about display values,
+///      the Film Grade pivots contrast about 0.5 = mid grey, Desaturate uses
+///      broadcast luma weights. An sRGB attachment hands the shader a
+///      LINEARISED value, where 0.5 is not mid grey at all (it is ~0.74 of the
+///      display range) and every one of those constants means something else.
+///
+/// UNORM is what the composite writes into when there are no looks — the window
+/// and the offscreen RTT are both plain UNORM — so the stage is a lossless
+/// pass-through of exactly the picture the chain already produced.
+
+/// THE OVERLAY PASSES' VISIBILITY MASK (POST_LOOKS_SPEC.md §5.3), and the AND
+/// with RESERVED_VISIBILITY_FLAGS is LOAD-BEARING rather than tidy.
+///
+/// Ogre builds a pass's effective mask as
+///     (viewportMask & sceneMask) | (viewportMask & ~RESERVED_VISIBILITY_FLAGS)
+/// (SceneManager::cullFrustum), and RESERVED is `~(LAYER_SHADOW_CASTER |
+/// LAYER_VISIBILITY)` — the low 30 bits. A raw `~kDistortionBit` therefore
+/// carries BOTH layer bits into the second term, and the cull test
+/// (`objectFlags & sceneFlags != 0`) then passes on LAYER_VISIBILITY alone —
+/// i.e. the mask would exclude nothing at all, silently. Ogre's own
+/// `setVisibilityMask` setter does this AND for exactly this reason; the
+/// definition field is public and does not.
+/// (A function and not a constant: RESERVED_VISIBILITY_FLAGS is an extern
+/// `const uint32` in OgreMovableObject.cpp, not a compile-time value, and
+/// restating its bit pattern here would be the exact class of copy this comment
+/// is about.)
+inline Ogre::uint32 overlayVisibilityMask() {
+    return Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS & ~kDistortionBit;
+}
+
+/// DISTORTION (POST_LOOKS_SPEC.md §5.3). Two textures: the displacement field
+/// the distortion objects render into, and the warped copy of the scene.
+///
+/// RGBA8 and not the sample's RGBA16F: the field is a screen-space offset in
+/// [-1,1] plus a strength, and eight bits of it is a third of a texel at 1080p —
+/// far finer than any haze needs and half the bandwidth. It is CLEARED to
+/// (0.5, 0.5, 0, 0), which decodes to "no displacement, no strength", so a
+/// pixel no emitter covered is untouched by construction.
+constexpr const char *kDistortionRt  = "jahDistortionRt";
+constexpr const char *kDistortionRtv = "jahDistortionRtv";
+constexpr const char *kDistorted     = "jahDistorted";
+constexpr const char *kLookA = "jahLookA";
+constexpr const char *kLookB = "jahLookB";
 /// Refraction (phase 7). Faithful to Samples/.../Refractions.compositor: the
 /// refractive objects render into a MSAA-preserving CLONE of the opaque result
 /// while SAMPLING the opaque result itself, and they need a non-MSAA copy of the
@@ -206,6 +268,26 @@ constexpr const char *kLetterboxFill = "jahLetterboxFill";
 /// The bars. Not configurable: every editor that letterboxes draws black ones,
 /// and a bar colour setting is a preference nobody has asked for.
 const Ogre::ColourValue kLetterboxBars(0.0f, 0.0f, 0.0f, 1.0f);
+
+/// THE MATERIAL BEHIND EACH LOOK. Ours, not upstream's (POST_LOOKS_SPEC §3
+/// decision D2): every look's parameters are compile-time constants in the
+/// sample shaders, so exposing an amount would mean forking upstream media.
+/// These live in irisgl/engine/media/Hlms/Jahshaka/JahLooks.material, which is
+/// already staged and registered as a folder — a new look is a material and a
+/// _ps.glsl there, plus one row of this switch.
+const char *lookMaterial(LookKind kind) {
+    switch (kind) {
+    case LookKind::Desaturate: return "Jahshaka/Look/Desaturate";
+    case LookKind::GlassWarp:  return "Jahshaka/Look/GlassWarp";
+    case LookKind::RadialBlur: return "Jahshaka/Look/RadialBlur";
+    case LookKind::OldMovie:   return "Jahshaka/Look/OldMovie";
+    case LookKind::Posterize:  return "Jahshaka/Look/Posterize";
+    case LookKind::Sharpen:    return "Jahshaka/Look/Sharpen";
+    case LookKind::FilmGrade:  return "Jahshaka/Look/FilmGrade";
+    case LookKind::Count:      break;
+    }
+    return "Jahshaka/Look/Desaturate";
+}
 
 /// Declares a local texture AND the same-named RenderTargetView that makes it
 /// usable as a target.
@@ -361,13 +443,25 @@ std::string sceneNodeDefName(const std::string &workspaceDef) {
 }   // namespace chain
 
 bool ChainDesc::anyEffect() const {
-    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || refractions;
+    // A stack of looks is an effect on its own: the LDR filters need the post
+    // shape (they read a finished image out of a texture), and nothing else in
+    // the description has to be on for that to be true.
+    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || refractions || distortion ||
+           !looks.empty();
 }
 
 bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     // Only what changes the GRAPH. Exposure, bloom threshold, AO power and the
     // like are uniforms — pushing them must never rebuild a workspace.
-    return a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
+    // THE LOOKS STACK's shape is its KIND SEQUENCE and nothing else
+    // (POST_LOOKS_SPEC §4.1): adding, removing or reordering a look changes the
+    // number of quads in the graph and must rebuild; scrubbing a look's amount
+    // is a uniform and must not. Same split, same reason, as exposure vs hdr.
+    if (a.looks.size() != b.looks.size()) return false;
+    for (size_t i = 0; i < a.looks.size(); ++i)
+        if (a.looks[i].kind != b.looks[i].kind) return false;
+    return a.distortion == b.distortion &&
+           a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
            a.tonemapFixed == b.tonemapFixed &&
            a.letterbox == b.letterbox &&
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
@@ -510,6 +604,15 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             p->mFirstRQ = kOverlayRenderQueue;
             p->mLastRQ  = 255u;
+            // THE ONE PASS THAT HAS TO SAY SO (POST_LOOKS_SPEC.md §5.3). Every
+            // other pass in every workspace excludes the distortion queue by
+            // RANGE; this one's range covers 210..255 and cannot shrink (Ogre's
+            // v1 overlay hook fires at 254). A distortion object drawn here
+            // would paint its displacement map over the finished frame as a
+            // smear of pale blue. Masking it out costs nothing and is what makes
+            // the PASSTHROUGH shape — thumbnails, previews, every pixel suite —
+            // byte-identical in a scene that contains one.
+            p->mVisibilityMask = overlayVisibilityMask();
             // THE ONE pass in the whole engine allowed to draw Ogre's overlay
             // set — and only when this view is entitled to it (see
             // kIncludeOverlaysNote and ChainDesc::overlays).
@@ -620,7 +723,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // buffer the compositor picks; SSAO's downsampler and refraction's copy both
     // need the depth as an input, so the scene pass renders through an explicit
     // RTV whenever any effect wants it.
-    const bool namedDepth = desc.ssao || desc.ssr || desc.refractions;
+    // ...and DISTORTION, whose scene pass depth-tests against the opaque scene
+    // (that is what makes haze behind a wall invisible) — so the depth has to be
+    // a named attachment it can borrow, and the opaque pass has to STORE it.
+    const bool namedDepth = desc.ssao || desc.ssr || desc.refractions || desc.distortion;
     if (namedDepth) {
         auto *td = addTex(n, kDepth, Ogre::PFG_D32_FLOAT);
         td->preferDepthTexture = true;
@@ -709,6 +815,35 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         addTex(n, kAoBlurH, Ogre::PFG_R16_FLOAT);
         addTex(n, kAoBlurV, Ogre::PFG_R16_FLOAT);
         addTex(n, kAoApplied, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+    }
+
+    if (desc.distortion) {
+        // The displacement field. Cleared to (0.5, 0.5, 0, 0) by the pass, which
+        // decodes to zero offset and zero strength.
+        addTex(n, kDistortionRt, Ogre::PFG_RGBA8_UNORM);
+        // The warped copy of the scene. Same format as the scene target, because
+        // this happens in LINEAR HDR — before the SSR history copy, before SSAO
+        // and long before the tonemap.
+        addTex(n, kDistorted, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        // Its own RTV, so the pass can BORROW the scene's depth buffer and test
+        // against the opaque geometry without writing to it.
+        {
+            Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kDistortionRtv);
+            Ogre::RenderTargetViewEntry colour0;
+            colour0.textureName = kDistortionRt;
+            rtv->colourAttachments.push_back(colour0);
+            rtv->depthAttachment.textureName = kDepth;
+            rtv->stencilAttachment.textureName = kDepth;
+            rtv->preferDepthTexture = true;
+        }
+    }
+
+    if (!desc.looks.empty()) {
+        // The looks stage's ping-pong (POST_LOOKS_SPEC §4.2). Declared BEFORE
+        // SMAA's textures purely for reading order; neither depends on the
+        // other, and a stack with SMAA off still needs kLookA.
+        addTex(n, kLookA, Ogre::PFG_RGBA8_UNORM);
+        if (desc.looks.size() > 1) addTex(n, kLookB, Ogre::PFG_RGBA8_UNORM);
     }
 
     if (desc.smaaPreset >= 0) {
@@ -919,9 +1054,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                                        ? Ogre::StoreAction::StoreAndMultisampleResolve
                                        : Ogre::StoreAction::Store;
         if (desc.ssao && !ssr) p->mStoreActionColour[1] = Ogre::StoreAction::Store;
-        // Depth survives the pass: SSAO marches it, refraction copies it, and
-        // the refractive pass depth-tests against it.
-        p->mStoreActionDepth   = (desc.ssao || ssr || desc.refractions)
+        // Depth survives the pass: SSAO marches it, refraction copies it, the
+        // refractive pass depth-tests against it — and so does the DISTORTION
+        // pass, which is the whole reason haze can hide behind a wall. The VUID
+        // lesson below applies verbatim: DontCare makes the contents UNDEFINED,
+        // not "kept but unpromised".
+        p->mStoreActionDepth   = (desc.ssao || ssr || desc.refractions || desc.distortion)
                                      ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
         p->mStoreActionStencil = Ogre::StoreAction::DontCare;
         // Ignored in a prepass mode (the flag's own documentation says so), and
@@ -989,8 +1127,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // is a knife edge — i.e. the SKY, which came out as blocks of
             // recycled-VRAM noise under the Epic chain (2026-09-03 defect lane;
             // sky_stays_smooth_under_the_post_chain is the pixel gate).
-            p->mStoreActionDepth = (desc.ssao || desc.ssr) ? Ogre::StoreAction::Store
-                                                           : Ogre::StoreAction::DontCare;
+            p->mStoreActionDepth = (desc.ssao || desc.ssr || desc.distortion)
+                                       ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
             p->mStoreActionStencil = Ogre::StoreAction::DontCare;
             // The shadow node was already computed for this camera by the opaque
             // pass; recomputing it would render every shadow map a second time.
@@ -1003,6 +1141,58 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mProfilingId = "Jahshaka refractives";
         }
         sceneResult = kRefractOut;
+    }
+
+    // ---- DISTORTION (POST_LOOKS_SPEC.md §5.3) -------------------------------
+    //
+    // Two passes. The first draws every distortion object into its own RGBA8
+    // target through render queue 220 and NOTHING ELSE — the range is one queue
+    // wide and the visibility mask is kDistortionBit, so it is impossible for a
+    // stray renderable to end up in the displacement field. It borrows the
+    // scene's depth buffer (LOAD, never written) so haze behind a wall is
+    // occluded exactly as the sample's `depth_pool 2` does it.
+    //
+    // The second warps the scene by what the first wrote and hands the result on
+    // as the new scene image.
+    //
+    // WHY HERE and not in the looks stage: this is SCENE SPACE and LINEAR HDR.
+    // Heat haze happens in front of the lens, so bloom and exposure should see
+    // the warped radiance, the SSR history should record it, and SMAA should
+    // clean the warped edges — none of which is true of an LDR filter applied to
+    // the finished picture. It is deliberately NOT a look.
+    if (desc.distortion) {
+        {
+            Ogre::CompositorTargetDef *t = n->addTargetPass(kDistortionRtv);
+            t->setNumPasses(1);
+            auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+            // (0.5, 0.5, 0, 0) = "no displacement, no strength" (the sample's
+            // own clear colour, and the identity of the decode in the quad).
+            p->setAllClearColours(Ogre::ColourValue(0.5f, 0.5f, 0.0f, 0.0f));
+            p->setAllLoadActions(Ogre::LoadAction::Clear);
+            // ...except the DEPTH, which is the opaque scene's and must survive.
+            p->mLoadActionDepth   = Ogre::LoadAction::Load;
+            p->mLoadActionStencil = Ogre::LoadAction::Load;
+            p->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            p->mStoreActionDepth     = Ogre::StoreAction::Store;
+            p->mStoreActionStencil   = Ogre::StoreAction::DontCare;
+            // The shadow node was computed for this camera by the opaque pass;
+            // recomputing it would render every shadow map a second time — and
+            // these objects cast nothing anyway.
+            p->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
+            p->mFirstRQ = kDistortionRenderQueue;
+            p->mLastRQ  = Ogre::uint8(kDistortionRenderQueue + 1u);
+            p->mVisibilityMask = kDistortionBit;
+            p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
+            p->mProfilingId = "Jahshaka distortion field";
+            if (desc.letterbox) inset(handlesOut, p);
+        }
+        {
+            auto *q = addQuad(n, kDistorted, "Jahshaka/Distortion", "Jahshaka distortion compose");
+            q->addQuadTextureSource(0, sceneResult);
+            q->addQuadTextureSource(1, kDistortionRt);
+            q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        }
+        sceneResult = kDistorted;
     }
 
     // SSR's colour history for the NEXT frame — copied here, deliberately, and
@@ -1124,8 +1314,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
     }
 
-    // Composite into the LDR image SMAA works on, or straight into the window.
-    const char *ldrTarget = desc.smaaPreset >= 0 ? kLdr : kTargetChannel;
+    // WHERE THE FINISHED PICTURE LANDS (POST_LOOKS_SPEC §4.2, decision D5).
+    // The looks stage runs LAST — after tonemapping AND after SMAA — so with a
+    // non-empty stack the anti-aliased image goes into the ping-pong's first
+    // buffer instead of into the window, and the last look writes the window.
+    // With an empty stack nothing below moves: the graph is what it was before
+    // this program existed, which is the byte-identical law (§8).
+    const bool haveLooks = !desc.looks.empty();
+    const char *aaTarget = haveLooks ? kLookA : kTargetChannel;
+
+    // Composite into the LDR image SMAA works on, or straight into the window
+    // (or, with looks and no SMAA, straight into the looks stage's input).
+    const char *ldrTarget = desc.smaaPreset >= 0 ? kLdr : aaTarget;
     {
         if (desc.hdr) {
             addTonemapQuad(n, ldrTarget, sceneResult, kLum, kBlur0);
@@ -1188,9 +1388,36 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             off->mProfilingId = "Jahshaka SMAA stencil off";
         }
         {
-            auto *q = addQuad(n, kTargetChannel, "SMAA/NeighborhoodBlending", "Jahshaka SMAA blend");
+            auto *q = addQuad(n, aaTarget, "SMAA/NeighborhoodBlending", "Jahshaka SMAA blend");
             q->addQuadTextureSource(0, kLdr);
             q->addQuadTextureSource(1, kSmaaBlend);
+            q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        }
+    }
+
+    // ---- THE LOOKS STAGE (POST_LOOKS_SPEC.md §4.2) --------------------------
+    //
+    // One full-screen quad per enabled look, ping-ponging between two sRGB
+    // buffers, the last one writing the window. The stage is ABSENT from the
+    // graph when the stack is empty rather than disabled inside it — an empty
+    // stack must cost nothing, including a texture.
+    //
+    // Ordering is the array's: entry 0 runs first. That is the whole model —
+    // Posterize-then-Desaturate and Desaturate-then-Posterize are different
+    // pictures, and the document's array order is what decides which one.
+    //
+    // The parameters are NOT here: they are per-view uniforms pushed by
+    // applyViewGlobals a moment before these passes execute, so two views with
+    // the same stack and different amounts do not fight over process-global
+    // material constants (§7 R1, the mechanism lens P3 proved).
+    if (haveLooks) {
+        const size_t count = desc.looks.size();
+        for (size_t i = 0; i < count; ++i) {
+            const char *src = (i % 2 == 0) ? kLookA : kLookB;
+            const char *dst = (i + 1 == count) ? kTargetChannel
+                                               : ((i % 2 == 0) ? kLookB : kLookA);
+            auto *q = addQuad(n, dst, lookMaterial(desc.looks[i].kind), "Jahshaka look");
+            q->addQuadTextureSource(0, src);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
     }
@@ -1209,6 +1436,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mStoreActionStencil  = Ogre::StoreAction::DontCare;
         p->mFirstRQ = kOverlayRenderQueue;
         p->mLastRQ  = 255u;
+        // ...and the effect shape's copy of the distortion mask (the note is on
+        // the passthrough shape's pass). Here it matters for a second reason:
+        // the distortion objects have ALREADY been drawn, into their own target,
+        // and drawing them again over the composited frame would show the
+        // displacement map itself.
+        p->mVisibilityMask = overlayVisibilityMask();
         // The effect shape's copy of THE ONE overlay-bearing pass — same rule
         // as the passthrough shape's (kIncludeOverlaysNote).
         p->mIncludeOverlays = desc.overlays;
@@ -2028,6 +2261,48 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
             Ogre::Vector4(desc.ssrRoughnessCutoff, desc.ssrIntensity, 0.0f, 0.0f));
 }
 
+// ---- DISTORTION -----------------------------------------------------------
+// One uniform: the world's global strength, multiplied into every material's
+// own (POST_LOOKS_SPEC.md §5.3). Per view, through the same listener as
+// everything else here, for the same reason — the material is a
+// MaterialManager singleton and two views may want two strengths.
+void updateDistortion(const ChainDesc &desc) {
+    Ogre::Pass *pass = materialPass("Jahshaka/Distortion");
+    if (!pass || !pass->hasFragmentProgram()) return;
+    Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+    ps->setIgnoreMissingParams(true);
+    ps->setNamedConstant("distortionParams",
+                         Ogre::Vector4(desc.distortionStrength, 0.0f, 0.0f, 0.0f));
+}
+
+// ---- LOOKS ----------------------------------------------------------------
+// The whole per-view mechanism for the looks stage, in one loop.
+//
+// Ogre's materials are MaterialManager singletons, so a look's parameters are
+// process-global: two views showing the same scene through different stacks
+// would otherwise fight over one set of numbers. They do not, because this runs
+// from ViewGlobalsListener::workspacePreUpdate — immediately before THIS
+// workspace's passes execute, and the values are read at pass-execute time
+// (POST_LOOKS_SPEC §7 R1; the mechanism the lens program proved).
+//
+// setIgnoreMissingParams is deliberate and is the reason a look shader may
+// declare one float4 or two: this pushes p[0..3] and p[4..7] blind, and a
+// material that only has `lookParams0` simply drops the second write instead of
+// throwing. It keeps the boundary's LookDesc a POD with no per-kind knowledge
+// on this side of it.
+void updateLooks(const ChainDesc &desc) {
+    for (const LookDesc &look : desc.looks) {
+        Ogre::Pass *pass = materialPass(lookMaterial(look.kind));
+        if (!pass || !pass->hasFragmentProgram()) continue;
+        Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+        ps->setIgnoreMissingParams(true);
+        ps->setNamedConstant("lookParams0",
+                             Ogre::Vector4(look.p[0], look.p[1], look.p[2], look.p[3]));
+        ps->setNamedConstant("lookParams1",
+                             Ogre::Vector4(look.p[4], look.p[5], look.p[6], look.p[7]));
+    }
+}
+
 // ---- The per-frame push, in its two halves --------------------------------
 // See the declarations in EnginePrivate.h for why the split exists at all.
 
@@ -2055,6 +2330,8 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
                    desc.ssaoRadius, desc.ssaoPower);
     }
     if (desc.ssr > 0) updateSsr(camera, desc);
+    if (!desc.looks.empty()) updateLooks(desc);
+    if (desc.distortion) updateDistortion(desc);
 }
 
 float exposureSeed(float exposure) {

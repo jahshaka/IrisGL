@@ -1,0 +1,62 @@
+// The distortion compose quad (SPECS/POST_LOOKS_SPEC.md §5.3). Ours rather than
+// upstream's for the same reason the looks are (§3 decision D2): the sample's
+// shader hard-codes its scale and its fringe, and both are settings here.
+//
+// GLSL + Vulkan only, like every other material we own in this folder.
+
+fragment_program Jahshaka/Distortion_ps_GLSL glsl
+{
+	source JahDistortion_ps.glsl
+	default_params
+	{
+		param_named sceneTexture		int 0
+		param_named distortionTexture	int 1
+	}
+}
+fragment_program Jahshaka/Distortion_ps_VK glslvk
+{
+	source JahDistortion_ps.glsl
+}
+fragment_program Jahshaka/Distortion_ps unified
+{
+	delegate Jahshaka/Distortion_ps_GLSL
+	delegate Jahshaka/Distortion_ps_VK
+}
+
+material Jahshaka/Distortion
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Distortion_ps
+			{
+				// Overwritten every frame, per view, by chain::updateDistortion.
+				// 0 = no warp: the safe value, not a pretty one.
+				param_named distortionParams float4 0 0 0 0
+			}
+
+			// BILINEAR on the scene, because the whole point is fetching between
+			// texels; the FIELD is bilinear too, which smooths the emitter's own
+			// silhouette into the warp instead of stepping it.
+			texture_unit sceneTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+			texture_unit distortionTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}

@@ -24,6 +24,7 @@ For more information see the LICENSE file
 #include "core/geometry/frustum.h"
 
 // temp
+#include <QJsonArray>
 #include <QJsonObject>
 
 class QMediaPlayer;
@@ -377,6 +378,35 @@ public:
     /// actually contains a refractive material — cost when unused is zero),
     /// 2 always on.
     int   refractionsMode;
+    /// DISTORTION (POST_LOOKS_SPEC.md §5.3): objects whose material's shading
+    /// model is Distortion warp the image behind them. 0 off, 1 AUTO (the
+    /// recommended default — the renderer grows the pass only while the scene
+    /// actually holds such a material, so the cost when unused is exactly
+    /// zero), 2 always on. Same three-state shape as refractionsMode, for the
+    /// same reason.
+    int   distortionMode;
+    /// A global multiplier on every distortion material's own strength. 0 is
+    /// inert and renders a byte-identical frame.
+    float distortionStrength;
+
+    // ---- The looks stack (POST_LOOKS_SPEC.md §4) ---------------------------
+    // An ORDERED array of {id, enabled, params:{...}} — the LDR image filters
+    // the renderer applies to the finished picture, entry 0 first. THE ARRAY
+    // ORDER IS THE FRAME ORDER and is the whole authoring model: desaturating a
+    // posterized image and posterizing a desaturated one are different
+    // pictures, and nothing but this order says which one a scene means.
+    //
+    // Absent in every document written before this feature = an empty stack,
+    // which is the renderer's byte-for-byte previous behaviour (no pass, no
+    // texture, not merely a disabled stage).
+    //
+    // Kept as JSON rather than as a typed vector for the same reason
+    // worldOverrides is: the catalogue grows, and a document written by a build
+    // that knows a look this one does not must survive the trip. Every write
+    // path goes through iris::normalizeLookStack (document/scenegraph/looks.h),
+    // which is where the rules — known ids only, one instance per look, every
+    // parameter present and clamped — are enforced exactly once.
+    QJsonArray looks;
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6) -----------------
     // How many mirror planes may re-render the scene. THE most expensive dial
     // in the world: each active plane is a whole extra scene render every

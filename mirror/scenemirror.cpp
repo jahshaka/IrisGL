@@ -19,6 +19,7 @@
 #include "irisgl/document/scenegraph/lightnode.h"
 #include "irisgl/document/scenegraph/decalnode.h"
 #include "irisgl/document/scenegraph/cameranode.h"
+#include "irisgl/document/scenegraph/looks.h"
 #include "irisgl/document/scenegraph/particlesystemnode.h"
 #include "irisgl/document/assets/mesh.h"
 #include "irisgl/document/assets/skeleton.h"
@@ -399,6 +400,7 @@ int SceneMirror::sync()
     }
     mAnyShadowCaster = false;
     mAnyRefractive = false;
+    mAnyDistortion = false;
     mShadowFilter = ShadowFilter::Hard;
     mMaxShadowResolution = 0;
     // RAW children, no QList: SceneNode::children() builds a
@@ -2091,6 +2093,10 @@ void SceneMirror::syncCustomPieces(iris::Material *material, MaterialId id)
 void SceneMirror::noteRefractive(const PbrParams &p)
 {
     if (p.alphaMode == PbrAlphaMode::Refractive) mAnyRefractive = true;
+    // DISTORTION "Auto" (POST_LOOKS_SPEC §5.3) is resolved the same way and for
+    // the same reason: its target and its two passes only enter the graph while
+    // the scene actually holds a distortion material.
+    if (p.shadingModel == ShadingModel::Distortion) mAnyDistortion = true;
 }
 
 TextureId SceneMirror::textureFor(const QString &path, bool srgb)
@@ -2239,7 +2245,9 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         // NOTICES a switch; applying it is a separate, atomic engine call (see
         // the visit() branch) because the two families are different backend
         // material types and the switch re-attaches every renderable.
-        out.shadingModel = pbr->shadingModel == 1 ? ShadingModel::Unlit : ShadingModel::Lit;
+        out.shadingModel = pbr->shadingModel == 2 ? ShadingModel::Distortion
+                         : pbr->shadingModel == 1 ? ShadingModel::Unlit
+                                                  : ShadingModel::Lit;
         out.brdf               = iris::PbrMaterial::brdfEngineName(pbr->brdf).toStdString();
         out.clearCoat          = pbr->clearCoat;
         out.clearCoatRoughness = pbr->clearCoatRoughness;
@@ -3795,6 +3803,45 @@ void SceneMirror::invalidateEnvironment()
 static bool cameraOverridesAnything(const iris::CameraNodePtr &camera);
 static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx);
 
+// THE LOOKS STACK, document -> engine (POST_LOOKS_SPEC.md §4.1).
+//
+// The document stores an ordered array of {id, enabled, params}; the engine
+// takes an ordered vector of {kind, p[8]}. This is the whole translation, and
+// it is the only place the two spellings meet.
+//
+// THE KIND MAP IS AN EXPLICIT SWITCH and not a cast, deliberately: the two
+// enums are the same list today and the compiler would happily let them drift
+// apart tomorrow. The document must not include the engine's header, so a
+// static_assert cannot stand in for it — the switch is the seam, and a new look
+// that forgets this line does not compile (-Wswitch).
+static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
+{
+    std::vector<LookDesc> out;
+    if (stack.isEmpty()) return out;   // the overwhelmingly common case
+    const QJsonArray clean = iris::normalizeLookStack(stack);
+    out.reserve(size_t(clean.size()));
+    for (const QJsonValue &v : clean) {
+        const QJsonObject entry = v.toObject();
+        if (!entry.value(QStringLiteral("enabled")).toBool(true)) continue;
+        const iris::LookDef *def = iris::lookDef(entry.value(QStringLiteral("id")).toString());
+        if (!def) continue;
+        LookDesc desc;
+        switch (def->kind) {
+        case iris::LookKind::Desaturate: desc.kind = LookKind::Desaturate; break;
+        case iris::LookKind::GlassWarp:  desc.kind = LookKind::GlassWarp;  break;
+        case iris::LookKind::RadialBlur: desc.kind = LookKind::RadialBlur; break;
+        case iris::LookKind::OldMovie:   desc.kind = LookKind::OldMovie;   break;
+        case iris::LookKind::Posterize:  desc.kind = LookKind::Posterize;  break;
+        case iris::LookKind::Sharpen:    desc.kind = LookKind::Sharpen;    break;
+        case iris::LookKind::FilmGrade:  desc.kind = LookKind::FilmGrade;  break;
+        case iris::LookKind::Count:      continue;
+        }
+        iris::lookParamValues(*def, entry, desc.p);
+        out.push_back(desc);
+    }
+    return out;
+}
+
 void SceneMirror::applyEnvironment(View *view, Engine *engine)
 {
     if (!mSource || !view) return;
@@ -3961,6 +4008,17 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // is accumulated by sync() the same way mAnyShadowCaster is.
         fx.refractions    = mSource->refractionsMode == 2 ||
                             (mSource->refractionsMode == 1 && mAnyRefractive);
+        // Distortion, resolved the same way (POST_LOOKS_SPEC §5.3): 0 off,
+        // 1 auto (only while the scene holds a distortion material — the
+        // recommended default), 2 always.
+        fx.distortion     = mSource->distortionMode == 2 ||
+                            (mSource->distortionMode == 1 && mAnyDistortion);
+        fx.distortionStrength = mSource->distortionStrength;
+        // THE LOOKS STACK (POST_LOOKS_SPEC §4.1). The document's array, in its
+        // own order, minus the entries the user switched off — a disabled look
+        // stays in the document and out of the graph, which is what makes the
+        // panel's toggle free rather than a destructive edit.
+        fx.looks = resolveLooks(mSource->looks);
         // THE DRIVING CAMERA'S OWN LOOK, layered over the world's
         // (CAMERA_LENS_SPEC §4/§5 — applyCameraPostFx documents the model).
         //
@@ -5000,6 +5058,22 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
         const QVariant v = camera->postOverride(QLatin1String("refractions"));
         if (v.isValid() && v.toInt() != 1) fx.refractions = v.toInt() == 2;
     }
+    // Distortion is the world's three-state mode resolved to a BOOL by the time
+    // it reaches the view — exactly like refractions above, including the rule
+    // that an override of 1 (auto) means "whatever the world just resolved".
+    {
+        const QVariant v = camera->postOverride(QLatin1String("distortion"));
+        if (v.isValid() && v.toInt() != 1) fx.distortion = v.toInt() == 2;
+    }
+    num("distortionStrength", fx.distortionStrength);
+
+    // THE LOOKS STACK, whole (POST_LOOKS_SPEC §4.1 / D4). Present REPLACES the
+    // world's stack — including with an empty one, which is how a camera says
+    // "no looks" over a world that has them; absent inherits, so the world's
+    // resolved stack survives untouched, which is what keeps the byte-identical
+    // negative in tests/cameras true for every camera that says nothing.
+    if (camera->hasPostOverride(QStringLiteral("looks")))
+        fx.looks = resolveLooks(camera->postOverrideStack(QStringLiteral("looks")));
 }
 
 void SceneMirror::applyPip(iris::CameraNodePtr camera, View *view, const ViewPipDesc &desc)

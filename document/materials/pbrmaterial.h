@@ -160,6 +160,10 @@ public:
     /// rows do nothing. Every entry is justified in the ShadingModel comment in
     /// the engine's Types.h — this list and that comment are the same claim.
     static const QVector<QString> &rowsUnusedWhenUnlit();
+    /// The same list for the DISTORTION shading model (POST_LOOKS_SPEC §5.2),
+    /// which keeps only three rows: the normal map (read as the screen-space
+    /// displacement field), the opacity (its own strength) and two-sidedness.
+    static const QVector<QString> &rowsUnusedWhenDistortion();
 
     QColor baseColor;
     float  baseColorFactor;
@@ -198,7 +202,8 @@ public:
     float  clearCoatRoughness;
 
     /// Which shading FAMILY renders this material: 0 = Lit (metallic-roughness
-    /// PBR), 1 = Unlit (flat colour). HLMS_ADOPTION P4a.
+    /// PBR), 1 = Unlit (flat colour), 2 = Distortion (draws nothing of itself
+    /// and WARPS what is behind it — POST_LOOKS_SPEC §5.2). HLMS_ADOPTION P4a.
     ///
     /// This is not one more knob on one pipeline — the renderer has two
     /// material families and switching costs a destroy/recreate of the whole

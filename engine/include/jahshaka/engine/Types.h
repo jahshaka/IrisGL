@@ -277,9 +277,42 @@ enum class PbrAlphaMode {
 ///     fall back to a plain alpha blend.
 /// An Unlit item still OCCLUDES the shadow map (it is ordinary geometry to the
 /// shadow pass) — it casts, it just cannot receive.
+///
+/// THE THIRD MODEL, Distortion (POST_LOOKS_SPEC.md §5.2 decision D3), is not a
+/// way of SHADING a surface at all — it is a way of using one. An object with a
+/// Distortion material draws nothing of itself: it writes a screen-space
+/// displacement into a separate target through its own render queue, and the
+/// chain then warps the image BEHIND it by that displacement. Heat haze, a
+/// blast wave, a shock ring, a cloaked hull.
+///
+/// It is a shading MODEL rather than a flag because that is what it is in the
+/// material panel: choosing it hides every PBR row (none of them mean anything)
+/// and shows the two that do — the displacement map and the strength. And it
+/// belongs on the MATERIAL rather than on a node type because it then works on
+/// any mesh, any imported model, and on particle billboards through their
+/// material (the upstream sample's own note is that these objects "can be
+/// whatever you want, fe. particle effect billboards").
+///
+/// WHAT DISTORTION USES, and it is a short list:
+///   * the NORMAL map slot, read as a screen-space displacement: the R and G
+///     channels are remapped from [0,1] to [-1,1] and scale the offset. A
+///     tangent-space normal map is exactly the right kind of texture, which is
+///     why it reuses that slot rather than inventing one;
+///   * `alpha`, as the per-material STRENGTH, multiplied by the world's
+///     `distortionStrength`. 0 is inert;
+///   * `twoSided` and `alphaCutoff`, which behave as they always do.
+/// Everything else — albedo, metalness, roughness, emissive, the BRDF, the
+/// clear coat, every other map — is ignored, because there is no lighting.
+///
+/// A distortion item is INVISIBLE to every other pass by construction: it
+/// carries its own visibility bit instead of the ordinary one, so it never
+/// appears in a thumbnail, a preview, a reflection probe, a shadow map or the
+/// GI voxelisation. A scene full of them renders byte-identically anywhere the
+/// distortion pass is not in the graph.
 enum class ShadingModel {
-    Lit,   ///< the metallic-roughness PBR family — everything above works
-    Unlit  ///< flat colour; the constraint list above applies in full
+    Lit,        ///< the metallic-roughness PBR family — everything above works
+    Unlit,      ///< flat colour; the constraint list above applies in full
+    Distortion  ///< draws no colour; warps what is behind it (see above)
 };
 
 /// Metallic-roughness PBR parameters — Jahshaka's material model, sized to what
@@ -1453,6 +1486,63 @@ struct ShaderCacheStats {
     long long lastSavedUnixMs = 0;
 };
 
+/// ONE LDR image filter — a "look" (POST_LOOKS_SPEC.md §4).
+///
+/// The looks stage is a stack of full-screen quads that runs at the very end of
+/// the chain, AFTER tonemapping and AFTER SMAA (§4.2 and D5: SMAA is LDR edge
+/// detection, so a look that CREATES edges — posterize bands, sharpen halos —
+/// must not be smeared by it, and a look that WARPS the image must not have its
+/// warped edges anti-aliased instead of the scene's). Every look is a colour
+/// transform of the finished picture: nothing here can see depth, normals or
+/// the scene at all.
+enum class LookKind {
+    /// Luma-weighted desaturation. p[0] = amount (0 = identity, 1 = grey).
+    Desaturate = 0,
+    /// Refraction through rippled glass: a procedural normal field offsets the
+    /// UV. p[0] = amount (0 = identity), p[1] = scale (ripple frequency).
+    GlassWarp,
+    /// Zoom blur about a centre. p[0] = amount, p[1] = centre x, p[2] = centre
+    /// y (both 0..1 in UV), p[3] = falloff exponent.
+    RadialBlur,
+    /// Sepia + dirt + flicker + frame jitter, all driven by `time`.
+    /// p[0] = amount, p[1] = flicker, p[2] = dirt, p[3] = jitter.
+    OldMovie,
+    /// Colour quantization. p[0] = amount, p[1] = levels, p[2] = gamma.
+    Posterize,
+    /// 3x3 unsharp mask. p[0] = amount.
+    Sharpen,
+    /// The film grade (the unbuilt CAMERA_LENS_SPEC §6 P5, absorbed here):
+    /// p[0] = amount, p[1] = saturation, p[2] = contrast, p[3] = vignette,
+    /// p[4..6] = tint rgb.
+    FilmGrade,
+    /// Not a look: the count, for range checks on the host side.
+    Count
+};
+
+/// One entry of the ordered looks stack. The PARAMETERS are uniforms pushed per
+/// view every frame (chain::applyViewGlobals), so scrubbing one is free; the
+/// KIND SEQUENCE is compositor shape and a change to it rebuilds the workspace
+/// (ChainDesc::sameShape) — the same split hdr/exposure has had since phase 3.
+///
+/// A kind appears AT MOST ONCE in a stack. Every look's parameters live on ONE
+/// process-global material (Ogre's MaterialManager is a singleton), so a second
+/// instance of the same look would be handed the first one's numbers; the host
+/// registry enforces the rule and the engine simply takes the first (§7 R2).
+struct LookDesc {
+    LookKind kind = LookKind::Desaturate;
+    /// Meaning is per kind, documented on LookKind. p[0] is ALWAYS the amount,
+    /// and every look is an exact identity at p[0] == 0 — that is what makes
+    /// "a look at zero is byte-identical to no look" assertable.
+    float p[8] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+
+    bool operator==(const LookDesc &o) const {
+        if (kind != o.kind) return false;
+        for (int i = 0; i < 8; ++i) if (p[i] != o.p[i]) return false;
+        return true;
+    }
+    bool operator!=(const LookDesc &o) const { return !(*this == o); }
+};
+
 /// The post-processing chain for a View (POST_CHAIN_SPEC.md).
 ///
 /// Everything here is OFF by default, and every field is IGNORED on an offscreen
@@ -1536,6 +1626,24 @@ struct PostFxDesc {
     /// that samples the opaque result. Costs nothing when no material is.
     bool  refractions = false;
 
+    /// THE DISTORTION PASS (POST_LOOKS_SPEC.md §5.3). Objects whose material's
+    /// shading model is Distortion render into their own RG target through
+    /// their own render queue, and a quad then warps the scene image by what
+    /// they wrote. Like `refractions` this is resolved by the HOST from an
+    /// auto/off row against whether the scene actually holds such a material,
+    /// so a scene without one pays nothing: no target, no passes, and a graph
+    /// identical to one built before this existed.
+    ///
+    /// It runs in LINEAR HDR, before the SSR history copy, SSAO and the
+    /// tonemap: heat haze is a phenomenon in front of the LENS, so bloom and
+    /// exposure should see the warped radiance and the anti-aliasing should
+    /// clean the warped edges.
+    bool  distortion = false;
+    /// A global multiplier on every distortion material's own strength. 0 is
+    /// inert and produces a byte-identical frame (the warp offset is exactly
+    /// zero, so the compose quad's fetch lands on the source texel).
+    float distortionStrength = 1.0f;
+
     /// THE SECONDARY-SURFACE TONEMAP (owner report 2026-09-07, fix wave item 6).
     ///
     /// The problem: everything that is NOT the main viewport — thumbnails,
@@ -1560,6 +1668,18 @@ struct PostFxDesc {
     /// fewer). Ignored unless `hdr`.
     bool  tonemapFixed = false;
 
+    /// THE LOOKS STACK (POST_LOOKS_SPEC.md §4), in FRAME ORDER: entry 0 runs
+    /// first, on the tonemapped and anti-aliased image, and the last one writes
+    /// the window. Empty is the default and costs exactly nothing — the stage
+    /// is absent from the compositor graph, not disabled inside it, so a scene
+    /// with no looks renders byte-for-byte what it rendered before this
+    /// existed.
+    ///
+    /// The KIND SEQUENCE is shape (adding, removing or reordering rebuilds the
+    /// workspace); the parameters are per-view uniforms and are free to scrub.
+    /// A kind must appear at most once — see LookDesc.
+    std::vector<LookDesc> looks;
+
     /// THE offscreen opt-in. Offscreen Views ignore every flag above unless this
     /// is set, because their exact colours are what thumbnails, previews and the
     /// pixel suites assert. Two callers set it, both deliberately: a screenshot
@@ -1578,7 +1698,10 @@ struct PostFxDesc {
                ssrRoughnessCutoff == o.ssrRoughnessCutoff &&
                ssrIntensity == o.ssrIntensity &&
                refractions == o.refractions &&
+               distortion == o.distortion &&
+               distortionStrength == o.distortionStrength &&
                tonemapFixed == o.tonemapFixed &&
+               looks == o.looks &&
                allowOffscreen == o.allowOffscreen;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }

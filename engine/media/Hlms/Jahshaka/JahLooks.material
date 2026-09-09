@@ -1,0 +1,386 @@
+// THE LOOKS CATALOGUE (POST_LOOKS_SPEC.md §2 + §3 decision D2).
+//
+// One full-screen quad per look, ours rather than upstream's. The samples in
+// Samples/Media/2.0/scripts/materials/Postprocessing are the REFERENCE — the
+// algorithms are theirs and the header of each _ps.glsl says which file it
+// followed — but every knob those shaders hard-code (Glass's 0.05 offset,
+// Posterize's 8 levels and 0.6 gamma, Sharpen's 9/-1 kernel weight, B&W's
+// missing mix) is a parameter here, and adding one to a sample shader would be
+// forking upstream media by the back door (the patches-only law).
+//
+// THE CONTRACT EVERY LOOK IN THIS FILE HONOURS:
+//   * `lookParams0.x` is the AMOUNT, and amount 0 is an EXACT identity — the
+//     source pixel returned unchanged, not approximately unchanged. The stage's
+//     ping-pong targets are sRGB and the decode/encode round trip is exact, so
+//     "a look at amount 0 is byte-identical to no look at all" is asserted, per
+//     look, by tests/looks.
+//   * every parameter's default in `default_params` is SAFE, not merely
+//     plausible: a frame rendered before chain::applyViewGlobals has run looks
+//     like the look is off rather than like a bug (the Jahshaka/Ssr* rule).
+//   * the source image arrives on texture unit 0, and the SOURCE PIXEL is read
+//     with texelFetch — never with an offset texture() read. Two looks need a
+//     bilinear sampler for their own taps, and a bilinear fetch at a pixel
+//     centre is exact only when uv * width lands exactly on x + 0.5, which is
+//     true at 128 and merely very nearly true at 956. texelFetch has no
+//     filtering and does no arithmetic on the value, so the amount-0 identity
+//     holds at every resolution and on every driver. The int coordinate comes
+//     from uv0 and not from gl_FragCoord, whose y origin differs between the
+//     GL and Vulkan paths.
+//   * GLSL + Vulkan only, like every other material we own here.
+//
+// The parameters travel as two float4s for every look — chain::updateLooks
+// pushes LookDesc::p[0..7] into `lookParams0` and `lookParams1` without knowing
+// what any of them mean, and the meaning is documented on LookKind (Types.h)
+// and in each shader's header. A look that uses four or fewer declares only
+// lookParams0; the push ignores what a material does not have.
+
+//-----------------------------------------------------------------------------
+// Desaturate — the plumbing proof (POST_LOOKS_SPEC §9 phase 1).
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/Look/Desaturate_ps_GLSL glsl
+{
+	source JahLookDesaturate_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Look/Desaturate_ps_VK glslvk
+{
+	source JahLookDesaturate_ps.glsl
+}
+fragment_program Jahshaka/Look/Desaturate_ps unified
+{
+	delegate Jahshaka/Look/Desaturate_ps_GLSL
+	delegate Jahshaka/Look/Desaturate_ps_VK
+}
+
+material Jahshaka/Look/Desaturate
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Look/Desaturate_ps
+			{
+				// Overwritten every frame, per view, by chain::updateLooks.
+				// 0 = identity: the safe value.
+				param_named lookParams0 float4 0 0 0 0
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Glass warp — bilinear, because it resamples through a displaced coordinate.
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/Look/GlassWarp_ps_GLSL glsl
+{
+	source JahLookGlassWarp_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Look/GlassWarp_ps_VK glslvk
+{
+	source JahLookGlassWarp_ps.glsl
+}
+fragment_program Jahshaka/Look/GlassWarp_ps unified
+{
+	delegate Jahshaka/Look/GlassWarp_ps_GLSL
+	delegate Jahshaka/Look/GlassWarp_ps_VK
+}
+
+material Jahshaka/Look/GlassWarp
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Look/GlassWarp_ps
+			{
+				param_named lookParams0 float4 0 4 0 0
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Radial blur — bilinear for the same reason: its taps land between texels.
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/Look/RadialBlur_ps_GLSL glsl
+{
+	source JahLookRadialBlur_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Look/RadialBlur_ps_VK glslvk
+{
+	source JahLookRadialBlur_ps.glsl
+}
+fragment_program Jahshaka/Look/RadialBlur_ps unified
+{
+	delegate Jahshaka/Look/RadialBlur_ps_GLSL
+	delegate Jahshaka/Look/RadialBlur_ps_VK
+}
+
+material Jahshaka/Look/RadialBlur
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Look/RadialBlur_ps
+			{
+				param_named lookParams0 float4 0 0.5 0.5 1
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Old movie — the one time-animated look. `lookTime` is Ogre's own auto
+// parameter, which under the engine's fixed frame delta advances by a known
+// amount per frame, so a stepped gate sees the same picture every run.
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/Look/OldMovie_ps_GLSL glsl
+{
+	source JahLookOldMovie_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Look/OldMovie_ps_VK glslvk
+{
+	source JahLookOldMovie_ps.glsl
+}
+fragment_program Jahshaka/Look/OldMovie_ps unified
+{
+	delegate Jahshaka/Look/OldMovie_ps_GLSL
+	delegate Jahshaka/Look/OldMovie_ps_VK
+}
+
+material Jahshaka/Look/OldMovie
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Look/OldMovie_ps
+			{
+				param_named			lookParams0	float4 0 0.5 0.5 0.5
+				// Seconds, wrapping every hour: long enough that the wrap is
+				// never seen, short enough that the float stays precise.
+				param_named_auto	lookTime	time_0_x	3600
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Posterize — point-sampled: it is a pure colour transform of its own pixel.
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/Look/Posterize_ps_GLSL glsl
+{
+	source JahLookPosterize_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Look/Posterize_ps_VK glslvk
+{
+	source JahLookPosterize_ps.glsl
+}
+fragment_program Jahshaka/Look/Posterize_ps unified
+{
+	delegate Jahshaka/Look/Posterize_ps_GLSL
+	delegate Jahshaka/Look/Posterize_ps_VK
+}
+
+material Jahshaka/Look/Posterize
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Look/Posterize_ps
+			{
+				param_named lookParams0 float4 0 8 0.6 0
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Sharpen — point-sampled: every one of its nine taps is a texelFetch.
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/Look/Sharpen_ps_GLSL glsl
+{
+	source JahLookSharpen_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Look/Sharpen_ps_VK glslvk
+{
+	source JahLookSharpen_ps.glsl
+}
+fragment_program Jahshaka/Look/Sharpen_ps unified
+{
+	delegate Jahshaka/Look/Sharpen_ps_GLSL
+	delegate Jahshaka/Look/Sharpen_ps_VK
+}
+
+material Jahshaka/Look/Sharpen
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Look/Sharpen_ps
+			{
+				param_named lookParams0 float4 0 0 0 0
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Film grade — the cheapest look here, and the only one with a second float4.
+//-----------------------------------------------------------------------------
+fragment_program Jahshaka/Look/FilmGrade_ps_GLSL glsl
+{
+	source JahLookFilmGrade_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/Look/FilmGrade_ps_VK glslvk
+{
+	source JahLookFilmGrade_ps.glsl
+}
+fragment_program Jahshaka/Look/FilmGrade_ps unified
+{
+	delegate Jahshaka/Look/FilmGrade_ps_GLSL
+	delegate Jahshaka/Look/FilmGrade_ps_VK
+}
+
+material Jahshaka/Look/FilmGrade
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/Look/FilmGrade_ps
+			{
+				param_named lookParams0 float4 0 1 1 0
+				param_named lookParams1 float4 1 1 1 0
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			none
+			}
+		}
+	}
+}
