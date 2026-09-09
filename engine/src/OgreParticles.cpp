@@ -55,6 +55,7 @@ std::string OgreScene::ParticleTopology::key() const {
     // first three on the datablock, the last two on the def), so they must NOT
     // split the recycling pool.
     std::string s = "q" + std::to_string(quotaBucket);
+    if (distortion) s += "|d";   // POST_LOOKS 4b: a distortion def is its own pool
     s += "|e";
     for (int shape : emitterShapes) s += std::to_string(shape) + ",";
     s += "|a";
@@ -320,6 +321,10 @@ void OgreScene::ensureHelperOverlayQueue() {
     // mode here cannot leak into a scene that draws no helpers.
     mSceneMgr->getRenderQueue()->setRenderQueueMode(kHelperOverlayRenderQueue,
                                                    Ogre::RenderQueue::PARTICLE_SYSTEM);
+    // ...and the distortion-particle queue (POST_LOOKS 4b), armed together
+    // because the ONE anchor below has to sit at the topmost of the two.
+    mSceneMgr->getRenderQueue()->setRenderQueueMode(kDistortionParticleRenderQueue,
+                                                   Ogre::RenderQueue::PARTICLE_SYSTEM);
     // THE DYNAMIC manager, deliberately: the cull loop visits a particle queue
     // once per entity memory manager deep enough to reach it, so putting the
     // anchor in exactly one of the two is also what keeps the helper sets from
@@ -417,14 +422,25 @@ std::string OgreScene::ensureParticleDatablock(Node &n, const ParticleSystemDesc
     // output when hlms_alpha_hash is set, or the piece could use vPos like its
     // own parameter name suggests. Both are Ogre-side; patch decisions are the
     // lead's.)
-    const bool alphaHash = !d.additive && d.alphaHash && tex != nullptr;
+    const bool alphaHash = !d.additive && d.alphaHash && tex != nullptr && !d.distortion;
 
     // Depth test on, depth write off — particles never occlude each other and
     // must not write into the depth the rest of the frame reads.
     Ogre::HlmsMacroblock macro;
     macro.mDepthCheck = true; macro.mDepthWrite = false; macro.mCullMode = Ogre::CULL_NONE;
     Ogre::HlmsBlendblock blend;
-    if (d.additive) {
+    if (d.distortion) {
+        // THE DISPLACEMENT FIELD (POST_LOOKS 4b), the same datablock shape
+        // OgreScene::applyDistortion gives a distortion ITEM: plain alpha blend
+        // onto the field's (0.5, 0.5, 0, 0) clear, so RG lerp towards the map
+        // and A carries the strength; the texture in slot 0 IS the map, and
+        // the per-particle vertex alpha (the emitter's colour range, a colour
+        // ramp) multiplies the datablock's white so it is the strength. Never
+        // additive (additive RG would push every overlap off-scale) and never
+        // alpha-hashed (a dithered displacement is a dithered picture).
+        blend.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
+        db->setAlphaTest(Ogre::CMPF_ALWAYS_PASS);
+    } else if (d.additive) {
         // (src-alpha, one). Order-independent by construction: additive fire,
         // embers and sparks need no sorting, and PFX2 never sorts.
         blend.mSourceBlendFactor = Ogre::SBF_SOURCE_ALPHA;
@@ -469,6 +485,13 @@ bool OgreScene::buildParticleDef(Node &n, const ParticleSystemDesc &d,
 
     Ogre::ParticleSystemDef *def = mgr->createParticleSystemDef(processUniqueName("psysdef"));
     ++mParticleDefsCreated;
+    if (topo.distortion) {
+        // Into the distortion pass's queue (armed in PARTICLE_SYSTEM mode, with
+        // the depth anchor above it, by the same call the icon queue uses —
+        // kQueueDepthAnchorRenderQueue explains why the anchor is mandatory).
+        ensureHelperOverlayQueue();
+        def->setRenderQueueGroup(kDistortionParticleRenderQueue);
+    }
     def->setParticleQuota(topo.quotaBucket);         // asserts !isInitialized(): before init only
     def->reserveNumEmitters(topo.emitterShapes.size());
     for (int shape : topo.emitterShapes)
@@ -669,6 +692,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
 
         ParticleTopology topo;
         topo.quotaBucket = quotaBucketFor(d.quota);
+        topo.distortion = d.distortion;
         for (const auto &e : d.emitters) topo.emitterShapes.push_back(int(e.shape));
         for (const auto &a : d.affectors) topo.affectorKinds.push_back(int(a.kind));
 
@@ -699,7 +723,8 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
         // onto it here. Node::visible is the record setNodeVisible keeps for
         // exactly this: the def is not a child of the node in Ogre's graph — it
         // hangs off the STATIC root — so no visibility cascade ever reaches it.
-        n.particleDef->setVisibilityFlags(n.visible ? (n.helper ? kHelperBit : kVisibleBit) : 0u);
+        n.particleDistortion = d.distortion;
+        n.particleDef->setVisibilityFlags(n.visible ? particleVisibilityBits(n) : 0u);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -735,6 +760,7 @@ void OgreScene::releaseParticleSystem(Node &n) {
     mParticleDefPool[n.particleTopology].push_back(n.particleDef);
     n.particleDef = nullptr;
     n.particleTopology.clear();
+    n.particleDistortion = false;
 }
 
 }}}  // namespace jahshaka::engine::detail

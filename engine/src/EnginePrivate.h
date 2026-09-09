@@ -100,6 +100,7 @@
 #include <exception>
 #include <limits>
 #include <map>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -337,6 +338,15 @@ constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
 // ride it — so the overlay passes carry an explicit visibility mask instead
 // (kDistortionBit above).
 constexpr Ogre::uint8 kDistortionRenderQueue = 220;
+/// DISTORTION PARTICLES (POST_LOOKS 4b): a PFX2 def can only be drawn from a
+/// PARTICLE_SYSTEM-mode queue, and 220 holds ITEMS, so distortion emitters get
+/// the next queue up, armed in particle mode beside the helper queue
+/// (OgreScene::ensureHelperOverlayQueue). The distortion pass draws
+/// [kDistortionRenderQueue, kDistortionParticleRenderQueue] — two queues, one
+/// field — and its kDistortionBit mask keeps everything else out. The queue
+/// depth anchor sits here too (kQueueDepthAnchorRenderQueue): one anchor serves
+/// 211 and 221, never two.
+constexpr Ogre::uint8 kDistortionParticleRenderQueue = 221;
 
 // ---------------------------------------------------------------------------
 // THE HELPER OVERLAY QUEUE (2026-09-08, the grey/blurred light icons).
@@ -379,12 +389,21 @@ constexpr Ogre::uint8 kHelperOverlayRenderQueue = 211;
 //
 // The anchor is one MovableObject with no renderables and visibility flags 0,
 // created once per scene beside the helper queue. It is never drawn in any
-// pass, it holds the entity depth at 213, and it costs one SIMD cull slot.
+// pass, it holds the entity depth at 222, and it costs one SIMD cull slot.
 // (The alternative was an Ogre patch to make the particle branch independent of
 // the entity managers — the honest upstream fix, and recorded as a finding —
 // but it changes cull code every pass runs, for a defect a 20-line object
 // closes here.)
-constexpr Ogre::uint8 kQueueDepthAnchorRenderQueue = 212;
+//
+// ONE ANCHOR, AT THE TOPMOST PARTICLE QUEUE. It sat at 212 while 211 was the
+// only particle queue above the overlay; the distortion-particle queue at 221
+// (POST_LOOKS 4b) moved it to 221 — the clamp is "highest entity queue plus
+// one", so an anchor at 221 covers 211 and 221 alike. Never add a second
+// anchor: the cull loop visits a particle queue once per entity memory manager
+// deep enough to reach it, and two anchors in two managers would draw every
+// helper set twice (the spike measured 0 px of difference between the anchor at
+// 221 and a second one, and a second one is exactly the double-draw trap).
+constexpr Ogre::uint8 kQueueDepthAnchorRenderQueue = kDistortionParticleRenderQueue;
 
 /// How many entries PbrTextureSlot has. The enum carries its own `Count`
 /// sentinel since the detail slots landed (MATERIAL_GAPS_SPEC GAP 2); this name
@@ -485,8 +504,22 @@ namespace chain {
 /// view owns and die with chain::destroy.
 struct ChainHandles {
     /// Every pass that must be confined to the INNER rectangle: the scene
-    /// passes and the quad that paints the inner background.
+    /// passes and the quad that paints the inner background. These take the
+    /// rectangle as VIEWPORT and scissor both — a scene pass projects into its
+    /// viewport, so the viewport IS the shot.
     std::vector<Ogre::CompositorPassDef *> insetPasses;
+    /// Every full-resolution POST quad of the letterboxed chain (SSAO apply,
+    /// distortion compose, the SSR history copy, tonemap/composite, the three
+    /// SMAA quads, every look). These take the rectangle as SCISSOR ONLY: the
+    /// viewport stays the whole target so the quad's 0..1 UVs still map the
+    /// source texture 1:1 onto the destination — an inset viewport would
+    /// squeeze the full image into the rectangle — while the scissor rejects
+    /// every fragment in the bars before it is shaded. Each pass also CLEARS
+    /// its target (a Vulkan clear is full-attachment, whatever the scissor),
+    /// so the bars of every intermediate and of the window are pure black
+    /// at no fill cost. The Unreal model: post processing runs on the shot,
+    /// never on the bars (riders lane R2, owner decision 2026-09-09).
+    std::vector<Ogre::CompositorPassDef *> scissorPasses;
     /// The clear that fills the tiny background swatch the inner-rect quad
     /// copies. Its colour is the view's background, pushed live.
     Ogre::CompositorPassClearDef *letterboxSwatch = nullptr;
@@ -661,6 +694,49 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
 /// re-seeded history starts exactly where a deterministic grade would land.
 float exposureSeed(float exposure);
+
+/// THE OPT-IN PASS PROFILER (riders lane R4, EngineConfig::profile). One per
+/// View, owned by it, registered through OgreView::addWorkspaceListener so it
+/// rides every workspace rebuild. Measures the CPU time between a pass's
+/// pre- and post-execute callbacks — what the render thread spent recording
+/// that pass, including any wait it did inside it (a texture wait, a PSO
+/// compile it blocked on) — keyed by the pass definition's profiling id, and
+/// logs one summary line per kFlushFrames frames to the engine log:
+///   [profile] view 'main' 120 frames, 4.83 ms/frame CPU in passes | Jahshaka
+///   opaque 2.10 (max 9.4) | Jahshaka overlays 0.61 (max 1.2) | ...
+/// sorted by total, top entries only. NOT GPU time — this pin has no timestamp
+/// query surface; that is upstream work and is recorded as such. When the
+/// profiler is off no instance exists, so the cost is exactly zero.
+class PassProfiler final : public Ogre::CompositorWorkspaceListener {
+public:
+    explicit PassProfiler(std::string viewName) : mView(std::move(viewName)) {}
+    void passPreExecute(Ogre::CompositorPass *) override {
+        mStart = std::chrono::steady_clock::now();
+    }
+    void passPosExecute(Ogre::CompositorPass *pass) override {
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - mStart).count();
+        const Ogre::CompositorPassDef *def = pass ? pass->getDefinition() : nullptr;
+        std::string key = def && !def->mProfilingId.empty() ? def->mProfilingId
+                                                             : std::string("(unnamed pass)");
+        Row &r = mRows[key];
+        r.ns += (unsigned long long)ns;
+        r.maxNs = std::max(r.maxNs, (unsigned long long)ns);
+        ++r.calls;
+    }
+    void workspacePosUpdate(Ogre::CompositorWorkspace *) override {
+        if (++mFrames >= kFlushFrames) flush();
+    }
+    /// Log whatever is accumulated (called on removal so a short run reports).
+    void flush();
+private:
+    static constexpr unsigned kFlushFrames = 120;
+    struct Row { unsigned long long ns = 0, maxNs = 0; unsigned calls = 0; };
+    std::string mView;
+    std::map<std::string, Row> mRows;
+    unsigned mFrames = 0;
+    std::chrono::steady_clock::time_point mStart{};
+};
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -1642,6 +1718,10 @@ private:
         Ogre::ParticleSystemDef  *particleDef = nullptr;
         Ogre::ParticleSystem2    *particleSystem = nullptr;
         std::string               particleTopology;   // the pool key this def answers to
+        /// Whether the live def is a DISTORTION emitter, so the visibility
+        /// pushes (setNodeVisible / setNodeHelper) hand it kDistortionBit and
+        /// never kVisibleBit — the def is what _addToRenderQueue tests.
+        bool                      particleDistortion = false;
         /// What setNodeVisible was last told. Kept because PFX2 objects do not
         /// live under the node in Ogre's graph (they hang off the STATIC root),
         /// so no visibility cascade reaches them and a system created or
@@ -1691,6 +1771,11 @@ private:
         int      orientation = 0;
         bool     additive = true;
         bool     alphaHash = false;
+        /// ParticleSystemDesc::distortion. Frozen with the def on purpose: a
+        /// distortion def lives in kDistortionParticleRenderQueue with
+        /// kDistortionBit and a displacement datablock, and a recycled def
+        /// must never hand that to an ordinary emitter (or the reverse).
+        bool     distortion = false;
         std::vector<int> emitterShapes;   // ParticleEmitterShape per emitter, in order
         std::vector<int> affectorKinds;   // ParticleAffectorDesc::Kind per affector, in order
         std::string key() const;
@@ -1927,6 +2012,9 @@ private:
     /// whose texture is a screen-space displacement field and whose colour
     /// alpha is the strength. See the definition for why each block is set.
     static void applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p);
+    /// The visibility bits a node's PFX2 def carries when visible:
+    /// kDistortionBit for a distortion emitter, else helper/visible.
+    static Ogre::uint32 particleVisibilityBits(const Node &n);
     /// (Re-)binds whatever `rec.boundTextures` says onto the material's CURRENT
     /// datablock — the step that makes a family switch keep its maps. The Unlit
     /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
@@ -2562,6 +2650,8 @@ public:
     /// The view does NOT own them: register at setup, unregister before the
     /// listener dies. Registering twice is a no-op.
     void addWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
+    /// Create/register (on) or flush+remove (off) this view's PassProfiler.
+    void setProfiling(bool on);
     void removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
     /// Counts completed workspace attachments. Neutral introspection (no Ogre
     /// type crosses the boundary) that lets hosts and tests see that a call was
@@ -2788,6 +2878,8 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
+    /// The opt-in pass profiler (chain::PassProfiler); null unless profiling.
+    std::unique_ptr<chain::PassProfiler> mProfiler;
     unsigned                   mWorkspaceGeneration = 0;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
@@ -2981,6 +3073,10 @@ public:
     bool renderStats(RenderStats &out) const override;
     bool objectCounts(ObjectCounts &out) const override;
     bool threading(EngineThreading &out) const override;
+    bool memoryStats(MemoryStats &out) const override;
+    bool reclaimMemory(MemoryStats *before, MemoryStats *after) override;
+    void setProfiling(bool on) override;
+    bool profiling() const override { return mProfiling; }
     bool saveShaderCache() override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
@@ -3183,6 +3279,9 @@ private:
     std::unique_ptr<Ogre::VertexFormatWarmUpStorage> mWarmUpSet;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
     std::vector<std::unique_ptr<OgreView>>  mViews;
+    /// EngineConfig::profile / setProfiling: views created while true get a
+    /// PassProfiler at birth.
+    bool mProfiling = false;
 };
 
 }  // namespace detail

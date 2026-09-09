@@ -287,9 +287,31 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     geometric-specular-antialiasing patch, landed on a later base than this
     lane's; numbered around it.)
 
+24. **0024-pbs-ortho-view-dir** — SOURCE + MEDIA (`OgreHlmsPbs.h/.cpp` +
+    `800.PixelShader_piece_ps.any`; every tree reruns `build-ogre.sh`). HlmsPbs
+    computes `viewDir = normalize( -inPs.pos )`, the direction to a PINHOLE at the
+    view-space origin — under an orthographic projection every pixel looks straight
+    down -Z and the direction back to the eye is +Z for every fragment, so with the
+    pinhole form NdotV, Fresnel, every light's half vector and the probe lookup vary
+    with the fragment's SCREEN position and an axis-view pan slides highlights and
+    reflections across a static scene (the owner's top-view report; 0019 closed the
+    SSR/SSAO half). A pass property `hlms_ortho_camera` (`PbsProperty::OrthoCamera`)
+    is set in `HlmsPbs::preparePassHash` BEFORE `preparePassHashBase` from the
+    rendering camera's projection type, non-caster passes only (the caster shader
+    never computes viewDir, and directional shadow cameras are orthographic — the
+    property would only double the caster permutations for nothing); the
+    LightingHeader piece takes `viewDir = (0, 0, 1)` under it. Compile-time branch:
+    zero per-pixel cost. COST: the PBS pixel permutation space doubles along one axis
+    — a scene first shown in an axis view compiles a second set of pixel shaders
+    (measured: see the riders-lane report / JOURNAL entry); the Jahshaka shader-cache
+    fingerprint hashes the staged Hlms tree, so every cache invalidates once.
+    Gate: ssr.engine section 12 grew a PBS half (a glossy sphere's highlight centroid
+    moves by exactly an 8 px ortho pan; the sphere window is the same picture
+    translated).
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild — the Studio build stages the
+patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild (0024 is SOURCE + media) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant

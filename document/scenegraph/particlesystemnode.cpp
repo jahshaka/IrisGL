@@ -22,6 +22,9 @@ namespace iris
 ParticleSystemNode::ParticleSystemNode() {
     sceneNodeType = SceneNodeType::ParticleSystem;
     texture = iris::Texture2D::load(":assets/textures/default_particle.jpg");
+    // A rendering-mode flag, NOT an authoring default: a preset (which resets
+    // the authoring fields) leaves a distortion emitter a distortion emitter.
+    distortion = false;
     resetAuthoringDefaults();
 }
 
@@ -368,6 +371,7 @@ QList<Property*> ParticleSystemNode::getProperties()
     addBool ("Random Rotation",      "randomRotation",     randomRotation);
     addBool ("Additive Blending",    "blendMode",          useAdditive);
     addBool ("Alpha Hashing",        "alphaHash",          alphaHash);
+    addBool ("Distortion",           "distortion",         distortion);
 
     addFloat("Cone Angle",           "coneAngle",          coneAngle);
     addFloat("Turbulence",           "turbulence",         turbulence);
@@ -446,6 +450,7 @@ QVariant ParticleSystemNode::getPropertyValue(QString valueName)
     if (valueName == "randomRotation")     return randomRotation;
     if (valueName == "blendMode")          return useAdditive;
     if (valueName == "alphaHash")          return alphaHash;
+    if (valueName == "distortion")         return distortion;
     if (valueName == "coneAngle")          return coneAngle;
     if (valueName == "turbulence")         return turbulence;
     if (valueName == "rotationSpeedMin")   return rotationSpeedMin;
@@ -490,6 +495,7 @@ bool ParticleSystemNode::setPropertyValue(QString valueName, const QVariant &val
     if (valueName == "randomRotation")     { randomRotation     = value.toBool();    return true; }
     if (valueName == "blendMode")          { useAdditive        = value.toBool();    return true; }
     if (valueName == "alphaHash")          { alphaHash          = value.toBool();    return true; }
+    if (valueName == "distortion")         { distortion         = value.toBool();    return true; }
     if (valueName == "coneAngle")          { coneAngle          = value.toFloat();   return true; }
     if (valueName == "turbulence")         { turbulence         = value.toFloat();   return true; }
     if (valueName == "rotationSpeedMin")   { rotationSpeedMin   = value.toFloat();   return true; }
@@ -560,6 +566,7 @@ SceneNodePtr ParticleSystemNode::createDuplicate()
     ps->rotationSpeedMax    = this->rotationSpeedMax;
     ps->orientation         = this->orientation;
     ps->alphaHash           = this->alphaHash;
+    ps->distortion          = this->distortion;
     ps->preset              = this->preset;
     // ADDENDUM A-4.
     ps->colourFade1         = this->colourFade1;

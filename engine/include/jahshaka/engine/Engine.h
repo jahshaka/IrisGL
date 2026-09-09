@@ -1382,6 +1382,25 @@ public:
     /// Returns false only when there is no backend to ask.
     virtual bool threading(EngineThreading &out) const = 0;
 
+    /// The renderer's memory pools right now (MemoryStats says what each row
+    /// is and who owns it). Cheap: reads the pool tables, renders nothing.
+    virtual bool memoryStats(MemoryStats &out) const = 0;
+    /// RECLAIM (riders lane R4): shrinks every scene manager's SIMD pools to
+    /// what is live (SceneManager::shrinkToFitMemoryPools — the pools never
+    /// shrink by themselves, they hold the high-water mark of nodes ever
+    /// alive). The right moments are after a large REMOVAL — a project close,
+    /// an undone import — never after growth, which it cannot help. Safe
+    /// between frames; slots are relocated through Ogre's rebase listener, and
+    /// no host holds a slot index. The GPU pools need no call: the Vulkan
+    /// VaoManager frees a pool that emptied by itself (see MemoryStats).
+    /// `before`/`after` are filled when given, so a caller can log the delta.
+    virtual bool reclaimMemory(MemoryStats *before = nullptr, MemoryStats *after = nullptr) = 0;
+    /// The opt-in pass profiler (EngineConfig::profile). Flipping it on
+    /// registers a listener on every live view (and every view created
+    /// later); off removes them. No effect on any pixel.
+    virtual void setProfiling(bool on) = 0;
+    virtual bool profiling() const = 0;
+
     /// Writes the cache now, if anything new has been compiled since the last
     /// write. Called on clean shutdown and once a compile burst has settled;
     /// safe (and a no-op) when the cache is disabled or nothing is dirty.

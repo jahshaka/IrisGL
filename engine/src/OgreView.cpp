@@ -640,6 +640,45 @@ void OgreView::syncGlobalsListener() {
     mGlobalsListener->mView = this;
 }
 
+void OgreView::setProfiling(bool on) {
+    if (on == bool(mProfiler)) return;
+    if (!on) {
+        mProfiler->flush();
+        removeWorkspaceListener(mProfiler.get());
+        mProfiler.reset();
+        return;
+    }
+    mProfiler.reset(new chain::PassProfiler(mName));
+    addWorkspaceListener(mProfiler.get());   // survives every workspace rebuild
+}
+
+void chain::PassProfiler::flush() {
+    if (mFrames == 0 || mRows.empty()) { mRows.clear(); mFrames = 0; return; }
+    std::vector<std::pair<std::string, Row>> rows(mRows.begin(), mRows.end());
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) {
+        return a.second.ns > b.second.ns;
+    });
+    unsigned long long total = 0;
+    for (const auto &r : rows) total += r.second.ns;
+    const double frames = double(mFrames);
+    char buf[256];
+    std::string line = "[profile] view '" + mView + "' ";
+    std::snprintf(buf, sizeof buf, "%u frames, %.2f ms/frame CPU in passes", mFrames,
+                  double(total) / frames / 1e6);
+    line += buf;
+    size_t shown = 0;
+    for (const auto &r : rows) {
+        if (shown++ >= 16) { line += " | ..."; break; }
+        std::snprintf(buf, sizeof buf, " | %s %.2f (max %.2f, x%.1f)", r.first.c_str(),
+                      double(r.second.ns) / frames / 1e6, double(r.second.maxNs) / 1e6,
+                      double(r.second.calls) / frames);
+        line += buf;
+    }
+    JAH_TRY { Ogre::LogManager::getSingleton().logMessage(line); } catch (...) {}
+    mRows.clear();
+    mFrames = 0;
+}
+
 void OgreView::addWorkspaceListener(Ogre::CompositorWorkspaceListener *l) {
     if (!l) return;
     if (std::find(mWorkspaceListeners.begin(), mWorkspaceListeners.end(), l) !=
@@ -796,7 +835,7 @@ void OgreView::applyLensShift(Ogre::Camera *camera, const CameraDesc &c, float a
 // on every resize and is written straight onto the pass definitions — which
 // Ogre re-reads on every execute, so this rebuilds nothing.
 void OgreView::applyLetterbox() {
-    if (mChainHandles.insetPasses.empty()) return;
+    if (mChainHandles.insetPasses.empty() && mChainHandles.scissorPasses.empty()) return;
     JAH_TRY {
         const unsigned w = width(), h = height();
         const float targetAspect = h ? float(w) / float(h) : 1.0f;
@@ -806,6 +845,14 @@ void OgreView::applyLetterbox() {
             auto &vp = p->mVpRect[0];
             vp.mVpLeft = inner[0]; vp.mVpTop = inner[1];
             vp.mVpWidth = inner[2]; vp.mVpHeight = inner[3];
+            vp.mVpScissorLeft = inner[0]; vp.mVpScissorTop = inner[1];
+            vp.mVpScissorWidth = inner[2]; vp.mVpScissorHeight = inner[3];
+        }
+        // The post quads: scissor only, viewport untouched (ChainHandles::
+        // scissorPasses says why). The rectangle is relative, so it is the
+        // same numbers whatever the quad's target resolution.
+        for (Ogre::CompositorPassDef *p : mChainHandles.scissorPasses) {
+            auto &vp = p->mVpRect[0];
             vp.mVpScissorLeft = inner[0]; vp.mVpScissorTop = inner[1];
             vp.mVpScissorWidth = inner[2]; vp.mVpScissorHeight = inner[3];
         }
@@ -1107,6 +1154,7 @@ bool OgreView::warmUpShaders() {
 }
 
 void OgreView::destroy() {
+    setProfiling(false);   // flushes what it has, then unregisters
     detachScene();
     JAH_TRY {
         chain::destroy(mRoot->getCompositorManager2(), mWorkspaceDef, mNodeDefs);

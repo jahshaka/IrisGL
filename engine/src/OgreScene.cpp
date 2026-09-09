@@ -236,7 +236,14 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
                     itemVisibilityFlags(n, n.materialUnlit, n.materialDistortion));
     const Ogre::uint32 on = n.helper ? kHelperBit : kVisibleBit;
     if (n.billboards) n.billboards->setVisibilityFlags(n.visible ? on : 0u);
-    if (n.particleDef) n.particleDef->setVisibilityFlags(n.visible ? on : 0u);
+    if (n.particleDef) n.particleDef->setVisibilityFlags(n.visible ? particleVisibilityBits(n) : 0u);
+}
+
+Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {
+    // A distortion emitter is invisible to every pass but the distortion pass,
+    // helper or not (there is no helper distortion; the icon queue draws colour).
+    if (n.particleDistortion) return kDistortionBit;
+    return n.helper ? kHelperBit : kVisibleBit;
 }
 
 void OgreScene::setNodeHelper(NodeId id, bool helper) {
@@ -291,7 +298,8 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
         // also what makes already-emitted particles disappear at once instead
         // of finishing their lives on screen.
         if (it->second.particleDef)
-            it->second.particleDef->setVisibilityFlags(visible ? on : 0u);
+            it->second.particleDef->setVisibilityFlags(
+                visible ? particleVisibilityBits(it->second) : 0u);
     } JAH_CATCH(mError, );
 }
 
