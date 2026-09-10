@@ -1438,11 +1438,15 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
                              const std::pair<unsigned, size_t> &b) { return a.first > b.first; });
         for (size_t k = 0; k < extra; ++k) {
             const size_t i = movers[k].second;
+            // Count only captures the reservation ADDS: on a fast-refresh frame
+            // (refreshVctFast dirties every probe without touching the slots)
+            // the probe is already going to render, and reporting it as spent
+            // reservation over-stated giStatus.dynamicProbeUpdates.
+            if (!probes[i]->mDirty) ++mDynamicProbeUpdates;
             probes[i]->mDirty = true;
             mProbeSlots[i].sweepPending = false;
             mProbeSlots[i].framesSinceUpdate = 0;
         }
-        mDynamicProbeUpdates = int(extra);
     }
 }
 
