@@ -18,6 +18,7 @@ For more information see the LICENSE file
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <functional>
 #include <mutex>
 #include <unordered_map>
@@ -786,6 +787,44 @@ void promoteStaticChildren(Ogre::SceneNode *n)
 }
 }  // namespace
 
+namespace
+{
+/// Stores `q` BIT-EXACT when it is already unit length (to float precision),
+/// and lets Ogre normalise it only when it genuinely is not.
+///
+/// Ogre::Node::setOrientation re-normalises UNCONDITIONALLY (OgreNode.cpp:572),
+/// and float normalisation is not idempotent: n(q) != q for many unit q, and
+/// n(n(q)) is often q again — the stored quaternion walks between two float
+/// fixed points on every write of its own value. That made a play/stop cycle
+/// change the document by one normalisation step (PlayBack::restoreNodeTransforms
+/// writes back exactly what it saved, and the node kept a DIFFERENT quaternion
+/// than the one it read), which is how the fixed-clock determinism suite found
+/// two IDENTICAL 120-frame physics runs landing tumbling bodies on different
+/// bits: A == C, B == D, A != B — the 2-cycle of the normaliser, amplified by
+/// the contact solve (ENGINEERING_DEBT_SPEC A4.2). A restore, an undo, a
+/// deserialise and the per-step physics write-back all pass through here and
+/// must leave the node holding exactly the value they were given.
+///
+/// The tolerance is on the SQUARED norm: 1e-5 is ~1e3 float ulps around 1 —
+/// far wider than any product of unit quaternions drifts, far narrower than a
+/// quaternion that was never unit (a lossy matrix decomposition of a scaled
+/// transform, hand-authored data). Those still get Ogre's normalise, once,
+/// after which they are unit and pass through exactly.
+void setOrientationExact(Ogre::Node *o, const Ogre::Quaternion &q)
+{
+    if (std::fabs(q.Norm() - 1.0f) > 1e-5f) {
+        o->setOrientation(q);
+        return;
+    }
+    Ogre::Transform &t = o->_getTransform();
+    t.mOrientation->setFromQuaternion(q, t.mIndex);
+    // The cached full-transform matrix must be re-derived (setOrientation's
+    // CACHED_TRANSFORM_OUT_OF_DATE); the flag is protected, and a position
+    // write of the position's own value raises it without touching the value.
+    o->setPosition(o->getPosition());
+}
+}  // namespace
+
 void setLocalPos(NodeHandle n, const Vec3 &v)
 {
     if (!n || !engineAlive()) return;
@@ -796,7 +835,7 @@ void setLocalPos(NodeHandle n, const Vec3 &v)
 void setLocalRot(NodeHandle n, const Quat &q)
 {
     if (!n || !engineAlive()) return;
-    nd(n)->setOrientation(toOgre(q));
+    setOrientationExact(nd(n), toOgre(q));
     markMoved(nd(n));
 }
 
@@ -812,7 +851,7 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s)
     if (!n || !engineAlive()) return;
     Ogre::SceneNode *o = nd(n);
     o->setPosition(toOgre(p));
-    o->setOrientation(toOgre(r));
+    setOrientationExact(o, toOgre(r));
     o->setScale(toOgre(s));
     markMoved(o);
 }
@@ -865,8 +904,8 @@ void setGlobalRot(NodeHandle n, const Quat &q)
     if (!n || !engineAlive()) return;
     Ogre::SceneNode *o = nd(n);
     Ogre::Node *p = o->getParent();
-    if (!p) { o->setOrientation(toOgre(q)); markMoved(o); return; }
-    o->setOrientation(p->_getDerivedOrientationUpdated().Inverse() * toOgre(q));
+    if (!p) { setOrientationExact(o, toOgre(q)); markMoved(o); return; }
+    setOrientationExact(o, p->_getDerivedOrientationUpdated().Inverse() * toOgre(q));
     markMoved(o);
 }
 
@@ -885,7 +924,7 @@ void setGlobalTransform(NodeHandle n, const Mat4 &m)
     Ogre::Quaternion rot;
     local.decomposition(pos, scale, rot);
     o->setPosition(pos);
-    o->setOrientation(rot);
+    setOrientationExact(o, rot);
     o->setScale(scale);
     markMoved(o);
 }

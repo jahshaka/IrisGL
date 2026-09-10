@@ -4128,22 +4128,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                                  : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
         mTarget->setShadowSettings(shadows);
     }
-    if (engine) {
-        // Particle simulation clock (PARTICLES_FX2_SPEC §10.3). PROCESS-WIDE in
-        // the renderer — one frame-time source, no per-scene and no per-node
-        // clock exists — so the last scene to call applyEnvironment owns it.
-        // Offscreen thumbnail and preview scenes never call this, so they never
-        // fight the editor for it. Pushed only on change: setParticleTimeScale
-        // and setFixedFrameDelta cancel each other inside the backend, and the
-        // suites hold a fixed step across whole runs.
-        // ...unless a FIXED frame delta is live (a scripted editor.frame(n, dt)
-        // or a test): the two settings cancel each other inside the backend, so
-        // pushing the scale here would silently undo the caller's determinism
-        // every frame.
-        if (engine->fixedFrameDelta() <= 0.0f &&
-            engine->particleTimeScale() != mSource->particleTimeScale)
-            engine->setParticleTimeScale(mSource->particleTimeScale);
-    }
+        // The particle clock is NOT pushed from here any more: the HOST pushes
+        // the document's simulated seconds x particleTimeScale as the engine's
+        // frame delta every frame (EngineSceneViewport::syncFrame,
+        // EnginePlayerScene::step — ENGINEERING_DEBT_SPEC A4.2), the one clock
+        // physics and animation advance on too.
     if (engine) {
         // world.refreshShadows(): one re-render of every static shadow map per
         // bump, the giRefreshSerial shape exactly (a serial, not a bool: two

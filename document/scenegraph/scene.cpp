@@ -277,8 +277,6 @@ Scene::Scene()
     meshes.reserve(100);
     particleSystems.reserve(100);
 
-	time = 0;
-
     environment = QSharedPointer<Environment>(new Environment());
 	gravity = environment->getWorldGravity();
     // The possession slot (AVATAR_LOCOMOTION_SPEC §8.4). Owned for the scene's
@@ -413,37 +411,49 @@ void Scene::updateSceneAnimation(float time)
     if (rootNode) rootNode->updateAnimation(time);
 }
 
-void Scene::update(float dt)
+float Scene::advance(float dt)
 {
-	if (!rootNode)
-		return;
-
-	time += dt < 0 ? 0 : dt;
+    // The clock ticks whether or not anything in the document consumes it:
+    // the return value feeds the renderer's particle and shader-time delta,
+    // which run in the editor too.
+    const int steps = clock.advance(dt);
+    const float simDt = float(clock.frameSeconds());
+    if (!rootNode || steps == 0) return simDt;
+    const bool simulating = environment && environment->isSimulating();
+    if (!playing && !simulating) return simDt;
 
     // SUN COUPLING (re-audit F5): before anything reads a transform this frame,
     // so the mirror, the gizmos and the shadow pass all see the same rotation.
     applySunCoupling();
 
-    // POSSESSION, first half (AVATAR_LOCOMOTION_SPEC §8.4): the possessed
-    // avatar is the ONE consumer of the gameplay input state, and its intent is
-    // camera-relative. This must run BEFORE the physics step, because
-    // Environment::updateAvatarMovement — which stepSimulation calls — is what
-    // spends the input. Every OTHER registered avatar steps with whatever input
-    // it has, which for an unpossessed one is zero (unpossess clears it), so it
-    // idles rather than freezing.
-    if (playing && possession) possession->routeInput(dt);
+    // THE POSE, at the clock's time — once, not per step: clips and property
+    // tracks are evaluated at an ABSOLUTE time (the document keeps the clock,
+    // the evaluators are stateless), so only the last evaluation of a frame
+    // can matter. Before the physics steps, as PlayBack always ordered it.
+    if (playing) {
+        animTime = float(clock.time());
+        rootNode->updateAnimation(animTime);
+    }
 
-    environment->stepSimulation(dt);
+    const float h = float(SimulationClock::kStepSeconds);
+    for (int i = 0; i < steps; ++i) {
+        // POSSESSION, first half (AVATAR_LOCOMOTION_SPEC §8.4): the possessed
+        // avatar is the ONE consumer of the gameplay input state, and its
+        // intent is camera-relative. This must run BEFORE the physics step,
+        // because Environment::updateAvatarMovement — which stepSimulation
+        // calls — is what spends the input. Every OTHER registered avatar
+        // steps with whatever input it has, which for an unpossessed one is
+        // zero (unpossess clears it), so it idles rather than freezing.
+        if (playing && possession) possession->routeInput(h);
+        environment->stepSimulation(h);
+    }
 
 	// Iterate over all rigid bodies and update the corresponding scenenode
 	QHashIterator<QString, btRigidBody*> physicsBodies(environment->hashBodies);
 	while (physicsBodies.hasNext()) {
 		physicsBodies.next();
 		// Match the bodies' hash to the scenenode's and override the mesh's transform if it's a known physics body
-		btScalar matrix[16];
 		auto rigidBodyWorldTransform = physicsBodies.value()->getWorldTransform();
-		// Put the transform matrix's float data into our array
-		rigidBodyWorldTransform.getOpenGLMatrix(matrix);
 		// Get the matching scenenode. NULL-CHECKED (deep-audit F3): a body
 		// whose node was deleted mid-simulation (or a stale hash after a
 		// scene switch) otherwise dereferences null here every frame.
@@ -452,29 +462,32 @@ void Scene::update(float dt)
 			continue;
 
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
-		//auto simulatedTransform = iris::Mat4(matrix).transposed();
-		//simulatedTransform.scale(mesh->getLocalScale());
 		// Set our scenenode to the simulated transform for the duration of the sim
-		//mesh->setGlobalTransform(simulatedTransform);
 		auto pos = rigidBodyWorldTransform.getOrigin();
 		mesh->setGlobalPos(iris::Vec3(pos.x(), pos.y(), pos.z()));
 		auto rot = rigidBodyWorldTransform.getRotation();
 		mesh->setGlobalRot(iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
 	}
 
-    // POSSESSION, second half: the spring arm follows the pose the step just
+    // POSSESSION, second half: the spring arm follows the pose the steps just
     // produced, so the camera never lags the character by a frame. It writes
     // `camera` — which the block below then updates and re-derives matrices
     // for, exactly as it does for any other camera move.
     if (playing && possession) possession->updateFollowCamera();
 
+	refresh();
+	return simDt;
+}
+
+void Scene::refresh()
+{
+	if (!rootNode) return;
 	// Cameras aren't always a part of the scene hierarchy, so their matrices are updated here
 	if (!!camera) {
-		camera->update(dt);
+		camera->update(0.0f);
 		camera->updateCameraMatrices();
 	}
-
-	rootNode->update(dt);
+	rootNode->update(0.0f);
 }
 
 void Scene::rayCast(const iris::Vec3& segStart,

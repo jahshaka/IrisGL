@@ -183,6 +183,8 @@ public:
     /// world here just to read one float would tie a component that simulates
     /// nothing to the solver (L2: Bullet is the COLLISION-QUERY LAYER ONLY).
     /// `gravityScale` multiplies it; the world stays the one gravity source.
+    /// One fixed step of `dt` (the document's SimulationClock grid, 1/60 s —
+    /// Scene::advance calls this once per grid step through the Environment).
     void step(btCollisionWorld *world, const SceneNodePtr &node, float dt,
               float gravityY = -10.0f);
 
@@ -193,10 +195,7 @@ public:
     /// `capsuleAuto`. Safe on a node with no meshes: the defaults stand.
     void fitCapsuleToNode(const SceneNodePtr &node);
 
-    /// Sub-stepping constants (§6.1). Public because the gates assert on them.
-    static constexpr float kMaxSubStep = 0.05f;
-    static constexpr int   kMaxSubSteps = 8;
-    /// Slide iterations per sub-step (§6.1 step 4).
+    /// Slide iterations per step (§6.1 step 4).
     static constexpr int   kMaxSlides = 4;
     /// The skin the sweep backs off by, in world units.
     static constexpr float kSkin = 0.005f;
