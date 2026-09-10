@@ -339,6 +339,7 @@ const QVector<QString> &PbrMaterial::rowsUnusedWhenUnlit()
         QStringLiteral("textureRotation"),
         QStringLiteral("normalMap"), QStringLiteral("metallicMap"),
         QStringLiteral("roughnessMap"), QStringLiteral("emissiveMap"),
+            "reflectionMap",   // the engine's unlit path returns before the reflection branch (code review 2026-09-10)
     };
     return kRows;
 }

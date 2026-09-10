@@ -265,6 +265,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mMaterials.clear();
     for (TextureId t : mTextures) mTarget->destroyTexture(t);
     mTextures.clear();
+    mLiveGenerations.clear();   // a key is here only while its engine texture is (code review 2026-09-10)
     mPbrPushed.clear();
     for (TextureId t : mIconTextures) mTarget->destroyTexture(t);
     mIconTextures.clear();

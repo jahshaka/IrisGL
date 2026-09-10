@@ -32,7 +32,9 @@ For more information see the LICENSE file
 // The registry is a process-wide table because a texture REFERENCE is a plain
 // string ("live://<guid>") stored in a material row, and the row has to be
 // resolvable by whoever loads it — the same role a file system plays for a
-// file-backed texture. It is cleared at the project boundary by the app.
+// file-backed texture. It is NOT cleared at the project boundary — a live
+// texture is a session object and outlives every project it was bound in
+// (scripting.e2e.live_textures asserts it); the registry dies with the process.
 
 #include <QHash>
 #include <QString>
