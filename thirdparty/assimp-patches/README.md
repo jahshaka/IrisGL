@@ -26,6 +26,26 @@ It is idempotent: an already-applied patch is detected (`git apply --reverse
 lines. Read their change, adapt or drop the patch. Never edit the vendored
 source in place.
 
+The applier is chosen **per source tree**, never per machine: when
+`thirdparty/assimp` is the toplevel of its own git work tree (the normal
+submodule checkout) the script uses `git apply`; when it is not — a release
+tarball unpacked in place, a vendored copy without `.git`, or a tree that sits
+inside some *other* repository without being its toplevel (where `git apply`
+from a subdirectory silently drops every hunk outside that directory) — it
+uses GNU `patch -p1 --fuzz=0 -N`, with a reversed dry-run for "already
+applied" and a forward dry-run for the loud `PATCH DOES NOT APPLY: <file>`
+stop. `--fuzz=0` matches git's strictness (patch's default fuzz of 2 would
+apply 0004 onto a rewritten target line). GNU `patch` therefore has to exist on
+a box that builds from a tarball; a git checkout needs only git.
+
+**Reproducibility (proved 2026-09-10):** the nine patches below, applied in
+order to the pristine pin `392a658f9` (v6.0.5), produce the eight patched files
+byte-for-byte — verified by both appliers on a clean clone against a configured
+tree, and by a clean-submodule clone configured and built from scratch. The
+eight `M` lines `git -C irisgl/thirdparty/assimp status` shows in every
+configured tree are this state and nothing else; `git -C irisgl/thirdparty/assimp
+checkout -- .` followed by a reconfigure recreates them exactly.
+
 Ogre-Next uses the same law with a different hook: `irisgl/scripts/build-ogre.sh`
 applies `ogre-patches/`, because Ogre is an out-of-tree prerequisite build that
 this project's configure step does not drive. assimp is compiled by our own
