@@ -80,7 +80,6 @@ struct Hasher {
         bytes(s.utf16(), size_t(s.size()) * sizeof(char16_t));
         return *this;
     }
-    Hasher &operator<<(const QColor &c) { return *this << c.rgba(); }
     Hasher &operator<<(const iris::Vec3 &v) { return *this << v.x() << v.y() << v.z(); }
     Hasher &operator<<(const iris::Quat &q) { return *this << q.x() << q.y() << q.z() << q.scalar(); }
 };
@@ -4912,7 +4911,10 @@ void SceneMirror::applySky(View *view)
     // IDEMPOTENT (the assertion mirror.document_to_engine's sky-idempotency case
     // makes): an unchanged description costs one comparison inside the engine —
     // no upload, no cube rebuild, no IBL reconvolution, no workspace churn.
-    mTarget->setSky(mSkyDesc);
+    // A push the engine REFUSED (a malformed cubemap, a missing face id) must
+    // not be retried every frame — resync to what is in force so the retry
+    // stops until the document changes (code review 2026-09-10).
+    if (!mTarget->setSky(mSkyDesc)) mSkyDesc = mTarget->sky();
     if (mSource->skyType == iris::SkyType::SINGLE_COLOR) {
         const QColor c = mSource->skyColor;
         view->setBackground(Colour(c.redF(), c.greenF(), c.blueF(), 1.0f));

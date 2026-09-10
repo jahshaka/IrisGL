@@ -35,7 +35,12 @@ const char *kIblWorkspace = "JahshakaIblSpecularWorkspace";
 // reflection faces must not tear the sky down and back up, because that is a
 // texture upload plus a six-face cube build for nothing.
 bool OgreScene::setSky(const SkyDesc &desc) {
-    const bool skyChanged  = !mSkyDesc.sameSky(desc);
+    // NoSky is a FULL clear: a description with no sky and no opinion on
+    // reflections must not leave an IBL-only reflection bound (the contract
+    // EnginePrivate.h states and the mirror's setSource relies on; code review
+    // 2026-09-10).
+    const bool noSkyClearsIbl = desc.mode == SkyMode::NoSky && mSkyDesc.reflections && !desc.reflections;
+    const bool skyChanged  = !mSkyDesc.sameSky(desc) || noSkyClearsIbl;
     const bool reflChanged = !mSkyDesc.sameReflections(desc);
     if (!skyChanged && !reflChanged) return true;   // idempotent: nothing to do
     bool ok = true;
@@ -101,9 +106,17 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
         mSkyIsEquirect = true;
         mSceneMgr->setSky(true, Ogre::SceneManager::SkyEquirectangular, use);
         tuneSkyRenderable();
-        // Only now is the old texture unreferenced by the sky material.
-        if (previous && previous != owned)
+        // Only now is the old texture unreferenced by the sky material. If a
+        // reflection convolution was still PENDING from that texture (a cubemap
+        // sky is its own IBL source), it must not run against a destroyed one
+        // on the next frame (code review 2026-09-10).
+        if (previous && previous != owned) {
+            if (mIblSourceTex == previous && !mIblSourceOwned) {
+                mIblPending = false;
+                mIblSourceTex = nullptr;
+            }
             mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(previous);
+        }
         return true;
     } JAH_CATCH(mError, false);
 }
