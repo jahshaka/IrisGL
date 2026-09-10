@@ -1743,6 +1743,14 @@ private:
         /// The riders hanging off THIS node's bones, so an owner that dies (or
         /// loses its rig) can free them before its skeleton goes.
         std::vector<NodeId>  boneRiders;
+        /// SKELETON GENERATION (S16, SMOKE_FIX_SPEC_2026_09_11 §1.1): bumped
+        /// every time this node's Item — and with it the SkeletonInstance the
+        /// Item owns — is destroyed. A ClipRec caches raw float*s into that
+        /// instance's weight arrays and an INDEX into its animation list, so a
+        /// record from an older generation is a dangling record. The counter is
+        /// what says so even when the allocator hands the replacement instance
+        /// the address the dead one had.
+        unsigned long long   rigGeneration = 0;
         // Billboard set (particles): uniquely owned; freed by releaseBillboards
         // BEFORE the scene manager dies (its _destroy needs the live VaoManager).
         // Decal (DECALS_SPEC): the Decal rides an internal child node whose
@@ -1889,6 +1897,14 @@ private:
         /// manual bone is not reset to bind and a clip would ADD to the last
         /// pushed pose rather than replace it.
         bool clipModeEntered = false;
+        /// WHOSE INSTANCE these records point into (S16): the SkeletonInstance
+        /// they were taken against, and the node's rigGeneration at that moment.
+        /// detachItem drops a node's clips with its Item, so this pair should
+        /// never disagree — it is the braces to that belt, and the reason a
+        /// re-attach the engine did not see is a logged refusal rather than a
+        /// use-after-free write followed by a std::vector subscript off the end.
+        Ogre::SkeletonInstance *owner = nullptr;
+        unsigned long long      ownerGeneration = 0;
     };
     struct MaterialRec {
         std::string datablockName;
@@ -2015,6 +2031,16 @@ private:
     Ogre::Hlms *hlmsFor(const MaterialRec &m) const;
     /// Removes the renderable from a node that references a SHARED mesh/material.
     void detachItem(NodeId id, Node &n);
+    /// S16: drops a node's clip RECORDS (never its manual-bone overrides, which
+    /// are host intent). Called wherever the node's SkeletonInstance dies — the
+    /// records are pointers into it.
+    void dropNodeClips(NodeId id);
+    /// True when a node's clip records were taken against an instance that is no
+    /// longer the one the node has (or against an older generation of it).
+    bool clipsAreStale(NodeId id, const NodeClips &nc,
+                       const Ogre::SkeletonInstance *skel) const;
+    /// The node's current rigGeneration, 0 for a node this scene does not know.
+    unsigned long long rigGenerationOf(NodeId id) const;
     /// Forgets this node's pose-following pairings in both directions — the
     /// node itself is going away (releaseNode).
     void dropSkeletonFollowers(NodeId id, Node &n);

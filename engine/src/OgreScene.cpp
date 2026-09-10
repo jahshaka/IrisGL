@@ -639,6 +639,19 @@ void OgreScene::detachItem(NodeId id, Node &n) {
         // destroy: the voxelizer/IR hold raw pointers into the dying geometry.
         if (n.item->getVisibilityFlags() & kGiGeometryBit) invalidateGiCaches();
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
+        // AND THE CLIPS (S16, SMOKE_FIX_SPEC_2026_09_11 §1.1). The
+        // SkeletonInstance belongs to the Item and has just died with it, while
+        // every ClipRec this node holds is a set of raw float*s into that
+        // instance's per-animation weight arrays plus an index into its
+        // animation list. The host's very next act after a re-attach is a state
+        // push (the mirror disables everything before re-attaching), which used
+        // to write through all of those and then subscript an animation list
+        // with nothing in it: a use-after-free write and a SIGABRT, from
+        // nothing worse than a material swap on a rigged node. The clips come
+        // back the way a share does — the host re-attaches them, and
+        // attachClips' idempotency set is empty again, so they really do.
+        ++n.rigGeneration;
+        dropNodeClips(id);
     }
     n.meshRef = 0; n.materialRef = 0;
 }
