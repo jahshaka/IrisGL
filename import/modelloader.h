@@ -4,7 +4,7 @@
 #include "irisglfwd.h"
 #include "import/model.h"
 
-class aiScene;
+struct aiScene;
 namespace iris
 {
 
