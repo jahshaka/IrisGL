@@ -512,10 +512,23 @@ private:
    /// regenerated, so a straight field copy would have every duplicate riding
    /// the first character forever).
    SceneNodePtr duplicateInto(QHash<QString, QString> &guidMap);
-   /// Re-points this subtree's socket owners through `guidMap`; an owner
-   /// OUTSIDE the copied subtree keeps its guid, which is the "second camera on
-   /// the same character" case and is correct.
-   void remapSocketOwners(const QHash<QString, QString> &guidMap);
+public:
+   /// Re-points every NODE-GUID reference this subtree carries through
+   /// `guidMap`: socket owners, physics constraint endpoints, and whatever a
+   /// subclass adds (a camera's focus target). A reference OUTSIDE the copied
+   /// subtree keeps its guid, which is the "second camera on the same
+   /// character" case and is correct.
+   ///
+   /// PUBLIC because a COPY is made two ways and the two must not disagree:
+   /// duplicate() calls it here, and the clipboard's paste calls it after
+   /// rebuilding a fragment with fresh guids (CLIPBOARD_SPEC §3.2 — before
+   /// this, only duplicate() remapped anything, and only socket owners).
+   void remapNodeReferences(const QHash<QString, QString> &guidMap);
+
+protected:
+   /// A subclass's own node-guid fields. The base walks the subtree and calls
+   /// this on each node; an override remaps its own fields and nothing else.
+   virtual void remapOwnNodeReferences(const QHash<QString, QString> &guidMap) { Q_UNUSED(guidMap); }
 public:
 
     bool isVisible() {

@@ -396,6 +396,15 @@ public:
 
 	SceneNodePtr createDuplicate() override;
 
+protected:
+    /// A camera's focus TARGET is a node guid (Track mode), so a duplicated or
+    /// pasted camera must follow the COPY of the thing it was following — not
+    /// the original (CLIPBOARD_SPEC §3.2, the recorded gap). A target outside
+    /// the copied subtree keeps its guid, which is what "this camera watches
+    /// that character" means.
+    void remapOwnNodeReferences(const QHash<QString, QString> &guidMap) override;
+public:
+
 private:
     CameraNode()
     {
