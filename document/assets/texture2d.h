@@ -14,7 +14,6 @@ For more information see the LICENSE file
 
 #include <QSharedPointer>
 #include <QImage>
-#include <QPixmap>
 
 #include "document/assets/texture.h"
 #include "irisglfwd.h"
@@ -71,7 +70,14 @@ public:
 
     static Texture2DPtr createCubeMap(QString, QString, QString, QString, QString, QString, QImage *i = nullptr);
 
-    QPixmap readData();
+    /// A LIVE texture (MATERIAL_GAPS_SPEC A-1): pixels a producer writes at
+    /// runtime instead of a file on disk. Born opaque black at `width` x
+    /// `height`; `source` is the "live://<guid>" reference every consumer
+    /// (material rows, the mirror, the writer) recognises. Created through
+    /// LiveTextures::create, which owns the session table — this is its
+    /// constructor, not a second registry.
+    static Texture2DPtr createLive(const QString &guid, const QString &name,
+                                   int width, int height, bool mipmaps);
 
     int getWidth() override;
     int getHeight() override;
@@ -80,6 +86,23 @@ public:
     /// without GL can rebuild the sky. Null for other textures.
     bool isCubeMap() const { return cubeMap; }
     const QImage *cubeFaces() const { return cubeMap ? cubeFaceImages : nullptr; }
+
+    // ---- live textures (MATERIAL_GAPS_SPEC A-1) --------------------------
+    bool isLive() const { return live; }
+    QString liveGuid() const { return liveTextureGuid; }
+    QString liveName() const { return liveTextureName; }
+    bool liveMipmaps() const { return liveMips; }
+    /// Moves on every accepted write and NEVER back. The whole synchronisation
+    /// contract between a producer and the renderer: the mirror uploads when
+    /// this number differs from the one it last uploaded, so a still image
+    /// costs one integer compare per frame and no engine call at all.
+    quint64 liveGeneration() const { return generation; }
+    /// The current frame, always RGBA8888 and always the creation size.
+    const QImage &liveImage() const { return image; }
+    /// Replaces the pixels. REFUSES a different size (a live texture's
+    /// renderer-side twin cannot resize — destroy and create) and anything
+    /// that is not a live texture. Bumps the generation on success.
+    bool writeLive(const QImage &rgba);
 
 private:
     Texture2D();
@@ -90,6 +113,12 @@ private:
     QImage image;
     bool cubeMap = false;
     QImage cubeFaceImages[6];
+
+    bool     live = false;
+    bool     liveMips = false;
+    QString  liveTextureGuid;
+    QString  liveTextureName;
+    quint64  generation = 0;
 };
 
 }

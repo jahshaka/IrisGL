@@ -114,6 +114,14 @@ public:
     void setEmissiveIntensity(float intensity);
     void setEmissiveMap(Texture2DPtr tex);
 
+    /// PER-MATERIAL REFLECTION CUBEMAP (MATERIAL_GAPS_SPEC ADDENDUM A-5).
+    /// Overrides the scene's global IBL cube for this material only; unset =
+    /// the global one. Not a member of mapRowNames(): a cubemap is sampled by
+    /// DIRECTION, so it has no addressing row to vary. Goes dark with the
+    /// global cube while automatic PCC is bound — the renderer's constraint,
+    /// enforced in one place at the boundary.
+    void setReflectionMap(Texture2DPtr tex);
+
     // --- opacity ---
     void setAlpha(float alpha);
     void setAlphaCutoff(float cutoff);
@@ -421,6 +429,7 @@ public:
     QColor emissiveColor;
     float  emissiveIntensity;
     bool   useEmissiveMap;
+    bool   useReflectionMap;
 
     float  alpha;
     float  alphaCutoff;

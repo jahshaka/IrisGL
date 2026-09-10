@@ -33,6 +33,7 @@
 #include "irisgl/document/materials/defaultmaterial.h"
 #include "irisgl/core/properties/property.h"
 #include "irisgl/core/math/trs.h"
+#include "irisgl/document/assets/livetextures.h"
 #include "irisgl/document/assets/texture2d.h"
 #include "irisgl/document/scenegraph/shadowmap.h"
 #include <QFileInfo>
@@ -420,6 +421,11 @@ int SceneMirror::sync()
     // or when an entry's reference to one CHANGES — every such site arms the
     // flag, and only then does the sweep run.
     if (mReclaimPending) { reclaimUnused(); mReclaimPending = false; }
+    // LIVE TEXTURES (ADDENDUM A-1). AFTER the sweep, so a texture the sweep
+    // just freed is not uploaded into; before the frame is drawn, because the
+    // engine's upload records into the OPEN command buffer and therefore lands
+    // ahead of this frame's draws with no flush of ours.
+    syncLiveTextures();
     // THE SHADER CLOCK (HLMS_ADOPTION P5), and only when something reads it.
     // The host owns the number: mShaderTimeOverride is what a deterministic
     // test or a scrubbed timeline sets; otherwise it is wall-clock seconds
@@ -2047,7 +2053,12 @@ void SceneMirror::reclaimUnused()
     if (mSkyTexture) usedTextures.insert(mSkyTexture);
     for (auto it = mTextures.begin(); it != mTextures.end();) {
         if (usedTextures.contains(it.value())) { ++it; continue; }
-        mTarget->destroyTexture(it.value()); it = mTextures.erase(it);
+        mTarget->destroyTexture(it.value());
+        // A live texture's generation record dies with its engine texture, or
+        // the next bind of the same guid would be recorded as already current
+        // and never receive its first upload.
+        mLiveGenerations.remove(it.key());
+        it = mTextures.erase(it);
     }
 }
 
@@ -2212,10 +2223,61 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
     // later.) Found the day the error pump landed — STABILITY_PROGRAM_SPEC
     // Lane 1, which is what it is for.
     if (path.startsWith(QLatin1Char(':'))) return 0;
+    // A LIVE TEXTURE (ADDENDUM A-1) has no file behind it: its pixels live in
+    // the document and are re-uploaded by syncLiveTextures whenever the
+    // producer bumps the generation. Born through createTexture rather than
+    // loadTexture because only createTexture-born ids may be written to — the
+    // engine refuses updateTexture on a file-loaded (pooled) texture by name.
+    if (iris::LiveTextures::isLiveRef(path)) {
+        iris::Texture2DPtr live = iris::LiveTextures::find(path);
+        if (!live || !live->isLive()) return 0;
+        const QImage &img = live->liveImage();
+        if (img.isNull()) return 0;
+        TextureId live_id = mTarget->createTexture(unsigned(img.width()), unsigned(img.height()),
+                                                   img.constBits(), srgb, live->liveMipmaps());
+        if (live_id) {
+            mTextures.insert(key, live_id);
+            mLiveGenerations.insert(key, live->liveGeneration());
+        }
+        return live_id;
+    }
     if (!QFileInfo::exists(path)) return 0;
     TextureId id = mTarget->loadTexture(path.toStdString(), srgb);
     if (id) mTextures.insert(key, id);
     return id;
+}
+
+// ONE UPLOAD PER CHANGED GENERATION, and none at all for a still image
+// (ADDENDUM A-1). The document side of a live texture is a counter: a producer
+// (a script writing pixels, a video decoder handing over a frame) replaces the
+// image and bumps it, and this is the only place that turns that into an
+// engine call. Runs over the LIVE entries of the texture cache, which is at
+// most a handful of textures in any real scene.
+void SceneMirror::syncLiveTextures()
+{
+    if (!mTarget || mLiveGenerations.isEmpty()) return;
+    for (auto it = mLiveGenerations.begin(); it != mLiveGenerations.end(); ++it) {
+        // The key is "<colour space>|live://<guid>" — the cache's key, so the
+        // same live texture bound in both colour spaces is two engine textures
+        // and both are kept current.
+        const QString path = it.key().mid(2);
+        iris::Texture2DPtr live = iris::LiveTextures::find(path);
+        if (!live || !live->isLive()) continue;
+        const quint64 gen = live->liveGeneration();
+        if (gen == it.value()) continue;
+        const auto tex = mTextures.constFind(it.key());
+        if (tex == mTextures.constEnd()) continue;
+        const QImage &img = live->liveImage();
+        if (img.isNull()) continue;
+        // A REFUSED write leaves the recorded generation alone deliberately:
+        // the pixels the engine holds are still the ones from the generation
+        // recorded here, and pretending otherwise would hide a real mismatch
+        // behind a number. (updateTexture only refuses a size change, which
+        // writeLive already refuses on the document side.)
+        if (mTarget->updateTexture(tex.value(), unsigned(img.width()),
+                                   unsigned(img.height()), img.constBits()))
+            it.value() = gen;
+    }
 }
 
 /// EVERYTHING THAT DEPENDS ONLY ON THE MATERIAL, computed once per material per
@@ -2261,6 +2323,10 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
         { QLatin1StringView("u_detail1NormalMap"), PbrTextureSlot::Detail1Nm,    false },
         // The weight MASK is data (per-channel scalars), never a colour.
         { QLatin1StringView("u_detailWeightMap"),  PbrTextureSlot::DetailWeight, false },
+        // THE REFLECTION CUBEMAP OVERRIDE (ADDENDUM A-5). An sRGB colour like
+        // the sky it replaces; the bind takes the cubemap route below rather
+        // than textureFor, because the slot holds a cube and not a 2D image.
+        { QLatin1StringView("u_reflectionMap"),    PbrTextureSlot::Reflection,   true  },
     };
     static_assert(int(iris::PbrMaterial::kDetailLayers) == int(kDetailLayerCount),
                   "the document and the engine boundary must agree on how many "
@@ -2320,7 +2386,8 @@ void SceneMirror::syncTextures(Entry &e, iris::Material *material)
     TextureId boundIds[kSlotCount] = {};
     for (const TextureBind &b : binds) {
         if (bound[int(b.slot)]) continue;
-        TextureId t = textureFor(b.path, b.srgb);
+        TextureId t = b.slot == PbrTextureSlot::Reflection ? reflectionCubeFor(b.path)
+                                                           : textureFor(b.path, b.srgb);
         if (t && mTarget->setPbrTexture(e.material, b.slot, t)) {
             bound[int(b.slot)] = true;
             boundIds[int(b.slot)] = t;
@@ -4921,12 +4988,30 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
     if (integrateSkyAmbientSh(equirect, mSkyAmbientSh))
         mHasSkyAmbient = true;
 
+    TextureId ids[6] = { 0, 0, 0, 0, 0, 0 };
+    if (buildEquirectCubeFaces(equirect, ids) && mTarget->setSkyReflection(ids)) {
+        for (int i = 0; i < 6; ++i) mReflFaceTextures[i] = ids[i];
+    } else {
+        for (int i = 0; i < 6; ++i) if (ids[i]) mTarget->destroyTexture(ids[i]);
+    }
+}
+
+// THE SIX WORLD-AXIS FACES of an equirect panorama, as engine textures the
+// caller owns. Factored out of applySkyReflection so the per-material
+// reflection override (ADDENDUM A-5) builds its cube from the SAME projection
+// the sky uses — a second copy of this is how one of the two ends up mirrored
+// or rotated against the other.
+bool SceneMirror::buildEquirectCubeFaces(const QImage &equirect, TextureId ids[6])
+{
+    for (int i = 0; i < 6; ++i) ids[i] = 0;
+    if (equirect.isNull() || !mTarget) return false;
+
     const int N = 128;   // reflection cube face size; the engine mips it further
     // Box-filter the source down to ~4 texels per face texel before sampling:
     // point-sampling a 4K equirect into 128^2 faces throws away 99.9% of it.
     const QImage src = boxDownscaleTo(equirect.convertToFormat(QImage::Format_RGBA8888), N * 4);
     const int W = src.width(), H = src.height();
-    if (W <= 0 || H <= 0) return;
+    if (W <= 0 || H <= 0) return false;
     // Face basis in WORLD axes (+X,-X,+Y,-Y,+Z,-Z; dir = axis + right*u + up*v
     // with image row 0 at the top) — exactly what Scene::setSkyReflection takes;
     // the engine converts to its cubemap handedness. The equirect fetch below
@@ -4936,7 +5021,6 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
     static const float rt[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
     static const float up[6][3] = {{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
     std::vector<unsigned char> face(size_t(N) * N * 4u);
-    TextureId ids[6] = { 0, 0, 0, 0, 0, 0 };
     bool ok = true;
     // Bilinear fetch: wrap in u (the seam is continuous), clamp in v (the poles
     // are not). Kills the stair-stepping the old nearest fetch left on gradients.
@@ -4973,11 +5057,40 @@ void SceneMirror::applySkyReflection(const QImage &equirect)
         ids[f] = mTarget->createTexture(unsigned(N), unsigned(N), face.data(), true);
         if (!ids[f]) ok = false;
     }
-    if (ok && mTarget->setSkyReflection(ids)) {
-        for (int i = 0; i < 6; ++i) mReflFaceTextures[i] = ids[i];
-    } else {
-        for (int i = 0; i < 6; ++i) if (ids[i]) mTarget->destroyTexture(ids[i]);
-    }
+    return ok;
+}
+
+// THE PER-MATERIAL REFLECTION CUBEMAP (ADDENDUM A-5).
+//
+// v1 takes ONE image — an equirect panorama, the same shape the equirect sky
+// takes — and projects it onto the six world-axis faces with the code above;
+// Scene::createCubemap then copies them into a cube, applying the backend's
+// left-handed remap once and in one place. The face textures are transient:
+// the cube is a copy, so they are released the moment it exists.
+//
+// NOT a live texture (ADDENDUM A-1): a live texture's contract is that a
+// generation bump re-uploads its pixels, and a cube built from it is a COPY
+// that no updateTexture can reach — binding one here would silently freeze at
+// its first frame. Refused by returning nothing rather than by lying.
+TextureId SceneMirror::reflectionCubeFor(const QString &path)
+{
+    if (path.isEmpty() || !mTarget) return 0;
+    if (iris::LiveTextures::isLiveRef(path)) return 0;
+    // Its own key space: this entry is a CUBE, and handing it to a 2D slot
+    // (or vice versa) would be a silently wrong bind rather than a miss.
+    const QString key = QStringLiteral("cube|") + path;
+    auto it = mTextures.constFind(key);
+    if (it != mTextures.constEnd()) return it.value();
+    if (path.startsWith(QLatin1Char(':')) || !QFileInfo::exists(path)) return 0;
+    const QImage equirect = QImage(path);
+    if (equirect.isNull()) return 0;
+
+    TextureId faces[6] = { 0, 0, 0, 0, 0, 0 };
+    TextureId cube = 0;
+    if (buildEquirectCubeFaces(equirect, faces)) cube = mTarget->createCubemap(faces);
+    for (int i = 0; i < 6; ++i) if (faces[i]) mTarget->destroyTexture(faces[i]);
+    if (cube) mTextures.insert(key, cube);
+    return cube;
 }
 
 // CPU port of irisgl/assets/shaders/realisticsky.frag (a Preetham-style analytic
