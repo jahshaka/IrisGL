@@ -575,6 +575,7 @@ bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
         // would dangle. A follower carries no clips at all — it renders from the
         // master's pose — and the host re-attaches them if it ever un-shares.
         mClips.erase(followerId);
+        ++f.rigGeneration;   // S16: a new instance means a new generation
         // ...and anything riding THIS node's bones: the instance those tags
         // point into is about to be released (AVATAR_RIG_PERF_SPEC §4). The
         // host re-arms them against whatever the node holds afterwards.
@@ -631,6 +632,7 @@ void OgreScene::unshareFollower(NodeId followerId, Node &f, Node *master) {
         // Same reason as at share time, from the other side: a fresh instance
         // means any cached clip pointers for this node name the OLD one.
         mClips.erase(followerId);
+        ++f.rigGeneration;   // S16: a new instance means a new generation
         // TRAP 2: the fresh instance has NO parent node. Re-attaching the Item
         // to its own node is the only thing that gives it one
         // (MovableObject::_notifyAttached) — and it is safe now, because the

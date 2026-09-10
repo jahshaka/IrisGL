@@ -98,6 +98,45 @@ const OgreScene::RigRec *OgreScene::rigOf(NodeId id) const {
 }
 
 // ---------------------------------------------------------------------------
+// S16 (SMOKE_FIX_SPEC_2026_09_11 §1.1). A ClipRec is a set of RAW POINTERS into
+// ONE SkeletonInstance — a float* per covered bone into that animation's weight
+// array, and the animation's slot in the instance's list. The instance belongs
+// to the Item, and the Item is re-created on every material or mesh swap, so
+// "the node still has clips" and "the node still has the instance those clips
+// describe" are two different facts. These three helpers are how the difference
+// is stated: detachItem drops the records, and everything that would follow one
+// checks first.
+unsigned long long OgreScene::rigGenerationOf(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it == mNodes.end() ? 0ull : it->second.rigGeneration;
+}
+
+void OgreScene::dropNodeClips(NodeId id) {
+    auto it = mClips.find(id);
+    if (it == mClips.end()) return;
+    NodeClips &nc = it->second;
+    nc.clips.clear();
+    nc.owner = nullptr;
+    nc.ownerGeneration = 0;
+    // A fresh instance is born with EVERY bone manual (attachSkinnedMesh does
+    // that so setBonePoses' values survive resetToPose), so the node is back in
+    // manual-bone mode and the next attachClips has to take it out again — or
+    // every clip would ADD to the last pushed pose instead of replacing it.
+    nc.clipModeEntered = false;
+    // The manual-bone OVERRIDES are host intent rather than instance state (the
+    // host set them through setBoneManual and never re-states them), so they
+    // outlive the Item and the next attachClips re-applies them. An entry that
+    // carries none has nothing left to say.
+    if (nc.manualBones.empty()) mClips.erase(it);
+}
+
+bool OgreScene::clipsAreStale(NodeId id, const NodeClips &nc,
+                              const Ogre::SkeletonInstance *skel) const {
+    if (nc.clips.empty()) return false;
+    return nc.owner != skel || nc.ownerGeneration != rigGenerationOf(id);
+}
+
+// ---------------------------------------------------------------------------
 bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
     // A FOLLOWER's skeleton IS the master's instance (AVATAR_RIG_PERF_SPEC
     // §3.3): a second clip set enabled on it would double-drive the whole
@@ -114,6 +153,21 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
     if (!rig) { mError = "attachClips: the node's rig is unknown to this scene"; return false; }
     const size_t boneCount = rig->desc.bones.size();
 
+    // S16, defence in depth: detachItem drops a node's clips with its Item, so
+    // arriving here with records from another instance means something replaced
+    // that instance without saying so. Say it out loud and start clean — the
+    // alternative is to hand Ogre an index into a list that no longer has it.
+    {
+        auto sit = mClips.find(id);
+        if (sit != mClips.end() && clipsAreStale(id, sit->second, skel)) {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: attachClips found " + std::to_string(sit->second.clips.size()) +
+                    " clip record(s) on node " + std::to_string(id) +
+                    " that point into a released skeleton instance; dropping them.",
+                Ogre::LML_CRITICAL);
+            dropNodeClips(id);
+        }
+    }
     NodeClips &nc = mClips[id];
 
     // R2. Not a style rule — see the file header.
@@ -289,6 +343,9 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
                 rec.weightPtr.push_back(ptr);
             }
             nc.clips.push_back(rec);
+            // ...and WHOSE instance the records above point into (S16).
+            nc.owner = skel;
+            nc.ownerGeneration = rigGenerationOf(id);
         }
         return true;
     } JAH_CATCH(mError, false);
@@ -298,6 +355,9 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
 std::vector<std::string> OgreScene::clipNames(NodeId id) const {
     auto it = mClips.find(id);
     if (it == mClips.end()) return {};
+    // S16: records that outlived their instance are not clips this node has —
+    // and the host reads this verb to decide what to re-attach.
+    if (clipsAreStale(id, it->second, skeletonOf(id))) return {};
     std::vector<std::string> out;
     out.reserve(it->second.clips.size());
     for (const auto &rec : it->second.clips) out.push_back(rec.name);
@@ -314,12 +374,50 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
     if (!skel) { mError = "setClipStates: the node has no rig"; return false; }
     if (!states && count) { mError = "setClipStates: null states"; return false; }
     auto it = mClips.find(id);
-    if (it == mClips.end()) { mError = "setClipStates: the node has no clips"; return false; }
+    // S16, same guard as attachClips: never walk records that point into an
+    // instance this node no longer has.
+    if (it != mClips.end() && clipsAreStale(id, it->second, skel)) {
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: setClipStates found " + std::to_string(it->second.clips.size()) +
+                " clip record(s) on node " + std::to_string(id) +
+                " that point into a released skeleton instance; dropping them.",
+            Ogre::LML_CRITICAL);
+        dropNodeClips(id);
+        it = mClips.find(id);
+    }
+    if (it == mClips.end() || it->second.clips.empty()) {
+        // The host disables everything before re-attaching a clip set (the
+        // mirror does it on every re-attach, scenemirror.cpp's attachClipsFor),
+        // so "disable nothing on a node with no clips" is its normal precaution
+        // and not a fault. Anything that NAMES a clip is still refused.
+        if (count == 0) return true;
+        mError = "setClipStates: the node has no clips";
+        return false;
+    }
     NodeClips &nc = it->second;
     const RigRec *rig = rigOf(id);
     if (!rig) { mError = "setClipStates: the node's rig is unknown"; return false; }
 
     JAH_TRY {
+        // ---- (S16) never subscript past the instance's animation list ------
+        // The staleness guard above is the real defence; this is the assertion
+        // that a record which somehow survived it cannot become an out-of-range
+        // std::vector subscript (Debug: an abort with no context, which is how
+        // this defect was first met; Release: UB).
+        {
+            const size_t animCount = skel->getAnimations().size();
+            for (const ClipRec &rec : nc.clips) {
+                if (rec.index < animCount) continue;
+                mError = "setClipStates: clip '" + rec.name + "' names animation " +
+                         std::to_string(rec.index) + " of a skeleton that has " +
+                         std::to_string(animCount) + "; its records outlived the instance";
+                Ogre::LogManager::getSingleton().logMessage("Jahshaka: " + mError,
+                                                            Ogre::LML_CRITICAL);
+                dropNodeClips(id);
+                return false;
+            }
+        }
+
         // ---- resolve intent ------------------------------------------------
         std::vector<float> raw(nc.clips.size(), 0.0f);
         std::vector<char>  on(nc.clips.size(), 0);
@@ -467,6 +565,10 @@ bool OgreScene::bonePoses(NodeId id, BonePose *out, size_t count) const {
 std::vector<float> OgreScene::clipBoneWeights(NodeId id, const std::string &clip) const {
     auto it = mClips.find(id);
     if (it == mClips.end()) return {};
+    // S16: every weight below is READ through a cached float* into the
+    // instance's arrays. A stale set reports nothing rather than reading freed
+    // memory; dropping it is the next attach's job (this verb is const).
+    if (clipsAreStale(id, it->second, skeletonOf(id))) return {};
     const RigRec *rig = rigOf(id);
     if (!rig) return {};
     for (const auto &rec : it->second.clips) {
