@@ -508,7 +508,7 @@ public:
 	// re-homed with the light and would need a "which one wins" rule the
 	// moment two lights carried it.
 	//
-	// applySunCoupling() is what enforces it; it runs from Scene::update()
+	// applySunCoupling() is what enforces it; it runs from Scene::advance()
 	// every frame, so the light follows the sun wherever the sun is moved from
 	// (panel, script verb, keyframe).
 	QString sunLightGuid;

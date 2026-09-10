@@ -51,7 +51,7 @@ For more information see the LICENSE file
 // WHY THIS IS DOCUMENT-SIDE. Every gate in §11's Stage 3 row — camera-relative
 // input, auto-possess order, the explorer fallback, the possess-while-held-W
 // case — has to be assertable with no window, no display and no engine. The
-// arm therefore COMPUTES its pose here (Scene::update drives it, right after
+// arm therefore COMPUTES its pose here (Scene::advance drives it, right after
 // the movement step, so it never lags the character by a frame) and writes
 // `Scene::camera`, which the document already owns and already updates.
 //
@@ -157,7 +157,7 @@ public:
     // ---- the per-frame halves ---------------------------------------------
     //
     // Two calls, on either side of the physics/movement step, because the
-    // camera must follow the pose the step just produced. Scene::update drives
+    // camera must follow the pose the step just produced. Scene::advance drives
     // both; nothing else should.
 
     /// Look -> the arm's angles; Move -> the possessed avatar's camera-relative

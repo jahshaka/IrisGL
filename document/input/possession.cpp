@@ -230,9 +230,9 @@ void AvatarPossession::updateFollowCamera()
     if (cam.isNull()) return;
     // R5: PlayBack::update calls setController(mouseController) every frame and
     // the mouse controller writes the camera in update(dt) — which runs BEFORE
-    // Scene::update, i.e. before this. Writing here means the arm wins without
+    // Scene::advance, i.e. before this. Writing here means the arm wins without
     // a second driver being installed beside the controller path, and
-    // Scene::update's own camera->update(dt)/updateCameraMatrices runs after us.
+    // Scene::advance's own camera refresh/updateCameraMatrices runs after us.
     if (!mHasSavedCamera) {
         mSavedCameraPos = cam->getLocalPos();
         mSavedCameraRot = cam->getLocalRot();

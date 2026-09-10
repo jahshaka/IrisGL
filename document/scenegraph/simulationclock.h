@@ -63,9 +63,9 @@ namespace iris
 /// the same seconds. The tiny epsilon in advance() absorbs the float->double
 /// rounding of a dt that is "exactly" one step (1.0f/60.0f is 1e-9 s above
 /// the double 1/60; a 1/30 float is 2e-9 above two steps) so those frames
-/// count as the whole steps they mean, and the carried remainder stays
-/// nanoseconds for the life of a session instead of creeping up to a phantom
-/// extra step.
+/// count as the whole steps they mean; the carried remainder then grows by at
+/// most that epsilon per frame (~2e-4 s after an hour of 1/60 frames, measured
+/// by the unit test) instead of creeping up to a phantom extra step.
 ///
 /// Value type, no engine, no Qt: the document owns one (iris::Scene) and the
 /// document tests exercise it with no display.
@@ -80,8 +80,12 @@ public:
     /// simulation), the remainder dropped.
     static constexpr int    kMaxStepsPerAdvance = 8;
     /// The most a scripted frame may ask for in one go — anything above it is
-    /// refused by the verbs (see the class comment).
-    static constexpr double kMaxAdvanceSeconds = kMaxStepsPerAdvance * kStepSeconds;
+    /// refused by the verbs (see the class comment). ONE STEP UNDER the catch-up
+    /// bound: advance() drops on the ACCUMULATOR, so a dt at the full bound plus
+    /// a carried fraction of a step would silently lose that fraction (A4.2 code
+    /// review S2); at seven steps the carry (< 1 step) can never cross eight, and
+    /// a scripted dt under this bound simulates exactly what it asked for.
+    static constexpr double kMaxAdvanceSeconds = (kMaxStepsPerAdvance - 1) * kStepSeconds;
 
     /// Hands the clock `seconds` of time (wall or scripted; negatives count as
     /// zero) and returns how many whole steps that buys, bounded by
