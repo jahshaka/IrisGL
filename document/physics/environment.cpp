@@ -40,7 +40,8 @@ void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &no
     world->addRigidBody(body);
 
 	hashBodies.insert(node->getGUID(), body);
-	nodeTransforms.insert(node->getGUID(), node->getGlobalTransform());
+	nodeTransforms.insert(node->getGUID(),
+	                      SavedLocal{ node->getLocalPos(), node->getLocalScale(), node->getLocalRot() });
 }
 
 void Environment::addBodyToWorld(PhysicsBody &owned, const iris::SceneNodePtr &node)
@@ -195,13 +196,21 @@ void Environment::stopSimulation()
 void Environment::stepSimulation(float delta)
 {
     if (simulating) {
-		world->stepSimulation(delta);
+		// ONE step of exactly `delta` (maxSubSteps 0 = Bullet's "variable"
+		// path: no internal accumulator, no interpolation, no clamping). The
+		// accumulator is the document's SimulationClock (Scene::advance),
+		// which hands this call the fixed grid step and calls it once per
+		// step — so Bullet's own fixed-step machinery would only be a second
+		// clock. Before A4.2 this was `stepSimulation(delta)` with the wall
+		// dt: maxSubSteps 1 ran at most one 1/60 step per frame, so the
+		// simulation's speed was the frame rate's (ENGINEERING_DEBT_SPEC
+		// ADDENDUM 4).
+		world->stepSimulation(delta, 0);
 		// AVATAR_LOCOMOTION_SPEC §6.3: the seam the 2016 controller update
 		// left. AFTER the rigid-body solve, so the sweeps see this frame's
-		// world, and OUTSIDE bullet's substepping, because the movement
-		// component does its own fixed sub-stepping (§6.1) and a component
-		// stepped from a bullet internal tick would be stepped a variable
-		// number of times per frame — defect 3 of the removed controller.
+		// world, and OUTSIDE bullet's stepping, so a component is stepped
+		// exactly once per grid step — defect 3 of the removed controller was
+		// a component stepped a variable number of times per frame.
 		updateAvatarMovement(delta);
 		//drawDebugShapes();
     }
@@ -224,7 +233,7 @@ void Environment::addAvatarToWorld(const iris::SceneNodePtr &node)
 	// and `restoreNodeTransformations` would have left it wherever it walked to
 	// — the spec's acceptance step 5 ("Stop returns both to their pre-play
 	// transforms") read as a defect.
-	nodeTransforms.insert(guid, node->getGlobalTransform());
+	nodeTransforms.insert(guid, SavedLocal{ node->getLocalPos(), node->getLocalScale(), node->getLocalRot() });
 	// R6, answered: an avatar spawned DURING play registers on the spot rather
 	// than being refused. Its capsule is fitted here so a spawn that happens
 	// before the mesh finished loading still gets the right dimensions.
@@ -386,8 +395,12 @@ void Environment::restoreNodeTransformationsRecursive(const iris::SceneNodePtr &
 		// node's transform every frame, and nothing else would ever put it back
 		// (AVATAR_LOCOMOTION_SPEC §2 step 5).
 		const bool restorable = child->isPhysicsBody || child->hasAvatarComponent();
-		if (restorable && nodeTransforms.contains(child->getGUID()))
-			child->setGlobalTransform(nodeTransforms.value(child->getGUID()));
+		const auto saved = nodeTransforms.constFind(child->getGUID());
+		if (restorable && saved != nodeTransforms.constEnd()) {
+			child->setLocalPos(saved->pos);
+			child->setLocalRot(saved->rot);
+			child->setLocalScale(saved->scale);
+		}
 		restoreNodeTransformationsRecursive(child);
 	}
 }

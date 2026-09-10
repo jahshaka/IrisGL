@@ -10,6 +10,7 @@
 // See { bullet specific variables, bullet specific constraints }
 
 #include "core/math/mat4.h"
+#include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "document/physics/physicshelper.h"
 
@@ -63,7 +64,16 @@ public:
 
 	QHash<QString, btCollisionObject*> collisionObjects;
     QHash<QString, btRigidBody*> hashBodies;
-    QHash<QString, iris::Mat4> nodeTransforms;
+    /// The pre-play LOCAL transform of every body and avatar, restored on
+    /// Stop bit-exactly. It used to be the global MATRIX, put back through
+    /// setGlobalTransform's decomposition — a lossy round trip that left a
+    /// node a few ulps from where Play found it after every Simulate stop
+    /// (the play path was saved by PlayBack's own exact restore running after
+    /// it). Locals are what a parent-independent restore needs: a body is
+    /// written in world space during the step and lands back in local space
+    /// through the same parent it had.
+    struct SavedLocal { iris::Vec3 pos, scale; iris::Quat rot; };
+    QHash<QString, SavedLocal> nodeTransforms;
 
 	void addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node);
 	/// Adds the body AND takes ownership of every allocation behind it (the

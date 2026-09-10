@@ -254,6 +254,7 @@ set (HEADERS
     core/math/trs.h
     document/scenegraph/looks.h
     document/scenegraph/scene.h
+    document/scenegraph/simulationclock.h
     document/scenegraph/skybake.h
     document/scenegraph/scenenode.h
     document/scenegraph/nodegraph.h

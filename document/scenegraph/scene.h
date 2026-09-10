@@ -21,6 +21,7 @@ For more information see the LICENSE file
 #include "document/input/possession.h"
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/shadowmap.h"
+#include "document/scenegraph/simulationclock.h"
 #include "core/geometry/frustum.h"
 
 // temp
@@ -358,17 +359,20 @@ public:
     // shadowResolution's 0 does.
     int shadowMapBudget;
 
-    // Particle simulation clock (PARTICLES_FX2_SPEC.md §10.3). 1 = real time,
-    // 0 = frozen, 2 = double speed. The DOCUMENT owns the clock and the ENGINE
-    // simulates — the same split the animation migration settled on.
+    // Particle time scale (PARTICLES_FX2_SPEC.md §10.3). 1 = the simulation
+    // clock's own rate, 0 = frozen, 2 = double speed. The DOCUMENT owns the
+    // clock (SimulationClock, below) and the ENGINE simulates — the same split
+    // the animation migration settled on: every frame the host multiplies the
+    // seconds the clock advanced by this and hands the product to the engine
+    // as its frame delta (ENGINEERING_DEBT_SPEC A4.2).
     //
     // It lives on the SCENE and not on the emitter, because the renderer has
     // exactly ONE frame-time source for the whole process: there is no per-node
     // and, strictly, no per-scene particle clock to push. Scene-level is the
-    // finest granularity that is not a lie, and the last scene whose
-    // applyEnvironment runs owns it — the same accepted compromise as the
-    // process-wide GI binding. Offscreen thumbnail and preview scenes never call
-    // applyEnvironment, so they do not fight the editor for it.
+    // finest granularity that is not a lie, and the scene the active host
+    // ticks owns it — the same accepted compromise as the process-wide GI
+    // binding. Offscreen thumbnail and preview scenes push nothing, so they do
+    // not fight the editor for it.
     float particleTimeScale;
 
     // ---- Post-processing chain (POST_CHAIN_SPEC.md phases 3-7) --------------
@@ -560,11 +564,13 @@ public:
     /// then lightens `outlineColor` itself.
     QColor outlinePrimaryColor;
 
-	// time counter to pass to shaders that do time-based animation
-	float time;
-
 	// The last absolute animation time, as handed to updateSceneAnimation.
 	float animTime = 0.0f;
+
+	// THE simulation clock (simulationclock.h): the one fixed grid physics,
+	// animation, possession and the renderer's own simulation advance on.
+	// Runtime only — never written to the file.
+	SimulationClock clock;
 
 	// needed for playing music — nullptr until the first startPlayingAmbientMusic();
 	// building one costs an audio-device probe, so it is NOT built in the ctor
@@ -612,11 +618,6 @@ public:
         skyTexture->source = src;
     }
 
-	float getRunningTime()
-	{
-		return time;
-	}
-
     QString getSkyTextureSource();
     void clearSkyTexture();
     void setSkyColor(QColor color);
@@ -636,7 +637,31 @@ public:
     /// relatively, because a relative clock makes every pose assertion
     /// order-dependent (and a scrub backwards impossible to reason about).
     float animationTime() const { return animTime; }
-    void update(float dt);
+
+    /// ONE FRAME OF SIMULATED TIME (ENGINEERING_DEBT_SPEC A4.2). Hands `dt`
+    /// seconds — the wall time the frame took, or a scripted step — to the
+    /// simulation clock and runs the whole number of fixed steps that buys:
+    /// per step, possession input, then Bullet and every avatar component
+    /// (Environment::stepSimulation); once per frame, the animation pose at the
+    /// clock's time (while playing), the rigid-body -> node copy, the follow
+    /// camera and the camera matrices. Physics runs only while the environment
+    /// is simulating (play, or the editor's Simulate); animation only while
+    /// `playing`. A frame that buys no step changes nothing.
+    ///
+    /// Returns the simulated seconds this frame advanced (steps x the grid) —
+    /// what the host hands the renderer as its frame delta, so particles and
+    /// shader time stay on the same grid. Every host ticks through this, with
+    /// no other clock: the editor viewport every driver frame, PlayBack in
+    /// play-in-place and the player, editor.frame / player.frame with their dt.
+    float advance(float dt);
+    /// Derived state without time: the camera's matrices and the node walk —
+    /// what a host does after placing a camera (previews, thumbnails, tests).
+    /// The old `update(0)` idiom; advance() does the same after every frame
+    /// that bought a step.
+    void refresh();
+    /// The clock itself: reset on play start/stop, read by scene.clock().
+    SimulationClock &simulationClock() { return clock; }
+    const SimulationClock &simulationClock() const { return clock; }
 
     // ---- the scene-graph binding (SPECS/SCENEGRAPH_SPEC.md D2) ------------
     /// The Ogre scene manager this document's ONE tree lives in. A scene starts

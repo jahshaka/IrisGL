@@ -1234,24 +1234,26 @@ public:
     virtual void setVsync(bool) = 0;
     virtual bool vsync() const = 0;
 
-    // ---- Simulation clock (PARTICLES_FX2_SPEC.md) ----
-    // The engine advances its own particle simulation inside renderOneFrame,
-    // from the backend's frame-time source. These two verbs are the ONLY control
-    // the host has over it, and both are PROCESS-WIDE, not per scene and not per
-    // view — the backend has exactly one frame-time source. "Freeze the editor's
-    // particles while the player window runs" is therefore not expressible; the
-    // document owns one clock scalar and pushes it here, the way the animation
-    // migration does.
-    /// Multiplies the frame delta every simulation reads. 1 = wall clock,
-    /// 0 = frozen, 2 = double speed. Also cancels any fixed frame delta.
-    virtual void setParticleTimeScale(float scale) = 0;
-    virtual float particleTimeScale() const = 0;
-    /// Replaces the wall clock with a FIXED step, in seconds — the same delta
-    /// every frame regardless of how long the frame took. Deterministic enough
-    /// for pixel gates and thumbnail warm-ups (emission is still randomised, so
-    /// those stay statistical); 0 restores the wall clock at scale 1.
+    // ---- Simulation clock (PARTICLES_FX2_SPEC.md; ENGINEERING_DEBT_SPEC A4.2) ----
+    // The engine advances its own simulations inside renderOneFrame — the
+    // particle systems and the shader `time` auto-params — by ONE frame delta
+    // it never measures itself: THE HOST'S CLOCK IS THE ONLY CLOCK. There is
+    // no wall-clock mode. The value is PROCESS-WIDE, not per scene and not per
+    // view (the backend has exactly one frame-time source), so "freeze the
+    // editor's particles while the player window runs" is not expressible;
+    // the document's SimulationClock (iris::Scene::advance) decides how many
+    // seconds a frame simulated and the host pushes that product here, every
+    // frame, scaled by the scene's particle time scale.
+    /// The seconds EVERY renderOneFrame advances the engine-side simulation
+    /// by, until the next call. 0 freezes it (a paused scene, a frame that
+    /// bought no clock step). Boots at kDefaultFrameDelta so a host that never
+    /// pushes (thumbnails, previews, engine-only suites) still simulates one
+    /// deterministic grid step per frame instead of the milliseconds an
+    /// offscreen frame takes on the wall clock.
     virtual void setFixedFrameDelta(float seconds) = 0;
     virtual float fixedFrameDelta() const = 0;
+    /// 1/60 — the document's SimulationClock grid (simulationclock.h).
+    static constexpr float kDefaultFrameDelta = 1.0f / 60.0f;
 
     /// Shadow filter quality for EVERY shadowed light in EVERY scene — the
     /// backend's PBR pipeline has one global filter, not a per-light one

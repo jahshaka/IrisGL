@@ -3043,13 +3043,10 @@ public:
     const std::string &lastError() const override;
     std::string takeLastError() override;
 
-    /// PROCESS-WIDE: both ride Ogre's single frame-time controller value
-    /// (ControllerManager -> FrameTimeControllerValue). Note the backend's own
-    /// coupling — setTimeFactor zeroes the frame delay and setFrameDelay zeroes
-    /// the time factor, so the two are mutually exclusive by construction, not
-    /// by our choice.
-    void  setParticleTimeScale(float scale) override;
-    float particleTimeScale() const override;
+    /// PROCESS-WIDE: rides Ogre's single frame-time controller value
+    /// (ControllerManager -> FrameTimeControllerValue), held in its
+    /// frame-delay mode for the whole process (setFrameDelay zeroes the time
+    /// factor, so the wall clock never gets back in).
     void  setFixedFrameDelta(float seconds) override;
     float fixedFrameDelta() const override;
 

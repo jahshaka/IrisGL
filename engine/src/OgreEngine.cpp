@@ -146,6 +146,13 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // no window, no device — so the first window a Vulkan session creates
         // is the host's real one whenever the host can wait that long.
         mNullWindow = mRoot->initialise(cfg.headless, "jahshaka-headless");
+        // THE ENGINE HAS NO WALL CLOCK (Engine.h "Simulation clock"): its
+        // frame-time source is put in frame-delay mode right here, before any
+        // frame, and stays there. The host's SimulationClock pushes the real
+        // per-frame value; this default is what a host that never pushes gets.
+        // After initialise(), not after the Root constructor: Root creates its
+        // ControllerManager in initialise() (OgreRoot.cpp:751).
+        Ogre::ControllerManager::getSingleton().setFrameDelay(kDefaultFrameDelta);
         // NOTE: Hlms registration is deferred to the first view. The VaoManager
         // does not exist until a render target is created, and HlmsUnlit/HlmsPbs
         // registration walks it via ConstBufferPool::_changeRenderSystem —
@@ -1002,32 +1009,24 @@ std::string OgreEngine::takeLastError()
     return taken;
 }
 
-// ---- Simulation clock (PARTICLES_FX2_SPEC.md) ------------------------------
+// ---- Simulation clock (PARTICLES_FX2_SPEC.md; ENGINEERING_DEBT_SPEC A4.2) --
 // SceneManager::updateSceneGraph feeds the particle manager
 // `ControllerManager::getFrameTimeSource()->getValue()` — one value, shared by
 // every scene in the process. There is no per-scene or per-view delta to hook,
-// which is why the header says these verbs are process-wide and means it.
+// which is why the header says the verb is process-wide and means it.
 //
-// The two settings CANCEL EACH OTHER inside Ogre, not here:
-// FrameTimeControllerValue::setTimeFactor zeroes mFrameDelay and setFrameDelay
-// zeroes mTimeFactor (OgrePredefinedControllers.cpp:80-95).
-
-void OgreEngine::setParticleTimeScale(float scale) {
-    JAH_TRY {
-        Ogre::ControllerManager::getSingleton().setTimeFactor(std::max(0.0f, scale));
-    } JAH_CATCH(mLastError, );
-}
-
-float OgreEngine::particleTimeScale() const {
-    return float(Ogre::ControllerManager::getSingleton().getTimeFactor());
-}
+// FrameTimeControllerValue has two modes and they cancel each other inside
+// Ogre (OgrePredefinedControllers.cpp:80-95): setTimeFactor zeroes mFrameDelay
+// (wall clock x factor) and setFrameDelay zeroes mTimeFactor (a constant
+// delta per frame). Since A4.2 the engine lives in the second mode for its
+// whole life — set at boot (init, below) and only ever re-set here — so the
+// wall clock is never consulted and a frame delay of 0 means "frozen", not
+// "back to the wall clock". A time factor never existed as a host concept:
+// the scene's particle time scale is multiplied into the delta by the host.
 
 void OgreEngine::setFixedFrameDelta(float seconds) {
     JAH_TRY {
-        if (seconds > 0.0f)
-            Ogre::ControllerManager::getSingleton().setFrameDelay(seconds);
-        else
-            Ogre::ControllerManager::getSingleton().setTimeFactor(1.0f);   // back to the wall clock
+        Ogre::ControllerManager::getSingleton().setFrameDelay(std::max(0.0f, seconds));
     } JAH_CATCH(mLastError, );
 }
 

@@ -502,15 +502,13 @@ void AvatarMovement::step(btCollisionWorld *world, const SceneNodePtr &node, flo
     if (!node || dt <= 0.0f) return;
     rebuildShape();
 
-    // Fixed sub-stepping, §6.1: at most 8 x 0.05 s, LEFTOVER DROPPED. An
-    // unbounded catch-up after a shader-compile hitch is how characters tunnel
-    // through floors; a bounded one only makes them fall behind for a frame.
-    float remaining = dt;
-    for (int i = 0; i < kMaxSubSteps && remaining > kEpsMotion; ++i) {
-        const float h = std::min(kMaxSubStep, remaining);
-        stepOnce(world, node, h, gravityY);
-        remaining -= h;
-    }
+    // ONE step of `dt`. This used to sub-step (at most 8 x 0.05 s, leftover
+    // dropped) because the frame handed it the wall dt; the document's
+    // SimulationClock now hands it the 1/60 grid step, once per step, and the
+    // bounded catch-up lives there (SimulationClock::kMaxStepsPerAdvance) for
+    // every consumer at once — a second clock here would only let the two
+    // disagree.
+    stepOnce(world, node, dt, gravityY);
 }
 
 // ---------------------------------------------------------------------------
