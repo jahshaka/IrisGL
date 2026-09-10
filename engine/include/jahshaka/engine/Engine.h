@@ -55,26 +55,33 @@ public:
     /// was ever mentioned. Cheap to call every frame while enabled; the enabled
     /// EDGE costs a shader rebuild (fog is a shader variant, not a uniform).
     virtual void        setFog(const FogDesc &) = 0;
-    /// Textured sky behind everything: an equirectangular (lat-long) image.
-    /// SkyMode::NoSky removes it (the View's background shows). Cubemap skies go
-    /// through setSkyCubemap() — this call rejects SkyMode::Cubemap.
-    virtual bool        setSky(SkyMode, TextureId) = 0;
-    /// Cubemap sky from six face textures, in the order +X, -X, +Y, -Y, +Z, -Z,
-    /// each face seen from INSIDE the cube looking down that WORLD axis (the
-    /// backend converts to whatever handedness its cubemaps use). Also feeds
-    /// environment reflections (IBL) from the same faces.
-    virtual bool        setSkyCubemap(const TextureId faces[6]) = 0;
-    /// Environment reflections (IBL) WITHOUT touching the sky: six square face
-    /// textures (+X, -X, +Y, -Y, +Z, -Z, world axes, all the same size) become
-    /// the reflection cubemap every PBR material samples. This is how
-    /// equirectangular and CPU-baked skies (gradient, realistic) get the
-    /// reflections cubemap skies already have — the host resamples its equirect
-    /// image into six faces and pushes them here. The mip chain is a GGX
-    /// (roughness) PREFILTER, not a box mip chain, so a rough metal reads the
-    /// hemisphere around its reflection vector instead of one blurred face.
-    /// Passing six zero ids clears the reflections. The face textures are
-    /// copied; the caller may destroy them afterwards.
-    virtual bool        setSkyReflection(const TextureId faces[6]) = 0;
+    /// THE SCENE'S SKY AND ITS ENVIRONMENT REFLECTIONS, as one description —
+    /// SkyDesc carries the whole model (modes, face order, what
+    /// `reflections == false` means, and why the flat colour and the CPU-baked
+    /// skies are not in it).
+    ///
+    /// IDEMPOTENT: a description equal to the live one does nothing — no
+    /// upload, no cube rebuild, no IBL reconvolution — and the two halves are
+    /// compared separately, so changing only the reflection faces never tears
+    /// the sky down. Hosts may therefore push every frame and let SkyDesc's
+    /// `operator==` be the change guard, instead of keeping "what did I push
+    /// last" bookkeeping of their own.
+    ///
+    /// False (see lastError()) leaves the scene's sky and reflections exactly
+    /// as they were: an unknown texture id, six faces that are not all the same
+    /// size, or a compressed face format.
+    virtual bool        setSky(const SkyDesc &) = 0;
+    /// The description currently in force (default-constructed = no sky).
+    virtual SkyDesc     sky() const = 0;
+    /// THIS SCENE'S SHADOW REQUEST — ShadowDesc says what the shape means and
+    /// why it exists (the backend's filter and atlas are global; this hides
+    /// that rather than pretending otherwise). Idempotent, and cheap when
+    /// unchanged, so hosts push it per frame rather than guarding two global
+    /// Engine setters by hand.
+    virtual void        setShadowSettings(const ShadowDesc &) = 0;
+    /// What this scene last requested (not what is globally in force — read
+    /// Engine::shadowFilter()/shadowResolution() for that).
+    virtual ShadowDesc  shadowSettings() const = 0;
     /// Removes a node and everything it uniquely owns (mesh, material). Unknown or
     /// already-removed ids are ignored and return false. Children are NOT removed;
     /// they are re-parented to the scene root.
@@ -351,7 +358,7 @@ public:
                                       bool srgb, bool mipmaps = false) = 0;
     /// A CUBEMAP from six square, same-size, same-format face textures, in
     /// WORLD-AXIS order (+X, -X, +Y, -Y, +Z, -Z) with image row 0 at the top —
-    /// exactly what setSkyReflection takes, and built by the SAME code, so the
+    /// exactly what SkyDesc::reflectionFaces takes, and built by the SAME code, so the
     /// left-handed remap the backend's cubemap lookups need is applied once and
     /// in one place (the 2026-09-03 fact: getting this wrong silently mirrors
     /// every reflection). Returns a TextureId the caller owns and destroys.

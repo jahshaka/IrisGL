@@ -27,15 +27,55 @@ const bool kFlipV[6]   = { false, false, true, true, false, false };
 const char *kIblWorkspace = "JahshakaIblSpecularWorkspace";
 }  // namespace
 
-bool OgreScene::setSky(SkyMode mode, TextureId texId) {
-    JAH_TRY {
-        if (mode == SkyMode::NoSky) { destroySky(); return true; }
-        if (mode == SkyMode::Cubemap) {
-            mError = "setSky: cubemap skies go through setSkyCubemap()";
-            return false;
+// THE ONE SKY ENTRY POINT (ENGINEERING_DEBT_SPEC.md item 4). It owns the three
+// things the host used to: the dispatch on mode, the ordering (sky first, then
+// reflections — destroySky takes the reflection cubemap with it, so the reverse
+// order would throw away reflections that were just built), and the
+// already-applied comparison, per HALF: a description that changes only its
+// reflection faces must not tear the sky down and back up, because that is a
+// texture upload plus a six-face cube build for nothing.
+bool OgreScene::setSky(const SkyDesc &desc) {
+    const bool skyChanged  = !mSkyDesc.sameSky(desc);
+    const bool reflChanged = !mSkyDesc.sameReflections(desc);
+    if (!skyChanged && !reflChanged) return true;   // idempotent: nothing to do
+    bool ok = true;
+    if (skyChanged) {
+        if (applySkyMode(desc)) {
+            mSkyDesc.mode = desc.mode;
+            mSkyDesc.equirect = desc.equirect;
+            for (int i = 0; i < 6; ++i) mSkyDesc.faces[i] = desc.faces[i];
+            // Both of these paths REPLACE the reflection cubemap themselves —
+            // destroySky() unbinds and frees it, and a cubemap sky rebuilds it
+            // from its own faces — so whatever reflection description was in
+            // force no longer describes anything. Forgetting it here is what
+            // lets the host push the very same reflection faces afterwards and
+            // have them actually applied.
+            if (desc.mode != SkyMode::Equirectangular) {
+                mSkyDesc.reflections = false;
+                for (int i = 0; i < 6; ++i) mSkyDesc.reflectionFaces[i] = 0;
+            }
+        } else {
+            ok = false;
         }
-        auto it = mTextures.find(texId);
-        if (it == mTextures.end()) { mError = "setSky: unknown texture"; return false; }
+    }
+    // `reflections == false` is "no opinion": leave whatever is bound alone.
+    if (desc.reflections && !mSkyDesc.sameReflections(desc)) {
+        if (applySkyReflectionFaces(desc.reflectionFaces)) {
+            mSkyDesc.reflections = true;
+            for (int i = 0; i < 6; ++i) mSkyDesc.reflectionFaces[i] = desc.reflectionFaces[i];
+        } else {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool OgreScene::applySkyMode(const SkyDesc &desc) {
+    if (desc.mode == SkyMode::Cubemap) return applySkyCubemap(desc.faces);
+    JAH_TRY {
+        if (desc.mode == SkyMode::NoSky) { destroySky(); return true; }
+        auto it = mTextures.find(desc.equirect);
+        if (it == mTextures.end()) { mError = "setSky: unknown sky texture"; return false; }
         Ogre::TextureGpu *src = it->second.texture;
         // WAIT FOR THIS ONE TEXTURE (THREADING_ADOPTION_SPEC.md P2). Everything
         // below reads the texture ITSELF rather than binding it: its internal
@@ -68,12 +108,12 @@ bool OgreScene::setSky(SkyMode mode, TextureId texId) {
     } JAH_CATCH(mError, false);
 }
 
-bool OgreScene::setSkyCubemap(const TextureId faces[6]) {
+bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
     JAH_TRY {
         Ogre::TextureGpu *tex[6];
         for (int i = 0; i < 6; ++i) {
             auto it = mTextures.find(faces[i]);
-            if (it == mTextures.end()) { mError = "setSkyCubemap: unknown face texture"; return false; }
+            if (it == mTextures.end()) { mError = "setSky: unknown cubemap face texture"; return false; }
             tex[i] = it->second.texture;
         }
         // The faces are READ here, not bound: their resolution decides the cube's,
@@ -82,7 +122,7 @@ bool OgreScene::setSkyCubemap(const TextureId faces[6]) {
         for (int i = 0; i < 6; ++i) waitForTextureResident(tex[i]);
         for (int i = 0; i < 6; ++i)
             if (tex[i]->getWidth() != tex[0]->getWidth() || tex[i]->getHeight() != tex[0]->getHeight()) {
-                mError = "setSkyCubemap: the six faces must all be the same size";
+                mError = "setSky: the six cubemap faces must all be the same size";
                 return false;
             }
         // ONE cube serves as both the sky and the IBL convolution input — the two
@@ -115,7 +155,7 @@ bool OgreScene::setSkyCubemap(const TextureId faces[6]) {
     } JAH_CATCH(mError, false);
 }
 
-bool OgreScene::setSkyReflection(const TextureId faces[6]) {
+bool OgreScene::applySkyReflectionFaces(const TextureId faces[6]) {
     JAH_TRY {
         bool anySet = false;
         for (int i = 0; i < 6; ++i) if (faces[i]) anySet = true;
@@ -123,14 +163,14 @@ bool OgreScene::setSkyReflection(const TextureId faces[6]) {
         Ogre::TextureGpu *tex[6];
         for (int i = 0; i < 6; ++i) {
             auto it = mTextures.find(faces[i]);
-            if (it == mTextures.end()) { mError = "setSkyReflection: unknown face texture"; return false; }
+            if (it == mTextures.end()) { mError = "setSky: unknown reflection face texture"; return false; }
             tex[i] = it->second.texture;
         }
-        // Same reason as setSkyCubemap: read, not bound.
+        // Same reason as the cubemap path: read, not bound.
         for (int i = 0; i < 6; ++i) waitForTextureResident(tex[i]);
         for (int i = 0; i < 6; ++i)
             if (tex[i]->getWidth() != tex[0]->getWidth() || tex[i]->getHeight() != tex[0]->getWidth()) {
-                mError = "setSkyReflection: the six faces must be square and the same size";
+                mError = "setSky: the six reflection faces must be square and the same size";
                 return false;
             }
         // The convolution INPUT: the world->Ogre cube, with AllowAutomipmaps
@@ -148,7 +188,7 @@ bool OgreScene::setSkyReflection(const TextureId faces[6]) {
 
 // ADDENDUM A-5: a cubemap the HOST owns, from six world-axis faces.
 //
-// Deliberately the SAME builder setSkyReflection uses: the backend samples
+// Deliberately the SAME builder the sky's reflection half uses: the backend samples
 // cubemaps LEFT-HANDED, so world-axis faces need a face swap plus per-axis
 // mirroring (buildCubeFromWorldFaces' table). A second copy of that remap is
 // how every reflection in the scene ends up silently mirrored — the 2026-09-03

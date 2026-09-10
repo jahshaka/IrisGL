@@ -14,6 +14,11 @@ struct Vec3 {
     float x = 0.0f, y = 0.0f, z = 0.0f;
     Vec3() = default;
     Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+    /// EXACT float equality, for the same reason Colour::operator== is exact:
+    /// it answers "is this the value I already pushed?", and a tolerance would
+    /// let a dragged slider stop reaching the backend.
+    bool operator==(const Vec3 &o) const { return x == o.x && y == o.y && z == o.z; }
+    bool operator!=(const Vec3 &o) const { return !(*this == o); }
 };
 
 struct Colour {
@@ -189,6 +194,88 @@ struct ClipState {
 
 using TextureId = unsigned int;
 enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides with X11's macro
+
+/// A SCENE'S WHOLE SKY, as one value (ENGINEERING_DEBT_SPEC.md item 4).
+///
+/// It replaces the three entry points this boundary used to have —
+/// `setSky(SkyMode, TextureId)`, `setSkyCubemap(faces[6])` and
+/// `setSkyReflection(faces[6])` — which between them made the host write the
+/// dispatch, the ordering ("sky first, then reflections") and the
+/// already-pushed bookkeeping that the backend is in a better position to own.
+/// Scene::setSky(const SkyDesc &) takes the whole description and is
+/// IDEMPOTENT: pushing a description equal to the live one does nothing at all
+/// — no re-upload, no cube rebuild, no IBL reconvolution — so a host may push
+/// it every frame and let `operator==` be the change guard.
+///
+/// WHAT IS NOT HERE. The flat "single colour sky" is not a sky at all in the
+/// backend: it is the VIEW's background (View::setBackground), and several
+/// views of one scene legitimately clear to different colours (an opaque
+/// editor, a transparent thumbnail). It stays a view property on purpose.
+/// The gradient and Preetham "realistic" skies are not here either: both are
+/// CPU bakes of DOCUMENT parameters into an equirectangular image, and the
+/// image is what this boundary consumes — see SceneMirror::applySky, which
+/// owns those bakes because they need an image decoder and this layer has
+/// none (no Qt, no image formats — Types.h's first line).
+struct SkyDesc {
+    /// NoSky removes the sky (the View's background shows through).
+    SkyMode   mode = SkyMode::NoSky;
+    /// SkyMode::Equirectangular: the lat-long image. Ignored otherwise.
+    TextureId equirect = 0;
+    /// SkyMode::Cubemap: six face textures, in the order +X, -X, +Y, -Y, +Z,
+    /// -Z, each face seen from INSIDE the cube looking down that WORLD axis
+    /// (the backend converts to whatever handedness its cubemaps use). They
+    /// also feed environment reflections — a cubemap sky needs no
+    /// `reflectionFaces`. Ignored in every other mode.
+    TextureId faces[6] = { 0, 0, 0, 0, 0, 0 };
+
+    /// ENVIRONMENT REFLECTIONS (IBL), independently of the sky.
+    ///
+    /// `reflections == false` means "this description says nothing about
+    /// reflections": whatever is bound stays bound. That is the state a
+    /// cubemap sky is in (its own faces are the source), and it is also what a
+    /// host says when it could not produce reflection faces this time and
+    /// prefers the previous ones to no reflections at all.
+    ///
+    /// With `reflections == true`, `reflectionFaces` are six square, equally
+    /// sized world-axis faces (same order as `faces`) which become the
+    /// GGX-prefiltered cubemap every PBR material samples — this is how
+    /// equirectangular and CPU-baked skies get what a cubemap sky gets for
+    /// free; the host resamples its equirect image into six faces and pushes
+    /// them here. The mip chain is a roughness PREFILTER, not a box mip chain,
+    /// so a rough metal reads the hemisphere around its reflection vector
+    /// instead of one blurred face. Six zeros CLEAR the reflections. The face
+    /// textures are copied; the caller may destroy them afterwards.
+    bool      reflections = false;
+    TextureId reflectionFaces[6] = { 0, 0, 0, 0, 0, 0 };
+
+    /// Exact equality, like every other change-guard on this boundary. Texture
+    /// ids are monotonic per scene and never recycled, so equal ids really are
+    /// the same pixels.
+    bool operator==(const SkyDesc &o) const {
+        return sameSky(o) && sameReflections(o);
+    }
+    bool operator!=(const SkyDesc &o) const { return !(*this == o); }
+
+    /// The two halves, separately: the backend rebuilds the sky and the
+    /// reflection cubemap independently (they were two verbs for exactly that
+    /// reason), so a description that changes only its reflection faces must
+    /// not tear the sky down and back up.
+    bool sameSky(const SkyDesc &o) const {
+        if (mode != o.mode) return false;
+        if (mode == SkyMode::Equirectangular) return equirect == o.equirect;
+        if (mode == SkyMode::Cubemap) {
+            for (int i = 0; i < 6; ++i) if (faces[i] != o.faces[i]) return false;
+        }
+        return true;
+    }
+    bool sameReflections(const SkyDesc &o) const {
+        if (reflections != o.reflections) return false;
+        if (!reflections) return true;
+        for (int i = 0; i < 6; ++i)
+            if (reflectionFaces[i] != o.reflectionFaces[i]) return false;
+        return true;
+    }
+};
 
 /// PBR texture slots. There is NO Occlusion slot, and since HLMS_ADOPTION P2
 /// there is no occlusion row on the document side either: the backend has no
@@ -783,6 +870,43 @@ enum class LightType { Directional, Point, Spot, Area };
 /// Engine::setShadowFilter). Ordered from cheapest/sharpest to softest.
 enum class ShadowFilter { Hard, Soft, VerySoft };
 
+/// A SCENE'S SHADOW REQUEST (ENGINEERING_DEBT_SPEC.md item 4, §9's reading of
+/// it: the globalness is real, so the API HIDES it rather than pretending to
+/// remove it).
+///
+/// The backend has ONE shadow filter and ONE shadow atlas for every scene it
+/// draws — Engine::setShadowFilter and Engine::setShadowResolution carry the
+/// detail and are still the low-level truth. What hosts actually have is a
+/// per-scene answer they derived themselves (the softest filter and the
+/// largest map any shadow-casting light in THIS scene asked for, or a World
+/// panel override that pins both), and before this shape they pushed it
+/// through the two global setters guarded by hand-written read-before-write
+/// tests — three of them, in the mirror, one per knob per policy branch.
+///
+/// Scene::setShadowSettings takes the resolved per-scene answer and applies it
+/// to the global state, dropping a push that asks for what is already in
+/// force. The last scene to push a value owns it, exactly as before — the same
+/// contract Engine::setParticleTimeScale documents for the simulation clock.
+struct ShadowDesc {
+    /// false = "this scene has no opinion about the filter": whatever is in
+    /// force stays. That is a scene with no shadow-casting light and no pinned
+    /// quality — it must not drag the filter back to a default and undo
+    /// another scene's request.
+    bool         hasFilter = false;
+    ShadowFilter filter = ShadowFilter::Soft;
+    /// 0 = "no opinion about the map size" (same reasoning as hasFilter).
+    /// Otherwise a request in pixels; the backend clamps to [256, 8192].
+    /// NOT cheap when it CHANGES (the shadow node and every workspace that
+    /// references it are rebuilt) — which is why the backend compares first.
+    unsigned     resolution = 0;
+
+    bool operator==(const ShadowDesc &o) const {
+        return hasFilter == o.hasFilter && (!hasFilter || filter == o.filter) &&
+               resolution == o.resolution;
+    }
+    bool operator!=(const ShadowDesc &o) const { return !(*this == o); }
+};
+
 /// A light attached to a node. Direction comes from the node's orientation
 /// (lights shine down the node's -Z), position from the node's transform.
 struct LightDesc {
@@ -869,6 +993,28 @@ struct LightDesc {
     /// light's shadow map) and it does NOT filter this light's GI bounce.
     /// Scene::setNodeLightMask carries the full contract.
     unsigned  lightMask = 0xFFFFFFFFu;
+
+    /// "Is this the same light state I last pushed?" — the guard a host with a
+    /// per-frame push loop needs (setLight is ~20 backend setters, including an
+    /// attenuation solve that rewrites the light's local AABB). Exact
+    /// comparison, like PbrParams::operator==.
+    ///
+    /// EVERY FIELD setLight READS IS HERE: add a field to this struct and this
+    /// must grow with it, or the new field silently stops reaching the backend
+    /// after the first push. (It lives beside the fields for that reason — the
+    /// mirror carried a hand-written `sameLight()` for it, one file away from
+    /// the struct it had to track.)
+    bool operator==(const LightDesc &o) const {
+        return type == o.type && colour == o.colour && intensity == o.intensity &&
+               range == o.range && spotAngleDegrees == o.spotAngleDegrees &&
+               spotSoftness == o.spotSoftness && spotFalloff == o.spotFalloff &&
+               castShadows == o.castShadows && shadowStatic == o.shadowStatic &&
+               rectWidth == o.rectWidth && rectHeight == o.rectHeight &&
+               doubleSided == o.doubleSided && accurate == o.accurate &&
+               iesProfilePath == o.iesProfilePath && texturePath == o.texturePath &&
+               lightMask == o.lightMask;
+    }
+    bool operator!=(const LightDesc &o) const { return !(*this == o); }
 };
 
 /// A projected-texture decal attached to a node (DECALS_SPEC.md §5.2).
@@ -1145,9 +1291,15 @@ using NativeWindowHandle = unsigned long long;
 /// opening a second connection to the same windows causes flicker and cross-bleed
 /// between windows. 0 where the platform has no such concept.
 ///
-/// KNOWN LEAK (audit): this is an X11 concept in a supposedly platform-neutral
-/// boundary. Left as-is for now; it is only consumed by on-screen Views on
-/// Linux/Vulkan and is redesigned when the macOS/Windows hosts arrive.
+/// KNOWN LEAK (audit; ENGINEERING_DEBT_SPEC.md item 4). This is an X11 concept
+/// in a supposedly platform-neutral boundary, and the macOS host has arrived
+/// since that note was written without settling it: macOS simply leaves it 0
+/// and the Linux host fills it from QNativeInterface::QX11Application
+/// (src/bridge/enginehost.cpp). Still not fixed HERE because the fix is not a
+/// rename: window and display are one surface identity, so the honest shape is
+/// a single native-surface value that both hosts fill and OgreView reads —
+/// which is host-side work (a different lane's files) plus a View change, for
+/// no behaviour difference. Recorded, deliberately not smuggled in.
 using NativeDisplayHandle = unsigned long long;
 
 /// Opaque handle to something in a Scene. 0 is "none". Ids are per-Scene and
@@ -1382,6 +1534,33 @@ struct GiParams {
     /// the shader's ambient is live, and inside one without a field the cone
     /// diffuse still carries it).
     float     ddgiAmbient = 1.0f;
+
+    /// "Is this the same GI configuration I last pushed?" Exact, like every
+    /// other change guard here — and load-bearing rather than cosmetic: a GI
+    /// push is a teardown plus a re-voxelize plus (in the hybrid) every probe
+    /// re-rendered twice, so a comparison that missed a field would either
+    /// rebuild GI every frame or never notice a dial moving.
+    ///
+    /// EVERY FIELD setGlobalIllumination READS IS HERE — add one above and add
+    /// it here. (The mirror hand-wrote this comparison over 24 fields; keeping
+    /// it beside the struct is what makes "add a field" a one-place edit.)
+    bool operator==(const GiParams &o) const {
+        return mode == o.mode && quality == o.quality && irLight == o.irLight &&
+               numBounces == o.numBounces &&
+               pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
+               pccProbesZ == o.pccProbesZ &&
+               probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
+               probeOverlap == o.probeOverlap &&
+               probeSnapDeviation == o.probeSnapDeviation &&
+               probeSnapSidesMin == o.probeSnapSidesMin &&
+               probeSnapSidesMax == o.probeSnapSidesMax &&
+               updateBudget == o.updateBudget && dynamicProbes == o.dynamicProbes &&
+               rayMarchStepScale == o.rayMarchStepScale &&
+               ddgi == o.ddgi && ddgiIntensity == o.ddgiIntensity &&
+               ddgiAmbient == o.ddgiAmbient && ddgiSource == o.ddgiSource &&
+               boundsMin == o.boundsMin && boundsMax == o.boundsMax;
+    }
+    bool operator!=(const GiParams &o) const { return !(*this == o); }
 };
 
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same

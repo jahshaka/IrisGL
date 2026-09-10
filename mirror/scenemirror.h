@@ -753,16 +753,18 @@ private:
     /// Translates and attaches a node's clips. Idempotent: does nothing unless
     /// the rig or the clip set changed.
     void attachClipsFor(Entry &e);
-    /// Resamples an equirect sky image into six small cubemap faces and pushes
-    /// them as the scene's environment reflections (Scene::setSkyReflection) —
+    /// Resamples an equirect sky image into six small cubemap faces, which
+    /// become the scene's environment reflections (SkyDesc::reflectionFaces) —
     /// how equirect/gradient/realistic skies get the IBL cubemap skies have.
     /// Also records the sky's ambient integral for applyEnvironment (item 3b).
-    void applySkyReflection(const QImage &equirect);
+    /// The faces land in mReflFaceTextures; false leaves them zeroed, which
+    /// says "no opinion" to the engine and keeps the reflections already bound.
+    bool buildSkyReflection(const QImage &equirect);
     /// The six world-axis faces of an equirect panorama as engine textures the
     /// caller owns (and destroys). Shared by the sky's reflection cube and by
     /// the per-material override, so one projection serves both.
     bool buildEquirectCubeFaces(const QImage &equirect, jahshaka::engine::TextureId ids[6]);
-    /// Cubemap skies do not go through applySkyReflection (the engine takes the
+    /// Cubemap skies do not go through buildSkyReflection (the engine takes the
     /// six faces directly), so their ambient integral is taken from the face
     /// images: the same SH projection, per face texel.
     void recordCubeAmbientSh(const QImage faces[6]);
@@ -793,12 +795,6 @@ public:
     /// the renderables of every node using `material` (a shading-model switch).
     void onMaterialItemsRebuilt(jahshaka::engine::MaterialId material);
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
-    /// Field equality for LightDesc — the "push on change only" test. PUBLIC
-    /// and static so a suite can pin the invariant its own comment states: a
-    /// field added to LightDesc and forgotten here reaches the engine ONCE and
-    /// then silently never again.
-    static bool sameLight(const jahshaka::engine::LightDesc &a,
-                          const jahshaka::engine::LightDesc &b);
     /// Fills everything but the texture ids (those need the atlas).
     static jahshaka::engine::DecalDesc toDecalDesc(iris::DecalNode *decal);
     /// The document -> engine particle mapping (PARTICLES_FX2_SPEC §5), isolated
@@ -1056,15 +1052,54 @@ private:
     /// MAIN view happened to ask for. Scene-level, so one value serves every
     /// view: the fields it carries (hdr, exposure) come from the document.
     jahshaka::engine::PostFxDesc mWorldPostFx;
-    /// Which sky the engine currently shows, and a 64-bit hash of the values it
-    /// was built from. Two fields rather than one string because applySky
-    /// DISPATCHES on the kind (and the realistic-bake debounce asks "was the
-    /// previous sky also realistic?"), while the parameters only ever need an
-    /// equality test — and building the parameter string cost ten QString::arg
-    /// calls per frame to conclude nothing had changed.
-    enum class SkyKind { None, Equirect, Cubemap, Gradient, Realistic };
-    SkyKind mSkyKind = SkyKind::None;
-    quint64 mSkyHash = 0;
+    /// WHAT THE DOCUMENT'S SKY IS MADE OF, as one value — the question "does
+    /// anything have to be BAKED again?" and nothing else. applySky DISPATCHES
+    /// on the kind (and the realistic-bake debounce asks "was the previous sky
+    /// also realistic?"); the parameters only ever need an equality test.
+    ///
+    /// Only the fields the kind actually uses are ever filled, so member-wise
+    /// equality asks exactly what the per-kind 64-bit hash this replaced asked
+    /// — without the hash's (small) collision story, and without the ten
+    /// QString::arg calls per frame that came before the hash. It is
+    /// deliberately NOT the engine-side SkyDesc: that one is made of texture
+    /// ids, which only exist AFTER the bake this comparison decides to skip.
+    ///
+    /// `ambientFromSky` is deliberately absent: toggling it changes what
+    /// applyEnvironment does with the recorded integral, not the integral, so
+    /// folding it in here would re-bake the whole sky to answer a question the
+    /// bake does not affect.
+    struct SkySource {
+        enum class Kind { None, Equirect, Cubemap, Gradient, Realistic };
+        Kind    kind = Kind::None;
+        /// Equirect: the image's path (the texture cache is keyed by it too).
+        QString equirectPath;
+        /// Cubemap: the document texture's identity. The six face images are
+        /// not comparable cheaply and a document texture is never mutated in
+        /// place — swapping the sky swaps the object.
+        const void *cubeTexture = nullptr;
+        /// Gradient: the three stops and the horizon offset.
+        QColor  gradientTop, gradientMid, gradientBot;
+        float   gradientOffset = 0.0f;
+        /// Realistic: the eight scattering parameters, the bake width (Sky
+        /// Detail — changing it must re-bake like a parameter does) and HDR
+        /// (with the post chain on, the bake stops before its own tonemap,
+        /// POST_CHAIN_SPEC §7.1, so toggling it must re-bake too).
+        float   luminance = 0.0f, reileigh = 0.0f, mieCoefficient = 0.0f;
+        float   mieDirectionalG = 0.0f, turbidity = 0.0f;
+        float   sunPosX = 0.0f, sunPosY = 0.0f, sunPosZ = 0.0f;
+        int     bakeResolution = 0;
+        bool    hdr = false;
+
+        bool operator==(const SkySource &o) const;
+        bool operator!=(const SkySource &o) const { return !(*this == o); }
+    };
+    /// Reads the document's sky fields into the value above.
+    static SkySource skySourceOf(const iris::Scene &scene);
+    SkySource mSkySource;
+    /// The sky description the engine holds (Scene::setSky is idempotent, so
+    /// applySky pushes this every frame and lets the boundary drop it). Built
+    /// once per SkySource change, beside the bake that produced its textures.
+    jahshaka::engine::SkyDesc mSkyDesc;
     /// The equirect sky's texture, taken from the shared cache (unlike the
     /// cubemap/gradient/realistic paths, which upload their own). Held so
     /// reclaimUnused does not free what the engine's sky is sampling.

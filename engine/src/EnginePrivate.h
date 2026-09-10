@@ -1416,11 +1416,36 @@ public:
     /// it must. And it needs ogre-patch 0009: upstream's Vulkan GLSL declares
     /// `sliceIdx` but samples slice 0, so glslang strips the uniform and
     /// SceneManager::setSky throws on setNamedConstant AFTER attaching the sky.
-    bool setSky(SkyMode mode, TextureId texId) override;
-    bool setSkyCubemap(const TextureId faces[6]) override;
-    /// Environment reflections divorced from the sky: the host pushes six
-    /// resampled faces of its equirect/baked sky image. Six zero ids clear.
-    bool setSkyReflection(const TextureId faces[6]) override;
+    ///
+    /// ONE entry point (SkyDesc), and it owns what the host used to: the
+    /// dispatch on mode, the ordering (sky first, then reflections — a NoSky
+    /// push destroys the reflections with the sky), and the "already applied"
+    /// comparison, per half.
+    bool setSky(const SkyDesc &desc) override;
+    SkyDesc sky() const override { return mSkyDesc; }
+    /// The description currently applied — the idempotency guard, and the
+    /// reason a host may push every frame.
+    SkyDesc mSkyDesc;
+    /// The two halves of setSky, each only reached when its half of the
+    /// description actually changed.
+    bool applySkyMode(const SkyDesc &desc);
+    /// Cubemap sky from six world-axis faces; also its own IBL source.
+    bool applySkyCubemap(const TextureId faces[6]);
+    /// Environment reflections divorced from the sky: six resampled faces of
+    /// the host's equirect/baked sky image. Six zero ids clear.
+    bool applySkyReflectionFaces(const TextureId faces[6]);
+
+    /// THIS SCENE'S SHADOW REQUEST (ShadowDesc). The backend's filter and atlas
+    /// are one per PROCESS, so all this does is apply the scene's resolved
+    /// answer to the global state and drop a push that asks for what is already
+    /// in force — which is exactly the read-before-write guard every host used
+    /// to hand-write around Engine::setShadowFilter/setShadowResolution.
+    void setShadowSettings(const ShadowDesc &desc) override;
+    ShadowDesc shadowSettings() const override { return mShadowDesc; }
+    ShadowDesc mShadowDesc;
+    /// The engine that made this scene — the owner of the global shadow state
+    /// above. Never null for a scene created through Engine::createScene().
+    OgreEngine *mEngine = nullptr;
     /// Builds (replacing any previous) the GGX-prefiltered reflection cubemap by
     /// convolving `srcCube`, and binds it on every PBR datablock. `ownsSource`
     /// means the source is ours to destroy once the convolution has run (the
