@@ -886,7 +886,7 @@ enum class ShadowFilter { Hard, Soft, VerySoft };
 /// Scene::setShadowSettings takes the resolved per-scene answer and applies it
 /// to the global state, dropping a push that asks for what is already in
 /// force. The last scene to push a value owns it, exactly as before — the same
-/// contract Engine::setParticleTimeScale documents for the simulation clock.
+/// contract the fixed simulation clock documents (ENGINEERING_DEBT_SPEC A4.2): the host pushes the simulated seconds as the engine frame delta.
 struct ShadowDesc {
     /// false = "this scene has no opinion about the filter": whatever is in
     /// force stays. That is a scene with no shadow-casting light and no pinned
