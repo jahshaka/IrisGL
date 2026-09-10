@@ -12,12 +12,20 @@ For more information see the LICENSE file
 #ifndef IRIS_IMPORTFLAGS_H
 #define IRIS_IMPORTFLAGS_H
 
-#include "assimp/postprocess.h"
-
 namespace iris
 {
 
-// THE canonical assimp post-process preset (ASSET_PIPELINE_SPEC §3.2.2).
+// THE canonical assimp post-process preset (ASSET_PIPELINE_SPEC §3.2.2), as
+// OPAQUE INTEGERS. This header is public and includes nothing of assimp's
+// (ENGINEERING_DEBT L4 part 3, 2026-09-10: assimp is a PRIVATE dependency of
+// IrisGL — no public IrisGL header includes it and Studio's include path does
+// not carry it). The values are composed from assimp's own enums in ONE place,
+// import/importflags.cpp, and every ReadFile inside IrisGL passes one of
+// these two. Outside IrisGL nothing calls ReadFile at all: Studio goes through
+// the import facade (import/scenesource.h, import/modelsceneinfo.h,
+// import/clipfileinfo.h, MeshNode::loadAsSceneFragment) — the white-box test
+// suites that drive the vendored importer directly link assimp themselves and
+// pass these same constants, so "one definition" still holds.
 //
 // Import, every subsequent load, and metadata extraction all pass this same
 // flag set, so the geometry the import preview/thumbnail saw IS the geometry
@@ -57,7 +65,7 @@ struct ImportFlags
     // Quality = CalcTangentSpace | GenSmoothNormals | JoinIdenticalVertices |
     // ImproveCacheLocality | LimitBoneWeights | RemoveRedundantMaterials |
     // SplitLargeMeshes | Triangulate | GenUVCoords | SortByPType |
-    // FindDegenerates | FindInvalidData.
+    // FindDegenerates | FindInvalidData — plus GlobalScale.
     //
     // GlobalScale is part of the CANONICAL set, not an option: it is the file's
     // own declaration of what its numbers mean, and a load site that skipped it
@@ -67,8 +75,7 @@ struct ImportFlags
     // (MeshBake::producerId hashes this value), so every bake produced before
     // the flag is rejected and rebuilt instead of silently serving 100x
     // geometry to a build that no longer parses it that way.
-    static constexpr unsigned int Canonical =
-        aiProcessPreset_TargetRealtime_Quality | aiProcess_GlobalScale;
+    static const unsigned int Canonical;
 
     // For the sites that read a file for its NAMES and NUMBERS only — the
     // animation-clip parsers, which want channels, not geometry (avatar
@@ -81,7 +88,7 @@ struct ImportFlags
     // exploded skeleton. ScaleProcess scales position keys, bone offset
     // matrices and node transforms and touches nothing else, so this stays a
     // names-and-numbers read.
-    static constexpr unsigned int ClipNamesOnly = aiProcess_GlobalScale;
+    static const unsigned int ClipNamesOnly;
 };
 
 } // namespace iris

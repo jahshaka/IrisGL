@@ -24,6 +24,7 @@ For more information see the LICENSE file
 #include "assimp/postprocess.h"
 #include "import/importflags.h"
 #include "assimp/Importer.hpp"
+#include "assimp/ProgressHandler.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
 #include "assimp/material.h"
@@ -46,6 +47,25 @@ For more information see the LICENSE file
 
 namespace iris
 {
+
+namespace {
+
+/// The importer's progress hook, forwarded to the caller's IModelReadProgress.
+/// Owned by the Importer once set (SetProgressHandler takes ownership).
+class ModelProgressHandler : public Assimp::ProgressHandler
+{
+public:
+    explicit ModelProgressHandler(IModelReadProgress *handler) : handler(handler) {}
+    bool Update(float percentage) override
+    {
+        if (handler) handler->onProgress(percentage);
+        return true;
+    }
+private:
+    IModelReadProgress *handler = nullptr;
+};
+
+} // namespace
 
 MeshNode::MeshNode() {
     sceneNodeType = SceneNodeType::Mesh;
@@ -356,11 +376,8 @@ MeshNode::loadAsSceneFragment(QString filePath,
         scene_ = localSource.data();
     }
 
-    ModelProgressHandler *handle = new ModelProgressHandler();
-    handle->setHandler(progressReader);
-
-    scene_->importer.SetProgressHandler(handle);
-    const aiScene *scene = scene_->importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    scene_->importer().SetProgressHandler(new ModelProgressHandler(progressReader));
+    const aiScene *scene = scene_->importer().ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
 
     // ReadFile returns null on failure (corrupt file, or an importer feature
     // that is not compiled in, e.g. KHR_draco_mesh_compression): dereferencing
@@ -368,7 +385,7 @@ MeshNode::loadAsSceneFragment(QString filePath,
     // assimp error on the log so the caller can surface a message.
     if (scene == nullptr) {
         qWarning("loadAsSceneFragment: assimp failed to load %s: %s",
-                 qUtf8Printable(filePath), scene_->importer.GetErrorString());
+                 qUtf8Printable(filePath), scene_->importer().GetErrorString());
         return QSharedPointer<iris::MeshNode>(nullptr);
     }
     if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
@@ -450,6 +467,16 @@ MeshNode::loadAsSceneFragment(QString filePath,
     node->applyDefaultPose();
 
     return node;
+}
+
+QSharedPointer<iris::SceneNode>
+MeshNode::loadAsSceneFragment(
+    const QString &filePath,
+    const SceneSource &source,
+    std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
+    const QString &extractDir)
+{
+    return loadAsSceneFragment(filePath, source.scene(), createMaterialFunc, extractDir);
 }
 
 QSharedPointer<iris::SceneNode>

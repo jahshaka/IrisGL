@@ -49,12 +49,9 @@ For more information see the LICENSE file
 #include <memory>
 
 #include "import/meshbake.h"
-
-class aiScene;
+#include "import/scenesource.h"
 
 namespace iris {
-
-class SceneSource;
 
 /// One entry of a prewarm PLAN: the model file, and where its bake should be
 /// (both resolved on the UI thread, before the worker runs).
@@ -81,9 +78,11 @@ public:
     /// Bake first, parse on a miss. `item.bakePath` empty = the old behaviour.
     void parse(const PrewarmItem &item);
 
-    /// The parsed scene for `path`, or null when absent or unparseable.
-    /// NULL for an entry served by a bake — ask baked() first.
-    const aiScene *scene(const QString &path) const;
+    /// The parse for `path`, or null when absent or unparseable. NULL for an
+    /// entry served by a bake — ask baked() first. Owned by the prewarm: hand
+    /// it to the IrisGL entry points that consume a SceneSource
+    /// (MeshNode::loadAsSceneFragment, GraphicsHelper::loadAllMeshesAndAnimationsFromSource).
+    const SceneSource *source(const QString &path) const;
 
     /// The baked model for `path`, or null when the entry was parsed (or is
     /// absent). Shared: BOTH open-path consumers get the SAME meshes, which is

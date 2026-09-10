@@ -66,6 +66,19 @@ QMap<QString, SkeletalAnimationPtr> GraphicsHelper::loadAnimationsFromClipFile(c
     return Mesh::extractAnimations(scene, filePath);
 }
 
+void GraphicsHelper::loadAllMeshesAndAnimationsFromSource(
+    const SceneSource &source,
+    const QString &filePath,
+    QList<MeshPtr> &meshes,
+    QMap<QString, SkeletalAnimationPtr> &animations)
+{
+    const aiScene *scene = source.scene();
+    if (scene != nullptr) {
+        meshes = loadAllMeshesFromAssimpScene(scene);
+        animations = Mesh::extractAnimations(scene, filePath);
+    }
+}
+
 QList<MeshPtr> GraphicsHelper::loadAllMeshesFromAssimpScene(const aiScene *scene)
 {
     QList<MeshPtr> meshes;

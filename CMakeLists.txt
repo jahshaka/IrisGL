@@ -158,6 +158,10 @@ set(SRCS
     import/graphicshelper.cpp
     import/meshprewarm.cpp
     import/meshbake.cpp
+    import/importflags.cpp
+    import/scenesource.cpp
+    import/modelsceneinfo.cpp
+    import/clipfileinfo.cpp
     document/scenegraph/cameranode.cpp
     document/scenegraph/cameralens.cpp
     document/assets/livetextures.cpp
@@ -228,6 +232,10 @@ set (HEADERS
     import/graphicshelper.h
     import/meshprewarm.h
     import/meshbake.h
+    import/importflags.h
+    import/scenesource.h
+    import/modelsceneinfo.h
+    import/clipfileinfo.h
     core/geometry/trimesh.h
     core/math/mathhelper.h
     irisglfwd.h
@@ -305,7 +313,8 @@ endif()
 # library's bakes away on every OgreEngine.cpp edit for no correctness gain.
 set(_mesh_bake_blob "")
 foreach(_s import/meshbake.cpp import/meshbake.h
-            import/importflags.h import/materialhelper.cpp import/graphicshelper.cpp
+            import/importflags.h import/importflags.cpp
+            import/materialhelper.cpp import/graphicshelper.cpp
             document/assets/mesh.cpp document/assets/mesh.h
             document/assets/skeleton.cpp document/assets/skeleton.h
             document/scenegraph/meshnode.cpp core/geometry/trimesh.cpp)
@@ -318,16 +327,27 @@ set(JAHSHAKA_MESH_BAKE_PRODUCER_ID "${_mesh_bake_producer_id}" PARENT_SCOPE)
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
-# Note the DIRs that are included, assimp generates a config that we need to find in the build dir. L2
 target_include_directories(IrisGL PUBLIC
     "${PROJECT_SOURCE_DIR}/"
-    "${PROJECT_BINARY_DIR}/thirdparty/assimp/include/"
-    "${PROJECT_SOURCE_DIR}/thirdparty/assimp/include/"
     "${PROJECT_SOURCE_DIR}/thirdparty/bullet3/src"
     "${PROJECT_SOURCE_DIR}/thirdparty/zip/src"
 )
 
-target_link_libraries (IrisGL PUBLIC assimp zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+# assimp is PRIVATE (ENGINEERING_DEBT L4 part 3, 2026-09-10): no public IrisGL
+# header includes it, and no consumer of libIrisGL links or includes it. The
+# import-side TUs (document/assets/mesh.cpp, document/scenegraph/meshnode.cpp,
+# import/*.cpp) are the only ones that see its headers; everything a consumer
+# needs from a parse crosses as plain data (import/modelsceneinfo.h,
+# import/clipfileinfo.h) or as the opaque import/scenesource.h. A translation
+# unit outside this library that includes an assimp header fails to compile —
+# that is the guard. (The build-dir include is assimp's generated config.h.)
+target_include_directories(IrisGL PRIVATE
+    "${PROJECT_BINARY_DIR}/thirdparty/assimp/include/"
+    "${PROJECT_SOURCE_DIR}/thirdparty/assimp/include/"
+)
+
+target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL PRIVATE assimp)
 
 # THE scene graph is Ogre-Next's (SPECS/SCENEGRAPH_SPEC.md D2), so the document
 # library links it. PRIVATE, exactly like the engine does: Ogre must not reach
