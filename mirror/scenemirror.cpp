@@ -157,28 +157,6 @@ quint64 worldTrsSignatureMemo(iris::graph::NodeHandle h,
 
 }   // namespace
 
-/// Field equality for LightDesc, so the mirror can push it on change only.
-/// Spelled out rather than hashed: the struct holds two std::strings, it is
-/// compared once per light per frame (not once per node), and an exact compare
-/// has no collision story to tell. Every field setLight reads is here — add a
-/// field to LightDesc and this must grow with it, or the new field silently
-/// stops reaching the engine after the first push (which is what the mirror
-/// suite pins).
-bool SceneMirror::sameLight(const LightDesc &a, const LightDesc &b)
-{
-    return a.type == b.type &&
-           a.colour.r == b.colour.r && a.colour.g == b.colour.g &&
-           a.colour.b == b.colour.b && a.colour.a == b.colour.a &&
-           a.intensity == b.intensity && a.range == b.range &&
-           a.spotAngleDegrees == b.spotAngleDegrees && a.spotSoftness == b.spotSoftness &&
-           a.spotFalloff == b.spotFalloff &&
-           a.castShadows == b.castShadows && a.shadowStatic == b.shadowStatic &&
-           a.rectWidth == b.rectWidth && a.rectHeight == b.rectHeight &&
-           a.doubleSided == b.doubleSided && a.accurate == b.accurate &&
-           a.iesProfilePath == b.iesProfilePath && a.texturePath == b.texturePath &&
-           a.lightMask == b.lightMask;
-}
-
 SceneMirror::SceneMirror(Scene *target) : mTarget(target)
 {
     // The mirror is the only thing in the program that can see BOTH a document
@@ -276,11 +254,11 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // enough — a slice another scene still holds stays alive.
     for (TextureId t : mDecalTextures) if (t) mTarget->destroyTexture(t);
     mDecalTextures.clear();
-    mTarget->setSky(SkyMode::NoSky, 0);   // also clears the engine's reflection cubemap
+    mTarget->setSky(SkyDesc());   // no sky — which also clears the reflection cubemap
     for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
     for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
-    mSkyKind = SkyKind::None;
-    mSkyHash = 0;
+    mSkySource = SkySource();
+    mSkyDesc = SkyDesc();
     clearSkyAmbient();
     mAmbientPushed = false;
     mSource = scene;
@@ -1707,7 +1685,10 @@ void SceneMirror::visit(iris::SceneNode *node)
         // graph carries position and direction), so skipping an unchanged push
         // cannot freeze a moving light.
         const LightDesc want = toLightDesc(light);
-        if (!e.lightPushed || !sameLight(want, e.lastLight)) {
+        // By value (LightDesc::operator==, beside the struct — every field
+        // setLight reads is in it, which is what keeps a new field from
+        // silently stopping at the first push).
+        if (!e.lightPushed || want != e.lastLight) {
             if (mTarget->setLight(e.node, want)) {
                 e.hasLight = true;
                 e.lastLight = want;
@@ -2050,7 +2031,7 @@ void SceneMirror::reclaimUnused()
         if (e.particleTexture) usedTextures.insert(e.particleTexture);
     }
     // The equirect sky samples a plain cache texture, and the engine keeps it
-    // until the sky changes — mSkyKind/mSkyHash own that lifetime, not this.
+    // until the sky changes — mSkySource owns that lifetime, not this.
     if (mSkyTexture) usedTextures.insert(mSkyTexture);
     for (auto it = mTextures.begin(); it != mTextures.end();) {
         if (usedTextures.contains(it.value())) { ++it; continue; }
@@ -4109,24 +4090,46 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
 void SceneMirror::applyEnvironment(View *view, Engine *engine)
 {
     if (!mSource || !view) return;
-    // Shadow filter: the engine has ONE global filter (Engine.h), the document a
-    // per-light ShadowMapType. Policy: the strongest (softest) quality any
-    // shadow-casting light asked for wins, as accumulated by the last sync().
-    // Nothing casting shadows leaves the engine's current filter untouched.
-    // World panel "Shadow Softness" (scene->shadowFilterTier, POST_CHAIN_SPEC
-    // §9.3) OVERRIDES that derivation outright when it is >= 0 — including for
-    // scenes with no shadow caster yet, exactly the way shadowResolution's
-    // override below works.
-    if (engine) {
+    // SHADOWS: ONE per-scene request (ENGINEERING_DEBT_SPEC.md item 4).
+    //
+    // The document has a per-light ShadowMapType and a per-light map size; the
+    // engine has ONE filter and ONE atlas for the whole process. The reduction
+    // is policy and stays here: the strongest (softest) filter and the largest
+    // map any shadow-casting light asked for win, as accumulated by the last
+    // sync(). The World panel's "Shadow Softness" (scene->shadowFilterTier,
+    // POST_CHAIN_SPEC §9.3) and "Shadow Quality" (scene->shadowResolution,
+    // VISUAL_PARITY item 2 option A) OVERRIDE that derivation outright —
+    // including for scenes with no shadow caster yet, so the setting is what
+    // the user asked for and not a function of the light list.
+    //
+    // What is NOT here any more is the read-before-write bookkeeping: three
+    // hand-written "is the engine already showing this?" guards around two
+    // global Engine setters, one per knob per policy branch. Scene::
+    // setShadowSettings drops a request for what is already in force, which is
+    // the same test in the one place that can see the global state.
+    {
+        ShadowDesc shadows;
         const int tier = mSource->shadowFilterTier;
         if (tier >= 0) {
-            const ShadowFilter wanted = tier >= 2 ? ShadowFilter::VerySoft
-                                      : tier == 1 ? ShadowFilter::Soft
-                                                  : ShadowFilter::Hard;
-            if (engine->shadowFilter() != wanted) engine->setShadowFilter(wanted);
-        } else if (mAnyShadowCaster && engine->shadowFilter() != mShadowFilter) {
-            engine->setShadowFilter(mShadowFilter);
+            shadows.hasFilter = true;
+            shadows.filter = tier >= 2 ? ShadowFilter::VerySoft
+                           : tier == 1 ? ShadowFilter::Soft
+                                       : ShadowFilter::Hard;
+        } else if (mAnyShadowCaster) {
+            // No caster and no override = no opinion: the engine's filter is
+            // left alone rather than dragged back to a default.
+            shadows.hasFilter = true;
+            shadows.filter = mShadowFilter;
         }
+        // 0 = no opinion, same reasoning. The engine rebuilds its shadow atlas
+        // on a CHANGE, which is why "ask for what is already in force" has to
+        // cost nothing.
+        shadows.resolution = mSource->shadowResolution > 0
+                                 ? unsigned(qBound(256, mSource->shadowResolution, 8192))
+                                 : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
+        mTarget->setShadowSettings(shadows);
+    }
+    if (engine) {
         // Particle simulation clock (PARTICLES_FX2_SPEC §10.3). PROCESS-WIDE in
         // the renderer — one frame-time source, no per-scene and no per-node
         // clock exists — so the last scene to call applyEnvironment owns it.
@@ -4142,25 +4145,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             engine->particleTimeScale() != mSource->particleTimeScale)
             engine->setParticleTimeScale(mSource->particleTimeScale);
     }
-    // Shadow Size: one global atlas, so the per-light combo is only a REQUEST
-    // and the largest one wins. World panel "Shadow Quality" (scene->
-    // shadowResolution, VISUAL_PARITY item 2 option A) overrides that
-    // derivation outright when it is non-zero — including for scenes with no
-    // shadow caster yet, so the setting is what the user asked for and not a
-    // function of the light list. The engine rebuilds its shadow atlas on
-    // change; the compare here is what keeps that rare.
     if (engine) {
-        const unsigned wanted = mSource->shadowResolution > 0
-                                    ? unsigned(qBound(256, mSource->shadowResolution, 8192))
-                                    : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
-        if (wanted > 0 && engine->shadowResolution() != wanted)
-            engine->setShadowResolution(wanted);
-        // Shadow-map BUDGET (SHADOW_TOOLING_SPEC.md §4.1). Unlike the size,
-        // there is nothing to derive from the lights here: the engine does that
-        // itself, per frame, from the light list it is about to draw. This
-        // pushes the CEILING only — the World Mode's tier value, or whatever
-        // the scene pinned. 0 (Auto with no tier resolved) leaves the engine's
-        // own default alone.
         // world.refreshShadows(): one re-render of every static shadow map per
         // bump, the giRefreshSerial shape exactly (a serial, not a bool: two
         // refreshes in one frame are still one re-render, and clearing is the
@@ -4169,6 +4154,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mShadowRefreshSerialSeen = mSource->shadowRefreshSerial;
             engine->refreshShadows();
         }
+        // Shadow-map BUDGET (SHADOW_TOOLING_SPEC.md §4.1). Unlike the size,
+        // there is nothing to derive from the lights here: the engine does that
+        // itself, per frame, from the light list it is about to draw. This
+        // pushes the CEILING only — the World Mode's tier value, or whatever
+        // the scene pinned. 0 (Auto with no tier resolved) leaves the engine's
+        // own default alone.
         const unsigned budget = mSource->shadowMapBudget > 0
                                     ? unsigned(qBound(2, mSource->shadowMapBudget, 16))
                                     : 0u;
@@ -4393,25 +4384,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                       : (mSource->giDdgiSource == 1 ? GiSource::Raster : GiSource::Auto);
         iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
         gi.irLight = driver ? engineNode(driver) : 0;
-        const auto same = [](const GiParams &a, const GiParams &b) {
-            return a.mode == b.mode && a.quality == b.quality && a.irLight == b.irLight &&
-                   a.numBounces == b.numBounces &&
-                   a.pccProbesX == b.pccProbesX && a.pccProbesY == b.pccProbesY &&
-                   a.pccProbesZ == b.pccProbesZ &&
-                   a.probeHdr == b.probeHdr && a.probeShadows == b.probeShadows &&
-                   a.probeOverlap == b.probeOverlap &&
-                   a.probeSnapDeviation == b.probeSnapDeviation &&
-                   a.probeSnapSidesMin == b.probeSnapSidesMin &&
-                   a.probeSnapSidesMax == b.probeSnapSidesMax &&
-                   a.updateBudget == b.updateBudget &&
-                   a.dynamicProbes == b.dynamicProbes &&
-                   a.rayMarchStepScale == b.rayMarchStepScale &&
-                   a.ddgi == b.ddgi && a.ddgiIntensity == b.ddgiIntensity &&
-                   a.ddgiAmbient == b.ddgiAmbient && a.ddgiSource == b.ddgiSource &&
-                   a.boundsMin.x == b.boundsMin.x && a.boundsMin.y == b.boundsMin.y &&
-                   a.boundsMin.z == b.boundsMin.z && a.boundsMax.x == b.boundsMax.x &&
-                   a.boundsMax.y == b.boundsMax.y && a.boundsMax.z == b.boundsMax.z;
-        };
         // What a refresh should track depends on the mode: IR re-traces from
         // ONE driving light, so only that light's transform matters; VCT
         // injects EVERY light into the voxel volume, so any light moving (or
@@ -4498,16 +4470,20 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             return combine(lightSigRaw, mTarget->giEscapeSignature(),
                            mTarget->giGeometrySignature());
         };
+        // Compared BY VALUE (GiParams::operator==, beside the struct — every
+        // field setGlobalIllumination reads is in it, so a new field cannot fall
+        // behind the comparison the way a lambda one file away did).
+        //
         // A dynamicProbes-ONLY change takes the cheap path (code review
         // 2026-09-10): the full push re-voxelizes and re-captures every probe,
         // and the Advanced slider emits per drag tick.
         GiParams onlyDynamic = gi;
         onlyDynamic.dynamicProbes = mLastGi.dynamicProbes;
-        if (mGiPushed && !same(gi, mLastGi) && same(onlyDynamic, mLastGi)) {
+        if (mGiPushed && gi != mLastGi && onlyDynamic == mLastGi) {
             mTarget->setGiDynamicProbes(gi.dynamicProbes);
             mLastGi.dynamicProbes = gi.dynamicProbes;
         }
-        if (!mGiPushed || !same(gi, mLastGi)) {
+        if (!mGiPushed || gi != mLastGi) {
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
             mGiLightSignature = readEngineSignature();
@@ -4748,54 +4724,98 @@ struct ShAccum {
 };
 }  // namespace
 
+bool SceneMirror::SkySource::operator==(const SkySource &o) const
+{
+    // Exact float equality, EXCEPT that two NaNs compare equal: these fields
+    // come from document sliders, and a NaN that never equalled itself would
+    // re-bake the sky on every single frame (the 64-bit hash this replaced was
+    // blind to the distinction, so this keeps the old behaviour).
+    const auto same = [](float a, float b) { return a == b || (a != a && b != b); };
+    if (kind != o.kind) return false;
+    switch (kind) {
+    case Kind::None:     return true;
+    case Kind::Equirect: return equirectPath == o.equirectPath;
+    case Kind::Cubemap:  return cubeTexture == o.cubeTexture;
+    case Kind::Gradient:
+        return gradientTop == o.gradientTop && gradientMid == o.gradientMid &&
+               gradientBot == o.gradientBot && same(gradientOffset, o.gradientOffset);
+    case Kind::Realistic:
+        return same(luminance, o.luminance) && same(reileigh, o.reileigh) &&
+               same(mieCoefficient, o.mieCoefficient) &&
+               same(mieDirectionalG, o.mieDirectionalG) && same(turbidity, o.turbidity) &&
+               same(sunPosX, o.sunPosX) && same(sunPosY, o.sunPosY) &&
+               same(sunPosZ, o.sunPosZ) &&
+               bakeResolution == o.bakeResolution && hdr == o.hdr;
+    }
+    return false;
+}
+
+/// The document's sky fields, read into the value applySky compares. A skyless
+/// scene (or a single-colour one, or a textured one with no texture loaded)
+/// reads as Kind::None — which is also the initial state, so a fresh
+/// single-colour scene never pushes a redundant "no sky" on its first frame.
+SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
+{
+    SkySource src;
+    if (scene.skyType == iris::SkyType::EQUIRECTANGULAR && scene.skyTexture) {
+        src.kind = SkySource::Kind::Equirect;
+        src.equirectPath = scene.skyTexture->source;
+    } else if (scene.skyType == iris::SkyType::CUBEMAP && scene.skyTexture &&
+               scene.skyTexture->isCubeMap()) {
+        src.kind = SkySource::Kind::Cubemap;
+        src.cubeTexture = scene.skyTexture.data();
+    } else if (scene.skyType == iris::SkyType::GRADIENT) {
+        src.kind = SkySource::Kind::Gradient;
+        src.gradientTop = scene.gradientTop;
+        src.gradientMid = scene.gradientMid;
+        src.gradientBot = scene.gradientBot;
+        src.gradientOffset = scene.gradientOffset;
+    } else if (scene.skyType == iris::SkyType::REALISTIC) {
+        const iris::SkyRealistic &r = scene.skyRealistic;
+        src.kind = SkySource::Kind::Realistic;
+        src.luminance = r.luminance;
+        src.reileigh = r.reileigh;
+        src.mieCoefficient = r.mieCoefficient;
+        src.mieDirectionalG = r.mieDirectionalG;
+        src.turbidity = r.turbidity;
+        src.sunPosX = r.sunPosX;
+        src.sunPosY = r.sunPosY;
+        src.sunPosZ = r.sunPosZ;
+        src.bakeResolution = scene.skyBakeResolution;
+        src.hdr = scene.hdrEnabled;
+    }
+    return src;
+}
+
+// BUILD THE DESCRIPTION, COMPARE, PUSH (ENGINEERING_DEBT_SPEC.md item 4).
+//
+// Two comparisons, and they answer different questions:
+//   * SkySource — "is the sky made of the same things?" Its answer decides
+//     whether the CPU BAKE runs (a Preetham evaluation, an equirect->cubemap
+//     resample, an SH integral over every texel), which is the expensive half
+//     and the reason this comparison exists at all.
+//   * SkyDesc — "is this the sky the engine already has?" It is made of
+//     texture ids, which only exist after the bake, and the ENGINE owns it:
+//     Scene::setSky drops a description equal to the live one, per half, so
+//     the push below is free every frame it changes nothing.
+//
+// The bakes stay HERE rather than moving below the boundary with the
+// description: they need an image decoder and a Preetham evaluator, and the
+// engine layer has neither by construction (Types.h: no Qt, no image formats).
 void SceneMirror::applySky(View *view)
 {
     if (!mSource || !view) return;
-    // WHICH sky (the dispatch below switches on it, and the realistic-bake
-    // debounce asks whether the previous sky was realistic too) plus a hash of
-    // the values it is built from. This used to be one QString built with
-    // startsWith() dispatch — up to ten QString::arg calls per frame whose
-    // only purpose was an equality test (deep audit 2026-09, area 8).
-    SkyKind kind = SkyKind::None;
-    Hasher hs;
-    if (mSource->skyType == iris::SkyType::EQUIRECTANGULAR && mSource->skyTexture) {
-        kind = SkyKind::Equirect;
-        hs << mSource->skyTexture->source;
-    } else if (mSource->skyType == iris::SkyType::CUBEMAP && mSource->skyTexture &&
-               mSource->skyTexture->isCubeMap()) {
-        kind = SkyKind::Cubemap;
-        hs << reinterpret_cast<quintptr>(mSource->skyTexture.data());
-    } else if (mSource->skyType == iris::SkyType::GRADIENT) {
-        kind = SkyKind::Gradient;
-        hs << mSource->gradientTop << mSource->gradientMid << mSource->gradientBot
-           << mSource->gradientOffset;
-    } else if (mSource->skyType == iris::SkyType::REALISTIC) {
-        kind = SkyKind::Realistic;
-        const iris::SkyRealistic &s = mSource->skyRealistic;
-        // Sky Detail (the bake width) rides in the signature: changing it must
-        // re-bake exactly like changing a scattering parameter does.
-        // HDR rides in the signature too: with the post chain on, the bake stops
-        // before its own tonemap (POST_CHAIN_SPEC §7.1), so toggling HDR must
-        // re-bake exactly like changing a scattering parameter does.
-        hs << s.luminance << s.reileigh << s.mieCoefficient << s.mieDirectionalG
-           << s.turbidity << s.sunPosX << s.sunPosY << s.sunPosZ
-           << mSource->skyBakeResolution << mSource->hdrEnabled;
-    }
-    // A skyless scene hashes to 0, not to the FNV basis: that keeps the initial
-    // (None, 0) state EQUAL to "no sky", so a single-colour sky does not push a
-    // redundant setSky(NoSky) on its first frame the way a non-zero empty hash
-    // would. (The old code compared two empty QStrings and got the same answer.)
-    const quint64 signature = kind == SkyKind::None ? 0 : hs.h;
-    if (kind != mSkyKind || signature != mSkyHash) {
+    const SkySource src = skySourceOf(*mSource);
+    if (src != mSkySource) {
         // Debounce the realistic bake: a slider drag changes the 8 parameters on
         // every event, and the Preetham bake is per-pixel CPU math. Re-bake at
-        // most every 150 ms — applySky recomputes the signature next frame, so
-        // the final value always lands once the slider settles.
-        if (kind == SkyKind::Realistic && mSkyKind == SkyKind::Realistic &&
+        // most every 150 ms — applySky re-reads the document next frame, so the
+        // final value always lands once the slider settles.
+        if (src.kind == SkySource::Kind::Realistic &&
+            mSkySource.kind == SkySource::Kind::Realistic &&
             mRealisticBakeTimer.isValid() && mRealisticBakeTimer.elapsed() < 150)
             return;
-        mSkyKind = kind;
-        mSkyHash = signature;
+        mSkySource = src;
         mSkyTexture = 0;
         mReclaimPending = true;
         for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
@@ -4803,14 +4823,33 @@ void SceneMirror::applySky(View *view)
         // The ambient integral belongs to the sky that is about to be built:
         // drop the old one first so a failed build cannot leave a stale colour.
         clearSkyAmbient();
-        if (kind == SkyKind::Equirect) {
-            TextureId t = textureFor(mSource->skyTexture->source, true);
+        // Default = no sky and NO OPINION about reflections; every failure path
+        // below simply leaves it that way, which is what the old code spelled
+        // out as setSky(NoSky, 0) in four places.
+        mSkyDesc = SkyDesc();
+        // Six freshly resampled faces become the description's reflection half.
+        // A failed resample leaves `reflections` false — "no opinion" — so the
+        // reflections already bound survive, exactly as they did when this was
+        // a separate setSkyReflection() call that simply never happened.
+        const auto attachReflection = [this](const QImage &image) {
+            if (!buildSkyReflection(image)) return;
+            mSkyDesc.reflections = true;
+            for (int i = 0; i < 6; ++i) mSkyDesc.reflectionFaces[i] = mReflFaceTextures[i];
+        };
+        switch (src.kind) {
+        case SkySource::Kind::Equirect: {
+            const TextureId t = textureFor(mSource->skyTexture->source, true);
             mSkyTexture = t;   // held against reclaimUnused for as long as the sky stands
-            mTarget->setSky(t ? SkyMode::Equirectangular : SkyMode::NoSky, t);
-            // Cubemap skies feed environment reflections (IBL); give equirect
-            // skies the same by resampling the image into six small faces.
-            if (t) applySkyReflection(QImage(mSource->skyTexture->source));
-        } else if (kind == SkyKind::Cubemap) {
+            if (t) {
+                mSkyDesc.mode = SkyMode::Equirectangular;
+                mSkyDesc.equirect = t;
+                // Cubemap skies feed environment reflections (IBL); give equirect
+                // skies the same by resampling the image into six small faces.
+                attachReflection(QImage(mSource->skyTexture->source));
+            }
+            break;
+        }
+        case SkySource::Kind::Cubemap: {
             // The document keeps the six face images (+X,-X,+Y,-Y,+Z,-Z); upload them.
             const QImage *faces = mSource->skyTexture->cubeFaces();
             bool ok = faces != nullptr;
@@ -4821,15 +4860,16 @@ void SceneMirror::applySky(View *view)
                 if (!mSkyFaceTextures[i]) ok = false;
             }
             if (ok) {
-                mTarget->setSkyCubemap(mSkyFaceTextures);
-                // A cubemap sky never passes through applySkyReflection (the
+                mSkyDesc.mode = SkyMode::Cubemap;
+                for (int i = 0; i < 6; ++i) mSkyDesc.faces[i] = mSkyFaceTextures[i];
+                // A cubemap sky never passes through buildSkyReflection (the
                 // engine takes the faces straight): integrate them here so it
                 // drives ambient like every other textured sky (item 3b).
                 recordCubeAmbientSh(faces);
-            } else {
-                mTarget->setSky(SkyMode::NoSky, 0);
             }
-        } else if (kind == SkyKind::Gradient) {
+            break;
+        }
+        case SkySource::Kind::Gradient: {
             // Legacy gradientsky.frag is a pure vertical 3-stop ramp: bake it into a
             // narrow equirect strip (row 0 = zenith) and reuse the equirect sky path.
             // The ramp itself is bakeGradientSky — shared with the glTF exporter,
@@ -4839,9 +4879,14 @@ void SceneMirror::applySky(View *view)
             mSkyFaceTextures[0] = strip.isNull() ? 0
                 : mTarget->createTexture(unsigned(strip.width()), unsigned(strip.height()),
                                          strip.constBits(), true);
-            mTarget->setSky(mSkyFaceTextures[0] ? SkyMode::Equirectangular : SkyMode::NoSky, mSkyFaceTextures[0]);
-            if (mSkyFaceTextures[0]) applySkyReflection(strip);
-        } else if (kind == SkyKind::Realistic) {
+            if (mSkyFaceTextures[0]) {
+                mSkyDesc.mode = SkyMode::Equirectangular;
+                mSkyDesc.equirect = mSkyFaceTextures[0];
+                attachReflection(strip);
+            }
+            break;
+        }
+        case SkySource::Kind::Realistic: {
             // Legacy realisticsky.frag (Preetham-style scattering), CPU-baked to
             // an equirect image and pushed through the same sky path as gradient.
             const int bakeW = mSource->skyBakeResolution >= 1024 ? 1024
@@ -4852,15 +4897,22 @@ void SceneMirror::applySky(View *view)
             if (!baked.isNull()) {
                 mSkyFaceTextures[0] = mTarget->createTexture(unsigned(baked.width()), unsigned(baked.height()),
                                                              baked.constBits(), true);
-                mTarget->setSky(mSkyFaceTextures[0] ? SkyMode::Equirectangular : SkyMode::NoSky, mSkyFaceTextures[0]);
-                if (mSkyFaceTextures[0]) applySkyReflection(baked);
-            } else {
-                mTarget->setSky(SkyMode::NoSky, 0);
+                if (mSkyFaceTextures[0]) {
+                    mSkyDesc.mode = SkyMode::Equirectangular;
+                    mSkyDesc.equirect = mSkyFaceTextures[0];
+                    attachReflection(baked);
+                }
             }
-        } else {
-            mTarget->setSky(SkyMode::NoSky, 0);
+            break;
+        }
+        case SkySource::Kind::None:
+            break;
         }
     }
+    // IDEMPOTENT (the assertion mirror.document_to_engine's sky-idempotency case
+    // makes): an unchanged description costs one comparison inside the engine —
+    // no upload, no cube rebuild, no IBL reconvolution, no workspace churn.
+    mTarget->setSky(mSkyDesc);
     if (mSource->skyType == iris::SkyType::SINGLE_COLOR) {
         const QColor c = mSource->skyColor;
         view->setBackground(Colour(c.redF(), c.greenF(), c.blueF(), 1.0f));
@@ -4939,8 +4991,8 @@ bool SceneMirror::integrateSkyAmbientSh(const QImage &equirect, float shOut[27])
 void SceneMirror::recordCubeAmbientSh(const QImage faces[6])
 {
     if (!faces) return;
-    // Face order is +X,-X,+Y,-Y,+Z,-Z in WORLD axes (what Scene::setSkyCubemap
-    // takes; the engine converts to Ogre's left-handed cube itself). Same basis
+    // Face order is +X,-X,+Y,-Y,+Z,-Z in WORLD axes (what SkyDesc::faces takes;
+    // the engine converts to Ogre's left-handed cube itself). Same basis
     // vectors the equirect->faces resample below uses, so a cubemap sky and an
     // equirect sky of the same environment integrate to the same coefficients.
     // 1/len^3 is the cube-face texel's solid-angle factor.
@@ -4981,24 +5033,27 @@ void SceneMirror::recordCubeAmbientSh(const QImage faces[6])
     mHasSkyAmbient = true;
 }
 
-void SceneMirror::applySkyReflection(const QImage &equirect)
+bool SceneMirror::buildSkyReflection(const QImage &equirect)
 {
-    if (equirect.isNull()) return;
+    if (equirect.isNull()) return false;
     // The ambient integral runs on the FULL-resolution image (it is a mean; the
     // decimation below would bias it) before anything else touches it.
     if (integrateSkyAmbientSh(equirect, mSkyAmbientSh))
         mHasSkyAmbient = true;
 
+    // The faces are only BUILT here; they reach the engine as the reflection
+    // half of the SkyDesc applySky pushes (one description, one verb).
     TextureId ids[6] = { 0, 0, 0, 0, 0, 0 };
-    if (buildEquirectCubeFaces(equirect, ids) && mTarget->setSkyReflection(ids)) {
-        for (int i = 0; i < 6; ++i) mReflFaceTextures[i] = ids[i];
-    } else {
+    if (!buildEquirectCubeFaces(equirect, ids)) {
         for (int i = 0; i < 6; ++i) if (ids[i]) mTarget->destroyTexture(ids[i]);
+        return false;
     }
+    for (int i = 0; i < 6; ++i) mReflFaceTextures[i] = ids[i];
+    return true;
 }
 
 // THE SIX WORLD-AXIS FACES of an equirect panorama, as engine textures the
-// caller owns. Factored out of applySkyReflection so the per-material
+// caller owns. Factored out of buildSkyReflection so the per-material
 // reflection override (ADDENDUM A-5) builds its cube from the SAME projection
 // the sky uses — a second copy of this is how one of the two ends up mirrored
 // or rotated against the other.
@@ -5014,7 +5069,7 @@ bool SceneMirror::buildEquirectCubeFaces(const QImage &equirect, TextureId ids[6
     const int W = src.width(), H = src.height();
     if (W <= 0 || H <= 0) return false;
     // Face basis in WORLD axes (+X,-X,+Y,-Y,+Z,-Z; dir = axis + right*u + up*v
-    // with image row 0 at the top) — exactly what Scene::setSkyReflection takes;
+    // with image row 0 at the top) — exactly what SkyDesc::reflectionFaces takes;
     // the engine converts to its cubemap handedness. The equirect fetch below
     // uses dirToEquirect, i.e. OGRE'S sky mapping, so a reflection lines up with
     // the sky pixel the camera sees in that direction.

@@ -289,6 +289,10 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
         // pass (ChainDesc::overlays) and per element (hud::apply).
         hud::attach(sm);
         mScenes.emplace_back(new OgreScene(mRoot, sm, name, mLastError));
+        // The scene's per-scene shadow request resolves against GLOBAL engine
+        // state (one filter, one atlas — Scene::setShadowSettings), so it needs
+        // its engine.
+        mScenes.back()->mEngine = this;
         return mScenes.back().get();
     } JAH_CATCH(mLastError, nullptr);
 }

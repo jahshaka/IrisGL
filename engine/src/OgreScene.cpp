@@ -13,6 +13,28 @@ OgreScene::~OgreScene() { destroy(); }
 
 const std::string &OgreScene::name() const { return mName; }
 
+// THE PER-SCENE SHADOW REQUEST (ENGINEERING_DEBT_SPEC.md item 4; ShadowDesc
+// carries the model). The backend has one filter and one shadow atlas for the
+// whole process, so "per scene" is a SHAPE, not a new capability: the scene's
+// resolved answer is applied to the global state, and a request for what is
+// already in force does nothing. That comparison is the whole point — it is
+// the read-before-write guard every host used to write by hand around two
+// global Engine setters, and getting it wrong means rebuilding the shadow node
+// and every workspace that references it, every frame.
+void OgreScene::setShadowSettings(const ShadowDesc &desc) {
+    mShadowDesc = desc;
+    if (!mEngine) return;
+    if (desc.hasFilter && mEngine->shadowFilter() != desc.filter)
+        mEngine->setShadowFilter(desc.filter);
+    if (desc.resolution) {
+        // Clamp before comparing: the engine clamps inside its setter, so an
+        // out-of-range request would otherwise never equal what it produced and
+        // would ask for a rebuild on every frame.
+        const unsigned want = std::min(8192u, std::max(256u, desc.resolution));
+        if (mEngine->shadowResolution() != want) mEngine->setShadowResolution(want);
+    }
+}
+
 void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
     // The hemisphere pair, expressed EXACTLY in the SH basis the backend now
     // runs on: f(n) = lerp(lower, upper, n.y * 0.5 + 0.5)

@@ -1220,7 +1220,7 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
     JAH_TRY {
         Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
         const std::string name = processUniqueName("pixels");
-        // ManualTexture (non-batched) on purpose: setSkyCubemap copyTo's these
+        // ManualTexture (non-batched) on purpose: the cubemap sky copyTo's these
         // into cubemap faces, which batched pool slices cannot do. KNOWN macOS
         // DEFECT: non-batched base maps sample the wrong data under MoltenVK
         // (pbr_texture_scale_tiles_uvs; file-loaded/batched textures are fine) —
