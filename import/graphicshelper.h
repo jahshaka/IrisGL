@@ -18,24 +18,9 @@ For more information see the LICENSE file
 
 #include "irisglfwd.h"
 #include "document/assets/mesh.h"
+#include "import/scenesource.h"
 
-class aiScene;
-
-class AssimpObject {
-public:
-	AssimpObject() = default;
-    AssimpObject(const aiScene *ai, QString g) : scene(ai), GUID(g) {}
-    const aiScene *getSceneData() { return scene; }
-    QString getGUID() { return GUID; }
-    ~AssimpObject() {}
-
-private:
-    const aiScene *scene = nullptr;
-    QString GUID;
-};
-
-Q_DECLARE_METATYPE(AssimpObject)
-Q_DECLARE_METATYPE(AssimpObject*)
+struct aiScene;
 
 namespace iris
 {
@@ -56,35 +41,14 @@ public:
                                                    QList<MeshPtr> &meshes,
                                                    QMap<QString, SkeletalAnimationPtr> &animations);
 
-    template <typename F>
-    static void loadAllMeshesAndAnimationsFromStore(const QVector<F> &store,
-                                                    QString filePath,
-                                                    QList<MeshPtr> &meshes,
-                                                    QMap<QString, SkeletalAnimationPtr> &animations)
-     {
-         // Prefer the first entry that actually CARRIES an assimp scene. The
-         // old first-match stopped at whichever entry shared the path — often
-         // an add-to-project AssetNodeObject (value = SceneNodePtr, no scene)
-         // registered alongside the import's AssimpObject — and reloaded the
-         // file although the parsed scene sat one element further on. Worse,
-         // when NO entry matched at all it returned silently and the caller
-         // got empty meshes (missing geometry on scene load).
-         for (F ao : store) {
-             if (ao->path != filePath) continue;
-             AssimpObject *assimpObject = ao->getValue().template value<AssimpObject*>();
-             const aiScene *scene = assimpObject ? assimpObject->getSceneData() : nullptr;
-             if (scene != nullptr) {
-                 meshes = loadAllMeshesFromAssimpScene(scene);
-                 animations = Mesh::extractAnimations(scene, filePath);
-                 return;
-             }
-         }
+    /// The meshes and clips of a parse the caller already holds (the threaded
+    /// open's prewarm): a copy out of the scene, never a file read.
+    static void loadAllMeshesAndAnimationsFromSource(const SceneSource &source,
+                                                     const QString &filePath,
+                                                     QList<MeshPtr> &meshes,
+                                                     QMap<QString, SkeletalAnimationPtr> &animations);
 
-         // No cached scene anywhere in the store: load the file itself.
-         loadAllMeshesAndAnimationsFromFile(filePath, meshes, animations);
-     }
-
-
+    /// IrisGL-internal (a complete aiScene needs assimp's headers).
     static QList<MeshPtr> loadAllMeshesFromAssimpScene(const aiScene* scene);
 
     /**

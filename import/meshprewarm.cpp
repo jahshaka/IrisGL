@@ -14,11 +14,7 @@ For more information see the LICENSE file
 #include <QFileInfo>
 #include <QMutexLocker>
 
-#include "assimp/Importer.hpp"
-#include "assimp/scene.h"
-
-#include "document/scenegraph/meshnode.h"   // SceneSource (owns the Importer)
-#include "import/importflags.h"
+#include "import/scenesource.h"
 
 namespace iris {
 
@@ -65,19 +61,18 @@ void MeshPrewarm::parse(const PrewarmItem &item)
     // Importer instances, and the aiScene must outlive this call (the entry
     // owns the importer, so it does).
     auto source = std::make_shared<SceneSource>();
-    const aiScene *scene =
-        source->importer.ReadFile(path.toStdString().c_str(), iris::ImportFlags::Canonical);
+    const bool parsed = source->read(path);
 
     QMutexLocker locked(&mLock);
-    mEntries.insert(path, scene ? source : std::shared_ptr<SceneSource>());
+    mEntries.insert(path, parsed ? source : std::shared_ptr<SceneSource>());
 }
 
-const aiScene *MeshPrewarm::scene(const QString &path) const
+const SceneSource *MeshPrewarm::source(const QString &path) const
 {
     QMutexLocker locked(&mLock);
     const auto it = mEntries.constFind(path);
     if (it == mEntries.constEnd() || !it->get()) return nullptr;
-    return (*it)->importer.GetScene();
+    return it->get();
 }
 
 BakedModelPtr MeshPrewarm::baked(const QString &path) const

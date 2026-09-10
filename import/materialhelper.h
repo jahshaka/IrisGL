@@ -12,7 +12,12 @@ For more information see the LICENSE file
 #ifndef MATERIALHELPER_H
 #define MATERIALHELPER_H
 
-#include "assimp/scene.h"
+// No assimp include (ENGINEERING_DEBT L4 part 3): the importer's types are
+// named by forward declaration only; the TUs that read them include assimp
+// themselves (IrisGL-private).
+struct aiScene;
+struct aiMaterial;
+struct aiTexture;
 #include <QColor>
 #include <QFuture>
 #include <QStringList>
@@ -20,7 +25,6 @@ For more information see the LICENSE file
 #include "irisglfwd.h"
 #include "document/assets/mesh.h"
 
-class aiMaterial;
 
 namespace iris
 {

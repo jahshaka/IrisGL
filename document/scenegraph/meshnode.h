@@ -20,10 +20,13 @@ For more information see the LICENSE file
 #include "document/assets/texture2d.h"
 #include "document/assets/mesh.h"
 
-#include "assimp/Importer.hpp"
-#include "assimp/ProgressHandler.hpp"
+// No assimp in this header (ENGINEERING_DEBT L4 part 3, 2026-09-10): assimp
+// is a PRIVATE dependency of IrisGL. The parse a caller may keep is the
+// opaque SceneSource (import/scenesource.h); the importer's progress hook is
+// an implementation detail of meshnode.cpp.
+#include "import/scenesource.h"
 
-class aiScene;
+struct aiScene;
 
 namespace iris
 {
@@ -34,35 +37,6 @@ class IModelReadProgress
 {
 public:
     virtual float onProgress(float percentage) = 0;
-};
-
-class ModelProgressHandler : public Assimp::ProgressHandler
-{
-public:
-    IModelReadProgress *handler;
-    ModelProgressHandler() : ProgressHandler() {
-        handler = Q_NULLPTR;
-    }
-
-    void setHandler(IModelReadProgress* handler) {
-        this->handler = handler;
-    }
-
-    ~ModelProgressHandler() {
-
-    }
-
-    bool Update(float percentage) {
-        if (handler) handler->onProgress(percentage);
-        return 1;
-    }
-};
-
-class SceneSource
-{
-public:
-    SceneSource() = default;
-    Assimp::Importer importer;
 };
 
 enum class FaceCullingMode
@@ -127,6 +101,18 @@ public:
         const QString &extractDir = QString()
     );
 
+    /// The fragment from a parse a caller already holds (the threaded open's
+    /// prewarm, import's one-parse rule): no file access at all.
+    static SceneNodePtr loadAsSceneFragment(
+        const QString &filePath,
+        const SceneSource &source,
+        std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
+        const QString &extractDir = QString()
+    );
+
+    /// IrisGL-internal form of the above (a complete aiScene needs assimp's
+    /// headers, which only this library's own translation units and the
+    /// white-box importer suites include).
 	static SceneNodePtr loadAsSceneFragment(
 		const QString &filePath,
 		const aiScene* scene_,

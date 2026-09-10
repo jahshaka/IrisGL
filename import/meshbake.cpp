@@ -23,7 +23,6 @@ For more information see the LICENSE file
 
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
-#include "assimp/version.h"
 
 #include "core/geometry/trimesh.h"
 #include "core/logger.h"
@@ -36,6 +35,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/scenenode.h"
 #include "import/importflags.h"
 #include "import/materialhelper.h"
+#include "import/modelsceneinfo.h"
 
 namespace iris
 {
@@ -459,10 +459,10 @@ int MeshBake::formatVersion() { return kFormatVersion; }
 
 QString MeshBake::producerId()
 {
-    return QStringLiteral("v%1|%2|assimp%3.%4.%5|flags%6")
+    return QStringLiteral("v%1|%2|assimp%3|flags%4")
         .arg(kFormatVersion)
         .arg(QLatin1String(JAHSHAKA_MESH_BAKE_PRODUCER_ID))
-        .arg(aiGetVersionMajor()).arg(aiGetVersionMinor()).arg(aiGetVersionRevision())
+        .arg(ModelSceneInfo::importerVersion())
         .arg(quint64(iris::ImportFlags::Canonical));
 }
 
@@ -544,6 +544,12 @@ bool findMeshNodeTransform(const aiNode *node, unsigned meshIndex,
 }
 
 }   // namespace
+
+MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QString &filePath,
+                                         const QString &fingerprint, const QString &extractDir)
+{
+    return buildFromScene(source.scene(), filePath, fingerprint, extractDir);
+}
 
 MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir)

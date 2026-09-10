@@ -70,9 +70,10 @@ For more information see the LICENSE file
 #include <functional>
 
 #include "irisglfwd.h"
+#include "import/scenesource.h"
 #include "document/assets/mesh.h"   // MeshMaterialData
 
-class aiScene;
+struct aiScene;
 
 namespace iris
 {
@@ -136,6 +137,11 @@ public:
     /// Build the bake from an ALREADY PARSED scene (the import side pays no
     /// second parse). `extractDir` is handed to MaterialHelper exactly as
     /// loadAsSceneFragment would.
+    static Model buildFromScene(const SceneSource &source, const QString &filePath,
+                                const QString &fingerprint,
+                                const QString &extractDir = QString());
+
+    /// IrisGL-internal form (a complete aiScene needs assimp's headers).
     static Model buildFromScene(const aiScene *scene, const QString &filePath,
                                 const QString &fingerprint,
                                 const QString &extractDir = QString());
