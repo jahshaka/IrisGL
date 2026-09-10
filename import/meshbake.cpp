@@ -175,7 +175,7 @@ void writeSkeleton(QDataStream &s, const SkeletonPtr &skel)
     for (const BonePtr &bone : skel->bones) {
         s << bone->name;
         writeMatrix(s, bone->inverseMeshSpacePoseMatrix);
-        s << qint32(bone->parentBone.isNull() ? -1 : index.value(bone->parentBone.data(), -1));
+        s << qint32(bone->parentBone.isNull() ? -1 : index.value(bone->parent().data(), -1));
     }
 }
 
@@ -207,7 +207,7 @@ SkeletonPtr readSkeleton(QDataStream &s, bool *okOut)
     // runs after linking (ANIMATION_ENGINE_MIGRATION_SPEC §1.5 F1).
     for (const auto &bone : skel->bones) {
         const iris::Mat4 bindLocal = !bone->parentBone.isNull()
-            ? bone->parentBone->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
+            ? bone->parent()->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
             : bone->meshSpacePoseMatrix;
         decomposeTRS(bindLocal, bone->bindingPos, bone->bindingRot, bone->bindingScale);
         bone->localMatrix = bindLocal;

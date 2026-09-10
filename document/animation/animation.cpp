@@ -81,6 +81,11 @@ Animation::Animation(QString name)
 
 Animation::~Animation()
 {
+    // The tracks are OWNED here (the header's raw pointers are the 2016 shape):
+    // every clip destroyed used to leak its whole curve tree, and an overwrite
+    // in addPropertyAnim leaked the replaced track (platform audit B10.1).
+    qDeleteAll(properties);
+    properties.clear();
 }
 
 QString Animation::getName() const
@@ -117,6 +122,9 @@ void Animation::addPropertyAnim(PropertyAnim *anim)
 {
     //Q_ASSERT(!properties.contains(name));
     
+    if (!anim) return;
+    if (PropertyAnim *old = properties.value(anim->getName(), nullptr); old && old != anim)
+        delete old;
     properties.insert(anim->getName(), anim);
     calculateAnimationLength();
 }

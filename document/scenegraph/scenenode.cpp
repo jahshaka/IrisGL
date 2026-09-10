@@ -802,6 +802,12 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	node->giBoundsExcluded = this->giBoundsExcluded;
 	node->lightMask		= this->lightMask;
 	node->attached		= this->attached;
+	// PHYSICS travels with the copy (platform audit B5.2): a duplicate of a rigid
+	// body is a rigid body with the same shape, mass and constraints — the
+	// constraint remap in remapNodeReferences exists for exactly this case and
+	// was dead on this path while the copy came back with no physics at all.
+	node->isPhysicsBody  = this->isPhysicsBody;
+	node->physicsProperty = this->physicsProperty;
 	// Whether a character can walk into the copy (AVATAR_LOCOMOTION_SPEC §6.3).
 	// The constructor already set the TYPE default; this carries the user's
 	// override, so duplicating a mesh you had made non-solid does not hand back

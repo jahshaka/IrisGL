@@ -2799,7 +2799,7 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
         // parentless and this loop would have produced a flat rig.)
         bd.parent = -1;
         if (!b->parentBone.isNull()) {
-            const auto it = skeleton->boneMap.constFind(b->parentBone->name);
+            const auto it = skeleton->boneMap.constFind(b->parent()->name);
             if (it != skeleton->boneMap.constEnd() && it.value() != i) bd.parent = it.value();
         }
 
@@ -2909,7 +2909,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
             // The piece's own chain: every bone above this one THAT THIS PIECE
             // carries. Different pieces carry different subsets, so the union of
             // the chains is what the character's real ancestry is.
-            for (iris::Bone *up = b->parentBone.data(); up; up = up->parentBone.data()) {
+            for (iris::Bone *up = b->parent().data(); up; up = up->parent().data()) {
                 if (up->name == b->name) break;       // defensive: a self-parent
                 r.ancestors.insert(up->name);
             }
@@ -3417,7 +3417,7 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
         e.boneParents.assign(n, -1);
         for (size_t i = 0; i < n; ++i) {
             if (bones[int(i)]->parentBone.isNull()) continue;
-            const auto pit = e.rigSkeleton->boneMap.constFind(bones[int(i)]->parentBone->name);
+            const auto pit = e.rigSkeleton->boneMap.constFind(bones[int(i)]->parent()->name);
             if (pit != e.rigSkeleton->boneMap.constEnd() && size_t(pit.value()) != i)
                 e.boneParents[i] = pit.value();
         }

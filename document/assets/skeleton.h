@@ -39,7 +39,12 @@ public:
     iris::Mat4 skinMatrix;// final transform sent to the shader
 
     QList<BonePtr> childBones;
-    BonePtr parentBone;
+    // WEAK: parent and children as two strong pointers made every skeleton a
+    // reference cycle that never freed (one clone per skinned MeshNode —
+    // platform audit B8.1). The parent always outlives the child through
+    // childBones, so a weak back-link loses nothing; read it through parent().
+    QWeakPointer<Bone> parentBone;
+    BonePtr parent() const { return parentBone.toStrongRef(); }
 
     void addChild(BonePtr bone)
     {
@@ -78,7 +83,7 @@ public:
     BonePtr getRootBone()
     {
         for(auto bone : bones)
-            if(!bone->parentBone)
+            if(bone->parentBone.isNull())
                 return bone;
         return BonePtr();  // no parentless bone (empty/cyclic skeleton)
     }
@@ -87,7 +92,7 @@ public:
     {
         QList<BonePtr> roots;
         for(auto bone : bones)
-            if(!bone->parentBone)
+            if(bone->parentBone.isNull())
                 roots.append(bone);
 
         return roots;

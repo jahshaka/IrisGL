@@ -361,7 +361,7 @@ SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)
         auto bone = skel->getBone(QString(node->mName.C_Str()));
         // A bone may appear twice in a node tree only if the file is malformed;
         // don't re-parent one that already has a parent.
-        if (!!bone && !!ancestor && !bone->parentBone && bone != ancestor)
+        if (!!bone && !!ancestor && bone->parentBone.isNull() && bone != ancestor)
             ancestor->addChild(bone);
         const BonePtr &nextAncestor = !!bone ? bone : ancestor;
         for (unsigned i = 0; i < node->mNumChildren; i++)
@@ -387,7 +387,7 @@ SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)
     // offset matrix. One quantity, three consumers, computed once here.
     for (const auto &bone : skel->bones) {
         const iris::Mat4 bindLocal = !bone->parentBone.isNull()
-            ? bone->parentBone->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
+            ? bone->parent()->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
             : bone->meshSpacePoseMatrix;
         decomposeTRS(bindLocal, bone->bindingPos, bone->bindingRot, bone->bindingScale);
         bone->localMatrix = bindLocal;

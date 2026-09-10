@@ -69,6 +69,7 @@ private:
 
 MeshNode::MeshNode() {
     sceneNodeType = SceneNodeType::Mesh;
+    meshIndex = 0;   // was uninitialised for years and serialised as-is (platform audit B5.1)
 
     faceCullingMode = FaceCullingMode::DefinedInMaterial;
 

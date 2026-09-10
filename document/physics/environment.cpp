@@ -23,6 +23,7 @@ Environment::Environment()
     createPhysicsWorld();
  
     simulating = false;
+    simulationStarted = false;   // read before play by isSimulating() (platform audit B11.1)
 
 	//activePickingConstraint = 0;
 	pickingHandles[(int)PickingHandleType::LeftHand] = PickingHandle();
@@ -148,17 +149,21 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 	// exactly what it cost before this feature existed.
 	buildCollisionContent(rootNode);
 
-	// now add constraints
-	// TODO - avoid looping like this, get constraint list -- list and then use that
-	// TODO - handle children of children?
-	for (const auto &node : rootNode->children()) {
-		if (node->isPhysicsBody) {
-			for (const auto &constraintProperties : node->physicsProperty.constraints) {
-				auto constraint = PhysicsHelper::createConstraintFromProperty(this, constraintProperties);
-				addConstraintToWorld(constraint);
+	// Constraints, over the WHOLE tree: bodies were built recursively above,
+	// but this pass used to walk only the root's direct children, so a
+	// constraint on a nested body was never created (platform audit B11.2).
+	std::function<void(const SceneNodePtr &)> addConstraints = [&](const SceneNodePtr &node) {
+		for (const auto &child : node->children()) {
+			if (child->isPhysicsBody) {
+				for (const auto &constraintProperties : child->physicsProperty.constraints) {
+					auto constraint = PhysicsHelper::createConstraintFromProperty(this, constraintProperties);
+					addConstraintToWorld(constraint);
+				}
 			}
+			addConstraints(child);
 		}
-	}
+	};
+	addConstraints(rootNode);
 
 	// notice the - sign for the gravity, show it as positive in the interface but flip it here
 	world->setGravity(btVector3(0, -worldYGravity, 0));

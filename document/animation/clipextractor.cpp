@@ -174,7 +174,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         // bind locals in (`bindLocal = meshSpacePoseMatrix`, i.e. mesh space).
         int parentIndex = -1;
         if (!bone->parentBone.isNull()) {
-            const auto pit = rig->boneMap.constFind(bone->parentBone->name);
+            const auto pit = rig->boneMap.constFind(bone->parent()->name);
             if (pit != rig->boneMap.constEnd() && pit.value() != i) parentIndex = pit.value();
         }
         SceneNode *frameNode = nullptr;
@@ -265,7 +265,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         if (!boneNode) continue;
         int parentIndex = -1;
         if (!bone->parentBone.isNull()) {
-            const auto pit = rig->boneMap.constFind(bone->parentBone->name);
+            const auto pit = rig->boneMap.constFind(bone->parent()->name);
             if (pit != rig->boneMap.constEnd() && pit.value() != i) parentIndex = pit.value();
         }
         const iris::Mat4 bindLocal = parentIndex >= 0

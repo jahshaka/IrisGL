@@ -41,6 +41,8 @@ public:
 
     explicit Animation(QString name = "Animation");
     ~Animation();
+    Animation(const Animation &) = delete;              // owns raw PropertyAnim tracks
+    Animation &operator=(const Animation &) = delete;
 
     void addPropertyAnim(PropertyAnim* anim);
     void removePropertyAnim(QString name);
