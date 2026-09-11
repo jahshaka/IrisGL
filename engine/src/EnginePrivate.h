@@ -1181,6 +1181,23 @@ public:
                                    bool, Ogre::SceneManager *) const override;
     float *preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
                              Ogre::SceneManager *sceneManager, float *passBufferPtr) override;
+    /// THE LAMP-MAP CACHE'S SELF-CHECK (ENGINE_CACHE_POLICY_SPEC E2, ogre-patch
+    /// 0025). Hlms declares `hlms_num_shadow_map_lights` from the shadow node's
+    /// ACTIVE COUNT but indexes shadow maps from the node's SLOT ARRAY; a lamp
+    /// fixed into a slot after the node last built its light list makes the two
+    /// disagree and generates a pixel shader that references a shadow map it
+    /// never declared — which does not compile, and on a cold shader cache used
+    /// to take the process down with it. The check is a handful of integer
+    /// reads on passes of a node that actually holds a cached lamp, and it is
+    /// permanent: this class of defect is invisible until a shader happens to
+    /// be generated, so the engine says so the moment the state exists.
+    void preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
+                         bool dualParaboloid, Ogre::SceneManager *sceneManager,
+                         Ogre::Hlms *hlms) override;
+    /// How many passes have been hashed in that broken state this session, and
+    /// a reset for the suites. Reported by Engine::shadowStatus.
+    static unsigned lightCountMismatches() { return sLightCountMismatches; }
+    static void     resetLightCountMismatches() { sLightCountMismatches = 0; sMismatchLogged = 0; }
 
     /// The per-scene fog table. OgreScene::setFog registers, the scene teardown
     /// unregisters, preparePassBuffer looks up.
@@ -1265,6 +1282,8 @@ private:
     /// conditions HlmsPbs itself uses to emit the block), 0 otherwise.
     static Ogre::uint32 ifdAlignFloats(bool casterPass);
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
+    static unsigned       sLightCountMismatches;                       // render thread only
+    static unsigned       sMismatchLogged;                             // render thread only
     static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
     static std::map<const Ogre::SceneManager *, float>    sSceneTime;  // render thread only
     static std::map<const Ogre::SceneManager *, IfdState> sIfdState;   // render thread only

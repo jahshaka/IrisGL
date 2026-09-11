@@ -2450,6 +2450,12 @@ struct ShadowStatus {
     /// "renders once" means, measurably.
     unsigned shadowPassesLastFrame = 0;
     unsigned cachedMapRendersLastFrame = 0;
+    /// THE CACHE'S SELF-CHECK, cumulative for the session: passes hashed while
+    /// the shadow node declared FEWER shadow maps than its own light list
+    /// indexes — the state that generates a pixel shader which cannot compile
+    /// (ogre-patch 0025 removes its cause; this counts any recurrence). Zero is
+    /// the only healthy value, and a suite may assert exactly that.
+    unsigned shaderLightMismatches = 0;
     /// The same for the planar mirrors' shadow nodes (every budget slot) and
     /// the reflection probes' (every shadowed probe that captured) — total
     /// passes, and the part spent on point/spot maps. A probe capture renders a

@@ -309,9 +309,48 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     moves by exactly an 8 px ortho pan; the sphere window is the same picture
     translated).
 
+25. **0025-shadow-node-fixed-light-invalidates-cached-build** — SOURCE
+    (`OgreCompositorShadowNode.cpp`; every tree reruns `build-ogre.sh`).
+    `CompositorShadowNode::buildClosestLightList` rebuilds a node's light list at
+    most once per (camera, compositor frame) — `mLastCamera`/`mLastFrame` — and
+    that build is the ONLY place `mNumActiveShadowMapCastingLights` is computed,
+    while `setLightFixedToShadowMap` writes the slot array without it. Hlms
+    declares `hlms_num_shadow_map_lights` from the COUNT (OgreHlms.cpp:3269) and
+    indexes shadow maps from the ARRAY (OgreHlms.cpp:3493-3505), so a lamp fixed
+    after a node has already built for the frame makes the two disagree: measured
+    on a reflection-probe capture as `declares 3 shadow maps but its lights index
+    4` with `[0:dynamic dir][1:cached spot]`, which drops the shader out of the
+    static-branching path, generates `hlms_shadowmap3` against three declared maps
+    ("undeclared identifier") and — on a cold shader cache — used to SEGV in
+    HlmsDiskCache over the entry the failed compile leaves behind. Upstream never
+    sees it because its own sample fixes lights once before the first frame; a
+    lamp-map CACHE re-assigns per frame (ENGINE_CACHE_POLICY_SPEC P2/P4). The
+    patch drops the cached camera so the next build recomputes the count — one
+    extra light-list build per ASSIGNMENT CHANGE, nothing at rest. There is no
+    engine-side fix: both the count and the guard are private, and the window
+    cannot be avoided by ordering (a probe captures from the frame's update half,
+    around the cache's own work — measured with the assignment moved earlier and
+    the mismatch still present). Gate: `scripting.e2e.shadow_cache_probes` (cold
+    shader cache; 3/3 red without the patch, 5/5 green with it) plus
+    `world.shadowStatus().shaderLightMismatches`, the engine's own self-check.
+
+26. **0026-hlms-disk-cache-skip-entries-without-pso** — SOURCE
+    (`OgreHlmsDiskCache.cpp`; every tree reruns `build-ogre.sh`).
+    `Hlms::createShaderCacheEntry` adds its cache entry before the backend builds
+    the PSO, so a shader that FAILS to compile leaves an entry whose
+    `pso.macroblock`/`pso.blendblock` are null — and `HlmsDiskCache::Pso`'s
+    constructor dereferences both, so saving the disk cache after any failed
+    compile is a SIGSEGV at address 0. The patch skips such an entry and logs it
+    at LML_CRITICAL with its hash; the cache still saves everything else. A
+    compile failure is recoverable everywhere else in the engine and must not
+    take the process down. Proven by running the 0025 defect with 0026 applied:
+    "HlmsDiskCache: skipping shader cache entry 536872216 - it has no PSO" and no
+    crash where the same state crashed before.
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild (0024 is SOURCE + media) — the Studio build stages the
+patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild (0024 is SOURCE + media;
+0025 and 0026 are SOURCE-only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant

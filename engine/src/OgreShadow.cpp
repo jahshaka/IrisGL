@@ -641,6 +641,7 @@ ShadowStatus OgreEngine::shadowStatus() const {
         st.live = true;
         st.shadowPassesLastFrame = mShadowPassesLastFrame;
         st.cachedMapRendersLastFrame = mCachedMapRendersLastFrame;
+        st.shaderLightMismatches = FogHlmsListener::lightCountMismatches();
         st.reflectPassesLastFrame = mShadowKindPasses[unsigned(ShadowNodeKind::Reflect)];
         st.probePassesLastFrame = mShadowKindPasses[unsigned(ShadowNodeKind::Probe)];
         st.reflectLampPassesLastFrame = mShadowKindLampPasses[unsigned(ShadowNodeKind::Reflect)];

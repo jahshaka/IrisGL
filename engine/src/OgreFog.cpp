@@ -34,8 +34,66 @@ std::map<const Ogre::SceneManager *, FogState> FogHlmsListener::sFogState;   // 
 std::map<const Ogre::SceneManager *, float>    FogHlmsListener::sSceneTime;  // render thread only
 std::map<const Ogre::SceneManager *, FogHlmsListener::IfdState> FogHlmsListener::sIfdState;  // render thread only
 Ogre::HlmsPbs                                 *FogHlmsListener::sPbs = nullptr;
+unsigned                                       FogHlmsListener::sLightCountMismatches = 0;
+unsigned                                       FogHlmsListener::sMismatchLogged = 0;
 
 FogHlmsListener gFogListener;
+
+// THE LAMP-MAP CACHE'S SELF-CHECK — see the declaration for what it guards.
+//
+// The two numbers that must agree, both written by Hlms::preparePassHashBase:
+//   hlms_num_shadow_map_lights = shadowNode->getNumActiveShadowCastingLights()
+//                                + (pssmSplits - 1)          [OgreHlms.cpp:3269]
+//   the shadow-map INDEX the generated shader reaches, walked from the node's
+//   slot array through the pass's cumulative per-type light counts
+//                                                       [OgreHlms.cpp:3640-3695]
+// The first comes from a count only buildClosestLightList maintains, the second
+// from the array setLightFixedToShadowMap writes — which is why ogre-patch 0025
+// makes the second invalidate the first's cache.
+void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
+                                      bool, Ogre::SceneManager *, Ogre::Hlms *hlms) {
+    if (casterPass || !shadowNode || !hlms) return;
+    // Only a node that holds a CACHED lamp can be in the broken state, and that
+    // test is a walk of at most seventeen pointers — the property reads below
+    // are linear scans and must not run on every pass of every frame.
+    bool anyCached = false;
+    const Ogre::LightClosestArray &held = shadowNode->getShadowCastingLights();
+    for (size_t i = 0; i < held.size() && !anyCached; ++i) anyCached = held[i].isStatic && held[i].light;
+    if (!anyCached) return;
+    const auto prop = [hlms](const char *name) {
+        return hlms->_getProperty(Ogre::Hlms::kNoTid, Ogre::IdString(name), 0);
+    };
+    const int declared = prop("hlms_num_shadow_map_lights");
+    const int pssm     = prop("hlms_pssm_splits");
+    const int dirCast  = prop("hlms_lights_directional");
+    const int dirAll   = prop("hlms_lights_directional_non_caster");
+    const int spotCum  = prop("hlms_lights_spot");
+    const int staticBr = prop("hlms_static_branch_shadow_map_lights");
+    int needed = (pssm ? pssm : (dirCast > 0 ? 1 : 0)) + (dirCast > 0 ? dirCast - 1 : 0);
+    if (!staticBr) needed += spotCum - dirAll;   // the point+spot casters, cumulative
+    if (needed <= declared) return;
+    ++sLightCountMismatches;
+    if (sMismatchLogged++ < 4u) {
+        std::string slots;
+        for (size_t i = 0; i < held.size(); ++i) {
+            slots += "[" + std::to_string(i) + ":";
+            if (!held[i].light) slots += "-";
+            else slots += std::string(held[i].isStatic ? "cached " : "dynamic ") +
+                          (held[i].light->getType() == Ogre::Light::LT_DIRECTIONAL ? "dir"
+                           : held[i].light->getType() == Ogre::Light::LT_POINT ? "point" : "spot");
+            slots += "]";
+        }
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka shadow cache: a pass hashed against '" +
+                shadowNode->getDefinition()->getNameStr() + "' declares " +
+                std::to_string(declared) + " shadow maps but its lights index " +
+                std::to_string(needed) + " (the node reports " +
+                std::to_string(shadowNode->getNumActiveShadowCastingLights()) +
+                " active casting lights, slots " + slots +
+                "). The generated shader cannot compile — see ogre-patch 0025.",
+            Ogre::LML_CRITICAL);
+    }
+}
 
 void FogHlmsListener::registerScene(const Ogre::SceneManager *sm, const FogState &p) {
     sFogState[sm] = p;
