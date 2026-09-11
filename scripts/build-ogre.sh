@@ -233,8 +233,15 @@ if [ "${OGRE_SAMPLES:-0}" = "1" ]; then
     SAMPLE_FLAGS="-DOGRE_BUILD_SAMPLES2=ON -DOGRE_INSTALL_SAMPLES=OFF -DOGRE_INSTALL_SAMPLES_SOURCE=OFF"
 fi
 
+# Compiler cache when installed (2026-09-11): each tree builds its own Ogre, so a shared
+# ccache turns every tree's build after the first into cache hits.
+CCACHE_FLAGS=""
+if command -v ccache >/dev/null 2>&1 && [ "${JAH_NO_CCACHE:-0}" != "1" ]; then
+    CCACHE_FLAGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+fi
+
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo $CCACHE_FLAGS \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DOGRE_SHADER_COMPILATION_THREADING_MODE=2 \
