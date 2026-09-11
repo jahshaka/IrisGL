@@ -865,8 +865,8 @@ std::vector<hud::AtlasTileDesc> OgreEngine::collectAtlasTiles() const {
             tile.u1 = float(td->uvOffset.x + td->uvLength.x);
             tile.v1 = float(td->uvOffset.y + td->uvLength.y);
             // The caption says what the map IS, which is the whole point of the
-            // overlay: which light, and whether its content is static and
-            // therefore not being redrawn.
+            // overlay: which light, and whether the lamp-map cache holds its
+            // content and is therefore not redrawing it.
             std::string label = "M" + std::to_string(i);
             const size_t lightIdx = td->light;
             if (lightIdx < lights.size() && lights[lightIdx].light) {
@@ -1031,6 +1031,18 @@ std::vector<Ogre::Light *> planCachedSlots(const Ogre::LightClosestArray &held, 
         size_t j = maps;
         if (!isSpot(want[i])) {
             for (size_t c = 0; c < firstSpot && c < maps; ++c) if (!plan[c]) { j = c; break; }
+            if (j == maps && firstSpot < maps) {
+                // THE POINTS' REGION IS FULL AND A SPOT SITS AT ITS EDGE. Moving
+                // that ONE spot to a free slot keeps the type order and costs a
+                // single re-rendered map — where re-laying the whole range out
+                // (step 3) would re-render every spot. Any free slot is above
+                // the last point, because everything below firstSpot is taken.
+                for (size_t c = firstSpot; c < maps; ++c) if (!plan[c]) { j = c; break; }
+                if (j != maps) {
+                    plan[j] = plan[firstSpot];      // the evicted spot, one slot up
+                    j = firstSpot;
+                }
+            }
         } else {
             for (size_t c = anyPoint ? lastPoint + 1u : 0u; c < maps; ++c) if (!plan[c]) { j = c; break; }
         }

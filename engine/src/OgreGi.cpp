@@ -1538,6 +1538,16 @@ void OgreScene::runItemWalk(bool shadow) {
     // are the slow, static-environment layer — E1 freezes animated content —
     // and shadows, which cannot wait, are same-frame).
     const bool gi = (mPcc && mGi.updateBudget > 0) || (mIfd && mIfdSource == GiSource::Raster);
+    if (!shadow && mShadowScanPrimed) {
+        // THE CACHE IS NOT RUNNING HERE (this scene has no shadow node to cache
+        // into, or not one cacheable lamp): its caster records go stale, and so
+        // do the departures waiting to be reported. Un-priming is what keeps
+        // mShadowVanished from growing for a whole session of edits in a scene
+        // whose shadows are off — and it costs nothing, because the next cached
+        // frame is a FRESH slot assignment, which renders every map anyway.
+        mShadowScanPrimed = false;
+        mShadowVanished.clear();
+    }
     const auto t0 = std::chrono::steady_clock::now();
     walkItems(gi, shadow, false);
     mShadowWalked = shadow;
