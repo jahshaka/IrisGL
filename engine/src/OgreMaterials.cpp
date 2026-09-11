@@ -1179,12 +1179,41 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
         // ever has to be backed out on a user's machine. A measurement and
         // recovery hatch, deliberately not a preference and not persisted — the
         // same shape as JAHSHAKA_SCENE_THREADS.
+        // A texture another scene already holds is already Resident (or on
+        // its way); scheduling the transition again is Ogre's own no-op.
         tex->scheduleTransitionTo(Ogre::GpuResidency::Resident);
         if (detail::syncTextureLoads()) tex->waitForData();
         TextureRec rec; rec.texture = tex; rec.path = path; rec.srgb = srgb;
+        rec.shared = true;
+        detail::retainSharedTexture(tex);
         return trackTexture(rec);
     } JAH_CATCH(mError, 0);
 }
+
+// The cross-scene references (EnginePrivate.h). Main thread only, like every
+// OgreScene texture call.
+namespace {
+std::unordered_map<Ogre::TextureGpu *, unsigned> &sharedTextureRefs() {
+    static std::unordered_map<Ogre::TextureGpu *, unsigned> sRefs;
+    return sRefs;
+}
+}   // namespace
+
+void retainSharedTexture(Ogre::TextureGpu *tex) {
+    if (tex) ++sharedTextureRefs()[tex];
+}
+
+bool releaseSharedTexture(Ogre::TextureGpu *tex) {
+    auto &refs = sharedTextureRefs();
+    auto it = refs.find(tex);
+    // Untracked = nobody else can hold it: the caller's release is the last.
+    if (it == refs.end()) return true;
+    if (--it->second > 0) return false;
+    refs.erase(it);
+    return true;
+}
+
+void resetSharedTextures() { sharedTextureRefs().clear(); }
 
 namespace {
 /// One box-filter step: halve `w` x `h` RGBA8 pixels (odd dimensions clamp, the
@@ -1342,6 +1371,10 @@ void OgreScene::releaseTextureRec(const TextureRec &rec) {
     // last user's release frees it (OgreDecals.cpp). Destroying it outright here
     // would leave the other scenes' Decals pointing at a dead TextureGpu.
     if (rec.decal) { detail::releaseDecalTexture(tm, rec.decalKind, rec.texture); return; }
+    // ANOTHER SCENE MAY STILL HOLD IT (detail::retainSharedTexture, lane L11):
+    // a file texture is the backend's, shared by alias across scenes, and only
+    // the last scene to let go destroys it.
+    if (rec.shared && !detail::releaseSharedTexture(rec.texture)) return;
     // NEVER WITH A LOAD IN FLIGHT (plan item 15: importer.glb's teardown
     // `free(): invalid pointer`, reproduced 2026-09-11 under single-core
     // starvation). loadTexture only SCHEDULES the decode, so a scene destroyed

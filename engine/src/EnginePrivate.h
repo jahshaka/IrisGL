@@ -1381,6 +1381,24 @@ unsigned    decalAtlasCapacity();
 bool        releaseDecalTexture(Ogre::TextureGpuManager *tm, DecalMap kind, Ogre::TextureGpu *tex);
 
 // ---------------------------------------------------------------------------
+// FILE TEXTURES ARE SHARED ACROSS SCENES (OgreMaterials.cpp, lane L11).
+// OgreScene::loadTexture gets its textures from
+// TextureGpuManager::createOrRetrieveTexture, whose lookup key is the ALIAS —
+// so two scenes that load the same file in the same colour space (the editor
+// and a thumbnail render of an asset that is in it) receive the SAME
+// TextureGpu. Each scene tracks it; whichever released it first used to
+// DESTROY it: Ogre's Deleted notification then stripped the map from the other
+// scene's datablocks (an editor model went untextured the moment
+// assets.refreshThumbnail rendered it), and the other scene's TextureRec kept a
+// dangling pointer it later destroyed again. One reference per tracking scene;
+// the last release destroys. resetSharedTextures() runs with Root's death, like
+// resetDecalAtlases().
+void retainSharedTexture(Ogre::TextureGpu *tex);
+/// True when this was the LAST reference (the caller destroys the texture).
+bool releaseSharedTexture(Ogre::TextureGpu *tex);
+void resetSharedTextures();
+
+// ---------------------------------------------------------------------------
 /// OgreGi.cpp: Ogre::IrradianceField with the protected surface a source
 /// switch needs (see there). Forward-declared here, defined beside its use.
 class JahIrradianceField;
@@ -1992,6 +2010,10 @@ private:
         /// keying on the path alone handed the first one out for both
         /// (MATERIAL_GAPS_SPEC I-2).
         bool     srgb = false;
+        /// Came from createOrRetrieveTexture, so other scenes may hold the very
+        /// same TextureGpu: refcounted (detail::retainSharedTexture), and only
+        /// the last scene to release it destroys it.
+        bool     shared = false;
     };
 
     void applyReflectionToAllImpl();
