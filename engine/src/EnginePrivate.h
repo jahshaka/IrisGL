@@ -2676,20 +2676,22 @@ private:
     /// The raster IrradianceField's one workspace names the probe shadow node
     /// (dropGiForShadowRebuild must tear the field down before an atlas rebuild).
     bool mIfdShadowed = false;
-    /// THE PROBE ROUND-ROBIN (FIX WAVE B2). One entry per probe, rebuilt with
-    /// the grid. `sweepPending` is true while the probe still owes this sweep an
-    /// update — the sweep set refills when it empties, which is what makes
-    /// "every probe within ceil(probes / budget) frames" a guarantee rather than
-    /// a hope. `framesSinceUpdate` and the moved-cover test only decide the
-    /// ORDER inside a sweep.
+    /// THE PROBE CACHE'S STALE SET (FIX WAVE B2; ENGINE_CACHE_POLICY_SPEC P1).
+    /// One entry per probe, rebuilt with the grid. `sweepPending` is true while
+    /// the probe is STALE — owes a capture because an input changed
+    /// (staleProbeGrid) — and the budget spends only on those, which is what
+    /// makes "every probe within ceil(probes / budget) frames of a change" a
+    /// guarantee and a still scene free. (It no longer refills when it empties:
+    /// that refill was the forever-sweep P1 removed.) `framesSinceUpdate` and
+    /// the moved-cover test only decide the ORDER of the catch-up.
     struct ProbeSlot {
         bool     sweepPending = true;
         unsigned framesSinceUpdate = 0;
     };
     std::vector<ProbeSlot> mProbeSlots;
-    /// How many probes updateProbeBudget dirtied on the LAST frame it ran, and
-    /// the resolved per-frame budget (the request clamped to the grid). Reported
-    /// by giStatus so a caller can see what the renderer actually spends.
+    /// The resolved per-frame budget (the request clamped to the grid) — the
+    /// CEILING a frame may spend on stale probes. Reported by giStatus; what a
+    /// frame actually spent is mProbeCapturesLastFrame.
     int mProbeUpdatesPerFrame = 0;
     /// The resolved `GiParams::dynamicProbes` reservation and how many extra
     /// moved-covering re-captures it spent on the last frame (Epic's column;

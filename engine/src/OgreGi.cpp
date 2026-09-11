@@ -390,7 +390,22 @@ bool OgreScene::refreshVctFast() {
         // drag, by a drag pausing for 250 ms, and by world.refreshGi(). Stale,
         // the budget spreads the same captures over ceil(probes / catch-up)
         // frames, and no frame costs more than an ordinary one.
-        staleProbeGrid(GiStaleReason::Refresh);
+        //
+        // EXCEPT WHEN PAUSED (updateBudget 0). Then there is no budget to
+        // spread over — nothing would ever capture a stale probe — and a
+        // re-solve can only have come from an explicit demand (the mirror arms
+        // nothing while paused; world.refreshGi() and a direct call do), whose
+        // documented contract is "the picture is what was last built until
+        // world.refreshGi() asks for more". So a paused refresh captures the
+        // whole grid at once, as it always did, and leaves nothing stale.
+        if (mGi.updateBudget > 0) {
+            staleProbeGrid(GiStaleReason::Refresh);
+        } else if (mPcc) {
+            for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mDirty = true;
+            for (ProbeSlot &sl : mProbeSlots) sl.sweepPending = false;
+            mLastStaleReason = GiStaleReason::Refresh;
+            ++mStaleSerial;
+        }
         // The DDGI field is re-INITIALIZED, not reset, on this path. The reuse
         // arm keeps the VctLighting OBJECT but re-voxelizes underneath it and
         // may have moved the volume (setRegionToVoxelize above), and the field's
