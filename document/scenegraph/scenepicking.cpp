@@ -40,6 +40,14 @@ bool gLastUsedEngine = false;
 inline bool passesFlags(SceneNode *node, uint64_t pickingMask, bool allowUnpickable)
 {
     if (!node->isPickable() && !allowUnpickable) return false;
+    // A HIDDEN MESH IS NEVER A HIT, and hidden means EFFECTIVELY hidden — by
+    // its own flag or any ancestor's (SceneNode::isVisibleInScene; the rule the
+    // renderer draws by, RENDER_PIPELINE_AUDIT 1.1/1.2). Decided HERE, on the
+    // document, for both broad phases: the fallback has no other test, and
+    // the engine sweep's LAYER_VISIBILITY mask lags the document by a sync —
+    // a script that hides a node and raycasts in the same breath must not hit
+    // it. O(depth) per candidate; candidates are few.
+    if (!node->isVisibleInScene()) return false;
     return (node->pickingGroups & pickingMask) == pickingMask;
 }
 
@@ -86,10 +94,8 @@ void collectCandidates(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
     out.reserve(scene->meshes.size());
     for (const MeshNodePtr &mn : scene->meshes) {
         if (!mn) continue;
-        // The engine sweep masks on LAYER_VISIBILITY, so hidden objects never
-        // reach its candidate list — the fallback must agree, or "can I click
-        // a hidden mesh?" gets two answers depending on which path ran.
-        if (!mn->isVisible()) continue;
+        // (Visibility is decided per candidate in passesFlags, for both broad
+        // phases alike.)
         MeshPtr mesh = mn->getMesh();
         if (!mesh) continue;
         const Mat4 inv = mn->getGlobalTransform().inverted();

@@ -118,7 +118,13 @@ public:
     /// numbers; the engine composes the hierarchy.
     virtual void        setNodeTransform(NodeId, const Vec3 &position, const Quat &rotation,
                                          const Vec3 &scale) = 0;
-    /// Hides the node and its subtree.
+    /// The node's OWN visibility. A node is drawn iff it and every ancestor
+    /// were told visible: hiding a node hides its subtree (geometry, lights,
+    /// decals, particles, and GI — a hidden subtree neither bounces light nor
+    /// shapes the automatic volume), and showing it again restores each
+    /// descendant to what that descendant was told, never to visible
+    /// wholesale. A host whose hierarchy differs from the engine's (a socket
+    /// rider hangs off a bone) pushes its own effective state per node.
     virtual void        setNodeVisible(NodeId, bool) = 0;
 
     // ---- Meshes and materials (step 3/4) ----

@@ -531,14 +531,33 @@ protected:
    virtual void remapOwnNodeReferences(const QHash<QString, QString> &guidMap) { Q_UNUSED(guidMap); }
 public:
 
-    bool isVisible() {
+    /// The node's OWN flag — what the outliner eye and `visible` in a saved
+    /// scene say about this node alone. Whether it is ON SCREEN is
+    /// isVisibleInScene(): a hidden ancestor hides it without touching this.
+    bool isVisible() const {
         return visible;
     }
 
 	void setVisible(bool flag = true);
 
+    /// Sets the OWN flag, and with `cascade` every descendant's OWN flag too —
+    /// which erases any child the user had hidden itself. The renderer does
+    /// not need a cascade (it follows isVisibleInScene). RECORDED DEBT: the
+    /// outliner's eye still walks its rows calling these on every descendant
+    /// (SceneHierarchyWidget::hide/showItemAndChildren), so on that path the
+    /// document's own flags are rewritten before the renderer ever sees them.
     void show(bool cascade = false);
     void hide(bool cascade = false);
+
+    /// EFFECTIVE VISIBILITY (RENDER_PIPELINE_AUDIT 1.1/1.2): true iff this node
+    /// AND every ancestor up to the root are visible. The one rule every
+    /// consumer applies — the mirror pushes exactly this to the engine, picking
+    /// and the GI Fit button skip what it rejects — while each node's own flag
+    /// stays the user's, so showing a parent brings back only the children
+    /// that were not hidden themselves. A socket rider answers through its
+    /// DOCUMENT parent (graph::parentOf's shadow parent), not the bone it hangs
+    /// from. O(depth); nothing calls it per node per frame.
+    bool isVisibleInScene() const;
 
     bool isRemovable() {
         return removable;

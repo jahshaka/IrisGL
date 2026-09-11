@@ -88,8 +88,19 @@ public:
         return DefaultMaterialPtr(new DefaultMaterial());
     }
 
+    /// Member-wise: every field is a value or a shared texture handle, and a
+    /// DefaultMaterial declares no property rows. Previews and thumbnails are
+    /// the only holders of this class; the copy keeps their look if one is
+    /// ever duplicated (Material::duplicate).
+    MaterialPtr duplicate() const override
+    {
+        return MaterialPtr(new DefaultMaterial(*this));
+    }
+
 private:
     DefaultMaterial();
+    DefaultMaterial(const DefaultMaterial &) = default;
+    DefaultMaterial &operator=(const DefaultMaterial &) = delete;
 };
 
 }

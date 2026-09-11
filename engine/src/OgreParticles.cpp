@@ -719,12 +719,13 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
             n.node->attachObject(n.particleSystem);
         }
         // A recycled or rebuilt def arrives HIDDEN (releaseParticleSystem parks
-        // it with visibility 0), so the node's own visibility has to be pushed
-        // onto it here. Node::visible is the record setNodeVisible keeps for
-        // exactly this: the def is not a child of the node in Ogre's graph — it
-        // hangs off the STATIC root — so no visibility cascade ever reaches it.
+        // it with visibility 0), so the node's visibility has to be pushed
+        // onto it here. Node::shown (the EFFECTIVE state setNodeVisible keeps)
+        // is the record for exactly this: the def is not a child of the node in
+        // Ogre's graph — it hangs off the STATIC root — so no Ogre cascade ever
+        // reaches it.
         n.particleDistortion = d.distortion;
-        n.particleDef->setVisibilityFlags(n.visible ? particleVisibilityBits(n) : 0u);
+        n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
         return true;
     } JAH_CATCH(mError, false);
 }

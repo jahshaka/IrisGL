@@ -314,7 +314,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         // an Item created now is born visible on an invisible node (found with
         // SMOKE_FIX S12; the GI half of the same question is in
         // itemVisibilityFlags).
-        if (!n.visible) n.item->setVisible(false);
+        if (!n.shown) n.item->setVisible(false);
         n.meshRef = meshId; n.materialRef = matId;
 
         Ogre::SkeletonInstance *skel = n.item->getSkeletonInstance();

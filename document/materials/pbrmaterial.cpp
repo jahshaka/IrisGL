@@ -537,6 +537,28 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     syncProperty(name, value);
 }
 
+MaterialPtr PbrMaterial::duplicate() const
+{
+    // The member-wise copy carries every FIELD — colours, factors, the five
+    // maps and the detail layers (the `textures` map of shared handles), the
+    // UV transform, the address modes, the render layer and states, the name
+    // and the preset/asset guid the material came from — in one line that
+    // cannot forget a field added next year.
+    PbrMaterialPtr copy(new PbrMaterial(*this));
+    // ...and SHARES the rows, which are the one thing it must not share: they
+    // are what the panel edits and what SceneWriter saves. Fresh rows, then
+    // this material's row values onto them BY NAME, so a row whose value is
+    // not derivable from a field (a map row's path) survives too.
+    copy->properties.clear();
+    copy->createProperties();
+    for (Property *row : copy->properties) {
+        for (Property *mine : properties) {
+            if (mine->name == row->name) { row->setValue(mine->getValue()); break; }
+        }
+    }
+    return copy;
+}
+
 void PbrMaterial::syncProperty(const QString& name, const QVariant& value)
 {
     for (auto prop : properties)
