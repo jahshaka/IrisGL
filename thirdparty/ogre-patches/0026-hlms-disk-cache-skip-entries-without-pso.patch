@@ -1,0 +1,56 @@
+From: Jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] HlmsDiskCache::copyFrom: skip a shader-cache entry that has no PSO instead of crashing
+
+WHY (Jahshaka lane E2, 2026-09-12 — measured crash)
+
+`Hlms::createShaderCacheEntry` pushes the HlmsCache entry before the backend
+creates the PSO. When the compile FAILS — an uncompilable property combination,
+a driver rejecting the generated source — the entry stays in `mShaderCache`
+with a default-constructed `HlmsPso`: `macroblock` and `blendblock` are null.
+
+`HlmsDiskCache::Pso`'s constructor dereferences both unconditionally
+(`macroblock( *srcPsoCache->pso.macroblock )`), so SAVING the disk cache after
+any failed compile is a SIGSEGV at address 0 inside
+`HlmsDiskCache::Pso::Pso` / `HlmsDiskCache::copyFrom` — the process dies over a
+shader that had merely failed to compile, which is a recoverable condition
+everywhere else in the engine.
+
+Measured: a PBS pixel shader generated against an inconsistent shadow-node
+light count ("'hlms_shadowmap3' : undeclared identifier") left such an entry,
+and the app's periodic shader-cache save crashed on the next tick.
+
+THE FIX: skip an entry with no PSO and log it loudly (LML_CRITICAL names the
+hash). The cache is still saved, without the entry that has nothing to save; a
+compile failure degrades instead of killing the process.
+
+diff --git a/OgreMain/src/OgreHlmsDiskCache.cpp b/OgreMain/src/OgreHlmsDiskCache.cpp
+index 93ca8f9fe..2e9306339 100644
+--- a/OgreMain/src/OgreHlmsDiskCache.cpp
++++ b/OgreMain/src/OgreHlmsDiskCache.cpp
+@@ -189,6 +189,26 @@ namespace Ogre
+                     }
+                 }
+ 
++                // A SHADER THAT FAILED TO COMPILE LEAVES AN ENTRY WITH NO PSO
++                // (Jahshaka). Hlms::createShaderCacheEntry adds the cache entry
++                // before the backend builds the PSO, so when the compile throws
++                // (a bad property combination, a driver rejecting the source)
++                // the entry survives with a default-constructed HlmsPso whose
++                // macroblock and blendblock are null — and this copy
++                // dereferences both. Saving the disk cache then crashed the
++                // process over a shader that had merely failed: skip the entry
++                // and say so, once per cache copy.
++                if( bCacheable && ( !( *itor )->pso.macroblock || !( *itor )->pso.blendblock ) )
++                {
++                    bCacheable = false;
++                    LogManager::getSingleton().logMessage(
++                        "HlmsDiskCache: skipping shader cache entry " +
++                            StringConverter::toString( ( *itor )->hash ) +
++                            " - it has no PSO (its shader failed to compile). The disk cache will "
++                            "be saved without it.",
++                        LML_CRITICAL );
++                }
++
+                 if( bCacheable )
+                 {
+                     Pso pso( hlms->mRenderableCache[renderableIdx], hlms->mPassCache[passIdx], *itor );

@@ -1,0 +1,64 @@
+From: Jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] CompositorShadowNode: fixing a light to a shadow map invalidates the cached light-list build
+
+WHY (Jahshaka lane E2, the lamp-map cache, 2026-09-12 — measured)
+
+`CompositorShadowNode::buildClosestLightList` rebuilds a node's light list at
+most once per (camera, compositor frame): `mLastCamera == newCamera &&
+mLastFrame == currentFrameCount` returns early. That build is the ONLY place
+`mNumActiveShadowMapCastingLights` is computed.
+
+`setLightFixedToShadowMap` writes `mShadowMapCastingLights[lightIdx]` without
+touching that count. Upstream's own use (the StaticShadowMaps sample) fixes its
+lights once, before anything renders, so the two are never out of step. A host
+that re-assigns fixed lights PER FRAME — a lamp-map cache — is out of step for
+every pass that runs between the assignment and the node's next build, and such
+a pass exists whenever a reflection probe captures in the same compositor frame
+in which the node last built (Ogre's PCC captures from outside the render
+phase, so the frame counter has not advanced).
+
+The two disagreeing numbers are both read by Hlms in the same pass:
+
+  * `hlms_num_shadow_map_lights` = getNumActiveShadowCastingLights() +
+    (pssmSplits - 1)                                  [OgreHlms.cpp:3269-3273]
+  * the pass's shadow-casting light counts per type, walked straight off
+    `getShadowCastingLights()`                        [OgreHlms.cpp:3493-3505]
+
+Measured on a probe capture: declared = 3, needed = 4, nodeActive = 1,
+held = [dynamic directional][static spot][empty]. The shader falls out of the
+static-branching path and references `hlms_shadowmap3` against three declared
+maps: "'hlms_shadowmap3' : undeclared identifier", the PBS pixel shader does not
+compile, and on a cold shader cache the null cache entry that leaves behind
+crashes HlmsDiskCache::Pso when the disk cache is saved.
+
+THE FIX: dropping the cached camera makes the next `buildClosestLightList`
+rebuild, which is the only place the count can be brought back in step with the
+array. Costs one extra light-list build after an assignment CHANGES (nothing at
+rest — the host only calls this when the slot's lamp really changed) and is a
+no-op for upstream's own usage, which fixes its lights before the first frame.
+
+diff --git a/OgreMain/src/Compositor/OgreCompositorShadowNode.cpp b/OgreMain/src/Compositor/OgreCompositorShadowNode.cpp
+index 911e768d9..50efc8f74 100644
+--- a/OgreMain/src/Compositor/OgreCompositorShadowNode.cpp
++++ b/OgreMain/src/Compositor/OgreCompositorShadowNode.cpp
+@@ -924,6 +924,20 @@ namespace Ogre
+         mShadowMapCastingLights[lightIdx].light = light;
+         mShadowMapCastingLights[lightIdx].isStatic = light != 0;
+         mShadowMapCastingLights[lightIdx].isDirty = true;
++
++        // THE CACHED BUILD NO LONGER DESCRIBES THIS NODE (Jahshaka).
++        // buildClosestLightList rebuilds at most once per (camera, compositor
++        // frame) and it is what computes mNumActiveShadowMapCastingLights.
++        // Hlms declares hlms_num_shadow_map_lights from that COUNT
++        // (OgreHlms.cpp:3269) but counts the pass's shadow-casting lights from
++        // THIS ARRAY (OgreHlms.cpp:3493-3505), so a light fixed after the node
++        // has already built for the current frame makes the two disagree: the
++        // generated PBS shader then references hlms_shadowmap<N> beyond what it
++        // declared and fails to compile. Dropping the cached camera forces the
++        // next build, which is the only place the count can be brought back in
++        // step.
++        mLastCamera = 0;
++        mLastFrame = std::numeric_limits<size_t>::max();
+     }
+     //-----------------------------------------------------------------------------------
+     void CompositorShadowNode::setStaticShadowMapDirty( size_t shadowMapIdx, bool includeLinked )
