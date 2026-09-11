@@ -5070,7 +5070,7 @@ bool SceneMirror::buildEquirectCubeFaces(const QImage &equirect, TextureId ids[6
     for (int i = 0; i < 6; ++i) ids[i] = 0;
     if (equirect.isNull() || !mTarget) return false;
 
-    const int N = 128;   // reflection cube face size; the engine mips it further
+    const int N = 128;   // reflection cube face size; the engine box-filters its mip chain (buildCubeFromWorldFaces host chain, 2026-09-11)
     // Box-filter the source down to ~4 texels per face texel before sampling:
     // point-sampling a 4K equirect into 128^2 faces throws away 99.9% of it.
     const QImage src = boxDownscaleTo(equirect.convertToFormat(QImage::Format_RGBA8888), N * 4);

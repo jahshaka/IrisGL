@@ -8,6 +8,7 @@
 // turns the interpolated camera direction into a lat-long or cube lookup: no
 // mesh, no datablock, no per-frame node work, and correct in every view that
 // shares the scene (Ogre feeds the rectangle each camera's corner rays).
+#include <vector>
 #include "EnginePrivate.h"
 
 #include <OgreMaterial.h>
@@ -308,8 +309,26 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
         Ogre::TextureFlags::ManualTexture | extraFlags, Ogre::TextureTypes::TypeCube);
     cube->setResolution(w, h, 6u);
     cube->setPixelFormat(pf);
-    cube->setNumMipmaps(mips ? Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h) : 1u);
+    // THE MIP CHAIN MUST BE WRITTEN BY SOMEBODY (2026-09-11, the reflection_map
+    // two-state defect). A caller that passes AllowAutomipmaps gets its chain
+    // generated later (the sky passes, the IBL convolution); a HOST cube (the
+    // per-material reflection override via createCubemap) had a full chain
+    // allocated and only mip 0 uploaded — mips 1..N held whatever VRAM the
+    // allocator handed back, and HlmsPbs samples a rough reflection at
+    // LOD = roughness x envMapNumMipmaps x 1.95, i.e. mostly those unwritten
+    // mips: a different garbage picture per allocation history (cold vs warm
+    // texture cache), found by scripting.e2e.reflection_map redding in every
+    // gate. A host cube now gets its chain box-filtered on the CPU below; a
+    // format we cannot filter (not 4 bytes per texel) gets ONE mip — never an
+    // unwritten level.
+    const bool hostChain = mips && !(extraFlags & Ogre::TextureFlags::AllowAutomipmaps);
+    const bool filterable = bpp == 4u;
+    const bool withMips = mips && (!hostChain || filterable);
+    cube->setNumMipmaps(withMips ? Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h) : 1u);
     cube->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    const bool buildChain = hostChain && filterable;
+    std::vector<Ogre::uint8> faces;   // the six flipped faces, for the host chain
+    if (buildChain) faces.resize(size_t(w) * h * bpp * 6u);
 
     // ONE staging texture for all six slices, one upload: six separate
     // getStagingTexture/upload/removeStagingTexture rounds inside a single frame
@@ -346,6 +365,8 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
                 for (Ogre::uint32 x = 0; x < w; ++x)
                     std::memcpy(out + size_t(x) * bpp, in + size_t(w - 1u - x) * bpp, bpp);
             }
+            if (buildChain)
+                std::memcpy(&faces[((size_t(dstFace) * h) + y) * size_t(w) * bpp], out, size_t(w) * bpp);
         }
         ticket->unmap();
         tm->destroyAsyncTextureTicket(ticket);
@@ -353,6 +374,49 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
     staging->stopMapRegion();
     staging->upload(dst, cube, 0, nullptr, nullptr, true);
     tm->removeStagingTexture(staging);
+
+    // The host chain: a 2x2 box filter per level, all six faces per upload
+    // (one staging texture per level, like mip 0). Values are filtered as
+    // stored; for an sRGB format that is a filter in encoded space — the same
+    // approximation Ogre's own automipmap blit makes, and far closer to right
+    // than an unwritten level.
+    if (buildChain) {
+        std::vector<Ogre::uint8> next;
+        Ogre::uint32 cw = w, ch = h;
+        for (Ogre::uint8 mip = 1; mip < cube->getNumMipmaps(); ++mip) {
+            const Ogre::uint32 nw = std::max(1u, cw / 2u), nh = std::max(1u, ch / 2u);
+            next.assign(size_t(nw) * nh * 4u * 6u, 0);
+            for (int f = 0; f < 6; ++f) {
+                const Ogre::uint8 *src = &faces[size_t(f) * ch * cw * 4u];
+                Ogre::uint8 *dstPx = &next[size_t(f) * nh * nw * 4u];
+                for (Ogre::uint32 y = 0; y < nh; ++y) {
+                    const Ogre::uint32 y0 = std::min(y * 2u, ch - 1u), y1 = std::min(y * 2u + 1u, ch - 1u);
+                    for (Ogre::uint32 x = 0; x < nw; ++x) {
+                        const Ogre::uint32 x0 = std::min(x * 2u, cw - 1u), x1 = std::min(x * 2u + 1u, cw - 1u);
+                        for (int c = 0; c < 4; ++c) {
+                            const unsigned sum = src[(size_t(y0) * cw + x0) * 4u + c] +
+                                                 src[(size_t(y0) * cw + x1) * 4u + c] +
+                                                 src[(size_t(y1) * cw + x0) * 4u + c] +
+                                                 src[(size_t(y1) * cw + x1) * 4u + c];
+                            dstPx[(size_t(y) * nw + x) * 4u + c] = Ogre::uint8((sum + 2u) / 4u);
+                        }
+                    }
+                }
+            }
+            Ogre::StagingTexture *st = tm->getStagingTexture(nw, nh, 1u, 6u, pf);
+            st->startMapRegion();
+            Ogre::TextureBox box = st->mapRegion(nw, nh, 1u, 6u, pf);
+            for (int f = 0; f < 6; ++f)
+                for (Ogre::uint32 y = 0; y < nh; ++y)
+                    std::memcpy(box.at(0, y, size_t(f)), &next[((size_t(f) * nh) + y) * nw * 4u],
+                                size_t(nw) * 4u);
+            st->stopMapRegion();
+            st->upload(box, cube, mip, nullptr, nullptr, true);
+            tm->removeStagingTexture(st);
+            faces.swap(next);
+            cw = nw; ch = nh;
+        }
+    }
     return cube;
 }
 
