@@ -897,11 +897,25 @@ void OgreEngine::applyShadowCache() {
         // rebuilt from scratch — so a two-way switch would turn a script
         // toggling a scene's only lamp into a multi-second hitch per toggle.
         // The quads over an idle atlas cost next to nothing by comparison.
+        //
+        // Only a scene that HAS a shadow-node instance counts: a preview drawn
+        // with shadows off (the Materials page's sphere, lit by a key and a
+        // shadow-casting fill) has nothing to cache, and flipping the whole
+        // process's atlas for it was a needless rebuild of every shadowed arm.
         if (!mShadowPerMapClears) {
             std::vector<OgreScene *> scenes;
             scenesFeedingEnabledViews(scenes);
             bool anyLamp = false;
-            for (OgreScene *s : scenes) if (s->hasCacheableShadowLights()) { anyLamp = true; break; }
+            for (OgreScene *s : scenes) {
+                if (!s->hasCacheableShadowLights()) continue;
+                bool shadowed = false;
+                for (auto &v : mViews)
+                    if (v->ogreScene() == s && v->shadowNodeInstance()) { shadowed = true; break; }
+                std::vector<Ogre::CompositorWorkspace *> ws;
+                s->shadowWorkspaces(ShadowNodeKind::Reflect, ws);
+                s->shadowWorkspaces(ShadowNodeKind::Probe, ws);
+                if (shadowed || !ws.empty()) { anyLamp = true; break; }
+            }
             if (anyLamp) rebuildShadowAtlas(mShadowResolution, mShadowMapCount, true);
         }
 
@@ -987,8 +1001,6 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
 
         // ---- detection per scene, application per instance ----------------
         for (OgreScene *s : drawn) {
-            OgreScene::ShadowCacheFrame f;
-            s->collectShadowCacheFrame(f);
             struct Instance { Ogre::CompositorShadowNode *node; ShadowNodeKind kind; };
             std::vector<Instance> instances;
             // EVERY view of the scene, enabled or not: a disabled view keeps its
@@ -1005,6 +1017,12 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                     if (Ogre::CompositorShadowNode *n = w->findShadowNode(shadowNodeNameOf(ShadowNodeKind(k))))
                         instances.push_back({ n, ShadowNodeKind(k) });
             }
+            // Nothing draws this scene's shadows (a preview with shadows off):
+            // nothing to cache, so no scan either. A node that appears later is
+            // new, and a new assignment renders its maps regardless.
+            if (instances.empty()) continue;
+            OgreScene::ShadowCacheFrame f;
+            s->collectShadowCacheFrame(f);
             for (const Instance &in : instances) {
                 const unsigned k = unsigned(in.kind);
                 const Ogre::LightClosestArray &held = in.node->getShadowCastingLights();

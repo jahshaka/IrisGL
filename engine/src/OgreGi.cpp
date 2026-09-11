@@ -625,6 +625,20 @@ void OgreScene::staleProbeGrid(GiStaleReason why) {
 // buildEnd each run updateAllDirtyProbes), bypassing the flags, so it reports
 // its own count through mPlacementCapturesThisFrame.
 void OgreScene::latchProbeCaptures(bool drawn) {
+    // A SCENE NOTHING DRAWS THIS FRAME CAPTURES NO PROBES. Ogre's automatic PCC
+    // captures from its own frame listener (allWorkspacesBeginUpdate) for every
+    // scene in the process, but only the scenes an enabled view draws get
+    // updateSceneGraph — so an undrawn scene's probe would render against a
+    // light list and transforms from whenever it was last drawn. Measured (E2,
+    // 2026-09-12): after a GI rebuild of the off-screen editor scene, the
+    // placement's own updateAllDirtyProbes ends in clearFrameData, a same-frame
+    // capture's shadow node early-outs with the sun still in its slot 0, and
+    // the pass is hashed as "one directional caster, zero lights" — a PBS
+    // shader that cannot compile ('lights' : no such field in 'passBuf'), and
+    // the shader-cache save then crashed on the broken PSO. Paused, the probes
+    // wait for the frame the scene is drawn again; nothing else is gated by
+    // mPaused (the rebuild's own placement runs updateAllDirtyProbes directly).
+    if (mPcc) mPcc->mPaused = !drawn;
     int captures = mPlacementCapturesThisFrame;
     mPlacementCapturesThisFrame = 0;
     if (drawn && mPcc) {
