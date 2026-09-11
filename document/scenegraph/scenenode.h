@@ -540,15 +540,6 @@ public:
 
 	void setVisible(bool flag = true);
 
-    /// Sets the OWN flag, and with `cascade` every descendant's OWN flag too —
-    /// which erases any child the user had hidden itself. The renderer does
-    /// not need a cascade (it follows isVisibleInScene). RECORDED DEBT: the
-    /// outliner's eye still walks its rows calling these on every descendant
-    /// (SceneHierarchyWidget::hide/showItemAndChildren), so on that path the
-    /// document's own flags are rewritten before the renderer ever sees them.
-    void show(bool cascade = false);
-    void hide(bool cascade = false);
-
     /// EFFECTIVE VISIBILITY (RENDER_PIPELINE_AUDIT 1.1/1.2): true iff this node
     /// AND every ancestor up to the root are visible. The one rule every
     /// consumer applies — the mirror pushes exactly this to the engine, picking

@@ -219,24 +219,6 @@ void SceneNode::setVisible(bool flag)
     notifyChanged(NodeChange::Visibility);
 }
 
-void SceneNode::show(bool cascade)
-{
-    setVisible(true);
-    if (cascade) {
-        const int n = childCount();
-        for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->show(cascade);
-    }
-}
-
-void SceneNode::hide(bool cascade)
-{
-    setVisible(false);
-    if (cascade) {
-        const int n = childCount();
-        for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->hide(cascade);
-    }
-}
-
 bool SceneNode::isVisibleInScene() const
 {
     // Raw handles up the chain — no QSharedPointer per level. parentOf answers
