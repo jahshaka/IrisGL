@@ -1490,6 +1490,9 @@ OgreEngine::~OgreEngine() {
     // THIS Root; a second Engine in the same process (test_engine_recreate)
     // would otherwise inherit stale masters and slice textures.
     detail::resetDecalAtlases();
+    // ...and the same for the cross-scene file-texture references: every scene
+    // above released its own, so this is empty on a clean teardown.
+    detail::resetSharedTextures();
     // Both log listeners are registered on Ogre's default log, which Root owns.
     mShaderCache.detachCounters();
     detachLogBridge();
