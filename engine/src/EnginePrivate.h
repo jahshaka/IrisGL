@@ -1615,6 +1615,7 @@ public:
     bool setGiDynamicProbes(int extraPerFrame) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
+    bool reassertGiBinding() override;
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
     bool refreshGiLighting() override;
@@ -1715,6 +1716,10 @@ private:
         /// "static" lives in the compositor shadow node, per workspace, and
         /// this is the engine's own memory of what the host asked for.
         bool             lightShadowStatic = false;
+        /// A hash of the LightDesc fields a reflection-probe capture can see
+        /// (ENGINE_CACHE_POLICY_SPEC P7), so setLight stales the probe grid on
+        /// a real parameter change only; 0 = no light pushed yet.
+        unsigned long long lightProbeKey = 0;
         Ogre::SceneNode *lightNode = nullptr;   // internal child: -Y (document) -> -Z (Ogre)
         // What is CURRENTLY assigned to `light`, so the per-frame setLight can
         // do nothing when nothing changed. Both assignments are expensive the
@@ -2260,6 +2265,11 @@ public:
     void addObjectCounts(ObjectCounts &out) const;
     /// Called by Engine::renderOneFrame before rendering.
     void applyPendingGi();
+    /// Called by Engine::renderOneFrame once the frame's GI work is decided and
+    /// before it renders: records how many probes this frame re-captures
+    /// (GiStatus::probeCapturesLastFrame). `drawn` = a View draws this scene
+    /// this frame (an undrawn scene's dirty probes do not render).
+    void latchProbeCaptures(bool drawn);
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
     void updateGiTracking(const Ogre::Vector3 &camPos);
@@ -2338,10 +2348,32 @@ private:
     /// which costs one Forward+ shader recompile, so it is deliberately
     /// quantised and monotonic.
     bool ensureCubemapProbeSlots(size_t probeCount);
-    /// Spends this frame's probe-update budget: picks the probes to re-capture
-    /// and raises `mDirty` on them (FIX WAVE B2). Called from updateGiTracking
-    /// with the AUTHORITATIVE camera position; a no-op at budget 0.
+    /// Spends this frame's probe-update budget on STALE probes only: picks the
+    /// highest-priority stale probes and raises `mDirty` on them (FIX WAVE B2;
+    /// ENGINE_CACHE_POLICY_SPEC P1 — a grid with nothing stale spends nothing).
+    /// Called from updateGiTracking with the AUTHORITATIVE camera position; a
+    /// no-op at budget 0.
     void updateProbeBudget(const Ogre::Vector3 &camPos);
+    /// Marks every probe of the grid stale — owed a capture the budget will
+    /// spend over the next frames — and records why (P1/P6/P7). Cheap: flags
+    /// only; nothing renders here. A no-op without a probe grid.
+    void staleProbeGrid(GiStaleReason why);
+    /// P7 hooks: does any item that probes (kVisibleBit) or the voxelizer
+    /// (kGiGeometryBit) can see use this material?
+    bool materialSeenByGi(MaterialId id, bool &voxelized) const;
+    /// P7, materials: a visible material changed — stale the probes and, when
+    /// the change reaches the voxelizer's conversion, bump the material
+    /// generation (see mGiMaterialGeneration).
+    void noteMaterialChanged(MaterialId id, bool voxelInputsChanged);
+    /// P6/P7: the reuse arm's variant for a MATERIAL change — a fresh voxelizer
+    /// and lighting (VctMaterial's by-pointer cache must go) under the SAME
+    /// probe grid, whose shapes a material edit cannot move. Returns false
+    /// when it could not build (the caller falls back to rebuildVct).
+    bool freshVoxelArm(const Ogre::Aabb &aabb);
+    /// The voxelizer + lighting half of rebuildVct, shared with freshVoxelArm:
+    /// builds mVctVoxelizer/mVctLighting over `aabb` from the live GI items.
+    /// Returns the item count (0 = nothing built, both left null).
+    size_t buildVoxelArm(const Ogre::Aabb &aabb);
     /// Refreshes mGiItemAabbs and fills mGiMovedBoxes with what moved since the
     /// last call (FIX WAVE B3, engine half). Called once per frame from
     /// updateProbeBudget; NOT from giGeometrySignature, which is stateless.
@@ -2674,6 +2706,11 @@ private:
     /// The AABBs that moved on the most recent scan (union of each mover's old
     /// and new box), in world space. Rebuilt every scan; empty when still.
     std::vector<Ogre::Aabb> mGiMovedBoxes;
+    /// A GI item was seen for the FIRST time by a scan after the first one — a
+    /// new object arrived. Not a move (the dynamic reservation ignores it, as it
+    /// always did) but it is an input the probes must see (P1): the next budget
+    /// pass stales the grid with reason Moved and clears it.
+    bool mGiItemsAppeared = false;
     /// Bumped by setBonePoses and by setClipStates when a clip's time or
     /// enable changed: a rig posed in place moves no AABB (Items keep their
     /// bind-pose bounds), so the movement scan cannot see it, and this is what
@@ -2686,6 +2723,50 @@ private:
     /// cache keys, VctMaterial's datablock-pointer cache) exactly as strong.
     unsigned long long mGiDestroyGeneration = 0;
     unsigned long long mGiBuiltGeneration   = ~0ull;   // no build yet
+    /// THE MATERIAL GENERATION (ENGINE_CACHE_POLICY_SPEC P7). Bumped when a
+    /// parameter the VOXELIZER reads (albedo, emissive, alpha, workflow, the
+    /// albedo/emissive maps) changes on a material that GI geometry uses.
+    /// VctMaterial converts each datablock ONCE and caches the result by
+    /// pointer for the voxelizer's lifetime (OgreVctMaterial.cpp addDatablock:
+    /// a cache hit never re-reads the colour), so the reuse arm would re-voxelize
+    /// the OLD albedo for ever. refreshVctFast compares the generation it built
+    /// the voxel arm at and, when it moved, builds a FRESH voxelizer and
+    /// lighting under the probes it keeps (freshVoxelArm). Folded into
+    /// giGeometrySignature, so the host's debounce coalesces a slider drag into
+    /// one re-voxelize when it stops, exactly like a moved object.
+    unsigned long long mGiMaterialGeneration      = 0;
+    unsigned long long mGiBuiltMaterialGeneration = 0;
+    /// THE PROBE CACHE's bookkeeping (ENGINE_CACHE_POLICY_SPEC P1). See
+    /// staleProbeGrid and GiStatus: why the grid was last staled, a serial per
+    /// stale event, the captures the last rendered frame actually made, the
+    /// captures a from-scratch placement made this frame (they bypass mDirty),
+    /// and how many from-scratch builds the scene has had.
+    GiStaleReason      mLastStaleReason = GiStaleReason::None;
+    unsigned long long mStaleSerial = 0;
+    int                mProbeCapturesLastFrame = 0;
+    int                mPlacementCapturesThisFrame = 0;
+    unsigned long long mGiRebuilds = 0;
+    /// The PCC/VCT trust window buildPcc bound the grid with, so a binding
+    /// re-assert (P10) re-binds with the same numbers without re-deriving them.
+    float mPccBindMinDist = 0.0f, mPccBindMaxDist = 0.0f;
+    /// "Time-varying content changed this frame" (spec D4 option A): set by a
+    /// live-texture upload into a material in use and by a shader-clock advance
+    /// with a clock-driven material in use; consumed (and cleared) by
+    /// updateProbeBudget, which keeps the budgeted sweep running while it is.
+    bool               mTimeVaryingThisFrame = false;
+    /// Live PFX2 particle-system instances in this scene (maintained where
+    /// they are created and destroyed), so the probe sweep's per-frame
+    /// "is a visible particle system simulating?" walk runs only when one can.
+    unsigned           mLiveParticleSystems = 0;
+    /// The rig-pose epoch the probe sweep last saw (a character posing in place
+    /// moves no AABB, so the movement scan cannot see it).
+    unsigned long long mProbeRigEpochSeen = 0;
+    /// The last ambient SH and fog the scene was given, so a host re-push of the
+    /// same value (every page return drops the host's own latch) stales nothing.
+    float   mLastAmbientSh[27] = {};
+    bool    mAmbientShKnown = false;
+    FogDesc mLastFogDesc;
+    bool    mFogDescKnown = false;
     /// The NodeIds handed to the live VctVoxelizer, so the reuse arm can add the
     /// items created since the build. Cleared with the arm.
     std::vector<NodeId> mVctItemIds;

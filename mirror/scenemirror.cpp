@@ -154,6 +154,23 @@ quint64 worldTrsSignatureMemo(iris::graph::NodeHandle h,
     return sig;
 }
 
+/// THE LIGHT'S GI PARAMETERS as a change key (ENGINE_CACHE_POLICY_SPEC P7).
+/// Folded into the GI light signature beside the light's transform: VCT
+/// injects each light's colour x intensity over its reach and cone, so a
+/// colour, intensity, range, type, spot or area-shape edit stales the voxel
+/// solve exactly as moving the light does. Before this the signature hashed
+/// TRS only, and such an edit never reached the bounce at all (nor, once the
+/// endless probe sweep went, the reflections). The same debounce then applies:
+/// a slider drag re-injects on the cheap cadence and re-solves once on release.
+quint64 lightGiParamSignature(const iris::LightNode *l)
+{
+    Hasher h;
+    h << int(l->lightType) << l->color.rgba() << l->intensity << l->iesNormalisation
+      << l->distance << l->spotCutOff << l->spotCutOffSoftness << l->spotFalloff
+      << l->rectWidth << l->rectHeight << l->doubleSided << l->accurate;
+    return h.h;
+}
+
 }   // namespace
 
 SceneMirror::SceneMirror(Scene *target) : mTarget(target)
@@ -4052,7 +4069,15 @@ void SceneMirror::invalidateEnvironment()
     mAmbientPushed = false;
     mLastAmbientWasSky = false;
     mFogPushed = false;
-    mGiPushed = false;
+    // GI IS NOT RE-PUSHED (ENGINE_CACHE_POLICY_SPEC P10). The GI latch used to
+    // be dropped here too, and the re-push that followed is a from-scratch
+    // rebuild in the engine — voxels, the whole probe grid, the irradiance
+    // field — on every page return: 2.1-2.9 s of blocked UI in the owner's log
+    // after "materials -> editor". What a re-take actually needs is the
+    // process-wide HlmsPbs binding pointed back at THIS scene's arms, which are
+    // still valid; the next applyEnvironment asks the engine for exactly that
+    // (Scene::reassertGiBinding) and nothing more.
+    mGiReassertPending = true;
 }
 
 // CAMERA_LENS_SPEC §4/§5. Defined beside applyCamera, where the whole model is
@@ -4405,14 +4430,20 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // of world matrices is blind to two lights swapping pure-translation
         // transforms, because translation matrices commute. A per-light hash
         // folded in scene order is not.)
+        // ...and, since ENGINE_CACHE_POLICY_SPEC P7, each light's GI PARAMETERS
+        // beside its transform (lightGiParamSignature says why).
         quint64 lightSig = 0;
         if (driver) {
-            lightSig = worldTrsSignature(driver->graphNode());
+            Hasher h;
+            h << worldTrsSignature(driver->graphNode()) << lightGiParamSignature(driver);
+            lightSig = h.h;
         } else if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
             mGiChainMemo.clear();          // capacity kept; contents are per call
             Hasher h;
             for (const auto &l : mSource->lights)
-                if (!l.isNull()) h << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo);
+                if (!l.isNull())
+                    h << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo)
+                      << lightGiParamSignature(l.data());
             lightSig = h.h;
         }
         // ---- RE-FIT ON EXIT (LIGHTING_FIX fix 2) ---------------------------
@@ -4482,6 +4513,13 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // A dynamicProbes-ONLY change takes the cheap path (code review
         // 2026-09-10): the full push re-voxelizes and re-captures every probe,
         // and the Advanced slider emits per drag tick.
+        // A screen re-take (invalidateEnvironment): point the process-wide GI
+        // binding back at this scene's arms. Before any push below, which — if
+        // the parameters did change meanwhile — rebuilds and binds anyway.
+        if (mGiReassertPending) {
+            mGiReassertPending = false;
+            if (mGiPushed) mTarget->reassertGiBinding();
+        }
         GiParams onlyDynamic = gi;
         onlyDynamic.dynamicProbes = mLastGi.dynamicProbes;
         if (mGiPushed && gi != mLastGi && onlyDynamic == mLastGi) {

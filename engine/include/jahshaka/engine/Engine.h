@@ -640,6 +640,23 @@ public:
     /// without this nothing, not even a pixel test, could tell the difference.
     /// Cheap: reads live pointers, renders nothing.
     virtual GiStatus    giStatus() const = 0;
+    /// "THIS SCENE IS ON SCREEN AGAIN" — re-points the process-wide HlmsPbs GI
+    /// binding (voxel lighting, reflection-probe grid, irradiance field) at
+    /// this scene's own arms, WITHOUT rebuilding anything
+    /// (ENGINE_CACHE_POLICY_SPEC §2 P10).
+    ///
+    /// The binding is "last scene to build wins" (OgreGi.cpp), so when the
+    /// player page builds its own GI and the editor comes back, the editor's
+    /// scene would render with the player's voxels and probes. The host used to
+    /// answer that by re-pushing setGlobalIllumination, which rebuilds the whole
+    /// arm from scratch — 2-3 s of blocked UI on every page return. This is the
+    /// whole of what a page return needs: the arms this scene already built are
+    /// still valid, only the pointer the shader reads is not.
+    ///
+    /// A scene with no arm of a kind unbinds that kind (another scene's probes
+    /// must not light this one). A no-op, returning false, when this scene
+    /// already owns the binding; true when it re-pointed anything.
+    virtual bool        reassertGiBinding() = 0;
 
     /// "SOMETHING A STATIC SHADOW MAP CAN SEE HAS CHANGED" — re-render this
     /// scene's static shadow maps on the next frame

@@ -128,6 +128,11 @@ public:
     /// one coming back would otherwise decide it had already pushed and leave the
     /// other's binding in place. Call this whenever a mirror (re)takes the
     /// screen — EngineSceneViewport::begin(), EnginePlayerScene::begin().
+    ///
+    /// GI is the exception (ENGINE_CACHE_POLICY_SPEC P10): it is NOT re-pushed —
+    /// a GI push is a from-scratch rebuild — the next applyEnvironment calls
+    /// Scene::reassertGiBinding instead, which re-points the binding at this
+    /// scene's still-valid arms and rebuilds nothing.
     void invalidateEnvironment();
 
     /// How many times applyEnvironment has pushed a NEW GI configuration
@@ -1243,6 +1248,9 @@ private:
     // applyEnvironment only re-pushes on change and re-traces on light movement.
     jahshaka::engine::GiParams mLastGi;
     bool mGiPushed = false;
+    /// Set by invalidateEnvironment: the next applyEnvironment re-asserts the
+    /// process-wide GI binding for this scene instead of re-pushing (P10).
+    bool mGiReassertPending = false;
     /// The GI-driving light transform(s), as a CHANGE KEY rather than a
     /// matrix — see the signature's derivation in applyEnvironment (audit F8).
     quint64 mGiLightSignature = 0;

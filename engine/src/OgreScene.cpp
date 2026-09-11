@@ -117,6 +117,15 @@ void OgreScene::applyVctAmbient() {
 }
 
 void OgreScene::setAmbientSh(const float sh[27]) {
+    // THE PROBE CACHE'S AMBIENT INPUT (ENGINE_CACHE_POLICY_SPEC P7): a probe
+    // capture is lit by it. Compared by value, because the host re-pushes the
+    // ambient every time a page takes the screen back and that must cost no
+    // re-capture. (setAmbient funnels through here, so both are covered.)
+    if (!mAmbientShKnown || std::memcmp(sh, mLastAmbientSh, sizeof mLastAmbientSh) != 0) {
+        std::memcpy(mLastAmbientSh, sh, sizeof mLastAmbientSh);
+        mAmbientShKnown = true;
+        staleProbeGrid(GiStaleReason::Ambient);          // a no-op before a grid exists
+    }
     JAH_TRY {
         // HlmsPbs does NOT evaluate the SH basis on the world normal. It uses
         //     wsNormal = mul( passBuf.invViewMatCubemap, normal ); wsNormal.x = -wsNormal.x;
@@ -576,6 +585,34 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         // picture.
         n.lightShadowStatic = d.shadowStatic;
         dirtyStaticShadows();
+        // THE PROBE CACHE'S LIGHT INPUT (ENGINE_CACHE_POLICY_SPEC P7). A probe
+        // capture is a lit render, so a light's colour, intensity, reach, cone,
+        // shape, shadowing and channels all change what every probe would hold
+        // — and a NEW light is the same statement. Keyed on exactly those
+        // fields (not on the call: the static-map flag above is not one of
+        // them, and a direct caller may push the same description twice). The
+        // VOXEL half of the same edit is the host's: its GI signature hashes
+        // these parameters too, so the voxels re-inject on the drag cadence and
+        // re-solve once on settle.
+        {
+            unsigned long long k = 1469598103934665603ull;      // FNV-1a
+            const auto foldBits = [&k](const void *p, size_t n) {
+                const unsigned char *b = static_cast<const unsigned char *>(p);
+                for (size_t i = 0; i < n; ++i) { k ^= b[i]; k *= 1099511628211ull; }
+            };
+            const auto fold = [&](const auto &v) { foldBits(&v, sizeof v); };
+            fold(int(d.type)); fold(d.colour.r); fold(d.colour.g); fold(d.colour.b);
+            fold(d.intensity); fold(d.range); fold(d.spotAngleDegrees); fold(d.spotSoftness);
+            fold(d.spotFalloff); fold(d.castShadows); fold(d.rectWidth); fold(d.rectHeight);
+            fold(d.doubleSided); fold(d.accurate); fold(d.lightMask);
+            foldBits(d.iesProfilePath.data(), d.iesProfilePath.size());
+            foldBits(d.texturePath.data(), d.texturePath.size());
+            if (k == 0ull) k = 1ull;                             // 0 means "never pushed"
+            if (k != n.lightProbeKey) {
+                n.lightProbeKey = k;
+                staleProbeGrid(GiStaleReason::Light);
+            }
+        }
         // Lights shine down their node's -Y once attached (document convention).
         return true;
     } JAH_CATCH(mError, false);

@@ -1339,6 +1339,32 @@ enum class GiToggle { Auto, Off, On };
 /// opt-in under the Advanced disclosure, never a default.
 enum class GiSource { Auto, Voxel, Raster };
 
+/// WHY THE REFLECTION-PROBE GRID WAS LAST MARKED STALE (ENGINE_CACHE_POLICY_SPEC
+/// §2 P1/P7) — GiStatus::lastStaleReason.
+///
+/// The probes are a CACHE: captured once, reused every frame, and re-captured
+/// only when one of their inputs changes. Every input that can change what a
+/// probe would capture marks the grid stale with its reason, and the per-frame
+/// update budget spends itself on stale probes only — so a still scene
+/// re-captures nothing at all. This names the input, so "why is the sweep
+/// running?" is a reading rather than a guess.
+///
+///   `Rebuild`   a from-scratch build placed a fresh grid (mode, quality, grid,
+///               bounds, anything destroyed) — every probe owes a capture
+///   `Refresh`   a GI re-solve (the mirror's settle after a drag, or
+///               world.refreshGi()) — the voxels moved under the probes
+///   `Moved`     GI geometry moved or appeared (the movement scan)
+///   `Light`     a light was added or one of its parameters changed
+///   `Material`  a material parameter or texture used by visible geometry changed
+///   `Sky`       the sky or its reflection cubemap changed
+///   `Ambient`   the ambient (flat, hemisphere or sky SH) changed
+///   `Fog`       the fog description changed
+///   `Animated`  time-varying content is live (a clock-driven material, a live
+///               texture upload, a visible particle system, a posing rig): while
+///               it is, the grid keeps today's budgeted sweep (spec D4 option A)
+///   `None`      nothing has staled the grid since the scene was created
+enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog, Animated };
+
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
     GiMode    mode    = GiMode::Off;
@@ -1425,22 +1451,28 @@ struct GiParams {
     /// `dynamicProbes` ("keep the nearest N live for ever") and the document's
     /// old giAutoRefresh flag, which were two spellings of the same question.
     ///
-    /// A RATE, not a subset. Each frame the engine dirties the `updateBudget`
-    /// highest-priority probes that still owe the current sweep an update, and
-    /// refills the sweep when it empties — so every probe in the grid re-captures
-    /// within ceil(probeCount / updateBudget) frames, whatever the priority does.
-    /// Priority (staleness x proximity to the tracked camera x covers-something-
-    /// that-just-moved) only decides the ORDER inside a sweep, which is what puts
-    /// the probes the viewer can see, and the ones the moving object is inside,
-    /// at the front of it.
+    /// A RATE, not a subset, and spent only on STALE probes (ENGINE_CACHE_POLICY_
+    /// SPEC P1, 2026-09-12): the probes are a cache. Every input that changes
+    /// what a probe would capture — a GI rebuild or re-solve, geometry moving or
+    /// appearing, a light, material, sky, ambient or fog change, time-varying
+    /// content — marks the grid stale (GiStatus::lastStaleReason names it), and
+    /// each frame the engine re-captures up to `updateBudget` of the
+    /// highest-priority stale probes. So every probe re-captures within
+    /// ceil(probeCount / updateBudget) frames OF A CHANGE, whatever the priority
+    /// does — and a still scene re-captures NOTHING (it used to re-capture one
+    /// probe every frame for ever). Priority (staleness x proximity to the
+    /// tracked camera x covers-something-that-just-moved) only decides the ORDER
+    /// of the catch-up, which is what puts the probes the viewer can see, and
+    /// the ones the moving object is inside, at the front of it.
     ///
     /// 0 = PAUSED: no probe re-captures, and the mirror stops auto-refreshing GI
     /// as well (it is the same "GI is frozen" intent). That is the pre-fix-wave
     /// shipped behaviour, kept as one switch.
     ///
-    /// 1 (the default) is a realtime editor: one probe face-set per frame,
-    /// measured at ~2.1 ms in a Debug build at Medium quality (256px faces).
-    /// Raising it buys latency at a linear cost. `GiStatus::probeUpdatesPerFrame`
+    /// 1 (the default) is a realtime editor: at most one probe face-set per
+    /// frame while anything is stale, measured at ~2.1 ms in a Debug build at
+    /// Medium quality (256px faces), and nothing at rest. Raising it buys
+    /// catch-up latency at a linear cost. `GiStatus::probeUpdatesPerFrame`
     /// reports the resolved figure (clamped to the probes that exist).
     ///
     /// LOUD CONSEQUENCE, because it changes the picture: while this is above 0
@@ -1648,8 +1680,10 @@ struct GiStatus {
     /// How many probes the renderer re-captures per frame — the RESOLVED
     /// `GiParams::updateBudget`, clamped to the probes that actually exist, and
     /// 0 whenever the probe arm did not build (FIX WAVE B1/B2). 0 in every mode
-    /// but the hybrid. Every probe still refreshes within
-    /// ceil(probeCount / this) frames; see GiParams::updateBudget.
+    /// but the hybrid. It is the CEILING a frame may spend: a stale grid
+    /// catches up within ceil(probeCount / this) frames of a change, and a
+    /// still scene spends nothing (probeCapturesLastFrame reads what was
+    /// actually spent); see GiParams::updateBudget.
     int    probeUpdatesPerFrame = 0;
     /// The RESOLVED `GiParams::dynamicProbes` — clamped to 0..8 and to the
     /// probes that exist, 0 whenever the probe arm did not build or the budget
@@ -1749,6 +1783,32 @@ struct GiStatus {
     /// and then reads Voxel while `GiParams::ddgiSource` says Raster: the same
     /// "asked for it, did not get it" reading as ifdBound.
     GiSource ifdSource = GiSource::Voxel;
+
+    // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
+    // Reflection probes are re-captured only while STALE. These say what the
+    // cache is doing, in counters rather than milliseconds: a still scene reads
+    // probeCapturesLastFrame 0 and staleProbes 0, every frame.
+
+    /// How many probes actually re-captured on the LAST rendered frame, from
+    /// every source: the budget's picks, the dynamic reservation and anything
+    /// else that marked a probe dirty — plus, on a from-scratch build, the
+    /// placement pass's own captures of the whole grid. 0 in every mode but
+    /// the hybrid.
+    int  probeCapturesLastFrame = 0;
+    /// How many probes are still stale — owe a capture the budget has not
+    /// spent yet. The grid has caught up when this reads 0; it drains at the
+    /// resolved budget per frame (probeUpdatesPerFrame).
+    int  staleProbes = 0;
+    /// The input that last marked the grid stale, and a serial that moves each
+    /// time something does (so a reader can tell two events with the same
+    /// reason apart).
+    GiStaleReason lastStaleReason = GiStaleReason::None;
+    unsigned long long staleSerial = 0;
+    /// FROM-SCRATCH GI builds (VCT/hybrid arm or an Instant Radiosity re-trace
+    /// from setGlobalIllumination or a post-destruction flush) since the scene
+    /// was created. A page return, a refresh and an idle frame must never move
+    /// it; a mode, quality, grid or bounds change and a destroyed object do.
+    unsigned long long rebuilds = 0;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

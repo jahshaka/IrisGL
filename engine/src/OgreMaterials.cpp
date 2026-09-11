@@ -595,6 +595,23 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             it->second.params.anisotropy != p.anisotropy ||
             !std::equal(std::begin(it->second.params.address), std::end(it->second.params.address),
                         std::begin(p.address));
+        // THE PROBE CACHE'S MATERIAL INPUT (ENGINE_CACHE_POLICY_SPEC P7). A
+        // parameter change on a material that visible geometry wears changes
+        // what every reflection probe would capture, so the grid goes stale
+        // (it used to be refreshed only by an endless sweep). The fields the
+        // VOXELIZER converts — diffuse, emissive, transparency (OgreVctMaterial
+        // addDatablockToBucket) — additionally move the material generation,
+        // which re-voxelizes once when the edit settles.
+        {
+            const PbrParams &o = it->second.params;
+            const auto sameCol = [](const Colour &a, const Colour &b) {
+                return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+            };
+            const bool voxelInputs = !it->second.paramsPushed ||
+                !sameCol(o.albedo, p.albedo) || !sameCol(o.emissive, p.emissive) ||
+                o.alpha != p.alpha || o.alphaMode != p.alphaMode || o.workflow != p.workflow;
+            noteMaterialChanged(id, voxelInputs);
+        }
         it->second.params = p;
         it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
@@ -832,13 +849,29 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
         // with different content — see the header comment. Also flushes the
         // material's renderables, which is what makes the new shader take.
         db->setCustomPieceFile(file, kGroup, ogrePieceStage(stage));
+        const bool pieceChanged = rec.customPiece[slot] != path;
         rec.customPiece[slot] = path;
         applyClockProperty(db, rec);
+        // A generated piece changes what the surface looks like, so it is a
+        // probe input (P7); the voxelizer never runs the piece.
+        if (pieceChanged) noteMaterialChanged(id, false);
         return true;
     } JAH_CATCH(mError, false);
 }
 
 void OgreScene::setShaderTime(float seconds) {
+    // TIME-VARYING CONTENT (ENGINE_CACHE_POLICY_SPEC D4, option A): a
+    // clock-driven material on visible geometry changes by itself as the clock
+    // advances, so while it does the probe grid keeps its budgeted sweep.
+    // Checked only when the clock actually MOVES, and only over materials with
+    // a generated piece (the only ones that read the clock).
+    if (seconds != mShaderTime && !mTimeVaryingThisFrame && mPcc) {
+        for (const auto &mk : mMaterials) {
+            if (mk.second.customPiece[0].empty() && mk.second.customPiece[1].empty()) continue;
+            bool voxelized = false;
+            if (materialSeenByGi(mk.first, voxelized)) { mTimeVaryingThisFrame = true; break; }
+        }
+    }
     mShaderTime = seconds;
     // Read by FogHlmsListener::preparePassBuffer, on the render thread, once
     // per pass. Nothing is flushed and nothing recompiles — the value lands in
@@ -1361,6 +1394,16 @@ bool OgreScene::updateTexture(TextureId id, unsigned w, unsigned h, const unsign
     }
     JAH_TRY {
         uploadRgbaLevels(rec.texture, w, h, rgba);
+        // TIME-VARYING CONTENT (D4, option A): a live texture (or a video frame)
+        // on visible geometry keeps the probe grid sweeping while it updates.
+        if (mPcc && !mTimeVaryingThisFrame) {
+            for (const auto &mk : mMaterials) {
+                bool bound = false;
+                for (TextureId t : mk.second.boundTextures) if (t == id) { bound = true; break; }
+                bool voxelized = false;
+                if (bound && materialSeenByGi(mk.first, voxelized)) { mTimeVaryingThisFrame = true; break; }
+            }
+        }
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1654,6 +1697,11 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
     // the material in hand, and the flag it reads is computed when the mesh is
     // uploaded rather than re-derived per call.
     JAH_TRY {
+        // P7: a different map on visible geometry is a probe input; an albedo
+        // or emissive map is a VOXEL input too (VctMaterial copies exactly those
+        // two into its texture pool, by TextureGpu pointer, once).
+        if (mit->second.boundTextures[size_t(slot)] != texId)
+            noteMaterialChanged(mat, slot == PbrTextureSlot::Albedo || slot == PbrTextureSlot::Emissive);
         // Remember the binding first: it is what destroyTexture undoes, what a
         // shading-model switch rebuilds from, and — on Unlit — the record of a
         // map the family cannot show but the document still owns.

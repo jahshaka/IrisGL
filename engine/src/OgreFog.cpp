@@ -237,6 +237,23 @@ void OgreScene::destroyAtmosphere() {
 }
 
 void OgreScene::setFog(const FogDesc &desc) {
+    // THE PROBE CACHE'S FOG INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
+    // faces are fogged PBS renders. Compared by value — the host re-pushes fog
+    // on every page return, and an unchanged push must cost no re-capture.
+    {
+        const FogDesc &o = mLastFogDesc;
+        const bool same = mFogDescKnown && o.enabled == desc.enabled &&
+            (!desc.enabled ||
+             (o.colour.r == desc.colour.r && o.colour.g == desc.colour.g &&
+              o.colour.b == desc.colour.b && o.density == desc.density &&
+              o.heightDensity == desc.heightDensity && o.heightFalloff == desc.heightFalloff &&
+              o.heightLevel == desc.heightLevel &&
+              o.breakMinBrightness == desc.breakMinBrightness &&
+              o.breakFalloff == desc.breakFalloff));
+        mLastFogDesc = desc;
+        mFogDescKnown = true;
+        if (!same) staleProbeGrid(GiStaleReason::Fog);   // a no-op before a grid exists
+    }
     if (!desc.enabled) {
         // Bit-exact off: no atmosphere means no hlms_fog property, which means the
         // fog code is not compiled into the shader at all. Every offscreen pixel

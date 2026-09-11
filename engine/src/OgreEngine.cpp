@@ -645,6 +645,10 @@ void OgreEngine::renderOneFrame() {
         const auto drawnThisFrame = [&updated](const OgreScene *s) {
             return std::find(updated.begin(), updated.end(), s) != updated.end();
         };
+        // THE PROBE CACHE'S FRAME COUNTER (ENGINE_CACHE_POLICY_SPEC P1): after
+        // the budget spent itself (updateGi) and any flush rebuilt (applyPendingGi),
+        // and before the frame renders the dirty probes.
+        for (auto &s : mScenes) s->latchProbeCaptures(drawnThisFrame(s.get()));
         // The refraction interlock (OgreScene::setRefractionsActive). A
         // Refractive datablock drawn by a pass that offers it no refractions
         // fails to COMPILE and loses the whole frame, and one scene can be drawn

@@ -146,6 +146,13 @@ static bool resolveToggle(GiToggle t, bool autoValue) {
 // anyway) and tight enough that a fit which escaped the room is caught.
 static const float kProbeShapeCellAllowance = 8.0f;
 
+// THE PROBE CATCH-UP RATE (ENGINE_CACHE_POLICY_SPEC D2) — how many STALE probes
+// one frame may re-capture. 0 = the tier's normal update budget (option A, the
+// shipped default: no hitch, progressive). A positive value raises the rate to
+// at least that many while probes are stale (option B was 4). The owner's
+// reflections design may move it; it is deliberately this one line.
+static const int kProbeCatchUpPerFrame = 0;
+
 // ---- DDGI (GI_UNIFIED_SPEC.md §4 P1) constants ---------------------------
 
 // HOW MANY PROBES A FIELD HAS, total. A power of two, because the per-axis
@@ -295,7 +302,8 @@ void OgreScene::refreshGlobalIllumination() {
 //     registrations stay pointed at the same textures;
 //   * items CREATED since the build are added first. Growth is safe for the same
 //     reason: a new Item cannot alias a dead one that never died;
-//   * the probes keep their shapes and are simply re-dirtied. Re-running
+//   * the probes keep their shapes and the grid is marked STALE — re-captured
+//     under the budget over the next frames (P6), never all at once. Re-running
 //     PccPerPixelGridPlacement would mean `setEnabled(false)`/`setEnabled(true)`
 //     — destroying and recreating every probe, its workspace and the cube array
 //     — plus six face renders per probe and a GPU readback, which is the bulk of
@@ -333,29 +341,37 @@ bool OgreScene::refreshVctFast() {
     }
 
     JAH_TRY {
-        // Items born since the build. Nothing can have DIED (the generation says
-        // so), so the voxelizer's item list only ever grows on this path.
-        for (auto &kv : mNodes) {
-            Ogre::Item *item = kv.second.item;
-            if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-            if (std::find(mVctItemIds.begin(), mVctItemIds.end(), kv.first) != mVctItemIds.end())
-                continue;
-            mVctVoxelizer->addItem(item, false);
-            mVctItemIds.push_back(kv.first);
+        // A MATERIAL the voxelizer converted has changed since it was built
+        // (P7): its VctMaterial cache would re-voxelize the old colour, so the
+        // voxel half is rebuilt fresh — under the SAME probe grid.
+        const bool freshVoxels = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
+        if (freshVoxels) {
+            if (!freshVoxelArm(aabb)) return false;          // the caller rebuilds
+        } else {
+            // Items born since the build. Nothing can have DIED (the generation
+            // says so), so the voxelizer's item list only ever grows on this path.
+            for (auto &kv : mNodes) {
+                Ogre::Item *item = kv.second.item;
+                if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+                if (std::find(mVctItemIds.begin(), mVctItemIds.end(), kv.first) != mVctItemIds.end())
+                    continue;
+                mVctVoxelizer->addItem(item, false);
+                mVctItemIds.push_back(kv.first);
+            }
+            // World transforms first: the voxelizer reads them, and the whole
+            // reason this call exists is that something moved.
+            mSceneMgr->updateSceneGraph();
+            if (!sameBox(aabb, mGiLitVolume)) {
+                mVctVoxelizer->setRegionToVoxelize(false, aabb);
+                mVctVoxelizer->dividideOctants(1u, 1u, 1u);
+            }
+            mVctVoxelizer->build(mSceneMgr);
+            applyVctAmbient();
+            const Ogre::uint32 extraBounces =
+                Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
+            mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+                                 giRayMarchStepScale(false));
         }
-        // World transforms first: the voxelizer reads them, and the whole reason
-        // this call exists is that something moved.
-        mSceneMgr->updateSceneGraph();
-        if (!sameBox(aabb, mGiLitVolume)) {
-            mVctVoxelizer->setRegionToVoxelize(false, aabb);
-            mVctVoxelizer->dividideOctants(1u, 1u, 1u);
-        }
-        mVctVoxelizer->build(mSceneMgr);
-        applyVctAmbient();
-        const Ogre::uint32 extraBounces =
-            Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
-                             giRayMarchStepScale(false));
         mGiLitVolume = aabb;
         mGiProbeRegion = region;
         noteGiAutoVolume(aabb, !giBoundsExplicit());
@@ -366,13 +382,15 @@ bool OgreScene::refreshVctFast() {
         // re-solving its own geometry must not snatch it back — and giStatus's
         // vctBound/pccBound go on reporting the truth either way.
         // The probe CONTENTS are stale (the scene moved), the SHAPES are not.
-        // Dirty every probe and restart the sweep, so the budget spends itself on
-        // a grid that all needs the same thing.
-        if (mPcc) {
-            const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
-            for (size_t i = 0; i < probes.size(); ++i) probes[i]->mDirty = true;
-            for (ProbeSlot &s : mProbeSlots) s.sweepPending = true;
-        }
+        // STALE the grid — never dirty it (ENGINE_CACHE_POLICY_SPEC P6). Raising
+        // mDirty on every probe here is what made a re-solve capture the WHOLE
+        // grid inline in one frame (Ogre renders every dirty probe it collects,
+        // mNumIterations 1, no cap): measured on the Showroom as 619 / 572 /
+        // 623 ms frames of 23 + 32 x 131 draws, fired by the settle after a
+        // drag, by a drag pausing for 250 ms, and by world.refreshGi(). Stale,
+        // the budget spreads the same captures over ceil(probes / catch-up)
+        // frames, and no frame costs more than an ordinary one.
+        staleProbeGrid(GiStaleReason::Refresh);
         // The DDGI field is re-INITIALIZED, not reset, on this path. The reuse
         // arm keeps the VctLighting OBJECT but re-voxelizes underneath it and
         // may have moved the volume (setRegionToVoxelize above), and the field's
@@ -381,11 +399,14 @@ bool OgreScene::refreshVctFast() {
         // own rule, in its own words: minor changes to VctLighting -> reset(),
         // major -> initialize() again.
         buildIrradianceField();
-        mGiReusedLastRefresh = true;
+        // A fresh voxel arm is not a reuse of the voxels (the probes were
+        // kept either way, and giStatus.rebuilds does not move).
+        mGiReusedLastRefresh = !freshVoxels;
         if (std::getenv("JAHSHAKA_GI_DEBUG"))
             Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka GI: refresh REUSED the voxel arm (" +
-                std::to_string(mVctItemIds.size()) + " items, probes re-dirtied)");
+                std::string("Jahshaka GI: refresh ") +
+                (freshVoxels ? "re-voxelized FRESH (a material changed)" : "REUSED the voxel arm") +
+                " (" + std::to_string(mVctItemIds.size()) + " items, probe grid staled)");
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -507,8 +528,63 @@ GiStatus OgreScene::giStatus() const {
         st.ifdConverged      = mIfd && mIfdProbesDone >= mIfdTotalProbes;
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
         st.ifdSource         = (mIfd && st.ifdBound) ? mIfdSource : GiSource::Voxel;
+        // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
+        st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
+        int stale = 0;
+        if (mPcc) for (const ProbeSlot &sl : mProbeSlots) if (sl.sweepPending) ++stale;
+        st.staleProbes     = stale;
+        st.lastStaleReason = mLastStaleReason;
+        st.staleSerial     = mStaleSerial;
+        st.rebuilds        = mGiRebuilds;
     } JAH_CATCH(mError, st);
     return st;
+}
+
+bool OgreScene::materialSeenByGi(MaterialId id, bool &voxelized) const {
+    voxelized = false;
+    bool seen = false;
+    for (const auto &kv : mNodes) {
+        if (kv.second.materialRef != id || !kv.second.item) continue;
+        const Ogre::uint32 flags = kv.second.item->getVisibilityFlags();
+        if (flags & kGiGeometryBit) { voxelized = true; seen = true; break; }
+        if (flags & kVisibleBit) seen = true;
+    }
+    return seen;
+}
+
+void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
+    if (mGi.mode == GiMode::Off) return;
+    bool voxelized = false;
+    if (!materialSeenByGi(id, voxelized)) return;     // nothing GI can see wears it
+    staleProbeGrid(GiStaleReason::Material);
+    if (voxelized && voxelInputsChanged) ++mGiMaterialGeneration;
+}
+
+void OgreScene::staleProbeGrid(GiStaleReason why) {
+    if (!mPcc) return;
+    const size_t n = mPcc->getProbes().size();
+    if (mProbeSlots.size() != n) mProbeSlots.assign(n, ProbeSlot());
+    for (ProbeSlot &sl : mProbeSlots) sl.sweepPending = true;
+    mLastStaleReason = why;
+    ++mStaleSerial;
+}
+
+// WHAT THE FRAME ACTUALLY RE-CAPTURES (GiStatus::probeCapturesLastFrame).
+// Counted at the last moment before the render, from the probes' own dirty
+// flags, so it covers every source that can raise one — the budget, the
+// dynamic reservation, a shape clamp's CubemapProbe::set — rather than trusting
+// any one of them to report itself. A from-scratch placement captures the whole
+// grid synchronously inside buildPcc (PccPerPixelGridPlacement's buildStart AND
+// buildEnd each run updateAllDirtyProbes), bypassing the flags, so it reports
+// its own count through mPlacementCapturesThisFrame.
+void OgreScene::latchProbeCaptures(bool drawn) {
+    int captures = mPlacementCapturesThisFrame;
+    mPlacementCapturesThisFrame = 0;
+    if (drawn && mPcc) {
+        for (const Ogre::CubemapProbe *p : mPcc->getProbes())
+            if (p->mDirty && p->mEnabled) ++captures;
+    }
+    mProbeCapturesLastFrame = captures;
 }
 
 void OgreScene::setNodeGiBoundsExcluded(NodeId id, bool excluded) {
@@ -1383,13 +1459,20 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
 void OgreScene::scanGiMovement() {
     mGiMovedBoxes.clear();
     size_t live = 0;
+    const bool firstScan = mGiItemAabbs.empty();
     for (auto &kv : mNodes) {
         Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         ++live;
         const Ogre::Aabb a = item->getWorldAabbUpdated();
         auto it = mGiItemAabbs.find(kv.first);
-        if (it == mGiItemAabbs.end()) { mGiItemAabbs.emplace(kv.first, a); continue; }
+        if (it == mGiItemAabbs.end()) {
+            mGiItemAabbs.emplace(kv.first, a);
+            // An ARRIVAL, after the first scan (which sees every item for the
+            // first time and is not news): the probes must capture it (P1).
+            if (!firstScan) mGiItemsAppeared = true;
+            continue;
+        }
         if (!giAabbMoved(it->second, a)) continue;
         Ogre::Aabb moved = it->second;
         moved.merge(a);
@@ -1431,13 +1514,31 @@ void OgreScene::scanGiMovement() {
 //     `_beginFrameOnce`/`_endFrameOnce`; at 1 it renders inline in `updateRender`
 //     with the frame's other workspaces. A budgeted probe wants the second.
 //
-//  3. A SWEEP, so the budget is a guarantee and not a heuristic. Every probe
-//     carries "still owes this sweep an update"; the sweep refills when it
-//     empties. So the whole grid refreshes within ceil(probes / budget) frames
-//     no matter what the priority prefers — the property gi.budget pins — and
-//     the priority (staleness x proximity x covers-a-moved-AABB) only decides
-//     the ORDER within a sweep, which is where it matters: the probes the viewer
-//     is looking at and the ones a moving object is inside come first.
+//  3. A STALE SET, so the budget is a guarantee and not a heuristic — and so a
+//     still scene costs NOTHING (ENGINE_CACHE_POLICY_SPEC P1, 2026-09-12). Every
+//     probe carries "stale: owes a capture". Inputs mark it (staleProbeGrid,
+//     with a reason — the invalidation table, spec §3: a GI rebuild or re-solve,
+//     geometry moving or appearing, a light or material or sky or ambient or fog
+//     change, time-varying content); the budget spends itself on stale probes
+//     only, and with nothing stale it spends nothing. So every probe re-captures
+//     within ceil(probes / budget) frames OF A CHANGE, whatever the priority
+//     prefers — the property gi.budget pins — and the priority (staleness x
+//     proximity x covers-a-moved-AABB) only decides the ORDER of the catch-up:
+//     the probes the viewer is looking at and the ones a moving object is
+//     inside come first.
+//
+//     WHAT IT REPLACED: the sweep used to REFILL itself whenever it emptied, so
+//     one probe re-captured every frame of a still scene, for ever — 131 draws
+//     and 19.3 ms a frame on the Showroom (spec §1), for a picture that could
+//     not change. That refill was also, silently, the only thing that ever
+//     brought reflections round after a material, sky or light-colour edit —
+//     nothing invalidated a probe on any of them — which is why the refill and
+//     the missing invalidations (P7) went out together.
+//
+//     v1 STALES THE WHOLE GRID per input, a mover included (on top of the
+//     dynamic reservation below, which is unchanged): indoors every parallax
+//     shape contains everything (the A2 clamp), so area or shape locality would
+//     discriminate nothing; v2 can add it for open fields.
 //
 // Called once per scene per frame, from the AUTHORITATIVE view only (F7): the
 // engine picks one on-screen view per scene in renderOneFrame, because two views
@@ -1459,9 +1560,41 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 
     if (!mGiMovementScanned) { scanGiMovement(); mGiMovementScanned = true; }
 
-    bool anyPending = false;
-    for (const ProbeSlot &s : mProbeSlots) if (s.sweepPending) { anyPending = true; break; }
-    if (!anyPending) for (ProbeSlot &s : mProbeSlots) s.sweepPending = true;
+    // THE INPUTS THIS PASS CAN SEE FOR ITSELF (the rest arrive through the
+    // setters: setLight, setPbrMaterial, setSky, ...). Geometry that moved or
+    // appeared since the last scan — what it shows in a reflection is out of
+    // date in every probe that can see it, which in v1 is all of them.
+    if (!mGiMovedBoxes.empty() || mGiItemsAppeared) staleProbeGrid(GiStaleReason::Moved);
+    mGiItemsAppeared = false;
+    // TIME-VARYING CONTENT (spec D4, option A — today's behaviour for such
+    // scenes, decided by the lead 2026-09-12 pending the reflections design):
+    // while something the probes can see changes by itself every frame, the
+    // grid stays stale and the budget keeps sweeping it exactly as it always
+    // did. A rig posing in place moves no AABB (Items keep bind-pose bounds), so
+    // it is read off the pose epoch; a visible particle system simulates every
+    // frame; a clock-driven material or a live texture upload flags itself.
+    if (mRigPoseEpoch != mProbeRigEpochSeen) {
+        mProbeRigEpochSeen = mRigPoseEpoch;
+        mTimeVaryingThisFrame = true;
+    }
+    if (!mTimeVaryingThisFrame && mLiveParticleSystems) {
+        for (const auto &kv : mNodes) {
+            const Ogre::ParticleSystemDef *def = kv.second.particleDef;
+            if (kv.second.particleSystem && def && (def->getVisibilityFlags() & kVisibleBit)) {
+                mTimeVaryingThisFrame = true;
+                break;
+            }
+        }
+    }
+    if (mTimeVaryingThisFrame) staleProbeGrid(GiStaleReason::Animated);
+    mTimeVaryingThisFrame = false;
+
+    // THE CATCH-UP RATE (spec D2). How many STALE probes a frame may capture:
+    // the tier's normal budget (option A, the default — no hitch, a 32-probe
+    // grid catches up in about half a second at 60 Hz). The reflections design
+    // being studied separately may raise it; this is the one line to change
+    // (option B was a temporary 4 per frame).
+    const int catchUp = kProbeCatchUpPerFrame > 0 ? std::max(budget, kProbeCatchUpPerFrame) : budget;
 
     // How much a probe covering something that just moved may jump the queue.
     // It cannot break the sweep guarantee (it only reorders within one), so the
@@ -1491,7 +1624,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
                             (covers ? kMovedBoost : 1.0f);
         ranked.emplace_back(-score, i);
     }
-    const size_t take = std::min(size_t(budget), ranked.size());
+    const size_t take = std::min(size_t(catchUp), ranked.size());
     std::partial_sort(ranked.begin(), ranked.begin() + std::ptrdiff_t(take), ranked.end());
     for (size_t k = 0; k < take; ++k) {
         const size_t i = ranked[k].second;
@@ -1529,10 +1662,10 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
                              const std::pair<unsigned, size_t> &b) { return a.first > b.first; });
         for (size_t k = 0; k < extra; ++k) {
             const size_t i = movers[k].second;
-            // Count only captures the reservation ADDS: on a fast-refresh frame
-            // (refreshVctFast dirties every probe without touching the slots)
-            // the probe is already going to render, and reporting it as spent
-            // reservation over-stated giStatus.dynamicProbeUpdates.
+            // Count only captures the reservation ADDS: a probe something else
+            // already dirtied this frame (a shape clamp's CubemapProbe::set)
+            // is going to render anyway, and reporting it as spent reservation
+            // would over-state giStatus.dynamicProbeUpdates.
             if (!probes[i]->mDirty) ++mDynamicProbeUpdates;
             probes[i]->mDirty = true;
             mProbeSlots[i].sweepPending = false;
@@ -1569,6 +1702,12 @@ unsigned long long OgreScene::giGeometrySignature() const {
     if (mGi.mode == GiMode::Off) return 0ull;
     unsigned long long h = 1469598103934665603ull;      // FNV-1a
     const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
+    // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7): what the voxelizer
+    // converted is as much an input to the solve as where the items stand. A
+    // colour drag moves it every tick (the host's debounce then runs the cheap
+    // paths and ONE re-solve when the drag stops, exactly as for a moved
+    // object); an idle scene never moves it.
+    fold(mGiMaterialGeneration);
     for (const auto &kv : mNodes) {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
@@ -1619,6 +1758,7 @@ float OgreScene::giRayMarchStepScale(bool inMotion) const {
 }
 
 void OgreScene::rebuildGi() {
+    ++mGiRebuilds;
     // Every early return below leaves "nothing built" showing in giStatus.
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     Ogre::Light *driver = markGiLight(mGi.irLight);
@@ -1667,6 +1807,7 @@ void OgreScene::rebuildGi() {
 }
 
 void OgreScene::rebuildVct() {
+    ++mGiRebuilds;
     // Every early return below leaves "nothing built" showing in giStatus.
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     // ALWAYS from scratch: VctVoxelizer keeps raw Item* until removeAllItems and
@@ -1676,54 +1817,10 @@ void OgreScene::rebuildVct() {
 
     Ogre::Vector3 mn, mx;
     if (!computeGiBounds(mn, mx)) return;   // nothing to voxelize (yet); stay armed via mGi
-
-    // Quality -> voxel volume resolution (the memory/compute knob: 32^3 =~ fast
-    // preview, 128^3 =~ crisp indirect shadows) and anisotropic cone mips.
-    const Ogre::uint32 res = giVoxelResolution();
-    const bool anisotropic = mGi.quality != GiQuality::Low;
-
-    // World transforms must be current before voxelization (the sample calls
-    // this before every voxelizeScene; outside the render loop it is a no-op
-    // repeat at worst).
-    mSceneMgr->updateSceneGraph();
-
-    mVctVoxelizer = new Ogre::VctVoxelizer(
-        Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
-        mRoot->getRenderSystem(), mRoot->getHlmsManager(),
-        true /*correctAreaLightShadows*/);
-    mVctVoxelizer->setResolution(res, res, res);
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
-    mVctVoxelizer->setRegionToVoxelize(false, aabb);
 
-    size_t itemCount = 0;
-    mVctItemIds.clear();
-    for (auto &kv : mNodes) {
-        Ogre::Item *item = kv.second.item;
-        // PBR items only — the same set IR traces (never sky/overlays/billboards).
-        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        mVctVoxelizer->addItem(item, false);
-        mVctItemIds.push_back(kv.first);     // what the reuse arm compares against (B4)
-        ++itemCount;
-    }
+    const size_t itemCount = buildVoxelArm(aabb);
     if (!itemCount) { teardownVct(); return; }   // stay armed; next churn re-flags
-
-    mVctVoxelizer->dividideOctants(1u, 1u, 1u);
-    mVctVoxelizer->build(mSceneMgr);
-
-    mVctLighting = new Ogre::VctLighting(
-        Ogre::Id::generateNewId<Ogre::VctLighting>(), mVctVoxelizer, anisotropic);
-    // Document bounces are total (1 = one indirect bounce, which light injection
-    // itself provides); VctLighting counts the extra propagation passes.
-    const Ogre::uint32 extraBounces =
-        Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-    mVctLighting->setAllowMultipleBounces(extraBounces > 0u);
-    // The scene's ambient, BEFORE the first update(): the pair is read when the
-    // probe const buffer is filled, and a volume built with black hemispheres
-    // shows a black ambient for the frame between build and the next ambient
-    // push. See applyVctAmbient (OgreScene.cpp) for why it is a genuine pair.
-    applyVctAmbient();
-    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
-                         giRayMarchStepScale(false));
 
     hlmsPbs(mRoot)->setVctLighting(mVctLighting);
     sVctBindingOwner = this;
@@ -1761,9 +1858,93 @@ void OgreScene::rebuildVct() {
     if (std::getenv("JAHSHAKA_GI_DEBUG"))
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: voxelized " + std::to_string(itemCount) + " items at " +
-            std::to_string(res) + "^3 over " + Ogre::StringConverter::toString(mn) +
+            std::to_string(giVoxelResolution()) + "^3 over " + Ogre::StringConverter::toString(mn) +
             " .. " + Ogre::StringConverter::toString(mx) +
             (mPcc ? " (+PCC probe grid)" : ""));
+}
+
+// THE VOXEL ARM — the voxelizer and the lighting over `aabb`, from the live GI
+// items. rebuildVct's first half, shared with freshVoxelArm (the material-edit
+// re-solve, P7), so the two can never build the arm differently. Always a NEW
+// voxelizer: its VctMaterial caches every datablock's conversion by raw pointer
+// for its whole life, which is the rule this file's header is about.
+size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
+    // Quality -> voxel volume resolution (the memory/compute knob: 32^3 =~ fast
+    // preview, 128^3 =~ crisp indirect shadows) and anisotropic cone mips.
+    const Ogre::uint32 res = giVoxelResolution();
+    const bool anisotropic = mGi.quality != GiQuality::Low;
+
+    // World transforms must be current before voxelization (the sample calls
+    // this before every voxelizeScene; outside the render loop it is a no-op
+    // repeat at worst).
+    mSceneMgr->updateSceneGraph();
+
+    mVctVoxelizer = new Ogre::VctVoxelizer(
+        Ogre::Id::generateNewId<Ogre::VctVoxelizer>(),
+        mRoot->getRenderSystem(), mRoot->getHlmsManager(),
+        true /*correctAreaLightShadows*/);
+    mVctVoxelizer->setResolution(res, res, res);
+    mVctVoxelizer->setRegionToVoxelize(false, aabb);
+
+    size_t itemCount = 0;
+    mVctItemIds.clear();
+    for (auto &kv : mNodes) {
+        Ogre::Item *item = kv.second.item;
+        // PBR items only — the same set IR traces (never sky/overlays/billboards).
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        mVctVoxelizer->addItem(item, false);
+        mVctItemIds.push_back(kv.first);     // what the reuse arm compares against (B4)
+        ++itemCount;
+    }
+    if (!itemCount) {
+        delete mVctVoxelizer; mVctVoxelizer = nullptr;
+        mVctItemIds.clear();
+        return 0;
+    }
+
+    mVctVoxelizer->dividideOctants(1u, 1u, 1u);
+    mVctVoxelizer->build(mSceneMgr);
+
+    mVctLighting = new Ogre::VctLighting(
+        Ogre::Id::generateNewId<Ogre::VctLighting>(), mVctVoxelizer, anisotropic);
+    // Document bounces are total (1 = one indirect bounce, which light injection
+    // itself provides); VctLighting counts the extra propagation passes.
+    const Ogre::uint32 extraBounces =
+        Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
+    mVctLighting->setAllowMultipleBounces(extraBounces > 0u);
+    // The scene's ambient, BEFORE the first update(): the pair is read when the
+    // probe const buffer is filled, and a volume built with black hemispheres
+    // shows a black ambient for the frame between build and the next ambient
+    // push. See applyVctAmbient (OgreScene.cpp) for why it is a genuine pair.
+    applyVctAmbient();
+    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+                         giRayMarchStepScale(false));
+    // The materials this voxelizer converted are the ones in force NOW.
+    mGiBuiltMaterialGeneration = mGiMaterialGeneration;
+    return itemCount;
+}
+
+// THE MATERIAL-EDIT RE-SOLVE (P7). A material edit destroys nothing, so the
+// destruction-generation rule does not apply and the probe grid — whose shapes
+// come from the room's geometry, not its colours — stays exactly as placed. But
+// the voxelizer's VctMaterial holds each datablock's conversion from the moment
+// it first saw it, so re-running THAT voxelizer would re-voxelize the old
+// albedo. So the voxel half is rebuilt fresh: the irradiance field first (it
+// holds the old VctLighting), then the lighting, then the voxelizer, then
+// buildVoxelArm. The HlmsPbs pointer follows the new lighting only if it was
+// pointing at the old one — a background scene must not snatch the binding
+// (refreshVctFast's own rule).
+bool OgreScene::freshVoxelArm(const Ogre::Aabb &aabb) {
+    teardownIrradianceField();
+    Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+    const bool wasBound = mVctLighting && pbs->getVctLighting() == mVctLighting;
+    if (wasBound) pbs->setVctLighting(nullptr);
+    delete mVctLighting;  mVctLighting = nullptr;
+    delete mVctVoxelizer; mVctVoxelizer = nullptr;
+    mVctItemIds.clear();
+    if (!buildVoxelArm(aabb)) return false;
+    if (wasBound) pbs->setVctLighting(mVctLighting);
+    return true;
 }
 
 void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
@@ -1868,7 +2049,16 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // selects a render stage, not an amount of work, and the budget already
     // decides how many probes render at all.
     for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mNumIterations = 1u;
+    // The placement above captured the whole grid TWICE, synchronously
+    // (buildStart and buildEnd each run updateAllDirtyProbes) — counted, so a
+    // rebuild frame reports what it cost (GiStatus::probeCapturesLastFrame).
+    mPlacementCapturesThisFrame += int(2u * mPcc->getProbes().size());
+    // ...and every probe is STALE all the same: the placement captured before
+    // the grid was bound to HlmsPbs and before this build's irradiance field
+    // existed, so those captures show neither probe reflections nor the DDGI
+    // bounce. The budget re-captures each once, over the next frames.
     mProbeSlots.assign(mPcc->getProbes().size(), ProbeSlot());
+    staleProbeGrid(GiStaleReason::Rebuild);
     // THE FORWARD+ PER-CELL PROBE BUDGET MUST HOLD THIS GRID
     // (EnginePrivate.h kCubemapProbeSlotsDefault has the measurement and the
     // upstream anchor). Done HERE, right after the probes exist and before the
@@ -1989,7 +2179,40 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // less stale than they used to be during a drag), and the principled
     // per-probe fix is still upstream's to make.
     if (mGi.updateBudget > 0) minDist = std::max(minDist, diag);
-    hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, minDist, minDist * 2.0f);
+    mPccBindMinDist = minDist;
+    mPccBindMaxDist = minDist * 2.0f;
+    hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
+}
+
+// THE PAGE-RETURN BINDING (ENGINE_CACHE_POLICY_SPEC P10). What a scene coming
+// back on screen needs, and ALL it needs: its arms were built against its own
+// geometry and nothing about a page switch invalidates them — only the
+// process-wide HlmsPbs pointers can have been taken over by another scene's
+// build (the player page's own GI, OgreGi.cpp's "last enabler wins").
+//
+// Each of the three is set to THIS scene's arm, including null for an arm the
+// scene does not have: a scene without probes must not be shaded through the
+// probes of the scene that last built some (the old re-push could not fix that
+// case at all — its teardown only unbinds when it is the owner). The shared
+// raster CubemapToIfd parameter needs nothing here: updateIrradianceField
+// re-pushes it before every raster dispatch, for exactly this reason.
+bool OgreScene::reassertGiBinding() {
+    if (sVctBindingOwner == this) return false;
+    JAH_TRY {
+        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+        pbs->setVctLighting(mVctLighting);
+        if (mPcc) pbs->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
+        else      pbs->setParallaxCorrectedCubemap(nullptr);
+        pbs->setIrradianceField(mIfd);
+        const bool owns = mVctLighting || mPcc || mIfd;
+        sVctBindingOwner = owns ? this : nullptr;
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                std::string("Jahshaka GI: binding re-asserted (") +
+                (mVctLighting ? "vct " : "") + (mPcc ? "pcc " : "") + (mIfd ? "ifd" : "") +
+                (owns ? ")" : "nothing — unbound)"));
+        return true;
+    } JAH_CATCH(mError, false);
 }
 
 // ===========================================================================

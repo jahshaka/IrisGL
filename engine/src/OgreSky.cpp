@@ -44,6 +44,11 @@ bool OgreScene::setSky(const SkyDesc &desc) {
     const bool skyChanged  = !mSkyDesc.sameSky(desc) || noSkyClearsIbl;
     const bool reflChanged = !mSkyDesc.sameReflections(desc);
     if (!skyChanged && !reflChanged) return true;   // idempotent: nothing to do
+    // THE PROBE CACHE'S SKY INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
+    // faces capture the sky (RQ 0 is inside their range) and the reflection
+    // cubemap lights what they capture. Nothing staled a probe on a sky change
+    // before; the endless sweep was the only thing that ever showed one.
+    staleProbeGrid(GiStaleReason::Sky);
     bool ok = true;
     if (skyChanged) {
         if (applySkyMode(desc)) {
