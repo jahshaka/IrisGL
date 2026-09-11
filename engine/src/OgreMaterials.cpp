@@ -611,6 +611,18 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                 !sameCol(o.albedo, p.albedo) || !sameCol(o.emissive, p.emissive) ||
                 o.alpha != p.alpha || o.alphaMode != p.alphaMode || o.workflow != p.workflow;
             noteMaterialChanged(id, voxelInputs);
+            // THE LAMP-MAP CACHE'S MATERIAL INPUT (ENGINE_CACHE_POLICY_SPEC §3:
+            // "only if it changes depth"). What a caster pass writes depends on
+            // the alpha mode (a cutout discards), its cutoff, and which faces
+            // are culled — a colour or roughness edit casts the same shadow.
+            // (Not on the first push: an Item wearing a material is seen
+            // arriving by the caster scan itself, and a walk of every node per
+            // material on the load path is exactly the O(materials x nodes)
+            // shape the tangent refusal once cost 2.1 s of boot with.)
+            if (it->second.paramsPushed &&
+                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff ||
+                 o.twoSided != p.twoSided))
+                noteShadowShapeChanged(id);
         }
         it->second.params = p;
         it->second.paramsPushed = true;
@@ -711,6 +723,10 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
         // content" true by construction instead of relying on destroy/create
         // ordering inside one frame.
         rec.shadingUnlit = wantUnlit;
+        // A family switch rebuilds the datablock every item wears: a different
+        // caster pass (lamp-map cache — the items keep their Item pointers, so
+        // the scan cannot see it on its own).
+        noteShadowShapeChanged(id);
         rec.unlit = wantUnlit;
         rec.distortion = wantDistortion;
         rec.pbsBacked = false;
@@ -827,6 +843,7 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
         if (!db) { mError = "setMaterialCustomPiece: the material has no datablock"; return false; }
         if (path.empty()) {
             db->setCustomPieceFile(Ogre::BLANKSTRING, Ogre::BLANKSTRING, ogrePieceStage(stage));
+            if (slot == 1u && !rec.customPiece[slot].empty()) noteShadowShapeChanged(id);
             rec.customPiece[slot].clear();
             applyClockProperty(db, rec);
             return true;
@@ -852,6 +869,9 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
         const bool pieceChanged = rec.customPiece[slot] != path;
         rec.customPiece[slot] = path;
         applyClockProperty(db, rec);
+        // A VERTEX piece moves vertices, so it is a caster-shape input; while
+        // it stays bound the scan treats the material's items as deforming.
+        if (pieceChanged && slot == 1u) noteShadowShapeChanged(id);
         // A generated piece changes what the surface looks like, so it is a
         // probe input (P7); the voxelizer never runs the piece.
         if (pieceChanged) noteMaterialChanged(id, false);
@@ -1451,6 +1471,8 @@ bool OgreScene::destroyTexture(TextureId id) {
             // unit: on Unlit the mapping from slot to unit is not one-to-one,
             // and one code path owning it is what keeps the two families honest.
             if (hit) bindTrackedTextures(m);
+            // An unbound albedo is a changed cutout silhouette (lamp-map cache).
+            if (hit) noteShadowShapeChanged(kv.first);
         }
         if (!it->second.path.empty()) {
             const std::string key = textureKey(it->second.path, it->second.decal,
@@ -1685,8 +1707,12 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         // P7: a different map on visible geometry is a probe input; an albedo
         // or emissive map is a VOXEL input too (VctMaterial copies exactly those
         // two into its texture pool, by TextureGpu pointer, once).
-        if (mit->second.boundTextures[size_t(slot)] != texId)
+        if (mit->second.boundTextures[size_t(slot)] != texId) {
             noteMaterialChanged(mat, slot == PbrTextureSlot::Albedo || slot == PbrTextureSlot::Emissive);
+            // A cutout's alpha comes from the albedo map: a new one is a new
+            // silhouette in every lamp map the material's items cast into.
+            if (slot == PbrTextureSlot::Albedo) noteShadowShapeChanged(mat);
+        }
         // Remember the binding first: it is what destroyTexture undoes, what a
         // shading-model switch rebuilds from, and — on Unlit — the record of a
         // map the family cannot show but the document still owns.

@@ -225,22 +225,6 @@ void setLocalScale(NodeHandle n, const Vec3 &v);
 /// Writes all three at once — one dirty mark instead of three.
 void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 
-/// HOW MANY TRANSFORM WRITES THIS PROCESS HAS DONE, ever — a monotonic counter
-/// bumped by every setter above (SPECS/SHADOW_TOOLING_SPEC.md §4.3, rule 3).
-///
-/// It exists because the renderer cannot see a caster move: the document owns
-/// the scene graph and writes into it directly, so nothing reaches the engine
-/// when a mesh is dragged. A watcher that samples this once a frame knows
-/// whether ANY transform in the process changed since the last frame, for one
-/// relaxed atomic load — which is exactly what static shadow maps need to
-/// decide whether to re-render (SceneMirror::sync is the watcher).
-///
-/// A CHANGE TEST, NOT A MEASUREMENT: it counts writes, not moves (writing the
-/// same value counts), and it is process-wide, not per scene. Both are on the
-/// safe side — a static map that re-renders when it did not have to costs
-/// exactly what a dynamic one costs.
-unsigned long long transformWrites();
-
 Mat4 localTransform(NodeHandle n);
 /// The world transform, RESOLVED via Ogre's `_getFullTransformUpdated()`.
 /// COST MODEL (corrected 2026-09-05, verified at the pin): this is NOT

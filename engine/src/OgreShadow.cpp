@@ -204,6 +204,26 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         texDef->depthBufferFormat = Ogre::PFG_D32_FLOAT;
         texDef->preferDepthTexture = false;
         texDef->fsaa = "1";
+        // A CACHING ATLAS KEEPS ITS CONTENT (keep_content; ENGINE_CACHE_POLICY
+        // E2 probe, 2026-09-12). Compositor textures are born DiscardableContent,
+        // which tells the backend it may throw the texels away between uses —
+        // the opposite of a cached lamp map, which must survive every frame it is
+        // not redrawn. It is also a hard failure, not only a theoretical one: in
+        // a frame where every pass of a node is skipped (all its lamps cached and
+        // clean, no sun), the first touch of the atlas is the scene pass that
+        // SAMPLES it, and the barrier solver refuses a discardable texture's
+        // first transition being a read — "Transitioning texture from Undefined
+        // to a read-only layout ... keep_content" (OgreResourceTransition.cpp:
+        // 185). That exception aborted the pass after the solver had already
+        // recorded the pass's colour target as a render target, so the NEXT
+        // frame's barrier read COLOR_ATTACHMENT -> COLOR_ATTACHMENT over an image
+        // that was really SHADER_READ: a Vulkan validation error on the planar
+        // mirror's and the probes' targets (tests/shadow `cachekinds`). Upstream's
+        // own StaticShadowMaps sample declares its static atlas keep_content for
+        // this reason. The whole-atlas-clear shape (nothing cached) keeps the
+        // default, so a scene without point/spot casters builds exactly the
+        // definition it always did.
+        if (perMapClears) texDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
         Ogre::RenderTargetViewDef *rtv = def->addRenderTextureView(atlasName);
         rtv->setForTextureDefinition(atlasName, texDef);
     }
@@ -258,27 +278,36 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     //   focused: one scene pass (spot) + 6 cube faces + 1 copy     (N * 8)
     def->setNumTargetPass((perMapClears ? numMaps : 1u) + 3u + N * 8u);
 
+    // What this node's maps draw: ONE definition shared with the lamp-map
+    // cache's caster scan (shadowCasterChannels — R1/R2 widen it per kind).
+    const ShadowNodeKind kind =
+        Ogre::IdString(name) == Ogre::IdString(OgreView::kReflectShadowNodeName) ? ShadowNodeKind::Reflect
+        : Ogre::IdString(name) == Ogre::IdString(OgreView::kProbeShadowNodeName) ? ShadowNodeKind::Probe
+                                                                                  : ShadowNodeKind::View;
+    const Ogre::uint32 casterMask = shadowCasterChannels(kind);
     const Ogre::uint8 directionalMask = Ogre::uint8(1u << Ogre::Light::LT_DIRECTIONAL);
     const Ogre::uint8 pointMask       = Ogre::uint8(1u << Ogre::Light::LT_POINT);
     const Ogre::uint8 spotMask        = Ogre::uint8(1u << Ogre::Light::LT_SPOTLIGHT);
     const char *clearMaterial = shadowClearMaterialName();
 
-    // (a) THE CLEAR. Upstream's ONE whole-atlas clear while no shadow map in
-    //     this process is static, and one QUAD PER MAP once one is — because
-    //     the quads are not free and, until a user ticks Static Shadow, they
-    //     buy nothing.
+    // (a) THE CLEAR. Upstream's ONE whole-atlas clear while no drawn scene in
+    //     this process holds a cacheable (point/spot, shadowed) lamp, and one
+    //     QUAD PER MAP once one does — because the quads are not free and,
+    //     until a lamp map is cached, they buy nothing.
     //
     //     MEASURED, which is why this is a switch and not a constant
     //     (gi.coalesce, 2026-09-09): three quads over the PSSM block (2048^2 +
     //     two 1024^2 of depth writes) every frame, where a hardware fast-clear
     //     had covered the whole atlas, delayed the frame enough to flip a
     //     neighbouring GI suite's frame-phase 3 times in 6 runs. With this
-    //     switch a scene that uses no static maps executes exactly upstream's
-    //     pass list again, and the suite is 6/6.
+    //     switch a scene lit only by the sun executes exactly upstream's pass
+    //     list again. (ENGINE_CACHE_POLICY_SPEC risk 3: the lamp-map cache makes
+    //     the quads the NORMAL case wherever lamps cast — if a frame-phase suite
+    //     moves again, the fix belongs on the test's side.)
     //
-    //     The engine rebuilds the node when the answer changes (the same
-    //     drop-swap-recreate a Shadow Quality change costs), so the quads exist
-    //     exactly in the sessions that need them.
+    //     The engine rebuilds the node when the first cacheable lamp appears
+    //     (the same drop-swap-recreate a Shadow Quality change costs), and
+    //     never back within the session (applyShadowCache says why).
     if (!perMapClears) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setNumPasses(1u);
@@ -291,7 +320,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     //     CompositorNode::_update on ITS OWN map index: it runs when the map
     //     holds a light and that light is dynamic or a dirty static
     //     (_shouldUpdateShadowMapIdx), which is precisely the frames in which
-    //     the map is about to be re-rendered. A static map that is clean is
+    //     the map is about to be re-rendered. A cached map that is clean is
     //     neither cleared nor drawn, so its contents survive — the whole point.
     for (unsigned m = 0u; perMapClears && m < numMaps; ++m) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
@@ -316,7 +345,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         scene->mFirstRQ = 0u;
         scene->mLastRQ = 255u;
         scene->mIncludeOverlays = false;
-        scene->mVisibilityMask = kVisibleBit;
+        scene->mVisibilityMask = casterMask;
     }
 
     // (c) The focused maps: a spot pass, then the point-light cubemap + copy.
@@ -333,7 +362,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         scene->mFirstRQ = 0u;
         scene->mLastRQ = 255u;
         scene->mIncludeOverlays = false;
-        scene->mVisibilityMask = kVisibleBit;
+        scene->mVisibilityMask = casterMask;
     }
     for (unsigned i = 0u; i < N; ++i) {
         for (Ogre::uint32 face = 0u; face < 6u; ++face) {
@@ -350,7 +379,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
             scene->mFirstRQ = 0u;
             scene->mLastRQ = 255u;
             scene->mIncludeOverlays = false;
-            scene->mVisibilityMask = kVisibleBit;
+            scene->mVisibilityMask = casterMask;
         }
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(pointMask);
@@ -562,11 +591,13 @@ ShadowStatus OgreEngine::shadowStatus() const {
     st.requestedBudget = mShadowMapBudget;
     if (!mHlmsRegistered || mHeadless) return st;   // live stays false
     // ASKING TURNS THE COUNTERS ON, exactly like RenderStats::metricsRecording:
-    // the shadow-pass listener is not free (a callback per compositor pass per
-    // frame), so it only runs while somebody is reading it or while a static
-    // map exists. The FIRST call therefore reports 0 passes; every call after a
-    // rendered frame reports the truth.
-    mShadowStatusPolled = true;
+    // the shadow-pass listeners are not free (a callback per compositor pass
+    // per frame), so they run only while somebody is reading — and the asking
+    // EXPIRES: kShadowPollWindowFrames frames without a read detach them again
+    // (P8; it used to be a latch that never cleared). The FIRST call therefore
+    // reports 0 passes; every call after a rendered frame reports the truth.
+    mShadowPolled = true;
+    mShadowPollFrame = mShadowFrame;
     JAH_TRY {
         st.resolution = mShadowResolution;
         st.budget = effectiveShadowMapBudget();
@@ -587,6 +618,18 @@ ShadowStatus OgreEngine::shadowStatus() const {
         st.live = true;
         st.shadowPassesLastFrame = mShadowPassesLastFrame;
         st.staticMapRendersLastFrame = mStaticShadowRendersLastFrame;
+        st.reflectPassesLastFrame = mShadowKindPasses[unsigned(ShadowNodeKind::Reflect)];
+        st.probePassesLastFrame = mShadowKindPasses[unsigned(ShadowNodeKind::Probe)];
+        st.reflectLampPassesLastFrame = mShadowKindLampPasses[unsigned(ShadowNodeKind::Reflect)];
+        st.probeLampPassesLastFrame = mShadowKindLampPasses[unsigned(ShadowNodeKind::Probe)];
+        st.cachedInstances = mShadowCachedInstances[0] + mShadowCachedInstances[1] +
+                             mShadowCachedInstances[2];
+        st.uncachedInstances = mShadowUncachedInstances[0] + mShadowUncachedInstances[1] +
+                               mShadowUncachedInstances[2];
+        st.viewCached = mShadowCachedInstances[unsigned(ShadowNodeKind::View)] > 0u &&
+                        mShadowUncachedInstances[unsigned(ShadowNodeKind::View)] == 0u;
+        st.mapsDirtiedLastFrame = mShadowDirtiedMaps[0] + mShadowDirtiedMaps[1] +
+                                  mShadowDirtiedMaps[2];
 
         // The demand, and who actually holds a map. The mapping is per WORKSPACE
         // (CompositorShadowNode is instance state), so it is read from the first
@@ -620,6 +663,15 @@ ShadowStatus OgreEngine::shadowStatus() const {
                     info.dirty = lights[i].isDirty;
                     if (info.node) seen.push_back(info.node);
                 }
+                // The passes the last frame spent on this slot's map(s): three
+                // PSSM rectangles for slot 0, one focused map (idx slot + 2)
+                // for the others. Zero for a cached lamp at rest.
+                if (i == 0) {
+                    for (unsigned m = 0; m < 3u && m < mShadowViewMapPasses.size(); ++m)
+                        info.passesLastFrame += mShadowViewMapPasses[m];
+                } else if (i + 2u < mShadowViewMapPasses.size()) {
+                    info.passesLastFrame = mShadowViewMapPasses[i + 2u];
+                }
                 st.mapped.push_back(info);
             }
             for (NodeId c : casters)
@@ -636,34 +688,45 @@ ShadowStatus OgreEngine::shadowStatus() const {
 }
 
 // ---------------------------------------------------------------------------
-// Static shadow maps (SHADOW_TOOLING_SPEC.md §4.3)
+// THE LAMP-MAP CACHE, engine half (ENGINE_CACHE_POLICY_SPEC P2-P5, P8)
 // ---------------------------------------------------------------------------
-// A static map is rendered ONCE and then skipped until it is dirtied: Ogre's
-// `_shouldUpdateShadowMapIdx` returns false for a clean static slot, which
-// skips its scene pass, its six cube faces, its DPSM copy — and, because our
-// definition clears per map rather than per atlas, its CLEAR as well. That last
-// one is the whole reason phase 0 existed: with upstream's whole-atlas clear the
-// contents would be wiped every frame and "not re-rendering" would mean "black".
+// Every point/spot map is CACHED: tied to its light with Ogre's own static
+// shadow-map API (setLightFixedToShadowMap), rendered once, and re-rendered
+// only when setStaticShadowMapDirty says so — which the scene's detection pass
+// decides per light (OgreScene::collectShadowCacheFrame). Ogre skips a clean
+// static map's scene pass, its six cube faces and its DPSM copy
+// (_shouldUpdateShadowMapIdx), and — because our definition clears per map
+// rather than per atlas — its clear too.
 //
-// THE SLOT RULE (F7, OgreCompositorShadowNode.h:308-317). Fixed lights are tied
-// to the END of the focused range and Ogre's distance sort fills from the front,
-// so a static light never steals the slot the sort was about to use, and the
-// dynamic casters keep the closest-first behaviour they always had.
+// PER INSTANCE, EVERY KIND (F8; P4/P5). The fixed-light table and the dirty
+// flags live in each CompositorShadowNode, i.e. per WORKSPACE: every view, every
+// planar budget slot and every shadowed reflection probe holds its own. They
+// all get the same assignment, which is what makes a probe capture render a
+// dirty lamp map on its FIRST face and reuse it on the other five, and the
+// planar mirror reuse its lamp maps at rest. Marking is lazy by construction:
+// a probe that does not capture this frame keeps the dirty flag until it does.
 //
-// PER WORKSPACE, NOT PER DEFINITION (F8). mShadowMapCastingLights and the dirty
-// flags are instance state, so every view's shadow node has to be told
-// separately — and a workspace recreated by an atlas rebuild starts empty,
-// which the "assign when it differs" test below picks up on the next frame.
+// THE SLOT RULE. Lamps take the LAST |lamps| focused slots, points before
+// spots (HlmsPbs's type order), so the front of the range stays empty — the
+// same end-of-range placement the static-map feature proved (F7).
+//
+// THE V1 OVER-BUDGET RULE. An instance caches only while every lamp fits its
+// maps; with more lamps than maps it releases them all to Ogre's
+// closest-first dynamic sort (which picks different lamps as the camera
+// moves — caching some of them would freeze an arbitrary subset), and
+// shadowStatus() counts it in `uncachedInstances`.
 
-/// The shadow-node pass counter. Counts passes whose parent node IS the shadow
-/// node, per shadow-map index, so "a static map rendered this frame" is a
-/// measurement and not an inference.
+/// The shadow-pass counter, one per kind. Counts passes whose parent node IS
+/// that kind's shadow node, per shadow-map index, so "a cached map rendered
+/// this frame" is a measurement and not an inference. Reset explicitly at the
+/// top of each frame (not in workspacePreUpdate: one counter rides many
+/// workspaces — every probe's, every planar slot's).
 class OgreEngine::ShadowPassCounter final : public Ogre::CompositorWorkspaceListener {
 public:
-    void workspacePreUpdate(Ogre::CompositorWorkspace *) override { reset(); }
+    explicit ShadowPassCounter(const char *nodeName) : mNode(nodeName) {}
     void passPreExecute(Ogre::CompositorPass *pass) override {
         const Ogre::CompositorNode *node = pass->getParentNode();
-        if (!node || node->getName() != Ogre::IdString(OgreView::kShadowNodeName)) return;
+        if (!node || node->getName() != mNode) return;
         ++mTotal;
         const Ogre::uint32 idx = pass->getDefinition()->mShadowMapIdx;
         if (idx < kMaxTrackedMaps) ++mPerMap[idx];
@@ -671,29 +734,71 @@ public:
     void reset() { mTotal = 0; for (unsigned &c : mPerMap) c = 0; }
     unsigned total() const { return mTotal; }
     unsigned perMap(unsigned idx) const { return idx < kMaxTrackedMaps ? mPerMap[idx] : 0u; }
+    /// Passes of the focused (point/spot) maps: every map index past the three
+    /// PSSM splits.
+    unsigned lamps() const {
+        unsigned n = 0;
+        for (unsigned i = 3u; i < kMaxTrackedMaps; ++i) n += mPerMap[i];
+        return n;
+    }
+    static constexpr unsigned kMaxTrackedMaps = 3u + kMaxShadowMaps;
 
 private:
-    static constexpr unsigned kMaxTrackedMaps = 3u + kMaxShadowMaps;
+    Ogre::IdString mNode;
     unsigned mTotal = 0;
     unsigned mPerMap[kMaxTrackedMaps] = { 0 };
 };
 
+namespace {
+const char *shadowNodeNameOf(ShadowNodeKind k) {
+    switch (k) {
+    case ShadowNodeKind::View:    return OgreView::kShadowNodeName;
+    case ShadowNodeKind::Reflect: return OgreView::kReflectShadowNodeName;
+    case ShadowNodeKind::Probe:   return OgreView::kProbeShadowNodeName;
+    }
+    return OgreView::kShadowNodeName;
+}
+
+void attachOnce(Ogre::CompositorWorkspace *ws, Ogre::CompositorWorkspaceListener *l) {
+    const Ogre::CompositorWorkspaceListenerVec &ls = ws->getListeners();
+    if (std::find(ls.begin(), ls.end(), l) == ls.end()) ws->addListener(l);
+}
+}   // namespace
+
 void OgreEngine::detachShadowCounter() {
-    if (mShadowCounterView && mShadowCounter)
-        mShadowCounterView->removeWorkspaceListener(mShadowCounter);
+    // The VIEW counter rides a view (through its workspace seam); the other
+    // two ride the scenes' private workspaces directly. Only LIVE workspaces
+    // are touched — a workspace that died took its listener list with it, so
+    // no pointer to one is ever kept.
+    ShadowPassCounter *viewCounter = mShadowCounters[unsigned(ShadowNodeKind::View)];
+    if (mShadowCounterView && viewCounter) {
+        for (const auto &v : mViews)
+            if (v.get() == mShadowCounterView) v->removeWorkspaceListener(viewCounter);
+    }
     mShadowCounterView = nullptr;
-    delete mShadowCounter;
-    mShadowCounter = nullptr;
+    for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
+        if (!mShadowCounters[k]) continue;
+        std::vector<Ogre::CompositorWorkspace *> ws;
+        for (const auto &sc : mScenes) sc->shadowWorkspaces(ShadowNodeKind(k), ws);
+        for (Ogre::CompositorWorkspace *w : ws) w->removeListener(mShadowCounters[k]);
+    }
+    for (ShadowPassCounter *&c : mShadowCounters) { delete c; c = nullptr; }
+    // P8: a detached counter reads NOTHING — never the last number it saw.
+    mShadowPassesLastFrame = 0;
+    mStaticShadowRendersLastFrame = 0;
+    for (unsigned k = 0; k < kShadowNodeKinds; ++k) mShadowKindPasses[k] = mShadowKindLampPasses[k] = 0;
+    mShadowViewMapPasses.clear();
 }
 
 void OgreEngine::noteViewDestroyed(OgreView *view) {
-    // THE COUNTER RIDES A VIEW, and this is where that view can die. Without
-    // this the next frame's applyStaticShadowMaps dereferences a freed OgreView
-    // to detach its listener — found by ASan on test_engine_asan's
+    // THE VIEW COUNTER RIDES A VIEW, and this is where that view can die.
+    // Without this the next frame's applyShadowCache dereferences a freed
+    // OgreView to detach its listener — found by ASan on test_engine_asan's
     // shadow_resolution_rebuilds_the_atlas, which destroys views while the
     // counter is attached.
     if (!view || view != mShadowCounterView) return;
-    if (mShadowCounter) view->removeWorkspaceListener(mShadowCounter);
+    if (ShadowPassCounter *c = mShadowCounters[unsigned(ShadowNodeKind::View)])
+        view->removeWorkspaceListener(c);
     mShadowCounterView = nullptr;
 }
 
@@ -752,8 +857,10 @@ std::vector<hud::AtlasTileDesc> OgreEngine::collectAtlasTiles() const {
                     const NodeId n = primary->nodeOfLight(l);
                     if (n) label += " #" + std::to_string((unsigned long long)n);
                 }
+                // "cached" = held by the lamp-map cache (ENGINE_CACHE_POLICY P2),
+                // "*" = re-rendering this frame.
                 if (lights[lightIdx].isStatic)
-                    label += lights[lightIdx].isDirty ? " static*" : " static";
+                    label += lights[lightIdx].isDirty ? " cached*" : " cached";
             } else {
                 label += " empty";
             }
@@ -767,164 +874,232 @@ std::vector<hud::AtlasTileDesc> OgreEngine::collectAtlasTiles() const {
 bool OgreEngine::refreshShadows() {
     if (!mHlmsRegistered || mHeadless) return false;
     bool any = false;
-    for (auto &s : mScenes) { s->dirtyStaticShadows(); any = true; }
-    mRefreshShadowsPending = any;
+    for (auto &s : mScenes) { s->dirtyAllShadowMaps(); any = true; }
     return any;
 }
 
-void OgreEngine::applyStaticShadowMaps() {
+void OgreEngine::applyShadowCache() {
+    if (!mHlmsRegistered || mHeadless) return;
+    ++mShadowFrame;
+    JAH_TRY {
+        // THE CLEAR STRATEGY FOLLOWS THE NEED — ONE WAY. Per-map clear quads are
+        // what let a cached map survive its atlas neighbours being redrawn;
+        // without a cacheable lamp they buy nothing and cost three quads over
+        // the PSSM block where a hardware fast-clear covered the whole atlas
+        // (measured, gi.coalesce 2026-09-09 — see buildShadowNode). So a process
+        // that has only ever drawn sun-lit scenes keeps upstream's pass list
+        // exactly, and the first lamp rebuilds the three node definitions once:
+        // the same hitch a Shadow Quality change costs.
+        //
+        // It never flips BACK within the session (the map count's D4 rule).
+        // A rebuild drops every workspace that names a shadow node — the
+        // views', the mirrors' and the reflection probes', whose GI arm is
+        // rebuilt from scratch — so a two-way switch would turn a script
+        // toggling a scene's only lamp into a multi-second hitch per toggle.
+        // The quads over an idle atlas cost next to nothing by comparison.
+        if (!mShadowPerMapClears) {
+            std::vector<OgreScene *> scenes;
+            scenesFeedingEnabledViews(scenes);
+            bool anyLamp = false;
+            for (OgreScene *s : scenes) if (s->hasCacheableShadowLights()) { anyLamp = true; break; }
+            if (anyLamp) rebuildShadowAtlas(mShadowResolution, mShadowMapCount, true);
+        }
+
+        // THE COUNTERS' OPT-IN EXPIRES (P8): nobody asked for a while, so the
+        // per-pass callbacks come off the render path and the readings go to 0.
+        const bool want = mShadowPolled && mShadowFrame - mShadowPollFrame <= kShadowPollWindowFrames;
+        if (!want) {
+            mShadowPolled = false;
+            if (mShadowCounters[0] || mShadowCounters[1] || mShadowCounters[2]) detachShadowCounter();
+        }
+    } JAH_CATCH(mLastError, );
+}
+
+void OgreEngine::releaseShadowLamp(OgreScene *scene, Ogre::Light *light) {
+    // A light is about to be destroyed: untie it from every instance that
+    // holds it FIXED, now — not on the next frame. Ogre dereferences a fixed
+    // light on every update of the node (clearShadowCastingLights flips its
+    // cast-shadows flag), and an instance that does not update this frame (a
+    // probe that does not capture, a disabled view) would carry the dangling
+    // pointer until it did; worse, a new light at the recycled address would
+    // read as "already cached" with the dead lamp's map.
+    if (!scene || !light || !mHlmsRegistered || mHeadless) return;
+    JAH_TRY {
+        std::vector<Ogre::CompositorShadowNode *> nodes;
+        for (auto &v : mViews)
+            if (v->ogreScene() == scene)
+                if (Ogre::CompositorShadowNode *n = v->shadowNodeInstance()) nodes.push_back(n);
+        for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
+            std::vector<Ogre::CompositorWorkspace *> ws;
+            scene->shadowWorkspaces(ShadowNodeKind(k), ws);
+            for (Ogre::CompositorWorkspace *w : ws)
+                if (Ogre::CompositorShadowNode *n = w->findShadowNode(shadowNodeNameOf(ShadowNodeKind(k))))
+                    nodes.push_back(n);
+        }
+        for (Ogre::CompositorShadowNode *n : nodes) {
+            const Ogre::LightClosestArray &held = n->getShadowCastingLights();
+            for (size_t slot = 1; slot < held.size(); ++slot)
+                if (held[slot].isStatic && held[slot].light == light)
+                    n->setLightFixedToShadowMap(slot + 2u, nullptr);
+        }
+    } JAH_CATCH(mLastError, );
+}
+
+void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) {
+    for (unsigned k = 0; k < kShadowNodeKinds; ++k)
+        mShadowCachedInstances[k] = mShadowUncachedInstances[k] = mShadowDirtiedMaps[k] = 0;
     if (!mHlmsRegistered || mHeadless) return;
     JAH_TRY {
-        // The counter rides the first enabled view that has a shadow node —
-        // the same "one view speaks for the process" rule the HUD and the post
-        // chain's recompile globals use. It is re-attached rather than hooked
-        // up once because a view's workspace is dropped and recreated by every
-        // atlas rebuild, and addWorkspaceListener is a no-op on repeat.
-        // THE COUNTER IS OPT-IN, and that is a performance decision, not a
-        // preference (found by gi.coalesce, 2026-09-09). A
-        // CompositorWorkspaceListener is called back for EVERY compositor pass
-        // of EVERY frame, and a GI scene has a lot of passes: attaching it
-        // unconditionally put a virtual call plus an IdString compare on the
-        // render path of every scene in the process, for numbers almost nobody
-        // reads. It measurably moved a neighbouring suite's frame-phase.
-        //
-        // So it rides the RenderStats::metricsRecording pattern this engine
-        // already uses: recording starts when something asks (shadowStatus())
-        // or when there is something to measure (a static map exists), and
-        // stops again when neither holds.
-        const bool wantCounter = mShadowStatusPolled || mShadowStaticSeen;
-        if (wantCounter && !mShadowCounter) mShadowCounter = new ShadowPassCounter();
-        OgreView *counterView = nullptr;
-
-        std::vector<OgreScene *> scenes;
-        scenesFeedingEnabledViews(scenes);
-
-        // THE EARLY OUT, and the reason it exists: this function is on the
-        // render path of EVERY frame of every scene in the process, and the
-        // overwhelmingly common case is "no light in this process has a static
-        // shadow map" — every scene shipped today. In that case there is
-        // nothing to assign, nothing to dirty and nothing to count, and the
-        // work below (a walk of the views, findShadowNode per view, the fixed
-        // -light table per view) is pure overhead. `mShadowStaticSeen` keeps
-        // one frame of memory so the LAST static light's slot is still released
-        // properly before the early-out engages.
-        bool anyStatic = false;
-        for (OgreScene *s : scenes) if (s->hasStaticShadowLights()) { anyStatic = true; break; }
-        // THE CLEAR STRATEGY FOLLOWS THE NEED. Per-map clear quads exist to let
-        // a static map survive; until one exists they are pure cost (measured —
-        // see buildShadowNode). The first static light in the process rebuilds
-        // the node with them, which is the same hitch a Shadow Quality change
-        // costs and happens once.
-        if (anyStatic != mShadowPerMapClears)
-            rebuildShadowAtlas(mShadowResolution, mShadowMapCount, anyStatic);
-        if (!anyStatic && !mShadowStaticSeen && !mShadowStatusPolled) {
-            for (OgreScene *s : scenes) s->takeStaticShadowsDirty();
-            mShadowPassesLastFrame = 0;
-            mStaticShadowRendersLastFrame = 0;
-            return;
+        // ---- the counters, armed for THIS frame (P8) ----------------------
+        // Here and not at the top of the frame: applyPendingGi / applyPendingPlanar
+        // may have rebuilt a probe or planar workspace since, and the counters
+        // must ride the workspaces that are about to render.
+        if (mShadowPolled) {
+            for (unsigned k = 0; k < kShadowNodeKinds; ++k) {
+                if (!mShadowCounters[k])
+                    mShadowCounters[k] = new ShadowPassCounter(shadowNodeNameOf(ShadowNodeKind(k)));
+                mShadowCounters[k]->reset();
+            }
+            // The VIEW counter rides the first enabled view that has a shadow
+            // node — the "one view speaks for the process" rule the HUD and the
+            // post chain's recompile globals use — through the view's workspace
+            // seam, so an atlas rebuild re-attaches it by itself.
+            OgreView *counterView = nullptr;
+            for (auto &v : mViews)
+                if (v->isEnabled() && v->ogreScene() && v->shadowNodeInstance()) { counterView = v.get(); break; }
+            ShadowPassCounter *viewCounter = mShadowCounters[unsigned(ShadowNodeKind::View)];
+            if (counterView != mShadowCounterView) {
+                // Only ever detach from a view still in mViews: a raw view
+                // pointer held across frames is the shape of the use-after-free
+                // ASan caught here once.
+                for (auto &v : mViews)
+                    if (v.get() == mShadowCounterView) v->removeWorkspaceListener(viewCounter);
+                mShadowCounterView = counterView;
+            }
+            if (mShadowCounterView) mShadowCounterView->addWorkspaceListener(viewCounter);
+            for (OgreScene *s : drawn)
+                for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
+                    std::vector<Ogre::CompositorWorkspace *> ws;
+                    s->shadowWorkspaces(ShadowNodeKind(k), ws);
+                    for (Ogre::CompositorWorkspace *w : ws) attachOnce(w, mShadowCounters[k]);
+                }
         }
 
-        // Consume each scene's dirty flag ONCE for the whole frame, before the
-        // per-view loop: two views of the same scene must not make the second
-        // one miss the dirty (or, worse, dirty a map that has already been
-        // re-rendered this frame).
-        std::vector<std::pair<OgreScene *, bool>> dirty;
-        dirty.reserve(scenes.size());
-        for (OgreScene *s : scenes) {
-            // Rule 1 (the light moved) is checked here rather than pushed from
-            // outside, so a host that drives the engine directly still gets
-            // correct static shadows — see OgreScene::staticLightsMoved.
-            const bool moved = s->staticLightsMoved();
-            dirty.emplace_back(s, s->takeStaticShadowsDirty() || moved);
-        }
-        mRefreshShadowsPending = false;
-
-        unsigned staticSlots = 0;
-        bool sawStatic = false;
-        for (auto &v : mViews) {
-            if (!v->isEnabled() || !v->ogreScene()) continue;
-            Ogre::CompositorShadowNode *node = v->shadowNodeInstance();
-            if (!node) continue;
-            if (!counterView && wantCounter) counterView = v.get();
-
-            if (!wantCounter) counterView = nullptr;
-            OgreScene *scene = v->ogreScene();
-            bool sceneDirty = false;
-            for (const auto &d : dirty) if (d.first == scene) sceneDirty = d.second;
-
-            std::vector<std::pair<NodeId, Ogre::Light *>> statics;
-            scene->staticShadowLights(statics);
-            // Never more static lights than there are focused maps, and never
-            // ALL of them: a scene where every caster is static would leave the
-            // dynamic sort nothing to work with, which is legal but surprising
-            // — the cap is the map count itself, and the lights that do not fit
-            // simply stay dynamic (reported through shadowStatus).
-            if (statics.size() > mShadowMapCount) statics.resize(mShadowMapCount);
-            staticSlots = std::max(staticSlots, unsigned(statics.size()));
-            if (!statics.empty()) sawStatic = true;
-
-            const Ogre::LightClosestArray &held = node->getShadowCastingLights();
-            // Walk the focused slots from the BACK, handing out the last ones to
-            // the static lights in order (F7).
-            for (unsigned i = 0; i < mShadowMapCount; ++i) {
-                const unsigned slot = mShadowMapCount - i;      // light slot: 1..N
-                if (slot >= held.size() + 1u) continue;
-                const unsigned mapIdx = slot + 2u;              // 3 PSSM splits first
-                Ogre::Light *want = i < statics.size() ? statics[i].second : nullptr;
-                const bool isStatic = held[slot].isStatic;
-                Ogre::Light *have = isStatic ? held[slot].light : nullptr;
-                if (want != have) {
-                    // setLightFixedToShadowMap(idx, null) releases the slot back
-                    // to the dynamic sort; with a light it also marks it dirty,
-                    // which is why this must only run when the ASSIGNMENT
-                    // changed — calling it every frame would keep the map
-                    // permanently dirty and save nothing at all.
-                    node->setLightFixedToShadowMap(mapIdx, want);
-                } else if (want && sceneDirty) {
-                    // includeLinked=false: our maps clear individually, so one
-                    // dirty map does not oblige its atlas neighbours to redraw
-                    // (which is exactly what upstream's whole-atlas clear WOULD
-                    // have obliged, and why upstream defaults it to true).
-                    node->setStaticShadowMapDirty(mapIdx, false);
+        // ---- detection per scene, application per instance ----------------
+        for (OgreScene *s : drawn) {
+            OgreScene::ShadowCacheFrame f;
+            s->collectShadowCacheFrame(f);
+            struct Instance { Ogre::CompositorShadowNode *node; ShadowNodeKind kind; };
+            std::vector<Instance> instances;
+            // EVERY view of the scene, enabled or not: a disabled view keeps its
+            // workspace, and marking its instance now is what keeps its maps
+            // honest for the frame it is shown again (the flags persist).
+            for (auto &v : mViews)
+                if (v->ogreScene() == s)
+                    if (Ogre::CompositorShadowNode *n = v->shadowNodeInstance())
+                        instances.push_back({ n, ShadowNodeKind::View });
+            for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
+                std::vector<Ogre::CompositorWorkspace *> ws;
+                s->shadowWorkspaces(ShadowNodeKind(k), ws);
+                for (Ogre::CompositorWorkspace *w : ws)
+                    if (Ogre::CompositorShadowNode *n = w->findShadowNode(shadowNodeNameOf(ShadowNodeKind(k))))
+                        instances.push_back({ n, ShadowNodeKind(k) });
+            }
+            for (const Instance &in : instances) {
+                const unsigned k = unsigned(in.kind);
+                const Ogre::LightClosestArray &held = in.node->getShadowCastingLights();
+                if (held.size() < 2u) continue;                  // a PSSM-only node
+                const size_t maps = held.size() - 1u;            // light slots 1..maps
+                std::vector<Ogre::Light *> want;
+                want.reserve(f.lights.size());
+                for (const OgreScene::ShadowCacheLight &l : f.lights)
+                    if (shadowLampCachedFor(in.kind, l.light)) want.push_back(l.light);
+                // Cache only with per-map clears (a whole-atlas clear would wipe
+                // a cached map every frame) and only while every lamp fits.
+                const bool cache = mShadowPerMapClears && !want.empty() && want.size() <= maps;
+                if (cache) ++mShadowCachedInstances[k];
+                else if (!want.empty()) ++mShadowUncachedInstances[k];
+                const size_t fixed = cache ? want.size() : 0u;
+                const std::vector<Ogre::Light *> &dirty = f.dirty[k];
+                // NO LAMP MAY SIT IN TWO SLOTS. A slot Ogre's dynamic sort filled
+                // on this instance's last update still names its light until the
+                // next update rebuilds it — and fixing that same light into
+                // another slot now would list it twice. Upstream's Forward+
+                // hides every listed light around its cull and restores each
+                // slot's RECORDED visibility (OgreForwardClustered.cpp:925-951):
+                // the second occurrence records "hidden", so the light ends the
+                // frame hidden for good. Measured: a GI rebuild's synchronous
+                // probe placement left such entries on every probe instance and
+                // switched every lamp of the scene off. Clearing the stale
+                // dynamic entry is free — the next update refills the dynamic
+                // slots from lamps the cache does not hold.
+                if (cache)
+                    for (size_t j = 0; j < maps; ++j) {
+                        const Ogre::LightClosest &e = held[j + 1u];
+                        if (e.light && !e.isStatic &&
+                            std::find(want.begin(), want.end(), e.light) != want.end())
+                            in.node->setLightFixedToShadowMap(j + 3u, nullptr);
+                    }
+                for (size_t j = 0; j < maps; ++j) {
+                    const size_t slot = j + 1u;
+                    const size_t mapIdx = slot + 2u;             // 3 PSSM maps first
+                    Ogre::Light *w = j >= maps - fixed ? want[j - (maps - fixed)] : nullptr;
+                    Ogre::Light *have = held[slot].isStatic ? held[slot].light : nullptr;
+                    if (w != have) {
+                        // A NEW assignment (or a release). setLightFixedToShadowMap
+                        // marks the map dirty itself, which is why this runs only
+                        // when the assignment CHANGED: every frame would keep it
+                        // permanently dirty and cache nothing.
+                        in.node->setLightFixedToShadowMap(mapIdx, w);
+                        if (w) ++mShadowDirtiedMaps[k];
+                    } else if (w && (f.dirtyAll ||
+                                     std::find(dirty.begin(), dirty.end(), w) != dirty.end())) {
+                        // includeLinked=false: our maps clear individually, so one
+                        // dirty map does not oblige its atlas neighbours to redraw.
+                        in.node->setStaticShadowMapDirty(mapIdx, false);
+                        ++mShadowDirtiedMaps[k];
+                    }
                 }
             }
         }
+    } JAH_CATCH(mLastError, );
+}
 
-        mShadowStaticSeen = sawStatic;
-
-        // Attribute last frame's counts. The per-map numbers were collected by
-        // the listener during the PREVIOUS frame, so this reads them before the
-        // next workspacePreUpdate resets them.
-        if (mShadowCounter) {
-            mShadowPassesLastFrame = mShadowCounter->total();
-            unsigned staticRenders = 0;
-            for (unsigned i = 0; i < staticSlots; ++i) {
-                const unsigned mapIdx = mShadowMapCount - i + 2u;
-                staticRenders += mShadowCounter->perMap(mapIdx);
-            }
-            mStaticShadowRendersLastFrame = staticRenders;
+void OgreEngine::latchShadowCounters() {
+    ShadowPassCounter *vc = mShadowCounters[unsigned(ShadowNodeKind::View)];
+    if (!vc) {
+        mShadowPassesLastFrame = 0;
+        mStaticShadowRendersLastFrame = 0;
+        for (unsigned k = 0; k < kShadowNodeKinds; ++k) mShadowKindPasses[k] = mShadowKindLampPasses[k] = 0;
+        mShadowViewMapPasses.clear();
+        return;
+    }
+    JAH_TRY {
+        // The view kind reports the COUNTED view's node — and nothing at all
+        // when no enabled view has one (shadows switched off): P8's "reset on
+        // detach", which used to keep reading the last frame it had counted.
+        Ogre::CompositorShadowNode *node = mShadowCounterView ? mShadowCounterView->shadowNodeInstance()
+                                                              : nullptr;
+        mShadowViewMapPasses.assign(ShadowPassCounter::kMaxTrackedMaps, 0u);
+        if (node) {
+            for (unsigned i = 0; i < ShadowPassCounter::kMaxTrackedMaps; ++i)
+                mShadowViewMapPasses[i] = vc->perMap(i);
+            mShadowPassesLastFrame = vc->total();
+            unsigned cachedRenders = 0;
+            const Ogre::LightClosestArray &held = node->getShadowCastingLights();
+            for (size_t slot = 1; slot < held.size(); ++slot)
+                if (held[slot].isStatic) cachedRenders += vc->perMap(unsigned(slot + 2u));
+            mStaticShadowRendersLastFrame = cachedRenders;
         } else {
             mShadowPassesLastFrame = 0;
             mStaticShadowRendersLastFrame = 0;
         }
-
-        if (counterView != mShadowCounterView) {
-            // BELT AND BRACES over noteViewDestroyed's unhook: only ever detach
-            // from a view that is still in mViews. A raw view pointer held
-            // across frames is exactly the shape of the use-after-free ASan
-            // caught here once, and the check costs a walk of a handful of
-            // views.
-            bool stillAlive = false;
-            for (const auto &v : mViews) if (v.get() == mShadowCounterView) stillAlive = true;
-            if (mShadowCounterView && stillAlive)
-                mShadowCounterView->removeWorkspaceListener(mShadowCounter);
-            mShadowCounterView = counterView;
+        mShadowKindPasses[0] = mShadowPassesLastFrame;
+        mShadowKindLampPasses[0] = node ? vc->lamps() : 0u;
+        for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
+            mShadowKindPasses[k] = mShadowCounters[k] ? mShadowCounters[k]->total() : 0u;
+            mShadowKindLampPasses[k] = mShadowCounters[k] ? mShadowCounters[k]->lamps() : 0u;
         }
-        if (mShadowCounterView && mShadowCounter)
-            mShadowCounterView->addWorkspaceListener(mShadowCounter);
-        // Nothing wants the numbers any more: unhook and let the render path go
-        // back to costing nothing.
-        if (!wantCounter && mShadowCounter) detachShadowCounter();
     } JAH_CATCH(mLastError, );
 }
 

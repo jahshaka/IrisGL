@@ -57,7 +57,13 @@ bool OgreScene::updateMeshVertices(MeshId id, const std::vector<float> &position
         rec.mesh->_setBounds(aabb, false);
         rec.mesh->_setBoundingSphereRadius(aabb.getRadius());
         for (auto &kv : mNodes)
-            if (kv.second.meshRef == id && kv.second.item) kv.second.item->setLocalAabb(aabb);
+            if (kv.second.meshRef == id && kv.second.item) {
+                kv.second.item->setLocalAabb(aabb);
+                // New vertex data is a new caster shape even when the bounds did
+                // not move (lamp-map cache): its lamps re-render in the frame it
+                // lands — flagged in the walk this function already makes.
+                kv.second.shadowShapeDirty = true;
+            }
         return true;
     } JAH_CATCH(mError, false);
 }

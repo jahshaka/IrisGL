@@ -936,22 +936,6 @@ struct LightDesc {
     /// higher concentrates the light towards the core.
     float     spotFalloff = 1.0f;
     bool      castShadows = true;          // ignored for Area (backend cannot shadow them)
-    /// STATIC SHADOW MAP (SPECS/SHADOW_TOOLING_SPEC.md §4.3): render this
-    /// light's shadow map ONCE and keep it until something invalidates it,
-    /// instead of re-rendering it every frame. For a point light that is six
-    /// cube-face passes plus a copy saved per frame — the single biggest
-    /// shadow saving available for a lamp that does not move.
-    ///
-    /// The engine invalidates it on its own when the light moves or any of its
-    /// parameters change; the HOST must call Scene::dirtyStaticShadows()
-    /// whenever the geometry the light sees moves, is attached or is removed
-    /// (SceneMirror does). Engine::refreshShadows() re-renders every static map
-    /// once, for the "I do not know what changed" case.
-    ///
-    /// IGNORED for directional lights (PSSM follows the camera) and for area
-    /// lights (which never cast). Ignored, not refused: a host that stores the
-    /// flag per light must not lose it when a light's type changes.
-    bool      shadowStatic = false;
     // Area lights only: a rectangle spanning the node's local X (width) and
     // Z (height), emitting down -Y like every other light type here.
     float     rectWidth = 1.0f;
@@ -1010,7 +994,7 @@ struct LightDesc {
         return type == o.type && colour == o.colour && intensity == o.intensity &&
                range == o.range && spotAngleDegrees == o.spotAngleDegrees &&
                spotSoftness == o.spotSoftness && spotFalloff == o.spotFalloff &&
-               castShadows == o.castShadows && shadowStatic == o.shadowStatic &&
+               castShadows == o.castShadows &&
                rectWidth == o.rectWidth && rectHeight == o.rectHeight &&
                doubleSided == o.doubleSided && accurate == o.accurate &&
                iesProfilePath == o.iesProfilePath && texturePath == o.texturePath &&
@@ -2407,9 +2391,16 @@ struct RenderStats {
 struct ShadowMapInfo {
     unsigned slot = 0;        ///< 0 = the directional/PSSM slot, 1..N the focused maps
     NodeId   node = 0;        ///< the light occupying it, 0 when the slot is empty or foreign
-    bool     isStatic = false;///< tied to that light with a static map (LightDesc::shadowStatic)
-    bool     dirty = false;   ///< a static map scheduled to re-render on the next frame
+    /// The lamp-map cache holds this slot's light (every point/spot map is
+    /// cached — ENGINE_CACHE_POLICY_SPEC P2 — unless the view has more lamps
+    /// than maps, when the node stays on Ogre's closest-first dynamic sort).
+    bool     isStatic = false;
+    bool     dirty = false;   ///< a cached map scheduled to re-render on the next frame
     bool     pssm = false;    ///< the directional slot (three splits) rather than a focused map
+    /// Shadow-node passes the last frame spent on this slot's map(s) in the
+    /// counted view — 0 for a cached lamp at rest (8 when it re-renders: a
+    /// clear, six cube faces and the copy for a point light).
+    unsigned passesLastFrame = 0;
 };
 
 /// WHAT THE SHADOW ATLAS ACTUALLY IS, as opposed to what was asked for
@@ -2446,11 +2437,31 @@ struct ShadowStatus {
     /// Shadow-casting point/spot lights with NO map this frame — the lights
     /// whose shadows are silently missing. Empty is the healthy state.
     std::vector<NodeId> unmapped;
-    /// Shadow-node passes the last frame executed, and how many of those were a
-    /// static map re-rendering. A static map that never dirties contributes
-    /// zero: that is what "renders once" means, measurably.
+    /// THE COST READINGS OF THE LAST RENDERED FRAME (counted only while
+    /// somebody polls — see Engine::shadowStatus). `shadowPassesLastFrame` =
+    /// the shadow-node passes the COUNTED view executed (the first enabled view
+    /// with shadows; 0 when none has any), and `staticMapRendersLastFrame` how
+    /// many of those re-rendered a CACHED lamp map: zero at rest, which is what
+    /// "renders once" means, measurably.
     unsigned shadowPassesLastFrame = 0;
     unsigned staticMapRendersLastFrame = 0;
+    /// The same for the planar mirrors' shadow nodes (every budget slot) and
+    /// the reflection probes' (every shadowed probe that captured) — total
+    /// passes, and the part spent on point/spot maps. A probe capture renders a
+    /// dirty lamp map on its FIRST face and reuses it on the other five.
+    unsigned reflectPassesLastFrame = 0;
+    unsigned probePassesLastFrame = 0;
+    unsigned reflectLampPassesLastFrame = 0;
+    unsigned probeLampPassesLastFrame = 0;
+    /// The lamp-map cache last frame (ENGINE_CACHE_POLICY_SPEC P2-P5): shadow-
+    /// node instances (views, planar slots, probes) whose lamps are cached,
+    /// instances left on the dynamic sort because the lamps outnumber their
+    /// maps (the v1 over-budget rule), whether the counted view's own node is
+    /// caching, and how many lamp maps were marked to re-render.
+    unsigned cachedInstances = 0;
+    unsigned uncachedInstances = 0;
+    bool     viewCached = false;
+    unsigned mapsDirtiedLastFrame = 0;
 };
 
 /// A CENSUS of everything alive behind the boundary (fps audit F11).

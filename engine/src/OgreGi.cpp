@@ -1303,14 +1303,14 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
 void OgreScene::invalidateGiCaches() {
     // EVERY STRUCTURAL CHANGE TO THE SCENE FUNNELS THROUGH HERE — a mesh
     // attached or detached, a node destroyed, a material or texture replaced,
-    // a light removed — which makes it the one place static shadow maps can be
-    // invalidated for "the geometry changed" without inventing a second funnel
-    // (SHADOW_TOOLING_SPEC.md §4.3, rule 4). What it does NOT cover is a caster
-    // MOVING: the document writes transforms straight into the shared scene
-    // graph, so no engine call happens at all — that is the host's
-    // dirtyStaticShadows(), which SceneMirror drives from the document's
-    // transform-write counter.
-    mStaticShadowsDirty = true;
+    // a light removed. It deliberately does NOT touch the cached lamp maps any
+    // more (ENGINE_CACHE_POLICY_SPEC P3): the caster scan sees an attach, a
+    // detach, a removal or a visibility edge by itself, per LIGHT, in the frame
+    // it happens (OgreScene::collectShadowCacheFrame) — funnelling them through
+    // here re-rendered every lamp in the scene for a prop spawned in one room.
+    // The depth-relevant edits the scan cannot see (material parameters, new
+    // vertex data) flag their items themselves (noteShadowShapeChanged,
+    // updateMeshVertices).
     if (mInstantRadiosity) {
         // The cache FREE must happen NOW, while the dying mesh/texture is still
         // alive: InstantRadiosity::freeMemory dereferences its cache KEYS

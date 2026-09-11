@@ -597,20 +597,41 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
                 n.lightMaskPath = wantMask;
             }
         }
-        // STATIC SHADOW MAPS (SHADOW_TOOLING_SPEC.md §4.3). setLight is called
-        // on CHANGE ONLY by the mirror, so reaching this line at all means one
-        // of this light's parameters moved — which is one of the invalidation
-        // rules. Dirtying the whole scene's static maps is the coarse v1: it
-        // costs a re-render of maps that did not need one, never a wrong
-        // picture.
-        n.lightShadowStatic = d.shadowStatic;
-        dirtyStaticShadows();
+        // THE LAMP-MAP CACHE'S PARAMETER INPUT (ENGINE_CACHE_POLICY_SPEC P3 item
+        // 4). What a point/spot shadow map depends on, from this description:
+        // the type (a point map is six faces, a spot one), the reach (the
+        // shadow camera's far plane is the range) and the cone (a spot camera's
+        // FOV is 1.2x the outer angle), and whether it casts at all. NOT the
+        // colour, the intensity, the softness or the falloff — a shadow map is
+        // depth, so a dimmer lamp casts the same shadow and a colour slider
+        // re-renders nothing. The cache compares this key (with the light's
+        // pose folded in) once a frame, so a direct caller pushing the same
+        // description twice costs nothing either.
+        {
+            unsigned long long k = 1469598103934665603ull;      // FNV-1a
+            const auto fold = [&k](const void *p, size_t bytes) {
+                const unsigned char *b = static_cast<const unsigned char *>(p);
+                for (size_t i = 0; i < bytes; ++i) { k ^= b[i]; k *= 1099511628211ull; }
+            };
+            const int type = int(d.type);
+            const float spot = d.type == LightType::Spot ? d.spotAngleDegrees : 0.0f;
+            fold(&type, sizeof type); fold(&d.range, sizeof d.range);
+            fold(&spot, sizeof spot); fold(&d.castShadows, sizeof d.castShadows);
+            n.lightShadowKey = k;
+        }
+        // A CACHED MAP MUST NOT DEPEND ON THE CAMERA THAT RENDERED IT: pin the
+        // shadow camera's near plane for point and spot lights
+        // (kShadowLampNearClip has the why). A directional light goes back to
+        // Ogre's camera-following default — PSSM derives its splits from the
+        // viewer and is never cached.
+        L->setShadowNearClipDistance(d.type == LightType::Point || d.type == LightType::Spot
+                                         ? kShadowLampNearClip : Ogre::Real(-1));
         // THE PROBE CACHE'S LIGHT INPUT (ENGINE_CACHE_POLICY_SPEC P7). A probe
         // capture is a lit render, so a light's colour, intensity, reach, cone,
         // shape, shadowing and channels all change what every probe would hold
         // — and a NEW light is the same statement. Keyed on exactly those
-        // fields (not on the call: the static-map flag above is not one of
-        // them, and a direct caller may push the same description twice). The
+        // fields (not on the call: a direct caller may push the same
+        // description twice). The
         // VOXEL half of the same edit is the host's: its GI signature hashes
         // these parameters too, so the voxels re-inject on the drag cadence and
         // re-solve once on settle.
@@ -642,6 +663,9 @@ bool OgreScene::removeLight(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end() || !it->second.light) return false;
     JAH_TRY {
+        // Untied from every cached shadow map first: a fixed light is
+        // dereferenced by its node on every update (releaseShadowLamp).
+        if (mEngine) mEngine->releaseShadowLamp(this, it->second.light);
         it->second.light->detachFromParent();
         mSceneMgr->destroyLight(it->second.light);
         it->second.light = nullptr;
@@ -653,8 +677,9 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.lightMaskPath.clear();
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         invalidateGiCaches();   // a vanished light must stop bouncing (VCT re-injects)
-        it->second.lightShadowStatic = false;
-        dirtyStaticShadows();   // its slot goes back to the dynamic sort
+        // Its cached maps need nothing: the lamp leaves the cache's light list,
+        // so the next frame releases its slot in every shadow-node instance.
+        it->second.lightShadowKey = 0;
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -877,6 +902,7 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.
     if (n.light) {
+        if (mEngine) mEngine->releaseShadowLamp(this, n.light);   // see removeLight
         n.light->detachFromParent(); mSceneMgr->destroyLight(n.light); n.light = nullptr;
         mLightNodes.erase(std::remove(mLightNodes.begin(), mLightNodes.end(), id), mLightNodes.end());
     }

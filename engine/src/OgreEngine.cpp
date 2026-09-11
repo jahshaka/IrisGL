@@ -491,7 +491,7 @@ void OgreEngine::destroyView(View *view) {
         if (it->get() != view) continue;
         // THE SHADOW-PASS COUNTER RIDES A VIEW (SHADOW_TOOLING_SPEC.md §4.3),
         // and this is where that view can die. Unhook it here or the next
-        // frame's applyStaticShadowMaps dereferences a freed OgreView to
+        // frame's applyShadowCache dereferences a freed OgreView to
         // detach a listener from it — found by ASan on test_engine_asan's
         // shadow_resolution_rebuilds_the_atlas, which destroys views while the
         // counter is attached.
@@ -557,10 +557,11 @@ void OgreEngine::renderOneFrame() {
         // same place it is safe. Debounced and growth-only, so a steady scene
         // pays one light-list walk per frame and nothing else.
         deriveShadowMapCount();
-        // ...and which of those maps are STATIC (SHADOW_TOOLING_SPEC.md §4.3).
-        // After the derivation, because a rebuild replaces the very
-        // CompositorShadowNode instances the assignments live on.
-        applyStaticShadowMaps();
+        // THE LAMP-MAP CACHE, first half (ENGINE_CACHE_POLICY_SPEC P2): the
+        // clear strategy and the pass counters. After the derivation, because a
+        // rebuild replaces the very CompositorShadowNode instances the cache
+        // lives on. The DETECTION half runs after updateSceneGraph below.
+        applyShadowCache();
         // ONE AUTHORITATIVE VIEW PER SCENE (FIX WAVE B2 / finding F7). The GI
         // tracker's work is per SCENE and stateful — it spends a per-frame probe
         // budget and carries the Forward+ range hysteresis — while `mViews` can
@@ -740,6 +741,13 @@ void OgreEngine::renderOneFrame() {
             // does nothing else, so neither do we.
             if (mRoot->_fireFrameStarted()) {
                 for (OgreScene *s : updated) s->sceneManager()->updateSceneGraph();
+                // THE LAMP-MAP CACHE, second half: here and nowhere earlier. The
+                // scene graph has just made every world AABB and light pose this
+                // frame's, and nothing has rendered yet — so a caster that moved
+                // this frame re-renders its lamps' maps in this frame, and the
+                // scan reads cached bounds instead of paying a root-recursive
+                // getWorldAabbUpdated per item (ENGINE_CACHE_POLICY_SPEC P3).
+                applyShadowCacheDirties(updated);
                 if (mRoot->_updateAllRenderTargets()) {
                     for (OgreScene *s : updated) s->sceneManager()->clearFrameData();
                     // MIRRORS OgreRoot.cpp:1123 EXACTLY. `Root::renderOneFrame`
@@ -758,6 +766,8 @@ void OgreEngine::renderOneFrame() {
                 }
             }
             mUpdatedScenes = unsigned(updated.size());
+            // ...and its readings (P8): what the pass counters saw this frame.
+            latchShadowCounters();
         }
         // POSE FOLLOWERS (Scene::followSkeleton — the selection silhouette over
         // an animating character). AFTER the frame, deliberately: the source's
@@ -1826,26 +1836,36 @@ void OgreEngine::createShadowNode() {
     // shared full-resolution node would cost ~56 MB per slot; half is ~14 MB,
     // and nobody has ever measured shadow-map resolution inside a mirror.
     //
-    // It keeps TWO focused maps whatever the main atlas grew to: a reflection
-    // is a secondary picture, and the count is what costs passes.
+    // ITS FOCUSED COUNT FOLLOWS THE MAIN NODE'S DERIVED COUNT (ENGINE_CACHE_
+    // POLICY_SPEC D3 = A, lead decision 2026-09-12). It used to hold two
+    // whatever the main atlas grew to, which made every lamp past the second
+    // shadowless inside a mirror AND kept the reflection off the lamp-map cache
+    // (a node caches only while its lamps fit its maps, applyShadowCacheDirties).
+    // With the count matched, a mirror reuses every lamp's cached map: at rest
+    // its lamp maps cost nothing, the whole point of P5.
     //
-    // ...and it never needs per-map clears: a reflection's shadow maps are all
-    // dynamic (fixed-light assignments are applied to the VIEW workspaces only).
+    // ...and it clears the way the view node does: per-map quads while the
+    // process holds any cacheable lamp, one whole-atlas clear otherwise
+    // (buildShadowNode's switch) — a whole-atlas clear would wipe the cached
+    // maps every frame.
     if (!cm->hasShadowNodeDefinition(OgreView::kReflectShadowNodeName))
         buildShadowNode(OgreView::kReflectShadowNodeName,
-                        std::max(256u, mShadowResolution / 2u), 2u, false);
+                        std::max(256u, mShadowResolution / 2u), mShadowMapCount,
+                        mShadowPerMapClears);
     // The PROBE-CAPTURE node (OgreView::kProbeShadowNodeName has the numbers):
     // instantiated once PER REFLECTION PROBE by the PCC / raster-IFD probe
     // workspaces, so it is the main atlas's layout at a quarter of the
     // resolution (512 at High — the largest probe face), the same derived
-    // focused count capped at four, a scratch cube of R/2, and no per-map
-    // clears (a probe's maps are never static). It is rebuilt with the other
-    // two whenever the resolution or the derived count changes.
+    // focused count capped at four and a scratch cube of R/2. It is rebuilt with
+    // the other two whenever the resolution, the derived count or the clear
+    // strategy changes — the last because a probe's lamp maps are CACHED too
+    // (ENGINE_CACHE_POLICY_SPEC P4): a capture's first face renders a dirty
+    // lamp map and the other five reuse it, which per-map clears make possible.
     if (!cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName)) {
         const unsigned probeRes = probeShadowResolution(mShadowResolution);
         buildShadowNode(OgreView::kProbeShadowNodeName, probeRes,
-                        std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps), false,
-                        probeRes / 2u);
+                        std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps),
+                        mShadowPerMapClears, probeRes / 2u);
     }
 }
 

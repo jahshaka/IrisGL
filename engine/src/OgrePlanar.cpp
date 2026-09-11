@@ -340,7 +340,7 @@ void OgreScene::rebuildPlanar() {
     // lockCamera is inert at our pin (its member and its early-out are both
     // commented out in OgrePlanarReflections.cpp) — pass null and do the camera
     // discrimination ourselves, in the listener.
-    mPlanar = new Ogre::PlanarReflections(mSceneMgr, cm, mPlanarParams.maxDistance, nullptr);
+    mPlanar = new planar::JahPlanarReflections(mSceneMgr, cm, mPlanarParams.maxDistance, nullptr);
     mPlanar->setMaxActiveActors(
         static_cast<Ogre::uint8>(mPlanarParams.budget), Ogre::IdString(mPlanarWorkspaceDef),
         mPlanarParams.accurateLighting, mPlanarParams.resolution, mPlanarParams.resolution,

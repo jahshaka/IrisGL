@@ -242,6 +242,42 @@ inline unsigned probeShadowResolution(unsigned mainResolution) {
     return std::min(kProbeShadowMaxResolution, std::max(256u, mainResolution / 4u));
 }
 
+/// THE THREE SHADOW-NODE KINDS (OgreView::kShadowNodeName and its two twins).
+/// A CompositorShadowNode is per WORKSPACE, so the lamp-map cache
+/// (ENGINE_CACHE_POLICY_SPEC P2-P5, OgreEngine::applyShadowCache) is applied
+/// per instance and counted per kind: the views' nodes, each planar budget
+/// slot's reflect node, and each shadowed reflection probe's probe node.
+enum class ShadowNodeKind : unsigned { View = 0u, Reflect = 1u, Probe = 2u };
+constexpr unsigned kShadowNodeKinds = 3u;
+/// THE CASTER SET, per kind: the render channels a shadow map of `kind` draws.
+/// ONE definition, read by the node's passes (buildShadowNode's
+/// mVisibilityMask) and by the lamp-map cache's caster scan (a changed box
+/// dirties a kind's maps only through these channels). Today every kind draws
+/// kVisibleBit. REALTIME_REFLECTIONS_SPEC R1/R2 widen View and Reflect to
+/// kVisibleBit | kMovableBit and keep Probe at kVisibleBit — and then a
+/// mover dirties view/reflect maps only, never probe maps (its §5.5), with no
+/// other change here. Never hard-code kVisibleBit as "the casters" elsewhere.
+inline Ogre::uint32 shadowCasterChannels(ShadowNodeKind) { return kVisibleBit; }
+inline Ogre::uint32 allShadowCasterChannels() {
+    return shadowCasterChannels(ShadowNodeKind::View) |
+           shadowCasterChannels(ShadowNodeKind::Reflect) |
+           shadowCasterChannels(ShadowNodeKind::Probe);
+}
+/// THE LAMPS a kind's instances may hold fixed (cached). Today: every
+/// cacheable lamp. R2's movable lights are outside the probe captures'
+/// `light_visibility_mask`, and a light FIXED to a map bypasses that mask (Ogre
+/// writes fixed lights into the pass buffer whatever the pass's light mask),
+/// so R2 filters them here for ShadowNodeKind::Probe.
+inline bool shadowLampCachedFor(ShadowNodeKind, const Ogre::Light *) { return true; }
+/// THE NEAR PLANE OF EVERY POINT/SPOT SHADOW CAMERA. Unset, Ogre falls back to
+/// the VIEWER's near clip (Light::_deriveShadowNearClipDistance), so the same
+/// lamp's depth range would follow whichever camera rendered it — fatal for a
+/// map rendered once and sampled by every camera after (ENGINE_CACHE_POLICY
+/// P4, risk 5). 0.1 is CameraDesc::nearClip's default (and the probe cameras'
+/// own floor order of magnitude), so a view at the default renders the exact
+/// maps it always rendered. Directional lights keep the camera's (PSSM).
+constexpr float kShadowLampNearClip = 0.1f;
+
 /// One shadow map's rectangle inside the atlas, in texels.
 struct ShadowMapRect { unsigned x = 0, y = 0, w = 0, h = 0; };
 
@@ -1294,6 +1330,23 @@ public:
     void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
 };
 
+/// Ogre's component plus ONE accessor: the per-slot reflection workspaces
+/// (ENGINE_CACHE_POLICY_SPEC P5). Each budget slot renders through its own
+/// private workspace, and each of those instantiates its own reflect shadow
+/// node — per-workspace state the lamp-map cache has to reach
+/// (OgreEngine::applyShadowCache). `mActiveActorData` is protected
+/// (OgrePlanarReflections.h:131), so this is engine API through inheritance,
+/// the JahIrradianceField shape, not a patch. ~PlanarReflections is NOT
+/// virtual: OgreScene holds and deletes this exact type.
+class JahPlanarReflections final : public Ogre::PlanarReflections {
+public:
+    using Ogre::PlanarReflections::PlanarReflections;
+    size_t slotCount() const { return mActiveActorData.size(); }
+    Ogre::CompositorWorkspace *slotWorkspace(size_t i) const {
+        return i < mActiveActorData.size() ? mActiveActorData[i].workspace : nullptr;
+    }
+};
+
 }   // namespace planar
 
 // ---------------------------------------------------------------------------
@@ -1635,6 +1688,9 @@ public:
     /// The scene's live PlanarReflections, or null when the budget is 0. Views
     /// read this once a frame to decide whether to arm their listener.
     Ogre::PlanarReflections *planarReflections() const { return mPlanar; }
+    /// The hybrid's reflection-probe arm, or null (the shadow-cache probe in
+    /// tests/shadow drives captures through it).
+    Ogre::ParallaxCorrectedCubemapAuto *parallaxCorrectedCubemap() const { return mPcc; }
     /// Re-derives every actor's world plane from its node's CURRENT transform.
     /// Actors are world-space objects that do NOT follow a SceneNode, so this
     /// has to happen after the host has pushed transforms and before the frame
@@ -1655,35 +1711,80 @@ public:
     /// was dropped and the caller must call the recreate below.
     bool dropGiForShadowRebuild();
     void recreateGiAfterShadowRebuild();
+    /// THE LAMP-MAP CACHE'S REACH INTO THIS SCENE'S PRIVATE WORKSPACES
+    /// (ENGINE_CACHE_POLICY_SPEC P4/P5): the live workspaces that instantiate
+    /// the shadow node of `kind` — each planar budget slot (Reflect) and each
+    /// reflection probe whose captures are shadowed (Probe). A view's own node
+    /// belongs to the view (OgreView::shadowNodeInstance), so View appends
+    /// nothing here. Empty when the arm is off or unshadowed. The raster
+    /// irradiance field's one workspace is NOT reachable (IrradianceFieldRaster
+    /// keeps it private, no accessor at the pin), so its lamp maps stay on
+    /// Ogre's dynamic path — correct, uncached.
+    void shadowWorkspaces(ShadowNodeKind kind,
+                          std::vector<Ogre::CompositorWorkspace *> &out) const;
     /// This scene's shadow-casting POINT and SPOT lights — the input to the
     /// derived focused-map count (SHADOW_TOOLING_SPEC.md §4.1). Directional
     /// lights ride the PSSM block and area lights can never cast, so neither
     /// counts. Fills `out` with the node ids when it is non-null.
     unsigned countLocalShadowCasters(std::vector<NodeId> *out) const;
-    /// The scene's STATIC shadow casters, in a stable order (node id), and the
-    /// backend lights behind them. The engine ties these to the LAST focused
-    /// slots and leaves the front of the range to Ogre's dynamic sort —
-    /// upstream's ordering rule (OgreCompositorShadowNode.h:308-317).
-    void staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>> &out) const;
-    /// "Is there anything static to do here at all?" — the early-out on the
-    /// per-frame path, which for every scene shipped today answers no.
-    bool hasStaticShadowLights() const;
-    /// "Something a static shadow map can see has changed." Sets a scene-level
-    /// flag the engine turns into setStaticShadowMapDirty on the next frame.
-    /// V1 IS DELIBERATELY COARSE: one flag for the whole scene, not per light —
-    /// a per-light range test is the recorded follow-up, and a static map that
-    /// is dirtied every frame costs exactly what a dynamic one costs, so being
-    /// wrong here is slow, never incorrect.
-    void dirtyStaticShadows() override;
-    bool takeStaticShadowsDirty();
-    /// Rule 1 of the invalidation list: "the light itself moved". The mirror
-    /// catches this in the app (any document transform write dirties the
-    /// scene), but a host driving the engine directly — a test, a preview, a
-    /// future tool — writes transforms through Scene::setNodeTransform and no
-    /// dirty would ever be raised. So the engine also watches the poses of its
-    /// OWN static lights: a handful of nodes, once a frame, compared as a hash.
-    /// Returns true when any of them moved since the last call.
-    bool staticLightsMoved();
+    // ---- THE LAMP-MAP CACHE (ENGINE_CACHE_POLICY_SPEC P2/P3; OgreLights.cpp) --
+    //
+    // EVERY point/spot shadow map is a CACHE (lead decision D1 = A, 2026-09-12;
+    // the per-light "Static Shadow" opt-in is gone): it renders once and is
+    // re-rendered only when one of ITS inputs changes — the light's own
+    // shadow-relevant parameters or pose, or a caster inside the light's reach
+    // moving, appearing, disappearing or changing shape. Per LIGHT, in the SAME
+    // frame: a mover near one lamp re-renders that lamp's map in the frame it
+    // moves, and every other lamp stays cached. The camera, gizmos, helpers,
+    // wires and outlines never dirty anything (none of them is a caster).
+    // Directional lights are not cached — PSSM follows the camera.
+    //
+    // The scene DETECTS; the engine APPLIES, to every shadow-node instance that
+    // draws the scene (views, planar slots, probes — ShadowNodeKind), in
+    // OgreEngine::applyShadowCacheDirties.
+
+    /// One cacheable lamp: a visible, shadow-casting point or spot light.
+    struct ShadowCacheLight { NodeId id = 0; Ogre::Light *light = nullptr; };
+    /// What one frame's detection produced for this scene.
+    struct ShadowCacheFrame {
+        /// The cacheable lamps in SLOT ORDER: every point light (by node id),
+        /// then every spot (by node id). HlmsPbs reads the shadow-casting light
+        /// list as directional, then point, then spot, cumulatively
+        /// (OgreHlms.cpp preparePassHashBase): fixed slots must keep that order
+        /// or a spot would be shaded as a point.
+        std::vector<ShadowCacheLight> lights;
+        /// Re-render every cached map (Engine::refreshShadows, a depth-relevant
+        /// edit nothing finer covers).
+        bool dirtyAll = false;
+        /// Lamps whose maps are out of date, per shadow-node kind — a caster
+        /// dirties a kind only through the render channels that kind's maps
+        /// draw (shadowCasterChannels), which is the seam REALTIME_REFLECTIONS
+        /// R2 needs (movers reach view/reflect maps, never probe maps).
+        std::vector<Ogre::Light *> dirty[kShadowNodeKinds];
+        unsigned casterChanges = 0;   ///< caster boxes that changed this frame
+        unsigned lightChanges  = 0;   ///< lamps whose own inputs changed
+    };
+    /// Runs ONCE per drawn scene per frame, AFTER SceneManager::updateSceneGraph
+    /// and before any workspace renders, so world AABBs and light poses are
+    /// this frame's (no getWorldAabbUpdated root recursion, and a mover's
+    /// shadow updates in the frame it moves).
+    void collectShadowCacheFrame(ShadowCacheFrame &out);
+    /// "Does this scene have anything to cache?" — decides the clear strategy
+    /// (per-map quads only while some drawn scene holds a cacheable lamp).
+    bool hasCacheableShadowLights() const;
+    /// Re-render every cached lamp map of this scene on the next frame.
+    void dirtyAllShadowMaps() { mShadowDirtyAll = true; }
+    /// A depth-relevant change to what the items wearing `mat` cast — alpha
+    /// mode/cutoff, two-sidedness, the albedo map under a cutout, a
+    /// shading-model switch, a vertex piece (new vertex data flags its items in
+    /// updateMeshVertices' own walk). Their lamps re-render on the next frame,
+    /// per light, like a moved caster.
+    void noteShadowShapeChanged(MaterialId mat);
+    /// A skinned node's pose moved (a clip time, a pushed bone pose) — the one
+    /// shape change an AABB scan cannot see (Items keep bind-pose bounds).
+    /// PER NODE, not the scene's mRigPoseEpoch: one animating character must
+    /// not re-dirty the lamps near every other rig.
+    void noteNodePosed(NodeId id);
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -1712,11 +1813,18 @@ private:
         bool             owned = true;
         Ogre::Item      *item  = nullptr;
         Ogre::Light     *light = nullptr;
-        /// LightDesc::shadowStatic as last pushed. Kept on the record rather
-        /// than read back off the Ogre light because Ogre has no such concept:
-        /// "static" lives in the compositor shadow node, per workspace, and
-        /// this is the engine's own memory of what the host asked for.
-        bool             lightShadowStatic = false;
+        /// A hash of the LightDesc fields the SHADOW MAP depends on — type,
+        /// range, spot cone, castShadows — pushed by setLight; the lamp-map
+        /// cache folds in the light's pose each frame. Colour and intensity are
+        /// deliberately absent: a shadow map is depth, and a dimmer lamp casts
+        /// the same shadow (ENGINE_CACHE_POLICY_SPEC §3).
+        unsigned long long lightShadowKey = 0;
+        /// Bumped by noteNodePosed (clip time / bone pose pushes): the caster
+        /// scan re-renders the lamps around a skinned item whose pose moved.
+        unsigned long long poseEpoch = 0;
+        /// Set by noteShadowShapeChanged / updateMeshVertices; consumed by the
+        /// next caster scan.
+        bool             shadowShapeDirty = false;
         /// A hash of the LightDesc fields a reflection-probe capture can see
         /// (ENGINE_CACHE_POLICY_SPEC P7), so setLight stales the probe grid on
         /// a real parameter change only; 0 = no light pushed yet.
@@ -2656,16 +2764,30 @@ private:
     /// giStatus, because "the fit is degenerate in this scene" is a fact about
     /// the scene the author can act on (GiStatus::probesClampedToRegion).
     int mProbesClampedToRegion = 0;
-    /// Same contract for the two probe-capture options (P3a/P3b): what the last
-    /// buildPcc RESOLVED, after GiToggle::Auto consulted the quality dial and
-    /// after the shadow half checked that a shadow node exists to recalculate.
-    /// "Something a static shadow map can see changed" — consumed once per
-    /// frame by OgreEngine::applyStaticShadowMaps. Starts TRUE so the first
-    /// frame after a light becomes static renders its map.
-    bool mStaticShadowsDirty = true;
+    /// THE LAMP-MAP CACHE'S MEMORY (collectShadowCacheFrame). Per caster: its
+    /// last seen world box, Item, pose epoch and render channels; per lamp: its
+    /// last seen shadow key (parameters + pose). A change is "different from
+    /// what was last seen", so a scene that is not drawn for a while is caught
+    /// up in full on the first frame it is drawn again.
+    struct ShadowCasterRec {
+        Ogre::Aabb          box;
+        const Ogre::Item   *item = nullptr;
+        unsigned long long  pose = 0;
+        Ogre::uint32        channels = 0;
+        unsigned            stamp = 0;
+        bool                present = false;
+    };
+    std::unordered_map<NodeId, ShadowCasterRec> mShadowCasters;
+    std::unordered_map<NodeId, unsigned long long> mShadowLightKeys;
+    unsigned mShadowScanStamp = 0;
+    bool     mShadowScanPrimed = false;
+    /// Re-render every cached map (dirtyAllShadowMaps). Starts TRUE: a scene's
+    /// first cached frame renders everything, which the fresh slot assignment
+    /// does anyway.
+    bool     mShadowDirtyAll = true;
     /// THE LIGHT INDEX. Node ids that currently carry an Ogre::Light, kept so
     /// the two per-frame shadow walks (countLocalShadowCasters and
-    /// staticShadowLights) iterate LIGHTS instead of every node in the scene.
+    /// collectShadowCacheFrame) iterate LIGHTS instead of every node in the scene.
     /// It is maintained where lights are born and die — setLight, removeLight,
     /// releaseNode — and a stale entry is tolerated by both readers (they skip
     /// a node whose light is gone), so it can never be worse than a hint.
@@ -2674,10 +2796,9 @@ private:
     /// gi.coalesce's 60-frame light drag failed 3 runs in 6 (the wall-clock
     /// re-inject debounce shifted); with the index it passes, like the base.
     std::vector<NodeId> mLightNodes;
-    /// Per static light, a hash of its world pose as of the last check (see
-    /// staticLightsMoved). Entries for lights that stop being static are
-    /// dropped, so a light toggled off and on re-renders once.
-    std::map<NodeId, unsigned long long> mStaticLightPose;
+    /// Same contract for the two probe-capture options (P3a/P3b): what the last
+    /// buildPcc RESOLVED, after GiToggle::Auto consulted the quality dial and
+    /// after the shadow half checked that a shadow node exists to recalculate.
     bool mPccHdr      = false;
     bool mPccShadowed = false;
     /// The raster IrradianceField's one workspace names the probe shadow node
@@ -2784,7 +2905,7 @@ private:
     // Planar-reflection arm. mPlanar is null unless mPlanarParams.budget > 0.
     // mReflectors is the DOCUMENT's set of reflector nodes and survives the arm
     // going up and down; mActors only exists while the arm is up.
-    Ogre::PlanarReflections *mPlanar = nullptr;
+    planar::JahPlanarReflections *mPlanar = nullptr;
     PlanarReflectionParams   mPlanarParams;
     std::string              mPlanarWorkspaceDef;
     std::vector<std::string> mPlanarNodeDefs;
@@ -2967,8 +3088,8 @@ public:
     ///
     /// It is per WORKSPACE, not per definition (CompositorShadowNode holds the
     /// fixed-light table and the static-map dirty flags), which is exactly why
-    /// anything that assigns static shadow maps has to reach every view that
-    /// draws — see OgreEngine::applyStaticShadowMaps.
+    /// anything that assigns cached shadow maps has to reach every view that
+    /// draws — see OgreEngine::applyShadowCacheDirties.
     Ogre::CompositorShadowNode *shadowNodeInstance() const;
     bool isEnabled() const override;
     unsigned width()  const override;
@@ -3267,14 +3388,28 @@ public:
     unsigned shadowMapBudget() const override;
     ShadowStatus shadowStatus() const override;
     bool refreshShadows() override;
-    /// Ties every scene's static lights to the END of the focused-map range and
-    /// dirties them when the scene says so. Runs once per frame, from
-    /// renderOneFrame, for EVERY workspace that instantiates the shadow node —
-    /// the fixed-light table and the dirty flags are per INSTANCE, not per
-    /// definition (SHADOW_TOOLING_SPEC.md F8).
-    void applyStaticShadowMaps();
-    /// Unhooks and destroys the shadow-pass counter. Called by ~OgreEngine
-    /// BEFORE the views go, so the listener never outlives its workspace.
+    /// THE LAMP-MAP CACHE, frame half one (OgreShadow.cpp; ENGINE_CACHE_POLICY
+    /// P2): at the top of the frame, before any per-view work — switches the
+    /// clear strategy to per-map quads when the first cacheable lamp appears
+    /// (one rebuild of the three node definitions, the Shadow Quality rebuild,
+    /// and never back) and disarms the pass counters when nobody asks (P8).
+    void applyShadowCache();
+    /// Frame half two: AFTER updateSceneGraph, before the workspaces render.
+    /// Each drawn scene detects what changed (collectShadowCacheFrame) and the
+    /// result is applied to EVERY shadow-node instance that draws it — views,
+    /// planar slots, probes: the fixed-light table and the dirty flags are per
+    /// INSTANCE (SHADOW_TOOLING_SPEC.md F8). A node caches only while the
+    /// lamps fit its maps (the v1 over-budget rule); otherwise it stays on
+    /// Ogre's closest-first dynamic sort and shadowStatus says so.
+    void applyShadowCacheDirties(const std::vector<OgreScene *> &drawn);
+    /// Frame half three: after the frame rendered — the counters' readings.
+    void latchShadowCounters();
+    /// Called by OgreScene BEFORE it destroys an Ogre::Light: unties it from
+    /// every shadow-node instance that holds it fixed (OgreShadow.cpp says why
+    /// this cannot wait for the next frame).
+    void releaseShadowLamp(OgreScene *scene, Ogre::Light *light);
+    /// Unhooks and destroys the shadow-pass counters. Called by ~OgreEngine
+    /// BEFORE the views go, so no listener outlives its workspace.
     void detachShadowCounter();
     /// One entry per shadow map of the LIVE shadow node — the atlas inspector's
     /// data (SHADOW_TOOLING_SPEC.md §4.4). Empty when nothing is rendering
@@ -3444,9 +3579,11 @@ private:
     /// eight; the resolution cap in effectiveShadowMapBudget() is what keeps a
     /// 4096 or 8192 atlas from taking the number literally.
     unsigned        mShadowMapBudget = 8;
-    /// Whether the CURRENT shadow node clears per map (see buildShadowNode).
-    /// False until a static shadow map exists anywhere in the process, so a
-    /// scene that never uses the feature executes upstream's pass list exactly.
+    /// Whether the CURRENT shadow nodes clear per map (see buildShadowNode).
+    /// False until a drawn scene first holds a cacheable (point/spot,
+    /// shadowed) lamp, so a process that only draws sun-lit scenes executes
+    /// upstream's pass list exactly; then true for the rest of the session
+    /// (one-way — applyShadowCache).
     bool            mShadowPerMapClears = false;
     /// Derivation bookkeeping: the count the last few frames asked for and how
     /// many frames in a row have asked for it. A scene LOADS its lights over
@@ -3460,31 +3597,46 @@ private:
     unsigned        mWarnedShadowCasters = 0;
     /// Frames the derived count must hold still before the atlas is rebuilt.
     static constexpr unsigned kShadowDeriveDebounceFrames = 3u;
-    /// Filled by the shadow-pass counter (ShadowPassCounter): how many passes
-    /// the shadow node ran last frame, and how many of those were a STATIC map
-    /// re-rendering. The second number is what makes "a static map renders
-    /// once" a measurement rather than a claim.
+    /// THE PASS COUNTERS' READINGS for the last rendered frame (P8), latched by
+    /// latchShadowCounters. View kind = the first enabled view with a shadow
+    /// node (the "one view speaks for the process" rule); reflect and probe
+    /// kinds = every planar slot and every shadowed probe of every scene.
+    /// `Lamp` = passes of focused (point/spot) maps; StaticShadowRenders = the
+    /// view's passes spent re-rendering CACHED lamp maps — zero at rest, which
+    /// is the whole point, measurably.
     unsigned        mShadowPassesLastFrame = 0;
     unsigned        mStaticShadowRendersLastFrame = 0;
-    /// Set by refreshShadows(): dirty every scene's static maps next frame.
-    bool            mRefreshShadowsPending = false;
-    /// The per-frame shadow-pass counter (defined in OgreShadow.cpp), held as
-    /// a RAW pointer for the LogBridge reason: a unique_ptr member would
-    /// instantiate its deleter in ~OgreEngine (OgreEngine.cpp), where the type
-    /// is incomplete. Created lazily by applyStaticShadowMaps and destroyed by
-    /// detachShadowCounter(), both of which live in the TU where it is complete.
+    unsigned        mShadowKindPasses[kShadowNodeKinds] = { 0, 0, 0 };
+    unsigned        mShadowKindLampPasses[kShadowNodeKinds] = { 0, 0, 0 };
+    std::vector<unsigned> mShadowViewMapPasses;   ///< per map index, view kind
+    /// What applyShadowCacheDirties did last frame, per kind: instances whose
+    /// lamps are cached, instances left on the dynamic sort (over budget), and
+    /// lamp maps it dirtied.
+    unsigned        mShadowCachedInstances[kShadowNodeKinds] = { 0, 0, 0 };
+    unsigned        mShadowUncachedInstances[kShadowNodeKinds] = { 0, 0, 0 };
+    unsigned        mShadowDirtiedMaps[kShadowNodeKinds] = { 0, 0, 0 };
+    /// The per-kind shadow-pass counters (defined in OgreShadow.cpp), RAW for
+    /// the LogBridge reason: a unique_ptr member would instantiate its deleter
+    /// in ~OgreEngine (OgreEngine.cpp), where the type is incomplete. Created
+    /// by applyShadowCache and destroyed by detachShadowCounter(), both in the
+    /// TU where it is complete.
     class ShadowPassCounter;
-    ShadowPassCounter *mShadowCounter = nullptr;
-    /// The view the counter is currently attached to, so it moves with the
-    /// primary view instead of counting a dead workspace's passes.
+    ShadowPassCounter *mShadowCounters[kShadowNodeKinds] = { nullptr, nullptr, nullptr };
+    /// The view the VIEW counter rides, so it moves with the primary view
+    /// instead of counting a dead workspace's passes.
     OgreView       *mShadowCounterView = nullptr;
-    /// The counter is OPT-IN (see applyStaticShadowMaps): a workspace listener
-    /// costs a callback per compositor pass per frame, so it runs only while
-    /// somebody reads shadowStatus() or a static shadow map exists. `mutable`
-    /// because shadowStatus() is const and asking is what arms it — the
-    /// RenderStats::metricsRecording pattern.
-    mutable bool    mShadowStatusPolled = false;
-    bool            mShadowStaticSeen = false;
+    /// THE COUNTERS ARE OPT-IN, AND THE OPT-IN EXPIRES (P8). A workspace
+    /// listener costs a callback per compositor pass per frame, so they run
+    /// only while somebody reads shadowStatus(): each read stamps the frame,
+    /// and kShadowPollWindowFrames frames without one detach them again. (It
+    /// used to be a latch that never cleared, so one World-panel open kept a
+    /// per-pass callback on the render path for the rest of the session.)
+    /// `mutable` because shadowStatus() is const and asking is what arms it —
+    /// the RenderStats::metricsRecording pattern.
+    static constexpr unsigned long long kShadowPollWindowFrames = 120ull;
+    unsigned long long mShadowFrame = 0;
+    mutable unsigned long long mShadowPollFrame = 0;
+    mutable bool    mShadowPolled = false;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     /// EngineConfig::vsync, then whatever setVsync() last said. Read at every
     /// window creation (createView + the MSAA-recreate hook), so the pacing

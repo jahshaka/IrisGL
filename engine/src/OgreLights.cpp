@@ -299,77 +299,287 @@ unsigned OgreScene::countLocalShadowCasters(std::vector<NodeId> *out) const {
     return n;
 }
 
-void OgreScene::staticShadowLights(std::vector<std::pair<NodeId, Ogre::Light *>> &out) const {
+// ---------------------------------------------------------------------------
+// THE LAMP-MAP CACHE, detection half (ENGINE_CACHE_POLICY_SPEC P2/P3)
+// ---------------------------------------------------------------------------
+// What this replaced, and why it could not stay: a light's map was either
+// DYNAMIC (re-rendered every frame — six cube faces plus a copy per point lamp,
+// in the view, in the planar mirror and on every face of every probe capture)
+// or opt-in STATIC, dirtied by the host whenever ANY transform in the document
+// changed (the mirror watched a process-wide transform-write counter, so the
+// editor camera moving re-rendered every "static" map). Now every point/spot
+// map is cached and the engine decides, per light, from what it can see
+// itself — after the scene graph has updated, so in the frame it matters.
+
+namespace {
+
+/// A light's REACH as a world box: what its shadow camera can contain. A
+/// point light's map is six 90-degree faces out to its range; a spot's is one
+/// perspective camera at 1.2x the outer cone (OgreShadowCameraSetup.cpp's
+/// DefaultShadowCameraSetup, capped at 175 degrees), also out to its range —
+/// the far plane is the light's range because we never set a shadow far clip
+/// (Light::_deriveShadowFarClipDistance). Conservative for spots: the box of
+/// the apex and the far cap, clipped to the range sphere's box.
+Ogre::Aabb lampReach(const Ogre::Light *l) {
+    const Ogre::Vector3 p = l->getParentNode()->_getDerivedPosition();
+    const Ogre::Real r = std::max(l->getAttenuationRange(), Ogre::Real(1e-3));
+    const Ogre::Aabb sphere(p, Ogre::Vector3(r, r, r));
+    if (l->getType() != Ogre::Light::LT_SPOTLIGHT) return sphere;
+    const Ogre::Vector3 d = l->getDerivedDirection().normalisedCopy();
+    const Ogre::Real halfFov =
+        std::min(l->getSpotlightOuterAngle().valueRadians() * Ogre::Real(0.6),
+                 Ogre::Degree(87.5f).valueRadians());
+    const Ogre::Real capR = std::min(r * std::tan(halfFov), r * Ogre::Real(64));
+    const Ogre::Vector3 c = p + d * r;
+    // The half extents of a disc of radius capR with normal d.
+    const Ogre::Vector3 e(capR * std::sqrt(std::max(Ogre::Real(0), 1 - d.x * d.x)),
+                          capR * std::sqrt(std::max(Ogre::Real(0), 1 - d.y * d.y)),
+                          capR * std::sqrt(std::max(Ogre::Real(0), 1 - d.z * d.z)));
+    Ogre::Vector3 mn = p, mx = p;
+    mn.makeFloor(c - e); mx.makeCeil(c + e);
+    mn.makeCeil(p - Ogre::Vector3(r, r, r)); mx.makeFloor(p + Ogre::Vector3(r, r, r));
+    return Ogre::Aabb::newFromExtents(mn, mx);
+}
+
+bool boxesTouch(const Ogre::Aabb &a, const Ogre::Aabb &b) {
+    const Ogre::Vector3 d = a.mCenter - b.mCenter;
+    const Ogre::Vector3 h = a.mHalfSize + b.mHalfSize;
+    return std::abs(d.x) <= h.x && std::abs(d.y) <= h.y && std::abs(d.z) <= h.z;
+}
+
+/// For a POINT lamp the sphere is the exact reach; the box test above only
+/// pre-filters.
+bool sphereTouchesBox(const Ogre::Vector3 &c, Ogre::Real r, const Ogre::Aabb &b) {
+    const Ogre::Vector3 d = c - b.mCenter;
+    const Ogre::Vector3 q(std::max(std::abs(d.x) - b.mHalfSize.x, Ogre::Real(0)),
+                          std::max(std::abs(d.y) - b.mHalfSize.y, Ogre::Real(0)),
+                          std::max(std::abs(d.z) - b.mHalfSize.z, Ogre::Real(0)));
+    return q.squaredLength() <= r * r;
+}
+
+/// "Did this box move?" A change test, not a measurement: the same transforms
+/// give the same floats frame after frame, so anything above a micro-metre of
+/// float noise is a real move — a physics body settling IS moving its shadow.
+bool boxMoved(const Ogre::Aabb &a, const Ogre::Aabb &b) {
+    const Ogre::Vector3 dc = a.mCenter - b.mCenter;
+    const Ogre::Vector3 dh = a.mHalfSize - b.mHalfSize;
+    const Ogre::Real eps = Ogre::Real(1e-5) * std::max(Ogre::Real(1), a.mHalfSize.length());
+    return std::abs(dc.x) > eps || std::abs(dc.y) > eps || std::abs(dc.z) > eps ||
+           std::abs(dh.x) > eps || std::abs(dh.y) > eps || std::abs(dh.z) > eps;
+}
+
+/// The key of everything a lamp's map depends on that setLight does not see:
+/// its world pose (a point map does not depend on orientation — its six faces
+/// are world-aligned, OgreCompositorShadowNode.cpp:577-591 — a spot's does).
+unsigned long long lampPoseKey(const Ogre::Light *l, unsigned long long paramKey) {
+    const Ogre::Node *n = l->getParentNode();
+    const Ogre::Vector3 p = n->_getDerivedPosition();
+    const Ogre::Quaternion q = l->getType() == Ogre::Light::LT_SPOTLIGHT
+                                   ? n->_getDerivedOrientation() : Ogre::Quaternion::IDENTITY;
+    unsigned long long h = paramKey ^ 1469598103934665603ull;
+    const float f[7] = { p.x, p.y, p.z, q.x, q.y, q.z, q.w };
+    for (float v : f) {
+        const long long k = (long long)std::llround(double(v) * 65536.0);
+        h ^= (unsigned long long)k;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+bool cacheableLamp(const Ogre::Light *l) {
+    // getVisible(), the LAYER_VISIBILITY flag our hide writes — NOT isVisible(),
+    // which also tests Root's *current* scene manager's combined visibility
+    // mask, i.e. whatever happened to render last (a probe capture, another
+    // scene's view): measured, it dropped every lamp of a GI scene.
+    if (!l || !l->getCastShadows() || !l->getVisible()) return false;
+    const Ogre::Light::LightTypes t = l->getType();
+    return t == Ogre::Light::LT_POINT || t == Ogre::Light::LT_SPOTLIGHT;
+}
+
+}   // namespace
+
+void OgreScene::shadowWorkspaces(ShadowNodeKind kind,
+                                 std::vector<Ogre::CompositorWorkspace *> &out) const {
+    if (kind == ShadowNodeKind::Reflect) {
+        // Only while the reflect pass names the node at all (rebuildPlanar).
+        if (!mPlanar || !mPlanarParams.shadows) return;
+        for (size_t i = 0; i < mPlanar->slotCount(); ++i)
+            if (Ogre::CompositorWorkspace *ws = mPlanar->slotWorkspace(i)) out.push_back(ws);
+    } else if (kind == ShadowNodeKind::Probe) {
+        if (!mPcc || !mPccShadowed) return;
+        for (const Ogre::CubemapProbe *p : mPcc->getProbes())
+            if (Ogre::CompositorWorkspace *ws = p->getWorkspace()) out.push_back(ws);
+    }
+}
+
+bool OgreScene::hasCacheableShadowLights() const {
     for (NodeId id : mLightNodes) {          // the light index, not every node
-        auto entryIt = mNodes.find(id);
-        if (entryIt == mNodes.end()) continue;
-        const auto &entry = *entryIt;
-        const Node &n = entry.second;
-        if (!n.light || !n.lightShadowStatic || !n.light->getCastShadows()) continue;
-        const Ogre::Light::LightTypes t = n.light->getType();
-        // Directional lights follow the camera through PSSM and area lights
-        // never cast: "static" is meaningless for both, and upstream says so
-        // (OgreCompositorShadowNode.h:298). Ignored, never refused — the
-        // document keeps the flag through a light-type change.
-        if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) continue;
-        out.emplace_back(entry.first, n.light);
-    }
-    // Stable by node id: the slot a light lands in must not depend on the
-    // iteration order of a map that a node insertion can rehash.
-    std::sort(out.begin(), out.end(),
-              [](const std::pair<NodeId, Ogre::Light *> &a,
-                 const std::pair<NodeId, Ogre::Light *> &b) { return a.first < b.first; });
-}
-
-bool OgreScene::staticLightsMoved() {
-    std::vector<std::pair<NodeId, Ogre::Light *>> statics;
-    staticShadowLights(statics);
-    bool moved = false;
-    std::map<NodeId, unsigned long long> now;
-    for (const auto &sl : statics) {
-        const Ogre::Node *n = sl.second->getParentNode();
-        if (!n) continue;
-        // A CHANGE KEY, not a measurement: the quantised world pose folded into
-        // one integer. `_getDerivedPositionUpdated` is what makes it honest on
-        // the frame of the move — the cached value can be a frame stale, and a
-        // one-frame-late shadow while dragging a lamp is exactly the artifact
-        // this whole feature must not introduce.
-        const Ogre::Vector3 p = const_cast<Ogre::Node *>(n)->_getDerivedPositionUpdated();
-        const Ogre::Quaternion q = const_cast<Ogre::Node *>(n)->_getDerivedOrientationUpdated();
-        unsigned long long h = 1469598103934665603ull;
-        const float f[7] = { p.x, p.y, p.z, q.x, q.y, q.z, q.w };
-        for (float v : f) {
-            const long long q10 = (long long)std::llround(double(v) * 4096.0);
-            h ^= (unsigned long long)q10;
-            h *= 1099511628211ull;
-        }
-        now[sl.first] = h;
-        auto it = mStaticLightPose.find(sl.first);
-        if (it == mStaticLightPose.end() || it->second != h) moved = true;
-    }
-    if (now.size() != mStaticLightPose.size()) moved = true;
-    mStaticLightPose.swap(now);
-    return moved;
-}
-
-bool OgreScene::hasStaticShadowLights() const {
-    for (NodeId id : mLightNodes) {
         auto it = mNodes.find(id);
-        if (it == mNodes.end()) continue;
-        const Node &n = it->second;
-        if (!n.light || !n.lightShadowStatic || !n.light->getCastShadows()) continue;
-        const Ogre::Light::LightTypes t = n.light->getType();
-        if (t == Ogre::Light::LT_POINT || t == Ogre::Light::LT_SPOTLIGHT) return true;
+        if (it != mNodes.end() && cacheableLamp(it->second.light)) return true;
     }
     return false;
 }
 
-void OgreScene::dirtyStaticShadows() { mStaticShadowsDirty = true; }
+void OgreScene::noteShadowShapeChanged(MaterialId mat) {
+    for (auto &kv : mNodes)
+        if (kv.second.materialRef == mat && kv.second.item) kv.second.shadowShapeDirty = true;
+}
 
-bool OgreScene::takeStaticShadowsDirty() {
-    const bool was = mStaticShadowsDirty;
-    mStaticShadowsDirty = false;
-    return was;
+void OgreScene::noteNodePosed(NodeId id) {
+    auto it = mNodes.find(id);
+    if (it != mNodes.end()) ++it->second.poseEpoch;
+}
+
+void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
+    out = ShadowCacheFrame();
+
+    // ---- 1. The lamps, in slot order, and each lamp's own inputs ----------
+    std::vector<std::pair<NodeId, Ogre::Light *>> points, spots;
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end() || !cacheableLamp(it->second.light)) continue;
+        (it->second.light->getType() == Ogre::Light::LT_POINT ? points : spots)
+            .emplace_back(id, it->second.light);
+    }
+    const auto byId = [](const std::pair<NodeId, Ogre::Light *> &a,
+                         const std::pair<NodeId, Ogre::Light *> &b) { return a.first < b.first; };
+    std::sort(points.begin(), points.end(), byId);
+    std::sort(spots.begin(), spots.end(), byId);
+    for (const auto &pl : points) out.lights.push_back({ pl.first, pl.second });
+    for (const auto &sl : spots)  out.lights.push_back({ sl.first, sl.second });
+
+    if (mShadowDirtyAll) { out.dirtyAll = true; mShadowDirtyAll = false; }
+    if (out.lights.empty()) {
+        // Nothing cached here: forget the casters. When a lamp arrives, its
+        // fresh slot assignment renders it, and the scan re-primes silently.
+        mShadowLightKeys.clear();
+        mShadowCasters.clear();
+        mShadowScanPrimed = false;
+        return;
+    }
+
+    // Dedupe per kind with a flag per lamp (the lists are single digits).
+    std::vector<unsigned char> marked(out.lights.size() * kShadowNodeKinds, 0u);
+    const auto dirtyLamp = [&](size_t i, unsigned kindMask) {
+        for (unsigned k = 0; k < kShadowNodeKinds; ++k) {
+            if (!(kindMask & (1u << k)) || marked[i * kShadowNodeKinds + k]) continue;
+            if (!shadowLampCachedFor(ShadowNodeKind(k), out.lights[i].light)) continue;
+            marked[i * kShadowNodeKinds + k] = 1u;
+            out.dirty[k].push_back(out.lights[i].light);
+        }
+    };
+    const unsigned allKinds = (1u << kShadowNodeKinds) - 1u;
+
+    std::vector<Ogre::Aabb> reach(out.lights.size());
+    std::unordered_map<NodeId, unsigned long long> keys;
+    keys.reserve(out.lights.size());
+    for (size_t i = 0; i < out.lights.size(); ++i) {
+        const Ogre::Light *l = out.lights[i].light;
+        reach[i] = lampReach(l);
+        const auto nit = mNodes.find(out.lights[i].id);
+        const unsigned long long key = lampPoseKey(l, nit->second.lightShadowKey);
+        keys.emplace(out.lights[i].id, key);
+        auto old = mShadowLightKeys.find(out.lights[i].id);
+        // A lamp seen for the first time needs nothing from here: its slot
+        // assignment is new, and setLightFixedToShadowMap marks it dirty.
+        if (old != mShadowLightKeys.end() && old->second != key) {
+            dirtyLamp(i, allKinds);
+            ++out.lightChanges;
+        }
+    }
+    mShadowLightKeys.swap(keys);
+
+    // ---- 2. The casters ---------------------------------------------------
+    // ONE walk of the items, reading world AABBs updateSceneGraph has just
+    // made current. A change is recorded as the box that must be re-rendered:
+    // old and new for a move, the new one for an arrival or a pose change,
+    // the old one for a departure — and it is tested against every lamp's
+    // reach, per the kinds whose channels the caster renders into.
+    const Ogre::uint32 channelsAll = allShadowCasterChannels();
+    const bool firstScan = !mShadowScanPrimed;
+    mShadowScanPrimed = true;
+    const unsigned stamp = ++mShadowScanStamp;
+    struct Change { Ogre::Aabb box; Ogre::uint32 channels; };
+    std::vector<Change> changes;
+    for (auto &kv : mNodes) {
+        Node &n = kv.second;
+        const Ogre::Item *item = n.item;
+        Ogre::uint32 channels = 0u;
+        bool present = false;
+        if (item) {
+            channels = item->getVisibilityFlags() & channelsAll;
+            // THE CASTER PREDICATE. A helper carries kHelperBit and a
+            // distortion item kDistortionBit — neither is in a shadow channel.
+            // The on-top overlay queue (gizmos, bone overlays: unlit, depth
+            // test off, kVisibleBit — lighting audit L6.3) writes no depth even
+            // where a shadow pass draws it, so it is never a caster either.
+            present = channels != 0u && n.shown && item->getCastShadows() &&
+                      item->getRenderQueueGroup() < kOverlayRenderQueue;
+        }
+        auto rit = mShadowCasters.find(kv.first);
+        if (!present && rit == mShadowCasters.end()) { n.shadowShapeDirty = false; continue; }
+        ShadowCasterRec &rec = mShadowCasters[kv.first];
+        rec.stamp = stamp;
+        // A SHARED skeleton poses through its source (shareSkeleton): an armour
+        // piece deforms when the body's clip moves.
+        unsigned long long pose = n.poseEpoch;
+        if (n.shareSource) {
+            auto sit = mNodes.find(n.shareSource);
+            if (sit != mNodes.end()) pose = pose * 1000003ull + sit->second.poseEpoch;
+        }
+        // A VERTEX-STAGE generated piece can move vertices every frame (it
+        // reads the shader clock) — risk 6: such a caster keeps its lamps
+        // re-rendering, the way Unreal excludes WPO materials from caching.
+        bool deforming = false;
+        if (present && n.materialRef) {
+            auto mit = mMaterials.find(n.materialRef);
+            deforming = mit != mMaterials.end() && !mit->second.customPiece[1].empty();
+        }
+        const Ogre::Aabb box = present ? item->getWorldAabb() : Ogre::Aabb();
+        if (!firstScan) {
+            if (present && !rec.present) {
+                changes.push_back({ box, channels });
+            } else if (!present && rec.present) {
+                changes.push_back({ rec.box, rec.channels });
+            } else if (present) {
+                if (rec.item != item || boxMoved(rec.box, box) || rec.channels != channels) {
+                    Ogre::Aabb both = rec.box; both.merge(box);
+                    changes.push_back({ both, channels | rec.channels });
+                } else if (rec.pose != pose || deforming || n.shadowShapeDirty) {
+                    changes.push_back({ box, channels });
+                }
+            }
+        }
+        n.shadowShapeDirty = false;
+        rec.present = present;
+        rec.item = present ? item : nullptr;
+        rec.box = box;
+        rec.pose = pose;
+        rec.channels = channels;
+    }
+    // Casters whose NODE went away (removeNode / releaseNode) were not visited.
+    for (auto it = mShadowCasters.begin(); it != mShadowCasters.end();) {
+        if (it->second.stamp == stamp) { ++it; continue; }
+        if (!firstScan && it->second.present) changes.push_back({ it->second.box, it->second.channels });
+        it = mShadowCasters.erase(it);
+    }
+
+    out.casterChanges = unsigned(changes.size());
+    for (const Change &c : changes) {
+        unsigned kinds = 0u;
+        for (unsigned k = 0; k < kShadowNodeKinds; ++k)
+            if (c.channels & shadowCasterChannels(ShadowNodeKind(k))) kinds |= 1u << k;
+        if (!kinds) continue;
+        for (size_t i = 0; i < out.lights.size(); ++i) {
+            if (!boxesTouch(reach[i], c.box)) continue;
+            const Ogre::Light *l = out.lights[i].light;
+            if (l->getType() == Ogre::Light::LT_POINT &&
+                !sphereTouchesBox(l->getParentNode()->_getDerivedPosition(),
+                                  l->getAttenuationRange(), c.box))
+                continue;
+            dirtyLamp(i, kinds);
+        }
+    }
 }
 
 }}}  // namespace jahshaka::engine::detail

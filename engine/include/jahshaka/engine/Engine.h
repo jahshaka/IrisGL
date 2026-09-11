@@ -664,20 +664,6 @@ public:
     /// already owns the binding; true when it re-pointed anything.
     virtual bool        reassertGiBinding() = 0;
 
-    /// "SOMETHING A STATIC SHADOW MAP CAN SEE HAS CHANGED" — re-render this
-    /// scene's static shadow maps on the next frame
-    /// (SPECS/SHADOW_TOOLING_SPEC.md §4.3, LightDesc::shadowStatic).
-    ///
-    /// The engine dirties them ITSELF when a light moves or any of its
-    /// parameters change, and when geometry is attached, detached or destroyed.
-    /// What it cannot see is a CASTER MOVING: the document owns the scene graph
-    /// and writes transforms into it directly, so a moved mesh reaches the
-    /// renderer without passing through any engine call. The host tells us
-    /// instead (SceneMirror watches the document's transform-write counter).
-    ///
-    /// Cheap and idempotent: it sets one flag. Calling it every frame is legal
-    /// and simply makes every static map cost exactly what a dynamic one costs.
-    virtual void        dirtyStaticShadows() = 0;
     /// "Has any object LEFT the volume that is currently lit?" — 0 when every
     /// GI item is inside it, otherwise a hash of the escapees' quantized world
     /// AABBs (LIGHTING_FIX fix 2).
@@ -1341,11 +1327,17 @@ public:
     /// What the shadow atlas ACTUALLY is: its layout, which light holds which
     /// map, and which shadow-casting lights got none. Cheap (reads live
     /// pointers, renders nothing); `live == false` on a headless engine.
+    /// ASKING ARMS THE PASS COUNTERS for the frames that follow; they come off
+    /// the render path again after ~120 frames without a call.
     virtual ShadowStatus shadowStatus() const = 0;
 
-    /// Re-render EVERY static shadow map in every scene, once, on the next
-    /// frame — the "I do not know what changed" button, and the shadow twin of
-    /// refreshGi(). Returns false when there is nothing to refresh.
+    /// Re-render EVERY cached point/spot shadow map in every scene, once, on
+    /// the next frame — the "I do not know what changed" button, and the shadow
+    /// twin of refreshGi(). The engine re-renders a lamp's map by itself when
+    /// the lamp moves or changes reach, and when a caster inside its reach
+    /// moves, appears, disappears or changes shape (ENGINE_CACHE_POLICY_SPEC
+    /// P3); this is for what it cannot see. Returns false when there is
+    /// nothing to refresh.
     virtual bool refreshShadows() = 0;
 
     /// Shadow-caster geometry optimization — see EngineConfig::optimizeShadowMeshes.
