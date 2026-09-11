@@ -163,7 +163,6 @@ public:
     bool hasSkeletalAnimations();
 
     static MeshPtr loadMesh(QString filePath);
-    static MeshPtr loadAnimatedMesh(QString filePath);
     static SkeletonPtr extractSkeleton(const aiMesh* mesh, const aiScene* scene);
     static QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QString source = "");
 

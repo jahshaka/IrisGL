@@ -23,6 +23,15 @@ For more information see the LICENSE file
 #include "core/math/mathhelper.h"
 #include "core/properties/property.h"
 
+namespace
+{
+/// |cos| of the angle between a look direction and world +Y above which
+/// CameraNode::lookAt treats the view as ON the pole (about 0.26 degrees): the
+/// fixed-+Y basis is unusable there, so the camera's heading becomes the up.
+/// The same line camera.lookAt used to refuse at.
+constexpr float kLookAtPoleCos = 0.99999f;
+}   // namespace
+
 namespace iris
 {
 
@@ -784,10 +793,47 @@ iris::lens::FocusInfo CameraNode::focusInfo() const
 
 void CameraNode::lookAt(iris::Vec3 target)
 {
+    // Works in the node's OWN space: `eye` is the LOCAL position (callers that
+    // aim an unparented camera — every verb and the editor camera — get
+    // exactly what they see).
+    const iris::Vec3 eye = getLocalPos();
+    const iris::Vec3 toTarget = target - eye;
+    // Nothing to look along: Mat4::lookAt would return an identity and the
+    // decomposition below would move the camera to the origin.
+    if (toTarget.lengthSquared() <= 0.0f) return;
+
+    // THE POLE (smoke L10 item 1). The basis is built against world +Y, which
+    // is parallel to a view straight down or straight up: the cross product is
+    // zero and the decomposed rotation is whatever the degenerate matrix says
+    // (editor.setCamera({position: {0,9,0}, lookAt: {0,0,0}}) pitched -36.87
+    // degrees instead of -90). There the frame's up is the camera's own
+    // HEADING instead — the horizontal direction it faces now, which is what
+    // "look down from where I stand" keeps at the top of the frame (and what
+    // the top axis view does: yaw 0, pitch -90). Off the pole NOTHING changes:
+    // the call below is the same fixed-+Y call, bit for bit, because the
+    // default editor camera — and so the self-test's pixels — rides it.
+    iris::Vec3 up(0, 1, 0);
+    const iris::Vec3 dir = toTarget.normalized();
+    if (std::abs(dir.y()) > kLookAtPoleCos) {
+        const iris::Quat rot = getLocalRot();
+        const iris::Vec3 forward = rot.rotatedVector(iris::Vec3(0, 0, -1));
+        iris::Vec3 heading(forward.x(), 0.0f, forward.z());
+        if (heading.lengthSquared() < 1e-8f) {
+            // Already looking straight up or down: the heading is where the top
+            // of the frame points (down) or the bottom (up).
+            const iris::Vec3 frameUp = rot.rotatedVector(iris::Vec3(0, 1, 0));
+            heading = iris::Vec3(frameUp.x(), 0.0f, frameUp.z()) * (forward.y() < 0.0f ? 1.0f : -1.0f);
+        }
+        if (heading.lengthSquared() < 1e-8f) heading = iris::Vec3(0, 0, -1);   // yaw 0
+        // Looking down, the heading is the top of the frame; looking up, it is
+        // the bottom (tilting the head back past the zenith).
+        up = heading.normalized() * (dir.y() < 0.0f ? 1.0f : -1.0f);
+    }
+
     //todo: use global matrices
     iris::Mat4 matrix;
     matrix.setToIdentity();
-    matrix.lookAt(getLocalPos(), target, iris::Vec3(0, 1, 0));
+    matrix.lookAt(eye, target, up);
     matrix = matrix.inverted();
     setLocalTransform(matrix);
 }

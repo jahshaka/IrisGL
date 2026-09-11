@@ -16,8 +16,31 @@ For more information see the LICENSE file
 
 #include "import/importflags.h"
 
+#include <QFile>
+#include <QFileInfo>
+
 namespace iris
 {
+
+const aiScene *readSceneFile(Assimp::Importer &importer, const QString &filePath,
+                             unsigned int flags)
+{
+    QString resource;
+    if (filePath.startsWith(QLatin1String("qrc:"))) resource = filePath.mid(3);   // "qrc:/x" -> ":/x"
+    else if (filePath.startsWith(QLatin1Char(':'))) resource = filePath;
+    if (resource.isEmpty())
+        return importer.ReadFile(filePath.toStdString().c_str(), flags);
+
+    QFile file(resource);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning("readSceneFile: failed to open %s", qUtf8Printable(filePath));
+        return nullptr;
+    }
+    const QByteArray data = file.readAll();
+    const QByteArray hint = QFileInfo(resource).suffix().toLower().toLatin1();
+    return importer.ReadFileFromMemory(data.constData(), size_t(data.size()), flags,
+                                       hint.isEmpty() ? "" : hint.constData());
+}
 
 struct SceneSource::Impl
 {
@@ -29,7 +52,7 @@ SceneSource::~SceneSource() = default;
 
 bool SceneSource::read(const QString &filePath)
 {
-    return d->importer.ReadFile(filePath.toStdString().c_str(), ImportFlags::Canonical) != nullptr;
+    return readSceneFile(d->importer, filePath, ImportFlags::Canonical) != nullptr;
 }
 
 bool SceneSource::hasScene() const

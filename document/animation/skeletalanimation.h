@@ -35,6 +35,18 @@ public:
 
     QMap<QString, QSharedPointer<BoneAnimation>> boneAnimations;
 
+    /// The clip's DECLARED length in seconds — the file's own duration
+    /// (assimp's mDuration / mTicksPerSecond), 0 when it declares none.
+    ///
+    /// The KEYS decide a clip's length (Animation::calculateAnimationLength);
+    /// this is consulted only when they span no time at all. That is the
+    /// one-frame clip every Mixamo CHARACTER download ships: two identical keys
+    /// one frame apart, which the canonical preset's FindInvalidData step
+    /// collapses into ONE key at t = 0 while the declared one-frame duration
+    /// survives (smoke L10 item 2). Without it the clip was zero seconds long
+    /// and the engine padded it on every attach.
+    float declaredLength = 0.0f;
+
     // takes ownership of boneAnim
     void addBoneAnimation(QString boneName,BoneAnimation* boneAnim);
 

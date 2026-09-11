@@ -66,6 +66,12 @@ void Animation::calculateAnimationLength()
         for (auto boneAnim : skeletalAnimation->boneAnimations) {
             maxLength = qMax(maxLength, boneAnim->getLength());
         }
+        // Keys that span NO time — a one-frame clip whose identical keys the
+        // import preset collapsed to one (SkeletalAnimation::declaredLength) —
+        // take the length the file declared. A clip whose keys do span time
+        // keeps the key span, as it always has.
+        if (!(maxLength > 0.0f) && skeletalAnimation->declaredLength > 0.0f)
+            maxLength = skeletalAnimation->declaredLength;
     }
 
     length = maxLength;

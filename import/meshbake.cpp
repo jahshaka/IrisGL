@@ -62,7 +62,11 @@ namespace
 // so an existing bake would have been rebuilt anyway; the bump makes the reason
 // legible in the header instead of only in a hash.) Shading factors and their
 // meaning are UNCHANGED from v2.
-constexpr int kFormatVersion = 3;
+// v4 (2026-09-11, smoke L10 item 2): every clip record carries the file's
+// DECLARED length (a double, after the clip name) — the only record of a
+// one-frame clip's length once the preset has merged its identical keys. A v3
+// blob replayed would bring the Mixamo T-pose clip back at zero seconds.
+constexpr int kFormatVersion = 4;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -358,6 +362,7 @@ void writeAnimations(QDataStream &s, const QMap<QString, SkeletalAnimationPtr> &
         s << it.key();
         const SkeletalAnimationPtr &anim = it.value();
         s << anim->name;
+        s << double(anim->declaredLength);
         s << qint32(anim->boneAnimations.size());
         for (auto b = anim->boneAnimations.constBegin(); b != anim->boneAnimations.constEnd(); ++b) {
             s << b.key();
@@ -380,12 +385,16 @@ bool readAnimations(QDataStream &s, const QString &source,
     for (qint32 i = 0; i < count; ++i) {
         QString key, name;
         s >> key >> name;
+        double declaredLength = 0.0;
+        s >> declaredLength;
         qint32 boneCount = 0;
         s >> boneCount;
         if (s.status() != QDataStream::Ok || boneCount < 0 || boneCount > 1000000) return false;
+        if (!(declaredLength >= 0.0) || declaredLength > 1.0e7) return false;
         auto anim = SkeletalAnimation::create();
         anim->name = name;
         anim->source = source;
+        anim->declaredLength = float(declaredLength);
         for (qint32 b = 0; b < boneCount; ++b) {
             QString boneName;
             s >> boneName;

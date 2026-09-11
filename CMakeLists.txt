@@ -152,7 +152,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
 set(SRCS
     document/assets/mesh.cpp
-    import/model.cpp
     document/materials/defaultmaterial.cpp
     document/scenegraph/meshnode.cpp
     import/graphicshelper.cpp
@@ -201,7 +200,6 @@ set(SRCS
     document/materials/postfx/fxaapostprocess.cpp
 	document/materials/renderstates.cpp
     document/materials/rasterizerstate.cpp
-    import/modelloader.cpp
     document/physics/avatarmovement.cpp
     document/physics/environment.cpp
     document/physics/physicshelper.cpp
@@ -220,7 +218,6 @@ set (HEADERS
     document/assets/texture.h
     document/scenegraph/shadowmap.h
     document/assets/mesh.h
-    import/model.h
     document/materials/material.h
     document/scenegraph/cameranode.h
     document/scenegraph/cameralens.h
@@ -281,7 +278,6 @@ set (HEADERS
     document/assets/shapehelper.h
     document/materials/postfx/fxaapostprocess.h
     document/materials/rasterizerstate.h
-	import/modelloader.h
     document/physics/avatarmovement.h
     document/physics/environment.h
     document/physics/physicshelper.h

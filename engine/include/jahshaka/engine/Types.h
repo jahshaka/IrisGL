@@ -167,9 +167,11 @@ struct BoneTrack {
 /// at attach time if it collides, and the mapping is reported by clipNames.
 ///
 /// `length` in seconds. A length <= 0 is PADDED to a minimum, not refused:
-/// every Mixamo character download ships a single-frame T-pose clip and it is
-/// the one the UI selects by default. Engine-side a zero length is fmod(t, 0)
-/// = NaN, so the padding is not cosmetic.
+/// engine-side a zero length is fmod(t, 0) = NaN, so the padding is not
+/// cosmetic. It is a GUARD — a clip whose keys span no time and whose file
+/// declares no duration. The one-frame T-pose every Mixamo character download
+/// ships arrives one frame long since smoke L10 item 2 (the document keeps the
+/// file's declared duration), so it no longer reaches the pad.
 struct ClipDesc {
     std::string            id;
     std::string            name;
