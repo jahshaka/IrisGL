@@ -619,9 +619,20 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             // arriving by the caster scan itself, and a walk of every node per
             // material on the load path is exactly the O(materials x nodes)
             // shape the tangent refusal once cost 2.1 s of boot with.)
+            //
+            // A CUTOUT'S SILHOUETTE ALSO MOVES WITH ITS UVs: the caster pass
+            // alpha-tests the albedo map through UV_DIFFUSE and our tiling
+            // piece, so the UV transform, the sampler's address modes and the
+            // alpha scalar all redraw the holes — when either side is Cutout.
+            const bool cutout = o.alphaMode == PbrAlphaMode::Cutout ||
+                                p.alphaMode == PbrAlphaMode::Cutout;
+            const bool cutoutInputs = cutout &&
+                (o.uvScale[0] != p.uvScale[0] || o.uvScale[1] != p.uvScale[1] ||
+                 o.uvOffset[0] != p.uvOffset[0] || o.uvOffset[1] != p.uvOffset[1] ||
+                 o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved);
             if (it->second.paramsPushed &&
                 (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff ||
-                 o.twoSided != p.twoSided))
+                 o.twoSided != p.twoSided || cutoutInputs))
                 noteShadowShapeChanged(id);
         }
         it->second.params = p;
@@ -968,6 +979,13 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         }
         n.item = mSceneMgr->createItem(mit->second.mesh, cls);
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
+        // A REBUILT ITEM IS A NEW CASTER SHAPE (lamp-map cache): a mesh or
+        // material swap detaches and recreates in this one call, and the
+        // allocator routinely hands the new Item the freed one's address — same
+        // pointer, same bounds, same channels — so the caster scan cannot tell
+        // on its own that a cutout just landed on a quad. Said here.
+        n.shadowShapeDirty = true;
+        indexItemNode(n);   // the item walk's index (walkItems)
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
         // line meshes must neither bounce nor occlude the radiosity rays.
         n.item->setVisibilityFlags(

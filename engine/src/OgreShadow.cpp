@@ -611,13 +611,36 @@ ShadowStatus OgreEngine::shadowStatus() const {
                                           : 16384u)));
         st.atlasWidth = plan.width;
         st.atlasHeight = plan.height;
-        st.atlasBytes = plan.bytes();
+        // THE MIRRORS' AND PROBES' ATLASES ARE REAL VRAM TOO, and D3 made the
+        // mirror's grow with the lamp count: one half-resolution atlas per live
+        // planar slot, one quarter-resolution atlas per shadowed probe — the
+        // same definitions createShadowNode builds, counted per instance.
+        {
+            const unsigned maxDim = std::min(16384u, unsigned(mRoot->getRenderSystem()->getCapabilities()
+                                        ? mRoot->getRenderSystem()->getCapabilities()->getMaximumResolution2D()
+                                        : 16384u));
+            unsigned long long reflectSlots = 0, probeSlots = 0;
+            for (const auto &sc : mScenes) {
+                std::vector<Ogre::CompositorWorkspace *> ws;
+                sc->shadowWorkspaces(ShadowNodeKind::Reflect, ws);
+                reflectSlots += ws.size();
+                ws.clear();
+                sc->shadowWorkspaces(ShadowNodeKind::Probe, ws);
+                probeSlots += ws.size();
+            }
+            const unsigned probeRes = probeShadowResolution(mShadowResolution);
+            st.reflectAtlasBytes = reflectSlots *
+                planShadowAtlas(std::max(256u, mShadowResolution / 2u), mShadowMapCount, maxDim).bytes();
+            st.probeAtlasBytes = probeSlots *
+                planShadowAtlas(probeRes, std::min(mShadowMapCount, kProbeShadowMaxFocusedMaps), maxDim).bytes();
+        }
+        st.atlasBytes = plan.bytes() + st.reflectAtlasBytes;
         st.focusedMaps = plan.focusedMaps;
         st.maps = st.pssmSplits + st.focusedMaps;
         st.lightSlots = 1u + st.focusedMaps;
         st.live = true;
         st.shadowPassesLastFrame = mShadowPassesLastFrame;
-        st.staticMapRendersLastFrame = mStaticShadowRendersLastFrame;
+        st.cachedMapRendersLastFrame = mCachedMapRendersLastFrame;
         st.reflectPassesLastFrame = mShadowKindPasses[unsigned(ShadowNodeKind::Reflect)];
         st.probePassesLastFrame = mShadowKindPasses[unsigned(ShadowNodeKind::Probe)];
         st.reflectLampPassesLastFrame = mShadowKindLampPasses[unsigned(ShadowNodeKind::Reflect)];
@@ -659,7 +682,7 @@ ShadowStatus OgreEngine::shadowStatus() const {
                 info.pssm = (i == 0);   // light 0 is the directional PSSM set
                 if (lights[i].light) {
                     info.node = primary->nodeOfLight(lights[i].light);
-                    info.isStatic = lights[i].isStatic;
+                    info.isCached = lights[i].isStatic;
                     info.dirty = lights[i].isDirty;
                     if (info.node) seen.push_back(info.node);
                 }
@@ -706,9 +729,10 @@ ShadowStatus OgreEngine::shadowStatus() const {
 // planar mirror reuse its lamp maps at rest. Marking is lazy by construction:
 // a probe that does not capture this frame keeps the dirty flag until it does.
 //
-// THE SLOT RULE. Lamps take the LAST |lamps| focused slots, points before
-// spots (HlmsPbs's type order), so the front of the range stays empty — the
-// same end-of-range placement the static-map feature proved (F7).
+// THE SLOT RULE (planCachedSlots). Every point before every spot (HlmsPbs's
+// type order); a lamp keeps the slot it has whenever that order allows, so an
+// added or hidden lamp re-renders nothing but itself; otherwise the canonical
+// layout, start-aligned (points by id, then spots by id).
 //
 // THE V1 OVER-BUDGET RULE. An instance caches only while every lamp fits its
 // maps; with more lamps than maps it releases them all to Ogre's
@@ -785,7 +809,7 @@ void OgreEngine::detachShadowCounter() {
     for (ShadowPassCounter *&c : mShadowCounters) { delete c; c = nullptr; }
     // P8: a detached counter reads NOTHING — never the last number it saw.
     mShadowPassesLastFrame = 0;
-    mStaticShadowRendersLastFrame = 0;
+    mCachedMapRendersLastFrame = 0;
     for (unsigned k = 0; k < kShadowNodeKinds; ++k) mShadowKindPasses[k] = mShadowKindLampPasses[k] = 0;
     mShadowViewMapPasses.clear();
 }
@@ -959,6 +983,70 @@ void OgreEngine::releaseShadowLamp(OgreScene *scene, Ogre::Light *light) {
     } JAH_CATCH(mLastError, );
 }
 
+namespace {
+/// WHICH LAMP IN WHICH SLOT (focused slots 1..maps, returned 0-based). The
+/// assignment is STABLE: a re-fixed lamp is a re-rendered map, so a lamp that
+/// already holds a slot keeps it whenever HlmsPbs's order still holds — every
+/// point before every spot (the pass buffer is read as cumulative type ranges;
+/// empty slots in between are skipped) — and a new lamp takes a free slot
+/// inside its own type's region. Only when that is impossible (a new point
+/// with no free slot before the first spot, a type change breaking the order)
+/// does it fall back to the canonical layout, START-aligned: points by id,
+/// then spots by id — which shifts only the slots after the change. In cache
+/// mode no dynamic lamp shares the node, so nothing needs the old end-of-range
+/// placement (F7 kept statics clear of Ogre's closest-first sort; there is no
+/// sort left to keep clear of). Adding a lamp therefore renders that lamp's
+/// map alone in the common case, and hiding one re-fixes nothing.
+std::vector<Ogre::Light *> planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
+                                           const std::vector<Ogre::Light *> &want, size_t fixed) {
+    std::vector<Ogre::Light *> plan(maps, nullptr);
+    if (!fixed) return plan;
+    const auto isSpot = [](const Ogre::Light *l) { return l->getType() == Ogre::Light::LT_SPOTLIGHT; };
+    // 1. Keep every lamp that is still wanted where it is.
+    std::vector<char> placed(want.size(), 0);
+    for (size_t j = 0; j < maps; ++j) {
+        const Ogre::LightClosest &e = held[j + 1u];
+        if (!e.isStatic || !e.light) continue;
+        const auto it = std::find(want.begin(), want.end(), e.light);
+        if (it == want.end()) continue;
+        plan[j] = e.light;
+        placed[size_t(it - want.begin())] = 1;
+    }
+    const auto regions = [&](size_t &lastPoint, size_t &firstSpot) {
+        lastPoint = 0; firstSpot = maps;
+        bool anyPoint = false;
+        for (size_t j = 0; j < maps; ++j) {
+            if (!plan[j]) continue;
+            if (isSpot(plan[j])) firstSpot = std::min(firstSpot, j);
+            else { lastPoint = j; anyPoint = true; }
+        }
+        return anyPoint;
+    };
+    size_t lastPoint = 0, firstSpot = maps;
+    bool anyPoint = regions(lastPoint, firstSpot);
+    bool ok = !anyPoint || lastPoint < firstSpot;
+    // 2. Place the new lamps in `want` order (points by id, then spots by id).
+    for (size_t i = 0; ok && i < want.size(); ++i) {
+        if (placed[i]) continue;
+        size_t j = maps;
+        if (!isSpot(want[i])) {
+            for (size_t c = 0; c < firstSpot && c < maps; ++c) if (!plan[c]) { j = c; break; }
+        } else {
+            for (size_t c = anyPoint ? lastPoint + 1u : 0u; c < maps; ++c) if (!plan[c]) { j = c; break; }
+        }
+        if (j == maps) { ok = false; break; }
+        plan[j] = want[i];
+        placed[i] = 1;
+        anyPoint = regions(lastPoint, firstSpot);
+    }
+    if (ok) return plan;
+    // 3. The canonical layout.
+    std::fill(plan.begin(), plan.end(), nullptr);
+    for (size_t i = 0; i < fixed && i < maps; ++i) plan[i] = want[i];
+    return plan;
+}
+}   // namespace
+
 void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) {
     for (unsigned k = 0; k < kShadowNodeKinds; ++k)
         mShadowCachedInstances[k] = mShadowUncachedInstances[k] = mShadowDirtiedMaps[k] = 0;
@@ -1017,9 +1105,13 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                     if (Ogre::CompositorShadowNode *n = w->findShadowNode(shadowNodeNameOf(ShadowNodeKind(k))))
                         instances.push_back({ n, ShadowNodeKind(k) });
             }
-            // Nothing draws this scene's shadows (a preview with shadows off):
-            // nothing to cache, so no scan either. A node that appears later is
-            // new, and a new assignment renders its maps regardless.
+            // THE FRAME'S ONE ITEM WALK: the GI movement records and — when
+            // this scene has shadow nodes to cache into and lamps to cache — the
+            // caster changes, in one pass on the bounds updateSceneGraph just
+            // made current. A preview drawn with shadows off gets only the GI
+            // half (if any); a node that appears later is new, and a new
+            // assignment renders its maps regardless.
+            s->runItemWalk(!instances.empty() && s->hasCacheableShadowLights());
             if (instances.empty()) continue;
             OgreScene::ShadowCacheFrame f;
             s->collectShadowCacheFrame(f);
@@ -1058,10 +1150,11 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                             std::find(want.begin(), want.end(), e.light) != want.end())
                             in.node->setLightFixedToShadowMap(j + 3u, nullptr);
                     }
+                const std::vector<Ogre::Light *> plan = planCachedSlots(held, maps, want, fixed);
                 for (size_t j = 0; j < maps; ++j) {
                     const size_t slot = j + 1u;
                     const size_t mapIdx = slot + 2u;             // 3 PSSM maps first
-                    Ogre::Light *w = j >= maps - fixed ? want[j - (maps - fixed)] : nullptr;
+                    Ogre::Light *w = plan[j];
                     Ogre::Light *have = held[slot].isStatic ? held[slot].light : nullptr;
                     if (w != have) {
                         // A NEW assignment (or a release). setLightFixedToShadowMap
@@ -1087,7 +1180,7 @@ void OgreEngine::latchShadowCounters() {
     ShadowPassCounter *vc = mShadowCounters[unsigned(ShadowNodeKind::View)];
     if (!vc) {
         mShadowPassesLastFrame = 0;
-        mStaticShadowRendersLastFrame = 0;
+        mCachedMapRendersLastFrame = 0;
         for (unsigned k = 0; k < kShadowNodeKinds; ++k) mShadowKindPasses[k] = mShadowKindLampPasses[k] = 0;
         mShadowViewMapPasses.clear();
         return;
@@ -1107,10 +1200,10 @@ void OgreEngine::latchShadowCounters() {
             const Ogre::LightClosestArray &held = node->getShadowCastingLights();
             for (size_t slot = 1; slot < held.size(); ++slot)
                 if (held[slot].isStatic) cachedRenders += vc->perMap(unsigned(slot + 2u));
-            mStaticShadowRendersLastFrame = cachedRenders;
+            mCachedMapRendersLastFrame = cachedRenders;
         } else {
             mShadowPassesLastFrame = 0;
-            mStaticShadowRendersLastFrame = 0;
+            mCachedMapRendersLastFrame = 0;
         }
         mShadowKindPasses[0] = mShadowPassesLastFrame;
         mShadowKindLampPasses[0] = node ? vc->lamps() : 0u;

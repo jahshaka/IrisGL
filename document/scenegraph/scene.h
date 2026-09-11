@@ -329,10 +329,11 @@ public:
     /// still be one re-solve, and because a bool would need a clearer — which is
     /// the mirror's job, not the caller's.
     quint64 giRefreshSerial = 0;
-    /// The SAME shape for static shadow maps (SHADOW_TOOLING_SPEC.md §4.3):
-    /// monotonic, never serialized, bumped by world.refreshShadows(). The
-    /// mirror compares it against the value it last acted on and asks the
-    /// renderer to re-render every static shadow map once per bump.
+    /// The SAME shape for the cached point/spot shadow maps
+    /// (ENGINE_CACHE_POLICY_SPEC P2): monotonic, never serialized, bumped by
+    /// world.refreshShadows(). The mirror compares it against the value it last
+    /// acted on and asks the renderer to re-render every cached map once per
+    /// bump.
     quint64 shadowRefreshSerial = 0;
 
     // anti-aliasing: MSAA sample count for the scene's viewport — 1 (off), 2, 4

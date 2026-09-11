@@ -4,6 +4,9 @@
 // VctLighting and ParallaxCorrectedCubemapAuto.
 #include "EnginePrivate.h"
 
+#include <chrono>
+#include <cstring>
+
 #include <IrradianceField/OgreIrradianceFieldRaster.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
@@ -1497,7 +1500,6 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
     // halves are driven once a frame, from the ONE authoritative view of the
     // scene: OgreEngine::renderOneFrame picks it, for the same reason the probe
     // budget must not be spent once per view.)
-    mGiMovementScanned = false;     // one scan per frame; the first consumer runs it
     updateIrradianceField();
     if (!mPcc || !mGiCamera) return;
     JAH_TRY {
@@ -1520,63 +1522,191 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
 // animation's sway) must not read as movement for ever. An item seen for the
 // FIRST time is recorded, not reported — appearing is not moving, and the
 // arrival is already in the signature.
-void OgreScene::scanGiMovement() {
-    mGiMovedBoxes.clear();
-    size_t live = 0, liveProbeOnly = 0;
-    const bool firstScan = !mGiScannedOnce;
-    mGiScannedOnce = true;
-    for (auto &kv : mNodes) {
-        Ogre::Item *item = kv.second.item;
+void OgreScene::runItemWalk(bool shadow) {
+    // THE FRAME'S ONE ITEM WALK (ENGINE_CACHE_POLICY_SPEC §4 row 7 + P3), run by
+    // OgreEngine::applyShadowCacheDirties for every drawn scene right after
+    // updateSceneGraph — so it reads the world AABBs the update has just made
+    // current (getWorldAabb, no root-recursive getWorldAabbUpdated per item:
+    // measured 2.1 ms -> 0.4 ms at 5k items in Debug+ASan).
+    //
+    // The GI half runs only while a GI consumer exists (the probe budget, the
+    // raster field): paused, nothing is recorded, and the first walk after the
+    // pause reports what moved meanwhile — exactly the old lazy scan's
+    // behaviour. Its consumers run EARLIER in the frame (updateGiTracking,
+    // before the scene graph updates), so they read the previous frame's walk:
+    // a mover stales the probes one frame later than it used to (the probes
+    // are the slow, static-environment layer — E1 freezes animated content —
+    // and shadows, which cannot wait, are same-frame).
+    const bool gi = (mPcc && mGi.updateBudget > 0) || (mIfd && mIfdSource == GiSource::Raster);
+    const auto t0 = std::chrono::steady_clock::now();
+    walkItems(gi, shadow, false);
+    mShadowWalked = shadow;
+    mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+}
+
+void OgreScene::indexItemNode(Node &n) {
+    if (n.itemSlot != size_t(-1)) return;
+    n.itemSlot = mItemNodes.size();
+    mItemNodes.push_back(&n);
+}
+
+void OgreScene::unindexItemNode(Node &n) {
+    // A CASTER LEAVING: its last box is what the lamps around it must re-render
+    // without it (the scan never sees a node that has no Item).
+    if (n.scan.shadowPresent && mShadowScanPrimed)
+        mShadowVanished.push_back({ n.scan.shadowBox, n.scan.shadowChannels });
+    n.scan.shadowPresent = false;
+    n.scan.shadowItem = nullptr;
+    n.scan.seenValid = false;
+    if (n.itemSlot == size_t(-1)) return;
+    const size_t i = n.itemSlot;
+    Node *last = mItemNodes.back();
+    mItemNodes[i] = last;
+    last->itemSlot = i;
+    mItemNodes.pop_back();
+    n.itemSlot = size_t(-1);
+}
+
+// THE ITEM WALK — the GI movement scan (FIX WAVE B3, engine half) and the
+// lamp-map cache's caster scan (ENGINE_CACHE_POLICY_SPEC P3), in one pass over
+// the nodes that HAVE an Item (mItemNodes), with each node's last-seen state on
+// the node itself. (It used to be two walks of the whole std::map, each with a
+// hash lookup per item: measured 1.4 + 2.3 ms at 5k nodes in Debug+ASan.)
+//
+// GI half: records which GI items MOVED since the last scan, as the union of
+// each mover's old and new world AABB. Two consumers, both cheap paths: the
+// probe round-robin (a probe whose parallax shape contains a moved box goes to
+// the front of the sweep) and the raster field's re-arm. QUANTIZED to a 64th of
+// the lit volume (giAabbMoved): sub-voxel jitter must not read as movement for
+// ever. An item seen for the FIRST time is recorded, not reported — appearing
+// is not moving, and the arrival is already in the signature.
+//
+// Shadow half: see collectShadowCacheFrame — a change is the box the lamps
+// around it must re-render (old and new for a move, the new one for an arrival
+// or a shape/pose change, the old one for a departure), with the channels the
+// caster renders into.
+void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
+    if (!gi && !shadow) return;
+    bool firstGi = false;
+    if (gi) {
+        mGiMovedBoxes.clear();
+        firstGi = !mGiScannedOnce;
+        mGiScannedOnce = true;
+    }
+    bool firstShadow = false;
+    Ogre::uint32 channelsAll = 0u;
+    std::vector<MaterialId> deforming;   // materials with a vertex-stage piece (usually none)
+    if (shadow) {
+        mShadowChanges.clear();
+        firstShadow = !mShadowScanPrimed;
+        mShadowScanPrimed = true;
+        channelsAll = allShadowCasterChannels();
+        for (const auto &mk : mMaterials)
+            if (!mk.second.customPiece[1].empty()) deforming.push_back(mk.first);
+    }
+    // THE FAST PATH (review item 4): at rest nearly every item is bit-identical
+    // to what the previous walk saw, and then neither half can have a new
+    // answer — the GI record was compared against this very box last time and
+    // the shadow record IS this box. Valid only when the previous walk asked
+    // the same questions (and never on a first scan of either half).
+    const bool fastOk = !firstGi && !firstShadow && gi == mLastWalkGi && shadow == mLastWalkShadow;
+    mLastWalkGi = gi;
+    mLastWalkShadow = shadow;
+    for (Node *np : mItemNodes) {
+        Node &n = *np;
+        Ogre::Item *item = n.item;
         if (!item) continue;
-        if (!(item->getVisibilityFlags() & kGiGeometryBit)) {
-            // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
-            // never voxelized. Same quantized test, its own map, and a flag
-            // rather than a moved box — the voxel side must not hear of it.
-            if (!probeSeesItem(kv.second)) continue;
-            ++liveProbeOnly;
-            const Ogre::Aabb a = item->getWorldAabbUpdated();
-            auto pit = mProbeOnlyAabbs.find(kv.first);
-            if (pit == mProbeOnlyAabbs.end()) {
-                mProbeOnlyAabbs.emplace(kv.first, a);
-                if (!firstScan) mProbeOnlyChanged = true;
-            } else if (giAabbMoved(pit->second, a)) {
-                pit->second = a;
-                mProbeOnlyChanged = true;
+        const Ogre::Aabb a = fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
+        // Read once per item, both halves use them (each is an SoA read, and
+        // this loop is the per-frame cost the whole walk is measured by).
+        const Ogre::uint32 flags = item->getVisibilityFlags();
+        const Ogre::uint8 rq = item->getRenderQueueGroup();
+        // A SHARED skeleton poses through its source (shareSkeleton): an
+        // armour piece deforms when the body's clip moves.
+        unsigned long long pose = n.poseEpoch;
+        if (n.shareSource) {
+            auto sit = mNodes.find(n.shareSource);
+            if (sit != mNodes.end()) pose = pose * 1000003ull + sit->second.poseEpoch;
+        }
+        // A VERTEX-STAGE generated piece can move vertices every frame (it
+        // reads the shader clock) — risk 6: such a caster keeps its lamps
+        // re-rendering, the way Unreal excludes WPO materials from caching.
+        const bool deforms = !deforming.empty() &&
+            std::find(deforming.begin(), deforming.end(), n.materialRef) != deforming.end();
+        Node::ScanRec &rs = n.scan;
+        if (fastOk && rs.seenValid && rs.seenItem == item && rs.seenFlags == flags &&
+            rs.seenRq == rq && rs.seenShown == n.shown && rs.seenPose == pose &&
+            !n.shadowShapeDirty && !deforms &&
+            std::memcmp(&rs.seenBox, &a, sizeof(Ogre::Aabb)) == 0)
+            continue;
+        rs.seenBox = a; rs.seenItem = item; rs.seenFlags = flags; rs.seenRq = rq;
+        rs.seenShown = n.shown; rs.seenPose = pose; rs.seenValid = true;
+        if (gi) {
+            if (!(flags & kGiGeometryBit)) {
+                // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
+                // never voxelized. Same quantized test, its own record, and a
+                // flag rather than a moved box — the voxel side must not hear of it.
+                // (probeSeesItem, inlined on the values read above.)
+                if (n.shown && (flags & kVisibleBit) && rq <= kProbeFaceRqLast) {
+                    if (!n.scan.probeKnown) {
+                        n.scan.probeKnown = true;
+                        n.scan.probeBox = a;
+                        if (!firstGi) mProbeOnlyChanged = true;
+                    } else if (giAabbMoved(n.scan.probeBox, a)) {
+                        n.scan.probeBox = a;
+                        mProbeOnlyChanged = true;
+                    }
+                }
+            } else if (!n.scan.giKnown) {
+                n.scan.giKnown = true;
+                n.scan.giBox = a;
+                // An ARRIVAL, after the first scan (which sees every item for
+                // the first time and is not news): the probes must capture it (P1).
+                if (!firstGi) mGiItemsAppeared = true;
+            } else if (giAabbMoved(n.scan.giBox, a)) {
+                Ogre::Aabb moved = n.scan.giBox;
+                moved.merge(a);
+                mGiMovedBoxes.push_back(moved);
+                n.scan.giBox = a;
             }
-            continue;
         }
-        ++live;
-        const Ogre::Aabb a = item->getWorldAabbUpdated();
-        auto it = mGiItemAabbs.find(kv.first);
-        if (it == mGiItemAabbs.end()) {
-            mGiItemAabbs.emplace(kv.first, a);
-            // An ARRIVAL, after the first scan (which sees every item for the
-            // first time and is not news): the probes must capture it (P1).
-            if (!firstScan) mGiItemsAppeared = true;
-            continue;
+        if (shadow) {
+            // THE CASTER PREDICATE. A helper carries kHelperBit and a distortion
+            // item kDistortionBit — neither is in a shadow channel. The on-top
+            // overlay queue (gizmos, bone overlays: unlit, depth test off,
+            // kVisibleBit — lighting audit L6.3) writes no depth even where a
+            // shadow pass draws it, so it is never a caster either.
+            const Ogre::uint32 channels = flags & channelsAll;
+            const bool present = channels != 0u && n.shown && rq < kOverlayRenderQueue &&
+                                 item->getCastShadows();
+            Node::ScanRec &r = n.scan;
+            if (!firstShadow) {
+                if (present && !r.shadowPresent) {
+                    mShadowChanges.push_back({ a, channels });
+                } else if (!present && r.shadowPresent) {
+                    mShadowChanges.push_back({ r.shadowBox, r.shadowChannels });
+                } else if (present) {
+                    if (r.shadowItem != item || boxMovedForShadows(r.shadowBox, a) ||
+                        r.shadowChannels != channels) {
+                        Ogre::Aabb both = r.shadowBox; both.merge(a);
+                        mShadowChanges.push_back({ both, channels | r.shadowChannels });
+                    } else if (r.shadowPose != pose || (deforms && present) || n.shadowShapeDirty) {
+                        mShadowChanges.push_back({ a, channels });
+                    }
+                }
+            }
+            n.shadowShapeDirty = false;
+            r.shadowPresent = present;
+            r.shadowItem = present ? item : nullptr;
+            r.shadowBox = present ? a : Ogre::Aabb();
+            r.shadowPose = pose;
+            r.shadowChannels = channels;
         }
-        if (!giAabbMoved(it->second, a)) continue;
-        Ogre::Aabb moved = it->second;
-        moved.merge(a);
-        mGiMovedBoxes.push_back(moved);
-        it->second = a;
     }
-    // Destroyed nodes leave entries behind. Bounded by the scene either way, but
-    // a long editing session should not pay for every object it ever deleted.
-    if (mProbeOnlyAabbs.size() > liveProbeOnly * 2u + 16u) {
-        mProbeOnlyAabbs.clear();
-        for (auto &kv : mNodes)
-            if (kv.second.item && !(kv.second.item->getVisibilityFlags() & kGiGeometryBit) &&
-                probeSeesItem(kv.second))
-                mProbeOnlyAabbs.emplace(kv.first, kv.second.item->getWorldAabbUpdated());
-    }
-    if (mGiItemAabbs.size() > live * 2u + 16u) {
-        mGiItemAabbs.clear();
-        for (auto &kv : mNodes) {
-            Ogre::Item *item = kv.second.item;
-            if (item && (item->getVisibilityFlags() & kGiGeometryBit))
-                mGiItemAabbs.emplace(kv.first, item->getWorldAabbUpdated());
-        }
+    if (shadow) {
+        if (!firstShadow)
+            mShadowChanges.insert(mShadowChanges.end(), mShadowVanished.begin(), mShadowVanished.end());
+        mShadowVanished.clear();
     }
 }
 
@@ -1647,7 +1777,8 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     mDynamicProbeUpdates = 0;
     if (!n || !budget) return;          // paused: nothing dirtied, nothing scanned
 
-    if (!mGiMovementScanned) { scanGiMovement(); mGiMovementScanned = true; }
+    // (mGiMovedBoxes and the arrival flags are the previous frame's item walk —
+    // runItemWalk, after that frame's updateSceneGraph.)
 
     // THE INPUTS THIS PASS CAN SEE FOR ITSELF (the rest arrive through the
     // setters: setLight, setPbrMaterial, setSky, attach/detach/visibility ...).
@@ -2699,7 +2830,7 @@ void OgreScene::updateIrradianceField() {
         // skinned character posing in place keeps its bind-pose bounds. A
         // sweep in flight is never restarted (that would starve the far
         // probes); the epoch is re-read when the next one starts.
-        if (!mGiMovementScanned) { JAH_TRY { scanGiMovement(); } JAH_CATCH(mError, ); mGiMovementScanned = true; }
+        // (mGiMovedBoxes: the previous frame's item walk, runItemWalk.)
         const bool moved = !mGiMovedBoxes.empty() || mRigPoseEpoch != mIfdRigEpochSeen;
         if (!moved) return;
         mIfdRigEpochSeen = mRigPoseEpoch;

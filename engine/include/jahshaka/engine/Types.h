@@ -2394,7 +2394,7 @@ struct ShadowMapInfo {
     /// The lamp-map cache holds this slot's light (every point/spot map is
     /// cached — ENGINE_CACHE_POLICY_SPEC P2 — unless the view has more lamps
     /// than maps, when the node stays on Ogre's closest-first dynamic sort).
-    bool     isStatic = false;
+    bool     isCached = false;
     bool     dirty = false;   ///< a cached map scheduled to re-render on the next frame
     bool     pssm = false;    ///< the directional slot (three splits) rather than a focused map
     /// Shadow-node passes the last frame spent on this slot's map(s) in the
@@ -2428,10 +2428,15 @@ struct ShadowStatus {
     unsigned budget = 0;         ///< the EFFECTIVE ceiling (resolution-capped)
     unsigned requestedBudget = 0;///< what the host asked for before the cap
     unsigned atlasWidth = 0, atlasHeight = 0;
-    /// The atlas texture's own bytes (D32). NOT included: the point-light cube
-    /// scratch (1024^2 x 6 R32F + depth, ~48 MB), which is allocated once for
-    /// any point caster and does not grow with the map count.
+    /// The depth atlases' bytes (D32): the view's atlas (atlasWidth x
+    /// atlasHeight) PLUS every live planar-mirror slot's (half resolution, the
+    /// same focused count since D3 — `reflectAtlasBytes` is that part). The
+    /// reflection probes' quarter-resolution atlases, one per shadowed probe,
+    /// are `probeAtlasBytes`, not included here. NOT included anywhere: the
+    /// point-light cube scratch (R^2 x 6 R32F + depth per instance).
     unsigned long long atlasBytes = 0;
+    unsigned long long reflectAtlasBytes = 0;
+    unsigned long long probeAtlasBytes = 0;
     /// Every light SLOT the live shadow node holds, in slot order.
     std::vector<ShadowMapInfo> mapped;
     /// Shadow-casting point/spot lights with NO map this frame — the lights
@@ -2440,11 +2445,11 @@ struct ShadowStatus {
     /// THE COST READINGS OF THE LAST RENDERED FRAME (counted only while
     /// somebody polls — see Engine::shadowStatus). `shadowPassesLastFrame` =
     /// the shadow-node passes the COUNTED view executed (the first enabled view
-    /// with shadows; 0 when none has any), and `staticMapRendersLastFrame` how
+    /// with shadows; 0 when none has any), and `cachedMapRendersLastFrame` how
     /// many of those re-rendered a CACHED lamp map: zero at rest, which is what
     /// "renders once" means, measurably.
     unsigned shadowPassesLastFrame = 0;
-    unsigned staticMapRendersLastFrame = 0;
+    unsigned cachedMapRendersLastFrame = 0;
     /// The same for the planar mirrors' shadow nodes (every budget slot) and
     /// the reflection probes' (every shadowed probe that captured) — total
     /// passes, and the part spent on point/spot maps. A probe capture renders a

@@ -454,6 +454,7 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
             }
         }
 
+        bool posedByWeights = false;
         // ---- (4) per-bone normalization ------------------------------------
         const size_t boneCount = rig->desc.bones.size();
         std::vector<float> perBoneTotal(boneCount, 0.0f);
@@ -473,7 +474,9 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
                 // clip's head motion". Zero here is what makes an override an
                 // override.
                 if (nc.manualBones.count(rig->desc.bones[bone].name)) w = 0.0f;
-                *rec.weightPtr[k] = w;
+                // A WEIGHT THAT MOVED IS A POSE THAT MOVED — a paused blend
+                // scrub changes no clip time, only these (lamp-map cache).
+                if (*rec.weightPtr[k] != w) { *rec.weightPtr[k] = w; posedByWeights = true; }
             }
         }
 
@@ -481,7 +484,11 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
         for (size_t i = 0; i < nc.clips.size(); ++i) {
             ClipRec &rec = nc.clips[i];
             Ogre::SkeletonAnimation &sa = skel->getAnimationsNonConst()[rec.index];
-            if (!on[i]) { if (sa.getEnabled()) sa.setEnabled(false); continue; }
+            if (!on[i]) {
+                // Disabling a clip drops its contribution: a pose change.
+                if (sa.getEnabled()) { sa.setEnabled(false); posedByWeights = true; }
+                continue;
+            }
             const ClipState *st = nullptr;
             for (size_t s = 0; s < count; ++s) if (states[s].name == rec.name) st = &states[s];
             if (!st) continue;
@@ -499,6 +506,7 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
             sa.setTime(st->time);
             if (!sa.getEnabled()) sa.setEnabled(true);
         }
+        if (posedByWeights) noteNodePosed(id);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -519,8 +527,12 @@ bool OgreScene::setBoneManual(NodeId id, const std::string &bone, bool manual) {
         }
         if (!target) { mError = "setBoneManual: no bone named '" + bone + "'"; return false; }
         NodeClips &nc = mClips[id];
+        const bool was = nc.manualBones.count(bone) != 0;
         if (manual) nc.manualBones.insert(bone);
         else        nc.manualBones.erase(bone);
+        // A bone leaving or joining the clips' control changes the pose the
+        // next evaluation produces (lamp-map cache: the shadow must follow).
+        if (was != manual) noteNodePosed(id);
         // Before any clip is attached every bone is manual by construction
         // (attachSkinnedMesh) and clearing one would strand it at bind.
         if (nc.clipModeEntered) skel->setManualBone(target, manual);

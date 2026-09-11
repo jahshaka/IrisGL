@@ -7,6 +7,7 @@
 
 #include <LightProfiles/OgreLightProfiles.h>
 
+#include <chrono>
 #include <map>
 #include <set>
 
@@ -357,17 +358,6 @@ bool sphereTouchesBox(const Ogre::Vector3 &c, Ogre::Real r, const Ogre::Aabb &b)
     return q.squaredLength() <= r * r;
 }
 
-/// "Did this box move?" A change test, not a measurement: the same transforms
-/// give the same floats frame after frame, so anything above a micro-metre of
-/// float noise is a real move — a physics body settling IS moving its shadow.
-bool boxMoved(const Ogre::Aabb &a, const Ogre::Aabb &b) {
-    const Ogre::Vector3 dc = a.mCenter - b.mCenter;
-    const Ogre::Vector3 dh = a.mHalfSize - b.mHalfSize;
-    const Ogre::Real eps = Ogre::Real(1e-5) * std::max(Ogre::Real(1), a.mHalfSize.length());
-    return std::abs(dc.x) > eps || std::abs(dc.y) > eps || std::abs(dc.z) > eps ||
-           std::abs(dh.x) > eps || std::abs(dh.y) > eps || std::abs(dh.z) > eps;
-}
-
 /// The key of everything a lamp's map depends on that setLight does not see:
 /// its world pose (a point map does not depend on orientation — its six faces
 /// are world-aligned, OgreCompositorShadowNode.cpp:577-591 — a spot's does).
@@ -431,6 +421,11 @@ void OgreScene::noteNodePosed(NodeId id) {
 }
 
 void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
+    const auto t0 = std::chrono::steady_clock::now();
+    struct Timer {
+        std::chrono::steady_clock::time_point t0; double &dst;
+        ~Timer() { dst = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
+    } timer{ t0, mShadowScanMicros };
     out = ShadowCacheFrame();
 
     // ---- 1. The lamps, in slot order, and each lamp's own inputs ----------
@@ -450,11 +445,11 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
 
     if (mShadowDirtyAll) { out.dirtyAll = true; mShadowDirtyAll = false; }
     if (out.lights.empty()) {
-        // Nothing cached here: forget the casters. When a lamp arrives, its
-        // fresh slot assignment renders it, and the scan re-primes silently.
+        // Nothing cached here. When a lamp arrives, its fresh slot assignment
+        // renders it, and the next walk re-primes the caster records silently.
         mShadowLightKeys.clear();
-        mShadowCasters.clear();
         mShadowScanPrimed = false;
+        mShadowVanished.clear();
         return;
     }
 
@@ -490,82 +485,15 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
     mShadowLightKeys.swap(keys);
 
     // ---- 2. The casters ---------------------------------------------------
-    // ONE walk of the items, reading world AABBs updateSceneGraph has just
-    // made current. A change is recorded as the box that must be re-rendered:
-    // old and new for a move, the new one for an arrival or a pose change,
-    // the old one for a departure — and it is tested against every lamp's
+    // The frame's item walk (runItemWalk, just before this) has produced them;
+    // a caller that drives this directly without one gets its own walk. A
+    // change is the box that must be re-rendered, tested against every lamp's
     // reach, per the kinds whose channels the caster renders into.
-    const Ogre::uint32 channelsAll = allShadowCasterChannels();
-    const bool firstScan = !mShadowScanPrimed;
-    mShadowScanPrimed = true;
-    const unsigned stamp = ++mShadowScanStamp;
-    struct Change { Ogre::Aabb box; Ogre::uint32 channels; };
-    std::vector<Change> changes;
-    for (auto &kv : mNodes) {
-        Node &n = kv.second;
-        const Ogre::Item *item = n.item;
-        Ogre::uint32 channels = 0u;
-        bool present = false;
-        if (item) {
-            channels = item->getVisibilityFlags() & channelsAll;
-            // THE CASTER PREDICATE. A helper carries kHelperBit and a
-            // distortion item kDistortionBit — neither is in a shadow channel.
-            // The on-top overlay queue (gizmos, bone overlays: unlit, depth
-            // test off, kVisibleBit — lighting audit L6.3) writes no depth even
-            // where a shadow pass draws it, so it is never a caster either.
-            present = channels != 0u && n.shown && item->getCastShadows() &&
-                      item->getRenderQueueGroup() < kOverlayRenderQueue;
-        }
-        auto rit = mShadowCasters.find(kv.first);
-        if (!present && rit == mShadowCasters.end()) { n.shadowShapeDirty = false; continue; }
-        ShadowCasterRec &rec = mShadowCasters[kv.first];
-        rec.stamp = stamp;
-        // A SHARED skeleton poses through its source (shareSkeleton): an armour
-        // piece deforms when the body's clip moves.
-        unsigned long long pose = n.poseEpoch;
-        if (n.shareSource) {
-            auto sit = mNodes.find(n.shareSource);
-            if (sit != mNodes.end()) pose = pose * 1000003ull + sit->second.poseEpoch;
-        }
-        // A VERTEX-STAGE generated piece can move vertices every frame (it
-        // reads the shader clock) — risk 6: such a caster keeps its lamps
-        // re-rendering, the way Unreal excludes WPO materials from caching.
-        bool deforming = false;
-        if (present && n.materialRef) {
-            auto mit = mMaterials.find(n.materialRef);
-            deforming = mit != mMaterials.end() && !mit->second.customPiece[1].empty();
-        }
-        const Ogre::Aabb box = present ? item->getWorldAabb() : Ogre::Aabb();
-        if (!firstScan) {
-            if (present && !rec.present) {
-                changes.push_back({ box, channels });
-            } else if (!present && rec.present) {
-                changes.push_back({ rec.box, rec.channels });
-            } else if (present) {
-                if (rec.item != item || boxMoved(rec.box, box) || rec.channels != channels) {
-                    Ogre::Aabb both = rec.box; both.merge(box);
-                    changes.push_back({ both, channels | rec.channels });
-                } else if (rec.pose != pose || deforming || n.shadowShapeDirty) {
-                    changes.push_back({ box, channels });
-                }
-            }
-        }
-        n.shadowShapeDirty = false;
-        rec.present = present;
-        rec.item = present ? item : nullptr;
-        rec.box = box;
-        rec.pose = pose;
-        rec.channels = channels;
-    }
-    // Casters whose NODE went away (removeNode / releaseNode) were not visited.
-    for (auto it = mShadowCasters.begin(); it != mShadowCasters.end();) {
-        if (it->second.stamp == stamp) { ++it; continue; }
-        if (!firstScan && it->second.present) changes.push_back({ it->second.box, it->second.channels });
-        it = mShadowCasters.erase(it);
-    }
-
+    if (!mShadowWalked) walkItems(false, true, false);
+    mShadowWalked = false;              // consumed: the next frame walks again
+    const std::vector<ShadowChange> &changes = mShadowChanges;
     out.casterChanges = unsigned(changes.size());
-    for (const Change &c : changes) {
+    for (const ShadowChange &c : changes) {
         unsigned kinds = 0u;
         for (unsigned k = 0; k < kShadowNodeKinds; ++k)
             if (c.channels & shadowCasterChannels(ShadowNodeKind(k))) kinds |= 1u << k;

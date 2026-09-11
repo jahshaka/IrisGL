@@ -808,6 +808,7 @@ void OgreScene::detachItem(NodeId id, Node &n) {
         // An UNLIT item the probes capture (P7): leaving the scene is a probe
         // input and nothing else — no voxel ever held it.
         else if (probeSeesItem(n)) staleProbeGrid(GiStaleReason::Moved);
+        unindexItemNode(n);   // the item walk: a caster leaving is a change
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
         // AND THE CLIPS (S16, SMOKE_FIX_SPEC_2026_09_11 §1.1). The
         // SkeletonInstance belongs to the Item and has just died with it, while
@@ -898,6 +899,7 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // usually done the second half; a node with no Item never had one).
     releaseBoneTag(id, n, 0);
     releaseBoneRiders(id, n);
+    unindexItemNode(n);   // always: the node is going away, and its pointer with it
     if (n.item)  { n.item->detachFromParent();  mSceneMgr->destroyItem(n.item);   n.item = nullptr; }
     n.meshRef = 0; n.materialRef = 0;
     // The internal light child must go before the reparent loop below would leak it to root.

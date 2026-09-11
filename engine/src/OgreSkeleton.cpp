@@ -304,6 +304,8 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         // is ever set — and that is what puts `hlms_skeleton` in the shader hash.
         n.item = mSceneMgr->createItem(mit->second.mesh, Ogre::SCENE_DYNAMIC);
         n.item->setDatablock(hlmsFor(tit->second)->getDatablock(Ogre::IdString(tit->second.datablockName)));
+        n.shadowShapeDirty = true;   // a rebuilt Item is a new caster shape (attachMesh says why)
+        indexItemNode(n);
         n.item->setVisibilityFlags(
             itemVisibilityFlags(n, tit->second.unlit, tit->second.distortion));
         n.item->setLightMask(n.lightMask);   // same reason as attachMesh's

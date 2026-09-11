@@ -269,6 +269,17 @@ inline Ogre::uint32 allShadowCasterChannels() {
 /// writes fixed lights into the pass buffer whatever the pass's light mask),
 /// so R2 filters them here for ShadowNodeKind::Probe.
 inline bool shadowLampCachedFor(ShadowNodeKind, const Ogre::Light *) { return true; }
+/// "Did this caster's box move?" (the lamp-map cache's change test). Not a
+/// measurement: the same transforms give the same floats frame after frame,
+/// so anything above a micro-metre of float noise is a real move — a physics
+/// body settling IS moving its shadow.
+inline bool boxMovedForShadows(const Ogre::Aabb &a, const Ogre::Aabb &b) {
+    const Ogre::Vector3 dc = a.mCenter - b.mCenter;
+    const Ogre::Vector3 dh = a.mHalfSize - b.mHalfSize;
+    const Ogre::Real eps = Ogre::Real(1e-5) * std::max(Ogre::Real(1), a.mHalfSize.length());
+    return std::abs(dc.x) > eps || std::abs(dc.y) > eps || std::abs(dc.z) > eps ||
+           std::abs(dh.x) > eps || std::abs(dh.y) > eps || std::abs(dh.z) > eps;
+}
 /// THE NEAR PLANE OF EVERY POINT/SPOT SHADOW CAMERA. Unset, Ogre falls back to
 /// the VIEWER's near clip (Light::_deriveShadowNearClipDistance), so the same
 /// lamp's depth range would follow whichever camera rendered it — fatal for a
@@ -1769,6 +1780,11 @@ public:
     /// this frame's (no getWorldAabbUpdated root recursion, and a mover's
     /// shadow updates in the frame it moves).
     void collectShadowCacheFrame(ShadowCacheFrame &out);
+    /// THE FRAME'S ONE ITEM WALK (OgreGi.cpp): the GI movement scan (while a GI
+    /// consumer exists) and, when `shadow`, the lamp-map cache's caster scan,
+    /// in one pass over mItemNodes after updateSceneGraph. Called by
+    /// OgreEngine::applyShadowCacheDirties for every drawn scene.
+    void runItemWalk(bool shadow);
     /// "Does this scene have anything to cache?" — decides the clear strategy
     /// (per-map quads only while some drawn scene holds a cacheable lamp).
     bool hasCacheableShadowLights() const;
@@ -1785,6 +1801,13 @@ public:
     /// PER NODE, not the scene's mRigPoseEpoch: one animating character must
     /// not re-dirty the lamps near every other rig.
     void noteNodePosed(NodeId id);
+    /// What the two per-frame item walks cost on the last frame, in
+    /// microseconds (steady clock): the lamp-map cache's detection
+    /// (collectShadowCacheFrame, its lamp half) and the frame's item walk
+    /// (runItemWalk: the GI movement records and the caster changes).
+    /// Internal diagnostics — read by tests/shadow's `scancost` mode.
+    double shadowScanMicros() const { return mShadowScanMicros; }
+    double giScanMicros() const { return mGiScanMicros; }
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -1822,9 +1845,30 @@ private:
         /// Bumped by noteNodePosed (clip time / bone pose pushes): the caster
         /// scan re-renders the lamps around a skinned item whose pose moved.
         unsigned long long poseEpoch = 0;
-        /// Set by noteShadowShapeChanged / updateMeshVertices; consumed by the
-        /// next caster scan.
+        /// Set by noteShadowShapeChanged / updateMeshVertices / a rebuilt Item;
+        /// consumed by the next caster scan.
         bool             shadowShapeDirty = false;
+        /// THE ITEM WALK'S MEMORY (walkItems — the GI movement scan and the
+        /// lamp-map cache's caster scan, one pass): what this node's Item looked
+        /// like the last time a walk saw it. On the node, not in per-scene hash
+        /// maps, so a walk is a vector of pointers and no lookups.
+        struct ScanRec {
+            Ogre::Aabb          giBox, probeBox, shadowBox;
+            const Ogre::Item   *shadowItem = nullptr;
+            unsigned long long  shadowPose = 0;
+            Ogre::uint32        shadowChannels = 0;
+            bool                giKnown = false, probeKnown = false, shadowPresent = false;
+            /// Exactly what the LAST walk saw — the fast path's key: an item
+            /// identical in all of these has no new answer for either half.
+            Ogre::Aabb          seenBox;
+            const Ogre::Item   *seenItem = nullptr;
+            unsigned long long  seenPose = 0;
+            Ogre::uint32        seenFlags = 0;
+            Ogre::uint8         seenRq = 0;
+            bool                seenShown = false, seenValid = false;
+        } scan;
+        /// This node's place in OgreScene::mItemNodes, or npos (no Item).
+        size_t           itemSlot = size_t(-1);
         /// A hash of the LightDesc fields a reflection-probe capture can see
         /// (ENGINE_CACHE_POLICY_SPEC P7), so setLight stales the probe grid on
         /// a real parameter change only; 0 = no light pushed yet.
@@ -2489,10 +2533,7 @@ private:
     /// builds mVctVoxelizer/mVctLighting over `aabb` from the live GI items.
     /// Returns the item count (0 = nothing built, both left null).
     size_t buildVoxelArm(const Ogre::Aabb &aabb);
-    /// Refreshes mGiItemAabbs and fills mGiMovedBoxes with what moved since the
-    /// last call (FIX WAVE B3, engine half). Called once per frame from
-    /// updateProbeBudget; NOT from giGeometrySignature, which is stateless.
-    void scanGiMovement();
+
     /// rayon2 S3 — the raster probe source. resolveSource: GiParams::ddgiSource
     /// with Auto = Voxel at every tier. applyRasterSource: re-sources a just
     /// converged voxel field to the raster workspace in place (refused, logged,
@@ -2505,7 +2546,7 @@ private:
     static Ogre::uint32 ifdRasterProbesPerFrame(int updateBudget, Ogre::uint32 totalProbes);
     /// The movement quantum for one item's world AABB (a 64th of its own
     /// largest extent), and "did this AABB move by at least that much?". Shared
-    /// by giGeometrySignature and scanGiMovement so the mirror's debounce and
+    /// by giGeometrySignature and walkItems so the mirror's debounce and
     /// the probe round-robin can never disagree about what moved.
     static float giAabbQuantum(const Ogre::Aabb &a);
     static bool  giAabbMoved(const Ogre::Aabb &before, const Ogre::Aabb &after);
@@ -2704,9 +2745,6 @@ private:
     /// The rig-activity epoch the raster field last converged against
     /// (mRigPoseEpoch below moves whenever a pose or clip time is pushed).
     unsigned long long                mIfdRigEpochSeen = 0;
-    /// True once scanGiMovement ran this frame (the raster re-arm and the probe
-    /// budget both consume mGiMovedBoxes; whoever runs first scans).
-    bool                              mGiMovementScanned = false;
     /// Convergence bookkeeping. `IrradianceField` counts processed probes
     /// internally and exposes nothing, so the engine keeps its own count —
     /// which it needs anyway to know when a re-converge has finished and to
@@ -2769,17 +2807,25 @@ private:
     /// last seen shadow key (parameters + pose). A change is "different from
     /// what was last seen", so a scene that is not drawn for a while is caught
     /// up in full on the first frame it is drawn again.
-    struct ShadowCasterRec {
-        Ogre::Aabb          box;
-        const Ogre::Item   *item = nullptr;
-        unsigned long long  pose = 0;
-        Ogre::uint32        channels = 0;
-        unsigned            stamp = 0;
-        bool                present = false;
-    };
-    std::unordered_map<NodeId, ShadowCasterRec> mShadowCasters;
     std::unordered_map<NodeId, unsigned long long> mShadowLightKeys;
-    unsigned mShadowScanStamp = 0;
+    /// THE ITEM INDEX: every Node that holds an Item (map nodes never move, so
+    /// the pointers are stable until the node is erased — indexItemNode /
+    /// unindexItemNode keep it exact at every Item create and destroy).
+    std::vector<Node *> mItemNodes;
+    void indexItemNode(Node &n);
+    void unindexItemNode(Node &n);
+    /// ONE WALK, TWO CONSUMERS (walkItems, via runItemWalk): the GI movement
+    /// records and the frame's caster changes, from the same pass.
+    struct ShadowChange { Ogre::Aabb box; Ogre::uint32 channels; };
+    void walkItems(bool gi, bool shadow, bool fresh);
+    std::vector<ShadowChange> mShadowChanges;
+    std::vector<ShadowChange> mShadowVanished;   ///< casters whose Item died since the last walk
+    bool mShadowWalked = false;                  ///< this frame's walk produced mShadowChanges
+    /// Which halves the previous walk evaluated: the fast path only holds when
+    /// this walk asks the same questions.
+    bool mLastWalkGi = false, mLastWalkShadow = false;
+    double   mShadowScanMicros = 0.0;
+    double   mGiScanMicros = 0.0;
     bool     mShadowScanPrimed = false;
     /// Re-render every cached map (dirtyAllShadowMaps). Starts TRUE: a scene's
     /// first cached frame renders everything, which the fresh slot assignment
@@ -2829,10 +2875,8 @@ private:
     /// Whether the last full refresh took the reuse arm (B4). Reported by
     /// giStatus; cleared by every from-scratch build.
     bool mGiReusedLastRefresh = false;
-    /// World AABBs of the GI items as of the last movement scan, keyed by node.
-    /// The scan is what feeds the "covers a moved AABB" term of the round-robin
-    /// priority and the movement half of the GI signature (B3).
-    std::unordered_map<NodeId, Ogre::Aabb> mGiItemAabbs;
+    /// (The GI items' last-seen world AABBs live on each Node — Node::scan,
+    /// walkItems — no longer in a per-scene map keyed by node.)
     /// The AABBs that moved on the most recent scan (union of each mover's old
     /// and new box), in world space. Rebuilt every scan; empty when still.
     std::vector<Ogre::Aabb> mGiMovedBoxes;
@@ -2843,10 +2887,10 @@ private:
     bool mGiItemsAppeared = false;
     /// PROBE-ONLY items (P7): unlit geometry the probe faces capture
     /// (probeSeesItem) but that is not GI geometry — tracked by the same scan
-    /// in their own map, so they stale the probes when they move or arrive and
-    /// never enter mGiMovedBoxes (the dynamic reservation, the raster field's
-    /// re-arm) nor giGeometrySignature (the voxel re-solve).
-    std::unordered_map<NodeId, Ogre::Aabb> mProbeOnlyAabbs;
+    /// in their own record (Node::scan.probeBox), so they stale the probes when
+    /// they move or arrive and never enter mGiMovedBoxes (the dynamic
+    /// reservation, the raster field's re-arm) nor giGeometrySignature (the
+    /// voxel re-solve).
     bool mProbeOnlyChanged = false;
     /// The movement scan has run at least once: before that, every item is
     /// seen for the first time and none of them is an arrival.
@@ -3601,11 +3645,11 @@ private:
     /// latchShadowCounters. View kind = the first enabled view with a shadow
     /// node (the "one view speaks for the process" rule); reflect and probe
     /// kinds = every planar slot and every shadowed probe of every scene.
-    /// `Lamp` = passes of focused (point/spot) maps; StaticShadowRenders = the
+    /// `Lamp` = passes of focused (point/spot) maps; CachedMapRenders = the
     /// view's passes spent re-rendering CACHED lamp maps — zero at rest, which
     /// is the whole point, measurably.
     unsigned        mShadowPassesLastFrame = 0;
-    unsigned        mStaticShadowRendersLastFrame = 0;
+    unsigned        mCachedMapRendersLastFrame = 0;
     unsigned        mShadowKindPasses[kShadowNodeKinds] = { 0, 0, 0 };
     unsigned        mShadowKindLampPasses[kShadowNodeKinds] = { 0, 0, 0 };
     std::vector<unsigned> mShadowViewMapPasses;   ///< per map index, view kind

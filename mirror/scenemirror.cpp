@@ -4156,7 +4156,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // EnginePlayerScene::step — ENGINEERING_DEBT_SPEC A4.2), the one clock
         // physics and animation advance on too.
     if (engine) {
-        // world.refreshShadows(): one re-render of every static shadow map per
+        // world.refreshShadows(): one re-render of every cached shadow map per
         // bump, the giRefreshSerial shape exactly (a serial, not a bool: two
         // refreshes in one frame are still one re-render, and clearing is the
         // mirror's job rather than the caller's).
