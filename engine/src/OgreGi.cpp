@@ -569,6 +569,14 @@ bool OgreScene::materialSeenByGi(MaterialId id, bool &voxelized) const {
 
 void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     if (mGi.mode == GiMode::Off) return;
+    // NOTHING CACHED TO INVALIDATE: no probe grid and no voxelizer built yet,
+    // or a from-scratch rebuild already owed (it reads every material fresh and
+    // stales the whole grid itself). This is also what keeps the node walk
+    // below off the LOAD path — every material and every texture bind is pushed
+    // once while a scene opens, and an O(nodes) walk per push there is the
+    // O(nodes x binds) class that once cost 2.1 s of boot (setPbrTexture's
+    // note). A live edit on a built arm walks once per push.
+    if (mGiCachesDirty || (!mPcc && !mVctVoxelizer)) return;
     bool voxelized = false;
     if (!materialSeenByGi(id, voxelized)) return;     // nothing GI can see wears it
     staleProbeGrid(GiStaleReason::Material);
