@@ -327,15 +327,29 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giC
     // point: a registered descendant takes ITS OWN flag into account, so
     // showing a parent no longer shows what the user hid underneath it.
     const size_t numObjects = sn->numAttachedObjects();
-    for (size_t i = 0; i < numObjects; ++i) sn->getAttachedObject(i)->setVisible(shown);
+    for (size_t i = 0; i < numObjects; ++i) {
+        Ogre::MovableObject *obj = sn->getAttachedObject(i);
+        // A LIGHT switching on or off changes what every reflection probe
+        // would capture (ENGINE_CACHE_POLICY_SPEC P7). It is not geometry, so
+        // nothing below would notice; the light rides its -Y adapter, one
+        // unregistered level down, and is reached by this same loop there.
+        if (obj->getVisible() != shown && dynamic_cast<Ogre::Light *>(obj))
+            staleProbeGrid(GiStaleReason::Light);
+        obj->setVisible(shown);
+    }
     if (rec) {
         // OURS: the Item's kGiGeometryBit and the billboard / PFX2 flags,
         // which no Ogre cascade reaches (applyNodeVisibilityFlags).
         const bool giBefore = rec->item && (rec->item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+        const bool probeBefore = probeSeesItem(*rec);
         rec->shown = shown;
         applyNodeVisibilityFlags(*rec);
         const bool giAfter = rec->item && (rec->item->getVisibilityFlags() & kGiGeometryBit) != 0u;
         if (giBefore != giAfter) giChanged = true;
+        // ...and what the PROBES see, which is more than what GI sees: an
+        // UNLIT item is captured (kVisibleBit) but never voxelized, so the GI
+        // edge above misses it. A probe-only stale, no GI invalidation.
+        if (probeSeesItem(*rec) != probeBefore) staleProbeGrid(GiStaleReason::Moved);
     }
     const size_t numChildren = sn->numChildren();
     for (size_t i = 0; i < numChildren; ++i)
@@ -353,8 +367,12 @@ void OgreScene::setNodeHelper(NodeId id, bool helper) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     if (it->second.helper == helper) return;
+    const bool probeBefore = probeSeesItem(it->second);
     it->second.helper = helper;
     applyNodeVisibilityFlags(it->second);
+    // A helper is exactly "the probes must not capture this" (kHelperBit
+    // instead of kVisibleBit), so the flag flipping is a probe input (P7).
+    if (probeSeesItem(it->second) != probeBefore) staleProbeGrid(GiStaleReason::Moved);
 }
 
 bool OgreScene::nodeHelper(NodeId id) const {
@@ -400,9 +418,11 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
             applyShownSubtree(n.node, inheritedShown(n.node), giChanged);
         } else {
             const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+            const bool probeBefore = probeSeesItem(n);
             n.shown = visible;
             applyNodeVisibilityFlags(n);
             giChanged = giBefore != (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u);
+            if (probeSeesItem(n) != probeBefore) staleProbeGrid(GiStaleReason::Moved);
         }
         // THE GI HALF (SMOKE_FIX S12). Hiding or showing lit geometry changes
         // what the next solve sees, exactly like detaching it does (detachItem's
@@ -760,6 +780,9 @@ void OgreScene::detachItem(NodeId id, Node &n) {
         // outline or wire overlay must not trigger a re-voxelize. BEFORE the
         // destroy: the voxelizer/IR hold raw pointers into the dying geometry.
         if (n.item->getVisibilityFlags() & kGiGeometryBit) invalidateGiCaches();
+        // An UNLIT item the probes capture (P7): leaving the scene is a probe
+        // input and nothing else — no voxel ever held it.
+        else if (probeSeesItem(n)) staleProbeGrid(GiStaleReason::Moved);
         n.item->detachFromParent(); mSceneMgr->destroyItem(n.item); n.item = nullptr;
         // AND THE CLIPS (S16, SMOKE_FIX_SPEC_2026_09_11 §1.1). The
         // SkeletonInstance belongs to the Item and has just died with it, while
@@ -834,6 +857,8 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
     if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit)))
         invalidateGiCaches();
+    else if (probeSeesItem(n))
+        staleProbeGrid(GiStaleReason::Moved);   // an unlit item the probes captured (P7)
     // The node is going away for good, so its pose-following pairings go with
     // it (detachItem does NOT: an Item swap keeps them, so a re-attached
     // character still drags its silhouette along).

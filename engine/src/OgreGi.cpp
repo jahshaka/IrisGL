@@ -341,6 +341,9 @@ bool OgreScene::refreshVctFast() {
     }
 
     JAH_TRY {
+        // Timed for the JAHSHAKA_GI_DEBUG log: the settle frame's cost is the
+        // owner's "no hitches" number (CPU side, submission included).
+        const auto tStart = std::chrono::steady_clock::now();
         // A MATERIAL the voxelizer converted has changed since it was built
         // (P7): its VctMaterial cache would re-voxelize the old colour, so the
         // voxel half is rebuilt fresh — under the SAME probe grid.
@@ -372,6 +375,7 @@ bool OgreScene::refreshVctFast() {
             mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
                                  giRayMarchStepScale(false));
         }
+        const auto tVoxels = std::chrono::steady_clock::now();
         mGiLitVolume = aabb;
         mGiProbeRegion = region;
         noteGiAutoVolume(aabb, !giBoundsExplicit());
@@ -417,11 +421,19 @@ bool OgreScene::refreshVctFast() {
         // A fresh voxel arm is not a reuse of the voxels (the probes were
         // kept either way, and giStatus.rebuilds does not move).
         mGiReusedLastRefresh = !freshVoxels;
-        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+        if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+            const auto tEnd = std::chrono::steady_clock::now();
+            const auto ms = [](std::chrono::steady_clock::time_point a,
+                               std::chrono::steady_clock::time_point b) {
+                return std::to_string(std::chrono::duration<double, std::milli>(b - a).count());
+            };
             Ogre::LogManager::getSingleton().logMessage(
                 std::string("Jahshaka GI: refresh ") +
                 (freshVoxels ? "re-voxelized FRESH (a material changed)" : "REUSED the voxel arm") +
-                " (" + std::to_string(mVctItemIds.size()) + " items, probe grid staled)");
+                " (" + std::to_string(mVctItemIds.size()) + " items, probe grid staled) in " +
+                ms(tStart, tEnd) + " ms: voxels + injection " + ms(tStart, tVoxels) +
+                " ms, irradiance field " + ms(tVoxels, tEnd) + " ms");
+        }
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -555,14 +567,24 @@ GiStatus OgreScene::giStatus() const {
     return st;
 }
 
+// THE PROBE FACE PASS'S RENDER-QUEUE CEILING — `rq_last 200` in
+// media/Hlms/Jahshaka/JahshakaPcc.compositor (both face passes). Gizmos and
+// selection outlines live at RQ 210 and are never captured; keep in step.
+static const Ogre::uint8 kProbeFaceRqLast = 200u;
+
+bool OgreScene::probeSeesItem(const Node &n) const {
+    if (!n.item || !n.shown) return false;
+    if (!(n.item->getVisibilityFlags() & kVisibleBit)) return false;   // helper / distortion
+    return n.item->getRenderQueueGroup() <= kProbeFaceRqLast;
+}
+
 bool OgreScene::materialSeenByGi(MaterialId id, bool &voxelized) const {
     voxelized = false;
     bool seen = false;
     for (const auto &kv : mNodes) {
         if (kv.second.materialRef != id || !kv.second.item) continue;
-        const Ogre::uint32 flags = kv.second.item->getVisibilityFlags();
-        if (flags & kGiGeometryBit) { voxelized = true; seen = true; break; }
-        if (flags & kVisibleBit) seen = true;
+        if (kv.second.item->getVisibilityFlags() & kGiGeometryBit) { voxelized = true; seen = true; break; }
+        if (probeSeesItem(kv.second)) seen = true;
     }
     return seen;
 }
@@ -576,7 +598,9 @@ void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     // once while a scene opens, and an O(nodes) walk per push there is the
     // O(nodes x binds) class that once cost 2.1 s of boot (setPbrTexture's
     // note). A live edit on a built arm walks once per push.
-    if (mGiCachesDirty || (!mPcc && !mVctVoxelizer)) return;
+    // Instant Radiosity counts as a cache too: its trace reads the same
+    // diffuse colours, and the generation is what makes the host re-trace it.
+    if (mGiCachesDirty || (!mPcc && !mVctVoxelizer && !mInstantRadiosity)) return;
     bool voxelized = false;
     if (!materialSeenByGi(id, voxelized)) return;     // nothing GI can see wears it
     staleProbeGrid(GiStaleReason::Material);
@@ -881,7 +905,10 @@ unsigned long long OgreScene::giEscapeSignature() const {
 bool OgreScene::hasVctLights() const {
     for (const auto &kv : mNodes) {
         const Ogre::Light *l = kv.second.light;
-        if (!l) continue;
+        // A HIDDEN light is no light to VctLighting (update() gathers only
+        // LAYER_VISIBILITY lights), so switching off a room's only lamp is the
+        // no-lights case below, not a scene with one light and a zero maximum.
+        if (!l || !l->getVisible()) continue;
         switch (l->getType()) {
         case Ogre::Light::LT_DIRECTIONAL: case Ogre::Light::LT_POINT:
         case Ogre::Light::LT_SPOTLIGHT:   case Ogre::Light::LT_AREA_APPROX:
@@ -1481,11 +1508,29 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
 // arrival is already in the signature.
 void OgreScene::scanGiMovement() {
     mGiMovedBoxes.clear();
-    size_t live = 0;
-    const bool firstScan = mGiItemAabbs.empty();
+    size_t live = 0, liveProbeOnly = 0;
+    const bool firstScan = !mGiScannedOnce;
+    mGiScannedOnce = true;
     for (auto &kv : mNodes) {
         Ogre::Item *item = kv.second.item;
-        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        if (!item) continue;
+        if (!(item->getVisibilityFlags() & kGiGeometryBit)) {
+            // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
+            // never voxelized. Same quantized test, its own map, and a flag
+            // rather than a moved box — the voxel side must not hear of it.
+            if (!probeSeesItem(kv.second)) continue;
+            ++liveProbeOnly;
+            const Ogre::Aabb a = item->getWorldAabbUpdated();
+            auto pit = mProbeOnlyAabbs.find(kv.first);
+            if (pit == mProbeOnlyAabbs.end()) {
+                mProbeOnlyAabbs.emplace(kv.first, a);
+                if (!firstScan) mProbeOnlyChanged = true;
+            } else if (giAabbMoved(pit->second, a)) {
+                pit->second = a;
+                mProbeOnlyChanged = true;
+            }
+            continue;
+        }
         ++live;
         const Ogre::Aabb a = item->getWorldAabbUpdated();
         auto it = mGiItemAabbs.find(kv.first);
@@ -1504,6 +1549,13 @@ void OgreScene::scanGiMovement() {
     }
     // Destroyed nodes leave entries behind. Bounded by the scene either way, but
     // a long editing session should not pay for every object it ever deleted.
+    if (mProbeOnlyAabbs.size() > liveProbeOnly * 2u + 16u) {
+        mProbeOnlyAabbs.clear();
+        for (auto &kv : mNodes)
+            if (kv.second.item && !(kv.second.item->getVisibilityFlags() & kGiGeometryBit) &&
+                probeSeesItem(kv.second))
+                mProbeOnlyAabbs.emplace(kv.first, kv.second.item->getWorldAabbUpdated());
+    }
     if (mGiItemAabbs.size() > live * 2u + 16u) {
         mGiItemAabbs.clear();
         for (auto &kv : mNodes) {
@@ -1584,33 +1636,17 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     if (!mGiMovementScanned) { scanGiMovement(); mGiMovementScanned = true; }
 
     // THE INPUTS THIS PASS CAN SEE FOR ITSELF (the rest arrive through the
-    // setters: setLight, setPbrMaterial, setSky, ...). Geometry that moved or
-    // appeared since the last scan — what it shows in a reflection is out of
-    // date in every probe that can see it, which in v1 is all of them.
-    if (!mGiMovedBoxes.empty() || mGiItemsAppeared) staleProbeGrid(GiStaleReason::Moved);
-    mGiItemsAppeared = false;
-    // TIME-VARYING CONTENT (spec D4, option A — today's behaviour for such
-    // scenes, decided by the lead 2026-09-12 pending the reflections design):
-    // while something the probes can see changes by itself every frame, the
-    // grid stays stale and the budget keeps sweeping it exactly as it always
-    // did. A rig posing in place moves no AABB (Items keep bind-pose bounds), so
-    // it is read off the pose epoch; a visible particle system simulates every
-    // frame; a clock-driven material or a live texture upload flags itself.
-    if (mRigPoseEpoch != mProbeRigEpochSeen) {
-        mProbeRigEpochSeen = mRigPoseEpoch;
-        mTimeVaryingThisFrame = true;
-    }
-    if (!mTimeVaryingThisFrame && mLiveParticleSystems) {
-        for (const auto &kv : mNodes) {
-            const Ogre::ParticleSystemDef *def = kv.second.particleDef;
-            if (kv.second.particleSystem && def && (def->getVisibilityFlags() & kVisibleBit)) {
-                mTimeVaryingThisFrame = true;
-                break;
-            }
-        }
-    }
-    if (mTimeVaryingThisFrame) staleProbeGrid(GiStaleReason::Animated);
-    mTimeVaryingThisFrame = false;
+    // setters: setLight, setPbrMaterial, setSky, attach/detach/visibility ...).
+    // Geometry the probes capture that moved or arrived since the last scan —
+    // GI geometry and unlit geometry alike — is out of date in every probe
+    // that can see it, which in v1 is all of them.
+    if (!mGiMovedBoxes.empty() || mGiItemsAppeared || mProbeOnlyChanged)
+        staleProbeGrid(GiStaleReason::Moved);
+    mGiItemsAppeared = mProbeOnlyChanged = false;
+    // TIME-VARYING CONTENT IS FROZEN (REALTIME_REFLECTIONS_SPEC O4 = A, lead
+    // decision 2026-09-12): a posing rig, a particle system, a clock-driven
+    // material or a live texture stales nothing by itself. SSR and planar
+    // reflections show it live; the probes are the static-environment layer.
 
     // THE CATCH-UP RATE (spec D2). How many STALE probes a frame may capture:
     // the tier's normal budget (option A, the default — no hitch, a 32-probe
@@ -1725,12 +1761,6 @@ unsigned long long OgreScene::giGeometrySignature() const {
     if (mGi.mode == GiMode::Off) return 0ull;
     unsigned long long h = 1469598103934665603ull;      // FNV-1a
     const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
-    // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7): what the voxelizer
-    // converted is as much an input to the solve as where the items stand. A
-    // colour drag moves it every tick (the host's debounce then runs the cheap
-    // paths and ONE re-solve when the drag stops, exactly as for a moved
-    // object); an idle scene never moves it.
-    fold(mGiMaterialGeneration);
     for (const auto &kv : mNodes) {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
@@ -1744,6 +1774,15 @@ unsigned long long OgreScene::giGeometrySignature() const {
         }
     }
     return h;
+}
+
+// THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), deliberately NOT folded into
+// the geometry signature above: the host arms the same one-re-solve-on-settle
+// debounce for it but skips the light re-inject cadence that geometry and
+// lights get, because nothing a re-inject reads changed (the voxels still hold
+// the old conversion until the re-solve builds fresh ones).
+unsigned long long OgreScene::giMaterialSignature() const {
+    return mGi.mode == GiMode::Off ? 0ull : mGiMaterialGeneration;
 }
 
 // The movement quantum for one item, and the test that uses it. Shared by the
@@ -2220,9 +2259,19 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
 // raster CubemapToIfd parameter needs nothing here: updateIrradianceField
 // re-pushes it before every raster dispatch, for exactly this reason.
 bool OgreScene::reassertGiBinding() {
-    if (sVctBindingOwner == this) return false;
     JAH_TRY {
         Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+        // THE BOUND POINTERS DECIDE, NOT THE OWNER FLAG (code review 2026-09-12):
+        // the flag says who bound last, the pointers say what the shader reads,
+        // and any path that let the two disagree left this scene "owning" a
+        // binding that pointed into another scene's arms — a use-after-free
+        // the moment that scene died. Already ours on all three: a no-op.
+        if (pbs->getVctLighting() == mVctLighting &&
+            pbs->getParallaxCorrectedCubemap() == mPcc &&
+            pbs->getIrradianceField() == mIfd) {
+            sVctBindingOwner = (mVctLighting || mPcc || mIfd) ? this : sVctBindingOwner;
+            return false;
+        }
         pbs->setVctLighting(mVctLighting);
         if (mPcc) pbs->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
         else      pbs->setParallaxCorrectedCubemap(nullptr);
@@ -2466,10 +2515,20 @@ void OgreScene::buildIrradianceField() {
         // threshold needs but upstream's own IrradianceField block does not
         // carry, reach the shader through the pass buffer.
         pushIfdState(settings);
-        // The process-wide binding, under the same discipline as VctLighting's
-        // (this scene is already sVctBindingOwner — rebuildVct took it).
-        hlmsPbs(mRoot)->setIrradianceField(mIfd);
-        sVctBindingOwner = this;
+        // The process-wide binding, under the same discipline as VctLighting's,
+        // and ONLY when the shader is reading THIS scene's voxel lighting: a
+        // rebuild has just bound it (rebuildVct), a re-solve of a background
+        // scene has not (refreshVctFast never snatches the binding). Binding
+        // the field and claiming ownership there anyway left HlmsPbs with the
+        // OTHER scene's VctLighting under an owner flag naming this one — the
+        // other scene's teardown then skipped its unbind (code review
+        // 2026-09-12). The field is kept either way; reassertGiBinding binds it
+        // when this scene takes the screen back.
+        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+        if (pbs->getVctLighting() == mVctLighting) {
+            pbs->setIrradianceField(mIfd);
+            sVctBindingOwner = this;
+        }
 
         if (std::getenv("JAHSHAKA_GI_DEBUG"))
             Ogre::LogManager::getSingleton().logMessage(
@@ -2684,10 +2743,15 @@ void OgreScene::teardownVct() {
     mVctItemIds.clear();
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;
-    if (sVctBindingOwner == this) {
-        hlmsPbs(mRoot)->setParallaxCorrectedCubemap(nullptr);
-        hlmsPbs(mRoot)->setVctLighting(nullptr);
-        sVctBindingOwner = nullptr;
+    // Unbind what the shader reads FROM THIS SCENE, by pointer identity (the
+    // same rule teardownIrradianceField uses): the owner flag can disagree with
+    // the pointers, and a pointer left bound past the delete below is a
+    // use-after-free on the next frame. Another scene's binding is untouched.
+    {
+        Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+        if (mPcc && pbs->getParallaxCorrectedCubemap() == mPcc) pbs->setParallaxCorrectedCubemap(nullptr);
+        if (mVctLighting && pbs->getVctLighting() == mVctLighting) pbs->setVctLighting(nullptr);
+        if (sVctBindingOwner == this) sVctBindingOwner = nullptr;
     }
     // Reverse dependency order, all while the SceneManager is still alive:
     // PCC (probe workspaces + cubemap textures) -> VctLighting (reads the

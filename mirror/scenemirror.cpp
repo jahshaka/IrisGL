@@ -162,12 +162,17 @@ quint64 worldTrsSignatureMemo(iris::graph::NodeHandle h,
 /// TRS only, and such an edit never reached the bounce at all (nor, once the
 /// endless probe sweep went, the reflections). The same debounce then applies:
 /// a slider drag re-injects on the cheap cadence and re-solves once on release.
+///
+/// And the light's EFFECTIVE shown state (its own flag and every ancestor's):
+/// VctLighting injects only visible lights, so switching a lamp off is as much
+/// a GI input as dimming it to zero (code review 2026-09-12).
 quint64 lightGiParamSignature(const iris::LightNode *l)
 {
     Hasher h;
     h << int(l->lightType) << l->color.rgba() << l->intensity << l->iesNormalisation
       << l->distance << l->spotCutOff << l->spotCutOffSoftness << l->spotFalloff
-      << l->rectWidth << l->rectHeight << l->doubleSided << l->accurate;
+      << l->rectWidth << l->rectHeight << l->doubleSided << l->accurate
+      << l->isVisibleInScene();
     return h.h;
 }
 
@@ -4506,6 +4511,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             return combine(lightSigRaw, mTarget->giEscapeSignature(),
                            mTarget->giGeometrySignature());
         };
+        // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), kept OUT of the
+        // signature above on purpose: a material edit arms the same
+        // one-re-solve-on-settle debounce but NOT the cheap light re-inject
+        // cadence (and its irradiance-field reset) — nothing a re-inject reads
+        // changed. Every mode (Instant Radiosity re-traces on it too).
+        const quint64 matSig = mTarget->giMaterialSignature();
         // Compared BY VALUE (GiParams::operator==, beside the struct — every
         // field setGlobalIllumination reads is in it, so a new field cannot fall
         // behind the comparison the way a lambda one file away did).
@@ -4530,8 +4541,10 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
             mGiLightSignature = readEngineSignature();
+            mGiMaterialSignature = mTarget->giMaterialSignature();
             mGiPushed = true;
             mGiPendingRefresh = false;
+            mGiPendingInject = false;
             mGiStableFrames = 0;
             mGiRefreshSerialSeen = mSource->giRefreshSerial;
             ++mGiPushCount;
@@ -4568,6 +4581,14 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // demand, so it does NOT wait for the stability window.
             const bool explicitRefresh = mSource->giRefreshSerial != mGiRefreshSerialSeen;
 
+            const bool matChanged = matSig != mGiMaterialSignature;
+            if (matChanged && mSource->giUpdateBudget > 0) {
+                // Arms the settle — and only the settle (see matSig above).
+                mGiMaterialSignature = matSig;
+                mGiPendingTimer.restart();
+                mGiPendingRefresh = true;
+                mGiStableFrames = 0;
+            }
             if (sigChanged) {
                 if (mSource->giUpdateBudget > 0) {
                     // The remembered signature is only advanced while the budget
@@ -4583,11 +4604,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                     // soon as the drag outlasted 250 ms — the exact cost this
                     // phase exists to remove, just less often.)
                     mGiPendingTimer.restart();
-                    if (!mGiPendingRefresh) mGiFramesSinceLightOnly = 0;
+                    if (!mGiPendingInject) mGiFramesSinceLightOnly = 0;
                     mGiPendingRefresh = true;
+                    mGiPendingInject = true;      // lights/geometry: the cheap path runs
                     mGiStableFrames = 0;
                 }
-            } else if (mGiPendingRefresh) {
+            } else if (mGiPendingRefresh && !matChanged) {
                 ++mGiStableFrames;
             }
 
@@ -4598,6 +4620,8 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // second being the signature changing back).
             const auto adoptSignature = [&]() {
                 if (vctLike) mGiLightSignature = readEngineSignature();
+                mGiMaterialSignature = mTarget->giMaterialSignature();
+                mGiPendingInject = false;
             };
             if (explicitRefresh) {
                 mGiRefreshSerialSeen = mSource->giRefreshSerial;
@@ -4614,8 +4638,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 mTarget->refreshGlobalIllumination();
                 ++mGiRefreshCount;
                 adoptSignature();
-            } else if (mGiPendingRefresh) {
-                // Still moving: the cheap path, rate-limited.
+            } else if (mGiPendingRefresh && mGiPendingInject) {
+                // Still moving: the cheap path, rate-limited. (A material-only
+                // edit waits for the settle without it.)
                 if (++mGiFramesSinceLightOnly >= kGiLightOnlyEveryN) {
                     mGiFramesSinceLightOnly = 0;
                     if (mTarget->refreshGiLighting()) ++mGiLightRefreshCount;

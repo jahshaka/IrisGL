@@ -602,8 +602,14 @@ public:
     virtual unsigned    decalAtlasUsed(DecalMap kind) const = 0;
 
     // ---- Global illumination (GI_SPEC.md). Scene-level, like fog and sky. ----
-    /// Applies the GI state idempotently, rebuilding whatever changed. Passing the
-    /// same params twice is cheap; GiMode::Off tears everything down. Modes the
+    /// Applies the GI state and BUILDS IT FROM SCRATCH — voxels, the probe grid
+    /// (placement captures every probe) and the irradiance field — every call,
+    /// equal params included: that is the explicit "rebuild now", and suites
+    /// use it as such. Hosts therefore push on CHANGE only (SceneMirror
+    /// compares GiParams by value), re-solve through refreshGlobalIllumination,
+    /// and take the process-wide binding back after another scene built GI with
+    /// reassertGiBinding — never by re-pushing. GiMode::Off tears everything
+    /// down. Modes the
     /// backend has not implemented yet degrade to Off (true is still returned so a
     /// document saved with a future mode keeps loading). Instant Radiosity is
     /// per-scene: its virtual point lights live in this scene only.
@@ -699,6 +705,15 @@ public:
     ///
     /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
     virtual unsigned long long giGeometrySignature() const = 0;
+    /// "Has a material GI converted changed?" (ENGINE_CACHE_POLICY_SPEC P7) — a
+    /// generation that moves when a parameter the voxelizer (or Instant
+    /// Radiosity's trace) reads — albedo, emissive, alpha, workflow, the albedo
+    /// or emissive map — changes on a material GI geometry wears. Its own term,
+    /// not part of giGeometrySignature: a host debounces it into ONE re-solve
+    /// when the edit settles, and must NOT run the light re-inject cadence for
+    /// it (a material edit changes nothing a re-inject reads). 0 when GI is off;
+    /// an idle scene never moves it. Cheap: returns a counter.
+    virtual unsigned long long giMaterialSignature() const = 0;
     /// "This object must not define WHERE global illumination happens"
     /// (REFLECTIONS_ADOPTION_SPEC.md P1a). The object still voxelizes and still
     /// bounces light — it is only kept out of the two AABB reductions, the lit

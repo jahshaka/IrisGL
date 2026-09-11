@@ -712,7 +712,6 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
 
         if (!n.particleSystem) {
             n.particleSystem = mSceneMgr->createParticleSystem2(n.particleDef);
-            ++mLiveParticleSystems;   // the probe sweep's D4 check walks only while > 0
             // MANDATORY: emission reads system->getParentNode() with no null
             // check (OgreParticleSystemManager2.cpp:213-215). Attaching to the
             // node's own SceneNode is also what makes the emitter follow the
@@ -753,7 +752,6 @@ void OgreScene::releaseParticleSystem(Node &n) {
         n.particleSystem->detachFromParent();
         mSceneMgr->destroyParticleSystem2(n.particleSystem);
         n.particleSystem = nullptr;
-        if (mLiveParticleSystems) --mLiveParticleSystems;
     }
     // The def survives — nothing can destroy one before the SceneManager dies.
     // Hide it (the def is what the render queue tests, so its live particles

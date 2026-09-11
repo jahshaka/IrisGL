@@ -1353,17 +1353,23 @@ enum class GiSource { Auto, Voxel, Raster };
 ///               bounds, anything destroyed) — every probe owes a capture
 ///   `Refresh`   a GI re-solve (the mirror's settle after a drag, or
 ///               world.refreshGi()) — the voxels moved under the probes
-///   `Moved`     GI geometry moved or appeared (the movement scan)
-///   `Light`     a light was added or one of its parameters changed
+///   `Moved`     geometry the probes capture moved, arrived, left, or was
+///               shown, hidden or flagged helper — GI geometry through the
+///               movement scan, UNLIT geometry through a probe-only stale that
+///               never touches the voxels
+///   `Light`     a light was added, switched on or off, or changed a parameter
 ///   `Material`  a material parameter or texture used by visible geometry changed
 ///   `Sky`       the sky or its reflection cubemap changed
 ///   `Ambient`   the ambient (flat, hemisphere or sky SH) changed
 ///   `Fog`       the fog description changed
-///   `Animated`  time-varying content is live (a clock-driven material, a live
-///               texture upload, a visible particle system, a posing rig): while
-///               it is, the grid keeps today's budgeted sweep (spec D4 option A)
 ///   `None`      nothing has staled the grid since the scene was created
-enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog, Animated };
+///
+/// TIME-VARYING CONTENT IS FROZEN in the probes (REALTIME_REFLECTIONS_SPEC O4,
+/// lead decision A, 2026-09-12): a posing rig, a particle system, a clock-driven
+/// material or a live/video texture is captured as it was when the grid last
+/// re-captured, and stales nothing on its own. SSR and planar reflections show
+/// such content live; probes are the static-environment layer.
+enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog };
 
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
@@ -1453,9 +1459,10 @@ struct GiParams {
     ///
     /// A RATE, not a subset, and spent only on STALE probes (ENGINE_CACHE_POLICY_
     /// SPEC P1, 2026-09-12): the probes are a cache. Every input that changes
-    /// what a probe would capture — a GI rebuild or re-solve, geometry moving or
-    /// appearing, a light, material, sky, ambient or fog change, time-varying
-    /// content — marks the grid stale (GiStatus::lastStaleReason names it), and
+    /// what a probe would capture — a GI rebuild or re-solve, geometry moving,
+    /// arriving, leaving or being shown/hidden, a light, material, sky, ambient
+    /// or fog change — marks the grid stale (GiStatus::lastStaleReason names
+    /// it; time-varying content is frozen, see GiStaleReason), and
     /// each frame the engine re-captures up to `updateBudget` of the
     /// highest-priority stale probes. So every probe re-captures within
     /// ceil(probeCount / updateBudget) frames OF A CHANGE, whatever the priority

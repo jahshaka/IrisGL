@@ -1251,6 +1251,12 @@ private:
     /// Set by invalidateEnvironment: the next applyEnvironment re-asserts the
     /// process-wide GI binding for this scene instead of re-pushing (P10).
     bool mGiReassertPending = false;
+    /// The engine's material generation as last adopted (Scene::giMaterialSignature),
+    /// and whether the pending settle was armed by lights/geometry — the only
+    /// changes the cheap re-inject cadence serves (a material-only edit waits
+    /// for the settle without it).
+    quint64 mGiMaterialSignature = 0;
+    bool     mGiPendingInject = false;
     /// The GI-driving light transform(s), as a CHANGE KEY rather than a
     /// matrix — see the signature's derivation in applyEnvironment (audit F8).
     quint64 mGiLightSignature = 0;

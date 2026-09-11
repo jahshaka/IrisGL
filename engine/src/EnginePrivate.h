@@ -1618,6 +1618,7 @@ public:
     bool reassertGiBinding() override;
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
+    unsigned long long giMaterialSignature() const override;
     bool refreshGiLighting() override;
     void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
     bool nodeGiBoundsExcluded(NodeId id) const override;
@@ -2358,9 +2359,15 @@ private:
     /// spend over the next frames — and records why (P1/P6/P7). Cheap: flags
     /// only; nothing renders here. A no-op without a probe grid.
     void staleProbeGrid(GiStaleReason why);
-    /// P7 hooks: does any item that probes (kVisibleBit) or the voxelizer
+    /// P7 hooks: does any item that probes (probeSeesItem) or the voxelizer
     /// (kGiGeometryBit) can see use this material?
     bool materialSeenByGi(MaterialId id, bool &voxelized) const;
+    /// Would a reflection-probe face capture this node's item? kVisibleBit
+    /// (the face pass's visibility_mask 0x1 — helpers carry kHelperBit and
+    /// distortion items kDistortionBit instead), effectively shown, and in the
+    /// face pass's render-queue range (rq_last 200: gizmos and selection
+    /// outlines at RQ 210 are never captured, so they never stale anything).
+    bool probeSeesItem(const Node &n) const;
     /// P7, materials: a visible material changed — stale the probes and, when
     /// the change reaches the voxelizer's conversion, bump the material
     /// generation (see mGiMaterialGeneration).
@@ -2713,6 +2720,16 @@ private:
     /// always did) but it is an input the probes must see (P1): the next budget
     /// pass stales the grid with reason Moved and clears it.
     bool mGiItemsAppeared = false;
+    /// PROBE-ONLY items (P7): unlit geometry the probe faces capture
+    /// (probeSeesItem) but that is not GI geometry — tracked by the same scan
+    /// in their own map, so they stale the probes when they move or arrive and
+    /// never enter mGiMovedBoxes (the dynamic reservation, the raster field's
+    /// re-arm) nor giGeometrySignature (the voxel re-solve).
+    std::unordered_map<NodeId, Ogre::Aabb> mProbeOnlyAabbs;
+    bool mProbeOnlyChanged = false;
+    /// The movement scan has run at least once: before that, every item is
+    /// seen for the first time and none of them is an arrival.
+    bool mGiScannedOnce = false;
     /// Bumped by setBonePoses and by setClipStates when a clip's time or
     /// enable changed: a rig posed in place moves no AABB (Items keep their
     /// bind-pose bounds), so the movement scan cannot see it, and this is what
@@ -2733,9 +2750,10 @@ private:
     /// a cache hit never re-reads the colour), so the reuse arm would re-voxelize
     /// the OLD albedo for ever. refreshVctFast compares the generation it built
     /// the voxel arm at and, when it moved, builds a FRESH voxelizer and
-    /// lighting under the probes it keeps (freshVoxelArm). Folded into
-    /// giGeometrySignature, so the host's debounce coalesces a slider drag into
-    /// one re-voxelize when it stops, exactly like a moved object.
+    /// lighting under the probes it keeps (freshVoxelArm). Reported as its
+    /// own term (giMaterialSignature), so the host's debounce coalesces a
+    /// slider drag into one re-voxelize when it stops WITHOUT running the
+    /// light re-inject cadence a material cannot need.
     unsigned long long mGiMaterialGeneration      = 0;
     unsigned long long mGiBuiltMaterialGeneration = 0;
     /// THE PROBE CACHE's bookkeeping (ENGINE_CACHE_POLICY_SPEC P1). See
@@ -2751,18 +2769,6 @@ private:
     /// The PCC/VCT trust window buildPcc bound the grid with, so a binding
     /// re-assert (P10) re-binds with the same numbers without re-deriving them.
     float mPccBindMinDist = 0.0f, mPccBindMaxDist = 0.0f;
-    /// "Time-varying content changed this frame" (spec D4 option A): set by a
-    /// live-texture upload into a material in use and by a shader-clock advance
-    /// with a clock-driven material in use; consumed (and cleared) by
-    /// updateProbeBudget, which keeps the budgeted sweep running while it is.
-    bool               mTimeVaryingThisFrame = false;
-    /// Live PFX2 particle-system instances in this scene (maintained where
-    /// they are created and destroyed), so the probe sweep's per-frame
-    /// "is a visible particle system simulating?" walk runs only when one can.
-    unsigned           mLiveParticleSystems = 0;
-    /// The rig-pose epoch the probe sweep last saw (a character posing in place
-    /// moves no AABB, so the movement scan cannot see it).
-    unsigned long long mProbeRigEpochSeen = 0;
     /// The last ambient SH and fog the scene was given, so a host re-push of the
     /// same value (every page return drops the host's own latch) stales nothing.
     float   mLastAmbientSh[27] = {};

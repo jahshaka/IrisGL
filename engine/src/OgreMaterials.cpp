@@ -860,18 +860,6 @@ bool OgreScene::setMaterialCustomPiece(MaterialId id, const std::string &path,
 }
 
 void OgreScene::setShaderTime(float seconds) {
-    // TIME-VARYING CONTENT (ENGINE_CACHE_POLICY_SPEC D4, option A): a
-    // clock-driven material on visible geometry changes by itself as the clock
-    // advances, so while it does the probe grid keeps its budgeted sweep.
-    // Checked only when the clock actually MOVES, and only over materials with
-    // a generated piece (the only ones that read the clock).
-    if (seconds != mShaderTime && !mTimeVaryingThisFrame && mPcc) {
-        for (const auto &mk : mMaterials) {
-            if (mk.second.customPiece[0].empty() && mk.second.customPiece[1].empty()) continue;
-            bool voxelized = false;
-            if (materialSeenByGi(mk.first, voxelized)) { mTimeVaryingThisFrame = true; break; }
-        }
-    }
     mShaderTime = seconds;
     // Read by FogHlmsListener::preparePassBuffer, on the render thread, once
     // per pass. Nothing is flushed and nothing recompiles — the value lands in
@@ -989,6 +977,10 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // New lit geometry must join the voxel volume / next trace; unlit
         // overlays (outlines, wires) never participate in GI.
         if (!tit->second.unlit) invalidateGiCaches();
+        // An UNLIT item the probes capture (kVisibleBit, RQ inside the probe
+        // face's range): arriving is a probe input only (P7). Overlays at RQ
+        // 210+ (gizmos, outlines) and helpers fail probeSeesItem.
+        else if (probeSeesItem(n)) staleProbeGrid(GiStaleReason::Moved);
         // A reflector node whose mesh was swapped keeps its flag (detachItem
         // above only disarmed the dead Item) — re-derive the plane from the new
         // geometry. A failure here is not fatal to attachMesh: the node simply
@@ -1394,16 +1386,9 @@ bool OgreScene::updateTexture(TextureId id, unsigned w, unsigned h, const unsign
     }
     JAH_TRY {
         uploadRgbaLevels(rec.texture, w, h, rgba);
-        // TIME-VARYING CONTENT (D4, option A): a live texture (or a video frame)
-        // on visible geometry keeps the probe grid sweeping while it updates.
-        if (mPcc && !mTimeVaryingThisFrame) {
-            for (const auto &mk : mMaterials) {
-                bool bound = false;
-                for (TextureId t : mk.second.boundTextures) if (t == id) { bound = true; break; }
-                bool voxelized = false;
-                if (bound && materialSeenByGi(mk.first, voxelized)) { mTimeVaryingThisFrame = true; break; }
-            }
-        }
+        // Stales no probe: a live or video texture is time-varying content,
+        // which the probes FREEZE (REALTIME_REFLECTIONS_SPEC O4 = A — SSR and
+        // planar reflections show it live). See GiStaleReason.
         return true;
     } JAH_CATCH(mError, false);
 }
