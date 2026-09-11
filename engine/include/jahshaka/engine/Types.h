@@ -1345,6 +1345,35 @@ struct GiParams {
     /// for directional lights). min == max means "auto": the backend derives it
     /// from the scene's lit geometry plus a margin.
     Vec3      boundsMin, boundsMax;
+    /// THE CEILING ON AN AUTOMATIC FIT, in METRES (SMOKE_FIX S14).
+    ///
+    /// The automatic volume's largest axis may not exceed this, and what
+    /// survives is centred on the scene's CONTENT. 64 m at the default tier
+    /// (Epic, 128^3) is half a metre per voxel.
+    ///
+    /// It exists because a new project's ground plane WAS 1024 m across (100 m
+    /// since the same fix re-staged it) and one item cannot be trimmed by a
+    /// heuristic that needs a population — the geometric mean of one extent is
+    /// that extent, so `giItemBounds`' ramp is a no-op by construction. Out of
+    /// the box that fitted 8.1 m voxels, an irradiance field two probes tall
+    /// and eighteen reflection probes 346 m apart over a square kilometre.
+    ///
+    /// WHY METRES AND NOT METRES-PER-VOXEL, which is the quantity that actually
+    /// decides whether GI means anything (LIGHTING_PIPELINE_AUDIT L4.4) and
+    /// would be tier-independent: a per-voxel ceiling SHRINKS the lit world as
+    /// the quality dial goes down (0.5 m/voxel is 64 m at High but 16 m at
+    /// Low), and that breaks standing contracts — measured, it took gi.cliff's
+    /// "a scene that is only a ground plane" and gi.pcc_bounds' "a scene that
+    /// IS one big mesh keeps the whole mesh" red at Low, which is the
+    /// "scenes go dark when a dial moves" class the LIGHTING_FIX lane exists to
+    /// prevent. A fixed 64 m holds at every tier and still kills the 8 m voxel:
+    /// High 0.5, Medium 1.0, Low 2.0 m per voxel. `GiStatus::voxelMetres`
+    /// reports the resolved figure so the per-voxel reading is still available.
+    ///
+    /// 0 disables the ceiling. It is ignored entirely once boundsMin/boundsMax
+    /// pin a volume — that, and world.fitGiBounds, is how a scene larger than
+    /// the ceiling asks for more. Full rationale: OgreGi.cpp clampAutoGiBounds.
+    float     autoBoundsMax = 64.0f;
     /// Instant Radiosity: the node whose light drives the bounce. 0 means "auto"
     /// (the backend picks the first directional light, else any light).
     NodeId    irLight = 0;
@@ -1546,7 +1575,7 @@ struct GiParams {
     /// it beside the struct is what makes "add a field" a one-place edit.)
     bool operator==(const GiParams &o) const {
         return mode == o.mode && quality == o.quality && irLight == o.irLight &&
-               numBounces == o.numBounces &&
+               numBounces == o.numBounces && autoBoundsMax == o.autoBoundsMax &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
@@ -1594,6 +1623,13 @@ struct GiStatus {
     /// for every scene that never pinned them.
     Vec3   boundsMin;
     Vec3   boundsMax;
+    /// METRES PER VOXEL of that volume — its largest axis divided by the tier's
+    /// voxel resolution (LIGHTING_PIPELINE_AUDIT L4.4). This, not the volume's
+    /// size, is the number that says whether the GI in this scene means
+    /// anything: the shipped default project used to report 8.1 (a 1040 m
+    /// volume at 128^3) and reports 0.5 with the automatic ceiling in force.
+    /// 0 when there is no volume.
+    float  voxelMetres = 0.0f;
     /// The RESOLVED reflection-probe region — the free space the probe grid was
     /// placed in, which is deliberately NOT the lit volume (it carries no
     /// margin and is pulled in to the room's walls). Equal corners in every mode

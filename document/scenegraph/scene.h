@@ -207,6 +207,15 @@ public:
     iris::Vec3 giBoundsMax;
     QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
     int giNumBounces;          // 1..4
+    /// THE AUTOMATIC VOLUME'S CEILING, in METRES (SMOKE_FIX S14). While
+    /// giBounds is automatic (min == max) the lit volume's largest axis is
+    /// capped at this, centred on the scene's CONTENT — 64 m is half a metre
+    /// per voxel at the default Epic tier (128^3). It exists because the
+    /// default ground was 1024 m across, which fitted 8 m voxels over a square
+    /// kilometre. 0 disables the cap; a pinned volume ignores it. Rationale
+    /// (including why the ceiling is not expressed per voxel): OgreGi.cpp
+    /// clampAutoGiBounds.
+    float giAutoBoundsMax = 64.0f;
     /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
     /// renderer may spend per frame, and the single "is GI live?" switch.
     ///

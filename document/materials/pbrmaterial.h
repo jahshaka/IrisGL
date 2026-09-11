@@ -462,6 +462,11 @@ private:
     // Property objects exposed to the editor's material panel. Owned by the base
     // class' `properties` list, which the panel iterates and renders by type.
     void createProperties();
+    /// Writes `value` into the property ROW called `name`, if it exists. The
+    /// rows are what SceneWriter serializes, so every field write that does not
+    /// come through setValue() has to say so here or the saved file disagrees
+    /// with the material that is rendering (SMOKE_FIX S11).
+    void syncProperty(const QString& name, const QVariant& value);
     static Texture2DPtr loadTexture(const QString& path);
 };
 

@@ -400,8 +400,15 @@ void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; }
 // before the V axis existed uses, and it has to keep meaning "tile the whole
 // thing this much" — including MaterialReader, which drives a loaded
 // "textureScale" number through setValue.
-void PbrMaterial::setTextureScale(float s)   { textureScale = s; textureScaleV = s; }
-void PbrMaterial::setTextureScale(float u, float v) { textureScale = u; textureScaleV = v; }
+void PbrMaterial::setTextureScale(float s)   { setTextureScale(s, s); }
+void PbrMaterial::setTextureScale(float u, float v) {
+    textureScale = u; textureScaleV = v;
+    // BOTH rows, always (SMOKE_FIX S11 — see setValue's note): the rows are
+    // what gets saved, and a V row left behind is a floor that squashes on
+    // reopen.
+    syncProperty(QStringLiteral("textureScale"), u);
+    syncProperty(QStringLiteral("textureScaleV"), v);
+}
 void PbrMaterial::setTextureOffset(float u, float v) { textureOffsetU = u; textureOffsetV = v; }
 void PbrMaterial::setTextureRotation(float degrees)  { textureRotation = degrees; }
 
@@ -515,10 +522,25 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
         }
     }
 
-    // keep the Property object in step so the panel and the field agree
-    for (auto prop : properties) {
-        if (prop->name == name) { prop->setValue(value); break; }
-    }
+    // KEEP THE PROPERTY ROWS IN STEP WITH THE FIELDS — every field this call
+    // touched, not just the row that was named (SMOKE_FIX S11).
+    //
+    // The rows are what SceneWriter serializes (scenewriter.cpp's values loop),
+    // so a row that disagrees with its field is a scene that reopens wrong.
+    // "textureScale" writes BOTH axes (setTextureScale above, which now syncs
+    // both rows itself), and syncing only the named row left `textureScaleV` at
+    // 1 in the file while the live material tiled 4x4: every scene built by
+    // createDefaultScene saved a (4, 1) floor and reopened with the checkers
+    // squashed along V. A caller that wants non-uniform tiling still gets it —
+    // it sets "textureScaleV" after "textureScale", which is the order both
+    // readers already apply.
+    syncProperty(name, value);
+}
+
+void PbrMaterial::syncProperty(const QString& name, const QVariant& value)
+{
+    for (auto prop : properties)
+        if (prop->name == name) { prop->setValue(value); return; }
 }
 
 // ---------------------------------------------------------------- properties

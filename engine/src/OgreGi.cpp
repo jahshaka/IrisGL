@@ -460,6 +460,9 @@ GiStatus OgreScene::giStatus() const {
         const auto toV = [](const Ogre::Vector3 &v) { return Vec3(v.x, v.y, v.z); };
         st.boundsMin      = toV(mGiLitVolume.getMinimum());
         st.boundsMax      = toV(mGiLitVolume.getMaximum());
+        const Ogre::Vector3 litSize = mGiLitVolume.getSize();
+        st.voxelMetres    = std::max(std::max(litSize.x, litSize.y), litSize.z) /
+                            float(std::max(giVoxelResolution(), 1u));
         st.probeRegionMin = toV(mGiProbeRegion.getMinimum());
         st.probeRegionMax = toV(mGiProbeRegion.getMaximum());
         // RESOLVED, not requested: both default to GiToggle::Auto, and the
@@ -816,6 +819,93 @@ bool OgreScene::giBoundsExplicit() const {
     return a.x != b.x || a.y != b.y || a.z != b.z;
 }
 
+// THE CEILING ON THE AUTOMATIC VOLUME (SMOKE_FIX S14 /
+// LIGHTING_PIPELINE_AUDIT L4.1).
+//
+// WHAT IT IS FOR, measured on the shipped default project as it was (born
+// Realtime/Epic, one 1024 m ground plane and two lights — mainwindow.cpp's
+// createDefaultScene; the same fix re-staged that plane to 100 m, and this
+// ceiling is what stops the class rather than that one number):
+//
+//     Jahshaka GI: voxelized 1 items at 128^3 over -520 -8 -520 .. 520 8 520
+//     Jahshaka GI: DDGI field 64x2x64 (8192 probes) over ... size 1040 16 1040
+//     Jahshaka GI: PCC region ... grid 3x2x3 ... [all 18 probes CLAMPED]
+//
+// Voxels 8.1 m across, two irradiance probes on the whole vertical axis,
+// eighteen reflection probes 346 m apart with nine of them four metres under a
+// solid floor: 437 MB and milliseconds a frame computing a constant. The
+// trimming in giItemBounds cannot help here and is right not to — with ONE item
+// there is no population for an outlier to be an outlier against, and the
+// geometric mean of one extent is that extent, so the ramp is a no-op by
+// construction whatever gate it is behind. The ground IS the scene; it is just
+// that a scene a kilometre across cannot be lit by 128 voxels.
+//
+// THE CEILING IS IN METRES, NOT IN METRES PER VOXEL, and that is a deliberate
+// choice against the audit's preference (L4.4: metres-per-voxel is the quantity
+// that decides whether GI means anything, and it would be tier-independent).
+// Measured, a per-voxel ceiling SHRINKS the lit world as the quality dial goes
+// down — 0.5 m/voxel is 64 m at High but 16 m at Low — and that took gi.cliff's
+// "a scene that is only a ground plane" and gi.pcc_bounds' "a scene that IS one
+// big mesh keeps the whole mesh in the lit volume" red at Low: the "a scene
+// goes dark because a dial moved" class the LIGHTING_FIX lane exists to
+// prevent. A fixed 64 m holds at every tier and still kills the 8 m voxel
+// (High 0.5, Medium 1.0, Low 2.0 m per voxel), and GiStatus::voxelMetres
+// reports the per-voxel reading the audit wants exposed.
+//
+// IT NEVER TOUCHES A PINNED VOLUME: computeGiBounds returns the user's own box
+// before reaching here, which is what `world.fitGiBounds` and the bounds rows
+// are for once a scene outgrows the ceiling.
+//
+// THE WINDOW IS CENTRED ON THE CONTENT, not on the union: the point of a lit
+// volume is the things standing in it, and a ground plane's centre is only the
+// content's centre by accident. `giContentCentre` is the MEAN OF THE CENTRES of
+// the items that fit inside the ceiling (i.e. everything that is not scenery) —
+// a mean rather than the centre of their union, so a window narrower than the
+// content still lands where most of the geometry is instead of in the gap
+// between two distant clusters. With nothing but scenery in the scene it falls
+// back to the union's own centre, which for the default project is the origin
+// the camera is already looking at. The window then slides to stay inside the
+// union, so a content centre near an edge still spends the whole ceiling on
+// real geometry.
+bool OgreScene::giContentCentre(float maxEdge, Ogre::Vector3 &centre) const {
+    Ogre::Vector3 sum(0.0f);
+    size_t n = 0;
+    for (const auto &kv : mNodes) {
+        const Ogre::Item *item = kv.second.item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        if (kv.second.giBoundsExcluded) continue;
+        const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
+        const Ogre::Vector3 size = a.getSize();
+        if (std::max(std::max(size.x, size.y), size.z) > maxEdge) continue;   // scenery
+        sum += a.mCenter;
+        ++n;
+    }
+    if (!n) return false;
+    centre = sum / float(n);
+    return true;
+}
+
+void OgreScene::clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
+    const float maxEdge = mGi.autoBoundsMax;
+    if (!(maxEdge > 0.0f)) return;
+    const Ogre::Vector3 size = mx - mn;
+    if (size.x <= maxEdge && size.y <= maxEdge && size.z <= maxEdge) return;
+
+    Ogre::Vector3 centre = (mn + mx) * 0.5f;
+    Ogre::Vector3 content;
+    if (giContentCentre(maxEdge, content)) centre = content;
+
+    const float half = maxEdge * 0.5f;
+    for (size_t ax = 0; ax < 3u; ++ax) {
+        if (mx[ax] - mn[ax] <= maxEdge) continue;
+        float lo = centre[ax] - half, hi = centre[ax] + half;
+        if (lo < mn[ax]) { lo = mn[ax]; hi = lo + maxEdge; }   // slide, never shrink
+        if (hi > mx[ax]) { hi = mx[ax]; lo = hi - maxEdge; }
+        mn[ax] = std::max(lo, mn[ax]);
+        mx[ax] = std::min(hi, mx[ax]);
+    }
+}
+
 bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
     const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
     if (giBoundsExplicit()) {
@@ -830,6 +920,7 @@ bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
         mn.makeFloor(aabb.getMinimum());
         mx.makeCeil(aabb.getMaximum());
     }
+    clampAutoGiBounds(mn, mx);
     // The margin is ONE VOXEL per axis, and no more (P1a). It exists for exactly
     // one reason: a surface lying exactly on the union's boundary would sit on
     // the volume's face, where it may or may not be rasterised into a voxel. One
