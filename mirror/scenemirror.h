@@ -449,9 +449,9 @@ private:
         /// node memory, so a migration out of this scene manager and back can
         /// hand the rebuilt node the SAME address.
         quint32 graphEpoch = 0;
-        /// The visibility last pushed; -1 = never. Visibility is the document's
-        /// flag (Ogre's setVisible walks a node's attachments, so an empty node
-        /// has no visibility of its own) but it is pushed on CHANGE only.
+        /// The EFFECTIVE visibility last pushed (the node's own flag AND every
+        /// ancestor's — SceneNode::isVisibleInScene); -1 = never. Pushed on
+        /// CHANGE only, and a change of an ANCESTOR is a change here.
         int visiblePushed = -1;
         /// The `pickable` flag last pushed onto this node's engine objects as
         /// Ogre QUERY FLAGS; -1 = never. Ogre's RaySceneQuery is the picking
@@ -709,7 +709,10 @@ private:
     /// through iris::graph rather than through SceneNode::children(), which
     /// materialises a QList<QSharedPointer> — one heap allocation and one
     /// atomic refcount per child — for every node of the scene, every frame.
-    void visit(iris::SceneNode *node);
+    /// `parentShown` is the parent's EFFECTIVE visibility (it and every
+    /// ancestor visible): the walk is parent-first, so the rule costs one AND
+    /// per node, never an ancestor walk.
+    void visit(iris::SceneNode *node, bool parentShown);
     void releaseEntry(Entry &e);
     /// Releases every engine object this mirror hung off DOCUMENT nodes
     /// (entries + highlight shells) — the body of the graph-evacuation hook

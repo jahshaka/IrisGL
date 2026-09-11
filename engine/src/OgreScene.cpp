@@ -163,6 +163,11 @@ bool OgreScene::removeNode(NodeId id) {
     if (it == mNodes.end()) return false;
     JAH_TRY {
         const bool hadDecal = it->second.decal != nullptr;
+        // The reverse index, by the id recorded at track() time — an adopted
+        // node may already be gone, so it cannot be asked for its id now. Only
+        // if it still points HERE: a re-adoption of the same Ogre node owns it.
+        auto idx = mNodeByOgreId.find(it->second.ogreId);
+        if (idx != mNodeByOgreId.end() && idx->second == id) mNodeByOgreId.erase(idx);
         releaseNode(it->first, it->second);
         mNodes.erase(it);
         // The last decal leaving must clear the SceneManager's atlas bindings,
@@ -211,6 +216,11 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
         if (n->getParent() == p) return true;
         if (n->getParent()) n->getParent()->removeChild(n);
         p->addChild(n);
+        // A move under a hidden parent hides the subtree, a move out from
+        // under one shows it again (as far as each node's own flag allows).
+        bool giChanged = false;
+        applyShownSubtree(n, inheritedShown(n), giChanged);
+        if (giChanged) invalidateGiCaches();
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -258,7 +268,12 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // the item out of all six gathers AND out of giItemBounds with one write,
     // because they all key on exactly this bit; setNodeVisible invalidates the
     // caches so the next solve is the one without it.
-    return n.visible ? (kVisibleBit | kGiGeometryBit) : kVisibleBit;
+    //
+    // EFFECTIVE, not own (RENDER_PIPELINE_AUDIT 1.1): `shown` is false for an
+    // item under a hidden ANCESTOR too. Keyed on the node's own flag, hiding
+    // an imported model by its root — the common case — left every part of
+    // it voxelised and bouncing light.
+    return n.shown ? (kVisibleBit | kGiGeometryBit) : kVisibleBit;
 }
 
 void OgreScene::applyNodeVisibilityFlags(Node &n) {
@@ -269,8 +284,53 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     if (n.item) n.item->setVisibilityFlags(
                     itemVisibilityFlags(n, n.materialUnlit, n.materialDistortion));
     const Ogre::uint32 on = n.helper ? kHelperBit : kVisibleBit;
-    if (n.billboards) n.billboards->setVisibilityFlags(n.visible ? on : 0u);
-    if (n.particleDef) n.particleDef->setVisibilityFlags(n.visible ? particleVisibilityBits(n) : 0u);
+    if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? on : 0u);
+    if (n.particleDef) n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
+}
+
+OgreScene::Node *OgreScene::registryNode(const Ogre::Node *sn) {
+    if (!sn) return nullptr;
+    auto idx = mNodeByOgreId.find(sn->getId());
+    if (idx == mNodeByOgreId.end()) return nullptr;
+    auto it = mNodes.find(idx->second);
+    return it == mNodes.end() ? nullptr : &it->second;
+}
+
+bool OgreScene::inheritedShown(const Ogre::Node *sn) {
+    // The nearest REGISTERED ancestor's effective state already folds in every
+    // ancestor above it, so the walk stops at the first one. Unregistered
+    // nodes pass through: the document root, a node the host has not adopted
+    // yet, and a socket rider's TagPoint — whose chain ends there (a tag's
+    // parent is a bone, not a node), which is why a host with riders pushes
+    // their effective state itself.
+    for (const Ogre::Node *p = sn ? sn->getParent() : nullptr; p; p = p->getParent())
+        if (const Node *rec = registryNode(p)) return rec->shown;
+    return true;
+}
+
+void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giChanged) {
+    Node *rec = registryNode(sn);
+    const bool shown = rec ? (inherited && rec->visible) : inherited;
+    // OGRE'S HALF: LAYER_VISIBILITY on everything attached HERE — the Item, a
+    // PFX2 instance — and, one level down through the unregistered helper
+    // children, a light on its -Y adapter and a decal on its projector box.
+    // This is SceneNode::setVisible(v, true) with one difference, the whole
+    // point: a registered descendant takes ITS OWN flag into account, so
+    // showing a parent no longer shows what the user hid underneath it.
+    const size_t numObjects = sn->numAttachedObjects();
+    for (size_t i = 0; i < numObjects; ++i) sn->getAttachedObject(i)->setVisible(shown);
+    if (rec) {
+        // OURS: the Item's kGiGeometryBit and the billboard / PFX2 flags,
+        // which no Ogre cascade reaches (applyNodeVisibilityFlags).
+        const bool giBefore = rec->item && (rec->item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+        rec->shown = shown;
+        applyNodeVisibilityFlags(*rec);
+        const bool giAfter = rec->item && (rec->item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+        if (giBefore != giAfter) giChanged = true;
+    }
+    const size_t numChildren = sn->numChildren();
+    for (size_t i = 0; i < numChildren; ++i)
+        applyShownSubtree(static_cast<Ogre::SceneNode *>(sn->getChild(i)), shown, giChanged);
 }
 
 Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {
@@ -316,30 +376,32 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
         auto it = mNodes.find(id);
         if (it == mNodes.end()) return;
         Node &n = it->second;
-        // Did this node's geometry bounce light BEFORE the change? Read off the
-        // item rather than re-derived from the material flags, so the rule lives
-        // in exactly one place (itemVisibilityFlags) and this stays true when it
-        // grows another case.
-        const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
         n.visible = visible;
-        if (n.node) n.node->setVisible(visible, true);
-        // THE FLAG HALF, for everything hanging off this node. The billboard set
-        // hangs off the STATIC root (world-space positions), not off this node,
-        // so the cascade above never reaches it; setVisible() is USELESS for
-        // PFX2 objects (ParticleSystemManager2::_addToRenderQueue tests
-        // getVisibilityFlags(), which strips the LAYER_VISIBILITY bit setVisible
-        // toggles); and the Item's kGiGeometryBit has to come off so GI stops
-        // seeing it. applyNodeVisibilityFlags is the one place all three live —
-        // this used to carry its own copy of the billboard/particle half.
-        applyNodeVisibilityFlags(n);
+        // THE WHOLE SUBTREE, EFFECTIVELY (RENDER_PIPELINE_AUDIT 1.1/1.2). This
+        // was Ogre's setVisible(visible, cascade = true) plus the GI bit of
+        // THIS node alone: hiding a model's root hid its parts on screen but
+        // left every one of them voxelised, in the Instant-Radiosity trace and
+        // defining the automatic lit volume (measured: bounds unchanged); and
+        // showing it again set every descendant visible, re-revealing parts
+        // the user had hidden themselves. applyShownSubtree recomputes each
+        // registered descendant from its OWN flag and the chain above it, and
+        // carries the GI bit, the billboard and the PFX2 halves with it.
+        bool giChanged = false;
+        if (n.node) {
+            applyShownSubtree(n.node, inheritedShown(n.node), giChanged);
+        } else {
+            const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+            n.shown = visible;
+            applyNodeVisibilityFlags(n);
+            giChanged = giBefore != (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u);
+        }
         // THE GI HALF (SMOKE_FIX S12). Hiding or showing lit geometry changes
         // what the next solve sees, exactly like detaching it does (detachItem's
-        // note) — so the caches go, on the EDGE only: the mirror pushes
-        // visibility every sync, and invalidating on every push would re-solve
-        // GI every frame. A script that blinks a node still costs one re-solve
-        // per settle, which is what the mirror's stability window coalesces to.
-        const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
-        if (giBefore != giAfter) invalidateGiCaches();
+        // note) — so the caches go, ONCE for the whole subtree and on the EDGE
+        // only: the mirror pushes visibility on change, and a push that moves
+        // no GI bit (an empty node, an unlit helper, a subtree already hidden
+        // by an ancestor) costs no re-solve.
+        if (giChanged) invalidateGiCaches();
     } JAH_CATCH(mError, );
 }
 
@@ -358,6 +420,10 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             n.lightNode->setOrientation(Ogre::Quaternion(Ogre::Radian(-Ogre::Math::HALF_PI), Ogre::Vector3::UNIT_X));
             n.light = mSceneMgr->createLight();
             n.lightNode->attachObject(n.light);
+            // Born HIDDEN on a hidden node (or under a hidden ancestor): the
+            // visibility walk only reaches objects attached at the time, and
+            // a host pushes visibility before it pushes the light.
+            if (!n.shown) n.light->setVisible(false);
             if (std::find(mLightNodes.begin(), mLightNodes.end(), id) == mLightNodes.end())
                 mLightNodes.push_back(id);   // the light index (see EnginePrivate.h)
         }
@@ -576,6 +642,7 @@ void OgreScene::destroy() {
         destroySky();   // also unbinds + destroys the reflection cubemap
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         mNodes.clear();
+        mNodeByOgreId.clear();
         // The helper overlay queue's depth anchor: an entity in this
         // SceneManager's memory manager, so it dies before the manager does.
         releaseQueueDepthAnchor();
@@ -783,7 +850,18 @@ Ogre::SceneNode *OgreScene::node(NodeId id) const {
     return it == mNodes.end() ? nullptr : it->second.node;
 }
 
-NodeId OgreScene::track(const Node &n) { mNodes[++mNextId] = n; return mNextId; }
+NodeId OgreScene::track(const Node &n) {
+    const NodeId id = ++mNextId;
+    Node &rec = mNodes[id] = n;
+    if (rec.node) {
+        rec.ogreId = rec.node->getId();
+        mNodeByOgreId[rec.ogreId] = id;
+        // Born with the EFFECTIVE state of wherever it hangs: a node created
+        // (or adopted) under a hidden parent is hidden until that parent shows.
+        rec.shown = rec.visible && inheritedShown(rec.node);
+    }
+    return id;
+}
 
 void OgreScene::addObjectCounts(ObjectCounts &out) const {
     // Registry sizes, not Ogre object counts: these are the ids this boundary

@@ -434,6 +434,8 @@ bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
             n.decalNode = n.node->createChildSceneNode();
             n.decal = mSceneMgr->createDecal();
             n.decalNode->attachObject(n.decal);
+            // Born hidden on a hidden node, like setLight's light.
+            if (!n.shown) n.decal->setVisible(false);
             ++mDecalCount;
         }
         // NEVER call Decal::setRenderQueueGroup. The constructor puts decals in

@@ -388,9 +388,10 @@ int SceneMirror::sync()
     // child — and the walk below runs over the whole document every frame.
     iris::SceneNode *root = mSource->getRootNode().data();
     const std::size_t rootChildren = iris::graph::childCount(root->graphNode());
+    const bool rootShown = root->isVisible();
     for (std::size_t i = 0; i < rootChildren; ++i)
         if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
-            visit(c);
+            visit(c, rootShown);
     removeMissing();
     // THE CACHE SWEEP, ON DEMAND. reclaimUnused builds three QSets out of every
     // entry in the scene; at 10k nodes that was 20k+ set inserts a frame to
@@ -529,6 +530,10 @@ void SceneMirror::syncHighlight()
     // than growing two shells over one mesh (double-drawn outlines, and a
     // shell pool that never settles).
     for (const auto &highlighted : mHighlighted) {
+        // The walk below skips a hidden node and its subtree; a member hidden
+        // by an ANCESTOR is just as off screen (SceneNode::isVisibleInScene),
+        // so it gets no outline either — an outline around nothing.
+        if (!highlighted || !highlighted->isVisibleInScene()) continue;
         const size_t before = targets.size();
         const bool primary =
             distinguishPrimary && highlighted.data() == mHighlightPrimary.data();
@@ -1419,7 +1424,7 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     return id;
 }
 
-void SceneMirror::visit(iris::SceneNode *node)
+void SceneMirror::visit(iris::SceneNode *node, bool parentShown)
 {
     if (!node) return;
     ++mVisited;
@@ -1451,13 +1456,24 @@ void SceneMirror::visit(iris::SceneNode *node)
     }
 
     e.docNode = node;
-    // Visibility is still the DOCUMENT's flag (Ogre's setVisible walks a node's
-    // attachments, so an empty node has no visibility of its own) — but it is
-    // pushed on CHANGE only now, like every other signature-guarded half of
-    // this walk, never unconditionally.
-    const int wantVisible = node->visible ? 1 : 0;
+    // EFFECTIVE VISIBILITY (RENDER_PIPELINE_AUDIT 1.1/1.2): what reaches the
+    // engine is this node's own flag AND every ancestor's — the DOCUMENT's
+    // rule, SceneNode::isVisibleInScene, computed here for one AND because the
+    // walk is parent-first. It used to push the node's own flag and lean on
+    // Ogre's setVisible cascade for the rest, which (1) cleared the GI bit of
+    // the hidden node alone, so a hidden model root left every child
+    // voxelised and bouncing light, and (2) on the way back set EVERY
+    // descendant visible, re-revealing children the user had hidden
+    // themselves — their own latch never moved, so nothing re-pushed them.
+    // Pushing the effective state per node also covers what no engine-side
+    // cascade can see: a socket rider (whose engine parent is a bone, not its
+    // document parent) and a re-parent under a hidden or a visible node. Each
+    // node's own flag is untouched; pushed on CHANGE only, like every other
+    // signature-guarded half of this walk.
+    const bool shown = parentShown && node->visible;
+    const int wantVisible = shown ? 1 : 0;
     if (e.visiblePushed != wantVisible) {
-        mTarget->setNodeVisible(e.node, node->visible);
+        mTarget->setNodeVisible(e.node, shown);
         e.visiblePushed = wantVisible;
     }
 
@@ -1733,7 +1749,7 @@ void SceneMirror::visit(iris::SceneNode *node)
     const std::size_t n = iris::graph::childCount(h);
     for (std::size_t i = 0; i < n; ++i)
         if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(h, i)))
-            visit(c);
+            visit(c, shown);
 }
 
 // ---- particles ------------------------------------------------------------------

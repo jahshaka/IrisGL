@@ -1794,11 +1794,23 @@ private:
         /// pushes (setNodeVisible / setNodeHelper) hand it kDistortionBit and
         /// never kVisibleBit — the def is what _addToRenderQueue tests.
         bool                      particleDistortion = false;
-        /// What setNodeVisible was last told. Kept because PFX2 objects do not
-        /// live under the node in Ogre's graph (they hang off the STATIC root),
-        /// so no visibility cascade reaches them and a system created or
-        /// recycled later has to be told the node's state explicitly.
+        /// What setNodeVisible was last told for THIS node — its own flag,
+        /// never overwritten by an ancestor's change, which is what lets
+        /// showing a parent restore each descendant to what IT was told
+        /// (RENDER_PIPELINE_AUDIT 1.2).
         bool                      visible = true;
+        /// EFFECTIVE visibility: `visible` AND every engine ancestor's (the
+        /// nearest registered ancestor's `shown`). The ONE state everything
+        /// drawn off this node follows — its attachments' LAYER_VISIBILITY,
+        /// the Item's kGiGeometryBit, the billboard and PFX2 flags (which no
+        /// Ogre cascade reaches: they hang off the STATIC root) — and the
+        /// state a system created or recycled later is born with.
+        bool                      shown = true;
+        /// This node's Ogre id, recorded at track() time so the registry's
+        /// reverse index (OgreScene::mNodeByOgreId) can be cleaned up even
+        /// after the document destroyed an adopted node under us. Ogre ids are
+        /// never reused, unlike node addresses.
+        Ogre::IdType              ogreId = 0;
         /// "Do not let this object define where GI happens"
         /// (REFLECTIONS_ADOPTION_SPEC.md P1a.2). It still VOXELIZES and still
         /// bounces light — the exclusion is only from the two AABB reductions
@@ -2372,6 +2384,19 @@ private:
     /// to whatever `n` currently carries. Needed because the helper flag can be
     /// set before or after the geometry is attached.
     void applyNodeVisibilityFlags(Node &n);
+    /// The registry record hanging off an Ogre node, or null (an engine-owned
+    /// helper child such as a light's -Y adapter, a document node the host has
+    /// not adopted yet, the scene root).
+    Node *registryNode(const Ogre::Node *sn);
+    /// The EFFECTIVE visibility `sn`'s children inherit from above it: the
+    /// `shown` of the nearest registered ancestor, true when there is none.
+    bool inheritedShown(const Ogre::Node *sn);
+    /// Applies EFFECTIVE visibility to `sn` and everything under it in Ogre's
+    /// graph: a registered node shows iff `inherited` and its own flag; an
+    /// unregistered one (a helper child) passes `inherited` through. Sets
+    /// `giChanged` when any Item's kGiGeometryBit moved, so the caller can
+    /// invalidate GI ONCE for the whole subtree. (RENDER_PIPELINE_AUDIT 1.1/1.2)
+    void applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giChanged);
     /// Voxel volume resolution per axis for the current quality.
     unsigned giVoxelResolution() const;
     /// The GI items' world AABBs after the exclude flag and the extent-outlier
@@ -2442,6 +2467,11 @@ private:
     std::string         mName;
     std::string        &mError;
     std::map<NodeId, Node> mNodes;
+    /// Reverse index Ogre node id -> registry id, for the one question the
+    /// visibility cascade has to ask of every node it walks ("is this one of
+    /// ours, and what was it told?"). Keyed by Ogre's never-reused id rather
+    /// than the node address, which Ogre recycles.
+    std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
     std::map<MeshId, MeshRec> mMeshes;
     std::map<std::string, RigRec> mRigs;
     std::map<NodeId, NodeClips> mClips;

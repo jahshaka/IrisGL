@@ -237,6 +237,15 @@ void SceneNode::hide(bool cascade)
     }
 }
 
+bool SceneNode::isVisibleInScene() const
+{
+    // Raw handles up the chain — no QSharedPointer per level. parentOf answers
+    // a socket rider with its document (shadow) parent.
+    for (const SceneNode *n = this; n; n = graph::ownerOf(graph::parentOf(n->mGraphNode)))
+        if (!n->visible) return false;
+    return true;
+}
+
 bool SceneNode::isStaticEligible() const
 {
     // Node kinds whose engine attachment cannot change memory-manager class.

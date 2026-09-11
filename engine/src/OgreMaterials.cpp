@@ -947,7 +947,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // an Item created now is born visible on an invisible node (found with
         // SMOKE_FIX S12; the GI half of the same question is in
         // itemVisibilityFlags).
-        if (!n.visible) n.item->setVisible(false);
+        if (!n.shown) n.item->setVisible(false);
         // A static Item is not in the per-frame bounds list: without this its
         // world AABB stays at its birth value and it is culled (and picked)
         // wrong. The manager batches the dirty per frame.
