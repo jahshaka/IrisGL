@@ -1780,11 +1780,16 @@ public:
     /// this frame's (no getWorldAabbUpdated root recursion, and a mover's
     /// shadow updates in the frame it moves).
     void collectShadowCacheFrame(ShadowCacheFrame &out);
-    /// THE FRAME'S ONE ITEM WALK (OgreGi.cpp): the GI movement scan (while a GI
-    /// consumer exists) and, when `shadow`, the lamp-map cache's caster scan,
-    /// in one pass over mItemNodes after updateSceneGraph. Called by
-    /// OgreEngine::applyShadowCacheDirties for every drawn scene.
+    /// THE FRAME'S CASTER WALK (OgreGi.cpp): the lamp-map cache's caster scan
+    /// over mItemNodes, after updateSceneGraph. Called by
+    /// OgreEngine::applyShadowCacheDirties for every drawn scene. `shadow`
+    /// false = this scene caches nothing this frame (the records are dropped).
     void runItemWalk(bool shadow);
+    /// THE GI MOVEMENT SCAN, once per frame, run by its first consumer (the
+    /// probe budget / the raster re-arm) — which is EARLIER in the frame than
+    /// any scene graph update, so it reads updated bounds. Same pass, same
+    /// per-node records as the caster walk (walkItems).
+    void ensureGiWalk();
     /// "Does this scene have anything to cache?" — decides the clear strategy
     /// (per-map quads only while some drawn scene holds a cacheable lamp).
     bool hasCacheableShadowLights() const;
@@ -1801,12 +1806,13 @@ public:
     /// PER NODE, not the scene's mRigPoseEpoch: one animating character must
     /// not re-dirty the lamps near every other rig.
     void noteNodePosed(NodeId id);
-    /// What the two per-frame item walks cost on the last frame, in
-    /// microseconds (steady clock): the lamp-map cache's detection
-    /// (collectShadowCacheFrame, its lamp half) and the frame's item walk
-    /// (runItemWalk: the GI movement records and the caster changes).
+    /// What the per-frame walks cost on the last frame, in microseconds
+    /// (steady clock): the lamp-map cache's own half (collectShadowCacheFrame:
+    /// the lamps and the change-to-lamp test), the caster walk (runItemWalk)
+    /// and the GI movement scan (ensureGiWalk).
     /// Internal diagnostics — read by tests/shadow's `scancost` mode.
     double shadowScanMicros() const { return mShadowScanMicros; }
+    double casterWalkMicros() const { return mCasterWalkMicros; }
     double giScanMicros() const { return mGiScanMicros; }
     void recreatePlanarAfterShadowRebuild();
 
@@ -1858,14 +1864,6 @@ private:
             unsigned long long  shadowPose = 0;
             Ogre::uint32        shadowChannels = 0;
             bool                giKnown = false, probeKnown = false, shadowPresent = false;
-            /// Exactly what the LAST walk saw — the fast path's key: an item
-            /// identical in all of these has no new answer for either half.
-            Ogre::Aabb          seenBox;
-            const Ogre::Item   *seenItem = nullptr;
-            unsigned long long  seenPose = 0;
-            Ogre::uint32        seenFlags = 0;
-            Ogre::uint8         seenRq = 0;
-            bool                seenShown = false, seenValid = false;
         } scan;
         /// This node's place in OgreScene::mItemNodes, or npos (no Item).
         size_t           itemSlot = size_t(-1);
@@ -2821,10 +2819,11 @@ private:
     std::vector<ShadowChange> mShadowChanges;
     std::vector<ShadowChange> mShadowVanished;   ///< casters whose Item died since the last walk
     bool mShadowWalked = false;                  ///< this frame's walk produced mShadowChanges
-    /// Which halves the previous walk evaluated: the fast path only holds when
-    /// this walk asks the same questions.
-    bool mLastWalkGi = false, mLastWalkShadow = false;
+    /// The GI movement scan has run this frame (reset by updateGiTracking, the
+    /// once-per-frame entry point): whoever consumes mGiMovedBoxes first runs it.
+    bool mGiWalkedThisFrame = false;
     double   mShadowScanMicros = 0.0;
+    double   mCasterWalkMicros = 0.0;
     double   mGiScanMicros = 0.0;
     bool     mShadowScanPrimed = false;
     /// Re-render every cached map (dirtyAllShadowMaps). Starts TRUE: a scene's
