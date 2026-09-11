@@ -123,6 +123,12 @@ QList<Property*> MeshNode::getProperties()
     intProp->value = static_cast<int>(faceCullingMode);
     props.append(intProp);
 
+    auto boolProp = new BoolProperty();
+    boolProp->displayName = "Default Floor";
+    boolProp->name = "defaultFloor";
+    boolProp->value = defaultFloor;
+    props.append(boolProp);
+
     // @todo: extract properties from material
     return props;
 }
@@ -132,6 +138,7 @@ QVariant MeshNode::getPropertyValue(QString valueName)
     if (valueName == "meshPath")        return meshPath;
     if (valueName == "meshIndex")       return meshIndex;
     if (valueName == "faceCullingMode") return static_cast<int>(faceCullingMode);
+    if (valueName == "defaultFloor")    return defaultFloor;
 
     return SceneNode::getPropertyValue(valueName);
 }
@@ -146,6 +153,7 @@ bool MeshNode::setPropertyValue(QString valueName, const QVariant &value)
         setFaceCullingMode(static_cast<FaceCullingMode>(value.toInt()));
         return true;
     }
+    if (valueName == "defaultFloor") { defaultFloor = value.toBool(); return true; }
 
     return SceneNode::setPropertyValue(valueName, value);
 }
@@ -591,6 +599,9 @@ SceneNodePtr MeshNode::createDuplicate()
     // its own copy of the list — a second character has the same head socket
     // and does not share it.
     node->setSockets(this->sockets);
+
+    // `defaultFloor` is deliberately NOT copied (meshnode.h): the copy of a
+    // floor is an ordinary mesh.
 
     return node;
 }
