@@ -61,9 +61,10 @@ namespace jahshaka { namespace engine { namespace detail {
 
 namespace {
 
-/// A clip whose length is <= 0 is padded to this, not refused: every Mixamo
-/// CHARACTER download ships a single-frame T-pose clip and the Avatar page
-/// selects it by default. Engine-side a zero length is `fmod(t, 0)` = NaN while
+/// A clip whose length is <= 0 is padded to this, not refused — a GUARD for a
+/// clip whose keys span no time and whose file declares no duration (the
+/// Mixamo character's one-frame T-pose used to be one; since smoke L10 item 2
+/// it arrives one frame long). Engine-side a zero length is `fmod(t, 0)` = NaN while
 /// looping and a Debug-only assert in getKeyFramesAtTime otherwise, so the pad
 /// is not cosmetic. One millisecond: short enough that no UI can scrub inside
 /// it, long enough that no float division underflows.

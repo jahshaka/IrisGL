@@ -371,6 +371,12 @@ public:
     /// question about the lens, not about the tracking mode.
     iris::lens::FocusInfo focusInfo() const;
 
+    /// Turns the camera (in its OWN space, from its local position) to face
+    /// `target`, with world +Y as the frame's up. Straight up or straight down
+    /// — where +Y is parallel to the view and gives no roll — the camera's
+    /// current HEADING is the frame's up instead (top of the frame looking
+    /// down, bottom looking up), so the pose is defined and keeps the
+    /// direction the camera was facing. A target AT the camera changes nothing.
     void lookAt(iris::Vec3 target);
     void updateCameraMatrices();
 	void setOrthagonalZoom(float size);

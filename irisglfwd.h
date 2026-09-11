@@ -32,7 +32,6 @@ class ParticleSystemNode;
 /// argument for exactly that reason).
 enum class ParticlePreset : int;
 class Mesh;
-class Model;
 class Frustum;
 class Material;
 class MeshNode;
@@ -91,7 +90,6 @@ typedef QSharedPointer<AvatarLocomotion> AvatarLocomotionPtr;
 typedef QWeakPointer<Scene> SceneWPtr;
 typedef QWeakPointer<SceneNode> SceneNodeWPtr;
 typedef QSharedPointer<Mesh> MeshPtr;
-typedef QSharedPointer<Model> ModelPtr;
 typedef QSharedPointer<Material> MaterialPtr;
 typedef QSharedPointer<DefaultMaterial> DefaultMaterialPtr;
 typedef QSharedPointer<LightNode> LightNodePtr;

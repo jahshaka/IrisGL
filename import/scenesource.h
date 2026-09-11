@@ -47,9 +47,10 @@ public:
     SceneSource(const SceneSource &) = delete;
     SceneSource &operator=(const SceneSource &) = delete;
 
-    /// Parses `filePath` with the canonical preset (ImportFlags::Canonical).
-    /// False, with errorString() set, when the file could not be read; a
-    /// second read releases the first scene.
+    /// Parses `filePath` with the canonical preset (ImportFlags::Canonical) —
+    /// a file on disk, or a Qt resource (":/..." or "qrc:/...") through
+    /// readSceneFile below. False, with errorString() set, when the file could
+    /// not be read; a second read releases the first scene.
     bool read(const QString &filePath);
 
     /// True while a successfully parsed scene is held.
@@ -66,6 +67,21 @@ private:
     struct Impl;
     std::unique_ptr<Impl> d;
 };
+
+/// THE ONE assimp READ of a model path, for every IrisGL caller that holds its
+/// own importer (IrisGL-internal: the importer is an assimp type).
+///
+/// A Qt RESOURCE (":/..." or "qrc:/...") cannot be opened by assimp, so it is
+/// read into memory and handed over WITH ITS EXTENSION as the format hint.
+/// Without the hint assimp names the buffer "$$$___magic___$$$." — no
+/// extension — and falls back to SNIFFING only the first 200 bytes for a
+/// format keyword (BaseImporter::SearchFileHeaderForToken's default window),
+/// so a comment block above an OBJ's `mtllib` made the default scene's ground
+/// unloadable with nothing but "error parsing file" (smoke L10 item 4). With
+/// the hint the resource is dispatched by extension, exactly as a file on disk
+/// always was. Returns null (the importer holds the error) on failure.
+const aiScene *readSceneFile(Assimp::Importer &importer, const QString &filePath,
+                             unsigned int flags);
 
 } // namespace iris
 

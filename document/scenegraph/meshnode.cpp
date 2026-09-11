@@ -236,7 +236,7 @@ QJsonObject readJahShader(const QString &filePath)
  */
 // Accumulated (root -> node) transform of the first aiNode referencing
 // `meshIndex`. assimp's matrices are row-major, so composition is
-// child * parent (same convention as ModelLoader::extractMeshesFromScene).
+// child * parent.
 static bool _findMeshNodeTransform(const aiNode* node, unsigned meshIndex,
                                    const aiMatrix4x4& parent, aiMatrix4x4& out)
 {

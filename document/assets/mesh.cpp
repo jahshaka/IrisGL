@@ -24,6 +24,7 @@ For more information see the LICENSE file
 
 #include "assimp/postprocess.h"
 #include "import/importflags.h"
+#include "import/scenesource.h"
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
 #include "assimp/mesh.h"
@@ -257,20 +258,10 @@ MeshPtr Mesh::loadMesh(QString filePath)
 		return MeshPtr();
 	}
 
-	if (filePath.startsWith(":") || filePath.startsWith("qrc:")) {
-		// loads mesh from resource
-		if (!file.open(QIODevice::ReadOnly))
-		    qWarning("Mesh::loadMesh: failed to open %s", qUtf8Printable(filePath));
-		auto data = file.readAll();
-		scene = importer.ReadFileFromMemory((void*)data.data(),
-			data.length(),
-			iris::ImportFlags::Canonical);
-	}
-	else {
-		// load mesh from file
-		scene = importer.ReadFile(filePath.toStdString().c_str(),
-			iris::ImportFlags::Canonical);
-	}
+	// A resource path reads from memory WITH its extension as the format hint
+	// (readSceneFile says why — a leading comment block used to make the
+	// default scene's ground unloadable).
+	scene = readSceneFile(importer, filePath, iris::ImportFlags::Canonical);
 
 	if (!scene) {
 		irisLog("model " + filePath + ": error parsing file");
@@ -296,31 +287,6 @@ MeshPtr Mesh::loadMesh(QString filePath)
 	}
 
 	return MeshPtr(meshObj);
-}
-
-MeshPtr Mesh::loadAnimatedMesh(QString filePath)
-{
-    Assimp::Importer importer;
-    const aiScene *scene;
-
-    if (filePath.startsWith(":") || filePath.startsWith("qrc:")) {
-        // loads mesh from resource
-        QFile file(filePath);
-        if (!file.open(QIODevice::ReadOnly))
-            qWarning("Mesh::loadAnimatedMesh: failed to open %s", qUtf8Printable(filePath));
-        auto data = file.readAll();
-        scene = importer.ReadFileFromMemory((void*)data.data(),
-                                            data.length(),
-                                            iris::ImportFlags::Canonical);
-    } else {
-        scene = importer.ReadFile(filePath.toStdString().c_str(),
-                                  iris::ImportFlags::Canonical);
-    }
-
-    //extract animations from scene
-    auto mesh = new Mesh(scene->mMeshes[0]);
-
-    return MeshPtr(mesh);
 }
 
 SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)
@@ -523,6 +489,11 @@ QMap<QString, iris::SkeletalAnimationPtr> iris::Mesh::extractAnimations(const ai
         auto skelAnim = SkeletalAnimation::create();
         skelAnim->name = animName;
         skelAnim->source = source;
+        // The duration the FILE declares, kept beside the keys: it is the only
+        // record of a one-frame clip's length once FindInvalidData has merged
+        // its identical keys (smoke L10 item 2; SkeletalAnimation::declaredLength).
+        skelAnim->declaredLength =
+            anim->mDuration > 0.0 ? float(anim->mDuration / ticksPerSecond) : 0.0f;
 
         for (unsigned j = 0; j<anim->mNumChannels; j++) {
             auto nodeAnim = anim->mChannels[j];
