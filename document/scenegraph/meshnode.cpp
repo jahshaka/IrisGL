@@ -573,7 +573,13 @@ SceneNodePtr MeshNode::createDuplicate()
     node->meshIndex = this->meshIndex;
     // A mesh node without a material exists (synthetic nodes, partially-built
     // imports) — duplicating one crashed here (found by the Stage 2 lane).
+    // The copy gets its OWN material, equal to this one in every value
+    // (Material::duplicate says why a copy and not the same pointer).
     if (this->material) node->setMaterial(this->material->duplicate());
+    // Saved and exported per node (scenewriter, the glTF double-sided flag), so
+    // a copy that dropped it would save and export differently from its
+    // original.
+    node->faceCullingMode = this->faceCullingMode;
 
 	// todo: clone instead of copying (Nick)
 	for (auto anim : animations) {

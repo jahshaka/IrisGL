@@ -118,9 +118,22 @@ public:
      */
     void removeTexture(QString name);
 
-	virtual MaterialPtr duplicate() {
-		return MaterialPtr(new Material());
-	}
+    /// A FULL, INDEPENDENT COPY of this material — what a duplicated node
+    /// carries. Pure because the base cannot copy what it does not know: this
+    /// used to return a BLANK base Material, and MeshNode::createDuplicate
+    /// handed that to every copy — Ctrl+D, Alt+drag, node.duplicate, the
+    /// outliner menu — so every duplicate rendered the mirror's neutral grey
+    /// fallback (RENDER_PIPELINE_AUDIT 3.2: original (86,2,2), copy
+    /// (70,70,70); `material.get(copy)` returned {}). A subclass that forgets
+    /// to implement it now fails to compile instead of losing the look.
+    ///
+    /// A COPY, NEVER A SHARED POINTER: a material belongs to ONE node. The
+    /// panel and material.set edit a node's material in place, material.apply
+    /// gives every mesh "its own material instance", and a saved scene writes
+    /// one material per node — so a shared pointer would make an edit to the
+    /// copy repaint the original, and would split back into two materials the
+    /// first time the scene was saved and reopened.
+    virtual MaterialPtr duplicate() const = 0;
 
 protected:
 	QSet<QString> flags;

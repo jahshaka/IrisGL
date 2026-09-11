@@ -180,6 +180,12 @@ public:
     // nothing that the shader actually reads.
     void setValue(const QString& name, const QVariant& value) override;
 
+    /// Every field, every map, every row — a new material that renders and
+    /// saves exactly like this one and shares nothing with it but the texture
+    /// handles (a Texture2D is an immutable path handle). See
+    /// Material::duplicate for why it is a copy and not a shared pointer.
+    MaterialPtr duplicate() const override;
+
     /// The BRDF vocabulary, in `brdf` index order. ONE table, three consumers:
     /// the panel's dropdown labels, the mirror's index -> engine-name mapping,
     /// and anyone reporting the row. A second copy of this list somewhere else
@@ -458,6 +464,12 @@ public:
 
 private:
     PbrMaterial();
+    /// Member-wise, for duplicate() ALONE: every field is a value, except
+    /// `properties` — the panel's rows, owned by raw pointer — which a
+    /// member-wise copy would SHARE (an edit to either material rewriting the
+    /// other's saved rows). duplicate() rebuilds them; nobody else may copy.
+    PbrMaterial(const PbrMaterial &) = default;
+    PbrMaterial &operator=(const PbrMaterial &) = delete;
 
     // Property objects exposed to the editor's material panel. Owned by the base
     // class' `properties` list, which the panel iterates and renders by type.
