@@ -4351,6 +4351,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeHdr = toggle(mSource->giProbeHdr);
         gi.probeShadows = toggle(mSource->giProbeShadows);
         gi.probeOverlap = mSource->giProbeOverlap;
+        gi.autoBoundsMax = qMax(0.0f, mSource->giAutoBoundsMax);
         gi.probeSnapDeviation = mSource->giProbeSnapDeviation;
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;

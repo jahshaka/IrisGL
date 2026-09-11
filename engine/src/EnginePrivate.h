@@ -2194,6 +2194,14 @@ private:
     /// The GI working volume: the document's explicit bounds, or (min == max)
     /// the world AABB of every GI-participating item plus a margin.
     bool computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const;
+    /// Applies GiParams::autoBoundsMax to an AUTOMATIC fit (see the long note
+    /// in OgreGi.cpp): the volume's largest axis may not exceed it, and the
+    /// window that survives is centred on the content rather than on the union.
+    /// Never called for a pinned volume.
+    void clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const;
+    /// The mean of the CENTRES of the GI items that fit inside `maxEdge` —
+    /// "everything that is not scenery". False when the scene is only scenery.
+    bool giContentCentre(float maxEdge, Ogre::Vector3 &centre) const;
     /// Re-traces Instant Radiosity against the scene as it is right now. Cheap
     /// enough (a few ms at editor quality) to run on every light move.
     /// Ogre::InstantRadiosity caches mesh data by raw VertexArrayObject* and

@@ -246,7 +246,19 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // engine that may draw it is the distortion pass (kDistortionBit's note).
     if (distortion) return kDistortionBit;
     if (n.helper) return kHelperBit;
-    return unlit ? kVisibleBit : (kVisibleBit | kGiGeometryBit);
+    if (unlit) return kVisibleBit;
+    // A HIDDEN NODE MUST NOT BOUNCE LIGHT (SMOKE_FIX S12). Ogre's own hide —
+    // SceneNode::setVisible — toggles the LAYER_VISIBILITY bit, which
+    // MovableObject::getVisibilityFlags() masks off before returning
+    // (OgreMovableObject.inl), so every GI gather's `flags & kGiGeometryBit`
+    // test was blind to it: a hidden cube stayed voxelised, stayed in the
+    // Instant-Radiosity trace, and went on defining the automatic lit volume
+    // (measured: hiding a cube at (0,20,40) left the volume at 4.0 x 22.0 x
+    // 63.2 and its bounce on the floor). Dropping the bit while hidden takes
+    // the item out of all six gathers AND out of giItemBounds with one write,
+    // because they all key on exactly this bit; setNodeVisible invalidates the
+    // caches so the next solve is the one without it.
+    return n.visible ? (kVisibleBit | kGiGeometryBit) : kVisibleBit;
 }
 
 void OgreScene::applyNodeVisibilityFlags(Node &n) {
@@ -303,25 +315,31 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
     JAH_TRY {
         auto it = mNodes.find(id);
         if (it == mNodes.end()) return;
-        it->second.visible = visible;
-        if (it->second.node) it->second.node->setVisible(visible, true);
-        // The billboard set hangs off the STATIC root (world-space positions),
-        // not off this node, so the cascade above never reaches it. And
-        // setVisible() is USELESS for PFX2 objects: ParticleSystemManager2::
-        // _addToRenderQueue tests getVisibilityFlags(), which strips the
-        // LAYER_VISIBILITY bit setVisible toggles. Toggle the user flags.
-        // A HELPER's billboards carry kHelperBit, not kVisibleBit (P1b): the
-        // light icons are the biggest single thing probe captures used to eat.
-        const Ogre::uint32 on = it->second.helper ? kHelperBit : kVisibleBit;
-        if (it->second.billboards) it->second.billboards->setVisibilityFlags(visible ? on : 0u);
-        // Same trap, same fix, for a simulated particle system — except the flag
-        // lives on the DEFINITION, not on the instance: _addToRenderQueue tests
-        // the def (OgreParticleSystemManager2.cpp:762-765). Hiding the def is
-        // also what makes already-emitted particles disappear at once instead
-        // of finishing their lives on screen.
-        if (it->second.particleDef)
-            it->second.particleDef->setVisibilityFlags(
-                visible ? particleVisibilityBits(it->second) : 0u);
+        Node &n = it->second;
+        // Did this node's geometry bounce light BEFORE the change? Read off the
+        // item rather than re-derived from the material flags, so the rule lives
+        // in exactly one place (itemVisibilityFlags) and this stays true when it
+        // grows another case.
+        const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+        n.visible = visible;
+        if (n.node) n.node->setVisible(visible, true);
+        // THE FLAG HALF, for everything hanging off this node. The billboard set
+        // hangs off the STATIC root (world-space positions), not off this node,
+        // so the cascade above never reaches it; setVisible() is USELESS for
+        // PFX2 objects (ParticleSystemManager2::_addToRenderQueue tests
+        // getVisibilityFlags(), which strips the LAYER_VISIBILITY bit setVisible
+        // toggles); and the Item's kGiGeometryBit has to come off so GI stops
+        // seeing it. applyNodeVisibilityFlags is the one place all three live —
+        // this used to carry its own copy of the billboard/particle half.
+        applyNodeVisibilityFlags(n);
+        // THE GI HALF (SMOKE_FIX S12). Hiding or showing lit geometry changes
+        // what the next solve sees, exactly like detaching it does (detachItem's
+        // note) — so the caches go, on the EDGE only: the mirror pushes
+        // visibility every sync, and invalidating on every push would re-solve
+        // GI every frame. A script that blinks a node still costs one re-solve
+        // per settle, which is what the mirror's stability window coalesces to.
+        const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+        if (giBefore != giAfter) invalidateGiCaches();
     } JAH_CATCH(mError, );
 }
 
