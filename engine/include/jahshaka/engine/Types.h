@@ -1717,11 +1717,12 @@ struct GiStatus {
     // it. So the hybrid builds NO probe grid in an open scene, and these two
     // say so out loud instead of leaving `probeCount 0` looking like a failure.
 
-    /// How many world axes `computeProbeRegion` found ENCLOSED — a slab pulled
-    /// the region in on BOTH faces of that axis (a floor and a ceiling; two
-    /// facing walls). 0..3, and 0 in every mode but the hybrid. Two is the
-    /// threshold: at two the probes are photographing something, below it they
-    /// are photographing the sky.
+    /// How many world axes `computeProbeRegion` found ENCLOSED — two SLABS
+    /// facing each other across a real gap (a floor and a ceiling; two facing
+    /// walls), measured out of the same reading that fits the probe region.
+    /// 0..3, and 0 in every mode but the hybrid. Two is the threshold: at two
+    /// the probes are photographing something, below it they are photographing
+    /// the sky.
     int    probeEnclosedAxes = 0;
     /// True when the hybrid deliberately declined to build a probe grid because
     /// `probeEnclosedAxes` was below the threshold AND no explicit

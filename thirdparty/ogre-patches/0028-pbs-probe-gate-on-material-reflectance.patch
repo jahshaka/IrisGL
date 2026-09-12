@@ -41,11 +41,32 @@ TWO EXCLUSIONS, both because kS does not scale them:
 `needs_env_brdf` is untouched: it is also raised by `hlms_enable_cubemaps_auto`,
 so the irradiance field's and VCT's diffuse still reach the surface.
 
+THE PREDICATE IS A DATABLOCK METHOD, AND EDITING IT REBUILDS THE SHADER
+(round-2 fix, 2026-09-13). The gate is decided in `calculateHashForPreCreate`,
+which runs only on `flushRenderables()` — and at this pin `setSpecular`,
+`setMetalness` and `setFresnel` call `scheduleConstBufferUpdate()` and nothing
+else. A material authored black-kS therefore stayed gated after the user raised
+its Specular Colour to make it a mirror: the constant changed, the shader did
+not, and the floor went on reflecting nothing until some unrelated edit happened
+to flush it. (Jahshaka's own material push writes kS on the live datablock every
+frame a material changes and deliberately never flushes — OgreMaterials.cpp
+applyPbr — so nothing else was going to.)
+
+The fix is upstream's own idiom for exactly this situation, `setClearCoat`
+(OgreHlmsPbsDatablock.cpp:885-897): evaluate the predicate before and after the
+write and flush ONLY when it CROSSES. An ordinary edit that leaves the material
+reflective either way still costs nothing. So that the rule cannot drift, the
+predicate has ONE definition — `HlmsPbsDatablock::hasZeroSpecularResponse()` —
+shared by the three setters and by `calculateHashForPreCreate`.
+
 WHAT IT TOUCHES
   * SOURCE  Components/Hlms/Pbs/include/OgreHlmsPbs.h  — one property id.
-  * SOURCE  Components/Hlms/Pbs/src/OgreHlmsPbs.cpp    — the predicate in
-    calculateHashForPreCreate, the gate in
+  * SOURCE  Components/Hlms/Pbs/src/OgreHlmsPbs.cpp    — the gate in
+    calculateHashForPreCreate and in
     notifyPropertiesMergedPreGenerationStep.
+  * SOURCE  Components/Hlms/Pbs/include/OgreHlmsPbsDatablock.h,
+            Components/Hlms/Pbs/src/OgreHlmsPbsDatablock.cpp — the one
+    definition of the predicate, and the three setters that can cross it.
   * MEDIA   Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any —
     `@insertpiece( forwardPlusDoCubemaps )` becomes conditional on the
     DATABLOCK property `use_parallax_correct_cubemaps`. Without this hunk the
@@ -78,7 +99,7 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
      const IdString PbsProperty::IrradianceVolumes = IdString( "irradiance_volumes" );
      const IdString PbsProperty::VctNumProbes = IdString( "vct_num_probes" );
      const IdString PbsProperty::VctConeDirs = IdString( "vct_cone_dirs" );
-@@ -763,6 +764,58 @@
+@@ -763,6 +764,36 @@
          const bool fresnelWorkflow =
              datablock->getWorkflow() == HlmsPbsDatablock::SpecularAsFresnelWorkflow;
  
@@ -98,41 +119,19 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
 +        // with pixelData.specular = material.kS (200.BRDFs_piece_ps.any /
 +        // Main/800.PixelShader_piece_ps.any:307), so a datablock whose SPECULAR
 +        // COLOUR is black multiplies every environment term by zero: skipping
-+        // the lookup is arithmetically identical, not an approximation. The
-+        // second half of the pair — F0 — is required as well, so that the gate
-+        // only fires where the AUTHOR has said "not reflective" with both of
-+        // the controls that spell it (F0 alone leaves the Schlick rim and the
-+        // envBRDF bias; kS alone is the one that zeroes the product).
++        // the lookup is arithmetically identical, not an approximation.
 +        //
-+        // Kept out of the gate, deliberately:
-+        //   * clear coat — its own environment term is NOT multiplied by kS, so
-+        //     a zero-kS clear-coated material still reflects;
-+        //   * cubemaps_as_diffuse_gi — there a probe also carries DIFFUSE light,
-+        //     which kS does not scale. Off in Jahshaka (envFeatures 0), checked
-+        //     anyway so the patch is honest upstream.
-+        // Physically lit surfaces keep their ~4% sheen: a default metallic
-+        // dielectric has kS = 1 and never qualifies.
-+        {
-+            const Vector3 kS = datablock->getSpecular();
-+            const Real kEps = Real( 1e-4 );
-+            bool bZeroSpecular = kS.x <= kEps && kS.y <= kEps && kS.z <= kEps;
-+            if( bZeroSpecular )
-+            {
-+                // ...and F0: authored directly in the Fresnel workflows, and
-+                // driven by metalness in the metallic one (where the shader's
-+                // dielectric floor of 0.04 is not reachable from any setter, so
-+                // "no authored F0" is metalness 0).
-+                if( metallicWorkflow )
-+                    bZeroSpecular = datablock->getMetalness() <= kEps;
-+                else
-+                {
-+                    const Vector3 f0 = datablock->getFresnel();
-+                    bZeroSpecular = f0.x <= kEps && f0.y <= kEps && f0.z <= kEps;
-+                }
-+            }
-+            if( bZeroSpecular && datablock->mClearCoat == 0.0f )
-+                setProperty( kNoTid, PbsProperty::ZeroSpecularResponse, 1 );
-+        }
++        // THE RULE ITSELF LIVES ON THE DATABLOCK — hasZeroSpecularResponse(),
++        // one definition — because the three setters that can cross it
++        // (setSpecular, setMetalness, setFresnel) flush the renderables on a
++        // crossing so that a runtime edit rebuilds this shader instead of
++        // leaving it gated. Two copies of the predicate would drift apart, and
++        // the drift would show up as a material that silently stops reflecting.
++        //
++        // cubemaps_as_diffuse_gi is checked at the USE site below rather than
++        // here: it is a pass property, not the material's business.
++        if( datablock->hasZeroSpecularResponse() )
++            setProperty( kNoTid, PbsProperty::ZeroSpecularResponse, 1 );
 +
          setProperty( kNoTid, PbsProperty::FresnelScalar,
                       datablock->hasSeparateFresnel() || metallicWorkflow );
@@ -159,6 +158,147 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
          {
              setProperty( tid, PbsProperty::UseEnvProbeMap, 1 );
  
+--- a/Components/Hlms/Pbs/include/OgreHlmsPbsDatablock.h
++++ b/Components/Hlms/Pbs/include/OgreHlmsPbsDatablock.h
+@@ -402,6 +402,28 @@ namespace Ogre
+         void    setSpecular( const Vector3 &specularColour );
+         Vector3 getSpecular() const;
+ 
++        /** JAHSHAKA PATCH 0028 — THE ONE DEFINITION of "this material cannot
++            reflect anything", shared by the three setters that can cross it
++            and by HlmsPbs::calculateHashForPreCreate, which turns it into the
++            zero_specular_response shader property.
++        @remarks
++            True when the specular colour is black AND no F0 is authored
++            (metalness 0 in the metallic workflow, fresnel black otherwise) AND
++            there is no clear coat. The PBS environment term is
++                Rs = envColourS * kS * (F0 * envBRDF.x + envBRDF.y)
++            so such a datablock multiplies every reflection probe / env map
++            contribution by zero: skipping the lookup is arithmetically
++            identical, not an approximation. Clear coat is excluded because its
++            own environment term is NOT scaled by kS.
++        @par
++            The three setters flush the renderables when this value CHANGES, so
++            that raising a black material's specular colour at runtime rebuilds
++            the shader instead of leaving it gated (setClearCoat's idiom).
++        @return
++            True if no environment lookup can affect this material's pixels.
++        */
++        bool hasZeroSpecularResponse() const;
++
+         /// Sets the roughness
+         void  setRoughness( float roughness );
+         float getRoughness() const;
+--- a/Components/Hlms/Pbs/src/OgreHlmsPbsDatablock.cpp
++++ b/Components/Hlms/Pbs/src/OgreHlmsPbsDatablock.cpp
+@@ -506,12 +506,23 @@ namespace Ogre
+     //-----------------------------------------------------------------------------------
+     void HlmsPbsDatablock::setSpecular( const Vector3 &specularColour )
+     {
++        // JAHSHAKA PATCH 0028: kS is the term the reflection-probe gate is
++        // decided on, so an edit that CROSSES it has to rebuild the shader, not
++        // just the const buffer. Same shape as setClearCoat below: evaluate
++        // before and after, flush only on a crossing, so the common case (an
++        // ordinary colour tweak on a material that reflects either way) still
++        // costs nothing.
++        const bool bWasZeroSpecularResponse = hasZeroSpecularResponse();
++
+         const float invPI = getBrdf() == PbsBrdf::BlinnPhongLegacyMath ? 0.318309886f : 1.0f;
+ 
+         mkSr = specularColour.x * invPI;
+         mkSg = specularColour.y * invPI;
+         mkSb = specularColour.z * invPI;
+         scheduleConstBufferUpdate();
++
++        if( bWasZeroSpecularResponse != hasZeroSpecularResponse() )
++            flushRenderables();
+     }
+     //-----------------------------------------------------------------------------------
+     Vector3 HlmsPbsDatablock::getSpecular() const
+@@ -520,6 +531,37 @@ namespace Ogre
+         return Vector3( mkSr, mkSg, mkSb ) * pi;
+     }
+     //-----------------------------------------------------------------------------------
++    bool HlmsPbsDatablock::hasZeroSpecularResponse() const
++    {
++        // JAHSHAKA PATCH 0028 — see the header's @remarks. This is the ONLY
++        // place the rule is written down: HlmsPbs::calculateHashForPreCreate
++        // and the three setters that can cross it all call this.
++        const Real kEps = Real( 1e-4 );
++
++        const Vector3 kS = getSpecular();
++        if( kS.x > kEps || kS.y > kEps || kS.z > kEps )
++            return false;
++
++        // ...and F0: authored directly in the Fresnel workflows, driven by
++        // metalness in the metallic one (where the shader's dielectric floor of
++        // 0.04 is not reachable from any setter, so "no authored F0" is
++        // metalness 0).
++        if( mWorkflow == MetallicWorkflow )
++        {
++            if( getMetalness() > kEps )
++                return false;
++        }
++        else
++        {
++            const Vector3 f0 = getFresnel();
++            if( f0.x > kEps || f0.y > kEps || f0.z > kEps )
++                return false;
++        }
++
++        // Clear coat has its own environment term and kS does not scale it.
++        return mClearCoat == 0.0f;
++    }
++    //-----------------------------------------------------------------------------------
+     void HlmsPbsDatablock::setRoughness( float roughness )
+     {
+         mRoughness = roughness;
+@@ -579,8 +621,14 @@ namespace Ogre
+     void HlmsPbsDatablock::setMetalness( float metalness )
+     {
+         assert( mWorkflow == MetallicWorkflow );
++        // JAHSHAKA PATCH 0028: metalness IS the authored F0 in this workflow,
++        // i.e. half of the probe gate's predicate — see setSpecular.
++        const bool bWasZeroSpecularResponse = hasZeroSpecularResponse();
+         mFresnelR = metalness;
+         scheduleConstBufferUpdate();
++
++        if( bWasZeroSpecularResponse != hasZeroSpecularResponse() )
++            flushRenderables();
+     }
+     //-----------------------------------------------------------------------------------
+     float HlmsPbsDatablock::getMetalness() const { return mFresnelR; }
+@@ -596,6 +644,11 @@ namespace Ogre
+     void HlmsPbsDatablock::setFresnel( const Vector3 &fresnel, bool separateFresnel )
+     {
+         assert( mWorkflow != MetallicWorkflow );
++        // JAHSHAKA PATCH 0028: the authored F0 — the other half of the probe
++        // gate's predicate. See setSpecular. Folded into the flush this
++        // function already owns, so a call can never flush twice.
++        const bool bWasZeroSpecularResponse = hasZeroSpecularResponse();
++
+         uint8 fresnelBytes = 4;
+         mFresnelR = fresnel.x;
+ 
+@@ -607,13 +660,17 @@ namespace Ogre
+             fresnelBytes = 12;
+         }
+ 
++        bool bMustFlush = false;
+         if( fresnelBytes != mFresnelTypeSizeBytes )
+         {
+             mFresnelTypeSizeBytes = fresnelBytes;
+-            flushRenderables();
++            bMustFlush = true;
+         }
+ 
+         scheduleConstBufferUpdate();
++
++        if( bMustFlush || bWasZeroSpecularResponse != hasZeroSpecularResponse() )
++            flushRenderables();
+     }
+     //-----------------------------------------------------------------------------------
+     Vector3 HlmsPbsDatablock::getFresnel() const { return Vector3( mFresnelR, mFresnelG, mFresnelB ); }
 --- a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
 +++ b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
 @@ -966,7 +966,17 @@

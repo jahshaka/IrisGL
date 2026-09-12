@@ -2977,6 +2977,9 @@ private:
     /// The GI items' world AABBs after the exclude flag and the extent-outlier
     /// trimming: the one place that decides which objects define the lit world.
     std::vector<Ogre::Aabb> giItemBounds() const;
+    /// The same list BEFORE the outlier trim — every GI item's world AABB as it
+    /// is. computeProbeRegion's slab search reads shapes, not fitted volumes.
+    std::vector<Ogre::Aabb> giItemBoundsRaw() const;
     /// Records (or clears) mGiAutoVolume after a rebuild. `fitted` is what the
     /// AUTO path resolved; a hand-typed bounds box clears the record instead.
     void noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic);
@@ -2992,8 +2995,8 @@ private:
     /// See the long-form argument on the definition — handing the padded voxel
     /// volume here instead is what made P4's finding-2 reflections go black.
     /// `enclosedAxesOut` (optional) receives how many of the three world axes
-    /// were pulled in by a slab on BOTH faces — the measured enclosure that
-    /// decides whether a probe grid is worth building at all (buildPcc).
+    /// are closed by two FACING slabs — the measured enclosure that decides
+    /// whether a probe grid is worth building at all (buildPcc, refreshVctFast).
     Ogre::Aabb computeProbeRegion(const Ogre::Aabb &litVolume, int *enclosedAxesOut = nullptr) const;
     /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
