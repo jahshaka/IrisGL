@@ -384,7 +384,8 @@ int SceneMirror::sync()
     mAnyShadowCaster = false;
     // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): recounted by this walk.
     mMovableNodes = 0;
-    mMovableLights.clear();
+    mMovableLights.clear();      // capacity kept; contents are per sync
+    mMobilityChanged = false;
     // THE PLAY EDGE the soft-promotion rule is scoped to. On the FALLING edge
     // the document has already cleared every node's soft flag
     // (Scene::setPlaying) and the transforms are back where the author left
@@ -1848,7 +1849,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
         // it (rule 2 is a question about the whole ancestor chain): recorded
         // here, where the walk has it, and read by applyEnvironment later in
         // the same frame.
-        if (node->getSceneNodeType() == iris::SceneNodeType::Light) mMovableLights.insert(node);
+        if (node->getSceneNodeType() == iris::SceneNodeType::Light) mMovableLights.push_back(node);
     }
     // ON CHANGE ONLY, like every other flag on this walk.
     const int want = movable ? 1 : 0;
@@ -1868,6 +1869,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
                                      : jahshaka::engine::MobilityChange::Authoring);
         e.movable = want;
         e.movableSoft = movable && why == iris::MobilityReason::Play;
+        mMobilityChanged = true;
     }
     return movable;
 }
@@ -4543,7 +4545,8 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // it. The probes hold the still room's lighting, as designed.
         quint64 lightSig = 0, movableLightSig = 0;
         const auto movingLamp = [&](const iris::LightNode *l) {
-            return mMovableLights.find(static_cast<const iris::SceneNode *>(l)) != mMovableLights.end();
+            const auto *n = static_cast<const iris::SceneNode *>(l);
+            return std::find(mMovableLights.begin(), mMovableLights.end(), n) != mMovableLights.end();
         };
         if (driver) {
             Hasher h;
@@ -4705,7 +4708,23 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 mGiPendingRefresh = true;
                 mGiStableFrames = 0;
             }
-            if (sigChanged) {
+            // A MOBILITY FLIP MOVES THE SIGNATURE WITHOUT BEING A CHANGE THE
+            // SETTLE MAY ANSWER (code review 2026-09-12, item 1). The engine's
+            // GI geometry signature hashes the items that BOUNCE light, so an
+            // object entering or leaving that set changes it — which, through
+            // the gate below, would arm a pending refresh and fire a full
+            // re-solve ~250 ms later. On the frame a character soft-promotes at
+            // play, that re-solve IS the hitch the whole design promises cannot
+            // happen (Types.h's MobilityChange::Soft, EnginePrivate.h's
+            // kMovableBit); and for an authoring flip it would be a SECOND
+            // rebuild on top of the one setNodeMovable already invalidated for.
+            // So the flip's own frame ADOPTS the signature instead of arming.
+            // Anything else that moved in the same frame keeps changing it and
+            // re-arms on the next one, so nothing real is swallowed for longer
+            // than one frame.
+            if (sigChanged && mMobilityChanged) {
+                if (mSource->giUpdateBudget > 0) mGiLightSignature = lightSig;
+            } else if (sigChanged) {
                 if (mSource->giUpdateBudget > 0) {
                     // The remembered signature is only advanced while the budget
                     // is above zero, exactly as it was only advanced while Auto

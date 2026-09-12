@@ -1330,7 +1330,22 @@ private:
     /// cannot die in between). It exists because the GI light signature has to
     /// ask "does this lamp move?" about each light while the answer is a
     /// property of the node's whole ancestor chain, which only the walk knows.
-    std::set<const iris::SceneNode *> mMovableLights;
+    ///
+    /// A VECTOR, cleared and refilled per sync for its CAPACITY: this is the
+    /// hot per-node walk, and a node-allocating container here would be a
+    /// malloc per movable lamp per frame for a list that is almost always
+    /// shorter than ten. Membership is a linear scan, which at that length
+    /// beats any tree.
+    std::vector<const iris::SceneNode *> mMovableLights;
+    /// "A node's mobility CHANGED this sync" — set by syncMobility, consumed by
+    /// applyEnvironment's settle gate. A class flip moves the engine's GI
+    /// geometry signature (the object enters or leaves it), and that signature
+    /// is the settle key: without this flag the frame a character promotes
+    /// ARMS a full re-solve, which is the hitch the whole design forbids
+    /// (code review 2026-09-12, item 1). The gate ADOPTS the new signature
+    /// instead — an Authoring flip's rebuild is owed on its own account
+    /// (setNodeMovable invalidated), and a Soft one owes nothing at all.
+    bool mMobilityChanged = false;
     /// The moving lamps' own change key, kept OUT of mGiLightSignature: a lamp
     /// that moves must re-inject its light into the voxels (owner decision O2)
     /// and must NOT arm the settle, or an animated torch would hold the

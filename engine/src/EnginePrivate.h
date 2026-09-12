@@ -307,11 +307,27 @@ inline Ogre::uint32 allShadowCasterChannels() {
            shadowCasterChannels(ShadowNodeKind::Reflect) |
            shadowCasterChannels(ShadowNodeKind::Probe);
 }
-/// THE LAMPS a kind's instances may hold fixed (cached). Today: every
-/// cacheable lamp. R2's movable lights are outside the probe captures'
-/// `light_visibility_mask`, and a light FIXED to a map bypasses that mask (Ogre
-/// writes fixed lights into the pass buffer whatever the pass's light mask),
-/// so R2 filters them here for ShadowNodeKind::Probe.
+/// THE LAMPS a kind's instances may hold fixed (cached). EVERY cacheable lamp,
+/// for every kind — the hook exists, and nothing filters through it today.
+///
+/// WHAT IS TRUE ABOUT A MOVING LAMP AND A PROBE, since that is what a reader
+/// comes here to ask (lane R2): a probe capture is still lit by every light,
+/// moving ones included — there is no `light_visibility_mask` anywhere in
+/// engine/media, and R2 deliberately did not add one (its interaction with a
+/// FIXED lamp map, which Ogre writes into the pass buffer whatever the pass's
+/// light mask says, is unverified at this pin). What a moving lamp does NOT do
+/// is make a probe re-capture: a light's TRANSFORM is not in the probe cache's
+/// light key (OgreScene::setLight folds colour, range, cone, shadowing and
+/// channels, never the pose), so the probe simply holds the frozen picture it
+/// last captured, which is the O4 freeze applied to lamps. Its pose key does
+/// dirty the lamp maps of every KIND through the caster scan, so no probe
+/// capture ever samples a stale map either.
+///
+/// THE FOLLOW-ON (REALTIME_REFLECTIONS_SPEC §3.3.4, "probe face passes gain
+/// light_visibility_mask 0x1"): a lane that makes probe captures see STILL
+/// lamps only must add the media mask AND filter here for
+/// ShadowNodeKind::Probe, because a fixed lamp map would otherwise bypass the
+/// mask it just added. Both halves or neither.
 inline bool shadowLampCachedFor(ShadowNodeKind, const Ogre::Light *) { return true; }
 /// "Did this caster's box move?" (the lamp-map cache's change test). Not a
 /// measurement: the same transforms give the same floats frame after frame,
@@ -1871,6 +1887,9 @@ public:
     /// PER NODE, not the scene's mRigPoseEpoch: one animating character must
     /// not re-dirty the lamps near every other rig.
     void noteNodePosed(NodeId id);
+    /// Both halves of "a rig was posed": the per-node lamp-map epoch always, the
+    /// scene-wide mRigPoseEpoch only for a STILL rig (see the definition).
+    void noteRigPosed(NodeId id);
     /// What the per-frame walks cost on the last frame, in microseconds
     /// (steady clock): the lamp-map cache's own half (collectShadowCacheFrame:
     /// the lamps and the change-to-lamp test), the caster walk (runItemWalk)
@@ -2051,6 +2070,17 @@ private:
         /// shadow maps, while the view, the planar mirrors, SSR and the
         /// view/reflect shadow maps keep drawing it every frame.
         bool                      movable = false;
+        /// THE SOFT PROMOTION'S HEALING KEY (owner decision O3). While a node is
+        /// softly promoted it carries no GI bit but its voxels were never
+        /// cleared — that stale bounce IS the documented ghost. If a
+        /// FROM-SCRATCH GI build happens meanwhile (a settle after a light edit,
+        /// a material change, another object's classification), the voxels are
+        /// rebuilt WITHOUT it and the ghost becomes a hole that would outlive
+        /// play. So the promotion records the rebuild count it was made at, and
+        /// the push that clears it invalidates when that count has moved.
+        /// Meaningful only while `movable && mobilitySoft`.
+        bool                      mobilitySoft = false;
+        unsigned long long        mobilitySoftRebuilds = 0;
         /// LIGHTING CHANNELS, object side (Scene::setNodeLightMask). Kept here
         /// rather than read back off the Item because the Item is REBUILT on
         /// every attachMesh/attachSkinnedMesh (a material swap destroys and
@@ -2962,10 +2992,14 @@ private:
     /// The movement scan has run at least once: before that, every item is
     /// seen for the first time and none of them is an arrival.
     bool mGiScannedOnce = false;
-    /// Bumped by setBonePoses and by setClipStates when a clip's time or
-    /// enable changed: a rig posed in place moves no AABB (Items keep their
+    /// THE STILL RIGS' POSE EPOCH. Bumped by setBonePoses and by setClipStates
+    /// when a clip's time or enable changed — for a node that is NOT movable
+    /// (noteRigPosed): a rig posed in place moves no AABB (Items keep their
     /// bind-pose bounds), so the movement scan cannot see it, and this is what
-    /// the raster field re-arms on instead.
+    /// the raster irradiance field re-arms on instead. A MOVABLE rig is not in
+    /// a probe face (kMovableBit), so re-converging the field for it would be
+    /// 8192 probes of work for a picture that cannot contain it; its pose still
+    /// dirties the lamp maps around it through the per-node epoch.
     unsigned long long mRigPoseEpoch = 0;
     /// Bumped whenever anything the GI arms hold RAW POINTERS INTO may have
     /// died — every invalidateGiCaches call site (B4). The reuse arm refuses to

@@ -499,10 +499,11 @@ bool OgreScene::setClipStates(NodeId id, const ClipState *states, size_t count) 
             // is deliberately not reachable from this boundary.
             // rayon2 S3: a raster-fed irradiance field re-arms on pose changes,
             // and a clip's time moving IS a pose change the AABB scan cannot
-            // see (Items keep their bind-pose bounds).
-            // The lamp-map cache keys the SAME edge per NODE (noteNodePosed): one
-            // animating character re-renders only the lamps around it.
-            if (sa.getCurrentTime() != st->time || !sa.getEnabled()) { ++mRigPoseEpoch; noteNodePosed(id); }
+            // see (Items keep their bind-pose bounds) — for a STILL rig; a
+            // MOVABLE one is not in a probe face at all (noteRigPosed).
+            // The lamp-map cache keys the SAME edge per NODE: one animating
+            // character re-renders only the lamps around it.
+            if (sa.getCurrentTime() != st->time || !sa.getEnabled()) noteRigPosed(id);
             sa.setTime(st->time);
             if (!sa.getEnabled()) sa.setEnabled(true);
         }

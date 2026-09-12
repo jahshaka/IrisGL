@@ -438,10 +438,22 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     if (n.movable == movable) return;
     const bool probeBefore = probeSeesItem(n);
     const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+    // THE GHOST HAS TO HEAL (code review 2026-09-12, item 5). A soft promotion
+    // leaves the object's bounce light in the voxels where it stood — that is
+    // the deal O3 makes. But if the voxels are rebuilt from scratch while it is
+    // promoted, they are rebuilt WITHOUT it, and the ghost turns into a hole
+    // that a free clearing push would leave for ever. So the clearing push
+    // invalidates exactly when that has happened, and the counter says so.
+    const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mGiRebuilds;
+    n.mobilitySoft = movable && change == MobilityChange::Soft;
+    n.mobilitySoftRebuilds = mGiRebuilds;
     n.movable = movable;
     applyNodeVisibilityFlags(n);
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
-    if (giBefore != giAfter && change == MobilityChange::Authoring) {
+    if (healing && giBefore != giAfter) {
+        invalidateGiCaches();
+        ++mMobilityRebuilds;
+    } else if (giBefore != giAfter && change == MobilityChange::Authoring) {
         // COUNT WHAT IT ACTUALLY COSTS. A scene with no GI arm built yet — the
         // load path, and every scene that never turns GI on — invalidates
         // nothing, and reporting a rebuild there would make the counter useless

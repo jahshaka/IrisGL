@@ -420,6 +420,28 @@ void OgreScene::noteNodePosed(NodeId id) {
     if (it != mNodes.end()) ++it->second.poseEpoch;
 }
 
+// A RIG WAS POSED (a clip time or a bone-pose push). Two consumers, and since
+// lane R2 they no longer agree about movers:
+//
+//   * the lamp-map cache, PER NODE (noteNodePosed above): a mover's shadow must
+//     follow its pose in the frame it moves, so this is unconditional;
+//   * the RASTER irradiance field, which restarts its 8192-probe sweep on the
+//     scene-wide epoch (updateIrradianceField). That sweep re-renders probe
+//     FACES, and a probe face carries `visibility_mask 0x1` — a movable rig is
+//     not in one. Restarting the field for a walking character would re-converge
+//     a field the character cannot appear in, every frame it animates, which is
+//     the exact "movers cost the room's lighting nothing" rule this lane exists
+//     for (and the field's own re-arm note says the epoch is for what the AABB
+//     scan cannot see: a STILL rig posing in place).
+//
+// So the scene-wide epoch means "a STILL rig posed" and the mover's pose is the
+// per-node half only.
+void OgreScene::noteRigPosed(NodeId id) {
+    noteNodePosed(id);
+    auto it = mNodes.find(id);
+    if (it == mNodes.end() || !it->second.movable) ++mRigPoseEpoch;
+}
+
 void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
     const auto t0 = std::chrono::steady_clock::now();
     struct Timer {
