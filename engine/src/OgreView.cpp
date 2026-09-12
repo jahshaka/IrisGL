@@ -14,6 +14,7 @@
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <OgreRenderPassDescriptor.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <string>
 
@@ -86,6 +87,7 @@ ChainDesc OgreView::chainDesc() const {
     d.exposure       = mPostFx.exposure;
     d.exposureMin    = mPostFx.exposureMin;
     d.exposureMax    = mPostFx.exposureMax;
+    d.exposureScale  = mPostFx.exposureScale;
     // Bloom rides the HDR node; without HDR there is nothing to bright-pass.
     d.bloom          = mPostFx.bloom && mPostFx.hdr;
     d.bloomThreshold = mPostFx.bloomThreshold;
@@ -208,7 +210,7 @@ void OgreView::applyFixedExposure() {
     if (!d.hdr || !d.tonemapFixed) return;
     JAH_TRY {
         writeLiveClearColour(mWorkspace, mChainHandles.fixedExposure,
-                             chain::fixedExposureColour(d.exposure));
+                             chain::fixedExposureColour(d.exposureScale, d.exposure));
     } JAH_CATCH(mError, );
 }
 
@@ -463,7 +465,7 @@ void OgreView::applyPip() {
         // through the writer that also touches the pass INSTANCE, because the
         // colour Vulkan uses is the one cached in its RenderPassDescriptor.
         writeLiveClearColour(mPipWorkspace, mPipHandles.exposure,
-                             chain::fixedExposureColour(mPip.exposure));
+                             chain::fixedExposureColour(0.0f, mPip.exposure));
     } JAH_CATCH(mError, );
 }
 
@@ -507,6 +509,80 @@ void OgreView::resetExposureHistory() {
             }
         }
     } JAH_CATCH(mError, );
+}
+
+/// THE EXPOSURE THIS VIEW ACTUALLY GRADED WITH, read back off the GPU (SS1).
+///
+/// WHY IT HAS TO BE A READBACK. The automatic exposure is computed entirely on
+/// the GPU — four downscale quads reduce the frame's log-luminance into a 1x1
+/// texture which the tonemapper then samples as `fInvLumAvg` — so the CPU never
+/// sees the number at all. Nothing else in this engine knows it, and no formula
+/// reproduces it (it is a temporal filter over the scene's own content).
+///
+/// WHICH TEXTURE. `jahOldLum`, the adaptation HISTORY, not the `jahLum` the
+/// tonemapper samples: kLum is Discardable (its content between frames is
+/// undefined memory by definition) while the history is explicitly
+/// keep_content, and the chain's last HDR pass copies one into the other — so
+/// the history holds exactly the multiplier the last presented frame graded
+/// with. One 1x1 R16_FLOAT texel, downloaded with accurate tracking; the cost
+/// is one fence on a path that already stalls (a screenshot).
+///
+/// 0 means "there is nothing to read": no workspace, no HDR, the FIXED form
+/// (whose exposure is a constant the caller already has), or a workspace that
+/// has not presented a frame YET.
+///
+/// "YET" IS PER WORKSPACE, NOT PER VIEW, and that distinction is a defect that
+/// was caught in review rather than in the field. `jahOldLum` is destroyed and
+/// recreated with the workspace, so every REBUILD — and a rebuild is what any
+/// shape change causes, `world.override({id:'ssr', value:'off'})` included —
+/// starts the adaptation history over. mFramesPresented does not reset there
+/// (it resets on scene bind and detach), so gating on it would have let a
+/// rebuild-then-shoot sequence read the one-shot 1.0 seed at best and UNWRITTEN
+/// VRAM at worst: the reflection_map class of defect, where `isfinite && > 0`
+/// happily passes garbage into the grade. mWorkspaceFramesPresented is reset
+/// inside attachWorkspace, beside the generation counter, so it can only mean
+/// "frames THIS graph has drawn".
+float OgreView::measuredExposureScale() const {
+    if (!mWorkspace || !mRoot) return 0.0f;
+    const ChainDesc d = chainDesc();
+    if (!d.hdr || d.tonemapFixed) return 0.0f;
+    if (mWorkspaceFramesPresented == 0u) return 0.0f;
+    float measured = 0.0f;
+    JAH_TRY {
+        Ogre::TextureGpu *lum = nullptr;
+        for (Ogre::CompositorNode *n : mWorkspace->getNodeSequence()) {
+            if (!n) continue;
+            if (Ogre::TextureGpu *t = n->getDefinedTexture(chain::exposureHistoryTextureName())) {
+                lum = t;
+                break;
+            }
+        }
+        if (!lum) return 0.0f;
+        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        // THE TICKET IS OWNED, not just created: `download` and `map` can both
+        // OGRE_EXCEPT (residency loss, a device reset), and the old shape leaked
+        // a staging allocation on every one of those. A ticket is not a
+        // SharedPtr, so the scope guard is the ownership.
+        struct TicketScope {
+            Ogre::TextureGpuManager *tm;
+            Ogre::AsyncTextureTicket *ticket;
+            bool mapped = false;
+            ~TicketScope() {
+                if (!ticket) return;
+                if (mapped) ticket->unmap();
+                tm->destroyAsyncTextureTicket(ticket);
+            }
+        } held{ tm, tm->createAsyncTextureTicket(1u, 1u, 1u, Ogre::TextureTypes::Type2D,
+                                                 lum->getPixelFormat()) };
+        if (!held.ticket) return 0.0f;
+        held.ticket->download(lum, 0, true);
+        const Ogre::TextureBox box = held.ticket->map(0);
+        held.mapped = true;
+        measured = box.getColourAt(0, 0, 0, lum->getPixelFormat()).r;
+    } JAH_CATCH(mError, 0.0f);
+    // A history that has not converged to anything finite is not an exposure.
+    if (!(measured > 0.0f) || !std::isfinite(measured)) return 0.0f;
+    return measured;
 }
 
 OgreView::~OgreView() { destroy(); }
@@ -587,6 +663,12 @@ bool OgreView::attachWorkspace() {
         for (Ogre::CompositorWorkspaceListener *l : mWorkspaceListeners)
             mWorkspace->addListener(l);
         ++mWorkspaceGeneration;
+        // A NEW GRAPH HAS DRAWN NOTHING. Every keep_content texture in the chain
+        // — the HDR adaptation history above all — was just destroyed and
+        // recreated, so anything that reads one back has to know that this
+        // particular graph has not written it yet (measuredExposureScale says
+        // why that is not the same question as mFramesPresented).
+        mWorkspaceFramesPresented = 0;
         // RE-ASSERT THE INSET'S POSITION (CAMERAS_SPEC §7.2's ordering trap).
         // The main workspace has just been appended, so it is now LAST on the
         // target and would paint over the inset. There is no reorder API: the
@@ -664,7 +746,7 @@ void OgreView::notePresented() {
     // Deliberately conservative: a disabled view's workspace is skipped by the
     // compositor, and a view with no scene or no workspace draws nothing. Only
     // frames that really put this view's pixels on the target count.
-    if (mEnabled && mWorkspace && mScene) ++mFramesPresented;
+    if (mEnabled && mWorkspace && mScene) { ++mFramesPresented; ++mWorkspaceFramesPresented; }
 }
 
 void OgreView::detachScene() {

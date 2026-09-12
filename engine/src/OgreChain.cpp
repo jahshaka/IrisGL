@@ -135,6 +135,18 @@ inline float fixedInverseLuminance(float exposure) {
     return std::exp(exposure - 2.0f) / 0.18f;
 }
 
+/// ...UNLESS THE HOST ALREADY MEASURED ONE (PostFxDesc::exposureScale, SS1).
+/// The grey card above is a stand-in for a measurement nobody made; a SCREENSHOT
+/// OF THE EDITOR is taken beside an on-screen view that has been measuring the
+/// same scene for as long as it has been open, and carrying that number across
+/// is both more correct (the card is about a stop off in a bright room) and
+/// still perfectly deterministic (it is a constant by the time it gets here).
+/// 0 — nobody measured — falls back to the card. Negatives are refused: the
+/// tonemapper multiplies by this, and a negative multiplier is not a grade.
+inline float resolveFixedInverseLuminance(float exposureScale, float exposure) {
+    return exposureScale > 0.0f ? exposureScale : fixedInverseLuminance(exposure);
+}
+
 constexpr const char *kOldLum  = "jahOldLum";
 constexpr const char *kLum     = "jahLum";
 constexpr const char *kLumIter0 = "jahLumIter0";
@@ -406,11 +418,12 @@ Ogre::CompositorPassQuadDef *addQuad(Ogre::CompositorNodeDef *n, const char *tar
 /// assert, and the inset must additionally be able to carry a PIPPED CAMERA's
 /// own exposure without the main view moving.
 Ogre::CompositorPassClearDef *addFixedExposureClear(Ogre::CompositorNodeDef *n,
-                                                    const char *lumTex, float exposure) {
+                                                    const char *lumTex, float exposureScale,
+                                                    float exposure) {
     Ogre::CompositorTargetDef *t = n->addTargetPass(lumTex);
     t->setNumPasses(1);
     auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
-    const float invLum = fixedInverseLuminance(exposure);
+    const float invLum = resolveFixedInverseLuminance(exposureScale, exposure);
     c->setAllClearColours(Ogre::ColourValue(invLum, invLum, invLum, invLum));
     c->mViewportModifierMask = 0x00;   // a 1x1 texture is never inset
     c->mProfilingId = "Jahshaka fixed exposure";
@@ -1284,7 +1297,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // THE CONSTANT EXPOSURE, written where the reduction would have written
         // it (addFixedExposureClear says why, once, for both surfaces that use
         // it — this chain and the picture-in-picture inset).
-        handlesOut.fixedExposure = addFixedExposureClear(n, kLum, desc.exposure);
+        handlesOut.fixedExposure =
+            addFixedExposureClear(n, kLum, desc.exposureScale, desc.exposure);
       } else {
         {
             auto *q = addQuad(n, kLumIter0, "HDR/DownScale01_SumLumStart", "Jahshaka HDR luminance start");
@@ -1834,7 +1848,9 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
         handlesOut.fill = c;
     }
     if (graded) {
-        handlesOut.exposure = addFixedExposureClear(n, kPipLum, pip.exposure);
+        // The inset never has a measured exposure of its own: it is a second
+        // surface showing a DIFFERENT camera, so there is nothing to carry over.
+        handlesOut.exposure = addFixedExposureClear(n, kPipLum, 0.0f, pip.exposure);
         handlesOut.exposure->mProfilingId = "Jahshaka PiP exposure";
         Ogre::CompositorTargetDef *t = n->addTargetPass(kPipBloom);
         t->setNumPasses(1);
@@ -1901,10 +1917,16 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
     workDef->connectExternal(0, n->getName(), 0);
 }
 
-Ogre::ColourValue fixedExposureColour(float exposure) {
-    const float invLum = fixedInverseLuminance(exposure);
+Ogre::ColourValue fixedExposureColour(float exposureScale, float exposure) {
+    const float invLum = resolveFixedInverseLuminance(exposureScale, exposure);
     return Ogre::ColourValue(invLum, invLum, invLum, invLum);
 }
+
+float fixedExposureScale(float exposureScale, float exposure) {
+    return resolveFixedInverseLuminance(exposureScale, exposure);
+}
+
+const char *exposureHistoryTextureName() { return kOldLum; }
 
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles) {
