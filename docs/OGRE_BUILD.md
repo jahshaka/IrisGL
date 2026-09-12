@@ -391,8 +391,23 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     threshold, and it is PIXEL EXACT rather than an approximation: the PBS
     specular term is `envColourS * pixelData.specular * (...)` with
     `pixelData.specular = material.kS`, so a black kS multiplies the whole
-    environment term by zero whether or not it was sampled. Clear coat and
-    `cubemaps_as_diffuse_gi` are excluded (kS scales neither).
+    environment term by zero whether or not it was sampled. CLEAR COAT IS
+    INSIDE the gate: its own environment term is scaled by kS too
+    (`Rs += clearCoatEnvColourS * pixelData.specular.xyz * (...) * clearCoat`,
+    `200.BRDFs_piece_ps.any:334`), so a zero-kS clear-coated material reflects
+    nothing either — the round-2 header claimed the opposite and was wrong
+    (corrected 2026-09-13, A/B-measured pixel-identical in `gi.probe_gate` (g)).
+    The one exclusion is `cubemaps_as_diffuse_gi`, where a probe also carries
+    DIFFUSE light, which kS does not scale.
+    THE F0 HALF OF THE PREDICATE READS WHAT THE SHADER READS: `setFresnel`
+    writes `mFresnelG`/`mFresnelB` only in the SEPARATE form and `getFresnel()`
+    returns all three regardless (the default datablock's stale G/B are 0.818),
+    so testing all three unconditionally answered "reflective" for every
+    zero-reflectance material in the non-separate Fresnel workflow and the gate
+    never fired there at all — no pixel differed, which is why a picture-only
+    suite could not see it (round-3 defect, 2026-09-13). The predicate now reads
+    `mFresnelR` alone unless `hasSeparateFresnel()`, which is the shader's own
+    rule (`500.Structs_piece_vs_piece_ps.any:283-287`).
     The MEDIA hunk is the one that saves the work: `forwardPlusDoCubemaps` is
     inserted from a PASS property, so it is made conditional on the DATABLOCK
     property `use_parallax_correct_cubemaps`.
@@ -403,7 +418,12 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     material whose Specular Color the user raises kept the gated shader and went
     on reflecting nothing — `calculateHashForPreCreate` runs on a flush, and
     nothing in Jahshaka's per-frame material push flushes (OgreMaterials
-    `applyPbr`). An ordinary edit that stays reflective costs no flush.
+    `applyPbr`). An ordinary edit that stays reflective costs no flush, and a
+    DRAG of the Specular Color slider down through black and back crosses
+    exactly twice, not once per frame. Both halves are measured rather than
+    claimed: the engine counts crossings
+    (`world.giStatus().probeGateCrossings`) and `gi.probe_gate` gates 100
+    non-crossing pushes at zero and a 41-push drag at two.
     Covered by `gi.probe_gate`.
 **DEFERRED (not in the stack, and HOLDING NO NUMBER).**
 `thirdparty/ogre-patches/deferred/0029-pcc-probe-visibility-from-captured-depth.patch.DEFERRED`

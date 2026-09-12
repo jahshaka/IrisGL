@@ -575,6 +575,10 @@ GiStatus OgreScene::giStatus() const {
             }
         }
         st.reusedLastRefresh = mGiReusedLastRefresh;
+        // Outside the probe block on purpose: a material can cross the gate in
+        // a scene that has no probe grid at all (the shader is rebuilt either
+        // way), and the count is the honest answer there too.
+        st.probeGateCrossings = mProbeGateCrossings;
         // DDGI, reported the same way pccBound/vctBound are: against the live
         // HlmsPbs pointer, not against what was requested or who bound last.
         st.ifdBound          = mIfd && pbs->getIrradianceField() == mIfd;
@@ -1191,12 +1195,32 @@ unsigned OgreScene::giVoxelResolution() const {
 //      the other two RELATIVE TO ITSELF (kSlabAspect). A wall, a floor, a
 //      ceiling, a partition and a billboard are slabs; a chair, a car, a column
 //      and a crate are not, at any scale, in any scene;
-//   2. for each axis the OUTERMOST slabs on either side of the content are the
-//      shell, and the space between their inner faces is the region on that
-//      axis. Anything standing between them is furniture, whatever its size;
-//   3. an axis is ENCLOSED when those two slabs FACE each other — they overlap
-//      substantially on the other two axes — across a REAL gap. A floor and a
-//      ceiling; two facing walls.
+//   2. a slab may CLOSE a face of the region only if it COVERS the region —
+//      at least half its cross-section on each of the other two axes, counting
+//      only axes something actually bounds (R1). Being thin and broad is what
+//      makes an item a slab; spanning the space is what makes it a wall. A
+//      shelf, a tabletop, a rug and a hanging light box are slabs by shape and
+//      none of them is a ceiling;
+//   3. an axis is ENCLOSED by a FACING PAIR of covering slabs across a REAL gap
+//      — two different slabs, one entirely beyond the other, overlapping
+//      substantially on the other two axes (R2). A floor and a ceiling; two
+//      facing walls. The OUTERMOST pair is the shell and anything between them
+//      is furniture, whatever its size;
+//   4. a LONE covering slab closes its one face only when NOTHING lies beyond
+//      it (R3): the ground has nothing below it and is the floor; a partition
+//      standing across a hall has the hall on both sides and closes nothing.
+//
+// THERE IS NO WORLD-ORIGIN TERM AND NO "WHICH SIDE OF THE CONTENT" TERM IN ANY
+// OF IT, and that is a correction, not a decoration (round-3 send-back,
+// 2026-09-13). Round 2 decided a slab's side by comparing its centre against
+// the midpoint of every NON-slab item — and on the default 100 m ground that
+// midpoint IS the world origin, because the ground is the content on X and Z.
+// Measured on this file's own contract geometry: the room of case 1 at the
+// origin read enclosed 2 with region x = [-4.90, 4.90]; THE SAME ROOM built at
+// x = +25 read enclosed 1 with x = [-50.00, 29.90] and lost its reflections
+// outright, and the roofed one kept them over a region spanning the whole 80 m
+// from the origin to the far wall — the oversized-region shrink-fit chain,
+// reached by translation. Contract rows 7 and 8 are that pair.
 //
 // WHY IT REPLACED THE HULL TEST (round-2 send-back, 2026-09-13; the lead's
 // measurement). The old test asked whether a slab covered half of the CONTENT
@@ -1212,8 +1236,11 @@ unsigned OgreScene::giVoxelResolution() const {
 // large one. The defect is the hull itself: whatever the scene stands ON
 // dominates a measurement that is supposed to be about what stands on IT.
 // Slab-ness is self-relative and the pairing is slab-to-slab, so the ground
-// takes part in the Y answer (it is the floor) and is INVISIBLE to the X and Z
-// answers — it is not thin on those axes. Nothing here is tuned to a size.
+// takes part in the Y answer (it is the floor) and never becomes a wall of the
+// X or Z ones — it is not thin on those axes. What it DOES still do there is
+// set the hull those axes fall back to when nothing closes them, which is the
+// honest answer ("this axis is open") rather than a verdict. Nothing here is
+// tuned to a size, and nothing here reads a position.
 //
 // THE A1 FIX IS STRUCTURAL NOW, not a condition. The Mirror Room sample's
 // free-standing MirrorPanel — a 5.2 x 3.0 x 0.24 slab standing at z = -2.2 in a
@@ -1266,6 +1293,13 @@ static const float kSlabFacingOverlap = 0.5f;
 // slab's own cross-section, for the space between to be a VOLUME. A rug lying
 // on a floor is two parallel Y slabs 5 mm apart; a crawlspace is not.
 static const float kSlabMinGapFraction = 0.05f;
+// HOW MUCH OF THE ROOM A SLAB MUST COVER TO BE ALLOWED TO CLOSE A FACE OF IT
+// (round-3 rule R1). Being thin and broad makes an item a slab; being a WALL
+// or a CEILING additionally means spanning the space it is supposed to close.
+// A shelf, a tabletop, a rug, a hanging panel and a light box are all slabs by
+// shape and none of them covers the room. Half is the same threshold the
+// facing test already uses for slab-to-slab overlap, applied to the region.
+static const float kSlabRegionCover = 0.5f;
 
 Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
                                          int *enclosedAxesOut) const {
@@ -1301,60 +1335,123 @@ Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
         return broad > 0.0f && broad >= kSlabAspect * thin;
     };
 
-    for (size_t ax = 0; ax < 3u; ++ax) {
-        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+    // What one axis' reading is: where its two faces ended up, whether each was
+    // CLOSED by a slab (as opposed to left at the hull), and whether the axis
+    // ENCLOSES — which only a facing PAIR can make true.
+    struct AxisRead { float lo = 0.0f, hi = 0.0f; bool closedLo = false, closedHi = false, enclosed = false; };
 
-        // The slabs for this axis, and where the rest of the scene — the
-        // CONTENT — sits on it, which is what says which side of the content a
-        // slab is on. (With nothing but slabs in the scene, the hull's own
-        // centre stands in.)
+    // THE READING FOR ONE AXIS. `coverAgainst` is null on the first pass (the
+    // seed) and points at the first pass' answer on the second (see R1 below).
+    const auto readAxis = [&](size_t ax, const AxisRead *coverAgainst) -> AxisRead {
+        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+        AxisRead out;
+        out.lo = hullMin[ax];
+        out.hi = hullMax[ax];
+
+        // R1: A SLAB MAY CLOSE A FACE ONLY IF IT COVERS THE ROOM. Coverage is
+        // measured against the REGION, per other axis — and ONLY against an
+        // axis something actually bounds. An axis with no slab of its own still
+        // carries the whole ground plane, and nothing real covers half of a
+        // hundred metres: measuring against it would reject the two long walls
+        // of an open-ended hall, which are exactly the walls that make it one.
+        const auto covers = [&](const Ogre::Aabb &a) {
+            if (!coverAgainst) return true;                   // pass 1: the seed
+            for (size_t k : { o1, o2 }) {
+                const AxisRead &r = coverAgainst[k];
+                if (!r.closedLo && !r.closedHi) continue;     // nothing bounds it: not evidence
+                const float span = r.hi - r.lo;
+                if (!(span > 1e-5f)) continue;
+                const float overlap = std::min(a.getMaximum()[k], r.hi) - std::max(a.getMinimum()[k], r.lo);
+                if (overlap < kSlabRegionCover * span) return false;
+            }
+            return true;
+        };
+
+        // The OUTERMOST covering slab on either side. Anything between them is
+        // furniture whatever its size — which is the structural form of the A1
+        // fix (the Mirror Room's free-standing panel is a Z slab and is simply
+        // inside the room).
         const Ogre::Aabb *lo = nullptr, *hi = nullptr;
-        float contentMin = 1e30f, contentMax = -1e30f;
         for (const Ogre::Aabb &a : raw) {
-            if (isSlab(a, ax)) {
-                if (!lo || a.mCenter[ax] < lo->mCenter[ax]) lo = &a;
-                if (!hi || a.mCenter[ax] > hi->mCenter[ax]) hi = &a;
-            } else {
-                contentMin = std::min(contentMin, a.getMinimum()[ax]);
-                contentMax = std::max(contentMax, a.getMaximum()[ax]);
+            if (!isSlab(a, ax) || !covers(a)) continue;
+            if (!lo || a.mCenter[ax] < lo->mCenter[ax]) lo = &a;
+            if (!hi || a.mCenter[ax] > hi->mCenter[ax]) hi = &a;
+        }
+        if (!lo) return out;                                  // no shell on this axis
+
+        // R2: TWO-SIDED CLOSURE IS A FACING PAIR ACROSS A REAL GAP. Two
+        // different slabs, one entirely below the other on this axis, sharing
+        // most of their extent on the other two, with a volume between them.
+        // There is NO world-origin term and no "which side of the content" term
+        // anywhere in this: a room is a room wherever on the ground it stands.
+        if (lo != hi && lo->getMaximum()[ax] < hi->getMinimum()[ax]) {
+            const auto shares = [&](size_t k) {
+                const float l = std::max(lo->getMinimum()[k], hi->getMinimum()[k]);
+                const float h = std::min(lo->getMaximum()[k], hi->getMaximum()[k]);
+                const float smaller = 2.0f * std::min(lo->mHalfSize[k], hi->mHalfSize[k]);
+                return (h - l) >= std::max(smaller * kSlabFacingOverlap, 1e-5f);
+            };
+            const float smallestSpan =
+                2.0f * std::min(std::min(lo->mHalfSize[o1], hi->mHalfSize[o1]),
+                                std::min(lo->mHalfSize[o2], hi->mHalfSize[o2]));
+            const float gap = hi->getMinimum()[ax] - lo->getMaximum()[ax];
+            if (shares(o1) && shares(o2) && gap >= smallestSpan * kSlabMinGapFraction) {
+                out.lo = std::min(std::max(lo->getMaximum()[ax], hullMin[ax]), hullMax[ax]);
+                out.hi = std::max(std::min(hi->getMinimum()[ax], hullMax[ax]), hullMin[ax]);
+                out.closedLo = out.closedHi = true;
+                out.enclosed = true;
+                if (!(out.lo < out.hi)) return AxisRead{ hullMin[ax], hullMax[ax], false, false, false };
+                return out;
             }
         }
-        if (!lo) continue;                                  // no shell on this axis
-        const float contentCentre = (contentMin <= contentMax)
-                                        ? 0.5f * (contentMin + contentMax)
-                                        : 0.5f * (hullMin[ax] + hullMax[ax]);
 
-        // The pulls. Only a slab that is on the far side of the content from
-        // the region's own centre closes a face, and the pull is clamped into
-        // the hull, so a face can only ever move inwards.
-        float pulledMin = hullMin[ax], pulledMax = hullMax[ax];
-        bool  closedMin = false, closedMax = false;
-        if (lo->mCenter[ax] < contentCentre) {
-            pulledMin = std::min(std::max(lo->getMaximum()[ax], hullMin[ax]), hullMax[ax]);
-            closedMin = true;
-        }
-        if (hi->mCenter[ax] > contentCentre) {
-            pulledMax = std::max(std::min(hi->getMinimum()[ax], hullMax[ax]), hullMin[ax]);
-            closedMax = true;
-        }
-        if (!(pulledMin < pulledMax)) continue;             // no real volume left: keep the hull
-        mn[ax] = pulledMin; mx[ax] = pulledMax;
-
-        // THE ENCLOSURE READING. Both faces closed, by two DIFFERENT slabs that
-        // FACE each other across a real gap.
-        if (!closedMin || !closedMax || lo == hi || !enclosedAxesOut) continue;
-        const auto shares = [&](size_t k) {
-            const float l = std::max(lo->getMinimum()[k], hi->getMinimum()[k]);
-            const float h = std::min(lo->getMaximum()[k], hi->getMaximum()[k]);
-            const float smaller = 2.0f * std::min(lo->mHalfSize[k], hi->mHalfSize[k]);
-            return (h - l) >= std::max(smaller * kSlabFacingOverlap, 1e-5f);
+        // R3: A LONE SLAB CLOSES ITS ONE FACE ONLY WHEN NOTHING IS BEYOND IT.
+        // The ground has nothing below it and is the floor; a partition
+        // standing in a hall has the hall on both sides and is a partition. The
+        // old code pulled a face towards any slab that sat past the middle of
+        // the content, so one partition in an open-ended hall dropped half of
+        // it — and which half depended on where the world origin was.
+        const float eps = 1e-4f * std::max(hullMax[ax] - hullMin[ax], 1.0f);
+        const auto beyond = [&](const Ogre::Aabb *s, bool below) {
+            for (const Ogre::Aabb &a : raw) {
+                if (&a == s) continue;
+                if (below ? (a.getMinimum()[ax] < s->getMinimum()[ax] - eps)
+                          : (a.getMaximum()[ax] > s->getMaximum()[ax] + eps))
+                    return true;
+            }
+            return false;
         };
-        const float smallestSpan =
-            2.0f * std::min(std::min(lo->mHalfSize[o1], hi->mHalfSize[o1]),
-                            std::min(lo->mHalfSize[o2], hi->mHalfSize[o2]));
-        const float gap = hi->getMinimum()[ax] - lo->getMaximum()[ax];
-        if (shares(o1) && shares(o2) && gap >= smallestSpan * kSlabMinGapFraction)
-            ++*enclosedAxesOut;
+        // The outermost slab on each side gets to close THAT side, and only if
+        // its outside is empty. A slab that is the whole extent of the scene on
+        // this axis (nothing beyond it either way) says nothing about which
+        // side the room is on, so it closes nothing.
+        if (!beyond(lo, true) && beyond(lo, false)) {
+            out.lo = std::min(std::max(lo->getMaximum()[ax], hullMin[ax]), hullMax[ax]);
+            out.closedLo = true;
+        }
+        if (!beyond(hi, false) && beyond(hi, true)) {
+            out.hi = std::max(std::min(hi->getMinimum()[ax], hullMax[ax]), hullMin[ax]);
+            out.closedHi = true;
+        }
+        if (!(out.lo < out.hi)) return AxisRead{ hullMin[ax], hullMax[ax], false, false, false };
+        return out;
+    };
+
+    // TWO PASSES, because R1 measures a slab against the region and the region
+    // is what the slabs decide. Pass 1 seeds it with the closure rules alone;
+    // pass 2 re-reads every axis with the cover test aimed at pass 1's answer
+    // and its per-axis "did anything bound this" flags. One iteration is
+    // enough: a pass-1 face can only ever be pulled INWARDS from the hull, and
+    // a smaller region only makes coverage easier, so no real wall can be
+    // rejected because of a pass-1 mistake — only a spurious closer removed.
+    AxisRead seed[3], final[3];
+    for (size_t ax = 0; ax < 3u; ++ax) seed[ax] = readAxis(ax, nullptr);
+    for (size_t ax = 0; ax < 3u; ++ax) final[ax] = readAxis(ax, seed);
+
+    for (size_t ax = 0; ax < 3u; ++ax) {
+        mn[ax] = final[ax].lo;
+        mx[ax] = final[ax].hi;
+        if (final[ax].enclosed && enclosedAxesOut) ++*enclosedAxesOut;
     }
     return Ogre::Aabb::newFromExtents(mn, mx);
 }

@@ -645,7 +645,21 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
             return true;   // an unlit material is never refractive
         }
         auto *db = static_cast<Ogre::HlmsPbsDatablock *>(raw);
+        // THE REFLECTION-PROBE GATE'S ONE EXPENSIVE EDIT, COUNTED (ogre-patch
+        // 0028, round-3 item 9). The gate is a SHADER property, so the three
+        // setters that can cross it flush every renderable wearing this
+        // datablock when — and only when — the answer CHANGES. That makes an
+        // ordinary parameter push free and a crossing push expensive, and the
+        // one workflow that crosses repeatedly is a user dragging the Specular
+        // Color slider down through black and back: each crossing frame
+        // rebuilds. It is bounded (two crossings per drag through zero, and
+        // only while the drag is AT black), but "bounded" is a claim, so the
+        // engine counts it and `world.giStatus().probeGateCrossings` reports
+        // it — which is also how gi.probe_gate proves the other half, that a
+        // NON-crossing edit flushes nothing at all.
+        const bool wasGated = db->hasZeroSpecularResponse();
         applyPbr(db, p, mRefractionsActive);
+        if (wasGated != db->hasZeroSpecularResponse()) ++mProbeGateCrossings;
         // An alpha-mode change moves the item between render queues, and the
         // items already exist: re-file them or a material turned refractive
         // keeps rendering in the opaque pass (as plain glass) until something

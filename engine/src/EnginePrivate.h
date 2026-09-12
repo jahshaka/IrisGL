@@ -3220,6 +3220,14 @@ private:
     /// giStatus, because "the fit is degenerate in this scene" is a fact about
     /// the scene the author can act on (GiStatus::probesClampedToRegion).
     int mProbesClampedToRegion = 0;
+    /// How many material pushes have CROSSED the reflection-probe gate
+    /// (ogre-patch 0028's HlmsPbsDatablock::hasZeroSpecularResponse) on this
+    /// scene. A crossing flushes every renderable wearing the datablock so the
+    /// shader is rebuilt with or without the per-pixel probe loop; an ordinary
+    /// edit that leaves the material reflective either way costs nothing. The
+    /// counter exists so BOTH halves of that are gateable
+    /// (GiStatus::probeGateCrossings).
+    unsigned mProbeGateCrossings = 0;
     /// THE LAMP-MAP CACHE'S MEMORY (collectShadowCacheFrame). Per caster: its
     /// last seen world box, Item, pose epoch and render channels; per lamp: its
     /// last seen shadow key (parameters + pose). A change is "different from

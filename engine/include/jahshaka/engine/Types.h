@@ -1802,6 +1802,16 @@ struct GiStatus {
     /// the honest signal that the fit is not doing the work in this scene, and
     /// unlike the union check above it CAN fire.
     int    probesClampedToRegion = 0;
+    /// How many material edits on this scene have CROSSED the reflection-probe
+    /// gate — the point at which a material stops (or starts) being able to
+    /// reflect anything, and its shader has to be rebuilt with or without the
+    /// per-pixel probe loop (ogre-patch 0028). An ordinary parameter push is
+    /// free; a crossing is a `flushRenderables` over every renderable wearing
+    /// that datablock. The only workflow that crosses repeatedly is a user
+    /// dragging Specular Color down through black and back, which crosses
+    /// exactly twice; a monotonically rising count on a still scene is a
+    /// defect. Cumulative, never reset.
+    unsigned probeGateCrossings = 0;
     /// The Forward+ per-cell CUBEMAP PROBE budget in force for this scene.
     ///
     /// `ForwardClustered::collectObjsForSlice` writes probes into a cluster cell

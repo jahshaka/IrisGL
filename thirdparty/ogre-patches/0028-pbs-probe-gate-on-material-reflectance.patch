@@ -32,14 +32,54 @@ the pair the owner named: F0 alone leaves the Schlick rim and the envBRDF bias),
 which makes it a strict subset of that provably-zero case. A physically lit
 dielectric has kS = 1 and never qualifies — it keeps its ~4% sheen.
 
-TWO EXCLUSIONS, both because kS does not scale them:
-  * clear coat — `clearCoatEnvColourS` is not multiplied by kS, so a
-    zero-kS clear-coated material still reflects and keeps the loop;
-  * `cubemaps_as_diffuse_gi` — there a probe also carries DIFFUSE light. Off in
-    Jahshaka (`setAmbientLight(..., envFeatures = 0)`), checked anyway.
+ONE EXCLUSION: `cubemaps_as_diffuse_gi` — there a probe also carries DIFFUSE
+light, which kS does not scale. Off in Jahshaka
+(`setAmbientLight(..., envFeatures = 0)`), checked anyway.
+
+CLEAR COAT IS NOT EXCLUDED (round-3 correction, 2026-09-13). Round 2 excluded it
+on the stated grounds that "clearCoatEnvColourS is not multiplied by kS". At
+this pin it is:
+
+    Rs += pixelData.clearCoatEnvColourS * pixelData.specular.xyz *
+          ( 0.04 * clearCoatEnvBRDF.x + clearCoatEnvBRDF.y ) * pixelData.clearCoat
+
+(Samples/Media/Hlms/Pbs/Any/Main/200.BRDFs_piece_ps.any:334). So a zero-kS
+clear-coated material provably reflects nothing either, and the exclusion bought
+the full per-pixel probe loop for a term that is multiplied away. The coat's
+other contributions are outside what the gate removes: its DIRECT lobe is in the
+light loop (200.BRDFs_piece_ps.any:225-239) and the attenuation it applies to
+Rd/Rs is in BRDF_EnvMap, which `needs_env_brdf` keeps; `clearCoatEnvColourS`
+itself is declared and zeroed under needs_env_brdf too
+(800.PixelShader_piece_ps.any:80-82 and 962), so folding the coat in cannot
+leave an undeclared symbol behind. Measured A/B across the fold in gi.probe_gate
+(g): the clear-coated zero-reflectance panel's pixels are identical either way.
+
+AND THE F0 HALF OF THE PREDICATE READS WHAT THE SHADER READS (round-3 defect,
+found by the same suite). `setFresnel` writes mFresnelG/mFresnelB only in the
+SEPARATE form; `getFresnel()` returns all three regardless, and the default
+datablock's stale G/B are 0.818. Round 2 tested all three unconditionally, so in
+the NON-separate Fresnel workflow — the one the owner's "not reflective" pair is
+authored in — the predicate answered "reflective" for a material whose F0 and kS
+are both zero, and the gate never fired there at all. No pixel differed (kS
+multiplies the term away either way), which is exactly why a picture-only suite
+could not see it. The predicate now reads mFresnelR alone unless
+hasSeparateFresnel(), which is the shader's own rule
+(500.Structs_piece_vs_piece_ps.any:283-287).
 
 `needs_env_brdf` is untouched: it is also raised by `hlms_enable_cubemaps_auto`,
 so the irradiance field's and VCT's diffuse still reach the surface.
+
+THE COST OF A CROSSING, AND THE ONE WORKFLOW THAT PAYS IT REPEATEDLY. A crossing
+flush walks every renderable wearing the datablock and recomputes its Hlms hash,
+so it is not free; an edit that leaves the material reflective either way costs
+nothing at all, by construction (both sides false => no flush). The one
+authoring gesture that crosses more than once is a user DRAGGING the Specular
+Color slider down through black and back up, which crosses exactly twice — once
+at the frame the value reaches zero and once at the frame it leaves it — not
+once per frame of the drag. Both halves are measured rather than asserted: the
+engine counts crossings (`world.giStatus().probeGateCrossings`) and gi.probe_gate
+gates 100 non-crossing pushes at ZERO crossings, and a 41-push drag through
+black at exactly two.
 
 THE PREDICATE IS A DATABLOCK METHOD, AND EDITING IT REBUILDS THE SHADER
 (round-2 fix, 2026-09-13). The gate is decided in `calculateHashForPreCreate`,
@@ -160,7 +200,7 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
  
 --- a/Components/Hlms/Pbs/include/OgreHlmsPbsDatablock.h
 +++ b/Components/Hlms/Pbs/include/OgreHlmsPbsDatablock.h
-@@ -402,6 +402,28 @@ namespace Ogre
+@@ -402,6 +402,31 @@ namespace Ogre
          void    setSpecular( const Vector3 &specularColour );
          Vector3 getSpecular() const;
  
@@ -170,13 +210,16 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
 +            zero_specular_response shader property.
 +        @remarks
 +            True when the specular colour is black AND no F0 is authored
-+            (metalness 0 in the metallic workflow, fresnel black otherwise) AND
-+            there is no clear coat. The PBS environment term is
++            (metalness 0 in the metallic workflow; the fresnel components the
++            SHADER reads otherwise — .x alone unless hasSeparateFresnel()).
++            The PBS environment term is
 +                Rs = envColourS * kS * (F0 * envBRDF.x + envBRDF.y)
 +            so such a datablock multiplies every reflection probe / env map
 +            contribution by zero: skipping the lookup is arithmetically
-+            identical, not an approximation. Clear coat is excluded because its
-+            own environment term is NOT scaled by kS.
++            identical, not an approximation. CLEAR COAT IS INCLUDED: its own
++            environment term is scaled by kS too
++            (200.BRDFs_piece_ps.any:334), so a zero-kS clear-coated material
++            reflects nothing either.
 +        @par
 +            The three setters flush the renderables when this value CHANGES, so
 +            that raising a black material's specular colour at runtime rebuilds
@@ -215,7 +258,7 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
      }
      //-----------------------------------------------------------------------------------
      Vector3 HlmsPbsDatablock::getSpecular() const
-@@ -520,6 +531,37 @@ namespace Ogre
+@@ -520,6 +531,61 @@ namespace Ogre
          return Vector3( mkSr, mkSg, mkSb ) * pi;
      }
      //-----------------------------------------------------------------------------------
@@ -234,20 +277,44 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
 +        // metalness in the metallic one (where the shader's dielectric floor of
 +        // 0.04 is not reachable from any setter, so "no authored F0" is
 +        // metalness 0).
++        //
++        // READ THROUGH THE SAME SWIZZLE THE SHADER USES. setFresnel writes
++        // mFresnelG/mFresnelB only in the SEPARATE form and leaves them at
++        // whatever the datablock was born with otherwise, while getFresnel()
++        // always returns all three; the shader reads material.F0.x alone unless
++        // fresnel_scalar is set (500.Structs_piece_vs_piece_ps.any:283-287,
++        // from hasSeparateFresnel() || metallicWorkflow). Reading all three
++        // unconditionally therefore answered "reflective" for every
++        // zero-reflectance material in the non-separate Fresnel workflow,
++        // because the default datablock's stale G/B are 0.818 — the gate never
++        // fired there at all. Measured, round 3.
 +        if( mWorkflow == MetallicWorkflow )
 +        {
 +            if( getMetalness() > kEps )
 +                return false;
 +        }
-+        else
++        else if( hasSeparateFresnel() )
 +        {
 +            const Vector3 f0 = getFresnel();
 +            if( f0.x > kEps || f0.y > kEps || f0.z > kEps )
 +                return false;
 +        }
++        else
++        {
++            if( mFresnelR > kEps )
++                return false;
++        }
 +
-+        // Clear coat has its own environment term and kS does not scale it.
-+        return mClearCoat == 0.0f;
++        // CLEAR COAT IS INSIDE THE PREDICATE, not an exclusion. Its environment
++        // term is scaled by kS like every other one:
++        //   Rs += clearCoatEnvColourS * pixelData.specular.xyz *
++        //         ( 0.04 * clearCoatEnvBRDF.x + clearCoatEnvBRDF.y ) * clearCoat
++        // (200.BRDFs_piece_ps.any:334, this pin), and clearCoatEnvColourS is
++        // declared and zeroed under needs_env_brdf, which the gate does not
++        // touch. The coat's DIRECT lobe is in the light loop and the
++        // attenuation it applies to Rd/Rs lives in BRDF_EnvMap, so neither
++        // moves either.
++        return true;
 +    }
 +    //-----------------------------------------------------------------------------------
      void HlmsPbsDatablock::setRoughness( float roughness )
