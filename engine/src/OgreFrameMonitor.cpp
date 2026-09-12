@@ -252,13 +252,23 @@ void FrameMonitor::closeOrphanPass() {
     pass(std::move(f.rec), f.gpuSampleId);
 }
 
+/// Banks a stage that arrived between frames. Past kPendingStageCoalesce the
+/// list stops growing and folds by NAME (see the constant): lossless in total
+/// time, bounded in size, and never silent.
+void FrameMonitor::bankPending(const std::string &name, float ms) {
+    if (mPendingHostStages.size() >= kPendingStageCoalesce) {
+        for (FrameStage &s : mPendingHostStages)
+            if (s.name == name) { s.ms += ms; return; }
+    }
+    mPendingHostStages.push_back({ name, ms });
+}
 void FrameMonitor::stage(const char *name, double ms) {
     if (mInFrame) mCurrent.stages.push_back({ name, float(ms) });
-    else          mPendingHostStages.push_back({ name, float(ms) });
+    else          bankPending(name, float(ms));
 }
 void FrameMonitor::hostStage(const std::string &name, float ms) {
     if (mInFrame) mCurrent.stages.push_back({ name, ms });
-    else          mPendingHostStages.push_back({ name, ms });
+    else          bankPending(name, ms);
 }
 void FrameMonitor::cacheWork(const CacheWork &w) {
     if (mInFrame) mCurrent.cacheWork.push_back(w);
@@ -643,6 +653,7 @@ MonitorStatus OgreEngine::monitorStatus() const {
     st.pendingEvents = mMonitor->pendingEvents();
     st.framesRecorded = mMonitor->framesRecorded();
     st.framesDropped  = mMonitor->framesDropped();
+    st.eventsDropped  = mMonitor->eventsDropped();
     st.overheadMs     = mMonitor->lastOverheadMs();
     gpuTimingStatus(st);
     return st;

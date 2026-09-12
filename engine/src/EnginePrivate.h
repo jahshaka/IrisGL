@@ -860,8 +860,21 @@ namespace monitor {
 /// Allocated when the monitor goes on and FREED when it goes off.
 static constexpr unsigned kRingCapacity = 4096u;
 /// Events are far rarer than frames, but a GI-rebuild storm can burst; the
-/// queue never grows past this (the overflow is reported, not hidden).
+/// queue never grows past this (the overflow is reported, not hidden —
+/// MonitorStatus::eventsDropped, which the capture bundle's truncation block
+/// reads).
 static constexpr unsigned kEventCapacity = 8192u;
+/// HOST STAGES WAITING FOR A FRAME. A stage reported outside a frame belongs to
+/// the NEXT one, and normally a handful wait (the host's sync tree). But a host
+/// that keeps reporting while NOTHING renders — the owner presses Ctrl+F4 and
+/// switches to a page with no viewport, so the driver skips every tick — would
+/// otherwise bank two entries per tick for the whole capture and hand all of
+/// them to the first frame that does render, as one enormous record charged to
+/// the wrong frame (lane MON-P1b review, 2026-09-13). Past this many, stages
+/// COALESCE BY NAME instead of growing: the total time is preserved exactly,
+/// the list is bounded by the number of distinct stage names, and nothing is
+/// dropped.
+static constexpr unsigned kPendingStageCoalesce = 64u;
 
 /// The per-pass listener. ONE instance for the process, attached to every live
 /// workspace while the monitor is on: the view's (through its seam, so it rides
@@ -957,6 +970,9 @@ public:
     // ---- what the instrumentation sites file ------------------------------
     void stage(const char *name, double ms);
     void hostStage(const std::string &name, float ms);
+    /// Banks a between-frames stage, coalescing by name past
+    /// kPendingStageCoalesce so the pending list cannot grow without bound.
+    void bankPending(const std::string &name, float ms);
     void cacheWork(const CacheWork &w);
     void pass(FramePass &&p, unsigned gpuSampleId = 0u);
     void event(MonitorEvent &&e);

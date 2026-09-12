@@ -38,6 +38,35 @@
 #include "irisgl/document/scenegraph/shadowmap.h"
 #include <QFileInfo>
 #include <functional>
+#include <chrono>
+
+namespace {
+
+/// ONE MIRROR SUB-STAGE, folded into the frame record the engine is building
+/// (RENDER_LOOP_MONITOR_SPEC §4.2). Constructed with a null engine — which is
+/// every frame with no capture running — it reads no clock and does nothing.
+/// The scopes below are SEQUENTIAL, never nested, so the times they report are
+/// exclusive by construction and sum to the mirror's own stage.
+struct MirrorStage {
+    jahshaka::engine::Engine *engine;
+    const char *name;
+    std::chrono::steady_clock::time_point start;
+    MirrorStage(jahshaka::engine::Engine *e, const char *n) : engine(e), name(n)
+    {
+        if (engine) start = std::chrono::steady_clock::now();
+    }
+    ~MirrorStage()
+    {
+        if (!engine) return;
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - start).count();
+        engine->noteHostStage(std::string(name), float(ms));
+    }
+    MirrorStage(const MirrorStage &) = delete;
+    MirrorStage &operator=(const MirrorStage &) = delete;
+};
+
+}   // namespace
 #include <QtMath>
 
 using namespace jahshaka::engine;
@@ -369,7 +398,15 @@ int SceneMirror::sync()
     // Sockets (CAMERAS_SPEC §5) move nodes, so they resolve BEFORE the walk
     // that pushes transforms — a camera on a character's head has to be on the
     // head in the frame that renders it, not in the one after.
+    // THE CAPTURE GATE (RENDER_LOOP_MONITOR_SPEC §4.2): ONE virtual call per
+    // sync when nothing is capturing, and every scope below is then a pair of
+    // no-ops on a null pointer.
+    jahshaka::engine::Engine *mon =
+        (mMonitorEngine && mMonitorEngine->frameMonitor() != jahshaka::engine::MonitorLevel::Off)
+            ? mMonitorEngine : nullptr;
+    { MirrorStage s(mon, "mirror.sockets");
     resolveSockets();
+    }
 
     ++mSyncStamp;
     mVisited = 0;
@@ -410,22 +447,29 @@ int SceneMirror::sync()
     iris::SceneNode *root = mSource->getRootNode().data();
     const std::size_t rootChildren = iris::graph::childCount(root->graphNode());
     const bool rootShown = root->isVisible();
+    { MirrorStage s(mon, "mirror.walk");
     for (std::size_t i = 0; i < rootChildren; ++i)
         if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
             visit(c, rootShown, false);
+    }
+    { MirrorStage s(mon, "mirror.removeMissing");
     removeMissing();
+    }
     // THE CACHE SWEEP, ON DEMAND. reclaimUnused builds three QSets out of every
     // entry in the scene; at 10k nodes that was 20k+ set inserts a frame to
     // conclude, almost always, that nothing had been dropped. An engine mesh /
     // material / texture can only become unreferenced when an entry is released
     // or when an entry's reference to one CHANGES — every such site arms the
     // flag, and only then does the sweep run.
-    if (mReclaimPending) { reclaimUnused(); mReclaimPending = false; }
+    if (mReclaimPending) { MirrorStage s(mon, "mirror.reclaim");
+                           reclaimUnused(); mReclaimPending = false; }
     // LIVE TEXTURES (ADDENDUM A-1). AFTER the sweep, so a texture the sweep
     // just freed is not uploaded into; before the frame is drawn, because the
     // engine's upload records into the OPEN command buffer and therefore lands
     // ahead of this frame's draws with no flush of ours.
+    { MirrorStage s(mon, "mirror.liveTextures");
     syncLiveTextures();
+    }
     // THE SHADER CLOCK (HLMS_ADOPTION P5), and only when something reads it.
     // The host owns the number: mShaderTimeOverride is what a deterministic
     // test or a scrubbed timeline sets; otherwise it is wall-clock seconds
@@ -440,13 +484,21 @@ int SceneMirror::sync()
     // SHARING BEFORE CLIPS (AVATAR_RIG_PERF_SPEC §3.4): a follower carries no
     // clips at all, so which pieces are followers has to be settled before the
     // clip pass decides who to push.
+    { MirrorStage s(mon, "mirror.skeletons");
     syncSkeletonSharing();
+    }
+    { MirrorStage s(mon, "mirror.clips");
     syncClips();
+    }
+    { MirrorStage s(mon, "mirror.helpers");
     syncHighlight();
     syncGrid();
+    }
     // AFTER removeMissing: a rider deleted from the document is a dangling key
     // in the reconciler's map until its entry is released (see the function).
+    { MirrorStage s(mon, "mirror.riders");
     sweepStaleRiders();
+    }
     return mVisited;
 }
 
