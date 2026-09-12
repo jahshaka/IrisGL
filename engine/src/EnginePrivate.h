@@ -1706,6 +1706,9 @@ public:
     void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
     bool nodeGiBoundsExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
+    void setNodeMovable(NodeId id, bool movable) override;
+    bool nodeMovable(NodeId id) const override;
+    MobilityStatus mobilityStatus() const override;
     bool nodeHelper(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
     unsigned nodeLightMask(NodeId id) const override;
@@ -1997,6 +2000,14 @@ private:
         /// icons, range wires — things the user must see but a reflection probe
         /// must not capture. Carries kHelperBit instead of kVisibleBit.
         bool                      helper = false;
+        /// MOBILITY, as the document RESOLVED it (REALTIME_REFLECTIONS_SPEC
+        /// §3.3, lane R1): true = this node moves. The host pushes it on change
+        /// through Scene::setNodeMovable; R1 only RECORDS it (and counts it,
+        /// Scene::mobilityStatus), so pushing it costs a bool write and cannot
+        /// move a pixel or invalidate a cache. Lane R2 is what acts on it —
+        /// kMovableBit instead of kVisibleBit, no kGiGeometryBit, the widened
+        /// view/reflect shadow channels and the probe-capture exclusion.
+        bool                      movable = false;
         /// LIGHTING CHANNELS, object side (Scene::setNodeLightMask). Kept here
         /// rather than read back off the Item because the Item is REBUILT on
         /// every attachMesh/attachSkinnedMesh (a material swap destroys and

@@ -382,6 +382,22 @@ int SceneMirror::sync()
     // MaterialSync): every mesh node sharing a material used to pay for it.
     mMaterialSync.clear();
     mAnyShadowCaster = false;
+    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): recounted by this walk.
+    mMovableNodes = 0;
+    // THE PLAY EDGE the soft-promotion rule is scoped to. On the FALLING edge
+    // the document has already cleared every node's soft flag
+    // (Scene::setPlaying) and the transforms are back where the author left
+    // them, so the warn latches and the remembered poses go with it.
+    {
+        const bool playing = mSource->isPlaying();
+        if (playing != mWasPlaying) {
+            for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
+                it->posed = false;
+                it->mobilityWarned = false;
+            }
+            mWasPlaying = playing;
+        }
+    }
     mAnyRefractive = false;
     mAnyDistortion = false;
     mShadowFilter = ShadowFilter::Hard;
@@ -394,7 +410,7 @@ int SceneMirror::sync()
     const bool rootShown = root->isVisible();
     for (std::size_t i = 0; i < rootChildren; ++i)
         if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
-            visit(c, rootShown);
+            visit(c, rootShown, false);
     removeMissing();
     // THE CACHE SWEEP, ON DEMAND. reclaimUnused builds three QSets out of every
     // entry in the scene; at 10k nodes that was 20k+ set inserts a frame to
@@ -1427,7 +1443,7 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     return id;
 }
 
-void SceneMirror::visit(iris::SceneNode *node, bool parentShown)
+void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMovable)
 {
     if (!node) return;
     ++mVisited;
@@ -1677,6 +1693,13 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown)
         }
     }
 
+    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3). Resolved here, where the walk
+    // is parent-first and the parent's answer is already in hand — the same
+    // shape effective visibility uses, and for the same reason: rule 2 ("it
+    // travels with its parent") is an AND down the chain, not a per-node
+    // question. `movable` is what this node's children inherit.
+    const bool movable = syncMobility(e, node, parentMovable);
+
     if (node->getSceneNodeType() == iris::SceneNodeType::ParticleSystem) {
         syncParticles(e, static_cast<iris::ParticleSystemNode *>(node));
     } else if (e.hasParticles) {
@@ -1752,7 +1775,72 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown)
     const std::size_t n = iris::graph::childCount(h);
     for (std::size_t i = 0; i < n; ++i)
         if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(h, i)))
-            visit(c, shown);
+            visit(c, shown, movable);
+}
+
+// ---- mobility -------------------------------------------------------------------
+// SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3. The DOCUMENT decides "does this move?"
+// and the engine is told; lane R1 pushes and counts, lane R2 spends it (movable
+// objects out of the reflection probes and the GI geometry set, into the view
+// and planar shadow maps only).
+//
+// TWO THINGS HAPPEN HERE and they must not be confused:
+//
+//  * THE RESOLUTION is PREDICTIVE. It reads drivers — physics, an avatar, a
+//    socket, a playing clip, a rig with a clip, a particle emitter — and the
+//    parent's answer. It never reads "did this move", because flipping an
+//    object's GI class costs a from-scratch GI rebuild, and an editor drag that
+//    promoted would put that rebuild in the middle of the gesture.
+//
+//  * THE SOFT PROMOTION is the one place movement IS read, and only while the
+//    document is PLAYING (owner decision O3). A script pushing a prop nobody
+//    marked Movable gets treated as movable from that frame — no rebuild, so
+//    the bounce light it left behind stays as a ghost until play stops — plus
+//    one warning naming the object. Once per node per play session: the latch
+//    is the entry's, and the whole set is cleared on both play edges.
+bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovable)
+{
+    iris::MobilityReason why = iris::MobilityReason::Default;
+    bool movable = node->resolveMobility(parentMovable, &why) == iris::Mobility::Movable;
+
+    // THE SURPRISE MOVER. Only for a node that resolved static with nobody
+    // having said so (an explicit `static` is a decision we keep honouring, and
+    // its ghost is the author's own choice), and only while playing.
+    if (!movable && mSource && mSource->isPlaying() && node->mobility() == iris::Mobility::Auto) {
+        const iris::Vec3 p = node->getLocalPos();
+        const iris::Quat r = node->getLocalRot();
+        const iris::Vec3 sc = node->getLocalScale();
+        if (!e.posed) {
+            // First play frame that saw it: remember where it stood. A node has
+            // to be seen standing still before it can be seen moving.
+            e.playPos = p; e.playRot = r; e.playScale = sc; e.posed = true;
+        } else if (!(p == e.playPos) || !(r == e.playRot) || !(sc == e.playScale)) {
+            node->_setSoftMovable(true);
+            movable = true;
+            why = iris::MobilityReason::Play;
+            e.playPos = p; e.playRot = r; e.playScale = sc;
+            if (!e.mobilityWarned) {
+                e.mobilityWarned = true;
+                ++mMobilityMisses;
+                mLastMobilityMiss = node->getName();
+                // PLAIN WORDS, once, naming the thing: the author is not a
+                // programmer and the fix is one combo box away.
+                qWarning("Jahshaka: '%s' started moving during play but is not marked Movable. "
+                         "It moves smoothly, but it leaves its old bounce light behind until you "
+                         "stop play — set Movement to Movable in its properties to remove that.",
+                         qUtf8Printable(node->getName()));
+            }
+        }
+    }
+
+    if (movable) ++mMovableNodes;
+    // ON CHANGE ONLY, like every other flag on this walk.
+    const int want = movable ? 1 : 0;
+    if (e.movable != want) {
+        mTarget->setNodeMovable(e.node, movable);
+        e.movable = want;
+    }
+    return movable;
 }
 
 // ---- particles ------------------------------------------------------------------

@@ -728,10 +728,30 @@ CameraNodePtr Scene::getActiveCamera() const
 // rule 1: `editor.stop()` has no early-out by design (a script must always be
 // able to force a real stop), so a second stop must find nothing left to do
 // rather than faulting or re-running a release. Gate P6.
+namespace {
+/// Pre-order over the document children (childAt skips the engine's own helper
+/// nodes and can answer null — a walk must not assume the range is dense).
+void clearSoftMobility(SceneNode *n)
+{
+    if (!n) return;
+    n->_setSoftMovable(false);
+    const int kids = n->childCount();
+    for (int i = 0; i < kids; ++i) clearSoftMobility(n->childAt(i));
+}
+} // namespace
+
 void Scene::setPlaying(bool playing)
 {
     if (this->playing == playing) return;
     this->playing = playing;
+    // SOFT PROMOTION IS PLAY-SCOPED (REALTIME_REFLECTIONS_SPEC §3.3.3, owner
+    // decision O3). A node that started moving during play with nothing
+    // predicting it was treated as movable for the rest of that play session,
+    // leaving a "ghost" of its bounce light at its authored spot. Stop puts the
+    // transforms back (PlayBack) and the classification with them, so the next
+    // settle refresh rebuilds the room around the real world again. Cleared on
+    // BOTH edges: a second play must not inherit the last one's promotions.
+    if (rootNode) clearSoftMobility(rootNode.data());
     if (!possession) return;
     if (playing) possession->onPlayStarted();
     else possession->onPlayStopped();

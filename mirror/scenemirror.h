@@ -151,6 +151,20 @@ public:
     /// the counter that moves; giRefreshCount() stays still until the drag ends.
     quint64 giLightRefreshCount() const { return mGiLightRefreshCount; }
 
+    // ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1) ----------------
+    /// How many of the document's nodes resolved MOVABLE on the last sync —
+    /// what the mirror pushed to the engine, which is also what the engine
+    /// reports back through Scene::mobilityStatus. Zero for a still scene of
+    /// props, which is the whole point of the classification.
+    quint64 movableNodeCount() const { return mMovableNodes; }
+    /// SOFT PROMOTIONS (§3.3.3, O3): nodes that started moving during play
+    /// with nothing predicting they would. Each one is a "mark it Movable"
+    /// message for the author, counted once per node per play session, and each
+    /// leaves a stale bounce-light ghost where it started until play stops.
+    quint64 mobilityMissCount() const { return mMobilityMisses; }
+    /// The name of the last one, for the message a host shows.
+    QString lastMobilityMiss() const { return mLastMobilityMiss; }
+
     /// The document light node driving Instant Radiosity: the scene's giLightGuid
     /// when it names a live light, else the first directional light (by creation
     /// order), else any light. Null when the scene has no lights. Public so the
@@ -562,6 +576,20 @@ private:
         // the flag really changes, so re-pushing it every frame would flag a
         // rebuild every frame. -1 = never pushed.
         int giBoundsExcluded = -1;
+        // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1): the last RESOLVED
+        // answer pushed to the engine, same push-on-change discipline. -1 =
+        // never pushed. The engine only records it today (R2 spends it), but
+        // the discipline is the point: a flip is a classification change, and
+        // R2's version of it invalidates render channels.
+        int movable = -1;
+        // SOFT PROMOTION (§3.3.3, owner decision O3). The pose this node was
+        // last seen at while playing, and whether the author has already been
+        // told about it. `posed` is false until the first play frame sees it —
+        // a node has to be seen standing still before it can be seen moving.
+        iris::Vec3 playPos, playScale;
+        iris::Quat playRot;
+        bool posed = false;
+        bool mobilityWarned = false;
         // (hasBillboards/billboardSignature lived here and had no reader or
         // writer anywhere in the tree — deleted with the deep-audit fix wave.)
         // Particles (PARTICLES_FX2_SPEC): the engine simulates, so the mirror
@@ -714,7 +742,13 @@ private:
     /// `parentShown` is the parent's EFFECTIVE visibility (it and every
     /// ancestor visible): the walk is parent-first, so the rule costs one AND
     /// per node, never an ancestor walk.
-    void visit(iris::SceneNode *node, bool parentShown);
+    /// `parentMovable` is the parent's RESOLVED mobility (§3.3.2 rule 2),
+    /// threaded down the walk so the resolution stays O(nodes).
+    void visit(iris::SceneNode *node, bool parentShown, bool parentMovable);
+    /// The mobility half of visit(): resolve, push on change, and watch for the
+    /// play-time surprise mover. Returns what this node RESOLVED to, which its
+    /// children inherit.
+    bool syncMobility(Entry &e, iris::SceneNode *node, bool parentMovable);
     void releaseEntry(Entry &e);
     /// Releases every engine object this mirror hung off DOCUMENT nodes
     /// (entries + highlight shells) — the body of the graph-evacuation hook
@@ -1268,6 +1302,16 @@ private:
     quint64 mGiPushCount = 0;
     quint64 mGiRefreshCount = 0;
     quint64 mGiLightRefreshCount = 0;
+    // ---- MOBILITY counters (REALTIME_REFLECTIONS_SPEC §3.3) ----------------
+    /// Recomputed every sync (the walk resolves every node anyway), so this is
+    /// a state, not a running total.
+    quint64 mMovableNodes = 0;
+    quint64 mMobilityMisses = 0;
+    QString mLastMobilityMiss;
+    /// The play edge the soft-promotion rule is scoped to. Play STOP clears the
+    /// document's soft flags (Scene::setPlaying) and the per-node warn latches
+    /// here, so a second play session starts clean.
+    bool mWasPlaying = false;
     // ---- Rebuild coalescing (REFLECTIONS_ADOPTION_SPEC.md §5 / P2) ----
     // A moving light ARMS a refresh instead of performing one; the expensive
     // rebuild fires when the light has held still. See applyEnvironment for the

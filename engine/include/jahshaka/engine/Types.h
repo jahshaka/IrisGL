@@ -126,6 +126,18 @@ struct RigStats {
     size_t streamedBones = 0;
 };
 
+/// WHAT THIS SCENE'S MOBILITY LOOKS LIKE (SPECS/REALTIME_REFLECTIONS_SPEC.md
+/// §3.3, lane R1). The host resolves every node's mobility from the document
+/// (drivers, parents, the user's setting) and pushes the answer with
+/// Scene::setNodeMovable; these are what the engine RECORDED, which is the only
+/// way to see that the push landed at all while the renderer does not yet act
+/// on it (lane R2 is what spends it).
+struct MobilityStatus {
+    size_t movableItems = 0;    ///< movable nodes carrying drawable geometry
+    size_t movableLights = 0;   ///< movable nodes carrying a light
+    size_t movableNodes = 0;    ///< every node the host marked movable
+};
+
 /// A posed bone: LOCAL to its parent bone (a root bone: local to the mesh node).
 /// This is absolute local TRS, not a delta from the bind pose.
 struct BonePose {

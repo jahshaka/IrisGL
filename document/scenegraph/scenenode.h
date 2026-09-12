@@ -55,27 +55,54 @@ enum class NodeChange {
     Name
 };
 
-/// Whether the SCENE_STATIC classification of this node was DECIDED BY A HUMAN
-/// or merely derived by the default policy (applyStaticDefaults).
+/// MOBILITY — "does this thing move?", the one classification a user sets and
+/// the renderer reads (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3).
 ///
-/// The distinction is the whole reason the serializer can persist the hint at
-/// all. `applyStaticDefaults` is a greedy policy — it marks every eligible
-/// branch of every scene that loads — so writing its result to the file would
-/// store a derivation, not a decision, and freeze today's policy into every
-/// document ever saved. What IS worth persisting is the case where the user
-/// disagreed with the policy: "this crate is going to be moved by a script,
-/// leave it dynamic" (Dynamic), or "mark this branch static even though the
-/// policy did not reach it" (Static).
+/// It REPLACES the old `StaticOverride` (None/Static/Dynamic) one-for-one, and
+/// it is one field on purpose: a second "is it static" flag would be a dual
+/// system, because the same answer drives two very different consumers —
+///   * the SCENE_STATIC memory-manager class, a cheap transform-pass
+///     optimisation the graph can flip at will (_applyStaticHint / rule 4);
+///   * the GI class the renderer gives the object, which is EXPENSIVE to flip
+///     (toggling an item's GI bit invalidates the caches and costs a full
+///     rebuild, probe placement included).
 ///
-/// So: `None` is written as NOTHING and re-derived on load; the other two are
-/// written explicitly and beat the policy. A transform write clears the
-/// override along with the hint (see SceneNode::_clearStaticHint) — moving a
-/// thing is a newer and stronger statement of intent than a checkbox.
-enum class StaticOverride : quint8 {
-    None = 0,     ///< no user opinion; applyStaticDefaults decides
-    Static = 1,   ///< the user asked for static
-    Dynamic = 2   ///< the user asked for dynamic, policy notwithstanding
+/// `Auto` is the default and is not written to the file: it is RE-DERIVED on
+/// every load by the resolution rule (resolveMobility), so a document always
+/// classifies under today's rule rather than the rule of the build that saved
+/// it. `Static` and `Movable` are a human's decision and ARE written.
+///
+/// Nothing here is the GRAPH's class: a light is never graph-static (its
+/// object memory manager has no static twin) and is still perfectly `static`
+/// mobility — it just does not move.
+enum class Mobility : quint8 {
+    Auto = 0,      ///< no user opinion; the resolution rule decides
+    Static = 1,    ///< the user says it never moves
+    Movable = 2    ///< the user says it moves
 };
+
+/// WHY a node resolved the way it did — the reason the verb, the panel row and
+/// the render-loop monitor report. First match wins, in this order:
+/// the six drivers, then `Parent`, then `User`, then `Play`, then `Default`.
+enum class MobilityReason : quint8 {
+    Default = 0,   ///< nothing drives it and nobody said otherwise -> static
+    User,          ///< the user's explicit Static/Movable
+    Physics,       ///< a physics body: Bullet writes its transform every step
+    Avatar,        ///< an avatar/character wrapper
+    Socket,        ///< it rides a socket (a bone) on something else
+    Animation,     ///< an animation with real channels can play on it
+    Skeleton,      ///< a rig with a skeletal clip
+    Particles,     ///< a particle emitter
+    Parent,        ///< its parent resolved movable, so it travels with it
+    Play           ///< SOFT PROMOTION: it started moving during play (§3.3.3)
+};
+
+/// Stable lower-case names — what the file, the verbs and the panel speak.
+/// Enum values travel as NAMES on this surface, never as ordinals.
+const char *mobilityName(Mobility m);
+/// False when `name` is not one of auto/static/movable (case-insensitive).
+bool mobilityFromName(const QString &name, Mobility &out);
+const char *mobilityReasonName(MobilityReason r);
 
 // -----------------------------------------------------------------------------
 // iris::SceneNode — a TYPED HANDLE onto one Ogre::SceneNode.
@@ -124,11 +151,20 @@ protected:
     /// How many times mGraphNode has been REPLACED. See graphEpoch().
     quint32 mGraphEpoch = 0;
 
-    /// SCENE_STATIC, the document's side of it. See setStaticHint().
+    /// SCENE_STATIC, the document's side of it — the GRAPH class only, which
+    /// rule 4 (a transform write) may clear at any time. Never the mobility.
     bool mStaticHint = false;
 
-    /// The USER's word on SCENE_STATIC, when there is one. See StaticOverride.
-    StaticOverride mStaticOverride = StaticOverride::None;
+    /// The USER's word on mobility, when there is one. See Mobility.
+    Mobility mMobility = Mobility::Auto;
+
+    /// SOFT PROMOTION (REALTIME_REFLECTIONS_SPEC §3.3.3, owner decision O3):
+    /// an `auto` node that nobody predicted would move STARTED MOVING while the
+    /// document was playing. It is treated as movable from that frame — with no
+    /// GI rebuild, so the bounce light it left behind stays until play stops —
+    /// and the author is warned once, by name. RUNTIME ONLY: never serialized,
+    /// and cleared for the whole scene when play stops (Scene::setPlaying).
+    bool mSoftMovable = false;
 
 public:
     SceneNodeType sceneNodeType;
@@ -634,36 +670,83 @@ public:
     /// Nodes whose engine attachment cannot change class — lights and particle
     /// systems (their object memory managers have no static twin) — refuse the
     /// hint. isStaticEligible() is the document-side test.
-    /// The EXPLICIT setter — node.setStatic, the properties panel, the reader
-    /// replaying a persisted override. It records that a human decided
-    /// (staticOverride() stops being None), which is what the serializer
-    /// writes and what applyStaticDefaults then refuses to overrule.
-    void setStaticHint(bool value);
+    /// MOBILITY, the user's setting (`auto` by default). The write RE-APPLIES
+    /// the classification: the graph class follows the resolution immediately,
+    /// so setting a prop `movable` takes it out of the static half at once.
+    ///
+    /// A setting is RECORDED even where it cannot hold: `static` on a physics
+    /// body is remembered (it becomes true the moment the body is removed) but
+    /// resolves movable, and mobility() / resolveMobility() disagree openly —
+    /// which is the same honesty rule the old node.setStatic refusal had.
+    void setMobility(Mobility m);
+    /// What the USER set. `Auto` means "nobody said" — ask resolveMobility()
+    /// for what that derives to.
+    Mobility mobility() const { return mMobility; }
+    /// Replays a persisted setting without touching the graph — the reader's
+    /// setter (a subtree still being built has no final parent chain yet) and
+    /// undo's. applyStaticDefaults() at the end of the load is what turns these
+    /// into graph state.
+    void _setMobility(Mobility m) { mMobility = m; }
+
+    /// THE RESOLUTION (REALTIME_REFLECTIONS_SPEC §3.3.2), first match wins:
+    ///   1. a hard DRIVER on this node — physics body, avatar component,
+    ///      socket rider, an animation with real channels, a rig with a
+    ///      skeletal clip, a particle emitter                     -> movable
+    ///   2. the parent resolved movable (it travels with it)      -> movable
+    ///   3. the user's explicit setting                           -> as set
+    ///   4. soft promotion: it moved during play with no driver   -> movable
+    ///   5. nothing                                               -> static
+    ///
+    /// IT IS PREDICTIVE, NEVER "IT MOVED". An editor drag or a gizmo move does
+    /// NOT promote anything: flipping an object's GI class costs a full GI
+    /// rebuild (probe placement included), so a drag that promoted would put a
+    /// half-second freeze in the middle of the gesture. What a drag does is
+    /// demote the cheap GRAPH class (rule 4) and nothing else.
+    ///
+    /// `parentMovable` is the caller's already-computed answer for the parent —
+    /// a top-down walk (the mirror, applyStaticDefaults) passes it down and pays
+    /// nothing; resolvedMobility() below is the stand-alone spelling that walks
+    /// up for you.
+    Mobility resolveMobility(bool parentMovable, MobilityReason *why = nullptr) const;
+    /// resolveMobility() with the parent chain resolved for you: O(depth).
+    /// For verbs, panels and one-off questions — not for a per-node per-frame
+    /// walk, which should thread the parent's answer down instead.
+    Mobility resolvedMobility(MobilityReason *why = nullptr) const;
+    /// Does THIS node carry a hard driver (rule 1)? Virtual so a mesh can add
+    /// its rig's clips. Never looks at the parent, the setting or play state.
+    virtual bool hasMobilityDriver(MobilityReason *why = nullptr) const;
+
+    /// SOFT PROMOTION, set by the host that noticed the movement (SceneMirror)
+    /// and cleared for the whole scene when play stops. Runtime only.
+    void _setSoftMovable(bool on) { mSoftMovable = on; }
+    bool softMovable() const { return mSoftMovable; }
+
+    /// The GRAPH class, asked for directly. Not a user decision and not
+    /// serialized: setMobility() is the user-facing spelling, this is what the
+    /// policy, undo and the mobility resolution call.
     bool staticHint() const { return mStaticHint; }
     /// What iris::graph reads when it reconciles a subtree after a structural
     /// move. Same value as staticHint(); named for the question it answers.
     bool wantsStatic() const { return mStaticHint; }
-    /// The user's recorded decision, or None when the classification is just
-    /// the default policy's output. Serializer v2 writes only the first two.
-    StaticOverride staticOverride() const { return mStaticOverride; }
-    /// Replays a persisted override without touching the graph — the reader's
-    /// setter, used while a subtree is still being built and its parent chain
-    /// is not final. The applyStaticDefaults() pass at the end of the load is
-    /// what turns these into real graph state.
-    void _setStaticOverride(StaticOverride o) { mStaticOverride = o; }
-    /// Cleared by iris::graph when a transform write demotes this subtree.
-    /// Not a public setter: it must not re-enter the graph.
+    /// Cleared by iris::graph when a transform write demotes this subtree
+    /// (rule 4). Not a public setter: it must not re-enter the graph.
     ///
-    /// The OVERRIDE goes with it: the user just moved this thing, and that is a
-    /// newer statement of intent than whatever checkbox produced the override.
-    /// Without this a node the user had pinned Static would come back static on
-    /// every load and be demoted again by the first drag, forever.
-    void _clearStaticHint() { mStaticHint = false; mStaticOverride = StaticOverride::None; }
-    /// Is this node the KIND of thing that may be static at all? Never-animated
-    /// geometry and plain groupings only: a light, a particle system, a decal,
-    /// a camera or a viewer carries an engine object that cannot switch class;
-    /// a physics body, a socket rider, a skinned mesh and anything carrying an
+    /// THE MOBILITY SURVIVES IT (REALTIME_REFLECTIONS_SPEC §3.3.3). Until
+    /// mobility existed this also wiped the user's Static/Dynamic override, on
+    /// the theory that moving a thing is a newer statement of intent than a
+    /// checkbox. It is not: the user's setting is what the renderer classifies
+    /// on, an editor drag is authoring, and silently clearing it made the
+    /// setting impossible to keep. The GRAPH class is all this clears.
+    void _clearStaticHint() { mStaticHint = false; }
+    /// Is this node the KIND of thing that may be in the GRAPH's static half at
+    /// all? A light, a particle system, a decal, a camera or a viewer carries an
+    /// engine object that cannot switch memory-manager class; a physics body, a
+    /// socket rider, a skinned mesh, an avatar wrapper and anything carrying an
     /// animation THAT CAN PLAY are all going to move.
+    ///
+    /// NOT the same question as mobility: a light that nothing drives is
+    /// perfectly `static` mobility (it does not move), it merely cannot live in
+    /// the static memory manager.
     ///
     /// "That can play" is the load-bearing half (2026-09-06): a channel-less
     /// `Animation` — which the animation panel attaches to every node it is
@@ -671,37 +754,42 @@ public:
     /// animated cost every loaded world its whole static classification. See
     /// the body for the measurement.
     virtual bool isStaticEligible() const;
-    /// setStaticHint's body, WITHOUT recording a user decision — the graph
-    /// state only. Two callers, both of which have their own idea of intent:
-    /// the default policy (applyStaticDefaults) and undo, which restores a
-    /// classification it captured rather than making a new one.
+    /// The GRAPH-class write, WITHOUT recording a user decision. Callers: the
+    /// mobility resolution (applyStaticDefaults / setMobility), undo restoring
+    /// a captured classification, and iris::graph reconciling a subtree.
     void _applyStaticHint(bool value);
     /// True when the graph really did put this node in the static manager —
     /// the hint is what was ASKED for, this is what happened.
     bool isStaticInGraph() const { return graph::isStatic(mGraphNode); }
 
-    /// THE DEFAULT POLICY: mark this subtree static wherever it is safe to.
+    /// THE CLASSIFICATION PASS: resolve mobility over this subtree and give
+    /// the graph the static half of it.
     ///
     /// Called when a subtree JOINS a scene — a primitive from the Add menu, an
     /// imported model, a project as it finishes loading — i.e. at the moments
     /// the document knows a branch is complete and at rest. Top-down, so a
     /// node is only marked once its parent already is (rule 2), and it marks
-    /// nothing that isStaticEligible() refuses.
+    /// nothing isStaticEligible() refuses.
     ///
     /// Marking is not a decision the user has to make and cannot get wrong:
-    /// the first transform write demotes whatever it touches (rule 4), so the
-    /// worst case of an over-eager default is one subtree migration the first
-    /// time something moves. The BEST case is the ground, the architecture and
-    /// every imported prop dropping out of the engine's per-frame transform and
-    /// bounds passes for the life of the session.
+    /// the first transform write demotes whatever it touches (rule 4, the graph
+    /// class only), so the worst case of an over-eager default is one subtree
+    /// migration the first time something moves. The BEST case is the ground,
+    /// the architecture and every imported prop dropping out of the engine's
+    /// per-frame transform and bounds passes for the life of the session.
     ///
-    /// THE POLICY IS NOT SERIALIZED, the OVERRIDE is (serializer v2). This runs
-    /// on every load, so a scene's classification always reflects today's
-    /// policy rather than the policy of the build that saved it; the only thing
-    /// the file carries is the places a human disagreed (StaticOverride). Those
-    /// are replayed by the reader BEFORE this pass and this pass honours them:
-    /// an override never gets overwritten by the default.
+    /// ONLY THE USER'S SETTING IS SERIALIZED. This runs on every load, so a
+    /// scene's classification always reflects today's resolution rule rather
+    /// than the rule of the build that saved it; the file carries only the
+    /// places a human disagreed (Mobility::Static / Movable), which the reader
+    /// replays BEFORE this pass and which this pass honours.
+    ///
+    /// Resolves this node's parent chain once (O(depth)) and threads its own
+    /// answers down from there, so the pass itself stays O(nodes).
     void applyStaticDefaults();
+    /// The recursion, for a caller that already knows what the parent resolved
+    /// to. `applyStaticDefaults()` is the spelling everything else uses.
+    void applyStaticDefaultsFrom(bool parentMovable);
 
     /// Re-asserts recorded static hints into the GRAPH, top-down, changing no
     /// hint and no override. For after a graph migration (Scene::setGraphScene)

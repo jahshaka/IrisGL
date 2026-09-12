@@ -198,6 +198,26 @@ public:
         return !skeleton && SceneNode::isStaticEligible();
     }
 
+    /// MOBILITY rule 1 for a mesh: a rig WITH A CLIP moves
+    /// (REALTIME_REFLECTIONS_SPEC §3.3.2). A rigged mesh with no clip attached
+    /// is not moving anything — it renders at its rest pose — so it resolves
+    /// static and is reflected and voxelised like any other prop. (It still
+    /// cannot be GRAPH-static, see isStaticEligible above: that is the engine's
+    /// memory-manager constraint, not a statement about movement.)
+    ///
+    /// The base class already answers `skeleton` for a clip carried on an
+    /// Animation; this adds the clips the MESH ASSET carries, which is the
+    /// shape an imported character arrives in.
+    bool hasMobilityDriver(MobilityReason *why = nullptr) const override
+    {
+        if (SceneNode::hasMobilityDriver(why)) return true;
+        if (!skeleton.isNull() && !mesh.isNull() && mesh->hasSkeletalAnimations()) {
+            if (why) *why = MobilityReason::Skeleton;
+            return true;
+        }
+        return false;
+    }
+
     float getMeshRadius();
     BoundingSphere getTransformedBoundingSphere();
 

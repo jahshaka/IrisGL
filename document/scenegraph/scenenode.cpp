@@ -228,6 +228,116 @@ bool SceneNode::isVisibleInScene() const
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// MOBILITY (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3) and the graph's static
+// class, which is a different question — see scenenode.h's two doc blocks.
+// ---------------------------------------------------------------------------
+
+const char *mobilityName(Mobility m)
+{
+    switch (m) {
+    case Mobility::Static:  return "static";
+    case Mobility::Movable: return "movable";
+    case Mobility::Auto:    break;
+    }
+    return "auto";
+}
+
+bool mobilityFromName(const QString &name, Mobility &out)
+{
+    const QString wanted = name.trimmed().toLower();
+    if (wanted == QLatin1String("auto"))    { out = Mobility::Auto;    return true; }
+    if (wanted == QLatin1String("static"))  { out = Mobility::Static;  return true; }
+    if (wanted == QLatin1String("movable")) { out = Mobility::Movable; return true; }
+    return false;
+}
+
+const char *mobilityReasonName(MobilityReason r)
+{
+    switch (r) {
+    case MobilityReason::User:      return "user";
+    case MobilityReason::Physics:   return "physics";
+    case MobilityReason::Avatar:    return "avatar";
+    case MobilityReason::Socket:    return "socket";
+    case MobilityReason::Animation: return "animation";
+    case MobilityReason::Skeleton:  return "skeleton";
+    case MobilityReason::Particles: return "particles";
+    case MobilityReason::Parent:    return "parent";
+    case MobilityReason::Play:      return "play";
+    case MobilityReason::Default:   break;
+    }
+    return "default";
+}
+
+namespace {
+/// ANIMATED means "something writes this node's transform", not "an Animation
+/// object is attached" — see isStaticEligible's note for the measurement that
+/// made the distinction load-bearing. Split in two here because mobility
+/// reports WHY: real property channels are `animation`, a skeletal clip is
+/// `skeleton`.
+bool drivesTransform(const AnimationPtr &a) { return !a.isNull() && !a->properties.isEmpty(); }
+bool drivesSkeleton(const AnimationPtr &a) { return !a.isNull() && !a->skeletalAnimation.isNull(); }
+} // namespace
+
+bool SceneNode::hasMobilityDriver(MobilityReason *why) const
+{
+    const auto yes = [why](MobilityReason r) { if (why) *why = r; return true; };
+    // A SIMULATED body: Bullet writes its transform every step.
+    //
+    // AN IMMOVABLE ONE IS NOT A MOVER, and getting this wrong is not academic:
+    // the DEFAULT SCENE'S GROUND is a physics body of type Static (the thing a
+    // character walks on), so a rule that read `isPhysicsBody` alone classified
+    // the floor of every new project as moving — and in lane R2 that takes the
+    // floor out of the reflection probes and the bounce light. Bullet never
+    // writes a static body's transform; only the author can, and that is an
+    // editor drag, which is not a promotion (§3.3.3).
+    if (isPhysicsBody && physicsProperty.type != PhysicsType::Static
+        && physicsProperty.objectMass != 0.0f)
+        return yes(MobilityReason::Physics);
+    // An avatar wrapper walks: the movement component and the locomotion state
+    // machine both write it. (This was the gap in the old isStaticEligible —
+    // an avatar was only caught later, by rule 4, after it had already moved.)
+    if (hasAvatarComponent()) return yes(MobilityReason::Avatar);
+    // The socket resolver writes a rider's transform every frame.
+    if (isSocketAttached()) return yes(MobilityReason::Socket);
+    if (sceneNodeType == SceneNodeType::ParticleSystem) return yes(MobilityReason::Particles);
+    if (drivesTransform(animation)) return yes(MobilityReason::Animation);
+    if (drivesSkeleton(animation)) return yes(MobilityReason::Skeleton);
+    for (const AnimationPtr &a : animations) {
+        if (drivesTransform(a)) return yes(MobilityReason::Animation);
+        if (drivesSkeleton(a))  return yes(MobilityReason::Skeleton);
+    }
+    return false;
+}
+
+Mobility SceneNode::resolveMobility(bool parentMovable, MobilityReason *why) const
+{
+    MobilityReason driver = MobilityReason::Default;
+    if (hasMobilityDriver(&driver)) { if (why) *why = driver; return Mobility::Movable; }
+    if (parentMovable) { if (why) *why = MobilityReason::Parent; return Mobility::Movable; }
+    if (mMobility != Mobility::Auto) {
+        if (why) *why = MobilityReason::User;
+        return mMobility;
+    }
+    // SOFT PROMOTION is the LAST word before the default and applies to `auto`
+    // nodes only: a user who wrote "static" said something the engine keeps
+    // honouring, and their ghost bounce light is their own decision.
+    if (mSoftMovable) { if (why) *why = MobilityReason::Play; return Mobility::Movable; }
+    if (why) *why = MobilityReason::Default;
+    return Mobility::Static;
+}
+
+Mobility SceneNode::resolvedMobility(MobilityReason *why) const
+{
+    // Rule 2 walks UP: a node travels with its parent. parentOf answers a
+    // socket rider with its document parent, which is right — a rider is
+    // movable through rule 1 anyway.
+    bool parentMovable = false;
+    if (const SceneNode *p = graph::ownerOf(graph::parentOf(mGraphNode)))
+        parentMovable = p->resolvedMobility(nullptr) == Mobility::Movable;
+    return resolveMobility(parentMovable, why);
+}
+
 bool SceneNode::isStaticEligible() const
 {
     // Node kinds whose engine attachment cannot change memory-manager class.
@@ -243,6 +353,12 @@ bool SceneNode::isStaticEligible() const
     }
     if (isPhysicsBody) return false;         // Bullet writes its transform every step
     if (isSocketAttached()) return false;    // the socket resolver writes it every frame
+    // AVATAR WRAPPERS (REALTIME_REFLECTIONS_SPEC §2, "Gap"): the movement
+    // component and the locomotion state machine write this node's transform
+    // every frame of play, and until 2026-09-12 nothing here said so — an
+    // avatar was marked static by the default policy and only demoted by rule 4
+    // once it had already taken a step.
+    if (hasAvatarComponent()) return false;
     // ANIMATED means "something writes this node's transform", not "an
     // Animation object is attached". The distinction is not academic: the
     // animation panel gives every node it is shown a default, CHANNEL-LESS
@@ -266,38 +382,39 @@ bool SceneNode::isStaticEligible() const
     // any attached animation actually HAS something to play — and if one grows
     // channels later, rule 4 (the first transform write demotes the subtree)
     // catches it without a document-side hook.
-    const auto drives = [](const AnimationPtr &a) {
-        return !a.isNull() && (!a->properties.isEmpty() || !a->skeletalAnimation.isNull());
-    };
-    if (drives(animation)) return false;
+    if (drivesTransform(animation) || drivesSkeleton(animation)) return false;
     for (const AnimationPtr &a : animations)
-        if (drives(a)) return false;
+        if (drivesTransform(a) || drivesSkeleton(a)) return false;
     return true;
 }
 
-void SceneNode::setStaticHint(bool value)
+void SceneNode::setMobility(Mobility m)
 {
-    // The user's word, recorded BEFORE the eligibility test: a refusal is still
-    // an opinion the file should carry ("I want this static") and it becomes
-    // legal the moment the node stops being a physics body, loses its clip or
-    // moves under a static parent. The refusal below leaves the graph alone; it
-    // does not un-record the intent.
-    mStaticOverride = value ? StaticOverride::Static : StaticOverride::Dynamic;
-    _applyStaticHint(value);
+    // The user's word, recorded BEFORE anything is applied: a setting that
+    // cannot hold today ("static" on a physics body) is still an opinion the
+    // file should carry, and it becomes the answer the moment the body is
+    // removed. resolveMobility() reports the disagreement openly rather than
+    // silently dropping it.
+    mMobility = m;
+    // The GRAPH follows the RESOLUTION, not the setting: `static` on a driven
+    // node must not put it in the static memory manager.
+    const bool wantStatic = resolvedMobility() == Mobility::Static;
+    _applyStaticHint(wantStatic && isStaticEligible() && graph::canBeStatic(mGraphNode));
+    notifyChanged(NodeChange::Flags);
 }
 
 void SceneNode::_applyStaticHint(bool value)
 {
     if (value && !isStaticEligible()) {
-        qWarning("iris::SceneNode::setStaticHint(true) refused for '%s': this node kind moves "
+        qWarning("iris::SceneNode: static graph class refused for '%s': this node kind moves "
                  "(SCENEGRAPH_SPEC §6 — lights, particles, decals, cameras, viewers, physics "
-                 "bodies, socket riders and animated nodes are never static).",
+                 "bodies, socket riders, avatars and animated nodes are never graph-static).",
                  qPrintable(name));
         return;
     }
     // The GRAPH state is part of the test, not just the field: a node that
     // inherited static from a static parent has `mStaticHint == false` while
-    // sitting in the static manager, and setStaticHint(false) on it must
+    // sitting in the static manager, and _applyStaticHint(false) on it must
     // really demote it.
     if (mStaticHint == value && graph::isStatic(mGraphNode) == value) return;
     mStaticHint = value;
@@ -321,26 +438,26 @@ void SceneNode::reapplyStaticHints()
 
 void SceneNode::applyStaticDefaults()
 {
-    // A HUMAN'S DECISION BEATS THE POLICY (StaticOverride). `Dynamic` leaves
-    // this node moving — and, through canBeStatic, its whole branch with it,
-    // which is exactly rule 2 doing the right thing for free. `Static` is
-    // re-asserted rather than skipped: the node may have arrived here through a
-    // reparent that reset its memory-manager class.
-    switch (mStaticOverride) {
-    case StaticOverride::Dynamic:
+    bool parentMovable = false;
+    if (const SceneNode *p = graph::ownerOf(graph::parentOf(mGraphNode)))
+        parentMovable = p->resolvedMobility() == Mobility::Movable;
+    applyStaticDefaultsFrom(parentMovable);
+}
+
+void SceneNode::applyStaticDefaultsFrom(bool parentMovable)
+{
+    // ONE RESOLUTION, TOP-DOWN. The parent's answer is threaded down rather
+    // than re-walked per node, so this is O(nodes) and not O(nodes x depth).
+    const bool movable = resolveMobility(parentMovable) == Mobility::Movable;
+    if (movable) {
+        // Movable: out of the static half. `_applyStaticHint`, not setMobility
+        // — the POLICY must never leave "the user asked for this" behind (that
+        // would write a derivation into the file on the next save).
         _applyStaticHint(false);
-        break;
-    case StaticOverride::Static:
-        _applyStaticHint(true);
-        break;
-    case StaticOverride::None:
+    } else {
         // canBeStatic() first: an ineligible PARENT means this whole branch
         // stays dynamic, and asking anyway would log a refusal per node.
-        // applyStaticHint, not setStaticHint: the POLICY must never leave a
-        // recorded "the user asked for this" behind (that would put the
-        // derivation in the file on the next save — see StaticOverride).
         if (isStaticEligible() && graph::canBeStatic(mGraphNode)) _applyStaticHint(true);
-        break;
     }
     // Descend regardless — a light in the middle of an imported rig does not
     // stop the props below it from being static, it only stops ITSELF (and,
@@ -348,7 +465,7 @@ void SceneNode::applyStaticDefaults()
     const std::size_t n = graph::childCount(mGraphNode);
     for (std::size_t i = 0; i < n; ++i)
         if (SceneNode *c = graph::ownerOf(graph::childAt(mGraphNode, i)))
-            c->applyStaticDefaults();
+            c->applyStaticDefaultsFrom(movable);
 }
 
 void SceneNode::addAnimation(AnimationPtr anim)
@@ -471,6 +588,19 @@ QList<Property*> SceneNode::getProperties()
     intProp->value = static_cast<int>(lightMask);
     props.append(intProp);
 
+    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3). An ENUM row on an IntProperty,
+    // exactly like a mesh's faceCullingMode: there is no enum Property type,
+    // and the verb surface maps the ordinal to a NAME at the boundary
+    // (nodeapi's mobilityRowName). The row carries the SETTING — auto/static/
+    // movable — never the resolved answer, because the resolution is derived
+    // and a derived value in a writable row would be a setting that silently
+    // rewrites itself.
+    intProp = new IntProperty();
+    intProp->displayName = "Movement";
+    intProp->name = "mobility";
+    intProp->value = static_cast<int>(mMobility);
+    props.append(intProp);
+
     return props;
 }
 
@@ -487,6 +617,7 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     if (valueName == "pickable")   return isPickable();
     // Signed, matching the row above: -1 is "all channels".
     if (valueName == "lightMask")  return static_cast<int>(lightMask);
+    if (valueName == "mobility")   return static_cast<int>(mMobility);
 
     return QVariant();
 }
@@ -514,6 +645,13 @@ bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
         const qlonglong wide = value.toLongLong(&ok);
         if (!ok) return false;
         setLightMask(static_cast<quint32>(wide & 0xFFFFFFFFll));
+        return true;
+    }
+    if (valueName == "mobility") {
+        bool ok = false;
+        const int m = value.toInt(&ok);
+        if (!ok || m < int(Mobility::Auto) || m > int(Mobility::Movable)) return false;
+        setMobility(static_cast<Mobility>(m));
         return true;
     }
     return false;
@@ -570,14 +708,13 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         //
         // The write below is rule 4's "a transform write demotes" firing on a
         // node that did not move in any sense the user would name — its world
-        // pose is preserved by construction. Re-assert the static hint after;
-        // setStaticHint validates eligibility under the NEW parent itself.
+        // pose is preserved by construction. Re-assert the graph class after;
+        // _applyStaticHint validates eligibility under the NEW parent itself.
         const bool wantedStatic = node->wantsStatic();
         node->setGlobalTransform(initialGlobalTransform);
-        // The RAW setter, not setStaticHint: since v2, setStaticHint records a
-        // USER decision (StaticOverride) that the serializer persists — a plain
-        // reparent of a policy-derived static node must not stamp the
-        // derivation into the file.
+        // _applyStaticHint, not setMobility: a plain reparent of a
+        // policy-derived static node must not stamp a USER decision (which the
+        // serializer persists) into the file.
         if (wantedStatic) node->_applyStaticHint(true);
     }
 
@@ -832,11 +969,12 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 		copy->setAssetPreservingDefaultFlag(this->avatarLocomotion->asset(), &err);
 		node->setLocomotionComponent(copy);
 	}
-    // The user's SCENE_STATIC decision travels with the copy (the derived hint
-    // does not: the copy is about to be parented somewhere, and the policy pass
-    // that follows every add re-derives it). Without this a duplicate of a node
-    // the user had pinned Dynamic came back Static on the next load.
-    node->_setStaticOverride(this->mStaticOverride);
+    // The user's MOBILITY decision travels with the copy (the derived graph
+    // hint does not: the copy is about to be parented somewhere, and the
+    // classification pass that follows every add re-derives it). Without this a
+    // duplicate of a node the user had pinned Movable came back static on the
+    // next load.
+    node->_setMobility(this->mMobility);
 	// A duplicate lands in the same outliner folder as its original — a copy
 	// that jumped back to the root level would be a small, constant annoyance
 	// (SCENEGRAPH_SPEC §6b). The folder itself is untouched; this is metadata.

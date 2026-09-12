@@ -380,6 +380,36 @@ bool OgreScene::nodeHelper(NodeId id) const {
     return it != mNodes.end() && it->second.helper;
 }
 
+// ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1: record only) -------
+//
+// DELIBERATELY INERT. The flag changes no visibility bit, no GI bit and no
+// cache, and it must not: the whole point of the design is that a host may
+// classify (and RE-classify, including the play-time soft promotion) without
+// paying a GI rebuild for it. Lane R2 is where the recorded value starts
+// selecting render channels.
+void OgreScene::setNodeMovable(NodeId id, bool movable) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    it->second.movable = movable;
+}
+
+bool OgreScene::nodeMovable(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it != mNodes.end() && it->second.movable;
+}
+
+MobilityStatus OgreScene::mobilityStatus() const {
+    MobilityStatus out;
+    for (const auto &kv : mNodes) {
+        const Node &n = kv.second;
+        if (!n.movable) continue;
+        ++out.movableNodes;
+        if (n.item || n.particleSystem || n.billboards) ++out.movableItems;
+        if (n.light) ++out.movableLights;
+    }
+    return out;
+}
+
 void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;

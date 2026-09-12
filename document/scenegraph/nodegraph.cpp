@@ -730,7 +730,10 @@ namespace
 /// pass per frame, i.e. exactly the cost SCENE_STATIC exists to avoid, paid
 /// while the scene is least able to afford it. Demoting the node (and its
 /// subtree, rule 1) makes the second write and every one after it free, and
-/// the document's hint is cleared with it so nothing puts it back.
+/// the document's GRAPH hint is cleared with it so nothing puts it back. The
+/// user's MOBILITY setting is NOT touched (REALTIME_REFLECTIONS_SPEC §3.3.3):
+/// a drag is authoring, and rewriting the renderer's classification in the
+/// middle of a gesture would cost a full GI rebuild.
 ///
 /// Out of line and behind an `isStatic()` test that is false for almost every
 /// node in almost every scene: this sits on the path of every transform write

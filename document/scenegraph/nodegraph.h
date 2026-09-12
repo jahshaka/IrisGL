@@ -293,7 +293,10 @@ bool isStatic(NodeHandle n);
 //  4. MOVING A STATIC NODE PROMOTES IT. Every transform write goes through
 //     this file; a write to a static node demotes it (and its subtree) back to
 //     dynamic instead of paying a whole static pass per edit. The document's
-//     hint is cleared with it — see SceneNode::setStaticHint.
+//     GRAPH hint is cleared with it (SceneNode::_clearStaticHint) — and ONLY
+//     that: since mobility (REALTIME_REFLECTIONS_SPEC §3.3) the user's
+//     Static/Movable setting survives a move, because an editor drag is
+//     authoring and must not silently rewrite the renderer's classification.
 
 /// True when `n` may legally be static: its parent is static, or its parent is
 /// the DOCUMENT ROOT (a document node whose own parent is the scene manager's

@@ -720,6 +720,25 @@ public:
     virtual void        setNodeHelper(NodeId, bool) = 0;
     virtual bool        nodeHelper(NodeId) const = 0;
 
+    /// "DOES THIS THING MOVE?" — the document's resolved MOBILITY for one node
+    /// (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3). The host decides it
+    /// PREDICTIVELY (a physics body, an avatar, a socket rider, a playing clip,
+    /// a rig with a clip, a particle emitter, or anything whose parent moves)
+    /// and pushes it on CHANGE; an editor drag is not a promotion, because
+    /// flipping an object's GI class costs a full rebuild.
+    ///
+    /// TODAY THIS ONLY RECORDS (lane R1): it renders identically either way,
+    /// invalidates nothing and costs a bool write, so a host can push it before
+    /// the renderer spends it. Lane R2 is what makes it mean something —
+    /// movable objects carry kMovableBit instead of kVisibleBit, leave the GI
+    /// geometry set and the reflection-probe captures, and dirty only the view
+    /// and planar shadow maps.
+    virtual void        setNodeMovable(NodeId, bool) = 0;
+    virtual bool        nodeMovable(NodeId) const = 0;
+    /// How many nodes this scene has been told are movable, split by what they
+    /// carry. A pure read of the records — no walk of the graph, no allocation.
+    virtual MobilityStatus mobilityStatus() const = 0;
+
     /// LIGHTING CHANNELS, object side (LightDesc::lightMask is the light side).
     ///
     /// A light lights an object when `light.lightMask & object.lightMask` is
