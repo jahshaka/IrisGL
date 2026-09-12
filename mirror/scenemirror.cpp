@@ -1853,6 +1853,14 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
     }
     // ON CHANGE ONLY, like every other flag on this walk.
     const int want = movable ? 1 : 0;
+    // ...and a node the walk has never seen is not a CHANGE: -1 is "never
+    // pushed", and its first push is the classification a node is born with.
+    // The distinction matters for the settle gate below — an arrival already
+    // has its own machinery (the engine's "items appeared" probe stale and the
+    // geometry signature the new item joins), and treating it as a flip would
+    // adopt a signature read before the scene graph has its transforms, which
+    // is the trap applyEnvironment's own "adopt AFTER the push" note describes.
+    const bool known = e.movable >= 0;
     if (e.movable != want) {
         // WHY the intent travels with the value: an AUTHORING change moves the
         // object in or out of the voxel bounce, which costs one from-scratch GI
@@ -1869,7 +1877,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
                                      : jahshaka::engine::MobilityChange::Authoring);
         e.movable = want;
         e.movableSoft = movable && why == iris::MobilityReason::Play;
-        mMobilityChanged = true;
+        if (known) mMobilityChanged = true;
     }
     return movable;
 }
