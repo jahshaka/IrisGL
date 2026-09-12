@@ -486,6 +486,9 @@ private:
         /// so a material swap cannot silently un-mask an object.
         quint32 lightMaskPushed = 0xFFFFFFFFu;
         bool    lightMaskEverPushed = false;
+        /// PER-OBJECT SHADOW CASTING (SceneNode::castShadow). Change-guarded
+        /// like the light mask; -1 = never pushed.
+        int     castShadowPushed = -1;
         /// The sync() this entry was last reached by. See mSyncStamp.
         quint32 lastSeen = 0;
         bool hasMesh  = false;

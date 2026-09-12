@@ -153,6 +153,8 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return doubleSided;
     if(valueName == "accurate")
         return accurate;
+    if(valueName == "forwardShadingPriority")
+        return forwardShadingPriority;
     // The two asset BINDINGS are reflected read-only-ish: the guid is the
     // document's state, the resolved path and the normalisation are the host's
     // (they come from the asset store, which irisgl cannot reach).
@@ -191,6 +193,7 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "shadowBias")        { shadowMap->bias = value.toFloat();   return true; }
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return true; }
     if (valueName == "accurate")          { accurate = value.toBool();           return true; }
+    if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return true; }
     if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return true; }
     if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return true; }
     if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return true; }
@@ -247,6 +250,11 @@ LightNode::LightNode()
     doubleSided = false;
     accurate = false;
 
+    // 0 = the sun. A light created on its own is the first directional a
+    // caller can possibly have; the auto-slot (Scene::nextForwardShadingPriority)
+    // moves the SECOND and later ones off 0 when they join a scene.
+    forwardShadingPriority = 0;
+
     iesNormalisation = 1.0f;   // no profile bound: intensity passes through
 
 	shadowAlpha = 1.0f;
@@ -275,6 +283,7 @@ SceneNodePtr LightNode::createDuplicate()
 	light->rectHeight = this->rectHeight;
 	light->doubleSided = this->doubleSided;
 	light->accurate = this->accurate;
+	light->forwardShadingPriority = this->forwardShadingPriority;
 	light->iesProfileGuid = this->iesProfileGuid;
 	light->iesProfilePath = this->iesProfilePath;
 	light->iesNormalisation = this->iesNormalisation;

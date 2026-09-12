@@ -16,6 +16,7 @@ For more information see the LICENSE file
 #include <functional>
 #include <QList>
 #include <QStringList>
+#include <QVector>
 #include "irisglfwd.h"
 #include "document/assets/texture2d.h"
 #include "document/input/possession.h"
@@ -499,9 +500,14 @@ public:
 	// sharper sun disc on big displays (VISUAL_PARITY_SPEC item 1).
 	int skyBakeResolution;
 
-	// SUN COUPLING (VISUAL_PARITY re-audit F5): the guid of the DIRECTIONAL
-	// light the realistic sky's sun drives. Empty (the default) = nothing is
-	// driven and every light keeps its authored rotation.
+	// THE SUN PIN (SUN_AND_LIGHT_DEFAULTS Q1): the guid of the DIRECTIONAL
+	// light the author has pinned as this scene's sun. Empty (the default) =
+	// AUTOMATIC, i.e. the lowest forwardShadingPriority wins — which is what
+	// every scene we ship stores.
+	//
+	// It used to mean "the light the sky's sun drives", and being one field
+	// for two questions is why picking a sun and steering it could not be told
+	// apart; the steering is `skyDrivesSun` below.
 	//
 	// An explicit guid on the SCENE, not a "driven by sky" flag on the light:
 	// the coupling is a property of the world (there is exactly one sun), the
@@ -510,10 +516,56 @@ public:
 	// re-homed with the light and would need a "which one wins" rule the
 	// moment two lights carried it.
 	//
-	// applySunCoupling() is what enforces it; it runs from Scene::advance()
-	// every frame, so the light follows the sun wherever the sun is moved from
-	// (panel, script verb, keyframe).
+	// applySunCoupling() is what enforces the steering; it runs from
+	// Scene::advance() every frame, so the light follows the sun wherever the
+	// sun is moved from (panel, script verb, keyframe).
 	QString sunLightGuid;
+
+	/// THE SKY STEERS THE SUN. The realistic sky's Azimuth/Elevation dials
+	/// drive `sunLight()`'s rotation while this is on. Off by default, and
+	/// independent of the pin: pinning which light is the sun and letting the
+	/// sky aim it are two different decisions (they were one field, and a user
+	/// could not have one without the other). A document written before this
+	/// existed carried a non-empty `sunLight` guid to mean exactly "driven",
+	/// so the reader turns it on for those files and nothing changes for them.
+	bool skyDrivesSun;
+
+	// ---- THE SUN -------------------------------------------------------
+	// (SUN_AND_LIGHT_DEFAULTS_SPEC, owner decisions Q1/Q1e.) "Sun" is a UI
+	// ROLE, not a type: there is one directional light type, and THE SUN is
+	// the directional light with the lowest `forwardShadingPriority`. Nothing
+	// stores "which one is the sun" — it is derived here, by the ONE resolver
+	// every consumer asks, because three consumers each having their own rule
+	// is exactly how they came to disagree with nobody being told.
+	//
+	// A SCENE WITH NO DIRECTIONAL LIGHT IS NORMAL (owner Q1c): Mirror Room and
+	// Showroom 2 ship that way. sunLight() answers null, cleanly, and nothing
+	// warns.
+
+	/// The scene's sun, or null when it has no directional light.
+	///   1. `sunLightGuid` when it names a live DIRECTIONAL light (an author's
+	///      explicit pin, and what the sky's sun steers);
+	///   2. otherwise the lowest `forwardShadingPriority`, ties broken by the
+	///      lowest `nodeId` (creation order — deterministic across reloads, and
+	///      the rule Ogre's own light-id sort agrees with by construction);
+	///   3. otherwise none.
+	LightNodePtr sunLight() const;
+
+	/// Why sunLight() answered as it did: "pinned", "priority" or "none".
+	/// The World panel prints it; `world.sun()` returns it.
+	QString sunReason() const;
+
+	/// Every DIRECTIONAL light in the scene, ordered by forwardShadingPriority
+	/// then nodeId — so the first entry is the sun whenever nothing is pinned.
+	QVector<LightNodePtr> directionalLights() const;
+
+	/// Every directional light that is NOT the sun, in the same order. These
+	/// light the scene and cast no shadow (one directional slot exists).
+	QVector<LightNodePtr> secondaryDirectionals() const;
+
+	/// The priority a directional light joining THIS scene should take: the
+	/// lowest number no directional is using. The first directional gets 0.
+	int nextForwardShadingPriority() const;
 
 	// Sky-driven ambient/diffuse IBL (VISUAL_PARITY_SPEC item 3b). ON by owner
 	// decision: with a textured/analytic sky the ambient hemisphere colours come

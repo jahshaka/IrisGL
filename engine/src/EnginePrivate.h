@@ -2033,6 +2033,8 @@ public:
     bool nodeHelper(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
     unsigned nodeLightMask(NodeId id) const override;
+    void setNodeCastShadow(NodeId id, bool on) override;
+    bool nodeCastShadow(NodeId id) const override;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
@@ -2375,6 +2377,11 @@ private:
         /// Ogre's own default (MovableObject::msDefaultLightMask, and it is
         /// genuinely consulted at OgreObjectDataArrayMemoryManager.cpp:138).
         Ogre::uint32              lightMask = 0xFFFFFFFFu;
+        /// PER-OBJECT SHADOW CASTING (Scene::setNodeCastShadow). Remembered
+        /// here for the same two reasons the light mask is: an Item is REBUILT
+        /// on every attach, and a host may say "this never casts" before the
+        /// geometry arrives.
+        bool                      castShadow = true;
         /// Whether the attached material is UNLIT, recorded at attach time.
         /// Needed because the helper flag can be toggled after the fact and the
         /// item's own flags cannot answer it once kVisibleBit is gone: a helper

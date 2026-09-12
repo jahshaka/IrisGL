@@ -93,6 +93,27 @@ public:
     bool doubleSided;
 
     /**
+     * FORWARD SHADING PRIORITY — DIRECTIONAL LIGHTS ONLY (SUN_AND_LIGHT_DEFAULTS
+     * owner decision Q1). The lowest number in the scene is THE SUN; every other
+     * directional light is a secondary one and casts no shadow (our shadow node
+     * has exactly one directional slot, OgreShadow.cpp).
+     *
+     * "Sun" is a UI ROLE, not a type and not a second stored field (owner Q1e):
+     * the document stores this number and NOTHING ELSE, and "which light is the
+     * sun" is DERIVED by the one resolver, `Scene::sunLight()`. The three
+     * resolvers that each had their own rule (the sky link's depth-first walk,
+     * the GI bounce light's lowest-nodeId scan and Ogre's castShadows-then-id
+     * sort) are gone — they are what made two lights able to disagree about
+     * which one was the sun with nobody being told.
+     *
+     * AUTOMATIC: the first directional light in a scene gets 0, the next the
+     * lowest free number (Scene::nextForwardShadingPriority), and the author
+     * can change it. Read on no other light type; -1 is not a value (0 is the
+     * winner and the default, exactly as Unreal's row reads).
+     */
+    int forwardShadingPriority;
+
+    /**
      * IES photometric profile bound to this light — the LIBRARY asset's guid
      * (empty = none), plus the absolute file path the host resolved it to and
      * the profile's own peak candela scale.
