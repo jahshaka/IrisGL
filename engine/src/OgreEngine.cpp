@@ -586,13 +586,21 @@ void OgreEngine::renderOneFrame() {
             const size_t before = tm ? countPendingTextures(tm, &names) : 0u;
             drainTextureStreaming(&ms);
             monitor::noteTextureWait(float(ms));
-            if (before) {
-                const size_t after = tm ? countPendingTextures(tm, nullptr) : 0u;
+            const size_t after = (before && tm) ? countPendingTextures(tm, nullptr) : 0u;
+            // ONLY WHEN SOMETHING ACTUALLY HAPPENED (lane MON-P1b's finding,
+            // fixed by the lead 2026-09-13). `before` alone is "a texture is
+            // pending", which is TRUE EVERY FRAME for a manual texture that
+            // never becomes resident: the VCT voxelizer's AccumVal sits at
+            // residency OnStorage for the life of the scene, so a 10 s capture
+            // logged 626 identical texture.load events — 99% of its event log —
+            // none of which recorded a load. The event means a load COMPLETED
+            // (or that this frame really waited), never "something is queued".
+            if (before > after || ms > 0.0) {
                 monitor::noteEvent(MonitorEventKind::TextureLoad, WorkReason::Request,
                                    "texture.load", names, float(ms),
                                    (unsigned long long)(before > after ? before - after : 0u));
                 monitor::noteCacheWork(CacheKind::Texture, WorkReason::Request, 0, names.c_str(),
-                                       unsigned(before), float(ms));
+                                       unsigned(before > after ? before - after : 0u), float(ms));
             }
         } else {
             drainTextureStreaming();
