@@ -14,6 +14,7 @@
 #include <Compositor/Pass/OgreCompositorPass.h>
 #include <OgreRenderPassDescriptor.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <string>
 
@@ -86,6 +87,7 @@ ChainDesc OgreView::chainDesc() const {
     d.exposure       = mPostFx.exposure;
     d.exposureMin    = mPostFx.exposureMin;
     d.exposureMax    = mPostFx.exposureMax;
+    d.exposureScale  = mPostFx.exposureScale;
     // Bloom rides the HDR node; without HDR there is nothing to bright-pass.
     d.bloom          = mPostFx.bloom && mPostFx.hdr;
     d.bloomThreshold = mPostFx.bloomThreshold;
@@ -208,7 +210,7 @@ void OgreView::applyFixedExposure() {
     if (!d.hdr || !d.tonemapFixed) return;
     JAH_TRY {
         writeLiveClearColour(mWorkspace, mChainHandles.fixedExposure,
-                             chain::fixedExposureColour(d.exposure));
+                             chain::fixedExposureColour(d.exposureScale, d.exposure));
     } JAH_CATCH(mError, );
 }
 
@@ -463,7 +465,7 @@ void OgreView::applyPip() {
         // through the writer that also touches the pass INSTANCE, because the
         // colour Vulkan uses is the one cached in its RenderPassDescriptor.
         writeLiveClearColour(mPipWorkspace, mPipHandles.exposure,
-                             chain::fixedExposureColour(mPip.exposure));
+                             chain::fixedExposureColour(0.0f, mPip.exposure));
     } JAH_CATCH(mError, );
 }
 
@@ -507,6 +509,55 @@ void OgreView::resetExposureHistory() {
             }
         }
     } JAH_CATCH(mError, );
+}
+
+/// THE EXPOSURE THIS VIEW ACTUALLY GRADED WITH, read back off the GPU (SS1).
+///
+/// WHY IT HAS TO BE A READBACK. The automatic exposure is computed entirely on
+/// the GPU — four downscale quads reduce the frame's log-luminance into a 1x1
+/// texture which the tonemapper then samples as `fInvLumAvg` — so the CPU never
+/// sees the number at all. Nothing else in this engine knows it, and no formula
+/// reproduces it (it is a temporal filter over the scene's own content).
+///
+/// WHICH TEXTURE. `jahOldLum`, the adaptation HISTORY, not the `jahLum` the
+/// tonemapper samples: kLum is Discardable (its content between frames is
+/// undefined memory by definition) while the history is explicitly
+/// keep_content, and the chain's last HDR pass copies one into the other — so
+/// the history holds exactly the multiplier the last presented frame graded
+/// with. One 1x1 R16_FLOAT texel, downloaded with accurate tracking; the cost
+/// is one fence on a path that already stalls (a screenshot).
+///
+/// 0 means "there is nothing to read": no workspace, no HDR, the FIXED form
+/// (whose exposure is a constant the caller already has), or a view that has
+/// never presented a frame.
+float OgreView::measuredExposureScale() const {
+    if (!mWorkspace || !mRoot) return 0.0f;
+    const ChainDesc d = chainDesc();
+    if (!d.hdr || d.tonemapFixed) return 0.0f;
+    if (mFramesPresented == 0u) return 0.0f;
+    float measured = 0.0f;
+    JAH_TRY {
+        Ogre::TextureGpu *lum = nullptr;
+        for (Ogre::CompositorNode *n : mWorkspace->getNodeSequence()) {
+            if (!n) continue;
+            if (Ogre::TextureGpu *t = n->getDefinedTexture(chain::exposureHistoryTextureName())) {
+                lum = t;
+                break;
+            }
+        }
+        if (!lum) return 0.0f;
+        Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+        Ogre::AsyncTextureTicket *t = tm->createAsyncTextureTicket(
+            1u, 1u, 1u, Ogre::TextureTypes::Type2D, lum->getPixelFormat());
+        t->download(lum, 0, true);
+        const Ogre::TextureBox box = t->map(0);
+        measured = box.getColourAt(0, 0, 0, lum->getPixelFormat()).r;
+        t->unmap();
+        tm->destroyAsyncTextureTicket(t);
+    } JAH_CATCH(mError, 0.0f);
+    // A history that has not converged to anything finite is not an exposure.
+    if (!(measured > 0.0f) || !std::isfinite(measured)) return 0.0f;
+    return measured;
 }
 
 OgreView::~OgreView() { destroy(); }

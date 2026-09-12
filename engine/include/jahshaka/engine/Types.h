@@ -2270,6 +2270,24 @@ struct PostFxDesc {
     /// fewer). Ignored unless `hdr`.
     bool  tonemapFixed = false;
 
+    /// THE FIXED GRADE'S EXPOSURE, AS THE TONEMAPPER'S OWN MULTIPLIER, when the
+    /// host already knows it (SS1, 2026-09-13). 0 — the default — means "derive
+    /// it from `exposure`", which is the grey-card constant `tonemapFixed` has
+    /// always used (OgreChain's fixedInverseLuminance: it substitutes a 0.18
+    /// mid-grey for the measurement the auto chain would have made).
+    ///
+    /// WHY A SECOND WAY TO SAY IT. The grey card is right for a THUMBNAIL, which
+    /// is a photograph of content nobody has measured. It is about a stop off in
+    /// a bright room, and it is wrong for a SCREENSHOT OF THE EDITOR, which has
+    /// a measured exposure a few centimetres away: the on-screen view converged
+    /// on one over the last second. `View::measuredExposureScale()` reads that
+    /// number back, and this field carries it into the one-shot offscreen view,
+    /// which can never converge on its own (it lives two frames). Right AND
+    /// deterministic — the same picture every time, because it is a constant.
+    ///
+    /// Ignored unless `hdr && tonemapFixed`. Never negative; 0 is "unknown".
+    float exposureScale = 0.0f;
+
     /// THE LOOKS STACK (POST_LOOKS_SPEC.md §4), in FRAME ORDER: entry 0 runs
     /// first, on the tonemapped and anti-aliased image, and the last one writes
     /// the window. Empty is the default and costs exactly nothing — the stage
@@ -2304,6 +2322,7 @@ struct PostFxDesc {
                distortion == o.distortion &&
                distortionStrength == o.distortionStrength &&
                tonemapFixed == o.tonemapFixed &&
+               exposureScale == o.exposureScale &&
                looks == o.looks &&
                allowOffscreen == o.allowOffscreen;
     }

@@ -561,6 +561,11 @@ struct ChainDesc {
     float exposure = 0.0f;          ///< stops; the auto-exposure midpoint
     float exposureMin = -2.5f;
     float exposureMax = 2.5f;
+    /// The FIXED form's exposure stated directly as the tonemapper's multiplier
+    /// (PostFxDesc::exposureScale). 0 = derive it from `exposure`. Like
+    /// `exposure` it is a CLEAR COLOUR, not a graph edit, so it is deliberately
+    /// NOT part of sameShape() — OgreView::applyFixedExposure rewrites it live.
+    float exposureScale = 0.0f;
     bool  bloom = false;            ///< rides the HDR node at ~zero marginal cost
     float bloomThreshold = 5.0f;    ///< bright-pass start, in the sample's units
     float bloomKnee = 2.0f;         ///< ramp WIDTH above it (A-6); 2.0 = the old hard-coded value
@@ -735,7 +740,7 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
 /// The colour a fixed-exposure clear must carry for `exposure` (chain units).
 /// The one conversion, shared by the main chain, the inset and every live
 /// rewrite of either — see the derivation at fixedInverseLuminance.
-Ogre::ColourValue fixedExposureColour(float exposure);
+Ogre::ColourValue fixedExposureColour(float exposureScale, float exposure);
 /// Tears down what buildPip made, including its datablock.
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles);
@@ -824,6 +829,19 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
 /// re-seeded history starts exactly where a deterministic grade would land.
 float exposureSeed(float exposure);
+
+/// THE MULTIPLIER THE FIXED TONEMAP CLEARS ITS 1x1 TEXTURE WITH, in one place:
+/// the host's measured value when it handed one over (ChainDesc::exposureScale),
+/// else the grey-card constant derived from `exposure`. Both callers — the main
+/// chain and the picture-in-picture inset — resolve it here so "0 means derive
+/// it" is stated once.
+float fixedExposureScale(float exposureScale, float exposure);
+
+/// The name of the 1x1 texture the AUTOMATIC exposure's adaptation history
+/// lives in, inside a built chain's scene node. Readable between frames
+/// (keep_content, unlike the per-frame `jahLum` it is copied from), which is
+/// what makes View::measuredExposureScale possible at all.
+const char *exposureHistoryTextureName();
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -3500,6 +3518,7 @@ public:
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
     void resetExposureHistory() override;
+    float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
     const ViewOverlayDesc &overlay() const override;

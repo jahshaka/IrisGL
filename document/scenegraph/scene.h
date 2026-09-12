@@ -388,8 +388,18 @@ public:
     /// engine fields (PostFxDesc::exposureMin/Max) existed and were pushed at
     /// their hard-coded defaults; the document could not say otherwise, so the
     /// World > Post Process section could not offer them (fix wave 2026-09-07,
-    /// item 8). Setting min == max PINS the exposure — the deterministic
-    /// setting, and the one the secondary-surface tonemap uses.
+    /// item 8).
+    ///
+    /// WHAT min == max REALLY DOES (corrected by measurement, SS1 2026-09-13 —
+    /// the old note here claimed it was "the deterministic setting the
+    /// secondary-surface tonemap uses", and it is not): it clamps what the
+    /// automatic exposure adapts TOWARDS to a single value, so the grade stops
+    /// following the scene's content. It is still the AUTOMATIC chain — a
+    /// temporal filter that takes about a second to arrive — and it lands
+    /// nowhere near the constant the secondary surfaces grade with, which
+    /// substitutes a 0.18 grey card for the measurement (measured on one floor
+    /// region: 12.9 against 86.6). For a picture that is deterministic by
+    /// construction, ask a screenshot for the "tonemap" or "scene" grade.
     float exposureMin;
     float exposureMax;
     bool  bloomEnabled;      ///< highlight bloom; rides the HDR node, needs hdrEnabled

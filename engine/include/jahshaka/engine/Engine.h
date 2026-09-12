@@ -914,6 +914,26 @@ public:
     /// yet: nothing to re-seed, no error.
     virtual void resetExposureHistory() = 0;
 
+    /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
+    /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader
+    /// samples as `fInvLumAvg`, read back off the GPU's 1x1 adaptation history.
+    ///
+    /// WHAT IT IS FOR. A one-shot offscreen view (a screenshot, an export
+    /// frame) lives about two frames and can therefore NEVER converge: its own
+    /// automatic exposure would grade at whatever it was seeded with. Handing
+    /// it this value through `PostFxDesc::exposureScale` + `tonemapFixed` makes
+    /// the shot grade exactly like the view the user is looking at, and makes
+    /// it deterministic while it is at it, because by then it is a constant.
+    ///
+    /// COSTS A GPU STALL (a 1x1 download with accurate tracking). Call it once
+    /// per picture, never per frame.
+    ///
+    /// 0 means there is nothing to read: no HDR in this view's chain, the fixed
+    /// (already-constant) form, an offscreen view with no chain, or a view that
+    /// has not presented a frame yet. 0 is not an error, and a caller should
+    /// fall back to the grade it would have used anyway.
+    virtual float measuredExposureScale() const = 0;
+
     /// The engine-drawn overlay for this View (STATS_OVERLAY_SPEC.md §5.1):
     /// a corner stats readout and/or a full-view loading cover.
     ///
