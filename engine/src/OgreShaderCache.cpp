@@ -337,19 +337,30 @@ void ShaderCache::detachCounters() {
 }
 
 void ShaderCache::recordCompileNames(bool on) {
-    if (mCounter) mCounter->recordNames.store(on, std::memory_order_relaxed);
-    if (!on && mCounter) {
-        std::lock_guard<std::mutex> lock(mCounter->namesMutex);
-        mCounter->names.clear();
-    }
+    if (!mCounter) return;
+    // SEED THE WINDOW HERE, under the same lock the drain takes. The monitor is
+    // FORWARD-ONLY: a capture reports what compiled DURING it, and nothing else.
+    // Without this seed `mCompileNamesAt` was still 0 (or the previous
+    // capture's mark), so the first frame of every capture reported every
+    // shader compiled since process start — thousands on a cold cache — and a
+    // second capture re-reported everything that happened between the two.
+    std::lock_guard<std::mutex> lock(mCounter->namesMutex);
+    mCounter->recordNames.store(on, std::memory_order_relaxed);
+    mCompileNamesAt = mCounter->compiled.load();
+    mCounter->names.clear();
 }
 
 unsigned ShaderCache::drainCompileNames(std::vector<std::string> &out) {
     if (!mCounter) return 0u;
+    // THE COUNT AND THE NAMES MUST BE TAKEN TOGETHER. The compiles run on the
+    // scene's worker pool (OGRE_SHADER_COMPILATION_THREADING_MODE=2), so a
+    // compile that lands between an unlocked read of the counter and the lock
+    // would have its NAME drained here and its COUNT attributed to the next
+    // window. One lock, one consistent window.
+    std::lock_guard<std::mutex> lock(mCounter->namesMutex);
     const unsigned total = mCounter->compiled.load();
     const unsigned since = total - mCompileNamesAt;
     mCompileNamesAt = total;
-    std::lock_guard<std::mutex> lock(mCounter->namesMutex);
     for (std::string &n : mCounter->names) out.push_back(std::move(n));
     mCounter->names.clear();
     return since;

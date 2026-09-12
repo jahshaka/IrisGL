@@ -884,7 +884,16 @@ void OgreEngine::renderOneFrame() {
         // followers and the HUD's one-shot re-caption included — so `totalMs`
         // is what one renderOneFrame cost the caller, not what the render cost.
         monPost.reset();
-        if (monitor::live()) monitor::gMonitor->endFrame(mUpdatedScenes);
+        if (monitor::live()) {
+            // Was the render system counting at all while this frame ran? The
+            // record says so outright: a frame rendered with recording off
+            // reports zeros for every geometry counter, and analysis must not
+            // have to infer that.
+            if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr)
+                monitor::gMonitor->current().metricsRecording =
+                    rs->getMetrics().mIsRecordingMetrics;
+            monitor::gMonitor->endFrame(mUpdatedScenes);
+        }
     } JAH_CATCH(mLastError, );
     // A frame that THREW still has to close, or the next one appends to it and
     // the ring holds one record that never ends.

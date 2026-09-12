@@ -926,6 +926,9 @@ public:
         FrameRecord           rec;
         std::vector<unsigned> passSampleIds;   ///< parallel to rec.passes
     };
+    /// The level this capture was started at (`Review` today). Held so the
+    /// switch is level-sensitive rather than merely on/off.
+    MonitorLevel mLevel = MonitorLevel::Review;
     /// Whether this capture is taking GPU samples at all. Set once, when the
     /// monitor goes on, from the render system's own answer.
     bool mGpu = false;
@@ -980,6 +983,18 @@ public:
         unsigned gpuSampleId = 0u;
     };
     std::vector<PassFrame> mPassStack;
+    /// The pass-stack depth each OPEN workspace update started at. A workspace
+    /// trims back to its own depth when it ends rather than clearing the stack,
+    /// so a workspace updated INSIDE an open pass (a probe capture, a planar
+    /// mirror) cannot destroy the enclosing pass's record — nor leave its GPU
+    /// sample open on the render system's stack.
+    std::vector<unsigned> mWorkspaceDepths;
+    /// The render system a pass last reported through, used only to close an
+    /// orphan's GPU sample. Never dereferenced for anything else.
+    Ogre::RenderSystem *mOrphanRs = nullptr;
+    /// Closes the innermost open pass that never got its `passPosExecute` —
+    /// recorded with unknown numbers and `orphaned`, never invented ones.
+    void closeOrphanPass();
     /// The innermost open Stage's child accumulator (Stage manages it).
     double *mStageChild = nullptr;
 
@@ -994,11 +1009,18 @@ public:
 
     PassListener      mListener;
     FrameSplitListener mSplit;
-    /// The workspaces the listener is attached to RIGHT NOW. Rebuilt every
-    /// frame rather than trusted across one: workspaces are recreated by atlas
-    /// rebuilds, GI rebuilds and probe placement, and a listener list dies with
-    /// its workspace.
-    std::vector<Ogre::CompositorWorkspace *> mAttached;
+    /// HOW MANY workspaces the listener was attached to on the last frame —
+    /// a COUNT and deliberately not a list of pointers.
+    ///
+    /// It used to be a vector of `CompositorWorkspace *`, and detaching walked
+    /// it. That was a use-after-free twice over: the list is rebuilt each frame
+    /// from the DRAWN scenes, so a scene the editor switched away from kept the
+    /// listener while vanishing from the list, and a workspace destroyed
+    /// between the last sync and the detach left a dangling pointer in it.
+    /// Detaching now walks every live view and every live scene instead
+    /// (`OgreEngine::setFrameMonitor`), which is free — Ogre's removeListener
+    /// is a find-and-erase — and this number is only ever reported.
+    unsigned mAttachedCount = 0u;
 
 private:
     void push(FrameRecord &&r);
@@ -1053,14 +1075,18 @@ void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
 /// probe grid placement) so that a capture can say how long it took and why.
 class EventScope {
 public:
+    /// `detail` is a `const char *` and not a std::string DELIBERATELY: a
+    /// std::string parameter is constructed at the CALL SITE, before the
+    /// constructor can test the gate, and §4.1 ("nothing happens while off") is
+    /// absolute.
     EventScope(MonitorEventKind kind, WorkReason reason, const char *label,
-               std::string detail = std::string());
+               const char *detail = nullptr);
     ~EventScope();
     EventScope(const EventScope &) = delete;
     EventScope &operator=(const EventScope &) = delete;
 private:
     const char      *mLabel = nullptr;
-    std::string      mDetail;
+    const char      *mDetail = nullptr;
     MonitorEventKind mKind;
     WorkReason       mReason;
     std::chrono::steady_clock::time_point mStart;

@@ -1474,10 +1474,12 @@ public:
     //
     // A DATA COLLECTOR for the lead's engine reviews, and nothing else: it
     // records what each frame did and WHY, judges none of it, and never draws.
-    // It replaces the old opt-in pass profiler (`EngineConfig::profile` /
-    // `setProfiling`), which measured one number per profiling id, mis-nested
-    // every scene pass that owned a shadow node (one start time for nested
-    // passes) and logged every C++-built shadow pass as "(unnamed pass)".
+    // It replaced an opt-in pass profiler that is GONE from this boundary
+    // (`EngineConfig::profile`, `setProfiling`/`profiling` and the Studio
+    // `app.profiling` verb were all deleted with it): it measured one number
+    // per profiling id, mis-nested every scene pass that owned a shadow node
+    // (a single start time, overwritten by each nested pass) and logged every
+    // C++-built shadow pass as "(unnamed pass)".
     //
     // OFF BY DEFAULT AND FREE WHEN OFF. At `MonitorLevel::Off` nothing is
     // attached to any workspace, no clock is read, the ring is freed and no GPU

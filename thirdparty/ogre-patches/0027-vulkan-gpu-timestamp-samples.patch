@@ -102,10 +102,10 @@ index 22c552197..a9f503d7f 100644
    target_link_libraries(RenderSystem_Vulkan ${OGRE_THREAD_LIBRARIES})
  endif ()
 diff --git a/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h b/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
-index cf8dce196..5dbf18180 100644
+index cf8dce196..87cd56153 100644
 --- a/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
 +++ b/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
-@@ -149,6 +149,47 @@ namespace Ogre
+@@ -149,6 +149,61 @@ namespace Ogre
          void destroyVkResources0();
          void destroyVkResources1();
  
@@ -131,18 +131,32 @@ index cf8dce196..5dbf18180 100644
 +        // whose results are read back non-blocking with the availability bit
 +        // just before it is reset. Nothing ever stalls the CPU on the GPU.
 +        static const uint32 kJahMaxGpuQueries = 4096u;
++        /// A sample the pool had no room for. It still rides the stack — that
++        /// is how `endGPUSampleProfile` finds its own sample — but no query is
++        /// written for it and it is never reported. Without the sentinel the
++        /// matching `end` popped the ENCLOSING sample and filed a wrong
++        /// duration as a real number.
++        static const uint32 kJahOverflowQuery = 0xFFFFFFFFu;
 +        struct JahGpuSample
 +        {
 +            uint32 hash;   ///< the caller's id for this sample (hashCache)
 +            uint32 query;  ///< the begin query index; end is query + 1
 +        };
-+        VkQueryPool               mJahQueryPool[2];
-+        bool                      mJahPoolWritten[2];
++        VkQueryPool               mJahQueryPool[2] = { 0, 0 };
++        bool                      mJahPoolWritten[2] = { false, false };
 +        std::vector<JahGpuSample> mJahSamples[2];
 +        std::vector<JahGpuSample> mJahSampleStack;   ///< samples nest
 +        std::vector<std::pair<uint32, float> > mJahResults;
++        /// Readback scratch, sized to what a frame actually wrote rather than
++        /// to the whole pool (which was 64 KB every frame).
++        FastArray<uint64>         mJahRawResults;
 +        uint32                    mJahPoolIdx;
 +        uint32                    mJahNextQuery;
++        /// Samples dropped for want of query room, this frame and last — the
++        /// honest "this capture's GPU numbers are incomplete" signal, read
++        /// through getCustomAttribute( "JahGpuSamplesTruncated" ).
++        uint32                    mJahOverflowed;
++        uint32                    mJahOverflowedLastFrame;
 +        float                     mJahTimestampPeriodNs;
 +        bool                      mJahGpuProfiling;
 +        /// Rotates the pools, reads back the one being recycled and resets it.
@@ -154,23 +168,25 @@ index cf8dce196..5dbf18180 100644
          VulkanRenderSystem( const NameValuePairList *options );
          ~VulkanRenderSystem() override;
 diff --git a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
-index 06e0c4728..e15065cd7 100644
+index 06e0c4728..d72cdaf9b 100644
 --- a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
 +++ b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
-@@ -223,6 +223,12 @@ namespace Ogre
+@@ -223,6 +223,14 @@ namespace Ogre
          mCurrentAutoParamsBufferPtr( 0 ),
          mCurrentAutoParamsBufferSpaceLeft( 0 ),
          mDevice( 0 ),
 +#ifdef JAH_GPU_TIMESTAMPS
 +        mJahPoolIdx( 0u ),
 +        mJahNextQuery( 0u ),
++        mJahOverflowed( 0u ),
++        mJahOverflowedLastFrame( 0u ),
 +        mJahTimestampPeriodNs( 0.0f ),
 +        mJahGpuProfiling( false ),
 +#endif
          mCache( 0 ),
          mPso( 0 ),
          mComputePso( 0 ),
-@@ -2662,13 +2668,177 @@ namespace Ogre
+@@ -2662,13 +2670,197 @@ namespace Ogre
  #endif
      }
      //-------------------------------------------------------------------------
@@ -222,12 +238,15 @@ index 06e0c4728..e15065cd7 100644
 +        mJahTimestampPeriodNs = props.limits.timestampPeriod;
 +        mJahPoolIdx = 0u;
 +        mJahNextQuery = 0u;
++        mJahOverflowed = 0u;
++        mJahOverflowedLastFrame = 0u;
 +        mJahSampleStack.clear();
 +        mJahResults.clear();
 +        mJahGpuProfiling = true;
 +#endif
 +    }
-+    //-------------------------------------------------------------------------
+     //-------------------------------------------------------------------------
+-    void VulkanRenderSystem::beginGPUSampleProfile( const String &name, uint32 *hashCache ) {}
 +    void VulkanRenderSystem::deinitGPUProfiling()
 +    {
 +#ifdef JAH_GPU_TIMESTAMPS
@@ -254,13 +273,25 @@ index 06e0c4728..e15065cd7 100644
 +#ifdef JAH_GPU_TIMESTAMPS
 +        if( !mJahGpuProfiling )
 +            return;
-+        // Two queries per sample (begin, end). Out of room: the sample is
-+        // simply not recorded, and the caller reports "no GPU time" for it
-+        // rather than a wrong number.
-+        if( mJahNextQuery + 2u > kJahMaxGpuQueries )
-+            return;
++        // Two queries per sample (begin, end). OUT OF ROOM: push a SENTINEL and
++        // return. Returning without pushing was a real mis-attribution bug: the
++        // stack is how `end` finds its own sample, so a bare return made the
++        // matching `end` pop the ENCLOSING sample, write that sample's end
++        // timestamp at the wrong point in the frame and file it as complete —
++        // from the first overflow to the end of the frame, WRONG durations were
++        // reported as real numbers. A sentinel keeps the nesting honest and the
++        // sample is simply absent, which the caller reports as "no GPU time".
++        // Reachable: three shadowed point lamps inside one probe capture is
++        // 6 faces x 22 passes before the view and the planar arms are counted.
 +        JahGpuSample sample;
 +        sample.hash = hashCache ? *hashCache : 0u;
++        if( mJahNextQuery + 2u > kJahMaxGpuQueries )
++        {
++            sample.query = kJahOverflowQuery;
++            ++mJahOverflowed;
++            mJahSampleStack.push_back( sample );
++            return;
++        }
 +        sample.query = mJahNextQuery;
 +        mJahNextQuery += 2u;
 +        // A timestamp write is legal inside a render pass, which is where most
@@ -275,8 +306,7 @@ index 06e0c4728..e15065cd7 100644
 +        (void)hashCache;
 +#endif
 +    }
-     //-------------------------------------------------------------------------
--    void VulkanRenderSystem::beginGPUSampleProfile( const String &name, uint32 *hashCache ) {}
++    //-------------------------------------------------------------------------
 +    void VulkanRenderSystem::endGPUSampleProfile( const String &name )
 +    {
 +#ifdef JAH_GPU_TIMESTAMPS
@@ -284,6 +314,8 @@ index 06e0c4728..e15065cd7 100644
 +            return;
 +        const JahGpuSample sample = mJahSampleStack.back();
 +        mJahSampleStack.pop_back();
++        if( sample.query == kJahOverflowQuery )
++            return;   // the sentinel: no query was ever written for it
 +        vkCmdWriteTimestamp( mDevice->mGraphicsQueue.getCurrentCmdBuffer(),
 +                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mJahQueryPool[mJahPoolIdx],
 +                             sample.query + 1u );
@@ -312,22 +344,24 @@ index 06e0c4728..e15065cd7 100644
 +            // is zero while the GPU has not written it; a sample whose pair is
 +            // not both available is skipped, never waited for and never
 +            // reported as zero.
-+            FastArray<uint64> raw;
-+            raw.resize( (size_t)kJahMaxGpuQueries * 2u );
 +            uint32 highest = 0u;
 +            for( size_t i = 0u; i < mJahSamples[mJahPoolIdx].size(); ++i )
 +                highest = std::max( highest, mJahSamples[mJahPoolIdx][i].query + 2u );
++            // Sized to what was actually written, not to the pool: a 20-pass
++            // frame read back 64 KB every frame before this.
++            mJahRawResults.resize( (size_t)highest * 2u );
++            uint64 *raw = mJahRawResults.begin();
 +            const VkResult res = vkGetQueryPoolResults(
 +                mDevice->mDevice, mJahQueryPool[mJahPoolIdx], 0u, highest,
-+                (size_t)highest * 2u * sizeof( uint64 ), raw.begin(), 2u * sizeof( uint64 ),
++                (size_t)highest * 2u * sizeof( uint64 ), raw, 2u * sizeof( uint64 ),
 +                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT );
 +            if( res == VK_SUCCESS || res == VK_NOT_READY )
 +            {
 +                for( size_t i = 0u; i < mJahSamples[mJahPoolIdx].size(); ++i )
 +                {
 +                    const JahGpuSample &sample = mJahSamples[mJahPoolIdx][i];
-+                    const uint64 *b = raw.begin() + (size_t)sample.query * 2u;
-+                    const uint64 *e = raw.begin() + (size_t)( sample.query + 1u ) * 2u;
++                    const uint64 *b = raw + (size_t)sample.query * 2u;
++                    const uint64 *e = raw + (size_t)( sample.query + 1u ) * 2u;
 +                    if( b[1] == 0u || e[1] == 0u || e[0] < b[0] )
 +                        continue;   // not back yet, or a wrapped counter
 +                    const float ms = float( double( e[0] - b[0] ) *
@@ -347,12 +381,14 @@ index 06e0c4728..e15065cd7 100644
 +                             mJahQueryPool[mJahPoolIdx], 0u, kJahMaxGpuQueries );
 +        mJahPoolWritten[mJahPoolIdx] = false;
 +        mJahNextQuery = 0u;
++        mJahOverflowedLastFrame = mJahOverflowed;
++        mJahOverflowed = 0u;
 +    }
 +#endif
      //-------------------------------------------------------------------------
      void VulkanRenderSystem::endGpuDebuggerFrameCapture( Window *window, const bool bDiscard )
      {
-@@ -2709,6 +2879,36 @@ namespace Ogre
+@@ -2709,6 +2901,45 @@ namespace Ogre
              *(VulkanQueue **)pData = &mDevice->mGraphicsQueue;
              return;
          }
@@ -373,6 +409,15 @@ index 06e0c4728..e15065cd7 100644
 +        else if( name == "JahGpuFrameBegin" )
 +        {
 +            jahGpuFrameBegin();
++            return;
++        }
++        else if( name == "JahGpuSamplesTruncated" )
++        {
++            // How many samples the LAST completed frame could not record
++            // because the query pool was full. Non-zero means a capture's GPU
++            // numbers are incomplete, and the host says so rather than letting
++            // analysis read a partial frame as a whole one.
++            *(uint32 *)pData = mJahOverflowedLastFrame;
 +            return;
 +        }
 +        else if( name == "JahGpuSampleResults" )

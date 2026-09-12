@@ -2752,13 +2752,20 @@ enum class PassBucket {
 /// a frame's passes reproduces `RenderStats::draws` for that frame exactly —
 /// which is what the suite asserts.
 ///
-/// ZERO DRAWS DOES NOT MEAN "NOTHING WAS DRAWN". Ogre's RenderQueue REPLAYS a
-/// cached command buffer when a queue has not changed since the last frame, and
-/// it only feeds `_addMetrics` on the build path — so an idle frame's passes
-/// legitimately report zero draws while the picture is complete. Analysis must
-/// read a run of zeroes as "replayed", not as "empty". (Measured 2026-09-12,
-/// lane MON-P1a: with one caster moved, frame N reports 3 draws and frame N+1
-/// reports 0, on the same scene.)
+/// ZERO DRAWS DOES NOT ALWAYS MEAN "NOTHING WAS DRAWN", and this is Ogre's
+/// plumbing rather than the monitor's. MEASURED (lane MON-P1a, 2026-09-12, the
+/// engine suite's offscreen rig): a frame whose view renders a ground, a cube
+/// and the overlays reports the view's own scene pass as `draws = 0`, while the
+/// shadow node's cube-face caster passes in the SAME frame report 1 each — so
+/// the frame's total is 3 on a frame that re-rendered a lamp map and 0 on the
+/// idle frames after it, with an identical, complete picture every time. In the
+/// app the main pass does report draws (`scripting.e2e.render_stats` asserts
+/// `draws > 0`), so the under-count is configuration-dependent and was NOT
+/// root-caused here; it is reported upstream-ward rather than guessed at.
+/// The monitor reports the render system's own numbers faithfully; analysis
+/// must therefore read a zero as "the renderer counted nothing here", never as
+/// "this pass drew nothing". `FrameRecord::metricsRecording` says whether the
+/// counters were live at all.
 struct FramePass {
     std::string workspace;        ///< the workspace instance's definition name
     std::string node;             ///< the parent compositor node's name
@@ -2769,6 +2776,10 @@ struct FramePass {
     static constexpr unsigned kNoShadowMap = 0xFFFFFFFFu;
     unsigned    draws = 0, batches = 0, instances = 0;
     unsigned long long triangles = 0;
+    /// TRUE when the pass never reported its end (a workspace update closed
+    /// with it still open). Its times and counts are unknown, not zero:
+    /// `cpuMs` is negative. Seeing one of these is itself the finding.
+    bool        orphaned = false;
     float       cpuMs = 0.0f;
     /// SCENE PASSES ONLY: of this pass's wall time, how much went on its shadow
     /// node's update (its own nested pass records included) — the shadow-vs-
@@ -2877,6 +2888,15 @@ struct FrameRecord {
     unsigned    shadowPassesProbe = 0;  ///< probes' shadow nodes
     unsigned    planarRenders = 0;
     unsigned    shaderCompiles = 0;
+    /// Was the render system COUNTING while this frame rendered? Recording is
+    /// off in Ogre until something asks for `renderStats()`, and a frame
+    /// rendered with it off reports zeros for every geometry counter — a fact
+    /// `frames.jsonl` states outright so analysis never has to infer it.
+    bool        metricsRecording = false;
+    /// Passes that were closed by a workspace boundary rather than by their own
+    /// `passPosExecute` (see `FramePass::orphaned`). Zero is the only value
+    /// seen so far; a non-zero one means this frame's pass tree is incomplete.
+    unsigned    orphanedPasses = 0;
     float       textureWaitMs = 0.0f;   ///< the frame-head streaming drain
     /// Σ of the passes' GPU milliseconds, or NEGATIVE when unmeasured.
     float       gpuMs = -1.0f;
@@ -2930,6 +2950,11 @@ struct MonitorStatus {
     bool     gpuSupported = false;   ///< ...and the device/backend can do timestamps
     bool     gpuActive    = false;   ///< ...and a capture has a query pool open NOW
     unsigned gpuQueryPools = 0;      ///< MUST be 0 outside a capture
+    /// GPU samples the LAST frame could not record because the query pool ran
+    /// out of room. Non-zero means this capture's GPU numbers are INCOMPLETE —
+    /// said out loud rather than left for analysis to notice that some passes
+    /// have no time. (A probe capture alone is 6 faces x ~22 passes.)
+    unsigned gpuSamplesTruncated = 0;
     std::string gpuReason;           ///< why GPU timing is unavailable, when it is
     float    overheadMs = 0.0f;      ///< the monitor's own cost, last frame
 };
@@ -3019,8 +3044,13 @@ struct EngineSnapshot {
     /// exact number the snapshot can state — and it is the one behind the
     /// batching-collapse question.
     std::vector<std::pair<std::string, unsigned>> hlmsDatablocks;
-    /// VRAM by pool — the texture-manager entries, largest first, capped.
+    /// VRAM by pool — the texture-manager entries, LARGEST FIRST and capped
+    /// (a bundle must not be dominated by this list). `textureCount` is how
+    /// many there really are and `texturesTruncated` how many were dropped, so
+    /// a reader is never silently given a partial list.
     std::vector<TextureMemoryEntry> textures;
+    unsigned textureCount = 0;
+    unsigned texturesTruncated = 0;
     std::vector<SnapshotLight> lights;
     std::vector<ProbeInfo>     probes;
     std::vector<CompositorWorkspaceInfo> workspaces;
