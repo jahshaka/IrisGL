@@ -934,21 +934,63 @@ void OgreEngine::applyShadowCache() {
         // with shadows off (the Materials page's sphere, lit by a key and a
         // shadow-casting fill) has nothing to cache, and flipping the whole
         // process's atlas for it was a needless rebuild of every shadowed arm.
+        //
+        // AND IT WAITS FOR THE WORLD TO BE UP (the sun lane, 2026-09-13). This
+        // flip used to fire on the very first frame a cacheable lamp was seen,
+        // which — the moment shadows became the default for every new light —
+        // meant it fired during the SCENE'S FIRST BIND, in the same frames
+        // where the post chain is being built and the texture streamer is
+        // uploading into its pooled Type2DArrays. Dropping and recreating every
+        // workspace that names a shadow node right there raced the streamer:
+        // 3-10 `VUID-vkCmdDraw-None-09600` image-layout errors per boot (a
+        // colour array expected in TRANSFER_DST found SHADER_READ_ONLY), which
+        // app.engine_selftest_validation is the only suite that can see. The
+        // pixels were never wrong — the hazard is, and it was there for any
+        // scene that opened with a casting lamp, which is four of the eight we
+        // ship.
+        //
+        // So the flip is debounced exactly as the atlas GROWTH beside it
+        // already is (that one carries the same comment: "a scene loads its
+        // lights over many frames and every rebuild drops and recreates every
+        // workspace"), with one addition — the frames only count while the
+        // views that want it are PRESENTING. A world that is still binding
+        // never advances the counter, so the rebuild lands in a quiet frame
+        // after the first presents instead of inside them. It costs at most
+        // kShadowClearFlipDebounceFrames presented frames of the old clear
+        // strategy, during which nothing is cached yet anyway.
         if (!mShadowPerMapClears) {
             std::vector<OgreScene *> scenes;
             scenesFeedingEnabledViews(scenes);
             bool anyLamp = false;
+            bool presenting = false;
             for (OgreScene *s : scenes) {
                 if (!s->hasCacheableShadowLights()) continue;
                 bool shadowed = false;
-                for (auto &v : mViews)
-                    if (v->ogreScene() == s && v->shadowNodeInstance()) { shadowed = true; break; }
+                bool shown = false;
+                for (auto &v : mViews) {
+                    if (v->ogreScene() != s || !v->shadowNodeInstance()) continue;
+                    shadowed = true;
+                    if (v->framesPresented() > 0u) shown = true;
+                }
                 std::vector<Ogre::CompositorWorkspace *> ws;
                 s->shadowWorkspaces(ShadowNodeKind::Reflect, ws);
                 s->shadowWorkspaces(ShadowNodeKind::Probe, ws);
-                if (shadowed || !ws.empty()) { anyLamp = true; break; }
+                if (shadowed || !ws.empty()) {
+                    anyLamp = true;
+                    // A scene whose only shadow-node instances are a mirror's
+                    // or a probe's has no view counter to wait on; it is not
+                    // in a first bind either, since those arms are built after
+                    // the view is up.
+                    if (shown || !shadowed) presenting = true;
+                    break;
+                }
             }
-            if (anyLamp) rebuildShadowAtlas(mShadowResolution, mShadowMapCount, true);
+            if (!anyLamp || !presenting) {
+                mShadowClearFlipFrames = 0;
+            } else if (++mShadowClearFlipFrames >= kShadowClearFlipDebounceFrames) {
+                mShadowClearFlipFrames = 0;
+                rebuildShadowAtlas(mShadowResolution, mShadowMapCount, true);
+            }
         }
 
         // THE COUNTERS' OPT-IN EXPIRES (P8): nobody asked for a while, so the

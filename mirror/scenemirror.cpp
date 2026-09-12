@@ -275,6 +275,15 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
     if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
     mGridBuiltSpacing = -1.0f;
+    // The ground's horizon: same discipline as the grid. Its MATERIAL is the
+    // floor's own and belongs to mMaterials, which is swept below — dropping it
+    // here would destroy the floor's material out from under the floor.
+    if (mHorizonNode) { mTarget->removeNode(mHorizonNode); mHorizonNode = 0; }
+    if (mHorizonMesh) { mTarget->destroyMesh(mHorizonMesh); mHorizonMesh = 0; }
+    mHorizonMeshSource = nullptr;
+    mHorizonMaterial = 0;
+    mHorizonVisible = -1;
+    mHorizonFloor = nullptr;
     // The GI volume overlay's two boxes (fix 9): same discipline as the grid.
     if (mGiVolLitNode)   { mTarget->removeNode(mGiVolLitNode);   mGiVolLitNode = 0; }
     if (mGiVolProbeNode) { mTarget->removeNode(mGiVolProbeNode); mGiVolProbeNode = 0; }
@@ -347,6 +356,18 @@ void SceneMirror::evacuateEngineObjects()
         if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
     mHighlighted.clear();
+    // THE GROUND'S HORIZON GOES TOO (lead review). Its `mHorizonFloor` is a raw
+    // pointer into the document that is leaving; its material PIN is what keeps
+    // the floor's datablock out of the sweep, and every entry that referenced
+    // that datablock has just been released — so a horizon left behind holds a
+    // material alive, on an Item, in a scene nobody renders, until the page
+    // switches back. Same three lines setSource has.
+    if (mHorizonNode) { mTarget->removeNode(mHorizonNode); mHorizonNode = 0; }
+    if (mHorizonMesh) { mTarget->destroyMesh(mHorizonMesh); mHorizonMesh = 0; }
+    mHorizonMeshSource = nullptr;
+    mHorizonMaterial = 0;
+    mHorizonVisible = -1;
+    mHorizonFloor = nullptr;
     mReclaimPending = true;
 }
 
@@ -437,6 +458,7 @@ int SceneMirror::sync()
             mWasPlaying = playing;
         }
     }
+    mHorizonFloor = nullptr;     // re-found by this walk (syncGroundHorizon)
     mAnyRefractive = false;
     mAnyDistortion = false;
     mShadowFilter = ShadowFilter::Hard;
@@ -493,6 +515,7 @@ int SceneMirror::sync()
     { MirrorStage s(mon, "mirror.helpers");
     syncHighlight();
     syncGrid();
+    syncGroundHorizon();
     }
     // AFTER removeMissing: a rider deleted from the document is a dangling key
     // in the reconciler's map until its entry is released (see the function).
@@ -1163,6 +1186,217 @@ void SceneMirror::syncGrid()
     mTarget->setNodeVisible(mGridNode, true);
 }
 
+// ---- the ground's horizon ---------------------------------------------------
+//
+// Owner, 2026-09-13 (testing push #18): "should the default ground not also be
+// infinite in the Grand Showroom 2? It seems cut off." It is: the default floor
+// is a 100 m square (lane L3 cut it from 1024 m so a new project would stop
+// voxelising a square kilometre) and Showroom 2's hall alone is 48 m, so flying
+// out of the hall shows the floor end in mid-air with sky underneath.
+//
+// This is the floor's own material carried on to the horizon by ONE extra plane
+// that belongs to the mirror, not to the document. The rationale for the shape,
+// and the two rejected alternatives with their measurements, are on
+// syncGroundHorizon's declaration in the header.
+//
+// THE NUMBERS. `kHorizonHalfExtent` is twice the editor camera's far clip
+// (1000 m, EngineSceneViewport::createEditorCamera), so the plane's own edge is
+// always beyond the far plane and what a user can see is the far plane's own
+// distance horizon, in every direction, at every height -- never a corner and
+// never an edge that can be flown to. `kHorizonSink` puts it just under the
+// floor so the floor always wins where they overlap; 5 mm reads as 0.006
+// degrees at the floor's 50 m edge, an order of magnitude under a pixel on a
+// 1080-line view.
+//
+// THE UV MAP IS MEASURED, NOT ASSUMED (lead review, and it was a real defect:
+// the first cut used a hand-picked 0.0625 UV per metre with no offset and got
+// the right DENSITY with the wrong PHASE and the wrong V SIGN -- the geometry
+// edge came back as a texture seam, misregistered by 0.195 of a repeat and
+// cycling along the north/south edges because v was mirrored). `fitGroundUvMap`
+// fits u = ux*x + uc and v = vz*z + vc over the floor's OWN engine-side
+// vertices -- the very arrays its Item is drawn from, after toMeshData's V flip
+// -- so the horizon inherits ground.obj's density, offset and sign whatever the
+// importer did with them, and survives a re-stage of that model. Measured on
+// the shipped ground.obj: the FILE carries u = 0.0625x + 0.048828 and
+// v = -0.0625z + 0.048828 (a non-zero offset, v running against +z), and the
+// importer's flip (v = 1 - v) turns the second into v = 0.0625z + 0.951172.
+// The material's own textureScale multiplies both meshes alike on top of it.
+//
+// WHAT THE HELPER BIT COSTS, stated rather than discovered later: kHelperBit
+// keeps the horizon out of the reflection-probe captures and the planar
+// reflection pass, so a mirror surface reflects the floor ENDING at its own
+// 100 m edge with sky beyond. Indoors -- where every planar reflector and
+// probe in the shipped content lives -- it cannot be seen; widening a capture
+// mask to fix it would put a 4 km plane into every probe face, which is the
+// worse trade.
+static constexpr float kHorizonHalfExtent = 2000.0f;
+static constexpr float kHorizonUvPerMetre = 0.0625f;   // the fallback density only
+static constexpr float kHorizonSink       = 0.005f;
+
+// The floor's own UV map, fitted over its engine-side vertices. False when the
+// mesh carries no usable map (no UVs, or a degenerate one) -- the caller then
+// falls back to the shipped density with no offset, which is the old behaviour
+// and is only ever reached by a floor whose mesh is not ground.obj.
+bool SceneMirror::fitGroundUvMap(iris::Mesh *mesh, float &ux, float &uc, float &vz, float &vc)
+{
+    if (!mesh) return false;
+    MeshData data;
+    if (!toMeshData(mesh, data)) return false;
+    const size_t nv = data.positions.size() / 3;
+    if (nv < 3 || data.uvs.size() != nv * 2) return false;
+    // Least squares, one axis at a time: the floor is a plane in XZ, so u is a
+    // function of x alone and v of z alone. A fit that does not describe the
+    // mesh (a floor whose map is rotated, or per-face) is REFUSED on its
+    // residual rather than half-applied.
+    auto axis = [&](size_t posOff, size_t uvOff, float &k, float &c) {
+        double sa = 0, sb = 0;
+        for (size_t i = 0; i < nv; ++i) { sa += data.positions[i*3 + posOff]; sb += data.uvs[i*2 + uvOff]; }
+        const double ma = sa / double(nv), mb = sb / double(nv);
+        double num = 0, den = 0;
+        for (size_t i = 0; i < nv; ++i) {
+            const double da = data.positions[i*3 + posOff] - ma;
+            num += da * (data.uvs[i*2 + uvOff] - mb);
+            den += da * da;
+        }
+        if (!(den > 1e-6)) return false;
+        k = float(num / den);
+        c = float(mb - (num / den) * ma);
+        double worst = 0;
+        for (size_t i = 0; i < nv; ++i)
+            worst = std::max(worst, std::abs(double(k) * data.positions[i*3 + posOff] + double(c)
+                                             - data.uvs[i*2 + uvOff]));
+        return worst < 1e-3 && std::abs(k) > 1e-9f;
+    };
+    return axis(0, 0, ux, uc) && axis(2, 1, vz, vc);
+}
+
+void SceneMirror::syncGroundHorizon()
+{
+    const iris::MeshNode *floor = mHorizonFloor;
+    // A scene with no default floor (a thumbnail scene, a preview, a project
+    // whose floor was deleted) has no horizon, and a hidden floor takes its
+    // horizon with it.
+    const bool want = floor && floor->isVisibleInScene();
+    if (!want) {
+        if (mHorizonNode && mHorizonVisible != 0) {
+            mTarget->setNodeVisible(mHorizonNode, false);
+            mHorizonVisible = 0;
+        }
+        // Let go of the floor's material as well: while the horizon holds one
+        // the cache sweep keeps it alive (reclaimUnused), and a floor that has
+        // been deleted must take its material with it.
+        if (mHorizonMaterial) {
+            mTarget->detachMesh(mHorizonNode);
+            mHorizonMaterial = 0;
+            mReclaimPending = true;
+        }
+        return;
+    }
+
+    if (!mHorizonNode) {
+        mHorizonNode = mTarget->createNode();
+        if (!mHorizonNode) return;
+        // AN EDITOR HELPER, in the engine's sense (EnginePrivate.h's bit
+        // scheme): kHelperBit instead of kVisibleBit takes the plane out of
+        // every reflection-probe capture, out of the shadow nodes (nothing this
+        // size may ever be a shadow caster or the atlas fits the horizon
+        // instead of the scene) and out of kGiGeometryBit, while the main chain
+        // -- which sets no visibility mask at all -- goes on drawing it.
+        mTarget->setNodeHelper(mHorizonNode, true);
+    }
+    // THE FLOOR'S MESH decides the horizon's UV map, so a floor that changes
+    // mesh rebuilds it (the map is measured off that mesh, above).
+    iris::Mesh *floorMesh = floor->mesh.data();
+    if (mHorizonMesh && floorMesh != mHorizonMeshSource) {
+        mTarget->detachMesh(mHorizonNode);
+        mTarget->destroyMesh(mHorizonMesh);
+        mHorizonMesh = 0;
+        mHorizonMaterial = 0;
+        mReclaimPending = true;
+    }
+    if (!mHorizonMesh) {
+        // Four corners, wound to face UP and no other way. The single winding is
+        // load-bearing: the default floor is invisible from below (its
+        // datablock culls back faces), and a horizon that was not would hide
+        // whatever a camera dipping under y = 0 was looking at — which is not
+        // an exotic pose at all, it is what editor.frameNode does whenever it
+        // frames a small object from above (five pixel suites caught exactly
+        // that: the camera lands at y = -0.09 and the subject went grey).
+        //
+        // The UVs come from the FLOOR'S OWN map (fitGroundUvMap) so the checker
+        // crosses the floor's edge in phase; only a floor whose mesh has no
+        // usable map falls back to the shipped density.
+        float ux = kHorizonUvPerMetre, uc = 0.0f, vz = kHorizonUvPerMetre, vc = 0.0f;
+        if (!fitGroundUvMap(floorMesh, ux, uc, vz, vc)) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                irisLog("SceneMirror: the default floor's mesh carries no linear UV map — the "
+                        "horizon falls back to the shipped checker density and may not line up");
+            }
+        }
+        const float h = kHorizonHalfExtent;
+        const float u0 = -h * ux + uc, u1 = h * ux + uc;
+        const float v0 = -h * vz + vc, v1 = h * vz + vc;
+        MeshData quad;
+        quad.positions = { -h, 0.0f, -h,   h, 0.0f, -h,   h, 0.0f, h,   -h, 0.0f, h };
+        quad.normals   = { 0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f,
+                           0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f };
+        quad.uvs       = { u0, v0,   u1, v0,   u1, v1,   u0, v1 };
+        quad.indices   = { 0, 2, 1,  0, 3, 2 };
+        mHorizonMesh = mTarget->createMesh(quad);
+        if (!mHorizonMesh) return;
+        mHorizonMeshSource = floorMesh;
+        mHorizonMaterial = 0;      // nothing is attached yet
+    }
+
+    // THE FLOOR'S OWN MATERIAL, by id: every edit a user makes to the floor --
+    // its colour, its checker, its tiling, a whole library material dropped on
+    // it -- reaches the horizon with no work here, because both items point at
+    // the same datablock. Only a material SWAP re-attaches.
+    const MaterialId mat = materialFor(floor->material.data());
+    if (mat && mat != mHorizonMaterial) {
+        mTarget->attachMesh(mHorizonNode, mHorizonMesh, mat);
+        mHorizonMaterial = mat;
+        // ARM THE SWEEP. reclaimUnused runs BEFORE this stage and keeps the id
+        // the horizon was holding alive (it is not an entry, so the sweep can
+        // only see it through that pin); dropping the old one here without
+        // re-arming leaves the previous datablock alive until something
+        // unrelated arms the sweep — a library material dropped on the floor
+        // leaked exactly that (lead review).
+        mReclaimPending = true;
+    }
+    if (!mHorizonMaterial) return;
+
+    // The floor's world transform, sunk. Rotation and scale ride along so a
+    // scaled or tilted floor keeps its horizon attached to it (and its checker
+    // density, which the scale multiplies on both meshes alike).
+    //
+    // AND NOTHING AT REST: a floor that has not moved re-pushes nothing, so a
+    // still scene pays three pointer tests for the whole feature.
+    const iris::Mat4 world = const_cast<iris::MeshNode *>(floor)->getGlobalTransform();
+    if (world == mHorizonWorld && mHorizonVisible == 1) return;
+    mHorizonWorld = world;
+    const iris::Vec3 cx = world.column(0).toVector3D(), cy = world.column(1).toVector3D(),
+                     cz = world.column(2).toVector3D();
+    const iris::Vec3 scale(cx.length(), cy.length(), cz.length());
+    const iris::Vec3 pos = world.column(3).toVector3D();
+    const float sx = scale.x() > 1e-8f ? scale.x() : 1.0f, sy = scale.y() > 1e-8f ? scale.y() : 1.0f,
+                sz = scale.z() > 1e-8f ? scale.z() : 1.0f;
+    float m[9] = { cx.x() / sx, cy.x() / sy, cz.x() / sz,
+                   cx.y() / sx, cy.y() / sy, cz.y() / sz,
+                   cx.z() / sx, cy.z() / sy, cz.z() / sz };
+    const iris::Quat rot = iris::Quat::fromRotationMatrix(iris::Mat3(m));
+    mTarget->setNodeTransform(mHorizonNode,
+                              Vec3(pos.x(), pos.y() - kHorizonSink * sy, pos.z()),
+                              Quat(rot.x(), rot.y(), rot.z(), rot.scalar()),
+                              Vec3(scale.x(), scale.y(), scale.z()));
+    if (mHorizonVisible != 1) {
+        mTarget->setNodeVisible(mHorizonNode, true);
+        mHorizonVisible = 1;
+    }
+}
+
 // ---- the GI volume overlay (LIGHTING_FIX fix 9) -----------------------------
 
 void SceneMirror::setGiVolumeOverlay(bool visible)
@@ -1588,8 +1822,26 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         e.lightMaskEverPushed = true;
     }
 
+    // PER-OBJECT SHADOW CASTING. `SceneNode::castShadow` has been in the
+    // document — serialized, reflected, set to false by the default floor —
+    // since long before the engine had anywhere to put it, and NOTHING pushed
+    // it: the flag was inert for years and the floor it was set on went on
+    // casting into every lamp. This is the wire (SUN_AND_LIGHT_DEFAULTS §2.4).
+    // Same shape as the mask above: change-guarded, the engine remembers it
+    // across Item rebuilds, and a light node carries no Item so it is a no-op
+    // there.
+    const int wantCastShadow = node->getShadowCastingEnabled() ? 1 : 0;
+    if (e.castShadowPushed != wantCastShadow) {
+        mTarget->setNodeCastShadow(e.node, wantCastShadow != 0);
+        e.castShadowPushed = wantCastShadow;
+    }
+
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto *meshNode = static_cast<iris::MeshNode *>(node);
+        // THE SCENE'S DEFAULT FLOOR, remembered for syncGroundHorizon. Recorded
+        // here rather than searched for afterwards: the walk is already at every
+        // mesh node, and the flag is the document's own (never the name).
+        if (meshNode->defaultFloor && !mHorizonFloor) mHorizonFloor = meshNode;
         // The members, not the by-value getters: `getMesh()`/`getMaterial()`/
         // `getSkeleton()` each return a QSharedPointer BY VALUE, so reading
         // them costs an atomic increment and decrement per mesh per frame for
@@ -2195,6 +2447,12 @@ void SceneMirror::reclaimUnused()
     QSet<MeshId> usedMeshes; QSet<MaterialId> usedMaterials;
     for (const Entry &e : mEntries) { if (e.mesh) usedMeshes.insert(e.mesh); if (e.material) usedMaterials.insert(e.material); }
     for (const HighlightShell &s : mHighlightShells) if (s.mesh) usedMeshes.insert(s.mesh);
+    // The ground's horizon holds the FLOOR's material by id and is not an entry,
+    // so the sweep cannot see it. A floor deleted in the same frame would
+    // otherwise destroy a datablock the horizon's Item still points at — the
+    // stale-binding crash, reached from the one object in the scene nobody can
+    // select. Its own mesh is not in mMeshes at all (like the grid's).
+    if (mHorizonMaterial) usedMaterials.insert(mHorizonMaterial);
     for (auto it = mMeshes.begin(); it != mMeshes.end();) {
         if (usedMeshes.contains(it.value())) { ++it; continue; }
         mTarget->destroyMesh(it.value()); it = mMeshes.erase(it);
@@ -2753,6 +3011,30 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&
                     light->shadowMap && light->shadowMap->shadowType != iris::ShadowMapType::None;
+    // ---- THE SUN, and the secondary directionals -----------------------
+    // Our shadow node declares exactly ONE directional slot (three PSSM splits
+    // at slot 0; every focused slot accepts spot/point only — OgreShadow.cpp).
+    // With two shadow-casting directionals Ogre filled that slot by its own
+    // castShadows-then-light-id sort, i.e. by engine creation order, which can
+    // flip across a reload: one of the two suns cast, silently, and which one
+    // was luck. The document's ONE resolver decides instead, and a directional
+    // that is not the sun is pushed as a non-caster — Ogre's sort then has a
+    // single candidate and the answer is the same on every frame and reload.
+    // (This is Unreal's Forward Shading Priority semantic exactly: one main
+    // directional casts. A SECOND PSSM set is out of scope — it is three more
+    // full-view-frustum scene passes EVERY frame, the most expensive shadow we
+    // render.)
+    if (light->lightType == iris::LightType::Directional) {
+        d.forwardShadingPriority = light->forwardShadingPriority;
+        // Through the light's OWN scene, which is what makes this a pure
+        // function of the node (the mirror's `mSource` is that same scene, and
+        // this is called from a static context too). A light that is not in a
+        // scene yet is the only directional there is, so it is the sun.
+        const auto scene = light->getScene();
+        const auto sun = scene ? scene->sunLight() : iris::LightNodePtr();
+        d.primaryDirectional = !sun || sun.data() == light;
+        if (!d.primaryDirectional) d.castShadows = false;
+    }
     // LIGHTING CHANNELS, light side. The document field is on SceneNode (one
     // field, one meaning, both ends of the test) — the light's copy says which
     // channels it illuminates.
@@ -4894,15 +5176,21 @@ iris::LightNode *SceneMirror::resolveGiLight() const
         auto it = mSource->lights.constFind(mSource->giLightGuid);
         if (it != mSource->lights.constEnd() && !it.value().isNull()) return it.value().data();
     }
-    // QHash order is arbitrary: pick deterministically by creation order (nodeId).
-    iris::LightNode *directional = nullptr, *any = nullptr;
+    // THE SUN, through the document's ONE resolver (SUN_AND_LIGHT_DEFAULTS Q1).
+    // This used to be a second, private rule — "the lowest-nodeId directional"
+    // — which agreed with the sky link's depth-first walk only by accident and
+    // could name a different light the moment anything was re-parented.
+    if (auto sun = mSource->sunLight()) return sun.data();
+    // No directional light at all is NORMAL (two of the eight shipped samples):
+    // Instant Radiosity still needs SOMETHING to bounce, so it falls through to
+    // the lowest-nodeId light of any type, exactly as before. QHash order is
+    // arbitrary, hence the explicit creation-order pick.
+    iris::LightNode *any = nullptr;
     for (const auto &l : mSource->lights) {
         if (l.isNull()) continue;
-        if (l->lightType == iris::LightType::Directional &&
-            (!directional || l->nodeId < directional->nodeId)) directional = l.data();
         if (!any || l->nodeId < any->nodeId) any = l.data();
     }
-    return directional ? directional : any;
+    return any;
 }
 
 namespace {

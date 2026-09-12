@@ -27,6 +27,8 @@ For more information see the LICENSE file
 #include "document/physics/environment.h"
 #include "core/math/intersectionhelper.h"
 #include <cmath>
+#include <algorithm>
+#include <QSet>
 
 #include <QtMultimedia/QMediaPlayer>
 // #include <QtMultimedia/QMediaPlaylist>
@@ -105,6 +107,13 @@ Scene::Scene()
     fogHeightLevel = 0.0f;
     fogBreakMinBrightness = 0.25f;
     fogBreakFalloff = 0.1f;
+
+    // SHADOWS ARE ON (SUN_AND_LIGHT_DEFAULTS_SPEC §2.5): this was the one
+    // field the constructor never assigned — an uninitialised bool that every
+    // shipped creation path happened to set afterwards, so it was latent
+    // rather than live. It is the scene-wide master switch; a light's own
+    // Shadow Type is the per-light one, and both default to on.
+    shadowEnabled = true;
 
     // global illumination is opt-in: off by default, everywhere, always
     giMode = GiMode::OFF;
@@ -207,8 +216,10 @@ Scene::Scene()
     // sky-driven ambient: on by default (owner decision, VISUAL_PARITY item 3b)
     ambientFromSky = true;
 
-    // nothing is driven by the sky's sun until a light is linked (re-audit F5)
+    // AUTOMATIC sun (the lowest forwardShadingPriority directional), and the
+    // sky steers nothing until asked (SUN_AND_LIGHT_DEFAULTS Q1).
     sunLightGuid = QString();
+    skyDrivesSun = false;
 
 	gradientTop = QColor(255, 0, 0);
 	gradientMid = QColor(0, 255, 0);
@@ -372,14 +383,15 @@ void Scene::setAmbientMusicVolume(float volume)
 
 bool Scene::applySunCoupling()
 {
-    if (sunLightGuid.isEmpty()) return false;
+    if (!skyDrivesSun) return false;
     // Only the analytic sky has a sun. A scene that switches to a colour or
-    // image sky keeps the LINK (switching back resumes it) but stops driving.
+    // image sky keeps the switch on (switching back resumes it) but stops
+    // driving.
     if (skyType != SkyType::REALISTIC) return false;
 
-    auto node = nodes.value(sunLightGuid);
-    if (!node) return false;
-    auto light = node.dynamicCast<LightNode>();
+    // THE ONE RESOLVER. The sky steers whichever light is the sun — pinned or
+    // automatic — instead of carrying its own idea of which light that is.
+    auto light = sunLight();
     if (!light) return false;
 
     // The light travels FROM the sun TOWARDS the scene, and a document light
@@ -399,6 +411,92 @@ bool Scene::applySunCoupling()
 
     light->setGlobalRot(want);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE SUN — one resolver, asked by everything (SUN_AND_LIGHT_DEFAULTS Q1/Q1e)
+// ---------------------------------------------------------------------------
+// What this replaced: three rules that could disagree in any scene with more
+// than one directional light, with nothing reporting the disagreement — the
+// sky link's depth-first walk (services/sunlink.cpp), the GI bounce light's
+// lowest-nodeId scan (irisgl/mirror/scenemirror.cpp) and Ogre's own
+// castShadows-then-light-id sort. Re-parenting a light silently moved the
+// first; engine creation order decided the third.
+//
+// Ordering is by (forwardShadingPriority, nodeId) and both halves matter: the
+// priority is the author's row, and the nodeId tie-break makes two lights that
+// both read 0 resolve the same way on every reload (R6 in the spec — the tie
+// case is the one the test has to assert, not the happy case).
+
+QVector<LightNodePtr> Scene::directionalLights() const
+{
+    QVector<LightNodePtr> out;
+    for (const auto &light : lights) {
+        if (!light) continue;
+        if (light->lightType != LightType::Directional) continue;
+        out.append(light);
+    }
+    std::sort(out.begin(), out.end(), [](const LightNodePtr &a, const LightNodePtr &b) {
+        if (a->forwardShadingPriority != b->forwardShadingPriority)
+            return a->forwardShadingPriority < b->forwardShadingPriority;
+        return a->nodeId < b->nodeId;
+    });
+    return out;
+}
+
+LightNodePtr Scene::sunLight() const
+{
+    // 1. An explicit pin wins outright — but only while it names a live
+    //    DIRECTIONAL light. A pin left behind by a deleted light resolves to
+    //    the automatic answer instead of to nothing (the panel then reads
+    //    "chosen automatically" again, which is the truth).
+    if (!sunLightGuid.isEmpty()) {
+        auto node = nodes.value(sunLightGuid);
+        if (node) {
+            auto light = node.dynamicCast<LightNode>();
+            if (light && light->lightType == LightType::Directional) return light;
+        }
+    }
+    // 2. Lowest priority, ties by creation order. 3. None — a legal, shipped
+    //    state (Mirror Room, Showroom 2), never a warning.
+    const auto dirs = directionalLights();
+    return dirs.isEmpty() ? LightNodePtr() : dirs.first();
+}
+
+QString Scene::sunReason() const
+{
+    if (!sunLightGuid.isEmpty()) {
+        auto node = nodes.value(sunLightGuid);
+        if (node) {
+            auto light = node.dynamicCast<LightNode>();
+            if (light && light->lightType == LightType::Directional)
+                return QStringLiteral("pinned");
+        }
+    }
+    return directionalLights().isEmpty() ? QStringLiteral("none")
+                                         : QStringLiteral("priority");
+}
+
+QVector<LightNodePtr> Scene::secondaryDirectionals() const
+{
+    const auto sun = sunLight();
+    QVector<LightNodePtr> out;
+    for (const auto &light : directionalLights())
+        if (light != sun) out.append(light);
+    return out;
+}
+
+int Scene::nextForwardShadingPriority() const
+{
+    // The lowest number nobody is using: the first directional gets 0, a
+    // second slots into 1, and deleting the sun frees 0 again for the next one.
+    QSet<int> used;
+    for (const auto &light : lights)
+        if (light && light->lightType == LightType::Directional)
+            used.insert(light->forwardShadingPriority);
+    int p = 0;
+    while (used.contains(p)) ++p;
+    return p;
 }
 
 void Scene::updateSceneAnimation(float time)
