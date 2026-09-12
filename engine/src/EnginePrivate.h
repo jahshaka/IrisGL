@@ -115,7 +115,10 @@ namespace Ogre { class CompositorPassSceneDef; class CompositorPassClearDef;
                  // Bone attachments (AVATAR_RIG_PERF_SPEC §4): a Node record
                  // holds a TagPoint*, and only OgreSockets.cpp does anything
                  // with one.
-                 class TagPoint; }
+                 class TagPoint;
+                 // The render-loop monitor's pass listener takes one
+                 // (passSceneAfterShadowMaps) and never dereferences it here.
+                 class CompositorPassScene; }
 
 namespace jahshaka { namespace engine {
 // The backend's own namespace: these types and helpers are shared between the
@@ -821,49 +824,6 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
 /// re-seeded history starts exactly where a deterministic grade would land.
 float exposureSeed(float exposure);
 
-/// THE OPT-IN PASS PROFILER (riders lane R4, EngineConfig::profile). One per
-/// View, owned by it, registered through OgreView::addWorkspaceListener so it
-/// rides every workspace rebuild. Measures the CPU time between a pass's
-/// pre- and post-execute callbacks — what the render thread spent recording
-/// that pass, including any wait it did inside it (a texture wait, a PSO
-/// compile it blocked on) — keyed by the pass definition's profiling id, and
-/// logs one summary line per kFlushFrames frames to the engine log:
-///   [profile] view 'main' 120 frames, 4.83 ms/frame CPU in passes | Jahshaka
-///   opaque 2.10 (max 9.4) | Jahshaka overlays 0.61 (max 1.2) | ...
-/// sorted by total, top entries only. NOT GPU time — this pin has no timestamp
-/// query surface; that is upstream work and is recorded as such. When the
-/// profiler is off no instance exists, so the cost is exactly zero.
-class PassProfiler final : public Ogre::CompositorWorkspaceListener {
-public:
-    explicit PassProfiler(std::string viewName) : mView(std::move(viewName)) {}
-    void passPreExecute(Ogre::CompositorPass *) override {
-        mStart = std::chrono::steady_clock::now();
-    }
-    void passPosExecute(Ogre::CompositorPass *pass) override {
-        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - mStart).count();
-        const Ogre::CompositorPassDef *def = pass ? pass->getDefinition() : nullptr;
-        std::string key = def && !def->mProfilingId.empty() ? def->mProfilingId
-                                                             : std::string("(unnamed pass)");
-        Row &r = mRows[key];
-        r.ns += (unsigned long long)ns;
-        r.maxNs = std::max(r.maxNs, (unsigned long long)ns);
-        ++r.calls;
-    }
-    void workspacePosUpdate(Ogre::CompositorWorkspace *) override {
-        if (++mFrames >= kFlushFrames) flush();
-    }
-    /// Log whatever is accumulated (called on removal so a short run reports).
-    void flush();
-private:
-    static constexpr unsigned kFlushFrames = 120;
-    struct Row { unsigned long long ns = 0, maxNs = 0; unsigned calls = 0; };
-    std::string mView;
-    std::map<std::string, Row> mRows;
-    unsigned mFrames = 0;
-    std::chrono::steady_clock::time_point mStart{};
-};
-
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
 /// Pushes `applyViewGlobals` for its own view, immediately before that view's
@@ -875,6 +835,193 @@ public:
     OgreView   *mView = nullptr;
 };
 }   // namespace chain
+
+// ---------------------------------------------------------------------------
+// THE RENDER-LOOP MONITOR — engine half (SPECS/RENDER_LOOP_MONITOR_SPEC.md;
+// impl in OgreFrameMonitor.cpp)
+// ---------------------------------------------------------------------------
+// A DATA COLLECTOR for the lead's engine reviews. It records what each frame
+// did and WHY; it judges nothing, draws nothing, and does not exist at all
+// while it is off.
+//
+// THE SHAPE, and why it is a file-scope pointer rather than a member the sites
+// reach through the engine: the instrumentation sites are spread over every
+// Ogre-private TU (the GI arm's probe sweep, the lamp-map cache, the planar
+// reflector, the shader cache, the frame loop), and most of them have no
+// OgreEngine in scope. `monitor::live()` is one load and one branch — the
+// entire cost of the monitor when it is off. Engine calls are UI-thread-only by
+// contract, so nothing here is atomic.
+namespace monitor {
+
+/// THE RING'S SIZE. 4096 records is ~68 s at 60 Hz and ~13 s at 300 Hz — more
+/// than the 20 s a capture records, so a host that drains on its own tick never
+/// loses a frame and a host that forgets keeps the most recent window.
+/// Allocated when the monitor goes on and FREED when it goes off.
+static constexpr unsigned kRingCapacity = 4096u;
+/// Events are far rarer than frames, but a GI-rebuild storm can burst; the
+/// queue never grows past this (the overflow is reported, not hidden).
+static constexpr unsigned kEventCapacity = 8192u;
+
+/// The per-pass listener. ONE instance for the process, attached to every live
+/// workspace while the monitor is on: the view's (through its seam, so it rides
+/// every rebuild), each planar mirror's slot and each reflection probe's.
+///
+/// PASSES NEST, and that is the defect the old PassProfiler had. A scene pass
+/// that owns a shadow node executes that node's passes BETWEEN its own
+/// pre/post callbacks, on the same workspace and therefore through the same
+/// listener (CompositorPass asks its parent NODE's workspace for the listener
+/// list, and a CompositorShadowNode belongs to that workspace). A single start
+/// time was overwritten by every child. This keeps a STACK and reports
+/// EXCLUSIVE time and EXCLUSIVE draw counts, so a frame's records sum to the
+/// frame's own totals.
+class PassListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    void workspacePreUpdate(Ogre::CompositorWorkspace *ws) override;
+    void workspacePosUpdate(Ogre::CompositorWorkspace *ws) override;
+    void passPreExecute(Ogre::CompositorPass *pass) override;
+    void passSceneAfterShadowMaps(Ogre::CompositorPassScene *pass) override;
+    void passPosExecute(Ogre::CompositorPass *pass) override;
+};
+
+/// THE RECORD/SWAP SPLIT. `Root::_updateAllRenderTargets` does two very
+/// different things in one call: the compositor update RECORDS the frame's
+/// command buffers, then `_swapAllFinalTargets` BLOCKS — fence wait, submit,
+/// present, acquire. Between them, and only between them, Ogre fires
+/// `frameRenderingQueued` (OgreRoot.cpp:1575-1584). A frame listener is
+/// therefore the only way to see where the recording ended and the waiting
+/// began, which is the difference between "the CPU is busy" and "the GPU or the
+/// display is holding us up". Registered with Root while the monitor is on.
+class FrameSplitListener final : public Ogre::FrameListener {
+public:
+    bool frameRenderingQueued(const Ogre::FrameEvent &) override;
+    /// Set on each callback; read by the frame loop when the call returns.
+    std::chrono::steady_clock::time_point mMark{};
+    bool mMarked = false;
+};
+
+/// THE MONITOR ITSELF: the ring of finished FrameRecords, the frame being
+/// built, the event queue and the pass stack. One per process, owned by
+/// OgreEngine, created when the monitor goes on and destroyed when it goes off
+/// — which is what makes "off" cost nothing rather than cost little.
+class FrameMonitor {
+public:
+    FrameMonitor();
+
+    // ---- the frame --------------------------------------------------------
+    void beginFrame(unsigned long long frame, FrameCause cause, bool onscreen);
+    void endFrame(unsigned scenesUpdated);
+    bool inFrame() const { return mInFrame; }
+    FrameRecord &current() { return mCurrent; }
+
+    // ---- what the instrumentation sites file ------------------------------
+    void stage(const char *name, double ms);
+    void hostStage(const std::string &name, float ms);
+    void cacheWork(const CacheWork &w);
+    void pass(FramePass &&p);
+    void event(MonitorEvent &&e);
+    /// Cache work recorded BEFORE the frame opened — the probe budget and the
+    /// lamp-map caster scan both run in the engine's pre-frame half — belongs
+    /// to the frame that is about to render it.
+    void adoptPendingCacheWork();
+
+    // ---- the host drains ---------------------------------------------------
+    unsigned drainFrames(std::vector<FrameRecord> &out);
+    unsigned drainEvents(std::vector<MonitorEvent> &out);
+
+    // ---- the pass stack (PassListener's, kept here so it dies with a frame) -
+    struct PassFrame {
+        std::chrono::steady_clock::time_point start;
+        double   childMs = 0.0;
+        unsigned drawsAt = 0, batchesAt = 0, instancesAt = 0;
+        unsigned long long trianglesAt = 0;
+        unsigned childDraws = 0, childBatches = 0, childInstances = 0;
+        unsigned long long childTriangles = 0;
+        FramePass rec;
+    };
+    std::vector<PassFrame> mPassStack;
+    /// The innermost open Stage's child accumulator (Stage manages it).
+    double *mStageChild = nullptr;
+
+    // ---- status -------------------------------------------------------------
+    unsigned ringFrames() const { return unsigned(mRing.size()); }
+    unsigned pendingEvents() const { return unsigned(mEvents.size()); }
+    unsigned long long framesRecorded() const { return mFramesRecorded; }
+    unsigned long long framesDropped() const { return mFramesDropped; }
+    unsigned long long eventsDropped() const { return mEventsDropped; }
+    float lastOverheadMs() const { return mLastOverheadMs; }
+    void addOverhead(double ms) { mOverheadMs += ms; }
+
+    PassListener      mListener;
+    FrameSplitListener mSplit;
+    /// The workspaces the listener is attached to RIGHT NOW. Rebuilt every
+    /// frame rather than trusted across one: workspaces are recreated by atlas
+    /// rebuilds, GI rebuilds and probe placement, and a listener list dies with
+    /// its workspace.
+    std::vector<Ogre::CompositorWorkspace *> mAttached;
+
+private:
+    void push(FrameRecord &&r);
+
+    std::vector<FrameRecord>  mRing;
+    unsigned                  mWrite = 0u;
+    std::vector<MonitorEvent> mEvents;
+    std::vector<FrameStage>   mPendingHostStages;
+    std::vector<CacheWork>    mPendingCacheWork;
+    FrameRecord               mCurrent;
+    std::chrono::steady_clock::time_point mFrameStart;
+    double   mOverheadMs = 0.0;
+    float    mLastOverheadMs = 0.0f;
+    bool     mInFrame = false;
+    unsigned long long mFramesRecorded = 0, mFramesDropped = 0, mEventsDropped = 0;
+};
+
+/// The live monitor, or null. EVERY instrumentation site starts with this: one
+/// load and one not-taken branch is the monitor's entire cost when it is off.
+extern FrameMonitor *gMonitor;
+inline bool live() { return gMonitor != nullptr; }
+
+/// Milliseconds on the monitor's clock (steady_clock), from the capture's zero.
+double nowMs();
+/// Re-zeroes that clock. Called once, when a capture starts.
+void resetEpoch();
+
+/// RAII stage scope: measures a span of the frame and files it under `name`,
+/// EXCLUSIVE of any scope nested inside it. Costs one branch when the monitor
+/// is off, which is the §4.1 guarantee.
+class Stage {
+public:
+    explicit Stage(const char *name);
+    ~Stage();
+    Stage(const Stage &) = delete;
+    Stage &operator=(const Stage &) = delete;
+private:
+    const char *mName = nullptr;
+    std::chrono::steady_clock::time_point mStart;
+    double     *mParentChild = nullptr;
+    double      mChild = 0.0;
+};
+
+// ---- what the instrumentation sites call (all no-ops while off) ------------
+
+/// A cache did work, for this reason. `ms` negative = the time is already
+/// inside the pass records (a probe capture, a shadow map), not measured again.
+void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
+                   const char *detail, unsigned units, float ms = -1.0f);
+/// A discrete event with its cause.
+void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &label,
+               const std::string &detail = std::string(), float ms = -1.0f,
+               unsigned long long value = 0);
+/// Per-frame counters the frame loop knows and no listener can see.
+void noteTextureWait(float ms);
+void noteShaderCompiles(unsigned n);
+void noteProbeCaptures(unsigned captures);
+void notePlanarRender(unsigned slots);
+
+/// The GI arm's stale reasons and the monitor's are the same vocabulary; this
+/// is the ONE translation, kept here so no TU invents a second one.
+WorkReason reasonOf(GiStaleReason why);
+
+}   // namespace monitor
 
 // ---------------------------------------------------------------------------
 // The engine-drawn overlay — stats readout AND loading cover (impl in
@@ -1814,6 +1961,24 @@ public:
     /// Ogre's dynamic path — correct, uncached.
     void shadowWorkspaces(ShadowNodeKind kind,
                           std::vector<Ogre::CompositorWorkspace *> &out) const;
+    /// EVERY live workspace this scene privately owns — each planar mirror
+    /// slot's and each reflection probe's — whether or not it is shadowed. The
+    /// render-loop monitor attaches its pass listener to these (a view's own
+    /// workspace belongs to the view); `owners`, when given, receives a label
+    /// per workspace ("planar:0", "probe:7") for the capture's snapshot.
+    void monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
+                           std::vector<std::string> *owners = nullptr) const;
+    /// The GI parameters as LAST APPLIED — what was asked for, beside what
+    /// giStatus() says it resolved to. The capture snapshot carries both.
+    const GiParams &giParams() const { return mGi; }
+    /// The planar-reflection arm's parameters, same contract.
+    const PlanarReflectionParams &planarParams() const { return mPlanarParams; }
+    /// Each live reflection probe's placement and dirty state, for the snapshot.
+    void collectProbeInfo(std::vector<ProbeInfo> &out) const;
+    /// Each light this scene holds, with its shadow-cache state filled in by
+    /// the caller from ShadowStatus (which is process-wide).
+    void collectLightInfo(std::vector<SnapshotLight> &out) const;
+
     /// This scene's shadow-casting POINT and SPOT lights — the input to the
     /// derived focused-map count (SHADOW_TOOLING_SPEC.md §4.1). Directional
     /// lights ride the PSSM block and area lights can never cast, so neither
@@ -3186,8 +3351,6 @@ public:
     /// The view does NOT own them: register at setup, unregister before the
     /// listener dies. Registering twice is a no-op.
     void addWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
-    /// Create/register (on) or flush+remove (off) this view's PassProfiler.
-    void setProfiling(bool on);
     void removeWorkspaceListener(Ogre::CompositorWorkspaceListener *l);
     /// Counts completed workspace attachments. Neutral introspection (no Ogre
     /// type crosses the boundary) that lets hosts and tests see that a call was
@@ -3242,6 +3405,10 @@ public:
     /// anything that assigns cached shadow maps has to reach every view that
     /// draws — see OgreEngine::applyShadowCacheDirties.
     Ogre::CompositorShadowNode *shadowNodeInstance() const;
+    /// This view's LIVE workspace, or null. Read-only, for the monitor's
+    /// workspace census and its compositor-graph snapshot; nothing mutates a
+    /// view's workspace from outside the seam.
+    Ogre::CompositorWorkspace *workspace() const { return mWorkspace; }
     bool isEnabled() const override;
     unsigned width()  const override;
     unsigned height() const override;
@@ -3414,8 +3581,6 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
-    /// The opt-in pass profiler (chain::PassProfiler); null unless profiling.
-    std::unique_ptr<chain::PassProfiler> mProfiler;
     unsigned                   mWorkspaceGeneration = 0;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
@@ -3623,8 +3788,33 @@ public:
     bool memoryStats(MemoryStats &out) const override;
     bool textureMemory(std::vector<TextureMemoryEntry> &out) const override;
     bool reclaimMemory(MemoryStats *before, MemoryStats *after) override;
-    void setProfiling(bool on) override;
-    bool profiling() const override { return mProfiling; }
+    // ---- The render-loop monitor (OgreFrameMonitor.cpp) ----
+    void setFrameMonitor(MonitorLevel level) override;
+    MonitorLevel frameMonitor() const override;
+    MonitorStatus monitorStatus() const override;
+    unsigned takeFrameRecords(std::vector<FrameRecord> &out) override;
+    unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) override;
+    void noteMonitorEvent(const MonitorEvent &event) override;
+    void noteHostStage(const std::string &name, float ms) override;
+    void setNextFrameCause(FrameCause cause) override;
+    bool captureSnapshot(EngineSnapshot &out, const std::string &label,
+                         Scene *scene = nullptr) const override;
+    /// Attaches (or removes) the monitor's pass listener on every live
+    /// workspace this engine can reach — each view's through its seam, each
+    /// planar slot's and each reflection probe's directly. Run once a frame
+    /// while the monitor is on, in the same place and for the same reason as
+    /// the shadow counters' re-attach (applyShadowCacheDirties): workspaces are
+    /// recreated by atlas rebuilds, GI rebuilds and probe placement, and a
+    /// listener list dies with its workspace.
+    void syncMonitorListeners(const std::vector<OgreScene *> &drawn);
+    /// Fills the GPU half of MonitorStatus: whether the engine was BUILT with
+    /// timestamp support (JAH_GPU_TIMESTAMPS in the Ogre patch), whether the
+    /// device can do it, and whether a query pool exists right now. Both
+    /// off-switches are visible here (owner decision D3).
+    void gpuTimingStatus(MonitorStatus &st) const;
+    /// Builds the compositor-graph half of a snapshot (every live workspace,
+    /// its nodes and passes, and which scene each renders).
+    void collectCompositorGraph(std::vector<CompositorWorkspaceInfo> &out) const;
     bool saveShaderCache() override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
@@ -3851,9 +4041,13 @@ private:
     std::unique_ptr<Ogre::VertexFormatWarmUpStorage> mWarmUpSet;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
     std::vector<std::unique_ptr<OgreView>>  mViews;
-    /// EngineConfig::profile / setProfiling: views created while true get a
-    /// PassProfiler at birth.
-    bool mProfiling = false;
+    /// THE RENDER-LOOP MONITOR (OgreFrameMonitor.cpp). Held by pointer and
+    /// NULL while the monitor is off — that is what "zero cost when off" means
+    /// structurally: nothing to allocate, nothing to read, and every
+    /// instrumentation site in every TU is one `if (monitor::live())` test.
+    std::unique_ptr<monitor::FrameMonitor> mMonitor;
+    /// Set by the host for the NEXT frame only (Engine::setNextFrameCause).
+    FrameCause mNextFrameCause = FrameCause::Driver;
 };
 
 }  // namespace detail

@@ -1,0 +1,705 @@
+// THE RENDER-LOOP MONITOR, engine half (SPECS/RENDER_LOOP_MONITOR_SPEC.md).
+//
+// WHAT THIS IS, in the owner's words (2026-09-12): "the purpose of the monitor
+// is to collect as much data as possible for you to be able to review the core
+// engine and how it's running, to look for issues and problems." It is a DATA
+// COLLECTOR, and the emphasis is on *collector*:
+//
+//  * IT JUDGES NOTHING. No budgets, no thresholds, no "wasted" verdicts. Work a
+//    cache redid with no recorded input change is recorded as work whose reason
+//    is `WorkReason::None`; whether that is a defect is the lead's reading of a
+//    capture, not a computation in here (owner decision D5).
+//  * IT DRAWS NOTHING. There is no on-screen display (owner, 2026-09-12: "we
+//    don't need an on-screen display, it will interfere with monitoring"), so
+//    the monitor cannot contaminate what it measures with passes of its own.
+//  * IT REMEMBERS NOTHING UNTIL ASKED. Capture is FORWARD ONLY: nothing is
+//    recorded before the host turns it on, and at Off there is no ring, no
+//    listener, no clock read and no GPU query pool — four facts
+//    `monitorStatus()` reports so a suite asserts them instead of trusting them.
+//
+// WHAT IT REPLACES: `chain::PassProfiler` (`--profile` / `app.profiling`), which
+// kept ONE start time for passes that nest — every scene pass that owns a shadow
+// node executes that node's passes between its own pre/post callbacks, so the
+// numbers it printed were the last child's, not the pass's — and which logged
+// every C++-built shadow pass as "(unnamed pass)" because those definitions
+// carry no profiling id. Deleted with this file's arrival (CRUD law, D4).
+//
+// THREADING: engine calls are UI-thread-only by contract, so nothing here is
+// atomic and nothing is locked.
+#include "EnginePrivate.h"
+
+#include <algorithm>
+#include <cstring>
+
+#include <Compositor/OgreCompositorManager2.h>
+#include <Compositor/OgreCompositorNode.h>
+#include <Compositor/OgreCompositorNodeDef.h>
+#include <Compositor/OgreCompositorShadowNode.h>
+#include <Compositor/OgreCompositorWorkspace.h>
+#include <Compositor/OgreCompositorWorkspaceDef.h>
+#include <Compositor/Pass/OgreCompositorPass.h>
+#include <Compositor/Pass/OgreCompositorPassDef.h>
+#include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
+#include <OgreCamera.h>
+#include <OgreLight.h>
+#include <OgreRenderSystem.h>
+#include <OgreRoot.h>
+#include <OgreSceneManager.h>
+#include <OgreTextureGpuManager.h>
+
+namespace jahshaka { namespace engine { namespace detail { namespace monitor {
+
+FrameMonitor *gMonitor = nullptr;
+
+namespace {
+/// The capture's zero. Set when the monitor is switched on, so every `startMs`
+/// in a bundle is capture-relative and two bundles are comparable.
+std::chrono::steady_clock::time_point gEpoch = std::chrono::steady_clock::now();
+
+/// PASS TYPE NAMES. Ogre declares `CompositorPassTypeEnumNames` but does not
+/// export it from OgreMain (no _OgreExport on the extern), so it is not
+/// linkable from here — recorded as a pin finding. This table is the same
+/// order as the enum and is asserted against its size below.
+const char *kPassTypeNames[] = { "invalid",   "scene",  "quad",      "clear",
+                                 "stencil",   "resolve","depth_copy","uav",
+                                 "mipmap",    "ibl_specular", "shadows",
+                                 "target_barrier", "warm_up", "compute", "custom" };
+static_assert(sizeof(kPassTypeNames) / sizeof(kPassTypeNames[0]) == Ogre::PASS_CUSTOM + 1u,
+              "Ogre's CompositorPassType grew: extend kPassTypeNames to match");
+const char *passTypeName(Ogre::CompositorPassType t) {
+    const unsigned i = unsigned(t);
+    return i < sizeof(kPassTypeNames) / sizeof(kPassTypeNames[0]) ? kPassTypeNames[i] : "?";
+}
+
+/// The three shadow nodes, as IdStrings — hashed once, compared per pass.
+const Ogre::IdString &shadowNodeId(ShadowNodeKind k) {
+    static const Ogre::IdString ids[kShadowNodeKinds] = {
+        Ogre::IdString(OgreView::kShadowNodeName),
+        Ogre::IdString(OgreView::kReflectShadowNodeName),
+        Ogre::IdString(OgreView::kProbeShadowNodeName)
+    };
+    return ids[unsigned(k)];
+}
+
+/// RenderingMetrics is reset once per frame by the render system; the monitor
+/// only ever READS it, so nothing here changes what any other reader sees.
+/// (Recording is already on for the process — `renderStats()` turns it on
+/// lazily and never off — so this adds no cost of its own.)
+void readMetrics(Ogre::RenderSystem *rs, unsigned &draws, unsigned &batches,
+                 unsigned long long &tris, unsigned &instances) {
+    draws = batches = instances = 0u;
+    tris = 0ull;
+    if (!rs) return;
+    const Ogre::RenderingMetrics &m = rs->getMetrics();
+    draws     = unsigned(m.mDrawCount);
+    batches   = unsigned(m.mBatchCount);
+    tris      = (unsigned long long)m.mFaceCount;
+    instances = unsigned(m.mInstanceCount);
+}
+}   // namespace
+
+double nowMs() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gEpoch)
+        .count();
+}
+void resetEpoch() { gEpoch = std::chrono::steady_clock::now(); }
+
+// ---------------------------------------------------------------------------
+// FrameMonitor
+// ---------------------------------------------------------------------------
+
+FrameMonitor::FrameMonitor() {
+    mRing.reserve(kRingCapacity);
+    mEvents.reserve(256u);
+    mPassStack.reserve(16u);
+}
+
+void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool onscreen) {
+    const auto t0 = std::chrono::steady_clock::now();
+    mCurrent = FrameRecord();
+    mCurrent.frame = frame;
+    mCurrent.cause = cause;
+    mCurrent.onscreen = onscreen;
+    mCurrent.startMs = nowMs();
+    mFrameStart = t0;
+    mInFrame = true;
+    mStageChild = nullptr;
+    mPassStack.clear();
+    // Host stages pushed before the frame opened (the driver's tick wraps the
+    // engine's frame, so `tick` and the mirror's sub-stages are known first)
+    // lead the stage list.
+    mCurrent.stages.swap(mPendingHostStages);
+    mPendingHostStages.clear();
+    adoptPendingCacheWork();
+    mOverheadMs += std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - t0).count();
+}
+
+void FrameMonitor::endFrame(unsigned scenesUpdated) {
+    if (!mInFrame) return;
+    const auto t = std::chrono::steady_clock::now();
+    mCurrent.totalMs = float(std::chrono::duration<double, std::milli>(t - mFrameStart).count());
+    mCurrent.scenesUpdated = scenesUpdated;
+    // The counters the pass records imply, summed here so nothing downstream
+    // has to re-derive them and `frames.jsonl` reads on its own.
+    for (const FramePass &p : mCurrent.passes) {
+        mCurrent.draws     += p.draws;
+        mCurrent.batches   += p.batches;
+        mCurrent.instances += p.instances;
+        mCurrent.triangles += p.triangles;
+        switch (p.bucket) {
+        case PassBucket::ShadowView:    ++mCurrent.shadowPasses; break;
+        case PassBucket::ShadowReflect: ++mCurrent.shadowPassesReflect; break;
+        case PassBucket::ShadowProbe:   ++mCurrent.shadowPassesProbe; break;
+        default: break;
+        }
+        if (p.gpuMs >= 0.0f) {
+            if (mCurrent.gpuMs < 0.0f) mCurrent.gpuMs = 0.0f;
+            mCurrent.gpuMs += p.gpuMs;
+        }
+    }
+    mOverheadMs += std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - t).count();
+    mCurrent.overheadMs = float(mOverheadMs);
+    mLastOverheadMs = float(mOverheadMs);
+    mOverheadMs = 0.0;
+    push(std::move(mCurrent));
+    mCurrent = FrameRecord();
+    mInFrame = false;
+    ++mFramesRecorded;
+}
+
+void FrameMonitor::push(FrameRecord &&r) {
+    if (mRing.size() < kRingCapacity) { mRing.push_back(std::move(r)); return; }
+    mRing[mWrite] = std::move(r);
+    mWrite = (mWrite + 1u) % kRingCapacity;
+    ++mFramesDropped;
+}
+
+unsigned FrameMonitor::drainFrames(std::vector<FrameRecord> &out) {
+    if (mRing.empty()) return 0u;
+    const unsigned n = unsigned(mRing.size());
+    // OLDEST FIRST. The ring is either still in order (never wrapped) or split
+    // at the write cursor.
+    for (unsigned i = 0; i < n; ++i) out.push_back(std::move(mRing[(mWrite + i) % n]));
+    mRing.clear();
+    mRing.reserve(kRingCapacity);
+    mWrite = 0u;
+    return n;
+}
+
+unsigned FrameMonitor::drainEvents(std::vector<MonitorEvent> &out) {
+    const unsigned n = unsigned(mEvents.size());
+    for (MonitorEvent &e : mEvents) out.push_back(std::move(e));
+    mEvents.clear();
+    return n;
+}
+
+void FrameMonitor::stage(const char *name, double ms) {
+    if (mInFrame) mCurrent.stages.push_back({ name, float(ms) });
+    else          mPendingHostStages.push_back({ name, float(ms) });
+}
+void FrameMonitor::hostStage(const std::string &name, float ms) {
+    if (mInFrame) mCurrent.stages.push_back({ name, ms });
+    else          mPendingHostStages.push_back({ name, ms });
+}
+void FrameMonitor::cacheWork(const CacheWork &w) {
+    if (mInFrame) mCurrent.cacheWork.push_back(w);
+    else          mPendingCacheWork.push_back(w);
+}
+void FrameMonitor::pass(FramePass &&p) {
+    if (mInFrame) mCurrent.passes.push_back(std::move(p));
+}
+void FrameMonitor::event(MonitorEvent &&e) {
+    if (mEvents.size() >= kEventCapacity) { ++mEventsDropped; return; }
+    if (e.frame == 0) e.frame = mCurrent.frame;
+    if (e.startMs == 0.0) e.startMs = nowMs();
+    mEvents.push_back(std::move(e));
+}
+void FrameMonitor::adoptPendingCacheWork() {
+    for (CacheWork &w : mPendingCacheWork) mCurrent.cacheWork.push_back(std::move(w));
+    mPendingCacheWork.clear();
+}
+
+bool FrameSplitListener::frameRenderingQueued(const Ogre::FrameEvent &) {
+    mMark = std::chrono::steady_clock::now();
+    mMarked = true;
+    return true;      // never veto a frame; the monitor changes nothing
+}
+
+// ---------------------------------------------------------------------------
+// Stage
+// ---------------------------------------------------------------------------
+
+Stage::Stage(const char *name) {
+    if (!gMonitor) return;
+    mName = name;
+    mStart = std::chrono::steady_clock::now();
+    mParentChild = gMonitor->mStageChild;
+    gMonitor->mStageChild = &mChild;
+}
+
+Stage::~Stage() {
+    if (!mName || !gMonitor) return;
+    const double total = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - mStart).count();
+    gMonitor->mStageChild = mParentChild;
+    if (mParentChild) *mParentChild += total;
+    gMonitor->stage(mName, total - mChild);   // EXCLUSIVE of nested stages
+}
+
+// ---------------------------------------------------------------------------
+// PassListener — per-pass records, exclusive by construction
+// ---------------------------------------------------------------------------
+
+void PassListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
+    (void)ws;
+    // A workspace that threw mid-update can leave the stack unbalanced; the
+    // next workspace must not inherit it.
+    if (gMonitor) gMonitor->mPassStack.clear();
+}
+
+void PassListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
+    (void)ws;
+    if (gMonitor) gMonitor->mPassStack.clear();
+}
+
+void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
+    if (!gMonitor || !pass) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    Ogre::RenderSystem *rs = node ? node->getRenderSystem() : nullptr;
+
+    FrameMonitor::PassFrame f;
+    f.start = t0;
+    readMetrics(rs, f.drawsAt, f.batchesAt, f.trianglesAt, f.instancesAt);
+
+    const Ogre::CompositorPassDef *def = pass->getDefinition();
+    const Ogre::CompositorNodeDef *ndef = node ? node->getDefinition() : nullptr;
+    f.rec.node = ndef ? ndef->getNameStr() : std::string();
+    if (node && node->getWorkspace()) {
+        const Ogre::CompositorWorkspaceDef *wdef =
+            const_cast<Ogre::CompositorWorkspace *>(node->getWorkspace())->getDefinition();
+        if (wdef) f.rec.workspace = wdef->getNameStr();
+    }
+    bool sceneKind = false;
+    if (def) {
+        const Ogre::CompositorPassType type = def->getType();
+        sceneKind = type == Ogre::PASS_SCENE;
+        f.rec.pass = !def->mProfilingId.empty()
+                         ? def->mProfilingId
+                         : std::string(passTypeName(type));
+        if (def->mShadowMapIdx != ~Ogre::uint32(0)) f.rec.shadowMapIdx = def->mShadowMapIdx;
+    }
+    // THE BUCKET is read from the parent NODE, not inferred from timings: the
+    // three shadow nodes are named constants, so "this is a probe's shadow map
+    // pass" is a fact and not a guess.
+    f.rec.bucket = PassBucket::Other;
+    if (node) {
+        const Ogre::IdString id = node->getName();
+        if (id == shadowNodeId(ShadowNodeKind::View))         f.rec.bucket = PassBucket::ShadowView;
+        else if (id == shadowNodeId(ShadowNodeKind::Reflect)) f.rec.bucket = PassBucket::ShadowReflect;
+        else if (id == shadowNodeId(ShadowNodeKind::Probe))   f.rec.bucket = PassBucket::ShadowProbe;
+        else f.rec.bucket = sceneKind ? PassBucket::Main : PassBucket::Post;
+    }
+    if (sceneKind) f.rec.shadowMs = 0.0f;   // a scene pass answers the split; see below
+    gMonitor->mPassStack.push_back(std::move(f));
+    gMonitor->addOverhead(std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count());
+}
+
+void PassListener::passSceneAfterShadowMaps(Ogre::CompositorPassScene *pass) {
+    // THE SHADOW/SCENE SPLIT INSIDE ONE SCENE PASS. Ogre fires this after the
+    // pass's shadow node has updated (and fires it even when there is no shadow
+    // node), between passPreExecute and the scene render — so the time from the
+    // pass's start to here IS the shadow half, nested pass records included.
+    // Zero is the interesting value: a scene pass whose lamps are all cached
+    // executes no shadow pass at all.
+    (void)pass;
+    if (!gMonitor || gMonitor->mPassStack.empty()) return;
+    FrameMonitor::PassFrame &f = gMonitor->mPassStack.back();
+    f.rec.shadowMs = float(std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - f.start).count());
+}
+
+void PassListener::passPosExecute(Ogre::CompositorPass *pass) {
+    if (!gMonitor || gMonitor->mPassStack.empty() || !pass) return;
+    const auto t1 = std::chrono::steady_clock::now();
+    FrameMonitor::PassFrame f = std::move(gMonitor->mPassStack.back());
+    gMonitor->mPassStack.pop_back();
+
+    const Ogre::CompositorNode *node = pass->getParentNode();
+    Ogre::RenderSystem *rs = node ? node->getRenderSystem() : nullptr;
+    unsigned draws = 0, batches = 0, instances = 0;
+    unsigned long long tris = 0;
+    readMetrics(rs, draws, batches, tris, instances);
+
+    const double totalMs = std::chrono::duration<double, std::milli>(t1 - f.start).count();
+    f.rec.cpuMs = float(totalMs - f.childMs);
+    // EXCLUSIVE draw counts: the delta across this pass MINUS what its children
+    // already reported. Summing a frame's records therefore reproduces the
+    // frame's own totals exactly.
+    const auto exclusive = [](unsigned long long now, unsigned long long at,
+                              unsigned long long child) -> unsigned long long {
+        const unsigned long long d = now >= at ? now - at : 0ull;
+        return d >= child ? d - child : 0ull;
+    };
+    f.rec.draws     = unsigned(exclusive(draws, f.drawsAt, f.childDraws));
+    f.rec.batches   = unsigned(exclusive(batches, f.batchesAt, f.childBatches));
+    f.rec.instances = unsigned(exclusive(instances, f.instancesAt, f.childInstances));
+    f.rec.triangles = exclusive(tris, f.trianglesAt, f.childTriangles);
+
+    if (!gMonitor->mPassStack.empty()) {
+        FrameMonitor::PassFrame &parent = gMonitor->mPassStack.back();
+        parent.childMs        += totalMs;
+        parent.childDraws     += f.rec.draws + f.childDraws;
+        parent.childBatches   += f.rec.batches + f.childBatches;
+        parent.childInstances += f.rec.instances + f.childInstances;
+        parent.childTriangles += f.rec.triangles + f.childTriangles;
+    }
+    gMonitor->pass(std::move(f.rec));
+    gMonitor->addOverhead(std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t1).count());
+}
+
+// ---------------------------------------------------------------------------
+// The instrumentation sites' entry points
+// ---------------------------------------------------------------------------
+
+WorkReason reasonOf(GiStaleReason why) {
+    switch (why) {
+    case GiStaleReason::None:     return WorkReason::None;
+    case GiStaleReason::Rebuild:  return WorkReason::Rebuild;
+    case GiStaleReason::Refresh:  return WorkReason::Refresh;
+    case GiStaleReason::Moved:    return WorkReason::Caster;
+    case GiStaleReason::Light:    return WorkReason::Light;
+    case GiStaleReason::Material: return WorkReason::Material;
+    case GiStaleReason::Sky:      return WorkReason::Sky;
+    case GiStaleReason::Ambient:  return WorkReason::Ambient;
+    case GiStaleReason::Fog:      return WorkReason::Fog;
+    case GiStaleReason::Mobility: return WorkReason::Mobility;
+    }
+    return WorkReason::None;
+}
+
+void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
+                   const char *detail, unsigned units, float ms) {
+    if (!gMonitor) return;
+    CacheWork w;
+    w.cache = cache;
+    w.reason = reason;
+    w.id = id;
+    if (detail) w.detail = detail;
+    w.units = units;
+    w.ms = ms;
+    gMonitor->cacheWork(w);
+}
+
+void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &label,
+               const std::string &detail, float ms, unsigned long long value) {
+    if (!gMonitor) return;
+    MonitorEvent e;
+    e.kind = kind;
+    e.reason = reason;
+    e.label = label;
+    e.detail = detail;
+    e.ms = ms;
+    e.value = value;
+    gMonitor->event(std::move(e));
+}
+
+void noteTextureWait(float ms) {
+    if (gMonitor && gMonitor->inFrame()) gMonitor->current().textureWaitMs += ms;
+}
+void noteShaderCompiles(unsigned n) {
+    if (gMonitor && gMonitor->inFrame()) gMonitor->current().shaderCompiles += n;
+}
+void noteProbeCaptures(unsigned captures) {
+    if (gMonitor && gMonitor->inFrame()) gMonitor->current().probeCaptures += captures;
+}
+void notePlanarRender(unsigned slots) {
+    if (gMonitor && gMonitor->inFrame()) gMonitor->current().planarRenders += slots;
+}
+
+}   // namespace monitor
+
+// ---------------------------------------------------------------------------
+// OgreEngine — the boundary implementation
+// ---------------------------------------------------------------------------
+
+void OgreEngine::setFrameMonitor(MonitorLevel level) {
+    if ((level != MonitorLevel::Off) == bool(mMonitor)) return;
+    if (level == MonitorLevel::Off) {
+        // DOWN: detach the listener from every workspace it is on, then free
+        // the ring. Only LIVE workspaces are touched — a workspace that died
+        // took its listener list with it, which is why the attached list is
+        // rebuilt every frame rather than trusted across one.
+        JAH_TRY {
+            for (Ogre::CompositorWorkspace *w : mMonitor->mAttached)
+                w->removeListener(&mMonitor->mListener);
+            for (auto &v : mViews) v->removeWorkspaceListener(&mMonitor->mListener);
+            if (mRoot) mRoot->removeFrameListener(&mMonitor->mSplit);
+        } JAH_CATCH(mLastError, );
+        monitor::gMonitor = nullptr;
+        mMonitor.reset();
+        return;
+    }
+    // UP: the ring is allocated here and the clock's zero is set here, so every
+    // record in a capture is relative to the moment the owner pressed the key.
+    monitor::resetEpoch();
+    mMonitor.reset(new monitor::FrameMonitor());
+    monitor::gMonitor = mMonitor.get();
+    if (mRoot) mRoot->addFrameListener(&mMonitor->mSplit);
+    monitor::noteEvent(MonitorEventKind::Host, WorkReason::Request, "monitor.start");
+}
+
+MonitorLevel OgreEngine::frameMonitor() const {
+    return mMonitor ? MonitorLevel::Review : MonitorLevel::Off;
+}
+
+MonitorStatus OgreEngine::monitorStatus() const {
+    MonitorStatus st;
+    st.level = mMonitor ? MonitorLevel::Review : MonitorLevel::Off;
+    if (!mMonitor) {
+        // THE ZERO-COST ASSERTIONS, answered from the ABSENCE of the object
+        // rather than from a flag: there is nothing to count.
+        st.gpuReason = "monitor off";
+        return st;
+    }
+    st.attachedListeners = unsigned(mMonitor->mAttached.size());
+    st.ringCapacity  = monitor::kRingCapacity;
+    st.ringFrames    = mMonitor->ringFrames();
+    st.pendingEvents = mMonitor->pendingEvents();
+    st.framesRecorded = mMonitor->framesRecorded();
+    st.framesDropped  = mMonitor->framesDropped();
+    st.overheadMs     = mMonitor->lastOverheadMs();
+    gpuTimingStatus(st);
+    return st;
+}
+
+unsigned OgreEngine::takeFrameRecords(std::vector<FrameRecord> &out) {
+    return mMonitor ? mMonitor->drainFrames(out) : 0u;
+}
+
+unsigned OgreEngine::takeMonitorEvents(std::vector<MonitorEvent> &out) {
+    return mMonitor ? mMonitor->drainEvents(out) : 0u;
+}
+
+void OgreEngine::noteMonitorEvent(const MonitorEvent &event) {
+    if (!mMonitor) return;
+    MonitorEvent e = event;
+    mMonitor->event(std::move(e));
+}
+
+void OgreEngine::noteHostStage(const std::string &name, float ms) {
+    if (mMonitor) mMonitor->hostStage(name, ms);
+}
+
+void OgreEngine::setNextFrameCause(FrameCause cause) { mNextFrameCause = cause; }
+
+// EVERY LIVE WORKSPACE THIS ENGINE CAN REACH, once a frame.
+//
+// Same shape and same reason as the shadow counters' re-attach: workspaces are
+// recreated by atlas rebuilds, GI rebuilds and probe placement, and a listener
+// list dies with its workspace. The view's listener rides the view's SEAM (so it
+// survives a rebuild between two frames); the scenes' private workspaces — each
+// planar mirror slot, each reflection probe — are attached directly and the
+// attached set is rebuilt from scratch, so a workspace that vanished is simply
+// not in it any more and is never dereferenced.
+void OgreEngine::syncMonitorListeners(const std::vector<OgreScene *> &drawn) {
+    if (!mMonitor) return;
+    JAH_TRY {
+        mMonitor->mAttached.clear();
+        for (auto &v : mViews) {
+            if (!v->isEnabled()) continue;
+            v->addWorkspaceListener(&mMonitor->mListener);   // idempotent, rides rebuilds
+        }
+        for (OgreScene *s : drawn) {
+            std::vector<Ogre::CompositorWorkspace *> ws;
+            s->monitorWorkspaces(ws);
+            for (Ogre::CompositorWorkspace *w : ws) {
+                const Ogre::CompositorWorkspaceListenerVec &ls = w->getListeners();
+                if (std::find(ls.begin(), ls.end(), &mMonitor->mListener) == ls.end())
+                    w->addListener(&mMonitor->mListener);
+                mMonitor->mAttached.push_back(w);
+            }
+        }
+        // The views' workspaces count too — reported, not owned.
+        for (auto &v : mViews)
+            if (Ogre::CompositorWorkspace *w = v->workspace())
+                mMonitor->mAttached.push_back(w);
+    } JAH_CATCH(mLastError, );
+}
+
+
+// ---------------------------------------------------------------------------
+// THE ENGINE SNAPSHOT (§4.8 `snapshot_start.json` / `snapshot_end.json`)
+// ---------------------------------------------------------------------------
+//
+// Everything a capture needs to be read MONTHS later without the scene in front
+// of you: what was asked for, what it resolved to, what exists, what it costs
+// and — the part nothing else in the engine can see — THE COMPOSITOR GRAPH:
+// every live workspace, its nodes, its passes and the scene each renders.
+//
+// Works with the monitor OFF. It renders nothing, allocates nothing persistent
+// and takes no lock, so the host can take one before it starts recording and
+// one after it stops.
+
+void OgreEngine::collectCompositorGraph(std::vector<CompositorWorkspaceInfo> &out) const {
+    if (!mRoot || mHeadless) return;
+    JAH_TRY {
+        const auto describe = [&](Ogre::CompositorWorkspace *ws, const std::string &owner) {
+            if (!ws) return;
+            CompositorWorkspaceInfo info;
+            info.owner = owner;
+            const Ogre::CompositorWorkspaceDef *wdef = ws->getDefinition();
+            if (wdef) info.name = wdef->getNameStr();
+            if (ws->getSceneManager()) info.scene = ws->getSceneManager()->getName();
+            info.enabled = ws->getEnabled();
+            info.listeners = unsigned(ws->getListeners().size());
+            if (Ogre::TextureGpu *t = ws->getFinalTarget()) {
+                info.width = t->getWidth();
+                info.height = t->getHeight();
+            }
+            const Ogre::CompositorNodeVec &nodes = ws->getNodeSequence();
+            for (Ogre::CompositorNode *n : nodes) {
+                if (!n) continue;
+                CompositorNodeInfo ni;
+                const Ogre::CompositorNodeDef *ndef = n->getDefinition();
+                ni.name = ndef ? ndef->getNameStr() : std::string();
+                if (ndef) {
+                    const size_t targets = ndef->getNumTargetPasses();
+                    for (size_t t = 0; t < targets; ++t) {
+                        const Ogre::CompositorTargetDef *td = ndef->getTargetPass(t);
+                        if (!td) continue;
+                        const Ogre::CompositorPassDefVec &passes = td->getCompositorPasses();
+                        for (const Ogre::CompositorPassDef *pd : passes) {
+                            if (!pd) continue;
+                            CompositorPassInfo pi;
+                            pi.type = monitor::passTypeName(pd->getType());
+                            pi.profilingId = pd->mProfilingId;
+                            pi.shadowMapIdx = pd->mShadowMapIdx;
+                            pi.numInitialPasses =
+                                pd->mNumInitialPasses == ~Ogre::uint32(0) ? 0u : pd->mNumInitialPasses;
+                            if (pd->getType() == Ogre::PASS_SCENE) {
+                                const Ogre::CompositorPassSceneDef *sd =
+                                    static_cast<const Ogre::CompositorPassSceneDef *>(pd);
+                                pi.camera = sd->mCameraName.getFriendlyText();
+                                // WHICH SHADOW NODE THIS PASS NAMES. The single
+                                // most expensive line in a capture's graph: a
+                                // probe face that names the VIEW's node costs a
+                                // full-resolution atlas per probe, and a pass
+                                // that names one at all re-renders it.
+                                pi.shadowNode = sd->mShadowNode.getFriendlyText();
+                            }
+                            ni.passes.push_back(std::move(pi));
+                        }
+                    }
+                }
+                info.nodes.push_back(std::move(ni));
+            }
+            out.push_back(std::move(info));
+        };
+
+        for (const auto &v : mViews) describe(v->workspace(), "view:" + v->name());
+        for (const auto &s : mScenes) {
+            std::vector<Ogre::CompositorWorkspace *> ws;
+            std::vector<std::string> owners;
+            s->monitorWorkspaces(ws, &owners);
+            for (size_t i = 0; i < ws.size(); ++i)
+                describe(ws[i], (i < owners.size() ? owners[i] : std::string("?")) + " (" +
+                                    s->name() + ")");
+        }
+    } JAH_CATCH(mLastError, );
+}
+
+bool OgreEngine::captureSnapshot(EngineSnapshot &out, const std::string &label,
+                                 Scene *scene) const {
+    out = EngineSnapshot();
+    out.label = label;
+    out.atMs = monitor::nowMs();
+    out.frame = mShadowFrame;
+    if (!mRoot) return false;
+    JAH_TRY {
+        // THE SCENE THE SNAPSHOT DESCRIBES: the caller's, or the first enabled
+        // on-screen view's — the same "one view speaks for the process" rule the
+        // HUD owner and the post chain's globals follow.
+        OgreScene *s = static_cast<OgreScene *>(scene);
+        if (!s) {
+            for (const auto &v : mViews)
+                if (v->isEnabled() && !v->isOffscreen() && v->ogreScene()) { s = v->ogreScene(); break; }
+            if (!s)
+                for (const auto &v : mViews)
+                    if (v->isEnabled() && v->ogreScene()) { s = v->ogreScene(); break; }
+        }
+        out.live = true;
+        out.device = deviceInfo();
+        out.shaderCache = shaderCacheStats();
+        out.shadow = shadowStatus();
+        objectCounts(out.objects);
+        memoryStats(out.memory);
+        threading(out.threading);
+        renderStats(out.render);
+        textureMemory(out.textures);
+        // The texture list is the biggest thing in a snapshot by far; the
+        // largest entries are what an engine review reads, so it is sorted and
+        // capped rather than dropped.
+        std::sort(out.textures.begin(), out.textures.end(),
+                  [](const TextureMemoryEntry &a, const TextureMemoryEntry &b) {
+                      return a.bytes > b.bytes;
+                  });
+        if (out.textures.size() > 256u) out.textures.resize(256u);
+        out.texturesDoneStreaming = texturesDoneStreaming();
+        // PER-HLMS DATABLOCK COUNTS. Ogre keeps its compiled-shader cache
+        // private at this pin (`Hlms::mShaderCache` has no size accessor —
+        // recorded for the upstream list), so what the snapshot can say
+        // exactly is how many datablocks each Hlms holds: the number behind
+        // the batching-collapse question ("> ~240 datablocks" in the render
+        // audit), and the one that grows when materials are per object.
+        if (Ogre::HlmsManager *hm = mRoot->getHlmsManager()) {
+            static const char *kBlockNames[Ogre::HLMS_MAX] = {
+                "low_level", "pbs", "toon", "unlit", "user0", "user1", "user2", "user3"
+            };
+            for (unsigned i = 0; i < Ogre::HLMS_MAX; ++i) {
+                Ogre::Hlms *h = hm->getHlms(Ogre::HlmsTypes(i));
+                if (!h) continue;
+                out.hlmsDatablocks.emplace_back(kBlockNames[i],
+                                                unsigned(h->getDatablockMap().size()));
+            }
+        }
+        if (s) {
+            out.scene = s->name();
+            out.giParams = s->giParams();
+            out.gi = s->giStatus();
+            out.mobility = s->mobilityStatus();
+            s->collectProbeInfo(out.probes);
+            s->collectLightInfo(out.lights);
+            // The per-light shadow-cache state is process-wide (it lives on the
+            // shadow node instances), so it is joined in here rather than
+            // guessed at in the scene.
+            for (SnapshotLight &l : out.lights)
+                for (const ShadowMapInfo &m : out.shadow.mapped)
+                    if (m.node == l.node) {
+                        l.cached = m.isCached;
+                        l.dirty = m.dirty;
+                        l.shadowSlot = m.slot;
+                    }
+        }
+        collectCompositorGraph(out.workspaces);
+    } JAH_CATCH(mLastError, false);
+    return out.live;
+}
+
+// ---------------------------------------------------------------------------
+// GPU timing status — BOTH off-switches, visible (owner decision D3)
+// ---------------------------------------------------------------------------
+void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
+    st.gpuCompiled = false;
+    st.gpuSupported = false;
+    st.gpuActive = false;
+    st.gpuQueryPools = 0u;
+    st.gpuReason = "GPU timestamps are not in this engine build (JAH_GPU_TIMESTAMPS unset)";
+}
+
+}   // namespace detail
+}}  // namespace jahshaka::engine

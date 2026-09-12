@@ -1470,11 +1470,68 @@ public:
     /// VaoManager frees a pool that emptied by itself (see MemoryStats).
     /// `before`/`after` are filled when given, so a caller can log the delta.
     virtual bool reclaimMemory(MemoryStats *before = nullptr, MemoryStats *after = nullptr) = 0;
-    /// The opt-in pass profiler (EngineConfig::profile). Flipping it on
-    /// registers a listener on every live view (and every view created
-    /// later); off removes them. No effect on any pixel.
-    virtual void setProfiling(bool on) = 0;
-    virtual bool profiling() const = 0;
+    // ---- THE RENDER-LOOP MONITOR (SPECS/RENDER_LOOP_MONITOR_SPEC.md) ----
+    //
+    // A DATA COLLECTOR for the lead's engine reviews, and nothing else: it
+    // records what each frame did and WHY, judges none of it, and never draws.
+    // It replaces the old opt-in pass profiler (`EngineConfig::profile` /
+    // `setProfiling`), which measured one number per profiling id, mis-nested
+    // every scene pass that owned a shadow node (one start time for nested
+    // passes) and logged every C++-built shadow pass as "(unnamed pass)".
+    //
+    // OFF BY DEFAULT AND FREE WHEN OFF. At `MonitorLevel::Off` nothing is
+    // attached to any workspace, no clock is read, the ring is freed and no GPU
+    // query pool exists. `monitorStatus()` reports each of those four so a test
+    // can assert it rather than trust it.
+    //
+    // FORWARD ONLY. Turning the monitor on starts recording from that frame;
+    // there is no background history, by the owner's decision.
+
+    /// Switch the monitor on (Review) or off. Attaches/detaches every listener
+    /// on every live workspace — the view's, each planar mirror's and each
+    /// reflection probe's — and allocates/frees the frame ring. Idempotent.
+    /// Listeners ride the workspace seams, so they survive an atlas rebuild, a
+    /// GI rebuild and a workspace recreation.
+    virtual void setFrameMonitor(MonitorLevel level) = 0;
+    virtual MonitorLevel frameMonitor() const = 0;
+    /// What the monitor is doing, including the four zero-cost assertions and
+    /// the state of both GPU-timing off-switches.
+    virtual MonitorStatus monitorStatus() const = 0;
+
+    /// Drains the frame ring into `out` (appending) and returns how many
+    /// records were moved. Empty when the monitor is off. The host drains on
+    /// its own tick; anything it does not drain is overwritten, counted by
+    /// `MonitorStatus::framesDropped`.
+    virtual unsigned takeFrameRecords(std::vector<FrameRecord> &out) = 0;
+    /// The same for discrete events (GI rebuilds, atlas changes, compiles,
+    /// texture loads, VRAM flushes, device-lost, and the host's own).
+    virtual unsigned takeMonitorEvents(std::vector<MonitorEvent> &out) = 0;
+    /// THE HOST'S HOOK. Page switches, UI-thread gaps, script marks, toast
+    /// lifetimes — anything the host knows and the engine cannot. Ignored when
+    /// the monitor is off, so a caller never has to check first. `frame` and
+    /// `startMs` are filled in by the engine when left at 0.
+    virtual void noteMonitorEvent(const MonitorEvent &event) = 0;
+    /// A host stage (tick, mirror sub-stages, UI gap) folded into the NEXT
+    /// frame record's stage list, so `frames.jsonl` carries one stage tree per
+    /// frame. Ignored when the monitor is off.
+    virtual void noteHostStage(const std::string &name, float ms) = 0;
+    /// Why the next frame is being rendered — the driver's tick, a script's
+    /// `editor.frame`, an offscreen readback, the warm-up gate. Consumed by the
+    /// next `renderOneFrame` and reset to `Driver`; an offscreen scope sets it
+    /// so analysis can tell a frame nobody saw from one the owner watched.
+    virtual void setNextFrameCause(FrameCause cause) = 0;
+
+    /// THE ENGINE, AT ONE INSTANT (§4.8) — every GI parameter and what it
+    /// resolved to, the probe grid, the shadow setup with per-light cache
+    /// state, the light list, the object/VRAM/Hlms census, the texture
+    /// streaming queue and THE COMPOSITOR GRAPH (every live workspace, its
+    /// nodes and passes, and which scene each renders).
+    ///
+    /// `scene` null = the scene of the first enabled on-screen view. Works with
+    /// the monitor off (it renders nothing and allocates nothing persistent) —
+    /// the host takes one at the start of a capture and one at the end.
+    virtual bool captureSnapshot(EngineSnapshot &out, const std::string &label,
+                                 Scene *scene = nullptr) const = 0;
 
     /// Writes the cache now, if anything new has been compiled since the last
     /// write. Called on clean shutdown and once a compile burst has settled;
