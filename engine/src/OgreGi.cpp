@@ -2170,8 +2170,9 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // The probe GRID is (re)placed here: every probe workspace in the scene is
     // destroyed and rebuilt, which is why the monitor re-syncs its listeners
     // every frame rather than once.
-    monitor::noteEvent(MonitorEventKind::ProbeGridBuild, monitor::reasonOf(mLastStaleReason),
-                       "gi.probeGrid");
+    if (monitor::live())
+        monitor::noteEvent(MonitorEventKind::ProbeGridBuild, monitor::reasonOf(mLastStaleReason),
+                           "gi.probeGrid");
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     mPccHdr = mPccShadowed = false;
     // The slots name probes that are about to be (re)created; the first

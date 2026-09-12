@@ -140,6 +140,36 @@
 // params do NOT contain (only Nx and Nx*Ny reach the shader,
 // OgreIrradianceField.cpp:812-813) and the threshold above needs all three.
 //
+// THE THIRD THING THAT IS NOT UPSTREAM'S: THE FIELD'S EDGE
+// (ENGINE_CACHE_POLICY_SPEC.md P9, re-scoped 2026-09-13; the owner's report was
+// "the Grand Showroom 2's roof shows texture maps", and the diagnosis is
+// spikes/showroom2-roof/ + spikes/e3-ifdedge/).
+//
+// THE DEFECT IS UPSTREAM'S AND IT IS TWO DEFECTS. (1) The cage loop's comment
+// says "clamp to the probe grid boundary" and no clamp is performed, here or in
+// the world->grid map (OgreIrradianceField.cpp:794-812), so a pixel outside the
+// grid indexes past it and getProbeIdx's FLAT index wraps into another probe
+// row -- a surface above a building is handed the irradiance of a probe inside
+// it. (2) Even with the cage clamped the field answers everywhere, because the
+// sum is NORMALISED by sumIfdWeight: a pixel a hundred metres outside the
+// volume still gets the border probes' irradiance at full strength, since
+// crushing all eight weights only renormalises the same eight probes. The
+// Chebyshev visibility test cannot rescue either case, and that was MEASURED
+// rather than assumed (the note in the loop).
+//
+// WHAT THIS FILE DOES ABOUT IT, in three parts, none of which costs a sample:
+//   * the CLAMP the comment promises;
+//   * a CONFIDENCE in [0, 1] that is 1 wherever the field has something to say
+//     and 0 where it does not -- zero outside the AUTHORED volume (the box the
+//     host handed initialize(), recoverable from the probe counts alone), and
+//     zero on a surface with no probe on its own side;
+//   * a FALLBACK, so that "the field says nothing" means "what this pixel had
+//     before a field was ever bound" rather than "black": the voxel-cone
+//     ambient term that binding a field deletes.
+// Inside the field the confidence is exactly 1 and every frame is what it was:
+// gi.modes, gi.ddgi, gi.ddgi_ambient and gi.ddgi_raster print identical numbers
+// with this file and without it.
+//
 // SCOPE: the whole file is gated on the `irradiance_field` property, which
 // HlmsPbs sets only while a field is bound. With no field bound (every scene
 // that has not opted in, which in P1 is all of them by default) not one line of
@@ -169,6 +199,28 @@
 
 	float3 ifdIrradiance = float3( 0, 0, 0 );
 	float sumIfdWeight = 0;
+
+	// OURS, AND THE THIRD THING THAT IS NOT UPSTREAM'S: THE FIELD'S EDGE
+	// (ENGINE_CACHE_POLICY_SPEC P9). Two numbers the cage loop below needs and
+	// upstream never computes.
+	//
+	//   ifdMaxProbe  the last legal probe index on each axis. Upstream's own
+	//                render params carry only Nx and Nx*Ny, so Y and Z ride
+	//                jahIfd.zw (the same two floats the sky-visibility
+	//                threshold uses). When they are absent -- the host pushed no
+	//                IFD state, which cannot happen today because the arm writes
+	//                the state before it binds -- the bound is set beyond any
+	//                real grid, and every line below reduces to upstream's
+	//                behaviour exactly.
+	//   (the fade that uses them is after the loop, with its derivation)
+	float3 ifdProbeCounts = float3( passBuf.irradianceField.numProbesAggregated.x,
+									passBuf.jahIfd.z, passBuf.jahIfd.w );
+	bool  ifdHaveCounts = passBuf.jahIfd.z > 0.5;
+	float3 ifdMaxProbe = ifdHaveCounts ? ifdProbeCounts - float3( 1.0, 1.0, 1.0 )
+									   : float3( 1e9, 1e9, 1e9 );
+	// How much of the cage's final weight comes from probes IN FRONT of the
+	// shading surface (P9; the fade after the loop says what it is for).
+	float ifdFrontWeight = 0;
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
 	// OURS: the cage-weighted sky visibility, and everything the taps need
 	// that does not change per probe. A tangent frame around the field-space
@@ -214,20 +266,45 @@
 		// Compute the offset grid coord and clamp to the probe grid boundary
 		// Offset = 0 or 1 along each axis
 		float3 probeOffset = float3( int3( i, i >> 1, i >> 2 ) & int3( 1, 1, 1 ) );
-		float3 probeOrigin = ifdGridProbeOrigin + probeOffset;
+		// THE CLAMP THE COMMENT ABOVE HAS ALWAYS PROMISED, and upstream has
+		// never performed (IrradianceField_piece_ps.any:130-140 at the pin, and
+		// the world->grid map has no clamp either,
+		// OgreIrradianceField.cpp:794-812). Without it a pixel outside the
+		// field indexes past the grid and getProbeIdx's flat index WRAPS into
+		// another row -- in the Grand Showroom 2 the roof's upper cage corner
+		// landed on the FLOOR layer with 77% of the trilinear weight, which is
+		// the "texture maps on the roof" the owner reported. A clamped cage
+		// EXTRAPOLATES the border probes instead, which is bounded and which
+		// the two fades below then take to zero.
+		float3 probeOrigin = clamp( ifdGridProbeOrigin + probeOffset,
+									float3( 0.0, 0.0, 0.0 ), ifdMaxProbe );
 
 		IrfProbeIndex probeIdx =
 			getProbeIdx( probeOrigin, passBuf.irradianceField.numProbesAggregated.xy );
 
 		float3 dir = probeOrigin - ifdGridPos;
-		float r = length( dir );
+		// max(): a clamped cage can put a probe exactly under the pixel, and
+		// 1/0 would make dir NaN and poison the whole sum. (The hazard is
+		// upstream's too -- a pixel landing exactly on a grid integer hits it
+		// unclamped -- but clamping makes the coincidence reachable by a whole
+		// half-space rather than by a measure-zero plane.)
+		float r = max( length( dir ), 1e-6 );
 		dir *= 1.0 / r;
 
 		// Ignore probes that are behind us, but don't black them out completely
 		// as detailed surface may otherwise have very few probes ppointing at it
-		float weight;
-		weight = dot( dir, ifdSpaceNormal ) * 200.0;
-		weight = saturate( weight ) + 0.2;
+		// Upstream's own front/back test, split into the weight it has always
+		// produced and a second reading of the same dot product for the
+		// front-side share (P9, after the loop). The +0.5 is what separates
+		// BEHIND from COPLANAR: a probe exactly in the shading surface -- which
+		// is the normal case for a flat field, e.g. the default scene's 64x2x64
+		// field puts a probe layer exactly in the ground plane -- has dot 0 and
+		// is not behind anything, so it reads 0.5 and keeps its say, while a
+		// probe genuinely under the surface reads 0 (the x200 makes even a
+		// 1 cm offset saturate).
+		float ifdNdotD = dot( dir, ifdSpaceNormal ) * 200.0;
+		float ifdFrontSide = saturate( ifdNdotD + 0.5 );
+		float weight = saturate( ifdNdotD ) + 0.2;
 
 		// Compute the trilinear weights based on the grid cell vertex to smoothly
 		// transition between probes. Avoid ever going entirely to zero because that
@@ -254,6 +331,19 @@
 
 			weight *= chebyshevWeight;
 		}
+		// WHY THERE IS NO VISIBILITY TERM OF OURS HERE, and it was measured
+		// rather than assumed (the lead's question, P9). The Chebyshev weight
+		// cannot carry the edge case on its own for two reasons. First,
+		// arithmetic: the sum is divided by sumIfdWeight below, so crushing ALL
+		// eight weights does not remove the contribution -- it renormalises the
+		// same eight probes and the leak survives at full strength. Second, and
+		// the reason a cage-visibility fraction was tried and then deleted: in
+		// the suite's sealed box the trilinear-weighted Chebyshev fraction of a
+		// roof pixel whose ENTIRE cage is embedded in the ceiling slab measures
+		// above 0.999 -- the depth atlas reports those probes as unoccluded, so
+		// no threshold on it can separate them from an interior floor. The
+		// probes that answer such a pixel are inside geometry; recognising them
+		// is probe classification (RTXGI-style), which this lane does not do.
 
 		// Avoid zero weight
 		weight = max( 0.000001, weight );
@@ -272,6 +362,7 @@
 		float3 irrColour = OGRE_SampleLevel( ifdColour, ifdSampler, ifdColourUV, 0 ).xyz;
 		ifdIrradiance += irrColour * weight;
 		sumIfdWeight += weight;
+		ifdFrontWeight += weight * ifdFrontSide;
 
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
 		// OURS: the sky-visibility taps for this cage probe. The branch is
@@ -319,13 +410,114 @@
 @end
 	}
 
+	// OURS (P9): HOW MUCH THE FIELD IS TRUSTED AT THIS PIXEL, in [0, 1], and
+	// the two independent ways it can have nothing to say.
+	//
+	// (a) OUTSIDE THE AUTHORED VOLUME.
+	//
+	// THE AUTHORED VOLUME, IN GRID SPACE, WITH NO NEW UNIFORM. `initialize()`
+	// enlarges the volume it was given by one probe block per side before it
+	// builds the world->grid transform (OgreIrradianceField.cpp:543-547):
+	//     O' = O - S/N,   S' = S + 2S/N
+	// and the transform maps [O', O'+S'] onto [0, N]
+	// (OgreIrradianceField.cpp:794-800). So the AUTHORED corner O lands at
+	//     ( O - O' ) * N / S' = ( S/N ) * N / ( S ( N+2 ) / N ) = N / ( N+2 )
+	// and the authored box is exactly [ q, N - q ] with q = N / (N+2), per axis,
+	// computable from the probe counts alone. (Checked against a live field:
+	// N_y = 16 over bounds y [-1, 5.25] gives q = 0.889 and the bounds' own
+	// corners measure at grid 0.889 and 15.111.)
+	//
+	// OUTSIDE IT THE FIELD SAYS NOTHING. Not "says something weaker": the
+	// volume is what was voxelised and what the probes integrate, and a surface
+	// beyond it has no probe on its own side at all -- the cage is clamped, so
+	// it is being handed the border probes' irradiance, which is the leak this
+	// fix exists for. The roll-off is half a probe spacing wide and lives
+	// INSIDE the authored box, so the field reaches zero AT the boundary and
+	// everything past it gets the fallback below. Half a spacing keeps the
+	// roll-off inside the shell where the cage is already half made of padding
+	// probes; measured, it moves no interior pixel of the gate scenes.
+	float3 ifdQ = ifdProbeCounts / ( ifdProbeCounts + float3( 2.0, 2.0, 2.0 ) );
+	float3 ifdInside = min( ifdGridPos - ifdQ, ( ifdProbeCounts - ifdQ ) - ifdGridPos );
+	float3 ifdAxisFade = saturate( ifdInside * 2.0 );
+	float ifdEdgeFade = ifdAxisFade.x * ifdAxisFade.y * ifdAxisFade.z;
+	ifdEdgeFade = ifdEdgeFade * ifdEdgeFade * ( 3.0 - 2.0 * ifdEdgeFade );
+	// (b) NO PROBE IN FRONT OF ME. The fade above is about the field's BOX; this
+	// one is about the last probe LAYER, and it is what the owner's report
+	// needed. Ogre places probe i at fieldOrigin + i * fieldSize / N over a box
+	// that was padded symmetrically, so the lattice reaches one probe block
+	// BELOW the authored volume and stops a fraction of a block INSIDE its top
+	// (upstream asymmetry; in the Grand Showroom 2 the topmost probe layer sits
+	// at y 7.731, which is 2 cm under the roof's outer face and INSIDE the 0.5 m
+	// ceiling slab). A pixel on that roof therefore has a perfectly legal cage
+	// in which EVERY probe is behind the surface and inside the slab, and the
+	// field hands it the inside of the building. `ifdFrontWeight` is the share
+	// of the normalised weight that comes from probes on the surface's own
+	// side; when it is zero there is no probe lighting this surface at all and
+	// the field has nothing to say. It is exactly zero for the roof case and
+	// well clear of the knee everywhere else, because upstream's own weights
+	// already favour a front probe 6:1 (1.2 against the 0.2 floor) and a
+	// coplanar probe counts as half -- an interior floor a centimetre above a
+	// probe plane measures 0.06, and one lying exactly ON a probe layer 0.5.
+	// This is NOT probe classification: it does not detect a probe inside
+	// geometry, it detects a SURFACE with no probe in front of it.
+	const float ifdFrontLo = 0.005;
+	const float ifdFrontHi = 0.05;
+	float ifdFrontFade = smoothstep( ifdFrontLo, ifdFrontHi, ifdFrontWeight / sumIfdWeight );
+	// The counts are absent only in a state the host cannot produce (the GI arm
+	// writes them before it binds the field); there, the box fade is skipped.
+	float ifdConfidence = min( ifdHaveCounts ? ifdEdgeFade : 1.0, ifdFrontFade );
+
 	// THE FIRST LINE THAT IS NOT UPSTREAM'S. Upstream writes
 	//     pixelData.envColourD.xyz += ifdIrradiance * ( 1.0 / sumIfdWeight );
 	// and we scale that by jahIfd.x, the DDGI diffuse intensity the host writes
 	// into the pass buffer (JahshakaEngine's FogHlmsListener; the default is
 	// calibrated against the pre-DDGI VCT diffuse, GiParams::ddgiIntensity).
-	// 1.0 reproduces upstream exactly.
-	pixelData.envColourD.xyz += ifdIrradiance * ( passBuf.jahIfd.x / sumIfdWeight );
+	// 1.0 reproduces upstream exactly. The confidence is ours too (P9): inside
+	// the field it is exactly 1 and this line is bit-for-bit what it always was.
+	pixelData.envColourD.xyz +=
+		ifdIrradiance * ( passBuf.jahIfd.x * ifdConfidence / sumIfdWeight );
+
+@property( vct_num_probes )
+	// AND THE FALLBACK (P9). Binding a field sets VctDisableDiffuse
+	// (OgreHlmsPbs.cpp:1784-1788), which deletes the ENTIRE voxel-cone diffuse
+	// block from the generated shader -- including the one term that block
+	// contributes outside the voxel volume, where every cone escapes without
+	// hitting anything: ambient x the escape weight, which is ambient x 1
+	// (Vct_piece_ps.any:470-477, then x blendFade x multiplier at :480-483,
+	// with `blend` hardcoded to 1). That term is exactly what a surface out
+	// here had BEFORE the field existed, and fading the field to zero without
+	// it would leave the roof flat and BLACK (measured on the base binary with
+	// intensity 0: 2/255 against 36/255 with no field at all).
+	//
+	// It is written as the closed form rather than by re-enabling the cone
+	// block, because the block is six cone marches per pixel and this is a
+	// lerp: the fallback costs nothing where it is not used (1 - confidence is
+	// 0 inside the field) and nothing that scales with anything where it is.
+	//
+	// NOT DOUBLE-COUNTED, and here is the whole accounting. envColourD receives
+	// exactly one diffuse-GI term in every regime: the field's irradiance x
+	// confidence, plus our sky-visibility ambient x confidence (below), plus
+	// this x (1 - confidence). At confidence 1 this line contributes zero and
+	// the frame is what it was; at confidence 0 the two field terms contribute
+	// zero and the pixel gets precisely the term VctDisableDiffuse took from
+	// it. DoAmbientLighting is not involved in either regime -- it is gated on
+	// `vctSpecular.w == 0` and upstream hardcodes that blend to 1 while VCT is
+	// bound (AmbientLighting_piece_ps.any:64-72), which is the gap this file's
+	// sky-visibility term exists to fill in the first place.
+	float ifdFallbackAmbient = 1.0 - ifdConfidence;
+	if( ifdFallbackAmbient > 0.0 )
+	{
+	@property( vct_ambient_hemisphere )
+		float3 ifdAmbientOutside = lerp( passBuf.vctProbeParams.ambientLowerHemi.xyz,
+										 passBuf.vctProbeParams.ambientUpperHemi.xyz, ambientWD );
+	@else
+		float3 ifdAmbientOutside = passBuf.vctProbeParams.ambientUpperHemi.xyz;
+	@end
+		pixelData.envColourD.xyz += ifdAmbientOutside * ( passBuf.vctProbeParams.blendFade *
+														 passBuf.vctProbeParams.multiplier *
+														 ifdFallbackAmbient );
+	}
+@end
 
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
 	// AND THE AMBIENT THE VOLUME SWALLOWED, times the sky visibility above.
@@ -339,8 +531,13 @@
 	{
 		float3 ifdWsNormal = mul( passBuf.invViewMatCubemap, pixelData.normal );
 		ifdWsNormal.x = -ifdWsNormal.x;
+		// x ifdConfidence (P9): this term is the field's own answer about how
+		// much sky the pixel can see, so it fades out with the field and the
+		// VCT ambient fallback above takes over. Inside the field the factor is
+		// exactly 1.
 		pixelData.envColourD.xyz += irradianceSH( ifdWsNormal PASSBUF_ARG ) *
-									( passBuf.jahIfd.y * ifdSkyVis / sumIfdWeight );
+									( passBuf.jahIfd.y * ifdSkyVis * ifdConfidence /
+									  sumIfdWeight );
 	}
 @end
 @end

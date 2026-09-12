@@ -125,6 +125,7 @@ void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool o
     mInFrame = true;
     mStageChild = nullptr;
     mPassStack.clear();
+    mWorkspaceDepths.clear();
     mPassSampleIds.clear();
     // Host stages pushed before the frame opened (the driver's tick wraps the
     // engine's frame, so `tick` and the mirror's sub-stages are known first)
@@ -154,6 +155,7 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
         case PassBucket::ShadowProbe:   ++mCurrent.shadowPassesProbe; break;
         default: break;
         }
+        if (p.orphaned) ++mCurrent.orphanedPasses;
     }
     mOverheadMs += std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - t).count();
@@ -234,6 +236,22 @@ unsigned FrameMonitor::drainEvents(std::vector<MonitorEvent> &out) {
     return n;
 }
 
+void FrameMonitor::closeOrphanPass() {
+    if (mPassStack.empty()) return;
+    PassFrame f = std::move(mPassStack.back());
+    mPassStack.pop_back();
+    // The pass never reported a `passPosExecute`, so its numbers are unknown —
+    // recorded as such (negative CPU time, no draw counts) rather than invented,
+    // and its GPU sample is closed so the render system's own stack stays
+    // balanced. Seeing one of these in a capture IS the finding.
+    if (mGpu && f.gpuSampleId && mOrphanRs) {
+        try { mOrphanRs->endGPUSampleProfile(f.rec.pass); } catch (...) {}
+    }
+    f.rec.cpuMs = -1.0f;
+    f.rec.orphaned = true;
+    pass(std::move(f.rec), f.gpuSampleId);
+}
+
 void FrameMonitor::stage(const char *name, double ms) {
     if (mInFrame) mCurrent.stages.push_back({ name, float(ms) });
     else          mPendingHostStages.push_back({ name, float(ms) });
@@ -293,16 +311,37 @@ Stage::~Stage() {
 // PassListener — per-pass records, exclusive by construction
 // ---------------------------------------------------------------------------
 
+// THE STACK IS TRIMMED TO A REMEMBERED DEPTH, NOT CLEARED.
+//
+// A workspace update can happen INSIDE an open pass — a reflection probe
+// captures from `allWorkspacesBeginUpdate` and a planar mirror renders its
+// workspaces synchronously from `passEarlyPreExecute`, and neither is nested
+// inside one of our pass records today. But clearing the whole stack on any
+// workspace boundary means the first nested update that IS destroys the outer
+// PassFrame: its record is lost, its parent's exclusive time and draw counts
+// are wrong, and — worse — its `endGPUSampleProfile` is never called, which
+// leaves a sample open on the render system's own stack and mis-attributes
+// every GPU time after it (the overflow-sentinel class of bug, from the other
+// end). Remembering the depth on the way in and trimming back to it on the way
+// out keeps an enclosing pass intact and still guarantees that a workspace
+// which threw mid-update cannot leak frames into the next one.
 void PassListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     (void)ws;
-    // A workspace that threw mid-update can leave the stack unbalanced; the
-    // next workspace must not inherit it.
-    if (gMonitor) gMonitor->mPassStack.clear();
+    if (!gMonitor) return;
+    gMonitor->mWorkspaceDepths.push_back(unsigned(gMonitor->mPassStack.size()));
 }
 
 void PassListener::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     (void)ws;
-    if (gMonitor) gMonitor->mPassStack.clear();
+    if (!gMonitor) return;
+    unsigned depth = 0u;
+    if (!gMonitor->mWorkspaceDepths.empty()) {
+        depth = gMonitor->mWorkspaceDepths.back();
+        gMonitor->mWorkspaceDepths.pop_back();
+    }
+    // Anything this workspace left open is closed here, in order, so the render
+    // system never carries an unbalanced GPU sample into the next workspace.
+    while (gMonitor->mPassStack.size() > depth) gMonitor->closeOrphanPass();
 }
 
 void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
@@ -311,6 +350,7 @@ void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
     const Ogre::CompositorNode *node = pass->getParentNode();
     Ogre::RenderSystem *rs = node ? node->getRenderSystem() : nullptr;
 
+    gMonitor->mOrphanRs = rs;
     FrameMonitor::PassFrame f;
     f.start = t0;
     readMetrics(rs, f.drawsAt, f.batchesAt, f.trianglesAt, f.instancesAt);
@@ -464,17 +504,17 @@ void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &labe
 }
 
 EventScope::EventScope(MonitorEventKind kind, WorkReason reason, const char *label,
-                       std::string detail)
+                       const char *detail)
     : mKind(kind), mReason(reason) {
     if (!gMonitor) return;
     mLabel = label;
-    mDetail = std::move(detail);
+    mDetail = detail;
     mStart = std::chrono::steady_clock::now();
 }
 
 EventScope::~EventScope() {
     if (!mLabel || !gMonitor) return;
-    noteEvent(mKind, mReason, mLabel, mDetail,
+    noteEvent(mKind, mReason, mLabel, mDetail ? std::string(mDetail) : std::string(),
               float(std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - mStart).count()));
 }
@@ -499,16 +539,43 @@ void notePlanarRender(unsigned slots) {
 // ---------------------------------------------------------------------------
 
 void OgreEngine::setFrameMonitor(MonitorLevel level) {
-    if ((level != MonitorLevel::Off) == bool(mMonitor)) return;
+    // LEVEL-SENSITIVE, not merely on/off: `Review` is the only recording level
+    // today, but a future one must not be a silent no-op when a capture is
+    // already running. Same level = nothing to do; a DIFFERENT level while one
+    // is live stops the current capture and starts the new one.
+    const MonitorLevel current = mMonitor ? mMonitor->mLevel : MonitorLevel::Off;
+    if (level == current) return;
+    if (level != MonitorLevel::Off && current != MonitorLevel::Off) {
+        setFrameMonitor(MonitorLevel::Off);
+        setFrameMonitor(level);
+        return;
+    }
     if (level == MonitorLevel::Off) {
-        // DOWN: detach the listener from every workspace it is on, then free
-        // the ring. Only LIVE workspaces are touched — a workspace that died
-        // took its listener list with it, which is why the attached list is
-        // rebuilt every frame rather than trusted across one.
+        // DOWN: detach the listener from EVERY workspace this engine owns — not
+        // from `mAttached`.
+        //
+        // WHY NOT A REMEMBERED LIST (a use-after-free, found in review): it
+        // was repopulated each frame from the DRAWN scenes only. Draw scene A
+        // on frame N (its planar slots and its probes take `&mListener`),
+        // switch the editor to scene B on N+1 (the list is now B's), stop the
+        // capture — and A's workspaces still hold a pointer into a FrameMonitor
+        // that is about to be destroyed, because it owns `mListener` by VALUE.
+        // The next render of A calls into freed memory. (A workspace destroyed
+        // between the last sync and this call was the second half of the same
+        // bug: the list held a dangling pointer of its own.)
+        //
+        // Walking every scene and every view instead is free: Ogre's
+        // `removeListener` is a find-and-erase, so removing from a workspace
+        // that never had it costs one failed search, and what survives is a
+        // COUNT (`mAttachedCount`) that is only ever reported.
         JAH_TRY {
-            for (Ogre::CompositorWorkspace *w : mMonitor->mAttached)
-                w->removeListener(&mMonitor->mListener);
             for (auto &v : mViews) v->removeWorkspaceListener(&mMonitor->mListener);
+            for (auto &s : mScenes) {
+                std::vector<Ogre::CompositorWorkspace *> ws;
+                s->monitorWorkspaces(ws);
+                for (Ogre::CompositorWorkspace *w : ws)
+                    w->removeListener(&mMonitor->mListener);
+            }
             if (mRoot) mRoot->removeFrameListener(&mMonitor->mSplit);
         } JAH_CATCH(mLastError, );
         mShaderCache.recordCompileNames(false);
@@ -529,8 +596,13 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
     }
     // UP: the ring is allocated here and the clock's zero is set here, so every
     // record in a capture is relative to the moment the owner pressed the key.
+    // A TAIL NOBODY DRAINED belongs to the PREVIOUS capture; carrying it into
+    // the next one would put frames from before the key press into a bundle
+    // that is supposed to be forward-only.
+    std::vector<FrameRecord>().swap(mFinalRecords);
     monitor::resetEpoch();
     mMonitor.reset(new monitor::FrameMonitor());
+    mMonitor->mLevel = level;
     monitor::gMonitor = mMonitor.get();
     mShaderCache.recordCompileNames(true);
     // THE RUNTIME OFF-SWITCH, closed here and nowhere else: the query pools are
@@ -551,12 +623,12 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
 }
 
 MonitorLevel OgreEngine::frameMonitor() const {
-    return mMonitor ? MonitorLevel::Review : MonitorLevel::Off;
+    return mMonitor ? mMonitor->mLevel : MonitorLevel::Off;
 }
 
 MonitorStatus OgreEngine::monitorStatus() const {
     MonitorStatus st;
-    st.level = mMonitor ? MonitorLevel::Review : MonitorLevel::Off;
+    st.level = mMonitor ? mMonitor->mLevel : MonitorLevel::Off;
     if (!mMonitor) {
         // THE ZERO-COST ASSERTIONS, answered from the ABSENCE of the object
         // rather than from a flag: there is nothing to count. The one thing
@@ -565,7 +637,7 @@ MonitorStatus OgreEngine::monitorStatus() const {
         gpuTimingStatus(st);
         return st;
     }
-    st.attachedListeners = unsigned(mMonitor->mAttached.size());
+    st.attachedListeners = mMonitor->mAttachedCount;
     st.ringCapacity  = monitor::kRingCapacity;
     st.ringFrames    = mMonitor->ringFrames();
     st.pendingEvents = mMonitor->pendingEvents();
@@ -614,10 +686,11 @@ void OgreEngine::setNextFrameCause(FrameCause cause) { mNextFrameCause = cause; 
 void OgreEngine::syncMonitorListeners(const std::vector<OgreScene *> &drawn) {
     if (!mMonitor) return;
     JAH_TRY {
-        mMonitor->mAttached.clear();
+        unsigned attached = 0u;
         for (auto &v : mViews) {
             if (!v->isEnabled()) continue;
             v->addWorkspaceListener(&mMonitor->mListener);   // idempotent, rides rebuilds
+            if (v->workspace()) ++attached;
         }
         for (OgreScene *s : drawn) {
             std::vector<Ogre::CompositorWorkspace *> ws;
@@ -626,13 +699,13 @@ void OgreEngine::syncMonitorListeners(const std::vector<OgreScene *> &drawn) {
                 const Ogre::CompositorWorkspaceListenerVec &ls = w->getListeners();
                 if (std::find(ls.begin(), ls.end(), &mMonitor->mListener) == ls.end())
                     w->addListener(&mMonitor->mListener);
-                mMonitor->mAttached.push_back(w);
+                ++attached;
             }
         }
-        // The views' workspaces count too — reported, not owned.
-        for (auto &v : mViews)
-            if (Ogre::CompositorWorkspace *w = v->workspace())
-                mMonitor->mAttached.push_back(w);
+        // A COUNT, never a list of pointers to keep: a workspace can die
+        // between this frame and the next call, and detaching walks the live
+        // scenes and views rather than anything remembered here.
+        mMonitor->mAttachedCount = attached;
     } JAH_CATCH(mLastError, );
 }
 
@@ -753,7 +826,12 @@ bool OgreEngine::captureSnapshot(EngineSnapshot &out, const std::string &label,
                   [](const TextureMemoryEntry &a, const TextureMemoryEntry &b) {
                       return a.bytes > b.bytes;
                   });
-        if (out.textures.size() > 256u) out.textures.resize(256u);
+        out.textureCount = unsigned(out.textures.size());
+        static const unsigned kMaxSnapshotTextures = 256u;
+        if (out.textures.size() > kMaxSnapshotTextures) {
+            out.texturesTruncated = out.textureCount - kMaxSnapshotTextures;
+            out.textures.resize(kMaxSnapshotTextures);
+        }
         out.texturesDoneStreaming = texturesDoneStreaming();
         // PER-HLMS DATABLOCK COUNTS. Ogre keeps its compiled-shader cache
         // private at this pin (`Hlms::mShaderCache` has no size accessor —
@@ -823,6 +901,11 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
     st.gpuSupported = true;
     st.gpuActive = available;
     st.gpuQueryPools = available ? 2u : 0u;
+    if (available) {
+        Ogre::uint32 truncated = 0u;
+        try { rs->getCustomAttribute("JahGpuSamplesTruncated", &truncated); } catch (...) {}
+        st.gpuSamplesTruncated = unsigned(truncated);
+    }
     if (!available)
         st.gpuReason = mMonitor ? "the device or queue has no usable timestamps"
                                 : "no capture is running (no query pool exists)";

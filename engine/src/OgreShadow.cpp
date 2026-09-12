@@ -460,8 +460,9 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, b
     // workspace that names a shadow node — the views', the planar mirrors' and
     // the reflection probes', whose GI arm is rebuilt from scratch — so it is
     // both a hitch and the reason a listener list can vanish under the monitor.
-    monitor::noteEvent(MonitorEventKind::AtlasRebuild, WorkReason::Resolution, "shadow.atlas",
-                       std::to_string(res) + "px, " + std::to_string(maps) + " focused maps");
+    if (monitor::live())   // §4.1 is ABSOLUTE: build no string while off
+        monitor::noteEvent(MonitorEventKind::AtlasRebuild, WorkReason::Resolution, "shadow.atlas",
+                           std::to_string(res) + "px, " + std::to_string(maps) + " focused maps");
     bool ok = false;
     JAH_TRY {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
