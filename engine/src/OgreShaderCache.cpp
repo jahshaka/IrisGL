@@ -15,6 +15,8 @@
 //    generation instead of maintaining an LRU we would have to get right.
 //  * survive doubt. Every failure path ends in "delete the directory, run cold".
 #include "EnginePrivate.h"
+
+#include <mutex>
 // JAHSHAKA_ENGINE_BUILD_ID: a hash of this library's own sources, regenerated
 // on every BUILD (irisgl/cmake/EngineBuildId.cmake) rather than at configure
 // time — an incremental edit to OgreEngine.cpp changes what the generated
@@ -216,6 +218,14 @@ class ShaderCache::Counter final : public Ogre::LogListener {
 public:
     std::atomic<unsigned> compiled{0};
     std::atomic<unsigned> fromCache{0};
+    /// THE MONITOR'S FEED (see ShaderCache::recordCompileNames). Written from
+    /// whatever thread compiled (mode 2 = the scene's worker pool), drained on
+    /// the UI thread. Bounded: a compile burst must never grow this without
+    /// limit, and the count above is the honest total either way.
+    std::atomic<bool>        recordNames{false};
+    std::mutex               namesMutex;
+    std::vector<std::string> names;
+    static constexpr size_t  kMaxNames = 256u;
 
     /// THE PIPELINE BLOB'S ACTUAL FATE (audit F7). `loadPipelineCache` is void:
     /// the driver's verdict on the blob we hand it exists ONLY as a log line, so
@@ -236,7 +246,13 @@ public:
         // Both shader sentences begin "Shader ". Bail on the first character for
         // the thousands of unrelated messages a startup logs.
         if (message.size() >= 8 && message.compare(0, 7, "Shader ") == 0) {
-            if (message.find(" compiled successfully") != Ogre::String::npos)      ++compiled;
+            if (message.find(" compiled successfully") != Ogre::String::npos) {
+                ++compiled;
+                if (recordNames.load(std::memory_order_relaxed)) {
+                    std::lock_guard<std::mutex> lock(namesMutex);
+                    if (names.size() < kMaxNames) names.push_back(message);
+                }
+            }
             else if (message.find(" was in microcode cache") != Ogre::String::npos) ++fromCache;
             return;
         }
@@ -318,6 +334,25 @@ void ShaderCache::detachCounters() {
     if (Ogre::LogManager::getSingletonPtr() && Ogre::LogManager::getSingleton().getDefaultLog())
         Ogre::LogManager::getSingleton().getDefaultLog()->removeListener(mCounter.get());
     mCounter.reset();
+}
+
+void ShaderCache::recordCompileNames(bool on) {
+    if (mCounter) mCounter->recordNames.store(on, std::memory_order_relaxed);
+    if (!on && mCounter) {
+        std::lock_guard<std::mutex> lock(mCounter->namesMutex);
+        mCounter->names.clear();
+    }
+}
+
+unsigned ShaderCache::drainCompileNames(std::vector<std::string> &out) {
+    if (!mCounter) return 0u;
+    const unsigned total = mCounter->compiled.load();
+    const unsigned since = total - mCompileNamesAt;
+    mCompileNamesAt = total;
+    std::lock_guard<std::mutex> lock(mCounter->namesMutex);
+    for (std::string &n : mCounter->names) out.push_back(std::move(n));
+    mCounter->names.clear();
+    return since;
 }
 
 void ShaderCache::progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const {

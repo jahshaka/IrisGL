@@ -1007,6 +1007,24 @@ private:
 /// inside the pass records (a probe capture, a shadow map), not measured again.
 void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
                    const char *detail, unsigned units, float ms = -1.0f);
+/// RAII: times a span and files it as one event when it ends. The shape every
+/// expensive, cause-carrying operation in the engine uses (a GI rebuild, a
+/// probe grid placement) so that a capture can say how long it took and why.
+class EventScope {
+public:
+    EventScope(MonitorEventKind kind, WorkReason reason, const char *label,
+               std::string detail = std::string());
+    ~EventScope();
+    EventScope(const EventScope &) = delete;
+    EventScope &operator=(const EventScope &) = delete;
+private:
+    const char      *mLabel = nullptr;
+    std::string      mDetail;
+    MonitorEventKind mKind;
+    WorkReason       mReason;
+    std::chrono::steady_clock::time_point mStart;
+};
+
 /// A discrete event with its cause.
 void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &label,
                const std::string &detail = std::string(), float ms = -1.0f,
@@ -1319,6 +1337,18 @@ public:
 
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
+    /// THE RENDER-LOOP MONITOR'S COMPILE FEED. Ogre exposes no "a shader was
+    /// compiled" callback — the counter is a log listener — and with
+    /// OGRE_SHADER_COMPILATION_THREADING_MODE=2 it fires on WORKER threads, so
+    /// the monitor cannot be touched from there. Instead the listener appends
+    /// the compiled shader's NAME to a small bounded, mutex-guarded queue while
+    /// `on` is set, and the frame loop drains it on the UI thread.
+    /// Off by default: nothing is recorded and no string is built.
+    void recordCompileNames(bool on);
+    /// Moves what has been recorded since the last call into `out`. Returns how
+    /// many compiles happened in that window (which can exceed out.size() when
+    /// the bounded queue overflowed).
+    unsigned drainCompileNames(std::vector<std::string> &out);
 
     /// Both out of line: Counter is only defined in OgreShaderCache.cpp, and a
     /// unique_ptr member to an incomplete type needs its owner's special
@@ -1344,6 +1374,8 @@ private:
     bool        mWriter = false;      ///< we hold the single-writer lock
     int         mLockFd = -1;
     unsigned    mExpectedShaders = 0; ///< from the manifest of the last saved run
+    /// The compile count at the last drainCompileNames — the monitor's window.
+    unsigned    mCompileNamesAt = 0;
     long long   mLastSavedUnixMs = 0;
     bool        mPipelineLoaded = false, mMicrocodeLoaded = false;
     /// The driver's verdict on the pipeline blob, scraped from its own log
@@ -2018,6 +2050,12 @@ public:
         /// draw (shadowCasterChannels), which is the seam REALTIME_REFLECTIONS
         /// R2 needs (movers reach view/reflect maps, never probe maps).
         std::vector<Ogre::Light *> dirty[kShadowNodeKinds];
+        /// WHY each entry of `dirty[k]` is dirty, in the same order — the lamp's
+        /// own inputs changed (Light), a caster inside its reach moved
+        /// (Caster), or everything was dirtied at once (Request). Read by the
+        /// render-loop monitor, which records a shadow-map render with the
+        /// input change that justified it, or `None`.
+        std::vector<WorkReason> dirtyReason[kShadowNodeKinds];
         unsigned casterChanges = 0;   ///< caster boxes that changed this frame
         unsigned lightChanges  = 0;   ///< lamps whose own inputs changed
     };
@@ -3128,8 +3166,19 @@ private:
     struct ProbeSlot {
         bool     sweepPending = true;
         unsigned framesSinceUpdate = 0;
+        /// WHY this probe is stale — carried from staleProbeGrid to the frame
+        /// that actually captures it, so the render-loop monitor records a
+        /// probe capture with the input change that justified it (or `None`).
+        /// Costs one byte per probe and is written on paths that already
+        /// touch the slot.
+        GiStaleReason staleReason = GiStaleReason::None;
     };
     std::vector<ProbeSlot> mProbeSlots;
+    /// (probe index, reason) for every probe the BUDGET dirtied this frame —
+    /// the monitor's record of "this capture happened because X". Cleared by
+    /// latchProbeCaptures, which is where a capture becomes a fact. Empty and
+    /// never grown while the monitor is off.
+    std::vector<std::pair<unsigned, GiStaleReason>> mProbeDirtiedThisFrame;
     /// The resolved per-frame budget (the request clamped to the grid) — the
     /// CEILING a frame may spend on stale probes. Reported by giStatus; what a
     /// frame actually spent is mProbeCapturesLastFrame.

@@ -544,12 +544,13 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
 
     // Dedupe per kind with a flag per lamp (the lists are single digits).
     std::vector<unsigned char> marked(out.lights.size() * kShadowNodeKinds, 0u);
-    const auto dirtyLamp = [&](size_t i, unsigned kindMask) {
+    const auto dirtyLamp = [&](size_t i, unsigned kindMask, WorkReason why) {
         for (unsigned k = 0; k < kShadowNodeKinds; ++k) {
             if (!(kindMask & (1u << k)) || marked[i * kShadowNodeKinds + k]) continue;
             if (!shadowLampCachedFor(ShadowNodeKind(k), out.lights[i].light)) continue;
             marked[i * kShadowNodeKinds + k] = 1u;
             out.dirty[k].push_back(out.lights[i].light);
+            out.dirtyReason[k].push_back(why);   // the monitor's §4.7 reason
         }
     };
     const unsigned allKinds = (1u << kShadowNodeKinds) - 1u;
@@ -567,7 +568,7 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
         // A lamp seen for the first time needs nothing from here: its slot
         // assignment is new, and setLightFixedToShadowMap marks it dirty.
         if (old != mShadowLightKeys.end() && old->second != key) {
-            dirtyLamp(i, allKinds);
+            dirtyLamp(i, allKinds, WorkReason::Light);
             ++out.lightChanges;
         }
     }
@@ -594,7 +595,7 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
                 !sphereTouchesBox(l->getParentNode()->_getDerivedPosition(),
                                   l->getAttenuationRange(), c.box))
                 continue;
-            dirtyLamp(i, kinds);
+            dirtyLamp(i, kinds, WorkReason::Caster);
         }
     }
 }

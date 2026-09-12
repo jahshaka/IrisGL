@@ -2765,8 +2765,11 @@ struct FramePass {
     /// SCENE PASSES ONLY: of this pass's wall time, how much went on its shadow
     /// node's update (its own nested pass records included) — the shadow-vs-
     /// scene split, taken from `passSceneAfterShadowMaps`. NEGATIVE on every
-    /// pass that is not a scene pass. ZERO on a scene pass whose shadow node
-    /// executed nothing, which is what a fully cached lamp set looks like.
+    /// pass that is not a scene pass (quads, clears, computes, resolves). ZERO
+    /// on a scene pass whose shadow node executed nothing — which is exactly
+    /// what a fully cached lamp set looks like, and is why the zero matters as
+    /// much as the number. Ogre fires the callback on every scene pass, a
+    /// shadow node's own caster passes included, so those carry it too.
     float       shadowMs = -1.0f;
     /// GPU milliseconds from timestamp queries. NEGATIVE means NOT MEASURED —
     /// the build has no JAH_GPU_TIMESTAMPS, the device has no usable

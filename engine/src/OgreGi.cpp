@@ -263,6 +263,11 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
 
 void OgreScene::refreshGlobalIllumination() {
     JAH_TRY {
+        // THE HOST ASKED, EXPLICITLY. Recorded before the arms run so whichever
+        // of them rebuilds carries `Refresh` as its reason rather than whatever
+        // staled the grid last (the Instant Radiosity arm sets nothing of its
+        // own). Read only by the render-loop monitor and by giStatus.
+        mLastStaleReason = GiStaleReason::Refresh;
         if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity)
             rebuildGi();
         else if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
@@ -605,7 +610,7 @@ void OgreScene::staleProbeGrid(GiStaleReason why) {
     if (!mPcc) return;
     const size_t n = mPcc->getProbes().size();
     if (mProbeSlots.size() != n) mProbeSlots.assign(n, ProbeSlot());
-    for (ProbeSlot &sl : mProbeSlots) sl.sweepPending = true;
+    for (ProbeSlot &sl : mProbeSlots) { sl.sweepPending = true; sl.staleReason = why; }
     mLastStaleReason = why;
     ++mStaleSerial;
 }
@@ -640,6 +645,22 @@ void OgreScene::latchProbeCaptures(bool drawn) {
             if (p->mDirty && p->mEnabled) ++captures;
     }
     mProbeCapturesLastFrame = captures;
+    // THE MONITOR'S CACHE-WORK RECORD (RENDER_LOOP_MONITOR_SPEC §4.7). One
+    // entry per probe that is about to capture, carrying the input change that
+    // staled it — or `None`, which is the value that matters: a probe captured
+    // with no recorded input change is redundant work. RECORDED, never judged.
+    if (monitor::live()) {
+        // A capture the PLACEMENT did (buildPcc's synchronous
+        // updateAllDirtyProbes, which bypasses the dirty flags) is a build.
+        if (captures > int(mProbeDirtiedThisFrame.size()))
+            monitor::noteCacheWork(CacheKind::Probe, WorkReason::Build, 0, "placement",
+                                   unsigned(captures - int(mProbeDirtiedThisFrame.size())));
+        for (const auto &pd : mProbeDirtiedThisFrame)
+            monitor::noteCacheWork(CacheKind::Probe, monitor::reasonOf(pd.second), pd.first,
+                                   "capture", 6u);   // six cube faces per capture
+        monitor::noteProbeCaptures(unsigned(std::max(0, captures)));
+    }
+    mProbeDirtiedThisFrame.clear();
 }
 
 void OgreScene::setNodeGiBoundsExcluded(NodeId id, bool excluded) {
@@ -1841,6 +1862,10 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
         probes[i]->mDirty = true;
         mProbeSlots[i].sweepPending = false;
         mProbeSlots[i].framesSinceUpdate = 0;
+        // The slot keeps its reason until the capture is COUNTED
+        // (latchProbeCaptures), which is where the monitor reads it.
+        if (monitor::live())
+            mProbeDirtiedThisFrame.emplace_back(unsigned(i), mProbeSlots[i].staleReason);
     }
 
     // (THE DYNAMIC-PROBE RESERVATION LIVED HERE and is DELETED, lane R2.) It
@@ -1943,6 +1968,10 @@ float OgreScene::giRayMarchStepScale(bool inMotion) const {
 
 void OgreScene::rebuildGi() {
     ++mGiRebuilds;
+    // The Instant Radiosity arm's rebuild — the same event, the same reason
+    // vocabulary; the detail says which arm paid for it.
+    monitor::EventScope giEvent(MonitorEventKind::GiRebuild, monitor::reasonOf(mLastStaleReason),
+                                "gi.rebuild", "ir");
     // Every early return below leaves "nothing built" showing in giStatus.
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     Ogre::Light *driver = markGiLight(mGi.irLight);
@@ -1992,6 +2021,12 @@ void OgreScene::rebuildGi() {
 
 void OgreScene::rebuildVct() {
     ++mGiRebuilds;
+    // THE MONITOR'S GI EVENT (§4.7 / §4.8). A rebuild is the single most
+    // expensive thing this engine does on the UI thread — measured in seconds
+    // on a page return — so it is timed and tagged with the stale reason that
+    // asked for it, or `None` when nothing recorded one.
+    monitor::EventScope giEvent(MonitorEventKind::GiRebuild, monitor::reasonOf(mLastStaleReason),
+                                "gi.rebuild", "vct");
     // Every early return below leaves "nothing built" showing in giStatus.
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     // ALWAYS from scratch: VctVoxelizer keeps raw Item* until removeAllItems and
@@ -2132,6 +2167,11 @@ bool OgreScene::freshVoxelArm(const Ogre::Aabb &aabb) {
 }
 
 void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
+    // The probe GRID is (re)placed here: every probe workspace in the scene is
+    // destroyed and rebuilt, which is why the monitor re-syncs its listeners
+    // every frame rather than once.
+    monitor::noteEvent(MonitorEventKind::ProbeGridBuild, monitor::reasonOf(mLastStaleReason),
+                       "gi.probeGrid");
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     mPccHdr = mPccShadowed = false;
     // The slots name probes that are about to be (re)created; the first

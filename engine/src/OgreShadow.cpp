@@ -456,6 +456,12 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, b
     mShadowMapCount = maps;
     mShadowPerMapClears = clears;
     if (!mHlmsRegistered) return false;   // first createShadowNode() picks it up
+    // THE MONITOR'S ATLAS EVENT. An atlas change drops and recreates EVERY
+    // workspace that names a shadow node — the views', the planar mirrors' and
+    // the reflection probes', whose GI arm is rebuilt from scratch — so it is
+    // both a hitch and the reason a listener list can vanish under the monitor.
+    monitor::noteEvent(MonitorEventKind::AtlasRebuild, WorkReason::Resolution, "shadow.atlas",
+                       std::to_string(res) + "px, " + std::to_string(maps) + " focused maps");
     bool ok = false;
     JAH_TRY {
         Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
@@ -1144,6 +1150,17 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                 else if (!want.empty()) ++mShadowUncachedInstances[k];
                 const size_t fixed = cache ? want.size() : 0u;
                 const std::vector<Ogre::Light *> &dirty = f.dirty[k];
+                static const char *kKindNames[kShadowNodeKinds] = { "view", "reflect", "probe" };
+                // THE MONITOR'S REASON LOOKUP (§4.7): why this lamp's map is
+                // dirty, straight from the detection pass that decided it.
+                const auto reasonFor = [&](const Ogre::Light *l) -> WorkReason {
+                    if (f.dirtyAll) return WorkReason::Request;
+                    for (size_t d = 0; d < dirty.size(); ++d)
+                        if (dirty[d] == l)
+                            return d < f.dirtyReason[k].size() ? f.dirtyReason[k][d]
+                                                              : WorkReason::None;
+                    return WorkReason::None;
+                };
                 // NO LAMP MAY SIT IN TWO SLOTS. A slot Ogre's dynamic sort filled
                 // on this instance's last update still names its light until the
                 // next update rebuilds it — and fixing that same light into
@@ -1175,13 +1192,21 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                         // when the assignment CHANGED: every frame would keep it
                         // permanently dirty and cache nothing.
                         in.node->setLightFixedToShadowMap(mapIdx, w);
-                        if (w) ++mShadowDirtiedMaps[k];
+                        if (w) {
+                            ++mShadowDirtiedMaps[k];
+                            if (monitor::live())
+                                monitor::noteCacheWork(CacheKind::ShadowMap, WorkReason::Added,
+                                                       s->nodeOfLight(w), kKindNames[k], 1u);
+                        }
                     } else if (w && (f.dirtyAll ||
                                      std::find(dirty.begin(), dirty.end(), w) != dirty.end())) {
                         // includeLinked=false: our maps clear individually, so one
                         // dirty map does not oblige its atlas neighbours to redraw.
                         in.node->setStaticShadowMapDirty(mapIdx, false);
                         ++mShadowDirtiedMaps[k];
+                        if (monitor::live())
+                            monitor::noteCacheWork(CacheKind::ShadowMap, reasonFor(w),
+                                                   s->nodeOfLight(w), kKindNames[k], 1u);
                     }
                 }
             }

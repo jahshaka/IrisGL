@@ -408,6 +408,22 @@ void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &labe
     gMonitor->event(std::move(e));
 }
 
+EventScope::EventScope(MonitorEventKind kind, WorkReason reason, const char *label,
+                       std::string detail)
+    : mKind(kind), mReason(reason) {
+    if (!gMonitor) return;
+    mLabel = label;
+    mDetail = std::move(detail);
+    mStart = std::chrono::steady_clock::now();
+}
+
+EventScope::~EventScope() {
+    if (!mLabel || !gMonitor) return;
+    noteEvent(mKind, mReason, mLabel, mDetail,
+              float(std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - mStart).count()));
+}
+
 void noteTextureWait(float ms) {
     if (gMonitor && gMonitor->inFrame()) gMonitor->current().textureWaitMs += ms;
 }
@@ -440,6 +456,7 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
             for (auto &v : mViews) v->removeWorkspaceListener(&mMonitor->mListener);
             if (mRoot) mRoot->removeFrameListener(&mMonitor->mSplit);
         } JAH_CATCH(mLastError, );
+        mShaderCache.recordCompileNames(false);
         monitor::gMonitor = nullptr;
         mMonitor.reset();
         return;
@@ -449,6 +466,7 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
     monitor::resetEpoch();
     mMonitor.reset(new monitor::FrameMonitor());
     monitor::gMonitor = mMonitor.get();
+    mShaderCache.recordCompileNames(true);
     if (mRoot) mRoot->addFrameListener(&mMonitor->mSplit);
     monitor::noteEvent(MonitorEventKind::Host, WorkReason::Request, "monitor.start");
 }

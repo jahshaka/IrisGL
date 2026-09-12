@@ -517,6 +517,12 @@ void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const 
     }
 }
 
+namespace {
+/// Defined below, beside drainTextureStreaming (its other caller). Declared here
+/// so the frame head can name the textures a frame waited on.
+size_t countPendingTextures(Ogre::TextureGpuManager *tm, std::string *namesOut);
+}   // namespace
+
 void OgreEngine::renderOneFrame() {
     // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
@@ -564,8 +570,25 @@ void OgreEngine::renderOneFrame() {
         if (monitor::live()) {
             monitor::Stage st("engine.texturewait");
             double ms = 0.0;
+            // The pending set BEFORE the drain and after it: what this frame
+            // actually waited for, by name. Ogre offers no per-texture "loaded"
+            // callback, so the frame-head drain is where a texture load becomes
+            // visible at all.
+            std::string names;
+            Ogre::TextureGpuManager *tm =
+                mRoot && mRoot->getRenderSystem() ? mRoot->getRenderSystem()->getTextureGpuManager()
+                                                  : nullptr;
+            const size_t before = tm ? countPendingTextures(tm, &names) : 0u;
             drainTextureStreaming(&ms);
             monitor::noteTextureWait(float(ms));
+            if (before) {
+                const size_t after = tm ? countPendingTextures(tm, nullptr) : 0u;
+                monitor::noteEvent(MonitorEventKind::TextureLoad, WorkReason::Request,
+                                   "texture.load", names, float(ms),
+                                   (unsigned long long)(before > after ? before - after : 0u));
+                monitor::noteCacheWork(CacheKind::Texture, WorkReason::Request, 0, names.c_str(),
+                                       unsigned(before), float(ms));
+            }
         } else {
             drainTextureStreaming();
         }
@@ -754,6 +777,24 @@ void OgreEngine::renderOneFrame() {
         // future feature that creates a workspace NOT owned by a View has to
         // extend `scenesFeedingEnabledViews` with it, or it will render against
         // a scene graph nobody updated.
+        // WHAT COMPILED SINCE THE LAST FRAME, with the permutation. The count
+        // comes from the shader cache's log counter (Ogre has no callback) and
+        // the names from its bounded queue, drained here on the UI thread —
+        // the compiles themselves may have happened on the scene's worker pool
+        // (OGRE_SHADER_COMPILATION_THREADING_MODE=2).
+        if (monitor::live()) {
+            std::vector<std::string> names;
+            const unsigned n = mShaderCache.drainCompileNames(names);
+            if (n) {
+                monitor::noteShaderCompiles(n);
+                for (const std::string &nm : names)
+                    monitor::noteCacheWork(CacheKind::Shader, WorkReason::Permutation, 0,
+                                           nm.c_str(), 1u);
+                monitor::noteEvent(MonitorEventKind::ShaderCompile, WorkReason::Permutation,
+                                   "shader.compile",
+                                   names.empty() ? std::string() : names.front(), -1.0f, n);
+            }
+        }
         // THE MONITOR'S LISTENERS, re-attached for THIS frame — here and not
         // earlier, for the same reason the shadow counters are re-attached
         // here: applyPendingGi / applyPendingPlanar may have rebuilt a probe or
