@@ -309,6 +309,9 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         n.item->setVisibilityFlags(
             itemVisibilityFlags(n, tit->second.unlit, tit->second.distortion));
         n.item->setLightMask(n.lightMask);   // same reason as attachMesh's
+        // PER-OBJECT SHADOW CASTING, re-applied for the same reason: a rebuilt
+        // Item is born casting (Scene::setNodeCastShadow).
+        n.item->setCastShadows(n.castShadow);
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
         n.node->attachObject(n.item);   // also hands the skeleton its parent node
         // A NODE THAT IS HIDDEN STAYS HIDDEN when it is given geometry:

@@ -561,6 +561,11 @@ struct ChainDesc {
     float exposure = 0.0f;          ///< stops; the auto-exposure midpoint
     float exposureMin = -2.5f;
     float exposureMax = 2.5f;
+    /// The FIXED form's exposure stated directly as the tonemapper's multiplier
+    /// (PostFxDesc::exposureScale). 0 = derive it from `exposure`. Like
+    /// `exposure` it is a CLEAR COLOUR, not a graph edit, so it is deliberately
+    /// NOT part of sameShape() — OgreView::applyFixedExposure rewrites it live.
+    float exposureScale = 0.0f;
     bool  bloom = false;            ///< rides the HDR node at ~zero marginal cost
     float bloomThreshold = 5.0f;    ///< bright-pass start, in the sample's units
     float bloomKnee = 2.0f;         ///< ramp WIDTH above it (A-6); 2.0 = the old hard-coded value
@@ -735,7 +740,7 @@ void buildPip(Ogre::Root *root, const std::string &workspaceDef, const ViewPipDe
 /// The colour a fixed-exposure clear must carry for `exposure` (chain units).
 /// The one conversion, shared by the main chain, the inset and every live
 /// rewrite of either — see the derivation at fixedInverseLuminance.
-Ogre::ColourValue fixedExposureColour(float exposure);
+Ogre::ColourValue fixedExposureColour(float exposureScale, float exposure);
 /// Tears down what buildPip made, including its datablock.
 void destroyPip(Ogre::Root *root, const std::string &workspaceDef,
                 std::vector<std::string> &nodeDefs, PipHandles &handles);
@@ -824,6 +829,19 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
 /// re-seeded history starts exactly where a deterministic grade would land.
 float exposureSeed(float exposure);
+
+/// THE MULTIPLIER THE FIXED TONEMAP CLEARS ITS 1x1 TEXTURE WITH, in one place:
+/// the host's measured value when it handed one over (ChainDesc::exposureScale),
+/// else the grey-card constant derived from `exposure`. Both callers — the main
+/// chain and the picture-in-picture inset — resolve it here so "0 means derive
+/// it" is stated once.
+float fixedExposureScale(float exposureScale, float exposure);
+
+/// The name of the 1x1 texture the AUTOMATIC exposure's adaptation history
+/// lives in, inside a built chain's scene node. Readable between frames
+/// (keep_content, unlike the per-frame `jahLum` it is copied from), which is
+/// what makes View::measuredExposureScale possible at all.
+const char *exposureHistoryTextureName();
 
 /// One per View, owned by it, registered through OgreView::addWorkspaceListener
 /// so it survives every workspace rebuild (the planar listener's shape).
@@ -2033,6 +2051,8 @@ public:
     bool nodeHelper(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
     unsigned nodeLightMask(NodeId id) const override;
+    void setNodeCastShadow(NodeId id, bool on) override;
+    bool nodeCastShadow(NodeId id) const override;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl OgrePlanar.cpp) ----
     bool setPlanarReflections(const PlanarReflectionParams &p) override;
@@ -2375,6 +2395,11 @@ private:
         /// Ogre's own default (MovableObject::msDefaultLightMask, and it is
         /// genuinely consulted at OgreObjectDataArrayMemoryManager.cpp:138).
         Ogre::uint32              lightMask = 0xFFFFFFFFu;
+        /// PER-OBJECT SHADOW CASTING (Scene::setNodeCastShadow). Remembered
+        /// here for the same two reasons the light mask is: an Item is REBUILT
+        /// on every attach, and a host may say "this never casts" before the
+        /// geometry arrives.
+        bool                      castShadow = true;
         /// Whether the attached material is UNLIT, recorded at attach time.
         /// Needed because the helper flag can be toggled after the fact and the
         /// item's own flags cannot answer it once kVisibleBit is gone: a helper
@@ -3514,6 +3539,7 @@ public:
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
     void resetExposureHistory() override;
+    float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
     const ViewOverlayDesc &overlay() const override;
@@ -3732,6 +3758,11 @@ private:
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.
     unsigned long long         mFramesPresented = 0;
+    /// The same count for the CURRENT workspace only — reset by attachWorkspace,
+    /// which is the one seam every (re)build goes through. What
+    /// measuredExposureScale needs: "has this graph written its keep_content
+    /// textures yet", a question a rebuild answers differently from a scene bind.
+    unsigned long long         mWorkspaceFramesPresented = 0;
     /// What the host asked for. Offscreen views keep it and ignore it.
     PostFxDesc                 mPostFx;
     /// Ditto for the engine-drawn overlay (STATS_OVERLAY_SPEC §5.1).
@@ -4089,6 +4120,13 @@ private:
     unsigned        mWarnedShadowCasters = 0;
     /// Frames the derived count must hold still before the atlas is rebuilt.
     static constexpr unsigned kShadowDeriveDebounceFrames = 3u;
+    /// THE SAME DEBOUNCE FOR THE CLEAR-STRATEGY FLIP, and it is not symmetry
+    /// for its own sake — see applyShadowCache. Counted only in frames where
+    /// the scenes that want it are actually PRESENTING, so the drop-and-
+    /// recreate of every workspace naming a shadow node cannot land inside a
+    /// world's first bind.
+    unsigned        mShadowClearFlipFrames = 0;
+    static constexpr unsigned kShadowClearFlipDebounceFrames = 3u;
     /// THE PASS COUNTERS' READINGS for the last rendered frame (P8), latched by
     /// latchShadowCounters. View kind = the first enabled view with a shadow
     /// node (the "one view speaks for the process" rule); reflect and probe

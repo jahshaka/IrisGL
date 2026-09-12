@@ -504,6 +504,30 @@ unsigned OgreScene::nodeLightMask(NodeId id) const {
     return it == mNodes.end() ? 0xFFFFFFFFu : unsigned(it->second.lightMask);
 }
 
+// PER-OBJECT SHADOW CASTING (Engine.h's contract). The document has carried
+// SceneNode::castShadow for years — serialized, reflected, and set to false by
+// the default floor — and nothing ever pushed it anywhere: this is the other
+// end of that wire.
+//
+// Ogre keeps it as the LAYER_SHADOW_CASTER bit of the visibility flags, which
+// MovableObject::setVisibilityFlags does NOT overwrite (it merges the reserved
+// layer bits), so this coexists with itemVisibilityFlags' channel scheme.
+void OgreScene::setNodeCastShadow(NodeId id, bool on) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    const bool changed = it->second.castShadow != on;
+    it->second.castShadow = on;
+    if (it->second.item) it->second.item->setCastShadows(on);
+    // A caster that just appeared or vanished is exactly what the lamp-map
+    // cache exists to notice.
+    if (changed && it->second.item) it->second.shadowShapeDirty = true;
+}
+
+bool OgreScene::nodeCastShadow(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it == mNodes.end() ? true : it->second.castShadow;
+}
+
 void OgreScene::setNodeVisible(NodeId id, bool visible) {
     JAH_TRY {
         auto it = mNodes.find(id);
@@ -583,7 +607,19 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         L->setLightMask(Ogre::uint32(d.lightMask));
         // Ogre-Next cannot render shadows for area lights (and our shadow node
         // only lists directional/point/spot); never mark them casters.
-        L->setCastShadows(d.type == LightType::Area ? false : d.castShadows);
+        //
+        // AND ONLY THE SUN CASTS AMONG DIRECTIONALS. The node declares a single
+        // directional slot (three PSSM splits at slot 0; every focused slot
+        // accepts spot/point only — OgreShadow.cpp), and Ogre fills it with the
+        // first CASTING directional in its own castShadows-then-light-id sort
+        // (OgreSceneManager.cpp) — engine creation order, which can flip across
+        // a reload or a mirror re-attach. Clearing the flag on every directional
+        // the host did not name primary leaves that sort exactly one candidate,
+        // so the sun takes the slot on every frame, in every process.
+        const bool secondaryDirectional =
+            d.type == LightType::Directional && !d.primaryDirectional;
+        L->setCastShadows(d.type == LightType::Area || secondaryDirectional ? false
+                                                                            : d.castShadows);
         if (d.type == LightType::Area) {
             L->setRectSize(Ogre::Vector2(std::max(d.rectWidth, 0.01f), std::max(d.rectHeight, 0.01f)));
             L->setDoubleSided(d.doubleSided);

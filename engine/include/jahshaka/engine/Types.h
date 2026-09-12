@@ -1020,8 +1020,25 @@ struct LightDesc {
     /// casting, Forward+ clustered, area approx and area LTC). It does NOT
     /// filter shadow CASTING (a masked-off object still renders into this
     /// light's shadow map) and it does NOT filter this light's GI bounce.
-    /// Scene::setNodeLightMask carries the full contract.
+    /// Scene::setNodeLightMask carries the full contract, and
+    /// Scene::setNodeCastShadow is the escape hatch for the caster side.
     unsigned  lightMask = 0xFFFFFFFFu;
+
+    /// FORWARD SHADING PRIORITY — DIRECTIONAL LIGHTS ONLY. 0 is the sun.
+    /// Informational at the backend: the host resolves which directional is
+    /// the sun (one resolver, iris::Scene::sunLight) and says so in
+    /// `primaryDirectional`; this number is carried so the renderer can report
+    /// it back and so the two cannot silently disagree.
+    int       forwardShadingPriority = 0;
+
+    /// Is this the scene's SUN — the one directional light allowed to cast?
+    /// Our shadow node has a single directional slot (three PSSM splits at slot
+    /// 0), so a second casting directional would be picked by Ogre's own
+    /// castShadows-then-light-id sort, i.e. by creation order, silently and
+    /// differently across reloads. setLight forces `castShadows` false on a
+    /// directional that is not the primary, which leaves Ogre's sort exactly
+    /// one candidate. Meaningless on point/spot/area lights (always true).
+    bool      primaryDirectional = true;
 
     /// "Is this the same light state I last pushed?" — the guard a host with a
     /// per-frame push loop needs (setLight is ~20 backend setters, including an
@@ -1041,7 +1058,9 @@ struct LightDesc {
                rectWidth == o.rectWidth && rectHeight == o.rectHeight &&
                doubleSided == o.doubleSided && accurate == o.accurate &&
                iesProfilePath == o.iesProfilePath && texturePath == o.texturePath &&
-               lightMask == o.lightMask;
+               lightMask == o.lightMask &&
+               forwardShadingPriority == o.forwardShadingPriority &&
+               primaryDirectional == o.primaryDirectional;
     }
     bool operator!=(const LightDesc &o) const { return !(*this == o); }
 };
@@ -2309,6 +2328,24 @@ struct PostFxDesc {
     /// fewer). Ignored unless `hdr`.
     bool  tonemapFixed = false;
 
+    /// THE FIXED GRADE'S EXPOSURE, AS THE TONEMAPPER'S OWN MULTIPLIER, when the
+    /// host already knows it (SS1, 2026-09-13). 0 — the default — means "derive
+    /// it from `exposure`", which is the grey-card constant `tonemapFixed` has
+    /// always used (OgreChain's fixedInverseLuminance: it substitutes a 0.18
+    /// mid-grey for the measurement the auto chain would have made).
+    ///
+    /// WHY A SECOND WAY TO SAY IT. The grey card is right for a THUMBNAIL, which
+    /// is a photograph of content nobody has measured. It is about a stop off in
+    /// a bright room, and it is wrong for a SCREENSHOT OF THE EDITOR, which has
+    /// a measured exposure a few centimetres away: the on-screen view converged
+    /// on one over the last second. `View::measuredExposureScale()` reads that
+    /// number back, and this field carries it into the one-shot offscreen view,
+    /// which can never converge on its own (it lives two frames). Right AND
+    /// deterministic — the same picture every time, because it is a constant.
+    ///
+    /// Ignored unless `hdr && tonemapFixed`. Never negative; 0 is "unknown".
+    float exposureScale = 0.0f;
+
     /// THE LOOKS STACK (POST_LOOKS_SPEC.md §4), in FRAME ORDER: entry 0 runs
     /// first, on the tonemapped and anti-aliased image, and the last one writes
     /// the window. Empty is the default and costs exactly nothing — the stage
@@ -2343,6 +2380,7 @@ struct PostFxDesc {
                distortion == o.distortion &&
                distortionStrength == o.distortionStrength &&
                tonemapFixed == o.tonemapFixed &&
+               exposureScale == o.exposureScale &&
                looks == o.looks &&
                allowOffscreen == o.allowOffscreen;
     }

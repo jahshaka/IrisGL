@@ -753,9 +753,10 @@ public:
     ///     shadow-casting, Forward+ clustered point/spot, and both area kinds;
     ///   * it does NOT filter SHADOW CASTING. A masked-off object still renders
     ///     into that light's shadow map and therefore still casts a shadow onto
-    ///     objects the light does light. The caster pass has no access to the
-    ///     receiver's mask (the shadow map is one texture shared by every
-    ///     receiver), so this is a property of shadow mapping, not an omission;
+    ///     objects the light does light. The shadow map is one texture shared by
+    ///     every receiver, so the caster pass has no receiver to compare a mask
+    ///     against; `setNodeCastShadow` below is the escape hatch that DOES
+    ///     work, and lights.masks case 6 is the measurement;
     ///   * it does NOT filter INDIRECT light. GI (Instant Radiosity VPLs, VCT)
     ///     bakes/propagates before the mask is consulted, so a masked-off object
     ///     still receives that light's bounce.
@@ -768,6 +769,26 @@ public:
     /// yet. Not inherited: set it on every node that carries geometry.
     virtual void        setNodeLightMask(NodeId, unsigned mask) = 0;
     virtual unsigned    nodeLightMask(NodeId) const = 0;
+
+    /// PER-OBJECT SHADOW CASTING (Unreal's `Cast Shadow` tick).
+    ///
+    /// False takes this node's geometry out of EVERY shadow map — the sun's
+    /// PSSM splits, every lamp's focused map, the planar mirrors' and the
+    /// probes' — while leaving it fully lit and fully visible. True (the
+    /// default) is Ogre's own. It is the escape hatch for the things that
+    /// should not darken a room: a ground plane, a sky dome, a backdrop, a
+    /// decorative interior shell.
+    ///
+    /// Ogre stores it as the LAYER_SHADOW_CASTER visibility bit, which our own
+    /// setVisibilityFlags calls do not touch — so it survives a helper/movable
+    /// reclassification. It does NOT survive an Item rebuild (a material swap
+    /// destroys and recreates the Item), so the engine remembers it per node
+    /// and re-applies it on attach, exactly as it does for the light mask, and
+    /// it may be set before any geometry has arrived. Not inherited: set it on
+    /// every node that carries geometry. Cached lamp maps that could see the
+    /// node re-render in the frame it changes.
+    virtual void        setNodeCastShadow(NodeId, bool) = 0;
+    virtual bool        nodeCastShadow(NodeId) const = 0;
 
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
     /// Applies the reflection state idempotently. Pushing the same params twice is
@@ -913,6 +934,29 @@ public:
     /// HDR, a fixed tonemap, an offscreen view with no chain, or no workspace
     /// yet: nothing to re-seed, no error.
     virtual void resetExposureHistory() = 0;
+
+    /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
+    /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader
+    /// samples as `fInvLumAvg`, read back off the GPU's 1x1 adaptation history.
+    ///
+    /// WHAT IT IS FOR. A one-shot offscreen view (a screenshot, an export
+    /// frame) lives about two frames and can therefore NEVER converge: its own
+    /// automatic exposure would grade at whatever it was seeded with. Handing
+    /// it this value through `PostFxDesc::exposureScale` + `tonemapFixed` makes
+    /// the shot grade exactly like the view the user is looking at, and makes
+    /// it deterministic while it is at it, because by then it is a constant.
+    ///
+    /// COSTS A GPU STALL (a 1x1 download with accurate tracking). Call it once
+    /// per picture, never per frame.
+    ///
+    /// 0 means there is nothing to read: no HDR in this view's chain, the fixed
+    /// (already-constant) form, an offscreen view with no chain, or a view whose
+    /// CURRENT workspace has not presented a frame yet — a rebuild (any post-fx
+    /// SHAPE change: switching SSR or SSAO off, resizing) destroys and recreates
+    /// the adaptation history, so "has drawn a frame" is asked of the graph, not
+    /// of the view. 0 is not an error, and a caller should fall back to the
+    /// grade it would have used anyway.
+    virtual float measuredExposureScale() const = 0;
 
     /// The engine-drawn overlay for this View (STATS_OVERLAY_SPEC.md §5.1):
     /// a corner stats readout and/or a full-view loading cover.
