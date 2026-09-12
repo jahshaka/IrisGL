@@ -996,6 +996,9 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // swap. Without it a masked object silently goes back to being lit by
         // everything the moment its material changes.
         n.item->setLightMask(n.lightMask);
+        // PER-OBJECT SHADOW CASTING, re-applied for the same reason: a rebuilt
+        // Item is born casting (Scene::setNodeCastShadow).
+        n.item->setCastShadows(n.castShadow);
         // Render-queue policy (POST_CHAIN_SPEC.md §6): on-top overlays go in the
         // chain's overlay pass, refractive items in its refraction pass, and
         // everything else stays on Ogre's default queue.

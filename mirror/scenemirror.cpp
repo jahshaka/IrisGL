@@ -1588,6 +1588,20 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         e.lightMaskEverPushed = true;
     }
 
+    // PER-OBJECT SHADOW CASTING. `SceneNode::castShadow` has been in the
+    // document — serialized, reflected, set to false by the default floor —
+    // since long before the engine had anywhere to put it, and NOTHING pushed
+    // it: the flag was inert for years and the floor it was set on went on
+    // casting into every lamp. This is the wire (SUN_AND_LIGHT_DEFAULTS §2.4).
+    // Same shape as the mask above: change-guarded, the engine remembers it
+    // across Item rebuilds, and a light node carries no Item so it is a no-op
+    // there.
+    const int wantCastShadow = node->getShadowCastingEnabled() ? 1 : 0;
+    if (e.castShadowPushed != wantCastShadow) {
+        mTarget->setNodeCastShadow(e.node, wantCastShadow != 0);
+        e.castShadowPushed = wantCastShadow;
+    }
+
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto *meshNode = static_cast<iris::MeshNode *>(node);
         // The members, not the by-value getters: `getMesh()`/`getMaterial()`/
@@ -2753,6 +2767,30 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&
                     light->shadowMap && light->shadowMap->shadowType != iris::ShadowMapType::None;
+    // ---- THE SUN, and the secondary directionals -----------------------
+    // Our shadow node declares exactly ONE directional slot (three PSSM splits
+    // at slot 0; every focused slot accepts spot/point only — OgreShadow.cpp).
+    // With two shadow-casting directionals Ogre filled that slot by its own
+    // castShadows-then-light-id sort, i.e. by engine creation order, which can
+    // flip across a reload: one of the two suns cast, silently, and which one
+    // was luck. The document's ONE resolver decides instead, and a directional
+    // that is not the sun is pushed as a non-caster — Ogre's sort then has a
+    // single candidate and the answer is the same on every frame and reload.
+    // (This is Unreal's Forward Shading Priority semantic exactly: one main
+    // directional casts. A SECOND PSSM set is out of scope — it is three more
+    // full-view-frustum scene passes EVERY frame, the most expensive shadow we
+    // render.)
+    if (light->lightType == iris::LightType::Directional) {
+        d.forwardShadingPriority = light->forwardShadingPriority;
+        // Through the light's OWN scene, which is what makes this a pure
+        // function of the node (the mirror's `mSource` is that same scene, and
+        // this is called from a static context too). A light that is not in a
+        // scene yet is the only directional there is, so it is the sun.
+        const auto scene = light->getScene();
+        const auto sun = scene ? scene->sunLight() : iris::LightNodePtr();
+        d.primaryDirectional = !sun || sun.data() == light;
+        if (!d.primaryDirectional) d.castShadows = false;
+    }
     // LIGHTING CHANNELS, light side. The document field is on SceneNode (one
     // field, one meaning, both ends of the test) — the light's copy says which
     // channels it illuminates.
@@ -4894,15 +4932,21 @@ iris::LightNode *SceneMirror::resolveGiLight() const
         auto it = mSource->lights.constFind(mSource->giLightGuid);
         if (it != mSource->lights.constEnd() && !it.value().isNull()) return it.value().data();
     }
-    // QHash order is arbitrary: pick deterministically by creation order (nodeId).
-    iris::LightNode *directional = nullptr, *any = nullptr;
+    // THE SUN, through the document's ONE resolver (SUN_AND_LIGHT_DEFAULTS Q1).
+    // This used to be a second, private rule — "the lowest-nodeId directional"
+    // — which agreed with the sky link's depth-first walk only by accident and
+    // could name a different light the moment anything was re-parented.
+    if (auto sun = mSource->sunLight()) return sun.data();
+    // No directional light at all is NORMAL (two of the eight shipped samples):
+    // Instant Radiosity still needs SOMETHING to bounce, so it falls through to
+    // the lowest-nodeId light of any type, exactly as before. QHash order is
+    // arbitrary, hence the explicit creation-order pick.
+    iris::LightNode *any = nullptr;
     for (const auto &l : mSource->lights) {
         if (l.isNull()) continue;
-        if (l->lightType == iris::LightType::Directional &&
-            (!directional || l->nodeId < directional->nodeId)) directional = l.data();
         if (!any || l->nodeId < any->nodeId) any = l.data();
     }
-    return directional ? directional : any;
+    return any;
 }
 
 namespace {
