@@ -757,8 +757,11 @@ private:
     /// carries on to the horizon instead of ending in a square edge. It is an
     /// EDITOR HELPER in the engine's sense (kHelperBit): drawn by the view and
     /// by nothing else — no GI geometry, no voxel bounce, no reflection-probe
-    /// capture, no shadow map, no probe staleness — so it costs one draw and
-    /// changes no cache. The document never hears about it: no node, no
+    /// capture, no shadow map, no probe staleness — so it changes no cache at
+    /// all. IT IS A SEPARATE ITEM on the floor's datablock, so the price is
+    /// ONE MORE DRAW CALL and two triangles, plus the shading of the pixels it
+    /// fills (measured: +0.15 ms on the rig in the worst view, nothing when it
+    /// is occluded or at rest). The document never hears about it: no node, no
     /// outliner row, nothing in scene.bounds and nothing saved.
     ///
     /// WHY NOT THE OBVIOUS TWO (measured, spikes/gf1-ground/):
@@ -772,6 +775,11 @@ private:
     ///     32-probe grid (192 cube faces to re-capture) and, in a scene the
     ///     ground dominates, drags the automatic volume along with it.
     void syncGroundHorizon();
+    /// The default floor's own UV map, fitted over its ENGINE-SIDE vertices
+    /// (u = ux*x + uc, v = vz*z + vc) so the horizon's checker crosses the
+    /// floor's edge in phase — density, offset and sign alike, whatever the
+    /// importer did to them. False when the mesh has no usable linear map.
+    bool fitGroundUvMap(iris::Mesh *mesh, float &ux, float &uc, float &vz, float &vc);
     void syncGiVolume();
     jahshaka::engine::MeshId wireMeshFor(int kind);
     /// The per-sync document walk. Takes a RAW node and iterates children
@@ -1248,6 +1256,9 @@ private:
     // it, which is why the sync reads it through mEntries and never dereferences
     // it after the walk.
     const iris::MeshNode *mHorizonFloor = nullptr;
+    /// The floor MESH the horizon's UV map was fitted from; a floor that
+    /// changes mesh rebuilds the quad against the new map.
+    const iris::Mesh *mHorizonMeshSource = nullptr;
     jahshaka::engine::NodeId mHorizonNode = 0;
     jahshaka::engine::MeshId mHorizonMesh = 0;
     jahshaka::engine::MaterialId mHorizonMaterial = 0;

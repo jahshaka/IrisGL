@@ -280,6 +280,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // here would destroy the floor's material out from under the floor.
     if (mHorizonNode) { mTarget->removeNode(mHorizonNode); mHorizonNode = 0; }
     if (mHorizonMesh) { mTarget->destroyMesh(mHorizonMesh); mHorizonMesh = 0; }
+    mHorizonMeshSource = nullptr;
     mHorizonMaterial = 0;
     mHorizonVisible = -1;
     mHorizonFloor = nullptr;
@@ -355,6 +356,18 @@ void SceneMirror::evacuateEngineObjects()
         if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
     mHighlighted.clear();
+    // THE GROUND'S HORIZON GOES TOO (lead review). Its `mHorizonFloor` is a raw
+    // pointer into the document that is leaving; its material PIN is what keeps
+    // the floor's datablock out of the sweep, and every entry that referenced
+    // that datablock has just been released — so a horizon left behind holds a
+    // material alive, on an Item, in a scene nobody renders, until the page
+    // switches back. Same three lines setSource has.
+    if (mHorizonNode) { mTarget->removeNode(mHorizonNode); mHorizonNode = 0; }
+    if (mHorizonMesh) { mTarget->destroyMesh(mHorizonMesh); mHorizonMesh = 0; }
+    mHorizonMeshSource = nullptr;
+    mHorizonMaterial = 0;
+    mHorizonVisible = -1;
+    mHorizonFloor = nullptr;
     mReclaimPending = true;
 }
 
@@ -1190,16 +1203,72 @@ void SceneMirror::syncGrid()
 // (1000 m, EngineSceneViewport::createEditorCamera), so the plane's own edge is
 // always beyond the far plane and what a user can see is the far plane's own
 // distance horizon, in every direction, at every height -- never a corner and
-// never an edge that can be flown to. `kHorizonUvPerMetre` is ground.obj's UV
-// density (its 100 m spans 6.25 UV, so 0.0625), which is what makes the
-// checker's world size on the horizon identical to the floor's under the same
-// material -- the material's own textureScale multiplies both. `kHorizonSink`
-// puts it just under the floor so the floor always wins where they overlap;
-// 5 mm reads as 0.006 degrees at the floor's 50 m edge, an order of magnitude
-// under a pixel on a 1080-line view.
+// never an edge that can be flown to. `kHorizonSink` puts it just under the
+// floor so the floor always wins where they overlap; 5 mm reads as 0.006
+// degrees at the floor's 50 m edge, an order of magnitude under a pixel on a
+// 1080-line view.
+//
+// THE UV MAP IS MEASURED, NOT ASSUMED (lead review, and it was a real defect:
+// the first cut used a hand-picked 0.0625 UV per metre with no offset and got
+// the right DENSITY with the wrong PHASE and the wrong V SIGN -- the geometry
+// edge came back as a texture seam, misregistered by 0.195 of a repeat and
+// cycling along the north/south edges because v was mirrored). `fitGroundUvMap`
+// fits u = ux*x + uc and v = vz*z + vc over the floor's OWN engine-side
+// vertices -- the very arrays its Item is drawn from, after toMeshData's V flip
+// -- so the horizon inherits ground.obj's density, offset and sign whatever the
+// importer did with them, and survives a re-stage of that model. Measured on
+// the shipped ground.obj: the FILE carries u = 0.0625x + 0.048828 and
+// v = -0.0625z + 0.048828 (a non-zero offset, v running against +z), and the
+// importer's flip (v = 1 - v) turns the second into v = 0.0625z + 0.951172.
+// The material's own textureScale multiplies both meshes alike on top of it.
+//
+// WHAT THE HELPER BIT COSTS, stated rather than discovered later: kHelperBit
+// keeps the horizon out of the reflection-probe captures and the planar
+// reflection pass, so a mirror surface reflects the floor ENDING at its own
+// 100 m edge with sky beyond. Indoors -- where every planar reflector and
+// probe in the shipped content lives -- it cannot be seen; widening a capture
+// mask to fix it would put a 4 km plane into every probe face, which is the
+// worse trade.
 static constexpr float kHorizonHalfExtent = 2000.0f;
-static constexpr float kHorizonUvPerMetre = 0.0625f;
+static constexpr float kHorizonUvPerMetre = 0.0625f;   // the fallback density only
 static constexpr float kHorizonSink       = 0.005f;
+
+// The floor's own UV map, fitted over its engine-side vertices. False when the
+// mesh carries no usable map (no UVs, or a degenerate one) -- the caller then
+// falls back to the shipped density with no offset, which is the old behaviour
+// and is only ever reached by a floor whose mesh is not ground.obj.
+bool SceneMirror::fitGroundUvMap(iris::Mesh *mesh, float &ux, float &uc, float &vz, float &vc)
+{
+    if (!mesh) return false;
+    MeshData data;
+    if (!toMeshData(mesh, data)) return false;
+    const size_t nv = data.positions.size() / 3;
+    if (nv < 3 || data.uvs.size() != nv * 2) return false;
+    // Least squares, one axis at a time: the floor is a plane in XZ, so u is a
+    // function of x alone and v of z alone. A fit that does not describe the
+    // mesh (a floor whose map is rotated, or per-face) is REFUSED on its
+    // residual rather than half-applied.
+    auto axis = [&](size_t posOff, size_t uvOff, float &k, float &c) {
+        double sa = 0, sb = 0;
+        for (size_t i = 0; i < nv; ++i) { sa += data.positions[i*3 + posOff]; sb += data.uvs[i*2 + uvOff]; }
+        const double ma = sa / double(nv), mb = sb / double(nv);
+        double num = 0, den = 0;
+        for (size_t i = 0; i < nv; ++i) {
+            const double da = data.positions[i*3 + posOff] - ma;
+            num += da * (data.uvs[i*2 + uvOff] - mb);
+            den += da * da;
+        }
+        if (!(den > 1e-6)) return false;
+        k = float(num / den);
+        c = float(mb - (num / den) * ma);
+        double worst = 0;
+        for (size_t i = 0; i < nv; ++i)
+            worst = std::max(worst, std::abs(double(k) * data.positions[i*3 + posOff] + double(c)
+                                             - data.uvs[i*2 + uvOff]));
+        return worst < 1e-3 && std::abs(k) > 1e-9f;
+    };
+    return axis(0, 0, ux, uc) && axis(2, 1, vz, vc);
+}
 
 void SceneMirror::syncGroundHorizon()
 {
@@ -1235,6 +1304,16 @@ void SceneMirror::syncGroundHorizon()
         // -- which sets no visibility mask at all -- goes on drawing it.
         mTarget->setNodeHelper(mHorizonNode, true);
     }
+    // THE FLOOR'S MESH decides the horizon's UV map, so a floor that changes
+    // mesh rebuilds it (the map is measured off that mesh, above).
+    iris::Mesh *floorMesh = floor->mesh.data();
+    if (mHorizonMesh && floorMesh != mHorizonMeshSource) {
+        mTarget->detachMesh(mHorizonNode);
+        mTarget->destroyMesh(mHorizonMesh);
+        mHorizonMesh = 0;
+        mHorizonMaterial = 0;
+        mReclaimPending = true;
+    }
     if (!mHorizonMesh) {
         // Four corners, wound to face UP and no other way. The single winding is
         // load-bearing: the default floor is invisible from below (its
@@ -1243,15 +1322,31 @@ void SceneMirror::syncGroundHorizon()
         // an exotic pose at all, it is what editor.frameNode does whenever it
         // frames a small object from above (five pixel suites caught exactly
         // that: the camera lands at y = -0.09 and the subject went grey).
-        const float h = kHorizonHalfExtent, u = h * kHorizonUvPerMetre;
+        //
+        // The UVs come from the FLOOR'S OWN map (fitGroundUvMap) so the checker
+        // crosses the floor's edge in phase; only a floor whose mesh has no
+        // usable map falls back to the shipped density.
+        float ux = kHorizonUvPerMetre, uc = 0.0f, vz = kHorizonUvPerMetre, vc = 0.0f;
+        if (!fitGroundUvMap(floorMesh, ux, uc, vz, vc)) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                irisLog("SceneMirror: the default floor's mesh carries no linear UV map — the "
+                        "horizon falls back to the shipped checker density and may not line up");
+            }
+        }
+        const float h = kHorizonHalfExtent;
+        const float u0 = -h * ux + uc, u1 = h * ux + uc;
+        const float v0 = -h * vz + vc, v1 = h * vz + vc;
         MeshData quad;
         quad.positions = { -h, 0.0f, -h,   h, 0.0f, -h,   h, 0.0f, h,   -h, 0.0f, h };
         quad.normals   = { 0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f,
                            0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f };
-        quad.uvs       = { -u, -u,   u, -u,   u, u,   -u, u };
+        quad.uvs       = { u0, v0,   u1, v0,   u1, v1,   u0, v1 };
         quad.indices   = { 0, 2, 1,  0, 3, 2 };
         mHorizonMesh = mTarget->createMesh(quad);
         if (!mHorizonMesh) return;
+        mHorizonMeshSource = floorMesh;
         mHorizonMaterial = 0;      // nothing is attached yet
     }
 
@@ -1263,6 +1358,13 @@ void SceneMirror::syncGroundHorizon()
     if (mat && mat != mHorizonMaterial) {
         mTarget->attachMesh(mHorizonNode, mHorizonMesh, mat);
         mHorizonMaterial = mat;
+        // ARM THE SWEEP. reclaimUnused runs BEFORE this stage and keeps the id
+        // the horizon was holding alive (it is not an entry, so the sweep can
+        // only see it through that pin); dropping the old one here without
+        // re-arming leaves the previous datablock alive until something
+        // unrelated arms the sweep — a library material dropped on the floor
+        // leaked exactly that (lead review).
+        mReclaimPending = true;
     }
     if (!mHorizonMaterial) return;
 
