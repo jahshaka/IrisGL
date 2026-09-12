@@ -95,6 +95,17 @@ public:
     /// Take (and clear) this thread's containment warnings.
     static QStringList takeContainmentWarnings();
 
+    /// Drop the containment warning recorded for `name`, because the reference
+    /// turned out to be resolvable after all (AV1, 2026-09-13). A Mixamo "with
+    /// skin" FBX names its maps by the EXPORTER's temp directory
+    /// ("../../../../home/app/mixamo-mini/tmp/skins_….fbm/Ch47_1001_Diffuse.png")
+    /// and carries the bytes EMBEDDED: containment correctly refuses the path,
+    /// the embedded lookup then finds the media by short name and extracts it,
+    /// and the import used to report five scary "the reference was dropped"
+    /// warnings for textures that are on the character. Only a reference that
+    /// nothing resolved is worth telling the user about.
+    static void retractContainmentWarning(const QString &name);
+
 private:
     static QImage loadOMEmbeddedTexture(const aiScene* scene,
                                         const QString& texPath,

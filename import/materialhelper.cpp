@@ -119,6 +119,17 @@ QStringList MaterialHelper::takeContainmentWarnings()
     return taken;
 }
 
+void MaterialHelper::retractContainmentWarning(const QString &name)
+{
+    if (name.isEmpty()) return;
+    // The warning quotes the name verbatim, which is what makes it findable
+    // (two textures can escape to the same basename).
+    const QString quoted = QLatin1Char('"') + name + QLatin1Char('"');
+    QStringList &sink = warningSink();
+    for (int i = sink.size() - 1; i >= 0; --i)
+        if (sink.at(i).contains(quoted)) sink.removeAt(i);
+}
+
 QString MaterialHelper::containedTexturePath(const QString &name, const QString &sourceDir,
                                              const QString &kind)
 {
@@ -295,6 +306,10 @@ void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
         QString imagePath = QDir(assetPath).filePath(QFileInfo(fileName).fileName());
         texPath = imagePath;
         hasEmbedded = true;
+        // The path containment refused a moment ago was about a path; these
+        // bytes came out of the model itself, so there is nothing to warn
+        // about any more (AV1: the five warnings on the owner's Jennifer.fbx).
+        retractContainmentWarning(texName);
 
         if (!QFileInfo::exists(texPath)) {
             // Compressed embedded textures are written VERBATIM: no
