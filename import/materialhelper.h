@@ -95,6 +95,33 @@ public:
     /// Take (and clear) this thread's containment warnings.
     static QStringList takeContainmentWarnings();
 
+    /// Registers the withdrawal of `name`'s containment warning, conditional on
+    /// `extractedPath` existing when the writes are settled, and applies the
+    /// registered withdrawals whose bytes really landed. PUBLIC for the suite
+    /// that pins the two rules this pair exists for (importer.security §1b):
+    /// the withdrawal is EXACT (never a substring match on the texture name)
+    /// and EARNED (never before the bytes are on disk).
+    static void registerRetraction(const QString &name, const QString &extractedPath);
+    static void settleRetractions();
+
+    // A containment warning is WITHDRAWN when the reference turns out to be
+    // resolvable after all (AV1, 2026-09-13). A Mixamo "with skin" FBX names
+    // its maps by the EXPORTER's temp directory
+    // ("../../../../home/app/mixamo-mini/tmp/skins_….fbm/Ch47_1001_Diffuse.png")
+    // and carries the bytes EMBEDDED: containment correctly refuses the path,
+    // the embedded lookup then finds the media by short name and extracts it,
+    // and the import used to report five scary "the reference was dropped"
+    // warnings for textures that are on the character.
+    //
+    // Withdrawal is EXACT and EARNED, both deliberately (lead review, AV1
+    // round 2): the warning to remove is rebuilt from the same two message
+    // templates containedTexturePath wrote (a substring match on the texture
+    // NAME would delete another texture's warning whenever one model's escaped
+    // path ends in another's base name), and it is removed only once the
+    // extracted bytes are ON DISK — a texture whose write failed is exactly
+    // the case the user must still be told about. So the retraction is
+    // REGISTERED during extraction and SETTLED after the writes are joined.
+
 private:
     static QImage loadOMEmbeddedTexture(const aiScene* scene,
                                         const QString& texPath,
@@ -114,25 +141,37 @@ private:
                                     QString& texPath,
                                     bool& hasEmbedded);
 
-    static void waitForTextureSave(const QString& path);
+    /// Joins THIS THREAD's texture writes (the task list is thread-local: two
+    /// parses running side by side — an Assets-page import and the Avatar
+    /// module's preview parse — used to drain each other's futures through one
+    /// process-wide list and each could return with the other's files still
+    /// half-written).
     static void waitForAllTextureSaves();
 
     /// The containment warning sink (thread-local; see takeContainmentWarnings).
     static QStringList& warningSink();
+
+    /// The two messages containedTexturePath can write, built in ONE place so
+    /// a retraction can name the exact string it withdraws.
+    static QString containmentFallbackWarning(const QString &kind, const QString &name,
+                                              const QString &base);
+    static QString containmentDroppedWarning(const QString &kind, const QString &name);
 
     struct SaveTask {
         QFuture<void> future;
         QString path;
     };
 
+    /// THREAD-LOCAL, one queue per parse (see the .cpp): the write queue and
+    /// the already-written set.
+    static QVector<SaveTask> &textureSaveTasks();
+    static QSet<QString> &savedTexturePaths();
+
     static void saveTextureAsync(const QImage& image, const QString& path);
     /// Verbatim byte write for embedded compressed textures — no re-encode,
     /// so the bytes on disk always match the (sniffed) extension.
     static void saveTextureBytesAsync(const QByteArray& bytes, const QString& path);
 
-    static QVector<SaveTask> g_textureSaveTasks;
-    static QSet<QString> g_savedPaths;
-    static QMutex g_saveMutex;
     static QThreadPool* g_threadPool;
 
 };

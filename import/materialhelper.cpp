@@ -17,9 +17,41 @@
 
 namespace iris {
 
-QVector<MaterialHelper::SaveTask> MaterialHelper::g_textureSaveTasks;
-QMutex MaterialHelper::g_saveMutex;
-QSet<QString> MaterialHelper::g_savedPaths;
+// THE TEXTURE-WRITE QUEUE IS PER PARSE, i.e. PER THREAD (AV1 round 2). It was
+// one process-wide list behind a mutex, and `waitForAllTextureSaves` DRAINS
+// and CLEARS it: two parses running side by side — an Assets-page import on
+// the import worker and the Avatar module's preview parse on a pool thread —
+// stole each other's futures, so each could return believing its files were
+// written while the other's were still in flight. A parse only ever waits for
+// its own writes, so thread-local storage is both the fix and the simpler
+// shape (no lock at all).
+QVector<MaterialHelper::SaveTask> &MaterialHelper::textureSaveTasks()
+{
+    static thread_local QVector<SaveTask> tasks;
+    return tasks;
+}
+
+QSet<QString> &MaterialHelper::savedTexturePaths()
+{
+    static thread_local QSet<QString> paths;
+    return paths;
+}
+
+namespace {
+/// A containment warning waiting to be withdrawn, and the file that has to
+/// exist for it to be earned.
+struct PendingRetraction
+{
+    QString fallbackMessage;
+    QString droppedMessage;
+    QString path;
+};
+QVector<PendingRetraction> &pendingRetractions()
+{
+    static thread_local QVector<PendingRetraction> pending;
+    return pending;
+}
+}   // namespace
 
 static QString generateTexGUID() {
     auto id = QUuid::createUuid();
@@ -119,6 +151,50 @@ QStringList MaterialHelper::takeContainmentWarnings()
     return taken;
 }
 
+QString MaterialHelper::containmentFallbackWarning(const QString &kind, const QString &name,
+                                                  const QString &base)
+{
+    return QStringLiteral("%1 \"%2\" points outside the model's folder; "
+                          "using \"%3\" from the model's folder instead").arg(kind, name, base);
+}
+
+QString MaterialHelper::containmentDroppedWarning(const QString &kind, const QString &name)
+{
+    return QStringLiteral("%1 \"%2\" points outside the model's folder; "
+                          "the reference was dropped").arg(kind, name);
+}
+
+void MaterialHelper::registerRetraction(const QString &name, const QString &extractedPath)
+{
+    if (name.isEmpty() || extractedPath.isEmpty()) return;
+    // Only a TEXTURE reference can be resolved from embedded media, so the
+    // kind is fixed here; both possible messages are rebuilt so the removal
+    // can be an exact match rather than a substring hunt.
+    const QString kind = QStringLiteral("texture");
+    PendingRetraction pending;
+    pending.fallbackMessage =
+        containmentFallbackWarning(kind, name, QFileInfo(name).fileName());
+    pending.droppedMessage = containmentDroppedWarning(kind, name);
+    pending.path = extractedPath;
+    pendingRetractions().append(pending);
+}
+
+void MaterialHelper::settleRetractions()
+{
+    auto &pending = pendingRetractions();
+    if (pending.isEmpty()) return;
+    QStringList &sink = warningSink();
+    for (const PendingRetraction &entry : pending) {
+        // EARNED, not assumed: the bytes have to be on disk (the writes were
+        // joined by waitForAllTextureSaves just before this). A write that
+        // failed leaves the warning standing, which is the truth.
+        if (!QFileInfo(entry.path).isFile()) continue;
+        sink.removeAll(entry.fallbackMessage);
+        sink.removeAll(entry.droppedMessage);
+    }
+    pending.clear();
+}
+
 QString MaterialHelper::containedTexturePath(const QString &name, const QString &sourceDir,
                                              const QString &kind)
 {
@@ -141,13 +217,8 @@ QString MaterialHelper::containedTexturePath(const QString &name, const QString 
     const QString fallback = base.isEmpty() ? QString()
                                             : QDir::cleanPath(QDir(dir).filePath(base));
     const bool haveFallback = !fallback.isEmpty() && QFileInfo(fallback).isFile();
-    const QString warning =
-        haveFallback
-            ? QStringLiteral("%1 \"%2\" points outside the model's folder; "
-                             "using \"%3\" from the model's folder instead")
-                  .arg(kind, name, base)
-            : QStringLiteral("%1 \"%2\" points outside the model's folder; "
-                             "the reference was dropped").arg(kind, name);
+    const QString warning = haveFallback ? containmentFallbackWarning(kind, name, base)
+                                        : containmentDroppedWarning(kind, name);
     QStringList &sink = warningSink();
     if (!sink.contains(warning)) sink.append(warning);   // once per distinct name
     // The fallback is returned even when no such file exists: it stays inside
@@ -199,10 +270,8 @@ void MaterialHelper::saveTextureAsync(const QImage &image, const QString &path)
 {
     if (image.isNull() || path.isEmpty()) return;
 
-    QMutexLocker locker(&g_saveMutex);
-    if (g_savedPaths.contains(path)) return;
-    g_savedPaths.insert(path);
-    locker.unlock();
+    if (savedTexturePaths().contains(path)) return;
+    savedTexturePaths().insert(path);
 
     QDir().mkpath(QFileInfo(path).absolutePath());
 
@@ -221,18 +290,15 @@ void MaterialHelper::saveTextureAsync(const QImage &image, const QString &path)
         }
     });
 
-    locker.relock();
-    g_textureSaveTasks.append(task);
+    textureSaveTasks().append(task);
 }
 
 void MaterialHelper::saveTextureBytesAsync(const QByteArray &bytes, const QString &path)
 {
     if (bytes.isEmpty() || path.isEmpty()) return;
 
-    QMutexLocker locker(&g_saveMutex);
-    if (g_savedPaths.contains(path)) return;
-    g_savedPaths.insert(path);
-    locker.unlock();
+    if (savedTexturePaths().contains(path)) return;
+    savedTexturePaths().insert(path);
 
     QDir().mkpath(QFileInfo(path).absolutePath());
 
@@ -245,23 +311,15 @@ void MaterialHelper::saveTextureBytesAsync(const QByteArray &bytes, const QStrin
         }
     });
 
-    locker.relock();
-    g_textureSaveTasks.append(task);
+    textureSaveTasks().append(task);
 }
 
 void MaterialHelper::waitForAllTextureSaves()
 {
-    QVector<QFuture<void>> futures;
-    {
-        QMutexLocker locker(&g_saveMutex);
-        for (auto &task : g_textureSaveTasks) {
-            futures.append(task.future);
-        }
-        g_textureSaveTasks.clear();
-    }
-
-    for (auto &f : futures) {
-        if (f.isRunning() || f.isStarted()) f.waitForFinished();
+    QVector<SaveTask> tasks;
+    tasks.swap(textureSaveTasks());
+    for (auto &task : tasks) {
+        if (task.future.isRunning() || task.future.isStarted()) task.future.waitForFinished();
     }
 }
 
@@ -295,6 +353,12 @@ void MaterialHelper::loadEmbeddedTexture(const aiScene* scene,
         QString imagePath = QDir(assetPath).filePath(QFileInfo(fileName).fileName());
         texPath = imagePath;
         hasEmbedded = true;
+        // The path containment refused a moment ago was about a path; these
+        // bytes came out of the model itself (AV1: the five warnings on the
+        // owner's Jennifer.fbx). REGISTERED, not withdrawn yet — the write
+        // below is asynchronous and the warning is only wrong once the file
+        // is really there.
+        registerRetraction(texName, imagePath);
 
         if (!QFileInfo::exists(texPath)) {
             // Compressed embedded textures are written VERBATIM: no
@@ -878,6 +942,9 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
     }
 
     waitForAllTextureSaves();
+    // ... and only NOW is a containment warning about an embedded texture
+    // provably wrong (see registerRetraction).
+    settleRetractions();
 
     // The packed MR map (metallic = BLUE, roughness = GREEN per glTF) must be
     // split at import: the engine's HlmsPbs samples metalness and roughness
