@@ -858,7 +858,22 @@ public:
     /// for the same reason toLightDesc is: it reads the node and nothing else.
     static jahshaka::engine::ParticleSystemDesc toParticleDesc(
         iris::ParticleSystemNode *ps, jahshaka::engine::TextureId tex);
+
+    /// THE RENDER-LOOP MONITOR's host hook (RENDER_LOOP_MONITOR_SPEC §4.2,
+    /// lane MON-P1b). The mirror is the biggest single piece of host work in a
+    /// frame, and "the mirror" as ONE number says nothing — a capture needs to
+    /// see the walk, the material pass, the live-texture uploads and the clip
+    /// push apart. Give it the engine once (the host that owns both) and
+    /// sync() reports its sub-stages into the frame record the engine is
+    /// building; leave it null and nothing here reads a clock.
+    ///
+    /// COSTS ONE VIRTUAL CALL PER SYNC when no capture is running
+    /// (Engine::frameMonitor(), checked once at the top of sync), and nothing
+    /// else. Not owned; cleared by passing null.
+    void setMonitorEngine(jahshaka::engine::Engine *engine) { mMonitorEngine = engine; }
+
 private:
+    jahshaka::engine::Engine *mMonitorEngine = nullptr;
 
     jahshaka::engine::Scene *mTarget;
     iris::ScenePtr           mSource;
