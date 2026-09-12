@@ -4549,6 +4549,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         const auto toggle = [](int v) {
             return v == 0 ? GiToggle::Off : (v == 1 ? GiToggle::On : GiToggle::Auto);
         };
+        gi.probeCaptureSize = qBound(0, mSource->giProbeCaptureSize, 1024);
         gi.probeHdr = toggle(mSource->giProbeHdr);
         gi.probeShadows = toggle(mSource->giProbeShadows);
         gi.probeOverlap = mSource->giProbeOverlap;

@@ -2991,7 +2991,10 @@ private:
     /// Where the reflection probes live: the free space inside `litVolume`.
     /// See the long-form argument on the definition — handing the padded voxel
     /// volume here instead is what made P4's finding-2 reflections go black.
-    Ogre::Aabb computeProbeRegion(const Ogre::Aabb &litVolume) const;
+    /// `enclosedAxesOut` (optional) receives how many of the three world axes
+    /// were pulled in by a slab on BOTH faces — the measured enclosure that
+    /// decides whether a probe grid is worth building at all (buildPcc).
+    Ogre::Aabb computeProbeRegion(const Ogre::Aabb &litVolume, int *enclosedAxesOut = nullptr) const;
     /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
@@ -3235,6 +3238,14 @@ private:
     /// after the shadow half checked that a shadow node exists to recalculate.
     bool mPccHdr      = false;
     bool mPccShadowed = false;
+    /// RESOLVED probe capture size (pixels per cube face) of the live grid, 0
+    /// when there is none. GiParams::probeCaptureSize is the request.
+    int  mPccCaptureSize = 0;
+    /// The enclosure measurement of the last probe-region fit, and whether it
+    /// made buildPcc decline the grid (GiStatus::probeEnclosedAxes /
+    /// probeGridRefused — the owner's "the sky is your first reflection asset").
+    int  mProbeEnclosedAxes = 0;
+    bool mProbeGridRefused  = false;
     /// The raster IrradianceField's one workspace names the probe shadow node
     /// (dropGiForShadowRebuild must tear the field down before an atlas rebuild).
     bool mIfdShadowed = false;

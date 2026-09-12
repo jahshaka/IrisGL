@@ -319,7 +319,11 @@ bool OgreScene::refreshVctFast() {
     if (!mVctVoxelizer || !mVctLighting) return false;
     if (mGiCachesDirty) return false;                  // a flush is already owed; it rebuilds
     if (mGiBuiltGeneration != mGiDestroyGeneration) return false;   // something may have died
-    if (mGi.mode == GiMode::VctPccHybrid && !mPcc) return false;
+    // `mProbeGridRefused` is a BUILT state, not a failed one (buildPcc's
+    // enclosure rule): an open scene has no grid on purpose, and forcing a
+    // from-scratch rebuild on every refresh because it has none would make the
+    // cheapest scene in the editor pay the most.
+    if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbeGridRefused) return false;
 
     Ogre::Vector3 mn, mx;
     if (!computeGiBounds(mn, mx)) return false;
@@ -516,6 +520,12 @@ GiStatus OgreScene::giStatus() const {
         st.probeRegionMax = toV(mGiProbeRegion.getMaximum());
         // RESOLVED, not requested: both default to GiToggle::Auto, and the
         // shadow half additionally falls back when there is no shadow node.
+        st.probeCaptureSize   = mPcc ? mPccCaptureSize : 0;
+        // The enclosure decision (buildPcc). Reported in EVERY mode so a caller
+        // can tell "no grid because this is an open scene" from "no grid
+        // because the mode does not build one".
+        st.probeEnclosedAxes  = mProbeEnclosedAxes;
+        st.probeGridRefused   = mProbeGridRefused;
         st.probeHdr     = mPcc && mPccHdr;
         st.probeShadows = (mPcc && mPccShadowed) || (mIfd && mIfdShadowed);   // either shadowed capture arm
         // RESOLVED, like the two above: the request is clamped to the probes
@@ -1177,7 +1187,9 @@ unsigned OgreScene::giVoxelResolution() const {
 // find its interior. Such a scene needs the explicit bounds rows (which clamp
 // this region) or the per-node exclude flag. Only a second depth-readback pass
 // could do better, and that doubles the probe render cost.
-Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume) const {
+Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
+                                         int *enclosedAxesOut) const {
+    if (enclosedAxesOut) *enclosedAxesOut = 0;
     const std::vector<Ogre::Aabb> items = giItemBounds();
     if (items.empty()) return litVolume;
 
@@ -1225,7 +1237,20 @@ Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume) const {
                 nearestMin = amx[ax];
         }
         // Only accept the pull if it leaves a real volume behind.
-        if (nearestMin < nearestMax) { mn[ax] = nearestMin; mx[ax] = nearestMax; }
+        if (nearestMin < nearestMax) {
+            mn[ax] = nearestMin; mx[ax] = nearestMax;
+            // THE ENCLOSURE MEASUREMENT (owner decision 2026-09-13, Q3). An
+            // axis counts as enclosed only when a slab was found on BOTH of its
+            // faces — a floor AND a ceiling, two facing walls. One face is what
+            // an open scene with a ground plane has, and a ground plane encloses
+            // nothing: the rays escape to sky in every other direction and
+            // there is nothing to photograph. Measured, never assumed: this is
+            // the same wall search the region fit already does, read for its
+            // other answer.
+            const bool pulledMax = nearestMax < hullMax[ax];
+            const bool pulledMin = nearestMin > hullMin[ax];
+            if (pulledMax && pulledMin && enclosedAxesOut) ++*enclosedAxesOut;
+        }
     }
     return Ogre::Aabb::newFromExtents(mn, mx);
 }
@@ -2052,7 +2077,8 @@ void OgreScene::rebuildVct() {
     // The probe grid gets its OWN region — the free space, not the padded voxel
     // volume. computeProbeRegion's header is the whole argument (P4 finding 2).
     if (mGi.mode == GiMode::VctPccHybrid) {
-        mGiProbeRegion = computeProbeRegion(aabb);
+        mProbeEnclosedAxes = 0;
+        mGiProbeRegion = computeProbeRegion(aabb, &mProbeEnclosedAxes);
         buildPcc(mGiProbeRegion);
         // The probe grid now owns the shader's one env-probe slot, so the IBL
         // cubemap must come OFF every datablock — see the long note at
@@ -2175,6 +2201,66 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
                            "gi.probeGrid");
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     mPccHdr = mPccShadowed = false;
+    mPccCaptureSize = 0;
+    mProbeGridRefused = false;
+
+    // NO ENCLOSURE MEANS NO PROBE GRID (owner decision 2026-09-13, Q3:
+    // "a user starts in the editor in a new project with an open scene and then
+    // builds by adding assets and objects... I would think the sky is your
+    // first reflection asset.").
+    //
+    // A reflection probe is a photograph of an enclosure taken from a point.
+    // `computeProbeRegion` has just MEASURED whether this scene has one: it
+    // pulls each of the six faces of the content hull in to the nearest slab
+    // that spans the space, and an axis with a slab on BOTH faces is an axis
+    // the probes are enclosed on. Nothing here assumes a "room" — the engine
+    // has no such concept, only geometry and where it stands.
+    //
+    // Below two such axes the probes would be photographing sky, and the cost
+    // of doing so is not small: at the shipped Epic grid that is 18-32 cube
+    // captures, 288-512 MiB of probe array, a probe shadow atlas per probe, and
+    // the per-pixel probe loop on every lit surface — to reproduce, badly and
+    // with a visible grid seam, exactly what the sky IBL already holds
+    // perfectly. The 2026-09-11 lighting audit measured the result of doing it
+    // anyway and called it finding #4: "moving the quality dial up replaced a
+    // correct sky reflection with a banded probe artifact", eighteen probes
+    // 346 m apart, nine of them buried under the ground plane.
+    //
+    // Declining is therefore the CHEAPER AND BETTER picture, and it costs no
+    // extra code to re-bind the sky: `reflectionTexForDatablocks()` already
+    // hands the IBL cubemap back to every datablock the moment `mPcc` is null
+    // (OgreSky.cpp — the env-probe slot has one occupant), and the caller runs
+    // applyReflectionToAll() right after this. The hybrid degrades to plain VCT
+    // + sky IBL, which is what Medium already looked like and what the owner's
+    // A/B preferred.
+    //
+    // It is reported rather than logged and forgotten: GiStatus carries
+    // `probeEnclosedAxes` and `probeGridRefused`, so "probeCount 0 in the
+    // hybrid" can be read as a decision instead of as the silent build failure
+    // gi.pcc_mirror was written to catch.
+    //
+    // ...AND IT IS A HEURISTIC ABOUT AN UNSTATED SPACE, so it stands down when
+    // the author has STATED one. Explicit `giBounds` rows are this engine's
+    // documented remedy for the one case the measurement provably cannot make
+    // (computeProbeRegion's own KNOWN LIMIT: a room imported as a single hollow
+    // mesh has an AABB that IS its outer shell, and no axis-aligned test can
+    // find its interior). A scene that has typed its lit volume has told the
+    // renderer where the space is; guessing over the top of that would be the
+    // renderer overruling the author. The auto path — which is every new
+    // project, every open scene and the case the owner described — is where the
+    // measurement decides, and it is the case the decision was about.
+    static const int kMinEnclosedAxes = 2;
+    if (mProbeEnclosedAxes < kMinEnclosedAxes && !giBoundsExplicit()) {
+        mProbeGridRefused = true;
+        mProbeSlots.clear();
+        mProbeUpdatesPerFrame = 0;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: no probe grid — the scene is enclosed on " +
+            std::to_string(mProbeEnclosedAxes) +
+            " of 3 axes and no bounds were pinned, so reflections come from the "
+            "sky and cone tracing");
+        return;
+    }
     // The slots name probes that are about to be (re)created; the first
     // updateProbeBudget after the build re-sizes and re-fills them.
     mProbeSlots.clear();
@@ -2245,13 +2331,33 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     placement.setSnapSides(Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMin)),
                            Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMax)));
 
-    // Quality -> probe face resolution (the probe render + memory knob).
+    // Quality -> probe face resolution (the probe render + memory knob), and
+    // the per-scene override that now sits beside it in the World panel
+    // (owner, 2026-09-13 Q4: "yes halve it but add it to the world settings").
+    //
+    // HIGH WAS 512 AND IS NOW 256. A probe costs 6 faces x size^2 x mips, so the
+    // halving quarters the grid: at High/HDR one probe drops 16.0 MiB -> 4.0 MiB
+    // and a 32-probe room drops 512 MiB -> 128 MiB (REFLECTION_PROBE_AUDIT
+    // §4.2's table, which the 2026-09-11 lighting audit's measured "288 MB /
+    // 108 slices" corroborates exactly). What is lost is detail the specular
+    // mip chain blurs away before it reaches a pixel: the cube is convolved for
+    // roughness, and only a roughness-0 mirror ever reads mip 0.
+    //
+    // 0 = follow the dial; anything else is the author's, clamped to a sane
+    // power of two because Ogre sizes the IBL mip chain from it.
     Ogre::uint32 probeRes = 256u;
     switch (mGi.quality) {
     case GiQuality::Low:    probeRes = 128u; break;
     case GiQuality::Medium: probeRes = 256u; break;
-    case GiQuality::High:   probeRes = 512u; break;
+    case GiQuality::High:   probeRes = 256u; break;
     }
+    if (mGi.probeCaptureSize > 0) {
+        unsigned want = unsigned(std::min(std::max(mGi.probeCaptureSize, 64), 1024));
+        unsigned pot = 64u;
+        while ((pot << 1u) <= want) pot <<= 1u;
+        probeRes = pot;
+    }
+    mPccCaptureSize = int(probeRes);
     // HDR PROBES (P3a). The main chain renders PFG_RGBA16_FLOAT (OgreChain.cpp),
     // so an LDR probe target clamps every value above 1.0 at CAPTURE time — i.e.
     // before the IBL convolution spreads a highlight across the mip chain, which
@@ -2901,6 +3007,9 @@ void OgreScene::teardownVct() {
     mProbeSlots.clear();
     mProbeUpdatesPerFrame = 0;
     mProbesClampedToRegion = 0;
+    mPccCaptureSize = 0;
+    mProbeEnclosedAxes = 0;
+    mProbeGridRefused = false;
     mVctItemIds.clear();
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;

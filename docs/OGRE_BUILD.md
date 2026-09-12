@@ -381,10 +381,55 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     production-configured engine by taking the "no patch in this build" branch.
     Upstream-reportable: the empty Vulkan hooks are an upstream gap.
 
+28. **0028-pbs-probe-gate-on-material-reflectance** — SOURCE + media. A reflection
+    probe only reaches a material that can reflect it (owner decision
+    2026-09-13 Q1, `SPECS/REFLECTION_PROBE_AUDIT.md`). Upstream has NO
+    material-side gate: once the pass sets `parallax_correct_cubemaps`, every
+    datablock takes `use_envprobe_map` and every lit pixel of every object runs
+    the per-pixel probe loop, however matte. The gate is the material's own
+    reflectance — specular colour black AND no authored F0 — never a roughness
+    threshold, and it is PIXEL EXACT rather than an approximation: the PBS
+    specular term is `envColourS * pixelData.specular * (...)` with
+    `pixelData.specular = material.kS`, so a black kS multiplies the whole
+    environment term by zero whether or not it was sampled. Clear coat and
+    `cubemaps_as_diffuse_gi` are excluded (kS scales neither).
+    The MEDIA hunk is the one that saves the work: `forwardPlusDoCubemaps` is
+    inserted from a PASS property, so it is made conditional on the DATABLOCK
+    property `use_parallax_correct_cubemaps`. Covered by `gi.probe_gate`.
+29. **0029-pcc-probe-visibility-from-captured-depth** — **DEFERRED, NOT IN THE
+    STACK.** The file is `…0029-pcc-probe-visibility-from-captured-depth.patch.DEFERRED`
+    so that `build-ogre.sh`'s `*.patch` glob does not pick it up; rename it back
+    to apply it. It WORKS on the case it was written for — `gi.probe_visibility`
+    measures r 1.000 -> 0.000 — but it also crushed a LEGITIMATE reflection in
+    `gi.budget` (a mirror in a sealed 2x1x2 room fell to r 0.004, with the probe
+    reporting a captured depth of about 10% of the distance to the shading point
+    in that direction; root cause not established in-lane). Shipping "the mirror
+    goes black in a sealed room" to fix "the roof shows the room" is the wrong
+    trade. `gi.probe_visibility` is registered as a CHARACTERISATION of the leak
+    meanwhile, so the defect is executable and the fix has a scene that flips in
+    one place. The design below is unchanged and is the intended fix.
+    MEDIA-only. A surface
+    takes a probe's picture only if it is IN that picture (owner decision
+    2026-09-13 Q2). The only spatial tests at this pin are two axis-aligned
+    boxes with three separate margins, and after Jahshaka's A2 shape clamp the
+    parallax box is ~the whole probe region indoors, so the entry gate excludes
+    nothing there: the outward face of a slab whose inward face a probe
+    photographed is inside the same box. The probe already holds the answer —
+    the DepthCompressor writes `min(0.5 * fDist/fApproxDist, 1)` into the cube's
+    alpha and the IBL convolution preserves it — so the shader marches from the
+    probe camera towards the shaded point, reads what the probe saw that way,
+    and treats "it saw something nearer" as occlusion. The confidence multiplies
+    the CONTRIBUTION (folded into `probeFade`) while `cubemapAccumWeight` keeps
+    the full weight, so the unclaimed share returns to VCT / the irradiance
+    field / the sky through patch 0017's blend instead of turning into black.
+    Measured fail-before: a mirror sealed off from a red wall by a partition
+    read r 1.000 g 0.055 (the wall it cannot see) and reads 0.000 with the
+    patch. Covered by `gi.probe_visibility`.
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild (0024 is SOURCE + media;
-0025, 0026 and 0027 are SOURCE-only) — the Studio build stages the
+patches (0003/0009/0011/0019/0021/0023/0029) need no Ogre rebuild (0024 and 0028 are
+SOURCE + media; 0025, 0026 and 0027 are SOURCE-only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant

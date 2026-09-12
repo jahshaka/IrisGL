@@ -1,0 +1,182 @@
+Jahshaka patch 0028 — a reflection probe only reaches a material that can
+reflect it.
+
+WHY (owner, 2026-09-13, REFLECTION_PROBE_AUDIT.md Q1): "[reflection probes]
+should only affect reflective objects in a scene." At this pin there is NO
+material-side gate anywhere in the probe chain. `HlmsPbs::
+notifyPropertiesMergedPreGenerationStep` sets `use_envprobe_map` and
+`use_parallax_correct_cubemaps` for EVERY datablock as soon as the PASS property
+`parallax_correct_cubemaps` is set, and the per-pixel probe loop
+(`forwardPlusDoCubemaps`) is inserted from the PASS property
+`hlms_enable_cubemaps_auto` — so a rough grey wall runs the same eight
+readOnlyFetches, two localCorrects and cube-array sample per overlapping probe
+that a chrome sphere does. The only conditional in the whole chain is
+`pixelData.roughness < 1.0f || vctSpecular.w == 0`, which excludes a
+perfectly-rough surface and only while VCT is live.
+
+THE GATE IS THE MATERIAL'S OWN REFLECTANCE, not a roughness threshold — roughness
+blurs a reflection, it never removes one. Unreal spells the same control as the
+Specular input (default 0.5 = ~4% reflectance, 0 = reflects nothing) and likewise
+has no per-material "receives reflections" tick.
+
+WHY IT CANNOT CHANGE A PIXEL. The PBS specular environment term ends as
+
+    Rs = envColourS * pixelData.specular * (F0 * envBRDF.x + envBRDF.y)
+
+with `pixelData.specular = material.kS`
+(Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any:307). A datablock
+whose SPECULAR COLOUR is black therefore multiplies every environment term by
+zero, and skipping the lookup is arithmetically identical rather than an
+approximation. The gate additionally requires no authored F0 (the second half of
+the pair the owner named: F0 alone leaves the Schlick rim and the envBRDF bias),
+which makes it a strict subset of that provably-zero case. A physically lit
+dielectric has kS = 1 and never qualifies — it keeps its ~4% sheen.
+
+TWO EXCLUSIONS, both because kS does not scale them:
+  * clear coat — `clearCoatEnvColourS` is not multiplied by kS, so a
+    zero-kS clear-coated material still reflects and keeps the loop;
+  * `cubemaps_as_diffuse_gi` — there a probe also carries DIFFUSE light. Off in
+    Jahshaka (`setAmbientLight(..., envFeatures = 0)`), checked anyway.
+
+`needs_env_brdf` is untouched: it is also raised by `hlms_enable_cubemaps_auto`,
+so the irradiance field's and VCT's diffuse still reach the surface.
+
+WHAT IT TOUCHES
+  * SOURCE  Components/Hlms/Pbs/include/OgreHlmsPbs.h  — one property id.
+  * SOURCE  Components/Hlms/Pbs/src/OgreHlmsPbs.cpp    — the predicate in
+    calculateHashForPreCreate, the gate in
+    notifyPropertiesMergedPreGenerationStep.
+  * MEDIA   Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any —
+    `@insertpiece( forwardPlusDoCubemaps )` becomes conditional on the
+    DATABLOCK property `use_parallax_correct_cubemaps`. Without this hunk the
+    C++ half saves nothing: the piece is defined from a pass property.
+
+SOURCE patch (not media-only): every tree must re-run build-ogre.sh.
+The media file is CRLF; edited in binary mode.
+
+Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
+--- a/Components/Hlms/Pbs/include/OgreHlmsPbs.h
++++ b/Components/Hlms/Pbs/include/OgreHlmsPbs.h
+@@ -674,6 +674,10 @@
+         static const IdString EnableCubemapsAuto;
+         static const IdString CubemapsUseDpm;
+         static const IdString CubemapsAsDiffuseGi;
++        /// Jahshaka patch 0028: the datablock has no specular response at all
++        /// (specular colour black AND no authored F0), so it samples no
++        /// reflection probe. Set in calculateHashForPreCreate.
++        static const IdString ZeroSpecularResponse;
+         static const IdString IrradianceVolumes;
+         static const IdString VctNumProbes;
+         static const IdString VctConeDirs;
+--- a/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
++++ b/Components/Hlms/Pbs/src/OgreHlmsPbs.cpp
+@@ -191,6 +191,7 @@
+     const IdString PbsProperty::EnableCubemapsAuto = IdString( "hlms_enable_cubemaps_auto" );
+     const IdString PbsProperty::CubemapsUseDpm = IdString( "hlms_cubemaps_use_dpm" );
+     const IdString PbsProperty::CubemapsAsDiffuseGi = IdString( "cubemaps_as_diffuse_gi" );
++    const IdString PbsProperty::ZeroSpecularResponse = IdString( "zero_specular_response" );
+     const IdString PbsProperty::IrradianceVolumes = IdString( "irradiance_volumes" );
+     const IdString PbsProperty::VctNumProbes = IdString( "vct_num_probes" );
+     const IdString PbsProperty::VctConeDirs = IdString( "vct_cone_dirs" );
+@@ -763,6 +764,58 @@
+         const bool fresnelWorkflow =
+             datablock->getWorkflow() == HlmsPbsDatablock::SpecularAsFresnelWorkflow;
+ 
++        // JAHSHAKA PATCH 0028 — A MATERIAL WITH NO SPECULAR RESPONSE SAMPLES NO
++        // REFLECTION PROBE.
++        //
++        // Owner, 2026-09-13: "[reflection probes] should only affect reflective
++        // objects in a scene." Upstream has no material-side gate at all: once
++        // the pass sets parallax_correct_cubemaps, EVERY datablock gets
++        // use_envprobe_map and every lit pixel of every object runs the
++        // per-pixel probe loop, however matte it is.
++        //
++        // The gate is the material's OWN reflectance, not a roughness guess
++        // (roughness blurs a reflection, it never removes one). The PBS
++        // specular term ends as
++        //     Rs = envColourS * pixelData.specular * (F0*envBRDF.x + envBRDF.y)
++        // with pixelData.specular = material.kS (200.BRDFs_piece_ps.any /
++        // Main/800.PixelShader_piece_ps.any:307), so a datablock whose SPECULAR
++        // COLOUR is black multiplies every environment term by zero: skipping
++        // the lookup is arithmetically identical, not an approximation. The
++        // second half of the pair — F0 — is required as well, so that the gate
++        // only fires where the AUTHOR has said "not reflective" with both of
++        // the controls that spell it (F0 alone leaves the Schlick rim and the
++        // envBRDF bias; kS alone is the one that zeroes the product).
++        //
++        // Kept out of the gate, deliberately:
++        //   * clear coat — its own environment term is NOT multiplied by kS, so
++        //     a zero-kS clear-coated material still reflects;
++        //   * cubemaps_as_diffuse_gi — there a probe also carries DIFFUSE light,
++        //     which kS does not scale. Off in Jahshaka (envFeatures 0), checked
++        //     anyway so the patch is honest upstream.
++        // Physically lit surfaces keep their ~4% sheen: a default metallic
++        // dielectric has kS = 1 and never qualifies.
++        {
++            const Vector3 kS = datablock->getSpecular();
++            const Real kEps = Real( 1e-4 );
++            bool bZeroSpecular = kS.x <= kEps && kS.y <= kEps && kS.z <= kEps;
++            if( bZeroSpecular )
++            {
++                // ...and F0: authored directly in the Fresnel workflows, and
++                // driven by metalness in the metallic one (where the shader's
++                // dielectric floor of 0.04 is not reachable from any setter, so
++                // "no authored F0" is metalness 0).
++                if( metallicWorkflow )
++                    bZeroSpecular = datablock->getMetalness() <= kEps;
++                else
++                {
++                    const Vector3 f0 = datablock->getFresnel();
++                    bZeroSpecular = f0.x <= kEps && f0.y <= kEps && f0.z <= kEps;
++                }
++            }
++            if( bZeroSpecular && datablock->mClearCoat == 0.0f )
++                setProperty( kNoTid, PbsProperty::ZeroSpecularResponse, 1 );
++        }
++
+         setProperty( kNoTid, PbsProperty::FresnelScalar,
+                      datablock->hasSeparateFresnel() || metallicWorkflow );
+         setProperty( kNoTid, PbsProperty::FresnelWorkflow, fresnelWorkflow );
+@@ -1199,7 +1252,20 @@
+             setProperty( tid, PbsProperty::EnvProbeMap, 1 );
+         setProperty( tid, PbsProperty::TargetEnvprobeMap, envProbeMap == targetEnvProbeMap );
+ 
+-        if( canUseManualProbe || getProperty( tid, PbsProperty::ParallaxCorrectCubemaps ) )
++        // JAHSHAKA PATCH 0028: ...and here is where the gate bites. A
++        // zero-specular-response datablock (set in calculateHashForPreCreate)
++        // takes neither use_envprobe_map nor use_parallax_correct_cubemaps, and
++        // the pixel shader's probe loop is inserted under the latter, so the
++        // whole per-pixel probe cost disappears from every matte material in
++        // the scene. `needs_env_brdf` is unaffected — it is also raised by
++        // hlms_enable_cubemaps_auto — so diffuse GI, which kS does not scale,
++        // is untouched.
++        const bool bZeroSpecularResponse =
++            getProperty( tid, PbsProperty::ZeroSpecularResponse ) != 0 &&
++            getProperty( tid, PbsProperty::CubemapsAsDiffuseGi ) == 0;
++
++        if( !bZeroSpecularResponse &&
++            ( canUseManualProbe || getProperty( tid, PbsProperty::ParallaxCorrectCubemaps ) ) )
+         {
+             setProperty( tid, PbsProperty::UseEnvProbeMap, 1 );
+ 
+--- a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
+@@ -966,7 +966,17 @@
+ 			@insertpiece( applyVoxelConeTracing )
+ 			@insertpiece( applyIrradianceField )
+ 
+-			@insertpiece( forwardPlusDoCubemaps )
++			/// Jahshaka patch 0028: the probe loop is PER MATERIAL now.
++			/// `use_parallax_correct_cubemaps` is a DATABLOCK property (set in
++			/// HlmsPbs::notifyPropertiesMergedPreGenerationStep); the piece
++			/// itself is defined under the PASS property
++			/// hlms_enable_cubemaps_auto, so without this gate every material in
++			/// the scene ran the per-pixel probe loop -- including the ones whose
++			/// specular response is identically zero and whose result it is
++			/// therefore multiplied away by. See the patch header.
++			@property( use_parallax_correct_cubemaps )
++				@insertpiece( forwardPlusDoCubemaps )
++			@end
+ 			@insertpiece( applyIrradianceVolumes )
+ 
+ 			@insertpiece( DoEmissiveLight )
