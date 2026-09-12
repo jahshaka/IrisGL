@@ -52,7 +52,6 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     mMediaDir = cfg.hlmsMediaDir;
     if (!mMediaDir.empty() && mMediaDir.back() != '/') mMediaDir += '/';
     mHeadless = cfg.headless;
-    mProfiling = cfg.profile;
     // The shader cache's fingerprint hashes the staged Hlms tree, so it is
     // configured as soon as the media directory is known — before Root, long
     // before anything could compile. The LOAD waits for ensureHlms().
@@ -411,7 +410,6 @@ View *OgreEngine::createView(const std::string &name,
         ensureHlms();
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
                                          background, mLastError));
-        if (mProfiling) mViews.back()->setProfiling(true);   // EngineConfig::profile / setProfiling
         OgreView *view = mViews.back().get();
         view->mRequestedSamples = mDefaultSamples;
 #ifdef __APPLE__
@@ -480,7 +478,6 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
         Ogre::TextureGpu *rtt = OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height);
         mViews.emplace_back(new OgreView(mRoot, nullptr, rtt, name, width, height,
                                          background, mLastError));
-        if (mProfiling) mViews.back()->setProfiling(true);   // EngineConfig::profile / setProfiling
         return mViews.back().get();
     } JAH_CATCH(mLastError, nullptr);
 }
@@ -520,12 +517,38 @@ void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const 
     }
 }
 
+namespace {
+/// Defined below, beside drainTextureStreaming (its other caller). Declared here
+/// so the frame head can name the textures a frame waited on.
+size_t countPendingTextures(Ogre::TextureGpuManager *tm, std::string *namesOut);
+}   // namespace
+
 void OgreEngine::renderOneFrame() {
     // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
     // and Root::renderOneFrame walks a workspace-less render system. Hosts do
     // not have to special-case their frame loop; it simply costs nothing.
     JAH_TRY {
+        // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
+        // Opened here and closed at the very bottom, so `totalMs` is exactly
+        // what one renderOneFrame cost. `mNextFrameCause` is the caller's — the
+        // driver tick, a scripted editor.frame, an offscreen readback, the
+        // warm-up gate — and it is CONSUMED here: a caller that does not set it
+        // gets Driver, which is what the loop is.
+        if (monitor::live()) {
+            bool onscreen = false;
+            for (auto &v : mViews)
+                if (v->isEnabled() && !v->isOffscreen()) { onscreen = true; break; }
+            monitor::gMonitor->beginFrame(mShadowFrame + 1ull, mNextFrameCause, onscreen);
+        }
+        mNextFrameCause = FrameCause::Driver;
+        std::unique_ptr<monitor::Stage> monPre;
+        if (monitor::live()) {
+            monPre.reset(new monitor::Stage("engine.pre"));
+            // BEFORE anything renders and outside every encoder — the only
+            // place a Vulkan query pool may be reset (ogre-patch 0027).
+            gpuFrameBegin();
+        }
         // THE ONE TEXTURE WAIT (THREADING_ADOPTION_SPEC.md P2 item 3, decision
         // D-C(1)). `loadTexture` no longer waits per texture; it schedules, and
         // this is where the frame collects. It is at the very TOP of the frame,
@@ -549,7 +572,31 @@ void OgreEngine::renderOneFrame() {
         // `waitForStreamingCompletion()`, whose loop can never end if a load
         // request cannot complete; drainTextureStreaming is the same drain with
         // a no-progress deadline and a diagnostic. See its definition.
-        drainTextureStreaming();
+        if (monitor::live()) {
+            monitor::Stage st("engine.texturewait");
+            double ms = 0.0;
+            // The pending set BEFORE the drain and after it: what this frame
+            // actually waited for, by name. Ogre offers no per-texture "loaded"
+            // callback, so the frame-head drain is where a texture load becomes
+            // visible at all.
+            std::string names;
+            Ogre::TextureGpuManager *tm =
+                mRoot && mRoot->getRenderSystem() ? mRoot->getRenderSystem()->getTextureGpuManager()
+                                                  : nullptr;
+            const size_t before = tm ? countPendingTextures(tm, &names) : 0u;
+            drainTextureStreaming(&ms);
+            monitor::noteTextureWait(float(ms));
+            if (before) {
+                const size_t after = tm ? countPendingTextures(tm, nullptr) : 0u;
+                monitor::noteEvent(MonitorEventKind::TextureLoad, WorkReason::Request,
+                                   "texture.load", names, float(ms),
+                                   (unsigned long long)(before > after ? before - after : 0u));
+                monitor::noteCacheWork(CacheKind::Texture, WorkReason::Request, 0, names.c_str(),
+                                       unsigned(before), float(ms));
+            }
+        } else {
+            drainTextureStreaming();
+        }
         // HOW MANY SHADOW MAPS THIS FRAME NEEDS (SHADOW_TOOLING_SPEC.md §4.1).
         // At the top of the frame, before any per-view work, because growing
         // the atlas drops and recreates every workspace that names the shadow
@@ -735,12 +782,41 @@ void OgreEngine::renderOneFrame() {
         // future feature that creates a workspace NOT owned by a View has to
         // extend `scenesFeedingEnabledViews` with it, or it will render against
         // a scene graph nobody updated.
+        // WHAT COMPILED SINCE THE LAST FRAME, with the permutation. The count
+        // comes from the shader cache's log counter (Ogre has no callback) and
+        // the names from its bounded queue, drained here on the UI thread —
+        // the compiles themselves may have happened on the scene's worker pool
+        // (OGRE_SHADER_COMPILATION_THREADING_MODE=2).
+        if (monitor::live()) {
+            std::vector<std::string> names;
+            const unsigned n = mShaderCache.drainCompileNames(names);
+            if (n) {
+                monitor::noteShaderCompiles(n);
+                for (const std::string &nm : names)
+                    monitor::noteCacheWork(CacheKind::Shader, WorkReason::Permutation, 0,
+                                           nm.c_str(), 1u);
+                monitor::noteEvent(MonitorEventKind::ShaderCompile, WorkReason::Permutation,
+                                   "shader.compile",
+                                   names.empty() ? std::string() : names.front(), -1.0f, n);
+            }
+        }
+        // THE MONITOR'S LISTENERS, re-attached for THIS frame — here and not
+        // earlier, for the same reason the shadow counters are re-attached
+        // here: applyPendingGi / applyPendingPlanar may have rebuilt a probe or
+        // a planar workspace since the top of the frame, and a listener list
+        // dies with its workspace.
+        syncMonitorListeners(updated);
+        monPre.reset();                    // closes the "engine.pre" stage
         if (mRoot) {
             // `_fireFrameStarted()` can veto the frame (a lost device, or a
             // frame listener saying stop); upstream returns false there and
             // does nothing else, so neither do we.
             if (mRoot->_fireFrameStarted()) {
-                for (OgreScene *s : updated) s->sceneManager()->updateSceneGraph();
+                {
+                    std::unique_ptr<monitor::Stage> st;
+                    if (monitor::live()) st.reset(new monitor::Stage("engine.sceneGraph"));
+                    for (OgreScene *s : updated) s->sceneManager()->updateSceneGraph();
+                }
                 // THE LAMP-MAP CACHE, second half: here and nowhere earlier. The
                 // scene graph has just made every world AABB and light pose this
                 // frame's, and nothing has rendered yet — so a caster that moved
@@ -748,7 +824,24 @@ void OgreEngine::renderOneFrame() {
                 // scan reads cached bounds instead of paying a root-recursive
                 // getWorldAabbUpdated per item (ENGINE_CACHE_POLICY_SPEC P3).
                 applyShadowCacheDirties(updated);
-                if (mRoot->_updateAllRenderTargets()) {
+                // THE RECORD/SWAP SPLIT. One call does both; the frame listener
+                // marks the instant between them (see FrameSplitListener).
+                const auto monFrameStart = std::chrono::steady_clock::now();
+                if (monitor::live()) monitor::gMonitor->mSplit.mMarked = false;
+                const bool monRendered = mRoot->_updateAllRenderTargets();
+                if (monitor::live()) {
+                    const auto end = std::chrono::steady_clock::now();
+                    const auto &sp = monitor::gMonitor->mSplit;
+                    const double total =
+                        std::chrono::duration<double, std::milli>(end - monFrameStart).count();
+                    const double record =
+                        sp.mMarked ? std::chrono::duration<double, std::milli>(
+                                         sp.mMark - monFrameStart).count()
+                                   : total;
+                    monitor::gMonitor->stage("engine.record", record);
+                    monitor::gMonitor->stage("engine.swap", total - record);
+                }
+                if (monRendered) {
                     for (OgreScene *s : updated) s->sceneManager()->clearFrameData();
                     // MIRRORS OgreRoot.cpp:1123 EXACTLY. `Root::renderOneFrame`
                     // is the only place upstream samples FrameStats, so skipping
@@ -775,6 +868,8 @@ void OgreEngine::renderOneFrame() {
         // pose that was just drawn and shows it on the next frame. One frame of
         // lag on a selection band, against a second full skeleton update per
         // frame if it were done the other way round.
+        std::unique_ptr<monitor::Stage> monPost;
+        if (monitor::live()) monPost.reset(new monitor::Stage("engine.post"));
         for (auto &s : mScenes) s->applySkeletonFollowers();
         // THE ONE-SHOT RE-CAPTION (OgreOverlayHud.cpp's `Caption`): a TextArea
         // whose caption was set before its first rendered frame built its
@@ -785,7 +880,25 @@ void OgreEngine::renderOneFrame() {
         // took part in it now has its OWN pixels on its target. This is the
         // signal hosts gate a loading cover on (View::framesPresented).
         for (auto &v : mViews) v->notePresented();
+        // THE FRAME IS CLOSED HERE, after everything the loop does — the pose
+        // followers and the HUD's one-shot re-caption included — so `totalMs`
+        // is what one renderOneFrame cost the caller, not what the render cost.
+        monPost.reset();
+        if (monitor::live()) {
+            // Was the render system counting at all while this frame ran? The
+            // record says so outright: a frame rendered with recording off
+            // reports zeros for every geometry counter, and analysis must not
+            // have to infer that.
+            if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr)
+                monitor::gMonitor->current().metricsRecording =
+                    rs->getMetrics().mIsRecordingMetrics;
+            monitor::gMonitor->endFrame(mUpdatedScenes);
+        }
     } JAH_CATCH(mLastError, );
+    // A frame that THREW still has to close, or the next one appends to it and
+    // the ring holds one record that never ends.
+    if (monitor::live() && monitor::gMonitor->inFrame())
+        monitor::gMonitor->endFrame(mUpdatedScenes);
 }
 
 bool OgreEngine::updateScene(Scene *scene) {
@@ -1338,11 +1451,6 @@ bool OgreEngine::reclaimMemory(MemoryStats *before, MemoryStats *after) {
         Ogre::LogManager::getSingleton().logMessage(buf);
         return true;
     } JAH_CATCH(mLastError, false);
-}
-
-void OgreEngine::setProfiling(bool on) {
-    mProfiling = on;
-    for (const auto &v : mViews) if (v) v->setProfiling(on);
 }
 
 bool OgreEngine::objectCounts(ObjectCounts &out) const {

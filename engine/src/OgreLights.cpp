@@ -402,6 +402,73 @@ void OgreScene::shadowWorkspaces(ShadowNodeKind kind,
     }
 }
 
+void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
+                                  std::vector<std::string> *owners) const {
+    // UNCONDITIONAL, unlike shadowWorkspaces: the monitor wants every pass a
+    // planar mirror or a probe executes, not only the shadowed ones.
+    if (mPlanar) {
+        for (size_t i = 0; i < mPlanar->slotCount(); ++i)
+            if (Ogre::CompositorWorkspace *ws = mPlanar->slotWorkspace(i)) {
+                out.push_back(ws);
+                if (owners) owners->push_back("planar:" + std::to_string(i));
+            }
+    }
+    if (mPcc) {
+        const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+        for (size_t i = 0; i < probes.size(); ++i)
+            if (Ogre::CompositorWorkspace *ws = probes[i]->getWorkspace()) {
+                out.push_back(ws);
+                if (owners) owners->push_back("probe:" + std::to_string(i));
+            }
+    }
+}
+
+void OgreScene::collectProbeInfo(std::vector<ProbeInfo> &out) const {
+    if (!mPcc) return;
+    const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
+    for (size_t i = 0; i < probes.size(); ++i) {
+        const Ogre::CubemapProbe *p = probes[i];
+        if (!p) continue;
+        ProbeInfo pi;
+        pi.index = unsigned(i);
+        const Ogre::Aabb area = p->getArea();
+        pi.centre = Vec3(area.mCenter.x, area.mCenter.y, area.mCenter.z);
+        pi.halfSize = Vec3(area.mHalfSize.x, area.mHalfSize.y, area.mHalfSize.z);
+        const Ogre::Aabb shape = p->getProbeShape();
+        const Ogre::Vector3 lo = shape.getMinimum(), hi = shape.getMaximum();
+        pi.shapeMin = Vec3(lo.x, lo.y, lo.z);
+        pi.shapeMax = Vec3(hi.x, hi.y, hi.z);
+        pi.dirty = p->mDirty;
+        pi.isStatic = p->getStatic();
+        if (const Ogre::TextureGpu *t = p->getInternalTexture()) pi.resolution = t->getWidth();
+        out.push_back(pi);
+    }
+}
+
+void OgreScene::collectLightInfo(std::vector<SnapshotLight> &out) const {
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end() || !it->second.light) continue;
+        const Ogre::Light *l = it->second.light;
+        SnapshotLight sl;
+        sl.node = id;
+        switch (l->getType()) {
+        case Ogre::Light::LT_DIRECTIONAL: sl.type = LightType::Directional; break;
+        case Ogre::Light::LT_POINT:       sl.type = LightType::Point; break;
+        case Ogre::Light::LT_SPOTLIGHT:   sl.type = LightType::Spot; break;
+        default:                          sl.type = LightType::Area; break;
+        }
+        sl.castShadow = l->getCastShadows();
+        sl.range = l->getAttenuationRange();
+        sl.intensity = l->getPowerScale();
+        if (l->getParentNode()) {
+            const Ogre::Vector3 p = l->getParentNode()->_getDerivedPosition();
+            sl.position = Vec3(p.x, p.y, p.z);
+        }
+        out.push_back(sl);
+    }
+}
+
 bool OgreScene::hasCacheableShadowLights() const {
     for (NodeId id : mLightNodes) {          // the light index, not every node
         auto it = mNodes.find(id);
@@ -477,12 +544,13 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
 
     // Dedupe per kind with a flag per lamp (the lists are single digits).
     std::vector<unsigned char> marked(out.lights.size() * kShadowNodeKinds, 0u);
-    const auto dirtyLamp = [&](size_t i, unsigned kindMask) {
+    const auto dirtyLamp = [&](size_t i, unsigned kindMask, WorkReason why) {
         for (unsigned k = 0; k < kShadowNodeKinds; ++k) {
             if (!(kindMask & (1u << k)) || marked[i * kShadowNodeKinds + k]) continue;
             if (!shadowLampCachedFor(ShadowNodeKind(k), out.lights[i].light)) continue;
             marked[i * kShadowNodeKinds + k] = 1u;
             out.dirty[k].push_back(out.lights[i].light);
+            out.dirtyReason[k].push_back(why);   // the monitor's §4.7 reason
         }
     };
     const unsigned allKinds = (1u << kShadowNodeKinds) - 1u;
@@ -500,7 +568,7 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
         // A lamp seen for the first time needs nothing from here: its slot
         // assignment is new, and setLightFixedToShadowMap marks it dirty.
         if (old != mShadowLightKeys.end() && old->second != key) {
-            dirtyLamp(i, allKinds);
+            dirtyLamp(i, allKinds, WorkReason::Light);
             ++out.lightChanges;
         }
     }
@@ -527,7 +595,7 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
                 !sphereTouchesBox(l->getParentNode()->_getDerivedPosition(),
                                   l->getAttenuationRange(), c.box))
                 continue;
-            dirtyLamp(i, kinds);
+            dirtyLamp(i, kinds, WorkReason::Caster);
         }
     }
 }

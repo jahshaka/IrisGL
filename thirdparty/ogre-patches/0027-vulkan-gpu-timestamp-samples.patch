@@ -1,0 +1,436 @@
+From: Jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] Vulkan: fill the empty GPU sample-profiling hooks with timestamp queries
+
+WHY (Jahshaka lane MON-P1c, 2026-09-12; SPECS/RENDER_LOOP_MONITOR_SPEC.md D3)
+
+At this pin `VulkanRenderSystem::initGPUProfiling`, `deinitGPUProfiling`,
+`beginGPUSampleProfile` and `endGPUSampleProfile` are EMPTY BODIES
+(OgreVulkanRenderSystem.cpp:2665-2671). There is therefore no GPU time anywhere
+in the Vulkan render system: not per pass, not per workspace, not per frame.
+The D3D11 and Metal render systems implement the same hooks; Vulkan does not.
+
+Jahshaka's render-loop monitor is a data collector for engine reviews, and the
+owner's words on 2026-09-12 were "we want GPU more than CPU, but we need both".
+Without this patch every capture answers "GPU: not measured", and the one
+question the owner is asking — why a simple scene on an RTX 4080 SUPER runs at
+34 fps — cannot be split into CPU-bound and GPU-bound.
+
+WHAT IT DOES
+
+* `initGPUProfiling` checks that the device reports a non-zero
+  `timestampPeriod` AND that the graphics queue family reports non-zero
+  `timestampValidBits` (a device may have timestamps on some queues only), then
+  creates TWO `VK_QUERY_TYPE_TIMESTAMP` pools of 4096 queries.
+* `beginGPUSampleProfile` / `endGPUSampleProfile` write a TOP_OF_PIPE and a
+  BOTTOM_OF_PIPE timestamp into the current pool. Samples NEST (a scene pass
+  owns a shadow node whose passes run inside it), so they ride a stack, exactly
+  like the caller's own.
+* Results are read back TWO FRAMES LATE and NON-BLOCKING
+  (`VK_QUERY_RESULT_WITH_AVAILABILITY_BIT`): a sample whose pair is not yet
+  available is skipped, never waited for and never reported as zero. The CPU
+  never stalls on the GPU.
+* THE POOL RESET IS THE DESIGN CONSTRAINT. A timestamp WRITE is legal inside a
+  render pass; `vkCmdResetQueryPool` is not. The pools therefore alternate, and
+  the one about to be written is read back and reset at ONE point the host
+  calls explicitly — `getCustomAttribute( "JahGpuFrameBegin" )` — at the top of
+  the frame, before any workspace updates, where ending the encoders costs
+  nothing because none is open.
+
+WHY getCustomAttribute AND NOT NEW VIRTUALS
+
+The readback needs a channel out of the render system. `getCustomAttribute` is
+already the render system's escape hatch (it hands out `VkDevice`,
+`VulkanQueue`, ...), it adds NO OgreMain ABI surface, and — because it THROWS
+on an unknown name — a build WITHOUT this patch answers the host's probe by
+throwing, which is exactly how the host learns there is no GPU timing. No
+version flag is needed anywhere.
+
+Three names are added, all under the same define:
+  "JahGpuTimestamps"     -> bool: are timestamps live right now
+  "JahGpuFrameBegin"     -> rotate pools, read back, reset (call once a frame)
+  "JahGpuSampleResults"  -> appends (sampleId, milliseconds) pairs
+
+THE TWO OFF-SWITCHES (owner decision D3, 2026-09-12)
+
+1. BUILD. Everything above is inside `#ifdef JAH_GPU_TIMESTAMPS`, set by the
+   new `JAH_GPU_TIMESTAMPS` CMake option, which DEFAULTS OFF. Without it the
+   four hooks compile to upstream's empty bodies byte for byte, the class
+   carries no extra members and the binary contains no query-pool code at all.
+   `build-ogre.sh` passes `-DJAH_GPU_TIMESTAMPS=ON` for dev builds and
+   `=OFF` when `JAH_PRODUCTION=1` (release and packaging lanes).
+2. RUNTIME. Even in a dev build nothing exists until the host calls
+   `initGPUProfiling`, which Jahshaka does only when a capture starts; the
+   pools are destroyed when it stops. A dev build with no capture running owns
+   zero query pools, which a suite asserts.
+
+UPSTREAM-REPORTABLE: the empty Vulkan hooks are an upstream gap, not a
+Jahshaka-specific need — Ogre's own `Profiler` calls them and gets nothing on
+Vulkan. Recorded for SPECS/OGRE_UPSTREAM_ISSUES.md.
+
+SCOPE: `RenderSystems/Vulkan` only. No OgreMain header, no ABI change, no
+behaviour change of any kind when the option is off. SOURCE patch: every tree
+must re-run `build-ogre.sh`.
+
+Verified: `git apply --check` and `git apply --reverse --check` against the
+pristine pin; built and measured on an RTX 4080 SUPER (driver 595.84) —
+test_engine's monitor_gpu_timestamps drained 5 frames with 42 passes carrying
+GPU times.
+
+diff --git a/RenderSystems/Vulkan/CMakeLists.txt b/RenderSystems/Vulkan/CMakeLists.txt
+index 22c552197..a9f503d7f 100644
+--- a/RenderSystems/Vulkan/CMakeLists.txt
++++ b/RenderSystems/Vulkan/CMakeLists.txt
+@@ -103,6 +103,20 @@ if( OGRE_VULKAN_USE_SWAPPY )
+ 	target_link_libraries(RenderSystem_Vulkan ${AndroidSwappy_LIBRARY})
+ endif()
+ 
++# --- Jahshaka local patch 0027: GPU timestamp sampling ----------------------
++# OFF BY DEFAULT, and that is lock 1 of the two the owner asked for (D3,
++# 2026-09-12): without this option the three GPU-profiling hooks compile to
++# upstream's empty stubs byte for byte, the render system carries no extra
++# members and no query pool type exists anywhere in the binary. A production or
++# packaging build simply does not pass it. `build-ogre.sh` passes it for DEV
++# builds (i.e. unless JAH_PRODUCTION=1). Lock 2 is at runtime: even with this
++# on, no pool is created until a capture starts.
++option(JAH_GPU_TIMESTAMPS "Jahshaka: fill Vulkan's GPU sample-profiling hooks with timestamp queries (dev builds only)" OFF)
++if( JAH_GPU_TIMESTAMPS )
++	target_compile_definitions(RenderSystem_Vulkan PRIVATE JAH_GPU_TIMESTAMPS)
++endif()
++# --- end Jahshaka local patch ----------------------------------------------
++
+ if (OGRE_CONFIG_THREADS)
+   target_link_libraries(RenderSystem_Vulkan ${OGRE_THREAD_LIBRARIES})
+ endif ()
+diff --git a/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h b/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
+index cf8dce196..87cd56153 100644
+--- a/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
++++ b/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
+@@ -149,6 +149,61 @@ namespace Ogre
+         void destroyVkResources0();
+         void destroyVkResources1();
+ 
++#ifdef JAH_GPU_TIMESTAMPS
++        // ---- JAHSHAKA patch 0027: GPU timestamp sampling ------------------
++        //
++        // Upstream leaves initGPUProfiling / beginGPUSampleProfile /
++        // endGPUSampleProfile as empty stubs on Vulkan, so there is no GPU time
++        // anywhere in this render system. Jahshaka's render-loop monitor needs
++        // it ("we want GPU more than CPU, but we need both" — owner, 2026-09-12)
++        // and fills them with plain timestamp queries.
++        //
++        // ENTIRELY BEHIND THIS DEFINE. Without JAH_GPU_TIMESTAMPS the class has
++        // no extra members and the three hooks compile to upstream's empty
++        // bodies, byte for byte — which is what a production or packaging build
++        // gets (owner decision D3, lock 1 of 2).
++        //
++        // TWO POOLS, READ TWO FRAMES LATE. A timestamp write is legal inside a
++        // render pass; a query-pool RESET is not. So the pool for frame N is
++        // reset at the START of frame N, outside every encoder, at the one
++        // moment the host calls in (the "JahGpuFrameBegin" custom attribute) —
++        // and the pool being recycled then is the one written two frames ago,
++        // whose results are read back non-blocking with the availability bit
++        // just before it is reset. Nothing ever stalls the CPU on the GPU.
++        static const uint32 kJahMaxGpuQueries = 4096u;
++        /// A sample the pool had no room for. It still rides the stack — that
++        /// is how `endGPUSampleProfile` finds its own sample — but no query is
++        /// written for it and it is never reported. Without the sentinel the
++        /// matching `end` popped the ENCLOSING sample and filed a wrong
++        /// duration as a real number.
++        static const uint32 kJahOverflowQuery = 0xFFFFFFFFu;
++        struct JahGpuSample
++        {
++            uint32 hash;   ///< the caller's id for this sample (hashCache)
++            uint32 query;  ///< the begin query index; end is query + 1
++        };
++        VkQueryPool               mJahQueryPool[2] = { 0, 0 };
++        bool                      mJahPoolWritten[2] = { false, false };
++        std::vector<JahGpuSample> mJahSamples[2];
++        std::vector<JahGpuSample> mJahSampleStack;   ///< samples nest
++        std::vector<std::pair<uint32, float> > mJahResults;
++        /// Readback scratch, sized to what a frame actually wrote rather than
++        /// to the whole pool (which was 64 KB every frame).
++        FastArray<uint64>         mJahRawResults;
++        uint32                    mJahPoolIdx;
++        uint32                    mJahNextQuery;
++        /// Samples dropped for want of query room, this frame and last — the
++        /// honest "this capture's GPU numbers are incomplete" signal, read
++        /// through getCustomAttribute( "JahGpuSamplesTruncated" ).
++        uint32                    mJahOverflowed;
++        uint32                    mJahOverflowedLastFrame;
++        float                     mJahTimestampPeriodNs;
++        bool                      mJahGpuProfiling;
++        /// Rotates the pools, reads back the one being recycled and resets it.
++        /// Called through getCustomAttribute( "JahGpuFrameBegin" ).
++        void jahGpuFrameBegin();
++#endif
++
+     public:
+         VulkanRenderSystem( const NameValuePairList *options );
+         ~VulkanRenderSystem() override;
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
+index 06e0c4728..d72cdaf9b 100644
+--- a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
+@@ -223,6 +223,14 @@ namespace Ogre
+         mCurrentAutoParamsBufferPtr( 0 ),
+         mCurrentAutoParamsBufferSpaceLeft( 0 ),
+         mDevice( 0 ),
++#ifdef JAH_GPU_TIMESTAMPS
++        mJahPoolIdx( 0u ),
++        mJahNextQuery( 0u ),
++        mJahOverflowed( 0u ),
++        mJahOverflowedLastFrame( 0u ),
++        mJahTimestampPeriodNs( 0.0f ),
++        mJahGpuProfiling( false ),
++#endif
+         mCache( 0 ),
+         mPso( 0 ),
+         mComputePso( 0 ),
+@@ -2662,13 +2670,197 @@ namespace Ogre
+ #endif
+     }
+     //-------------------------------------------------------------------------
+-    void VulkanRenderSystem::initGPUProfiling() {}
++    // JAHSHAKA patch 0027: the GPU timestamp half of these hooks. Upstream
++    // leaves all four empty on Vulkan, so nothing in this render system can say
++    // what the GPU spent on a pass. See OgreVulkanRenderSystem.h for the design
++    // and for why every line of it is behind JAH_GPU_TIMESTAMPS.
+     //-------------------------------------------------------------------------
+-    void VulkanRenderSystem::deinitGPUProfiling() {}
++    void VulkanRenderSystem::initGPUProfiling()
++    {
++#ifdef JAH_GPU_TIMESTAMPS
++        if( mJahGpuProfiling || !mDevice )
++            return;
++
++        VkPhysicalDeviceProperties props;
++        vkGetPhysicalDeviceProperties( mDevice->mPhysicalDevice, &props );
++        // timestampPeriod == 0 means the device cannot do timestamps at all;
++        // timestampValidBits == 0 on the queue family means this queue cannot.
++        if( props.limits.timestampPeriod <= 0.0f )
++            return;
++        uint32 numFamilies = 0u;
++        vkGetPhysicalDeviceQueueFamilyProperties( mDevice->mPhysicalDevice, &numFamilies, 0 );
++        FastArray<VkQueueFamilyProperties> families;
++        families.resize( numFamilies );
++        vkGetPhysicalDeviceQueueFamilyProperties( mDevice->mPhysicalDevice, &numFamilies,
++                                                  families.begin() );
++        const uint32 familyIdx = mDevice->mGraphicsQueue.getFamilyIdx();
++        if( familyIdx >= numFamilies || families[familyIdx].timestampValidBits == 0u )
++            return;
++
++        VkQueryPoolCreateInfo poolCi;
++        makeVkStruct( poolCi, VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO );
++        poolCi.queryType = VK_QUERY_TYPE_TIMESTAMP;
++        poolCi.queryCount = kJahMaxGpuQueries;
++        for( size_t i = 0u; i < 2u; ++i )
++        {
++            mJahQueryPool[i] = 0;
++            mJahPoolWritten[i] = false;
++            mJahSamples[i].clear();
++            if( vkCreateQueryPool( mDevice->mDevice, &poolCi, 0, &mJahQueryPool[i] ) != VK_SUCCESS )
++            {
++                for( size_t j = 0u; j < i; ++j )
++                    vkDestroyQueryPool( mDevice->mDevice, mJahQueryPool[j], 0 );
++                return;
++            }
++        }
++        mJahTimestampPeriodNs = props.limits.timestampPeriod;
++        mJahPoolIdx = 0u;
++        mJahNextQuery = 0u;
++        mJahOverflowed = 0u;
++        mJahOverflowedLastFrame = 0u;
++        mJahSampleStack.clear();
++        mJahResults.clear();
++        mJahGpuProfiling = true;
++#endif
++    }
+     //-------------------------------------------------------------------------
+-    void VulkanRenderSystem::beginGPUSampleProfile( const String &name, uint32 *hashCache ) {}
++    void VulkanRenderSystem::deinitGPUProfiling()
++    {
++#ifdef JAH_GPU_TIMESTAMPS
++        if( !mJahGpuProfiling )
++            return;
++        mJahGpuProfiling = false;
++        // The pools may still be referenced by command buffers in flight.
++        mDevice->stall();
++        for( size_t i = 0u; i < 2u; ++i )
++        {
++            if( mJahQueryPool[i] )
++                vkDestroyQueryPool( mDevice->mDevice, mJahQueryPool[i], 0 );
++            mJahQueryPool[i] = 0;
++            mJahPoolWritten[i] = false;
++            mJahSamples[i].clear();
++        }
++        mJahSampleStack.clear();
++        mJahResults.clear();
++#endif
++    }
++    //-------------------------------------------------------------------------
++    void VulkanRenderSystem::beginGPUSampleProfile( const String &name, uint32 *hashCache )
++    {
++#ifdef JAH_GPU_TIMESTAMPS
++        if( !mJahGpuProfiling )
++            return;
++        // Two queries per sample (begin, end). OUT OF ROOM: push a SENTINEL and
++        // return. Returning without pushing was a real mis-attribution bug: the
++        // stack is how `end` finds its own sample, so a bare return made the
++        // matching `end` pop the ENCLOSING sample, write that sample's end
++        // timestamp at the wrong point in the frame and file it as complete —
++        // from the first overflow to the end of the frame, WRONG durations were
++        // reported as real numbers. A sentinel keeps the nesting honest and the
++        // sample is simply absent, which the caller reports as "no GPU time".
++        // Reachable: three shadowed point lamps inside one probe capture is
++        // 6 faces x 22 passes before the view and the planar arms are counted.
++        JahGpuSample sample;
++        sample.hash = hashCache ? *hashCache : 0u;
++        if( mJahNextQuery + 2u > kJahMaxGpuQueries )
++        {
++            sample.query = kJahOverflowQuery;
++            ++mJahOverflowed;
++            mJahSampleStack.push_back( sample );
++            return;
++        }
++        sample.query = mJahNextQuery;
++        mJahNextQuery += 2u;
++        // A timestamp write is legal inside a render pass, which is where most
++        // of these land.
++        vkCmdWriteTimestamp( mDevice->mGraphicsQueue.getCurrentCmdBuffer(),
++                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mJahQueryPool[mJahPoolIdx],
++                             sample.query );
++        mJahPoolWritten[mJahPoolIdx] = true;
++        mJahSampleStack.push_back( sample );
++#else
++        (void)name;
++        (void)hashCache;
++#endif
++    }
++    //-------------------------------------------------------------------------
++    void VulkanRenderSystem::endGPUSampleProfile( const String &name )
++    {
++#ifdef JAH_GPU_TIMESTAMPS
++        if( !mJahGpuProfiling || mJahSampleStack.empty() )
++            return;
++        const JahGpuSample sample = mJahSampleStack.back();
++        mJahSampleStack.pop_back();
++        if( sample.query == kJahOverflowQuery )
++            return;   // the sentinel: no query was ever written for it
++        vkCmdWriteTimestamp( mDevice->mGraphicsQueue.getCurrentCmdBuffer(),
++                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mJahQueryPool[mJahPoolIdx],
++                             sample.query + 1u );
++        mJahSamples[mJahPoolIdx].push_back( sample );
++#else
++        (void)name;
++#endif
++    }
++#ifdef JAH_GPU_TIMESTAMPS
+     //-------------------------------------------------------------------------
+-    void VulkanRenderSystem::endGPUSampleProfile( const String &name ) {}
++    void VulkanRenderSystem::jahGpuFrameBegin()
++    {
++        if( !mJahGpuProfiling )
++            return;
++        // Any sample left open by a frame that threw would corrupt the next
++        // one's nesting.
++        mJahSampleStack.clear();
++        mJahPoolIdx = ( mJahPoolIdx + 1u ) & 1u;
++        mJahResults.clear();
++
++        const uint32 written = (uint32)mJahSamples[mJahPoolIdx].size();
++        if( mJahPoolWritten[mJahPoolIdx] && written > 0u )
++        {
++            // NON-BLOCKING. WITH_AVAILABILITY gives a third word per query that
++            // is zero while the GPU has not written it; a sample whose pair is
++            // not both available is skipped, never waited for and never
++            // reported as zero.
++            uint32 highest = 0u;
++            for( size_t i = 0u; i < mJahSamples[mJahPoolIdx].size(); ++i )
++                highest = std::max( highest, mJahSamples[mJahPoolIdx][i].query + 2u );
++            // Sized to what was actually written, not to the pool: a 20-pass
++            // frame read back 64 KB every frame before this.
++            mJahRawResults.resize( (size_t)highest * 2u );
++            uint64 *raw = mJahRawResults.begin();
++            const VkResult res = vkGetQueryPoolResults(
++                mDevice->mDevice, mJahQueryPool[mJahPoolIdx], 0u, highest,
++                (size_t)highest * 2u * sizeof( uint64 ), raw, 2u * sizeof( uint64 ),
++                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT );
++            if( res == VK_SUCCESS || res == VK_NOT_READY )
++            {
++                for( size_t i = 0u; i < mJahSamples[mJahPoolIdx].size(); ++i )
++                {
++                    const JahGpuSample &sample = mJahSamples[mJahPoolIdx][i];
++                    const uint64 *b = raw + (size_t)sample.query * 2u;
++                    const uint64 *e = raw + (size_t)( sample.query + 1u ) * 2u;
++                    if( b[1] == 0u || e[1] == 0u || e[0] < b[0] )
++                        continue;   // not back yet, or a wrapped counter
++                    const float ms = float( double( e[0] - b[0] ) *
++                                            double( mJahTimestampPeriodNs ) * 1e-6 );
++                    mJahResults.push_back( std::pair<uint32, float>( sample.hash, ms ) );
++                }
++            }
++        }
++        mJahSamples[mJahPoolIdx].clear();
++
++        // THE RESET MUST BE OUTSIDE EVERY ENCODER (a render pass cannot contain
++        // vkCmdResetQueryPool). This is the one call the host makes at the top
++        // of the frame, before any workspace updates, so ending the encoders
++        // here costs nothing: there is nothing open yet in a normal frame.
++        mDevice->mGraphicsQueue.endAllEncoders();
++        vkCmdResetQueryPool( mDevice->mGraphicsQueue.getCurrentCmdBuffer(),
++                             mJahQueryPool[mJahPoolIdx], 0u, kJahMaxGpuQueries );
++        mJahPoolWritten[mJahPoolIdx] = false;
++        mJahNextQuery = 0u;
++        mJahOverflowedLastFrame = mJahOverflowed;
++        mJahOverflowed = 0u;
++    }
++#endif
+     //-------------------------------------------------------------------------
+     void VulkanRenderSystem::endGpuDebuggerFrameCapture( Window *window, const bool bDiscard )
+     {
+@@ -2709,6 +2901,45 @@ namespace Ogre
+             *(VulkanQueue **)pData = &mDevice->mGraphicsQueue;
+             return;
+         }
++#ifdef JAH_GPU_TIMESTAMPS
++        // JAHSHAKA patch 0027 — the readback channel for the GPU timestamps
++        // above. getCustomAttribute is used rather than new virtuals so the
++        // patch adds NO OgreMain ABI surface, and the names simply do not exist
++        // in a build without the define: the host asks for "JahGpuTimestamps",
++        // catches the exception, and reports gpuCompiled = false.
++        else if( name == "JahGpuTimestamps" )
++        {
++            // "was this render system built with timestamp support, and did the
++            // device accept it" — the runtime half of the answer is whether a
++            // pool exists, i.e. whether initGPUProfiling succeeded.
++            *(bool *)pData = mJahGpuProfiling;
++            return;
++        }
++        else if( name == "JahGpuFrameBegin" )
++        {
++            jahGpuFrameBegin();
++            return;
++        }
++        else if( name == "JahGpuSamplesTruncated" )
++        {
++            // How many samples the LAST completed frame could not record
++            // because the query pool was full. Non-zero means a capture's GPU
++            // numbers are incomplete, and the host says so rather than letting
++            // analysis read a partial frame as a whole one.
++            *(uint32 *)pData = mJahOverflowedLastFrame;
++            return;
++        }
++        else if( name == "JahGpuSampleResults" )
++        {
++            // (sample id, milliseconds) for the frame recorded two frames ago.
++            // Appended, never cleared, so one caller can drain several.
++            std::vector<std::pair<uint32, float> > *out =
++                (std::vector<std::pair<uint32, float> > *)pData;
++            out->insert( out->end(), mJahResults.begin(), mJahResults.end() );
++            mJahResults.clear();
++            return;
++        }
++#endif
+ 
+         OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS, "Attribute not found: " + name,
+                      "VulkanRenderSystem::getCustomAttribute" );

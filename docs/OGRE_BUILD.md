@@ -347,10 +347,44 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     "HlmsDiskCache: skipping shader cache entry 536872216 - it has no PSO" and no
     crash where the same state crashed before.
 
+27. **0027-vulkan-gpu-timestamp-samples** — SOURCE
+    (`RenderSystems/Vulkan` only; every tree reruns `build-ogre.sh`).
+    At this pin `VulkanRenderSystem::initGPUProfiling`, `deinitGPUProfiling`,
+    `beginGPUSampleProfile` and `endGPUSampleProfile` are EMPTY BODIES, so the
+    Vulkan render system can report no GPU time at all — not per pass, not per
+    frame (D3D11 and Metal implement the same hooks; Vulkan does not). The patch
+    fills them with `VK_QUERY_TYPE_TIMESTAMP` queries for the render-loop
+    monitor (SPECS/RENDER_LOOP_MONITOR_SPEC.md; owner, 2026-09-12: "we want GPU
+    more than CPU, but we need both"). Two alternating pools; results are read
+    back TWO FRAMES LATE and non-blocking (`WITH_AVAILABILITY`), so the CPU
+    never stalls on the GPU and a sample that is not back is reported as "not
+    measured", never as zero. The design constraint is the RESET: a timestamp
+    write is legal inside a render pass, `vkCmdResetQueryPool` is not, so the
+    pool rotation, readback and reset happen at one host-called point at the top
+    of the frame (`getCustomAttribute("JahGpuFrameBegin")`), outside every
+    encoder. The readback rides `getCustomAttribute` — three new names,
+    `JahGpuTimestamps` / `JahGpuFrameBegin` / `JahGpuSampleResults` — so the
+    patch adds NO OgreMain ABI surface, and a build without it answers the
+    host's probe by throwing, which is how the host learns there is no GPU
+    timing.
+    **TWO OFF-SWITCHES (owner decision D3).** BUILD: everything is inside
+    `#ifdef JAH_GPU_TIMESTAMPS`, set by the new `JAH_GPU_TIMESTAMPS` CMake
+    option, which **defaults OFF** — without it the four hooks compile to
+    upstream's empty bodies byte for byte and the binary contains no query-pool
+    code (verified: `strings RenderSystem_Vulkan.so | grep JahGpu` = 231 with
+    the option on, 0 with `JAH_PRODUCTION=1`). `build-ogre.sh` passes
+    `-DJAH_GPU_TIMESTAMPS=ON` for dev builds and `=OFF` when `JAH_PRODUCTION=1`
+    (the release and packaging lanes). RUNTIME: even in a dev build no pool is
+    created until a capture starts and both are destroyed when it stops, so a
+    dev build with no capture running owns zero query pools — asserted by
+    `test_engine`'s `monitor_gpu_timestamps`, which also passes on a
+    production-configured engine by taking the "no patch in this build" branch.
+    Upstream-reportable: the empty Vulkan hooks are an upstream gap.
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild (0024 is SOURCE + media;
-0025 and 0026 are SOURCE-only) — the Studio build stages the
+0025, 0026 and 0027 are SOURCE-only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant

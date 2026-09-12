@@ -105,6 +105,20 @@ void WorkspaceListener::passEarlyPreExecute(Ogre::CompositorPass *pass) {
     const Ogre::Real aspect = mCamera->getAutoAspectRatio()
                                   ? pass->getViewportAspectRatio(0u)
                                   : mCamera->getAspectRatio();
+    // THE PLANAR REFLECTOR'S CACHE WORK (§4.7). It is VIEW-DEPENDENT, so its
+    // reason is always `Camera` and never `None`: a mirror re-renders every
+    // frame by definition. Counted so a capture can price it (it drags its own
+    // shadow node behind it), never flagged.
+    if (monitor::live()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        mReflections->update(mCamera, aspect);
+        const float ms = float(std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - t0).count());
+        monitor::noteCacheWork(CacheKind::Planar, WorkReason::Camera, 0, "reflect",
+                               unsigned(mReflections->getMaxActiveActors()), ms);
+        monitor::notePlanarRender(1u);
+        return;
+    }
     mReflections->update(mCamera, aspect);
 }
 

@@ -1967,15 +1967,6 @@ struct EngineConfig {
     /// validation error, an ABI complaint) actually happen. Setting it through
     /// Engine::setLogSink afterwards works too and misses exactly that window.
     EngineLogSink logSink;
-    /// OPT-IN PASS PROFILER (riders lane R4; `--profile` on the Studio command
-    /// line, Engine::setProfiling at runtime). Off by default and free when
-    /// off: no listener is registered on any workspace. On, every view logs
-    /// one summary line per ~120 frames to the engine log with the CPU
-    /// submission time of every compositor pass (avg / max per frame, by the
-    /// pass's profiling id) — the time the render thread spent recording that
-    /// pass, including any wait it did inside it. NOT GPU time: this pin has
-    /// no timestamp-query surface, so a GPU-side profile is upstream work.
-    bool        profile = false;
     /// Initial MSAA sample count for ON-SCREEN views (1 = off; 2/4/8 typical).
     /// Offscreen views (thumbnails, previews, tests) always start at 1 so their
     /// pixel readbacks stay exact — raise per view with View::setSampleCount.
@@ -2711,6 +2702,358 @@ struct Image {
         const size_t i = (static_cast<size_t>(y) * width + x) * 4u;
         return Colour(rgba[i] / 255.0f, rgba[i+1] / 255.0f, rgba[i+2] / 255.0f, rgba[i+3] / 255.0f);
     }
+};
+
+// ---------------------------------------------------------------------------
+// THE RENDER-LOOP MONITOR (SPECS/RENDER_LOOP_MONITOR_SPEC.md)
+// ---------------------------------------------------------------------------
+// A DATA COLLECTOR, not a judge. The owner's words: "the purpose of the monitor
+// is to collect as much data as possible for you to be able to review the core
+// engine and how it's running, to look for issues and problems." It records
+// what the frame did and WHY, and nothing in it computes a verdict: no budgets,
+// no thresholds, no 'wasted' flags. Redundant work appears as work whose
+// `reason` is `None`, which is data; whether that is a defect is the LEAD's
+// reading, made from a capture, not the engine's.
+//
+// THREE RULES THIS BOUNDARY ENCODES:
+//  1. OFF BY DEFAULT, ZERO COST WHEN OFF. At MonitorLevel::Off no listener is
+//     attached to any workspace, no clock is read, no ring is allocated and no
+//     GPU query pool exists (MonitorStatus reports all four, and a suite
+//     asserts them).
+//  2. FORWARD ONLY. Nothing is recorded until a capture starts; there is no
+//     background history to look back at.
+//  3. NO ON-SCREEN OUTPUT, EVER. The monitor writes records the host drains; it
+//     never draws, because drawing would cost frame time and passes and
+//     contaminate what it measures.
+
+/// What the monitor is doing. `Review` is the one recording level — the spec's
+/// old Recorder/Compact/Full ladder collapsed to it when the HUD was cut.
+enum class MonitorLevel {
+    Off,     ///< nothing attached, nothing allocated, nothing read
+    Review   ///< per-pass records, cache work + reasons, events, GPU samples
+};
+
+/// Which part of the frame a compositor pass belonged to. The classifier reads
+/// the pass's parent NODE (the three shadow nodes are named constants) and the
+/// workspace's owner, so it is exact rather than inferred from timings.
+enum class PassBucket {
+    Other,          ///< anything unclassified — a warm-up workspace, a mipmap chain
+    Main,           ///< the view's own camera scene pass
+    Post,           ///< the view's post chain (quads, computes, resolves)
+    ShadowView,     ///< the view's shadow node (kShadowNodeName)
+    ShadowReflect,  ///< a planar mirror's shadow node (kReflectShadowNodeName)
+    ShadowProbe,    ///< a reflection probe's shadow node (kProbeShadowNodeName)
+    Planar,         ///< a planar-mirror reflection render
+    ProbeFace       ///< a reflection-probe cube face
+};
+
+/// One compositor pass, as executed. `draws`/`batches`/`triangles`/`instances`
+/// are the DELTA of the render system's own metrics across the pass, so summing
+/// a frame's passes reproduces `RenderStats::draws` for that frame exactly —
+/// which is what the suite asserts.
+///
+/// ZERO DRAWS DOES NOT ALWAYS MEAN "NOTHING WAS DRAWN", and this is Ogre's
+/// plumbing rather than the monitor's. MEASURED (lane MON-P1a, 2026-09-12, the
+/// engine suite's offscreen rig): a frame whose view renders a ground, a cube
+/// and the overlays reports the view's own scene pass as `draws = 0`, while the
+/// shadow node's cube-face caster passes in the SAME frame report 1 each — so
+/// the frame's total is 3 on a frame that re-rendered a lamp map and 0 on the
+/// idle frames after it, with an identical, complete picture every time. In the
+/// app the main pass does report draws (`scripting.e2e.render_stats` asserts
+/// `draws > 0`), so the under-count is configuration-dependent and was NOT
+/// root-caused here; it is reported upstream-ward rather than guessed at.
+/// The monitor reports the render system's own numbers faithfully; analysis
+/// must therefore read a zero as "the renderer counted nothing here", never as
+/// "this pass drew nothing". `FrameRecord::metricsRecording` says whether the
+/// counters were live at all.
+struct FramePass {
+    std::string workspace;        ///< the workspace instance's definition name
+    std::string node;             ///< the parent compositor node's name
+    std::string pass;             ///< the definition's profiling id, else its type
+    PassBucket  bucket = PassBucket::Other;
+    /// The shadow map index a shadow pass renders; kNoShadowMap otherwise.
+    unsigned    shadowMapIdx = 0xFFFFFFFFu;
+    static constexpr unsigned kNoShadowMap = 0xFFFFFFFFu;
+    unsigned    draws = 0, batches = 0, instances = 0;
+    unsigned long long triangles = 0;
+    /// TRUE when the pass never reported its end (a workspace update closed
+    /// with it still open). Its times and counts are unknown, not zero:
+    /// `cpuMs` is negative. Seeing one of these is itself the finding.
+    bool        orphaned = false;
+    float       cpuMs = 0.0f;
+    /// SCENE PASSES ONLY: of this pass's wall time, how much went on its shadow
+    /// node's update (its own nested pass records included) — the shadow-vs-
+    /// scene split, taken from `passSceneAfterShadowMaps`. NEGATIVE on every
+    /// pass that is not a scene pass (quads, clears, computes, resolves). ZERO
+    /// on a scene pass whose shadow node executed nothing — which is exactly
+    /// what a fully cached lamp set looks like, and is why the zero matters as
+    /// much as the number. Ogre fires the callback on every scene pass, a
+    /// shadow node's own caster passes included, so those carry it too.
+    float       shadowMs = -1.0f;
+    /// GPU milliseconds from timestamp queries. NEGATIVE means NOT MEASURED —
+    /// the build has no JAH_GPU_TIMESTAMPS, the device has no usable
+    /// timestamps, or the result has not come back yet. Never faked as 0.
+    float       gpuMs = -1.0f;
+};
+
+/// The caches whose work and reason the monitor records (§4.7).
+enum class CacheKind {
+    Probe,      ///< a reflection-probe capture (units = cube faces)
+    ShadowMap,  ///< a shadow map render (units = passes; id = the light's NodeId)
+    Gi,         ///< the GI volume: voxelize / IR trace / IFD converge
+    Planar,     ///< a planar reflector's render (view-dependent: always justified)
+    Shader,     ///< a shader/PSO compile (detail = the permutation)
+    Texture     ///< a texture load (units = bytes/1024, detail = the name)
+};
+
+/// WHY a cache redid its work. `None` is the important value: the cache did the
+/// work with no recorded input change. That is recorded as data and judged by
+/// nobody here.
+///
+/// The names come from the invalidation causes that already exist in the
+/// engine — `GiStaleReason` (including `Mobility`, lane R1), the lamp-map
+/// cache's per-light dirty keys (lane E2) and the probe sweep's own bookkeeping
+/// — so a reason is a REPORT of what the engine decided, never a second guess.
+enum class WorkReason {
+    None,        ///< no recorded input change (the redundant-work value)
+    Build,       ///< first build / the arm was created this frame
+    Rebuild,     ///< a full teardown-and-rebuild
+    Refresh,     ///< an explicit refresh request (refreshGlobalIllumination)
+    Sweep,       ///< the round-robin budget's turn came up (no input changed)
+    Moved,       ///< the owner itself moved
+    Caster,      ///< a caster moved or changed inside its range/volume
+    Light,       ///< a light moved or changed
+    Material,    ///< a material or texture changed
+    Sky,         ///< the sky changed
+    Ambient,     ///< the ambient term changed
+    Fog,         ///< fog changed
+    Mobility,    ///< an object's mobility class changed (R1)
+    Added,       ///< an object was added
+    Removed,     ///< an object was removed
+    Bounds,      ///< the volume/region bounds changed
+    Resolution,  ///< resolution, quality or budget changed (an atlas rebuild)
+    Camera,      ///< the camera moved (planar reflections; a view-dependent cache)
+    Permutation, ///< a shader permutation was seen for the first time
+    Request      ///< the host asked for it directly
+};
+
+/// One cache's work in one frame, with its reason.
+struct CacheWork {
+    CacheKind  cache  = CacheKind::Probe;
+    WorkReason reason = WorkReason::None;
+    /// Probe index, light NodeId, planar slot — 0 when the cache is global.
+    unsigned long long id = 0;
+    /// Free text the analysis reads: the permutation, the texture name, the
+    /// shadow node kind, the GI phase.
+    std::string detail;
+    /// Faces captured, maps rendered, compiles, kilobytes — per `cache`.
+    unsigned   units = 0;
+    /// Milliseconds, or NEGATIVE when this work was not timed separately
+    /// (it is inside the pass records instead).
+    float      ms = -1.0f;
+};
+
+/// One stage of the frame, exclusive of its children.
+struct FrameStage {
+    std::string name;          ///< "engine.pre", "engine.record", "engine.swap", host stages
+    float       ms = 0.0f;
+};
+
+/// Why this frame was rendered. Set by the caller through
+/// `Engine::setNextFrameCause` — the driver tick, a script's `editor.frame`, an
+/// offscreen readback, the warm-up gate — so analysis can tell a frame nobody
+/// saw from one the owner watched.
+enum class FrameCause { Unknown, Driver, Scripted, Offscreen, WarmUp, Player };
+
+/// EVERYTHING ONE `renderOneFrame` DID. One of these per frame while a capture
+/// runs; the host drains them with `takeFrameRecords` and writes them to
+/// `frames.jsonl`.
+struct FrameRecord {
+    unsigned long long frame = 0;    ///< the engine's monotonic frame counter
+    /// Milliseconds since the capture started, at the frame's first stage mark.
+    double      startMs = 0.0;
+    float       totalMs = 0.0f;      ///< the whole renderOneFrame, wall clock
+    FrameCause  cause = FrameCause::Unknown;
+    bool        onscreen = false;    ///< an enabled WINDOW view took part
+    unsigned    scenesUpdated = 0;
+    std::vector<FrameStage> stages;
+    std::vector<FramePass>  passes;
+    std::vector<CacheWork>  cacheWork;
+    // ---- counters (all for THIS frame) ----
+    unsigned    draws = 0, batches = 0, instances = 0;
+    unsigned long long triangles = 0;
+    unsigned    probeCaptures = 0;      ///< probe cube faces captured
+    unsigned    shadowPasses = 0;       ///< the view's shadow node
+    unsigned    shadowPassesReflect = 0;///< planar mirrors' shadow nodes
+    unsigned    shadowPassesProbe = 0;  ///< probes' shadow nodes
+    unsigned    planarRenders = 0;
+    unsigned    shaderCompiles = 0;
+    /// Was the render system COUNTING while this frame rendered? Recording is
+    /// off in Ogre until something asks for `renderStats()`, and a frame
+    /// rendered with it off reports zeros for every geometry counter — a fact
+    /// `frames.jsonl` states outright so analysis never has to infer it.
+    bool        metricsRecording = false;
+    /// Passes that were closed by a workspace boundary rather than by their own
+    /// `passPosExecute` (see `FramePass::orphaned`). Zero is the only value
+    /// seen so far; a non-zero one means this frame's pass tree is incomplete.
+    unsigned    orphanedPasses = 0;
+    float       textureWaitMs = 0.0f;   ///< the frame-head streaming drain
+    /// Σ of the passes' GPU milliseconds, or NEGATIVE when unmeasured.
+    float       gpuMs = -1.0f;
+    /// What the monitor itself cost this frame, so analysis can subtract it.
+    float       overheadMs = 0.0f;
+};
+
+/// A discrete thing that happened, with its cause.
+enum class MonitorEventKind {
+    GiRebuild,        ///< a GI arm was torn down and rebuilt
+    GiRefresh,        ///< every probe / the voxel volume was invalidated
+    ProbeGridBuild,   ///< the PCC probe grid was (re)placed
+    AtlasRebuild,     ///< the shadow atlas changed shape (workspaces recreated)
+    WorkspaceRebuild, ///< a view's workspace was recreated
+    ShaderCompile,    ///< a permutation was compiled (label = the permutation)
+    TextureLoad,      ///< a texture finished loading (value = bytes)
+    VramFlush,        ///< a deferred-free flush / device memory was reclaimed
+    DeviceLost,       ///< the device was lost
+    ViewDestroyed,
+    Host              ///< the host's own hook: page switches, UI gaps, script marks
+};
+
+/// One event. Times share the frame records' clock.
+struct MonitorEvent {
+    MonitorEventKind kind = MonitorEventKind::Host;
+    unsigned long long frame = 0;
+    double      startMs = 0.0;
+    float       ms = -1.0f;          ///< duration, negative when instantaneous
+    WorkReason  reason = WorkReason::None;
+    std::string label;               ///< the host's label, a permutation, a path
+    std::string detail;
+    unsigned long long value = 0;    ///< bytes, counts — per `kind`
+};
+
+/// What the monitor is doing right now — and the four assertions that make
+/// "zero cost when off" checkable from a test rather than believed.
+struct MonitorStatus {
+    MonitorLevel level = MonitorLevel::Off;
+    /// Monitor listeners attached across EVERY live workspace (view, planar,
+    /// probe). MUST be 0 at Off.
+    unsigned attachedListeners = 0;
+    unsigned ringCapacity = 0;       ///< 0 at Off: the ring is freed, not kept
+    unsigned ringFrames = 0;         ///< records waiting to be drained
+    unsigned pendingEvents = 0;
+    unsigned long long framesRecorded = 0;
+    /// Records the ring overwrote because nobody drained fast enough. Non-zero
+    /// is a fact about the host's drain rate, not a failure.
+    unsigned long long framesDropped = 0;
+    // ---- GPU timing (P1c), with BOTH its off-switches visible ----
+    bool     gpuCompiled  = false;   ///< the engine was built with JAH_GPU_TIMESTAMPS
+    bool     gpuSupported = false;   ///< ...and the device/backend can do timestamps
+    bool     gpuActive    = false;   ///< ...and a capture has a query pool open NOW
+    unsigned gpuQueryPools = 0;      ///< MUST be 0 outside a capture
+    /// GPU samples the LAST frame could not record because the query pool ran
+    /// out of room. Non-zero means this capture's GPU numbers are INCOMPLETE —
+    /// said out loud rather than left for analysis to notice that some passes
+    /// have no time. (A probe capture alone is 6 faces x ~22 passes.)
+    unsigned gpuSamplesTruncated = 0;
+    std::string gpuReason;           ///< why GPU timing is unavailable, when it is
+    float    overheadMs = 0.0f;      ///< the monitor's own cost, last frame
+};
+
+// ---- Engine snapshot (§4.8 `snapshot_start.json` / `snapshot_end.json`) ----
+
+/// One pass of the compositor graph, as DEFINED (not as executed).
+struct CompositorPassInfo {
+    std::string type;            ///< "render_scene", "render_quad", "clear", "compute", ...
+    std::string profilingId;
+    std::string camera;          ///< the camera the definition names, when it names one
+    /// The shadow node a SCENE pass names, empty when it names none. The single
+    /// most expensive line in a capture's graph: a pass that names one
+    /// re-renders it, and a probe face that names the VIEW's node costs a
+    /// full-resolution atlas per probe.
+    std::string shadowNode;
+    unsigned    shadowMapIdx = FramePass::kNoShadowMap;
+    unsigned    numInitialPasses = 0;   ///< 0 = every frame; >0 = only the first N
+};
+
+struct CompositorNodeInfo {
+    std::string name;
+    std::vector<CompositorPassInfo> passes;
+};
+
+/// One live workspace. THE COMPOSITOR GRAPH the spec asks for is the list of
+/// these: every workspace, its nodes and passes, and which scene each renders.
+struct CompositorWorkspaceInfo {
+    std::string name;            ///< the workspace definition's name
+    std::string owner;           ///< "view:main", "probe:7", "planar:0", "?"
+    std::string scene;           ///< the SceneManager it renders
+    bool        enabled = false;
+    unsigned    width = 0, height = 0;
+    unsigned    listeners = 0;   ///< listeners attached to it (the monitor's included)
+    std::vector<CompositorNodeInfo> nodes;
+};
+
+/// One reflection probe, as placed.
+struct ProbeInfo {
+    unsigned index = 0;
+    Vec3     centre, halfSize;
+    /// The probe's parallax SHAPE (what the shader reprojects onto).
+    Vec3     shapeMin, shapeMax;
+    bool     dirty = false;      ///< scheduled to re-capture
+    bool     isStatic = false;   ///< placed as a static (never-swept) probe
+    unsigned resolution = 0;
+};
+
+/// One light, as the engine holds it — with whether the lamp-map cache has it.
+struct SnapshotLight {
+    NodeId      node = 0;
+    LightType   type = LightType::Point;
+    bool        castShadow = false;
+    bool        cached = false;     ///< the lamp-map cache holds its map
+    bool        dirty = false;      ///< ...and it re-renders on the next frame
+    unsigned    shadowSlot = 0xFFFFFFFFu;   ///< the atlas slot, or ~0
+    float       range = 0.0f;
+    float       intensity = 0.0f;
+    Vec3        position;
+};
+
+/// THE WHOLE ENGINE, at one instant. Written at the start and the end of a
+/// capture so analysis can see what changed under it. Built from the status
+/// readers that already exist plus the compositor graph, which nothing else
+/// could see.
+struct EngineSnapshot {
+    bool        live = false;
+    std::string label;              ///< "start" / "end" / whatever the host passes
+    std::string scene;              ///< the scene the snapshot describes
+    unsigned long long frame = 0;
+    double      atMs = 0.0;         ///< capture-relative milliseconds
+    DeviceInfo  device;
+    GiParams    giParams;           ///< every GI parameter, as requested
+    GiStatus    gi;                 ///< ...and what they resolved to
+    ShadowStatus shadow;
+    ShaderCacheStats shaderCache;
+    ObjectCounts objects;
+    MemoryStats  memory;
+    EngineThreading threading;
+    MobilityStatus  mobility;
+    RenderStats  render;
+    /// The texture streaming queue at this instant.
+    bool        texturesDoneStreaming = true;
+    unsigned    texturesPending = 0;
+    /// Datablocks held per Hlms block (pbs, unlit, low-level...). Ogre keeps
+    /// the compiled-shader cache itself private at this pin, so this is the
+    /// exact number the snapshot can state — and it is the one behind the
+    /// batching-collapse question.
+    std::vector<std::pair<std::string, unsigned>> hlmsDatablocks;
+    /// VRAM by pool — the texture-manager entries, LARGEST FIRST and capped
+    /// (a bundle must not be dominated by this list). `textureCount` is how
+    /// many there really are and `texturesTruncated` how many were dropped, so
+    /// a reader is never silently given a partial list.
+    std::vector<TextureMemoryEntry> textures;
+    unsigned textureCount = 0;
+    unsigned texturesTruncated = 0;
+    std::vector<SnapshotLight> lights;
+    std::vector<ProbeInfo>     probes;
+    std::vector<CompositorWorkspaceInfo> workspaces;
 };
 
 }}  // namespace jahshaka::engine
