@@ -275,6 +275,14 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     if (mGridMinorMaterial) { mTarget->destroyMaterial(mGridMinorMaterial); mGridMinorMaterial = 0; }
     if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
     mGridBuiltSpacing = -1.0f;
+    // The ground's horizon: same discipline as the grid. Its MATERIAL is the
+    // floor's own and belongs to mMaterials, which is swept below — dropping it
+    // here would destroy the floor's material out from under the floor.
+    if (mHorizonNode) { mTarget->removeNode(mHorizonNode); mHorizonNode = 0; }
+    if (mHorizonMesh) { mTarget->destroyMesh(mHorizonMesh); mHorizonMesh = 0; }
+    mHorizonMaterial = 0;
+    mHorizonVisible = -1;
+    mHorizonFloor = nullptr;
     // The GI volume overlay's two boxes (fix 9): same discipline as the grid.
     if (mGiVolLitNode)   { mTarget->removeNode(mGiVolLitNode);   mGiVolLitNode = 0; }
     if (mGiVolProbeNode) { mTarget->removeNode(mGiVolProbeNode); mGiVolProbeNode = 0; }
@@ -437,6 +445,7 @@ int SceneMirror::sync()
             mWasPlaying = playing;
         }
     }
+    mHorizonFloor = nullptr;     // re-found by this walk (syncGroundHorizon)
     mAnyRefractive = false;
     mAnyDistortion = false;
     mShadowFilter = ShadowFilter::Hard;
@@ -493,6 +502,7 @@ int SceneMirror::sync()
     { MirrorStage s(mon, "mirror.helpers");
     syncHighlight();
     syncGrid();
+    syncGroundHorizon();
     }
     // AFTER removeMissing: a rider deleted from the document is a dangling key
     // in the reconciler's map until its entry is released (see the function).
@@ -1163,6 +1173,124 @@ void SceneMirror::syncGrid()
     mTarget->setNodeVisible(mGridNode, true);
 }
 
+// ---- the ground's horizon ---------------------------------------------------
+//
+// Owner, 2026-09-13 (testing push #18): "should the default ground not also be
+// infinite in the Grand Showroom 2? It seems cut off." It is: the default floor
+// is a 100 m square (lane L3 cut it from 1024 m so a new project would stop
+// voxelising a square kilometre) and Showroom 2's hall alone is 48 m, so flying
+// out of the hall shows the floor end in mid-air with sky underneath.
+//
+// This is the floor's own material carried on to the horizon by ONE extra plane
+// that belongs to the mirror, not to the document. The rationale for the shape,
+// and the two rejected alternatives with their measurements, are on
+// syncGroundHorizon's declaration in the header.
+//
+// THE NUMBERS. `kHorizonHalfExtent` is twice the editor camera's far clip
+// (1000 m, EngineSceneViewport::createEditorCamera), so the plane's own edge is
+// always beyond the far plane and what a user can see is the far plane's own
+// distance horizon, in every direction, at every height -- never a corner and
+// never an edge that can be flown to. `kHorizonUvPerMetre` is ground.obj's UV
+// density (its 100 m spans 6.25 UV, so 0.0625), which is what makes the
+// checker's world size on the horizon identical to the floor's under the same
+// material -- the material's own textureScale multiplies both. `kHorizonSink`
+// puts it just under the floor so the floor always wins where they overlap;
+// 5 mm reads as 0.006 degrees at the floor's 50 m edge, an order of magnitude
+// under a pixel on a 1080-line view.
+static constexpr float kHorizonHalfExtent = 2000.0f;
+static constexpr float kHorizonUvPerMetre = 0.0625f;
+static constexpr float kHorizonSink       = 0.005f;
+
+void SceneMirror::syncGroundHorizon()
+{
+    const iris::MeshNode *floor = mHorizonFloor;
+    // A scene with no default floor (a thumbnail scene, a preview, a project
+    // whose floor was deleted) has no horizon, and a hidden floor takes its
+    // horizon with it.
+    const bool want = floor && floor->isVisibleInScene();
+    if (!want) {
+        if (mHorizonNode && mHorizonVisible != 0) {
+            mTarget->setNodeVisible(mHorizonNode, false);
+            mHorizonVisible = 0;
+        }
+        // Let go of the floor's material as well: while the horizon holds one
+        // the cache sweep keeps it alive (reclaimUnused), and a floor that has
+        // been deleted must take its material with it.
+        if (mHorizonMaterial) {
+            mTarget->detachMesh(mHorizonNode);
+            mHorizonMaterial = 0;
+            mReclaimPending = true;
+        }
+        return;
+    }
+
+    if (!mHorizonNode) {
+        mHorizonNode = mTarget->createNode();
+        if (!mHorizonNode) return;
+        // AN EDITOR HELPER, in the engine's sense (EnginePrivate.h's bit
+        // scheme): kHelperBit instead of kVisibleBit takes the plane out of
+        // every reflection-probe capture, out of the shadow nodes (nothing this
+        // size may ever be a shadow caster or the atlas fits the horizon
+        // instead of the scene) and out of kGiGeometryBit, while the main chain
+        // -- which sets no visibility mask at all -- goes on drawing it.
+        mTarget->setNodeHelper(mHorizonNode, true);
+    }
+    if (!mHorizonMesh) {
+        // Four corners, and BOTH windings: the plane is seen from above in
+        // every normal view, and an engine node is born with back-face culling
+        // the document's faceCullingMode would otherwise have to turn off.
+        const float h = kHorizonHalfExtent, u = h * kHorizonUvPerMetre;
+        MeshData quad;
+        quad.positions = { -h, 0.0f, -h,   h, 0.0f, -h,   h, 0.0f, h,   -h, 0.0f, h };
+        quad.normals   = { 0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f,
+                           0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f };
+        quad.uvs       = { -u, -u,   u, -u,   u, u,   -u, u };
+        quad.indices   = { 0, 1, 2,  0, 2, 3,   0, 2, 1,  0, 3, 2 };
+        mHorizonMesh = mTarget->createMesh(quad);
+        if (!mHorizonMesh) return;
+        mHorizonMaterial = 0;      // nothing is attached yet
+    }
+
+    // THE FLOOR'S OWN MATERIAL, by id: every edit a user makes to the floor --
+    // its colour, its checker, its tiling, a whole library material dropped on
+    // it -- reaches the horizon with no work here, because both items point at
+    // the same datablock. Only a material SWAP re-attaches.
+    const MaterialId mat = materialFor(floor->material.data());
+    if (mat && mat != mHorizonMaterial) {
+        mTarget->attachMesh(mHorizonNode, mHorizonMesh, mat);
+        mHorizonMaterial = mat;
+    }
+    if (!mHorizonMaterial) return;
+
+    // The floor's world transform, sunk. Rotation and scale ride along so a
+    // scaled or tilted floor keeps its horizon attached to it (and its checker
+    // density, which the scale multiplies on both meshes alike).
+    //
+    // AND NOTHING AT REST: a floor that has not moved re-pushes nothing, so a
+    // still scene pays three pointer tests for the whole feature.
+    const iris::Mat4 world = const_cast<iris::MeshNode *>(floor)->getGlobalTransform();
+    if (world == mHorizonWorld && mHorizonVisible == 1) return;
+    mHorizonWorld = world;
+    const iris::Vec3 cx = world.column(0).toVector3D(), cy = world.column(1).toVector3D(),
+                     cz = world.column(2).toVector3D();
+    const iris::Vec3 scale(cx.length(), cy.length(), cz.length());
+    const iris::Vec3 pos = world.column(3).toVector3D();
+    const float sx = scale.x() > 1e-8f ? scale.x() : 1.0f, sy = scale.y() > 1e-8f ? scale.y() : 1.0f,
+                sz = scale.z() > 1e-8f ? scale.z() : 1.0f;
+    float m[9] = { cx.x() / sx, cy.x() / sy, cz.x() / sz,
+                   cx.y() / sx, cy.y() / sy, cz.y() / sz,
+                   cx.z() / sx, cy.z() / sy, cz.z() / sz };
+    const iris::Quat rot = iris::Quat::fromRotationMatrix(iris::Mat3(m));
+    mTarget->setNodeTransform(mHorizonNode,
+                              Vec3(pos.x(), pos.y() - kHorizonSink * sy, pos.z()),
+                              Quat(rot.x(), rot.y(), rot.z(), rot.scalar()),
+                              Vec3(scale.x(), scale.y(), scale.z()));
+    if (mHorizonVisible != 1) {
+        mTarget->setNodeVisible(mHorizonNode, true);
+        mHorizonVisible = 1;
+    }
+}
+
 // ---- the GI volume overlay (LIGHTING_FIX fix 9) -----------------------------
 
 void SceneMirror::setGiVolumeOverlay(bool visible)
@@ -1590,6 +1718,10 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
         auto *meshNode = static_cast<iris::MeshNode *>(node);
+        // THE SCENE'S DEFAULT FLOOR, remembered for syncGroundHorizon. Recorded
+        // here rather than searched for afterwards: the walk is already at every
+        // mesh node, and the flag is the document's own (never the name).
+        if (meshNode->defaultFloor && !mHorizonFloor) mHorizonFloor = meshNode;
         // The members, not the by-value getters: `getMesh()`/`getMaterial()`/
         // `getSkeleton()` each return a QSharedPointer BY VALUE, so reading
         // them costs an atomic increment and decrement per mesh per frame for
@@ -2195,6 +2327,12 @@ void SceneMirror::reclaimUnused()
     QSet<MeshId> usedMeshes; QSet<MaterialId> usedMaterials;
     for (const Entry &e : mEntries) { if (e.mesh) usedMeshes.insert(e.mesh); if (e.material) usedMaterials.insert(e.material); }
     for (const HighlightShell &s : mHighlightShells) if (s.mesh) usedMeshes.insert(s.mesh);
+    // The ground's horizon holds the FLOOR's material by id and is not an entry,
+    // so the sweep cannot see it. A floor deleted in the same frame would
+    // otherwise destroy a datablock the horizon's Item still points at — the
+    // stale-binding crash, reached from the one object in the scene nobody can
+    // select. Its own mesh is not in mMeshes at all (like the grid's).
+    if (mHorizonMaterial) usedMaterials.insert(mHorizonMaterial);
     for (auto it = mMeshes.begin(); it != mMeshes.end();) {
         if (usedMeshes.contains(it.value())) { ++it; continue; }
         mTarget->destroyMesh(it.value()); it = mMeshes.erase(it);
