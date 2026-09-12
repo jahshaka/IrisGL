@@ -125,6 +125,7 @@ void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool o
     mInFrame = true;
     mStageChild = nullptr;
     mPassStack.clear();
+    mPassSampleIds.clear();
     // Host stages pushed before the frame opened (the driver's tick wraps the
     // engine's frame, so `tick` and the mirror's sub-stages are known first)
     // lead the stage list.
@@ -153,20 +154,57 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
         case PassBucket::ShadowProbe:   ++mCurrent.shadowPassesProbe; break;
         default: break;
         }
-        if (p.gpuMs >= 0.0f) {
-            if (mCurrent.gpuMs < 0.0f) mCurrent.gpuMs = 0.0f;
-            mCurrent.gpuMs += p.gpuMs;
-        }
     }
     mOverheadMs += std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - t).count();
     mCurrent.overheadMs = float(mOverheadMs);
     mLastOverheadMs = float(mOverheadMs);
     mOverheadMs = 0.0;
-    push(std::move(mCurrent));
+    // THE HOLDING QUEUE (P1c). A GPU sample comes back two frames late, so the
+    // record waits here until its samples arrive or it ages out; without GPU
+    // sampling the queue is one deep and the record is published immediately.
+    PendingFrame pf;
+    pf.rec = std::move(mCurrent);
+    pf.passSampleIds.swap(mPassSampleIds);
+    if (mGpu) {
+        const unsigned slot = unsigned(mPending.size());
+        for (unsigned i = 0; i < pf.passSampleIds.size(); ++i)
+            if (pf.passSampleIds[i]) mGpuSampleIndex[pf.passSampleIds[i]] = { slot, i };
+    }
+    mPending.push_back(std::move(pf));
+    retirePending(false);
     mCurrent = FrameRecord();
     mInFrame = false;
     ++mFramesRecorded;
+}
+
+void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
+    auto it = mGpuSampleIndex.find(sampleId);
+    if (it == mGpuSampleIndex.end()) return;     // its frame already aged out
+    const unsigned slot = it->second.first, pass = it->second.second;
+    if (slot < mPending.size() && pass < mPending[slot].rec.passes.size())
+        mPending[slot].rec.passes[pass].gpuMs = ms;
+    mGpuSampleIndex.erase(it);
+}
+
+void FrameMonitor::retirePending(bool all) {
+    const size_t keep = (all || !mGpu) ? 0u : size_t(kGpuLatencyFrames);
+    while (mPending.size() > keep) {
+        PendingFrame pf = std::move(mPending.front());
+        mPending.pop_front();
+        // The frame's GPU total, from whatever came back. NEGATIVE stays
+        // negative: a pass with no sample is "not measured", never zero.
+        for (const FramePass &p : pf.rec.passes)
+            if (p.gpuMs >= 0.0f) {
+                if (pf.rec.gpuMs < 0.0f) pf.rec.gpuMs = 0.0f;
+                pf.rec.gpuMs += p.gpuMs;
+            }
+        for (unsigned id : pf.passSampleIds) mGpuSampleIndex.erase(id);
+        push(std::move(pf.rec));
+        // Every surviving frame moved down one slot.
+        for (auto &kv : mGpuSampleIndex)
+            if (kv.second.first > 0u) --kv.second.first;
+    }
 }
 
 void FrameMonitor::push(FrameRecord &&r) {
@@ -177,6 +215,7 @@ void FrameMonitor::push(FrameRecord &&r) {
 }
 
 unsigned FrameMonitor::drainFrames(std::vector<FrameRecord> &out) {
+    retirePending(false);
     if (mRing.empty()) return 0u;
     const unsigned n = unsigned(mRing.size());
     // OLDEST FIRST. The ring is either still in order (never wrapped) or split
@@ -207,8 +246,10 @@ void FrameMonitor::cacheWork(const CacheWork &w) {
     if (mInFrame) mCurrent.cacheWork.push_back(w);
     else          mPendingCacheWork.push_back(w);
 }
-void FrameMonitor::pass(FramePass &&p) {
-    if (mInFrame) mCurrent.passes.push_back(std::move(p));
+void FrameMonitor::pass(FramePass &&p, unsigned gpuSampleId) {
+    if (!mInFrame) return;
+    mCurrent.passes.push_back(std::move(p));
+    if (mGpu) mPassSampleIds.push_back(gpuSampleId);
 }
 void FrameMonitor::event(MonitorEvent &&e) {
     if (mEvents.size() >= kEventCapacity) { ++mEventsDropped; return; }
@@ -303,6 +344,17 @@ void PassListener::passPreExecute(Ogre::CompositorPass *pass) {
         else f.rec.bucket = sceneKind ? PassBucket::Main : PassBucket::Post;
     }
     if (sceneKind) f.rec.shadowMs = 0.0f;   // a scene pass answers the split; see below
+    // THE GPU SAMPLE (P1c). Ogre's own profiler is the only upstream caller of
+    // these hooks and it is compiled out here (OGRE_PROFILING = 0), so the
+    // monitor calls them itself: one sample per pass, nested exactly like the
+    // CPU stack. Costs two vkCmdWriteTimestamp calls; nothing is read back.
+    if (gMonitor->mGpu && rs) {
+        f.gpuSampleId = gMonitor->nextGpuSampleId();
+        if (f.gpuSampleId) {
+            unsigned hash = f.gpuSampleId;
+            try { rs->beginGPUSampleProfile(f.rec.pass, &hash); } catch (...) {}
+        }
+    }
     gMonitor->mPassStack.push_back(std::move(f));
     gMonitor->addOverhead(std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0).count());
@@ -330,6 +382,9 @@ void PassListener::passPosExecute(Ogre::CompositorPass *pass) {
 
     const Ogre::CompositorNode *node = pass->getParentNode();
     Ogre::RenderSystem *rs = node ? node->getRenderSystem() : nullptr;
+    if (gMonitor->mGpu && rs && f.gpuSampleId) {
+        try { rs->endGPUSampleProfile(f.rec.pass); } catch (...) {}
+    }
     unsigned draws = 0, batches = 0, instances = 0;
     unsigned long long tris = 0;
     readMetrics(rs, draws, batches, tris, instances);
@@ -357,7 +412,7 @@ void PassListener::passPosExecute(Ogre::CompositorPass *pass) {
         parent.childInstances += f.rec.instances + f.childInstances;
         parent.childTriangles += f.rec.triangles + f.childTriangles;
     }
-    gMonitor->pass(std::move(f.rec));
+    gMonitor->pass(std::move(f.rec), f.gpuSampleId);
     gMonitor->addOverhead(std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t1).count());
 }
@@ -457,6 +512,12 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
             if (mRoot) mRoot->removeFrameListener(&mMonitor->mSplit);
         } JAH_CATCH(mLastError, );
         mShaderCache.recordCompileNames(false);
+        // Everything still in the holding queue is published before the ring
+        // dies, minus the GPU samples that were never going to arrive.
+        mMonitor->retirePending(true);
+        if (mMonitor->mGpu)
+            if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr)
+                try { rs->deinitGPUProfiling(); } catch (...) {}
         monitor::gMonitor = nullptr;
         mMonitor.reset();
         return;
@@ -467,6 +528,19 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
     mMonitor.reset(new monitor::FrameMonitor());
     monitor::gMonitor = mMonitor.get();
     mShaderCache.recordCompileNames(true);
+    // THE RUNTIME OFF-SWITCH, closed here and nowhere else: the query pools are
+    // created when a capture starts and destroyed when it stops, so a dev build
+    // with no capture running owns no pool at all (owner decision D3, lock 2).
+    if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr) {
+        try {
+            rs->initGPUProfiling();
+            bool available = false;
+            rs->getCustomAttribute("JahGpuTimestamps", &available);
+            mMonitor->mGpu = available;
+        } catch (...) {
+            mMonitor->mGpu = false;   // no patch in this build: CPU only, honestly
+        }
+    }
     if (mRoot) mRoot->addFrameListener(&mMonitor->mSplit);
     monitor::noteEvent(MonitorEventKind::Host, WorkReason::Request, "monitor.start");
 }
@@ -716,7 +790,53 @@ void OgreEngine::gpuTimingStatus(MonitorStatus &st) const {
     st.gpuSupported = false;
     st.gpuActive = false;
     st.gpuQueryPools = 0u;
-    st.gpuReason = "GPU timestamps are not in this engine build (JAH_GPU_TIMESTAMPS unset)";
+    Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+    if (!rs) { st.gpuReason = "no render system"; return; }
+    // LOCK 1, THE BUILD. `getCustomAttribute` THROWS on an unknown name, and in
+    // a render system built without JAH_GPU_TIMESTAMPS the name does not exist:
+    // that exception IS the answer, and it is why a production build needs no
+    // runtime flag of its own to be honest here.
+    bool available = false;
+    try {
+        rs->getCustomAttribute("JahGpuTimestamps", &available);
+        st.gpuCompiled = true;
+    } catch (...) {
+        st.gpuReason = "this Ogre build has no GPU timestamp support "
+                       "(ogre-patch 0027 / JAH_GPU_TIMESTAMPS is off — a production build)";
+        return;
+    }
+    // LOCK 2, THE RUNTIME. `available` is true only while a query pool exists,
+    // and a pool exists only inside a capture.
+    st.gpuSupported = true;
+    st.gpuActive = available;
+    st.gpuQueryPools = available ? 2u : 0u;
+    if (!available)
+        st.gpuReason = mMonitor ? "the device or queue has no usable timestamps"
+                                : "no capture is running (no query pool exists)";
+    else
+        st.gpuReason.clear();
+}
+
+// The frame's GPU bookkeeping: rotate the query pools, read back what the frame
+// two frames ago measured, and reset the pool about to be written. ONE call,
+// at the top of the frame and outside every encoder — which is the only place
+// vkCmdResetQueryPool is legal (see ogre-patch 0027).
+void OgreEngine::gpuFrameBegin() {
+    if (!mMonitor || !mMonitor->mGpu) return;
+    Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+    if (!rs) return;
+    try {
+        rs->getCustomAttribute("JahGpuFrameBegin", nullptr);
+        std::vector<std::pair<Ogre::uint32, float>> results;
+        rs->getCustomAttribute("JahGpuSampleResults", &results);
+        for (const auto &r : results) mMonitor->noteGpuSample(unsigned(r.first), r.second);
+    } catch (...) {
+        // A render system that stopped answering (a device loss took the pools)
+        // turns GPU sampling off for the rest of the capture rather than
+        // half-filling records.
+        mMonitor->mGpu = false;
+        monitor::noteEvent(MonitorEventKind::DeviceLost, WorkReason::None, "gpu.timestamps.lost");
+    }
 }
 
 }   // namespace detail

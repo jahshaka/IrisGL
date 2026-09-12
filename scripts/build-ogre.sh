@@ -240,8 +240,23 @@ if command -v ccache >/dev/null 2>&1 && [ "${JAH_NO_CCACHE:-0}" != "1" ]; then
     CCACHE_FLAGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
 fi
 
+# GPU TIMESTAMPS (ogre-patch 0027) — DEV BUILDS ONLY, the first of the two
+# off-switches the owner asked for (RENDER_LOOP_MONITOR_SPEC D3, 2026-09-12).
+# Without it the Vulkan render system's initGPUProfiling /
+# beginGPUSampleProfile / endGPUSampleProfile compile to upstream's empty stubs
+# byte for byte: no query pool type, no extra members, nothing to switch off at
+# runtime because nothing is there. A production or packaging build sets
+# JAH_PRODUCTION=1 and gets exactly upstream's behaviour. (The SECOND
+# off-switch is at runtime: even in a dev build no query pool is created until
+# a Ctrl+F4 capture starts, and it is destroyed when the capture stops.)
+GPU_TIMESTAMP_FLAGS="-DJAH_GPU_TIMESTAMPS=ON"
+if [ "${JAH_PRODUCTION:-0}" = "1" ]; then
+    echo "JAH_PRODUCTION=1: building Ogre WITHOUT GPU timestamp sampling (upstream stubs)."
+    GPU_TIMESTAMP_FLAGS="-DJAH_GPU_TIMESTAMPS=OFF"
+fi
+
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo $CCACHE_FLAGS \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo $CCACHE_FLAGS $GPU_TIMESTAMP_FLAGS \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DOGRE_SHADER_COMPILATION_THREADING_MODE=2 \

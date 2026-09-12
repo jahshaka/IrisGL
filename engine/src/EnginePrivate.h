@@ -101,6 +101,7 @@
 #include <limits>
 #include <map>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -910,6 +911,43 @@ public:
     // ---- the frame --------------------------------------------------------
     void beginFrame(unsigned long long frame, FrameCause cause, bool onscreen);
     void endFrame(unsigned scenesUpdated);
+
+    // ---- GPU timestamps (P1c, ogre-patch 0027) -----------------------------
+    //
+    // A GPU sample comes back TWO FRAMES LATE (the query pool for frame N is
+    // read just before it is recycled at the start of frame N+2, behind the
+    // availability bit, so nothing ever stalls the CPU on the GPU). A frame
+    // record therefore cannot be published the moment it ends: it waits in a
+    // short holding queue until its samples arrive or it ages out, and only
+    // then enters the ring the host drains.
+    static constexpr unsigned kGpuLatencyFrames = 3u;
+    /// A frame waiting for its GPU samples, with the sample id of each pass.
+    struct PendingFrame {
+        FrameRecord           rec;
+        std::vector<unsigned> passSampleIds;   ///< parallel to rec.passes
+    };
+    /// Whether this capture is taking GPU samples at all. Set once, when the
+    /// monitor goes on, from the render system's own answer.
+    bool mGpu = false;
+    /// The next sample id. Unique for the life of the capture, so a result that
+    /// comes back late can always be attributed to the right pass of the right
+    /// frame — and one that belongs to a frame already published is dropped
+    /// rather than mis-filed.
+    unsigned mNextGpuSampleId = 1u;
+    /// id -> (pending-queue index, pass index). Rebuilt as frames retire.
+    std::unordered_map<unsigned, std::pair<unsigned, unsigned>> mGpuSampleIndex;
+    std::deque<PendingFrame> mPending;
+    /// The sample id of each pass of the frame being built, parallel to
+    /// `mCurrent.passes`. Empty while GPU sampling is off.
+    std::vector<unsigned> mPassSampleIds;
+    /// Files a GPU result against the pass that asked for it. Unknown ids (a
+    /// frame that already aged out) are dropped.
+    void noteGpuSample(unsigned sampleId, float ms);
+    /// Moves everything that has waited long enough from the holding queue into
+    /// the ring.
+    void retirePending(bool all);
+    /// The next sample id for a pass about to execute (0 = not sampling).
+    unsigned nextGpuSampleId() { return mGpu ? mNextGpuSampleId++ : 0u; }
     bool inFrame() const { return mInFrame; }
     FrameRecord &current() { return mCurrent; }
 
@@ -917,7 +955,7 @@ public:
     void stage(const char *name, double ms);
     void hostStage(const std::string &name, float ms);
     void cacheWork(const CacheWork &w);
-    void pass(FramePass &&p);
+    void pass(FramePass &&p, unsigned gpuSampleId = 0u);
     void event(MonitorEvent &&e);
     /// Cache work recorded BEFORE the frame opened — the probe budget and the
     /// lamp-map caster scan both run in the engine's pre-frame half — belongs
@@ -937,6 +975,9 @@ public:
         unsigned childDraws = 0, childBatches = 0, childInstances = 0;
         unsigned long long childTriangles = 0;
         FramePass rec;
+        /// The GPU sample this pass opened (0 = none). Held here because the
+        /// render system's begin/end hooks are a STACK, exactly like this one.
+        unsigned gpuSampleId = 0u;
     };
     std::vector<PassFrame> mPassStack;
     /// The innermost open Stage's child accumulator (Stage manages it).
@@ -3861,6 +3902,11 @@ public:
     /// device can do it, and whether a query pool exists right now. Both
     /// off-switches are visible here (owner decision D3).
     void gpuTimingStatus(MonitorStatus &st) const;
+    /// The frame's GPU bookkeeping (P1c): rotate the query pools, read back the
+    /// samples of the frame two frames ago and reset the pool about to be
+    /// written. Must run at the TOP of the frame, outside every encoder. A
+    /// no-op with the monitor off or without ogre-patch 0027.
+    void gpuFrameBegin();
     /// Builds the compositor-graph half of a snapshot (every live workspace,
     /// its nodes and passes, and which scene each renders).
     void collectCompositorGraph(std::vector<CompositorWorkspaceInfo> &out) const;

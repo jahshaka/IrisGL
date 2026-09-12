@@ -543,7 +543,12 @@ void OgreEngine::renderOneFrame() {
         }
         mNextFrameCause = FrameCause::Driver;
         std::unique_ptr<monitor::Stage> monPre;
-        if (monitor::live()) monPre.reset(new monitor::Stage("engine.pre"));
+        if (monitor::live()) {
+            monPre.reset(new monitor::Stage("engine.pre"));
+            // BEFORE anything renders and outside every encoder — the only
+            // place a Vulkan query pool may be reset (ogre-patch 0027).
+            gpuFrameBegin();
+        }
         // THE ONE TEXTURE WAIT (THREADING_ADOPTION_SPEC.md P2 item 3, decision
         // D-C(1)). `loadTexture` no longer waits per texture; it schedules, and
         // this is where the frame collects. It is at the very TOP of the frame,
