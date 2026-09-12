@@ -136,6 +136,11 @@ struct MobilityStatus {
     size_t movableItems = 0;    ///< movable nodes carrying drawable geometry
     size_t movableLights = 0;   ///< movable nodes carrying a light
     size_t movableNodes = 0;    ///< every node the host marked movable
+    /// GI rebuilds a mobility CHANGE caused. 0 in every scene today: recording
+    /// mobility invalidates nothing (lane R1), so a flip is free. Lane R2 —
+    /// where the value starts selecting render channels and a flip can turn an
+    /// item's GI bit on or off — is what can move this.
+    unsigned long long mobilityRebuilds = 0;
 };
 
 /// A posed bone: LOCAL to its parent bone (a root bone: local to the mesh node).

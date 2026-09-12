@@ -671,8 +671,12 @@ public:
     /// systems (their object memory managers have no static twin) — refuse the
     /// hint. isStaticEligible() is the document-side test.
     /// MOBILITY, the user's setting (`auto` by default). The write RE-APPLIES
-    /// the classification: the graph class follows the resolution immediately,
-    /// so setting a prop `movable` takes it out of the static half at once.
+    /// the classification OVER THE WHOLE SUBTREE: the graph class follows the
+    /// resolution immediately, so setting a prop `movable` takes it and
+    /// everything under it out of the static half at once (rule 2 — a child
+    /// travels with its parent — makes this a subtree question, and leaving
+    /// children's stale hints standing costs a refusal warning per child on
+    /// every later scene bind).
     ///
     /// A setting is RECORDED even where it cannot hold: `static` on a physics
     /// body is remembered (it becomes true the moment the body is removed) but

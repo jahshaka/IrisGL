@@ -284,14 +284,27 @@ bool SceneNode::hasMobilityDriver(MobilityReason *why) const
     const auto yes = [why](MobilityReason r) { if (why) *why = r; return true; };
     // A SIMULATED body: Bullet writes its transform every step.
     //
-    // AN IMMOVABLE ONE IS NOT A MOVER, and getting this wrong is not academic:
-    // the DEFAULT SCENE'S GROUND is a physics body of type Static (the thing a
-    // character walks on), so a rule that read `isPhysicsBody` alone classified
-    // the floor of every new project as moving — and in lane R2 that takes the
-    // floor out of the reflection probes and the bounce light. Bullet never
-    // writes a static body's transform; only the author can, and that is an
-    // editor drag, which is not a promotion (§3.3.3).
-    if (isPhysicsBody && physicsProperty.type != PhysicsType::Static
+    // ALL THREE TESTS ARE LOAD-BEARING, and `isPhysicsBody` alone is none of
+    // them:
+    //
+    //  * TYPE None. The Properties panel's Collision Shape row sets
+    //    `isPhysicsBody = true` on its own (physicspropertywidget.cpp), leaving
+    //    Physics Type at None and the mass at its constructor default of 1 — so
+    //    any node whose shape was ever touched would read as moving, with the
+    //    Movement blade saying "Moves - it is a physics object" directly above a
+    //    Physics blade reading "None". A scene written before the file carried
+    //    `physicsProperties.type` reads back None the same way
+    //    (scenereader.cpp: a missing key is 0).
+    //  * TYPE Static, and a ZERO MASS, which is the same thing in Bullet: an
+    //    immovable body does not move. The DEFAULT SCENE'S GROUND is one — the
+    //    thing a character walks on — so this decides whether the floor of every
+    //    new project is classified as moving, and in lane R2 that is the floor
+    //    leaving the reflection probes and the bounce light.
+    //
+    // Nothing writes an immovable body's transform but the author, and that is
+    // an editor drag, which is not a promotion (§3.3.3).
+    if (isPhysicsBody && physicsProperty.type != PhysicsType::None
+        && physicsProperty.type != PhysicsType::Static
         && physicsProperty.objectMass != 0.0f)
         return yes(MobilityReason::Physics);
     // An avatar wrapper walks: the movement component and the locomotion state
@@ -396,10 +409,18 @@ void SceneNode::setMobility(Mobility m)
     // removed. resolveMobility() reports the disagreement openly rather than
     // silently dropping it.
     mMobility = m;
-    // The GRAPH follows the RESOLUTION, not the setting: `static` on a driven
-    // node must not put it in the static memory manager.
-    const bool wantStatic = resolvedMobility() == Mobility::Static;
-    _applyStaticHint(wantStatic && isStaticEligible() && graph::canBeStatic(mGraphNode));
+    // THE WHOLE SUBTREE RE-CLASSIFIES, not just this node. Rule 2 says a child
+    // travels with its parent, so pinning a parent Movable changes what every
+    // node under it resolves to — and if their stale `mStaticHint` is left
+    // standing, the next scene bind replays it (reapplyStaticHints) and the
+    // graph refuses each one under the now-dynamic parent: a warning per child,
+    // per bind, for a classification the document already knows is wrong.
+    //
+    // applyStaticDefaults resolves this node's parent chain once and threads
+    // its own answers down, which is exactly the pass an authoring change to a
+    // driver needs. It records no user decision of its own (only this
+    // function's `mMobility` write is the decision).
+    applyStaticDefaults();
     notifyChanged(NodeChange::Flags);
 }
 
@@ -430,7 +451,14 @@ void SceneNode::reapplyStaticHints()
 {
     // Top-down: a parent must be static before its child asks (rule 2), and
     // Ogre pushes the class down anyway — the order makes every ask legal.
-    if (mStaticHint) _applyStaticHint(true);
+    //
+    // `canBeStatic` FIRST (2026-09-12): this replays a hint recorded earlier,
+    // and the world may have moved on — a parent that has since become movable
+    // makes every stale hint under it illegal, and asking anyway costs a
+    // qWarning per node per bind for something the document is not even
+    // claiming any more. Asking only where the graph can say yes changes what
+    // is re-asserted not at all: the refused asks were no-ops with a log line.
+    if (mStaticHint && graph::canBeStatic(mGraphNode)) _applyStaticHint(true);
     const int n = childCount();
     for (int i = 0; i < n; ++i)
         if (SceneNode *c = childAt(i)) c->reapplyStaticHints();

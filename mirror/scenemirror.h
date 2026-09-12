@@ -586,6 +586,16 @@ private:
         // last seen at while playing, and whether the author has already been
         // told about it. `posed` is false until the first play frame sees it —
         // a node has to be seen standing still before it can be seen moving.
+        //
+        // THESE TWO LATCHES ARE PER MIRROR, the flag they set is per DOCUMENT
+        // (SceneNode::_setSoftMovable). One scene drawn by TWO mirrors — the
+        // editor and the player viewport both syncing the same document, which
+        // nothing does today because the visible page owns the graph (see
+        // sync()'s re-take) — would therefore warn about the same object twice,
+        // once per mirror, while the promotion itself stays correct (the flag
+        // is idempotent and the document clears it). If a second simultaneous
+        // mirror ever becomes real, the warn latch belongs on the node beside
+        // the flag, not here.
         iris::Vec3 playPos, playScale;
         iris::Quat playRot;
         bool posed = false;
