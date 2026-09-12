@@ -176,9 +176,9 @@ class OgreEngine;
 // (OgreSceneManager.cpp) and CompositorPassScene applies it per pass.
 //
 // THE RULE THAT COMES WITH IT: any future pass that sets an explicit
-// visibility_mask must include kHelperBit, or helpers vanish from that pass.
-// The planar-reflection path is the next place that wants this channel
-// (helpers out of mirrors); the bit is ready, the mask is not wired there yet.
+// visibility_mask must include kHelperBit, or helpers vanish from that pass —
+// AND kMovableBit, unless the pass is a probe capture (see kMovableBit below;
+// a pass that forgets it silently drops every moving object).
 constexpr Ogre::uint32 kVisibleBit     = 1u;
 constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
 constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
@@ -199,6 +199,43 @@ constexpr Ogre::uint32 kHelperBit      = 1u << 3;
 // thumbnails, previews and the pixel suites stay byte-identical without knowing
 // the feature exists.
 constexpr Ogre::uint32 kDistortionBit  = 1u << 4;
+// THE MOVING CHANNEL (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3.4, lane R2). A
+// MOVABLE item carries this bit *INSTEAD OF* kVisibleBit — the third use of the
+// inversion above, and the one the realtime program is built on.
+//
+// WHY A CHANNEL AND NOT A FLAG. The renderer keeps a memory of the room:
+// reflection-probe captures, a voxel copy for the bounce light, cached shadow
+// maps. Everything that MOVES has to stay out of that memory, or the memory
+// re-takes its photos while things move and rebuilds itself when they stop
+// (measured on the alive scene before this lane: probe captures on every frame
+// of a mover, and a full re-solve the moment it stopped). "Stay out of the
+// captures" is exactly what an include channel expresses and what an exclude
+// bit cannot (the any-bit test above), so a mover simply stops carrying the bit
+// every capture pass asks for:
+//   * OUT, with no mask change anywhere: the reflection-probe faces
+//     (`visibility_mask 0x1` in JahshakaPcc.compositor and
+//     JahshakaIfdRaster.compositor), the PROBE-kind shadow node
+//     (shadowCasterChannels), and — through the flags, not through a mask —
+//     Instant Radiosity's trace and every GI gather that keys on
+//     kGiGeometryBit, which a movable item never carries either (it is LIT by
+//     the room's GI, it just does not voxelize or bounce into it).
+//   * IN, because these passes ask for the channel explicitly: the planar
+//     reflection pass (OgrePlanar.cpp) and the VIEW and REFLECT shadow nodes
+//     (shadowCasterChannels again). A mover is therefore reflected by the
+//     mirror floor and casts its shadow in the SAME frame it moves.
+//   * IN by default everywhere else: the main chain, the SSR prepass and the
+//     thumbnail/preview shapes set no restricting visibility mask at all, and
+//     the two overlay passes mask with RESERVED_VISIBILITY_FLAGS & ~kDistortion
+//     (overlayVisibilityMask), which contains this bit.
+//
+// THE GI CLASS IS THE EXPENSIVE HALF, THE CHANNEL IS FREE. Turning
+// kGiGeometryBit off is a GI edge (a from-scratch rebuild, OgreScene::
+// setNodeMovable); switching kVisibleBit for kMovableBit costs one
+// setVisibilityFlags. That difference is what makes the play-time SOFT
+// promotion (owner decision O3) possible: it changes the channel and the
+// gathers and deliberately does NOT invalidate, leaving the object's old bounce
+// light behind as a ghost until play stops, for no hitch at all.
+constexpr Ogre::uint32 kMovableBit     = 1u << 5;
 
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
@@ -252,12 +289,19 @@ constexpr unsigned kShadowNodeKinds = 3u;
 /// THE CASTER SET, per kind: the render channels a shadow map of `kind` draws.
 /// ONE definition, read by the node's passes (buildShadowNode's
 /// mVisibilityMask) and by the lamp-map cache's caster scan (a changed box
-/// dirties a kind's maps only through these channels). Today every kind draws
-/// kVisibleBit. REALTIME_REFLECTIONS_SPEC R1/R2 widen View and Reflect to
-/// kVisibleBit | kMovableBit and keep Probe at kVisibleBit — and then a
-/// mover dirties view/reflect maps only, never probe maps (its §5.5), with no
-/// other change here. Never hard-code kVisibleBit as "the casters" elsewhere.
-inline Ogre::uint32 shadowCasterChannels(ShadowNodeKind) { return kVisibleBit; }
+/// dirties a kind's maps only through these channels).
+///
+/// R2: the VIEW and REFLECT kinds draw the still world AND the movers
+/// (kMovableBit), the PROBE kind draws the still world only — because a probe
+/// capture does not contain the movers in the first place (kMovableBit's note),
+/// so a shadow map rendered for one would be shadowing objects that are not
+/// there. Read as the caster scan reads it, this one line is also the rule
+/// "a mover dirties view and reflect maps only, never a probe's" (spec §5.5):
+/// the scan records each caster's channels and the cache dirties a kind only
+/// where they intersect. Never hard-code kVisibleBit as "the casters" elsewhere.
+inline Ogre::uint32 shadowCasterChannels(ShadowNodeKind kind) {
+    return kind == ShadowNodeKind::Probe ? kVisibleBit : (kVisibleBit | kMovableBit);
+}
 inline Ogre::uint32 allShadowCasterChannels() {
     return shadowCasterChannels(ShadowNodeKind::View) |
            shadowCasterChannels(ShadowNodeKind::Reflect) |
@@ -1695,7 +1739,6 @@ public:
     // scenes' geometry outside the voxel volume samples nothing (cones exit the
     // volume and add no light), so previews/thumbnails stay sane in practice.
     bool setGlobalIllumination(const GiParams &p) override;
-    bool setGiDynamicProbes(int extraPerFrame) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
     bool reassertGiBinding() override;
@@ -1706,7 +1749,7 @@ public:
     void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
     bool nodeGiBoundsExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
-    void setNodeMovable(NodeId id, bool movable) override;
+    void setNodeMovable(NodeId id, bool movable, MobilityChange change) override;
     bool nodeMovable(NodeId id) const override;
     MobilityStatus mobilityStatus() const override;
     bool nodeHelper(NodeId id) const override;
@@ -2001,12 +2044,12 @@ private:
         /// must not capture. Carries kHelperBit instead of kVisibleBit.
         bool                      helper = false;
         /// MOBILITY, as the document RESOLVED it (REALTIME_REFLECTIONS_SPEC
-        /// §3.3, lane R1): true = this node moves. The host pushes it on change
-        /// through Scene::setNodeMovable; R1 only RECORDS it (and counts it,
-        /// Scene::mobilityStatus), so pushing it costs a bool write and cannot
-        /// move a pixel or invalidate a cache. Lane R2 is what acts on it —
-        /// kMovableBit instead of kVisibleBit, no kGiGeometryBit, the widened
-        /// view/reflect shadow channels and the probe-capture exclusion.
+        /// §3.3). True = this node moves, and the renderer keeps it OUT of the
+        /// still-world layer: its item carries kMovableBit instead of
+        /// kVisibleBit and never kGiGeometryBit, so it leaves the probe
+        /// captures, the voxel bounce, every GI gather and the probe-kind
+        /// shadow maps, while the view, the planar mirrors, SSR and the
+        /// view/reflect shadow maps keep drawing it every frame.
         bool                      movable = false;
         /// LIGHTING CHANNELS, object side (Scene::setNodeLightMask). Kept here
         /// rather than read back off the Item because the Item is REBUILT on
@@ -2896,11 +2939,6 @@ private:
     /// CEILING a frame may spend on stale probes. Reported by giStatus; what a
     /// frame actually spent is mProbeCapturesLastFrame.
     int mProbeUpdatesPerFrame = 0;
-    /// The resolved `GiParams::dynamicProbes` reservation and how many extra
-    /// moved-covering re-captures it spent on the last frame (Epic's column;
-    /// see updateProbeBudget). Both reported by giStatus.
-    int mDynamicProbes = 0;
-    int mDynamicProbeUpdates = 0;
     /// Whether the last full refresh took the reuse arm (B4). Reported by
     /// giStatus; cleared by every from-scratch build.
     bool mGiReusedLastRefresh = false;
@@ -2960,6 +2998,12 @@ private:
     int                mProbeCapturesLastFrame = 0;
     int                mPlacementCapturesThisFrame = 0;
     unsigned long long mGiRebuilds = 0;
+    /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::
+    /// mobilityRebuilds). Its own counter and not a share of mGiRebuilds
+    /// because the question it answers is "is my classification costing me
+    /// rebuilds?", which a total cannot: every other rebuild reason (a mode
+    /// change, a destroyed object, a quality dial) is mixed into that one.
+    unsigned long long mMobilityRebuilds = 0;
     /// The PCC/VCT trust window buildPcc bound the grid with, so a binding
     /// re-assert (P10) re-binds with the same numbers without re-deriving them.
     float mPccBindMinDist = 0.0f, mPccBindMaxDist = 0.0f;

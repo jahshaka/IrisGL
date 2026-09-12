@@ -147,7 +147,12 @@ void buildWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspaceDe
         // kept: an exclude bit (`~kNoReflectBit`) cannot work, because Ogre's
         // test is any-bit-set — per-object exclusion needs its own include
         // channel, not a cleared bit.
-        pass->setVisibilityMask(kVisibleBit);
+        // ...and the MOVERS are explicitly IN (REALTIME_REFLECTIONS_SPEC §3.3.4):
+        // a movable object carries kMovableBit instead of kVisibleBit, and a
+        // mirror floor is exactly where a walking character has to appear, in
+        // the frame it moves. This is the "widen every mask except the probe
+        // captures" half of the channel rule (EnginePrivate.h, kMovableBit).
+        pass->setVisibilityMask(kVisibleBit | kMovableBit);
         // Overlays out by RENDER QUEUE as well (see kReflectLastRQ): the mask
         // above covers helpers, this covers the on-top overlay queue.
         pass->mFirstRQ = 0u;

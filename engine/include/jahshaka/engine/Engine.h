@@ -614,14 +614,6 @@ public:
     /// document saved with a future mode keeps loading). Instant Radiosity is
     /// per-scene: its virtual point lights live in this scene only.
     virtual bool        setGlobalIllumination(const GiParams &) = 0;
-    /// The one GI knob that costs nothing to change: GiParams::dynamicProbes is
-    /// read per frame by the probe budget pass and by nothing that is BUILT, so
-    /// a change to it alone must not go through setGlobalIllumination (which
-    /// re-voxelizes and re-captures every probe). Code review 2026-09-10: the
-    /// Advanced slider re-voxelized the scene on every drag tick. Returns false
-    /// only without a live GI arm (nothing to update; the next full push
-    /// carries the value).
-    virtual bool        setGiDynamicProbes(int extraPerFrame) = 0;
     /// Re-runs the active GI solution against the scene's current state (the
     /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
     /// in milliseconds at editor quality; callers may invoke this per edit.
@@ -727,13 +719,22 @@ public:
     /// and pushes it on CHANGE; an editor drag is not a promotion, because
     /// flipping an object's GI class costs a full rebuild.
     ///
-    /// TODAY THIS ONLY RECORDS (lane R1): it renders identically either way,
-    /// invalidates nothing and costs a bool write, so a host can push it before
-    /// the renderer spends it. Lane R2 is what makes it mean something —
-    /// movable objects carry kMovableBit instead of kVisibleBit, leave the GI
-    /// geometry set and the reflection-probe captures, and dirty only the view
-    /// and planar shadow maps.
-    virtual void        setNodeMovable(NodeId, bool) = 0;
+    /// WHAT IT BUYS (lane R2): a movable object leaves the STILL-WORLD layer.
+    /// It is not captured by the reflection probes, it does not voxelize or
+    /// bounce light, it is in none of the GI signatures, it stales no probe by
+    /// moving and it renders no probe-kind shadow map — while the view, the
+    /// planar mirrors, SSR and the view/reflect shadow maps keep drawing it
+    /// every frame, in the frame it moves. So a scene full of moving things
+    /// costs the room's lighting nothing.
+    ///
+    /// WHAT IT COSTS: the GI half of the class (voxelize or not) is a GI edge,
+    /// so RE-classifying an object the scene has already been lit with costs
+    /// one from-scratch GI rebuild — reported in MobilityStatus::
+    /// mobilityRebuilds. Push mobility BEFORE the node's geometry (the way a
+    /// document walk naturally does) and it costs nothing. The play-time SOFT
+    /// promotion costs nothing by construction: see MobilityChange.
+    virtual void        setNodeMovable(NodeId, bool,
+                                       MobilityChange = MobilityChange::Authoring) = 0;
     virtual bool        nodeMovable(NodeId) const = 0;
     /// How many nodes this scene has been told are movable, split by what they
     /// carry. A pure read of the records — no walk of the graph, no allocation.

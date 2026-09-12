@@ -136,11 +136,37 @@ struct MobilityStatus {
     size_t movableItems = 0;    ///< movable nodes carrying drawable geometry
     size_t movableLights = 0;   ///< movable nodes carrying a light
     size_t movableNodes = 0;    ///< every node the host marked movable
-    /// GI rebuilds a mobility CHANGE caused. 0 in every scene today: recording
-    /// mobility invalidates nothing (lane R1), so a flip is free. Lane R2 —
-    /// where the value starts selecting render channels and a flip can turn an
-    /// item's GI bit on or off — is what can move this.
+    /// From-scratch GI rebuilds a mobility CHANGE caused, and the reason is
+    /// always the same one: an object's GI class turning on or off is a GI edge
+    /// (a movable object does not voxelize), so RE-classifying a live object
+    /// the room has already been lit with costs one rebuild.
+    ///
+    /// WHICH FLIPS COST ONE, honestly: an AUTHORING change (the user sets
+    /// Movable or Static in the properties panel) on an object that is already
+    /// in the scene, in a scene whose GI arm is built. A classification that
+    /// arrives BEFORE the object's geometry does — which is every load and
+    /// every newly added node, because the host resolves mobility in the same
+    /// walk that creates the node — costs nothing at all, and neither does the
+    /// play-time SOFT promotion (MobilityChange::Soft, owner decision O3).
     unsigned long long mobilityRebuilds = 0;
+};
+
+/// WHY a node's mobility changed, which decides what the renderer may spend on
+/// it (REALTIME_REFLECTIONS_SPEC §3.3.3).
+enum class MobilityChange : unsigned {
+    /// The classification the document derived or the user set. The GI class
+    /// follows it: an object becoming movable LEAVES the voxel bounce and an
+    /// object becoming static JOINS it, and either edge costs one from-scratch
+    /// GI rebuild if the scene is already lit (counted in mobilityRebuilds).
+    Authoring = 0,
+    /// THE PLAY-TIME SOFT PROMOTION (owner decision O3): something nobody
+    /// marked Movable started moving while the document is playing. The render
+    /// channel and every GI gather drop it from that frame — so it costs no
+    /// probe capture and no re-solve for the rest of play — but NOTHING is
+    /// invalidated: the voxels keep the bounce light it had where it started,
+    /// as a ghost, until play stops. That is the whole point: a surprise mover
+    /// must never buy the author a half-second freeze mid-play.
+    Soft = 1
 };
 
 /// A posed bone: LOCAL to its parent bone (a root bone: local to the mesh node).
@@ -1370,7 +1396,7 @@ enum class GiSource { Auto, Voxel, Raster };
 /// material or a live/video texture is captured as it was when the grid last
 /// re-captured, and stales nothing on its own. SSR and planar reflections show
 /// such content live; probes are the static-environment layer.
-enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog };
+enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog, Mobility };
 
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
@@ -1460,10 +1486,12 @@ struct GiParams {
     ///
     /// A RATE, not a subset, and spent only on STALE probes (ENGINE_CACHE_POLICY_
     /// SPEC P1, 2026-09-12): the probes are a cache. Every input that changes
-    /// what a probe would capture — a GI rebuild or re-solve, geometry moving,
-    /// arriving, leaving or being shown/hidden, a light, material, sky, ambient
-    /// or fog change — marks the grid stale (GiStatus::lastStaleReason names
-    /// it; time-varying content is frozen, see GiStaleReason), and
+    /// what a probe would capture — a GI rebuild or re-solve, STILL geometry
+    /// moving, arriving, leaving or being shown/hidden, a light, material, sky,
+    /// ambient or fog change, an object's mobility changing — marks the grid
+    /// stale (GiStatus::lastStaleReason names it; time-varying content is
+    /// frozen, and MOVABLE objects are not in a capture at all, so moving one
+    /// is not an input — see GiStaleReason and MobilityStatus), and
     /// each frame the engine re-captures up to `updateBudget` of the
     /// highest-priority stale probes. So every probe re-captures within
     /// ceil(probeCount / updateBudget) frames OF A CHANGE, whatever the priority
@@ -1490,26 +1518,6 @@ struct GiParams {
     /// and ROUGH surfaces inside the probe region take their environment from the
     /// probes instead of from cone tracing. Mirror-sharp pixels do not move.
     int       updateBudget = 1;
-    /// DYNAMIC REFLECTION PROBES — Epic's column of the Rayon tier table
-    /// (GI_UNIFIED_SPEC.md §2; owner decision 2026-09-09, option (b)).
-    ///
-    /// How many EXTRA probe re-captures per frame the renderer may spend, on
-    /// top of `updateBudget`, on probes whose area covers geometry that MOVED
-    /// this frame (the same movement scan the sweep priority reads). The sweep
-    /// is a guarantee about every probe; this is a reservation for the ones a
-    /// moving object is inside, so its reflection follows it frame by frame
-    /// instead of waiting for the sweep to come round again. 0 (the default)
-    /// is the sweep alone — the shipped High behaviour. It costs NOTHING while
-    /// the scene is still (no moved box, no candidate), and at most this many
-    /// probe captures per frame while something moves. Clamped to 0..8 and to
-    /// the probes that exist; `GiStatus::dynamicProbes` reports the resolution
-    /// and `GiStatus::dynamicProbeUpdates` how many it actually spent on the
-    /// last frame.
-    ///
-    /// NOT the retired P5a `dynamicProbes` ("keep the nearest N probes live
-    /// for ever", replaced by the budget above): that one re-captured at rest;
-    /// this one re-captures only what moved. Hybrid only; ignored elsewhere.
-    int       dynamicProbes = 0;
     /// VCT light-injection ray-march step scale AT REST (FIX WAVE B5). Upstream:
     /// "bigger values means the shadow raymarching during light injection is
     /// faster, but may cause glitches if too high (areas that are supposed to be
@@ -1625,7 +1633,7 @@ struct GiParams {
                probeSnapDeviation == o.probeSnapDeviation &&
                probeSnapSidesMin == o.probeSnapSidesMin &&
                probeSnapSidesMax == o.probeSnapSidesMax &&
-               updateBudget == o.updateBudget && dynamicProbes == o.dynamicProbes &&
+               updateBudget == o.updateBudget &&
                rayMarchStepScale == o.rayMarchStepScale &&
                ddgi == o.ddgi && ddgiIntensity == o.ddgiIntensity &&
                ddgiAmbient == o.ddgiAmbient && ddgiSource == o.ddgiSource &&
@@ -1693,13 +1701,6 @@ struct GiStatus {
     /// still scene spends nothing (probeCapturesLastFrame reads what was
     /// actually spent); see GiParams::updateBudget.
     int    probeUpdatesPerFrame = 0;
-    /// The RESOLVED `GiParams::dynamicProbes` — clamped to 0..8 and to the
-    /// probes that exist, 0 whenever the probe arm did not build or the budget
-    /// is paused (a paused scene re-captures nothing, moved or not) — and how
-    /// many extra re-captures that reservation actually spent on the LAST frame
-    /// (0 while nothing moves: the column is free at rest, by construction).
-    int    dynamicProbes = 0;
-    int    dynamicProbeUpdates = 0;
     /// The UNION of every probe's fitted PARALLAX SHAPE — the boxes the shader
     /// reprojects reflection rays onto (FIX WAVE A2). Equal corners in every
     /// mode but the hybrid, and in the hybrid it must lie inside

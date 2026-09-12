@@ -221,7 +221,8 @@ public:
     ///
     /// It replaces two fields that were asking the same question from opposite
     /// ends: `giAutoRefresh` (a bool: may the mirror re-solve when the scene
-    /// changes?) and `giDynamicProbes` (an int: how many probes stay live?).
+    /// changes?) and the old `giDynamicProbes` (an int: how many probes stay
+    /// live?).
     /// Their combination had four states and only two of them meant anything.
     ///
     ///   0 = PAUSED. No probe re-captures and nothing auto-re-solves; GI shows
@@ -237,15 +238,6 @@ public:
     /// map onto it (false -> 0, true -> 1); readers that still speak the old
     /// spelling (world.settings' `autoRefresh`) report `budget > 0`.
     int giUpdateBudget = 1;
-    /// DYNAMIC REFLECTION PROBES — Epic's column of the Rayon tier table
-    /// (GI_UNIFIED_SPEC.md §2, owner option (b) 2026-09-09). Extra probe
-    /// re-captures per frame, on top of giUpdateBudget, reserved for probes
-    /// covering geometry that MOVED this frame, so a mover's reflection follows
-    /// it frame by frame instead of waiting for the sweep. 0 = the sweep alone
-    /// (Low/Medium/High); Epic writes 2. Free at rest (no mover, nothing
-    /// spent). Tier-written through the `giDynamicProbes` registry row, so an
-    /// explicit edit PINS it like giNumBounces. Hybrid only. 0..8.
-    int giDynamicProbes = 0;
     iris::Vec3 giPccGrid;       // hybrid: reflection-probe counts per world axis (1..8 each)
     // Hybrid probe-capture knobs (REFLECTIONS_ADOPTION_SPEC.md P3). Integrator
     // knobs, not quality-dial rows: they reach the engine through world.gi only
@@ -310,8 +302,8 @@ public:
     /// (GI_UNIFIED_SPEC.md §2 / P2). 0 Low, 1 Medium, 2 High, 3 Epic.
     ///
     /// It is a REQUEST, never a second source of truth: the tier resolves
-    /// WRITE-THROUGH into giMode / giQuality / giDdgi / giNumBounces /
-    /// giDynamicProbes (services/worldmodes.cpp, setRayon) exactly the way a World Mode resolves into its rows, so the
+    /// WRITE-THROUGH into giMode / giQuality / giDdgi / giNumBounces
+    /// (services/worldmodes.cpp, setRayon) exactly the way a World Mode resolves into its rows, so the
     /// mirror, the serializer, the engine and every existing verb keep reading
     /// the one field they always read. A field the user pinned deviates from
     /// the tier and survives tier switches, which is what makes the panel's

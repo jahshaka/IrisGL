@@ -23,6 +23,7 @@
 #include <QImage>
 #include <QSet>
 #include <utility>
+#include <set>
 #include <vector>
 #include "irisgl/irisglfwd.h"
 #include "irisgl/document/animation/clipextractor.h"
@@ -582,6 +583,12 @@ private:
         // the discipline is the point: a flip is a classification change, and
         // R2's version of it invalidates render channels.
         int movable = -1;
+        /// Whether the movable state above was a PLAY-TIME SOFT promotion. It
+        /// decides the intent of the push that CLEARS it too: a soft promotion
+        /// never took the object out of the voxel bounce (that is what makes it
+        /// free), so putting it back must not pay a from-scratch rebuild
+        /// either.
+        bool movableSoft = false;
         // SOFT PROMOTION (§3.3.3, owner decision O3). The pose this node was
         // last seen at while playing, and whether the author has already been
         // told about it. `posed` is false until the first play frame sees it —
@@ -1318,6 +1325,20 @@ private:
     quint64 mMovableNodes = 0;
     quint64 mMobilityMisses = 0;
     QString mLastMobilityMiss;
+    /// THE LIGHTS THIS WALK RESOLVED AS MOVING, by node pointer, valid for the
+    /// rest of the frame (applyEnvironment runs after sync and the pointers
+    /// cannot die in between). It exists because the GI light signature has to
+    /// ask "does this lamp move?" about each light while the answer is a
+    /// property of the node's whole ancestor chain, which only the walk knows.
+    std::set<const iris::SceneNode *> mMovableLights;
+    /// The moving lamps' own change key, kept OUT of mGiLightSignature: a lamp
+    /// that moves must re-inject its light into the voxels (owner decision O2)
+    /// and must NOT arm the settle, or an animated torch would hold the
+    /// stability window open for ever and pay a full re-solve every time it
+    /// paused. `mGiMovableLightsMoving` is what carries the cadence when no
+    /// settle is pending at all.
+    quint64 mGiMovableLightSignature = 0;
+    bool    mGiMovableLightsMoving = false;
     /// The play edge the soft-promotion rule is scoped to. Play STOP clears the
     /// document's soft flags (Scene::setPlaying) and the per-node warn latches
     /// here, so a second play session starts clean.

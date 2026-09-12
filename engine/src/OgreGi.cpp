@@ -210,13 +210,6 @@ static float probeShapeCellRatio(const Ogre::CubemapProbe *p) {
     return worst;
 }
 
-bool OgreScene::setGiDynamicProbes(int extraPerFrame) {
-    mGi.dynamicProbes = std::min(std::max(extraPerFrame, 0), 8);
-    // updateProbeBudget re-resolves mDynamicProbes from mGi next frame; nothing
-    // built (voxels, probes, the field) depends on the value.
-    return mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid;
-}
-
 bool OgreScene::setGlobalIllumination(const GiParams &p) {
     JAH_TRY {
         switch (p.mode) {
@@ -525,8 +518,6 @@ GiStatus OgreScene::giStatus() const {
         // camera position (updateGiTracking), so this reads 0 for the frame
         // between the rebuild and the first tracking update.
         st.probeUpdatesPerFrame = mPcc ? mProbeUpdatesPerFrame : 0;
-        st.dynamicProbes        = mPcc ? mDynamicProbes : 0;
-        st.dynamicProbeUpdates  = mPcc ? mDynamicProbeUpdates : 0;
         st.cubemapProbeSlotsPerCell = int(mCubemapProbeSlots);
         if (mPcc) {
             const Ogre::CubemapProbeVec &probes = mPcc->getProbes();
@@ -1396,7 +1387,10 @@ void OgreScene::updateForwardPlusRanges(const Ogre::Camera *cam) {
         size_t count = 0;
         for (auto &kv : mNodes) {
             Ogre::Item *item = kv.second.item;
-            if (!item || !(item->getVisibilityFlags() & kVisibleBit)) continue;
+            // Everything the VIEW draws — the still world and the movers
+            // (kMovableBit) — because this is the camera's clustered grid, not
+            // a capture's.
+            if (!item || !(item->getVisibilityFlags() & (kVisibleBit | kMovableBit))) continue;
             const Ogre::Aabb a = item->getWorldAabbUpdated();
             mn.makeFloor(a.getMinimum()); mx.makeCeil(a.getMaximum());
             ++count;
@@ -1788,11 +1782,6 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     if (mProbeSlots.size() != n) mProbeSlots.assign(n, ProbeSlot());
     const int budget = std::max(0, mGi.updateBudget);
     mProbeUpdatesPerFrame = std::min(budget, int(n));
-    // Epic's DYNAMIC-PROBE reservation (GiParams::dynamicProbes): resolved here
-    // like the budget, and 0 whenever the budget is paused — "paused" means no
-    // probe re-captures at all, and a moved-covering re-capture is one.
-    mDynamicProbes = budget ? std::min(std::max(0, std::min(mGi.dynamicProbes, 8)), int(n)) : 0;
-    mDynamicProbeUpdates = 0;
     if (!n || !budget) return;          // paused: nothing dirtied, nothing scanned
 
     ensureGiWalk();
@@ -1854,45 +1843,16 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
         mProbeSlots[i].framesSinceUpdate = 0;
     }
 
-    // THE DYNAMIC-PROBE RESERVATION (Epic's column, GiParams::dynamicProbes).
-    //
-    // The sweep above is a guarantee about EVERY probe and it spends the budget
-    // in priority order — so with budget 1 and a grid of 18, the probe a moving
-    // object is inside re-captures once (it jumps the queue on kMovedBoost) and
-    // then waits up to 17 frames for the sweep to refill before it can go
-    // again. That is the right economy for a still scene and the wrong one for
-    // a moving one: the reflection of the mover updates in steps. Epic reserves
-    // `dynamicProbes` extra captures per frame for probes whose AREA covers a
-    // box that moved THIS frame, ranked by how long they have waited, skipping
-    // any the sweep already took. A still scene has no moved box and spends
-    // nothing here — the column is free at rest by construction — and a probe
-    // taken here counts as fresh for the sweep (it IS a capture), so the sweep
-    // guarantee is untouched: it only ever gets ahead, never behind.
-    if (mDynamicProbes > 0 && !mGiMovedBoxes.empty()) {
-        std::vector<std::pair<unsigned, size_t>> movers;   // (framesSinceUpdate, index)
-        for (size_t i = 0; i < n; ++i) {
-            if (!mProbeSlots[i].framesSinceUpdate) continue;   // taken this frame already
-            bool covers = false;
-            for (const Ogre::Aabb &b : mGiMovedBoxes)
-                if (probes[i]->getArea().intersects(b)) { covers = true; break; }
-            if (covers) movers.emplace_back(mProbeSlots[i].framesSinceUpdate, i);
-        }
-        const size_t extra = std::min(size_t(mDynamicProbes), movers.size());
-        std::partial_sort(movers.begin(), movers.begin() + std::ptrdiff_t(extra), movers.end(),
-                          [](const std::pair<unsigned, size_t> &a,
-                             const std::pair<unsigned, size_t> &b) { return a.first > b.first; });
-        for (size_t k = 0; k < extra; ++k) {
-            const size_t i = movers[k].second;
-            // Count only captures the reservation ADDS: a probe something else
-            // already dirtied this frame (a shape clamp's CubemapProbe::set)
-            // is going to render anyway, and reporting it as spent reservation
-            // would over-state giStatus.dynamicProbeUpdates.
-            if (!probes[i]->mDirty) ++mDynamicProbeUpdates;
-            probes[i]->mDirty = true;
-            mProbeSlots[i].sweepPending = false;
-            mProbeSlots[i].framesSinceUpdate = 0;
-        }
-    }
+    // (THE DYNAMIC-PROBE RESERVATION LIVED HERE and is DELETED, lane R2.) It
+    // spent up to `GiParams::dynamicProbes` extra captures per frame on the
+    // probes a MOVING object was inside, so that its reflection followed it
+    // frame by frame. Movers are no longer in a probe capture at all
+    // (kMovableBit): the reflection of a moving thing is the per-frame layers'
+    // job — SSR and the planar mirrors — and re-photographing the room because
+    // something walked through it is exactly the cost this program removes
+    // (measured on the alive scene at Epic, where the column was the last
+    // ~3 ms of per-frame probe work). What is left is the sweep above: a
+    // guarantee about every STALE probe, spent at the tier's budget.
 }
 
 // THE MOVEMENT TERM OF THE GI SIGNATURE (FIX WAVE B3, mirror half).
@@ -2178,7 +2138,6 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // updateProbeBudget after the build re-sizes and re-fills them.
     mProbeSlots.clear();
     mProbeUpdatesPerFrame = 0;
-    mDynamicProbes = mDynamicProbeUpdates = 0;
     // Our own probe workspace (media/Hlms/Jahshaka/JahshakaPcc.compositor):
     // per-face scene render + PCC depth compression + IBL specular mips — the
     // sample's LocalCubemapsProbeWorkspace, with the sample's shadow node behind
@@ -2379,29 +2338,29 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // extreme is the one to take.
     //
     // WHAT IT COSTS, stated rather than hidden: rough surfaces inside the region
-    // take their environment from the probes instead of from cone tracing while
-    // dynamic probes are on, so a scene's ROUGH pixels change when the author
-    // raises dynamicProbes above 0 even if nothing moves (measured on the same
-    // room's floor pixel: 0.000 -> 0.059/1.000/0.059). The mirror-sharp pixels
-    // do not move. Nothing changes for a scene at the default of 0.
+    // take their environment from the probes instead of from cone tracing
+    // whenever the budget is live, which is every hybrid scene that has not
+    // paused GI (measured on the same room's floor pixel: 0.000 ->
+    // 0.059/1.000/0.059 when the inversion first came on). The mirror-sharp
+    // pixels do not move.
     //
     // THE REFINEMENT THIS IS NOT (recorded, not built — it needs upstream): the
-    // honest version of this rule is PER PROBE, since only the dynamic probes
-    // are fresher than the voxels. `pccVctMinDistance` is a single pass
-    // constant, and making it per-probe means a new field in the probe const
-    // buffer plus the shader that reads it — an upstream change on both sides,
-    // which §9 of the spec makes a stop-and-report rather than a lane decision.
+    // honest version of this rule is PER PROBE, since only the recently
+    // re-captured probes are fresher than the voxels. `pccVctMinDistance` is a
+    // single pass constant, and making it per-probe means a new field in the
+    // probe const buffer plus the shader that reads it — an upstream change on
+    // both sides, which §9 of the spec makes a stop-and-report rather than a
+    // lane decision.
     //
-    // WHAT THE FIX WAVE CHANGED HERE (B1/B2): the gate used to be
-    // `dynamicProbes > 0`, a knob that defaulted to 0, so this inversion was
+    // WHAT THE FIX WAVE CHANGED HERE (B1/B2): the gate used to be the retired
+    // `dynamicProbes > 0` knob, which defaulted to 0, so this inversion was
     // opt-in and almost nobody saw it. The realtime budget model defaults to 1,
     // so it is now the SHIPPED look for every hybrid scene that has not paused
     // GI — and that is stated loudly here, in the panel's tooltip and in the
-    // spec rather than discovered later. The freshness gap the inversion papers
-    // over is narrowed by B3 (a moving object re-dirties the probes that cover
-    // it and re-injects the lights on the cheap cadence, so the voxels are much
-    // less stale than they used to be during a drag), and the principled
-    // per-probe fix is still upstream's to make.
+    // spec rather than discovered later. The freshness gap it papers over is
+    // narrowed by the probe cache's invalidations (a change re-captures the
+    // probes that can see it, and the lights are re-injected on the cheap
+    // cadence), and the principled per-probe fix is still upstream's to make.
     if (mGi.updateBudget > 0) minDist = std::max(minDist, diag);
     mPccBindMinDist = minDist;
     mPccBindMaxDist = minDist * 2.0f;
@@ -2900,7 +2859,6 @@ void OgreScene::teardownVct() {
     mPccHdr = mPccShadowed = false;
     mProbeSlots.clear();
     mProbeUpdatesPerFrame = 0;
-    mDynamicProbes = mDynamicProbeUpdates = 0;
     mProbesClampedToRegion = 0;
     mVctItemIds.clear();
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse

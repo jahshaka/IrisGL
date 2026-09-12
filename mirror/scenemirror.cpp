@@ -384,6 +384,7 @@ int SceneMirror::sync()
     mAnyShadowCaster = false;
     // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): recounted by this walk.
     mMovableNodes = 0;
+    mMovableLights.clear();
     // THE PLAY EDGE the soft-promotion rule is scoped to. On the FALLING edge
     // the document has already cleared every node's soft flag
     // (Scene::setPlaying) and the transforms are back where the author left
@@ -1496,6 +1497,21 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         e.visiblePushed = wantVisible;
     }
 
+    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3). Resolved here, where the walk
+    // is parent-first and the parent's answer is already in hand — the same
+    // shape effective visibility uses, and for the same reason: rule 2 ("it
+    // travels with its parent") is an AND down the chain, not a per-node
+    // question. `movable` is what this node's children inherit.
+    //
+    // BEFORE THE GEOMETRY, deliberately (lane R2): the renderer chooses an
+    // item's render channel and its GI class when the item is CREATED, so a
+    // node classified before its mesh attaches is born movable and costs
+    // nothing. Pushed after the attach instead, every newly added moving object
+    // — and every object in a scene being opened — would be created as still
+    // world, joined to the voxel bounce, and then taken out of it again: one
+    // from-scratch GI rebuild each, at load time.
+    const bool movable = syncMobility(e, node, parentMovable);
+
     // Picking's broad phase is Ogre's RaySceneQuery (SCENEGRAPH_SPEC §2) and
     // its mask is tested inside the SIMD sweep, so `pickable` has to reach the
     // node's engine objects as QUERY FLAGS. Change-guarded; the document's flag
@@ -1693,13 +1709,6 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         }
     }
 
-    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3). Resolved here, where the walk
-    // is parent-first and the parent's answer is already in hand — the same
-    // shape effective visibility uses, and for the same reason: rule 2 ("it
-    // travels with its parent") is an AND down the chain, not a per-node
-    // question. `movable` is what this node's children inherit.
-    const bool movable = syncMobility(e, node, parentMovable);
-
     if (node->getSceneNodeType() == iris::SceneNodeType::ParticleSystem) {
         syncParticles(e, static_cast<iris::ParticleSystemNode *>(node));
     } else if (e.hasParticles) {
@@ -1833,12 +1842,32 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
         }
     }
 
-    if (movable) ++mMovableNodes;
+    if (movable) {
+        ++mMovableNodes;
+        // The GI light signature needs this answer per light and cannot derive
+        // it (rule 2 is a question about the whole ancestor chain): recorded
+        // here, where the walk has it, and read by applyEnvironment later in
+        // the same frame.
+        if (node->getSceneNodeType() == iris::SceneNodeType::Light) mMovableLights.insert(node);
+    }
     // ON CHANGE ONLY, like every other flag on this walk.
     const int want = movable ? 1 : 0;
     if (e.movable != want) {
-        mTarget->setNodeMovable(e.node, movable);
+        // WHY the intent travels with the value: an AUTHORING change moves the
+        // object in or out of the voxel bounce, which costs one from-scratch GI
+        // rebuild; the play-time soft promotion must cost nothing at all (owner
+        // decision O3), so it asks the renderer for the channel change without
+        // the GI edge and accepts the stale bounce ghost until play stops.
+        //
+        // ...and the play STOP that clears such a promotion is soft for the
+        // same reason, from the other side: the object never left the voxels,
+        // so nothing has to be rebuilt to put it back.
+        const bool soft = why == iris::MobilityReason::Play || (!movable && e.movableSoft);
+        mTarget->setNodeMovable(e.node, movable,
+                                soft ? jahshaka::engine::MobilityChange::Soft
+                                     : jahshaka::engine::MobilityChange::Authoring);
         e.movable = want;
+        e.movableSoft = movable && why == iris::MobilityReason::Play;
     }
     return movable;
 }
@@ -4466,7 +4495,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
         gi.updateBudget = qMax(0, mSource->giUpdateBudget);        // FIX WAVE B1
-        gi.dynamicProbes = qBound(0, mSource->giDynamicProbes, 8);  // Epic's column
         gi.rayMarchStepScale = qMax(1.0f, mSource->giRayMarchStepScale);   // B5
         // DDGI (GI_UNIFIED_SPEC.md §4 P1): the same tri-state travel as the
         // probe toggles, plus our own intensity scalar. Both ride the CHANGE
@@ -4501,19 +4529,40 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // folded in scene order is not.)
         // ...and, since ENGINE_CACHE_POLICY_SPEC P7, each light's GI PARAMETERS
         // beside its transform (lightGiParamSignature says why).
-        quint64 lightSig = 0;
+        //
+        // STILL LAMPS ONLY (REALTIME_REFLECTIONS_SPEC §3.3.4, owner decision
+        // O2). A lamp the document resolved as MOVING — a carried torch, a
+        // swaying pendant, a light on an animated rig — is hashed into its OWN
+        // key below and never into this one, because this one arms the settle:
+        // a lamp that moves every frame would hold the stability window open
+        // for ever and then pay a full re-solve (a teardown, a re-voxelize and
+        // every probe re-captured) the moment it paused. What a moving lamp
+        // gets instead is the CHEAP path on its own cadence — its light
+        // re-injected into the voxels that are already there, about six times a
+        // second — which is measurably free and is what makes its bounce follow
+        // it. The probes hold the still room's lighting, as designed.
+        quint64 lightSig = 0, movableLightSig = 0;
+        const auto movingLamp = [&](const iris::LightNode *l) {
+            return mMovableLights.find(static_cast<const iris::SceneNode *>(l)) != mMovableLights.end();
+        };
         if (driver) {
             Hasher h;
             h << worldTrsSignature(driver->graphNode()) << lightGiParamSignature(driver);
-            lightSig = h.h;
+            // Instant Radiosity traces from ONE light; if that one moves it is
+            // the same argument, and the re-trace rides the same cheap cadence.
+            if (movingLamp(driver)) movableLightSig = h.h;
+            else                    lightSig = h.h;
         } else if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
             mGiChainMemo.clear();          // capacity kept; contents are per call
-            Hasher h;
-            for (const auto &l : mSource->lights)
-                if (!l.isNull())
-                    h << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo)
-                      << lightGiParamSignature(l.data());
+            Hasher h, m;
+            for (const auto &l : mSource->lights) {
+                if (l.isNull()) continue;
+                Hasher &into = movingLamp(l.data()) ? m : h;
+                into << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo)
+                     << lightGiParamSignature(l.data());
+            }
             lightSig = h.h;
+            movableLightSig = m.h;
         }
         // ---- RE-FIT ON EXIT (LIGHTING_FIX fix 2) ---------------------------
         //
@@ -4585,9 +4634,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // field setGlobalIllumination reads is in it, so a new field cannot fall
         // behind the comparison the way a lambda one file away did).
         //
-        // A dynamicProbes-ONLY change takes the cheap path (code review
-        // 2026-09-10): the full push re-voxelizes and re-captures every probe,
-        // and the Advanced slider emits per drag tick.
         // A screen re-take (invalidateEnvironment): point the process-wide GI
         // binding back at this scene's arms. Before any push below, which — if
         // the parameters did change meanwhile — rebuilds and binds anyway.
@@ -4595,16 +4641,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mGiReassertPending = false;
             if (mGiPushed) mTarget->reassertGiBinding();
         }
-        GiParams onlyDynamic = gi;
-        onlyDynamic.dynamicProbes = mLastGi.dynamicProbes;
-        if (mGiPushed && gi != mLastGi && onlyDynamic == mLastGi) {
-            mTarget->setGiDynamicProbes(gi.dynamicProbes);
-            mLastGi.dynamicProbes = gi.dynamicProbes;
-        }
         if (!mGiPushed || gi != mLastGi) {
             mTarget->setGlobalIllumination(gi);
             mLastGi = gi;
             mGiLightSignature = readEngineSignature();
+            mGiMovableLightSignature = movableLightSig;
+            mGiMovableLightsMoving = false;
             mGiMaterialSignature = mTarget->giMaterialSignature();
             mGiPushed = true;
             mGiPendingRefresh = false;
@@ -4645,6 +4687,16 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // demand, so it does NOT wait for the stability window.
             const bool explicitRefresh = mSource->giRefreshSerial != mGiRefreshSerialSeen;
 
+            // THE MOVING LAMPS' OWN GATE (O2). It arms the cheap re-inject and
+            // NOTHING else: no stability window, no pending refresh, so a lamp
+            // that moves for ever costs a re-inject every kGiLightOnlyEveryN
+            // frames and not one re-solve. Like the settle gates, it is only
+            // tracked while the budget is live ("GI paused" means the mirror is
+            // not following the scene at all).
+            if (movableLightSig != mGiMovableLightSignature && mSource->giUpdateBudget > 0) {
+                mGiMovableLightSignature = movableLightSig;
+                mGiMovableLightsMoving = true;
+            }
             const bool matChanged = matSig != mGiMaterialSignature;
             if (matChanged && mSource->giUpdateBudget > 0) {
                 // Arms the settle — and only the settle (see matSig above).
@@ -4702,11 +4754,14 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 mTarget->refreshGlobalIllumination();
                 ++mGiRefreshCount;
                 adoptSignature();
-            } else if (mGiPendingRefresh && mGiPendingInject) {
+            } else if ((mGiPendingRefresh && mGiPendingInject) || mGiMovableLightsMoving) {
                 // Still moving: the cheap path, rate-limited. (A material-only
-                // edit waits for the settle without it.)
+                // edit waits for the settle without it.) A MOVING LAMP reaches
+                // this branch on its own, with no settle pending — that is the
+                // whole of O2: its bounce follows it, and nothing re-solves.
                 if (++mGiFramesSinceLightOnly >= kGiLightOnlyEveryN) {
                     mGiFramesSinceLightOnly = 0;
+                    mGiMovableLightsMoving = false;   // re-armed by the next move
                     if (mTarget->refreshGiLighting()) ++mGiLightRefreshCount;
                 }
             }

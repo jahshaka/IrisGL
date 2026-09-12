@@ -265,7 +265,15 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // engine that may draw it is the distortion pass (kDistortionBit's note).
     if (distortion) return kDistortionBit;
     if (n.helper) return kHelperBit;
-    if (unlit) return kVisibleBit;
+    // MOVING THINGS ARE THEIR OWN CHANNEL (REALTIME_REFLECTIONS_SPEC §3.3.4,
+    // kMovableBit's note): a movable item carries kMovableBit INSTEAD OF
+    // kVisibleBit, which takes it out of every capture pass that asks for
+    // kVisibleBit — the reflection-probe faces, the raster-DDGI faces and the
+    // probe-kind shadow node — while the view, the planar mirror, SSR and the
+    // view/reflect shadow nodes (which ask for both channels) go on drawing it
+    // every frame.
+    const Ogre::uint32 channel = n.movable ? kMovableBit : kVisibleBit;
+    if (unlit) return channel;
     // A HIDDEN NODE MUST NOT BOUNCE LIGHT (SMOKE_FIX S12). Ogre's own hide —
     // SceneNode::setVisible — toggles the LAYER_VISIBILITY bit, which
     // MovableObject::getVisibilityFlags() masks off before returning
@@ -282,7 +290,16 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // item under a hidden ANCESTOR too. Keyed on the node's own flag, hiding
     // an imported model by its root — the common case — left every part of
     // it voxelised and bouncing light.
-    return n.shown ? (kVisibleBit | kGiGeometryBit) : kVisibleBit;
+    //
+    // ...AND A MOVING THING IS NOT GI GEOMETRY. It is LIT by the room (it reads
+    // the probes, the voxel cone and the irradiance field like everything else)
+    // but it does not voxelize and does not bounce: keeping it would put a
+    // moving object into the lit volume, the escape and geometry signatures,
+    // the movement scan and the voxel arm — which is the entire cost this lane
+    // removes. The price is stated rather than hidden: movers cast no indirect
+    // light and do not darken the room's bounce (spec §5.3, the same limit
+    // Unreal has without Lumen). Contact darkening is SSAO's job.
+    return (n.shown && !n.movable) ? (channel | kGiGeometryBit) : channel;
 }
 
 void OgreScene::applyNodeVisibilityFlags(Node &n) {
@@ -292,7 +309,7 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     // carries kHelperBit alone.
     if (n.item) n.item->setVisibilityFlags(
                     itemVisibilityFlags(n, n.materialUnlit, n.materialDistortion));
-    const Ogre::uint32 on = n.helper ? kHelperBit : kVisibleBit;
+    const Ogre::uint32 on = n.helper ? kHelperBit : (n.movable ? kMovableBit : kVisibleBit);
     if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? on : 0u);
     if (n.particleDef) n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
 }
@@ -360,7 +377,11 @@ Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {
     // A distortion emitter is invisible to every pass but the distortion pass,
     // helper or not (there is no helper distortion; the icon queue draws colour).
     if (n.particleDistortion) return kDistortionBit;
-    return n.helper ? kHelperBit : kVisibleBit;
+    // A particle system is time-varying content by definition, so the document
+    // resolves every emitter movable (spec §3.6, owner decision O4): the probes
+    // freeze whatever they last captured of it and SSR and the mirrors show it
+    // live. The channel is what implements that here.
+    return n.helper ? kHelperBit : (n.movable ? kMovableBit : kVisibleBit);
 }
 
 void OgreScene::setNodeHelper(NodeId id, bool helper) {
@@ -380,17 +401,59 @@ bool OgreScene::nodeHelper(NodeId id) const {
     return it != mNodes.end() && it->second.helper;
 }
 
-// ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1: record only) -------
+// ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R2: spent) ------------
 //
-// DELIBERATELY INERT. The flag changes no visibility bit, no GI bit and no
-// cache, and it must not: the whole point of the design is that a host may
-// classify (and RE-classify, including the play-time soft promotion) without
-// paying a GI rebuild for it. Lane R2 is where the recorded value starts
-// selecting render channels.
-void OgreScene::setNodeMovable(NodeId id, bool movable) {
+// THE ONE PLACE the document's answer to "does this move?" becomes render
+// state. Three things follow from one bool, and the order they are applied in
+// is what makes the cheap cases cheap:
+//
+//  1. THE CHANNEL. kMovableBit instead of kVisibleBit (and the GI bit dropped)
+//     — one setVisibilityFlags per attached object, no cache touched. This is
+//     the whole of the play-time soft promotion.
+//  2. THE PROBES. Whether a reflection probe would CAPTURE this item changes
+//     across the flip (that is the point), so the probes that hold its picture
+//     owe a re-capture: a stale with its own reason, spread at the budget like
+//     every other input, ONCE per flip rather than once per frame of movement.
+//  3. THE VOXELS, and only for an AUTHORING change. An object entering or
+//     leaving the GI geometry set is a GI edge — the voxel arm, the lit volume
+//     and Instant Radiosity's trace were all built without it (or with it) —
+//     so the caches go and the next solve is the honest one. That is one
+//     from-scratch rebuild, counted in MobilityStatus::mobilityRebuilds so the
+//     cost is visible rather than mysterious.
+//
+//     MobilityChange::Soft refuses step 3 deliberately (owner decision O3): a
+//     script pushing a prop mid-play must not buy the author a half-second
+//     freeze, so the voxels keep the bounce light the object had where it
+//     started — a ghost — until play stops and the object is classified for
+//     real. Nothing else about it differs.
+//
+// A classification that arrives BEFORE the geometry (every load, every newly
+// created node: the host resolves mobility in the same walk that creates the
+// node) reaches none of the three — there is no item to re-flag and no probe
+// that ever saw it — which is why a scene full of movers costs nothing to open.
+void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
-    it->second.movable = movable;
+    Node &n = it->second;
+    if (n.movable == movable) return;
+    const bool probeBefore = probeSeesItem(n);
+    const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+    n.movable = movable;
+    applyNodeVisibilityFlags(n);
+    const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+    if (giBefore != giAfter && change == MobilityChange::Authoring) {
+        // COUNT WHAT IT ACTUALLY COSTS. A scene with no GI arm built yet — the
+        // load path, and every scene that never turns GI on — invalidates
+        // nothing, and reporting a rebuild there would make the counter useless
+        // for the question it exists to answer ("is my classification costing
+        // me rebuilds?"). `mGiCachesDirty` already true means one is owed for
+        // another reason and this change rides it.
+        const bool wouldRebuild =
+            !mGiCachesDirty && (mPcc || mVctVoxelizer || mInstantRadiosity || mIfd);
+        invalidateGiCaches();
+        if (wouldRebuild) ++mMobilityRebuilds;
+    }
+    if (probeSeesItem(n) != probeBefore) staleProbeGrid(GiStaleReason::Mobility);
 }
 
 bool OgreScene::nodeMovable(NodeId id) const {
@@ -400,6 +463,7 @@ bool OgreScene::nodeMovable(NodeId id) const {
 
 MobilityStatus OgreScene::mobilityStatus() const {
     MobilityStatus out;
+    out.mobilityRebuilds = mMobilityRebuilds;
     for (const auto &kv : mNodes) {
         const Node &n = kv.second;
         if (!n.movable) continue;
