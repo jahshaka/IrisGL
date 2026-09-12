@@ -4082,6 +4082,13 @@ private:
     unsigned        mWarnedShadowCasters = 0;
     /// Frames the derived count must hold still before the atlas is rebuilt.
     static constexpr unsigned kShadowDeriveDebounceFrames = 3u;
+    /// THE SAME DEBOUNCE FOR THE CLEAR-STRATEGY FLIP, and it is not symmetry
+    /// for its own sake — see applyShadowCache. Counted only in frames where
+    /// the scenes that want it are actually PRESENTING, so the drop-and-
+    /// recreate of every workspace naming a shadow node cannot land inside a
+    /// world's first bind.
+    unsigned        mShadowClearFlipFrames = 0;
+    static constexpr unsigned kShadowClearFlipDebounceFrames = 3u;
     /// THE PASS COUNTERS' READINGS for the last rendered frame (P8), latched by
     /// latchShadowCounters. View kind = the first enabled view with a shadow
     /// node (the "one view speaks for the process" rule); reflect and probe
