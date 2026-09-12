@@ -2945,6 +2945,13 @@ struct MonitorStatus {
     /// Records the ring overwrote because nobody drained fast enough. Non-zero
     /// is a fact about the host's drain rate, not a failure.
     unsigned long long framesDropped = 0;
+    /// EVENTS the event list could not hold (its capacity is fixed and it drops
+    /// rather than grow). On the boundary for the same reason `framesDropped`
+    /// is: a capture bundle certifies itself complete or incomplete, and it
+    /// cannot do that honestly if the host cannot see what the engine dropped
+    /// (lane MON-P1b review, 2026-09-13 — a bundle claimed completeness while
+    /// events had been dropped past the cap).
+    unsigned long long eventsDropped = 0;
     // ---- GPU timing (P1c), with BOTH its off-switches visible ----
     bool     gpuCompiled  = false;   ///< the engine was built with JAH_GPU_TIMESTAMPS
     bool     gpuSupported = false;   ///< ...and the device/backend can do timestamps
