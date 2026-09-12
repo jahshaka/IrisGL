@@ -753,6 +753,36 @@ private:
     jahshaka::engine::TextureId iconTextureFor(const QString &path);
     void syncHighlight();
     void syncGrid();
+    /// THE GROUND'S HORIZON (owner, 2026-09-13: "should the default ground not
+    /// also be infinite in the Grand Showroom 2? It seems cut off"). A single
+    /// mirror-owned plane, far beyond anything a user flies to, drawn under the
+    /// scene's DEFAULT FLOOR in the floor's own material so the checker simply
+    /// carries on to the horizon instead of ending in a square edge. It is an
+    /// EDITOR HELPER in the engine's sense (kHelperBit): drawn by the view and
+    /// by nothing else — no GI geometry, no voxel bounce, no reflection-probe
+    /// capture, no shadow map, no probe staleness — so it changes no cache at
+    /// all. IT IS A SEPARATE ITEM on the floor's datablock, so the price is
+    /// ONE MORE DRAW CALL and two triangles, plus the shading of the pixels it
+    /// fills (measured: +0.15 ms on the rig in the worst view, nothing when it
+    /// is occluded or at rest). The document never hears about it: no node, no
+    /// outliner row, nothing in scene.bounds and nothing saved.
+    ///
+    /// WHY NOT THE OBVIOUS TWO (measured, spikes/gf1-ground/):
+    ///   * a BIGGER default ground re-opens exactly what lane L3 closed. At 24x
+    ///     (2.4 km) the automatic lit volume of a default scene collapsed from
+    ///     +-23.1 m to +-1.8 m and the voxel size from 0.362 m to 0.029 m: the
+    ///     ground becomes such an outlier that giItemBounds' trim drops it, so
+    ///     the floor stops being lit and stops bouncing.
+    ///   * the ground FOLLOWING the camera moves still geometry the probes
+    ///     capture: the move raised `lastStaleReason = moved` on Showroom 2's
+    ///     32-probe grid (192 cube faces to re-capture) and, in a scene the
+    ///     ground dominates, drags the automatic volume along with it.
+    void syncGroundHorizon();
+    /// The default floor's own UV map, fitted over its ENGINE-SIDE vertices
+    /// (u = ux*x + uc, v = vz*z + vc) so the horizon's checker crosses the
+    /// floor's edge in phase — density, offset and sign alike, whatever the
+    /// importer did to them. False when the mesh has no usable linear map.
+    bool fitGroundUvMap(iris::Mesh *mesh, float &ux, float &uc, float &vz, float &vc);
     void syncGiVolume();
     jahshaka::engine::MeshId wireMeshFor(int kind);
     /// The per-sync document walk. Takes a RAW node and iterates children
@@ -1224,6 +1254,19 @@ private:
     jahshaka::engine::NodeId mGridNode = 0, mGridMinorNode = 0, mGridMajorNode = 0;
     jahshaka::engine::MeshId mGridMinorMesh = 0, mGridMajorMesh = 0;
     jahshaka::engine::MaterialId mGridMinorMaterial = 0, mGridMajorMaterial = 0;
+    // The ground's horizon (syncGroundHorizon). `mHorizonFloor` is the default
+    // floor this walk found — a RAW pointer, valid only for the walk that set
+    // it, which is why the sync reads it through mEntries and never dereferences
+    // it after the walk.
+    const iris::MeshNode *mHorizonFloor = nullptr;
+    /// The floor MESH the horizon's UV map was fitted from; a floor that
+    /// changes mesh rebuilds the quad against the new map.
+    const iris::Mesh *mHorizonMeshSource = nullptr;
+    jahshaka::engine::NodeId mHorizonNode = 0;
+    jahshaka::engine::MeshId mHorizonMesh = 0;
+    jahshaka::engine::MaterialId mHorizonMaterial = 0;
+    int mHorizonVisible = -1;
+    iris::Mat4 mHorizonWorld;     ///< the floor transform last pushed (nothing at rest)
     // The GI volume overlay: one node per box, rebuilt only when the reported
     // bounds actually move (a GI rebuild is rare; this sync runs every frame).
     bool mGiVolumeVisible = false;
