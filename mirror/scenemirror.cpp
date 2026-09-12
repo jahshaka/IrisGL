@@ -1236,16 +1236,20 @@ void SceneMirror::syncGroundHorizon()
         mTarget->setNodeHelper(mHorizonNode, true);
     }
     if (!mHorizonMesh) {
-        // Four corners, and BOTH windings: the plane is seen from above in
-        // every normal view, and an engine node is born with back-face culling
-        // the document's faceCullingMode would otherwise have to turn off.
+        // Four corners, wound to face UP and no other way. The single winding is
+        // load-bearing: the default floor is invisible from below (its
+        // datablock culls back faces), and a horizon that was not would hide
+        // whatever a camera dipping under y = 0 was looking at — which is not
+        // an exotic pose at all, it is what editor.frameNode does whenever it
+        // frames a small object from above (five pixel suites caught exactly
+        // that: the camera lands at y = -0.09 and the subject went grey).
         const float h = kHorizonHalfExtent, u = h * kHorizonUvPerMetre;
         MeshData quad;
         quad.positions = { -h, 0.0f, -h,   h, 0.0f, -h,   h, 0.0f, h,   -h, 0.0f, h };
         quad.normals   = { 0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f,
                            0.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f };
         quad.uvs       = { -u, -u,   u, -u,   u, u,   -u, u };
-        quad.indices   = { 0, 1, 2,  0, 2, 3,   0, 2, 1,  0, 3, 2 };
+        quad.indices   = { 0, 2, 1,  0, 3, 2 };
         mHorizonMesh = mTarget->createMesh(quad);
         if (!mHorizonMesh) return;
         mHorizonMaterial = 0;      // nothing is attached yet
