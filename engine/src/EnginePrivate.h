@@ -4143,6 +4143,14 @@ private:
     std::unique_ptr<monitor::FrameMonitor> mMonitor;
     /// Set by the host for the NEXT frame only (Engine::setNextFrameCause).
     FrameCause mNextFrameCause = FrameCause::Driver;
+    /// WHAT STOPPING A CAPTURE LEAVES BEHIND. Switching the monitor off flushes
+    /// the frames still waiting for their GPU samples (which arrive two frames
+    /// late) into here, so the host's usual "stop, then drain" order does not
+    /// silently lose the tail of every capture. The NEXT takeFrameRecords moves
+    /// them out and frees the storage; until then MonitorStatus reports them as
+    /// `ringFrames` with a `ringCapacity` of 0, because the ring itself is
+    /// gone.
+    std::vector<FrameRecord> mFinalRecords;
 };
 
 }  // namespace detail

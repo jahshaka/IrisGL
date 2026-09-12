@@ -1499,9 +1499,17 @@ public:
     virtual MonitorStatus monitorStatus() const = 0;
 
     /// Drains the frame ring into `out` (appending) and returns how many
-    /// records were moved. Empty when the monitor is off. The host drains on
-    /// its own tick; anything it does not drain is overwritten, counted by
-    /// `MonitorStatus::framesDropped`.
+    /// records were moved. The host drains on its own tick; anything it does
+    /// not drain is overwritten, counted by `MonitorStatus::framesDropped`.
+    ///
+    /// TWO THINGS TO KNOW, both consequences of GPU timing:
+    ///  * A frame is not published the instant it ends. GPU samples come back
+    ///    two frames late, so a record waits a few frames for them; drain in a
+    ///    loop, never "render one frame, expect one record".
+    ///  * STOPPING the monitor flushes everything still waiting, and the NEXT
+    ///    call to this returns it even though the monitor is off. That makes
+    ///    the natural host order — stop the capture, then drain — lossless. The
+    ///    call after that returns 0 and the storage is freed.
     virtual unsigned takeFrameRecords(std::vector<FrameRecord> &out) = 0;
     /// The same for discrete events (GI rebuilds, atlas changes, compiles,
     /// texture loads, VRAM flushes, device-lost, and the host's own).

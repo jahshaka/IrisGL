@@ -2751,6 +2751,14 @@ enum class PassBucket {
 /// are the DELTA of the render system's own metrics across the pass, so summing
 /// a frame's passes reproduces `RenderStats::draws` for that frame exactly —
 /// which is what the suite asserts.
+///
+/// ZERO DRAWS DOES NOT MEAN "NOTHING WAS DRAWN". Ogre's RenderQueue REPLAYS a
+/// cached command buffer when a queue has not changed since the last frame, and
+/// it only feeds `_addMetrics` on the build path — so an idle frame's passes
+/// legitimately report zero draws while the picture is complete. Analysis must
+/// read a run of zeroes as "replayed", not as "empty". (Measured 2026-09-12,
+/// lane MON-P1a: with one caster moved, frame N reports 3 draws and frame N+1
+/// reports 0, on the same scene.)
 struct FramePass {
     std::string workspace;        ///< the workspace instance's definition name
     std::string node;             ///< the parent compositor node's name

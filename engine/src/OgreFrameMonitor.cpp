@@ -513,8 +513,13 @@ void OgreEngine::setFrameMonitor(MonitorLevel level) {
         } JAH_CATCH(mLastError, );
         mShaderCache.recordCompileNames(false);
         // Everything still in the holding queue is published before the ring
-        // dies, minus the GPU samples that were never going to arrive.
+        // dies, minus the GPU samples that were never going to arrive — and
+        // then the whole ring is handed to mFinalRecords, because a host that
+        // stops the capture and THEN drains (the natural order, and what
+        // Ctrl+F4 does) must not lose the tail of what it just recorded.
         mMonitor->retirePending(true);
+        mFinalRecords.clear();
+        mMonitor->drainFrames(mFinalRecords);
         if (mMonitor->mGpu)
             if (Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr)
                 try { rs->deinitGPUProfiling(); } catch (...) {}
@@ -554,8 +559,10 @@ MonitorStatus OgreEngine::monitorStatus() const {
     st.level = mMonitor ? MonitorLevel::Review : MonitorLevel::Off;
     if (!mMonitor) {
         // THE ZERO-COST ASSERTIONS, answered from the ABSENCE of the object
-        // rather than from a flag: there is nothing to count.
-        st.gpuReason = "monitor off";
+        // rather than from a flag: there is nothing to count. The one thing
+        // that can survive a stop is the undrained tail of the last capture.
+        st.ringFrames = unsigned(mFinalRecords.size());
+        gpuTimingStatus(st);
         return st;
     }
     st.attachedListeners = unsigned(mMonitor->mAttached.size());
@@ -570,7 +577,13 @@ MonitorStatus OgreEngine::monitorStatus() const {
 }
 
 unsigned OgreEngine::takeFrameRecords(std::vector<FrameRecord> &out) {
-    return mMonitor ? mMonitor->drainFrames(out) : 0u;
+    if (mMonitor) return mMonitor->drainFrames(out);
+    // The tail of the last capture, once, and then the storage goes.
+    if (mFinalRecords.empty()) return 0u;
+    const unsigned n = unsigned(mFinalRecords.size());
+    for (FrameRecord &r : mFinalRecords) out.push_back(std::move(r));
+    std::vector<FrameRecord>().swap(mFinalRecords);
+    return n;
 }
 
 unsigned OgreEngine::takeMonitorEvents(std::vector<MonitorEvent> &out) {
