@@ -1,0 +1,196 @@
+Jahshaka patch 0029 — a surface takes a reflection probe's picture only if it
+is IN that picture.
+
+WHY (owner, 2026-09-13, REFLECTION_PROBE_AUDIT.md Q2): "why would the outside of
+a building show the room inside? That makes zero sense to me." — and when the
+lead reached for enclosure detection: "the engine should not know if there is a
+room? Isn't it the layout of objects in a scene that matters?" Correct: the
+engine has no concept of a room, only geometry and where it stands.
+
+At this pin the only spatial tests are two AXIS-ALIGNED BOXES: the parallax box
+(`getProbeFade > 0`) and the influence area (`getProbeNDF`). Neither traces
+geometry, both carry margins (the grid overlap overruns the region by 12.5% of a
+cell, `CubemapProbe::set` pads x1.005, our own shape clamp pads x1.05), and after
+Jahshaka's A2 shape clamp the parallax box is ~the whole probe region indoors —
+so the entry gate excludes nothing there. The outward face of a slab whose inward
+face a probe photographed is, geometrically, inside the same box.
+
+THE RULE IS VISIBILITY FROM THE PROBE, and the probe already captured the answer.
+The DepthCompressor pass writes `min( 0.5 * fDist / fApproxDist, 1 )` into the
+cube's ALPHA for every texel (Media/2.0/scripts/materials/Common/Any/
+PccDepthCompressor_ps.any), where fApproxDist is the probe camera's distance to
+its own parallax box along that direction. Upstream's `getPccVctBlendWeight`
+already decodes exactly that (`* (pccCompressedDepth * 2.0)`, Vct_piece_ps.any),
+and the IBL convolution preserves alpha (SpecularIblIntegrator_piece_cs.any:
+`alphaValue += sampleValue.a * NoL`), so mip 0 of the bound array is the probe's
+depth. This patch marches from the probe camera towards the shaded point, reads
+what the probe saw that way, and treats "it saw something nearer" as occlusion.
+It is the same Chebyshev-style test the irradiance field already applies to its
+own probes.
+
+CONFIDENCE SCALES THE CONTRIBUTION, NOT THE WEIGHT — the measured trap from lane
+E3, and the reason this patch keeps TWO weights. `pccEnvS` is normalised by
+`cubemapAccumWeight` at the bottom of the piece, so crushing every probe's weight
+would only renormalise the same probes back to full strength. So the visibility
+factor is folded into `probeFade` (which multiplies every sampled term, and
+patch 0017's probe-trust accumulator with it) while `cubemapAccumWeight` keeps
+accumulating the FULL, unscaled weight — one added local and one changed line.
+With
+
+    w_p = probeFade, v_p = visibility, t_p = PCC trust, W = sum( w_p )
+    pccEnvS    = sum( w_p * v_p * t_p * S_p ) / W
+    trust      = sum( w_p * v_p * t_p ) / W          (patch 0017's accumVctLerp)
+    envColourS = pccEnvS + prior * (1 - trust)       (patch 0017's blend)
+
+the share an occluded probe does not claim goes back to whatever filled
+`envColourS` before the probes ran — cone tracing, the irradiance field, the sky
+— and never to black, which is the failure mode a naive tightening of probe
+influence produces in a sealed room. With every probe fully visible (v_p = 1)
+every line is bit-identical to the code it replaces.
+
+THE NON-VCT BRANCH at the bottom of the piece is deliberately left alone: it has
+no other environment term to hand the unclaimed share back to, so there the
+occluded share simply drops out. Jahshaka never takes it (a probe grid exists
+only in the VCT+PCC hybrid, so `vct_num_probes` is always set when probes are),
+and touching that line would break `git apply --reverse --check` of patch 0017,
+which build-ogre.sh uses as its already-applied test.
+
+SLACK. Relative, because the error is: one cube texel spans a solid angle, the
+compressed depth is 8 bits at the LDR tiers, and a texel straddling a silhouette
+filters between two depths. 8% of the probe-to-point distance with a floor of 2%
+of the captured distance keeps grazing floors and walls fully visible; the case
+the owner pointed at (a slab's outward face, ~1 m past the inward face a probe
+2.7 m away photographed) fails it by more than 30%.
+
+COST: one extra cube-array fetch at mip 0 per probe per pixel inside the loop —
+which patch 0028 has just removed from every material with no specular response.
+
+MEDIA-ONLY (Hlms .any templates, both CRLF — edited in binary mode). Studio
+stages media from the SOURCE tree, so every tree still needs the patch loop /
+build-ogre.sh; no C++ is rebuilt by it.
+
+Covered by tests/gi/test_gi_probe_visibility.cpp (gi.probe_visibility).
+--- a/Samples/Media/Hlms/Common/Any/Cubemap_piece_all.any
++++ b/Samples/Media/Hlms/Common/Any/Cubemap_piece_all.any
+@@ -99,6 +99,31 @@
+ 	return min( min( vDiff.x, vDiff.y ), vDiff.z );
+ }
+ 
++/** Jahshaka patch 0029 -- HOW FAR THE PROBE COULD SEE IN THIS DIRECTION.
++
++	The probe's own capture carries its depth: the DepthCompressor pass writes
++	`min( 0.5 * fDist / fApproxDist, 1 )` into the cube's ALPHA, where
++	fApproxDist is the distance from the probe camera to its parallax box along
++	that same direction (Common/Any/PccDepthCompressor_ps.any). This is the
++	exact inverse of that encoding, and it is what upstream's own
++	getPccVctBlendWeight already assumes (`interesectionPosVS = cubemapPosVS +
++	(...) * (pccCompressedDepth * 2.0)`, Vct_piece_ps.any).
++
++	dirLS must be NORMALISED and in the probe's local space; the return value is
++	a distance in that same space, saturating at 2 * fApproxDist (the encoding's
++	own ceiling, i.e. "at least this far").
++*/
++INLINE midf probeCapturedDistance( midf3 dirLS, midf3 cameraPosLS, midf3 probeShapeHalfSize,
++								   midf compressedDepth )
++{
++	midf3 invDirLS = midf3_c( 1.0, 1.0, 1.0 ) / dirLS;
++	midf3 atMinPlane = ( -probeShapeHalfSize - cameraPosLS ) * invDirLS;
++	midf3 atMaxPlane = (  probeShapeHalfSize - cameraPosLS ) * invDirLS;
++	midf3 largest = max( atMaxPlane.xyz, atMinPlane.xyz );
++	midf approxDist = min( min( largest.x, largest.y ), largest.z );
++	return compressedDepth * _h( 2.0 ) * approxDist;
++}
++
+ INLINE midf getProbeNDF( midf3 posLS, midf3 probeToAreaCenterOffsetLS,
+ 						 midf3 innerRange, midf3 outerRange )
+ {
+--- a/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
+@@ -193,6 +193,78 @@
+ 			probeFade = probeFade * probeFade;
+ 			probeFade *= midf_c( probePriority );
+ 
++			// ---- JAHSHAKA PATCH 0029: CAN THIS POINT SEE THE PROBE? ----------
++			//
++			// Owner, 2026-09-13: "why would the outside of a building show the
++			// room inside? That makes zero sense to me." -- and, when the lead
++			// reached for enclosure detection: "the engine should not know if
++			// there is a room? Isn't it the layout of objects in a scene that
++			// matters?" Exactly so. A probe is a photograph taken from a point,
++			// and the only honest question is whether the shaded point is IN
++			// that photograph or hidden behind something in it. Pure geometry;
++			// no concept of a room required.
++			//
++			// The probe already captured the answer. Its cube's ALPHA is how far
++			// it could see in every direction (the DepthCompressor pass), so:
++			// march from the probe camera towards this pixel, read what the
++			// probe saw that way, and treat "it saw something nearer" as
++			// occlusion. The parallax box (getProbeFade, above) stays as the
++			// cheap first rejection; this is the test that knows about geometry.
++			//
++			// THE SLACK IS RELATIVE, because the error is: one cube texel spans
++			// a solid angle, the compressed depth is 8 bits at the LDR tiers,
++			// and a texel straddling a silhouette filters between two depths.
++			// 8% of the probe-to-point distance, floored at 2% of the captured
++			// distance, keeps grazing floors and walls fully visible while the
++			// case the owner pointed at -- the outward face of a slab whose
++			// inward face the probe photographed -- fails it by 30% or more.
++			midf3 probeCamPosLS   = midf3_c( probe.cubemapPosLS.xyz );
++			midf3 probeToPosLS    = posInProbSpace.xyz - probeCamPosLS;
++			midf  probeToPosDist  = length( probeToPosLS );
++			midf3 probeToPosDirLS = probeToPosLS / max( probeToPosDist, _h( 1e-6 ) );
++			// The cube is sampled LEFT HANDED (localCorrect flips z on the way
++			// out); the visibility ray is flipped the same way.
++			midf3 probeVisDirLS   = midf3_c( probeToPosDirLS.x, probeToPosDirLS.y,
++											 -probeToPosDirLS.z );
++			midf  probeVisDepth;
++			@property( !hlms_cubemaps_use_dpm )
++				probeVisDepth = OGRE_SampleArrayCubeLevelF16(
++					texEnvProbeMap, samplerState@value(envMapRegSampler),
++					float3( probeVisDirLS ), probeCubemapIdx, 0.0 ).w;
++			@else
++				probeVisDepth = OGRE_SampleArray2DLevelF16(
++					texEnvProbeMap, samplerState@value(envMapRegSampler),
++					mapCubemapToDpm( probeVisDirLS ), probeCubemapIdx, 0.0 ).w;
++			@end
++			midf probeSeenDist = probeCapturedDistance( probeToPosDirLS, probeCamPosLS,
++														midf3_c( probe.halfSize.xyz ),
++														probeVisDepth );
++			midf probeVisSlack = max( probeToPosDist * _h( 0.08 ),
++									  probeSeenDist * _h( 0.02 ) );
++			midf probeVisible = saturate( ( probeSeenDist - probeToPosDist + probeVisSlack ) /
++										  max( probeVisSlack, _h( 1e-6 ) ) );
++
++			// CONFIDENCE SCALES THE CONTRIBUTION, NOT THE WEIGHT -- the measured
++			// trap from lane E3, and the reason this is two variables rather
++			// than one. `pccEnvS` is normalised by cubemapAccumWeight at the
++			// bottom of this piece, so crushing every probe's weight would only
++			// renormalise the SAME probes back to full strength. So `probeFade`
++			// (which multiplies every sampled term below, and patch 0017's
++			// probe-trust accumulator with it) carries the visibility, while
++			// cubemapAccumWeight keeps accumulating the FULL weight. The share
++			// an occluded probe does not claim is then handed back by patch
++			// 0017's blend to whatever filled envColourS before the probes ran
++			// -- cone tracing, the irradiance field, the sky -- and never to
++			// black, which is what a naive tightening of probe influence
++			// produces in a sealed room.
++			//
++			// In the non-VCT branch at the bottom (upstream-only: Jahshaka
++			// builds a probe grid in the VCT+PCC hybrid alone, so vct_num_probes
++			// is always set when probes exist) there is no other environment
++			// term to hand it back to, and the occluded share simply drops out.
++			midf probeFadeFull = probeFade;
++			probeFade = probeFade * probeVisible;
++
+ 			@property( vct_num_probes )
+ 				midf4 reflDirLS_dist = localCorrect( pixelData.reflDir, posInProbSpace, probe );
+ 				midf3 reflDirLS = reflDirLS_dist.xyz;
+@@ -274,7 +346,7 @@
+ 				clearCoatPccEnvS += clearCoatPccSingleEnvS;
+ 			@end
+ 
+-			cubemapAccumWeight += probeFade;
++			cubemapAccumWeight += probeFadeFull;	// Jahshaka patch 0029 -- FULL weight
+ 		}
+ 	}
+ 

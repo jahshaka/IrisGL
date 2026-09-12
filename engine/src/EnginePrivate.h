@@ -3002,6 +3002,9 @@ private:
     /// The GI items' world AABBs after the exclude flag and the extent-outlier
     /// trimming: the one place that decides which objects define the lit world.
     std::vector<Ogre::Aabb> giItemBounds() const;
+    /// The same list BEFORE the outlier trim — every GI item's world AABB as it
+    /// is. computeProbeRegion's slab search reads shapes, not fitted volumes.
+    std::vector<Ogre::Aabb> giItemBoundsRaw() const;
     /// Records (or clears) mGiAutoVolume after a rebuild. `fitted` is what the
     /// AUTO path resolved; a hand-typed bounds box clears the record instead.
     void noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic);
@@ -3016,7 +3019,10 @@ private:
     /// Where the reflection probes live: the free space inside `litVolume`.
     /// See the long-form argument on the definition — handing the padded voxel
     /// volume here instead is what made P4's finding-2 reflections go black.
-    Ogre::Aabb computeProbeRegion(const Ogre::Aabb &litVolume) const;
+    /// `enclosedAxesOut` (optional) receives how many of the three world axes
+    /// are closed by two FACING slabs — the measured enclosure that decides
+    /// whether a probe grid is worth building at all (buildPcc, refreshVctFast).
+    Ogre::Aabb computeProbeRegion(const Ogre::Aabb &litVolume, int *enclosedAxesOut = nullptr) const;
     /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
@@ -3214,6 +3220,14 @@ private:
     /// giStatus, because "the fit is degenerate in this scene" is a fact about
     /// the scene the author can act on (GiStatus::probesClampedToRegion).
     int mProbesClampedToRegion = 0;
+    /// How many material pushes have CROSSED the reflection-probe gate
+    /// (ogre-patch 0028's HlmsPbsDatablock::hasZeroSpecularResponse) on this
+    /// scene. A crossing flushes every renderable wearing the datablock so the
+    /// shader is rebuilt with or without the per-pixel probe loop; an ordinary
+    /// edit that leaves the material reflective either way costs nothing. The
+    /// counter exists so BOTH halves of that are gateable
+    /// (GiStatus::probeGateCrossings).
+    unsigned mProbeGateCrossings = 0;
     /// THE LAMP-MAP CACHE'S MEMORY (collectShadowCacheFrame). Per caster: its
     /// last seen world box, Item, pose epoch and render channels; per lamp: its
     /// last seen shadow key (parameters + pose). A change is "different from
@@ -3260,6 +3274,14 @@ private:
     /// after the shadow half checked that a shadow node exists to recalculate.
     bool mPccHdr      = false;
     bool mPccShadowed = false;
+    /// RESOLVED probe capture size (pixels per cube face) of the live grid, 0
+    /// when there is none. GiParams::probeCaptureSize is the request.
+    int  mPccCaptureSize = 0;
+    /// The enclosure measurement of the last probe-region fit, and whether it
+    /// made buildPcc decline the grid (GiStatus::probeEnclosedAxes /
+    /// probeGridRefused — the owner's "the sky is your first reflection asset").
+    int  mProbeEnclosedAxes = 0;
+    bool mProbeGridRefused  = false;
     /// The raster IrradianceField's one workspace names the probe shadow node
     /// (dropGiForShadowRebuild must tear the field down before an atlas rebuild).
     bool mIfdShadowed = false;

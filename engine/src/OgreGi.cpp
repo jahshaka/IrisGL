@@ -149,6 +149,12 @@ static bool resolveToggle(GiToggle t, bool autoValue) {
 // anyway) and tight enough that a fit which escaped the room is caught.
 static const float kProbeShapeCellAllowance = 8.0f;
 
+// HOW MANY ENCLOSED AXES MAKE A ROOM (buildPcc, refreshVctFast). Two: a floor
+// and a ceiling with no walls, or four walls with no roof, are both spaces a
+// probe can photograph. One — a ground plane, and nothing else — is the open
+// sky, which the sky IBL already holds perfectly and for free.
+static const int kMinEnclosedAxes = 2;
+
 // THE PROBE CATCH-UP RATE (ENGINE_CACHE_POLICY_SPEC D2) — how many STALE probes
 // one frame may re-capture. 0 = the tier's normal update budget (option A, the
 // shipped default: no hitch, progressive). A positive value raises the rate to
@@ -319,7 +325,11 @@ bool OgreScene::refreshVctFast() {
     if (!mVctVoxelizer || !mVctLighting) return false;
     if (mGiCachesDirty) return false;                  // a flush is already owed; it rebuilds
     if (mGiBuiltGeneration != mGiDestroyGeneration) return false;   // something may have died
-    if (mGi.mode == GiMode::VctPccHybrid && !mPcc) return false;
+    // `mProbeGridRefused` is a BUILT state, not a failed one (buildPcc's
+    // enclosure rule): an open scene has no grid on purpose, and forcing a
+    // from-scratch rebuild on every refresh because it has none would make the
+    // cheapest scene in the editor pay the most.
+    if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbeGridRefused) return false;
 
     Ogre::Vector3 mn, mx;
     if (!computeGiBounds(mn, mx)) return false;
@@ -337,8 +347,20 @@ bool OgreScene::refreshVctFast() {
     };
     Ogre::Aabb region = mGiProbeRegion;
     if (mGi.mode == GiMode::VctPccHybrid) {
-        region = computeProbeRegion(aabb);
+        // THE ENCLOSURE IS RE-MEASURED HERE TOO, and a change of VERDICT takes
+        // the full rebuild (round-2 send-back, 2026-09-13). Reading it without
+        // the out-param left two defects: the reported `probeEnclosedAxes` went
+        // stale for as long as the fast path kept the grid, and — worse —
+        // raising walls at the EXISTING hull faces changes the enclosure
+        // WITHOUT moving the region, so `sameBox` accepted the reuse and the
+        // scene stayed probe-less (or kept a grid it should no longer have)
+        // until something else forced a from-scratch rebuild.
+        int enclosed = 0;
+        region = computeProbeRegion(aabb, &enclosed);
+        const bool wouldRefuse = enclosed < kMinEnclosedAxes && !giBoundsExplicit();
+        if (wouldRefuse != mProbeGridRefused) return false;   // the grid itself is wrong now
         if (!sameBox(region, mGiProbeRegion)) return false;   // shapes must be re-derived
+        mProbeEnclosedAxes = enclosed;                        // keep giStatus honest
     }
 
     JAH_TRY {
@@ -516,6 +538,12 @@ GiStatus OgreScene::giStatus() const {
         st.probeRegionMax = toV(mGiProbeRegion.getMaximum());
         // RESOLVED, not requested: both default to GiToggle::Auto, and the
         // shadow half additionally falls back when there is no shadow node.
+        st.probeCaptureSize   = mPcc ? mPccCaptureSize : 0;
+        // The enclosure decision (buildPcc). Reported in EVERY mode so a caller
+        // can tell "no grid because this is an open scene" from "no grid
+        // because the mode does not build one".
+        st.probeEnclosedAxes  = mProbeEnclosedAxes;
+        st.probeGridRefused   = mProbeGridRefused;
         st.probeHdr     = mPcc && mPccHdr;
         st.probeShadows = (mPcc && mPccShadowed) || (mIfd && mIfdShadowed);   // either shadowed capture arm
         // RESOLVED, like the two above: the request is clamped to the probes
@@ -547,6 +575,10 @@ GiStatus OgreScene::giStatus() const {
             }
         }
         st.reusedLastRefresh = mGiReusedLastRefresh;
+        // Outside the probe block on purpose: a material can cross the gate in
+        // a scene that has no probe grid at all (the shader is rebuilt either
+        // way), and the count is the honest answer there too.
+        st.probeGateCrossings = mProbeGateCrossings;
         // DDGI, reported the same way pccBound/vctBound are: against the live
         // HlmsPbs pointer, not against what was requested or who bound last.
         st.ifdBound          = mIfd && pbs->getIrradianceField() == mIfd;
@@ -763,7 +795,11 @@ Ogre::Light *OgreScene::markGiLight(NodeId requested) {
 // escape hatch, and it runs BEFORE all of this: an excluded item is not in the
 // population, cannot be protected by the hysteresis floor, and therefore still
 // shrinks the volume the instant it is flagged.
-std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
+// The PLAIN gather, before any outlier trimming: every GI item's world AABB as
+// it actually is. computeProbeRegion's slab search reads this one — an item's
+// SHAPE is its evidence there, and the morph below deliberately moves a trimmed
+// box's faces.
+std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
     std::vector<Ogre::Aabb> all;
     all.reserve(mNodes.size());
     for (const auto &kv : mNodes) {
@@ -772,6 +808,11 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         if (kv.second.giBoundsExcluded) continue;
         all.push_back(const_cast<Ogre::Item *>(item)->getWorldAabbUpdated());
     }
+    return all;
+}
+
+std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
+    std::vector<Ogre::Aabb> all = giItemBoundsRaw();
     // One item IS the scene; there is no population to be an outlier against.
     mGiLastItemCount = all.size();
     if (all.size() < 2u) return all;
@@ -1111,18 +1152,24 @@ unsigned OgreScene::giVoxelResolution() const {
     }
 }
 
-// THE PROBE REGION — not the lit volume (REFLECTIONS_ADOPTION_SPEC.md P1a, the
-// root cause of P4's finding 2).
+// THE PROBE REGION AND THE ENCLOSURE, FROM ONE MEASUREMENT OF THE LAYOUT
+// (REFLECTIONS_ADOPTION_SPEC.md P1a + owner decision 2026-09-13 Q3).
 //
-// `PccPerPixelGridPlacement::setFullRegion` does NOT take a bounding box of the
-// geometry. It takes the FREE SPACE the probes will live in: upstream's own
-// sample hands it the interior cube's exact interior (half-size 0.5 for a
-// 1x1x1 room, no margin at all). We used to hand it the voxel volume — the
-// geometry union plus 10% plus 0.5, or whatever the user typed into the bounds
-// rows — and that is a materially different box.
+// Two answers come out of here and they are the SAME reading, deliberately:
+//   * WHERE the probes live — `PccPerPixelGridPlacement::setFullRegion` does
+//     NOT take a bounding box of the geometry, it takes the FREE SPACE the
+//     probes will occupy (upstream's own sample hands it a 1x1x1 room's exact
+//     interior, no margin at all);
+//   * WHETHER there is anything to photograph — `enclosedAxesOut` counts the
+//     world axes that are closed on BOTH sides. buildPcc declines the grid
+//     below two of them.
+// They cannot be two measurements. If the walls are not found, the region is
+// ALSO wrong — it keeps the empty acres of whatever the content is standing on,
+// which is the A1/A2 shrink-fit pathology — so a scene either has a room (its
+// region is that room's interior, its probes are worth building) or it has not.
 //
-// Why it matters, measured (gi.pcc_bounds, 2x1x2 probes, identical geometry,
-// ONLY the region changing):
+// WHY THE REGION MATTERS, measured (gi.pcc_bounds, 2x1x2 probes, identical
+// geometry, ONLY the region changing):
 //     region = geometry + 0.2   mirror pixel r = 0.251
 //     region = geometry + 0.4                   0.063
 //     region = geometry + 0.6                   0.000   <- black
@@ -1139,93 +1186,272 @@ unsigned OgreScene::giVoxelResolution() const {
 // nothing, i.e. black. probeCount and pccBound stay perfectly healthy
 // throughout, which is exactly why P4 could not see it.
 //
-// So: start from the TIGHT union (no margin) of the same items the lit volume
-// uses, clamp it into the lit volume (an explicit user bounds box therefore
-// still governs the extent, and a user who types the room's interior gets the
-// room's interior), and then pull each of the six faces in to the nearest
-// ENCLOSING slab — the floor, the ceiling, the walls. An item counts as a wall
-// for a direction when it (1) lies wholly on that side of the hull's centre,
-// (2) spans at least half of the hull on both other axes, and (3) HAS ITS OUTER
-// FACE AT THE HULL'S FACE. Furniture and the subject of the scene fail (2); a
-// free-standing partition in the middle of the room fails (3). In an open scene
-// no wall is found on most axes and the tight hull stands, which is the right
-// answer there.
+// ---- THE MEASUREMENT: FACING SLABS, NOT A HULL ----------------------------
 //
-// CONDITION (3) IS THE FIX FOR THE MIRROR ROOM'S BLACK REFLECTIONS (FIX WAVE
-// defect A1, 2026-09-07; found by the debug-runner on the shipped sample).
-// Without it, "wall-like" meant nothing more than "big and off-centre", so the
-// sample's free-standing MirrorPanel — a 5.2 x 3.0 x 0.24 slab standing at
-// z = -2.2 in the MIDDLE of a room whose walls are at z = +-5.25 — qualified as
-// the room's -Z wall and truncated the probe region at its own face (measured:
-// probeRegionMin.z came back EQUAL to the panel's zMax to five decimals). Every
-// probe was then placed and shrink-fitted inside a region that stopped a third
-// of the way across the room, the parallax boxes that came out of buildEnd
-// disagreed with the voxel volume by more than the hybrid's trust window, and
-// `getPccVctBlendWeight` handed those pixels to VCT — black, in a sealed room.
-// The defect needs no thin panel to appear, only a big enough object standing
-// clear of the walls: any partition, screen, counter or bookcase would do it.
+// It asks the question the owner asked — "isn't it the layout of objects in a
+// scene that matters" — directly, and of the objects THEMSELVES:
 //
-// The epsilon is RELATIVE (kWallFaceEpsilon of the hull's own extent on that
-// axis) rather than absolute, so it is scale-invariant, and it is generous
-// enough for the case that would otherwise regress: a floor slab wider than the
-// room leaves the side walls' outer faces a little inside the hull. A wall stops
-// counting as one when it stands further in than a tenth of the room; the
-// MirrorPanel stands 30% in.
+//   1. an item is a SLAB for an axis when it is thin on that axis and broad on
+//      the other two RELATIVE TO ITSELF (kSlabAspect). A wall, a floor, a
+//      ceiling, a partition and a billboard are slabs; a chair, a car, a column
+//      and a crate are not, at any scale, in any scene;
+//   2. a slab may CLOSE a face of the region only if it COVERS the region —
+//      at least half its cross-section on each of the other two axes, counting
+//      only axes something actually bounds (R1). Being thin and broad is what
+//      makes an item a slab; spanning the space is what makes it a wall. A
+//      shelf, a tabletop, a rug and a hanging light box are slabs by shape and
+//      none of them is a ceiling;
+//   3. an axis is ENCLOSED by a FACING PAIR of covering slabs across a REAL gap
+//      — two different slabs, one entirely beyond the other, overlapping
+//      substantially on the other two axes (R2). A floor and a ceiling; two
+//      facing walls. The OUTERMOST pair is the shell and anything between them
+//      is furniture, whatever its size;
+//   4. a LONE covering slab closes its one face only when NOTHING lies beyond
+//      it (R3): the ground has nothing below it and is the floor; a partition
+//      standing across a hall has the hall on both sides and closes nothing.
+//
+// THERE IS NO WORLD-ORIGIN TERM AND NO "WHICH SIDE OF THE CONTENT" TERM IN ANY
+// OF IT, and that is a correction, not a decoration (round-3 send-back,
+// 2026-09-13). Round 2 decided a slab's side by comparing its centre against
+// the midpoint of every NON-slab item — and on the default 100 m ground that
+// midpoint IS the world origin, because the ground is the content on X and Z.
+// Measured on this file's own contract geometry: the room of case 1 at the
+// origin read enclosed 2 with region x = [-4.90, 4.90]; THE SAME ROOM built at
+// x = +25 read enclosed 1 with x = [-50.00, 29.90] and lost its reflections
+// outright, and the roofed one kept them over a region spanning the whole 80 m
+// from the origin to the far wall — the oversized-region shrink-fit chain,
+// reached by translation. Contract rows 7 and 8 are that pair.
+//
+// WHY IT REPLACED THE HULL TEST (round-2 send-back, 2026-09-13; the lead's
+// measurement). The old test asked whether a slab covered half of the CONTENT
+// HULL on the other two axes and had its outer face at that hull's face — and
+// the hull is `giItemBounds()`, in which a trimmed outlier's half-size is
+// blended GEOMETRICALLY back towards its full one. For the ordinary case this
+// whole feature is about — a new project, the default 100 m ground, four 10 m
+// walls, a mirror — that blend put the hull at +-31 m: the walls covered 10 of
+// the 31 m required, failed before the outer-face test was even reached, and
+// the room measured OPEN. Raising the walls to 30 m does not help either (the
+// ground stops being an outlier at all, the hull becomes +-50, and 30 < 50), so
+// "build the hull from untrimmed items" repairs the small room and breaks the
+// large one. The defect is the hull itself: whatever the scene stands ON
+// dominates a measurement that is supposed to be about what stands on IT.
+// Slab-ness is self-relative and the pairing is slab-to-slab, so the ground
+// takes part in the Y answer (it is the floor) and never becomes a wall of the
+// X or Z ones — it is not thin on those axes. What it DOES still do there is
+// set the hull those axes fall back to when nothing closes them, which is the
+// honest answer ("this axis is open") rather than a verdict. Nothing here is
+// tuned to a size, and nothing here reads a position.
+//
+// THE A1 FIX IS STRUCTURAL NOW, not a condition. The Mirror Room sample's
+// free-standing MirrorPanel — a 5.2 x 3.0 x 0.24 slab standing at z = -2.2 in a
+// room whose walls are at z = +-5.25 — IS a slab for Z, and used to be read as
+// the room's -Z wall, truncating the probe region at its own face (measured:
+// probeRegionMin.z came back EQUAL to the panel's zMax to five decimals; every
+// probe was then fitted inside a third of a room, the parallax boxes
+// disagreed with the voxel volume, and `getPccVctBlendWeight` handed those
+// pixels to VCT — black, in a sealed room). It cannot be read that way here:
+// the outermost Z slabs are the two walls, and the panel is simply inside the
+// room. Any partition, screen, counter or bookcase is covered by the same
+// sentence. Covered by gi.pcc_bounds' A1 case.
 //
 // KNOWN LIMIT, documented rather than papered over: a room imported as ONE
-// hollow mesh has an AABB that IS its outer shell, and no axis-aligned test can
-// find its interior. Such a scene needs the explicit bounds rows (which clamp
-// this region) or the per-node exclude flag. Only a second depth-readback pass
-// could do better, and that doubles the probe render cost.
-Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume) const {
+// hollow mesh has an AABB that IS its outer shell — it is not a slab on any
+// axis, so it has no walls to find and the scene measures OPEN. Such a scene
+// needs the explicit bounds rows (which clamp this region AND stand the
+// enclosure rule down — see buildPcc) or the per-node exclude flag. Only a
+// second depth-readback pass could do better, and that doubles the probe render
+// cost.
+
+// An item is a SLAB for an axis when it is at least this many times broader on
+// BOTH other axes than it is thick on this one. Self-relative, so it is
+// scale-free and population-free: nothing about the rest of the scene can make
+// a wall stop being a wall.
+//
+// 2.0 IS MEASURED, not chosen. The two populations it has to separate, taken
+// from the shapes the suites and the shipped samples actually contain:
+//   walls and floors    gi.pcc_bounds' THICK room — a 1.4 m wall over a 5 m
+//                       storey — is the slimmest real one at 3.57; the thin
+//                       rooms are 12.5, a ground plane is hundreds;
+//   everything else     a column or pillar is 1.00 whatever its size (square
+//                       cross-section, by definition), an imported car 1.36,
+//                       a sofa ~1.1.
+// So the honest split is the geometric middle of 1.36 and 3.57, and it costs
+// 1.8x of margin on the wall side and 1.5x on the other. Two REDS in
+// gi.pcc_bounds found it: at 4.0 the thick room's walls were read as furniture,
+// its probe region stayed at the walls' outer faces and its auto-bounds twin
+// measured OPEN and lost its grid.
+//
+// Being read as a slab is not, by itself, being read as a wall: only the
+// OUTERMOST slab on each side of the content closes a face, so a bookcase or a
+// display panel inside a room changes nothing.
+static const float kSlabAspect = 2.0f;
+// How much of the SMALLER slab's extent the two must share on each of the other
+// two axes to be "facing each other" rather than merely parallel somewhere in
+// the world.
+static const float kSlabFacingOverlap = 0.5f;
+// ...and how big the gap between them must be, as a fraction of the smaller
+// slab's own cross-section, for the space between to be a VOLUME. A rug lying
+// on a floor is two parallel Y slabs 5 mm apart; a crawlspace is not.
+static const float kSlabMinGapFraction = 0.05f;
+// HOW MUCH OF THE ROOM A SLAB MUST COVER TO BE ALLOWED TO CLOSE A FACE OF IT
+// (round-3 rule R1). Being thin and broad makes an item a slab; being a WALL
+// or a CEILING additionally means spanning the space it is supposed to close.
+// A shelf, a tabletop, a rug, a hanging panel and a light box are all slabs by
+// shape and none of them covers the room. Half is the same threshold the
+// facing test already uses for slab-to-slab overlap, applied to the region.
+static const float kSlabRegionCover = 0.5f;
+
+Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
+                                         int *enclosedAxesOut) const {
+    if (enclosedAxesOut) *enclosedAxesOut = 0;
     const std::vector<Ogre::Aabb> items = giItemBounds();
     if (items.empty()) return litVolume;
 
+    // THE STARTING BOX is still the TIGHT union (no margin) of the same items
+    // the lit volume uses, clamped into the lit volume — so an explicit user
+    // bounds box still governs the extent, and a user who types the room's
+    // interior gets the room's interior. Every face below is only ever pulled
+    // INWARDS from here (the A2 shape clamp depends on that).
     Ogre::Vector3 mn(1e30f), mx(-1e30f);
     for (const Ogre::Aabb &a : items) { mn.makeFloor(a.getMinimum()); mx.makeCeil(a.getMaximum()); }
-    mn.makeCeil(litVolume.getMinimum());     // clamp INTO the lit volume
+    mn.makeCeil(litVolume.getMinimum());
     mx.makeFloor(litVolume.getMaximum());
     for (size_t ax = 0; ax < 3u; ++ax)
         if (!(mn[ax] < mx[ax])) return litVolume;   // clamped to nothing: keep the caller's box
 
     const Ogre::Vector3 hullMin = mn, hullMax = mx;
-    const Ogre::Vector3 centre = (hullMin + hullMax) * 0.5f;
-    const Ogre::Vector3 hullSize = hullMax - hullMin;
 
-    // How far a slab's outer face may sit inside the hull's face and still be
-    // read as part of the enclosure, as a fraction of the hull's extent on that
-    // axis. Measured against both cases it has to separate: a room whose floor
-    // overhangs its walls (wall faces ~7% in — must still count) and the Mirror
-    // Room's free-standing panel (~30% in — must not).
-    static const float kWallFaceEpsilon = 0.1f;
+    // THE SLAB SEARCH runs on the RAW world AABBs, not the trimmed ones: an
+    // item's SHAPE is the evidence here, and giItemBounds' outlier morph moves
+    // a trimmed box's faces (that is its job — it is fitting a lit volume, not
+    // describing geometry). This is the same list, before the trim.
+    const std::vector<Ogre::Aabb> raw = giItemBoundsRaw();
+    if (raw.empty()) return Ogre::Aabb::newFromExtents(mn, mx);
+
+    const auto isSlab = [](const Ogre::Aabb &a, size_t ax) {
+        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+        const float thin  = std::max(a.mHalfSize[ax], 1e-5f);   // a plane has zero
+        const float broad = std::min(a.mHalfSize[o1], a.mHalfSize[o2]);
+        return broad > 0.0f && broad >= kSlabAspect * thin;
+    };
+
+    // What one axis' reading is: where its two faces ended up, whether each was
+    // CLOSED by a slab (as opposed to left at the hull), and whether the axis
+    // ENCLOSES — which only a facing PAIR can make true.
+    struct AxisRead { float lo = 0.0f, hi = 0.0f; bool closedLo = false, closedHi = false, enclosed = false; };
+
+    // THE READING FOR ONE AXIS. `coverAgainst` is null on the first pass (the
+    // seed) and points at the first pass' answer on the second (see R1 below).
+    const auto readAxis = [&](size_t ax, const AxisRead *coverAgainst) -> AxisRead {
+        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+        AxisRead out;
+        out.lo = hullMin[ax];
+        out.hi = hullMax[ax];
+
+        // R1: A SLAB MAY CLOSE A FACE ONLY IF IT COVERS THE ROOM. Coverage is
+        // measured against the REGION, per other axis — and ONLY against an
+        // axis something actually bounds. An axis with no slab of its own still
+        // carries the whole ground plane, and nothing real covers half of a
+        // hundred metres: measuring against it would reject the two long walls
+        // of an open-ended hall, which are exactly the walls that make it one.
+        const auto covers = [&](const Ogre::Aabb &a) {
+            if (!coverAgainst) return true;                   // pass 1: the seed
+            for (size_t k : { o1, o2 }) {
+                const AxisRead &r = coverAgainst[k];
+                if (!r.closedLo && !r.closedHi) continue;     // nothing bounds it: not evidence
+                const float span = r.hi - r.lo;
+                if (!(span > 1e-5f)) continue;
+                const float overlap = std::min(a.getMaximum()[k], r.hi) - std::max(a.getMinimum()[k], r.lo);
+                if (overlap < kSlabRegionCover * span) return false;
+            }
+            return true;
+        };
+
+        // The OUTERMOST covering slab on either side. Anything between them is
+        // furniture whatever its size — which is the structural form of the A1
+        // fix (the Mirror Room's free-standing panel is a Z slab and is simply
+        // inside the room).
+        const Ogre::Aabb *lo = nullptr, *hi = nullptr;
+        for (const Ogre::Aabb &a : raw) {
+            if (!isSlab(a, ax) || !covers(a)) continue;
+            if (!lo || a.mCenter[ax] < lo->mCenter[ax]) lo = &a;
+            if (!hi || a.mCenter[ax] > hi->mCenter[ax]) hi = &a;
+        }
+        if (!lo) return out;                                  // no shell on this axis
+
+        // R2: TWO-SIDED CLOSURE IS A FACING PAIR ACROSS A REAL GAP. Two
+        // different slabs, one entirely below the other on this axis, sharing
+        // most of their extent on the other two, with a volume between them.
+        // There is NO world-origin term and no "which side of the content" term
+        // anywhere in this: a room is a room wherever on the ground it stands.
+        if (lo != hi && lo->getMaximum()[ax] < hi->getMinimum()[ax]) {
+            const auto shares = [&](size_t k) {
+                const float l = std::max(lo->getMinimum()[k], hi->getMinimum()[k]);
+                const float h = std::min(lo->getMaximum()[k], hi->getMaximum()[k]);
+                const float smaller = 2.0f * std::min(lo->mHalfSize[k], hi->mHalfSize[k]);
+                return (h - l) >= std::max(smaller * kSlabFacingOverlap, 1e-5f);
+            };
+            const float smallestSpan =
+                2.0f * std::min(std::min(lo->mHalfSize[o1], hi->mHalfSize[o1]),
+                                std::min(lo->mHalfSize[o2], hi->mHalfSize[o2]));
+            const float gap = hi->getMinimum()[ax] - lo->getMaximum()[ax];
+            if (shares(o1) && shares(o2) && gap >= smallestSpan * kSlabMinGapFraction) {
+                out.lo = std::min(std::max(lo->getMaximum()[ax], hullMin[ax]), hullMax[ax]);
+                out.hi = std::max(std::min(hi->getMinimum()[ax], hullMax[ax]), hullMin[ax]);
+                out.closedLo = out.closedHi = true;
+                out.enclosed = true;
+                if (!(out.lo < out.hi)) return AxisRead{ hullMin[ax], hullMax[ax], false, false, false };
+                return out;
+            }
+        }
+
+        // R3: A LONE SLAB CLOSES ITS ONE FACE ONLY WHEN NOTHING IS BEYOND IT.
+        // The ground has nothing below it and is the floor; a partition
+        // standing in a hall has the hall on both sides and is a partition. The
+        // old code pulled a face towards any slab that sat past the middle of
+        // the content, so one partition in an open-ended hall dropped half of
+        // it — and which half depended on where the world origin was.
+        const float eps = 1e-4f * std::max(hullMax[ax] - hullMin[ax], 1.0f);
+        const auto beyond = [&](const Ogre::Aabb *s, bool below) {
+            for (const Ogre::Aabb &a : raw) {
+                if (&a == s) continue;
+                if (below ? (a.getMinimum()[ax] < s->getMinimum()[ax] - eps)
+                          : (a.getMaximum()[ax] > s->getMaximum()[ax] + eps))
+                    return true;
+            }
+            return false;
+        };
+        // The outermost slab on each side gets to close THAT side, and only if
+        // its outside is empty. A slab that is the whole extent of the scene on
+        // this axis (nothing beyond it either way) says nothing about which
+        // side the room is on, so it closes nothing.
+        if (!beyond(lo, true) && beyond(lo, false)) {
+            out.lo = std::min(std::max(lo->getMaximum()[ax], hullMin[ax]), hullMax[ax]);
+            out.closedLo = true;
+        }
+        if (!beyond(hi, false) && beyond(hi, true)) {
+            out.hi = std::max(std::min(hi->getMinimum()[ax], hullMax[ax]), hullMin[ax]);
+            out.closedHi = true;
+        }
+        if (!(out.lo < out.hi)) return AxisRead{ hullMin[ax], hullMax[ax], false, false, false };
+        return out;
+    };
+
+    // TWO PASSES, because R1 measures a slab against the region and the region
+    // is what the slabs decide. Pass 1 seeds it with the closure rules alone;
+    // pass 2 re-reads every axis with the cover test aimed at pass 1's answer
+    // and its per-axis "did anything bound this" flags. One iteration is
+    // enough: a pass-1 face can only ever be pulled INWARDS from the hull, and
+    // a smaller region only makes coverage easier, so no real wall can be
+    // rejected because of a pass-1 mistake — only a spurious closer removed.
+    AxisRead seed[3], final[3];
+    for (size_t ax = 0; ax < 3u; ++ax) seed[ax] = readAxis(ax, nullptr);
+    for (size_t ax = 0; ax < 3u; ++ax) final[ax] = readAxis(ax, seed);
 
     for (size_t ax = 0; ax < 3u; ++ax) {
-        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
-        const float faceEps = std::max(hullSize[ax] * kWallFaceEpsilon, 1e-4f);
-        float nearestMax = hullMax[ax];      // the +axis face, pulled inwards
-        float nearestMin = hullMin[ax];      // the -axis face, pulled inwards
-        for (const Ogre::Aabb &a : items) {
-            const Ogre::Vector3 amn = a.getMinimum(), amx = a.getMaximum();
-            // Wall-like for this axis: covers at least half of the hull on both
-            // of the OTHER axes. A 2-unit box in a 9-unit room never qualifies.
-            const auto covers = [&](size_t k) {
-                if (hullSize[k] <= 0.0f) return true;
-                const float lo = std::max(amn[k], hullMin[k]);
-                const float hi = std::min(amx[k], hullMax[k]);
-                return (hi - lo) >= hullSize[k] * 0.5f;
-            };
-            if (!covers(o1) || !covers(o2)) continue;
-            // ...AND its OUTER face is the hull's face (condition 3, the A1 fix
-            // — see the header). `>=`/`<=` rather than a two-sided band: a slab
-            // reaching PAST the clamped hull (a wall outside user-typed bounds)
-            // is still a wall.
-            if (amn[ax] > centre[ax] && amn[ax] < nearestMax && amx[ax] >= hullMax[ax] - faceEps)
-                nearestMax = amn[ax];
-            if (amx[ax] < centre[ax] && amx[ax] > nearestMin && amn[ax] <= hullMin[ax] + faceEps)
-                nearestMin = amx[ax];
-        }
-        // Only accept the pull if it leaves a real volume behind.
-        if (nearestMin < nearestMax) { mn[ax] = nearestMin; mx[ax] = nearestMax; }
+        mn[ax] = final[ax].lo;
+        mx[ax] = final[ax].hi;
+        if (final[ax].enclosed && enclosedAxesOut) ++*enclosedAxesOut;
     }
     return Ogre::Aabb::newFromExtents(mn, mx);
 }
@@ -2052,7 +2278,8 @@ void OgreScene::rebuildVct() {
     // The probe grid gets its OWN region — the free space, not the padded voxel
     // volume. computeProbeRegion's header is the whole argument (P4 finding 2).
     if (mGi.mode == GiMode::VctPccHybrid) {
-        mGiProbeRegion = computeProbeRegion(aabb);
+        mProbeEnclosedAxes = 0;
+        mGiProbeRegion = computeProbeRegion(aabb, &mProbeEnclosedAxes);
         buildPcc(mGiProbeRegion);
         // The probe grid now owns the shader's one env-probe slot, so the IBL
         // cubemap must come OFF every datablock — see the long note at
@@ -2175,6 +2402,68 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
                            "gi.probeGrid");
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     mPccHdr = mPccShadowed = false;
+    mPccCaptureSize = 0;
+    mProbeGridRefused = false;
+
+    // NO ENCLOSURE MEANS NO PROBE GRID (owner decision 2026-09-13, Q3:
+    // "a user starts in the editor in a new project with an open scene and then
+    // builds by adding assets and objects... I would think the sky is your
+    // first reflection asset.").
+    //
+    // A reflection probe is a photograph of an enclosure taken from a point.
+    // `computeProbeRegion` has just MEASURED whether this scene has one, out of
+    // the same reading that fitted the region: for each axis it finds the
+    // outermost SLABS (thin on that axis, broad on the other two, relative to
+    // themselves) either side of the content, and counts the axis as enclosed
+    // when those two face each other across a real gap. Nothing here assumes a
+    // "room" — the engine has no such concept, only geometry and where it
+    // stands — and nothing is tuned to a size: the ground a scene sits on takes
+    // part in the Y answer, as the floor, and is invisible to X and Z.
+    //
+    // Below two such axes the probes would be photographing sky, and the cost
+    // of doing so is not small: at the shipped Epic grid that is 18-32 cube
+    // captures, 288-512 MiB of probe array, a probe shadow atlas per probe, and
+    // the per-pixel probe loop on every lit surface — to reproduce, badly and
+    // with a visible grid seam, exactly what the sky IBL already holds
+    // perfectly. The 2026-09-11 lighting audit measured the result of doing it
+    // anyway and called it finding #4: "moving the quality dial up replaced a
+    // correct sky reflection with a banded probe artifact", eighteen probes
+    // 346 m apart, nine of them buried under the ground plane.
+    //
+    // Declining is therefore the CHEAPER AND BETTER picture, and it costs no
+    // extra code to re-bind the sky: `reflectionTexForDatablocks()` already
+    // hands the IBL cubemap back to every datablock the moment `mPcc` is null
+    // (OgreSky.cpp — the env-probe slot has one occupant), and the caller runs
+    // applyReflectionToAll() right after this. The hybrid degrades to plain VCT
+    // + sky IBL, which is what Medium already looked like and what the owner's
+    // A/B preferred.
+    //
+    // It is reported rather than logged and forgotten: GiStatus carries
+    // `probeEnclosedAxes` and `probeGridRefused`, so "probeCount 0 in the
+    // hybrid" can be read as a decision instead of as the silent build failure
+    // gi.pcc_mirror was written to catch.
+    //
+    // ...AND IT IS A HEURISTIC ABOUT AN UNSTATED SPACE, so it stands down when
+    // the author has STATED one. Explicit `giBounds` rows are this engine's
+    // documented remedy for the one case the measurement provably cannot make
+    // (computeProbeRegion's own KNOWN LIMIT: a room imported as a single hollow
+    // mesh has an AABB that IS its outer shell, and no axis-aligned test can
+    // find its interior). A scene that has typed its lit volume has told the
+    // renderer where the space is; guessing over the top of that would be the
+    // renderer overruling the author. The auto path — which is every new
+    // project, every open scene and the case the owner described — is where the
+    // measurement decides, and it is the case the decision was about.
+    if (mProbeEnclosedAxes < kMinEnclosedAxes && !giBoundsExplicit()) {
+        mProbeGridRefused = true;
+        mProbeSlots.clear();
+        mProbeUpdatesPerFrame = 0;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: no probe grid — the scene is enclosed on " +
+            std::to_string(mProbeEnclosedAxes) +
+            " of 3 axes and no bounds were pinned, so reflections come from the "
+            "sky and cone tracing");
+        return;
+    }
     // The slots name probes that are about to be (re)created; the first
     // updateProbeBudget after the build re-sizes and re-fills them.
     mProbeSlots.clear();
@@ -2245,13 +2534,33 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     placement.setSnapSides(Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMin)),
                            Ogre::Vector3(std::max(0.0f, mGi.probeSnapSidesMax)));
 
-    // Quality -> probe face resolution (the probe render + memory knob).
+    // Quality -> probe face resolution (the probe render + memory knob), and
+    // the per-scene override that now sits beside it in the World panel
+    // (owner, 2026-09-13 Q4: "yes halve it but add it to the world settings").
+    //
+    // HIGH WAS 512 AND IS NOW 256. A probe costs 6 faces x size^2 x mips, so the
+    // halving quarters the grid: at High/HDR one probe drops 16.0 MiB -> 4.0 MiB
+    // and a 32-probe room drops 512 MiB -> 128 MiB (REFLECTION_PROBE_AUDIT
+    // §4.2's table, which the 2026-09-11 lighting audit's measured "288 MB /
+    // 108 slices" corroborates exactly). What is lost is detail the specular
+    // mip chain blurs away before it reaches a pixel: the cube is convolved for
+    // roughness, and only a roughness-0 mirror ever reads mip 0.
+    //
+    // 0 = follow the dial; anything else is the author's, clamped to a sane
+    // power of two because Ogre sizes the IBL mip chain from it.
     Ogre::uint32 probeRes = 256u;
     switch (mGi.quality) {
     case GiQuality::Low:    probeRes = 128u; break;
     case GiQuality::Medium: probeRes = 256u; break;
-    case GiQuality::High:   probeRes = 512u; break;
+    case GiQuality::High:   probeRes = 256u; break;
     }
+    if (mGi.probeCaptureSize > 0) {
+        unsigned want = unsigned(std::min(std::max(mGi.probeCaptureSize, 64), 1024));
+        unsigned pot = 64u;
+        while ((pot << 1u) <= want) pot <<= 1u;
+        probeRes = pot;
+    }
+    mPccCaptureSize = int(probeRes);
     // HDR PROBES (P3a). The main chain renders PFG_RGBA16_FLOAT (OgreChain.cpp),
     // so an LDR probe target clamps every value above 1.0 at CAPTURE time — i.e.
     // before the IBL convolution spreads a highlight across the mip chain, which
@@ -2901,6 +3210,9 @@ void OgreScene::teardownVct() {
     mProbeSlots.clear();
     mProbeUpdatesPerFrame = 0;
     mProbesClampedToRegion = 0;
+    mPccCaptureSize = 0;
+    mProbeEnclosedAxes = 0;
+    mProbeGridRefused = false;
     mVctItemIds.clear();
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;

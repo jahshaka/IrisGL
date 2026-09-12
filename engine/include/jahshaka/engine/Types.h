@@ -1478,6 +1478,15 @@ struct GiParams {
     /// back silently to the unshadowed capture when no shadow node exists (a
     /// headless engine has none) — GiStatus reports what actually happened.
     GiToggle  probeShadows = GiToggle::Auto;
+    /// PROBE CAPTURE SIZE — the pixel size of one cube face, and the single
+    /// biggest VRAM lever the hybrid has (REFLECTION_PROBE_AUDIT §4.2: a probe
+    /// costs `6 * size^2 * bytes * mips`, so halving it quarters the grid).
+    /// 0 = follow the quality dial (128 at Low, 256 at Medium and High since
+    /// the 2026-09-13 halving: 512 spent 16 MiB per probe — 512 MiB on a
+    /// 32-probe room — for detail the roughness mip chain blurs away). Any
+    /// other value is taken verbatim, clamped to 64..1024 and rounded down to
+    /// a power of two, because Ogre's IBL mip chain is built from it.
+    int       probeCaptureSize = 0;
     /// How far each probe's influence volume is stretched past its 1/N share of
     /// the probe region, so neighbours blend instead of showing a hard seam.
     /// 1.0 = no overlap (visible seams), the pin's own ctor default is 1.5, and
@@ -1648,6 +1657,7 @@ struct GiParams {
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
+               probeCaptureSize == o.probeCaptureSize &&
                probeOverlap == o.probeOverlap &&
                probeSnapDeviation == o.probeSnapDeviation &&
                probeSnapSidesMin == o.probeSnapSidesMin &&
@@ -1712,6 +1722,35 @@ struct GiStatus {
     /// shadow node to recalculate. False in every mode but the hybrid.
     bool   probeHdr = false;
     bool   probeShadows = false;
+    /// The RESOLVED probe capture size in pixels per cube face — what
+    /// `GiParams::probeCaptureSize` (0 = follow the quality dial) actually
+    /// became. 0 when no grid was built.
+    int    probeCaptureSize = 0;
+
+    // ---- ENCLOSURE: why there is (or is not) a probe grid -------------------
+    // Owner decision 2026-09-13: "a user starts in the editor in a new project
+    // with an open scene ... I would think the sky is your first reflection
+    // asset." A reflection probe is a photograph of an enclosure; where the
+    // renderer measured no enclosure there is nothing to photograph but the
+    // sky, and the sky IBL is both cheaper and sharper than 18-32 captures of
+    // it. So the hybrid builds NO probe grid in an open scene, and these two
+    // say so out loud instead of leaving `probeCount 0` looking like a failure.
+
+    /// How many world axes `computeProbeRegion` found ENCLOSED — two SLABS
+    /// facing each other across a real gap (a floor and a ceiling; two facing
+    /// walls), measured out of the same reading that fits the probe region.
+    /// 0..3, and 0 in every mode but the hybrid. Two is the threshold: at two
+    /// the probes are photographing something, below it they are photographing
+    /// the sky.
+    int    probeEnclosedAxes = 0;
+    /// True when the hybrid deliberately declined to build a probe grid because
+    /// `probeEnclosedAxes` was below the threshold AND no explicit
+    /// `boundsMin`/`boundsMax` were pinned (a scene that has typed its lit
+    /// volume has stated where the space is, and the measurement stands down). `probeCount 0` with this
+    /// TRUE is the open-scene answer (and the sky IBL is bound instead);
+    /// `probeCount 0` with this FALSE while the mode is the hybrid is the old
+    /// silent-degradation failure gi.pcc_mirror exists to catch.
+    bool   probeGridRefused = false;
     /// How many probes the renderer re-captures per frame — the RESOLVED
     /// `GiParams::updateBudget`, clamped to the probes that actually exist, and
     /// 0 whenever the probe arm did not build (FIX WAVE B1/B2). 0 in every mode
@@ -1763,6 +1802,16 @@ struct GiStatus {
     /// the honest signal that the fit is not doing the work in this scene, and
     /// unlike the union check above it CAN fire.
     int    probesClampedToRegion = 0;
+    /// How many material edits on this scene have CROSSED the reflection-probe
+    /// gate — the point at which a material stops (or starts) being able to
+    /// reflect anything, and its shader has to be rebuilt with or without the
+    /// per-pixel probe loop (ogre-patch 0028). An ordinary parameter push is
+    /// free; a crossing is a `flushRenderables` over every renderable wearing
+    /// that datablock. The only workflow that crosses repeatedly is a user
+    /// dragging Specular Color down through black and back, which crosses
+    /// exactly twice; a monotonically rising count on a still scene is a
+    /// defect. Cumulative, never reset.
+    unsigned probeGateCrossings = 0;
     /// The Forward+ per-cell CUBEMAP PROBE budget in force for this scene.
     ///
     /// `ForwardClustered::collectObjsForSlice` writes probes into a cluster cell

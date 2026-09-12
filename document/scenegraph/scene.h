@@ -249,6 +249,12 @@ public:
     int giProbeHdr = -1;          // HDR probe captures (RGBA16F); auto = High only
     int giProbeShadows = -1;      // shadowed probe captures; auto = High only
     float giProbeOverlap = 1.25f; // probe influence overlap (upstream's sample value)
+    /// PROBE CAPTURE SIZE in pixels per cube face, 0 = follow the quality dial
+    /// (128 Low, 256 Medium and High). The hybrid's single biggest VRAM lever:
+    /// a probe costs 6 faces x size^2 x mips, so halving it quarters the grid
+    /// (REFLECTION_PROBE_AUDIT §4.2). A Rayon-tiered row, like the technique
+    /// and quality above — setting it in the World panel PINS it.
+    int giProbeCaptureSize = 0;
     float giProbeSnapDeviation = 0.05f;  // shrink-fit snap-back tolerances: the pin's
     float giProbeSnapSidesMin = 0.25f;   // own ctor defaults, made explicit and ours
     float giProbeSnapSidesMax = 0.25f;
