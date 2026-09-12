@@ -929,9 +929,12 @@ public:
     /// per picture, never per frame.
     ///
     /// 0 means there is nothing to read: no HDR in this view's chain, the fixed
-    /// (already-constant) form, an offscreen view with no chain, or a view that
-    /// has not presented a frame yet. 0 is not an error, and a caller should
-    /// fall back to the grade it would have used anyway.
+    /// (already-constant) form, an offscreen view with no chain, or a view whose
+    /// CURRENT workspace has not presented a frame yet — a rebuild (any post-fx
+    /// SHAPE change: switching SSR or SSAO off, resizing) destroys and recreates
+    /// the adaptation history, so "has drawn a frame" is asked of the graph, not
+    /// of the view. 0 is not an error, and a caller should fall back to the
+    /// grade it would have used anyway.
     virtual float measuredExposureScale() const = 0;
 
     /// The engine-drawn overlay for this View (STATS_OVERLAY_SPEC.md §5.1):

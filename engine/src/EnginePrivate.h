@@ -3737,6 +3737,11 @@ private:
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.
     unsigned long long         mFramesPresented = 0;
+    /// The same count for the CURRENT workspace only — reset by attachWorkspace,
+    /// which is the one seam every (re)build goes through. What
+    /// measuredExposureScale needs: "has this graph written its keep_content
+    /// textures yet", a question a rebuild answers differently from a scene bind.
+    unsigned long long         mWorkspaceFramesPresented = 0;
     /// What the host asked for. Offscreen views keep it and ignore it.
     PostFxDesc                 mPostFx;
     /// Ditto for the engine-drawn overlay (STATS_OVERLAY_SPEC §5.1).
