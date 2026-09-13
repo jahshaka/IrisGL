@@ -188,11 +188,77 @@
 					   passBuf.irradianceField.viewToIrradianceFieldRow1,
 					   passBuf.irradianceField.viewToIrradianceFieldRow2 );
 
-	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
 	float3 ifdSpaceNormal = normalize( transformDir3( pixelData.normal, //
 									   passBuf.irradianceField.viewToIrradianceFieldRow0,
 									   passBuf.irradianceField.viewToIrradianceFieldRow1,
 									   passBuf.irradianceField.viewToIrradianceFieldRow2 ) );
+
+	// THE FOURTH THING THAT IS NOT UPSTREAM'S: THE SURFACE BIAS (ENGINE-6 item
+	// 1; PHOTON-S2 FINDINGS §5 item 2 and §7 item 1, recorded in
+	// SPECS/OGRE_UPSTREAM_ISSUES.md as "IrradianceField: three visibility
+	// findings").
+	//
+	// THE DEFECT, upstream's: the cage is looked up AT THE SHADED POINT. A
+	// point lying ON a surface is, to a probe on the other side of that
+	// surface, at very nearly the distance the depth atlas recorded for the
+	// surface itself -- so the Chebyshev test is evaluated on its own knife
+	// edge, where the stored variance decides the answer. With
+	// `mNumRaysPerPixel = 1` (our setting, and upstream's own default in the
+	// sample) the depth moments come from ONE ray per texel convolved by the
+	// integration job, so that variance is small and the test is very nearly a
+	// hard step: a wall's two faces are a texel apart in it. That is the
+	// standard DDGI leak pair, and the paper's own answer is not a better test
+	// but a MOVED SAMPLE POINT -- shift the lookup off the surface, along the
+	// normal and towards the eye, by a fraction of a probe spacing. The wall's
+	// far side then sits a real distance behind the sample and the Chebyshev
+	// test has something to bite on.
+	//
+	// THE UNITS ARE PROBE SPACINGS, which is why this is applied HERE, in grid
+	// space, and not in metres in view space: one unit of ifdGridPos is one
+	// probe spacing ON THAT AXIS, so an anisotropic field (32x8x32 is what our
+	// fit gives a room) biases by more metres along its sparse axis, which is
+	// exactly where its depth texels are coarsest. A metre-valued bias would
+	// need the spacing to convert and would be wrong on two axes out of three.
+	//
+	// THE TWO CONSTANTS are the DDGI paper's own MIXTURE -- 0.2 along the
+	// normal to 0.8 towards the eye (Majercik et al. 2019 §4.2; RTXGI ships
+	// the same shape as probeNormalBias/probeViewBias) -- at a QUARTER of the
+	// paper's magnitude: it writes `( 0.2 n + 0.8 w_o ) * 0.75` spacings,
+	// this is the same vector times 0.25. The view half dominates because a
+	// grazing view is the case that leaks: the shading point is then nearly IN
+	// the surface as the probe sees it, whatever the normal does.
+	//
+	// WHY A QUARTER, measured in this lane on the PHOTON-S2 leak room
+	// (0.5/0.2/0.1/0.05 m walls, one lamp outside) against gi.ddgi_edge's
+	// legitimate red bounce and the brightness of a floor 5 m from any wall.
+	// The bias trades one against the other MONOTONICALLY, because lifting a
+	// probe's false self-occlusion and lifting its true occlusion are the same
+	// operation:
+	//
+	//    view bias | 0.10 m wall leak | 0.05 m wall leak | open floor
+	//       0.00   |      0.0520      |      0.0807      |   +3/255
+	//       0.20   |      0.0436      |      0.0694      |  +13/255
+	//       0.60   |      0.0415      |      0.0641      |  +22/255
+	//     (today)  |      0.0536      |      0.0829      |     --
+	//
+	// The knee is at 0.20: it takes 87 % of the leak the full paper value
+	// takes, for little more than half of the interior brightening -- and that
+	// brightening is a change to every shipped DDGI picture, not a test
+	// number. The normal half is scaled with it to keep the paper's ratio.
+	const float ifdNormalBias = 0.05;   // probe spacings
+	const float ifdViewBias   = 0.20;   // probe spacings
+	// The direction TOWARDS the eye: inPs.pos is a VIEW-space position, so the
+	// eye is the origin. Normalised in view space and then rotated into grid
+	// space (transformDir3 is the rotation half of the same transform), which
+	// makes it a direction in probe spacings -- deliberately NOT re-normalised
+	// afterwards, so an anisotropic grid biases per axis as described above.
+	float3 ifdViewDirGrid = transformDir3( normalize( -inPs.pos.xyz ), //
+										   passBuf.irradianceField.viewToIrradianceFieldRow0,
+										   passBuf.irradianceField.viewToIrradianceFieldRow1,
+										   passBuf.irradianceField.viewToIrradianceFieldRow2 );
+	ifdGridPos += ifdSpaceNormal * ifdNormalBias + ifdViewDirGrid * ifdViewBias;
+
+	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
 
 	// ifdAlpha is how far from the floor( ifdGridPos ). on [0, 1] for each axis.
 	float3 ifdAlpha = saturate( fract( ifdGridPos ) );
@@ -467,6 +533,40 @@
 	// writes them before it binds the field); there, the box fade is skipped.
 	float ifdConfidence = min( ifdHaveCounts ? ifdEdgeFade : 1.0, ifdFrontFade );
 
+	// (c) OURS, AND THE SECOND HALF OF ENGINE-6 ITEM 1: NO PROBE OF THIS CAGE
+	// CAN SEE ME.
+	//
+	// THE DEFECT, upstream's, and the one the cage loop's own note above
+	// records as arithmetic: the sum below is NORMALISED by `sumIfdWeight`, so
+	// crushing every probe of a cage does not remove its contribution -- it
+	// renormalises the same eight crushed probes and hands the pixel the full
+	// leak back. The Chebyshev test can say "none of these probes can see
+	// you"; the division then throws that answer away. (PHOTON-S2 measured the
+	// consequence from the other side: a distance field that crushes MORE
+	// sharply bought 4-24 % of the leak, because the renormalisation gives it
+	// back.)
+	//
+	// WHAT THE NUMBER MEANS. `weight` starts at `saturate( dot ) + 0.2`, so a
+	// probe that is merely behind the surface still carries 0.2, and the
+	// trilinear factors sum to 1 over the cage: an UNCRUSHED cage therefore
+	// sums to at least 0.2 and a well-lit one to about 1.2. The crush cubes
+	// anything under 0.2, and a fully crushed cage lands at ~1e-17. There is
+	// no legitimate cage anywhere in between, which is why the fade can sit
+	// four orders of magnitude BELOW the uncrushed floor and still separate
+	// the two cases perfectly: it is a guard against a division, not a dial on
+	// the picture. The measured cost of it on gi.ddgi_edge's legitimate red
+	// bounce is zero (lane report).
+	//
+	// WHAT IT FADES TO: nothing, deliberately -- not to the VCT ambient
+	// fallback below. `ifdConfidence` means "this pixel is outside the field's
+	// reach", and there the ambient a no-field build gave the pixel is the
+	// right answer. THIS says "the field can see this pixel and reports that
+	// nothing lights it from here", which is a real answer; substituting an
+	// unoccluded ambient for it would re-open the leak in a different colour.
+	const float ifdWeightLo = 0.0005;
+	const float ifdWeightHi = 0.0050;
+	float ifdWeightFade = smoothstep( ifdWeightLo, ifdWeightHi, sumIfdWeight );
+
 	// THE FIRST LINE THAT IS NOT UPSTREAM'S. Upstream writes
 	//     pixelData.envColourD.xyz += ifdIrradiance * ( 1.0 / sumIfdWeight );
 	// and we scale that by jahIfd.x, the DDGI diffuse intensity the host writes
@@ -475,7 +575,7 @@
 	// 1.0 reproduces upstream exactly. The confidence is ours too (P9): inside
 	// the field it is exactly 1 and this line is bit-for-bit what it always was.
 	pixelData.envColourD.xyz +=
-		ifdIrradiance * ( passBuf.jahIfd.x * ifdConfidence / sumIfdWeight );
+		ifdIrradiance * ( passBuf.jahIfd.x * ifdConfidence * ifdWeightFade / sumIfdWeight );
 
 @property( vct_num_probes )
 	// AND THE FALLBACK (P9). Binding a field sets VctDisableDiffuse
@@ -536,8 +636,8 @@
 		// VCT ambient fallback above takes over. Inside the field the factor is
 		// exactly 1.
 		pixelData.envColourD.xyz += irradianceSH( ifdWsNormal PASSBUF_ARG ) *
-									( passBuf.jahIfd.y * ifdSkyVis * ifdConfidence /
-									  sumIfdWeight );
+									( passBuf.jahIfd.y * ifdSkyVis * ifdConfidence *
+									  ifdWeightFade / sumIfdWeight );
 	}
 @end
 @end
