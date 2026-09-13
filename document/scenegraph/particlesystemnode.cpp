@@ -78,6 +78,9 @@ void ParticleSystemNode::resetAuthoringDefaults()
     orientation = ParticleOrientation::Billboard;
     alphaHash = true;
     preset = ParticlePreset::Custom;
+    // The whole authoring block at once (lead review R2 #2): every field here
+    // is in the emitter's mirror signature, and applyPreset runs through this.
+    notifyChanged(NodeChange::Params);
 }
 
 ParticleSystemNode::~ParticleSystemNode() = default;
@@ -249,6 +252,7 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
         scaleKeys  = { sk(0.0f, 1.0f), sk(1.0f, 0.4f) };
         break;
     }
+    notifyChanged(NodeChange::Params);
 }
 
 // ---- name tables -----------------------------------------------------------
@@ -482,41 +486,41 @@ QVariant ParticleSystemNode::getPropertyValue(QString valueName)
 
 bool ParticleSystemNode::setPropertyValue(QString valueName, const QVariant &value)
 {
-    if (valueName == "particlesPerSecond") { particlesPerSecond = value.toFloat();   return true; }
-    if (valueName == "particleScale")      { particleScale      = value.toFloat();   return true; }
-    if (valueName == "gravityComplement")  { gravityComplement  = value.toFloat();   return true; }
-    if (valueName == "lifeLength")         { lifeLength         = value.toFloat();   return true; }
-    if (valueName == "speed")              { speed              = value.toFloat();   return true; }
-    if (valueName == "speedError")         { speedError         = value.toFloat();   return true; }
-    if (valueName == "lifeError")          { lifeError          = value.toFloat();   return true; }
-    if (valueName == "scaleError")         { scaleError         = value.toFloat();   return true; }
-    if (valueName == "dissipate")          { dissipate          = value.toBool();    return true; }
-    if (valueName == "dissipateInv")       { dissipateInv       = value.toBool();    return true; }
-    if (valueName == "randomRotation")     { randomRotation     = value.toBool();    return true; }
-    if (valueName == "blendMode")          { useAdditive        = value.toBool();    return true; }
-    if (valueName == "alphaHash")          { alphaHash          = value.toBool();    return true; }
-    if (valueName == "distortion")         { distortion         = value.toBool();    return true; }
-    if (valueName == "coneAngle")          { coneAngle          = value.toFloat();   return true; }
-    if (valueName == "turbulence")         { turbulence         = value.toFloat();   return true; }
-    if (valueName == "rotationSpeedMin")   { rotationSpeedMin   = value.toFloat();   return true; }
-    if (valueName == "rotationSpeedMax")   { rotationSpeedMax   = value.toFloat();   return true; }
-    if (valueName == "burstDuration")      { burstDuration      = value.toFloat();   return true; }
-    if (valueName == "burstRepeatDelay")   { burstRepeatDelay   = value.toFloat();   return true; }
-    if (valueName == "startDelay")         { startDelay         = value.toFloat();   return true; }
-    if (valueName == "maxParticles")       { maxParticles       = value.toInt();     return true; }
-    if (valueName == "shape")              { shape = shapeFromName(value.toString()); return true; }
-    if (valueName == "orientation")        { orientation = orientationFromName(value.toString()); return true; }
-    if (valueName == "preset")             { applyPreset(presetFromName(value.toString())); return true; }
-    if (valueName == "extents")            { extents      = iris::fromQt(value.value<QVector3D>()); return true; }
-    if (valueName == "innerExtents")       { innerExtents = iris::fromQt(value.value<QVector3D>()); return true; }
-    if (valueName == "wind")               { wind         = iris::fromQt(value.value<QVector3D>()); return true; }
-    if (valueName == "emitColourStart")    { emitColourStart = value.value<QColor>(); return true; }
-    if (valueName == "emitColourEnd")      { emitColourEnd   = value.value<QColor>(); return true; }
-    if (valueName == "colourFade1")        { colourFade1       = value.value<QColor>(); return true; }
-    if (valueName == "colourFade2")        { colourFade2       = value.value<QColor>(); return true; }
-    if (valueName == "colourFadeSwitch")   { colourFadeSwitch  = value.toFloat();   return true; }
-    if (valueName == "scaleRate")          { scaleRate         = value.toFloat();   return true; }
-    if (valueName == "scaleRateMultiply")  { scaleRateMultiply = value.toBool();    return true; }
+    if (valueName == "particlesPerSecond") { particlesPerSecond = value.toFloat();   return markedParams(); }
+    if (valueName == "particleScale")      { particleScale      = value.toFloat();   return markedParams(); }
+    if (valueName == "gravityComplement")  { gravityComplement  = value.toFloat();   return markedParams(); }
+    if (valueName == "lifeLength")         { lifeLength         = value.toFloat();   return markedParams(); }
+    if (valueName == "speed")              { speed              = value.toFloat();   return markedParams(); }
+    if (valueName == "speedError")         { speedError         = value.toFloat();   return markedParams(); }
+    if (valueName == "lifeError")          { lifeError          = value.toFloat();   return markedParams(); }
+    if (valueName == "scaleError")         { scaleError         = value.toFloat();   return markedParams(); }
+    if (valueName == "dissipate")          { dissipate          = value.toBool();    return markedParams(); }
+    if (valueName == "dissipateInv")       { dissipateInv       = value.toBool();    return markedParams(); }
+    if (valueName == "randomRotation")     { randomRotation     = value.toBool();    return markedParams(); }
+    if (valueName == "blendMode")          { useAdditive        = value.toBool();    return markedParams(); }
+    if (valueName == "alphaHash")          { alphaHash          = value.toBool();    return markedParams(); }
+    if (valueName == "distortion")         { distortion         = value.toBool();    return markedParams(); }
+    if (valueName == "coneAngle")          { coneAngle          = value.toFloat();   return markedParams(); }
+    if (valueName == "turbulence")         { turbulence         = value.toFloat();   return markedParams(); }
+    if (valueName == "rotationSpeedMin")   { rotationSpeedMin   = value.toFloat();   return markedParams(); }
+    if (valueName == "rotationSpeedMax")   { rotationSpeedMax   = value.toFloat();   return markedParams(); }
+    if (valueName == "burstDuration")      { burstDuration      = value.toFloat();   return markedParams(); }
+    if (valueName == "burstRepeatDelay")   { burstRepeatDelay   = value.toFloat();   return markedParams(); }
+    if (valueName == "startDelay")         { startDelay         = value.toFloat();   return markedParams(); }
+    if (valueName == "maxParticles")       { maxParticles       = value.toInt();     return markedParams(); }
+    if (valueName == "shape")              { shape = shapeFromName(value.toString()); return markedParams(); }
+    if (valueName == "orientation")        { orientation = orientationFromName(value.toString()); return markedParams(); }
+    if (valueName == "preset")             { applyPreset(presetFromName(value.toString())); return markedParams(); }
+    if (valueName == "extents")            { extents      = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
+    if (valueName == "innerExtents")       { innerExtents = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
+    if (valueName == "wind")               { wind         = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
+    if (valueName == "emitColourStart")    { emitColourStart = value.value<QColor>(); return markedParams(); }
+    if (valueName == "emitColourEnd")      { emitColourEnd   = value.value<QColor>(); return markedParams(); }
+    if (valueName == "colourFade1")        { colourFade1       = value.value<QColor>(); return markedParams(); }
+    if (valueName == "colourFade2")        { colourFade2       = value.value<QColor>(); return markedParams(); }
+    if (valueName == "colourFadeSwitch")   { colourFadeSwitch  = value.toFloat();   return markedParams(); }
+    if (valueName == "scaleRate")          { scaleRate         = value.toFloat();   return markedParams(); }
+    if (valueName == "scaleRateMultiply")  { scaleRateMultiply = value.toBool();    return markedParams(); }
     if (valueName == "texture")            return false;   // read-only, see getProperties()
     // The colour RAMP is an asset BINDING, not a value: it needs a project pin
     // and a CAS resolve, which is particles.setColourRamp's job — the same rule

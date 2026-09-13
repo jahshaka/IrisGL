@@ -178,27 +178,39 @@ public:
     // finest granularity that is not a lie.)
 
     // ---- setters kept for the panel and for source compatibility -------------
-    void setRandomRotation(bool val)      { randomRotation = val; }
-    void setBlendMode(bool useAddittive)  { useAdditive = useAddittive; }
-    void setDissipation(bool b)           { dissipate = b; }
-    void setDissipationInv(bool b)        { dissipateInv = b; }
-    void setParticleScale(float scale)    { particleScale = scale; }
-    void setPPS(float pps)                { particlesPerSecond = pps; }
+    //
+    // EVERY ONE OF THEM MARKS (lead review R2 #2). The mirror hashes all of
+    // these fields into the emitter's signature, and since the dirty set it
+    // only looks at an emitter the document says changed — so a setter that
+    // reported nothing left the emitter stale on screen until the background
+    // verifier happened to rotate onto it, which is a second or two of the
+    // panel's sliders doing visibly nothing. The emitter panel drives
+    // setDissipation and setDissipationInv live and on undo.
+    //
+    // ...AND EVERY ONE EARLY-OUTS ON NO CHANGE FIRST, for the same reason the
+    // camera's do: a panel that re-asserts a value it already set would
+    // otherwise put this node on the change list every frame it is shown.
+    void setRandomRotation(bool val)      { if (randomRotation == val) return; randomRotation = val; notifyChanged(NodeChange::Params); }
+    void setBlendMode(bool useAddittive)  { if (useAdditive == useAddittive) return; useAdditive = useAddittive; notifyChanged(NodeChange::Params); }
+    void setDissipation(bool b)           { if (dissipate == b) return; dissipate = b; notifyChanged(NodeChange::Params); }
+    void setDissipationInv(bool b)        { if (dissipateInv == b) return; dissipateInv = b; notifyChanged(NodeChange::Params); }
+    void setParticleScale(float scale)    { if (particleScale == scale) return; particleScale = scale; notifyChanged(NodeChange::Params); }
+    void setPPS(float pps)                { if (particlesPerSecond == pps) return; particlesPerSecond = pps; notifyChanged(NodeChange::Params); }
     float getPPS() const                  { return particlesPerSecond; }
-    void setGravity(float g)              { gravityComplement = g; }
+    void setGravity(float g)              { if (gravityComplement == g) return; gravityComplement = g; notifyChanged(NodeChange::Params); }
     float getGravity() const              { return gravityComplement; }
-    void setLife(float ll)                { lifeLength = ll; }
+    void setLife(float ll)                { if (lifeLength == ll) return; lifeLength = ll; notifyChanged(NodeChange::Params); }
     float getLife() const                 { return lifeLength; }
-    void setSpeed(float s)                { speed = s; }
+    void setSpeed(float s)                { if (speed == s) return; speed = s; notifyChanged(NodeChange::Params); }
     float getSpeed() const                { return speed; }
-    void setTexture(QSharedPointer<iris::Texture2D> tex) { texture = tex; }
+    void setTexture(QSharedPointer<iris::Texture2D> tex) { if (texture == tex) return; texture = tex; notifyChanged(NodeChange::Params); }
 
     /// The "Random ..." sliders send a FRACTION of the mean; the fields hold
     /// the absolute spread. (These three were edited by the panel and never
     /// serialized until the ParticleFX2 adoption — audit defect #7.)
-    void setSpeedError(float fraction)  { speedError = fraction * speed; }
-    void setLifeError(float fraction)   { lifeError = fraction * lifeLength; }
-    void setScaleError(float fraction)  { scaleError = fraction * particleScale; }
+    void setSpeedError(float fraction)  { const float v = fraction * speed; if (speedError == v) return; speedError = v; notifyChanged(NodeChange::Params); }
+    void setLifeError(float fraction)   { const float v = fraction * lifeLength; if (lifeError == v) return; lifeError = v; notifyChanged(NodeChange::Params); }
+    void setScaleError(float fraction)  { const float v = fraction * particleScale; if (scaleError == v) return; scaleError = v; notifyChanged(NodeChange::Params); }
     float speedErrorFraction() const  { return speed        > 0 ? speedError / speed        : 0.0f; }
     float lifeErrorFraction() const   { return lifeLength   > 0 ? lifeError  / lifeLength   : 0.0f; }
     float scaleErrorFraction() const  { return particleScale> 0 ? scaleError / particleScale: 0.0f; }

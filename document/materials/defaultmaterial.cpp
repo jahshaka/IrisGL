@@ -84,11 +84,13 @@ QString DefaultMaterial::getDiffuseTextureSource()
 void DefaultMaterial::setAmbientColor(QColor col)
 {
     ambientColor = col;
+    touch();
 }
 
 void DefaultMaterial::setDiffuseColor(QColor col)
 {
     diffuseColor = col;
+    touch();
 }
 
 QColor DefaultMaterial::getDiffuseColor()
@@ -125,6 +127,7 @@ QString DefaultMaterial::getNormalTextureSource()
 void DefaultMaterial::setNormalIntensity(float intensity)
 {
     normalIntensity = intensity;
+    touch();
 }
 
 float DefaultMaterial::getNormalIntensity()
@@ -162,6 +165,7 @@ QString DefaultMaterial::getSpecularTextureSource()
 void DefaultMaterial::setSpecularColor(QColor col)
 {
     specularColor = col;
+    touch();
 }
 
 QColor DefaultMaterial::getSpecularColor()
@@ -172,6 +176,7 @@ QColor DefaultMaterial::getSpecularColor()
 void DefaultMaterial::setShininess(float shininess)
 {
     this->shininess = shininess;
+    touch();
 }
 
 float DefaultMaterial::getShininess()
@@ -210,6 +215,7 @@ QString DefaultMaterial::getReflectionTextureSource()
 void DefaultMaterial::setReflectionInfluence(float intensity)
 {
     reflectionInfluence = intensity;
+    touch();
 }
 
 float DefaultMaterial::getReflectionInfluence()
@@ -220,6 +226,7 @@ float DefaultMaterial::getReflectionInfluence()
 void DefaultMaterial::setTextureScale(float scale)
 {
     this->textureScale = scale;
+    touch();
 }
 
 float DefaultMaterial::getTextureScale()

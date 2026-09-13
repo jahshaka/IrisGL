@@ -94,25 +94,22 @@ PbrMaterial::PbrMaterial()
 
 // ---------------------------------------------------------------- setters
 
-void PbrMaterial::setBaseColor(QColor color)        { baseColor = color; }
-void PbrMaterial::setBaseColorFactor(float factor)  { baseColorFactor = factor; }
-
+void PbrMaterial::setBaseColor(QColor color)        { baseColor = color; touch(); }
+void PbrMaterial::setBaseColorFactor(float factor)  { baseColorFactor = factor; touch(); }
 void PbrMaterial::setBaseColorMap(Texture2DPtr tex)
 {
     if (!!tex) { useBaseColorMap = true;  addTexture("u_baseColorMap", tex); }
     else       { useBaseColorMap = false; removeTexture("u_baseColorMap"); }
 }
 
-void PbrMaterial::setMetallicFactor(float factor)   { metallicFactor = factor; }
-
+void PbrMaterial::setMetallicFactor(float factor)   { metallicFactor = factor; touch(); }
 void PbrMaterial::setMetallicMap(Texture2DPtr tex)
 {
     if (!!tex) { useMetallicMap = true;  addTexture("u_metallicMap", tex); }
     else       { useMetallicMap = false; removeTexture("u_metallicMap"); }
 }
 
-void PbrMaterial::setRoughnessFactor(float factor)  { roughnessFactor = factor; }
-
+void PbrMaterial::setRoughnessFactor(float factor)  { roughnessFactor = factor; touch(); }
 void PbrMaterial::setRoughnessMap(Texture2DPtr tex)
 {
     if (!!tex) { useRoughnessMap = true;  addTexture("u_roughnessMap", tex); }
@@ -125,11 +122,9 @@ void PbrMaterial::setNormalMap(Texture2DPtr tex)
     else       { useNormalMap = false; removeTexture("u_normalMap"); }
 }
 
-void PbrMaterial::setNormalFactor(float factor)     { normalFactor = factor; }
-
-void PbrMaterial::setShadingModel(int model)            { shadingModel = model; }
-void PbrMaterial::setWorkflow(int w)                    { workflow = w; }
-
+void PbrMaterial::setNormalFactor(float factor)     { normalFactor = factor; touch(); }
+void PbrMaterial::setShadingModel(int model)            { shadingModel = model; touch(); }
+void PbrMaterial::setWorkflow(int w)                    { workflow = w; touch(); }
 // The renderer's detail texture units are bound from `textures` like every
 // other map, under the sampler names the mirror's slot table reads.
 void PbrMaterial::setDetailMap(int layer, Texture2DPtr tex)
@@ -204,17 +199,16 @@ const QVector<const char *> &PbrMaterial::detailBlendNames()
     };
     return kNames;
 }
-void PbrMaterial::setSpecularColor(QColor color)        { specularColor = color; }
-void PbrMaterial::setIor(float v)                       { ior = v; }
-void PbrMaterial::setFresnelColor(QColor color)         { fresnelColor = color; }
-void PbrMaterial::setUseFresnelColor(bool use)          { useFresnelColor = use; }
-void PbrMaterial::setSeparateFresnel(bool separate)     { separateFresnel = separate; }
-void PbrMaterial::setClearCoat(float coat)              { clearCoat = coat; }
-void PbrMaterial::setClearCoatRoughness(float r)        { clearCoatRoughness = r; }
-void PbrMaterial::setBrdf(int index)                    { brdf = index; }
-void PbrMaterial::setReceiveShadows(bool receive)       { receiveShadows = receive; }
-void PbrMaterial::setEmissiveAsLightmap(bool asLightmap){ emissiveAsLightmap = asLightmap; }
-
+void PbrMaterial::setSpecularColor(QColor color)        { specularColor = color; touch(); }
+void PbrMaterial::setIor(float v)                       { ior = v; touch(); }
+void PbrMaterial::setFresnelColor(QColor color)         { fresnelColor = color; touch(); }
+void PbrMaterial::setUseFresnelColor(bool use)          { useFresnelColor = use; touch(); }
+void PbrMaterial::setSeparateFresnel(bool separate)     { separateFresnel = separate; touch(); }
+void PbrMaterial::setClearCoat(float coat)              { clearCoat = coat; touch(); }
+void PbrMaterial::setClearCoatRoughness(float r)        { clearCoatRoughness = r; touch(); }
+void PbrMaterial::setBrdf(int index)                    { brdf = index; touch(); }
+void PbrMaterial::setReceiveShadows(bool receive)       { receiveShadows = receive; touch(); }
+void PbrMaterial::setEmissiveAsLightmap(bool asLightmap){ emissiveAsLightmap = asLightmap; touch(); }
 // The BRDF vocabulary. Six of the renderer's twelve named values: the three
 // families, plain and with SEPARATE diffuse fresnel (the variant that exists
 // for glass, transparent plastics, fur and marbles — surfaces with complex
@@ -373,9 +367,8 @@ const QVector<QString> &PbrMaterial::rowsUnusedWhenDistortion()
     return kRows;
 }
 
-void PbrMaterial::setEmissiveColor(QColor color)        { emissiveColor = color; }
-void PbrMaterial::setEmissiveIntensity(float intensity) { emissiveIntensity = intensity; }
-
+void PbrMaterial::setEmissiveColor(QColor color)        { emissiveColor = color; touch(); }
+void PbrMaterial::setEmissiveIntensity(float intensity) { emissiveIntensity = intensity; touch(); }
 void PbrMaterial::setEmissiveMap(Texture2DPtr tex)
 {
     if (!!tex) { useEmissiveMap = true;  addTexture("u_emissiveMap", tex); }
@@ -392,33 +385,31 @@ void PbrMaterial::setReflectionMap(Texture2DPtr tex)
     else       { useReflectionMap = false; removeTexture("u_reflectionMap"); }
 }
 
-void PbrMaterial::setAlpha(float a)          { alpha = a; }
-void PbrMaterial::setAlphaCutoff(float c)    { alphaCutoff = c; }
-void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; }
-void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; }
+void PbrMaterial::setAlpha(float a)          { alpha = a; touch(); }
+void PbrMaterial::setAlphaCutoff(float c)    { alphaCutoff = c; touch(); }
+void PbrMaterial::setAlphaMode(int mode)     { alphaMode = mode; touch(); }
+void PbrMaterial::setRefractionStrength(float s) { refractionStrength = s; touch(); }
 // The UNIFORM overload sets both axes: it is the one every caller written
 // before the V axis existed uses, and it has to keep meaning "tile the whole
 // thing this much" — including MaterialReader, which drives a loaded
 // "textureScale" number through setValue.
-void PbrMaterial::setTextureScale(float s)   { setTextureScale(s, s); }
+void PbrMaterial::setTextureScale(float s)   { setTextureScale(s, s); touch(); }
 void PbrMaterial::setTextureScale(float u, float v) {
     textureScale = u; textureScaleV = v;
+    touch();
     // BOTH rows, always (SMOKE_FIX S11 — see setValue's note): the rows are
     // what gets saved, and a V row left behind is a floor that squashes on
     // reopen.
     syncProperty(QStringLiteral("textureScale"), u);
     syncProperty(QStringLiteral("textureScaleV"), v);
 }
-void PbrMaterial::setTextureOffset(float u, float v) { textureOffsetU = u; textureOffsetV = v; }
-void PbrMaterial::setTextureRotation(float degrees)  { textureRotation = degrees; }
-
+void PbrMaterial::setTextureOffset(float u, float v) { textureOffsetU = u; textureOffsetV = v; touch(); }
+void PbrMaterial::setTextureRotation(float degrees)  { textureRotation = degrees; touch(); }
 // The generated-piece paths are stored, never opened here: the renderer's
 // boundary registers the file's directory with its resource system and reads
 // it, and nothing in the document model has any business parsing shader source.
-void PbrMaterial::setCustomPiecePixel(const QString& path)  { customPiecePixel = path; }
-void PbrMaterial::setCustomPieceVertex(const QString& path) { customPieceVertex = path; }
-
-
+void PbrMaterial::setCustomPiecePixel(const QString& path)  { customPiecePixel = path; touch(); }
+void PbrMaterial::setCustomPieceVertex(const QString& path) { customPieceVertex = path; touch(); }
 // Empty path clears the slot; a missing file yields a null texture, which the
 // set*Map functions treat as "no map" rather than failing.
 Texture2DPtr PbrMaterial::loadTexture(const QString& path)
@@ -535,6 +526,11 @@ void PbrMaterial::setValue(const QString& name, const QVariant& value)
     // it sets "textureScaleV" after "textureScale", which is the order both
     // readers already apply.
     syncProperty(name, value);
+    // THE MATERIAL'S CHANGE MARK (DIRTY_SET_MIRROR_SPEC §3.6). One bump for
+    // the whole call, whichever field it landed on — the mirror's memo keys on
+    // it, so an edit that does not bump is an edit that never reaches the
+    // screen until the verifier catches it a second or two later.
+    touch();
 }
 
 MaterialPtr PbrMaterial::duplicate() const

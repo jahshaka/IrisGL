@@ -19,6 +19,7 @@ For more information see the LICENSE file
 #include "irisglfwd.h"
 #include "document/physics/physicsproperties.h"
 #include "document/scenegraph/nodegraph.h"
+#include "document/scenegraph/nodedirtyset.h"
 
 namespace iris
 {
@@ -43,17 +44,47 @@ class Animation;
 class PropertyAnim;
 typedef QSharedPointer<Animation> AnimationPtr;
 
-/// What a mutation changed. The funnel below reports it; v1.5's undo capture
-/// and the properties panel's live refresh are meant to ride this seam rather
-/// than polling (SPECS/SCENEGRAPH_SPEC.md §1: "the handle notifies; Ogre has no
-/// write events — its only transform hook is compiled out in release").
+/// What a mutation changed. Every setter on SceneNode and its subclasses
+/// reports it through notifyChanged(), and the node's SCENE collects it
+/// (iris::NodeDirtySet) — which is what lets SceneMirror handle the list of
+/// what moved instead of asking every object in the document once a frame
+/// (SPECS/DIRTY_SET_MIRROR_SPEC.md; SCENEGRAPH_SPEC.md §1: "the handle
+/// notifies; Ogre has no write events — its only transform hook is compiled
+/// out in release").
+///
+/// ORDER IS THE BIT ORDER of the node's dirty mask; it has no other meaning.
 enum class NodeChange {
     Transform,   ///< local or world TRS
     Structure,   ///< parent / child list / scene membership
     Visibility,
-    Flags,       ///< pickable, castShadow, planarReflector, ...
-    Name
+    Flags,       ///< pickable, castShadow, planarReflector, mobility, ...
+    Name,
+    /// The node's CONTENT — a mesh, material or skeleton POINTER swapped
+    /// (MeshNode::setMesh / setMaterial). Nothing reported this before the
+    /// dirty set: the mirror noticed a swap by comparing the pointers it kept.
+    Content,
+    /// A SUBCLASS PARAMETER — any field behind `setPropertyValue` on a light,
+    /// camera, particle emitter or decal, and the typed setters beside them.
+    /// The walk used to re-hash those fields per node per frame to find one.
+    Params
 };
+
+/// How many NodeChange kinds there are (the width of a node's dirty mask).
+const unsigned kNodeChangeCount = unsigned(NodeChange::Params) + 1u;
+/// The one bit for a kind.
+inline quint16 nodeChangeBit(NodeChange what) { return quint16(1u << unsigned(what)); }
+/// ...and the SECOND bit, "this kind was already cascaded over my subtree".
+///
+/// It has to be separate from the first (found by mirror.dirty_equals_full,
+/// 2026-09-13): setMobility raises a plain Flags mark on the node through
+/// _applyStaticHint and THEN cascades Flags over the subtree, so a cascade that
+/// pruned on the plain bit alone saw it already set and marked no descendant at
+/// all — every child of a re-classified group kept the parent's old mobility
+/// until something else happened to write it.
+inline quint16 nodeSubtreeBit(NodeChange what)
+{
+    return quint16(1u << (unsigned(what) + 8u));
+}
 
 /// MOBILITY — "does this thing move?", the one classification a user sets and
 /// the renderer reads (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3).
@@ -165,6 +196,26 @@ protected:
     /// and the author is warned once, by name. RUNTIME ONLY: never serialized,
     /// and cleared for the whole scene when play stops (Scene::setPlaying).
     bool mSoftMovable = false;
+
+    // ---- THE CHANGE MARK (SPECS/DIRTY_SET_MIRROR_SPEC.md) ----------------
+    //
+    // `mDirtySet` is the collector of the SCENE this node belongs to, or null
+    // for a node that is not in one (a fragment the reader is still building,
+    // a subtree the undo stack is holding). It is a RAW pointer and it is set
+    // and cleared in exactly the two places scene membership is (setScene /
+    // removeFromScene), which is why a node can never name a dead one.
+    //
+    // `mDirtyMask` is which NodeChange kinds have been raised since the mirror
+    // last consumed this node, and `mQueued` says the node is already ON the
+    // scene's list — that pair IS the dedupe, so however many times a frame
+    // writes this node it is appended once.
+    NodeDirtySet *mDirtySet = nullptr;
+    quint16 mDirtyMask = 0;
+    bool mQueued = false;
+    /// Where this node sits on the scene's list while `mQueued` — what lets a
+    /// node that leaves the document before the list is consumed cancel its
+    /// own slot instead of leaving a dangling pointer behind.
+    std::size_t mDirtySlot = 0;
 
 public:
     SceneNodeType sceneNodeType;
@@ -419,18 +470,81 @@ public:
     void _migrateGraph(graph::SceneHandle target, graph::NodeHandle newParent);
 
     // ---- the mutation funnel ----------------------------------------------
-    using ChangeObserver = void (*)(SceneNode *, NodeChange);
-    /// A single process-wide observer, null by default (v1 keeps the seam
-    /// minimal deliberately — SPECS/SCENEGRAPH_SPEC.md §3 step 1). Every setter
-    /// on this class routes through notifyChanged() before it forwards.
+    //
+    // The process-wide `ChangeObserver` function pointer that used to sit here
+    // is GONE (CRUD, 2026-09-13): it had zero callers for the whole life of the
+    // codebase — the funnel existed and nobody listened. What listens now is
+    // the node's own SCENE, through the dirty set below, which is per scene
+    // rather than per process (a material preview and the editor mirror their
+    // own documents on the same thread, and one list between them would hand
+    // each other's nodes to the wrong mirror).
+
+    /// Which NodeChange kinds have been raised since the mirror last consumed
+    /// this node. Read by SceneMirror; there is no other consumer.
+    quint16 dirtyMask() const { return mDirtyMask; }
+    /// True when this node is on its scene's dirty list.
+    bool isQueuedDirty() const { return mQueued; }
+    /// THE CONSUMER'S END of the funnel: hands over the mask and re-arms the
+    /// node. Cleared BEFORE the visit that consumes it, so a write the visit
+    /// itself makes (the mirror's own `_setSoftMovable`) is not lost.
+    quint16 _takeDirtyMask()
+    {
+        const quint16 m = mDirtyMask;
+        mDirtyMask = 0;
+        mQueued = false;
+        return m;
+    }
+    /// The scene's collector, or null. Set with scene membership.
+    NodeDirtySet *dirtySet() const { return mDirtySet; }
+    /// Called by setScene / removeFromScene (and by Scene::cleanup) only.
+    void _setDirtySet(NodeDirtySet *set)
+    {
+        if (mDirtySet == set) return;
+        mDirtySet = set;
+        mDirtyMask = 0;
+        mQueued = false;
+        mDirtySlot = 0;
+    }
+    /// OUT OF THE DOCUMENT: cancels this node's queued slot (a marked node the
+    /// mirror has not visited yet would be a dangling pointer once the node is
+    /// released) and records the EVICTION the mirror releases its entry from.
+    void _leaveDirtySet()
+    {
+        if (!mDirtySet) return;
+        if (mQueued) mDirtySet->cancel(mDirtySlot, this);
+        mDirtySet->evict(this);
+        mDirtySet = nullptr;
+        mDirtyMask = 0;
+        mQueued = false;
+        mDirtySlot = 0;
+    }
+
+    /// PUBLIC spelling of notifyChanged for the few writers that are not
+    /// setters on this class — the mirror's own soft-mobility promotion, and
+    /// the host code that still writes a reflected field by hand.
+    void markChanged(NodeChange what) { notifyChanged(what); }
+    /// Marks this node AND EVERY DESCENDANT. The three kinds that INHERIT —
+    /// effective visibility, mobility (rule 2: a child travels with its
+    /// parent) and a structural move — have to mark the whole subtree AT EVENT
+    /// TIME and never lazily: since ENGINE-3 the engine's own visibility walk
+    /// descends only into engine-owned children, so the mirror is the SOLE
+    /// pusher of a document node's effective visibility and a subtree it does
+    /// not visit stays drawn and voxelised with no backstop anywhere.
     ///
-    /// The pointer is exposed so notifyChanged can be INLINE: this is on the
-    /// path of every transform write in the program, and in a Debug build (the
-    /// one the §6 benchmark measures) an out-of-line call whose body is one
-    /// null test costs more than the test.
-    static ChangeObserver sChangeObserver;
-    static void setChangeObserver(ChangeObserver observer);
-    static ChangeObserver changeObserver() { return sChangeObserver; }
+    /// Pruned: a node already carrying the bit had its subtree marked when it
+    /// got it, so a second cascade over the same branch costs one test.
+    void notifyChangedSubtree(NodeChange what);
+
+protected:
+    /// `return markedParams();` — the spelling every subclass
+    /// setPropertyValue branch that writes a reflected field by hand uses. One
+    /// Params mark for the whole call, however many fields the branch touched.
+    bool markedParams()
+    {
+        notifyChanged(NodeChange::Params);
+        return true;
+    }
+public:
 
     void setName(QString name);
     QString getName();
@@ -690,7 +804,14 @@ public:
     /// setter (a subtree still being built has no final parent chain yet) and
     /// undo's. applyStaticDefaults() at the end of the load is what turns these
     /// into graph state.
-    void _setMobility(Mobility m) { mMobility = m; }
+    void _setMobility(Mobility m)
+    {
+        if (mMobility == m) return;
+        mMobility = m;
+        // MOBILITY INHERITS (rule 2) — the whole subtree's resolution moves
+        // with it, so the mark does too (DIRTY_SET_MIRROR_SPEC §3.4).
+        notifyChangedSubtree(NodeChange::Flags);
+    }
 
     /// THE RESOLUTION (REALTIME_REFLECTIONS_SPEC §3.3.2), first match wins:
     ///   1. a hard DRIVER on this node — physics body, avatar component,
@@ -722,7 +843,16 @@ public:
 
     /// SOFT PROMOTION, set by the host that noticed the movement (SceneMirror)
     /// and cleared for the whole scene when play stops. Runtime only.
-    void _setSoftMovable(bool on) { mSoftMovable = on; }
+    void _setSoftMovable(bool on)
+    {
+        if (mSoftMovable == on) return;
+        mSoftMovable = on;
+        // Written by the mirror, from inside a visit: the promotion changes
+        // what every DESCENDANT resolves to, and those are re-visited on the
+        // next sync (the list this lands in is the one the current sync
+        // already swapped away).
+        notifyChangedSubtree(NodeChange::Flags);
+    }
     bool softMovable() const { return mSoftMovable; }
 
     /// The GRAPH class, asked for directly. Not a user decision and not
@@ -875,9 +1005,20 @@ public:
 
 protected:
     /// THE funnel. Every mutator calls it before (or instead of) forwarding.
+    ///
+    /// INLINE on purpose: this is on the path of every transform write in the
+    /// program (a physics step writes one per body per step), and its body is
+    /// a load, a test and — at most once per node per frame — a push_back.
     void notifyChanged(NodeChange what)
     {
-        if (sChangeObserver) sChangeObserver(this, what);
+        if (!mDirtySet) return;
+        const quint16 bit = nodeChangeBit(what);
+        if (mDirtyMask & bit) return;
+        mDirtyMask |= bit;
+        if (!mQueued) {
+            mQueued = true;
+            mDirtySlot = mDirtySet->append(this);
+        }
     }
 
 private:

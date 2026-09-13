@@ -173,7 +173,11 @@ public:
     /// stops moving (the fail-soft rule in socket.h).
     bool removeSocket(const QString &name);
     /// Replaces the whole list (the reader, and duplication).
-    void setSockets(const QList<Socket> &list) { sockets = list; }
+    void setSockets(const QList<Socket> &list)
+    {
+        sockets = list;
+        notifyChanged(NodeChange::Params);
+    }
 
     void setMaterial(MaterialPtr material);
 
@@ -184,7 +188,12 @@ public:
     // not needed because this guy likes public members...
     // shouldnt be here at all, the value is already set in the constructor...
     void setNodeType(SceneNodeType type) {
+        if (sceneNodeType == type) return;
         sceneNodeType = type;
+        // Every type switch in the mirror reads this (a node that stops being
+        // an emitter has its particle system removed, and so on), so a live
+        // change has to be reported — SPECS/DIRTY_SET_MIRROR_SPEC.md.
+        notifyChanged(NodeChange::Params);
     }
 
     SceneNodePtr createDuplicate() override;
