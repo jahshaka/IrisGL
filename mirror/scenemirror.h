@@ -152,6 +152,42 @@ public:
     /// the counter that moves; giRefreshCount() stays still until the drag ends.
     quint64 giLightRefreshCount() const { return mGiLightRefreshCount; }
 
+    /// HOW MANY MATERIAL DESCRIPTIONS THE LAST SYNC BUILT (MIRROR_SCALE lane).
+    /// Building one converts the document material into a PbrParams and a
+    /// texture-bind list — a dozen heap allocations, two dynamic_casts and a
+    /// pass over the slot table — and it used to happen once per distinct
+    /// material per FRAME, which in this editor means once per mesh node per
+    /// frame (every primitive is born with its own PbrMaterial). It is now
+    /// keyed on a fingerprint of the material's own fields, so a STILL frame
+    /// must build ZERO. Not observable in pixels; hence the counter, and hence
+    /// mirror.scale's assertion on it.
+    quint64 materialBuildCount() const { return mMaterialBuilds; }
+    /// How many document nodes the last sync walked (sync()'s own return, kept
+    /// so a reader that did not call it can still ask).
+    int visitedCount() const { return mVisited; }
+
+    /// ---- SCENE_STATIC, the settle half (MIRROR_SCALE lane) ---------------
+    /// How many nodes are in a SCENE_STATIC memory manager right now
+    /// (iris::graph::staticNodeCount), and how many times this mirror has
+    /// re-derived the whole scene's classification after the document went
+    /// quiet. A user nudging props used to drain the first number to zero for
+    /// the session; the second is what puts it back. Both are on
+    /// editor.mirrorStats() so a test — and a lead reading a live app — can see
+    /// a scene's classification hold instead of leaking away.
+    quint64 staticNodeCount() const;
+    quint64 staticRepromotionCount() const { return mStaticRepromotions; }
+    /// How many consecutive syncs with NO transform write anywhere in the
+    /// document count as "settled". Half a second at 60 Hz: long enough that a
+    /// drag's inter-frame gaps never trip it, short enough that the
+    /// classification is back before the user's next gesture.
+    static constexpr quint32 kStaticSettleFrames = 30;
+    /// A NOTE ON THE PAUSED HAND (lead review F4): the settle is driven by the
+    /// document, not by the mouse, so a drag the user pauses for half a second
+    /// re-promotes under a still hand and the next movement demotes again. That
+    /// is correct (the classification always describes what the scene is doing)
+    /// and it is bounded — one pass per pause — but it is worth knowing before
+    /// reading a staticRepromotions count taken during a slow edit.
+
     // ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1) ----------------
     /// How many of the document's nodes resolved MOVABLE on the last sync —
     /// what the mirror pushed to the engine, which is also what the engine
@@ -478,6 +514,10 @@ private:
         /// geometry is (re-)attached, because the flags live on the Item and a
         /// new Item is born with the default mask.
         int pickablePushed = -1;
+        /// The `mMaterialItemSerial` this entry last pushed query flags
+        /// against. Behind = the material's Items were rebuilt (a shading-model
+        /// switch) and the new ones carry the default mask.
+        quint32 materialItemSerial = 0;
         /// The LIGHTING CHANNEL mask last pushed onto this node's engine
         /// objects, and whether one ever was. Unlike the query flags above this
         /// does NOT need re-pushing when geometry is re-attached: the engine
@@ -653,6 +693,15 @@ private:
         /// skipped by the clip pass — it has no animation state of its own — so
         /// this is what turns five clip pushes per character into one.
         jahshaka::engine::NodeId shareMaster = 0;
+        /// SKELETON SHARING's eligibility answer, memoised: whether this piece
+        /// may render from its master's SkeletonInstance. It is a rig-id match
+        /// plus a world-transform comparison, and the transform half needs
+        /// `getGlobalTransform()` on the piece AND the master — per piece, per
+        /// frame, to re-derive an answer that can only change when something
+        /// writes a transform. Invalidated by the document's write counter and
+        /// by a re-attach (which can change `rigId`).
+        bool shareEligible = false;
+        bool shareEligibleValid = false;
         bool gpuSkinned = false;                     // the engine accepted the rig
         size_t boneCount = 0;
         /// Each bone's PARENT INDEX, resolved once per rig instead of by a
@@ -668,7 +717,12 @@ private:
         // WHICH clip and WHEN; the engine samples and blends it.
         iris::SceneNode *docNode = nullptr;          // the document node this entry mirrors
         std::string rigId;                           // for the clip def's content key
-        QString clipSignature;                       // rig + clip set; re-attach on change
+        /// The rig + clip set, as a HASH. It was a QString built by
+        /// concatenation — a Mixamo character with 30 clips cost ~100
+        /// allocations per frame to produce a string whose only use was a
+        /// compare against last frame's (MIRROR_SCALE lane). 0 = "no clips
+        /// attached", which is what the re-attach sites write.
+        quint64 clipSignature = 0;
         /// Document clip -> its content id -> the name the engine gave it.
         ///
         /// Two hops because attachClips is IDEMPOTENT PER CONTENT ID and clips
@@ -861,7 +915,8 @@ private:
     void clearSkyAmbient();
     jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh, const QString &rigId = QString());
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
-    void syncTextures(Entry &e, iris::Material *material);
+    struct MaterialSync;
+    void syncTextures(Entry &e, const MaterialSync &ms);
     jahshaka::engine::TextureId textureFor(const QString &path, bool srgb);
     /// The reflection SLOT takes a cubemap, so its bind cannot go through
     /// textureFor: the six faces are built here (from the document texture's
@@ -941,14 +996,36 @@ private:
     /// Conservative by construction: a missed site delays a free to the next
     /// real change, it never frees something still in use.
     bool                     mReclaimPending = true;
-    /// PER-SYNC memo of the two things that depend only on the MATERIAL, not on
-    /// the node: its PbrParams and its texture-bind signature. Both used to be
+    /// MEMO of the two things that depend only on the MATERIAL, not on the
+    /// node: its PbrParams and its texture-bind signature. Both used to be
     /// recomputed per MESH per frame — `toPbrParams` runs two dynamic_casts and
     /// a scan of every shader property, and `syncTextures` did seven
     /// QHash<QString> lookups whose keys it built from `const char *` (a QString
     /// construction each) plus a QVector of binds — so a scene of 8000 cubes
-    /// sharing ONE material paid for that material 8000 times a frame. Cleared
-    /// at the top of every sync: within one sync a material cannot change.
+    /// sharing ONE material paid for that material 8000 times a frame.
+    ///
+    /// IT SURVIVES THE FRAME (MIRROR_SCALE lane, 2026-09-13). Sharing was only
+    /// half the problem: the editor gives every primitive its OWN PbrMaterial
+    /// (SceneEditService::addNodeToScene), so a scene of 8000 cubes is a scene
+    /// of 8000 materials and a per-SYNC memo rebuilt all 8000 descriptions on
+    /// every still frame — ~13 heap allocations each (a std::string for the
+    /// BRDF name, ten QStrings for the address rows, the bind vector). Measured
+    /// on a 2000-node lattice: 4.08 us per node per still frame with its own
+    /// material per node against 0.83 us with one shared material — four fifths
+    /// of the walk was this function.
+    ///
+    /// WHAT MAKES REUSE SAFE is `fingerprint`: an FNV over every document field
+    /// the two builds read, computed once per material per sync out of PODs
+    /// with no allocation at all. A material whose fingerprint has not moved
+    /// cannot have produced different output, so the memo stands. A document
+    /// REVISION COUNTER would be cheaper still and was rejected: PbrMaterial's
+    /// parameters are public fields written from panels, scripts, readers and
+    /// commands, and a counter is only as good as the writer that remembers to
+    /// bump it — a forgotten one is an edit that silently never reaches the
+    /// renderer. The fingerprint reads the same fields the conversion does, so
+    /// it cannot go stale that way; what it CAN do is forget a NEW field, which
+    /// is what mirror.scale's "every authored property moves the fingerprint"
+    /// case (driven from PbrMaterial's own property rows) exists to catch.
     struct TextureBind {
         jahshaka::engine::PbrTextureSlot slot;
         QString path;
@@ -959,6 +1036,25 @@ private:
         jahshaka::engine::PbrParams   pbr;
         quint64                       textureSignature = 0;
         std::vector<TextureBind>      binds;
+        /// Every document field the build above read, as one hash. See the
+        /// block comment: this is what lets the memo cross frames.
+        quint64                       fingerprint = 0;
+        /// The sync that last validated this entry. Two jobs: a material is
+        /// fingerprinted at most ONCE per walk however many nodes share it,
+        /// and an entry the walk did not reach is dropped at the end of it
+        /// (so the hash never holds a pointer to a material that has left the
+        /// document — the keys are raw, like mMaterials' own).
+        quint32                       lastSeen = 0;
+        /// The dynamic_cast, resolved once per material instead of twice per
+        /// mesh per frame. Null for a material that is not a PbrMaterial.
+        iris::PbrMaterial            *asPbr = nullptr;
+        /// THE PUSH GUARD: the engine material this description was last
+        /// pushed to, and the fingerprint it was pushed at. setPbrMaterial
+        /// re-applies the whole datablock (a const-buffer upload), so the
+        /// mirror still LOOKS every frame and pushes only a change.
+        jahshaka::engine::MaterialId  pushedTo = 0;
+        quint64                       pushedFingerprint = 0;
+        bool                          pushed = false;
     };
     QHash<iris::Material *, MaterialSync> mMaterialSync;
     /// The PBR state last PUSHED to each engine material, and the guard that
@@ -966,12 +1062,22 @@ private:
     /// because that is what the push targets; engine ids are never reused (the
     /// counter only increments), so a destroyed material cannot inherit a stale
     /// record — it is dropped in reclaimUnused anyway.
-    struct PbrPush {
-        jahshaka::engine::PbrParams params;
-        bool pushed = false;
-    };
-    QHash<jahshaka::engine::MaterialId, PbrPush> mPbrPushed;
+    /// (mPbrPushed — a second QHash, keyed by engine material id, holding a
+    /// whole PbrParams copy per material — is GONE with the MIRROR_SCALE lane.
+    /// It compared a full PbrParams (std::string BRDF name included) and cost a
+    /// hash probe per MESH NODE per frame to do it; the same statement now
+    /// lives in the memo above as `pushedTo` + `pushedFingerprint`, in the
+    /// entry the walk already has in hand.)
+    /// How many times each engine material has had its Items REBUILT under the
+    /// entries drawing it (a shading-model switch). Bumped by
+    /// onMaterialItemsRebuilt; an entry whose `materialItemSerial` is behind
+    /// re-pushes its query flags on its next visit. See that function for what
+    /// this replaced (an O(entries) walk per material, i.e. O(N^2) per open).
+    QHash<jahshaka::engine::MaterialId, quint32> mMaterialItemSerial;
     const MaterialSync &materialSyncFor(iris::Material *material);
+    /// The memo's validity key — see MaterialSync. `pbr` is the resolved cast
+    /// (null when the material is not a PbrMaterial), so this never runs one.
+    static quint64 materialFingerprint(iris::Material *material, iris::PbrMaterial *pbr);
     /// Binds a graph material's generated shader pieces (HLMS_ADOPTION P5).
     void syncCustomPieces(iris::Material *material, jahshaka::engine::MaterialId id);
     /// True once any mirrored material has carried a generated piece: the gate
@@ -1248,6 +1354,10 @@ private:
     // Ground grid: one root node (dropped a hair below y=0 against z-fighting
     // with floor geometry) carrying a minor- and a major-line child.
     bool  mGridVisible = false;
+    /// The visibility last PUSHED to the grid's node, -1 = never. Same reason
+    /// as the GI boxes above: setNodeVisible is a subtree walk and the grid
+    /// node has two children.
+    int   mGridVisiblePushed = -1;
     GridPlane mGridPlane = GridPlane::Floor;
     GridPlane mGridBuiltPlane = GridPlane::Floor;
     float mGridFloorOffset = -0.01f;        // see setGridFloorOffset
@@ -1275,6 +1385,10 @@ private:
     jahshaka::engine::MaterialId mHorizonMaterial = 0;
     int mHorizonVisible = -1;
     iris::Mat4 mHorizonWorld;     ///< the floor transform last pushed (nothing at rest)
+    /// The document's transform-write count when the horizon's world was last
+    /// resolved. Nothing wrote a transform => the floor cannot have moved, and
+    /// the derived-transform walk below can be skipped entirely.
+    unsigned long long mHorizonWrites = ~0ull;
     // The GI volume overlay: one node per box, rebuilt only when the reported
     // bounds actually move (a GI rebuild is rare; this sync runs every frame).
     bool mGiVolumeVisible = false;
@@ -1283,8 +1397,18 @@ private:
     jahshaka::engine::MaterialId mGiVolLitMaterial = 0, mGiVolProbeMaterial = 0;
     jahshaka::engine::Vec3 mGiVolLitMin, mGiVolLitMax, mGiVolProbeMin, mGiVolProbeMax;
     bool mGiVolBuilt = false;
+    /// The visibility last PUSHED to each GI volume box, -1 = never
+    /// (MIRROR_SCALE lane). An engine setNodeVisible is a subtree walk, and
+    /// both boxes were re-hidden every frame in every scene that never shows
+    /// them — which is every scene, until somebody opens the GI overlay.
+    int mGiVolLitVisible = -1;
+    int mGiVolProbeVisible = -1;
     /// The highlighted SET, primary first. Empty = nothing selected.
     QList<iris::SceneNodePtr> mHighlighted;
+    /// The same set, for the membership test (isHighlighted). The list keeps
+    /// the ORDER and the strong references; this answers "is this one in it?"
+    /// without a scan, which the walk asks per light and per camera.
+    QSet<const iris::SceneNode *> mHighlightSet;
     /// The set's PRIMARY member, or null. Only distinguishes a colour when the
     /// set has more than one member (see setHighlightedNodes).
     iris::SceneNodePtr mHighlightPrimary;
@@ -1388,6 +1512,30 @@ private:
     quint64 mGiPushCount = 0;
     quint64 mGiRefreshCount = 0;
     quint64 mGiLightRefreshCount = 0;
+    /// materialBuildCount() — reset at the top of every sync, so it reports the
+    /// LAST walk rather than a running total.
+    quint64 mMaterialBuilds = 0;
+    /// The settle machine behind the static re-promotion (see sync()).
+    unsigned long long mLastTransformWrites = 0;
+    /// ...and the document's demotion count when the settle last ran. A quiet
+    /// spell is only worth a re-derivation if a transform write really took a
+    /// subtree OUT of the static half since the last one; a camera orbit, an
+    /// undo and a scene open all write transforms and demote nothing.
+    unsigned long long mLastStaticDemotions = 0;
+    quint32 mSettleFrames = 0;
+    bool    mStaticSettlePending = false;
+    quint64 mStaticRepromotions = 0;
+    /// SKELETON SHARING (syncSkeletonSharing): how many CHARACTER PIECES the
+    /// last walk saw — pieces of a multi-piece character, the only things that
+    /// can share — and the document's transform-write count when the world
+    /// comparisons were last made. Below two pieces there is nothing to share
+    /// and the pass returns before it walks a single entry; with no write since
+    /// the last pass no world transform can have moved.
+    quint32 mCharacterPieces = 0;
+    /// ...and how many GPU-SKINNED nodes it saw at all. syncClips has nothing
+    /// to push below one and used to walk every entry to find out.
+    quint32 mSkinnedNodes = 0;
+    unsigned long long mShareWorldWrites = ~0ull;
     // ---- MOBILITY counters (REALTIME_REFLECTIONS_SPEC §3.3) ----------------
     /// Recomputed every sync (the walk resolves every node anyway), so this is
     /// a state, not a running total.

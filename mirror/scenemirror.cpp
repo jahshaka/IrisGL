@@ -293,6 +293,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     if (mGiVolProbeMaterial) { mTarget->destroyMaterial(mGiVolProbeMaterial); mGiVolProbeMaterial = 0; }
     mGiVolBuilt = false;
     mHighlighted.clear();
+    mHighlightSet.clear();
     for (HighlightShell &s : mHighlightShells) if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
     if (mHighlightMaterial) { mTarget->destroyMaterial(mHighlightMaterial); mHighlightMaterial = 0; }
@@ -303,7 +304,8 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     for (TextureId t : mTextures) mTarget->destroyTexture(t);
     mTextures.clear();
     mLiveGenerations.clear();   // a key is here only while its engine texture is (code review 2026-09-10)
-    mPbrPushed.clear();
+    mMaterialSync.clear();     // the per-material memo dies with the materials
+    mMaterialItemSerial.clear();
     for (TextureId t : mIconTextures) mTarget->destroyTexture(t);
     mIconTextures.clear();
     // Decal-atlas slices are a FIXED, process-wide budget (32 slices), and this
@@ -356,6 +358,7 @@ void SceneMirror::evacuateEngineObjects()
         if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
     mHighlighted.clear();
+    mHighlightSet.clear();
     // THE GROUND'S HORIZON GOES TOO (lead review). Its `mHorizonFloor` is a raw
     // pointer into the document that is leaving; its material PIN is what keeps
     // the floor's datablock out of the sweep, and every entry that referenced
@@ -393,11 +396,32 @@ MaterialId SceneMirror::engineMaterial(const iris::SceneNode *node) const
 /// with Ogre's default query mask, so an unpickable object would quietly become
 /// clickable again after a switch. Forgetting one push is why this is a named
 /// function next to the switch and not a line inside it.
+quint64 SceneMirror::staticNodeCount() const
+{
+    return quint64(iris::graph::staticNodeCount());
+}
+
 void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
 {
     if (!material) return;
-    for (auto it = mEntries.begin(); it != mEntries.end(); ++it)
-        if (it->material == material) it->pickablePushed = -1;
+    // O(1), NOT O(every entry in the scene) (MIRROR_SCALE lane, 2026-09-13).
+    //
+    // A shading-model switch rebuilds every Item the material draws, and each
+    // new Item is born with the default query mask — so every entry using it
+    // owes one re-push of its `pickable` flag. That was done by walking the
+    // whole entry hash, and the walk ran from visit() the FIRST time each
+    // material was seen (shadingModelPushed starts at -1, and an attach resets
+    // it): on a scene open with N nodes each carrying its own material — which
+    // is exactly what the editor creates, one PbrMaterial per primitive — that
+    // is N walks of N entries. Measured on a 2020-node lattice: 84 ms of
+    // adopting sync against 40 ms for the same nodes sharing one material, and
+    // the gap is quadratic, so an 8000-node scene paid for it sixteenfold.
+    //
+    // Now the material carries a SERIAL and the entry remembers which one it
+    // pushed against. Same statement, no walk: the re-push happens on the
+    // entry's own next visit, which is the frame it would have happened on
+    // anyway (the walk only moved a latch).
+    ++mMaterialItemSerial[material];
 }
 
 int SceneMirror::sync()
@@ -431,14 +455,74 @@ int SceneMirror::sync()
 
     ++mSyncStamp;
     mVisited = 0;
+    mMaterialBuilds = 0;    // per-walk, not a running total (materialBuildCount)
+    mCharacterPieces = 0;   // ...and so are the rig counts the two skeleton
+    mSkinnedNodes = 0;      //    passes early-out on
+    // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13).
+    //
+    // Rule 4 (nodegraph.h) DEMOTES a static subtree on the first transform
+    // write, and that is right: re-running the static pass per frame of a drag
+    // is exactly the cost SCENE_STATIC exists to avoid. But nothing ever put
+    // the node back — the demotion lasted the SESSION, so every prop a user
+    // nudged spent the rest of the day in Ogre's per-frame transform and bounds
+    // passes, and a long editing session drained the classification to nothing.
+    //
+    // The missing half is here: when NOTHING in the document has written a
+    // transform for kStaticSettleFrames consecutive syncs, the document's own
+    // static pass runs once and re-derives the whole scene's classification.
+    // It is the same pass a load runs (SceneNode::applyStaticDefaults), so a
+    // settled scene ends up classified exactly as if it had just been opened —
+    // the user's own Static/Movable settings included, because the pass honours
+    // overrides and writes none. A node whose class does not change costs the
+    // walk and nothing else; one that does gets its notifyStaticDirty from
+    // `switchOne`, one per promoted node, on this frame alone.
+    //
+    // THE GATE IS THE DOCUMENT'S TRANSFORM-WRITE COUNTER, which is global and
+    // therefore conservative in the direction that cannot hurt: a physics step,
+    // a playing animation, a drag anywhere in the scene holds the whole scene
+    // dynamic until it stops. That is what "settle" has to mean — a promotion
+    // in the middle of a gesture would migrate a subtree the next write
+    // migrates straight back.
+    if (mSource) {
+        const unsigned long long writes = iris::graph::transformWrites();
+        // ...AND ONLY WHEN SOMETHING WAS DEMOTED (lead review F4). The write
+        // counter alone re-armed the settle on every transform write anywhere —
+        // the end of a camera orbit, an undo, a reparent, a scene open — and
+        // each quiet spell after one of those bought a whole-tree
+        // applyStaticDefaults (a resolveMobility and an isStaticEligible per
+        // node) to re-derive a classification nothing had disturbed. The
+        // document counts its own demotions now, and that is the only thing a
+        // re-promotion has to answer.
+        const unsigned long long demotions = iris::graph::staticDemotions();
+        if (writes != mLastTransformWrites) {
+            mLastTransformWrites = writes;
+            mSettleFrames = 0;
+            if (demotions != mLastStaticDemotions) {
+                mLastStaticDemotions = demotions;
+                mStaticSettlePending = true;
+            }
+        } else if (mStaticSettlePending && ++mSettleFrames >= kStaticSettleFrames) {
+            if (auto root = mSource->getRootNode()) {
+                root->applyStaticDefaults();
+                ++mStaticRepromotions;
+            }
+            mStaticSettlePending = false;
+            // applyStaticDefaults migrates nodes between memory managers; the
+            // migration itself must not read as a write, or a demotion, and
+            // re-arm the settle.
+            mLastTransformWrites = iris::graph::transformWrites();
+            mLastStaticDemotions = iris::graph::staticDemotions();
+        }
+    }
     // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2). Zero on
     // the first sync, and capped at a tenth of a second: a stall must not let a
     // tracking camera jump its whole remaining focus travel in one frame.
     if (!mFocusClock.isValid()) { mFocusClock.start(); mFocusDt = 0.0f; }
     else mFocusDt = std::min(0.1f, float(mFocusClock.restart()) * 0.001f);
-    // Per-material work is memoised for the duration of this walk (see
-    // MaterialSync): every mesh node sharing a material used to pay for it.
-    mMaterialSync.clear();
+    // (The per-walk `mMaterialSync.clear()` that stood here is GONE — the memo
+    // crosses frames now, validated by a fingerprint; see MaterialSync in the
+    // header. It is PRUNED at the end of the walk instead, so it never holds a
+    // material the document has dropped.)
     // THE SUN, RESOLVED ONCE FOR THE WHOLE WALK (clean-2 lane, 2026-09-13).
     // toLightDesc asks the document which directional is the sun, and the
     // document answers by building a QVector of every directional and SORTING
@@ -529,6 +613,17 @@ int SceneMirror::sync()
     { MirrorStage s(mon, "mirror.riders");
     sweepStaleRiders();
     }
+    // THE MATERIAL MEMO'S OWN SWEEP. Its keys are raw `iris::Material *`, like
+    // mMaterials' — so an entry the walk did not reach names a material that is
+    // no longer in the scene, and it goes now rather than waiting for a cache
+    // sweep that only runs when something was released. One pass over the
+    // materials, no allocation, and the hash can never hold a dangling key for
+    // longer than the walk that dropped it.
+    for (auto it = mMaterialSync.begin(); it != mMaterialSync.end();) {
+        if (it->lastSeen == mSyncStamp) ++it;
+        else it = mMaterialSync.erase(it);
+    }
+
     return mVisited;
 }
 
@@ -564,7 +659,8 @@ void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
                                       const iris::SceneNodePtr &primary)
 {
     mHighlighted.clear();
-    for (const auto &n : nodes) if (n) mHighlighted.append(n);
+    mHighlightSet.clear();
+    for (const auto &n : nodes) if (n) { mHighlighted.append(n); mHighlightSet.insert(n.data()); }
     // The primary only counts when it is actually IN the list: the viewport
     // filters the World root and the built-in ground out of the highlight, and
     // a primary that was filtered away must not colour somebody else's shell.
@@ -576,9 +672,10 @@ void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
 
 bool SceneMirror::isHighlighted(const iris::SceneNode *node) const
 {
-    if (!node) return false;
-    for (const auto &n : mHighlighted) if (n.data() == node) return true;
-    return false;
+    // A SET, not a scan of the list (MIRROR_SCALE lane). It is asked per light,
+    // per camera and per selected mesh on every walk, and a rubber-band select
+    // over a big scene puts hundreds of nodes in the list.
+    return node && mHighlightSet.contains(node);
 }
 
 void SceneMirror::setHighlightWireframe(bool on)
@@ -938,7 +1035,13 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
     const bool wanted = mCameraBodies && camera->bodyVisible &&
                         camera != mViewCamera;   // never draws itself — see applyCamera
     if (!wanted) {
-        if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
+        // LATCHED like the light wires' (MIRROR_SCALE lane): an engine
+        // setNodeVisible walks the node's subtree, and this ran every frame for
+        // every camera body in the scene whether it was already hidden or not.
+        if (e.wireNode && e.wireVisible != 0) {
+            mTarget->setNodeVisible(e.wireNode, false);
+            e.wireVisible = 0;
+        }
         return;
     }
     if (!e.wireNode) {
@@ -1069,12 +1172,21 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
                                : jahshaka::engine::Colour(0.75f, 0.78f, 0.85f, 1.0f));
     // Wires live in the camera node's local space; undo the node's own scale so
     // a scaled camera node still draws a true frustum.
+    // ON CHANGE ONLY, the same discipline the light wires' scale push uses: a
+    // camera nobody is scaling re-pushed this transform, and this visibility,
+    // sixty times a second.
     const iris::Vec3 sc = camera->getLocalScale();
-    mTarget->setNodeTransform(e.wireNode, jahshaka::engine::Vec3(), jahshaka::engine::Quat(),
-                              jahshaka::engine::Vec3(sc.x() > 1e-6f ? 1.0f / sc.x() : 1.0f,
-                                                     sc.y() > 1e-6f ? 1.0f / sc.y() : 1.0f,
-                                                     sc.z() > 1e-6f ? 1.0f / sc.z() : 1.0f));
-    mTarget->setNodeVisible(e.wireNode, true);
+    quint64 xk = 1469598103934665603ull;
+    mixFloat(xk, sc.x()); mixFloat(xk, sc.y()); mixFloat(xk, sc.z());
+    if (!e.wireXformPushed || e.wireXformKey != xk) {
+        mTarget->setNodeTransform(e.wireNode, jahshaka::engine::Vec3(), jahshaka::engine::Quat(),
+                                  jahshaka::engine::Vec3(sc.x() > 1e-6f ? 1.0f / sc.x() : 1.0f,
+                                                         sc.y() > 1e-6f ? 1.0f / sc.y() : 1.0f,
+                                                         sc.z() > 1e-6f ? 1.0f / sc.z() : 1.0f));
+        e.wireXformKey = xk;
+        e.wireXformPushed = true;
+    }
+    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
 }
 
 // ---- ground grid (EDITOR_SHORTCUTS_SPEC §3) --------------------------------------
@@ -1116,7 +1228,13 @@ void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
 void SceneMirror::syncGrid()
 {
     if (!mGridVisible) {
-        if (mGridNode) mTarget->setNodeVisible(mGridNode, false);
+        // Latched (MIRROR_SCALE lane): setNodeVisible is a subtree walk in the
+        // engine and the grid's node has two children, so a hidden grid cost
+        // three node writes a frame to stay hidden.
+        if (mGridNode && mGridVisiblePushed != 0) {
+            mTarget->setNodeVisible(mGridNode, false);
+            mGridVisiblePushed = 0;
+        }
         return;
     }
     if (mGridColoursDirty) {
@@ -1190,7 +1308,7 @@ void SceneMirror::syncGrid()
         mGridBuiltSpacing = mGridSpacing;
         mGridBuiltExtent = mGridExtent;
     }
-    mTarget->setNodeVisible(mGridNode, true);
+    if (mGridVisiblePushed != 1) { mTarget->setNodeVisible(mGridNode, true); mGridVisiblePushed = 1; }
 }
 
 // ---- the ground's horizon ---------------------------------------------------
@@ -1379,8 +1497,14 @@ void SceneMirror::syncGroundHorizon()
     // scaled or tilted floor keeps its horizon attached to it (and its checker
     // density, which the scale multiplies on both meshes alike).
     //
-    // AND NOTHING AT REST: a floor that has not moved re-pushes nothing, so a
-    // still scene pays three pointer tests for the whole feature.
+    // AND NOTHING AT REST. The claim used to be "three pointer tests"; the line
+    // below it resolved the floor's DERIVED WORLD TRANSFORM every frame, which
+    // walks the node's parent chain (MIRROR_SCALE lane). The document's global
+    // transform-write counter answers "can the floor have moved?" without
+    // asking the graph anything: no write anywhere, no new world.
+    const unsigned long long writes = iris::graph::transformWrites();
+    if (writes == mHorizonWrites && mHorizonVisible == 1) return;
+    mHorizonWrites = writes;
     const iris::Mat4 world = const_cast<iris::MeshNode *>(floor)->getGlobalTransform();
     if (world == mHorizonWorld && mHorizonVisible == 1) return;
     mHorizonWorld = world;
@@ -1445,8 +1569,14 @@ void SceneMirror::syncGiVolume()
     // a call per frame, so the toggle short-circuits before it.
     if (!mGiVolumeVisible) {
         if (mGiVolBuilt) {
-            if (mGiVolLitNode)   mTarget->setNodeVisible(mGiVolLitNode, false);
-            if (mGiVolProbeNode) mTarget->setNodeVisible(mGiVolProbeNode, false);
+            // Latched, like the grid above: two subtree walks a frame to keep
+            // two boxes nobody asked for hidden.
+            if (mGiVolLitNode && mGiVolLitVisible != 0) {
+                mTarget->setNodeVisible(mGiVolLitNode, false); mGiVolLitVisible = 0;
+            }
+            if (mGiVolProbeNode && mGiVolProbeVisible != 0) {
+                mTarget->setNodeVisible(mGiVolProbeNode, false); mGiVolProbeVisible = 0;
+            }
         }
         return;
     }
@@ -1472,20 +1602,21 @@ void SceneMirror::syncGiVolume()
 
     const auto rebuild = [&](NodeId node, MeshId &mesh, MaterialId material,
                              const Vec3 &mn, const Vec3 &mx,
-                             Vec3 &cachedMin, Vec3 &cachedMax, bool have) {
-        if (!have) { mTarget->setNodeVisible(node, false); return; }
+                             Vec3 &cachedMin, Vec3 &cachedMax, bool have, int &vis) {
+        if (!have) { if (vis != 0) { mTarget->setNodeVisible(node, false); vis = 0; } return; }
         if (!mesh || !sameBox(mn, mx, cachedMin, cachedMax)) {
             if (mesh) { mTarget->detachMesh(node); mTarget->destroyMesh(mesh); mesh = 0; }
             mesh = mTarget->createLineMesh(boxEdges(mn, mx), false);
             if (mesh) mTarget->attachMesh(node, mesh, material);
             cachedMin = mn; cachedMax = mx;
         }
-        mTarget->setNodeVisible(node, mesh != 0);
+        const int want = mesh != 0 ? 1 : 0;
+        if (vis != want) { mTarget->setNodeVisible(node, want != 0); vis = want; }
     };
     rebuild(mGiVolLitNode, mGiVolLitMesh, mGiVolLitMaterial,
-            st.boundsMin, st.boundsMax, mGiVolLitMin, mGiVolLitMax, haveLit);
+            st.boundsMin, st.boundsMax, mGiVolLitMin, mGiVolLitMax, haveLit, mGiVolLitVisible);
     rebuild(mGiVolProbeNode, mGiVolProbeMesh, mGiVolProbeMaterial,
-            st.probeRegionMin, st.probeRegionMax, mGiVolProbeMin, mGiVolProbeMax, haveProbe);
+            st.probeRegionMin, st.probeRegionMax, mGiVolProbeMin, mGiVolProbeMax, haveProbe, mGiVolProbeVisible);
 }
 
 MeshId SceneMirror::wireMeshFor(int kind)
@@ -1811,9 +1942,15 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
     // node's engine objects as QUERY FLAGS. Change-guarded; the document's flag
     // stays the authority and is re-checked exactly on the candidates.
     const int wantPickable = node->isPickable() ? 1 : 0;
-    if (e.pickablePushed != wantPickable) {
+    // ...and a material whose Items were rebuilt under this entry (a
+    // shading-model switch) hands it Items born with the DEFAULT query mask,
+    // so the flag has to go out again even when the document's answer is
+    // unchanged. See onMaterialItemsRebuilt.
+    const quint32 wantItemSerial = e.material ? mMaterialItemSerial.value(e.material, 0) : 0;
+    if (e.pickablePushed != wantPickable || e.materialItemSerial != wantItemSerial) {
         iris::graph::setPickable(node->graphNode(), wantPickable != 0);
         e.pickablePushed = wantPickable;
+        e.materialItemSerial = wantItemSerial;
     }
 
     // LIGHTING CHANNELS, object side. Change-guarded like everything else in
@@ -1872,6 +2009,10 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
             rigStale = cr == mCharacterRigs.constEnd() || cr->epoch != e.characterEpoch;
         }
         if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh || rigStale)) {
+            // ONE memo probe for the whole branch — materialFor reads the same
+            // entry, and the reference stays valid because nothing between here
+            // and syncTextures inserts another material.
+            const MaterialSync &attachMs = materialSyncFor(material);
             MaterialId mat = materialFor(material);
             bool attached = false;
             e.gpuSkinned = false;
@@ -1917,7 +2058,8 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                         e.characterEpoch = epoch;
                         e.boneCount = rig.bones.size();
                         e.rigId = rig.id;
-                        e.clipSignature.clear();     // force a clip re-attach
+                        e.clipSignature = 0;         // force a clip re-attach
+                        e.shareEligibleValid = false;   // ...and re-decide sharing (rigId moved)
                     }
                 }
             }
@@ -1937,7 +2079,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // a NEW engine material may be in either family
                 e.pickablePushed = -1;   // a NEW Item carries the default query mask
-                syncTextures(e, material);
+                syncTextures(e, attachMs);
             }
         } else if (!mesh && e.hasMesh) {
             // The document dropped the mesh (a node kept, its MeshPtr cleared).
@@ -1982,16 +2124,30 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                 }
                 // ONE COMPARE PER MATERIAL, not per node. See PbrPush in the
                 // header for what this replaced and why it mattered.
-                PbrPush &push = mPbrPushed[e.material];
-                if (!push.pushed || !(ms.pbr == push.params)) {
+                // ONE COMPARE PER MATERIAL, not per node — and it is the
+                // fingerprint the memo computed anyway, not a second full
+                // PbrParams compare through a second hash.
+                MaterialSync &push = const_cast<MaterialSync &>(ms);
+                if (!push.pushed || push.pushedTo != e.material
+                    || push.pushedFingerprint != ms.fingerprint) {
                     if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
-                        push.params = ms.pbr;
+                        push.pushedTo = e.material;
+                        push.pushedFingerprint = ms.fingerprint;
                         push.pushed = true;
                     }
                 }
                 noteRefractive(ms.pbr);
             }
-            syncTextures(e, material);
+            syncTextures(e, ms);
+        }
+        // How many pieces of a multi-piece character the walk has seen — AFTER
+        // the attach above, so a piece counts on the frame it is rigged rather
+        // than the one after. Below two, syncSkeletonSharing has nothing to do
+        // and returns without touching an entry (it used to iterate every entry
+        // in the scene, every frame, to find that out).
+        if (e.gpuSkinned) {
+            ++mSkinnedNodes;
+            if (e.characterHost) ++mCharacterPieces;
         }
     }
 
@@ -2466,7 +2622,13 @@ void SceneMirror::reclaimUnused()
     }
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
-        mPbrPushed.remove(it.value());
+        // The two per-material records go WITH the material (lead review F7).
+        // The memo is keyed by the document material and the item-rebuild
+        // serial by the engine one, and this is the one place both die: a
+        // serial whose material is gone can never be read again, and engine
+        // ids only ever increment so a later material cannot inherit it.
+        mMaterialItemSerial.remove(it.value());
+        mMaterialSync.remove(it.key());
         mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
     }
     // Textures, the third cache — and the one that was never reclaimed at all
@@ -2579,6 +2741,21 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh, const QString &rigId)
 
 MaterialId SceneMirror::materialFor(iris::Material *material)
 {
+    // THE CACHE FIRST (MIRROR_SCALE lane). This built a whole PbrParams —
+    // two dynamic_casts, a std::string for the BRDF name and ten QStrings for
+    // the address rows — BEFORE looking, so every re-attach of an already
+    // mirrored material paid the full conversion to throw it away. On a scene
+    // open that is once per mesh node.
+    if (material) {
+        auto hit = mMaterials.constFind(material);
+        if (hit != mMaterials.constEnd()) {
+            // noteRefractive still has to see it: the refraction pass is armed
+            // from what the LAST walk saw, not from what was created.
+            const MaterialSync &ms = materialSyncFor(material);
+            if (ms.hasPbr) noteRefractive(ms.pbr);
+            return hit.value();
+        }
+    }
     PbrParams p;
     if (!material || !toPbrParams(material, p)) {
         // A material class the mirror cannot translate gets one shared neutral
@@ -2734,12 +2911,127 @@ void SceneMirror::syncLiveTextures()
 /// construction per lookup) plus a QVector of binds and a hash over their
 /// paths. A lattice of 8000 cubes sharing ONE material paid all of that 8000
 /// times a frame, and the mirror's walk was ~90% of the idle tick because of it.
+/// EVERY DOCUMENT FIELD `materialSyncFor` AND `toPbrParams` READ, as one hash.
+///
+/// The memo's validity key (see MaterialSync in the header). All of it is PODs,
+/// QColors (four ints) and the material's own texture map — no allocation, no
+/// dynamic_cast (the caller passes the resolved one), no string construction
+/// except the texture map's own keys, which a material without maps does not
+/// have at all.
+///
+/// A FIELD ADDED TO PbrMaterial AND FORGOTTEN HERE is an edit that never
+/// reaches the renderer, which is why mirror.scale drives every one of the
+/// material's own authored property rows through setValue and asserts that each
+/// moves this number.
+namespace {
+/// THE FINGERPRINT'S HASHER. Hasher above mixes one BYTE at a time, which is
+/// right for strings and four times the work for a wall of floats and ints —
+/// the same reason mixFloat exists a few lines below it. This one mixes a WORD
+/// per field, and it runs over ~40 fields per material per sync.
+struct FieldHasher {
+    quint64 h = 1469598103934665603ull;
+    inline FieldHasher &operator<<(quint32 v) { h ^= v; h *= 1099511628211ull; return *this; }
+    inline FieldHasher &operator<<(int v)     { return *this << quint32(v); }
+    inline FieldHasher &operator<<(bool v)    { return *this << quint32(v ? 1 : 0); }
+    inline FieldHasher &operator<<(float f)
+    { quint32 b; std::memcpy(&b, &f, sizeof b); return *this << b; }
+    /// AT THE PRECISION THE CONVERSION READS. toPbrParams takes redF()/greenF()
+    /// /blueF(), which come off QColor's 16-BIT storage; rgba() is the 8-bit
+    /// view, so hashing that would let a sub-1/255 edit slip past the memo.
+    /// Nothing in the tree writes a colour that fine today — the panel's picker
+    /// and every reader are 8-bit — which is exactly why it would have been a
+    /// silent trap rather than a visible one (lead review F5).
+    inline FieldHasher &operator<<(const QColor &c)
+    {
+        const QRgba64 q = c.rgba64();
+        return *this << quint32(q.red() << 16 | q.green())
+                     << quint32(q.blue() << 16 | q.alpha());
+    }
+    FieldHasher &operator<<(const QString &s)
+    {
+        *this << quint32(s.size());
+        const char16_t *d = reinterpret_cast<const char16_t *>(s.utf16());
+        for (qsizetype i = 0; i < s.size(); ++i) *this << quint32(d[i]);
+        return *this;
+    }
+};
+}  // namespace
+
+quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMaterial *pbr)
+{
+    FieldHasher h;
+    if (!material) return h.h;
+    // The texture MAP, first and for both material classes: the slot table
+    // below reads `textures`, and a map bound or cleared has to move the hash.
+    h << quint32(material->textures.size());
+    for (auto t = material->textures.constBegin(); t != material->textures.constEnd(); ++t) {
+        h << t.key();
+        h << (t.value() ? t.value()->source : QString());
+    }
+    if (pbr) {
+        h << quint32(1);
+        h << pbr->baseColor << pbr->baseColorFactor
+          << pbr->metallicFactor << pbr->roughnessFactor
+          << pbr->roughnessLowerBound << pbr->roughnessUpperBound
+          << pbr->emissiveColor << pbr->emissiveIntensity
+          << pbr->alphaMode << pbr->refractionStrength << pbr->alpha << pbr->alphaCutoff
+          << pbr->normalFactor
+          << pbr->textureScale << pbr->textureScaleV
+          << pbr->textureOffsetU << pbr->textureOffsetV << pbr->textureRotation
+          << int(pbr->renderStates.rasterState.cullMode)
+          << pbr->shadingModel << pbr->brdf
+          << pbr->clearCoat << pbr->clearCoatRoughness
+          << pbr->receiveShadows << pbr->emissiveAsLightmap
+          << pbr->workflow
+          << pbr->specularColor << pbr->ior
+          << pbr->fresnelColor
+          << pbr->useFresnelColor << pbr->separateFresnel
+          << pbr->anisotropy;
+        // Per-map addressing. The hash is EMPTY on an unauthored material (the
+        // absent-means-Wrap rule), so the overwhelming majority of materials
+        // pay nothing for this loop.
+        h << quint32(pbr->mapAddress.size());
+        for (auto a = pbr->mapAddress.constBegin(); a != pbr->mapAddress.constEnd(); ++a)
+            h << a.key() << a.value();
+        for (int i = 0; i < iris::PbrMaterial::kDetailLayers; ++i) {
+            const auto &d = pbr->detail[i];
+            h << d.blend << d.offsetU << d.offsetV << d.scaleU << d.scaleV
+              << d.weight << d.normalWeight;
+        }
+        return h.h;
+    }
+    if (auto *def = dynamic_cast<iris::DefaultMaterial *>(material)) {
+        h << quint32(2) << def->getDiffuseColor()
+          << def->getShininess() << def->getTextureScale();
+        return h.h;
+    }
+    h << quint32(0);
+    return h.h;
+}
+
 const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *material)
 {
     auto it = mMaterialSync.find(material);
-    if (it != mMaterialSync.end()) return it.value();
-
-    MaterialSync ms;
+    if (it != mMaterialSync.end()) {
+        // Already validated by THIS walk: however many nodes share the
+        // material, it is fingerprinted once.
+        if (it->lastSeen == mSyncStamp) return it.value();
+        it->lastSeen = mSyncStamp;
+        const quint64 fp = materialFingerprint(material, it->asPbr);
+        if (fp == it->fingerprint) return it.value();   // nothing the build reads moved
+        // It DID move: fall through and rebuild in place, keeping the cast.
+        MaterialSync fresh;
+        fresh.lastSeen = mSyncStamp;
+        fresh.asPbr = it->asPbr;
+        it.value() = fresh;
+    } else {
+        MaterialSync fresh;
+        fresh.lastSeen = mSyncStamp;
+        fresh.asPbr = dynamic_cast<iris::PbrMaterial *>(material);
+        it = mMaterialSync.insert(material, fresh);
+    }
+    MaterialSync &ms = it.value();
+    ++mMaterialBuilds;
     ms.hasPbr = toPbrParams(material, ms.pbr);
 
     // Document slot name -> engine slot. PbrMaterial and DefaultMaterial naming.
@@ -2782,8 +3074,7 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // Both texture caches now key on the flag (I-2), so the same file bound
     // here and as a linear map elsewhere is two engine textures, correctly.
     bool sharedSrgb = false;
-    if (auto *pbrMat = dynamic_cast<iris::PbrMaterial *>(material))
-        sharedSrgb = iris::PbrMaterial::sharedMapIsSrgb(pbrMat->workflow);
+    if (ms.asPbr) sharedSrgb = iris::PbrMaterial::sharedMapIsSrgb(ms.asPbr->workflow);
 
     // Resolve every candidate path: the textures map (Texture2D::source), then
     // shader-graph texture properties (a file path in the property value).
@@ -2809,14 +3100,18 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // conclude "unchanged" and keep sampling the old one.
     for (const TextureBind &b : ms.binds) hs << int(b.slot) << b.path << quint32(b.srgb ? 1 : 0);
     ms.textureSignature = hs.h;
-
-    return *mMaterialSync.insert(material, ms);
+    // LAST, so a throw or an early return above cannot leave a fingerprint
+    // standing over a half-built description.
+    ms.fingerprint = materialFingerprint(material, ms.asPbr);
+    return ms;
 }
 
-void SceneMirror::syncTextures(Entry &e, iris::Material *material)
+void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
 {
-    if (!material || !e.material || e.material == mDefaultMaterial) return;
-    const MaterialSync &ms = materialSyncFor(material);
+    // (It took the document material and re-probed the memo for it — a second
+    // QHash lookup per mesh node per frame to fetch what the caller already had
+    // in hand. MIRROR_SCALE lane.)
+    if (!e.material || e.material == mDefaultMaterial) return;
     const std::vector<TextureBind> &binds = ms.binds;
     const quint64 signature = ms.textureSignature;
     if (e.texturesPushed && signature == e.textureSignature) return;
@@ -3744,7 +4039,13 @@ void SceneMirror::attachClipsFor(Entry &e)
     // holding: the rig, and the identity + length of every clip. It does NOT
     // cover the clip's keys — those are inside the per-clip content id, which is
     // what the engine's process-lifetime def cache is keyed on.
-    QString signature = QString::fromStdString(e.rigId);
+    // A HASH, not a concatenated string (MIRROR_SCALE lane): this ran per
+    // skinned node per frame, and a Mixamo character with 30 clips built ~100
+    // QStrings to produce a value whose only use is a compare with last
+    // frame's.
+    Hasher sig;
+    sig << quint32(e.rigId.size());
+    sig.bytes(e.rigId.data(), e.rigId.size());
     QList<iris::AnimationPtr> clips;
     if (host) {
         QList<iris::AnimationPtr> candidates = host->getAnimations();
@@ -3764,11 +4065,10 @@ void SceneMirror::attachClipsFor(Entry &e)
             // page's root-motion toggle rebuilds every clip's Animation object
             // with the same name and length, and without this the mirror would
             // keep playing the pre-toggle translation.
-            signature += QLatin1Char('|') + anim->getName() +
-                         QLatin1Char(':') + QString::number(double(anim->getLength()), 'g', 6) +
-                         QLatin1Char('@') + QString::number(quintptr(anim.data()), 16);
+            sig << anim->getName() << anim->getLength() << quintptr(anim.data());
         }
     }
+    const quint64 signature = sig.h;
     if (signature == e.clipSignature) return;
     e.clipSignature = signature;
     e.lastClipPush.clear();
@@ -4276,6 +4576,11 @@ void SceneMirror::syncSkeletonSharing()
     // a mesh swap — and a latch would then believe in a share that no longer
     // exists.
     if (!mTarget || mEntries.isEmpty()) return;
+    // BELOW TWO CHARACTER PIECES THERE IS NOTHING TO SHARE, and this used to
+    // find that out by iterating EVERY entry in the scene, every frame
+    // (MIRROR_SCALE lane): 8,404 QHash probes per frame on a lattice with no
+    // skeleton in it at all. The walk counts the pieces as it goes.
+    if (mCharacterPieces < 2) { mShareGroups.clear(); return; }
 
     mShareGroups.clear();
     for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
@@ -4307,15 +4612,30 @@ void SceneMirror::syncSkeletonSharing()
         if (mTarget->sharesSkeleton(master->node)) {
             mTarget->shareSkeleton(master->node, 0);
             master->shareMaster = 0;
-            master->clipSignature.clear();      // it owns its clips again
+            master->clipSignature = 0;          // it owns its clips again
             master->lastClipPush.clear();
         }
-        const iris::Mat4 masterWorld = master->docNode->getGlobalTransform();
+        // THE WORLD COMPARISONS, ONLY WHEN A WORLD CAN HAVE MOVED. Eligibility
+        // is a rig-id match plus "this piece sits exactly where the master
+        // does", and the second half costs a derived-transform resolution on
+        // the master AND on every piece — per frame, for an answer that cannot
+        // change unless something wrote a transform. The document's global
+        // write counter is the gate; a re-attach (which can change `rigId`)
+        // clears the memo itself.
+        const unsigned long long writes = iris::graph::transformWrites();
+        const bool worldsMayHaveMoved = writes != mShareWorldWrites;
+        iris::Mat4 masterWorld;
+        if (worldsMayHaveMoved) masterWorld = master->docNode->getGlobalTransform();
 
         for (Entry *e : group) {
             if (e == master) continue;
-            const bool eligible = e->rigId == master->rigId &&
-                                  sameWorld(e->docNode->getGlobalTransform(), masterWorld);
+            if (worldsMayHaveMoved || !e->shareEligibleValid) {
+                if (!worldsMayHaveMoved) masterWorld = master->docNode->getGlobalTransform();
+                e->shareEligible = e->rigId == master->rigId &&
+                                   sameWorld(e->docNode->getGlobalTransform(), masterWorld);
+                e->shareEligibleValid = true;
+            }
+            const bool eligible = e->shareEligible;
             const bool shared = mTarget->sharesSkeleton(e->node);
             if (eligible && (!shared || e->shareMaster != master->node)) {
                 if (mTarget->shareSkeleton(e->node, master->node)) {
@@ -4323,7 +4643,7 @@ void SceneMirror::syncSkeletonSharing()
                     // A follower holds NO clips (the engine drops them when the
                     // instance goes): forget what we think it has, so that if it
                     // ever un-shares the clip pass re-attaches from scratch.
-                    e->clipSignature.clear();
+                    e->clipSignature = 0;
                     e->clipMap.clear();
                     e->clipIdMap.clear();
                     e->clipNameMap.clear();
@@ -4334,7 +4654,7 @@ void SceneMirror::syncSkeletonSharing()
             } else if (!eligible && shared) {
                 mTarget->shareSkeleton(e->node, 0);
                 e->shareMaster = 0;
-                e->clipSignature.clear();       // it needs its own clips again
+                e->clipSignature = 0;           // it needs its own clips again
                 e->clipMap.clear();
                 e->clipIdMap.clear();
                 e->clipNameMap.clear();
@@ -4344,6 +4664,7 @@ void SceneMirror::syncSkeletonSharing()
             }
         }
     }
+    mShareWorldWrites = iris::graph::transformWrites();
 }
 
 void SceneMirror::syncClips()
@@ -4380,6 +4701,11 @@ void SceneMirror::syncClips()
     // compare per node and no engine call, and no std::string is built at all on
     // a frame whose push is skipped.
     if (!mSource) return;
+    // NO SKINNED NODE, NO PASS (MIRROR_SCALE lane). This walked every entry in
+    // the scene every frame to discover that none of them was rigged — 8,403
+    // QHash probes a frame on a lattice of cubes, 1.16 ms of the capture. The
+    // walk counts the rigged nodes as it goes.
+    if (mSkinnedNodes == 0) return;
     const float t = mSource->animationTime();
     for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
         Entry &e = *it;

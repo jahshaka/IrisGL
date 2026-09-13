@@ -560,10 +560,13 @@ float Scene::advance(float dt)
 
 		// Since the physics is detached from the engine rendering, this is VERY important to retain object scale
 		// Set our scenenode to the simulated transform for the duration of the sim
-		auto pos = rigidBodyWorldTransform.getOrigin();
-		mesh->setGlobalPos(iris::Vec3(pos.x(), pos.y(), pos.z()));
-		auto rot = rigidBodyWorldTransform.getRotation();
-		mesh->setGlobalRot(iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
+		// ONE write, not two (MIRROR_SCALE lane): setGlobalPos and setGlobalRot
+		// each resolved this body's parent and inverted it, so a falling crate
+		// paid two parent resolutions and two inverses per step for one pose.
+		const auto pos = rigidBodyWorldTransform.getOrigin();
+		const auto rot = rigidBodyWorldTransform.getRotation();
+		mesh->setGlobalPosRot(iris::Vec3(pos.x(), pos.y(), pos.z()),
+		                      iris::Quat(rot.w(), rot.x(), rot.y(), rot.z()));
 	}
 
     // POSSESSION, second half: the spring arm follows the pose the steps just

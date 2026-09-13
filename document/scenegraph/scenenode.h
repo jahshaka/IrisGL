@@ -829,6 +829,13 @@ public:
     iris::Mat4 getLocalTransform()  { return graph::localTransform(mGraphNode); }
 
 	void setGlobalPos(iris::Vec3 pos);
+	/// Position AND rotation in one write. Each setter above undoes the
+	/// parent's derived state to get a local value — a full-transform inverse
+	/// for the position, a derived-orientation inverse for the rotation — so a
+	/// caller that has both (the physics write-back, per body per step) paid
+	/// two parent resolutions and two inverses for one pose. This pays one, and
+	/// none at all when the parent is at identity.
+	void setGlobalPosRot(iris::Vec3 pos, iris::Quat rot);
 	void setGlobalRot(iris::Quat rot);
 	void setGlobalTransform(iris::Mat4 transform);
 
