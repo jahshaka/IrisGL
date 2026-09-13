@@ -15,6 +15,7 @@
 // ERRORS: no backend exception ever escapes this boundary. A failing call returns
 // null/false and the reason is available from Engine::lastError() until the next
 // failing call overwrites it.
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -1160,6 +1161,29 @@ public:
     /// Destroys the Scene and every node, mesh and material it owns. Views bound to
     /// it are detached first (they stay alive, showing nothing).
     virtual void   destroyScene(Scene *) = 0;
+
+    /// THE HOST'S TRANSFORM-WRITE EPOCH — how the renderer learns that nothing
+    /// moved (clean-2 lane, 2026-09-13).
+    ///
+    /// The document owns the scene graph and writes transforms into it
+    /// directly, so a dragged mesh reaches the engine through no call at all.
+    /// The renderer's only answer was to LOOK: `OgreScene`'s GI movement scan
+    /// reads every item's updated world AABB once a frame in any probe-lit
+    /// scene — 0.4 / 2.0 / 4.3 ms at 1k / 5k / 10k nodes, still or not.
+    ///
+    /// Hand it the address of a counter the host bumps on every transform
+    /// write (`iris::graph::transformWriteCounter()`) and the scan runs only on
+    /// frames where SOMETHING was written: a still scene pays one relaxed
+    /// atomic load. The engine's OWN writes (`Scene::setNodeTransform`, socket
+    /// riders) are counted internally and need no help from the host.
+    ///
+    /// RELAXED BY DESIGN: a count of writes, not of moves, process-wide rather
+    /// than per scene. Every one of those errs towards scanning when nothing
+    /// moved, which costs what the unconditional scan cost. The pointer must
+    /// outlive the engine (a process-lifetime counter); null (the default)
+    /// means "no epoch available" and every frame scans, which is why a host
+    /// that never calls this is simply as slow as before.
+    virtual void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) = 0;
 
     /// Draws every enabled View once. The host owns the loop and calls this.
     virtual void renderOneFrame() = 0;

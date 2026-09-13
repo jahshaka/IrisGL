@@ -367,6 +367,13 @@ void destroyRecursive(Ogre::SceneNode *n)
     n->getCreator()->destroySceneNode(n);
 }
 
+/// See graph::transformWrites(). Relaxed because it is a CHANGE TEST read once
+/// a frame by the renderer: it needs to observe "different from last frame"
+/// eventually, not to order anything. (Deleted with the static-shadow opt-in
+/// in lane E2, 2026-09-11, and reinstated here for the GI movement scan, which
+/// was left walking every item of every probe-lit scene every frame.)
+std::atomic<unsigned long long> gTransformWrites{0};
+
 }  // namespace
 
 bool available() { return Ogre::Root::getSingletonPtr() != nullptr; }
@@ -542,6 +549,14 @@ void attach(NodeHandle parent, NodeHandle child, int index)
     // the socket is a socket operation — Scene::detachFromSocket — not a
     // reparent, and the reconciler is what performs it.)
     if (riderParentOf(c)) { setSocketRider(child, parent); return; }
+    // A REPARENT MOVES THE CHILD unless the caller re-adopts its world pose
+    // (clean-2 lane review, F4): the local transform is kept and the parent
+    // under it changes, so the whole subtree's world AABBs move without any
+    // setter being called. The renderer's scans read that counter to decide
+    // whether to look at all, so a reparent has to cost one scan — every live
+    // caller today happens to preserve the pose, which is exactly the kind of
+    // thing that stops being true silently.
+    gTransformWrites.fetch_add(1, std::memory_order_relaxed);
     if (c->getParent()) c->getParent()->removeChild(c);
     // APPEND is the overwhelming majority (addChild passes -1) and must not pay
     // for the sibling-index machinery below: at a fan-out of k that scan is
@@ -589,6 +604,7 @@ NodeHandle detach(NodeHandle child)
     // parent. (Its Ogre parent is the TagPoint, so the re-home below would tear
     // it off the socket.)
     if (riderParentOf(c)) { forgetRider(c); return child; }
+    gTransformWrites.fetch_add(1, std::memory_order_relaxed);   // see attach (F4)
     // Out of its parent and under its scene manager's root — NOT migrated to
     // the staging manager, which is what this used to do. A migration rebuilds
     // the whole subtree, which changes every handle in it, which makes the
@@ -743,6 +759,7 @@ void promoteStaticChildren(Ogre::SceneNode *n);
 
 inline void markMoved(Ogre::SceneNode *n)
 {
+    gTransformWrites.fetch_add(1, std::memory_order_relaxed);
     if (n->isStatic()) { promoteOnWrite(n); return; }
     // The root-moved case (see promoteStaticChildren). Two loads, and only in a
     // process that has static nodes at all.
@@ -851,6 +868,16 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s)
     setOrientationExact(o, toOgre(r));
     o->setScale(toOgre(s));
     markMoved(o);
+}
+
+unsigned long long transformWrites()
+{
+    return gTransformWrites.load(std::memory_order_relaxed);
+}
+
+const std::atomic<unsigned long long> &transformWriteCounter()
+{
+    return gTransformWrites;
 }
 
 Mat4 localTransform(NodeHandle n)

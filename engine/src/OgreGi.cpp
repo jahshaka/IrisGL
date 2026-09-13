@@ -155,13 +155,6 @@ static const float kProbeShapeCellAllowance = 8.0f;
 // sky, which the sky IBL already holds perfectly and for free.
 static const int kMinEnclosedAxes = 2;
 
-// THE PROBE CATCH-UP RATE (ENGINE_CACHE_POLICY_SPEC D2) — how many STALE probes
-// one frame may re-capture. 0 = the tier's normal update budget (option A, the
-// shipped default: no hitch, progressive). A positive value raises the rate to
-// at least that many while probes are stale (option B was 4). The owner's
-// reflections design may move it; it is deliberately this one line.
-static const int kProbeCatchUpPerFrame = 0;
-
 // ---- DDGI (GI_UNIFIED_SPEC.md §4 P1) constants ---------------------------
 
 // HOW MANY PROBES A FIELD HAS, total. A power of two, because the per-axis
@@ -594,6 +587,9 @@ GiStatus OgreScene::giStatus() const {
         st.lastStaleReason = mLastStaleReason;
         st.staleSerial     = mStaleSerial;
         st.rebuilds        = mGiRebuilds;
+        st.giScans         = mGiScans;
+        st.giScanMicros    = mGiScanMicros;
+        st.giAabbReads     = mGiAabbReads;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -620,8 +616,54 @@ bool OgreScene::materialSeenByGi(MaterialId id, bool &voxelized) const {
     return seen;
 }
 
-void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
-    if (mGi.mode == GiMode::Off) return;
+void OgreScene::settleTextureResidency() {
+    // ONE empty() TEST on a scene that is not waiting for anything — which is
+    // every frame once a scene has opened. Entries appear only in setPbrTexture,
+    // and only for a bind whose texture was not resident yet.
+    if (mMaterialsAwaitingTexture.empty()) return;
+    // EVERY ENTRY THAT BECAME READY THIS FRAME IS ONE EVENT (clean-2 lane
+    // review, F5). A scene's textures arrive in batches, and noting each
+    // material separately staled the grid once per material and — worse — bumped
+    // the material generation once per material, which is what the host re-reads
+    // to re-inject the voxel bounce. Ten maps landing together used to buy ten
+    // re-injects; they buy one.
+    bool stale = false, bumpVoxels = false;
+    for (size_t i = 0; i < mMaterialsAwaitingTexture.size();) {
+        const MaterialId mat = mMaterialsAwaitingTexture[i].first;
+        const bool voxelInput = mMaterialsAwaitingTexture[i].second;
+        auto mit = mMaterials.find(mat);
+        bool waiting = false;
+        if (mit != mMaterials.end()) {
+            for (size_t sl = 0; sl < kPbrTextureSlotCount && !waiting; ++sl) {
+                const TextureId tid = mit->second.boundTextures[sl];
+                if (!tid) continue;
+                auto tit = mTextures.find(tid);
+                if (tit == mTextures.end() || !tit->second.texture) continue;
+                waiting = !tit->second.texture->isDataReady();
+            }
+        }
+        if (waiting) { ++i; continue; }
+        // The material (or the whole entry) is settled. A material that died
+        // while waiting simply leaves, having staled nothing.
+        if (mit != mMaterials.end()) {
+            bool bump = false;
+            if (giMaterialChangeEffect(mat, voxelInput, bump)) { stale = true; bumpVoxels |= bump; }
+        }
+        mMaterialsAwaitingTexture[i] = mMaterialsAwaitingTexture.back();
+        mMaterialsAwaitingTexture.pop_back();
+    }
+    if (stale) staleProbeGrid(GiStaleReason::Material);
+    if (bumpVoxels) ++mGiMaterialGeneration;
+}
+
+// WHAT A MATERIAL EDIT COSTS THE GI CACHES — THE ONE DEFINITION, so the single
+// edit and the batched settle below can never decide it differently.
+// Returns "the probe grid is stale because of this"; `bumpVoxels` says the
+// voxel/IR solve has to be re-read too.
+bool OgreScene::giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged,
+                                       bool &bumpVoxels) const {
+    bumpVoxels = false;
+    if (mGi.mode == GiMode::Off) return false;
     // NOTHING CACHED TO INVALIDATE: no probe grid and no voxelizer built yet,
     // or a from-scratch rebuild already owed (it reads every material fresh and
     // stales the whole grid itself). This is also what keeps the node walk
@@ -631,11 +673,18 @@ void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     // note). A live edit on a built arm walks once per push.
     // Instant Radiosity counts as a cache too: its trace reads the same
     // diffuse colours, and the generation is what makes the host re-trace it.
-    if (mGiCachesDirty || (!mPcc && !mVctVoxelizer && !mInstantRadiosity)) return;
+    if (mGiCachesDirty || (!mPcc && !mVctVoxelizer && !mInstantRadiosity)) return false;
     bool voxelized = false;
-    if (!materialSeenByGi(id, voxelized)) return;     // nothing GI can see wears it
+    if (!materialSeenByGi(id, voxelized)) return false;   // nothing GI can see wears it
+    bumpVoxels = voxelized && voxelInputsChanged;
+    return true;
+}
+
+void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
+    bool bumpVoxels = false;
+    if (!giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels)) return;
     staleProbeGrid(GiStaleReason::Material);
-    if (voxelized && voxelInputsChanged) ++mGiMaterialGeneration;
+    if (bumpVoxels) ++mGiMaterialGeneration;
 }
 
 void OgreScene::staleProbeGrid(GiStaleReason why) {
@@ -649,9 +698,9 @@ void OgreScene::staleProbeGrid(GiStaleReason why) {
 
 // WHAT THE FRAME ACTUALLY RE-CAPTURES (GiStatus::probeCapturesLastFrame).
 // Counted at the last moment before the render, from the probes' own dirty
-// flags, so it covers every source that can raise one — the budget, the
-// dynamic reservation, a shape clamp's CubemapProbe::set — rather than trusting
-// any one of them to report itself. A from-scratch placement captures the whole
+// flags, so it covers every source that can raise one — the budget, a shape
+// clamp's CubemapProbe::set — rather than trusting any one of them to report
+// itself. A from-scratch placement captures the whole
 // grid synchronously inside buildPcc (PccPerPixelGridPlacement's buildStart AND
 // buildEnd each run updateAllDirtyProbes), bypassing the flags, so it reports
 // its own count through mPlacementCapturesThisFrame.
@@ -700,6 +749,7 @@ void OgreScene::setNodeGiBoundsExcluded(NodeId id, bool excluded) {
     if (it == mNodes.end()) return;
     if (it->second.giBoundsExcluded == excluded) return;
     it->second.giBoundsExcluded = excluded;
+    noteSceneTransformWrite();      // the escape signature reads this flag
     // The flag changes WHERE GI happens, so it is exactly as much of a change
     // as moving the geometry: flag the caches and let the frame-time flush
     // rebuild once, however many nodes the caller toggles in a burst.
@@ -806,6 +856,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.giBoundsExcluded) continue;
+        ++mGiAabbReads;
         all.push_back(const_cast<Ogre::Item *>(item)->getWorldAabbUpdated());
     }
     return all;
@@ -936,6 +987,25 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
 unsigned long long OgreScene::giEscapeSignature() const {
     if (mGi.mode == GiMode::Off) return 0ull;
     if (!mGiAutoVolumeValid) return 0ull;      // nothing resolved yet, or hand-typed bounds
+    // CACHED AGAINST THE MOVEMENT EPOCH (clean-2 lane, 2026-09-13). The mirror
+    // reads this every frame of every VCT-like scene, and it is a pure function
+    // of the GI items' boxes and the volume they are tested against — so on a
+    // frame where nothing wrote a transform and nothing structural changed, the
+    // answer is last frame's and the walk (a root-recursive
+    // getWorldAabbUpdated per GI item) is skipped outright.
+    // ...AND ONLY WHERE THE EPOCH CAN SEE THE HOST'S WRITES. Without a counter
+    // from the host (Engine::setTransformWriteCounter) a document-side move
+    // moves nothing the engine can read, so the cache would answer with a
+    // signature from before the drag — caught by gi.coalesce and gi.budget,
+    // which drive their drags through the document and wire no counter. Same
+    // rule as ensureGiWalk's: no epoch, no skipping.
+    const unsigned long long epoch = transformEpoch();
+    if (detail::gTransformWriteCounter &&
+        mEscapeSigValid && mEscapeSigEpoch == epoch && mEscapeSigMode == mGi.mode &&
+        mEscapeSigVolumeValid == mGiAutoVolumeValid &&
+        mEscapeSigVolume.mCenter == mGiAutoVolume.mCenter &&
+        mEscapeSigVolume.mHalfSize == mGiAutoVolume.mHalfSize)
+        return mEscapeSig;
     const Ogre::Vector3 vmn = mGiAutoVolume.getMinimum(), vmx = mGiAutoVolume.getMaximum();
     const Ogre::Vector3 size = vmx - vmn;
     const float quantum = std::max(std::max(std::max(size.x, size.y), size.z) / 64.0f, 1e-4f);
@@ -947,6 +1017,7 @@ unsigned long long OgreScene::giEscapeSignature() const {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.giBoundsExcluded) continue;
+        ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
         if (mn.x >= vmn.x && mn.y >= vmn.y && mn.z >= vmn.z &&
@@ -957,7 +1028,13 @@ unsigned long long OgreScene::giEscapeSignature() const {
             fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
         }
     }
-    return h == 1469598103934665603ull ? 0ull : h;      // untouched hash == nothing escaped
+    mEscapeSig = h == 1469598103934665603ull ? 0ull : h;   // untouched hash == nothing escaped
+    mEscapeSigEpoch = epoch;
+    mEscapeSigMode = mGi.mode;
+    mEscapeSigVolume = mGiAutoVolume;
+    mEscapeSigVolumeValid = mGiAutoVolumeValid;
+    mEscapeSigValid = true;
+    return mEscapeSig;
 }
 
 // A SCENE WITH NO LIGHTS AT ALL BREAKS VctLighting's AUTO MULTIPLIER, and after
@@ -1008,6 +1085,7 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
     // first object to appear in an empty-but-for-scenery scene legitimately
     // re-centres the volume onto it, and that is the heuristic working.
     mGiAutoVolumeValid = automatic && mGiLastItemCount >= 2u;
+    noteSceneTransformWrite();      // the escape signature is relative to it
 }
 
 bool OgreScene::giBoundsExplicit() const {
@@ -1070,6 +1148,7 @@ bool OgreScene::giContentCentre(float maxEdge, Ogre::Vector3 &centre) const {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.giBoundsExcluded) continue;
+        ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const Ogre::Vector3 size = a.getSize();
         if (std::max(std::max(size.x, size.y), size.z) > maxEdge) continue;   // scenery
@@ -1630,19 +1709,32 @@ void OgreScene::updateForwardPlusRanges(const Ogre::Camera *cam) {
     if (++mFwdPlusTick < kFwdPlusEveryNFrames) return;
     mFwdPlusTick = 0;
     JAH_TRY {
-        Ogre::Vector3 mn(1e30f), mx(-1e30f);
-        size_t count = 0;
-        for (auto &kv : mNodes) {
-            Ogre::Item *item = kv.second.item;
-            // Everything the VIEW draws — the still world and the movers
-            // (kMovableBit) — because this is the camera's clustered grid, not
-            // a capture's.
-            if (!item || !(item->getVisibilityFlags() & (kVisibleBit | kMovableBit))) continue;
-            const Ogre::Aabb a = item->getWorldAabbUpdated();
-            mn.makeFloor(a.getMinimum()); mx.makeCeil(a.getMaximum());
-            ++count;
+        // THE SCENE'S EXTENT IS CACHED AGAINST THE MOVEMENT EPOCH (clean-2
+        // lane): the walk below is a root-recursive getWorldAabbUpdated per
+        // drawn item, and a still scene's answer cannot have changed. Only the
+        // CAMERA half below is recomputed on every tick.
+        const unsigned long long epoch = transformEpoch();
+        if (!detail::gTransformWriteCounter || !mFwdPlusBoundsValid ||
+            mFwdPlusBoundsEpoch != epoch) {
+            Ogre::Vector3 bmn(1e30f), bmx(-1e30f);
+            size_t found = 0;
+            for (auto &kv : mNodes) {
+                Ogre::Item *item = kv.second.item;
+                // Everything the VIEW draws — the still world and the movers
+                // (kMovableBit) — because this is the camera's clustered grid,
+                // not a capture's.
+                if (!item || !(item->getVisibilityFlags() & (kVisibleBit | kMovableBit))) continue;
+                ++mGiAabbReads;
+                const Ogre::Aabb a = item->getWorldAabbUpdated();
+                bmn.makeFloor(a.getMinimum()); bmx.makeCeil(a.getMaximum());
+                ++found;
+            }
+            mFwdPlusBoundsValid = found != 0;
+            if (mFwdPlusBoundsValid) mFwdPlusBounds = Ogre::Aabb::newFromExtents(bmn, bmx);
+            mFwdPlusBoundsEpoch = epoch;
         }
-        if (!count) return;                 // an empty scene keeps whatever it has
+        if (!mFwdPlusBoundsValid) return;   // an empty scene keeps whatever it has
+        const Ogre::Vector3 mn = mFwdPlusBounds.getMinimum(), mx = mFwdPlusBounds.getMaximum();
         const Ogre::Vector3 camPos = cam->getDerivedPosition();
         // The far end: the distance to the furthest corner of what exists.
         float far2 = 0.0f;
@@ -1801,18 +1893,76 @@ void OgreScene::runItemWalk(bool shadow) {
 void OgreScene::ensureGiWalk() {
     if (mGiWalkedThisFrame) return;
     mGiWalkedThisFrame = true;
+    // NOTHING WROTE A TRANSFORM SINCE THE LAST SCAN, so nothing can have moved
+    // (clean-2 lane, 2026-09-13). This walk reads getWorldAabbUpdated() per
+    // item — a parent-chain walk each — and it ran on every frame of every
+    // probe-lit scene, still or not: 392 / 1961 / 4328 us at 1k / 5k / 10k
+    // nodes, measured by lane R2. The epoch is the host's transform-write
+    // counter plus our own writes; see transformEpoch().
+    //
+    // EVERYTHING ELSE THE PROBES CONSUME IS PUSHED, NOT SCANNED: an item
+    // arriving, leaving, being hidden, shown, made a helper, re-materialled or
+    // re-classified all call staleProbeGrid at their own seam (OgreScene.cpp,
+    // OgreMaterials.cpp). The scan's unique job is movement, and movement is
+    // exactly what the epoch reports.
+    const unsigned long long epoch = transformEpoch();
+    if (mGiScannedOnce && mGiWalkEpochValid && epoch == mGiWalkEpoch) {
+        // The boxes are per frame by contract (walkItems clears them at its
+        // head), so a skipped frame must publish "nothing moved" rather than
+        // last frame's movers — otherwise a single move would stale the grid
+        // for ever.
+        mGiMovedBoxes.clear();
+        mGiScanMicros = 0.0;
+        return;
+    }
+    mGiWalkEpoch = epoch;
+    mGiWalkEpochValid = detail::gTransformWriteCounter != nullptr;
+    ++mGiScans;
     const auto t0 = std::chrono::steady_clock::now();
     walkItems(true, false, true);
     mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
 
+/// THE MOVEMENT EPOCH: the host's process-wide transform-write counter (the
+/// document writes into the shared scene graph without telling the engine) plus
+/// the writes the ENGINE itself makes to nodes of this scene — Scene::
+/// setNodeTransform, a socket rider's per-frame placement, a decal's projector
+/// box. Both halves are counts of WRITES, so writing the same value again reads
+/// as movement and costs one extra scan; that is the safe direction.
+unsigned long long OgreScene::transformEpoch() const {
+    const unsigned long long host =
+        detail::gTransformWriteCounter
+            ? detail::gTransformWriteCounter->load(std::memory_order_relaxed)
+            : 0ull;
+    return host + mSceneTransformWrites;
+}
+
 void OgreScene::indexItemNode(Node &n) {
+    noteSceneTransformWrite();      // an Item arriving is an input to every scan
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
 }
 
+void OgreScene::indexDecalNode(Node &n) {
+    if (n.decalSlot != size_t(-1)) return;
+    n.decalSlot = mDecalNodes.size();
+    mDecalNodes.push_back(&n);
+}
+
+void OgreScene::unindexDecalNode(Node &n) {
+    n.scan.decalKnown = false;
+    if (n.decalSlot == size_t(-1)) return;
+    const size_t i = n.decalSlot;
+    Node *last = mDecalNodes.back();
+    mDecalNodes[i] = last;
+    last->decalSlot = i;
+    mDecalNodes.pop_back();
+    n.decalSlot = size_t(-1);
+}
+
 void OgreScene::unindexItemNode(Node &n) {
+    noteSceneTransformWrite();      // ...and so is one leaving
     // A CASTER LEAVING: its last box is what the lamps around it must re-render
     // without it (the scan never sees a node that has no Item).
     if (n.scan.shadowPresent && mShadowScanPrimed)
@@ -1856,7 +2006,10 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
     }
     bool firstShadow = false;
     Ogre::uint32 channelsAll = 0u;
-    std::vector<MaterialId> deforming;   // materials with a vertex-stage piece (usually none)
+    // Materials with a vertex-stage piece (usually NONE). A scratch member, not
+    // a local: this walk runs every frame (clean-2 lane).
+    std::vector<MaterialId> &deforming = mScanDeforming;
+    deforming.clear();
     if (shadow) {
         mShadowChanges.clear();
         firstShadow = !mShadowScanPrimed;
@@ -1877,6 +2030,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
         // would let the fresh walk skip the update where nothing moved, exists
         // only in OGRE_DEBUG_MEDIUM builds — an engine-side movement epoch is
         // the way to cut this, and it is a lane of its own.)
+        if (fresh) ++mGiAabbReads;
         const Ogre::Aabb a = fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
         // Read once per item, both halves use them (each is an SoA read, and
         // this loop is the per-frame cost the whole walk is measured by).
@@ -1962,6 +2116,30 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
             r.shadowChannels = channels;
         }
     }
+    if (gi) {
+        // THE DECALS (clean-2 lane, 2026-09-13). A decal is not an Item and its
+        // node usually carries none, so the loop above cannot see it — yet the
+        // probe faces render decals like any other Forward+ surface, which
+        // makes a decal that MOVES a probe input exactly as a moved crate is.
+        // (Arrival, removal and edits stale the grid at their own seam, in
+        // setDecal/removeDecal; this half is the one that cannot be pushed.)
+        // Its box is `probeOnly`: a decal paints a surface the probes capture,
+        // and the voxels never see one.
+        for (Node *np : mDecalNodes) {
+            Node &n = *np;
+            if (!n.decal || !n.decalNode) continue;
+            const Ogre::Aabb a = n.decal->getWorldAabbUpdated();
+            if (!n.scan.decalKnown) {
+                n.scan.decalKnown = true;
+                n.scan.decalBox = a;
+                continue;                       // arrival: setDecal staled it already
+            }
+            if (giAabbMoved(n.scan.decalBox, a)) {
+                n.scan.decalBox = a;
+                mProbeOnlyChanged = true;
+            }
+        }
+    }
     if (shadow) {
         if (!firstShadow)
             mShadowChanges.insert(mShadowChanges.end(), mShadowVanished.begin(), mShadowVanished.end());
@@ -2013,10 +2191,9 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
 //     nothing invalidated a probe on any of them — which is why the refill and
 //     the missing invalidations (P7) went out together.
 //
-//     v1 STALES THE WHOLE GRID per input, a mover included (on top of the
-//     dynamic reservation below, which is unchanged): indoors every parallax
-//     shape contains everything (the A2 clamp), so area or shape locality would
-//     discriminate nothing; v2 can add it for open fields.
+//     v1 STALES THE WHOLE GRID per input, a mover included: indoors every
+//     parallax shape contains everything (the A2 clamp), so area or shape
+//     locality would discriminate nothing; v2 can add it for open fields.
 //
 // Called once per scene per frame, from the AUTHORITATIVE view only (F7): the
 // engine picks one on-screen view per scene in renderOneFrame, because two views
@@ -2046,12 +2223,12 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // material or a live texture stales nothing by itself. SSR and planar
     // reflections show it live; the probes are the static-environment layer.
 
-    // THE CATCH-UP RATE (spec D2). How many STALE probes a frame may capture:
-    // the tier's normal budget (option A, the default — no hitch, a 32-probe
-    // grid catches up in about half a second at 60 Hz). The reflections design
-    // being studied separately may raise it; this is the one line to change
-    // (option B was a temporary 4 per frame).
-    const int catchUp = kProbeCatchUpPerFrame > 0 ? std::max(budget, kProbeCatchUpPerFrame) : budget;
+    // THE CATCH-UP RATE (spec D2) IS THE BUDGET (option A, the shipped answer:
+    // no hitch, progressive — a 32-probe grid catches up in about half a second
+    // at 60 Hz). Option B, a separate faster rate while probes are stale, was a
+    // dead constant at 0 with a branch nobody could reach; raising the rate now
+    // means raising the tier's budget, which is the same number the status
+    // reports (clean-2 lane, 2026-09-13).
 
     // How much a probe covering something that just moved may jump the queue.
     // It cannot break the sweep guarantee (it only reorders within one), so the
@@ -2081,7 +2258,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
                             (covers ? kMovedBoost : 1.0f);
         ranked.emplace_back(-score, i);
     }
-    const size_t take = std::min(size_t(catchUp), ranked.size());
+    const size_t take = std::min(size_t(budget), ranked.size());
     std::partial_sort(ranked.begin(), ranked.begin() + std::ptrdiff_t(take), ranked.end());
     for (size_t k = 0; k < take; ++k) {
         const size_t i = ranked[k].second;
@@ -2132,11 +2309,19 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // item, so the hash of a still scene is still whatever the volume does.
 unsigned long long OgreScene::giGeometrySignature() const {
     if (mGi.mode == GiMode::Off) return 0ull;
+    // CACHED AGAINST THE MOVEMENT EPOCH, exactly as giEscapeSignature is and
+    // for the same reason: the mirror reads it once a frame and it is a pure
+    // function of the GI items' boxes (clean-2 lane, 2026-09-13).
+    // Only where the epoch can see the host's writes — see giEscapeSignature.
+    const unsigned long long epoch = transformEpoch();
+    if (detail::gTransformWriteCounter &&
+        mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
     unsigned long long h = 1469598103934665603ull;      // FNV-1a
     const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
     for (const auto &kv : mNodes) {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const float quantum = giAabbQuantum(a);
         const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
@@ -2146,7 +2331,11 @@ unsigned long long OgreScene::giGeometrySignature() const {
             fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
         }
     }
-    return h;
+    mGeomSig = h;
+    mGeomSigEpoch = epoch;
+    mGeomSigMode = mGi.mode;
+    mGeomSigValid = true;
+    return mGeomSig;
 }
 
 // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), deliberately NOT folded into
@@ -2412,13 +2601,18 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     //
     // A reflection probe is a photograph of an enclosure taken from a point.
     // `computeProbeRegion` has just MEASURED whether this scene has one, out of
-    // the same reading that fitted the region: for each axis it finds the
-    // outermost SLABS (thin on that axis, broad on the other two, relative to
-    // themselves) either side of the content, and counts the axis as enclosed
-    // when those two face each other across a real gap. Nothing here assumes a
-    // "room" — the engine has no such concept, only geometry and where it
-    // stands — and nothing is tuned to a size: the ground a scene sits on takes
-    // part in the Y answer, as the floor, and is invisible to X and Z.
+    // the same reading that fitted the region — rules R1-R3, stated in full at
+    // that function: an item is a SLAB for an axis when it is thin on that axis
+    // and broad on the other two relative to itself; a slab may CLOSE a face
+    // only if it also COVERS the region (half its cross-section on each of the
+    // other two axes), which is what separates a wall from a shelf; an axis is
+    // ENCLOSED by a FACING PAIR of covering slabs across a real gap, and a LONE
+    // covering slab closes its one face only when nothing at all lies beyond
+    // it. Nothing here assumes a "room" — the engine has no such concept, only
+    // geometry and where it stands — nothing is tuned to a size, and nothing
+    // reads a POSITION: the same room measures the same wherever it is built.
+    // The ground a scene sits on is the floor by R3 (nothing is below it) and
+    // decides nothing on X and Z, where it is the content rather than a wall.
     //
     // Below two such axes the probes would be photographing sky, and the cost
     // of doing so is not small: at the shipped Epic grid that is 18-32 cube

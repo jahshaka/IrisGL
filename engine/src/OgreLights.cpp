@@ -484,7 +484,14 @@ void OgreScene::noteShadowShapeChanged(MaterialId mat) {
 
 void OgreScene::noteNodePosed(NodeId id) {
     auto it = mNodes.find(id);
-    if (it != mNodes.end()) ++it->second.poseEpoch;
+    if (it == mNodes.end()) return;
+    ++it->second.poseEpoch;
+    // A POSE MOVES A SOCKET RIDER, and that is the ONLY thing about a pose the
+    // GI movement scan can see (a skinned Item keeps its bind-pose bounds,
+    // which is why the raster field has a rig epoch of its own). So a rig with
+    // riders counts as a transform write and the scan runs while it animates —
+    // a rig without them costs nothing (clean-2 lane, ensureGiWalk).
+    if (!it->second.boneRiders.empty()) noteSceneTransformWrite();
 }
 
 // A RIG WAS POSED (a clip time or a bone-pose push). Two consumers, and since
@@ -515,10 +522,15 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
         std::chrono::steady_clock::time_point t0; double &dst;
         ~Timer() { dst = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); }
     } timer{ t0, mShadowScanMicros };
-    out = ShadowCacheFrame();
+    out.clear();
 
     // ---- 1. The lamps, in slot order, and each lamp's own inputs ----------
-    std::vector<std::pair<NodeId, Ogre::Light *>> points, spots;
+    // SCRATCH MEMBERS, not locals: this runs per drawn scene per frame for ever
+    // (clean-2 lane).
+    std::vector<std::pair<NodeId, Ogre::Light *>> &points = mScanPoints;
+    std::vector<std::pair<NodeId, Ogre::Light *>> &spots  = mScanSpots;
+    points.clear();
+    spots.clear();
     for (NodeId id : mLightNodes) {
         auto it = mNodes.find(id);
         if (it == mNodes.end() || !cacheableLamp(it->second.light)) continue;
@@ -543,11 +555,11 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
     }
 
     // Dedupe per kind with a flag per lamp (the lists are single digits).
-    std::vector<unsigned char> marked(out.lights.size() * kShadowNodeKinds, 0u);
+    std::vector<unsigned char> &marked = mScanMarked;
+    marked.assign(out.lights.size() * kShadowNodeKinds, 0u);
     const auto dirtyLamp = [&](size_t i, unsigned kindMask, WorkReason why) {
         for (unsigned k = 0; k < kShadowNodeKinds; ++k) {
             if (!(kindMask & (1u << k)) || marked[i * kShadowNodeKinds + k]) continue;
-            if (!shadowLampCachedFor(ShadowNodeKind(k), out.lights[i].light)) continue;
             marked[i * kShadowNodeKinds + k] = 1u;
             out.dirty[k].push_back(out.lights[i].light);
             out.dirtyReason[k].push_back(why);   // the monitor's §4.7 reason
@@ -555,8 +567,10 @@ void OgreScene::collectShadowCacheFrame(ShadowCacheFrame &out) {
     };
     const unsigned allKinds = (1u << kShadowNodeKinds) - 1u;
 
-    std::vector<Ogre::Aabb> reach(out.lights.size());
-    std::unordered_map<NodeId, unsigned long long> keys;
+    std::vector<Ogre::Aabb> &reach = mScanReach;
+    reach.assign(out.lights.size(), Ogre::Aabb());
+    std::unordered_map<NodeId, unsigned long long> &keys = mScanKeys;
+    keys.clear();                       // keeps the buckets; swap below keeps both alive
     keys.reserve(out.lights.size());
     for (size_t i = 0; i < out.lights.size(); ++i) {
         const Ogre::Light *l = out.lights[i].light;

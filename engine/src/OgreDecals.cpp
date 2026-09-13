@@ -437,6 +437,7 @@ bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
             // Born hidden on a hidden node, like setLight's light.
             if (!n.shown) n.decal->setVisible(false);
             ++mDecalCount;
+            indexDecalNode(n);          // the movement scan's decal half
         }
         // NEVER call Decal::setRenderQueueGroup. The constructor puts decals in
         // RQ 0 and that is the only queue ForwardClustered::collectObjs counts
@@ -465,6 +466,15 @@ bool OgreScene::setDecal(NodeId id, const DecalDesc &d)
         n.decal->setIgnoreAlphaDiffuse(d.ignoreAlphaDiffuse);
 
         refreshDecalBindings();
+        // A DECAL IS A PROBE INPUT (clean-2 lane, 2026-09-13). The probe faces
+        // render decals with everything else, so a decal added, re-textured,
+        // re-sized or re-roughened changes what every probe that can see it
+        // holds — and nothing else was going to say so: the movement scan sees
+        // Items, and `setDecal` is the one call that makes this happen. The box
+        // write above is an engine transform write, so the scan runs this frame
+        // too (ensureGiWalk's epoch).
+        noteSceneTransformWrite();
+        staleProbeGrid(GiStaleReason::Moved);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -482,11 +492,16 @@ bool OgreScene::removeDecal(NodeId id)
 
 void OgreScene::releaseDecal(Node &n)
 {
+    unindexDecalNode(n);
     if (n.decal) {
         n.decal->detachFromParent();
         mSceneMgr->destroyDecal(n.decal);
         n.decal = nullptr;
         if (mDecalCount) --mDecalCount;
+        // A DECAL LEAVING is a probe input like a decal arriving: every probe
+        // that can see the surface is still holding it. Here rather than in
+        // removeDecal so that deleting the NODE counts too (releaseNode).
+        staleProbeGrid(GiStaleReason::Moved);
     }
     if (n.decalNode) { mSceneMgr->destroySceneNode(n.decalNode); n.decalNode = nullptr; }
 }

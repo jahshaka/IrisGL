@@ -129,9 +129,11 @@ struct RigStats {
 /// WHAT THIS SCENE'S MOBILITY LOOKS LIKE (SPECS/REALTIME_REFLECTIONS_SPEC.md
 /// §3.3, lane R1). The host resolves every node's mobility from the document
 /// (drivers, parents, the user's setting) and pushes the answer with
-/// Scene::setNodeMovable; these are what the engine RECORDED, which is the only
-/// way to see that the push landed at all while the renderer does not yet act
-/// on it (lane R2 is what spends it).
+/// Scene::setNodeMovable; these are what the engine RECORDED, and the way to
+/// see that a push landed. The renderer SPENDS it (lane R2): a movable object
+/// carries no GI-geometry bit, so it does not voxelize and bounces no light,
+/// and a classification that crosses that edge invalidates the GI caches
+/// (`mobilityRebuilds`) or stales the probe grid with reason Mobility.
 struct MobilityStatus {
     size_t movableItems = 0;    ///< movable nodes carrying drawable geometry
     size_t movableLights = 0;   ///< movable nodes carrying a light
@@ -161,11 +163,20 @@ enum class MobilityChange : unsigned {
     Authoring = 0,
     /// THE PLAY-TIME SOFT PROMOTION (owner decision O3): something nobody
     /// marked Movable started moving while the document is playing. The render
-    /// channel and every GI gather drop it from that frame — so it costs no
-    /// probe capture and no re-solve for the rest of play — but NOTHING is
-    /// invalidated: the voxels keep the bounce light it had where it started,
-    /// as a ghost, until play stops. That is the whole point: a surprise mover
-    /// must never buy the author a half-second freeze mid-play.
+    /// channel and every GI gather drop it from that frame, and nothing is
+    /// RE-SOLVED: no voxelization, no from-scratch rebuild, no mobilityRebuilds
+    /// — the voxels keep the bounce light it had where it started, as a ghost,
+    /// until play stops. That is the whole point: a surprise mover must never
+    /// buy the author a half-second freeze mid-play.
+    ///
+    /// IT DOES COST ONE PROBE-GRID CATCH-UP, and deliberately (clean-2 lane,
+    /// 2026-09-13, correcting this doc rather than the code): a promoted object
+    /// leaves the probe channel as well — a movable item carries kMovableBit
+    /// INSTEAD OF kVisibleBit — so every probe holding its photograph is
+    /// holding an object the probes no longer capture. Leaving those captures
+    /// alone would freeze the mover's image into the room's reflections for the
+    /// rest of play, following nothing. So the grid is staled once, with reason
+    /// Mobility, and drains at the budget; that is a rate, not a hitch.
     Soft = 1
 };
 
@@ -1402,12 +1413,17 @@ enum class GiSource { Auto, Voxel, Raster };
 ///   `Moved`     geometry the probes capture moved, arrived, left, or was
 ///               shown, hidden or flagged helper — GI geometry through the
 ///               movement scan, UNLIT geometry through a probe-only stale that
-///               never touches the voxels
+///               never touches the voxels. A DECAL added, edited, moved or
+///               removed is this reason too (it paints a surface the probes
+///               capture, and it is never voxelized)
 ///   `Light`     a light was added, switched on or off, or changed a parameter
 ///   `Material`  a material parameter or texture used by visible geometry changed
 ///   `Sky`       the sky or its reflection cubemap changed
 ///   `Ambient`   the ambient (flat, hemisphere or sky SH) changed
 ///   `Fog`       the fog description changed
+///   `Mobility`  an object's mobility class changed, so it left (or joined) the
+///               channel the probes capture — the probes holding its photograph
+///               owe one re-capture (see MobilityChange)
 ///   `None`      nothing has staled the grid since the scene was created
 ///
 /// TIME-VARYING CONTENT IS FROZEN in the probes (REALTIME_REFLECTIONS_SPEC O4,
@@ -1867,10 +1883,9 @@ struct GiStatus {
     // probeCapturesLastFrame 0 and staleProbes 0, every frame.
 
     /// How many probes actually re-captured on the LAST rendered frame, from
-    /// every source: the budget's picks, the dynamic reservation and anything
-    /// else that marked a probe dirty — plus, on a from-scratch build, the
-    /// placement pass's own captures of the whole grid. 0 in every mode but
-    /// the hybrid.
+    /// every source: the budget's picks and anything else that marked a probe
+    /// dirty — plus, on a from-scratch build, the placement pass's own captures
+    /// of the whole grid. 0 in every mode but the hybrid.
     int  probeCapturesLastFrame = 0;
     /// How many probes are still stale — owe a capture the budget has not
     /// spent yet. The grid has caught up when this reads 0; it drains at the
@@ -1886,6 +1901,29 @@ struct GiStatus {
     /// was created. A page return, a refresh and an idle frame must never move
     /// it; a mode, quality, grid or bounds change and a destroyed object do.
     unsigned long long rebuilds = 0;
+
+    /// THE MOVEMENT SCAN'S OWN COST (clean-2 lane, 2026-09-13). The renderer
+    /// cannot be told that a document node moved — the document writes into the
+    /// shared scene graph directly — so it walks every item's world AABB to
+    /// find out. That walk used to run on EVERY frame of every probe-lit scene,
+    /// still or not (392 / 1961 / 4328 us at 1k / 5k / 10k nodes); it now runs
+    /// only on frames where a transform was written
+    /// (`Engine::setTransformWriteCounter`).
+    ///
+    /// `giScans` is cumulative and is the assertable half: the delta over N
+    /// STILL frames must be 0, and over N frames with something moving, N.
+    /// `giScanMicros` is what the last scan that actually ran cost — 0 on a
+    /// skipped frame, which is the whole point.
+    unsigned long long giScans = 0;
+    double             giScanMicros = 0.0;
+    /// EVERY `getWorldAabbUpdated` THIS ENGINE'S OWN GI CODE HAS ASKED FOR,
+    /// cumulative. That call walks the node's parent chain and recomputes the
+    /// node's whole SIMD block, and there were three separate per-frame walks
+    /// making it per item: the movement scan and the two signatures the host
+    /// reads to decide whether to re-solve (plus the Forward+ slice walk one
+    /// frame in thirty). The acceptance for all four is this counter: its
+    /// delta over a STILL frame is 0.
+    unsigned long long giAabbReads = 0;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

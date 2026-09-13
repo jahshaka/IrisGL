@@ -622,6 +622,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mLastRQ  = kOverlayRenderQueue;
             p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka opaque";
+            // THE PASS THAT UPDATES THE MIRRORS (planar::kPlanarUpdatePassIdentifier):
+            // the one that samples a planar reflection, so the one that renders it.
+            p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
         }
         {
             auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
@@ -1116,6 +1119,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mLastRQ  = desc.refractions ? kRefractiveRenderQueue : kOverlayRenderQueue;
         p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
         p->mProfilingId = "Jahshaka opaque";
+        // THE PASS THAT UPDATES THE MIRRORS — see the other chain shape above.
+        p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
     }
 
     // MSAA resolve, in HDR space.

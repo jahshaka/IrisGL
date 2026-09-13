@@ -523,6 +523,16 @@ namespace {
 size_t countPendingTextures(Ogre::TextureGpuManager *tm, std::string *namesOut);
 }   // namespace
 
+const std::atomic<unsigned long long> *gTransformWriteCounter = nullptr;
+
+void OgreEngine::setTransformWriteCounter(const std::atomic<unsigned long long> *counter) {
+    // PROCESS-WIDE, like the counter it names: one document graph feeds every
+    // scene in the process, and a second host handing over the same address
+    // changes nothing. Null clears it and every scene goes back to scanning
+    // every frame — which is correct, not a failure mode.
+    detail::gTransformWriteCounter = counter;
+}
+
 void OgreEngine::renderOneFrame() {
     // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
@@ -605,6 +615,12 @@ void OgreEngine::renderOneFrame() {
         } else {
             drainTextureStreaming();
         }
+        // A TEXTURE THAT ARRIVED IS A PROBE INPUT (clean-2 lane, 2026-09-13).
+        // The drain above is where a load becomes visible at all — Ogre has no
+        // per-texture completion callback — so it is also the only place the
+        // renderer can notice that a material the probes captured WITHOUT its
+        // texture now has one. Free on a scene with nothing outstanding.
+        for (auto &sc : mScenes) sc->settleTextureResidency();
         // HOW MANY SHADOW MAPS THIS FRAME NEEDS (SHADOW_TOOLING_SPEC.md §4.1).
         // At the top of the frame, before any per-view work, because growing
         // the atlas drops and recreates every workspace that names the shadow

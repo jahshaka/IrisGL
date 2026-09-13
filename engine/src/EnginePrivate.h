@@ -130,6 +130,13 @@ namespace detail {
 inline Ogre::Vector3     toOgre(const Vec3 &v)   { return Ogre::Vector3(v.x, v.y, v.z); }
 inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r, c.g, c.b, c.a); }
 
+/// THE HOST'S TRANSFORM-WRITE COUNTER (Engine::setTransformWriteCounter), or
+/// null when no host handed one over — in which case every frame's GI movement
+/// scan runs, the way it always did. Read once a frame per scene, relaxed: it
+/// is a change test, not an ordering. Process-wide because the document's
+/// counter is (one graph, many scenes).
+extern const std::atomic<unsigned long long> *gTransformWriteCounter;
+
 /// Names handed to Ogre must be unique for the life of the process (a destroyed
 /// scene may be recreated under the same name while stale resources linger).
 inline std::string processUniqueName(const char *prefix) {
@@ -311,8 +318,11 @@ inline Ogre::uint32 allShadowCasterChannels() {
            shadowCasterChannels(ShadowNodeKind::Reflect) |
            shadowCasterChannels(ShadowNodeKind::Probe);
 }
-/// THE LAMPS a kind's instances may hold fixed (cached). EVERY cacheable lamp,
-/// for every kind — the hook exists, and nothing filters through it today.
+/// WHICH LAMPS A KIND'S INSTANCES HOLD FIXED (cached): EVERY cacheable lamp,
+/// for every kind. There is no filter and there was never a real one — the
+/// `shadowLampCachedFor(kind, light)` hook that used to say so returned true
+/// unconditionally and was called per lamp per kind per frame from both walks
+/// (deleted, clean-2 lane 2026-09-13).
 ///
 /// WHAT IS TRUE ABOUT A MOVING LAMP AND A PROBE, since that is what a reader
 /// comes here to ask (lane R2): a probe capture is still lit by every light,
@@ -329,10 +339,11 @@ inline Ogre::uint32 allShadowCasterChannels() {
 ///
 /// THE FOLLOW-ON (REALTIME_REFLECTIONS_SPEC §3.3.4, "probe face passes gain
 /// light_visibility_mask 0x1"): a lane that makes probe captures see STILL
-/// lamps only must add the media mask AND filter here for
-/// ShadowNodeKind::Probe, because a fixed lamp map would otherwise bypass the
-/// mask it just added. Both halves or neither.
-inline bool shadowLampCachedFor(ShadowNodeKind, const Ogre::Light *) { return true; }
+/// lamps only must add the media mask AND re-introduce a per-kind lamp filter
+/// in the two places the deleted hook was called — collectShadowCacheFrame's
+/// dirtyLamp (OgreLights.cpp) and applyShadowCacheDirties' `want` list
+/// (OgreShadow.cpp) — because a fixed lamp map would otherwise bypass the mask
+/// it just added. Both halves or neither.
 /// "Did this caster's box move?" (the lamp-map cache's change test). Not a
 /// measurement: the same transforms give the same floats frame after frame,
 /// so anything above a micro-metre of float noise is a real move — a physics
@@ -1539,6 +1550,29 @@ public:
     static unsigned lightCountMismatches() { return sLightCountMismatches; }
     static void     resetLightCountMismatches() { sLightCountMismatches = 0; sMismatchLogged = 0; }
 
+    /// WHEN THE CHECK ABOVE RUNS (clean-2 lane, 2026-09-13). Only a node whose
+    /// SLOT ASSIGNMENT changed can have entered the broken state, and there are
+    /// exactly TWO places one changes: OgreEngine::applyShadowCacheDirties'
+    /// setLightFixedToShadowMap calls, and releaseShadowLamp's release of a
+    /// destroyed lamp's slot. Every node either touches is marked here, and the
+    /// marks are cleared at the head of the NEXT frame's pass, so every pass
+    /// hashed in the frame of a change is checked (the pass count and its
+    /// properties differ per pass: the view, six probe faces, each planar arm)
+    /// and a frame that changed nothing costs one `empty()` test per pass.
+    ///
+    /// It matters because the check's own comment said it must not run per
+    /// pass: `anyCached` is true for every node in a scene with a cached lamp
+    /// — which, since E2 made caching automatic, is every point and spot lamp
+    /// in the scene — so the six `_getProperty` calls (each a linear scan of
+    /// the merged property vector) ran for the view, every probe face and
+    /// every planar arm, every frame, for ever.
+    static void noteShadowAssignmentChanged(const Ogre::CompositorShadowNode *node);
+    /// Drops the marks; called at the top of applyShadowCacheDirties, i.e.
+    /// after the frame that made the assignments has rendered.
+    static void clearShadowAssignmentChanges();
+    /// How many nodes are marked — a suite read (and the fast path's test).
+    static size_t shadowAssignmentChanges() { return sAssignmentChanged.size(); }
+
     /// The per-scene fog table. OgreScene::setFog registers, the scene teardown
     /// unregisters, preparePassBuffer looks up.
     static void     registerScene(const Ogre::SceneManager *sm, const FogState &p);
@@ -1624,6 +1658,12 @@ private:
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
+    /// Shadow nodes whose slot assignment changed this frame — see
+    /// noteShadowAssignmentChanged. A handful of pointers at most (one per
+    /// shadow-node instance in the process), rebuilt per frame, and EMPTY on
+    /// every frame that assigned nothing, which is every frame of a still
+    /// scene.
+    static std::vector<const Ogre::CompositorShadowNode *> sAssignmentChanged;  // render thread only
     static std::map<const Ogre::SceneManager *, FogState> sFogState;   // render thread only
     static std::map<const Ogre::SceneManager *, float>    sSceneTime;  // render thread only
     static std::map<const Ogre::SceneManager *, IfdState> sIfdState;   // render thread only
@@ -1649,6 +1689,21 @@ namespace planar {
 /// visibility bit means an overlay does not have to remember to tag itself,
 /// and it composes with the chain's own RQ policy (OgreChain.cpp).
 constexpr Ogre::uint8 kReflectLastRQ = 199u;
+
+/// THE ONE PASS THAT UPDATES THE MIRRORS, by pass-definition identifier
+/// (clean-2 lane, 2026-09-13). `PlanarReflections::update()` renders every
+/// active actor's workspace synchronously — a full scene render per mirror,
+/// with its own shadow node — and the listener that calls it used to fire on
+/// every PASS_SCENE drawn with the view's camera. At Epic that is the SSR
+/// prepass, the opaque pass, the refractive pass and the overlays pass: the
+/// mirror was rendered three times a frame (measured 1.04 / 0.70 / 0.70 ms GPU
+/// and 2.08 / 0.15 / 0.15 ms CPU on the alive room) and the second and third
+/// produced a picture nobody sampled. Upstream's own sample gates the same
+/// callback on ONE pass by identifier (Samples/2.0/ApiUsage/PlanarReflections),
+/// which is what this is: `chain::build` stamps it on the OPAQUE pass — the
+/// pass that actually samples the reflection — and nothing else carries it, so
+/// the exclusion is by construction rather than by frame order.
+constexpr Ogre::uint32 kPlanarUpdatePassIdentifier = 25001u;
 
 /// Builds the private workspace definition the reflection cameras render
 /// through, under `workspaceDef` (node definitions appended to `nodeDefsOut`).
@@ -2161,6 +2216,16 @@ public:
         std::vector<WorkReason> dirtyReason[kShadowNodeKinds];
         unsigned casterChanges = 0;   ///< caster boxes that changed this frame
         unsigned lightChanges  = 0;   ///< lamps whose own inputs changed
+        /// EMPTIED, NEVER REBUILT. One of these is filled per drawn scene per
+        /// frame, for ever; assigning a fresh instance freed and re-allocated
+        /// seven vectors every time (clean-2 lane, 2026-09-13). clear() keeps
+        /// the capacity, so a steady scene allocates nothing here at all.
+        void clear() {
+            lights.clear();
+            dirtyAll = false;
+            for (unsigned k = 0; k < kShadowNodeKinds; ++k) { dirty[k].clear(); dirtyReason[k].clear(); }
+            casterChanges = lightChanges = 0;
+        }
     };
     /// Runs ONCE per drawn scene per frame, AFTER SceneManager::updateSceneGraph
     /// and before any workspace renders, so world AABBs and light poses are
@@ -2172,6 +2237,16 @@ public:
     /// OgreEngine::applyShadowCacheDirties for every drawn scene. `shadow`
     /// false = this scene caches nothing this frame (the records are dropped).
     void runItemWalk(bool shadow);
+    /// A TEXTURE THAT ARRIVED LATE IS A LATE PROBE INPUT (clean-2 lane,
+    /// 2026-09-13). `setPbrTexture` stales the grid when the bind happens, but
+    /// a texture is only SCHEDULED there: what the probes captured that frame
+    /// was the stub, and the frame the pixels actually arrive is nobody's
+    /// input. Materials bound to a not-yet-resident texture are parked here and
+    /// re-noted on the frame the last of their textures becomes ready. Called
+    /// once a frame per scene, right after the engine's texture drain; returns
+    /// immediately (one empty() test) when nothing is parked, which is every
+    /// frame after a scene has finished loading.
+    void settleTextureResidency();
     /// THE GI MOVEMENT SCAN, once per frame, run by its first consumer (the
     /// probe budget / the raster re-arm) — which is EARLIER in the frame than
     /// any scene graph update, so it reads updated bounds. Same pass, same
@@ -2204,6 +2279,16 @@ public:
     double shadowScanMicros() const { return mShadowScanMicros; }
     double casterWalkMicros() const { return mCasterWalkMicros; }
     double giScanMicros() const { return mGiScanMicros; }
+    /// AN INPUT TO THIS SCENE'S GI SCANS CHANGED — a transform this scene
+    /// itself wrote (setNodeTransform, a socket rider's placement, a decal's
+    /// box), or a STRUCTURAL change that moves what the scans would read
+    /// (an Item arriving or leaving, a visibility/helper/mobility flag, the
+    /// lit volume). The host's transform counter cannot see any of it.
+    ///
+    /// It is the same counter for both because every reader wants the same
+    /// question answered — "could the answer have changed since I last
+    /// looked?" — and a false yes costs one scan.
+    void noteSceneTransformWrite() { ++mSceneTransformWrites; }
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -2249,14 +2334,19 @@ private:
         /// like the last time a walk saw it. On the node, not in per-scene hash
         /// maps, so a walk is a vector of pointers and no lookups.
         struct ScanRec {
-            Ogre::Aabb          giBox, probeBox, shadowBox;
+            Ogre::Aabb          giBox, probeBox, shadowBox, decalBox;
             const Ogre::Item   *shadowItem = nullptr;
             unsigned long long  shadowPose = 0;
             Ogre::uint32        shadowChannels = 0;
             bool                giKnown = false, probeKnown = false, shadowPresent = false;
+            bool                decalKnown = false;
         } scan;
         /// This node's place in OgreScene::mItemNodes, or npos (no Item).
         size_t           itemSlot = size_t(-1);
+        /// ...and in OgreScene::mDecalNodes (a decal is not an Item, and a
+        /// decal node usually carries no Item at all, so the movement scan
+        /// would never see it — clean-2 lane, 2026-09-13).
+        size_t           decalSlot = size_t(-1);
         /// A hash of the LightDesc fields a reflection-probe capture can see
         /// (ENGINE_CACHE_POLICY_SPEC P7), so setLight stales the probe grid on
         /// a real parameter change only; 0 = no light pushed yet.
@@ -2936,6 +3026,11 @@ private:
     /// the change reaches the voxelizer's conversion, bump the material
     /// generation (see mGiMaterialGeneration).
     void noteMaterialChanged(MaterialId id, bool voxelInputsChanged);
+    /// The rule noteMaterialChanged applies, as a QUESTION — so the batched
+    /// settle in settleTextureResidency can ask it per material and act ONCE
+    /// (F5: one probe stale and one material-generation bump per frame,
+    /// however many textures arrived together).
+    bool giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged, bool &bumpVoxels) const;
     /// P6/P7: the reuse arm's variant for a MATERIAL change — a fresh voxelizer
     /// and lighting (VctMaterial's by-pointer cache must go) under the SAME
     /// probe grid, whose shapes a material edit cannot move. Returns false
@@ -3240,6 +3335,25 @@ private:
     std::vector<Node *> mItemNodes;
     void indexItemNode(Node &n);
     void unindexItemNode(Node &n);
+    /// THE DECAL INDEX, the same shape and for the same reason: the probes
+    /// capture decals (they are projected in the Forward+ pass that renders the
+    /// cube faces), so a decal that moves, arrives or leaves is a probe input.
+    /// THE PER-FRAME SCANS' SCRATCH (clean-2 lane, 2026-09-13). Every one of
+    /// these was a local container built and destroyed on every drawn frame of
+    /// every scene — the promise is that a still scene costs nothing, and a
+    /// still scene was allocating a dozen times a frame. Members, cleared and
+    /// refilled: after the first few frames they never allocate again.
+    std::vector<std::pair<NodeId, Ogre::Light *>> mScanPoints, mScanSpots;
+    std::vector<unsigned char>                    mScanMarked;
+    std::vector<Ogre::Aabb>                       mScanReach;
+    std::unordered_map<NodeId, unsigned long long> mScanKeys;
+    std::vector<MaterialId>                       mScanDeforming;
+    /// (materialId, the albedo/emissive half of noteMaterialChanged) for
+    /// materials waiting on a texture — see settleTextureResidency.
+    std::vector<std::pair<MaterialId, bool>> mMaterialsAwaitingTexture;
+    std::vector<Node *> mDecalNodes;
+    void indexDecalNode(Node &n);
+    void unindexDecalNode(Node &n);
     /// ONE WALK, TWO CONSUMERS (walkItems, via runItemWalk): the GI movement
     /// records and the frame's caster changes, from the same pass.
     struct ShadowChange { Ogre::Aabb box; Ogre::uint32 channels; };
@@ -3250,6 +3364,42 @@ private:
     /// The GI movement scan has run this frame (reset by updateGiTracking, the
     /// once-per-frame entry point): whoever consumes mGiMovedBoxes first runs it.
     bool mGiWalkedThisFrame = false;
+    /// THE STILL-FRAME SKIP (clean-2 lane, 2026-09-13). The GI scan is the only
+    /// per-frame walk of every item left in a still scene, and it exists solely
+    /// to notice a transform nobody told the engine about. `transformEpoch()` is
+    /// the host's process-wide transform-write counter (Engine::
+    /// setTransformWriteCounter) plus this scene's OWN writes; when it has not
+    /// moved since the last scan, nothing can have moved and the scan is
+    /// skipped. Without a host counter the epoch is unavailable and every frame
+    /// scans, exactly as before.
+    unsigned long long transformEpoch() const;
+    unsigned long long mGiWalkEpoch = 0;          ///< the epoch the last scan ran at
+    bool mGiWalkEpochValid = false;               ///< ...and whether it was ever set
+    unsigned long long mSceneTransformWrites = 0; ///< OUR writes: setNodeTransform, riders
+    unsigned long long mGiScans = 0;              ///< movement scans actually run, ever
+    /// getWorldAabbUpdated calls made by OUR GI code, ever (GiStatus::
+    /// giAabbReads). Mutable: two of the four readers are const signatures.
+    mutable unsigned long long mGiAabbReads = 0;
+    /// THE TWO SIGNATURES THE MIRROR READS EVERY FRAME (giEscapeSignature,
+    /// giGeometrySignature) ARE PURE FUNCTIONS OF THE SAME BOXES, and each was
+    /// a full walk of mNodes with a root-recursive getWorldAabbUpdated per GI
+    /// item — so a still frame paid THREE such walks (these two plus
+    /// ensureGiWalk) before Ogre's own update. Cached against the movement
+    /// epoch, with the volume the escape test is relative to in the key
+    /// (clean-2 lane, 2026-09-13).
+    mutable unsigned long long mEscapeSigEpoch = 0, mEscapeSig = 0;
+    mutable bool               mEscapeSigValid = false;
+    mutable Ogre::Aabb         mEscapeSigVolume;
+    mutable bool               mEscapeSigVolumeValid = false;
+    mutable GiMode             mEscapeSigMode = GiMode::Off;
+    mutable unsigned long long mGeomSigEpoch = 0, mGeomSig = 0;
+    mutable bool               mGeomSigValid = false;
+    mutable GiMode             mGeomSigMode = GiMode::Off;
+    /// ...and the same for the Forward+ slice walk's scene bounds, which runs
+    /// one frame in thirty and read every item's updated AABB to do it.
+    Ogre::Aabb         mFwdPlusBounds;
+    bool               mFwdPlusBoundsValid = false;
+    unsigned long long mFwdPlusBoundsEpoch = 0;
     double   mShadowScanMicros = 0.0;
     double   mCasterWalkMicros = 0.0;
     double   mGiScanMicros = 0.0;
@@ -3322,9 +3472,9 @@ private:
     /// and new box), in world space. Rebuilt every scan; empty when still.
     std::vector<Ogre::Aabb> mGiMovedBoxes;
     /// A GI item was seen for the FIRST time by a scan after the first one — a
-    /// new object arrived. Not a move (the dynamic reservation ignores it, as it
-    /// always did) but it is an input the probes must see (P1): the next budget
-    /// pass stales the grid with reason Moved and clears it.
+    /// new object arrived. Not a move, but it is an input the probes must see
+    /// (P1): the next budget pass stales the grid with reason Moved and clears
+    /// it.
     bool mGiItemsAppeared = false;
     /// PROBE-ONLY items (P7): unlit geometry the probe faces capture
     /// (probeSeesItem) but that is not GI geometry — tracked by the same scan
@@ -3839,6 +3989,7 @@ public:
 
     void destroyView(View *view) override;
 
+    void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) override;
     void renderOneFrame() override;
     bool updateScene(Scene *scene) override;
     bool hasEnabledViews() const override;
@@ -4237,6 +4388,30 @@ private:
     /// the Ogre type stays out of every other TU's view of this header.
     std::unique_ptr<Ogre::VertexFormatWarmUpStorage> mWarmUpSet;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
+    /// THE SHADOW CACHE'S PER-FRAME SCRATCH (clean-2 lane, 2026-09-13).
+    /// applyShadowCache and applyShadowCacheDirties run every frame for ever
+    /// and used to build five containers per call (plus one per shadow-node
+    /// instance): a still scene allocated and freed them at 60 Hz. Cleared and
+    /// refilled instead, so a steady frame allocates nothing here.
+    struct ShadowInstance { Ogre::CompositorShadowNode *node; ShadowNodeKind kind; };
+    std::vector<ShadowInstance>              mShadowInstScratch;
+    std::vector<Ogre::Light *>               mShadowWantScratch;
+    std::vector<Ogre::Light *>               mShadowPlanScratch;
+    std::vector<char>                        mShadowPlacedScratch;
+    std::vector<Ogre::CompositorWorkspace *> mShadowWsScratch;
+    /// THE PROBE KIND'S CACHE-WORK RECORDS, COALESCED PER FRAME (clean-2 lane,
+    /// 2026-09-13). A shadowed probe grid holds one shadow-node INSTANCE per
+    /// probe, so one moving lamp used to write 35 identical "reason: light"
+    /// records into a capture's frame (1 view + 2 reflect + 32 probe), 32 of
+    /// them for instances that will not render this frame at all. One record
+    /// per lamp per frame instead, with `units` = the instances marked.
+    struct ProbeMark { unsigned long long node; WorkReason reason; unsigned instances; };
+    std::vector<ProbeMark> mShadowProbeMarks;
+    void noteShadowMapWork(ShadowNodeKind kind, WorkReason reason, unsigned long long node,
+                           const char *kindName);
+    void flushShadowProbeMarks();
+    std::vector<OgreScene *>                 mShadowSceneScratch;
+    OgreScene::ShadowCacheFrame              mShadowFrameScratch;
     std::vector<std::unique_ptr<OgreView>>  mViews;
     /// THE RENDER-LOOP MONITOR (OgreFrameMonitor.cpp). Held by pointer and
     /// NULL while the monitor is off — that is what "zero cost when off" means

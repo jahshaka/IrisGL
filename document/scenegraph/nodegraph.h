@@ -95,6 +95,7 @@ For more information see the LICENSE file
 // back with it — that revert is not neutral.
 // -----------------------------------------------------------------------------
 
+#include <atomic>
 #include <cstddef>
 #include <vector>
 
@@ -224,6 +225,35 @@ void setLocalRot(NodeHandle n, const Quat &q);
 void setLocalScale(NodeHandle n, const Vec3 &v);
 /// Writes all three at once — one dirty mark instead of three.
 void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
+
+/// THE TRANSFORM-WRITE EPOCH — a monotonic counter bumped by every setter
+/// above, and the only way the renderer can learn that NOTHING moved.
+///
+/// It exists because the document owns the scene graph and writes into it
+/// directly: when a mesh is dragged, no call reaches the engine at all. The
+/// renderer's answer used to be to look for itself — a per-frame walk of every
+/// item's world AABB (`OgreScene::ensureGiWalk`), which in a probe-lit scene
+/// costs 0.4 / 2.0 / 4.3 ms at 1k / 5k / 10k nodes EVERY FRAME, moving or
+/// still. Reading this counter instead makes a still frame's scan free.
+///
+/// A CHANGE TEST, NOT A MEASUREMENT, and deliberately relaxed:
+///   * it counts WRITES, not moves (writing the same value counts),
+///   * it is PROCESS-WIDE, not per scene (a write in one scene makes every
+///     scene re-scan once),
+///   * it is read once a frame, so it needs to be eventually-visible, never
+///     ordered — hence `memory_order_relaxed` on both ends.
+/// All three err on the side of scanning when nothing moved, which costs
+/// exactly what the old unconditional scan cost.
+///
+/// The consumer is the ENGINE, which cannot include this header: the host
+/// hands the engine the counter's address once (`Engine::
+/// setTransformWriteCounter` — Studio does it in src/bridge/enginehost.cpp
+/// beside `setStagingScene`, the suites in tests/support/documentgraph.h), and
+/// an engine that was never given one keeps scanning every frame.
+unsigned long long transformWrites();
+/// The counter itself, for the host that hands its address to the engine.
+/// Its lifetime is the process's.
+const std::atomic<unsigned long long> &transformWriteCounter();
 
 Mat4 localTransform(NodeHandle n);
 /// The world transform, RESOLVED via Ogre's `_getFullTransformUpdated()`.

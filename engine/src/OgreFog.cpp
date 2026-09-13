@@ -36,6 +36,7 @@ std::map<const Ogre::SceneManager *, FogHlmsListener::IfdState> FogHlmsListener:
 Ogre::HlmsPbs                                 *FogHlmsListener::sPbs = nullptr;
 unsigned                                       FogHlmsListener::sLightCountMismatches = 0;
 unsigned                                       FogHlmsListener::sMismatchLogged = 0;
+std::vector<const Ogre::CompositorShadowNode *> FogHlmsListener::sAssignmentChanged;  // render thread only
 
 FogHlmsListener gFogListener;
 
@@ -53,6 +54,22 @@ FogHlmsListener gFogListener;
 void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
                                       bool, Ogre::SceneManager *, Ogre::Hlms *hlms) {
     if (casterPass || !shadowNode || !hlms) return;
+    // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
+    // only ENTER the broken state when setLightFixedToShadowMap is called on
+    // it, which happens in two places — applyShadowCacheDirties and
+    // releaseShadowLamp — and both mark the node. On every other frame this is
+    // one empty() test per pass.
+    //
+    // It used to be gated on `anyCached` alone — true for every node in a
+    // scene with a cached lamp, which since E2 made caching automatic is every
+    // scene with a point or spot lamp. So the six property reads below, each a
+    // LINEAR SCAN of the merged property vector, ran for the view pass, all six
+    // probe faces and every planar arm, every frame — exactly what the comment
+    // beside them said must not happen.
+    if (sAssignmentChanged.empty()) return;
+    if (std::find(sAssignmentChanged.begin(), sAssignmentChanged.end(), shadowNode) ==
+        sAssignmentChanged.end())
+        return;
     // Only a node that holds a CACHED lamp can be in the broken state, and that
     // test is a walk of at most seventeen pointers — the property reads below
     // are linear scans and must not run on every pass of every frame.
@@ -93,6 +110,19 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                 "). The generated shader cannot compile — see ogre-patch 0025.",
             Ogre::LML_CRITICAL);
     }
+}
+
+void FogHlmsListener::noteShadowAssignmentChanged(const Ogre::CompositorShadowNode *node) {
+    if (!node) return;
+    if (std::find(sAssignmentChanged.begin(), sAssignmentChanged.end(), node) ==
+        sAssignmentChanged.end())
+        sAssignmentChanged.push_back(node);
+}
+
+void FogHlmsListener::clearShadowAssignmentChanges() {
+    // clear(), never a fresh vector: this runs every frame and the capacity is
+    // one pointer per shadow-node instance in the process.
+    sAssignmentChanged.clear();
 }
 
 void FogHlmsListener::registerScene(const Ogre::SceneManager *sm, const FogState &p) {

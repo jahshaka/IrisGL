@@ -439,6 +439,13 @@ int SceneMirror::sync()
     // Per-material work is memoised for the duration of this walk (see
     // MaterialSync): every mesh node sharing a material used to pay for it.
     mMaterialSync.clear();
+    // THE SUN, RESOLVED ONCE FOR THE WHOLE WALK (clean-2 lane, 2026-09-13).
+    // toLightDesc asks the document which directional is the sun, and the
+    // document answers by building a QVector of every directional and SORTING
+    // it (Scene::sunLight -> directionalLights) — that ran per directional
+    // light per sync, at 60 Hz, to answer the same question with the same
+    // answer. The light list cannot change inside one walk.
+    mSyncSun = mSource->sunLight().data();
     mAnyShadowCaster = false;
     // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): recounted by this walk.
     mMovableNodes = 0;
@@ -2039,7 +2046,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // from the node's transform (the light rides the adopted node and the
         // graph carries position and direction), so skipping an unchanged push
         // cannot freeze a moving light.
-        const LightDesc want = toLightDesc(light);
+        const LightDesc want = toLightDesc(light, mSyncSun, true);
         // By value (LightDesc::operator==, beside the struct — every field
         // setLight reads is in it, which is what keeps a new field from
         // silently stopping at the first push).
@@ -2977,6 +2984,11 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
 
 LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
 {
+    return toLightDesc(light, nullptr, false);
+}
+
+LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown)
+{
     LightDesc d;
     switch (light->lightType) {
     case iris::LightType::Directional: d.type = LightType::Directional; break;
@@ -3030,9 +3042,16 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
         // function of the node (the mirror's `mSource` is that same scene, and
         // this is called from a static context too). A light that is not in a
         // scene yet is the only directional there is, so it is the sun.
-        const auto scene = light->getScene();
-        const auto sun = scene ? scene->sunLight() : iris::LightNodePtr();
-        d.primaryDirectional = !sun || sun.data() == light;
+        // RESOLVED BY THE CALLER when it has a whole light list to push (the
+        // per-sync walk): the answer is the same for every light in one sync,
+        // and computing it here costs a QVector and a sort per directional.
+        iris::LightNode *resolved = sun;
+        if (!sunKnown) {
+            const auto scene = light->getScene();
+            const auto own = scene ? scene->sunLight() : iris::LightNodePtr();
+            resolved = own.data();
+        }
+        d.primaryDirectional = !resolved || resolved == light;
         if (!d.primaryDirectional) d.castShadows = false;
     }
     // LIGHTING CHANNELS, light side. The document field is on SceneNode (one
