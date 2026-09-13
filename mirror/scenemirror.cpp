@@ -456,7 +456,8 @@ int SceneMirror::sync()
     ++mSyncStamp;
     mVisited = 0;
     mMaterialBuilds = 0;    // per-walk, not a running total (materialBuildCount)
-    mCharacterPieces = 0;   // ...and so is the character-piece count
+    mCharacterPieces = 0;   // ...and so are the rig counts the two skeleton
+    mSkinnedNodes = 0;      //    passes early-out on
     // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13).
     //
     // Rule 4 (nodegraph.h) DEMOTES a static subtree on the first transform
@@ -2129,7 +2130,10 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // than the one after. Below two, syncSkeletonSharing has nothing to do
         // and returns without touching an entry (it used to iterate every entry
         // in the scene, every frame, to find that out).
-        if (e.gpuSkinned && e.characterHost) ++mCharacterPieces;
+        if (e.gpuSkinned) {
+            ++mSkinnedNodes;
+            if (e.characterHost) ++mCharacterPieces;
+        }
     }
 
     // Planar reflector flag (PLANAR_REFLECTIONS_SPEC.md §7). Pushed only on a
@@ -4664,6 +4668,11 @@ void SceneMirror::syncClips()
     // compare per node and no engine call, and no std::string is built at all on
     // a frame whose push is skipped.
     if (!mSource) return;
+    // NO SKINNED NODE, NO PASS (MIRROR_SCALE lane). This walked every entry in
+    // the scene every frame to discover that none of them was rigged — 8,403
+    // QHash probes a frame on a lattice of cubes, 1.16 ms of the capture. The
+    // walk counts the rigged nodes as it goes.
+    if (mSkinnedNodes == 0) return;
     const float t = mSource->animationTime();
     for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
         Entry &e = *it;

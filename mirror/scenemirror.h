@@ -1521,6 +1521,9 @@ private:
     /// and the pass returns before it walks a single entry; with no write since
     /// the last pass no world transform can have moved.
     quint32 mCharacterPieces = 0;
+    /// ...and how many GPU-SKINNED nodes it saw at all. syncClips has nothing
+    /// to push below one and used to walk every entry to find out.
+    quint32 mSkinnedNodes = 0;
     unsigned long long mShareWorldWrites = ~0ull;
     // ---- MOBILITY counters (REALTIME_REFLECTIONS_SPEC §3.3) ----------------
     /// Recomputed every sync (the walk resolves every node anyway), so this is
