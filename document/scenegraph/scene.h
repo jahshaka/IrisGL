@@ -88,21 +88,15 @@ struct SkyRealistic
 	float mieCoefficient;
 	float mieDirectionalG;
 	float turbidity;
-	float sunPosX;
-	float sunPosY;
-	float sunPosZ;
 
-	// --- sun position, in the terms a user can reason about --------------
-	// sunPos* stays the stored truth (old scenes keep working), but the model
-	// only ever uses two things from it: the NORMALIZED direction, and sunPosY
-	// divided by 450000 (the `sunfade` day/night term). So the vector is kept
-	// at that radius and azimuth/elevation are exact round-trips of it.
-	// Azimuth: degrees clockwise from +Z toward +X. Elevation: degrees above
-	// the horizon (negative = below it, where sunfade finally does something).
-	static constexpr float kSunRadius = 450000.0f;
-	void  setSunAngles(float azimuthDegrees, float elevationDegrees);
-	float sunAzimuth() const;      ///< [0, 360)
-	float sunElevation() const;    ///< [-90, 90]
+	// THE SKY HAS NO SUN OF ITS OWN (SKY_LIGHT_SPEC.md §3, owner decision D15).
+	// The analytic sky's sun DIRECTION comes from the scene's sun — the first
+	// directional light, Scene::sunLight() — and nowhere else. The sunPosX/Y/Z
+	// vector, setSunAngles/sunAzimuth/sunElevation and the panel's Azimuth /
+	// Elevation sliders were the hack that let a sky carry a light; they are
+	// deleted, along with the `skyDrivesSun` steering that pushed the light
+	// around from them. A scene with a sky and no directional light bakes the
+	// model's own night — correct, and the panel says so.
 
 	/// The ONE set of starting values: iris::Scene's constructor and every
 	/// per-key deserializer default read them from here.
@@ -163,7 +157,6 @@ public:
     bool renderSky;
     Texture2DPtr skyTexture;
     QColor skyColor;
-    QColor ambientColor;
 	QColor gradientTop;
 	QColor gradientMid;
 	QColor gradientBot;
@@ -482,7 +475,7 @@ public:
     // below are whatever the user/document set them to), 0 = Low, 1 = Medium,
     // 2 = High, 3 = Epic. Resolution is WRITE-THROUGH: setting a mode writes the
     // tier value into each backing field (antiAliasing, shadowResolution,
-    // shadowFilterTier, giMode, giQuality, skyBakeResolution, ambientFromSky,
+    // shadowFilterTier, giMode, giQuality, skyBakeResolution,
     // ...) EXCEPT rows listed in worldOverrides, so every existing consumer —
     // the mirror, the serializer, the panels, the verbs — keeps reading the one
     // field it always read. The invariant: a backing field is always the
@@ -521,9 +514,11 @@ public:
 	// AUTOMATIC, i.e. the lowest forwardShadingPriority wins — which is what
 	// every scene we ship stores.
 	//
-	// It used to mean "the light the sky's sun drives", and being one field
-	// for two questions is why picking a sun and steering it could not be told
-	// apart; the steering is `skyDrivesSun` below.
+	// It used to mean "the light the sky's sun drives", and being one field for
+	// two questions is why picking a sun and steering it could not be told
+	// apart. The steering itself is GONE (D15): the sky follows the sun light,
+	// never the other way round, so the pin is now only ever "which directional
+	// light is the sun".
 	//
 	// An explicit guid on the SCENE, not a "driven by sky" flag on the light:
 	// the coupling is a property of the world (there is exactly one sun), the
@@ -532,19 +527,31 @@ public:
 	// re-homed with the light and would need a "which one wins" rule the
 	// moment two lights carried it.
 	//
-	// applySunCoupling() is what enforces the steering; it runs from
-	// Scene::advance() every frame, so the light follows the sun wherever the
-	// sun is moved from (panel, script verb, keyframe).
 	QString sunLightGuid;
 
-	/// THE SKY STEERS THE SUN. The realistic sky's Azimuth/Elevation dials
-	/// drive `sunLight()`'s rotation while this is on. Off by default, and
-	/// independent of the pin: pinning which light is the sun and letting the
-	/// sky aim it are two different decisions (they were one field, and a user
-	/// could not have one without the other). A document written before this
-	/// existed carried a non-empty `sunLight` guid to mean exactly "driven",
-	/// so the reader turns it on for those files and nothing changes for them.
-	bool skyDrivesSun;
+	// ---- THE SUN DISC (SKY_LIGHT_SPEC.md §3, owner picks 2 and 4) -------
+	// The bright disc drawn in the sky where the sun light points. ONE
+	// mechanism, owned by the sun and not by the sky: it used to be a term
+	// baked into the analytic sky's texels, which made it a property of one sky
+	// type, at the bake's resolution, in a place no capture mask could exclude
+	// it from.
+	//
+	// A SCENE setting, not a per-light row (owner, §193a: "we need a World
+	// setting to hide the sun disc") — the disc is part of the world's picture,
+	// like the sky it is drawn on. Its angular SIZE stays on the light
+	// (LightNode::sunAngle), because that is a property of the sun itself.
+	//
+	// Drawn over EVERY sky type by default (owner pick 2). An image sky usually
+	// has a sun PAINTED into it, so a disc that is not aimed at the painted one
+	// shows two suns — the World-panel row's tooltip says so, and the answer is
+	// to aim the light or switch the disc off.
+	bool sunDiscVisible = true;
+	/// Do reflection-probe captures contain the disc? FALSE by default (owner
+	/// pick 4, both options): the sun's energy already reaches glossy surfaces
+	/// through the directional light's own specular highlight, so capturing the
+	/// disc as well paints a SECOND sun on everything the probes light.
+	bool sunDiscInProbes = false;
+
 
 	// ---- THE SUN -------------------------------------------------------
 	// (SUN_AND_LIGHT_DEFAULTS_SPEC, owner decisions Q1/Q1e.) "Sun" is a UI
@@ -583,12 +590,26 @@ public:
 	/// lowest number no directional is using. The first directional gets 0.
 	int nextForwardShadingPriority() const;
 
-	// Sky-driven ambient/diffuse IBL (VISUAL_PARITY_SPEC item 3b). ON by owner
-	// decision: with a textured/analytic sky the ambient hemisphere colours come
-	// from the sky itself (cosine-weighted upper/lower averages) instead of the
-	// flat `ambientColor` — a red sky reddens what it lights. Single-colour skies
-	// have nothing to integrate and always use `ambientColor`.
-	bool ambientFromSky;
+	// ---- THE SKY LIGHT -------------------------------------------------
+	// (SKY_LIGHT_SPEC.md §2, owner decision D14.) Ambient is SKYLIGHT ONLY:
+	// there is no flat World-panel ambient colour and no "Ambient From Sky"
+	// switch any more. The scene's ambient is the sky's own cosine-convolved
+	// integral, tinted and scaled by a LIGHT NODE of type LightType::Sky — and
+	// a scene with no Sky Light has no ambient at all.
+	//
+	// The same shape as sunLight(): ONE resolver, asked by everything.
+
+	/// The scene's skylight: the first VISIBLE LightType::Sky light by nodeId,
+	/// or null. Hidden Sky Lights do not light (that is how a user turns the
+	/// skylight off without deleting it, and how the duplicate issue clears).
+	LightNodePtr skyLight() const;
+
+	/// Why skyLight() answered as it did: "first", "none" or "allHidden".
+	QString skyLightReason() const;
+
+	/// Every LightType::Sky light in the scene, ordered by nodeId (creation
+	/// order — deterministic across reloads, like directionalLights()).
+	QVector<LightNodePtr> skyLights() const;
 
     QString skyGuid;
     QString ambientMusicGuid;
@@ -603,17 +624,6 @@ public:
 	QMap<QString, QJsonObject> skyData;
 
 	void setWorldGravity(float gravity);
-
-	/// Points the light named by `sunLightGuid` down the realistic sky's sun
-	/// direction (VISUAL_PARITY re-audit F5). No-op when nothing is linked, the
-	/// guid names no live light, the linked node is not a light, or the sky is
-	/// not the realistic one — the analytic sky is the only sky with a sun.
-	///
-	/// Document lights emit down their local -Y (LightNode::getLightDir), so
-	/// the rotation built here is the one that takes -Y onto the vector FROM
-	/// the sun TOWARDS the scene. Returns true when it actually changed the
-	/// light's rotation, which is what makes it cheap to call every frame.
-	bool applySunCoupling();
 
     QString skyBoxTextures[6];
 
@@ -691,7 +701,6 @@ public:
     QString getSkyTextureSource();
     void clearSkyTexture();
     void setSkyColor(QColor color);
-    void setAmbientColor(QColor color);
 
 	void setAmbientMusic(QString path);
 	void stopPlayingAmbientMusic();

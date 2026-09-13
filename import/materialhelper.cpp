@@ -1,5 +1,6 @@
 #include "assimp/scene.h"
 #include "import/materialhelper.h"
+#include "core/color.h"
 #include <QDir>
 #include <QUuid>
 #include <QFileInfo>
@@ -60,11 +61,22 @@ static QString generateTexGUID() {
     return guid;
 }
 
+// A MATERIAL COLOUR OUT OF assimp IS LINEAR, and the document's invariant is
+// that a QColor is sRGB (SKY_LIGHT_SPEC.md §4 / round-2 review item 2). glTF
+// specifies baseColorFactor, emissiveFactor and specularColorFactor as linear
+// and assimp hands them through unchanged; OBJ/FBX/COLLADA material colours are
+// linear reflectance too. Storing the raw float as if it were an 8-bit sRGB
+// byte and then letting the renderer decode it AGAIN darkens every flat-coloured
+// import by a gamma — 0.5 becomes 0.216 instead of 0.5.
+//
+// ENCODE HERE, once, at the boundary where the linear number is still known to
+// be linear. Every reader of the document downstream then means the same thing
+// by a QColor, which is the whole point of having one rule.
 QColor getAiMaterialColor(aiMaterial* aiMat, const char* pKey, unsigned int type = 0, unsigned int idx = 0)
 {
     aiColor3D col;
     aiMat->Get(pKey, type, idx, col);
-    return QColor(col.r * 255, col.g * 255, col.b * 255, 255);
+    return iris::srgbOf(col.r, col.g, col.b);
 }
 
 QString getAiMaterialTexture(aiMaterial* aiMat, aiTextureType texType)
@@ -720,7 +732,10 @@ void MaterialHelper::specularGlossinessToMetallicRoughness(const float diffuse[4
         base[i] = qBound(0.0f, fromDiffuse * (1.0f - t) + fromSpecular * t, 1.0f);
     }
 
-    baseColorOut = QColor::fromRgbF(base[0], base[1], base[2], qBound(0.0f, diffuse[3], 1.0f));
+    // The spec-gloss conversion works in LINEAR reflectance throughout, so its
+    // answer is encoded on the way out like every other imported colour
+    // (getAiMaterialColor's header).
+    baseColorOut = iris::srgbOf(base[0], base[1], base[2], qBound(0.0f, diffuse[3], 1.0f));
     metallicOut  = metallic;
     roughnessOut = qBound(0.0f, 1.0f - glossiness, 1.0f);
 }
@@ -872,13 +887,14 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         // the fallback for targets with no workflow concept (web export), which
         // is the one place §2.6 keeps it.
         mat.workflow = 1;   // Specular
-        mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, diffuse[0], 1.0f),
-                                               qBound(0.0f, diffuse[1], 1.0f),
-                                               qBound(0.0f, diffuse[2], 1.0f),
-                                               qBound(0.0f, diffuse[3], 1.0f));
-        mat.specularFactor  = QColor::fromRgbF(qBound(0.0f, specular[0], 1.0f),
-                                               qBound(0.0f, specular[1], 1.0f),
-                                               qBound(0.0f, specular[2], 1.0f));
+        // LINEAR by spec, sRGB in the document (getAiMaterialColor's header).
+        mat.baseColorFactor = iris::srgbOf(qBound(0.0f, diffuse[0], 1.0f),
+                                           qBound(0.0f, diffuse[1], 1.0f),
+                                           qBound(0.0f, diffuse[2], 1.0f),
+                                           qBound(0.0f, diffuse[3], 1.0f));
+        mat.specularFactor  = iris::srgbOf(qBound(0.0f, specular[0], 1.0f),
+                                           qBound(0.0f, specular[1], 1.0f),
+                                           qBound(0.0f, specular[2], 1.0f));
         // Glossiness is the inverse sense of roughness, exactly.
         mat.roughnessFactor = qBound(0.0f, 1.0f - gloss, 1.0f);
         mat.metallicFactor  = 0.0f;   // not read in this workflow; kept sane
@@ -894,14 +910,14 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         // the pin's documentation, not a measured comparison.
         mat.workflow = 2;   // Specular-as-Fresnel
         if (hasBaseColor)
-            mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, baseColor.r, 1.0f),
-                                                   qBound(0.0f, baseColor.g, 1.0f),
-                                                   qBound(0.0f, baseColor.b, 1.0f),
-                                                   qBound(0.0f, baseColor.a, 1.0f));
+            mat.baseColorFactor = iris::srgbOf(qBound(0.0f, baseColor.r, 1.0f),
+                                               qBound(0.0f, baseColor.g, 1.0f),
+                                               qBound(0.0f, baseColor.b, 1.0f),
+                                               qBound(0.0f, baseColor.a, 1.0f));
         if (hasRoughness) mat.roughnessFactor = roughness;
         const float sf = qBound(0.0f, facts.specularFactor, 1.0f);
         mat.useFresnelColor = true;
-        mat.fresnelFactor = QColor::fromRgbF(
+        mat.fresnelFactor = iris::srgbOf(
             qBound(0.0f, facts.specularColorFactor[0] * sf, 1.0f),
             qBound(0.0f, facts.specularColorFactor[1] * sf, 1.0f),
             qBound(0.0f, facts.specularColorFactor[2] * sf, 1.0f));
@@ -914,19 +930,19 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         // environment to reflect looks dark because that is what metal does,
         // not because the import lost anything.
         if (hasBaseColor)
-            mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, baseColor.r, 1.0f),
-                                                   qBound(0.0f, baseColor.g, 1.0f),
-                                                   qBound(0.0f, baseColor.b, 1.0f),
-                                                   qBound(0.0f, baseColor.a, 1.0f));
+            mat.baseColorFactor = iris::srgbOf(qBound(0.0f, baseColor.r, 1.0f),
+                                               qBound(0.0f, baseColor.g, 1.0f),
+                                               qBound(0.0f, baseColor.b, 1.0f),
+                                               qBound(0.0f, baseColor.a, 1.0f));
         if (hasMetallic)  mat.metallicFactor  = metallic;
         if (hasRoughness) mat.roughnessFactor = roughness;
     } else if (hasBaseColor && !facts.valid) {
         // A non-glTF source that reported a base colour but no workflow keeps
         // the colour on the dielectric defaults.
-        mat.baseColorFactor = QColor::fromRgbF(qBound(0.0f, baseColor.r, 1.0f),
-                                               qBound(0.0f, baseColor.g, 1.0f),
-                                               qBound(0.0f, baseColor.b, 1.0f),
-                                               qBound(0.0f, baseColor.a, 1.0f));
+        mat.baseColorFactor = iris::srgbOf(qBound(0.0f, baseColor.r, 1.0f),
+                                           qBound(0.0f, baseColor.g, 1.0f),
+                                           qBound(0.0f, baseColor.b, 1.0f),
+                                           qBound(0.0f, baseColor.a, 1.0f));
     }
 
     // KHR_materials_ior. Stored on every workflow — inert on a metallic

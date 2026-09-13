@@ -475,13 +475,18 @@ public:
     /// is tonemapped TWICE — washed-out, low-contrast skies in exactly the
     /// scenes that look best today. With `forHdr` the bake stops after the
     /// exposure and lets the chain's tonemapper do the grading, once.
+    /// THE SUN IS THE SCENE'S SUN LIGHT (SKY_LIGHT_SPEC.md §3, D15). `sunDir`
+    /// is the direction FROM the scene TOWARDS the sun — i.e. the reverse of
+    /// the sun light's travel, `-sunLight->getLightDir()`, normalized by the
+    /// bake. `hasSun == false` (a scene with no directional light) bakes the
+    /// model's own night: no solar term at all.
     static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height,
-                                   bool forHdr = false);
+                                   bool forHdr, const iris::Vec3 &sunDir, bool hasSun);
 
     /// Cosine-convolved irradiance of an equirect sky image as 9 spherical-
     /// harmonic bands (27 floats, r/g/b per band), in LINEAR light — what the
-    /// scene's ambient becomes when `Scene::ambientFromSky` is on
-    /// (VISUAL_PARITY_SPEC item 3b). Basis, order and units are exactly what
+    /// scene's ambient becomes, tinted and scaled by the scene's Sky Light
+    /// (SKY_LIGHT_SPEC.md §2). Basis, order and units are exactly what
     /// `Scene::setAmbientSh` documents; row 0 of the image is the zenith and the
     /// longitude follows Ogre's own sky shader. Returns false for a null image.
     /// Public for tests.
@@ -1288,12 +1293,12 @@ private:
     /// deliberately NOT the engine-side SkyDesc: that one is made of texture
     /// ids, which only exist AFTER the bake this comparison decides to skip.
     ///
-    /// `ambientFromSky` is deliberately absent: toggling it changes what
-    /// applyEnvironment does with the recorded integral, not the integral, so
-    /// folding it in here would re-bake the whole sky to answer a question the
-    /// bake does not affect.
+    /// The SKY LIGHT is deliberately absent: its intensity and tint scale the
+    /// recorded integral in applyEnvironment, they do not change the integral,
+    /// so folding them in here would re-bake the whole sky to answer a question
+    /// the bake does not affect.
     struct SkySource {
-        enum class Kind { None, Equirect, Cubemap, Gradient, Realistic };
+        enum class Kind { None, Equirect, Cubemap, Gradient, Realistic, Color };
         Kind    kind = Kind::None;
         /// Equirect: the image's path (the texture cache is keyed by it too).
         QString equirectPath;
@@ -1310,9 +1315,19 @@ private:
         /// POST_CHAIN_SPEC §7.1, so toggling it must re-bake too).
         float   luminance = 0.0f, reileigh = 0.0f, mieCoefficient = 0.0f;
         float   mieDirectionalG = 0.0f, turbidity = 0.0f;
-        float   sunPosX = 0.0f, sunPosY = 0.0f, sunPosZ = 0.0f;
+        /// Realistic: the SUN LIGHT's direction (towards the sun) and whether
+        /// the scene has one at all — the bake's only sun input since D15.
+        /// Compared with a dot-product band rather than exactly, so a keyed
+        /// slow rotation re-bakes at the debounce cadence and a still sun never.
+        iris::Vec3 sunDir;
+        bool    hasSun = false;
         int     bakeResolution = 0;
         bool    hdr = false;
+        /// Color: a SINGLE_COLOR sky is a REAL sky now (SKY_LIGHT_SPEC §2) —
+        /// baked as a 64x32 strip of the colour and pushed through the equirect
+        /// path, so its SH band 0 is linear(colour), its reflections are
+        /// uniform, and the sun disc has a sky pass to compose over.
+        QColor  skyColor;
 
         bool operator==(const SkySource &o) const;
         bool operator!=(const SkySource &o) const { return !(*this == o); }
@@ -1336,17 +1351,15 @@ private:
     // every event; re-bake at most every ~150 ms (the last change always lands —
     // applySky recomputes the signature each frame until it sticks).
     QElapsedTimer mRealisticBakeTimer;
-    // Sky-driven ambient (VISUAL_PARITY item 3b): the cosine-weighted hemisphere
-    // integrals of whatever sky is live, in linear light. Recomputed only when
-    // the sky signature changes; applyEnvironment pushes them (or the flat
-    // document colour when there is no sky, or the scene opts out).
+    // THE SKY'S OWN LIGHT (SKY_LIGHT_SPEC.md §2): the cosine-convolved integral
+    // of whatever sky is live, in linear light. Recomputed only when the sky
+    // signature changes; applyEnvironment scales it by the scene's Sky Light
+    // and pushes the result. No Sky Light => 27 zeros, whatever this holds.
     bool mHasSkyAmbient = false;
     // Last ambient pair actually pushed. Ogre picks its ambient shader variant
     // from these (equal => fixed, different => hemisphere), so pushing an
     // unchanged value every frame is not free.
     bool mAmbientPushed = false;
-    bool mLastAmbientWasSky = false;
-    jahshaka::engine::Colour mLastFlatAmbient { -1.0f, -1.0f, -1.0f, 1.0f };
     float mLastAmbientSh[27] = { 0.0f };
     /// The sky's own SH ambient (before the World-panel gain). Valid while
     /// mHasSkyAmbient; zeroed by clearSkyAmbient.

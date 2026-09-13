@@ -1496,13 +1496,25 @@ bool OgreScene::destroyTexture(TextureId id) {
     auto it = mTextures.find(id);
     if (it == mTextures.end()) return false;
     JAH_TRY {
-        invalidateGiCaches();   // BEFORE the texture dies: IR caches images by TextureGpu*
         // UNBIND FIRST, from every material still holding it. An
         // HlmsPbsDatablock keeps the raw TextureGpu* (and a descriptor set
         // built from it); destroying a bound texture leaves that pointer
         // stale with no diagnostic until the GPU faults. Nothing reclaimed
         // textures before the deep-audit fix wave, so this was latent — it
         // stops being latent the moment reclaimUnused frees one.
+        //
+        // THE GI CACHES ARE INVALIDATED ONLY IF SOMETHING WAS ACTUALLY BOUND
+        // (SKY_LIGHT_SPEC review, round 2 item 4). The unconditional call that
+        // used to stand above this loop said "Instant Radiosity caches images
+        // by TextureGpu*" — true, and it caches the images of GI GEOMETRY,
+        // which reaches it through a material. A texture no datablock holds
+        // cannot be in any of those caches, and the commonest such texture is
+        // THE SKY'S: its strip and its six reflection faces are consumed by the
+        // sky pass and by a COPY into the IBL cube, never by a datablock. With
+        // a single-colour sky finally being a real sky (§2) that made every
+        // mouse-move on the World sky colour picker a from-scratch GI build —
+        // measured on Showroom 2 before this: one rebuild per drag event.
+        bool boundSomewhere = false;
         for (auto &kv : mMaterials) {
             MaterialRec &m = kv.second;
             // Overlay materials (grid, gizmo, outline) hold no tracked maps. A
@@ -1514,6 +1526,7 @@ bool OgreScene::destroyTexture(TextureId id) {
                 m.boundTextures[s] = 0;
                 hit = true;
             }
+            boundSomewhere = boundSomewhere || hit;
             // Re-bind from the (now cleared) record rather than clearing one
             // unit: on Unlit the mapping from slot to unit is not one-to-one,
             // and one code path owning it is what keeps the two families honest.
@@ -1521,6 +1534,8 @@ bool OgreScene::destroyTexture(TextureId id) {
             // An unbound albedo is a changed cutout silhouette (lamp-map cache).
             if (hit) noteShadowShapeChanged(kv.first);
         }
+        // ...and now, if it really was in play, the caches that hold it.
+        if (boundSomewhere) invalidateGiCaches();
         if (!it->second.path.empty()) {
             const std::string key = textureKey(it->second.path, it->second.decal,
                                                it->second.decalKind, it->second.srgb);

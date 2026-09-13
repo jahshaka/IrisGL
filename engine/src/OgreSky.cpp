@@ -15,6 +15,7 @@
 #include <OgreTechnique.h>
 #include <OgrePass.h>
 #include <OgreTextureUnitState.h>
+#include <OgreMaterialManager.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -43,7 +44,15 @@ bool OgreScene::setSky(const SkyDesc &desc) {
     const bool noSkyClearsIbl = desc.mode == SkyMode::NoSky && mSkyDesc.reflections && !desc.reflections;
     const bool skyChanged  = !mSkyDesc.sameSky(desc) || noSkyClearsIbl;
     const bool reflChanged = !mSkyDesc.sameReflections(desc);
-    if (!skyChanged && !reflChanged) return true;   // idempotent: nothing to do
+    // THE SUN DISC is the description's third independent half: it changes
+    // every time the sun light is rotated, and re-uploading the sky or
+    // re-convolving the IBL cubemap for that would be absurd. It also does NOT
+    // stale the probe grid — the disc is excluded from probe captures by
+    // default, and when it is not, moving the sun already stales them through
+    // the light itself.
+    const bool sunChanged  = !(mSkyDesc.sun == desc.sun);
+    if (sunChanged) { applySunDisc(desc.sun); mSkyDesc.sun = desc.sun; }
+    if (!skyChanged && !reflChanged) return true;   // idempotent: nothing else to do
     // THE PROBE CACHE'S SKY INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
     // faces capture the sky (RQ 0 is inside their range) and the reflection
     // cubemap lights what they capture. Nothing staled a probe on a sky change
@@ -630,7 +639,120 @@ void OgreScene::applyReflectionToAllImpl() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// THE SUN DISC (SPECS/SKY_LIGHT_SPEC.md §3, owner decision D15)
+// ---------------------------------------------------------------------------
+// ONE mechanism, owned by the sun light, drawn over every sky type. A second
+// Rectangle2D beside Ogre's own sky quad, at render queue 1 — after the sky
+// (queue 0) and long before opaque geometry, so the scene occludes it through
+// the depth test exactly as it occludes the sky.
+//
+// WHY A QUAD AND NOT A BILLBOARD OR A SPHERE. The disc is at INFINITY: it has a
+// direction and an angular size and no position at all, which is precisely what
+// a full-screen quad with the camera's ray per pixel expresses (Ogre hands
+// `Ogre/Compositor/QuadCameraDirNoUV_vs` the corner rays of whichever camera is
+// rendering, so one quad is correct in every view of the scene — the editor,
+// the player, a thumbnail, a probe face — with no per-camera work of ours).
+//
+// WHY NOT AN Ogre PATCH. It is not a variant of the sky material: it composes
+// OVER any of them, the uniform strip a colour sky bakes included. The material
+// is ours, in our own media folder, and upstream is untouched.
+void OgreScene::applySunDisc(const SunDisc &sun) {
+    JAH_TRY {
+        if (!sun.enabled) {
+            // Hidden, not destroyed: the sun is switched on and off (a World
+            // row, a sky with no directional light), and churning a renderable
+            // and a material clone for that would be absurd. Zero flags is the
+            // BillboardSet2 rule applied to a Rectangle2D — visibility is an
+            // any-bit test on the object's own flags.
+            if (mSunDisc) mSunDisc->setVisibilityFlags(0u);
+            return;
+        }
+        if (!mSunDisc) {
+            mSunDisc = mSceneMgr->createRectangle2D(Ogre::SCENE_STATIC);
+            // A screen-filling quad, no normals: our vertex program derives the
+            // camera ray from the inverse view-projection instead of reading it
+            // out of the normals, because nothing writes a second quad's
+            // normals (JahSunDisc_vs's header).
+            mSunDisc->initialize(Ogre::BT_DEFAULT, Ogre::Rectangle2D::GeometryFlagQuad);
+            mSunDisc->setGeometry(-Ogre::Vector2::UNIT_SCALE, Ogre::Vector2(2.0f));
+            // AND THEN update(), which is not optional: Rectangle2D's position
+            // and size are UNINITIALISED members, initialize() fills the vertex
+            // buffer from whatever they happen to hold, and setGeometry only
+            // raises a dirty flag. Ogre's own sky survives this because
+            // SceneManager::_renderPhase02 calls update() on it every frame;
+            // nothing calls it on ours.
+            mSunDisc->update();
+            // The auto-params this quad's vertex shader needs (the real view
+            // and projection) are handed to it as the IDENTITY while these two
+            // flags — which Rectangle2D's constructor sets — are on.
+            mSunDisc->setUseIdentityView(false);
+            mSunDisc->setUseIdentityProjection(false);
+            // Queue 1: immediately after the sky, before everything else.
+            mSunDisc->setRenderQueueGroup(1u);
+            mSunDisc->setCastShadows(false);
+            mSceneMgr->getRootSceneNode(Ogre::SCENE_STATIC)->attachObject(mSunDisc);
+            mSceneMgr->notifyStaticAabbDirty(mSunDisc);
+            // SCENE_STATIC: the static memory manager only recomputes what it
+            // is TOLD is dirty, so an object attached after the first frame is
+            // never visited and never drawn (CLAUDE.md's static-AABB rule).
+            // Ogre's own sky gets away without this only because it is created
+            // before anything has rendered.
+            // A per-SCENE clone, for the same reason Ogre clones its sky
+            // material per SceneManager: the parameters below are this scene's
+            // sun, and two scenes in one process share the base material.
+            Ogre::MaterialManager &mm = Ogre::MaterialManager::getSingleton();
+            const Ogre::String name = "Jahshaka/SunDisc" +
+                                      Ogre::StringConverter::toString(mSceneMgr->getId());
+            mSunDiscMaterial = mm.getByName(name);
+            if (!mSunDiscMaterial) {
+                // AUTODETECT, not DEFAULT_RESOURCE_GROUP_NAME: our own media
+                // folder is registered as its own group (the Hlms library path),
+                // so a DEFAULT-group lookup finds nothing and the disc silently
+                // never draws. This is the same load() every other material of
+                // ours goes through (OgreChain's materialPass).
+                Ogre::MaterialPtr base = std::static_pointer_cast<Ogre::Material>(
+                    mm.load("Jahshaka/SunDisc",
+                            Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME));
+                if (!base) { mError = "sun disc: Jahshaka/SunDisc material is not staged"; return; }
+                mSunDiscMaterial = base->clone(name);
+                mSunDiscMaterial->load();
+            }
+            mSunDisc->setMaterial(mSunDiscMaterial);
+        }
+        if (!mSunDiscMaterial) return;
+
+        // THE VISIBILITY CHANNEL (EnginePrivate.h, kSunDiscBit). kSunDiscBit
+        // INSTEAD OF kVisibleBit keeps the disc out of every probe capture and
+        // every shadow node for free; `inProbes` puts kVisibleBit back BESIDE
+        // it, which is the owner's "both options" (pick 4).
+        mSunDisc->setVisibilityFlags(kSunDiscBit | (sun.inProbes ? kVisibleBit : 0u));
+        Ogre::Pass *pass = mSunDiscMaterial->getTechnique(0)->getPass(0);
+        Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+        // w = cos(angular RADIUS); the document row is the DIAMETER, as every
+        // renderer's "source angle" row is.
+        const float radiusRad =
+            float(std::max(0.0, double(sun.angularDiameterDeg)) * 0.5 * M_PI / 180.0);
+        ps->setNamedConstant("sunDirection",
+                             Ogre::Vector4(sun.dir[0], sun.dir[1], sun.dir[2],
+                                           std::cos(radiusRad)));
+        ps->setNamedConstant("sunColour",
+                             Ogre::Vector4(sun.colour.r, sun.colour.g, sun.colour.b, 1.0f));
+    } JAH_CATCH(mError, );
+}
+
+void OgreScene::destroySunDisc() {
+    if (mSunDisc) { mSceneMgr->destroyRectangle2D(mSunDisc); mSunDisc = nullptr; }
+    mSunDiscMaterial.reset();
+    // ...AND FORGET WHAT WAS PUSHED. destroySky() takes the disc with it (a
+    // NoSky description is a full clear), so the quad is gone while mSkyDesc
+    // still says a disc is enabled — and the next push, being value-equal,
+    // would do nothing and leave the sun missing until something else moved it.
+    mSkyDesc.sun = SunDisc();
+}
+
 void OgreScene::destroySky() {
+    destroySunDisc();
     // Unbind the reflection cubemap from every datablock before it goes away.
     destroyReflection();
     if (mSceneMgr->getSky())
