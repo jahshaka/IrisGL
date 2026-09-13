@@ -127,6 +127,17 @@ public:
     /// wholesale. A host whose hierarchy differs from the engine's (a socket
     /// rider hangs off a bone) pushes its own effective state per node.
     virtual void        setNodeVisible(NodeId, bool) = 0;
+    /// The same push from a host that walks its tree PARENT-FIRST and therefore
+    /// already knows the parent's effective state (SceneMirror::visit). It is
+    /// the only difference: `setNodeVisible` derives that state by walking up
+    /// to the nearest registered ancestor — one registry lookup per push, which
+    /// on a first sync is one per adopted node on top of the one `adoptNode`
+    /// already paid, for an answer the caller computed a line earlier.
+    /// `parentShown` is what the host would have found (true at the root of the
+    /// pushed walk, and for a node whose engine parent is not in the document's
+    /// tree at all — a socket rider on a bone — which is why a host pushes the
+    /// EFFECTIVE state of those itself).
+    virtual void        setNodeVisibleUnder(NodeId, bool visible, bool parentShown) = 0;
 
     // ---- Meshes and materials (step 3/4) ----
     /// Uploads geometry. Returns 0 on invalid data (lastError()).

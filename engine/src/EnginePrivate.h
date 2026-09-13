@@ -1974,6 +1974,7 @@ public:
     bool setNodeParent(NodeId id, NodeId parent) override;
     void setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) override;
     void setNodeVisible(NodeId id, bool visible) override;
+    void setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) override;
 
     // ---- Meshes and materials ----
     MeshId createMesh(const MeshData &data) override;
@@ -2519,6 +2520,15 @@ private:
         /// (POST_LOOKS_SPEC.md §5.3): the item's own flags cannot answer it once
         /// kVisibleBit is gone, and the helper flag can be toggled afterwards.
         bool                      materialDistortion = false;
+        /// ENGINE-OWNED REGISTERED CHILDREN this node has ever been given
+        /// (createNode with a parent, setNodeParent onto it): a gizmo slot, a
+        /// selection wire, a bone-overlay bone. The visibility walk descends
+        /// into those and into the two unregistered helper children named
+        /// above, and into nothing else — so a node with none of them needs no
+        /// per-child registry lookup at all (ledger 179). It only ever grows:
+        /// over-counting costs one lookup per child on a node that once had an
+        /// engine-owned child, under-counting would lose a wire's visibility.
+        unsigned                  ownedChildren = 0;
     };
 
     /// THE ONE PLACE `shadowShapeDirty` IS RAISED (ENGINE-4 F5), so that
@@ -3120,6 +3130,11 @@ private:
     /// invalidate GI ONCE for the whole subtree.
     /// (RENDER_PIPELINE_AUDIT 1.1/1.2)
     void applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giChanged);
+    void applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited, bool &giChanged);
+    /// setNodeVisible / setNodeVisibleUnder, in one body: `parentShown` null
+    /// means "derive it" (inheritedShown), non-null means the host walked its
+    /// tree parent-first and already knows.
+    void setNodeVisibleImpl(NodeId id, bool visible, const bool *parentShown);
     /// Voxel volume resolution per axis for the current quality.
     unsigned giVoxelResolution() const;
     /// The GI items' world AABBs after the exclude flag and the extent-outlier

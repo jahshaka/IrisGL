@@ -208,6 +208,14 @@ NodeId OgreScene::createNode(NodeId parent) {
         Ogre::SceneNode *p = parent ? node(parent) : nullptr;
         if (parent && !p) { mError = "createNode: unknown parent"; return 0; }
         if (!p) p = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
+        // AN ENGINE-OWNED CHILD OF A REGISTERED NODE: the one case
+        // applyShownSubtree still has to descend into (a gizmo slot, a
+        // selection wire, a bone-overlay bone), recorded so that walk does not
+        // have to ask the registry about every child to find out.
+        if (parent) {
+            auto pit = mNodes.find(parent);
+            if (pit != mNodes.end()) ++pit->second.ownedChildren;
+        }
         Node rec; rec.node = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
         return track(rec);
     } JAH_CATCH(mError, 0);
@@ -241,6 +249,14 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
         if (n->getParent() == p) return true;
         if (n->getParent()) n->getParent()->removeChild(n);
         p->addChild(n);
+        // ...and the same record as createNode's (it is a COUNT that only ever
+        // grows: a node that once had an engine-owned child keeps walking its
+        // children, which costs a lookup per child on a node that has had one
+        // and is never wrong).
+        if (parent) {
+            auto pit = mNodes.find(parent);
+            if (pit != mNodes.end()) ++pit->second.ownedChildren;
+        }
         // A move under a hidden parent hides the subtree, a move out from
         // under one shows it again (as far as each node's own flag allows).
         bool giChanged = false;
@@ -357,7 +373,14 @@ bool OgreScene::inheritedShown(const Ogre::Node *sn) {
 }
 
 void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giChanged) {
-    Node *rec = registryNode(sn);
+    applyShownSubtree(sn, registryNode(sn), inherited, giChanged);
+}
+
+/// ...and the same walk when the caller ALREADY HAS the record (the push site
+/// looked it up to write `visible` into it a line earlier). `rec` may be null:
+/// that is an unregistered helper child — a light's -Y adapter, a decal's
+/// projector box — and the walk exists for exactly those.
+void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited, bool &giChanged) {
     const bool shown = rec ? (inherited && rec->visible) : inherited;
     // OGRE'S HALF: LAYER_VISIBILITY on everything attached HERE — the Item, a
     // PFX2 instance — and, one level down through the unregistered helper
@@ -436,6 +459,21 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giC
     //
     // Everything else below a registered node belongs to the document, and the
     // document's host owns its visibility.
+    // AND THE LOOKUP PER CHILD GOES WITH IT (ledger 179). The whitelist above is
+    // a closed set: engine-owned registered children (createNode / setNodeParent
+    // put them there, and `ownedChildren` records that they did — sticky, never
+    // cleared, so it can only over-approximate) and the two unregistered helper
+    // children this engine makes, both of which the record names by pointer. A
+    // node with neither has nothing below it this walk may touch, and asking the
+    // registry about each of its children — 10,503 lookups on a first sync of
+    // the 10 k bench, every one of them answering "a document node, skip it" —
+    // is the dead work this removes. The mirror pushes those children itself,
+    // parent-first, which is why the descent stopped at them in the first place.
+    if (rec && !rec->ownedChildren) {
+        if (rec->lightNode) applyShownSubtree(rec->lightNode, nullptr, shown, giChanged);
+        if (rec->decalNode) applyShownSubtree(rec->decalNode, nullptr, shown, giChanged);
+        return;
+    }
     const size_t numChildren = sn->numChildren();
     for (size_t i = 0; i < numChildren; ++i) {
         Ogre::SceneNode *child = static_cast<Ogre::SceneNode *>(sn->getChild(i));
@@ -604,6 +642,21 @@ bool OgreScene::nodeCastShadow(NodeId id) const {
 }
 
 void OgreScene::setNodeVisible(NodeId id, bool visible) {
+    setNodeVisibleImpl(id, visible, nullptr);
+}
+
+// THE SAME PUSH FROM A PARENT-FIRST HOST (L12 follow-up, ledger 179). The
+// mirror computes `shown = parentShown && node->visible` for every node it
+// walks and then pushed it through setNodeVisible, which derived the very same
+// parent state again by walking up to the nearest registered ancestor: on a
+// bulk first sync that is one registryNode (two hash lookups) per adopted node
+// for an answer the caller had in a local variable. Measured at 10,503 nodes:
+// 21,006 inheritedShown calls, of which half were this one.
+void OgreScene::setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) {
+    setNodeVisibleImpl(id, visible, &parentShown);
+}
+
+void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentShown) {
     JAH_TRY {
         auto it = mNodes.find(id);
         if (it == mNodes.end()) return;
@@ -620,7 +673,8 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
         // carries the GI bit, the billboard and the PFX2 halves with it.
         bool giChanged = false;
         if (n.node) {
-            applyShownSubtree(n.node, inheritedShown(n.node), giChanged);
+            applyShownSubtree(n.node, &n, parentShown ? *parentShown : inheritedShown(n.node),
+                              giChanged);
         } else {
             const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
             const bool probeBefore = probeSeesItem(n);

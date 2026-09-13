@@ -1918,7 +1918,12 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
     const bool shown = parentShown && node->visible;
     const int wantVisible = shown ? 1 : 0;
     if (e.visiblePushed != wantVisible) {
-        mTarget->setNodeVisible(e.node, shown);
+        // THROUGH THE PARENT-FIRST VERB (ledger 179): this walk knows
+        // `parentShown` — it is the argument — and the plain setNodeVisible
+        // would derive the same answer again by walking up to the nearest
+        // registered ancestor, one registry lookup per push. On a first sync
+        // that is one per adopted node, for a value sitting in a local.
+        mTarget->setNodeVisibleUnder(e.node, shown, parentShown);
         e.visiblePushed = wantVisible;
     }
 
