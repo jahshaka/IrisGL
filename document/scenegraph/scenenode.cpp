@@ -520,6 +520,11 @@ void SceneNode::applyStaticDefaultsFrom(bool parentMovable)
 void SceneNode::addAnimation(AnimationPtr anim)
 {
     animations.append(anim);
+    // AN ANIMATION IS A MOBILITY DRIVER (resolveMobility rule 1) and takes the
+    // node out of the static half (isStaticEligible), so attaching or dropping
+    // one changes what the renderer is told about it. Flags, and over the
+    // subtree, because rule 2 makes a child travel with its parent.
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 QList<AnimationPtr> SceneNode::getAnimations()
@@ -529,7 +534,9 @@ QList<AnimationPtr> SceneNode::getAnimations()
 
 void SceneNode::setAnimation(AnimationPtr anim)
 {
+    if (animation == anim) return;
     animation = anim;
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 AnimationPtr SceneNode::getAnimation()
@@ -545,11 +552,13 @@ bool SceneNode::hasActiveAnimation()
 void SceneNode::deleteAnimation(int index)
 {
     animations.removeAt(index);
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 void SceneNode::deleteAnimation(AnimationPtr anim)
 {
     animations.removeOne(anim);
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 QList<Property*> SceneNode::getProperties()

@@ -71,9 +71,18 @@ public:
     /// frame would otherwise be a dangling pointer in the list — the mirror
     /// must dereference a dirty node (it reads its fields), unlike an evicted
     /// one (whose pointer is only ever a map key).
-    void cancel(std::size_t slot)
+    ///
+    /// THE NODE IS PASSED AND CHECKED (lead review R2 #5). A slot number means
+    /// nothing once the list has been SWAPPED away: the consumer holds the old
+    /// vector and this one is fresh, so a removal in that window would write a
+    /// tombstone over a DIFFERENT node's slot — leaving that node silently
+    /// unmarked until the next full walk — while the pointer it meant to cancel
+    /// stayed live in the consumer's copy. The window is empty today (the mirror
+    /// clears each node's mask before it visits it, on the same thread), which
+    /// is exactly why it must be closed here rather than relied upon.
+    void cancel(std::size_t slot, const SceneNode *node)
     {
-        if (slot < mDirty.size()) mDirty[slot] = nullptr;
+        if (slot < mDirty.size() && mDirty[slot] == node) mDirty[slot] = nullptr;
     }
 
     /// A node that has LEFT the document (removeChildInternal / removeFromScene).

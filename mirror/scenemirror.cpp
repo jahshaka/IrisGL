@@ -914,15 +914,31 @@ void SceneMirror::consumeDirty()
     mSource->dirtySet()->takeDirty(mDirtyScratch);
     mDirtyNodes = quint64(mDirtyScratch.size());
     mConsumingDirty = true;
-    // Materials first, so a shading-model switch and a slider drag land on the
-    // same frame as the node edits beside them.
-    markChangedMaterials();
-    // INDEX-based, because the loop APPENDS: a shading-model switch inside a
-    // visit queues every other node drawing that material, and those have to be
-    // reached on this frame (their Items were rebuilt with the default query
-    // mask). A node queued twice is visited twice, which is idempotent and
+    // THE DOCUMENT'S OWN LIST FIRST, MATERIALS AFTER (lead review R2 #1).
+    //
+    // markChangedMaterials reads the REVISION of every material the memo holds
+    // — a dereference of a raw pointer — and a material the document dropped
+    // since the last sync is reachable there until something prunes it. The
+    // node that dropped it is ON THIS LIST (setMaterial marks Content), and
+    // visiting that node is what calls noteMaterialUser and takes the dead
+    // material out of the memo. So the pass over the list is also the pass
+    // that makes the material question safe to ask.
+    //
+    // ONE INDEX LOOP, because every phase APPENDS to the same list: a
+    // shading-model switch queues every other node drawing that material (their
+    // Items were rebuilt with the default query mask), a character's piece set
+    // changing queues its other pieces, and the material pass queues the users
+    // of every material whose revision moved. All of them have to be reached on
+    // THIS frame. A node queued twice is visited twice, which is idempotent and
     // cheaper than a set.
-    for (std::size_t i = 0; i < mDirtyScratch.size(); ++i) {
+    bool materialsAsked = false;
+    for (std::size_t i = 0;; ++i) {
+        if (i >= mDirtyScratch.size()) {
+            if (materialsAsked) break;
+            materialsAsked = true;
+            markChangedMaterials();
+            if (i >= mDirtyScratch.size()) break;
+        }
         iris::SceneNode *n = mDirtyScratch[i];
         if (!n) continue;               // tombstoned: the node left the document
         // CLEARED BEFORE THE VISIT, so a write the visit itself makes (the
@@ -985,11 +1001,17 @@ void SceneMirror::runVerifier()
     if (!mVerifierBudget || mEntries.isEmpty()) return;
     const quint64 count = quint64(mEntries.size());
     if (mVerifierCursor >= count) mVerifierCursor = 0;
-    // QHash has no random access; walking to the cursor would be O(n) per
-    // sync. The pass therefore takes a CONTIGUOUS RUN of the iteration order
-    // and remembers how far it got — the order is stable between rehashes, and
-    // a rehash only costs one rotation's coverage, never correctness (the
-    // cursor wraps and every entry is reached again).
+    // THE WALK TO THE CURSOR IS O(cursor), and that is a deliberate choice, not
+    // an oversight (the comment that stood here claimed otherwise — lead review
+    // R2 #8). QHash has no random access and no stable iterator across the
+    // insert/erase this map sees every time a node is adopted or released, so
+    // the alternatives are a stored iterator that has to be invalidated at five
+    // seams and re-found anyway, or this: skip to the cursor and take a
+    // contiguous run. The skip is a pointer-chase per bucket with no work in it
+    // — measured inside `mirror.verify`, which is 0.370 ms for the WHOLE pass
+    // on an 8,404-entry map, budget included. The order is stable between
+    // rehashes, and a rehash costs one rotation's coverage, never correctness:
+    // the cursor wraps and every entry is reached again.
     quint64 i = 0;
     unsigned done = 0;
     mParentState.clear();
@@ -2787,40 +2809,48 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             e.lightPushed = false;
             syncLightWires(e, light);
             syncLightIcon(e, light);
-            // The old walk RETURNED here, children included. Preserved exactly
-            // (a Sky Light with children is not a shape anyone authors, and a
-            // behaviour change smuggled into a performance lane is worse than
-            // the oddity) — reported to the lead as a pre-existing defect.
-            out.descend = false;
-            return out;
-        }
-        // ON CHANGE ONLY (audit F7). setLight is ~20 Ogre setters — type,
-        // diffuse, specular, cast-shadows, power scale, an attenuation solve
-        // (setAttenuationBasedOnRadius takes a square root and rewrites the
-        // light's local AABB), spot range — plus two std::string compares for
-        // the profile/mask paths, and it ran for every light in the scene on
-        // every frame to re-push values a human edits by hand. It reads NOTHING
-        // from the node's transform (the light rides the adopted node and the
-        // graph carries position and direction), so skipping an unchanged push
-        // cannot freeze a moving light.
-        const LightDesc want = toLightDesc(light, mSyncSun, true);
-        // By value (LightDesc::operator==, beside the struct — every field
-        // setLight reads is in it, which is what keeps a new field from
-        // silently stopping at the first push).
-        if (!e.lightPushed || want != e.lastLight) {
-            if (mTarget->setLight(e.node, want)) {
-                notePush(node, "light");
-                e.hasLight = true;
-                e.lastLight = want;
-                e.lightPushed = true;
+            // THE EARLY RETURN IS GONE (lead review R2 #6). It used to skip the
+            // rest of the visit AND the child recursion, which made a Sky
+            // Light's children invisible to the full walk — removeMissing then
+            // released their entries every frame — while the dirty pass, which
+            // reaches a marked node directly and resolves its parent from the
+            // DOCUMENT, adopted them. Two modes disagreeing about the same
+            // scene is the one thing this lane cannot ship. A Sky Light's
+            // children are ordinary nodes; the sky-specific work above it (no
+            // engine light, the icon, no wires) is what makes it a Sky Light.
+            //
+            // Nothing below can misfire on it: it carries no mesh, no
+            // particles, no decal and is not a camera, and the light branch
+            // itself has already been answered.
+        } else {
+            // ON CHANGE ONLY (audit F7). setLight is ~20 Ogre setters — type,
+            // diffuse, specular, cast-shadows, power scale, an attenuation solve
+            // (setAttenuationBasedOnRadius takes a square root and rewrites the
+            // light's local AABB), spot range — plus two std::string compares for
+            // the profile/mask paths, and it ran for every light in the scene on
+            // every frame to re-push values a human edits by hand. It reads NOTHING
+            // from the node's transform (the light rides the adopted node and the
+            // graph carries position and direction), so skipping an unchanged push
+            // cannot freeze a moving light.
+            const LightDesc want = toLightDesc(light, mSyncSun, true);
+            // By value (LightDesc::operator==, beside the struct — every field
+            // setLight reads is in it, which is what keeps a new field from
+            // silently stopping at the first push).
+            if (!e.lightPushed || want != e.lastLight) {
+                if (mTarget->setLight(e.node, want)) {
+                    notePush(node, "light");
+                    e.hasLight = true;
+                    e.lastLight = want;
+                    e.lightPushed = true;
+                }
             }
+            // (The per-light shadow fold that stood here — strongest filter, largest
+            // atlas request, "does anything cast" — is refreshLightAggregates()
+            // now: it is a fold over Scene::lights, which is BOUNDED BY THE LIGHT
+            // COUNT and therefore free, and a still frame runs no walk to fold it
+            // over. Same answer, same order, once a sync.)
+            syncLightWires(e, light);
         }
-        // (The per-light shadow fold that stood here — strongest filter, largest
-        // atlas request, "does anything cast" — is refreshLightAggregates()
-        // now: it is a fold over Scene::lights, which is BOUNDED BY THE LIGHT
-        // COUNT and therefore free, and a still frame runs no walk to fold it
-        // over. Same answer, same order, once a sync.)
-        syncLightWires(e, light);
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Decal) {
@@ -3516,7 +3546,20 @@ void SceneMirror::noteMaterialUser(iris::SceneNode *node, iris::Material *from,
             auto &v = it.value();
             auto at = std::find(v.begin(), v.end(), node);
             if (at != v.end()) v.erase(at);
-            if (v.empty()) mMaterialUsers.erase(it);
+            if (v.empty()) {
+                mMaterialUsers.erase(it);
+                // ...AND THE MEMO WITH IT (lead review R2 #1). Its key is a raw
+                // `iris::Material *` and markChangedMaterials DEREFERENCES
+                // every key it holds (to read the material's revision), while
+                // the memo was pruned only by reclaimUnused — which runs AFTER
+                // the change list is consumed. A material dropped by its last
+                // node is free to die the moment the caller's reference goes,
+                // and that is the ordinary rebake/replace path (materialsapi
+                // builds a fresh material, assigns it, and lets the old one go
+                // at scope end). Nothing else can reference a material no entry
+                // draws, so this is the exact moment its record must go.
+                mMaterialSync.remove(from);
+            }
         }
     }
     if (to) {
@@ -3767,7 +3810,16 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
         }
         // The fields moved. If the REVISION did not, the write bypassed
         // Material::touch() — count it, name it, and heal it.
-        if (it->revision == rev) notePush(nullptr, "material written without touch()");
+        if (it->revision == rev) {
+            // NAMED (lead review R2 #4): a material has a name and a guid, and
+            // "something was written without touch()" is useless without them.
+            const QByteArray reason =
+                QStringLiteral("material '%1' written without touch()")
+                    .arg(material->getName().isEmpty() ? material->getGuid()
+                                                       : material->getName())
+                    .toUtf8();
+            notePush(nullptr, reason.constData());
+        }
         // Fall through and rebuild in place, keeping the cast.
         MaterialSync fresh;
         fresh.lastSeen = mSyncStamp;

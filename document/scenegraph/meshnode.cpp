@@ -90,7 +90,12 @@ FaceCullingMode MeshNode::getFaceCullingMode() const
 
 void MeshNode::setFaceCullingMode(const FaceCullingMode &value)
 {
+    if (faceCullingMode == value) return;
     faceCullingMode = value;
+    // The mirror pushes this (it is part of the material's render state), and
+    // since the dirty set it only looks at a node the document says changed
+    // (lead review R2 #10).
+    notifyChanged(NodeChange::Params);
 }
 
 QList<Property*> MeshNode::getProperties()

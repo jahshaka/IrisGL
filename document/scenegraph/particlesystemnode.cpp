@@ -78,6 +78,9 @@ void ParticleSystemNode::resetAuthoringDefaults()
     orientation = ParticleOrientation::Billboard;
     alphaHash = true;
     preset = ParticlePreset::Custom;
+    // The whole authoring block at once (lead review R2 #2): every field here
+    // is in the emitter's mirror signature, and applyPreset runs through this.
+    notifyChanged(NodeChange::Params);
 }
 
 ParticleSystemNode::~ParticleSystemNode() = default;
@@ -249,6 +252,7 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
         scaleKeys  = { sk(0.0f, 1.0f), sk(1.0f, 0.4f) };
         break;
     }
+    notifyChanged(NodeChange::Params);
 }
 
 // ---- name tables -----------------------------------------------------------

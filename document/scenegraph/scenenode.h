@@ -511,7 +511,7 @@ public:
     void _leaveDirtySet()
     {
         if (!mDirtySet) return;
-        if (mQueued) mDirtySet->cancel(mDirtySlot);
+        if (mQueued) mDirtySet->cancel(mDirtySlot, this);
         mDirtySet->evict(this);
         mDirtySet = nullptr;
         mDirtyMask = 0;
