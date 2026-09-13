@@ -364,8 +364,13 @@ bool OgreScene::refreshVctFast() {
         // (P7): its VctMaterial cache would re-voxelize the old colour, so the
         // voxel half is rebuilt fresh — under the SAME probe grid.
         const bool freshVoxels = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
+        // ONE ROW FOR THE REFRESH'S VOXEL HALF (ENGINE-5 item 2): re-voxelise +
+        // re-inject, with the reason that staled the volume. `units` is the
+        // item count the voxeliser walked.
+        monitor::CacheScope voxelWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
+                                      "vct.refresh", mRoot->getRenderSystem());
         if (freshVoxels) {
-            if (!freshVoxelArm(aabb)) return false;          // the caller rebuilds
+            if (!freshVoxelArm(aabb)) { voxelWork.cancel(); return false; }   // the caller rebuilds
         } else {
             // Items born since the build. Nothing can have DIED (the generation
             // says so), so the voxelizer's item list only ever grows on this path.
@@ -392,6 +397,8 @@ bool OgreScene::refreshVctFast() {
                                  giRayMarchStepScale(false));
         }
         const auto tVoxels = std::chrono::steady_clock::now();
+        voxelWork.setUnits(unsigned(mVctItemIds.size()));
+        voxelWork.close();
         mGiLitVolume = aabb;
         mGiProbeRegion = region;
         noteGiAutoVolume(aabb, !giBoundsExplicit());
@@ -433,7 +440,12 @@ bool OgreScene::refreshVctFast() {
         // leave the probes describing a box that no longer exists. Upstream's
         // own rule, in its own words: minor changes to VctLighting -> reset(),
         // major -> initialize() again.
-        buildIrradianceField();
+        {
+            monitor::CacheScope fieldWork(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
+                                          "ifd.build", mRoot->getRenderSystem());
+            buildIrradianceField();
+            fieldWork.setUnits(mIfdTotalProbes);
+        }
         // A fresh voxel arm is not a reuse of the voxels (the probes were
         // kept either way, and giStatus.rebuilds does not move).
         mGiReusedLastRefresh = !freshVoxels;
@@ -497,8 +509,17 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
         // moving, the scene's own at rest.
         const Ogre::uint32 extraBounces =
             inMotion ? 0u : Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
-                             giRayMarchStepScale(inMotion));
+        {
+            // THE LIGHT-ONLY TICK (ENGINE-5 item 2). The cheap path a drag runs
+            // every few frames: one injection dispatch per bounce over the
+            // voxels that are already there. `units` = bounces actually run.
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0,
+                                     inMotion ? "vct.light.moving" : "vct.light",
+                                     mRoot->getRenderSystem());
+            mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+                                 giRayMarchStepScale(inMotion));
+            work.setUnits(extraBounces + 1u);
+        }
         // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
         // object, same voxel textures, same field geometry — only the radiance
         // in the volume changed. reset() re-arms the integration counter and
@@ -517,8 +538,11 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             // a raster one would be 8192 x 6 scene renders in one frame, so it
             // keeps its previous answer until the budget is raised.
             if (!mIfdProbesPerFrame && mIfdSource != GiSource::Raster) {
+                monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
+                                         mRoot->getRenderSystem());
                 mIfd->update(mIfdTotalProbes);
                 mIfdProbesDone = mIfdTotalProbes;
+                work.setUnits(mIfdTotalProbes);
             }
         }
         return true;
@@ -2595,7 +2619,16 @@ void OgreScene::rebuildGi() {
     mInstantRadiosity->mAoI.clear();
     mInstantRadiosity->mAoI.push_back(
         Ogre::InstantRadiosity::AreaOfInterest(aabb, aabb.getRadius() * 2.0f));
-    mInstantRadiosity->build();
+    {
+        // THE GI CACHE'S OWN ROW (ENGINE-5 item 2). `CacheKind::Gi` existed in
+        // Types.h and nothing ever filed one, so a capture showed GI rebuilds
+        // as EVENTS and never as work in the frame that paid for it. The IR
+        // trace is pure CPU (a ray trace on the UI thread), hence no render
+        // system and no GPU pair.
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
+                                 "ir.rebuild");
+        mInstantRadiosity->build();
+    }
     // Diagnostic: JAHSHAKA_GI_DEBUG=1 logs how many VPLs the trace planted.
     if (std::getenv("JAHSHAKA_GI_DEBUG")) {
         size_t vpls = 0;
@@ -2645,7 +2678,16 @@ void OgreScene::rebuildVct() {
     if (!computeGiBounds(mn, mx)) return;   // nothing to voxelize (yet); stay armed via mGi
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
 
-    const size_t itemCount = buildVoxelArm(aabb);
+    size_t itemCount = 0;
+    {
+        // The voxelisation and the first light injection: compute dispatches,
+        // so the GPU half is a 0027 timestamp pair around them (the compositor
+        // never sees this work and the frame's pass list cannot show it).
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
+                                 "vct.rebuild", mRoot->getRenderSystem());
+        itemCount = buildVoxelArm(aabb);
+        work.setUnits(unsigned(itemCount));
+    }
     if (!itemCount) { teardownVct(); return; }   // stay armed; next churn re-flags
 
     hlmsPbs(mRoot)->setVctLighting(mVctLighting);
@@ -3578,7 +3620,16 @@ void OgreScene::updateIrradianceField() {
             mIfdProbesDone = mIfdTotalProbes;
             return;
         }
-        mIfd->update(batch);
+        {
+            // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
+            // budget's turn, one batch of probes a frame, so `Sweep` is its
+            // reason: nothing changed, this is the cache catching up.
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0,
+                                     raster ? "ifd.converge.raster" : "ifd.converge",
+                                     mRoot->getRenderSystem());
+            mIfd->update(batch);
+            work.setUnits(batch);
+        }
         mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + batch);
     } JAH_CATCH(mError, );
 }

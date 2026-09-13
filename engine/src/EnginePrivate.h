@@ -985,10 +985,12 @@ public:
     // short holding queue until its samples arrive or it ages out, and only
     // then enters the ring the host drains.
     static constexpr unsigned kGpuLatencyFrames = 3u;
-    /// A frame waiting for its GPU samples, with the sample id of each pass.
+    /// A frame waiting for its GPU samples, with the sample id of each pass
+    /// and of each timed cache row.
     struct PendingFrame {
         FrameRecord           rec;
-        std::vector<unsigned> passSampleIds;   ///< parallel to rec.passes
+        std::vector<unsigned> passSampleIds;    ///< parallel to rec.passes
+        std::vector<unsigned> cacheSampleIds;   ///< parallel to rec.cacheWork
     };
     /// The level this capture was started at (`Review` today). Held so the
     /// switch is level-sensitive rather than merely on/off.
@@ -1001,12 +1003,23 @@ public:
     /// frame — and one that belongs to a frame already published is dropped
     /// rather than mis-filed.
     unsigned mNextGpuSampleId = 1u;
-    /// id -> (pending-queue index, pass index). Rebuilt as frames retire.
-    std::unordered_map<unsigned, std::pair<unsigned, unsigned>> mGpuSampleIndex;
+    /// Where a sample id's result belongs: which frame in the holding queue,
+    /// which row of it, and whether that row is a PASS or a CACHE-WORK entry
+    /// (a compute dispatch the compositor never sees).
+    struct GpuSampleSlot {
+        unsigned frame = 0;   ///< index into mPending
+        unsigned row = 0;     ///< index into rec.passes or rec.cacheWork
+        bool     cache = false;
+    };
+    /// id -> where its result goes. Rebuilt as frames retire.
+    std::unordered_map<unsigned, GpuSampleSlot> mGpuSampleIndex;
     std::deque<PendingFrame> mPending;
     /// The sample id of each pass of the frame being built, parallel to
     /// `mCurrent.passes`. Empty while GPU sampling is off.
     std::vector<unsigned> mPassSampleIds;
+    /// The same, for `mCurrent.cacheWork` — held index-parallel, which is why
+    /// `adoptPendingCacheWork` files a 0 for every row it adopts.
+    std::vector<unsigned> mCacheSampleIds;
     /// Files a GPU result against the pass that asked for it. Unknown ids (a
     /// frame that already aged out) are dropped.
     void noteGpuSample(unsigned sampleId, float ms);
@@ -1024,7 +1037,7 @@ public:
     /// Banks a between-frames stage, coalescing by name past
     /// kPendingStageCoalesce so the pending list cannot grow without bound.
     void bankPending(const std::string &name, float ms);
-    void cacheWork(const CacheWork &w);
+    void cacheWork(const CacheWork &w, unsigned gpuSampleId = 0u);
     void pass(FramePass &&p, unsigned gpuSampleId = 0u);
     void event(MonitorEvent &&e);
     /// Cache work recorded BEFORE the frame opened — the probe budget and the
@@ -1097,8 +1110,17 @@ private:
     std::vector<MonitorEvent> mEvents;
     std::vector<FrameStage>   mPendingHostStages;
     std::vector<CacheWork>    mPendingCacheWork;
+    /// The GPU sample id of each pending row, parallel to `mPendingCacheWork`.
+    /// Cache work BETWEEN frames (the mirror's GI half runs before the frame
+    /// opens) still takes its timestamp pair — the pair rides the same command
+    /// buffer the next frame's passes will — and the id is registered when the
+    /// row is adopted.
+    std::vector<unsigned>     mPendingCacheSampleIds;
     FrameRecord               mCurrent;
     std::chrono::steady_clock::time_point mFrameStart;
+    /// The number of the last frame that BEGAN. Events recorded between frames
+    /// are stamped with it rather than with the empty record's 0.
+    unsigned long long mLastFrameNumber = 0;
     double   mOverheadMs = 0.0;
     float    mLastOverheadMs = 0.0f;
     bool     mInFrame = false;
@@ -1137,6 +1159,58 @@ private:
 /// inside the pass records (a probe capture, a shadow map), not measured again.
 void noteCacheWork(CacheKind cache, WorkReason reason, unsigned long long id,
                    const char *detail, unsigned units, float ms = -1.0f);
+/// RAII: times ONE cache's work and files it as a CacheWork row when it ends —
+/// the shape every expensive cached system uses for work it does INSIDE a
+/// frame (a GI voxelisation, a light injection, an irradiance-field batch).
+///
+/// It also brackets the work with a GPU timestamp pair (ogre-patch 0027) when
+/// the capture has GPU sampling live, which is the only way a compute dispatch
+/// can report GPU time at all: the monitor's other samples ride the compositor
+/// pass callbacks, and a compute job the engine dispatches itself is not a
+/// compositor pass. The pair is written into the same command buffer as the
+/// dispatch and read back two frames later, exactly like a pass's.
+///
+/// A SCOPE MUST NOT STRADDLE A FRAME BOUNDARY. The render system's sample
+/// stack is cleared when the host opens a frame (patch 0027's
+/// `JahGpuFrameBegin`, so that a frame which threw cannot corrupt the next
+/// one's nesting), and a `begin` on one side of that point with its `end` on
+/// the other would pop somebody else's sample. Every call site here is inside
+/// one frame or inside the mirror's pre-frame half, never across the edge.
+///
+/// `detail` is a `const char *` for the same reason EventScope's is: nothing
+/// may be constructed at the call site while the monitor is off.
+class CacheScope {
+public:
+    CacheScope(CacheKind cache, WorkReason reason, unsigned long long id,
+               const char *detail, Ogre::RenderSystem *rs = nullptr);
+    ~CacheScope();
+    CacheScope(const CacheScope &) = delete;
+    CacheScope &operator=(const CacheScope &) = delete;
+    /// What the work turned out to be worth (probes, items, bounces). Read at
+    /// destruction, so the call site can set it once it knows.
+    void setUnits(unsigned units) { mUnits = units; }
+    /// Abandons the row entirely — for a path that decided to do nothing after
+    /// all (an early return that built no work).
+    void cancel() { mCancelled = true; }
+    /// Files the row NOW rather than at the end of the enclosing block, for a
+    /// scope whose work ends in the middle of a long function. Idempotent; the
+    /// destructor does nothing afterwards.
+    void close();
+private:
+    const char        *mDetail = nullptr;
+    Ogre::RenderSystem *mRs = nullptr;
+    unsigned long long mId = 0;
+    CacheKind          mCache;
+    WorkReason         mReason;
+    unsigned           mUnits = 0;
+    unsigned           mGpuSampleId = 0u;
+    bool               mCancelled = false;
+    /// The monitor was live when the scope OPENED. A capture that starts in the
+    /// middle of one must not file a row timed from an unset clock.
+    bool               mArmed = false;
+    std::chrono::steady_clock::time_point mStart;
+};
+
 /// RAII: times a span and files it as one event when it ends. The shape every
 /// expensive, cause-carrying operation in the engine uses (a GI rebuild, a
 /// probe grid placement) so that a capture can say how long it took and why.

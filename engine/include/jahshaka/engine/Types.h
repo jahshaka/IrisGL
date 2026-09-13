@@ -3074,6 +3074,18 @@ struct CacheWork {
     /// Milliseconds, or NEGATIVE when this work was not timed separately
     /// (it is inside the pass records instead).
     float      ms = -1.0f;
+    /// GPU milliseconds for this work's OWN dispatches, from the render
+    /// system's timestamp queries (ogre-patch 0027). NEGATIVE means NOT
+    /// MEASURED — the build has no JAH_GPU_TIMESTAMPS, the device has no
+    /// usable timestamps, the work ran outside a recorded frame, or the result
+    /// has not come back yet. Never faked as 0.
+    ///
+    /// It is the ONLY GPU time in a capture that does not come from a
+    /// compositor pass: a GI voxelisation, a light injection and an irradiance
+    /// field's integration are compute dispatches the compositor never sees,
+    /// so they are absent from `FrameRecord::gpuMs` (which stays the sum of the
+    /// frame's passes — the invariant a suite asserts) and appear only here.
+    float      gpuMs = -1.0f;
 };
 
 /// One stage of the frame, exclusive of its children.
