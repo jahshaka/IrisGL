@@ -293,6 +293,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     if (mGiVolProbeMaterial) { mTarget->destroyMaterial(mGiVolProbeMaterial); mGiVolProbeMaterial = 0; }
     mGiVolBuilt = false;
     mHighlighted.clear();
+    mHighlightSet.clear();
     for (HighlightShell &s : mHighlightShells) if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
     if (mHighlightMaterial) { mTarget->destroyMaterial(mHighlightMaterial); mHighlightMaterial = 0; }
@@ -357,6 +358,7 @@ void SceneMirror::evacuateEngineObjects()
         if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
     mHighlighted.clear();
+    mHighlightSet.clear();
     // THE GROUND'S HORIZON GOES TOO (lead review). Its `mHorizonFloor` is a raw
     // pointer into the document that is leaving; its material PIN is what keeps
     // the floor's datablock out of the sweep, and every entry that referenced
@@ -454,6 +456,7 @@ int SceneMirror::sync()
     ++mSyncStamp;
     mVisited = 0;
     mMaterialBuilds = 0;    // per-walk, not a running total (materialBuildCount)
+    mCharacterPieces = 0;   // ...and so is the character-piece count
     // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13).
     //
     // Rule 4 (nodegraph.h) DEMOTES a static subtree on the first transform
@@ -640,7 +643,8 @@ void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
                                       const iris::SceneNodePtr &primary)
 {
     mHighlighted.clear();
-    for (const auto &n : nodes) if (n) mHighlighted.append(n);
+    mHighlightSet.clear();
+    for (const auto &n : nodes) if (n) { mHighlighted.append(n); mHighlightSet.insert(n.data()); }
     // The primary only counts when it is actually IN the list: the viewport
     // filters the World root and the built-in ground out of the highlight, and
     // a primary that was filtered away must not colour somebody else's shell.
@@ -652,9 +656,10 @@ void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
 
 bool SceneMirror::isHighlighted(const iris::SceneNode *node) const
 {
-    if (!node) return false;
-    for (const auto &n : mHighlighted) if (n.data() == node) return true;
-    return false;
+    // A SET, not a scan of the list (MIRROR_SCALE lane). It is asked per light,
+    // per camera and per selected mesh on every walk, and a rubber-band select
+    // over a big scene puts hundreds of nodes in the list.
+    return node && mHighlightSet.contains(node);
 }
 
 void SceneMirror::setHighlightWireframe(bool on)
@@ -1014,7 +1019,13 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
     const bool wanted = mCameraBodies && camera->bodyVisible &&
                         camera != mViewCamera;   // never draws itself — see applyCamera
     if (!wanted) {
-        if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
+        // LATCHED like the light wires' (MIRROR_SCALE lane): an engine
+        // setNodeVisible walks the node's subtree, and this ran every frame for
+        // every camera body in the scene whether it was already hidden or not.
+        if (e.wireNode && e.wireVisible != 0) {
+            mTarget->setNodeVisible(e.wireNode, false);
+            e.wireVisible = 0;
+        }
         return;
     }
     if (!e.wireNode) {
@@ -1145,12 +1156,21 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
                                : jahshaka::engine::Colour(0.75f, 0.78f, 0.85f, 1.0f));
     // Wires live in the camera node's local space; undo the node's own scale so
     // a scaled camera node still draws a true frustum.
+    // ON CHANGE ONLY, the same discipline the light wires' scale push uses: a
+    // camera nobody is scaling re-pushed this transform, and this visibility,
+    // sixty times a second.
     const iris::Vec3 sc = camera->getLocalScale();
-    mTarget->setNodeTransform(e.wireNode, jahshaka::engine::Vec3(), jahshaka::engine::Quat(),
-                              jahshaka::engine::Vec3(sc.x() > 1e-6f ? 1.0f / sc.x() : 1.0f,
-                                                     sc.y() > 1e-6f ? 1.0f / sc.y() : 1.0f,
-                                                     sc.z() > 1e-6f ? 1.0f / sc.z() : 1.0f));
-    mTarget->setNodeVisible(e.wireNode, true);
+    quint64 xk = 1469598103934665603ull;
+    mixFloat(xk, sc.x()); mixFloat(xk, sc.y()); mixFloat(xk, sc.z());
+    if (!e.wireXformPushed || e.wireXformKey != xk) {
+        mTarget->setNodeTransform(e.wireNode, jahshaka::engine::Vec3(), jahshaka::engine::Quat(),
+                                  jahshaka::engine::Vec3(sc.x() > 1e-6f ? 1.0f / sc.x() : 1.0f,
+                                                         sc.y() > 1e-6f ? 1.0f / sc.y() : 1.0f,
+                                                         sc.z() > 1e-6f ? 1.0f / sc.z() : 1.0f));
+        e.wireXformKey = xk;
+        e.wireXformPushed = true;
+    }
+    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
 }
 
 // ---- ground grid (EDITOR_SHORTCUTS_SPEC §3) --------------------------------------
@@ -1192,7 +1212,13 @@ void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
 void SceneMirror::syncGrid()
 {
     if (!mGridVisible) {
-        if (mGridNode) mTarget->setNodeVisible(mGridNode, false);
+        // Latched (MIRROR_SCALE lane): setNodeVisible is a subtree walk in the
+        // engine and the grid's node has two children, so a hidden grid cost
+        // three node writes a frame to stay hidden.
+        if (mGridNode && mGridVisiblePushed != 0) {
+            mTarget->setNodeVisible(mGridNode, false);
+            mGridVisiblePushed = 0;
+        }
         return;
     }
     if (mGridColoursDirty) {
@@ -1266,7 +1292,7 @@ void SceneMirror::syncGrid()
         mGridBuiltSpacing = mGridSpacing;
         mGridBuiltExtent = mGridExtent;
     }
-    mTarget->setNodeVisible(mGridNode, true);
+    if (mGridVisiblePushed != 1) { mTarget->setNodeVisible(mGridNode, true); mGridVisiblePushed = 1; }
 }
 
 // ---- the ground's horizon ---------------------------------------------------
@@ -1455,8 +1481,14 @@ void SceneMirror::syncGroundHorizon()
     // scaled or tilted floor keeps its horizon attached to it (and its checker
     // density, which the scale multiplies on both meshes alike).
     //
-    // AND NOTHING AT REST: a floor that has not moved re-pushes nothing, so a
-    // still scene pays three pointer tests for the whole feature.
+    // AND NOTHING AT REST. The claim used to be "three pointer tests"; the line
+    // below it resolved the floor's DERIVED WORLD TRANSFORM every frame, which
+    // walks the node's parent chain (MIRROR_SCALE lane). The document's global
+    // transform-write counter answers "can the floor have moved?" without
+    // asking the graph anything: no write anywhere, no new world.
+    const unsigned long long writes = iris::graph::transformWrites();
+    if (writes == mHorizonWrites && mHorizonVisible == 1) return;
+    mHorizonWrites = writes;
     const iris::Mat4 world = const_cast<iris::MeshNode *>(floor)->getGlobalTransform();
     if (world == mHorizonWorld && mHorizonVisible == 1) return;
     mHorizonWorld = world;
@@ -1521,8 +1553,14 @@ void SceneMirror::syncGiVolume()
     // a call per frame, so the toggle short-circuits before it.
     if (!mGiVolumeVisible) {
         if (mGiVolBuilt) {
-            if (mGiVolLitNode)   mTarget->setNodeVisible(mGiVolLitNode, false);
-            if (mGiVolProbeNode) mTarget->setNodeVisible(mGiVolProbeNode, false);
+            // Latched, like the grid above: two subtree walks a frame to keep
+            // two boxes nobody asked for hidden.
+            if (mGiVolLitNode && mGiVolLitVisible != 0) {
+                mTarget->setNodeVisible(mGiVolLitNode, false); mGiVolLitVisible = 0;
+            }
+            if (mGiVolProbeNode && mGiVolProbeVisible != 0) {
+                mTarget->setNodeVisible(mGiVolProbeNode, false); mGiVolProbeVisible = 0;
+            }
         }
         return;
     }
@@ -1548,20 +1586,21 @@ void SceneMirror::syncGiVolume()
 
     const auto rebuild = [&](NodeId node, MeshId &mesh, MaterialId material,
                              const Vec3 &mn, const Vec3 &mx,
-                             Vec3 &cachedMin, Vec3 &cachedMax, bool have) {
-        if (!have) { mTarget->setNodeVisible(node, false); return; }
+                             Vec3 &cachedMin, Vec3 &cachedMax, bool have, int &vis) {
+        if (!have) { if (vis != 0) { mTarget->setNodeVisible(node, false); vis = 0; } return; }
         if (!mesh || !sameBox(mn, mx, cachedMin, cachedMax)) {
             if (mesh) { mTarget->detachMesh(node); mTarget->destroyMesh(mesh); mesh = 0; }
             mesh = mTarget->createLineMesh(boxEdges(mn, mx), false);
             if (mesh) mTarget->attachMesh(node, mesh, material);
             cachedMin = mn; cachedMax = mx;
         }
-        mTarget->setNodeVisible(node, mesh != 0);
+        const int want = mesh != 0 ? 1 : 0;
+        if (vis != want) { mTarget->setNodeVisible(node, want != 0); vis = want; }
     };
     rebuild(mGiVolLitNode, mGiVolLitMesh, mGiVolLitMaterial,
-            st.boundsMin, st.boundsMax, mGiVolLitMin, mGiVolLitMax, haveLit);
+            st.boundsMin, st.boundsMax, mGiVolLitMin, mGiVolLitMax, haveLit, mGiVolLitVisible);
     rebuild(mGiVolProbeNode, mGiVolProbeMesh, mGiVolProbeMaterial,
-            st.probeRegionMin, st.probeRegionMax, mGiVolProbeMin, mGiVolProbeMax, haveProbe);
+            st.probeRegionMin, st.probeRegionMax, mGiVolProbeMin, mGiVolProbeMax, haveProbe, mGiVolProbeVisible);
 }
 
 MeshId SceneMirror::wireMeshFor(int kind)
@@ -2003,7 +2042,8 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                         e.characterEpoch = epoch;
                         e.boneCount = rig.bones.size();
                         e.rigId = rig.id;
-                        e.clipSignature.clear();     // force a clip re-attach
+                        e.clipSignature = 0;         // force a clip re-attach
+                        e.shareEligibleValid = false;   // ...and re-decide sharing (rigId moved)
                     }
                 }
             }
@@ -2084,6 +2124,12 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
             }
             syncTextures(e, ms);
         }
+        // How many pieces of a multi-piece character the walk has seen — AFTER
+        // the attach above, so a piece counts on the frame it is rigged rather
+        // than the one after. Below two, syncSkeletonSharing has nothing to do
+        // and returns without touching an entry (it used to iterate every entry
+        // in the scene, every frame, to find that out).
+        if (e.gpuSkinned && e.characterHost) ++mCharacterPieces;
     }
 
     // Planar reflector flag (PLANAR_REFLECTIONS_SPEC.md §7). Pushed only on a
@@ -3956,7 +4002,13 @@ void SceneMirror::attachClipsFor(Entry &e)
     // holding: the rig, and the identity + length of every clip. It does NOT
     // cover the clip's keys — those are inside the per-clip content id, which is
     // what the engine's process-lifetime def cache is keyed on.
-    QString signature = QString::fromStdString(e.rigId);
+    // A HASH, not a concatenated string (MIRROR_SCALE lane): this ran per
+    // skinned node per frame, and a Mixamo character with 30 clips built ~100
+    // QStrings to produce a value whose only use is a compare with last
+    // frame's.
+    Hasher sig;
+    sig << quint32(e.rigId.size());
+    sig.bytes(e.rigId.data(), e.rigId.size());
     QList<iris::AnimationPtr> clips;
     if (host) {
         QList<iris::AnimationPtr> candidates = host->getAnimations();
@@ -3976,11 +4028,10 @@ void SceneMirror::attachClipsFor(Entry &e)
             // page's root-motion toggle rebuilds every clip's Animation object
             // with the same name and length, and without this the mirror would
             // keep playing the pre-toggle translation.
-            signature += QLatin1Char('|') + anim->getName() +
-                         QLatin1Char(':') + QString::number(double(anim->getLength()), 'g', 6) +
-                         QLatin1Char('@') + QString::number(quintptr(anim.data()), 16);
+            sig << anim->getName() << anim->getLength() << quintptr(anim.data());
         }
     }
+    const quint64 signature = sig.h;
     if (signature == e.clipSignature) return;
     e.clipSignature = signature;
     e.lastClipPush.clear();
@@ -4488,6 +4539,11 @@ void SceneMirror::syncSkeletonSharing()
     // a mesh swap — and a latch would then believe in a share that no longer
     // exists.
     if (!mTarget || mEntries.isEmpty()) return;
+    // BELOW TWO CHARACTER PIECES THERE IS NOTHING TO SHARE, and this used to
+    // find that out by iterating EVERY entry in the scene, every frame
+    // (MIRROR_SCALE lane): 8,404 QHash probes per frame on a lattice with no
+    // skeleton in it at all. The walk counts the pieces as it goes.
+    if (mCharacterPieces < 2) { mShareGroups.clear(); return; }
 
     mShareGroups.clear();
     for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
@@ -4519,15 +4575,30 @@ void SceneMirror::syncSkeletonSharing()
         if (mTarget->sharesSkeleton(master->node)) {
             mTarget->shareSkeleton(master->node, 0);
             master->shareMaster = 0;
-            master->clipSignature.clear();      // it owns its clips again
+            master->clipSignature = 0;          // it owns its clips again
             master->lastClipPush.clear();
         }
-        const iris::Mat4 masterWorld = master->docNode->getGlobalTransform();
+        // THE WORLD COMPARISONS, ONLY WHEN A WORLD CAN HAVE MOVED. Eligibility
+        // is a rig-id match plus "this piece sits exactly where the master
+        // does", and the second half costs a derived-transform resolution on
+        // the master AND on every piece — per frame, for an answer that cannot
+        // change unless something wrote a transform. The document's global
+        // write counter is the gate; a re-attach (which can change `rigId`)
+        // clears the memo itself.
+        const unsigned long long writes = iris::graph::transformWrites();
+        const bool worldsMayHaveMoved = writes != mShareWorldWrites;
+        iris::Mat4 masterWorld;
+        if (worldsMayHaveMoved) masterWorld = master->docNode->getGlobalTransform();
 
         for (Entry *e : group) {
             if (e == master) continue;
-            const bool eligible = e->rigId == master->rigId &&
-                                  sameWorld(e->docNode->getGlobalTransform(), masterWorld);
+            if (worldsMayHaveMoved || !e->shareEligibleValid) {
+                if (!worldsMayHaveMoved) masterWorld = master->docNode->getGlobalTransform();
+                e->shareEligible = e->rigId == master->rigId &&
+                                   sameWorld(e->docNode->getGlobalTransform(), masterWorld);
+                e->shareEligibleValid = true;
+            }
+            const bool eligible = e->shareEligible;
             const bool shared = mTarget->sharesSkeleton(e->node);
             if (eligible && (!shared || e->shareMaster != master->node)) {
                 if (mTarget->shareSkeleton(e->node, master->node)) {
@@ -4535,7 +4606,7 @@ void SceneMirror::syncSkeletonSharing()
                     // A follower holds NO clips (the engine drops them when the
                     // instance goes): forget what we think it has, so that if it
                     // ever un-shares the clip pass re-attaches from scratch.
-                    e->clipSignature.clear();
+                    e->clipSignature = 0;
                     e->clipMap.clear();
                     e->clipIdMap.clear();
                     e->clipNameMap.clear();
@@ -4546,7 +4617,7 @@ void SceneMirror::syncSkeletonSharing()
             } else if (!eligible && shared) {
                 mTarget->shareSkeleton(e->node, 0);
                 e->shareMaster = 0;
-                e->clipSignature.clear();       // it needs its own clips again
+                e->clipSignature = 0;           // it needs its own clips again
                 e->clipMap.clear();
                 e->clipIdMap.clear();
                 e->clipNameMap.clear();
@@ -4556,6 +4627,7 @@ void SceneMirror::syncSkeletonSharing()
             }
         }
     }
+    mShareWorldWrites = iris::graph::transformWrites();
 }
 
 void SceneMirror::syncClips()

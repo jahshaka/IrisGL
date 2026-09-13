@@ -687,6 +687,15 @@ private:
         /// skipped by the clip pass — it has no animation state of its own — so
         /// this is what turns five clip pushes per character into one.
         jahshaka::engine::NodeId shareMaster = 0;
+        /// SKELETON SHARING's eligibility answer, memoised: whether this piece
+        /// may render from its master's SkeletonInstance. It is a rig-id match
+        /// plus a world-transform comparison, and the transform half needs
+        /// `getGlobalTransform()` on the piece AND the master — per piece, per
+        /// frame, to re-derive an answer that can only change when something
+        /// writes a transform. Invalidated by the document's write counter and
+        /// by a re-attach (which can change `rigId`).
+        bool shareEligible = false;
+        bool shareEligibleValid = false;
         bool gpuSkinned = false;                     // the engine accepted the rig
         size_t boneCount = 0;
         /// Each bone's PARENT INDEX, resolved once per rig instead of by a
@@ -702,7 +711,12 @@ private:
         // WHICH clip and WHEN; the engine samples and blends it.
         iris::SceneNode *docNode = nullptr;          // the document node this entry mirrors
         std::string rigId;                           // for the clip def's content key
-        QString clipSignature;                       // rig + clip set; re-attach on change
+        /// The rig + clip set, as a HASH. It was a QString built by
+        /// concatenation — a Mixamo character with 30 clips cost ~100
+        /// allocations per frame to produce a string whose only use was a
+        /// compare against last frame's (MIRROR_SCALE lane). 0 = "no clips
+        /// attached", which is what the re-attach sites write.
+        quint64 clipSignature = 0;
         /// Document clip -> its content id -> the name the engine gave it.
         ///
         /// Two hops because attachClips is IDEMPOTENT PER CONTENT ID and clips
@@ -1334,6 +1348,10 @@ private:
     // Ground grid: one root node (dropped a hair below y=0 against z-fighting
     // with floor geometry) carrying a minor- and a major-line child.
     bool  mGridVisible = false;
+    /// The visibility last PUSHED to the grid's node, -1 = never. Same reason
+    /// as the GI boxes above: setNodeVisible is a subtree walk and the grid
+    /// node has two children.
+    int   mGridVisiblePushed = -1;
     GridPlane mGridPlane = GridPlane::Floor;
     GridPlane mGridBuiltPlane = GridPlane::Floor;
     float mGridFloorOffset = -0.01f;        // see setGridFloorOffset
@@ -1361,6 +1379,10 @@ private:
     jahshaka::engine::MaterialId mHorizonMaterial = 0;
     int mHorizonVisible = -1;
     iris::Mat4 mHorizonWorld;     ///< the floor transform last pushed (nothing at rest)
+    /// The document's transform-write count when the horizon's world was last
+    /// resolved. Nothing wrote a transform => the floor cannot have moved, and
+    /// the derived-transform walk below can be skipped entirely.
+    unsigned long long mHorizonWrites = ~0ull;
     // The GI volume overlay: one node per box, rebuilt only when the reported
     // bounds actually move (a GI rebuild is rare; this sync runs every frame).
     bool mGiVolumeVisible = false;
@@ -1369,8 +1391,18 @@ private:
     jahshaka::engine::MaterialId mGiVolLitMaterial = 0, mGiVolProbeMaterial = 0;
     jahshaka::engine::Vec3 mGiVolLitMin, mGiVolLitMax, mGiVolProbeMin, mGiVolProbeMax;
     bool mGiVolBuilt = false;
+    /// The visibility last PUSHED to each GI volume box, -1 = never
+    /// (MIRROR_SCALE lane). An engine setNodeVisible is a subtree walk, and
+    /// both boxes were re-hidden every frame in every scene that never shows
+    /// them — which is every scene, until somebody opens the GI overlay.
+    int mGiVolLitVisible = -1;
+    int mGiVolProbeVisible = -1;
     /// The highlighted SET, primary first. Empty = nothing selected.
     QList<iris::SceneNodePtr> mHighlighted;
+    /// The same set, for the membership test (isHighlighted). The list keeps
+    /// the ORDER and the strong references; this answers "is this one in it?"
+    /// without a scan, which the walk asks per light and per camera.
+    QSet<const iris::SceneNode *> mHighlightSet;
     /// The set's PRIMARY member, or null. Only distinguishes a colour when the
     /// set has more than one member (see setHighlightedNodes).
     iris::SceneNodePtr mHighlightPrimary;
@@ -1482,6 +1514,14 @@ private:
     quint32 mSettleFrames = 0;
     bool    mStaticSettlePending = false;
     quint64 mStaticRepromotions = 0;
+    /// SKELETON SHARING (syncSkeletonSharing): how many CHARACTER PIECES the
+    /// last walk saw — pieces of a multi-piece character, the only things that
+    /// can share — and the document's transform-write count when the world
+    /// comparisons were last made. Below two pieces there is nothing to share
+    /// and the pass returns before it walks a single entry; with no write since
+    /// the last pass no world transform can have moved.
+    quint32 mCharacterPieces = 0;
+    unsigned long long mShareWorldWrites = ~0ull;
     // ---- MOBILITY counters (REALTIME_REFLECTIONS_SPEC §3.3) ----------------
     /// Recomputed every sync (the walk resolves every node anyway), so this is
     /// a state, not a running total.
