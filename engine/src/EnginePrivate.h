@@ -2925,6 +2925,18 @@ private:
     /// family has one usable slot (Albedo -> texture unit 0); the rest are kept
     /// in the record so switching back to Lit restores them.
     void bindTrackedTextures(MaterialRec &rec);   // records what it bound (see MaterialRec)
+    /// THE SAMPLERBLOCK REFERENCE CEILING (ENGINE-6 item 2, ENGINE-5 review F2).
+    /// Every textured slot on every datablock holds a REFERENCE on the
+    /// samplerblock it was bound with, `BasicBlock::mRefCount` is a uint16, and
+    /// its overflow check is a debug-only assert: at five real maps per
+    /// material, 13,108 textured materials sharing one sampler wrap it, the
+    /// block is freed under live datablocks and the next ~HlmsPbsDatablock
+    /// throws out of a noexcept destructor (the exit-134 class ENGINE-5 fixed
+    /// for EMPTY slots — this is the same ceiling reached honestly). Hands back
+    /// the params to bind with: the same sampler until its block nears the
+    /// ceiling, then a fresh block with identical FILTERING, differing only in
+    /// a max-LOD clamp far above any mip a texture can have.
+    Ogre::HlmsSamplerblock guardSamplerCeiling(Ogre::HlmsSamplerblock sampler);
     /// The same job for generated shader pieces (HLMS_ADOPTION P5): re-applies
     /// `rec.customPiece` onto the material's CURRENT datablock, so a family
     /// switch back to Lit renders the graph again instead of the plain surface
@@ -3082,7 +3094,12 @@ public:
     /// per-cell budget, and the budget itself (F-F2). See RenderStats.
     void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const;
 private:
-    void rebuildGi();
+    /// The Instant Radiosity arm's from-scratch re-trace. `why` NAMES THE CAUSE
+    /// for the render monitor: the default reads the grid's last recorded stale
+    /// reason, which is right for a refresh but wrong on the light-drag path,
+    /// where the IR arm records nothing of its own and the row came out
+    /// carrying whatever staled the grid last (ENGINE-5 review, ledger §208).
+    void rebuildGi(GiStaleReason why = GiStaleReason::None);
     /// Voxelizes the scene's PBR items over computeGiBounds at quality-mapped
     /// resolution, (re)builds VctLighting and binds it to HlmsPbs. The voxelizer
     /// and lighting are recreated from scratch every time (see invalidateGiCaches).
@@ -3763,6 +3780,11 @@ private:
     NodeId              mNextId = 0;
     MeshId              mNextMeshId = 0;
     MaterialId          mNextMaterialId = 0;
+    /// How many times guardSamplerCeiling has had to step off a full block, and
+    /// whether the one log line has been written. See it for what a generation
+    /// is; 0 is the state every scene that ever shipped stays in.
+    unsigned            mSamplerGeneration = 0;
+    bool                mSamplerCeilingLogged = false;
 };
 
 // ---------------------------------------------------------------------------
