@@ -11,6 +11,7 @@
 #include <vector>
 #include "EnginePrivate.h"
 
+#include <OgreBitwise.h>
 #include <OgreMaterial.h>
 #include <OgreTechnique.h>
 #include <OgrePass.h>
@@ -27,6 +28,63 @@ const bool kFlipH[6]   = { true, true, false, false, true, true };
 const bool kFlipV[6]   = { false, false, true, true, false, false };
 
 const char *kIblWorkspace = "JahshakaIblSpecularWorkspace";
+const char *kSkyCaptureWorkspace = "JahshakaSkyCaptureWorkspace";
+
+// THE CAPTURED SKY'S FACE SIZE. 128 is what the host's CPU resample produced
+// for every equirect/baked sky before SKY-GPU, so the reflections this replaces
+// are the same resolution; the SH is integrated from the 32^2 mip of it, which
+// is what the cubemap path always integrated. Raising it costs one GGX
+// convolution, not one CPU pass — but it changes every reflection in every
+// scene, so it is a deliberate number, not a knob.
+const Ogre::uint32 kSkyCaptureSize = 128u;
+/// ...and the mip whose faces the ambient integral reads (128 >> 2 = 32).
+const Ogre::uint8  kSkyShMip = 2u;
+
+// THE SIX CAPTURE FACES, in the camera basis Ogre's own
+// CompositorPass::CubemapRotations gives a `camera_cubemap_reorient` pass
+// (OgreCompositorPass.cpp:59), applied to a camera at the origin with the
+// identity orientation: forward = q*(0,0,-1), right = q*(1,0,0), up = q*(0,1,0).
+//
+// It is NOT the world-face basis of buildCubeFromWorldFaces above — slice 4 of
+// an Ogre cube ("+Z") is the world -Z direction, and four of the six faces are
+// mirrored against their world-axis twin. That is the same left-handedness the
+// kSrcFace/kFlipH/kFlipV table encodes, arrived at from the other end: here the
+// GPU wrote the face, so the direction of a texel is the direction the CAMERA
+// had, and these three vectors are that camera's axes. Deriving it twice and
+// getting the same answer is the check that matters (dst 4 <- world face 5 with
+// a horizontal flip, exactly as the table says).
+const float kFaceFwd[6][3] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,-1}, {0,0,1} };
+const float kFaceRight[6][3] = { {0,0,1}, {0,0,-1}, {1,0,0}, {1,0,0}, {1,0,0}, {-1,0,0} };
+const float kFaceUp[6][3] = { {0,1,0}, {0,1,0}, {0,0,1}, {0,0,-1}, {0,1,0}, {0,1,0} };
+
+/// Cosine-convolved irradiance in 9 SH bands, in the basis and the units
+/// Scene::setAmbientSh documents (its header has the whole model). Moved here
+/// from the host with the integral itself: the sky is a GPU cube now, and the
+/// host has no way to read one.
+struct ShAccum {
+    double a[9][3] = {};
+    void add(float x, float y, float z, double r, double g, double b, double w) {
+        const double bi[9] = { 1.0, y, z, x, double(x) * y, double(y) * z,
+                               3.0 * double(z) * z - 1.0, double(z) * x,
+                               double(x) * x - double(y) * y };
+        for (int i = 0; i < 9; ++i) {
+            const double f = bi[i] * w;
+            a[i][0] += r * f; a[i][1] += g * f; a[i][2] += b * f;
+        }
+    }
+    void finish(float out[27]) const {
+        static const double k[9] = {
+            0.0795774715,
+            0.1591549431, 0.1591549431, 0.1591549431,
+            0.2984155183, 0.2984155183,
+            0.0248679599,
+            0.2984155183,
+            0.0746038796
+        };
+        for (int i = 0; i < 9; ++i)
+            for (int c = 0; c < 3; ++c) out[i * 3 + c] = float(a[i][c] * k[i]);
+    }
+};
 }  // namespace
 
 // THE ONE SKY ENTRY POINT (ENGINEERING_DEBT_SPEC.md item 4). It owns the three
@@ -51,7 +109,31 @@ bool OgreScene::setSky(const SkyDesc &desc) {
     // default, and when it is not, moving the sun already stales them through
     // the light itself.
     const bool sunChanged  = !(mSkyDesc.sun == desc.sun);
-    if (sunChanged) { applySunDisc(desc.sun); mSkyDesc.sun = desc.sun; }
+    if (sunChanged) {
+        // ...WITH ONE EXCEPTION, and it is the whole of ENGINE-6 item 5: while
+        // the disc IS in the probe captures it is part of what they
+        // photograph, so a change to it has to invalidate them exactly as a sky
+        // change does. Nothing did, and since the probe captures became CACHED
+        // (ENGINE_CACHE_POLICY_SPEC) a cached face is what a mirror keeps
+        // showing — which is why `world.sunDisc({inProbes:true})` appeared to
+        // do nothing at all in a reflection while the disc drew perfectly in
+        // every ordinary camera. It was never a cull or a mask: it was a stale
+        // capture. The test is the disc's probe participation BEFORE or AFTER,
+        // so turning it off invalidates too (the disc has to leave the faces it
+        // is baked into), and the ordinary case — a sun rotating with the disc
+        // out of the probes — still stales nothing.
+        const bool inCaptures = (mSkyDesc.sun.enabled && mSkyDesc.sun.inProbes) ||
+                                (desc.sun.enabled && desc.sun.inProbes);
+        applySunDisc(desc.sun);
+        mSkyDesc.sun = desc.sun;
+        if (inCaptures) {
+            staleProbeGrid(GiStaleReason::Sky);
+            // ...and the SKY capture with them: while the disc is in the
+            // environment it is part of the cube every reflective material
+            // samples, so moving the sun moves the reflected sun too.
+            if (mSkyDesc.mode != SkyMode::NoSky) requestSkyCapture();
+        }
+    }
     if (!skyChanged && !reflChanged) return true;   // idempotent: nothing else to do
     // THE PROBE CACHE'S SKY INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
     // faces capture the sky (RQ 0 is inside their range) and the reflection
@@ -63,7 +145,23 @@ bool OgreScene::setSky(const SkyDesc &desc) {
         if (applySkyMode(desc)) {
             mSkyDesc.mode = desc.mode;
             mSkyDesc.equirect = desc.equirect;
+            mSkyDesc.atmosphere = desc.atmosphere;
             for (int i = 0; i < 6; ++i) mSkyDesc.faces[i] = desc.faces[i];
+            // THE ENVIRONMENT COMES FROM THE SKY ITSELF (SKY-GPU). Every sky
+            // there is gets CAPTURED on the GPU — six render_scene passes over
+            // the sky's render queue — and that cube is what the ambient
+            // integral reads. For every sky but a cubemap it is ALSO the IBL
+            // convolution's input; a cubemap sky keeps feeding the convolution
+            // its own full-resolution faces, because re-rendering those into a
+            // 128^2 capture would throw reflection detail away for nothing.
+            if (desc.mode != SkyMode::NoSky)
+                requestSkyCapture();
+            else {
+                // No sky, no sky light: the ambient the host derives from this
+                // must go to zero in the same push that removed the sky.
+                mSkyCapturePending = false;
+                mSkyShValid = false;
+            }
             // Both of these paths REPLACE the reflection cubemap themselves —
             // destroySky() unbinds and frees it, and a cubemap sky rebuilds it
             // from its own faces — so whatever reflection description was in
@@ -92,6 +190,7 @@ bool OgreScene::setSky(const SkyDesc &desc) {
 
 bool OgreScene::applySkyMode(const SkyDesc &desc) {
     if (desc.mode == SkyMode::Cubemap) return applySkyCubemap(desc.faces);
+    if (desc.mode == SkyMode::Atmosphere) return applySkyAtmosphere(desc.atmosphere);
     JAH_TRY {
         if (desc.mode == SkyMode::NoSky) { destroySky(); return true; }
         auto it = mTextures.find(desc.equirect);
@@ -119,6 +218,10 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
         Ogre::TextureGpu *previous = mSkyOwnedTex;
         mSkyOwnedTex = owned;
         mSkyIsEquirect = true;
+        // Leaving the analytic sky: its quad is hidden here rather than in
+        // destroySky, because an image sky does not tear anything down — and
+        // two sky quads at render queue 0 would both draw.
+        if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
         mSceneMgr->setSky(true, Ogre::SceneManager::SkyEquirectangular, use);
         tuneSkyRenderable();
         // Only now is the old texture unreferenced by the sky material. If a
@@ -175,12 +278,346 @@ bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
         else        destroyReflection();
         mSkyOwnedTex = cube;
         mSkyIsEquirect = false;
+        if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
         mSceneMgr->setSky(true, Ogre::SceneManager::SkyCubemap, cube);
         tuneSkyRenderable();
         if (previous)
             mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(previous);
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// ---------------------------------------------------------------------------
+// THE ANALYTIC SKY — Ogre's AtmosphereNpr (SKY-GPU, owner pick 5)
+// ---------------------------------------------------------------------------
+// The "realistic" sky used to be a Preetham evaluation the HOST ran on the CPU,
+// up to 1024x512 pixels of pow/exp/acos per parameter change, on the UI thread,
+// into an equirect image that was then uploaded, resampled into six cube faces
+// and integrated for its ambient. The engine has its own analytic sky —
+// Components/Atmosphere, already built and already in this process for the FOG
+// — whose whole model is a fragment shader over the camera ray. This is the
+// adoption (ALL-IN ON OGRE): the sky is evaluated where a sky belongs.
+//
+// THREE THINGS THE COMPONENT DOES THAT WE DO NOT WANT, and how each is refused:
+//
+//   1. IT OVERWRITES THE LINKED LIGHT. syncToLight() sets the light's type,
+//      direction, diffuse AND specular colour and power scale from its own
+//      model, and pushes an ambient hemisphere pair into the SceneManager
+//      (OgreAtmosphereNpr.cpp:199-213). All of that is OURS: the sun is the
+//      user's directional light and the ambient is the Sky Light's SH. The
+//      refusal costs nothing and needs no patch — syncToLight() returns at its
+//      first line when no light is linked, and we never call setLight(). The
+//      link runs the OTHER way instead: the host pushes the sun light's
+//      direction into `sunDir` and this pushes it into the component.
+//
+//   2. ITS OWN SUN DISC. `sunPower` scales a pow(LdotV, ...) term in the sky
+//      shader; zero removes it. The disc is SunDisc's — one mechanism, over
+//      every sky type, at the sun light's angular size, with its own visibility
+//      channel so probe captures can exclude it. Two discs would be two suns.
+//
+//   3. ITS FOG, IN EVERY PBS SHADER. preparePassHash sets HlmsBaseProp::Fog for
+//      any scene the component is registered on, and registration is not
+//      optional: _update() — which writes the quad's per-camera corner rays —
+//      only runs for the SceneManager's registered atmosphere. So a scene with
+//      the analytic sky compiles the fog block whether or not the World fog is
+//      on. `fogDensity = 0` makes that block an exact identity (fogWeight =
+//      exp2(0) = 1, and lerp(a, b, 1) is b), which is what setFog leaves behind
+//      when the fog is off. A scene with no analytic sky and no fog registers
+//      no atmosphere at all and its shaders are untouched — that is what keeps
+//      every other scene's pixels, and the selftest, where they were.
+bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
+    ensureAtmosphere();
+    if (!mAtmosphere) return false;   // media missing: mError says so
+    JAH_TRY {
+        // Ogre's own sky (an image) and ours cannot both be bound: one scene,
+        // one sky. Dropping it also frees the texture copy it owned.
+        if (mSceneMgr->getSky())
+            mSceneMgr->setSky(false, mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
+        if (mSkyOwnedTex) {
+            mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mSkyOwnedTex);
+            mSkyOwnedTex = nullptr;
+        }
+        mSkyIsEquirect = false;
+
+        Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
+        preset.densityCoeff     = std::max(0.0f, sky.density);
+        preset.densityDiffusion = std::max(0.0f, sky.diffusion);
+        preset.horizonLimit     = sky.horizon;
+        preset.skyColour        = Ogre::Vector3(sky.skyColour.r, sky.skyColour.g, sky.skyColour.b);
+        preset.skyPower         = std::max(0.0f, sky.skyPower);
+        preset.sunPower         = 0.0f;    // (2) above: the disc is SunDisc's
+        // THE FOG HALF belongs to setFog — but only when the fog is ON. When
+        // this path is what CREATED the component (a scene that picks the
+        // analytic sky and has never touched the fog), the preset it copies is
+        // UPSTREAM's constructor default, and that is `fogDensity( 0.0001f )`
+        // (OgreAtmosphereNpr.h): 0.7 % of a surface's colour lost at 100 m and
+        // 13 % at the 2 km horizon plane, for a fog nobody asked for and no
+        // panel row admits to. setFog's off-branch zeroes it, but only for a
+        // scene that had the fog on first. Zero it here, from the flag that
+        // says whether the fog has a customer at all.
+        if (!mAtmoFogOn) preset.fogDensity = 0.0f;
+        mAtmosphere->setPreset(preset);
+
+        // THE SUN, PUSHED IN. setSunDir takes the direction the light TRAVELS
+        // (it negates internally: mSunDir = -sunDir) plus a normalised time of
+        // day, which the model uses for the sun's height terms; sin(elevation)
+        // of our own unit vector is that number, and asin/PI puts it in the
+        // [0;1] the component wants. With no sun light in the scene the sky is
+        // evaluated at the model's lowest sun: its night, the same answer the
+        // CPU bake gave for a sunless scene.
+        const Ogre::Vector3 toSun = sky.hasSun
+            ? Ogre::Vector3(sky.sunDir[0], sky.sunDir[1], sky.sunDir[2]).normalisedCopy()
+            : Ogre::Vector3::UNIT_Y;
+        const float elevation = std::max(-1.0f, std::min(1.0f, float(toSun.y)));
+        const float timeOfDay = sky.hasSun
+            ? std::max(0.0f, std::min(1.0f - 1e-6f, std::asin(elevation) / float(M_PI)))
+            : 0.0f;
+        mAtmosphere->setSunDir(-toSun, timeOfDay);
+
+        mAtmoSkyOn = true;
+        syncAtmosphere();
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+// ONE COMPONENT, TWO CUSTOMERS (the analytic sky and the fog). Registration on
+// the SceneManager is what makes the quad update and what sets hlms_fog, so it
+// is decided HERE from both flags rather than by whichever of setSky/setFog ran
+// last — the bug that would otherwise be written twice is "turning the fog off
+// takes the sky down with it".
+void OgreScene::syncAtmosphere() {
+    if (!mAtmosphere) return;
+    JAH_TRY {
+        if (!mAtmoSkyOn && !mAtmoFogOn) {
+            // Neither: hide the quad AND unregister, which is what makes "no
+            // fog" bit-exact (no hlms_fog, no fog code in any shader).
+            mAtmosphere->setSky(mSceneMgr, false);
+            return;
+        }
+        // setSky(true) shows the quad and registers; setSky(false) hides and
+        // unregisters, so "fog only" is the documented two-step: hide, then
+        // register again.
+        mAtmosphere->setSky(mSceneMgr, mAtmoSkyOn);
+        if (!mAtmoSkyOn) mSceneMgr->_setAtmosphere(mAtmosphere);
+        tuneAtmosphereRenderable();
+        // ...and the FOG's colour mode with it: the aerial mode is only
+        // meaningful while the analytic sky is the sky, so it is re-derived
+        // here rather than pinned at the moment setFog happened to run
+        // (pushFogState's header has the defect that made this a function).
+        pushFogState();
+    } JAH_CATCH(mError, );
+}
+
+// The component parks its quad at render queue 212 with default visibility
+// flags. Both are wrong here, for the same reasons Ogre's own sky is moved in
+// tuneSkyRenderable: 212 is inside the OVERLAY pass's range [210,255), so the
+// sky would be painted over every gizmo, wire and selection outline in the
+// scene; and default flags carry kGiGeometryBit, which is what Instant
+// Radiosity casts its rays against — a sky that is GI geometry is a bounce
+// surface wrapped around the world.
+//
+// The quad pointer is taken from the SceneManager's Rectangle2D list at the
+// moment the component creates it (ensureAtmosphere), because the component
+// keeps its per-SceneManager map private and offers no accessor.
+void OgreScene::tuneAtmosphereRenderable() {
+    if (!mAtmoQuad) return;
+    mAtmoQuad->setRenderQueueGroup(0u);
+    mAtmoQuad->setVisibilityFlags(kVisibleBit);
+    mAtmoQuad->setCastShadows(false);
+}
+
+// ---------------------------------------------------------------------------
+// THE SKY, CAPTURED ON THE GPU (SKY-GPU)
+// ---------------------------------------------------------------------------
+void OgreScene::requestSkyCapture() { mSkyCapturePending = true; }
+
+bool OgreScene::skyAmbientSh(float out[27]) const {
+    if (!mSkyShValid) return false;
+    for (int i = 0; i < 27; ++i) out[i] = mSkySh[i];
+    return true;
+}
+
+// Six render_scene passes over render queue 0 into the six faces of a small
+// cube, then two readers of that cube: the ambient SH integral (its 32^2 mip)
+// and — for every sky that is not already a cubemap — the GGX convolution that
+// produces what every PBR datablock samples.
+//
+// WHY A SCENE PASS AND NOT SIX QUADS OF OUR OWN. The sky is whatever is bound:
+// Ogre's equirect material, Ogre's cube material, or the atmosphere's shader.
+// Rendering the SCENE's sky queue means the environment is by construction the
+// picture the viewport shows — there is no second implementation of the sky to
+// keep in step, which is exactly what the CPU resample was and why a sky change
+// had to touch three code paths. The cost is six culls of a queue with one
+// object in it, once per sky CHANGE.
+//
+// WHERE THIS IS CALLED FROM, and why it is not beside applyPendingIbl (which it
+// feeds): this is a SCENE pass, so it needs a scene graph that has been updated
+// THIS FRAME. `updateSceneGraph` runs after the pending-work loop at the top of
+// OgreEngine::renderOneFrame, so a capture there renders a scene whose static
+// memory manager has never been walked — and on the first frame of a process
+// that means the sky quad has no world AABB yet, culls out, and the capture
+// comes back BLACK (measured: the first colour sky of a run integrated to 0,0,0
+// and every later one was exact). So the capture runs right after
+// updateSceneGraph/applyShadowCacheDirties, still inside the frame; the
+// convolution it queues is picked up by applyPendingIbl at the top of the next.
+void OgreScene::applyPendingSkyCapture() {
+    if (!mSkyCapturePending) return;
+    mSkyCapturePending = false;
+    if (mSkyDesc.mode == SkyMode::NoSky) { mSkyShValid = false; return; }
+    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
+    if (!cm->hasWorkspaceDefinition(Ogre::IdString(kSkyCaptureWorkspace))) {
+        // Media missing (an unstaged tree): no environment rather than a wrong
+        // one, and one line saying which file.
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: " + std::string(kSkyCaptureWorkspace) +
+            " not found — the sky lights nothing and reflects nothing");
+        mSkyShValid = false;
+        return;
+    }
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    Ogre::TextureGpu *cube = nullptr;
+    Ogre::CompositorWorkspace *ws = nullptr;
+    JAH_TRY {
+        cube = tm->createTexture(
+            processUniqueName("skycapture"), Ogre::GpuPageOutStrategy::Discard,
+            // RenderToTexture because the compositor draws into it;
+            // AllowAutomipmaps because BOTH readers want a chain — the SH from
+            // the 32^2 level, the ibl_specular pass from all of them (it
+            // refuses an input that cannot generate one).
+            Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps,
+            Ogre::TextureTypes::TypeCube);
+        cube->setResolution(kSkyCaptureSize, kSkyCaptureSize, 6u);
+        // FLOAT16, NOT sRGB8, and it is the ambient integral that decides it:
+        // one 8-bit sRGB step at mid-grey is ~5e-3 of linear radiance, and the
+        // rounding a GPU does on that encode is vendor-dependent — so a
+        // band-0 assertion against `linearOf(the picked colour)` could only be
+        // held to 4e-3, three times looser than the CPU path it replaced. In
+        // half-float the capture stores what the shader computed, and the
+        // tolerance goes back to 1e-3. It also stops the environment clipping
+        // at 1.0, which an HDR sky (a sunset, a bright HDRI) very much does.
+        cube->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
+        cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(kSkyCaptureSize, kSkyCaptureSize));
+        cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+
+        if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
+        // The capture camera IS the cube's centre: at the origin, unrotated
+        // (camera_cubemap_reorient multiplies the six face rotations onto
+        // whatever orientation it finds), square, 90 degrees.
+        mIblCamera->setPosition(Ogre::Vector3::ZERO);
+        mIblCamera->setOrientation(Ogre::Quaternion::IDENTITY);
+        mIblCamera->setAspectRatio(1.0f);
+        mIblCamera->setFOVy(Ogre::Degree(90.0f));
+        Ogre::CompositorChannelVec externals;
+        externals.push_back(cube);
+        ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
+                              Ogre::IdString(kSkyCaptureWorkspace), false);
+        ws->_beginUpdate(false);
+        ws->_update();
+        ws->_endUpdate(false);
+        cm->removeWorkspace(ws);
+        ws = nullptr;
+
+        // THE AMBIENT, off the sky the capture just took. The SUN DISC is
+        // deliberately NOT in it (the compositor's queue range), and not in the
+        // reflections either: see the note on SunDisc::inProbes in Types.h for
+        // what that switch can and cannot reach today.
+        integrateSkyShFromCube(cube);
+
+        // WHO OWNS THE ENVIRONMENT. Two descriptions say "not the capture":
+        //   * a CUBEMAP sky — its own faces are already the cube, at their full
+        //     resolution, and a 128^2 capture would throw detail away;
+        //   * a description that carries EXPLICIT reflectionFaces — the host
+        //     has stated what the environment is, and SkyDesc says that is what
+        //     a datablock samples. A visible sky and a reflected environment are
+        //     allowed to differ (gi.probe_open's two-toned sky rests on it), and
+        //     the capture must not quietly overrule the host.
+        // In both cases the capture still ran, because the AMBIENT is the sky's
+        // own light either way.
+        if (mSkyDesc.mode == SkyMode::Cubemap || mSkyDesc.reflections) {
+            tm->destroyTexture(cube);
+        } else {
+            // ...and for every other sky the capture IS the environment. The
+            // convolution it queues runs at the top of the NEXT frame
+            // (applyPendingIbl) and frees the cube afterwards — the same one
+            // frame of latency the IBL has always had, and the reason the
+            // ambient a host reads is the sky of the frame before.
+            buildReflectionCubemapFrom(cube, true);
+        }
+        return;
+    } catch (Ogre::Exception &e) {
+        mError = e.getFullDescription();
+    } catch (std::exception &e) {
+        mError = std::string("engine: ") + e.what();
+    }
+    Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky capture failed: " + mError);
+    if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
+    if (cube) { try { tm->destroyTexture(cube); } catch (...) {} }
+    mSkyShValid = false;
+}
+
+// The ambient, read back from the captured cube's 32^2 mip: 6 x 1024 texels,
+// once per sky change. It replaces an integral the host ran over the sky's
+// FULL equirect image (a 4K HDRI is 8.4 M texels x 9 bands on the UI thread,
+// bounded to 256 wide by LIGHTS-2 and now not run at all).
+//
+// THE READBACK RULES, both learned the hard way and both load-bearing:
+// `_autogenerateMipmaps` only RECORDS its blits, and an AsyncTextureTicket
+// issued before the command buffer is submitted reads the allocation's PREVIOUS
+// contents — not zeros, a destroyed texture's pixels. flushCommands() submits.
+void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
+    mSkyShValid = false;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    Ogre::AsyncTextureTicket *ticket = nullptr;
+    JAH_TRY {
+        cube->_autogenerateMipmaps();
+        mRoot->getRenderSystem()->flushCommands();
+        const Ogre::uint8 mip = std::min<Ogre::uint8>(kSkyShMip, Ogre::uint8(cube->getNumMipmaps() - 1u));
+        const Ogre::uint32 n = std::max(1u, kSkyCaptureSize >> mip);
+        ticket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
+                                              cube->getPixelFormat());
+        ticket->download(cube, mip, true);
+        const Ogre::TextureBox box = ticket->map(0);
+        ShAccum acc;
+        for (int f = 0; f < 6; ++f) {
+            const float *fw = kFaceFwd[f], *rt = kFaceRight[f], *up = kFaceUp[f];
+            // A cube-face texel's solid angle is (2/N)(2/N) / |dir|^3 before
+            // normalisation — the projection of the flat face onto the sphere.
+            const double texel = (2.0 / n) * (2.0 / n);
+            for (Ogre::uint32 py = 0; py < n; ++py) {
+                const float ny = 1.0f - 2.0f * (py + 0.5f) / n;
+                const Ogre::uint16 *row = reinterpret_cast<const Ogre::uint16 *>(box.at(0, py, size_t(f)));
+                for (Ogre::uint32 px = 0; px < n; ++px) {
+                    const float nx = 2.0f * (px + 0.5f) / n - 1.0f;
+                    float dx = fw[0] + rt[0] * nx + up[0] * ny;
+                    float dy = fw[1] + rt[1] * nx + up[1] * ny;
+                    float dz = fw[2] + rt[2] * nx + up[2] * ny;
+                    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (len < 1e-6f) continue;
+                    const double w = texel / (double(len) * len * len);
+                    dx /= len; dy /= len; dz /= len;
+                    // Half floats, and ALREADY LINEAR: the capture target is
+                    // RGBA16_FLOAT, so what the sky's shader computed is what
+                    // is stored — no sRGB decode, no 8-bit step.
+                    const Ogre::uint16 *t = row + size_t(px) * 4u;
+                    acc.add(dx, dy, dz, Ogre::Bitwise::halfToFloat(t[0]),
+                            Ogre::Bitwise::halfToFloat(t[1]),
+                            Ogre::Bitwise::halfToFloat(t[2]), w);
+                }
+            }
+        }
+        ticket->unmap();
+        tm->destroyAsyncTextureTicket(ticket);
+        ticket = nullptr;
+        acc.finish(mSkySh);
+        mSkyShValid = true;
+        return;
+    } catch (Ogre::Exception &e) {
+        mError = e.getFullDescription();
+    } catch (std::exception &e) {
+        mError = std::string("engine: ") + e.what();
+    }
+    if (ticket) { try { tm->destroyAsyncTextureTicket(ticket); } catch (...) {} }
+    Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky ambient integral failed: " + mError);
 }
 
 bool OgreScene::applySkyReflectionFaces(const TextureId faces[6]) {
@@ -688,8 +1125,14 @@ void OgreScene::applySunDisc(const SunDisc &sun) {
             // flags — which Rectangle2D's constructor sets — are on.
             mSunDisc->setUseIdentityView(false);
             mSunDisc->setUseIdentityProjection(false);
-            // Queue 1: immediately after the sky, before everything else.
-            mSunDisc->setRenderQueueGroup(1u);
+            // QUEUE 5: after the sky (0) and long before opaque geometry (10),
+            // so the scene occludes the disc through the depth test exactly as
+            // it occludes the sky — and OUT of the sky capture's range, which
+            // is queue 0 and the queue above it (JahshakaSkyCapture.compositor
+            // has the measurement). It was 1, and at 1 a disc the user had put
+            // in the probes was captured into the environment and became most
+            // of the scene's ambient.
+            mSunDisc->setRenderQueueGroup(5u);
             mSunDisc->setCastShadows(false);
             mSceneMgr->getRootSceneNode(Ogre::SCENE_STATIC)->attachObject(mSunDisc);
             mSceneMgr->notifyStaticAabbDirty(mSunDisc);
@@ -753,6 +1196,11 @@ void OgreScene::destroySunDisc() {
 
 void OgreScene::destroySky() {
     destroySunDisc();
+    // The analytic sky goes with it — but the COMPONENT does not: the fog may
+    // still want it (syncAtmosphere owns that decision).
+    if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
+    mSkyCapturePending = false;
+    mSkyShValid = false;
     // Unbind the reflection cubemap from every datablock before it goes away.
     destroyReflection();
     if (mSceneMgr->getSky())

@@ -99,10 +99,27 @@
 // Replace upstream's per-vertex sky evaluation with the authored colour. Redefinition
 // needs the undef first (the parser rejects a duplicate piece) and needs this folder
 // to be the LAST library folder, after Hlms/Pbs/Any/Atmosphere.
-@undefpiece( DoAtmosphereNprSky )
-@piece( DoAtmosphereNprSky )
-	outVs.fog.xyz = midf3_c( passBuf.jahFogColour.xyz );
-	@property( hlms_normal || hlms_qtangent )
+//
+// UNLESS THE FOG IS IN ATMOSPHERE MODE (jah_fog_atmo, set by FogHlmsListener
+// from FogDesc::atmosphereColour). Then upstream's piece is left ALONE and the
+// distance fog takes the ANALYTIC SKY's own scattering colour for the direction
+// each vertex is seen from — aerial perspective, the same model the sky itself
+// is drawn with, changing with the sun for free. It costs the ~30 ALU per vertex
+// that the authored colour saves, which is why it is a mode and not the rule.
+//
+// The height layer's interpolant is written in BOTH modes, so it cannot live in
+// that piece any more: custom_vs_posExecution is inserted at the end of the
+// same function (Hlms/Pbs/GLSL/VertexShader_vs.glsl:73), where worldPos is
+// still in scope.
+@property( !jah_fog_atmo )
+	@undefpiece( DoAtmosphereNprSky )
+	@piece( DoAtmosphereNprSky )
+		outVs.fog.xyz = midf3_c( passBuf.jahFogColour.xyz );
+	@end
+@end
+
+@property( hlms_normal || hlms_qtangent )
+	@piece( custom_vs_posExecution )
 		outVs.jahFogWorldY = worldPos.y;
 	@end
 @end
