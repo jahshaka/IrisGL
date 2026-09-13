@@ -933,12 +933,34 @@ unsigned long long OgreScene::giContentSignature(const std::vector<Ogre::Aabb> &
 
 std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     std::vector<Ogre::Aabb> all = giItemBoundsRaw();
-    // What this fit is being made FOR, remembered by noteGiAutoVolume if the
-    // fit is adopted. The hysteresis floor below reads it.
+    // What this fit is being made FOR. The memo below is keyed on it.
     mGiFitContentNow = giContentSignature(all);
     // One item IS the scene; there is no population to be an outlier against.
     mGiLastItemCount = all.size();
-    if (all.size() < 2u) return all;
+    // THE ANSWER ALREADY ADOPTED FOR THIS CONTENT (lane ENGINE-7 item 2, round
+    // 2). Everything below is a pure function of the gathered boxes AND of the
+    // volume the last fit produced — and that second input is what makes a
+    // re-fit non-idempotent: an outlier the first fit trimmed sits inside the
+    // volume that trim produced, so the next fit keeps it WHOLE and the volume
+    // grows to hold it (Showroom 2: 48.14 -> 56.62 m, 0.376 -> 0.442 m per
+    // voxel, on the second solve of an open nobody touched).
+    //
+    // So the fit is COMPUTED ONCE PER CONTENT and remembered: while the content
+    // signature holds, every caller gets the answer that was adopted for it.
+    // That is both halves of the contract in one line — no ratchet (the fit
+    // cannot re-read its own output) and no oscillation (a re-solve with
+    // unchanged content cannot drop a floor an earlier solve granted; arming
+    // the floor on the content change alone did exactly that, 48 -> 56 -> 48,
+    // which is worse than the ratchet because it takes light away one solve
+    // late).
+    if (mGiFitBoxesValid && mGiFitBoxesKey == mGiFitContentNow) return mGiFitBoxes;
+    const auto adopt = [this](std::vector<Ogre::Aabb> out) {
+        mGiFitBoxes = out;
+        mGiFitBoxesKey = mGiFitContentNow;
+        mGiFitBoxesValid = true;
+        return out;
+    };
+    if (all.size() < 2u) return adopt(all);
 
     const size_t n = all.size();
     std::vector<float> extents(n);
@@ -949,7 +971,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         logSum += std::log(double(extents[i]));
     }
     const float scale = float(std::exp(logSum / double(n)));
-    if (!(scale > 0.0f)) return all;      // degenerate (all points) — keep everything
+    if (!(scale > 0.0f)) return adopt(all);   // degenerate (all points) — keep everything
 
     // The weight ramp, in log space so it is scale-invariant.
     static const float kOutlierSoftStart = 4.0f;    // content up to here
@@ -961,25 +983,11 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     // are kept whole, so ADDING an object can never take light away from
     // something that was already lit (gi.cliff's live table).
     //
-    // ...AND ONLY WHILE THE CONTENT IS CHANGING (lane ENGINE-7 item 2). The
-    // floor used to apply to every fit, including a re-fit of the SAME scene —
-    // and a re-fit is not idempotent under it: an outlier the first fit trimmed
-    // sits inside the volume that trim produced, so the second fit keeps it
-    // WHOLE and the volume grows to hold it. Measured on Showroom 2: the open's
-    // first solve fits 48.14 m and the second 56.62 (+17.6%, 0.376 -> 0.442 m
-    // per voxel), and it stays there for the session. That is a RATCHET, not
-    // hysteresis: the fit answered a different question the second time it was
-    // asked the same one.
-    //
-    // The floor is for the question it was written for — "did the scene's
-    // content change, and may that change take light away?" — so it is armed
-    // by a content change and by nothing else. Re-fitting unchanged content now
-    // re-derives the trim's own answer, which is deterministic, so frame 1,
-    // frame 2 and frame 60 are the same number. (Flicker is not what this
-    // guards against and never was: the trim's ramp is a smoothstep, so a
-    // small input change moves the fit by a small amount by construction.)
-    const bool contentChanged = !mGiFitContentValid || mGiFitContent != mGiFitContentNow;
-    const bool havePrev = mGiAutoVolumeValid && contentChanged;
+    // It applies to every fit this function actually COMPUTES — which, since
+    // the memo above, is one per content: the volume it reads is the one
+    // adopted for the PREVIOUS content, which is exactly the question the floor
+    // asks ("did this change take light away from something already lit?").
+    const bool havePrev = mGiAutoVolumeValid;
     const Ogre::Vector3 prevMin = mGiAutoVolume.getMinimum();
     const Ogre::Vector3 prevMax = mGiAutoVolume.getMaximum();
     const auto coveredByPrev = [&](const Ogre::Aabb &a) {
@@ -1003,7 +1011,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         ramp[i] = c;
         if (w[i] < 1.0f) anyTrimmed = true;
     }
-    if (!anyTrimmed) return all;      // the common case: the plain union, untouched
+    if (!anyTrimmed) return adopt(all);   // the common case: the plain union, untouched
 
     // THE CONTENT CORE: every item at its weight, an outlier collapsing towards
     // its own centre rather than vanishing. Continuous in w by construction —
@@ -1187,7 +1195,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         }
         out.push_back(Ogre::Aabb::newFromExtents(fmn, fmx));
     }
-    return out;
+    return adopt(out);
 }
 
 // Does any GI item's world AABB lie (even partly) OUTSIDE the volume that is
@@ -1307,12 +1315,14 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
     // first object to appear in an empty-but-for-scenery scene legitimately
     // re-centres the volume onto it, and that is the heuristic working.
     mGiAutoVolumeValid = automatic && mGiLastItemCount >= 2u;
-    // WHAT THIS FIT WAS MADE FOR (ENGINE-7 item 2): the content signature the
-    // gather computed on the way here. The hysteresis floor is armed by a
-    // change to it, so a re-fit of unchanged content re-derives the same
-    // answer instead of ratcheting the volume outwards.
-    mGiFitContent = mGiFitContentNow;
-    mGiFitContentValid = true;
+    // THE MEMO IS NOT TOUCHED HERE, and that is the load-bearing half: every
+    // re-solve is a teardown followed by a build, and the teardown comes
+    // through this function with `automatic` false (the zero volume at the top
+    // of rebuildGi). Dropping the memo there made the "unchanged content" test
+    // fail on every re-solve — measured on a Showroom 2 open, which fits the
+    // SAME 16-item signature seven times — so the floor read its own output
+    // again and the volume grew 48.10 -> 56.62. The memo is keyed on the
+    // content and nothing else, because nothing else changes the answer.
     noteSceneTransformWrite();      // the escape signature is relative to it
 }
 

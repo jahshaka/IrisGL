@@ -3649,15 +3649,18 @@ private:
     /// getWorldAabbUpdated calls made by OUR GI code, ever (GiStatus::
     /// giAabbReads). Mutable: two of the four readers are const signatures.
     mutable unsigned long long mGiAabbReads = 0;
-    /// THE CONTENT THE AUTOMATIC VOLUME WAS FITTED TO (ENGINE-7 item 2).
-    /// `mGiFitContentNow` is what the last gather saw (mutable: the gather is a
-    /// const signature); `mGiFitContent` is what the volume in force was made
-    /// for, adopted by noteGiAutoVolume. The hysteresis floor in giItemBounds
-    /// is armed by the difference, so a re-fit of unchanged content cannot
-    /// enlarge its own previous answer.
+    /// THE FIT, MEMOISED AGAINST THE CONTENT IT WAS MADE FOR (ENGINE-7 item 2).
+    /// giItemBounds is a pure function of the gathered boxes AND of the volume
+    /// the last fit produced, which is what makes a re-fit non-idempotent: it
+    /// would read its own output through the hysteresis floor. Computing it
+    /// ONCE PER CONTENT removes both failures at once — the ratchet (a re-fit
+    /// growing its own answer) and the oscillation (a later re-solve dropping a
+    /// floor an earlier one granted). `mGiFitContentNow` is what the last
+    /// gather saw; the rest is the answer adopted for it.
     mutable unsigned long long mGiFitContentNow = 0;
-    unsigned long long mGiFitContent = 0;
-    bool mGiFitContentValid = false;
+    mutable std::vector<Ogre::Aabb> mGiFitBoxes;
+    mutable unsigned long long mGiFitBoxesKey = 0;
+    mutable bool mGiFitBoxesValid = false;
     /// THE TWO SIGNATURES THE MIRROR READS EVERY FRAME (giEscapeSignature,
     /// giGeometrySignature) ARE PURE FUNCTIONS OF THE SAME BOXES, and each was
     /// a full walk of mNodes with a root-recursive getWorldAabbUpdated per GI
