@@ -741,8 +741,16 @@ namespace
 void promoteOnWrite(Ogre::SceneNode *n);
 void promoteStaticChildren(Ogre::SceneNode *n);
 
+/// See graph::transformWrites(). Relaxed because it is a CHANGE TEST read once
+/// a frame by the renderer: it needs to observe "different from last frame"
+/// eventually, not to order anything. (Deleted with the static-shadow opt-in
+/// in lane E2, 2026-09-11, and reinstated here for the GI movement scan, which
+/// was left walking every item of every probe-lit scene every frame.)
+std::atomic<unsigned long long> gTransformWrites{0};
+
 inline void markMoved(Ogre::SceneNode *n)
 {
+    gTransformWrites.fetch_add(1, std::memory_order_relaxed);
     if (n->isStatic()) { promoteOnWrite(n); return; }
     // The root-moved case (see promoteStaticChildren). Two loads, and only in a
     // process that has static nodes at all.
@@ -851,6 +859,16 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s)
     setOrientationExact(o, toOgre(r));
     o->setScale(toOgre(s));
     markMoved(o);
+}
+
+unsigned long long transformWrites()
+{
+    return gTransformWrites.load(std::memory_order_relaxed);
+}
+
+const std::atomic<unsigned long long> &transformWriteCounter()
+{
+    return gTransformWrites;
 }
 
 Mat4 localTransform(NodeHandle n)

@@ -1743,7 +1743,25 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         // or emissive map is a VOXEL input too (VctMaterial copies exactly those
         // two into its texture pool, by TextureGpu pointer, once).
         if (mit->second.boundTextures[size_t(slot)] != texId) {
-            noteMaterialChanged(mat, slot == PbrTextureSlot::Albedo || slot == PbrTextureSlot::Emissive);
+            const bool voxelInput = slot == PbrTextureSlot::Albedo || slot == PbrTextureSlot::Emissive;
+            noteMaterialChanged(mat, voxelInput);
+            // ...AND AGAIN WHEN THE PIXELS ACTUALLY ARRIVE (clean-2 lane,
+            // 2026-09-13). loadTexture only SCHEDULES the decode, and a load
+            // that misses the frame-head drain's no-progress deadline is a stub
+            // — so the probes captured a material wearing nothing, and the
+            // frame the texture became resident staled nothing at all.
+            // settleTextureResidency re-notes this material when the last of
+            // its maps is ready.
+            if (texId) {
+                auto tit = mTextures.find(texId);
+                if (tit != mTextures.end() && tit->second.texture &&
+                    !tit->second.texture->isDataReady()) {
+                    bool parked = false;
+                    for (auto &e : mMaterialsAwaitingTexture)
+                        if (e.first == mat) { e.second = e.second || voxelInput; parked = true; break; }
+                    if (!parked) mMaterialsAwaitingTexture.push_back({ mat, voxelInput });
+                }
+            }
             // A cutout's alpha comes from the albedo map: a new one is a new
             // silhouette in every lamp map the material's items cast into.
             if (slot == PbrTextureSlot::Albedo) noteShadowShapeChanged(mat);

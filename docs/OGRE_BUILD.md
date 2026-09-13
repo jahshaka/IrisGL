@@ -397,8 +397,17 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     `200.BRDFs_piece_ps.any:334`), so a zero-kS clear-coated material reflects
     nothing either — the round-2 header claimed the opposite and was wrong
     (corrected 2026-09-13, A/B-measured pixel-identical in `gi.probe_gate` (g)).
-    The one exclusion is `cubemaps_as_diffuse_gi`, where a probe also carries
-    DIFFUSE light, which kS does not scale.
+    TWO EXCLUSIONS, both "a PASS feature writes the material's specular terms
+    after the material has": `cubemaps_as_diffuse_gi`, where a probe also
+    carries DIFFUSE light, which kS does not scale; and `hlms_decals_diffuse`,
+    where a diffuse decal REWRITES `pixelData.specular` and `pixelData.F0`
+    downstream of `material.kS`
+    (`ForwardPlus_DecalsCubemaps_piece_ps.any:92-100`), so a decal laid on a
+    matte black-kS floor is a reflective patch that must still see the room —
+    the exactness argument does not hold under one, and Jahshaka feeds diffuse
+    decals (`OgreDecals.cpp` setDecal requires a diffuse image). The gate is per
+    DATABLOCK and a decal is per PIXEL, so a scene with diffuse decals bound
+    keeps the probe loop on every material (clean-2 lane, 2026-09-13).
     THE F0 HALF OF THE PREDICATE READS WHAT THE SHADER READS: `setFresnel`
     writes `mFresnelG`/`mFresnelB` only in the SEPARATE form and `getFresnel()`
     returns all three regardless (the default datablock's stale G/B are 0.818),

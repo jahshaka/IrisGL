@@ -155,13 +155,6 @@ static const float kProbeShapeCellAllowance = 8.0f;
 // sky, which the sky IBL already holds perfectly and for free.
 static const int kMinEnclosedAxes = 2;
 
-// THE PROBE CATCH-UP RATE (ENGINE_CACHE_POLICY_SPEC D2) — how many STALE probes
-// one frame may re-capture. 0 = the tier's normal update budget (option A, the
-// shipped default: no hitch, progressive). A positive value raises the rate to
-// at least that many while probes are stale (option B was 4). The owner's
-// reflections design may move it; it is deliberately this one line.
-static const int kProbeCatchUpPerFrame = 0;
-
 // ---- DDGI (GI_UNIFIED_SPEC.md §4 P1) constants ---------------------------
 
 // HOW MANY PROBES A FIELD HAS, total. A power of two, because the per-axis
@@ -594,6 +587,8 @@ GiStatus OgreScene::giStatus() const {
         st.lastStaleReason = mLastStaleReason;
         st.staleSerial     = mStaleSerial;
         st.rebuilds        = mGiRebuilds;
+        st.giScans         = mGiScans;
+        st.giScanMicros    = mGiScanMicros;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -618,6 +613,34 @@ bool OgreScene::materialSeenByGi(MaterialId id, bool &voxelized) const {
         if (probeSeesItem(kv.second)) seen = true;
     }
     return seen;
+}
+
+void OgreScene::settleTextureResidency() {
+    // ONE empty() TEST on a scene that is not waiting for anything — which is
+    // every frame once a scene has opened. Entries appear only in setPbrTexture,
+    // and only for a bind whose texture was not resident yet.
+    if (mMaterialsAwaitingTexture.empty()) return;
+    for (size_t i = 0; i < mMaterialsAwaitingTexture.size();) {
+        const MaterialId mat = mMaterialsAwaitingTexture[i].first;
+        const bool voxelInput = mMaterialsAwaitingTexture[i].second;
+        auto mit = mMaterials.find(mat);
+        bool waiting = false;
+        if (mit != mMaterials.end()) {
+            for (size_t sl = 0; sl < kPbrTextureSlotCount && !waiting; ++sl) {
+                const TextureId tid = mit->second.boundTextures[sl];
+                if (!tid) continue;
+                auto tit = mTextures.find(tid);
+                if (tit == mTextures.end() || !tit->second.texture) continue;
+                waiting = !tit->second.texture->isDataReady();
+            }
+        }
+        if (waiting) { ++i; continue; }
+        // The material (or the whole entry) is settled. A material that died
+        // while waiting simply leaves, having staled nothing.
+        if (mit != mMaterials.end()) noteMaterialChanged(mat, voxelInput);
+        mMaterialsAwaitingTexture[i] = mMaterialsAwaitingTexture.back();
+        mMaterialsAwaitingTexture.pop_back();
+    }
 }
 
 void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
@@ -649,9 +672,9 @@ void OgreScene::staleProbeGrid(GiStaleReason why) {
 
 // WHAT THE FRAME ACTUALLY RE-CAPTURES (GiStatus::probeCapturesLastFrame).
 // Counted at the last moment before the render, from the probes' own dirty
-// flags, so it covers every source that can raise one — the budget, the
-// dynamic reservation, a shape clamp's CubemapProbe::set — rather than trusting
-// any one of them to report itself. A from-scratch placement captures the whole
+// flags, so it covers every source that can raise one — the budget, a shape
+// clamp's CubemapProbe::set — rather than trusting any one of them to report
+// itself. A from-scratch placement captures the whole
 // grid synchronously inside buildPcc (PccPerPixelGridPlacement's buildStart AND
 // buildEnd each run updateAllDirtyProbes), bypassing the flags, so it reports
 // its own count through mPlacementCapturesThisFrame.
@@ -1801,15 +1824,71 @@ void OgreScene::runItemWalk(bool shadow) {
 void OgreScene::ensureGiWalk() {
     if (mGiWalkedThisFrame) return;
     mGiWalkedThisFrame = true;
+    // NOTHING WROTE A TRANSFORM SINCE THE LAST SCAN, so nothing can have moved
+    // (clean-2 lane, 2026-09-13). This walk reads getWorldAabbUpdated() per
+    // item — a parent-chain walk each — and it ran on every frame of every
+    // probe-lit scene, still or not: 392 / 1961 / 4328 us at 1k / 5k / 10k
+    // nodes, measured by lane R2. The epoch is the host's transform-write
+    // counter plus our own writes; see transformEpoch().
+    //
+    // EVERYTHING ELSE THE PROBES CONSUME IS PUSHED, NOT SCANNED: an item
+    // arriving, leaving, being hidden, shown, made a helper, re-materialled or
+    // re-classified all call staleProbeGrid at their own seam (OgreScene.cpp,
+    // OgreMaterials.cpp). The scan's unique job is movement, and movement is
+    // exactly what the epoch reports.
+    const unsigned long long epoch = transformEpoch();
+    if (mGiScannedOnce && mGiWalkEpochValid && epoch == mGiWalkEpoch) {
+        // The boxes are per frame by contract (walkItems clears them at its
+        // head), so a skipped frame must publish "nothing moved" rather than
+        // last frame's movers — otherwise a single move would stale the grid
+        // for ever.
+        mGiMovedBoxes.clear();
+        mGiScanMicros = 0.0;
+        return;
+    }
+    mGiWalkEpoch = epoch;
+    mGiWalkEpochValid = detail::gTransformWriteCounter != nullptr;
+    ++mGiScans;
     const auto t0 = std::chrono::steady_clock::now();
     walkItems(true, false, true);
     mGiScanMicros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+}
+
+/// THE MOVEMENT EPOCH: the host's process-wide transform-write counter (the
+/// document writes into the shared scene graph without telling the engine) plus
+/// the writes the ENGINE itself makes to nodes of this scene — Scene::
+/// setNodeTransform, a socket rider's per-frame placement, a decal's projector
+/// box. Both halves are counts of WRITES, so writing the same value again reads
+/// as movement and costs one extra scan; that is the safe direction.
+unsigned long long OgreScene::transformEpoch() const {
+    const unsigned long long host =
+        detail::gTransformWriteCounter
+            ? detail::gTransformWriteCounter->load(std::memory_order_relaxed)
+            : 0ull;
+    return host + mSceneTransformWrites;
 }
 
 void OgreScene::indexItemNode(Node &n) {
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
+}
+
+void OgreScene::indexDecalNode(Node &n) {
+    if (n.decalSlot != size_t(-1)) return;
+    n.decalSlot = mDecalNodes.size();
+    mDecalNodes.push_back(&n);
+}
+
+void OgreScene::unindexDecalNode(Node &n) {
+    n.scan.decalKnown = false;
+    if (n.decalSlot == size_t(-1)) return;
+    const size_t i = n.decalSlot;
+    Node *last = mDecalNodes.back();
+    mDecalNodes[i] = last;
+    last->decalSlot = i;
+    mDecalNodes.pop_back();
+    n.decalSlot = size_t(-1);
 }
 
 void OgreScene::unindexItemNode(Node &n) {
@@ -1856,7 +1935,10 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
     }
     bool firstShadow = false;
     Ogre::uint32 channelsAll = 0u;
-    std::vector<MaterialId> deforming;   // materials with a vertex-stage piece (usually none)
+    // Materials with a vertex-stage piece (usually NONE). A scratch member, not
+    // a local: this walk runs every frame (clean-2 lane).
+    std::vector<MaterialId> &deforming = mScanDeforming;
+    deforming.clear();
     if (shadow) {
         mShadowChanges.clear();
         firstShadow = !mShadowScanPrimed;
@@ -1962,6 +2044,30 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
             r.shadowChannels = channels;
         }
     }
+    if (gi) {
+        // THE DECALS (clean-2 lane, 2026-09-13). A decal is not an Item and its
+        // node usually carries none, so the loop above cannot see it — yet the
+        // probe faces render decals like any other Forward+ surface, which
+        // makes a decal that MOVES a probe input exactly as a moved crate is.
+        // (Arrival, removal and edits stale the grid at their own seam, in
+        // setDecal/removeDecal; this half is the one that cannot be pushed.)
+        // Its box is `probeOnly`: a decal paints a surface the probes capture,
+        // and the voxels never see one.
+        for (Node *np : mDecalNodes) {
+            Node &n = *np;
+            if (!n.decal || !n.decalNode) continue;
+            const Ogre::Aabb a = n.decal->getWorldAabbUpdated();
+            if (!n.scan.decalKnown) {
+                n.scan.decalKnown = true;
+                n.scan.decalBox = a;
+                continue;                       // arrival: setDecal staled it already
+            }
+            if (giAabbMoved(n.scan.decalBox, a)) {
+                n.scan.decalBox = a;
+                mProbeOnlyChanged = true;
+            }
+        }
+    }
     if (shadow) {
         if (!firstShadow)
             mShadowChanges.insert(mShadowChanges.end(), mShadowVanished.begin(), mShadowVanished.end());
@@ -2013,10 +2119,9 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
 //     nothing invalidated a probe on any of them — which is why the refill and
 //     the missing invalidations (P7) went out together.
 //
-//     v1 STALES THE WHOLE GRID per input, a mover included (on top of the
-//     dynamic reservation below, which is unchanged): indoors every parallax
-//     shape contains everything (the A2 clamp), so area or shape locality would
-//     discriminate nothing; v2 can add it for open fields.
+//     v1 STALES THE WHOLE GRID per input, a mover included: indoors every
+//     parallax shape contains everything (the A2 clamp), so area or shape
+//     locality would discriminate nothing; v2 can add it for open fields.
 //
 // Called once per scene per frame, from the AUTHORITATIVE view only (F7): the
 // engine picks one on-screen view per scene in renderOneFrame, because two views
@@ -2046,12 +2151,12 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // material or a live texture stales nothing by itself. SSR and planar
     // reflections show it live; the probes are the static-environment layer.
 
-    // THE CATCH-UP RATE (spec D2). How many STALE probes a frame may capture:
-    // the tier's normal budget (option A, the default — no hitch, a 32-probe
-    // grid catches up in about half a second at 60 Hz). The reflections design
-    // being studied separately may raise it; this is the one line to change
-    // (option B was a temporary 4 per frame).
-    const int catchUp = kProbeCatchUpPerFrame > 0 ? std::max(budget, kProbeCatchUpPerFrame) : budget;
+    // THE CATCH-UP RATE (spec D2) IS THE BUDGET (option A, the shipped answer:
+    // no hitch, progressive — a 32-probe grid catches up in about half a second
+    // at 60 Hz). Option B, a separate faster rate while probes are stale, was a
+    // dead constant at 0 with a branch nobody could reach; raising the rate now
+    // means raising the tier's budget, which is the same number the status
+    // reports (clean-2 lane, 2026-09-13).
 
     // How much a probe covering something that just moved may jump the queue.
     // It cannot break the sweep guarantee (it only reorders within one), so the
@@ -2081,7 +2186,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
                             (covers ? kMovedBoost : 1.0f);
         ranked.emplace_back(-score, i);
     }
-    const size_t take = std::min(size_t(catchUp), ranked.size());
+    const size_t take = std::min(size_t(budget), ranked.size());
     std::partial_sort(ranked.begin(), ranked.begin() + std::ptrdiff_t(take), ranked.end());
     for (size_t k = 0; k < take; ++k) {
         const size_t i = ranked[k].second;
@@ -2412,13 +2517,18 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     //
     // A reflection probe is a photograph of an enclosure taken from a point.
     // `computeProbeRegion` has just MEASURED whether this scene has one, out of
-    // the same reading that fitted the region: for each axis it finds the
-    // outermost SLABS (thin on that axis, broad on the other two, relative to
-    // themselves) either side of the content, and counts the axis as enclosed
-    // when those two face each other across a real gap. Nothing here assumes a
-    // "room" — the engine has no such concept, only geometry and where it
-    // stands — and nothing is tuned to a size: the ground a scene sits on takes
-    // part in the Y answer, as the floor, and is invisible to X and Z.
+    // the same reading that fitted the region — rules R1-R3, stated in full at
+    // that function: an item is a SLAB for an axis when it is thin on that axis
+    // and broad on the other two relative to itself; a slab may CLOSE a face
+    // only if it also COVERS the region (half its cross-section on each of the
+    // other two axes), which is what separates a wall from a shelf; an axis is
+    // ENCLOSED by a FACING PAIR of covering slabs across a real gap, and a LONE
+    // covering slab closes its one face only when nothing at all lies beyond
+    // it. Nothing here assumes a "room" — the engine has no such concept, only
+    // geometry and where it stands — nothing is tuned to a size, and nothing
+    // reads a POSITION: the same room measures the same wherever it is built.
+    // The ground a scene sits on is the floor by R3 (nothing is below it) and
+    // decides nothing on X and Z, where it is the content rather than a wall.
     //
     // Below two such axes the probes would be photographing sky, and the cost
     // of doing so is not small: at the shipped Epic grid that is 18-32 cube

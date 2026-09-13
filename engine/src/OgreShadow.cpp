@@ -544,7 +544,7 @@ void OgreEngine::deriveShadowMapCount() {
     // What the frame is about to draw — the same set the frame loop updates, so
     // a preview scene nobody is looking at cannot force the editor's atlas to
     // grow.
-    std::vector<OgreScene *> scenes;
+    std::vector<OgreScene *> &scenes = mShadowSceneScratch;   // per frame; clean-2 lane
     scenesFeedingEnabledViews(scenes);
     unsigned casters = 0;
     for (OgreScene *s : scenes) casters = std::max(casters, s->countLocalShadowCasters(nullptr));
@@ -959,7 +959,12 @@ void OgreEngine::applyShadowCache() {
         // kShadowClearFlipDebounceFrames presented frames of the old clear
         // strategy, during which nothing is cached yet anyway.
         if (!mShadowPerMapClears) {
-            std::vector<OgreScene *> scenes;
+            // SCRATCH, not locals: in a scene whose only light is the sun this
+            // branch runs on every frame for the life of the process (the flip
+            // it debounces never happens), and it built two vectors each time
+            // (clean-2 lane, 2026-09-13).
+            std::vector<OgreScene *> &scenes = mShadowSceneScratch;
+            scenes.clear();
             scenesFeedingEnabledViews(scenes);
             bool anyLamp = false;
             bool presenting = false;
@@ -972,7 +977,8 @@ void OgreEngine::applyShadowCache() {
                     shadowed = true;
                     if (v->framesPresented() > 0u) shown = true;
                 }
-                std::vector<Ogre::CompositorWorkspace *> ws;
+                std::vector<Ogre::CompositorWorkspace *> &ws = mShadowWsScratch;
+                ws.clear();
                 s->shadowWorkspaces(ShadowNodeKind::Reflect, ws);
                 s->shadowWorkspaces(ShadowNodeKind::Probe, ws);
                 if (shadowed || !ws.empty()) {
@@ -1047,13 +1053,16 @@ namespace {
 /// placement (F7 kept statics clear of Ogre's closest-first sort; there is no
 /// sort left to keep clear of). Adding a lamp therefore renders that lamp's
 /// map alone in the common case, and hiding one re-fixes nothing.
-std::vector<Ogre::Light *> planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
-                                           const std::vector<Ogre::Light *> &want, size_t fixed) {
-    std::vector<Ogre::Light *> plan(maps, nullptr);
-    if (!fixed) return plan;
+// (`plan` and `placed` are the caller's scratch — this runs per instance per
+// frame for ever, so neither is built here; clean-2 lane, 2026-09-13.)
+void planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
+                     const std::vector<Ogre::Light *> &want, size_t fixed,
+                     std::vector<Ogre::Light *> &plan, std::vector<char> &placed) {
+    plan.assign(maps, nullptr);
+    if (!fixed) return;
     const auto isSpot = [](const Ogre::Light *l) { return l->getType() == Ogre::Light::LT_SPOTLIGHT; };
     // 1. Keep every lamp that is still wanted where it is.
-    std::vector<char> placed(want.size(), 0);
+    placed.assign(want.size(), 0);
     for (size_t j = 0; j < maps; ++j) {
         const Ogre::LightClosest &e = held[j + 1u];
         if (!e.isStatic || !e.light) continue;
@@ -1101,17 +1110,21 @@ std::vector<Ogre::Light *> planCachedSlots(const Ogre::LightClosestArray &held, 
         placed[i] = 1;
         anyPoint = regions(lastPoint, firstSpot);
     }
-    if (ok) return plan;
+    if (ok) return;
     // 3. The canonical layout.
     std::fill(plan.begin(), plan.end(), nullptr);
     for (size_t i = 0; i < fixed && i < maps; ++i) plan[i] = want[i];
-    return plan;
 }
 }   // namespace
 
 void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) {
     for (unsigned k = 0; k < kShadowNodeKinds; ++k)
         mShadowCachedInstances[k] = mShadowUncachedInstances[k] = mShadowDirtiedMaps[k] = 0;
+    // THE SELF-CHECK'S WINDOW CLOSES HERE, not at the end of this function: the
+    // marks made below must survive the frame's passes (that is when the pass
+    // hashes are built), so they are dropped at the head of the NEXT frame.
+    // See FogHlmsListener::noteShadowAssignmentChanged.
+    detail::FogHlmsListener::clearShadowAssignmentChanges();
     if (!mHlmsRegistered || mHeadless) return;
     JAH_TRY {
         // ---- the counters, armed for THIS frame (P8) ----------------------
@@ -1143,7 +1156,8 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
             if (mShadowCounterView) mShadowCounterView->addWorkspaceListener(viewCounter);
             for (OgreScene *s : drawn)
                 for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
-                    std::vector<Ogre::CompositorWorkspace *> ws;
+                    std::vector<Ogre::CompositorWorkspace *> &ws = mShadowWsScratch;
+                    ws.clear();
                     s->shadowWorkspaces(ShadowNodeKind(k), ws);
                     for (Ogre::CompositorWorkspace *w : ws) attachOnce(w, mShadowCounters[k]);
                 }
@@ -1151,8 +1165,8 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
 
         // ---- detection per scene, application per instance ----------------
         for (OgreScene *s : drawn) {
-            struct Instance { Ogre::CompositorShadowNode *node; ShadowNodeKind kind; };
-            std::vector<Instance> instances;
+            std::vector<ShadowInstance> &instances = mShadowInstScratch;
+            instances.clear();
             // EVERY view of the scene, enabled or not: a disabled view keeps its
             // workspace, and marking its instance now is what keeps its maps
             // honest for the frame it is shown again (the flags persist).
@@ -1161,7 +1175,8 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                     if (Ogre::CompositorShadowNode *n = v->shadowNodeInstance())
                         instances.push_back({ n, ShadowNodeKind::View });
             for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
-                std::vector<Ogre::CompositorWorkspace *> ws;
+                std::vector<Ogre::CompositorWorkspace *> &ws = mShadowWsScratch;
+                ws.clear();
                 s->shadowWorkspaces(ShadowNodeKind(k), ws);
                 for (Ogre::CompositorWorkspace *w : ws)
                     if (Ogre::CompositorShadowNode *n = w->findShadowNode(shadowNodeNameOf(ShadowNodeKind(k))))
@@ -1175,17 +1190,17 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
             // assignment renders its maps regardless.
             s->runItemWalk(!instances.empty() && s->hasCacheableShadowLights());
             if (instances.empty()) continue;
-            OgreScene::ShadowCacheFrame f;
+            OgreScene::ShadowCacheFrame &f = mShadowFrameScratch;
             s->collectShadowCacheFrame(f);
-            for (const Instance &in : instances) {
+            for (const ShadowInstance &in : instances) {
                 const unsigned k = unsigned(in.kind);
                 const Ogre::LightClosestArray &held = in.node->getShadowCastingLights();
                 if (held.size() < 2u) continue;                  // a PSSM-only node
                 const size_t maps = held.size() - 1u;            // light slots 1..maps
-                std::vector<Ogre::Light *> want;
+                std::vector<Ogre::Light *> &want = mShadowWantScratch;
+                want.clear();
                 want.reserve(f.lights.size());
-                for (const OgreScene::ShadowCacheLight &l : f.lights)
-                    if (shadowLampCachedFor(in.kind, l.light)) want.push_back(l.light);
+                for (const OgreScene::ShadowCacheLight &l : f.lights) want.push_back(l.light);
                 // Cache only with per-map clears (a whole-atlas clear would wipe
                 // a cached map every frame) and only while every lamp fits.
                 const bool cache = mShadowPerMapClears && !want.empty() && want.size() <= maps;
@@ -1220,10 +1235,13 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                     for (size_t j = 0; j < maps; ++j) {
                         const Ogre::LightClosest &e = held[j + 1u];
                         if (e.light && !e.isStatic &&
-                            std::find(want.begin(), want.end(), e.light) != want.end())
+                            std::find(want.begin(), want.end(), e.light) != want.end()) {
                             in.node->setLightFixedToShadowMap(j + 3u, nullptr);
+                            detail::FogHlmsListener::noteShadowAssignmentChanged(in.node);
+                        }
                     }
-                const std::vector<Ogre::Light *> plan = planCachedSlots(held, maps, want, fixed);
+                std::vector<Ogre::Light *> &plan = mShadowPlanScratch;
+                planCachedSlots(held, maps, want, fixed, plan, mShadowPlacedScratch);
                 for (size_t j = 0; j < maps; ++j) {
                     const size_t slot = j + 1u;
                     const size_t mapIdx = slot + 2u;             // 3 PSSM maps first
@@ -1235,6 +1253,9 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                         // when the assignment CHANGED: every frame would keep it
                         // permanently dirty and cache nothing.
                         in.node->setLightFixedToShadowMap(mapIdx, w);
+                        // THE ONE PLACE AN ASSIGNMENT CHANGES: this frame's
+                        // passes on this node get the cache's self-check.
+                        detail::FogHlmsListener::noteShadowAssignmentChanged(in.node);
                         if (w) {
                             ++mShadowDirtiedMaps[k];
                             if (monitor::live())

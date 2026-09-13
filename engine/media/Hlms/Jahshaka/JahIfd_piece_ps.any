@@ -2,7 +2,7 @@
 // has no knob for (GI_UNIFIED_SPEC.md §4 P1 / addendum item 2).
 //
 // WHY THIS FILE EXISTS. Binding an IrradianceField makes HlmsPbs set
-// `VctDisableDiffuse` (OgreHlmsPbs.cpp:1784-1788): DDGI does not ADD to voxel
+// `VctDisableDiffuse` (OgreHlmsPbs.cpp:1846-1850): DDGI does not ADD to voxel
 // cone tracing's diffuse, it REPLACES it — and the P0 spike measured the
 // replacement at ~13x dimmer than the (over-bright, leak-prone) VCT diffuse it
 // takes over from. Every scene therefore gets markedly darker the moment the
@@ -479,7 +479,7 @@
 
 @property( vct_num_probes )
 	// AND THE FALLBACK (P9). Binding a field sets VctDisableDiffuse
-	// (OgreHlmsPbs.cpp:1784-1788), which deletes the ENTIRE voxel-cone diffuse
+	// (OgreHlmsPbs.cpp:1846-1850), which deletes the ENTIRE voxel-cone diffuse
 	// block from the generated shader -- including the one term that block
 	// contributes outside the voxel volume, where every cone escapes without
 	// hitting anything: ambient x the escape weight, which is ambient x 1

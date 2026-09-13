@@ -127,6 +127,7 @@ bool OgreScene::attachToBone(NodeId riderId, NodeId ownerId, const std::string &
         r.boneName = bone;
         if (std::find(o.boneRiders.begin(), o.boneRiders.end(), riderId) == o.boneRiders.end())
             o.boneRiders.push_back(riderId);
+        noteSceneTransformWrite();       // the rider jumped to the bone
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -156,6 +157,7 @@ bool OgreScene::setBoneAttachmentOffset(NodeId riderId, const Vec3 &position,
         tag->setPosition(toOgre(position));
         tag->setOrientation(Ogre::Quaternion(rotation.w, rotation.x, rotation.y, rotation.z));
         tag->setScale(toOgre(scale));
+        noteSceneTransformWrite();       // the rider moved (ensureGiWalk's epoch)
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -209,6 +211,7 @@ void OgreScene::releaseBoneTag(NodeId id, Node &n, NodeId parent)
             n.node->setPosition(p);
             n.node->setOrientation(q);
             n.node->setScale(s);
+            noteSceneTransformWrite();
         }
         mSceneMgr->destroySceneNode(tag);     // its dtor removes it from the bone
     } JAH_CATCH(mError, );

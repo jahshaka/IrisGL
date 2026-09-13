@@ -45,10 +45,11 @@ on an unknown name — a build WITHOUT this patch answers the host's probe by
 throwing, which is exactly how the host learns there is no GPU timing. No
 version flag is needed anywhere.
 
-Three names are added, all under the same define:
-  "JahGpuTimestamps"     -> bool: are timestamps live right now
-  "JahGpuFrameBegin"     -> rotate pools, read back, reset (call once a frame)
-  "JahGpuSampleResults"  -> appends (sampleId, milliseconds) pairs
+Four names are added, all under the same define:
+  "JahGpuTimestamps"        -> bool: are timestamps live right now
+  "JahGpuFrameBegin"        -> rotate pools, read back, reset (once a frame)
+  "JahGpuSampleResults"     -> appends (sampleId, milliseconds) pairs
+  "JahGpuSamplesTruncated"  -> samples the pool had no room for last frame
 
 THE TWO OFF-SWITCHES (owner decision D3, 2026-09-12)
 
@@ -119,7 +120,7 @@ index cf8dce196..87cd56153 100644
 +        // and fills them with plain timestamp queries.
 +        //
 +        // ENTIRELY BEHIND THIS DEFINE. Without JAH_GPU_TIMESTAMPS the class has
-+        // no extra members and the three hooks compile to upstream's empty
++        // no extra members and the four hooks compile to upstream's empty
 +        // bodies, byte for byte — which is what a production or packaging build
 +        // gets (owner decision D3, lock 1 of 2).
 +        //

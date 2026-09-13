@@ -32,9 +32,25 @@ the pair the owner named: F0 alone leaves the Schlick rim and the envBRDF bias),
 which makes it a strict subset of that provably-zero case. A physically lit
 dielectric has kS = 1 and never qualifies — it keeps its ~4% sheen.
 
-ONE EXCLUSION: `cubemaps_as_diffuse_gi` — there a probe also carries DIFFUSE
-light, which kS does not scale. Off in Jahshaka
-(`setAmbientLight(..., envFeatures = 0)`), checked anyway.
+TWO EXCLUSIONS, both of the same kind — a PASS feature that writes the
+material's specular terms after the material has.
+
+  * `cubemaps_as_diffuse_gi` — there a probe also carries DIFFUSE light, which
+    kS does not scale. Off in Jahshaka (`setAmbientLight(..., envFeatures = 0)`),
+    checked anyway.
+  * `hlms_decals_diffuse` — a diffuse decal REWRITES the terms the proof above
+    rests on, downstream of the material:
+        pixelData.specular = lerp( pixelData.specular.xyz, decalF0, decalMask )
+        pixelData.F0       = lerp( pixelData.F0,   decalMetalness, decalMask )
+    (Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any:92-100).
+    So a decal laid on a matte black-kS floor IS reflective where the decal
+    covers it, and gating the probe loop out of that datablock would leave the
+    decal reflecting nothing in a room full of probes. Jahshaka feeds diffuse
+    decals (`OgreDecals.cpp` setDecal requires a diffuse image), so this is not
+    a theoretical exclusion. The gate is per DATABLOCK and a decal is per PIXEL:
+    there is no finer test available at hash time, so a scene with diffuse
+    decals bound keeps the probe loop on every material. (Found by the clean-2
+    lane, 2026-09-13; the round-3 patch was exact only in the absence of decals.)
 
 CLEAR COAT IS NOT EXCLUDED (round-3 correction, 2026-09-13). Round 2 excluded it
 on the stated grounds that "clearCoatEnvColourS is not multiplied by kS". At
@@ -176,7 +192,7 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
          setProperty( kNoTid, PbsProperty::FresnelScalar,
                       datablock->hasSeparateFresnel() || metallicWorkflow );
          setProperty( kNoTid, PbsProperty::FresnelWorkflow, fresnelWorkflow );
-@@ -1199,7 +1252,20 @@
+@@ -1199,7 +1252,37 @@
              setProperty( tid, PbsProperty::EnvProbeMap, 1 );
          setProperty( tid, PbsProperty::TargetEnvprobeMap, envProbeMap == targetEnvProbeMap );
  
@@ -189,9 +205,26 @@ Covered by tests/gi/test_gi_probe_gate.cpp (gi.probe_gate).
 +        // the scene. `needs_env_brdf` is unaffected — it is also raised by
 +        // hlms_enable_cubemaps_auto — so diffuse GI, which kS does not scale,
 +        // is untouched.
++        //
++        // TWO PASS-SIDE EXCLUSIONS, and both are "something else writes kS
++        // after the material does":
++        //   cubemaps_as_diffuse_gi -- a probe then also carries DIFFUSE light,
++        //     which kS does not scale.
++        //   hlms_decals_diffuse    -- a DIFFUSE DECAL REWRITES pixelData.specular
++        //     and pixelData.F0 downstream of material.kS
++        //     (ForwardPlus_DecalsCubemaps_piece_ps.any:92-100:
++        //      `pixelData.specular = lerp( pixelData.specular.xyz, decalF0,
++        //      decalMask )`), so the "kS multiplies every environment term by
++        //      zero" proof does not hold for a pixel under a decal: a decal on
++        //      a matte floor is a reflective patch and must see the room. The
++        //      gate is per DATABLOCK and the decal is per PIXEL, so there is
++        //      nothing finer to test here -- a scene that feeds diffuse decals
++        //      (Jahshaka does, OgreDecals.cpp) keeps the probe loop on every
++        //      material. Found by the clean-2 lane, 2026-09-13.
 +        const bool bZeroSpecularResponse =
 +            getProperty( tid, PbsProperty::ZeroSpecularResponse ) != 0 &&
-+            getProperty( tid, PbsProperty::CubemapsAsDiffuseGi ) == 0;
++            getProperty( tid, PbsProperty::CubemapsAsDiffuseGi ) == 0 &&
++            getProperty( tid, HlmsBaseProp::DecalsDiffuse ) == 0;
 +
 +        if( !bZeroSpecularResponse &&
 +            ( canUseManualProbe || getProperty( tid, PbsProperty::ParallaxCorrectCubemaps ) ) )

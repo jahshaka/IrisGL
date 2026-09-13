@@ -248,6 +248,9 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
             n->setPosition(toOgre(pos));
             n->setOrientation(Ogre::Quaternion(rot.w, rot.x, rot.y, rot.z));
             n->setScale(toOgre(scale));
+            // OUR HALF OF THE MOVEMENT EPOCH (ensureGiWalk): the host's counter
+            // sees the document's writes into the shared graph, not ours.
+            noteSceneTransformWrite();
         }
     } JAH_CATCH(mError, );
 }

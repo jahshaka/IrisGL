@@ -580,11 +580,11 @@ private:
         // the flag really changes, so re-pushing it every frame would flag a
         // rebuild every frame. -1 = never pushed.
         int giBoundsExcluded = -1;
-        // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1): the last RESOLVED
-        // answer pushed to the engine, same push-on-change discipline. -1 =
-        // never pushed. The engine only records it today (R2 spends it), but
-        // the discipline is the point: a flip is a classification change, and
-        // R2's version of it invalidates render channels.
+        // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lanes R1/R2): the last
+        // RESOLVED answer pushed to the engine, same push-on-change discipline.
+        // -1 = never pushed. The discipline is load-bearing now that the engine
+        // spends it: a flip is a classification change, and crossing the GI
+        // edge costs a from-scratch invalidation or a probe-grid stale.
         int movable = -1;
         /// Whether the movable state above was a PLAY-TIME SOFT promotion. It
         /// decides the intent of the push that CLEARS it too: a soft promotion
@@ -884,6 +884,14 @@ public:
     /// the renderables of every node using `material` (a shading-model switch).
     void onMaterialItemsRebuilt(jahshaka::engine::MaterialId material);
     static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light);
+    /// The same, with the scene's SUN already resolved by the caller —
+    /// `sunKnown` says the caller did resolve it (a null `sun` then means "this
+    /// scene has no sun", not "ask the document"). The per-sync walk resolves
+    /// once for every light it pushes: the document answers by building and
+    /// sorting a QVector of every directional, and that ran per directional
+    /// light per frame (clean-2 lane, 2026-09-13).
+    static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light,
+                                                   iris::LightNode *sun, bool sunKnown);
     /// Fills everything but the texture ids (those need the atlas).
     static jahshaka::engine::DecalDesc toDecalDesc(iris::DecalNode *decal);
     /// The document -> engine particle mapping (PARTICLES_FX2_SPEC §5), isolated
@@ -1384,6 +1392,10 @@ private:
     /// Recomputed every sync (the walk resolves every node anyway), so this is
     /// a state, not a running total.
     quint64 mMovableNodes = 0;
+    /// THE SCENE'S SUN, resolved once at the head of each sync and handed to
+    /// every toLightDesc of that walk (clean-2 lane). Never dereferenced
+    /// outside the walk that set it.
+    iris::LightNode *mSyncSun = nullptr;
     quint64 mMobilityMisses = 0;
     QString mLastMobilityMiss;
     /// THE LIGHTS THIS WALK RESOLVED AS MOVING, by node pointer, valid for the
