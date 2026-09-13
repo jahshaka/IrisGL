@@ -1639,11 +1639,99 @@ static Ogre::HlmsSamplerblock materialSamplerblock(
     return sampler;
 }
 
+// THE SAMPLERBLOCK REFERENCE CEILING (ENGINE-6 item 2; the review finding F2
+// left open by ENGINE-5 item 1).
+//
+// WHAT IS COUNTED. `HlmsDatablock::setTexture( slot, tex, refParams )` asks the
+// HlmsManager for the block matching `refParams` — `getSamplerblock` DEDUPES by
+// the params (OgreHlmsManager.cpp:320-350: a linear compare over the active
+// blocks, `HlmsSamplerblock::operator!=`), so every material in a scene with the
+// same filtering shares ONE block — and takes a reference on it which the slot
+// holds for the datablock's whole life. `BasicBlock::mRefCount` is a uint16
+// whose overflow check is `assert( retVal->mRefCount < 0xFFFF )`: compiled out
+// in every build we ship. Past the wrap the block is freed while thousands of
+// datablocks still point at it and the next ~HlmsPbsDatablock throws
+// ItemIdentityException out of a NOEXCEPT destructor — std::terminate, exit
+// 134, at shutdown.
+//
+// ENGINE-5 stopped an EMPTY slot from taking a reference (ten per plain
+// material, so the wrap arrived at 6,554 materials of no maps at all). What is
+// left is the honest count: five real maps on a textured material, i.e. 13,108
+// textured materials sharing one sampler. That is a big scene, not an
+// impossible one, and it is the same terminate.
+//
+// WHAT THIS DOES. Before handing the params over, find the block they would
+// resolve to and read its `mRefCount`; near the ceiling, step to a fresh block.
+// The read is NON-INVASIVE — `_getActiveBlocksIndices` + `_getSamplerblock`
+// walk what already exists (at most OGRE_HLMS_NUM_SAMPLERBLOCKS = 64 entries,
+// usually five) rather than calling `getSamplerblock`, which would take and
+// release a reference and, on a block at zero, create and destroy a live
+// VkSampler on every bind.
+//
+// HOW A SECOND BLOCK FOR THE SAME SAMPLER IS LEGAL. `getSamplerblock` dedupes
+// by VALUE, so asking twice for identical params can only ever give the same
+// block: the params must differ. `mMaxLod` is the one field that can differ
+// with NO effect on sampling — it is an upper clamp on the mip level, it
+// reaches the backend as VkSamplerCreateInfo::maxLod unchanged
+// (OgreVulkanRenderSystem.cpp:4048), and a texture cannot have more than ~20
+// mips, so FLT_MAX and FLT_MAX/2^k are the same sampler for every texture that
+// can exist. Each generation halves it. Filtering, addressing, anisotropy,
+// LOD bias and border colour are untouched, which is the whole point: the
+// picture cannot move.
+//
+// GENERATIONS ARE CAPPED at 8 (8 x 65,535 = half a million references, against
+// a 64-block budget shared with the compositor and the shadow nodes). At the
+// cap it keeps binding the last block and says so once — a wrap then is still
+// possible, and is a scene 40x past anything measured.
+Ogre::HlmsSamplerblock OgreScene::guardSamplerCeiling(Ogre::HlmsSamplerblock sampler) {
+    static const unsigned kMaxGenerations = 8u;
+    // uint16 headroom: one bind can add at most kPbrTextureSlotCount references
+    // and a material at most that, so 255 is hundreds of materials of slack.
+    static const Ogre::uint16 kCeiling = 0xFF00u;
+    const auto applyGeneration = [](Ogre::HlmsSamplerblock &s, unsigned gen) {
+        for (unsigned i = 0; i < gen; ++i) s.mMaxLod *= 0.5f;
+    };
+    applyGeneration(sampler, mSamplerGeneration);
+    Ogre::HlmsManager *mgr = mRoot->getHlmsManager();
+    if (!mgr) return sampler;
+    const auto refCountOf = [mgr](const Ogre::HlmsSamplerblock &s) -> Ogre::uint16 {
+        const Ogre::HlmsManager::BlockIdxVec &active =
+            mgr->_getActiveBlocksIndices(Ogre::BLOCK_SAMPLER);
+        for (Ogre::uint16 idx : active) {
+            const Ogre::HlmsSamplerblock *blk = mgr->_getSamplerblock(idx);
+            // operator!= deliberately ignores the ids, so this is a value match.
+            if (blk && !(*blk != s)) return blk->mRefCount;
+        }
+        return 0;   // no such block yet: binding it will create one at 1
+    };
+    if (refCountOf(sampler) < kCeiling) return sampler;
+    if (mSamplerGeneration >= kMaxGenerations) {
+        if (!mSamplerCeilingLogged) {
+            mSamplerCeilingLogged = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: samplerblock reference ceiling reached on all " +
+                std::to_string(kMaxGenerations) + " generations; further materials share the "
+                "last block (a uint16 reference count can wrap past this).");
+        }
+        return sampler;
+    }
+    ++mSamplerGeneration;
+    applyGeneration(sampler, 1u);
+    if (!mSamplerCeilingLogged) {
+        mSamplerCeilingLogged = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: a samplerblock reached " + std::to_string(unsigned(kCeiling)) +
+            " references (a uint16 counter); binding further materials through a second "
+            "block with identical filtering. This is a very large scene, not an error.");
+    }
+    return sampler;
+}
+
 void OgreScene::bindTrackedTextures(MaterialRec &rec) {
     auto *raw = hlmsFor(rec)->getDatablock(Ogre::IdString(rec.datablockName));
     if (!raw) return;
     const Ogre::HlmsSamplerblock sampler =
-        materialSamplerblock(rec.params.address[0], rec.params.anisotropy);
+        guardSamplerCeiling(materialSamplerblock(rec.params.address[0], rec.params.anisotropy));
     auto textureOf = [this](TextureId id) -> Ogre::TextureGpu * {
         if (!id) return nullptr;
         auto tit = mTextures.find(id);
@@ -1718,7 +1806,7 @@ void OgreScene::bindTrackedTextures(MaterialRec &rec) {
         // what the detail layers need — a tiled detail map over a clamped base
         // map is the ordinary case (§3.3/§3.5).
         const Ogre::HlmsSamplerblock slotSampler =
-            materialSamplerblock(rec.params.address[s], rec.params.anisotropy);
+            guardSamplerCeiling(materialSamplerblock(rec.params.address[s], rec.params.anisotropy));
         db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(PbrTextureSlot(s))), tex,
                        tex ? &slotSampler : nullptr);
         rec.lastBoundTextures[s] = rec.boundTextures[s];
@@ -1829,8 +1917,8 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         // `tex ? &sampler : nullptr` is what every other binding site in this
         // file already does (bindTrackedTextures, the Unlit branch, particles).
         const Ogre::HlmsSamplerblock sampler =
-            materialSamplerblock(mit->second.params.address[size_t(slot)],
-                                 mit->second.params.anisotropy);
+            guardSamplerCeiling(materialSamplerblock(mit->second.params.address[size_t(slot)],
+                                                     mit->second.params.anisotropy));
         db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(slot)), tex,
                        tex ? &sampler : nullptr);
         return true;

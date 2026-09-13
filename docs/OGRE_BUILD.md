@@ -235,6 +235,15 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     fixed the identical defect in its own SSR marcher at the same time
     (irisgl/engine/media/Hlms/Jahshaka/JahSsrRayMarch_ps.glsl), which is not a
     patch because that shader is ours.
+20. **0020-samples-env-suppress-config-dialog** — SOURCE, and the only patch in
+    the stack that touches nothing Jahshaka ships: Ogre's sample framework
+    (`Samples/2.0/Common/src/GraphicsSystem.cpp`) sets `mAlwaysAskForConfig`,
+    which short-circuits `restoreConfig()` — so a seeded `ogre.cfg` is ignored
+    and every sample run from a script or a headless shell stops on the config
+    dialog. With `JAH_OGRE_SAMPLE_NO_CONFIG` set in the environment the flag is
+    cleared and the seeded config is honoured. Kept because running an upstream
+    sample against a pristine engine is how an upstream behaviour gets checked.
+
 21. **0021-vct-anisotropic-escape-fraction** — anisotropic voxel cone tracing
     (every Jahshaka GI quality above Low: `anisotropic = quality != Low`,
     OgreGi.cpp) saturates its cone alpha against the cone's OWN starting surface:
@@ -603,10 +612,16 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     empty-list case — the one a compaction hits most often — has no non-indirect
     equivalent short of a CPU-side branch the CPU has no information to take.
 
+THE STACK IS 0001-0032 (this list; `build-ogre.sh` globs `*.patch`, so the file
+count under thirdparty/ogre-patches/ is the truth and this document tracks it).
+A lane's new patch takes the next free number and the LEAD renumbers at merge if
+a sibling landed first.
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0023/0029/0030/0031) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027 and 0032 are SOURCE-only) — the Studio build stages the
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031) need no Ogre rebuild (0024 and 0028 are
+SOURCE + media; 0025, 0026, 0027 and 0032 are SOURCE-only, and 0020 touches the
+sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant
