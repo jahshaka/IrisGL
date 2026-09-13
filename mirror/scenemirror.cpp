@@ -5907,8 +5907,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         case iris::GiQuality::HIGH:            gi.quality = GiQuality::High; break;
         case iris::GiQuality::MEDIUM: default: gi.quality = GiQuality::Medium; break;
         }
-        gi.boundsMin = toVec3(mSource->giBoundsMin);
-        gi.boundsMax = toVec3(mSource->giBoundsMax);
+        // NO BOUNDS TRAVEL ANY MORE (owner decision D8): GiParams::boundsMin ==
+        // boundsMax == 0 is the engine's "fit it yourself", and leaving the
+        // field at its default is how this mirror says so. `autoBoundsMax`
+        // likewise keeps the engine's own default ceiling. The document has no
+        // bounds fields to push.
         gi.numBounces = mSource->giNumBounces;
         gi.pccProbesX = qBound(1, qRound(mSource->giPccGrid.x()), 8);
         gi.pccProbesY = qBound(1, qRound(mSource->giPccGrid.y()), 8);
@@ -5923,7 +5926,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeHdr = toggle(mSource->giProbeHdr);
         gi.probeShadows = toggle(mSource->giProbeShadows);
         gi.probeOverlap = mSource->giProbeOverlap;
-        gi.autoBoundsMax = qMax(0.0f, mSource->giAutoBoundsMax);
         gi.probeSnapDeviation = mSource->giProbeSnapDeviation;
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;
