@@ -181,6 +181,12 @@ public:
     /// drag's inter-frame gaps never trip it, short enough that the
     /// classification is back before the user's next gesture.
     static constexpr quint32 kStaticSettleFrames = 30;
+    /// A NOTE ON THE PAUSED HAND (lead review F4): the settle is driven by the
+    /// document, not by the mouse, so a drag the user pauses for half a second
+    /// re-promotes under a still hand and the next movement demotes again. That
+    /// is correct (the classification always describes what the scene is doing)
+    /// and it is bounded — one pass per pause — but it is worth knowing before
+    /// reading a staticRepromotions count taken during a slow edit.
 
     // ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1) ----------------
     /// How many of the document's nodes resolved MOVABLE on the last sync —
@@ -1511,6 +1517,11 @@ private:
     quint64 mMaterialBuilds = 0;
     /// The settle machine behind the static re-promotion (see sync()).
     unsigned long long mLastTransformWrites = 0;
+    /// ...and the document's demotion count when the settle last ran. A quiet
+    /// spell is only worth a re-derivation if a transform write really took a
+    /// subtree OUT of the static half since the last one; a camera orbit, an
+    /// undo and a scene open all write transforms and demote nothing.
+    unsigned long long mLastStaticDemotions = 0;
     quint32 mSettleFrames = 0;
     bool    mStaticSettlePending = false;
     quint64 mStaticRepromotions = 0;

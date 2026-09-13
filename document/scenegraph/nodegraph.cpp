@@ -160,6 +160,14 @@ std::size_t gLiveNodes = 0;
 /// assert that its 80% static population really reached the static manager
 /// rather than reporting a hint nobody applied.
 std::size_t gStaticNodes = 0;
+/// HOW MANY SUBTREES A TRANSFORM WRITE HAS DEMOTED (rule 4). Its only consumer
+/// is the mirror's settle, which re-derives the whole scene's classification
+/// when the document goes quiet: without this it re-derived after EVERY quiet
+/// spell, including the ones nobody dragged anything in — a camera orbit, an
+/// undo, a reparent, a scene open all write transforms and all bought a
+/// whole-tree pass. Relaxed: it is a CHANGE TEST read once per frame, exactly
+/// like gTransformWrites beside it.
+std::atomic<unsigned long long> gStaticDemotions{0};
 
 Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
 {
@@ -771,6 +779,9 @@ void promoteOnWrite(Ogre::SceneNode *n)
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     if (SceneNode *owner = ownerById(n->getId())) owner->_clearStaticHint();
     applyStaticSubtree(n, false);
+    // COUNTED, because somebody has to put these back (graph::staticDemotions).
+    // This is the ONLY demoter on the write path, so the counter is exact.
+    gStaticDemotions.fetch_add(1, std::memory_order_relaxed);
 }
 
 /// THE ONE HOLE RULE 2 LEAVES, closed. A static node's parent must be static
@@ -792,6 +803,7 @@ void promoteStaticChildren(Ogre::SceneNode *n)
         if (!c->isStatic()) continue;
         if (SceneNode *owner = ownerById(c->getId())) owner->_clearStaticHint();
         applyStaticSubtree(c, false);
+        gStaticDemotions.fetch_add(1, std::memory_order_relaxed);
         any = true;
     }
     if (any)
@@ -1013,6 +1025,11 @@ bool setStatic(NodeHandle n, bool value)
 }
 
 std::size_t staticNodeCount() { return gStaticNodes; }
+
+unsigned long long staticDemotions()
+{
+    return gStaticDemotions.load(std::memory_order_relaxed);
+}
 
 std::size_t liveNodeCount() { return gLiveNodes; }
 

@@ -485,10 +485,22 @@ int SceneMirror::sync()
     // migrates straight back.
     if (mSource) {
         const unsigned long long writes = iris::graph::transformWrites();
+        // ...AND ONLY WHEN SOMETHING WAS DEMOTED (lead review F4). The write
+        // counter alone re-armed the settle on every transform write anywhere —
+        // the end of a camera orbit, an undo, a reparent, a scene open — and
+        // each quiet spell after one of those bought a whole-tree
+        // applyStaticDefaults (a resolveMobility and an isStaticEligible per
+        // node) to re-derive a classification nothing had disturbed. The
+        // document counts its own demotions now, and that is the only thing a
+        // re-promotion has to answer.
+        const unsigned long long demotions = iris::graph::staticDemotions();
         if (writes != mLastTransformWrites) {
             mLastTransformWrites = writes;
             mSettleFrames = 0;
-            mStaticSettlePending = true;
+            if (demotions != mLastStaticDemotions) {
+                mLastStaticDemotions = demotions;
+                mStaticSettlePending = true;
+            }
         } else if (mStaticSettlePending && ++mSettleFrames >= kStaticSettleFrames) {
             if (auto root = mSource->getRootNode()) {
                 root->applyStaticDefaults();
@@ -496,8 +508,10 @@ int SceneMirror::sync()
             }
             mStaticSettlePending = false;
             // applyStaticDefaults migrates nodes between memory managers; the
-            // migration itself must not read as a write and re-arm the settle.
+            // migration itself must not read as a write, or a demotion, and
+            // re-arm the settle.
             mLastTransformWrites = iris::graph::transformWrites();
+            mLastStaticDemotions = iris::graph::staticDemotions();
         }
     }
     // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2). Zero on
@@ -609,6 +623,7 @@ int SceneMirror::sync()
         if (it->lastSeen == mSyncStamp) ++it;
         else it = mMaterialSync.erase(it);
     }
+
     return mVisited;
 }
 
@@ -2607,6 +2622,13 @@ void SceneMirror::reclaimUnused()
     }
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
+        // The two per-material records go WITH the material (lead review F7).
+        // The memo is keyed by the document material and the item-rebuild
+        // serial by the engine one, and this is the one place both die: a
+        // serial whose material is gone can never be read again, and engine
+        // ids only ever increment so a later material cannot inherit it.
+        mMaterialItemSerial.remove(it.value());
+        mMaterialSync.remove(it.key());
         mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
     }
     // Textures, the third cache — and the one that was never reclaimed at all
@@ -2913,7 +2935,18 @@ struct FieldHasher {
     inline FieldHasher &operator<<(bool v)    { return *this << quint32(v ? 1 : 0); }
     inline FieldHasher &operator<<(float f)
     { quint32 b; std::memcpy(&b, &f, sizeof b); return *this << b; }
-    inline FieldHasher &operator<<(const QColor &c) { return *this << quint32(c.rgba()); }
+    /// AT THE PRECISION THE CONVERSION READS. toPbrParams takes redF()/greenF()
+    /// /blueF(), which come off QColor's 16-BIT storage; rgba() is the 8-bit
+    /// view, so hashing that would let a sub-1/255 edit slip past the memo.
+    /// Nothing in the tree writes a colour that fine today — the panel's picker
+    /// and every reader are 8-bit — which is exactly why it would have been a
+    /// silent trap rather than a visible one (lead review F5).
+    inline FieldHasher &operator<<(const QColor &c)
+    {
+        const QRgba64 q = c.rgba64();
+        return *this << quint32(q.red() << 16 | q.green())
+                     << quint32(q.blue() << 16 | q.alpha());
+    }
     FieldHasher &operator<<(const QString &s)
     {
         *this << quint32(s.size());

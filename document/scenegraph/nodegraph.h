@@ -355,6 +355,12 @@ bool setStatic(NodeHandle n, bool value);
 /// How many nodes in this process currently live in a SCENE_STATIC manager.
 /// The benchmark asserts on it; nothing else should need it.
 std::size_t staticNodeCount();
+/// How many subtrees a transform write has DEMOTED out of the static half
+/// (rule 4). The counterpart to `transformWrites()` for anything that wants to
+/// put the classification back: a quiet spell is only worth a re-derivation if
+/// something was actually demoted since the last one, and most quiet spells
+/// follow a camera move, an undo or a scene open rather than a drag.
+unsigned long long staticDemotions();
 
 /// Debug/diagnostic: how many live handles this process has made.
 std::size_t liveNodeCount();
