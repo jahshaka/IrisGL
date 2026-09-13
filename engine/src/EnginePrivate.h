@@ -3184,6 +3184,11 @@ private:
     /// face pass's render-queue range (rq_last 200: gizmos and selection
     /// outlines at RQ 210 are never captured, so they never stale anything).
     bool probeSeesItem(const Node &n) const;
+    /// Can a transform write on this node change what any of the epoch's scans
+    /// reads? (OgreScene.cpp, beside the bit scheme it asks about.) No for
+    /// editor furniture — the gizmo, the bone overlay, wires, the grid — which
+    /// is most of what goes through setNodeTransform at all.
+    bool writeIsSceneMovement(const Node &n) const;
     /// P7, materials: a visible material changed — stale the probes and, when
     /// the change reaches the voxelizer's conversion, bump the material
     /// generation (see mGiMaterialGeneration).

@@ -280,9 +280,57 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
             n->setScale(toOgre(scale));
             // OUR HALF OF THE MOVEMENT EPOCH (ensureGiWalk): the host's counter
             // sees the document's writes into the shared graph, not ours.
-            noteSceneTransformWrite();
+            //
+            // ...BUT ONLY FOR SOMETHING A SCAN CAN READ (lane ENGINE-7 item 1).
+            // Most writes through this entry point are EDITOR FURNITURE — the
+            // gizmo, the bone overlay, wires, the grid — and the gizmo is
+            // screen-scaled, so it writes four transforms on every frame the
+            // camera moves. Counting those re-ran the GI movement scan, the
+            // caster walk and both GI signatures on every frame of an orbit:
+            // measured on the 8,404-node lattice, the mirror's GI push cost
+            // 9.7 ms a frame while flying and 0.02 ms still, and the four
+            // gizmo pushes were the whole of it once the document's camera
+            // stopped counting (nodegraph.h's epoch).
+            if (it == mNodes.end() || writeIsSceneMovement(it->second))
+                noteSceneTransformWrite();
         }
     } JAH_CATCH(mError, );
+}
+
+// CAN A TRANSFORM WRITE ON THIS NODE CHANGE WHAT ANY SCAN READS?
+// (lane ENGINE-7 item 1 — the movement epoch's precision.)
+//
+// The epoch exists so a still frame skips four O(scene) walks: the GI movement
+// scan, the shadow-caster walk and the two GI signatures the host reads every
+// frame. Each of them reads ITEMS through a filter (walkItems), and this is
+// the same filter asked the other way round — "is there anything here that a
+// filter lets through?" A NO means the write cannot have changed a single
+// answer, so counting it would buy nothing but the walks.
+//
+// The three things a scan can read, and nothing else:
+//   * VOXELISED geometry (kGiGeometryBit) — the GI scan and both signatures;
+//   * PROBE-ONLY geometry (P7: unlit, visible, below the probe-face queue) —
+//     the probe grid's half of the GI scan;
+//   * a SHADOW CASTER (casts, and below the overlay queue, which writes no
+//     depth) — the caster walk. The channel test is deliberately left out: a
+//     caster that no lamp can see still counts, which is the safe direction.
+// ...plus three structural yeses that are not items at all: a node with
+// CHILDREN moves them, a DECAL is a probe input (mDecalNodes), and a LIGHT is
+// an input to everything (its position is not read here, but nothing is gained
+// by being clever about the handful of lights in a scene).
+//
+// Everything else is EDITOR FURNITURE: the gizmo (four screen-scaled parts
+// re-pushed on every frame the camera moves), the bone overlay, the selection
+// shell, the light wires, the grid, the horizon and the GI volume boxes.
+bool OgreScene::writeIsSceneMovement(const Node &n) const {
+    if (n.light || n.decal) return true;
+    if (n.node && n.node->numChildren()) return true;
+    const Ogre::Item *item = n.item;
+    if (!item) return false;              // an empty node with nothing under it
+    if (item->getVisibilityFlags() & kGiGeometryBit) return true;
+    const Ogre::uint8 rq = item->getRenderQueueGroup();
+    if (probeSeesItem(n)) return true;
+    return item->getCastShadows() && n.shown && rq < kOverlayRenderQueue;
 }
 
 // THE bit-scheme application point (REFLECTIONS_ADOPTION_SPEC.md P1b).

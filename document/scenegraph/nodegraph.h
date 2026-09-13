@@ -245,6 +245,20 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 /// All three err on the side of scanning when nothing moved, which costs
 /// exactly what the old unconditional scan cost.
 ///
+/// THE ONE THING IT DOES NOT COUNT IS THE VIEWER (lane ENGINE-7 item 1, from
+/// RR2's measurement). A CAMERA's transform is not scene movement: nothing any
+/// consumer of this counter scans — the GI items' world boxes, the shadow
+/// casters, the forward-plus scene extent, the floor's world, the skeleton
+/// share's world comparisons — can have changed because the camera moved. It
+/// was counted anyway, and the bill was exact: on the 8,404-node lattice
+/// `host.env` (the mirror's GI push, which reads two O(scene) engine
+/// signatures) measured 0.024 ms while the camera was still and 10.28 ms on
+/// 92% of FLYING frames, with the same scene and the same path costing
+/// 0.014 ms with GI off. Flying re-ran every scan in the program, every frame.
+/// A camera node says so once, at birth (`setCountsAsMovement(h, false)` in
+/// CameraNode's constructor), and a camera that has CHILDREN counts again —
+/// moving it moves whatever is parented under it, and that IS scene movement.
+///
 /// The consumer is the ENGINE, which cannot include this header: the host
 /// hands the engine the counter's address once (`Engine::
 /// setTransformWriteCounter` — Studio does it in src/bridge/enginehost.cpp
@@ -254,6 +268,15 @@ unsigned long long transformWrites();
 /// The counter itself, for the host that hands its address to the engine.
 /// Its lifetime is the process's.
 const std::atomic<unsigned long long> &transformWriteCounter();
+/// Does a write to this node's transform count as SCENE MOVEMENT (above)?
+/// True for every node by default; a CAMERA says false once, in its
+/// constructor. Not a "static" hint and not a visibility flag: it answers one
+/// question, "can anything the renderer scans have changed because this node
+/// moved?", and the honest answer for the viewer is no.
+void setCountsAsMovement(NodeHandle n, bool counts);
+/// What the flag above says right now (a suite read; the write path asks the
+/// document node itself, see nodegraph.cpp).
+bool countsAsMovement(NodeHandle n);
 
 Mat4 localTransform(NodeHandle n);
 /// The world transform, RESOLVED via Ogre's `_getFullTransformUpdated()`.
