@@ -394,6 +394,11 @@ MaterialId SceneMirror::engineMaterial(const iris::SceneNode *node) const
 /// with Ogre's default query mask, so an unpickable object would quietly become
 /// clickable again after a switch. Forgetting one push is why this is a named
 /// function next to the switch and not a line inside it.
+quint64 SceneMirror::staticNodeCount() const
+{
+    return quint64(iris::graph::staticNodeCount());
+}
+
 void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
 {
     if (!material) return;
@@ -449,6 +454,48 @@ int SceneMirror::sync()
     ++mSyncStamp;
     mVisited = 0;
     mMaterialBuilds = 0;    // per-walk, not a running total (materialBuildCount)
+    // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13).
+    //
+    // Rule 4 (nodegraph.h) DEMOTES a static subtree on the first transform
+    // write, and that is right: re-running the static pass per frame of a drag
+    // is exactly the cost SCENE_STATIC exists to avoid. But nothing ever put
+    // the node back — the demotion lasted the SESSION, so every prop a user
+    // nudged spent the rest of the day in Ogre's per-frame transform and bounds
+    // passes, and a long editing session drained the classification to nothing.
+    //
+    // The missing half is here: when NOTHING in the document has written a
+    // transform for kStaticSettleFrames consecutive syncs, the document's own
+    // static pass runs once and re-derives the whole scene's classification.
+    // It is the same pass a load runs (SceneNode::applyStaticDefaults), so a
+    // settled scene ends up classified exactly as if it had just been opened —
+    // the user's own Static/Movable settings included, because the pass honours
+    // overrides and writes none. A node whose class does not change costs the
+    // walk and nothing else; one that does gets its notifyStaticDirty from
+    // `switchOne`, one per promoted node, on this frame alone.
+    //
+    // THE GATE IS THE DOCUMENT'S TRANSFORM-WRITE COUNTER, which is global and
+    // therefore conservative in the direction that cannot hurt: a physics step,
+    // a playing animation, a drag anywhere in the scene holds the whole scene
+    // dynamic until it stops. That is what "settle" has to mean — a promotion
+    // in the middle of a gesture would migrate a subtree the next write
+    // migrates straight back.
+    if (mSource) {
+        const unsigned long long writes = iris::graph::transformWrites();
+        if (writes != mLastTransformWrites) {
+            mLastTransformWrites = writes;
+            mSettleFrames = 0;
+            mStaticSettlePending = true;
+        } else if (mStaticSettlePending && ++mSettleFrames >= kStaticSettleFrames) {
+            if (auto root = mSource->getRootNode()) {
+                root->applyStaticDefaults();
+                ++mStaticRepromotions;
+            }
+            mStaticSettlePending = false;
+            // applyStaticDefaults migrates nodes between memory managers; the
+            // migration itself must not read as a write and re-arm the settle.
+            mLastTransformWrites = iris::graph::transformWrites();
+        }
+    }
     // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2). Zero on
     // the first sync, and capped at a tenth of a second: a stall must not let a
     // tracking camera jump its whole remaining focus travel in one frame.

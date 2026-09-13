@@ -162,6 +162,25 @@ public:
     /// must build ZERO. Not observable in pixels; hence the counter, and hence
     /// mirror.scale's assertion on it.
     quint64 materialBuildCount() const { return mMaterialBuilds; }
+    /// How many document nodes the last sync walked (sync()'s own return, kept
+    /// so a reader that did not call it can still ask).
+    int visitedCount() const { return mVisited; }
+
+    /// ---- SCENE_STATIC, the settle half (MIRROR_SCALE lane) ---------------
+    /// How many nodes are in a SCENE_STATIC memory manager right now
+    /// (iris::graph::staticNodeCount), and how many times this mirror has
+    /// re-derived the whole scene's classification after the document went
+    /// quiet. A user nudging props used to drain the first number to zero for
+    /// the session; the second is what puts it back. Both are on
+    /// editor.mirrorStats() so a test — and a lead reading a live app — can see
+    /// a scene's classification hold instead of leaking away.
+    quint64 staticNodeCount() const;
+    quint64 staticRepromotionCount() const { return mStaticRepromotions; }
+    /// How many consecutive syncs with NO transform write anywhere in the
+    /// document count as "settled". Half a second at 60 Hz: long enough that a
+    /// drag's inter-frame gaps never trip it, short enough that the
+    /// classification is back before the user's next gesture.
+    static constexpr quint32 kStaticSettleFrames = 30;
 
     // ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1) ----------------
     /// How many of the document's nodes resolved MOVABLE on the last sync —
@@ -1458,6 +1477,11 @@ private:
     /// materialBuildCount() — reset at the top of every sync, so it reports the
     /// LAST walk rather than a running total.
     quint64 mMaterialBuilds = 0;
+    /// The settle machine behind the static re-promotion (see sync()).
+    unsigned long long mLastTransformWrites = 0;
+    quint32 mSettleFrames = 0;
+    bool    mStaticSettlePending = false;
+    quint64 mStaticRepromotions = 0;
     // ---- MOBILITY counters (REALTIME_REFLECTIONS_SPEC §3.3) ----------------
     /// Recomputed every sync (the walk resolves every node anyway), so this is
     /// a state, not a running total.
