@@ -278,6 +278,17 @@ Vec3 globalPos(NodeHandle n);
 Quat globalRot(NodeHandle n);
 void setGlobalPos(NodeHandle n, const Vec3 &v);
 void setGlobalRot(NodeHandle n, const Quat &q);
+/// BOTH AT ONCE, for a caller that has both — the physics write-back, which
+/// runs per body per step (MIRROR_SCALE lane).
+///
+/// setGlobalPos and setGlobalRot each resolve the PARENT's derived state to
+/// undo it: a full-transform inverse for the position and a derived-orientation
+/// inverse for the rotation. Called back to back that is two resolutions and
+/// two inverses per body per frame for one pose. This resolves the parent once
+/// and, when the parent turns out to be at identity — which is what the
+/// document root is, and what a physics body's parent almost always is —
+/// writes the world values straight through with no inverse at all.
+void setGlobalPosRot(NodeHandle n, const Vec3 &v, const Quat &q);
 void setGlobalTransform(NodeHandle n, const Mat4 &m);
 
 // ---- flags ----------------------------------------------------------------
