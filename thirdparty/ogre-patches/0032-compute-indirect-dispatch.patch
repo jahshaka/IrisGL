@@ -1,0 +1,399 @@
+Jahshaka patch 0032 — GPU-driven compute dispatch (vkCmdDispatchIndirect), and
+the compute-write -> indirect-read barrier the BarrierSolver cannot express.
+
+WHY (Photon lane S0; SPECS/NANITE_SPEC.md §4.2, SPECS/research/
+LUMEN_SUPPORTING_TECH_2026-09-13.md §6; ledger §190/§192). Every Lumen-shaped
+stage narrows its work as it goes: screen traces that miss are compacted into a
+shorter list, that list is re-traced, what misses again is compacted once more.
+Epic: "it was essential that we utilize indirect dispatch where supported",
+worth up to a 50% tracing speedup from the compaction it enables. Without it
+every later pass must be dispatched at its WORST CASE, because the CPU cannot
+know how many items survived. It is the single mandatory piece of supporting
+technology for either Photon arm, and this pin has none of it.
+
+WHAT THE PIN HAS. `VulkanRenderSystem::_dispatch` issues `vkCmdDispatch` with
+CPU-side group counts and nothing else; `vkCmdDispatchIndirect` appears nowhere
+in the tree. `HlmsComputeJob::setNumThreadGroupsBasedOn` looks like the feature
+and is not: it derives the counts on the CPU from a bound texture's or UAV's
+DIMENSIONS (OgreHlmsComputeJob.cpp:699-744), so it can never see a number a
+shader computed.
+
+WHAT THIS ADDS, in four small pieces:
+
+ 1. `HlmsComputeJob::setIndirectDispatchBuffer( BufferPacked *, offsetBytes,
+    issueBarrier = true )`. While a buffer is set the job dispatches indirectly
+    and its CPU-side group counts are ignored. The buffer must be GPU-resident
+    and readable as an indirect argument — in practice a `UavBufferPacked`,
+    because the producing shader has to bind it as an SSBO to write the counts.
+    NOTE that Ogre's own `IndirectBufferPacked` is NOT usable here on Vulkan:
+    `VulkanVaoManager` forces `mSupportsIndirectBuffers` to false
+    (OgreVulkanVaoManager.cpp:183-184) and emulates indirect DRAW buffers in
+    system memory, so such a buffer carries no BufferInterface at all. The
+    ordinary VBO pools are already created with
+    `VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT` (same file, :1122-1127), so a UAV
+    buffer needs no allocator change.
+
+ 2. `RenderSystem::_dispatchIndirect` + `supportsIndirectDispatch()`. The base
+    implementation throws ERR_NOT_IMPLEMENTED and `supportsIndirectDispatch()`
+    returns false, so D3D11, Metal, GL3Plus, GLES2 and NULL are untouched and
+    compile unchanged; only Vulkan overrides both.
+
+ 3. `HlmsCompute::dispatch` routes to `_dispatchIndirect` when the job carries a
+    buffer, and `HlmsCompute::compileShader` no longer requires a non-zero
+    `num_thread_groups_*` for such a job. That requirement exists because Metal
+    needs the counts on the C++ side; an indirectly dispatched job has none by
+    definition, and forcing every caller to carry a meaningless dummy would be a
+    trap. The threads-per-group half of the check is untouched.
+
+ 4. THE BARRIER, hand-rolled in `VulkanRenderSystem::_dispatchIndirect`.
+    `executeResourceTransition`'s buffer branch only ever sets
+    `VK_ACCESS_SHADER_READ/WRITE_BIT`, and `ogreToVkStageFlags` knows only the
+    six shader stages (OgreVulkanRenderSystem.cpp, both in this file), so
+    `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` at `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT`
+    is unreachable from the BarrierSolver — and `BarrierSolver::assumeTransition`
+    exists only for textures, so it cannot even be told after the fact. The edge
+    is therefore issued directly as a `VkBufferMemoryBarrier` over the twelve
+    bytes actually read, and DELIBERATELY NOT registered with the solver: it is
+    orthogonal to the state the solver tracks (the argument buffer's ordinary
+    SSBO write/read transitions are still resolved the normal way by the
+    caller), so the solver stays coherent by construction rather than by
+    notification. Routing it through `executeResourceTransition` would also be
+    wrong mechanically: that function begins with `endAllEncoders()`, which
+    would close the compute encoder the dispatch is being recorded into.
+
+    It covers BOTH producers — `SHADER_WRITE` at COMPUTE_SHADER and
+    `TRANSFER_WRITE` at TRANSFER — because Ogre's copy encoder does not end with
+    INDIRECT_COMMAND_READ in its destination mask either, so a CPU-seeded or
+    freshly uploaded argument buffer is the same gap wearing a different hat.
+
+MEASURED (suite `compute.indirect_dispatch`, RTX 4080 SUPER, Vulkan): job A
+counts the non-zero entries of a 4096-long list and writes the group count; job B
+is dispatched from it and stamps `gl_NumWorkGroups.x` into one slot per group. At
+0, 7 and 4096 survivors the count written, the number of groups that ran and the
+count the groups read all agree, and the output buffer is byte-identical to the
+same job dispatched from a CPU-side count. With the barrier suppressed
+(issueBarrier = false), Vulkan synchronization validation reports
+SYNC-HAZARD-READ-AFTER-WRITE at `vkCmdDispatchIndirect` naming exactly "must
+allow VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT accesses at
+VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT"; with it, the layer is silent. The data
+hazard itself did not reproduce on this driver in four runs — which is why the
+barrier is unconditional rather than opt-in.
+
+The two argument-buffer preconditions (4-byte alignment, 12 bytes in range) are
+OGRE_EXCEPTs and not OGRE_ASSERT_LOWs on purpose: this engine ships
+RelWithDebInfo, where OGRE_ASSERT_LOW compiles to `(void)0`, so the named failure
+the API promises would never fire in any build anyone runs — the alternative is a
+validation-layer message, or silence, from inside somebody's render loop.
+
+ABI: `HlmsComputeJob` grows three members. This is a SOURCE patch: every tree
+must re-run irisgl/scripts/build-ogre.sh.
+
+--- a/OgreMain/include/OgreRenderSystem.h
++++ b/OgreMain/include/OgreRenderSystem.h
+@@ -1182,6 +1182,39 @@
+ 
+         virtual void _dispatch( const HlmsComputePso &pso ) = 0;
+ 
++        /** GPU-DRIVEN COMPUTE DISPATCH (Jahshaka patch 0032).
++
++            Same as _dispatch, except the three thread-group counts are NOT known to
++            the CPU: they are read by the GPU out of `indirectBuffer` at `offsetBytes`,
++            as three consecutive uint32 (x, y, z) — the layout of
++            VkDispatchIndirectCommand / D3D12's D3D12_DISPATCH_ARGUMENTS.
++
++            That is what lets a compute job SIZE the job after it: pass A appends N
++            items to a list and writes ceil(N/threadsPerGroup) into the buffer, pass B
++            runs exactly that many groups. Without it every later pass must be
++            dispatched at its worst case.
++
++            `indirectBuffer` must be a buffer the GPU can read as an indirect argument.
++            On Vulkan that means any BufferPacked living in the ordinary VBO pools —
++            UavBufferPacked in practice, because the writer has to bind it as an SSBO
++            (note IndirectBufferPacked is a CPU-side emulation on this pin, see
++            VulkanVaoManager::mSupportsIndirectBuffers).
++
++            Implementations are responsible for the compute-write -> indirect-read
++            execution/memory dependency, which BarrierSolver cannot express. Pass
++            issueBarrier = false only when the counts were made visible some other way
++            (e.g. written in an earlier frame, or by a CPU upload).
++
++        @remarks
++            Not implemented by every render system; the base throws. Only call it
++            after checking RenderSystem::supportsIndirectDispatch().
++        */
++        virtual void _dispatchIndirect( const HlmsComputePso &pso, BufferPacked *indirectBuffer,
++                                        size_t offsetBytes, bool issueBarrier );
++
++        /// True when _dispatchIndirect is implemented by this render system.
++        virtual bool supportsIndirectDispatch() const { return false; }
++
+         /** Part of the low level rendering interface. Tells the RS which VAO will be bound now.
+             (i.e. Vertex Formats, buffers being bound, etc.)
+             You don't need to rebind if the VAO's mRenderQueueId is the same as previous call.
+--- a/OgreMain/src/OgreRenderSystem.cpp
++++ b/OgreMain/src/OgreRenderSystem.cpp
+@@ -1099,6 +1099,17 @@
+         }
+     }
+     //-----------------------------------------------------------------------
++    void RenderSystem::_dispatchIndirect( const HlmsComputePso &, BufferPacked *, size_t, bool )
++    {
++        // Jahshaka patch 0032. Only Vulkan implements GPU-driven dispatch at this pin;
++        // every other render system keeps the CPU-sized _dispatch and says so loudly
++        // rather than silently running the wrong number of groups.
++        OGRE_EXCEPT( Exception::ERR_NOT_IMPLEMENTED,
++                     "Indirect compute dispatch is not implemented by this RenderSystem. "
++                     "Check RenderSystem::supportsIndirectDispatch() first.",
++                     "RenderSystem::_dispatchIndirect" );
++    }
++    //-----------------------------------------------------------------------
+     void RenderSystem::_render( const v1::RenderOperation &op )
+     {
+         // Update stats
+--- a/OgreMain/include/OgreHlmsComputeJob.h
++++ b/OgreMain/include/OgreHlmsComputeJob.h
+@@ -121,6 +121,11 @@
+         PiecesMap mPieces;
+         size_t    mPsoCacheHash;
+ 
++        /// See setIndirectDispatchBuffer (Jahshaka patch 0032). Null = CPU-sized dispatch.
++        BufferPacked *mIndirectDispatchBuffer;
++        size_t        mIndirectDispatchOffset;
++        bool          mIndirectDispatchBarrier;
++
+         map<IdString, ShaderParams>::type mShaderParams;
+ 
+         void discoverGeneralTextures();
+@@ -240,6 +245,38 @@
+         /// in setNumThreadGroupsBasedOn, overriding setNumThreadGroups.
+         void _calculateNumThreadGroupsBasedOnSetting();
+ 
++        /** GPU-DRIVEN DISPATCH (Jahshaka patch 0032).
++
++            While a buffer is set, this job dispatches INDIRECTLY: the three thread-group
++            counts are read by the GPU from `buffer` at `offsetBytes` as three uint32
++            (x, y, z), and setNumThreadGroups / setNumThreadGroupsBasedOn are ignored.
++
++            That is what lets a compute pass be sized by the pass before it — a compaction
++            writes how many groups the next pass needs and the next pass runs exactly that
++            many, instead of being dispatched at its worst case from the CPU.
++
++            The buffer must be GPU-resident and readable as an indirect argument. On Vulkan
++            that means an ordinary pooled buffer — in practice a UavBufferPacked, since the
++            producing job binds it as an SSBO to write the counts (IndirectBufferPacked is
++            a CPU-side emulation on this pin). `offsetBytes` must be a multiple of 4.
++
++            The render system issues the compute-write -> indirect-read barrier itself; the
++            BarrierSolver has no vocabulary for VK_ACCESS_INDIRECT_COMMAND_READ_BIT.
++
++        @param buffer
++            Null to go back to CPU-sized dispatch (the default).
++        @param issueBarrier
++            Leave true unless the counts are already visible to the indirect stage (they were
++            written in an earlier frame, or uploaded from the CPU). False exists so the
++            dependency can be measured, and so a caller who already paid for the sync does not
++            pay twice.
++        */
++        void setIndirectDispatchBuffer( BufferPacked *buffer, size_t offsetBytes = 0u,
++                                        bool issueBarrier = true );
++
++        BufferPacked *getIndirectDispatchBuffer() const { return mIndirectDispatchBuffer; }
++        size_t        getIndirectDispatchOffset() const { return mIndirectDispatchOffset; }
++
+         /** Sets an arbitrary property to pass to the shader.
+         @remarks
+             Will trigger a recompilation if the value changes, regardless of
+--- a/OgreMain/src/OgreHlmsComputeJob.cpp
++++ b/OgreMain/src/OgreHlmsComputeJob.cpp
+@@ -70,7 +70,10 @@
+         mInformHlmsOfTextureData( false ),
+         mMaxTexUnitReached( 0 ),
+         mMaxUavUnitReached( 0 ),
+-        mPsoCacheHash( std::numeric_limits<size_t>::max() )
++        mPsoCacheHash( std::numeric_limits<size_t>::max() ),
++        mIndirectDispatchBuffer( 0 ),
++        mIndirectDispatchOffset( 0u ),
++        mIndirectDispatchBarrier( true )
+     {
+         memset( mThreadsPerGroup, 0, sizeof( mThreadsPerGroup ) );
+         memset( mNumThreadGroups, 0, sizeof( mNumThreadGroups ) );
+@@ -685,6 +688,33 @@
+         }
+     }
+     //-----------------------------------------------------------------------------------
++    void HlmsComputeJob::setIndirectDispatchBuffer( BufferPacked *buffer, size_t offsetBytes,
++                                                    bool issueBarrier )
++    {
++        // Jahshaka patch 0032. See the header. Vulkan's vkCmdDispatchIndirect requires the
++        // offset to be 4-byte aligned and three uint32s to fit.
++        //
++        // OGRE_EXCEPT and not OGRE_ASSERT_LOW: this engine ships RelWithDebInfo, where
++        // OGRE_ASSERT_LOW compiles to (void)0 — the named failure would never fire in any
++        // build anyone runs, and the alternative is a validation-layer message (or silence)
++        // from inside somebody's render loop.
++        if( buffer && ( offsetBytes & 0x03u ) != 0u )
++        {
++            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
++                         "Indirect dispatch offset must be a multiple of 4 bytes.",
++                         "HlmsComputeJob::setIndirectDispatchBuffer" );
++        }
++        if( buffer && offsetBytes + sizeof( uint32 ) * 3u > buffer->getTotalSizeBytes() )
++        {
++            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
++                         "Indirect dispatch offset + 12 bytes is past the end of the buffer.",
++                         "HlmsComputeJob::setIndirectDispatchBuffer" );
++        }
++        mIndirectDispatchBuffer = buffer;
++        mIndirectDispatchOffset = offsetBytes;
++        mIndirectDispatchBarrier = issueBarrier;
++    }
++    //-----------------------------------------------------------------------------------
+     void HlmsComputeJob::setNumThreadGroupsBasedOn( ThreadGroupsBasedOn source, uint8 texSlot,
+                                                     uint8 divisorX, uint8 divisorY, uint8 divisorZ )
+     {
+--- a/OgreMain/src/OgreHlmsCompute.cpp
++++ b/OgreMain/src/OgreHlmsCompute.cpp
+@@ -355,8 +355,15 @@
+         pso.mNumThreadGroups[1] = (uint32)( getProperty( kNoTid, ComputeProperty::NumThreadGroupsY ) );
+         pso.mNumThreadGroups[2] = (uint32)( getProperty( kNoTid, ComputeProperty::NumThreadGroupsZ ) );
+ 
++        // Jahshaka patch 0032: a job dispatched INDIRECTLY has no CPU-side group count by
++        // definition — the whole point is that only the GPU knows it — so requiring one here
++        // would force every such job to carry a meaningless dummy. The threads per group are
++        // still required (Metal needs them on the C++ side, and both back ends bake them into
++        // the shader), so only the second half of the test is relaxed.
++        const bool bIndirect = job->mIndirectDispatchBuffer != 0;
+         if( pso.mThreadsPerGroup[0] * pso.mThreadsPerGroup[1] * pso.mThreadsPerGroup[2] == 0u ||
+-            pso.mNumThreadGroups[0] * pso.mNumThreadGroups[1] * pso.mNumThreadGroups[2] == 0u )
++            ( !bIndirect &&
++              pso.mNumThreadGroups[0] * pso.mNumThreadGroups[1] * pso.mNumThreadGroups[2] == 0u ) )
+         {
+             OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
+                          job->getNameStr() +
+@@ -561,7 +568,18 @@
+         csParams->_updateAutoParams( mAutoParamDataSource, GPV_ALL );
+         mRenderSystem->bindGpuProgramParameters( GPT_COMPUTE_PROGRAM, csParams, GPV_ALL );
+ 
+-        mRenderSystem->_dispatch( psoCache.pso );
++        // Jahshaka patch 0032: a job that has been given an indirect buffer is sized by
++        // the GPU, not by mNumThreadGroups.
++        if( job->mIndirectDispatchBuffer )
++        {
++            mRenderSystem->_dispatchIndirect( psoCache.pso, job->mIndirectDispatchBuffer,
++                                              job->mIndirectDispatchOffset,
++                                              job->mIndirectDispatchBarrier );
++        }
++        else
++        {
++            mRenderSystem->_dispatch( psoCache.pso );
++        }
+     }
+     //----------------------------------------------------------------------------------
+     HlmsDatablock *HlmsCompute::createDatablockImpl( IdString datablockName,
+--- a/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
++++ b/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
+@@ -323,6 +323,11 @@
+         VertexElementType getColourVertexElementType() const override;
+ 
+         void _dispatch( const HlmsComputePso &pso ) override;
++        /// Jahshaka patch 0032 — GPU-driven dispatch, plus the compute-write ->
++        /// indirect-read barrier BarrierSolver cannot express.
++        void _dispatchIndirect( const HlmsComputePso &pso, BufferPacked *indirectBuffer,
++                                size_t offsetBytes, bool issueBarrier ) override;
++        bool supportsIndirectDispatch() const override { return true; }
+ 
+         void _setVertexArrayObject( const VertexArrayObject *vao ) override;
+ 
+--- a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
+@@ -2154,6 +2154,90 @@
+                        pso.mNumThreadGroups[1], pso.mNumThreadGroups[2] );
+     }
+     //-------------------------------------------------------------------------
++    void VulkanRenderSystem::_dispatchIndirect( const HlmsComputePso &pso,
++                                                BufferPacked *indirectBuffer, size_t offsetBytes,
++                                                bool issueBarrier )
++    {
++        // JAHSHAKA PATCH 0032 — GPU-driven compute dispatch.
++        //
++        // The argument buffer has to be a real VkBuffer. Note that Ogre's own
++        // IndirectBufferPacked is NOT one on this pin: VulkanVaoManager forces
++        // mSupportsIndirectBuffers to false (OgreVulkanVaoManager.cpp:183-184) and emulates
++        // indirect DRAW buffers in system memory, so such a buffer carries no
++        // BufferInterface at all. UavBufferPacked is the buffer to use — it comes out of the
++        // ordinary VBO pools, which are already created with
++        // VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT (same file, :1122-1127), and it is the only
++        // kind a compute shader can write the counts into anyway.
++        VulkanBufferInterface *bufferInterface =
++            static_cast<VulkanBufferInterface *>( indirectBuffer->getBufferInterface() );
++        if( !bufferInterface )
++        {
++            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
++                         "The indirect dispatch buffer has no GPU representation. "
++                         "IndirectBufferPacked is CPU-emulated on Vulkan at this pin; "
++                         "use a UavBufferPacked instead.",
++                         "VulkanRenderSystem::_dispatchIndirect" );
++        }
++
++        const VkDeviceSize bufferOffset =
++            indirectBuffer->_getFinalBufferStart() * indirectBuffer->getBytesPerElement() +
++            offsetBytes;
++
++        flushRootLayoutCS();
++
++        VkCommandBuffer cmdBuffer = mDevice->mGraphicsQueue.getCurrentCmdBuffer();
++
++        // THE BARRIER THE SOLVER CANNOT EXPRESS.
++        //
++        // executeResourceTransition's buffer branch only ever sets SHADER_READ/SHADER_WRITE,
++        // and ogreToVkStageFlags only knows the six shader stages (:3372-3389, :3510-3520), so
++        // VK_ACCESS_INDIRECT_COMMAND_READ_BIT at VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT is
++        // unreachable from the BarrierSolver — and BarrierSolver has no assumeTransition()
++        // overload for buffers to be told about one after the fact either.
++        //
++        // So this edge is issued here, by hand, and DELIBERATELY NOT registered with the
++        // solver: it is orthogonal to the state the solver tracks. The caller still resolves
++        // the buffer's ordinary SSBO transitions (write-by-job-A -> read-by-job-B) the normal
++        // way; this adds the second, indirect-read dependency on top and changes no tracked
++        // state, so the solver stays coherent by construction rather than by notification.
++        // Routing it through executeResourceTransition() would be wrong for a second reason:
++        // that function starts with endAllEncoders(), which would close the compute encoder
++        // the dispatch about to be recorded is riding in.
++        //
++        // Scope is the twelve bytes actually read, on the pool buffer's real offset — not a
++        // global VkMemoryBarrier — so it cannot accidentally serialise unrelated pool traffic.
++        //
++        // It covers BOTH producers, because neither path reaches the indirect stage on its
++        // own: a compute shader that wrote the counts (the point of the feature) and a
++        // TRANSFER that uploaded them (a CPU-seeded argument, and also every buffer's
++        // _firstUpload). Ogre's copy encoder does not end with INDIRECT_COMMAND_READ in its
++        // destination mask either, so the upload case is the same gap wearing a different
++        // hat — measured: with this barrier suppressed, Vulkan synchronization validation
++        // reports SYNC-HAZARD-READ-AFTER-WRITE at vkCmdDispatchIndirect naming exactly
++        // "must allow VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT at
++        // VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT", and with it the layer is silent.
++        if( issueBarrier )
++        {
++            VkBufferMemoryBarrier bufferBarrier;
++            makeVkStruct( bufferBarrier, VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER );
++            bufferBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
++            bufferBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
++            bufferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            bufferBarrier.buffer = bufferInterface->getVboName();
++            bufferBarrier.offset = bufferOffset;
++            bufferBarrier.size = sizeof( uint32 ) * 3u;
++
++            const VkPipelineStageFlags srcStage =
++                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
++            vkCmdPipelineBarrier( cmdBuffer, srcStage & mDevice->mSupportedStages,
++                                  VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT & mDevice->mSupportedStages, 0,
++                                  0u, 0, 1u, &bufferBarrier, 0u, 0 );
++        }
++
++        vkCmdDispatchIndirect( cmdBuffer, bufferInterface->getVboName(), bufferOffset );
++    }
++    //-------------------------------------------------------------------------
+     void VulkanRenderSystem::_setVertexArrayObject( const VertexArrayObject *vao )
+     {
+         VkBuffer vulkanVertexBuffers[15];
