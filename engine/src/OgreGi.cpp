@@ -967,16 +967,23 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     // on a 50 m ground to a 15 m one — the same scene, three answers). Nothing
     // below reads the slab's extent.
     //
-    // The margin is deliberately small and content-relative: it exists so the
-    // clipped floor reaches just PAST the content it supports rather than
-    // ending exactly on its boundary (the same question computeGiBounds' one
-    // voxel of slack answers for the volume as a whole), not so that empty
-    // ground is lit. It is charged to every scene, so it is small: at 5% an
-    // 18 m room's floor reaches 0.45 m past its walls and a 2 m crate's patch
-    // is 2.1 m. With no content at all (a scene of nothing but oversized slabs)
-    // there is nothing to be a patch around and the core stands in, which is
-    // the old behaviour.
-    static const float kSlabPatchMargin = 0.05f;   // 5% of the content, 2.5% a side
+    // THE MARGIN IS A FRACTION OF THE CONTENT'S SMALLEST EXTENT, and that
+    // choice is measured rather than tasteful. A patch that ends exactly on the
+    // content's own boundary takes the floor's bounce away with the acres: on a
+    // bare scene — one 2 m crate on the default ground, the case
+    // scripting.e2e.live_texture_pixels photographs — the crate's lit surface
+    // reads 83 of 255 with a volume its own size, 162 at twice it, 179 at four
+    // times and 220 with the whole 46 m the old fit gave it (GI off reads 83,
+    // i.e. at its own size the bounce contributes NOTHING). So the patch has to
+    // reach a real distance past the content, and the honest scale for "how far
+    // does a floor's bounce matter" is the content's own SMALLEST dimension —
+    // its height, for anything standing on the ground — not its footprint,
+    // which would grow a room's patch by the width of the room.
+    //
+    // Half of it, each side: a 2 m crate gets a 4 m patch (162, the bounce back
+    // within a point of what it was) and an 18 m room whose storey is 4.75 m
+    // gets 2.4 m of floor past its walls. Nothing here reads the slab.
+    static const float kSlabPatchMargin = 0.5f;    // x the content's smallest extent, a side
     Ogre::Vector3 contentMin(1e30f), contentMax(-1e30f);
     bool haveContent = false;
     for (size_t i = 0; i < n; ++i) {
@@ -987,9 +994,11 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     }
     Ogre::Vector3 patchMin = coreMin, patchMax = coreMax;
     if (haveContent) {
-        const Ogre::Vector3 pgrow = (contentMax - contentMin) * (kSlabPatchMargin * 0.5f);
-        patchMin = contentMin - pgrow;
-        patchMax = contentMax + pgrow;
+        const Ogre::Vector3 csize = contentMax - contentMin;
+        const float reach = kSlabPatchMargin *
+                            std::max(std::min(std::min(csize.x, csize.y), csize.z), 1e-4f);
+        patchMin = contentMin - Ogre::Vector3(reach);
+        patchMax = contentMax + Ogre::Vector3(reach);
     }
     // THE GEOMETRIC BLEND between two boxes, by `k` (0 = a, 1 = b): sizes
     // interpolated in LOG space and centres linearly, which is exactly what the
