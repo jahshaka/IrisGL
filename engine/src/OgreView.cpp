@@ -50,6 +50,16 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
                  mChainHandles);
 }
 
+/// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
+/// ordinary mip count. A free function so the resize hooks can ask the same
+/// question chainDesc() answers, and so the number has exactly one definition.
+static unsigned hzbLevelsFor(unsigned w, unsigned h) {
+    unsigned levels = 1u;
+    unsigned m = w > h ? w : h;
+    while (m > 1u) { m >>= 1u; ++levels; }
+    return levels;
+}
+
 ChainDesc OgreView::chainDesc() const {
     ChainDesc d;
     d.background = mBackground;
@@ -67,6 +77,18 @@ ChainDesc OgreView::chainDesc() const {
     // show the same shot the viewport does, and the flag can only be true when
     // a host deliberately pushed a constrained camera.
     d.letterbox  = mCameraDesc.constrainAspect && mCameraDesc.aspect > 0.0f;
+    // THE HZB (NANITE_SPEC §4.3) is set BEFORE the offscreen early-out, with
+    // letterbox and for the same kind of reason: it is not a post-process and it
+    // changes no pixel of the picture — it is a resource a future screen-space
+    // trace reads, and an offscreen capture is exactly where such a trace gets
+    // measured. It can only be true when a host deliberately asked for it, and
+    // nothing in this engine asks yet.
+    //
+    // The LEVEL COUNT is part of the graph (see ChainDesc::hzbLevels), derived
+    // here from the view's achieved size — which is why it is read through
+    // width()/height() (the target's real size) and not from mWidth/mHeight.
+    d.hzb        = mPostFx.hzb;
+    d.hzbLevels  = d.hzb ? hzbLevelsFor(width(), height()) : 0u;
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -992,8 +1014,15 @@ void OgreView::resize(unsigned w, unsigned h) {
             // the "viewport stops presenting after a dock-open resize" defect).
             mPendingW = w; mPendingH = h;
         } else {
+            const unsigned hzbBefore = mPostFx.hzb ? hzbLevelsFor(width(), height()) : 0u;
             rebuildRtt(w, h);   // an RTT cannot be resized in place
             mWidth = w; mHeight = h;
+            // THE HZB'S LEVEL COUNT IS GRAPH SHAPE (ChainDesc::hzbLevels): the
+            // compositor resizes a factor-sized texture without rebuilding the
+            // node, so a size change that changes the mip count would leave
+            // compute passes addressing levels that no longer exist.
+            if (mPostFx.hzb && hzbLevelsFor(width(), height()) != hzbBefore)
+                rebuildWorkspaceDef();
         }
     } JAH_CATCH(mError, );
 }
@@ -1074,6 +1103,17 @@ bool OgreView::readPixels(Image &out) {
 }
 
 void OgreView::applyPendingResize() {
+    // See the offscreen branch of resize(): the pyramid's level count is part of
+    // the graph, so a size change that moves it rebuilds the chain. Free (one
+    // integer compare) for every view that has no pyramid, which is all of them
+    // until a Photon spike turns one on.
+    const unsigned hzbBefore = mPostFx.hzb ? hzbLevelsFor(width(), height()) : 0u;
+    applyPendingResizeImpl();
+    if (mPostFx.hzb && hzbLevelsFor(width(), height()) != hzbBefore)
+        rebuildWorkspaceDef();
+}
+
+void OgreView::applyPendingResizeImpl() {
     if (!mWindow || !mPendingW || !mPendingH) return;
     const unsigned w = mPendingW, h = mPendingH;
     const bool sampleChange = mPendingSamples != 0;

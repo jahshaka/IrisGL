@@ -614,6 +614,22 @@ struct ChainDesc {
     float ssrIntensity = 1.0f;
     bool  refractions = false;
 
+    // ---- The hierarchical depth pyramid (SPECS/NANITE_SPEC.md §4.3) ----
+    /// Build a closest-depth mip chain of the scene depth, once per frame, right
+    /// after the opaque pass. PHOTON SHARED INFRASTRUCTURE and nothing else
+    /// today: no pass of this engine reads it yet, so it is OFF everywhere and
+    /// costs nothing until a spike asks for it (a stackless screen-space trace
+    /// is the first intended consumer). A GRAPH change — one texture and one
+    /// compute pass per mip level.
+    bool  hzb = false;
+    /// How many mip levels the pyramid has, i.e. how many compute passes the
+    /// graph carries. Derived from the view's CURRENT size by OgreView (the
+    /// compositor auto-resizes a factor-sized texture without rebuilding the
+    /// node, so the pass count has to be part of the graph's identity or a
+    /// resize would leave passes addressing mips that no longer exist). 0 when
+    /// the pyramid is off.
+    unsigned hzbLevels = 0u;
+
     // ---- Distortion (POST_LOOKS_SPEC.md §5.3) ----
     /// The RESOLVED flag (the host has already answered "auto" against whether
     /// the scene holds a distortion material). Adds one target and two passes.
@@ -3875,6 +3891,7 @@ public:
     ///  * MSAA change on X11: the window IS recreated on the same native handle,
     ///    because Vulkan/XCB has no setFsaa. The device is stalled first.
     void applyPendingResize();
+    void applyPendingResizeImpl();
     /// Full GPU stall through the public VaoManager contract. Required before
     /// destroying a render window: the swapchain's acquire semaphore is
     /// destroyed outright (VulkanVaoManager::notifySemaphoreUnused →
@@ -4231,6 +4248,11 @@ public:
     bool memoryStats(MemoryStats &out) const override;
     bool textureMemory(std::vector<TextureMemoryEntry> &out) const override;
     bool reclaimMemory(MemoryStats *before, MemoryStats *after) override;
+    // ---- Photon shared infrastructure (OgreCompute.cpp) ----
+    bool indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) override;
+    bool hzbStatus(View *view, HzbStatus &out) const override;
+    bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
+                      unsigned &width, unsigned &height) override;
     // ---- The render-loop monitor (OgreFrameMonitor.cpp) ----
     void setFrameMonitor(MonitorLevel level) override;
     MonitorLevel frameMonitor() const override;

@@ -1633,6 +1633,35 @@ public:
     virtual bool captureSnapshot(EngineSnapshot &out, const std::string &label,
                                  Scene *scene = nullptr) const = 0;
 
+    // ---- PHOTON SHARED INFRASTRUCTURE (SPECS/NANITE_SPEC.md §4.2-§4.3) ----
+
+    /// Runs the indirect-dispatch chain once and reports what the GPU did
+    /// (IndirectDispatchProbe says what each field means). `survivors` is how
+    /// many entries of a 4096-long input list are non-zero, i.e. how many thread
+    /// groups the second job must end up running.
+    ///
+    /// This is the PROOF of ogre-patch 0032 and, for now, its only caller: the
+    /// capability exists for the Photon arms, which are not built yet. It
+    /// allocates three small UAV buffers, dispatches twice, reads back and frees
+    /// everything again, so it is safe to call at any time — but it is a
+    /// measurement, not a render path.
+    ///
+    /// False means the jobs are missing (unstaged media) or the backend cannot
+    /// do it; `out.supported` distinguishes the two.
+    virtual bool indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) = 0;
+
+    /// What pyramid `view` is building, if any (HzbStatus). Cheap: reads the
+    /// live texture's shape, renders nothing. False when the view has none.
+    virtual bool hzbStatus(View *view, HzbStatus &out) const = 0;
+
+    /// Reads one mip level of `view`'s pyramid back to the CPU, row-major, one
+    /// float per texel (the raw depth value in the engine's own convention —
+    /// see HzbStatus::reverseDepth). A MEASUREMENT: it flushes the command
+    /// buffer and stalls on the copy, so it belongs in a suite or a spike, never
+    /// in a frame. False when there is no pyramid or no such level.
+    virtual bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
+                              unsigned &width, unsigned &height) = 0;
+
     /// Writes the cache now, if anything new has been compiled since the last
     /// write. Called on clean shutdown and once a compile burst has settled;
     /// safe (and a no-op) when the cache is disabled or nothing is dirty.
