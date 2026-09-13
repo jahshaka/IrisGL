@@ -1636,6 +1636,10 @@ struct FogState {
     float heightDensity = 0.0f;     ///< 0 = no height layer (shader skips the branch)
     float heightFalloff = 0.1f;
     float heightLevel   = 0.0f;
+    /// FogDesc::atmosphereColour — read in preparePassHash, where it becomes the
+    /// `jah_fog_atmo` shader property that decides whether our media file
+    /// replaces upstream's per-vertex sky colour with the authored one.
+    bool  atmosphere    = false;
 };
 
 class FogHlmsListener final : public Ogre::HlmsListener {
@@ -2042,6 +2046,50 @@ public:
     /// Environment reflections divorced from the sky: six resampled faces of
     /// the host's equirect/baked sky image. Six zero ids clear.
     bool applySkyReflectionFaces(const TextureId faces[6]);
+    /// THE ANALYTIC SKY (AtmosphereSky): Ogre's AtmosphereNpr quad, shown and
+    /// parameterised. The component is the same instance the FOG uses — one per
+    /// scene — so the two halves negotiate through mAtmoSkyOn/mAtmoFogOn rather
+    /// than each calling setSky()/destroyAtmosphere() behind the other's back.
+    bool applySkyAtmosphere(const AtmosphereSky &sky);
+    /// Registers/unregisters the component on the SceneManager and shows or
+    /// hides its quad from the two flags. The registration is what sets
+    /// hlms_fog, so "no fog and no analytic sky" must leave it unregistered.
+    void syncAtmosphere();
+    bool mAtmoSkyOn = false;   // the analytic sky is the scene's sky
+    bool mAtmoFogOn = false;   // the World fog is on
+    /// The component's own sky quad, grabbed from the SceneManager's
+    /// Rectangle2D list the moment it creates it (the component keeps its
+    /// per-SceneManager map private). Needed to move it off render queue 212
+    /// and off the default visibility flags — see tuneAtmosphereRenderable.
+    Ogre::Rectangle2D *mAtmoQuad = nullptr;
+    void tuneAtmosphereRenderable();
+
+    /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
+    /// environment reflections and its ambient SH, for every sky that is not
+    /// already a cubemap.
+    ///
+    /// Six render_scene passes over render queue 0 alone (the sky's queue),
+    /// into the six faces of a small cube: whatever the viewport shows as sky
+    /// — an equirect photograph, a baked gradient strip, a uniform colour, the
+    /// analytic sky's shader — is what the reflections and the ambient are made
+    /// of, by construction rather than by a second CPU implementation of the
+    /// same picture. It replaces SceneMirror's equirect->cube resample (6x128^2
+    /// point samples per sky change on the UI thread) and its SH integral over
+    /// the full image.
+    void requestSkyCapture();
+    /// Runs the capture (workspace update), reads the 32^2 mip back for the SH,
+    /// and hands the cube to buildReflectionCubemapFrom. Called from
+    /// applyPendingIbl, i.e. inside a frame, where a command buffer exists.
+    void applyPendingSkyCapture();
+    /// The ambient half of the capture: the cube's 32^2 mip, read back and
+    /// integrated into 9 SH bands (the host scales them by its Sky Light).
+    void integrateSkyShFromCube(Ogre::TextureGpu *cube);
+    bool mSkyCapturePending = false;
+    /// The sky's ambient, 9 SH bands x 3 channels, integrated from the captured
+    /// cube. Valid only while mSkyShValid; the host scales it by its Sky Light.
+    bool skyAmbientSh(float out[27]) const override;
+    bool  mSkyShValid = false;
+    float mSkySh[27] = { 0.0f };
 
     /// THIS SCENE'S SHADOW REQUEST (ShadowDesc). The backend's filter and atlas
     /// are one per PROCESS, so all this does is apply the scene's resolved

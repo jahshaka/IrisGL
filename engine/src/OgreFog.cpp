@@ -52,7 +52,14 @@ FogHlmsListener gFogListener;
 // from the array setLightFixedToShadowMap writes — which is why ogre-patch 0025
 // makes the second invalidate the first's cache.
 void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
-                                      bool, Ogre::SceneManager *, Ogre::Hlms *hlms) {
+                                      bool, Ogre::SceneManager *sceneManager, Ogre::Hlms *hlms) {
+    // THE FOG'S COLOUR MODE, first and unconditionally for a colour pass: it is
+    // a SHADER property (the media file's @undefpiece of upstream's per-vertex
+    // sky colour is gated on it), so it has to be set before any of the early
+    // returns below — and it participates in the pass hash, which is what makes
+    // flipping the row recompile rather than silently keep the old shader.
+    if (hlms && !casterPass && sceneManager && lookup(sceneManager).atmosphere)
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_fog_atmo", 1);
     if (casterPass || !shadowNode || !hlms) return;
     // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
     // only ENTER the broken state when setLightFixedToShadowMap is called on
@@ -308,14 +315,41 @@ void OgreScene::ensureAtmosphere() {
     // caller satisfies — scenes exist only after Engine::createView().
     JAH_TRY {
         mAtmosphere = new Ogre::AtmosphereNpr(vao);
+        // WHICH Rectangle2D IS THE COMPONENT'S. It keeps its per-SceneManager
+        // map private and offers no accessor, and the quad needs two things
+        // done to it that upstream cannot know about (render queue 0 instead of
+        // 212, kVisibleBit instead of the default flags —
+        // tuneAtmosphereRenderable says why). So: the set of Rectangle2Ds
+        // before its first setSky, the set after, and the one that appeared is
+        // its. Deterministic, and it survives upstream changing how many it
+        // makes — unlike matching on the material name.
+        std::set<Ogre::MovableObject *> before;
+        {
+            Ogre::SceneManager::MovableObjectIterator it =
+                mSceneMgr->getMovableObjectIterator(Ogre::Rectangle2DFactory::FACTORY_TYPE_NAME);
+            while (it.hasMoreElements()) before.insert(it.getNext());
+        }
         mAtmosphere->setSky(mSceneMgr, true);      // creates the sky quad, registers
-        mAtmosphere->setSky(mSceneMgr, false);     // hides the quad, unregisters
-        mSceneMgr->_setAtmosphere(mAtmosphere);    // fog only, no sky
+        {
+            Ogre::SceneManager::MovableObjectIterator it =
+                mSceneMgr->getMovableObjectIterator(Ogre::Rectangle2DFactory::FACTORY_TYPE_NAME);
+            while (it.hasMoreElements()) {
+                Ogre::MovableObject *mo = it.getNext();
+                if (!before.count(mo)) mAtmoQuad = static_cast<Ogre::Rectangle2D *>(mo);
+            }
+        }
+        tuneAtmosphereRenderable();
+        // The state the two customers left behind decides what happens next
+        // (ONE component, two customers — syncAtmosphere's header). A first
+        // creation from setFog leaves the quad hidden and the component
+        // registered; from the analytic sky it leaves both on.
+        syncAtmosphere();
     } JAH_CATCH(mError, );
 }
 
 void OgreScene::destroyAtmosphere() {
     if (!mAtmosphere) return;
+    mAtmoQuad = nullptr;   // the component destroys it in its own destructor
     // ~AtmosphereNpr un-registers itself from every SceneManager it knows and
     // destroys their Rectangle2Ds — which is why this must precede the manager.
     JAH_TRY {
@@ -346,12 +380,29 @@ void OgreScene::setFog(const FogDesc &desc) {
         // Bit-exact off: no atmosphere means no hlms_fog property, which means the
         // fog code is not compiled into the shader at all. Every offscreen pixel
         // suite depends on this.
-        destroyAtmosphere();
+        //
+        // UNLESS THE ANALYTIC SKY IS BOUND (SKY-GPU): the same component draws
+        // it, and its registration is what makes the quad update at all, so the
+        // fog cannot take it down. The fog block then stays in the shader with
+        // fogDensity 0 — an exact identity, see applySkyAtmosphere (3).
+        mAtmoFogOn = false;
+        if (mAtmoSkyOn) {
+            syncAtmosphere();
+            if (mAtmosphere) JAH_TRY {
+                Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
+                preset.fogDensity = 0.0f;
+                mAtmosphere->setPreset(preset);
+            } JAH_CATCH(mError, );
+        } else {
+            destroyAtmosphere();
+        }
         FogHlmsListener::unregisterFog(mSceneMgr);
         return;
     }
+    mAtmoFogOn = true;
     ensureAtmosphere();
     if (!mAtmosphere) return;   // media missing: the scene renders unfogged, mError says why
+    syncAtmosphere();
 
     JAH_TRY {
         Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
@@ -367,6 +418,11 @@ void OgreScene::setFog(const FogDesc &desc) {
         s.heightDensity = std::max(desc.heightDensity, 0.0f);
         s.heightFalloff = desc.heightFalloff;
         s.heightLevel   = desc.heightLevel;
+        // AERIAL PERSPECTIVE (FogDesc::atmosphereColour): only meaningful while
+        // an ANALYTIC sky is drawn — the colour it asks for is that sky's own
+        // scattering, and with any other sky bound the component's model would
+        // be evaluated for a sky nobody can see. Refused rather than faked.
+        s.atmosphere    = desc.atmosphereColour && mAtmoSkyOn;
         FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassBuffer
     } JAH_CATCH(mError, );
 }

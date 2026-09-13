@@ -72,6 +72,21 @@ public:
     /// as they were: an unknown texture id, six faces that are not all the same
     /// size, or a compressed face format.
     virtual bool        setSky(const SkyDesc &) = 0;
+    /// THE SKY'S OWN AMBIENT, as the same 9x3 spherical harmonics setAmbientSh
+    /// takes, integrated from the sky the backend just drew (SKY-GPU).
+    ///
+    /// The backend captures whatever sky is bound into a small cubemap on the
+    /// GPU and integrates THAT — so a photograph, a gradient, a picked colour
+    /// and the analytic sky all answer the same question the same way, and no
+    /// host needs an image decoder, a scattering model or a sphere-integral of
+    /// its own. Returns false while no sky has been captured yet (no sky at
+    /// all, or the capture has not run: it happens inside the next rendered
+    /// frame, like the IBL convolution).
+    ///
+    /// UNSCALED: this is the sky's mean incident radiance. A host that models a
+    /// sky LIGHT multiplies by its intensity and tint and pushes the result
+    /// through setAmbientSh — the backend never applies a light of its own.
+    virtual bool        skyAmbientSh(float out[27]) const = 0;
     /// The description currently in force (default-constructed = no sky).
     virtual SkyDesc     sky() const = 0;
     /// THIS SCENE'S SHADOW REQUEST — ShadowDesc says what the shape means and

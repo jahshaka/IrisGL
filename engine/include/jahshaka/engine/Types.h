@@ -249,7 +249,49 @@ struct ClipState {
 };
 
 using TextureId = unsigned int;
-enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides with X11's macro
+enum class SkyMode { NoSky, Equirectangular, Cubemap, Atmosphere };   // 'None' collides with X11's macro
+
+/// THE ANALYTIC SKY, drawn by the engine itself (SKY-GPU, owner pick 5).
+///
+/// It is Ogre's `AtmosphereNpr` component: a full-screen quad whose fragment
+/// shader turns the camera ray into a scattering colour, evaluated on the GPU
+/// every frame. It replaces a CPU "Preetham" bake that cost up to 1024x512
+/// pixels of transcendental math on the UI thread per parameter change, and its
+/// dials are the component's own — there is no mapping from the old ones and
+/// none is owed (the model is different arithmetic, not a re-parameterisation).
+///
+/// THE SUN IS NOT THE COMPONENT'S. `sunDir` is pushed by the host from the
+/// scene's sun light, and the component's own light/ambient link is never armed
+/// (see OgreSky.cpp): the light keeps the colour and the power the user gave it.
+/// The component's own sun DISC is off too — the disc is SunDisc's, one
+/// mechanism over every sky type.
+struct AtmosphereSky {
+    /// How much atmosphere the ray travels through: the blue's depth. (0; 1]-ish.
+    float density   = 0.47f;
+    /// How fast the colour changes with altitude — the horizon's spread.
+    float diffusion = 2.0f;
+    /// The lowest the sky is drawn at; raises the horizon band in a sunset.
+    float horizon   = 0.025f;
+    /// The sky's own colour, before absorption. Ogre's default is a daylight blue.
+    Colour skyColour { 0.334f, 0.57f, 1.0f, 1.0f };
+    /// Multiplies the whole sky (HDR).
+    float skyPower  = 1.0f;
+    /// Unit vector FROM the scene TOWARDS the sun, in world space — the scene's
+    /// sun light's direction, reversed, pushed by the host. With `hasSun` false
+    /// the sky is evaluated with the sun straight overhead at its lowest time
+    /// of day, which is this model's night.
+    float sunDir[3] = { 0.0f, 1.0f, 0.0f };
+    bool  hasSun    = false;
+
+    bool operator==(const AtmosphereSky &o) const {
+        return density == o.density && diffusion == o.diffusion && horizon == o.horizon &&
+               skyColour.r == o.skyColour.r && skyColour.g == o.skyColour.g &&
+               skyColour.b == o.skyColour.b && skyPower == o.skyPower &&
+               hasSun == o.hasSun && sunDir[0] == o.sunDir[0] && sunDir[1] == o.sunDir[1] &&
+               sunDir[2] == o.sunDir[2];
+    }
+    bool operator!=(const AtmosphereSky &o) const { return !(*this == o); }
+};
 
 /// A SCENE'S WHOLE SKY, as one value (ENGINEERING_DEBT_SPEC.md item 4).
 ///
@@ -321,6 +363,9 @@ struct SkyDesc {
     /// `reflectionFaces`. Ignored in every other mode.
     TextureId faces[6] = { 0, 0, 0, 0, 0, 0 };
 
+    /// SkyMode::Atmosphere: the analytic sky's parameters. Ignored otherwise.
+    AtmosphereSky atmosphere;
+
     /// ENVIRONMENT REFLECTIONS (IBL), independently of the sky.
     ///
     /// `reflections == false` means "this description says nothing about
@@ -364,6 +409,7 @@ struct SkyDesc {
         if (mode == SkyMode::Cubemap) {
             for (int i = 0; i < 6; ++i) if (faces[i] != o.faces[i]) return false;
         }
+        if (mode == SkyMode::Atmosphere) return atmosphere == o.atmosphere;
         return true;
     }
     bool sameReflections(const SkyDesc &o) const {
@@ -2001,6 +2047,21 @@ struct FogDesc {
     /// hold. breakFalloff = 0 turns it off, leaving pure exponential fog.
     float  breakMinBrightness = 0.25f;
     float  breakFalloff       = 0.1f;
+
+    /// AERIAL PERSPECTIVE: take the fog's COLOUR from the analytic sky instead
+    /// of `colour` (SKY-GPU). The engine's atmosphere component computes a
+    /// per-vertex scattering colour for the direction each surface is seen
+    /// from, so a distant hill fades into the sky it stands against rather than
+    /// into one authored grey — and it changes with the sun, for free, because
+    /// it is the same model the sky is drawn with.
+    ///
+    /// OFF BY DEFAULT, and off is what every scene authored before this had:
+    /// `colour` is a value a person picked, and no scene's look changes unasked.
+    /// The height layer is unaffected either way (it is ours, and it uses
+    /// `colour`); with the atmospheric colour on, the two layers are
+    /// deliberately different colours — the distance haze is the sky's, the
+    /// ground layer is the author's.
+    bool   atmosphereColour = false;
 };
 
 // ---- Planar reflections (scene-level, PLANAR_REFLECTIONS_SPEC.md) ----

@@ -81,13 +81,29 @@ enum class GiQuality : int
 	HIGH
 };
 
+/// THE ANALYTIC ("realistic") SKY's parameters — the ENGINE's own, since
+/// SKY-GPU (2026-09-13).
+///
+/// The five Preetham dials this replaces (luminance, reileigh, mieCoefficient,
+/// mieDirectionalG, turbidity) described a CPU bake that no longer exists: the
+/// sky is Ogre's AtmosphereNpr, evaluated per pixel on the GPU, and these are
+/// its parameters. There is no mapping from the old names and none is owed —
+/// the arithmetic is different, not re-parameterised — so `world.sky realistic`
+/// refuses them BY NAME and an old file's Realistic block reads as the
+/// defaults below (no migrations, ever; the crud law).
 struct SkyRealistic
 {
-	float luminance;
-	float reileigh;
-	float mieCoefficient;
-	float mieDirectionalG;
-	float turbidity;
+	/// How much atmosphere the ray travels through — the blue's depth.
+	float density;
+	/// How fast the colour changes with altitude — the horizon's spread.
+	float diffusion;
+	/// The lowest point the sky is drawn at; raises the band in a sunset.
+	float horizon;
+	/// The sky's own colour before absorption, as a colour a user PICKS
+	/// (decoded sRGB->linear at the boundary, like every other one).
+	QColor skyColour;
+	/// Multiplies the whole sky (HDR).
+	float power;
 
 	// THE SKY HAS NO SUN OF ITS OWN (SKY_LIGHT_SPEC.md §3, owner decision D15).
 	// The analytic sky's sun DIRECTION comes from the scene's sun — the first
@@ -178,6 +194,13 @@ public:
     float fogHeightLevel;      // world Y at which fogHeightDensity applies
     float fogBreakMinBrightness;   // luminance where bright pixels start resisting the fog
     float fogBreakFalloff;         // how fast they do; 0 = pure exponential fog
+    /// AERIAL PERSPECTIVE (SKY-GPU): the distance fog takes its colour from the
+    /// ANALYTIC sky's own scattering for the direction each surface is seen
+    /// from, instead of fogColor — so a far hill fades into the sky behind it
+    /// and follows the sun. Needs the realistic sky (it IS that sky's model);
+    /// with any other sky bound the engine keeps the authored colour. Off by
+    /// default: fogColor is a colour a person picked.
+    bool fogAtmosphere;
 
     /// The exponential density an old LINEAR start/end pair maps to: the two
     /// curves are matched where the eye reads fog, at the HALF-fogged distance.
@@ -472,7 +495,7 @@ public:
     // below are whatever the user/document set them to), 0 = Low, 1 = Medium,
     // 2 = High, 3 = Epic. Resolution is WRITE-THROUGH: setting a mode writes the
     // tier value into each backing field (antiAliasing, shadowResolution,
-    // shadowFilterTier, giMode, giQuality, skyBakeResolution,
+    // shadowFilterTier, giMode, giQuality,
     // ...) EXCEPT rows listed in worldOverrides, so every existing consumer —
     // the mirror, the serializer, the panels, the verbs — keeps reading the one
     // field it always read. The invariant: a backing field is always the
@@ -500,11 +523,6 @@ public:
 
 	SkyType skyType;
 	SkyRealistic skyRealistic;
-
-	// Equirect width the analytic (realistic) sky is CPU-baked at; the height is
-	// half of it. 256 is the historical value; 512/1024 trade bake time for a
-	// sharper sun disc on big displays (VISUAL_PARITY_SPEC item 1).
-	int skyBakeResolution;
 
 	// THE SUN PIN (SUN_AND_LIGHT_DEFAULTS Q1): the guid of the DIRECTIONAL
 	// light the author has pinned as this scene's sun. Empty (the default) =

@@ -1,0 +1,68 @@
+// Jahshaka's SKY CAPTURE (SKY-GPU, 2026-09-13).
+//
+// Six render_scene passes over RENDER QUEUE 0 ALONE — the queue every sky
+// renderable in this engine sits in (OgreSky.cpp's tuneSkyRenderable moves
+// Ogre's own sky quad there, and the analytic sky's quad with it) — into the
+// six faces of a small cubemap, with `camera_cubemap_reorient` turning one
+// camera into the six face directions.
+//
+// WHAT IT REPLACES: the host used to resample its equirect sky image into six
+// 128^2 faces on the CPU (6 x 16k bilinear fetches per sky change, on the UI
+// thread) and integrate the sky's ambient over the whole image. Now the sky is
+// captured from the very shader the viewport draws it with, so a photograph, a
+// baked gradient strip, a picked colour and the analytic sky all reach the
+// reflections and the ambient through one path. The capture is the input of
+// the ibl_specular convolution (JahshakaIbl.compositor) and of the SH integral
+// (OgreSky.cpp, from the 32^2 mip).
+//
+// visibility_mask 0x1 is kVisibleBit: the sun disc carries kSunDiscBit INSTEAD
+// (EnginePrivate.h), so it is never captured into the environment — the disc is
+// drawn, the sun's energy is the directional light's.
+//
+// rq_last is EXCLUSIVE in Ogre-Next: 0..1 is queue 0 and nothing else. A scene
+// render with no geometry in range still walks the cull, which is why this runs
+// on a sky CHANGE and never per frame.
+//
+// external 0 = the capture cube (RenderToTexture + AllowAutomipmaps)
+
+abstract target jah_sky_face
+{
+	pass render_scene
+	{
+		load
+		{
+			all				clear
+			clear_colour	0 0 0 1
+		}
+		store
+		{
+			depth			dont_care
+			stencil			dont_care
+		}
+
+		rq_first			0
+		rq_last				1
+		visibility_mask		0x1
+		overlays			off
+		camera_cubemap_reorient true
+
+		profiling_id "Jahshaka sky capture"
+	}
+}
+
+compositor_node JahshakaSkyCaptureNode
+{
+	in 0 skyCapture
+
+	target skyCapture +X : jah_sky_face { }
+	target skyCapture -X : jah_sky_face { }
+	target skyCapture +Y : jah_sky_face { }
+	target skyCapture -Y : jah_sky_face { }
+	target skyCapture +Z : jah_sky_face { }
+	target skyCapture -Z : jah_sky_face { }
+}
+
+workspace JahshakaSkyCaptureWorkspace
+{
+	connect_external 0 JahshakaSkyCaptureNode 0
+}

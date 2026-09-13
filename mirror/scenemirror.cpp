@@ -318,10 +318,9 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mDecalTextures.clear();
     mTarget->setSky(SkyDesc());   // no sky — which also clears the reflection cubemap
     for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
-    for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
     mSkySource = SkySource();
     mSkyDesc = SkyDesc();
-    clearSkyAmbient();
+    for (float &c : mSkyAmbientSh) c = 0.0f;
     mAmbientPushed = false;
     mSource = scene;
     // ...and the incoming one moves INTO it. This is the whole of the swap from
@@ -5051,8 +5050,13 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // but no document path reaches it any more.
     {
         float sh[27] = { 0.0f };
+        // THE SKY'S INTEGRAL COMES FROM THE ENGINE (SKY-GPU): it captured the
+        // sky it drew into a cubemap and integrated that. Read every frame —
+        // 27 floats — because the capture lands one frame after the sky change
+        // that asked for it, exactly like the IBL convolution.
+        const bool hasSky = mTarget->skyAmbientSh(mSkyAmbientSh);
         const auto skyLight = mSource->skyLight();
-        if (skyLight && mHasSkyAmbient) {
+        if (skyLight && hasSky) {
             const iris::LinearColor tint = iris::linearOf(skyLight->color);
             const float gain[3] = { tint.r * skyLight->intensity,
                                     tint.g * skyLight->intensity,
@@ -5172,6 +5176,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         fog.heightLevel = mSource->fogHeightLevel;
         fog.breakMinBrightness = mSource->fogBreakMinBrightness;
         fog.breakFalloff = mSource->fogBreakFalloff;
+        fog.atmosphereColour = mSource->fogAtmosphere;
         const bool changed =
             !mFogPushed || mLastFog.enabled != fog.enabled ||
             mLastFog.colour.r != fog.colour.r || mLastFog.colour.g != fog.colour.g ||
@@ -5179,6 +5184,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastFog.heightDensity != fog.heightDensity ||
             mLastFog.heightFalloff != fog.heightFalloff ||
             mLastFog.heightLevel != fog.heightLevel ||
+            mLastFog.atmosphereColour != fog.atmosphereColour ||
             mLastFog.breakMinBrightness != fog.breakMinBrightness ||
             mLastFog.breakFalloff != fog.breakFalloff;
         if (changed) { mTarget->setFog(fog); mLastFog = fog; mFogPushed = true; }
@@ -5630,51 +5636,6 @@ inline void dirToEquirect(float x, float y, float z, float &u, float &v)
     u = (std::atan2(x, -z) + kPi) / (2.0f * kPi);
 }
 
-// sRGB byte -> linear float, table-driven: the SH integral touches every texel
-// of a sky that can be 4096x2048, three channels, and std::pow dominated it.
-// THE TABLE MOVED to irisgl/core/color.h (SKY_LIGHT_SPEC.md §4): it is the same
-// curve `iris::linearOf` applies to every colour a user picks, and a painted sky
-// and a picked sky agreeing is exactly the point of having ONE of it.
-inline const float *srgbTable() { return iris::srgbToLinearTable(); }
-
-// Cosine-convolved irradiance in 9 SH bands, in the basis and units
-// Scene::setAmbientSh documents. Accumulate raw radiance moments
-//     A_i = sum( radiance * b_i(dir) * dOmega )
-// over the basis polynomials b = {1, y, z, x, xy, yz, 3z^2-1, zx, x^2-y^2},
-// then fold in BOTH the SH normalisation k_i (twice: once for the projection,
-// once for the reconstruction) and the Lambert convolution ratio
-// A_l/pi = {1, 2/3, 1/4}. The result evaluates to E(n)/pi, a mean incident
-// radiance — the same quantity the two hemisphere colours used to carry, so a
-// sky that used to light a surface at brightness X still does.
-struct ShAccum {
-    double a[9][3] = {};
-
-    void add(float x, float y, float z, double r, double g, double b, double w)
-    {
-        const double bi[9] = { 1.0, y, z, x, double(x) * y, double(y) * z,
-                               3.0 * double(z) * z - 1.0, double(z) * x,
-                               double(x) * x - double(y) * y };
-        for (int i = 0; i < 9; ++i) {
-            const double f = bi[i] * w;
-            a[i][0] += r * f; a[i][1] += g * f; a[i][2] += b * f;
-        }
-    }
-
-    void finish(float out[27]) const
-    {
-        // A_l/pi * k_i^2, per band.
-        static const double k[9] = {
-            0.0795774715,                                     // 1     * 1/(4pi)
-            0.1591549431, 0.1591549431, 0.1591549431,         // y,z,x * 2/3 * 3/(4pi)
-            0.2984155183, 0.2984155183,                       // xy,yz * 1/4 * 15/(4pi)
-            0.0248679599,                                     // 3z^2-1* 1/4 * 5/(16pi)
-            0.2984155183,                                     // zx
-            0.0746038796                                      // x^2-y^2 * 1/4 * 15/(16pi)
-        };
-        for (int i = 0; i < 9; ++i)
-            for (int c = 0; c < 3; ++c) out[i * 3 + c] = float(a[i][c] * k[i]);
-    }
-};
 }  // namespace
 
 bool SceneMirror::SkySource::operator==(const SkySource &o) const
@@ -5695,20 +5656,19 @@ bool SceneMirror::SkySource::operator==(const SkySource &o) const
     case Kind::Color:
         return skyColor == o.skyColor;
     case Kind::Realistic: {
-        if (!(same(luminance, o.luminance) && same(reileigh, o.reileigh) &&
-              same(mieCoefficient, o.mieCoefficient) &&
-              same(mieDirectionalG, o.mieDirectionalG) && same(turbidity, o.turbidity) &&
-              bakeResolution == o.bakeResolution && hdr == o.hdr))
+        if (!(same(density, o.density) && same(diffusion, o.diffusion) &&
+              same(horizon, o.horizon) && same(power, o.power) &&
+              skyColour == o.skyColour))
             return false;
         if (hasSun != o.hasSun) return false;
         if (!hasSun) return true;
         // THE SUN'S DIRECTION, with a BAND (SKY_LIGHT_SPEC.md §3). The sun is a
-        // LIGHT now, so its direction arrives from a transform a keyframe or a
+        // LIGHT, so its direction arrives from a transform a keyframe or a
         // gizmo drag can nudge by a float epsilon every frame; an exact
-        // comparison would re-bake a 256x128 Preetham image for a rotation
-        // nobody can see. dot > 1 - 1e-5 is about a quarter of a degree, well
-        // under the bake's own angular resolution (1.4 deg per texel at 256),
-        // and a keyed slow rotation still crosses it at the debounce cadence.
+        // comparison would re-capture the whole environment (six face renders,
+        // a GGX convolution and a readback) for a rotation nobody can see.
+        // dot > 1 - 1e-5 is about a quarter of a degree, well under one texel
+        // of the 128^2 capture.
         const float d = sunDir.x() * o.sunDir.x() + sunDir.y() * o.sunDir.y() +
                         sunDir.z() * o.sunDir.z();
         return d > 0.99999f;
@@ -5740,11 +5700,11 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
     } else if (scene.skyType == iris::SkyType::REALISTIC) {
         const iris::SkyRealistic &r = scene.skyRealistic;
         src.kind = SkySource::Kind::Realistic;
-        src.luminance = r.luminance;
-        src.reileigh = r.reileigh;
-        src.mieCoefficient = r.mieCoefficient;
-        src.mieDirectionalG = r.mieDirectionalG;
-        src.turbidity = r.turbidity;
+        src.density = r.density;
+        src.diffusion = r.diffusion;
+        src.horizon = r.horizon;
+        src.power = r.power;
+        src.skyColour = r.skyColour;
         // D15: the analytic sky's sun is the SCENE'S SUN LIGHT, and there is no
         // other source for it. A document light emits down its local -Y, so the
         // direction TOWARDS the sun is the reverse of the light's travel.
@@ -5755,8 +5715,6 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
                 src.hasSun = true;
             }
         }
-        src.bakeResolution = scene.skyBakeResolution;
-        src.hdr = scene.hdrEnabled;
     } else if (scene.skyType == iris::SkyType::SINGLE_COLOR) {
         // A SINGLE-COLOUR SKY IS A REAL SKY (SKY_LIGHT_SPEC.md §2). It used to
         // read as Kind::None — a view background with no sky pass, no
@@ -5776,51 +5734,32 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
 //
 // Two comparisons, and they answer different questions:
 //   * SkySource — "is the sky made of the same things?" Its answer decides
-//     whether the CPU BAKE runs (a Preetham evaluation, an equirect->cubemap
-//     resample, an SH integral over every texel), which is the expensive half
-//     and the reason this comparison exists at all.
-//   * SkyDesc — "is this the sky the engine already has?" It is made of
-//     texture ids, which only exist after the bake, and the ENGINE owns it:
-//     Scene::setSky drops a description equal to the live one, per half, so
-//     the push below is free every frame it changes nothing.
+//     whether the sky is BUILT again: an image decode and upload for an image
+//     sky, a strip for a gradient, a const-buffer write for the analytic one.
+//   * SkyDesc — "is this the sky the engine already has?" The ENGINE owns it:
+//     Scene::setSky drops a description equal to the live one, per half, so the
+//     push below is free every frame it changes nothing.
 //
-// The bakes stay HERE rather than moving below the boundary with the
-// description: they need an image decoder and a Preetham evaluator, and the
-// engine layer has neither by construction (Types.h: no Qt, no image formats).
+// WHAT IS NOT HERE ANY MORE (SKY-GPU). The environment — the reflection cube
+// and the ambient SH — used to be built HERE, on the UI thread, out of the sky
+// image: a 6x128^2 bilinear resample into cube faces plus a 9-band integral
+// over every texel of the panorama (CPU_GPU_LIGHTING_AUDIT F2). The engine now
+// CAPTURES its own sky into a cubemap on the GPU and integrates that, so this
+// function's whole job is the sky itself. The Preetham bake is gone with it:
+// the analytic sky is Ogre's AtmosphereNpr, five numbers pushed into a shader.
 void SceneMirror::applySky(View *view)
 {
     if (!mSource || !view) return;
     const SkySource src = skySourceOf(*mSource);
     if (src != mSkySource) {
-        // Debounce the realistic bake: a slider drag changes the 8 parameters on
-        // every event, and the Preetham bake is per-pixel CPU math. Re-bake at
-        // most every 150 ms — applySky re-reads the document next frame, so the
-        // final value always lands once the slider settles.
-        if (src.kind == SkySource::Kind::Realistic &&
-            mSkySource.kind == SkySource::Kind::Realistic &&
-            mRealisticBakeTimer.isValid() && mRealisticBakeTimer.elapsed() < 150)
-            return;
         mSkySource = src;
         mSkyTexture = 0;
         mReclaimPending = true;
         for (TextureId &t : mSkyFaceTextures)  { if (t) mTarget->destroyTexture(t); t = 0; }
-        for (TextureId &t : mReflFaceTextures) { if (t) mTarget->destroyTexture(t); t = 0; }
-        // The ambient integral belongs to the sky that is about to be built:
-        // drop the old one first so a failed build cannot leave a stale colour.
-        clearSkyAmbient();
         // Default = no sky and NO OPINION about reflections; every failure path
         // below simply leaves it that way, which is what the old code spelled
         // out as setSky(NoSky, 0) in four places.
         mSkyDesc = SkyDesc();
-        // Six freshly resampled faces become the description's reflection half.
-        // A failed resample leaves `reflections` false — "no opinion" — so the
-        // reflections already bound survive, exactly as they did when this was
-        // a separate setSkyReflection() call that simply never happened.
-        const auto attachReflection = [this](const QImage &image) {
-            if (!buildSkyReflection(image)) return;
-            mSkyDesc.reflections = true;
-            for (int i = 0; i < 6; ++i) mSkyDesc.reflectionFaces[i] = mReflFaceTextures[i];
-        };
         switch (src.kind) {
         case SkySource::Kind::Equirect: {
             const TextureId t = textureFor(mSource->skyTexture->source, true);
@@ -5828,9 +5767,6 @@ void SceneMirror::applySky(View *view)
             if (t) {
                 mSkyDesc.mode = SkyMode::Equirectangular;
                 mSkyDesc.equirect = t;
-                // Cubemap skies feed environment reflections (IBL); give equirect
-                // skies the same by resampling the image into six small faces.
-                attachReflection(QImage(mSource->skyTexture->source));
             }
             break;
         }
@@ -5847,10 +5783,6 @@ void SceneMirror::applySky(View *view)
             if (ok) {
                 mSkyDesc.mode = SkyMode::Cubemap;
                 for (int i = 0; i < 6; ++i) mSkyDesc.faces[i] = mSkyFaceTextures[i];
-                // A cubemap sky never passes through buildSkyReflection (the
-                // engine takes the faces straight): integrate them here so it
-                // drives ambient like every other textured sky (item 3b).
-                recordCubeAmbientSh(faces);
             }
             break;
         }
@@ -5858,7 +5790,9 @@ void SceneMirror::applySky(View *view)
             // Legacy gradientsky.frag is a pure vertical 3-stop ramp: bake it into a
             // narrow equirect strip (row 0 = zenith) and reuse the equirect sky path.
             // The ramp itself is bakeGradientSky — shared with the glTF exporter,
-            // which used to carry its own copy of it (re-audit F10).
+            // which used to carry its own copy of it (re-audit F10). It stays a
+            // host bake: it is 64 x 32 texels of a linear interpolation, and
+            // there is no engine-side gradient sky to adopt.
             const QImage strip = iris::bakeGradientSky(mSource->gradientTop, mSource->gradientMid,
                                                        mSource->gradientBot, mSource->gradientOffset);
             mSkyFaceTextures[0] = strip.isNull() ? 0
@@ -5867,43 +5801,37 @@ void SceneMirror::applySky(View *view)
             if (mSkyFaceTextures[0]) {
                 mSkyDesc.mode = SkyMode::Equirectangular;
                 mSkyDesc.equirect = mSkyFaceTextures[0];
-                attachReflection(strip);
             }
             break;
         }
         case SkySource::Kind::Realistic: {
-            // Legacy realisticsky.frag (Preetham-style scattering), CPU-baked to
-            // an equirect image and pushed through the same sky path as gradient.
-            const int bakeW = mSource->skyBakeResolution >= 1024 ? 1024
-                            : mSource->skyBakeResolution >= 512  ? 512 : 256;
-            const QImage baked = bakeRealisticSky(mSource->skyRealistic, bakeW, bakeW / 2,
-                                                  mSource->hdrEnabled, src.sunDir, src.hasSun);
-            mRealisticBakeTimer.restart();
-            if (!baked.isNull()) {
-                mSkyFaceTextures[0] = mTarget->createTexture(unsigned(baked.width()), unsigned(baked.height()),
-                                                             baked.constBits(), true);
-                if (mSkyFaceTextures[0]) {
-                    mSkyDesc.mode = SkyMode::Equirectangular;
-                    mSkyDesc.equirect = mSkyFaceTextures[0];
-                    attachReflection(baked);
-                }
-            }
+            // THE ANALYTIC SKY IS THE ENGINE'S (SKY-GPU, owner pick 5). Five
+            // parameters and the sun's direction; no image, no upload, no
+            // debounce — the Preetham bake that used to live here cost up to
+            // 524 k pixels of transcendental math per slider event.
+            mSkyDesc.mode = SkyMode::Atmosphere;
+            AtmosphereSky &a = mSkyDesc.atmosphere;
+            a.density   = mSource->skyRealistic.density;
+            a.diffusion = mSource->skyRealistic.diffusion;
+            a.horizon   = mSource->skyRealistic.horizon;
+            a.skyPower  = mSource->skyRealistic.power;
+            // The sky's colour is a colour a user PICKS, so it is decoded like
+            // every other one (§4) — the component's own numbers are linear.
+            const iris::LinearColor c = iris::linearOf(mSource->skyRealistic.skyColour);
+            a.skyColour = Colour(c.r, c.g, c.b, 1.0f);
+            a.hasSun = src.hasSun;
+            a.sunDir[0] = src.sunDir.x();
+            a.sunDir[1] = src.sunDir.y();
+            a.sunDir[2] = src.sunDir.z();
             break;
         }
         case SkySource::Kind::Color: {
             // A UNIFORM SKY, as a 64x32 equirect strip (SKY_LIGHT_SPEC.md §2).
             // The strip is uploaded sRGB like every other sky image, so the
-            // sampler decodes it and the SH integral decodes it — which is
-            // precisely what makes a 72-grey COLOUR sky and a 72-grey PAINTED
-            // sky the same sky (the colour-space rule, §4). Band 0 comes out at
-            // linear(colour) and bands 1..8 at zero.
-            //
-            // 64x32 AND NOT 16x8, which a uniform image would seem to justify:
-            // the SH integral weights each texel by sin(phi) dphi dtheta, and
-            // that Riemann sum only converges on 4*pi as the rows get fine. At
-            // 8 rows it is 0.6% out and leaks 0.004 into the higher bands — a
-            // "uniform" sky with a direction in it. At 32 rows both are under
-            // 1e-4. The image is 8 KB and the bake is a memset.
+            // sampler decodes it and the engine's capture re-encodes exactly
+            // what it decoded — which is precisely what makes a 72-grey COLOUR
+            // sky and a 72-grey PAINTED sky the same sky (the colour-space
+            // rule, §4).
             const QColor c = mSource->skyColor;
             QImage strip(64, 32, QImage::Format_RGBA8888);
             strip.fill(QColor(c.red(), c.green(), c.blue(), 255));
@@ -5913,7 +5841,6 @@ void SceneMirror::applySky(View *view)
             if (mSkyFaceTextures[0]) {
                 mSkyDesc.mode = SkyMode::Equirectangular;
                 mSkyDesc.equirect = mSkyFaceTextures[0];
-                attachReflection(strip);
             }
             break;
         }
@@ -5982,8 +5909,15 @@ namespace {
 //
 // THIS ONE AVERAGES ENCODED BYTES, and that is correct for what it feeds: the
 // cube faces it produces are UPLOADED as sRGB textures, so the average has to
-// live in the same encoding the texels do. The SH integral is the other case
-// and uses decodeLinearTo below — see its header for why the two cannot share.
+// live in the same encoding the texels do.
+//
+// THE SKY NO LONGER COMES HERE (SKY-GPU): the engine captures its own sky into
+// a cubemap on the GPU and integrates that for the ambient. What is left is the
+// PER-MATERIAL reflection override — an authored equirect panorama projected
+// into a cube once, at import-ish cadence rather than per sky change — which
+// keeps its host-side projection deliberately: the reflection_map suite pins
+// those cubes' pixels, and a GPU projection would have to prove bit-for-bit
+// determinism across cold and warm texture caches to replace them.
 QImage boxDownscaleTo(const QImage &src, int maxW)
 {
     QImage img = src;
@@ -6006,190 +5940,7 @@ QImage boxDownscaleTo(const QImage &src, int maxW)
     return img;
 }
 
-/// Widest equirect the 9-band ambient integral ever runs on (SKY_LIGHT_SPEC §7).
-constexpr int kAmbientShMaxWidth = 256;
-/// ...and the cube path's per-face size, which has always been 32.
-constexpr int kAmbientShCubeFaceWidth = 32;
-
-/// An image in LINEAR light, r/g/b per texel.
-struct LinearImage {
-    int w = 0, h = 0;
-    std::vector<float> px;                       // 3 floats per texel
-    const float *at(int x, int y) const { return &px[(size_t(y) * size_t(w) + size_t(x)) * 3u]; }
-    float *at(int x, int y) { return &px[(size_t(y) * size_t(w) + size_t(x)) * 3u]; }
-};
-
-/// DECODE FIRST, THEN BOX-FILTER — the two do not commute, and the difference
-/// is not small. Averaging sRGB BYTES and decoding the average answers
-/// srgb((a+b)/2); the mean radiance of those two texels is (srgb(a)+srgb(b))/2.
-/// A black-and-white checker is the extreme: byte-first says 0.216 of radiance,
-/// linear-first says 0.5. A sky's SH bands are MEAN RADIANCE by definition, so
-/// every halving on the way to them has to happen in linear — which the bound
-/// added in this lane made load-bearing, because before it there was no halving
-/// at all on the equirect path.
-///
-/// The first halving is FUSED with the decode so a 4K sky's transient is a
-/// quarter of what a full-size float copy would be (25 MB rather than 100).
-LinearImage decodeLinearTo(const QImage &src8, int maxW)
-{
-    const float *lut = iris::srgbToLinearTable();
-    const QImage src = src8.format() == QImage::Format_RGBA8888
-                           ? src8 : src8.convertToFormat(QImage::Format_RGBA8888);
-    LinearImage out;
-    if (src.width() <= 0 || src.height() <= 0) return out;
-
-    if (src.width() > maxW && src.width() >= 2 && src.height() >= 2) {
-        out.w = src.width() / 2;
-        out.h = src.height() / 2;
-        out.px.resize(size_t(out.w) * size_t(out.h) * 3u);
-        for (int y = 0; y < out.h; ++y) {
-            const unsigned char *r0 = src.constScanLine(y * 2);
-            const unsigned char *r1 = src.constScanLine(y * 2 + 1);
-            for (int x = 0; x < out.w; ++x) {
-                const size_t a = size_t(x) * 8u;
-                float *o = out.at(x, y);
-                for (int c = 0; c < 3; ++c)
-                    o[c] = 0.25f * (lut[r0[a + c]] + lut[r0[a + 4 + c]] +
-                                    lut[r1[a + c]] + lut[r1[a + 4 + c]]);
-            }
-        }
-    } else {
-        out.w = src.width();
-        out.h = src.height();
-        out.px.resize(size_t(out.w) * size_t(out.h) * 3u);
-        for (int y = 0; y < out.h; ++y) {
-            const unsigned char *p = src.constScanLine(y);
-            for (int x = 0; x < out.w; ++x) {
-                float *o = out.at(x, y);
-                for (int c = 0; c < 3; ++c) o[c] = lut[p[size_t(x) * 4u + c]];
-            }
-        }
-    }
-    // ...and the rest of the way, in float.
-    while (out.w > maxW && out.w >= 2 && out.h >= 2) {
-        LinearImage half;
-        half.w = out.w / 2;
-        half.h = out.h / 2;
-        half.px.resize(size_t(half.w) * size_t(half.h) * 3u);
-        for (int y = 0; y < half.h; ++y)
-            for (int x = 0; x < half.w; ++x) {
-                const float *a = out.at(x * 2, y * 2), *b = out.at(x * 2 + 1, y * 2);
-                const float *c = out.at(x * 2, y * 2 + 1), *d = out.at(x * 2 + 1, y * 2 + 1);
-                float *o = half.at(x, y);
-                for (int k = 0; k < 3; ++k) o[k] = 0.25f * (a[k] + b[k] + c[k] + d[k]);
-            }
-        out = std::move(half);
-    }
-    return out;
-}
 } // namespace
-
-void SceneMirror::clearSkyAmbient()
-{
-    mHasSkyAmbient = false;
-    for (float &c : mSkyAmbientSh) c = 0.0f;
-}
-
-bool SceneMirror::integrateSkyAmbientSh(const QImage &equirect, float shOut[27])
-{
-    if (equirect.isNull()) return false;
-    // THE BOUND AND THE DECODE, both here (SKY_LIGHT_SPEC.md §7). Nine SH bands
-    // cannot see finer than a quarter-sphere lobe, so a 4K HDRI is integrated
-    // from a 256-wide box-filtered copy — a 40-130x cut with no look change —
-    // and every halving happens in LINEAR light, because an SH band is a mean
-    // RADIANCE and averaging sRGB bytes answers a different question
-    // (decodeLinearTo's header has the arithmetic).
-    const LinearImage src = decodeLinearTo(equirect, kAmbientShMaxWidth);
-    const int W = src.w, H = src.h;
-    if (W <= 0 || H <= 0) return false;
-    // Per-column longitude, hoisted: every row shares it.
-    std::vector<float> sinT(static_cast<std::vector<float>::size_type>(W)),
-                       cosT(static_cast<std::vector<float>::size_type>(W));
-    for (int col = 0; col < W; ++col) {
-        const float t = (col + 0.5f) / W * 2.0f * kPi - kPi;
-        sinT[size_t(col)] = std::sin(t);
-        cosT[size_t(col)] = std::cos(t);
-    }
-    ShAccum acc;
-    for (int row = 0; row < H; ++row) {
-        const float phi = (row + 0.5f) / H * kPi;
-        const float sp = std::sin(phi), y = std::cos(phi);
-        // Solid angle of one texel in this row: sin(phi) * dphi * dtheta.
-        const double w = double(sp) * (kPi / H) * (2.0 * kPi / W);
-        if (w <= 0.0) continue;
-        for (int col = 0; col < W; ++col) {
-            const float x =  sp * sinT[size_t(col)];
-            const float z = -sp * cosT[size_t(col)];
-            const float *t = src.at(col, row);
-            acc.add(x, y, z, t[0], t[1], t[2], w);
-        }
-    }
-    acc.finish(shOut);
-    return true;
-}
-
-void SceneMirror::recordCubeAmbientSh(const QImage faces[6])
-{
-    if (!faces) return;
-    // Face order is +X,-X,+Y,-Y,+Z,-Z in WORLD axes (what SkyDesc::faces takes;
-    // the engine converts to Ogre's left-handed cube itself). Same basis
-    // vectors the equirect->faces resample below uses, so a cubemap sky and an
-    // equirect sky of the same environment integrate to the same coefficients.
-    // 1/len^3 is the cube-face texel's solid-angle factor.
-    static const float ax[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    static const float rt[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
-    static const float upv[6][3] = {{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
-    ShAccum acc;
-    bool any = false;
-    for (int f = 0; f < 6; ++f) {
-        // A face is uniform enough at 32x32 for an irradiance integral, and the
-        // downscale is a box filter, so this is cheap and stable — IN LINEAR,
-        // for the same reason the equirect path is (decodeLinearTo's header).
-        const LinearImage img = decodeLinearTo(faces[f], kAmbientShCubeFaceWidth);
-        const int N = img.w, M = img.h;
-        if (N <= 0 || M <= 0) continue;
-        any = true;
-        const float *a = ax[f], *r = rt[f], *u = upv[f];
-        const double texel = (2.0 / N) * (2.0 / M);
-        for (int py = 0; py < M; ++py) {
-            const float uv = 1.0f - 2.0f * (py + 0.5f) / M;
-            for (int px = 0; px < N; ++px) {
-                const float ur = 2.0f * (px + 0.5f) / N - 1.0f;
-                float dx = a[0] + r[0] * ur + u[0] * uv;
-                float dy = a[1] + r[1] * ur + u[1] * uv;
-                float dz = a[2] + r[2] * ur + u[2] * uv;
-                const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (len < 1e-6f) continue;
-                const double w = texel / (double(len) * len * len);
-                dx /= len; dy /= len; dz /= len;
-                const float *t = img.at(px, py);
-                acc.add(dx, dy, dz, t[0], t[1], t[2], w);
-            }
-        }
-    }
-    if (!any) return;
-    acc.finish(mSkyAmbientSh);
-    mHasSkyAmbient = true;
-}
-
-bool SceneMirror::buildSkyReflection(const QImage &equirect)
-{
-    if (equirect.isNull()) return false;
-    // The ambient integral (bounded and decoded inside — SKY_LIGHT_SPEC.md §7)
-    // runs on the image the caller passed, before anything else touches it.
-    if (integrateSkyAmbientSh(equirect, mSkyAmbientSh))
-        mHasSkyAmbient = true;
-
-    // The faces are only BUILT here; they reach the engine as the reflection
-    // half of the SkyDesc applySky pushes (one description, one verb).
-    TextureId ids[6] = { 0, 0, 0, 0, 0, 0 };
-    if (!buildEquirectCubeFaces(equirect, ids)) {
-        for (int i = 0; i < 6; ++i) if (ids[i]) mTarget->destroyTexture(ids[i]);
-        return false;
-    }
-    for (int i = 0; i < 6; ++i) mReflFaceTextures[i] = ids[i];
-    return true;
-}
 
 // THE SIX WORLD-AXIS FACES of an equirect panorama, as engine textures the
 // caller owns. Factored out of buildSkyReflection so the per-material
@@ -6286,150 +6037,6 @@ TextureId SceneMirror::reflectionCubeFor(const QString &path)
     for (int i = 0; i < 6; ++i) if (faces[i]) mTarget->destroyTexture(faces[i]);
     if (cube) mTextures.insert(key, cube);
     return cube;
-}
-
-// CPU port of irisgl/assets/shaders/realisticsky.frag (a Preetham-style analytic
-// scattering shader, Three.js lineage). Faithful to the GLSL — including its
-// quirks (the unused ExposureBias, the simplified Rayleigh term) — evaluated per
-// equirect texel over the view direction; the sun's colour and haze land exactly
-// where the legacy renderer put them (the DISC is the engine's now, §3).
-QImage SceneMirror::bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height,
-                                     bool forHdr, const iris::Vec3 &sunDir, bool hasSun)
-{
-    if (width <= 0 || height <= 0) return QImage();
-    struct V3 {
-        float x, y, z;
-        V3(float v = 0) : x(v), y(v), z(v) {}
-        V3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
-        V3 operator+(const V3 &o) const { return V3(x + o.x, y + o.y, z + o.z); }
-        V3 operator-(const V3 &o) const { return V3(x - o.x, y - o.y, z - o.z); }
-        V3 operator*(const V3 &o) const { return V3(x * o.x, y * o.y, z * o.z); }
-        V3 operator/(const V3 &o) const { return V3(x / o.x, y / o.y, z / o.z); }
-        V3 operator*(float s) const { return V3(x * s, y * s, z * s); }
-    };
-    const auto vpow = [](const V3 &v, float e) {
-        return V3(std::pow(std::max(0.0f, v.x), e), std::pow(std::max(0.0f, v.y), e),
-                  std::pow(std::max(0.0f, v.z), e));
-    };
-    const auto vexp = [](const V3 &v) { return V3(std::exp(v.x), std::exp(v.y), std::exp(v.z)); };
-    const float pi = 3.14159265358979f;
-    // Filmic tonemap constants (Uncharted2), verbatim from the shader.
-    const float A = 0.15f, B = 0.50f, C = 0.10f, D = 0.20f, E = 0.02f, F = 0.30f, W = 1000.0f;
-    const auto tonemap = [&](const V3 &v) {
-        const auto f1 = [&](float x) {
-            return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
-        };
-        return V3(f1(v.x), f1(v.y), f1(v.z));
-    };
-
-    // Per-image terms (uniform across directions).
-    const float luminance = std::max(0.01f, sky.luminance);
-    // THE SUN IS THE SCENE'S SUN LIGHT (SKY_LIGHT_SPEC.md §3). The legacy model
-    // stored a position at radius 450 000 and read `sunPosY / 450000` for its
-    // day/night `sunfade` term — which is just sin(elevation). The radius is
-    // gone with the sky's sun dials; the constant stays HERE, where it belongs,
-    // as the identity sin(el) = sunDir.y on a unit vector.
-    //
-    // NO DIRECTIONAL LIGHT = NO SUN: the Preetham model has no sun-less
-    // daylight, so `hasSun == false` bakes its own night — sunE 0 (no solar
-    // term, no in-scatter, no disc glow) with the phase terms evaluated against
-    // straight up, leaving L0 = Fex * 0.1. The Sky panel says so in words.
-    V3 sunDirection(0.0f, 1.0f, 0.0f);
-    if (hasSun) {
-        const float len = sunDir.length();
-        if (len > 1e-6f)
-            sunDirection = V3(sunDir.x() / len, sunDir.y() / len, sunDir.z() / len);
-    }
-    const float sunfade = hasSun
-        ? 1.0f - std::min(1.0f, std::max(0.0f, 1.0f - std::exp(sunDirection.y)))
-        : 0.0f;
-    const float reileighCoefficient = sky.reileigh - (1.0f * (1.0f - sunfade));
-    const float cutoffAngle = pi / 1.95f, steepness = 1.5f, EE = 1000.0f;
-    const float sunE = !hasSun ? 0.0f
-        : EE * std::max(0.0f, 1.0f - std::exp(-((cutoffAngle - std::acos(std::min(1.0f, std::max(-1.0f, sunDirection.y)))) / steepness)));
-    const V3 betaR = V3(0.0005f / 94.0f, 0.0005f / 40.0f, 0.0005f / 18.0f) * reileighCoefficient;
-    // totalMie(lambda, K, T) * mieCoefficient; lambda/K/v verbatim.
-    const V3 lambda(680e-9f, 550e-9f, 450e-9f);
-    const V3 K(0.686f, 0.678f, 0.666f);
-    const float mieC = (0.2f * sky.turbidity) * 1e-17f;   // (0.2*T)*10E-18 in GLSL
-    const V3 betaM = V3(0.434f * mieC * pi * std::pow(2.0f * pi / lambda.x, 2.0f) * K.x,
-                        0.434f * mieC * pi * std::pow(2.0f * pi / lambda.y, 2.0f) * K.y,
-                        0.434f * mieC * pi * std::pow(2.0f * pi / lambda.z, 2.0f) * K.z) * sky.mieCoefficient;
-    const V3 betaRM = betaR + betaM;
-    const V3 whiteScale = V3(1, 1, 1) / tonemap(V3(W));
-    const float horizonMix = std::min(1.0f, std::max(0.0f, std::pow(std::max(0.0f, 1.0f - sunDirection.y), 5.0f)));
-    const float exposure = std::log2(2.0f / std::pow(luminance, 4.0f));
-    const float finalGamma = 1.0f / (1.2f + (1.2f * sunfade));
-
-    QImage img(width, height, QImage::Format_RGBA8888);
-    for (int row = 0; row < height; ++row) {
-        unsigned char *out = img.scanLine(row);
-        const float v = (row + 0.5f) / height;
-        for (int col = 0; col < width; ++col) {
-            // equirectDir: the mapping Ogre's sky shader reads the bake back
-            // with, so the sun lands in the world direction sunDir names.
-            float dx, dy, dz;
-            equirectDir((col + 0.5f) / width, v, dx, dy, dz);
-            const V3 dir(dx, dy, dz);
-
-            const float zenithAngle = std::acos(std::max(0.0f, dir.y));
-            const float denom = std::cos(zenithAngle) +
-                                0.15f * std::pow(93.885f - zenithAngle * 180.0f / pi, -1.253f);
-            const float sR = 8.4e3f / denom, sM = 1.25e3f / denom;
-            const V3 Fex = vexp(V3(-(betaR.x * sR + betaM.x * sM), -(betaR.y * sR + betaM.y * sM),
-                                   -(betaR.z * sR + betaM.z * sM)));
-
-            const float cosTheta = dir.x * sunDirection.x + dir.y * sunDirection.y + dir.z * sunDirection.z;
-            const float rp = cosTheta * 0.5f + 0.5f;
-            const float rPhase = (3.0f / (16.0f * pi)) * (1.0f + rp * rp);
-            const float g = sky.mieDirectionalG;
-            const float mPhase = (1.0f / (4.0f * pi)) *
-                ((1.0f - g * g) / std::pow(std::max(1e-6f, 1.0f - 2.0f * g * cosTheta + g * g), 1.5f));
-            const V3 betaTheta = betaR * rPhase + betaM * mPhase;
-            const V3 ratio = betaTheta / betaRM;
-
-            V3 Lin = vpow(ratio * sunE * (V3(1, 1, 1) - Fex), 1.5f);
-            const V3 linB = vpow(ratio * sunE * Fex, 0.5f);
-            Lin = Lin * (V3(1.0f - horizonMix) + linB * horizonMix);
-
-            // Night-sky base. THE DISC IS NOT BAKED ANY MORE (SKY_LIGHT_SPEC
-            // §3): it is the SUN LIGHT's, drawn by the engine over every sky
-            // type from one mechanism, at the light's own angular size and
-            // switchable from the World panel. Baking it here made it a
-            // property of one sky type, at the bake's resolution, in a place
-            // no probe mask could exclude it from. The Mie glow AROUND the sun
-            // stays — that is sky, not sun.
-            V3 L0 = Fex * 0.1f;
-
-            V3 texColor = (Lin + L0) * 0.04f + V3(0.0f, 0.001f, 0.0025f) * 0.3f;
-            // Two gradings are one too many (POST_CHAIN_SPEC §7.1). Without the
-            // post chain the bake IS the grade — Uncharted2 plus a gamma, and
-            // the result goes to an LDR viewport. With the chain on, the chain's
-            // own filmic tonemapper grades everything else in the frame, so the
-            // sky must arrive UNgraded or it is rolled off twice and reads flat.
-            // The exposure term stays either way: it is what makes a luminance
-            // setting mean anything.
-            V3 colr = texColor * exposure;
-            if (!forHdr) {
-                colr = tonemap(colr) * whiteScale;
-                colr = vpow(colr, finalGamma);
-            } else {
-                // Still 8-bit storage, so the top end has to land somewhere:
-                // Reinhard is the gentlest possible mapping into [0,1] and, unlike
-                // Hable + gamma, leaves the midtones where the chain expects them.
-                colr = V3(colr.x / (1.0f + colr.x), colr.y / (1.0f + colr.y),
-                          colr.z / (1.0f + colr.z));
-            }
-
-            const auto to8 = [](float v) {
-                if (!std::isfinite(v)) v = 0.0f;
-                return (unsigned char)std::lround(std::min(1.0f, std::max(0.0f, v)) * 255.0f);
-            };
-            unsigned char *p = out + size_t(col) * 4u;
-            p[0] = to8(colr.x); p[1] = to8(colr.y); p[2] = to8(colr.z); p[3] = 255;
-        }
-    }
-    return img;
 }
 
 /// Translates a document camera into the engine's CameraDesc — the shared half

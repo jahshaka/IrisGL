@@ -38,18 +38,20 @@ namespace iris
 
 static constexpr float kPi = 3.14159265358979f;
 
-// The Preetham model's own working ranges, not the legacy panel's degenerate
-// corner (VISUAL_PARITY_SPEC item 1): the old turbidity .32 sat well below the
-// model's 1..20 band and the old sun vector (10, 7, 10) pinned `sunfade` to a
-// constant. Mid-morning sun, clear air.
+// The ENGINE's own defaults (SKY-GPU): these are Ogre AtmosphereNpr's preset
+// values, which is what the sky is drawn with. The dials they replace described
+// a CPU bake that no longer exists.
 SkyRealistic SkyRealistic::defaults()
 {
     SkyRealistic s;
-    s.luminance = 1.0f;
-    s.reileigh = 2.0f;
-    s.mieCoefficient = 0.005f;
-    s.mieDirectionalG = 0.8f;
-    s.turbidity = 2.0f;
+    // Ogre's AtmosphereNpr preset defaults, with its linear skyColour
+    // (0.334, 0.57, 1.0) expressed as the sRGB colour a user would pick to mean
+    // it — the decode at the boundary turns it back into those three numbers.
+    s.density   = 0.47f;
+    s.diffusion = 2.0f;
+    s.horizon   = 0.025f;
+    s.skyColour = QColor(157, 198, 255);
+    s.power     = 1.0f;
     return s;
 }
 
@@ -77,6 +79,7 @@ Scene::Scene()
     // fog looking like itself (see fogDensityFromLinear).
     fogDensity = fogDensityFromLinear(fogStart, fogEnd);
     fogHeightDensity = 0.0f;      // height layer off until asked for
+    fogAtmosphere = false;        // the authored colour, until a scene asks for the sky's
     fogHeightFalloff = 0.1f;
     fogHeightLevel = 0.0f;
     fogBreakMinBrightness = 0.25f;
@@ -182,9 +185,6 @@ Scene::Scene()
 
     skyRealistic = SkyRealistic::defaults();
 
-    // 256x128 equirect bake; 512/1024 are the sharper (slower) choices
-    skyBakeResolution = 256;
-
     // AUTOMATIC sun: the lowest forwardShadingPriority directional
     // (SUN_AND_LIGHT_DEFAULTS Q1). The sky follows it; nothing steers it.
     sunLightGuid = QString();
@@ -206,11 +206,18 @@ Scene::Scene()
 	skyDataSingleColor.insert("skyColor", colObj);
 
 	skyDataRealistic = QJsonObject();
-	skyDataRealistic.insert("luminance", skyRealistic.luminance);
-	skyDataRealistic.insert("reileigh", skyRealistic.reileigh);
-	skyDataRealistic.insert("mieCoefficient", skyRealistic.mieCoefficient);
-	skyDataRealistic.insert("mieDirectionalG", skyRealistic.mieDirectionalG);
-	skyDataRealistic.insert("turbidity", skyRealistic.turbidity);
+	skyDataRealistic.insert("density", skyRealistic.density);
+	skyDataRealistic.insert("diffusion", skyRealistic.diffusion);
+	skyDataRealistic.insert("horizon", skyRealistic.horizon);
+	skyDataRealistic.insert("power", skyRealistic.power);
+	{
+		QJsonObject skyCol;
+		skyCol["r"] = skyRealistic.skyColour.red();
+		skyCol["g"] = skyRealistic.skyColour.green();
+		skyCol["b"] = skyRealistic.skyColour.blue();
+		skyCol["a"] = skyRealistic.skyColour.alpha();
+		skyDataRealistic.insert("skyColour", skyCol);
+	}
 
 	QJsonObject colTop;
 	QColor top(255, 146, 138);
