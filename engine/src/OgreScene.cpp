@@ -595,7 +595,7 @@ void OgreScene::setNodeCastShadow(NodeId id, bool on) {
     if (it->second.item) it->second.item->setCastShadows(on);
     // A caster that just appeared or vanished is exactly what the lamp-map
     // cache exists to notice.
-    if (changed && it->second.item) it->second.shadowShapeDirty = true;
+    if (changed && it->second.item) markShadowShapeDirty(it->second);
 }
 
 bool OgreScene::nodeCastShadow(NodeId id) const {

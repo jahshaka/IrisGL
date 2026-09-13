@@ -1890,6 +1890,41 @@ void OgreScene::runItemWalk(bool shadow) {
         mShadowVanished.clear();
     }
     if (!shadow) return;
+    // THE STILL-FRAME GATE (ENGINE-4 F5), the caster half's version of
+    // ensureGiWalk's. Everything this walk reads is either a TRANSFORM (the
+    // world AABB) or a PUSHED event that moves nothing — a pose, a rebuilt
+    // Item, a material's generated vertex piece, a per-object Cast Shadow flag,
+    // a render-queue refile, a visibility or channel change. The first half is
+    // the host's transform epoch; the second is why the GI half's gate could
+    // not simply be copied, and is now counted at its own seams
+    // (markShadowShapeDirty / noteShadowScanInput). With neither moved since
+    // the last walk, nothing a lamp map depends on can have changed and the
+    // walk is O(1) instead of O(items).
+    //
+    // TWO THINGS THE GATE MUST NOT SKIP, and neither is a transform:
+    //   * a caster whose Item DIED (mShadowVanished) — unindexItemNode notes a
+    //     scene transform write, so the epoch moves and the walk runs;
+    //   * a material with a VERTEX-STAGE generated piece, which moves vertices
+    //     every frame off the shader clock. Its items must be re-flagged every
+    //     frame, so the presence of one takes the gate out entirely. The list
+    //     is over MATERIALS (a handful), never items, and walkItems builds it
+    //     for its own use anyway.
+    bool deforms = false;
+    for (const auto &mk : mMaterials)
+        if (!mk.second.customPiece[1].empty()) { deforms = true; break; }
+    const unsigned long long epoch = shadowEpoch();
+    if (!deforms && mShadowScanPrimed && mShadowWalkEpochValid && epoch == mShadowWalkEpoch) {
+        // The changes are per frame by contract (walkItems clears them at its
+        // head), and "the walk ran and found nothing" is what the consumer
+        // must see — collectShadowCacheFrame walks for itself when the frame's
+        // walk did not happen, which would undo the whole gate.
+        mShadowChanges.clear();
+        mShadowWalked = true;
+        mCasterWalkMicros = 0.0;
+        return;
+    }
+    mShadowWalkEpoch = epoch;
+    mShadowWalkEpochValid = detail::gTransformWriteCounter != nullptr;
     const auto t0 = std::chrono::steady_clock::now();
     walkItems(false, true, false);
     mShadowWalked = true;
@@ -2094,6 +2129,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
             }
         }
         if (shadow) {
+            ++mCasterWalkItems;
             // THE CASTER PREDICATE. A helper carries kHelperBit and a distortion
             // item kDistortionBit — neither is in a shadow channel. The on-top
             // overlay queue (gizmos, bone overlays: unlit, depth test off,

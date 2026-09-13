@@ -2285,6 +2285,10 @@ public:
     double shadowScanMicros() const { return mShadowScanMicros; }
     double casterWalkMicros() const { return mCasterWalkMicros; }
     double giScanMicros() const { return mGiScanMicros; }
+    /// ITEM VISITS made by the CASTER half of the walk, ever (ENGINE-4 F5).
+    /// The still-frame statement in one number: a frame in which nothing that
+    /// a lamp map depends on changed must not move it at all.
+    unsigned long long casterWalkItems() const { return mCasterWalkItems; }
     /// AN INPUT TO THIS SCENE'S GI SCANS CHANGED — a transform this scene
     /// itself wrote (setNodeTransform, a socket rider's placement, a decal's
     /// box), or a STRUCTURAL change that moves what the scans would read
@@ -2295,6 +2299,13 @@ public:
     /// question answered — "could the answer have changed since I last
     /// looked?" — and a false yes costs one scan.
     void noteSceneTransformWrite() { ++mSceneTransformWrites; }
+    /// AN INPUT TO THE CASTER HALF OF THE WALK CHANGED, and it is not a
+    /// transform (ENGINE-4 F5): a rig posed, a caster-shape seam (a mesh or
+    /// material swap, a rebuilt Item, a per-object Cast Shadow flag, a
+    /// generated vertex piece), a render-queue refile. The GI half's epoch
+    /// cannot carry these — none of them moves anything — so the caster half
+    /// adds its own counter on top of it (shadowEpoch below).
+    void noteShadowScanInput() { ++mShadowScanWrites; }
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -2509,6 +2520,12 @@ private:
         /// kVisibleBit is gone, and the helper flag can be toggled afterwards.
         bool                      materialDistortion = false;
     };
+
+    /// THE ONE PLACE `shadowShapeDirty` IS RAISED (ENGINE-4 F5), so that
+    /// raising it and telling the caster walk's still-frame gate about it
+    /// cannot come apart. Here rather than beside noteShadowScanInput because
+    /// it needs `Node` to be complete.
+    void markShadowShapeDirty(Node &n) { n.shadowShapeDirty = true; noteShadowScanInput(); }
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
     /// every element of this matches, because none of it can be changed after
@@ -3386,6 +3403,19 @@ private:
     unsigned long long transformEpoch() const;
     unsigned long long mGiWalkEpoch = 0;          ///< the epoch the last scan ran at
     bool mGiWalkEpochValid = false;               ///< ...and whether it was ever set
+    /// THE SAME SKIP FOR THE CASTER HALF (ENGINE-4 F5). It was left out when
+    /// the GI half got its gate because a caster's inputs are not all
+    /// transforms — a pose, a material's vertex piece, a rebuilt Item, a Cast
+    /// Shadow flag — so it ran O(items) every frame for every drawn scene with
+    /// a cacheable lamp, still or not. Those inputs are PUSHED at their own
+    /// seams, and each of them now bumps mShadowScanWrites, so the caster half
+    /// can ask the same question the GI half asks: could anything I read have
+    /// changed since I last looked?
+    unsigned long long shadowEpoch() const { return transformEpoch() + mShadowScanWrites; }
+    unsigned long long mShadowScanWrites = 0;     ///< pushed caster inputs that move nothing
+    unsigned long long mShadowWalkEpoch = 0;      ///< the epoch the last caster walk ran at
+    bool mShadowWalkEpochValid = false;
+    unsigned long long mCasterWalkItems = 0;      ///< item visits by the caster half, ever
     unsigned long long mSceneTransformWrites = 0; ///< OUR writes: setNodeTransform, riders
     unsigned long long mGiScans = 0;              ///< movement scans actually run, ever
     /// getWorldAabbUpdated calls made by OUR GI code, ever (GiStatus::

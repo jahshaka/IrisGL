@@ -62,7 +62,7 @@ bool OgreScene::updateMeshVertices(MeshId id, const std::vector<float> &position
                 // New vertex data is a new caster shape even when the bounds did
                 // not move (lamp-map cache): its lamps re-render in the frame it
                 // lands — flagged in the walk this function already makes.
-                kv.second.shadowShapeDirty = true;
+                markShadowShapeDirty(kv.second);
             }
         return true;
     } JAH_CATCH(mError, false);
