@@ -890,6 +890,14 @@ void SceneNode::setGlobalRot(iris::Quat rot)
     graph::setGlobalRot(mGraphNode, rot);
 }
 
+void SceneNode::setGlobalPosRot(iris::Vec3 pos, iris::Quat rot)
+{
+    // ONE notification and ONE parent resolution for a pose that arrives whole
+    // — the physics write-back's shape (MIRROR_SCALE lane).
+    notifyChanged(NodeChange::Transform);
+    graph::setGlobalPosRot(mGraphNode, pos, rot);
+}
+
 void SceneNode::setGlobalTransform(iris::Mat4 transform)
 {
     notifyChanged(NodeChange::Transform);

@@ -160,6 +160,14 @@ std::size_t gLiveNodes = 0;
 /// assert that its 80% static population really reached the static manager
 /// rather than reporting a hint nobody applied.
 std::size_t gStaticNodes = 0;
+/// HOW MANY SUBTREES A TRANSFORM WRITE HAS DEMOTED (rule 4). Its only consumer
+/// is the mirror's settle, which re-derives the whole scene's classification
+/// when the document goes quiet: without this it re-derived after EVERY quiet
+/// spell, including the ones nobody dragged anything in — a camera orbit, an
+/// undo, a reparent, a scene open all write transforms and all bought a
+/// whole-tree pass. Relaxed: it is a CHANGE TEST read once per frame, exactly
+/// like gTransformWrites beside it.
+std::atomic<unsigned long long> gStaticDemotions{0};
 
 Ogre::SceneNode *rootOf(Ogre::SceneManager *s)
 {
@@ -771,6 +779,9 @@ void promoteOnWrite(Ogre::SceneNode *n)
     std::lock_guard<std::recursive_mutex> lock(graphMutex());
     if (SceneNode *owner = ownerById(n->getId())) owner->_clearStaticHint();
     applyStaticSubtree(n, false);
+    // COUNTED, because somebody has to put these back (graph::staticDemotions).
+    // This is the ONLY demoter on the write path, so the counter is exact.
+    gStaticDemotions.fetch_add(1, std::memory_order_relaxed);
 }
 
 /// THE ONE HOLE RULE 2 LEAVES, closed. A static node's parent must be static
@@ -792,6 +803,7 @@ void promoteStaticChildren(Ogre::SceneNode *n)
         if (!c->isStatic()) continue;
         if (SceneNode *owner = ownerById(c->getId())) owner->_clearStaticHint();
         applyStaticSubtree(c, false);
+        gStaticDemotions.fetch_add(1, std::memory_order_relaxed);
         any = true;
     }
     if (any)
@@ -928,6 +940,40 @@ void setGlobalRot(NodeHandle n, const Quat &q)
     markMoved(o);
 }
 
+void setGlobalPosRot(NodeHandle n, const Vec3 &v, const Quat &q)
+{
+    if (!n || !engineAlive()) return;
+    Ogre::SceneNode *o = nd(n);
+    Ogre::Node *p = o->getParent();
+    if (!p) {
+        o->setPosition(toOgre(v));
+        setOrientationExact(o, toOgre(q));
+        markMoved(o);
+        return;
+    }
+    // ONE resolution of the parent, for both halves.
+    const Ogre::Vector3 pPos = p->_getDerivedPositionUpdated();
+    const Ogre::Quaternion pRot = p->_getDerivedOrientationUpdated();
+    const Ogre::Vector3 pScale = p->_getDerivedScaleUpdated();
+    // THE IDENTITY FAST PATH. A physics body's parent is the document root, and
+    // the root is identity by construction (nodegraph.h rule 2's exemption), so
+    // the whole inverse is the identity map. Three compares to find out.
+    if (pPos == Ogre::Vector3::ZERO && pRot == Ogre::Quaternion::IDENTITY
+        && pScale == Ogre::Vector3::UNIT_SCALE) {
+        o->setPosition(toOgre(v));
+        setOrientationExact(o, toOgre(q));
+        markMoved(o);
+        return;
+    }
+    const Ogre::Quaternion invRot = pRot.Inverse();
+    const Ogre::Vector3 invScale(pScale.x != 0.0f ? 1.0f / pScale.x : 0.0f,
+                                 pScale.y != 0.0f ? 1.0f / pScale.y : 0.0f,
+                                 pScale.z != 0.0f ? 1.0f / pScale.z : 0.0f);
+    o->setPosition(invRot * (toOgre(v) - pPos) * invScale);
+    setOrientationExact(o, invRot * toOgre(q));
+    markMoved(o);
+}
+
 void setGlobalTransform(NodeHandle n, const Mat4 &m)
 {
     if (!n || !engineAlive()) return;
@@ -979,6 +1025,11 @@ bool setStatic(NodeHandle n, bool value)
 }
 
 std::size_t staticNodeCount() { return gStaticNodes; }
+
+unsigned long long staticDemotions()
+{
+    return gStaticDemotions.load(std::memory_order_relaxed);
+}
 
 std::size_t liveNodeCount() { return gLiveNodes; }
 

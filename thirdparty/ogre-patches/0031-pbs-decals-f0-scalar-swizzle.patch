@@ -1,0 +1,78 @@
+Jahshaka patch 0031 -- a diffuse decal on a material whose Fresnel is a SCALAR
+loses the WHOLE PBS shader: `pixelData.F0.xyz` where F0 is a float.
+
+UPSTREAM BUG, and reachable in Studio long before any patch of ours: it needs a
+diffuse decal and an ordinary authored F0, nothing else. Found by
+`gi.probe_gate` on 2026-09-13 (lane-probevis), which was logging eight of these
+per run while passing:
+
+    ERROR: 0:1553: 'xyz' : vector swizzle selection out of range
+    ERROR: 0:1553: '' : compilation terminated
+    Fragment Program 100000020PixelShader_ps failed to compile.
+
+THE CAUSE. `pixelData.F0` is of type `float_fresnel`, which is `midf3` only when
+`fresnel_scalar` is set and `midf` otherwise -- upstream's own FresnelSwizzle
+pair decides both (Main/500.Structs_piece_vs_piece_ps.any:283-287, and every
+other write goes through `@insertpiece( FresnelSwizzle )`). The decal piece's
+second branch runs for `metallic_workflow || fresnel_workflow || fresnel_scalar`
+and writes `pixelData.F0.xyz` unconditionally. Of those three, the middle one --
+an authored F0 in the NON-separate form, which is what
+`HlmsPbsDatablock::setFresnel` writes for an ordinary material -- leaves F0
+SCALAR, and `.xyz` on a float is a swizzle out of range. On Vulkan that means
+`VulkanProgram::compile` throws and the permutation is gone.
+
+A PERMUTATION THAT DOES NOT COMPILE RENDERS BLACK, SILENTLY. Measured on the
+pristine pin, same binary, this hunk apart: the decal region of a panel whose
+material carries a non-separate F0 reads r 0.000 g 0.000 b 0.000 where it should
+reflect the room, and the suite's Ogre log carries 50 compile errors; with the
+hunk, r 0.071 g 0.012 b 0.012 -- the red wall behind the camera -- and zero.
+
+THE FIX is upstream's own idiom: split the assignment on `fresnel_scalar`, the
+property that decides the type. `decalF0` stays a midf3 either way, so the
+scalar branch takes its red channel, which is the same component
+`HlmsPbsDatablock` writes into `material.F0.x` for a non-separate Fresnel.
+
+WHY IT IS NOT PART OF 0028, which found it: 0028 gates the per-pixel probe loop
+on a material's reflectance and excludes materials under a diffuse decal, so a
+Jahshaka scene with decals generates this permutation far more often -- but the
+bug is upstream's, needs no probe, no grid and no gate, and belongs in its own
+patch so a tree that already carries 0028 applies one NEW patch instead of
+resetting the file.
+
+MEDIA-only (one Hlms .any template, CRLF -- edited in binary mode). Studio stages
+media from the SOURCE tree, so every tree needs the patch loop / build-ogre.sh
+rerun; no C++ is rebuilt by it.
+
+Covered by tests/gi/test_gi_probe_gate.cpp: case (h) asserts the decal pixel is a
+reflection rather than black, and case (i) greps the suite's own Ogre log and
+asserts ZERO shader compile errors across every case it renders.
+diff --git a/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
+index 79c588832..0f503e8a7 100644
+--- a/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
+@@ -96,7 +96,24 @@
+ 				pixelData.F0		= lerp( pixelData.F0, decalMetalness, decalMask );
+ 			@else
+ 				pixelData.specular	= lerp( pixelData.specular.xyz, midf3_c( 1.0f, 1.0f, 1.0f ), decalMask );
+-				pixelData.F0.xyz	= lerp( pixelData.F0.xyz, decalF0.xyz, decalMask );
++				// JAHSHAKA patch 0031 -- `pixelData.F0` IS NOT ALWAYS A FLOAT3.
++				// Its type is `float_fresnel`, which is midf3 only when
++				// `fresnel_scalar` is set and midf otherwise (the FresnelSwizzle
++				// pair, Main/500.Structs_piece_vs_piece_ps.any:283-287). This
++				// branch is taken for `metallic_workflow || fresnel_workflow ||
++				// fresnel_scalar`, and the middle one of those three -- an
++				// authored F0 in the NON-separate form, which is what
++				// HlmsPbsDatablock::setFresnel writes unless the material asked
++				// for separate Fresnel -- keeps F0 SCALAR. The unconditional
++				// `.xyz` here then fails to compile ("'xyz' : vector swizzle
++				// selection out of range") and the whole PBS permutation is
++				// lost, which renders black. Split by the same property the
++				// declaration uses.
++				@property( fresnel_scalar )
++					pixelData.F0.xyz = lerp( pixelData.F0.xyz, decalF0.xyz, decalMask );
++				@else
++					pixelData.F0 = lerp( pixelData.F0, decalF0.x, decalMask );
++				@end
+ 			@end
+ 
+ 			@property( hlms_decals_normals || hlms_decals_emissive )

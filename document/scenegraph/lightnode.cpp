@@ -104,6 +104,20 @@ QList<Property*> LightNode::getProperties()
     intProp->value = shadowMap->resolution;
     props.append(intProp);
 
+    // FORWARD SHADING PRIORITY — the slot this light takes in the renderer's
+    // shadow-casting order, and which directional IS the sun (0 wins).
+    // getPropertyValue/setPropertyValue have carried it since it landed, and the
+    // light panel's row is bound through them; only the LIST was missing, so
+    // `node.properties(id)` never mentioned it and a model reading the surface
+    // could not discover the one row that decides which light is the sun
+    // (MIRROR_SCALE lane, 2026-09-13 — an API-first discovery gap, not a
+    // wiring one).
+    intProp = new IntProperty();
+    intProp->displayName = "Forward Shading Priority";
+    intProp->name = "forwardShadingPriority";
+    intProp->value = forwardShadingPriority;
+    props.append(intProp);
+
     auto boolProp = new BoolProperty();
     boolProp->displayName = "Double Sided";
     boolProp->name = "doubleSided";

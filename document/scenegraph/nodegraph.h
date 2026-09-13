@@ -278,6 +278,17 @@ Vec3 globalPos(NodeHandle n);
 Quat globalRot(NodeHandle n);
 void setGlobalPos(NodeHandle n, const Vec3 &v);
 void setGlobalRot(NodeHandle n, const Quat &q);
+/// BOTH AT ONCE, for a caller that has both — the physics write-back, which
+/// runs per body per step (MIRROR_SCALE lane).
+///
+/// setGlobalPos and setGlobalRot each resolve the PARENT's derived state to
+/// undo it: a full-transform inverse for the position and a derived-orientation
+/// inverse for the rotation. Called back to back that is two resolutions and
+/// two inverses per body per frame for one pose. This resolves the parent once
+/// and, when the parent turns out to be at identity — which is what the
+/// document root is, and what a physics body's parent almost always is —
+/// writes the world values straight through with no inverse at all.
+void setGlobalPosRot(NodeHandle n, const Vec3 &v, const Quat &q);
 void setGlobalTransform(NodeHandle n, const Mat4 &m);
 
 // ---- flags ----------------------------------------------------------------
@@ -344,6 +355,12 @@ bool setStatic(NodeHandle n, bool value);
 /// How many nodes in this process currently live in a SCENE_STATIC manager.
 /// The benchmark asserts on it; nothing else should need it.
 std::size_t staticNodeCount();
+/// How many subtrees a transform write has DEMOTED out of the static half
+/// (rule 4). The counterpart to `transformWrites()` for anything that wants to
+/// put the classification back: a quiet spell is only worth a re-derivation if
+/// something was actually demoted since the last one, and most quiet spells
+/// follow a camera move, an undo or a scene open rather than a drag.
+unsigned long long staticDemotions();
 
 /// Debug/diagnostic: how many live handles this process has made.
 std::size_t liveNodeCount();

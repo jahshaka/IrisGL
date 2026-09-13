@@ -58,11 +58,60 @@ which build-ogre.sh uses as its already-applied test.
 SLACK. Relative, because the error is: one cube texel spans a solid angle, the
 compressed depth is 8 bits at the LDR tiers, and a texel straddling a silhouette
 filters between two depths. 8% of the probe-to-point distance with a floor of 2%
-of the captured distance keeps grazing floors and walls fully visible; the case
-the owner pointed at (a slab's outward face, ~1 m past the inward face a probe
-2.7 m away photographed) fails it by more than 30%.
+of the captured distance keeps grazing floors and walls fully visible; the leak
+case fails it by 69% (measured: the probe's view stops at 0.762 m, the surface is
+at 2.468 m).
 
-COST: one extra cube-array fetch at mip 0 per probe per pixel inside the loop —
+ONLY A PROBE IN FRONT OF THE SURFACE IS ASKED, and this is the part that took a
+second measurement to get right. The thing most often standing between a probe
+and a shaded point is THE SHADED POINT'S OWN OBJECT: a probe beside or behind a
+mirror box photographs that box's far face or its silhouette edge, and a depth
+test then reports "cannot see you" about a surface whose only occluder is itself.
+Measured in `gi.probe_gate`'s room, where the only probes with any influence
+weight at all stand behind the witnesses: the chrome box's front face reads 79%
+of its own distance, and the runtime plate 39% -- by depth alone, indistinguishable
+from a wall, and both would go black. So the depth verdict is weighted by
+`saturate( dot( N, dirToProbe ) * 4 )`, both vectors taken in the probe's own
+local space (a rotation of view space, so it is the same cosine): a probe behind
+the surface keeps upstream's box reprojection -- which is what a mirror in a
+sealed room lives on -- a probe in front is tested, and the weight ramps over the
+first quarter of the cosine so a curved surface fades in instead of flickering
+along its own horizon.
+
+AND ONE MORE THING IT CANNOT SEE, for the same reason: a SINGLE-SIDED material
+drawn with culling off keeps its FRONT normal when you look at its back face, so
+a probe standing in front of THAT face reads as "behind the surface", the test
+is skipped, and the leak survives there. A two-sided material flips its normal
+by `gl_FrontFacing` before this piece runs and is tested correctly.
+
+WHAT THIS RULE CANNOT DO, said plainly: a surface separated from its probe by
+nothing but a thin wall's own thickness -- the outward face of a 0.3 m wall a
+probe photographs from 5 m inside -- is geometrically the mirror-box case
+(a probe behind the surface, an occluder at 94% of the distance), and no
+depth rule of any tightness separates the two. What answers that case is the
+enclosure measurement that decides WHERE probes are built at all
+(REFLECTION_PROBE_AUDIT section 12) and the material gate of patch 0028. This
+patch removes the case the owner's question is really about, and the one that is
+decidable from a photograph: a probe reaching THROUGH geometry into a space it
+photographed -- another room, a corridor, the far side of a partition.
+
+IT STANDS ON PATCH 0030, AND MUST NOT SHIP WITHOUT IT. This patch was written,
+measured and PARKED on 2026-09-13 because it also took a legitimate mirror in a
+sealed room to near-black: the probe reported the surface at about a tenth of
+its true distance. That was not this test's fault and not a tuning question --
+the DEPTH ITSELF was wrong. `PccDepthCompressor_ps.any` multiplied its
+view->probe-local matrix on the wrong side for GLSL/Vulkan, so every probe that
+does not sit at the centre of its own parallax box encoded its X and Y depths
+against the MIRRORED direction (patch 0030 carries the measurements and the
+cause). With 0030 in the stack the same room reads:
+
+    the mirror, 2.256 m from its probe   recorded 2.275 m   ->  r 1.000
+    without 0030                         recorded 1.058 m   ->  r 0.000
+
+and the leak this patch exists for still closes: a metal box sealed off from the
+probe by a partition reads r 1.000 g 0.055 before the patch and r 0.000 after.
+
+COST: one extra cube-array fetch at mip 0 per probe per pixel inside the loop --
 which patch 0028 has just removed from every material with no specular response.
 
 MEDIA-ONLY (Hlms .any templates, both CRLF — edited in binary mode). Studio
@@ -70,9 +119,11 @@ stages media from the SOURCE tree, so every tree still needs the patch loop /
 build-ogre.sh; no C++ is rebuilt by it.
 
 Covered by tests/gi/test_gi_probe_visibility.cpp (gi.probe_visibility).
+diff --git a/Samples/Media/Hlms/Common/Any/Cubemap_piece_all.any b/Samples/Media/Hlms/Common/Any/Cubemap_piece_all.any
+index c83d200d6..dc34021b7 100644
 --- a/Samples/Media/Hlms/Common/Any/Cubemap_piece_all.any
 +++ b/Samples/Media/Hlms/Common/Any/Cubemap_piece_all.any
-@@ -99,6 +99,31 @@
+@@ -99,6 +99,31 @@ INLINE midf4 localCorrect( midf3 reflDir, midf3 posLS, CubemapProbe probe )
  	return min( min( vDiff.x, vDiff.y ), vDiff.z );
  }
  
@@ -104,9 +155,11 @@ Covered by tests/gi/test_gi_probe_visibility.cpp (gi.probe_visibility).
  INLINE midf getProbeNDF( midf3 posLS, midf3 probeToAreaCenterOffsetLS,
  						 midf3 innerRange, midf3 outerRange )
  {
+diff --git a/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
+index 24f23f5d0..79c588832 100644
 --- a/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
 +++ b/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
-@@ -193,6 +193,78 @@
+@@ -193,6 +193,111 @@
  			probeFade = probeFade * probeFade;
  			probeFade *= midf_c( probePriority );
  
@@ -156,10 +209,43 @@ Covered by tests/gi/test_gi_probe_visibility.cpp (gi.probe_visibility).
 +			midf probeSeenDist = probeCapturedDistance( probeToPosDirLS, probeCamPosLS,
 +														midf3_c( probe.halfSize.xyz ),
 +														probeVisDepth );
++			// SLACK, relative, because the error is: one cube texel spans a solid
++			// angle, the compressed depth is 8 bits at the LDR tiers, and a
++			// texel straddling a silhouette filters between two depths. 8% of
++			// the probe-to-point distance with a floor of 2% of the captured
++			// distance keeps grazing floors and walls fully visible; a partition
++			// with a room beyond it fails by 69% (measured).
 +			midf probeVisSlack = max( probeToPosDist * _h( 0.08 ),
 +									  probeSeenDist * _h( 0.02 ) );
-+			midf probeVisible = saturate( ( probeSeenDist - probeToPosDist + probeVisSlack ) /
-+										  max( probeVisSlack, _h( 1e-6 ) ) );
++			midf probeVisPass = saturate( ( probeSeenDist - probeToPosDist + probeVisSlack ) /
++										   max( probeVisSlack, _h( 1e-6 ) ) );
++
++			// ...AND ONLY A PROBE IN FRONT OF THIS SURFACE MAY BE TESTED AT ALL.
++			// The thing most often standing between a probe and a shaded point
++			// is THE SHADED POINT'S OWN OBJECT: a probe beside or behind a
++			// mirror box photographs that box's own far face or its silhouette
++			// edge, and the depth test then says "cannot see you" about a
++			// surface whose only occluder is itself. Measured, in
++			// gi.probe_gate's room: the chrome box's front face reads 79% of
++			// its own distance from the probes behind it, and the runtime plate
++			// 39% -- both indistinguishable, by depth alone, from a wall.
++			// A probe behind the surface cannot be asked this question, so it
++			// is not: it keeps upstream's box reprojection, which is what a
++			// mirror in a sealed room lives on. A probe IN FRONT can be, and
++			// there the answer is meaningful -- it is a partition, a wall, a
++			// second room. The test fades in over the first quarter of the
++			// cosine (full trust about 15 degrees off the tangent plane), so a
++			// curved surface ramps instead of flickering along its own horizon.
++			// Both vectors live in the PROBE's local space, which is view space
++			// rotated, so the cosine is the same one; probeToPosDirLS runs FROM
++			// the probe TO the point, so facing the probe is its negative.
++			midf3x3 probeVsToLs = buildMidf3x3( probe.row0_centerX.xyz,
++												probe.row1_centerY.xyz,
++												probe.row2_centerZ.xyz );
++			midf3 probeNormalLS = mul( pixelData.normal, probeVsToLs );
++			midf probeFacing = -dot( probeNormalLS, probeToPosDirLS );
++			midf probeVisWeight = saturate( probeFacing * _h( 4.0 ) );
++			midf probeVisible = _h( 1.0 ) - probeVisWeight * ( _h( 1.0 ) - probeVisPass );
 +
 +			// CONFIDENCE SCALES THE CONTRIBUTION, NOT THE WEIGHT -- the measured
 +			// trap from lane E3, and the reason this is two variables rather
@@ -185,7 +271,7 @@ Covered by tests/gi/test_gi_probe_visibility.cpp (gi.probe_visibility).
  			@property( vct_num_probes )
  				midf4 reflDirLS_dist = localCorrect( pixelData.reflDir, posInProbSpace, probe );
  				midf3 reflDirLS = reflDirLS_dist.xyz;
-@@ -274,7 +346,7 @@
+@@ -274,7 +379,7 @@
  				clearCoatPccEnvS += clearCoatPccSingleEnvS;
  			@end
  
