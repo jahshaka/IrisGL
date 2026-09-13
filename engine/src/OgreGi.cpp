@@ -968,8 +968,15 @@ unsigned long long OgreScene::giEscapeSignature() const {
     // frame where nothing wrote a transform and nothing structural changed, the
     // answer is last frame's and the walk (a root-recursive
     // getWorldAabbUpdated per GI item) is skipped outright.
+    // ...AND ONLY WHERE THE EPOCH CAN SEE THE HOST'S WRITES. Without a counter
+    // from the host (Engine::setTransformWriteCounter) a document-side move
+    // moves nothing the engine can read, so the cache would answer with a
+    // signature from before the drag — caught by gi.coalesce and gi.budget,
+    // which drive their drags through the document and wire no counter. Same
+    // rule as ensureGiWalk's: no epoch, no skipping.
     const unsigned long long epoch = transformEpoch();
-    if (mEscapeSigValid && mEscapeSigEpoch == epoch && mEscapeSigMode == mGi.mode &&
+    if (detail::gTransformWriteCounter &&
+        mEscapeSigValid && mEscapeSigEpoch == epoch && mEscapeSigMode == mGi.mode &&
         mEscapeSigVolumeValid == mGiAutoVolumeValid &&
         mEscapeSigVolume.mCenter == mGiAutoVolume.mCenter &&
         mEscapeSigVolume.mHalfSize == mGiAutoVolume.mHalfSize)
@@ -1682,7 +1689,8 @@ void OgreScene::updateForwardPlusRanges(const Ogre::Camera *cam) {
         // drawn item, and a still scene's answer cannot have changed. Only the
         // CAMERA half below is recomputed on every tick.
         const unsigned long long epoch = transformEpoch();
-        if (!mFwdPlusBoundsValid || mFwdPlusBoundsEpoch != epoch) {
+        if (!detail::gTransformWriteCounter || !mFwdPlusBoundsValid ||
+            mFwdPlusBoundsEpoch != epoch) {
             Ogre::Vector3 bmn(1e30f), bmx(-1e30f);
             size_t found = 0;
             for (auto &kv : mNodes) {
@@ -2279,8 +2287,10 @@ unsigned long long OgreScene::giGeometrySignature() const {
     // CACHED AGAINST THE MOVEMENT EPOCH, exactly as giEscapeSignature is and
     // for the same reason: the mirror reads it once a frame and it is a pure
     // function of the GI items' boxes (clean-2 lane, 2026-09-13).
+    // Only where the epoch can see the host's writes — see giEscapeSignature.
     const unsigned long long epoch = transformEpoch();
-    if (mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
+    if (detail::gTransformWriteCounter &&
+        mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
     unsigned long long h = 1469598103934665603ull;      // FNV-1a
     const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
     for (const auto &kv : mNodes) {
