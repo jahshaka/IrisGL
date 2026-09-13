@@ -92,8 +92,6 @@ Scene::Scene()
     // global illumination is opt-in: off by default, everywhere, always
     giMode = GiMode::OFF;
     giQuality = GiQuality::MEDIUM;
-    giBoundsMin = iris::Vec3();          // min == max -> automatic bounds
-    giBoundsMax = iris::Vec3();
     giNumBounces = 1;
     giUpdateBudget = 1;         // one probe re-capture per frame (FIX WAVE B1)
     giPccGrid = iris::Vec3(3, 2, 3);
