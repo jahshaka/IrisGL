@@ -1796,10 +1796,28 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
         }
         Ogre::TextureGpu *tex = nullptr;
         if (texId) tex = mTextures.find(texId)->second.texture;
+        // NO SAMPLER ON AN EMPTY SLOT (ENGINE-5 item 1, the 8,404-node exit
+        // abort). Ogre's setTexture takes a REFERENCE on the samplerblock the
+        // third argument names and hands it to the slot; with a null texture
+        // the slot keeps that reference for the datablock's whole life, doing
+        // nothing (bakeTextures only emits samplers for slots that HAVE a
+        // texture; bakeSamplers — the Vulkan path — emits a descriptor set for
+        // them). The mirror unbinds every slot a material does not use
+        // (SceneMirror::syncTextures), so a plain PBR material held TEN
+        // references to the one shared sampler, and `BasicBlock::mRefCount` is
+        // a uint16 whose overflow check is a debug-only assert: past 6,553
+        // materials the count wrapped, the block was freed while 8,000
+        // datablocks still pointed at it, and the next ~HlmsPbsDatablock threw
+        // ItemIdentityException out of a noexcept destructor — terminate, exit
+        // 134, at shutdown step 6->7. Measured on the lattice: 8,001 datablocks
+        // x 10 slots = 80,010 references against a 65,535 ceiling.
+        // `tex ? &sampler : nullptr` is what every other binding site in this
+        // file already does (bindTrackedTextures, the Unlit branch, particles).
         const Ogre::HlmsSamplerblock sampler =
             materialSamplerblock(mit->second.params.address[size_t(slot)],
                                  mit->second.params.anisotropy);
-        db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(slot)), tex, &sampler);
+        db->setTexture(static_cast<Ogre::uint8>(pbsSlotOf(slot)), tex,
+                       tex ? &sampler : nullptr);
         return true;
     } JAH_CATCH(mError, false);
 }
