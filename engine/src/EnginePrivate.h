@@ -4102,10 +4102,22 @@ public:
     void deriveShadowMapCount();
     /// The focused-map count the scenes about to be drawn WANT right now:
     /// stepped {2,4,8,16} from their shadow-casting point/spot lights and
-    /// clamped to effectiveShadowMapBudget(). No debounce, no state — the raw
-    /// demand, so the clear-strategy flip can size the atlas in the SAME
-    /// rebuild instead of leaving a second one to the derivation.
-    unsigned shadowMapDemand();
+    /// clamped to effectiveShadowMapBudget(). No debounce — the raw demand, so
+    /// the clear-strategy flip can size the atlas in the SAME rebuild instead
+    /// of leaving a second one to the derivation. It also owns the over-budget
+    /// warning's bookkeeping, so both growth paths keep it (F3). `castersOut`
+    /// receives the caster count the answer was derived from.
+    unsigned shadowMapDemand(unsigned *castersOut = nullptr);
+    /// The one log line either growth path writes.
+    void logShadowAtlasGrowth(unsigned want, unsigned casters, const char *why);
+    /// Has any ENABLED view of a scene this frame draws put pixels on its target
+    /// yet (View::framesPresented)? The gate deriveShadowMapCount shares with
+    /// the clear-strategy flip: neither may rebuild the atlas while a world is
+    /// still BINDING. Deliberately independent of lamps and shadow nodes — the
+    /// flip's own `presenting` is computed inside its lamp scan, and reusing
+    /// that would have stalled the GROWTH for ever in a scene whose casters are
+    /// not cacheable. (F1, round 2.)
+    bool anyDrawnViewPresented();
     /// What the atlas currently HAS: `mShadowMapCount` focused maps at
     /// `mShadowResolution`. Read by shadowStatus() and by the derivation.
     unsigned shadowMapCount() const { return mShadowMapCount; }
