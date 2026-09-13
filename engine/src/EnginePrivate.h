@@ -2017,6 +2017,10 @@ public:
     /// destroys its Rectangle2D through it).
     void ensureAtmosphere();
     void destroyAtmosphere();
+    /// Re-derives the per-scene FogState the shader reads from the last pushed
+    /// FogDesc. Called by setFog AND by syncAtmosphere, because the aerial
+    /// colour mode depends on whether the analytic sky is bound.
+    void pushFogState();
     Ogre::AtmosphereNpr *mAtmosphere = nullptr;
 
     /// Ogre's OWN sky (SceneManager::setSky): a full-screen Rectangle2D at the far

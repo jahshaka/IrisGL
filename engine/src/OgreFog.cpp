@@ -413,18 +413,32 @@ void OgreScene::setFog(const FogDesc &desc) {
         // hidden quad and the absent light make those values unobservable.
         mAtmosphere->setPreset(preset);
 
-        FogState s;
-        s.r = desc.colour.r; s.g = desc.colour.g; s.b = desc.colour.b;
-        s.heightDensity = std::max(desc.heightDensity, 0.0f);
-        s.heightFalloff = desc.heightFalloff;
-        s.heightLevel   = desc.heightLevel;
-        // AERIAL PERSPECTIVE (FogDesc::atmosphereColour): only meaningful while
-        // an ANALYTIC sky is drawn — the colour it asks for is that sky's own
-        // scattering, and with any other sky bound the component's model would
-        // be evaluated for a sky nobody can see. Refused rather than faked.
-        s.atmosphere    = desc.atmosphereColour && mAtmoSkyOn;
-        FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassBuffer
+        pushFogState();
     } JAH_CATCH(mError, );
+}
+
+// THE FOG STATE THE SHADER READS, derived from the LAST description the host
+// pushed — and re-derived whenever the SKY changes, which is the point of it
+// being a function.
+//
+// `atmosphere` (the aerial-perspective mode) is only meaningful while an
+// ANALYTIC sky is drawn: the colour it asks for is that sky's own scattering,
+// and with any other sky bound the component's model would be evaluated for a
+// sky nobody can see. It used to be decided once, at setFog time, and then
+// OUTLIVED the sky — pick Realistic, turn Aerial on, switch to a photograph,
+// and the fog went on being coloured by an atmosphere that was no longer
+// drawn. Now syncAtmosphere calls this on every sky change, so the mode is a
+// function of the state rather than of the order the host pushed things in.
+void OgreScene::pushFogState() {
+    if (!mAtmoFogOn || !mFogDescKnown) return;
+    const FogDesc &desc = mLastFogDesc;
+    FogState s;
+    s.r = desc.colour.r; s.g = desc.colour.g; s.b = desc.colour.b;
+    s.heightDensity = std::max(desc.heightDensity, 0.0f);
+    s.heightFalloff = desc.heightFalloff;
+    s.heightLevel   = desc.heightLevel;
+    s.atmosphere    = desc.atmosphereColour && mAtmoSkyOn;
+    FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassBuffer
 }
 
 }}}  // namespace jahshaka::engine::detail

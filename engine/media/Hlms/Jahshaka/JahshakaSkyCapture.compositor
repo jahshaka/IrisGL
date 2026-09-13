@@ -19,9 +19,22 @@
 // (EnginePrivate.h), so it is never captured into the environment — the disc is
 // drawn, the sun's energy is the directional light's.
 //
-// rq_last is EXCLUSIVE in Ogre-Next: 0..1 is queue 0 and nothing else. A scene
-// render with no geometry in range still walks the cull, which is why this runs
-// on a sky CHANGE and never per frame.
+// THE QUEUE RANGE, AND THE ONE MEASUREMENT THAT DECIDED IT. `rq_last` is
+// documented as exclusive (our own PCC compositor says so) — but with this pass
+// at `0 1` the SUN DISC, which sits at render queue 1, landed in the capture the
+// moment `world.sunDisc({inProbes:true})` gave it kVisibleBit: the scene's
+// ambient went from 0.117 to 1.01 at a HALF-DEGREE disc and to 4.30 at 170
+// degrees. Setting `rq_last 0` then captured nothing at all, which says the
+// range really is exclusive and the leak is somewhere else in the cull.
+//
+// So the disc is kept out by the only means that is not in question: it lives
+// at render queue 5 now (OgreSky.cpp's applySunDisc), which no capture pass in
+// this engine asks for. The sun's energy reaches surfaces through the
+// DIRECTIONAL LIGHT; a disc in the 9-band integral would be that light twice,
+// and `sunAngle` is a dial that goes to 170 degrees.
+//
+// A scene render with no geometry in range still walks the cull, which is why
+// this runs on a sky CHANGE and never per frame.
 //
 // external 0 = the capture cube (RenderToTexture + AllowAutomipmaps)
 

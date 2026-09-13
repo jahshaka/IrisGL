@@ -283,6 +283,19 @@ struct AtmosphereSky {
     float sunDir[3] = { 0.0f, 1.0f, 0.0f };
     bool  hasSun    = false;
 
+    /// THE COST, stated where the mode is chosen: an analytic sky is drawn by a
+    /// component the backend has to REGISTER on the scene (its quad's per-camera
+    /// rays come from that registration), and registering it puts `hlms_fog`
+    /// into every PBS pass hash for as long as the sky is bound — a second
+    /// permutation set for the scene's materials and, on a cold shader cache,
+    /// a compile hitch the first time the sky is switched on. The fog block
+    /// itself is an exact identity while the World fog is off (density 0), so
+    /// it costs shader COMPILES and a few ALU, never a pixel. MEASURED on a
+    /// floor + a metal sphere with the fog OFF: 100 shader compiles with a
+    /// colour sky, 104 after switching to the analytic one — four permutations
+    /// and one hitch, once, warm-cached afterwards. With the fog ON (which is
+    /// every scene this engine ships) the property is already in the hash and
+    /// the analytic sky adds nothing at all: 96 either way.
     bool operator==(const AtmosphereSky &o) const {
         return density == o.density && diffusion == o.diffusion && horizon == o.horizon &&
                skyColour.r == o.skyColour.r && skyColour.g == o.skyColour.g &&

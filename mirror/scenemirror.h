@@ -536,9 +536,6 @@ public:
     void setGiVolumeOverlay(bool visible);
     bool giVolumeOverlay() const { return mGiVolumeVisible; }
 
-    /// The legacy Preetham "realistic" sky, CPU-baked to an equirect image —
-    /// exactly realisticsky.frag's math per direction. Public for tests.
-
 private:
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
     /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
