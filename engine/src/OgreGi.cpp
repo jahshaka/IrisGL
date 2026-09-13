@@ -859,6 +859,14 @@ Ogre::Light *OgreScene::markGiLight(NodeId requested) {
 // it actually is. computeProbeRegion's slab search reads this one — an item's
 // SHAPE is its evidence there, and the morph below deliberately moves a trimmed
 // box's faces.
+// AN ITEM IS A SLAB FOR AN AXIS when it is at least kSlabAspect times broader
+// on BOTH other axes than it is thick on this one. Self-relative, so it is
+// scale-free and population-free — a wall is a wall whatever else is in the
+// scene, and nothing here reads a position or a size constant. The enclosure
+// search below is its other caller (it is the same reading, and deliberately so
+// — see the note on kSlabAspect there).
+static bool giIsSlab(const Ogre::Aabb &a, size_t ax);
+
 std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
     std::vector<Ogre::Aabb> all;
     all.reserve(mNodes.size());
@@ -945,6 +953,47 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     for (size_t i = 0; i < n; ++i) {
         const Ogre::Vector3 mn = all[i].getMinimum(), mx = all[i].getMaximum();
         if (w[i] >= 1.0f) { out.push_back(all[i]); continue; }
+        // WHAT THE GROUND SUPPORTS, AND NO MORE (UNPIN-1's measurement, lane
+        // ENGINE-4 item 5). An oversized item that is a SLAB — the same
+        // self-relative shape test the enclosure search uses, and the ONLY
+        // thing read here: no position, no size constant, no world origin — is
+        // the thing the rest of the scene stands on. Its extent past the
+        // content is empty ground, and lighting it costs resolution: on the
+        // three shipped rooms the morph below left the 100 m default ground
+        // measuring +-20.6 m around an 18 m room (41.3 m of volume at 0.32 m
+        // per voxel, with visible cone-trace banding), +-18.3 around 24, and
+        // +-32.5 around 48 — roughly twice the room, every time, and exactly
+        // the room once the ground was hidden.
+        //
+        // So a slab contributes on its BROAD axes only where the content is:
+        // clipped to the content core, which is the same box the trim region
+        // below is grown from. Its THIN axis is kept whole, because that is the
+        // surface itself — the floor stays in the volume, it just stops
+        // reaching past the walls. Non-slab outliers (a big prop, an imported
+        // vehicle) keep the geometric morph: they are content, not scenery.
+        //
+        // The probe ENCLOSURE is unaffected by construction: computeProbeRegion
+        // runs its slab search on giItemBoundsRaw(), the untrimmed gather, so
+        // the ground goes on being the floor that closes the Y axis.
+        size_t thin = 3u;
+        for (size_t ax = 0; ax < 3u; ++ax)
+            if (giIsSlab(all[i], ax) &&
+                (thin == 3u || all[i].mHalfSize[ax] < all[i].mHalfSize[thin]))
+                thin = ax;
+        if (thin != 3u) {
+            Ogre::Vector3 smn = mn, smx = mx;
+            for (size_t ax = 0; ax < 3u; ++ax) {
+                if (ax == thin) continue;
+                smn[ax] = std::max(smn[ax], coreMin[ax]);
+                smx[ax] = std::min(smx[ax], coreMax[ax]);
+                if (smn[ax] > smx[ax]) {                  // no overlap: a point at the core
+                    const float c = std::min(std::max(all[i].mCenter[ax], coreMin[ax]), coreMax[ax]);
+                    smn[ax] = smx[ax] = c;
+                }
+            }
+            out.push_back(Ogre::Aabb::newFromExtents(smn, smx));
+            continue;
+        }
         // The trimmed box...
         Ogre::Vector3 tmn = mn, tmx = mx;
         tmn.makeCeil(regionMin);  tmx.makeFloor(regionMax);
@@ -1374,6 +1423,12 @@ unsigned OgreScene::giVoxelResolution() const {
 // OUTERMOST slab on each side of the content closes a face, so a bookcase or a
 // display panel inside a room changes nothing.
 static const float kSlabAspect = 2.0f;
+static bool giIsSlab(const Ogre::Aabb &a, size_t ax) {
+    const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+    const float thin  = std::max(a.mHalfSize[ax], 1e-5f);   // a plane has zero
+    const float broad = std::min(a.mHalfSize[o1], a.mHalfSize[o2]);
+    return broad > 0.0f && broad >= kSlabAspect * thin;
+}
 // How much of the SMALLER slab's extent the two must share on each of the other
 // two axes to be "facing each other" rather than merely parallel somewhere in
 // the world.
@@ -1417,12 +1472,9 @@ Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
     const std::vector<Ogre::Aabb> raw = giItemBoundsRaw();
     if (raw.empty()) return Ogre::Aabb::newFromExtents(mn, mx);
 
-    const auto isSlab = [](const Ogre::Aabb &a, size_t ax) {
-        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
-        const float thin  = std::max(a.mHalfSize[ax], 1e-5f);   // a plane has zero
-        const float broad = std::min(a.mHalfSize[o1], a.mHalfSize[o2]);
-        return broad > 0.0f && broad >= kSlabAspect * thin;
-    };
+    // The shape test itself is giIsSlab (file scope): the lit volume's fit reads
+    // it too, so that "what is scenery" is ONE reading in this file.
+    const auto isSlab = [](const Ogre::Aabb &a, size_t ax) { return giIsSlab(a, ax); };
 
     // What one axis' reading is: where its two faces ended up, whether each was
     // CLOSED by a slab (as opposed to left at the hull), and whether the axis
