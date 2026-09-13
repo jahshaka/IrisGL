@@ -110,6 +110,13 @@ QList<Property*> LightNode::getProperties()
     prop->value = sunAngle;
     props.append(prop);
 
+    // FOLLOWS ATMOSPHERE (the sun only; lightnode.h says what it means).
+    auto atmoProp = new BoolProperty();
+    atmoProp->displayName = "Follows Atmosphere";
+    atmoProp->name = "followsAtmosphere";
+    atmoProp->value = followsAtmosphere;
+    props.append(atmoProp);
+
     // FORWARD SHADING PRIORITY — the slot this light takes in the renderer's
     // shadow-casting order, and which directional IS the sun (0 wins).
     // getPropertyValue/setPropertyValue have carried it since it landed, and the
@@ -177,6 +184,8 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return forwardShadingPriority;
     if(valueName == "sunAngle")
         return sunAngle;
+    if(valueName == "followsAtmosphere")
+        return followsAtmosphere;
     // The two asset BINDINGS are reflected read-only-ish: the guid is the
     // document's state, the resolved path and the normalisation are the host's
     // (they come from the asset store, which irisgl cannot reach).
@@ -219,6 +228,10 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     // THE SUN'S ANGULAR DIAMETER in degrees (the disc's size). Bounded where
     // the disc stops being a disc: 0 draws nothing, 20 is a fifth of the sky.
     if (valueName == "sunAngle")          { sunAngle = float(qBound(0.0, value.toDouble(), 20.0)); return markedParams(); }
+    // The sun's direct light is tinted by the atmosphere at its own elevation
+    // (lightnode.h). A LIGHT change, so the shadow and probe caches see it
+    // through the same staleness path a colour edit already travels.
+    if (valueName == "followsAtmosphere") { followsAtmosphere = value.toBool(); return markedParams(); }
     if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return markedParams(); }
     if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return markedParams(); }
     if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return markedParams(); }
@@ -310,6 +323,7 @@ SceneNodePtr LightNode::createDuplicate()
 	light->accurate = this->accurate;
 	light->forwardShadingPriority = this->forwardShadingPriority;
 	light->sunAngle = this->sunAngle;
+	light->followsAtmosphere = this->followsAtmosphere;
 	light->iesProfileGuid = this->iesProfileGuid;
 	light->iesProfilePath = this->iesProfilePath;
 	light->iesNormalisation = this->iesNormalisation;

@@ -357,6 +357,7 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         // says whether the fog has a customer at all.
         if (!mAtmoFogOn) preset.fogDensity = 0.0f;
         mAtmosphere->setPreset(preset);
+        ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
 
         // THE SUN, PUSHED IN. setSunDir takes the direction the light TRAVELS
         // (it negates internally: mSunDir = -sunDir) plus a normalised time of
@@ -373,11 +374,88 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
             ? std::max(0.0f, std::min(1.0f - 1e-6f, std::asin(elevation) / float(M_PI)))
             : 0.0f;
         mAtmosphere->setSunDir(-toSun, timeOfDay);
+        mAtmoSunDir = -toSun;          // what the component is holding, for the tint query
+        mAtmoTimeOfDay = timeOfDay;
 
         mAtmoSkyOn = true;
         syncAtmosphere();
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// THE ATMOSPHERE'S TINT ON THE DIRECT SUNLIGHT (SUN_FOLLOWS_ATMOSPHERE, lane
+// ENGINE-7 item 6; Engine.h states the contract).
+//
+// WHAT IT IS, AND WHERE IT COMES FROM. AtmosphereNpr's model carries its own
+// term for what the air takes out of SUNLIGHT on the way down — upstream calls
+// it `skyLightAbsorption`, it is the factor the model multiplies its own sun
+// disc by, and it is two lines (OgreAtmosphereNpr.cpp:154-161 and :163-193):
+//
+//     lightDensity = densityCoeff / max(sunHeight, 0.0035)^0.75
+//     absorption   = 2 * exp2(-lightDensity * skyColour)
+//
+// with `sunHeight = sin(normalizedTimeOfDay * PI)`. Both inputs are PRESET
+// fields, which the component hands out (getPreset), so this reads the model
+// rather than inventing one — the same numbers the sky on screen is drawn from.
+//
+// Divided by its own value with the sun at the zenith, so the answer is exactly
+// (1,1,1) at noon — the user's picked colour IS the noon colour — and falls,
+// blue first, as the sun goes down. On the shipped preset a sun 5 degrees above
+// the horizon comes out at about (0.72, 0.57, 0.38): reddened AND dimmed, which
+// is what a low sun really does.
+//
+// WHY NOT THE COMPONENT'S OWN LIGHT LINK. `setLight` takes the light over
+// completely — type, direction, diffuse, specular and power — so it would
+// delete the user's colour and intensity rather than tint them, and its colour
+// is normalised to max 1, i.e. it reddens without dimming (and makes the NOON
+// sun blue, because the quantity it normalises is the sky's radiance looking at
+// the sun, not the sunlight). The link stays unarmed, as SKY-GPU left it.
+//
+// WHY NOT getAtmosphereAt. That is the sky's in-scattered radiance in a
+// direction — it gets BRIGHTER as the sun sets (measured: 0.09/0.24/0.55 at the
+// zenith against 6.92/3.38/0.69 at 5 degrees, which is the sunset glow) — so it
+// is the wrong quantity for "what reached the ground".
+Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
+    const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
+    if (!mAtmosphere || !mAtmoSkyOn) return white;
+    Ogre::Vector3 toSun(toSunIn.x, toSunIn.y, toSunIn.z);
+    if (toSun.squaredLength() < 1e-12f) return white;
+    toSun.normalise();
+    if (mAtmoTintGeneration == mAtmoPresetGeneration &&
+        (mAtmoTintDir - toSun).squaredLength() < 1e-12f)
+        return mAtmoTint;
+    Colour tint = white;
+    JAH_TRY {
+        const Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
+        // The model's own absorption, at an elevation. `normalizedTimeOfDay` is
+        // asin(elevation)/PI — what applySkyAtmosphere pushes — so sunHeight
+        // below is the same number the component computes for itself.
+        const auto absorption = [&preset](float elevation) {
+            const float tod = std::max(0.0f, std::min(1.0f - 1e-6f,
+                                                      std::asin(std::max(-1.0f, std::min(1.0f, elevation)))
+                                                          / float(M_PI)));
+            const float sunHeight = std::sin(tod * float(M_PI));
+            const float lightDensity =
+                std::max(0.0f, preset.densityCoeff) /
+                std::pow(std::max(sunHeight, 0.0035f), 0.75f);
+            return Ogre::Vector3(std::exp2(-lightDensity * preset.skyColour.x),
+                                 std::exp2(-lightDensity * preset.skyColour.y),
+                                 std::exp2(-lightDensity * preset.skyColour.z));
+            // (upstream's factor of 2 is common to both ends of the ratio)
+        };
+        const Ogre::Vector3 here = absorption(float(toSun.y));
+        const Ogre::Vector3 noon = absorption(1.0f);
+        const auto ratio = [](float a, float b) {
+            if (!(b > 1e-8f)) return 1.0f;              // a degenerate zenith: no opinion
+            return std::max(0.0f, std::min(1.0f, a / b));
+        };
+        tint = Colour(ratio(float(here.x), float(noon.x)), ratio(float(here.y), float(noon.y)),
+                      ratio(float(here.z), float(noon.z)), 1.0f);
+    } JAH_CATCH(mError, white);
+    mAtmoTintDir = toSun;
+    mAtmoTint = tint;
+    mAtmoTintGeneration = mAtmoPresetGeneration;
+    return tint;
 }
 
 // ONE COMPONENT, TWO CUSTOMERS (the analytic sky and the fog). Registration on

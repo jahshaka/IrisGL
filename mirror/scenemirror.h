@@ -1060,8 +1060,30 @@ public:
     /// once for every light it pushes: the document answers by building and
     /// sorting a QVector of every directional, and that ran per directional
     /// light per frame (clean-2 lane, 2026-09-13).
-    static jahshaka::engine::LightDesc toLightDesc(iris::LightNode *light,
-                                                   iris::LightNode *sun, bool sunKnown);
+    /// `sunTint` is the ATMOSPHERE'S TINT on this light's colour — white for
+    /// every light but the sun, and white for the sun too unless it follows the
+    /// atmosphere and the atmosphere is the sky (atmosphereTintFor). It is a
+    /// PARAMETER rather than a lookup so this stays a pure function of its
+    /// inputs: the per-sync walk and the full-walk verifier must derive the
+    /// same description from the same node.
+    static jahshaka::engine::LightDesc toLightDesc(
+        iris::LightNode *light, iris::LightNode *sun, bool sunKnown,
+        const jahshaka::engine::Colour &sunTint =
+            jahshaka::engine::Colour(1.0f, 1.0f, 1.0f, 1.0f));
+    /// THE SUN'S TINT (SUN_FOLLOWS_ATMOSPHERE, lane ENGINE-7 item 6): what the
+    /// air does to this light's colour at its own elevation, asked of the
+    /// renderer's own sky model (Scene::atmosphereSunTint). White unless
+    /// `light` IS the scene's sun, the sun's "Follows Atmosphere" is on, and
+    /// the scene's sky is the analytic atmosphere — the engine answers the last
+    /// of those itself. ONE value feeds the light and the sun DISC, so the two
+    /// can never disagree about what colour the sun is.
+    jahshaka::engine::Colour atmosphereTintFor(const iris::LightNode *light,
+                                               const iris::LightNode *sun) const;
+    /// Re-pushes the SUN's light description when its atmosphere tint moved.
+    /// The dirty set cannot carry this one: the tint follows the sun's
+    /// TRANSFORM, and a transform write marks nothing (the light rides the
+    /// adopted node). One light, one compare, per sync.
+    void syncSunAtmosphere();
     /// Fills everything but the texture ids (those need the atlas).
     static jahshaka::engine::DecalDesc toDecalDesc(iris::DecalNode *decal);
     /// The document -> engine particle mapping (PARTICLES_FX2_SPEC §5), isolated

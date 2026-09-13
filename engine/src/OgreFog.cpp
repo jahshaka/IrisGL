@@ -392,6 +392,7 @@ void OgreScene::setFog(const FogDesc &desc) {
                 Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
                 preset.fogDensity = 0.0f;
                 mAtmosphere->setPreset(preset);
+                ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
             } JAH_CATCH(mError, );
         } else {
             destroyAtmosphere();
@@ -412,6 +413,7 @@ void OgreScene::setFog(const FogDesc &desc) {
         // Everything else in the preset drives the sky and the (unlinked) sun; the
         // hidden quad and the absent light make those values unobservable.
         mAtmosphere->setPreset(preset);
+        ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
 
         pushFogState();
     } JAH_CATCH(mError, );

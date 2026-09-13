@@ -73,6 +73,25 @@ public:
     /// on the sun.
     float sunAngle = 0.53f;
 
+    /// FOLLOWS ATMOSPHERE (SUN_FOLLOWS_ATMOSPHERE, owner 2026-09-14 — Unreal's
+    /// Sun Sky does the same thing). ON by default.
+    ///
+    /// While the scene's sky is the ANALYTIC atmosphere, the sun's direct light
+    /// is tinted by what the air does to sunlight at the sun's current
+    /// elevation: the colour the user picked is the NOON value, and a low sun
+    /// arrives reddened and dimmed — from the sky model itself
+    /// (Scene::atmosphereSunTint), so the disc, the sky and the light agree.
+    /// Off is the old behaviour: the picked colour at every elevation.
+    ///
+    /// INERT ON EVERY OTHER SKY. A photograph, a gradient or a picked colour
+    /// knows nothing about the air, so the tint is white and the row says so.
+    /// Meaningful on the scene's SUN only, like sunAngle above.
+    ///
+    /// A document written before this reads TRUE (the reader's absent-key
+    /// answer and this default agree — the trap SceneReader's own header
+    /// records).
+    bool followsAtmosphere = true;
+
 	/*
 	Shadow's color and trasnsparency
 	*/

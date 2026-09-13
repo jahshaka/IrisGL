@@ -590,6 +590,10 @@ int SceneMirror::sync()
     // walk (bounded by the NODE count) since the dirty set: a still frame runs
     // no walk at all, so nothing else could re-derive them. §3.7.
     refreshLightAggregates();
+    // ...and the one light property that follows a TRANSFORM rather than an
+    // edit: the sun's atmosphere tint (syncSunAtmosphere says why it cannot
+    // ride the dirty set).
+    syncSunAtmosphere();
     // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): mMovableNodes and
     // mMovableLights are INCREMENTAL now (syncMobility maintains them on each
     // entry's transition, releaseEntry gives the contribution back) — only the
@@ -1079,6 +1083,32 @@ void SceneMirror::refreshLightAggregates()
         if (light->shadowMap->resolution > 0)
             mMaxShadowResolution = std::max(mMaxShadowResolution,
                                             unsigned(light->shadowMap->resolution));
+    }
+}
+
+// THE SUN'S EFFECTIVE COLOUR, PUSHED WHEN THE SUN MOVES (SUN_FOLLOWS_
+// ATMOSPHERE, lane ENGINE-7 item 6).
+//
+// The walk's light push is driven by the DIRTY SET, and a transform write does
+// not mark a node: it does not have to, because the light rides the adopted
+// node and the graph carries its direction (the push's own comment says so).
+// The atmosphere tint is the one thing about a light that DOES depend on its
+// transform — rotating the sun down to the horizon reddens it — so it needs a
+// per-frame test of its own. It is over ONE light and the tint is memoised by
+// the renderer, so a still sun costs a compare and pushes nothing.
+void SceneMirror::syncSunAtmosphere()
+{
+    if (!mTarget || !mSource || !mSyncSun) return;
+    if (!mSyncSun->followsAtmosphere) return;     // nothing to follow
+    auto it = mEntries.find(mSyncSun);
+    if (it == mEntries.end() || !it->node || !it->lightPushed) return;
+    const LightDesc want = toLightDesc(mSyncSun, mSyncSun, true,
+                                       atmosphereTintFor(mSyncSun, mSyncSun));
+    if (want == it->lastLight) return;            // the still case, every frame
+    if (mTarget->setLight(it->node, want)) {
+        notePush(mSyncSun, "sun atmosphere tint");
+        it->hasLight = true;
+        it->lastLight = want;
     }
 }
 
@@ -2831,7 +2861,8 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // from the node's transform (the light rides the adopted node and the
             // graph carries position and direction), so skipping an unchanged push
             // cannot freeze a moving light.
-            const LightDesc want = toLightDesc(light, mSyncSun, true);
+            const LightDesc want = toLightDesc(light, mSyncSun, true,
+                                               atmosphereTintFor(light, mSyncSun));
             // By value (LightDesc::operator==, beside the struct — every field
             // setLight reads is in it, which is what keeps a new field from
             // silently stopping at the first push).
@@ -4093,7 +4124,33 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     return toLightDesc(light, nullptr, false);
 }
 
-LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown)
+Colour SceneMirror::atmosphereTintFor(const iris::LightNode *light,
+                                      const iris::LightNode *sun) const
+{
+    const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
+    if (!mTarget || !light || light->lightType != iris::LightType::Directional) return white;
+    if (!light->followsAtmosphere) return white;
+    // THE SUN ONLY. A secondary directional is not the sun (it draws no disc
+    // and casts no shadow), and tinting it would be a second, invisible sun
+    // following the sky.
+    const iris::LightNode *resolved = sun;
+    if (!resolved) {
+        const auto scene = const_cast<iris::LightNode *>(light)->getScene();
+        const auto own = scene ? scene->sunLight() : iris::LightNodePtr();
+        resolved = own.data();
+    }
+    if (resolved != light) return white;
+    const iris::Vec3 travel = const_cast<iris::LightNode *>(light)->getLightDir();
+    if (travel.lengthSquared() < 1e-12f) return white;
+    const iris::Vec3 toSun = -travel.normalized();
+    // The ENGINE decides whether there is an atmosphere to ask at all: it
+    // answers white for every other sky, so "is the realistic sky on?" is not
+    // a second opinion kept here.
+    return mTarget->atmosphereSunTint(Vec3(toSun.x(), toSun.y(), toSun.z()));
+}
+
+LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown,
+                                   const Colour &sunTint)
 {
     LightDesc d;
     switch (light->lightType) {
@@ -4105,9 +4162,16 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     // A LIGHT'S COLOUR IS A COLOUR THE USER PICKED (§4, pick 3): decoded, like
     // every other one. White is 1.0 either way; a tinted light's saturation
     // moves, which is the point — the picker means one thing everywhere now.
+    //
+    // ...TIMES WHAT THE AIR DOES TO IT (SUN_FOLLOWS_ATMOSPHERE, lane ENGINE-7
+    // item 6). White for every light but a sun that follows the atmosphere, so
+    // this line is the picked colour itself in every other scene; on the sun it
+    // makes the picked colour the NOON colour and lets a low sun arrive red and
+    // dim. The sun DISC is multiplied by the same value at the same moment
+    // (applySky), so the two cannot disagree.
     {
         const iris::LinearColor lc = iris::linearOf(light->color);
-        d.colour = Colour(lc.r, lc.g, lc.b, 1.0f);
+        d.colour = Colour(lc.r * sunTint.r, lc.g * sunTint.g, lc.b * sunTint.b, 1.0f);
     }
     // A photometric profile multiplies the renderer's attenuation by the raw
     // IES magnitude (peak candela / 1024 * multiplier * ballast factors), which
@@ -6738,7 +6802,12 @@ void SceneMirror::applySky(View *view)
                 const float kDiscRadiance = 8.0f;
                 const iris::LinearColor c = iris::linearOf(sunLight->color);
                 const float k = kDiscRadiance * std::max(0.0f, sunLight->intensity);
-                sun.colour = Colour(c.r * k, c.g * k, c.b * k, 1.0f);
+                // THE SAME EFFECTIVE COLOUR THE LIGHT GETS (SUN_FOLLOWS_
+                // ATMOSPHERE): a sun that looks white in the sky while lighting
+                // the room orange would be the defect this toggle exists to
+                // avoid, so the disc reads the identical tint.
+                const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
+                sun.colour = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
             }
         }
     }

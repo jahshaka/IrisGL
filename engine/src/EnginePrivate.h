@@ -2067,6 +2067,19 @@ public:
     /// and off the default visibility flags — see tuneAtmosphereRenderable.
     Ogre::Rectangle2D *mAtmoQuad = nullptr;
     void tuneAtmosphereRenderable();
+    /// WHAT applySkyAtmosphere PUSHED INTO THE COMPONENT, kept because the
+    /// component offers no getter for either and atmosphereSunTint has to put
+    /// them back after asking it a question about a different sun.
+    Ogre::Vector3 mAtmoSunDir = Ogre::Vector3::UNIT_Y;   // the direction the light TRAVELS
+    float         mAtmoTimeOfDay = 0.0f;
+    /// atmosphereSunTint's memo: the direction asked about, the answer, and the
+    /// preset generation it was computed under (bumped by every setPreset).
+    /// A sun that has not moved costs a compare.
+    mutable Ogre::Vector3 mAtmoTintDir = Ogre::Vector3::ZERO;
+    mutable Colour        mAtmoTint = Colour(1.0f, 1.0f, 1.0f, 1.0f);
+    mutable unsigned long long mAtmoTintGeneration = 0;
+    unsigned long long    mAtmoPresetGeneration = 0;
+    Colour atmosphereSunTint(const Vec3 &toSun) const override;
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
     /// environment reflections and its ambient SH, for every sky that is not
