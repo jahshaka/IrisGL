@@ -303,7 +303,8 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     for (TextureId t : mTextures) mTarget->destroyTexture(t);
     mTextures.clear();
     mLiveGenerations.clear();   // a key is here only while its engine texture is (code review 2026-09-10)
-    mPbrPushed.clear();
+    mMaterialSync.clear();     // the per-material memo dies with the materials
+    mMaterialItemSerial.clear();
     for (TextureId t : mIconTextures) mTarget->destroyTexture(t);
     mIconTextures.clear();
     // Decal-atlas slices are a FIXED, process-wide budget (32 slices), and this
@@ -396,8 +397,24 @@ MaterialId SceneMirror::engineMaterial(const iris::SceneNode *node) const
 void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
 {
     if (!material) return;
-    for (auto it = mEntries.begin(); it != mEntries.end(); ++it)
-        if (it->material == material) it->pickablePushed = -1;
+    // O(1), NOT O(every entry in the scene) (MIRROR_SCALE lane, 2026-09-13).
+    //
+    // A shading-model switch rebuilds every Item the material draws, and each
+    // new Item is born with the default query mask — so every entry using it
+    // owes one re-push of its `pickable` flag. That was done by walking the
+    // whole entry hash, and the walk ran from visit() the FIRST time each
+    // material was seen (shadingModelPushed starts at -1, and an attach resets
+    // it): on a scene open with N nodes each carrying its own material — which
+    // is exactly what the editor creates, one PbrMaterial per primitive — that
+    // is N walks of N entries. Measured on a 2020-node lattice: 84 ms of
+    // adopting sync against 40 ms for the same nodes sharing one material, and
+    // the gap is quadratic, so an 8000-node scene paid for it sixteenfold.
+    //
+    // Now the material carries a SERIAL and the entry remembers which one it
+    // pushed against. Same statement, no walk: the re-push happens on the
+    // entry's own next visit, which is the frame it would have happened on
+    // anyway (the walk only moved a latch).
+    ++mMaterialItemSerial[material];
 }
 
 int SceneMirror::sync()
@@ -431,14 +448,16 @@ int SceneMirror::sync()
 
     ++mSyncStamp;
     mVisited = 0;
+    mMaterialBuilds = 0;    // per-walk, not a running total (materialBuildCount)
     // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2). Zero on
     // the first sync, and capped at a tenth of a second: a stall must not let a
     // tracking camera jump its whole remaining focus travel in one frame.
     if (!mFocusClock.isValid()) { mFocusClock.start(); mFocusDt = 0.0f; }
     else mFocusDt = std::min(0.1f, float(mFocusClock.restart()) * 0.001f);
-    // Per-material work is memoised for the duration of this walk (see
-    // MaterialSync): every mesh node sharing a material used to pay for it.
-    mMaterialSync.clear();
+    // (The per-walk `mMaterialSync.clear()` that stood here is GONE — the memo
+    // crosses frames now, validated by a fingerprint; see MaterialSync in the
+    // header. It is PRUNED at the end of the walk instead, so it never holds a
+    // material the document has dropped.)
     // THE SUN, RESOLVED ONCE FOR THE WHOLE WALK (clean-2 lane, 2026-09-13).
     // toLightDesc asks the document which directional is the sun, and the
     // document answers by building a QVector of every directional and SORTING
@@ -528,6 +547,16 @@ int SceneMirror::sync()
     // in the reconciler's map until its entry is released (see the function).
     { MirrorStage s(mon, "mirror.riders");
     sweepStaleRiders();
+    }
+    // THE MATERIAL MEMO'S OWN SWEEP. Its keys are raw `iris::Material *`, like
+    // mMaterials' — so an entry the walk did not reach names a material that is
+    // no longer in the scene, and it goes now rather than waiting for a cache
+    // sweep that only runs when something was released. One pass over the
+    // materials, no allocation, and the hash can never hold a dangling key for
+    // longer than the walk that dropped it.
+    for (auto it = mMaterialSync.begin(); it != mMaterialSync.end();) {
+        if (it->lastSeen == mSyncStamp) ++it;
+        else it = mMaterialSync.erase(it);
     }
     return mVisited;
 }
@@ -1811,9 +1840,15 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
     // node's engine objects as QUERY FLAGS. Change-guarded; the document's flag
     // stays the authority and is re-checked exactly on the candidates.
     const int wantPickable = node->isPickable() ? 1 : 0;
-    if (e.pickablePushed != wantPickable) {
+    // ...and a material whose Items were rebuilt under this entry (a
+    // shading-model switch) hands it Items born with the DEFAULT query mask,
+    // so the flag has to go out again even when the document's answer is
+    // unchanged. See onMaterialItemsRebuilt.
+    const quint32 wantItemSerial = e.material ? mMaterialItemSerial.value(e.material, 0) : 0;
+    if (e.pickablePushed != wantPickable || e.materialItemSerial != wantItemSerial) {
         iris::graph::setPickable(node->graphNode(), wantPickable != 0);
         e.pickablePushed = wantPickable;
+        e.materialItemSerial = wantItemSerial;
     }
 
     // LIGHTING CHANNELS, object side. Change-guarded like everything else in
@@ -1872,6 +1907,10 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
             rigStale = cr == mCharacterRigs.constEnd() || cr->epoch != e.characterEpoch;
         }
         if (mesh && (!e.hasMesh || e.materialPtr != material || e.meshPtr != mesh || rigStale)) {
+            // ONE memo probe for the whole branch — materialFor reads the same
+            // entry, and the reference stays valid because nothing between here
+            // and syncTextures inserts another material.
+            const MaterialSync &attachMs = materialSyncFor(material);
             MaterialId mat = materialFor(material);
             bool attached = false;
             e.gpuSkinned = false;
@@ -1937,7 +1976,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // a NEW engine material may be in either family
                 e.pickablePushed = -1;   // a NEW Item carries the default query mask
-                syncTextures(e, material);
+                syncTextures(e, attachMs);
             }
         } else if (!mesh && e.hasMesh) {
             // The document dropped the mesh (a node kept, its MeshPtr cleared).
@@ -1982,16 +2021,21 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                 }
                 // ONE COMPARE PER MATERIAL, not per node. See PbrPush in the
                 // header for what this replaced and why it mattered.
-                PbrPush &push = mPbrPushed[e.material];
-                if (!push.pushed || !(ms.pbr == push.params)) {
+                // ONE COMPARE PER MATERIAL, not per node — and it is the
+                // fingerprint the memo computed anyway, not a second full
+                // PbrParams compare through a second hash.
+                MaterialSync &push = const_cast<MaterialSync &>(ms);
+                if (!push.pushed || push.pushedTo != e.material
+                    || push.pushedFingerprint != ms.fingerprint) {
                     if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
-                        push.params = ms.pbr;
+                        push.pushedTo = e.material;
+                        push.pushedFingerprint = ms.fingerprint;
                         push.pushed = true;
                     }
                 }
                 noteRefractive(ms.pbr);
             }
-            syncTextures(e, material);
+            syncTextures(e, ms);
         }
     }
 
@@ -2466,7 +2510,6 @@ void SceneMirror::reclaimUnused()
     }
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
-        mPbrPushed.remove(it.value());
         mTarget->destroyMaterial(it.value()); it = mMaterials.erase(it);
     }
     // Textures, the third cache — and the one that was never reclaimed at all
@@ -2579,6 +2622,21 @@ MeshId SceneMirror::meshFor(iris::Mesh *mesh, const QString &rigId)
 
 MaterialId SceneMirror::materialFor(iris::Material *material)
 {
+    // THE CACHE FIRST (MIRROR_SCALE lane). This built a whole PbrParams —
+    // two dynamic_casts, a std::string for the BRDF name and ten QStrings for
+    // the address rows — BEFORE looking, so every re-attach of an already
+    // mirrored material paid the full conversion to throw it away. On a scene
+    // open that is once per mesh node.
+    if (material) {
+        auto hit = mMaterials.constFind(material);
+        if (hit != mMaterials.constEnd()) {
+            // noteRefractive still has to see it: the refraction pass is armed
+            // from what the LAST walk saw, not from what was created.
+            const MaterialSync &ms = materialSyncFor(material);
+            if (ms.hasPbr) noteRefractive(ms.pbr);
+            return hit.value();
+        }
+    }
     PbrParams p;
     if (!material || !toPbrParams(material, p)) {
         // A material class the mirror cannot translate gets one shared neutral
@@ -2734,12 +2792,116 @@ void SceneMirror::syncLiveTextures()
 /// construction per lookup) plus a QVector of binds and a hash over their
 /// paths. A lattice of 8000 cubes sharing ONE material paid all of that 8000
 /// times a frame, and the mirror's walk was ~90% of the idle tick because of it.
+/// EVERY DOCUMENT FIELD `materialSyncFor` AND `toPbrParams` READ, as one hash.
+///
+/// The memo's validity key (see MaterialSync in the header). All of it is PODs,
+/// QColors (four ints) and the material's own texture map — no allocation, no
+/// dynamic_cast (the caller passes the resolved one), no string construction
+/// except the texture map's own keys, which a material without maps does not
+/// have at all.
+///
+/// A FIELD ADDED TO PbrMaterial AND FORGOTTEN HERE is an edit that never
+/// reaches the renderer, which is why mirror.scale drives every one of the
+/// material's own authored property rows through setValue and asserts that each
+/// moves this number.
+namespace {
+/// THE FINGERPRINT'S HASHER. Hasher above mixes one BYTE at a time, which is
+/// right for strings and four times the work for a wall of floats and ints —
+/// the same reason mixFloat exists a few lines below it. This one mixes a WORD
+/// per field, and it runs over ~40 fields per material per sync.
+struct FieldHasher {
+    quint64 h = 1469598103934665603ull;
+    inline FieldHasher &operator<<(quint32 v) { h ^= v; h *= 1099511628211ull; return *this; }
+    inline FieldHasher &operator<<(int v)     { return *this << quint32(v); }
+    inline FieldHasher &operator<<(bool v)    { return *this << quint32(v ? 1 : 0); }
+    inline FieldHasher &operator<<(float f)
+    { quint32 b; std::memcpy(&b, &f, sizeof b); return *this << b; }
+    inline FieldHasher &operator<<(const QColor &c) { return *this << quint32(c.rgba()); }
+    FieldHasher &operator<<(const QString &s)
+    {
+        *this << quint32(s.size());
+        const char16_t *d = reinterpret_cast<const char16_t *>(s.utf16());
+        for (qsizetype i = 0; i < s.size(); ++i) *this << quint32(d[i]);
+        return *this;
+    }
+};
+}  // namespace
+
+quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMaterial *pbr)
+{
+    FieldHasher h;
+    if (!material) return h.h;
+    // The texture MAP, first and for both material classes: the slot table
+    // below reads `textures`, and a map bound or cleared has to move the hash.
+    h << quint32(material->textures.size());
+    for (auto t = material->textures.constBegin(); t != material->textures.constEnd(); ++t) {
+        h << t.key();
+        h << (t.value() ? t.value()->source : QString());
+    }
+    if (pbr) {
+        h << quint32(1);
+        h << pbr->baseColor << pbr->baseColorFactor
+          << pbr->metallicFactor << pbr->roughnessFactor
+          << pbr->roughnessLowerBound << pbr->roughnessUpperBound
+          << pbr->emissiveColor << pbr->emissiveIntensity
+          << pbr->alphaMode << pbr->refractionStrength << pbr->alpha << pbr->alphaCutoff
+          << pbr->normalFactor
+          << pbr->textureScale << pbr->textureScaleV
+          << pbr->textureOffsetU << pbr->textureOffsetV << pbr->textureRotation
+          << int(pbr->renderStates.rasterState.cullMode)
+          << pbr->shadingModel << pbr->brdf
+          << pbr->clearCoat << pbr->clearCoatRoughness
+          << pbr->receiveShadows << pbr->emissiveAsLightmap
+          << pbr->workflow
+          << pbr->specularColor << pbr->ior
+          << pbr->fresnelColor
+          << pbr->useFresnelColor << pbr->separateFresnel
+          << pbr->anisotropy;
+        // Per-map addressing. The hash is EMPTY on an unauthored material (the
+        // absent-means-Wrap rule), so the overwhelming majority of materials
+        // pay nothing for this loop.
+        h << quint32(pbr->mapAddress.size());
+        for (auto a = pbr->mapAddress.constBegin(); a != pbr->mapAddress.constEnd(); ++a)
+            h << a.key() << a.value();
+        for (int i = 0; i < iris::PbrMaterial::kDetailLayers; ++i) {
+            const auto &d = pbr->detail[i];
+            h << d.blend << d.offsetU << d.offsetV << d.scaleU << d.scaleV
+              << d.weight << d.normalWeight;
+        }
+        return h.h;
+    }
+    if (auto *def = dynamic_cast<iris::DefaultMaterial *>(material)) {
+        h << quint32(2) << def->getDiffuseColor()
+          << def->getShininess() << def->getTextureScale();
+        return h.h;
+    }
+    h << quint32(0);
+    return h.h;
+}
+
 const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *material)
 {
     auto it = mMaterialSync.find(material);
-    if (it != mMaterialSync.end()) return it.value();
-
-    MaterialSync ms;
+    if (it != mMaterialSync.end()) {
+        // Already validated by THIS walk: however many nodes share the
+        // material, it is fingerprinted once.
+        if (it->lastSeen == mSyncStamp) return it.value();
+        it->lastSeen = mSyncStamp;
+        const quint64 fp = materialFingerprint(material, it->asPbr);
+        if (fp == it->fingerprint) return it.value();   // nothing the build reads moved
+        // It DID move: fall through and rebuild in place, keeping the cast.
+        MaterialSync fresh;
+        fresh.lastSeen = mSyncStamp;
+        fresh.asPbr = it->asPbr;
+        it.value() = fresh;
+    } else {
+        MaterialSync fresh;
+        fresh.lastSeen = mSyncStamp;
+        fresh.asPbr = dynamic_cast<iris::PbrMaterial *>(material);
+        it = mMaterialSync.insert(material, fresh);
+    }
+    MaterialSync &ms = it.value();
+    ++mMaterialBuilds;
     ms.hasPbr = toPbrParams(material, ms.pbr);
 
     // Document slot name -> engine slot. PbrMaterial and DefaultMaterial naming.
@@ -2782,8 +2944,7 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // Both texture caches now key on the flag (I-2), so the same file bound
     // here and as a linear map elsewhere is two engine textures, correctly.
     bool sharedSrgb = false;
-    if (auto *pbrMat = dynamic_cast<iris::PbrMaterial *>(material))
-        sharedSrgb = iris::PbrMaterial::sharedMapIsSrgb(pbrMat->workflow);
+    if (ms.asPbr) sharedSrgb = iris::PbrMaterial::sharedMapIsSrgb(ms.asPbr->workflow);
 
     // Resolve every candidate path: the textures map (Texture2D::source), then
     // shader-graph texture properties (a file path in the property value).
@@ -2809,14 +2970,18 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // conclude "unchanged" and keep sampling the old one.
     for (const TextureBind &b : ms.binds) hs << int(b.slot) << b.path << quint32(b.srgb ? 1 : 0);
     ms.textureSignature = hs.h;
-
-    return *mMaterialSync.insert(material, ms);
+    // LAST, so a throw or an early return above cannot leave a fingerprint
+    // standing over a half-built description.
+    ms.fingerprint = materialFingerprint(material, ms.asPbr);
+    return ms;
 }
 
-void SceneMirror::syncTextures(Entry &e, iris::Material *material)
+void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
 {
-    if (!material || !e.material || e.material == mDefaultMaterial) return;
-    const MaterialSync &ms = materialSyncFor(material);
+    // (It took the document material and re-probed the memo for it — a second
+    // QHash lookup per mesh node per frame to fetch what the caller already had
+    // in hand. MIRROR_SCALE lane.)
+    if (!e.material || e.material == mDefaultMaterial) return;
     const std::vector<TextureBind> &binds = ms.binds;
     const quint64 signature = ms.textureSignature;
     if (e.texturesPushed && signature == e.textureSignature) return;

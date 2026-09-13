@@ -152,6 +152,17 @@ public:
     /// the counter that moves; giRefreshCount() stays still until the drag ends.
     quint64 giLightRefreshCount() const { return mGiLightRefreshCount; }
 
+    /// HOW MANY MATERIAL DESCRIPTIONS THE LAST SYNC BUILT (MIRROR_SCALE lane).
+    /// Building one converts the document material into a PbrParams and a
+    /// texture-bind list — a dozen heap allocations, two dynamic_casts and a
+    /// pass over the slot table — and it used to happen once per distinct
+    /// material per FRAME, which in this editor means once per mesh node per
+    /// frame (every primitive is born with its own PbrMaterial). It is now
+    /// keyed on a fingerprint of the material's own fields, so a STILL frame
+    /// must build ZERO. Not observable in pixels; hence the counter, and hence
+    /// mirror.scale's assertion on it.
+    quint64 materialBuildCount() const { return mMaterialBuilds; }
+
     // ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R1) ----------------
     /// How many of the document's nodes resolved MOVABLE on the last sync —
     /// what the mirror pushed to the engine, which is also what the engine
@@ -478,6 +489,10 @@ private:
         /// geometry is (re-)attached, because the flags live on the Item and a
         /// new Item is born with the default mask.
         int pickablePushed = -1;
+        /// The `mMaterialItemSerial` this entry last pushed query flags
+        /// against. Behind = the material's Items were rebuilt (a shading-model
+        /// switch) and the new ones carry the default mask.
+        quint32 materialItemSerial = 0;
         /// The LIGHTING CHANNEL mask last pushed onto this node's engine
         /// objects, and whether one ever was. Unlike the query flags above this
         /// does NOT need re-pushing when geometry is re-attached: the engine
@@ -861,7 +876,8 @@ private:
     void clearSkyAmbient();
     jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh, const QString &rigId = QString());
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
-    void syncTextures(Entry &e, iris::Material *material);
+    struct MaterialSync;
+    void syncTextures(Entry &e, const MaterialSync &ms);
     jahshaka::engine::TextureId textureFor(const QString &path, bool srgb);
     /// The reflection SLOT takes a cubemap, so its bind cannot go through
     /// textureFor: the six faces are built here (from the document texture's
@@ -941,14 +957,36 @@ private:
     /// Conservative by construction: a missed site delays a free to the next
     /// real change, it never frees something still in use.
     bool                     mReclaimPending = true;
-    /// PER-SYNC memo of the two things that depend only on the MATERIAL, not on
-    /// the node: its PbrParams and its texture-bind signature. Both used to be
+    /// MEMO of the two things that depend only on the MATERIAL, not on the
+    /// node: its PbrParams and its texture-bind signature. Both used to be
     /// recomputed per MESH per frame — `toPbrParams` runs two dynamic_casts and
     /// a scan of every shader property, and `syncTextures` did seven
     /// QHash<QString> lookups whose keys it built from `const char *` (a QString
     /// construction each) plus a QVector of binds — so a scene of 8000 cubes
-    /// sharing ONE material paid for that material 8000 times a frame. Cleared
-    /// at the top of every sync: within one sync a material cannot change.
+    /// sharing ONE material paid for that material 8000 times a frame.
+    ///
+    /// IT SURVIVES THE FRAME (MIRROR_SCALE lane, 2026-09-13). Sharing was only
+    /// half the problem: the editor gives every primitive its OWN PbrMaterial
+    /// (SceneEditService::addNodeToScene), so a scene of 8000 cubes is a scene
+    /// of 8000 materials and a per-SYNC memo rebuilt all 8000 descriptions on
+    /// every still frame — ~13 heap allocations each (a std::string for the
+    /// BRDF name, ten QStrings for the address rows, the bind vector). Measured
+    /// on a 2000-node lattice: 4.08 us per node per still frame with its own
+    /// material per node against 0.83 us with one shared material — four fifths
+    /// of the walk was this function.
+    ///
+    /// WHAT MAKES REUSE SAFE is `fingerprint`: an FNV over every document field
+    /// the two builds read, computed once per material per sync out of PODs
+    /// with no allocation at all. A material whose fingerprint has not moved
+    /// cannot have produced different output, so the memo stands. A document
+    /// REVISION COUNTER would be cheaper still and was rejected: PbrMaterial's
+    /// parameters are public fields written from panels, scripts, readers and
+    /// commands, and a counter is only as good as the writer that remembers to
+    /// bump it — a forgotten one is an edit that silently never reaches the
+    /// renderer. The fingerprint reads the same fields the conversion does, so
+    /// it cannot go stale that way; what it CAN do is forget a NEW field, which
+    /// is what mirror.scale's "every authored property moves the fingerprint"
+    /// case (driven from PbrMaterial's own property rows) exists to catch.
     struct TextureBind {
         jahshaka::engine::PbrTextureSlot slot;
         QString path;
@@ -959,6 +997,25 @@ private:
         jahshaka::engine::PbrParams   pbr;
         quint64                       textureSignature = 0;
         std::vector<TextureBind>      binds;
+        /// Every document field the build above read, as one hash. See the
+        /// block comment: this is what lets the memo cross frames.
+        quint64                       fingerprint = 0;
+        /// The sync that last validated this entry. Two jobs: a material is
+        /// fingerprinted at most ONCE per walk however many nodes share it,
+        /// and an entry the walk did not reach is dropped at the end of it
+        /// (so the hash never holds a pointer to a material that has left the
+        /// document — the keys are raw, like mMaterials' own).
+        quint32                       lastSeen = 0;
+        /// The dynamic_cast, resolved once per material instead of twice per
+        /// mesh per frame. Null for a material that is not a PbrMaterial.
+        iris::PbrMaterial            *asPbr = nullptr;
+        /// THE PUSH GUARD: the engine material this description was last
+        /// pushed to, and the fingerprint it was pushed at. setPbrMaterial
+        /// re-applies the whole datablock (a const-buffer upload), so the
+        /// mirror still LOOKS every frame and pushes only a change.
+        jahshaka::engine::MaterialId  pushedTo = 0;
+        quint64                       pushedFingerprint = 0;
+        bool                          pushed = false;
     };
     QHash<iris::Material *, MaterialSync> mMaterialSync;
     /// The PBR state last PUSHED to each engine material, and the guard that
@@ -966,12 +1023,22 @@ private:
     /// because that is what the push targets; engine ids are never reused (the
     /// counter only increments), so a destroyed material cannot inherit a stale
     /// record — it is dropped in reclaimUnused anyway.
-    struct PbrPush {
-        jahshaka::engine::PbrParams params;
-        bool pushed = false;
-    };
-    QHash<jahshaka::engine::MaterialId, PbrPush> mPbrPushed;
+    /// (mPbrPushed — a second QHash, keyed by engine material id, holding a
+    /// whole PbrParams copy per material — is GONE with the MIRROR_SCALE lane.
+    /// It compared a full PbrParams (std::string BRDF name included) and cost a
+    /// hash probe per MESH NODE per frame to do it; the same statement now
+    /// lives in the memo above as `pushedTo` + `pushedFingerprint`, in the
+    /// entry the walk already has in hand.)
+    /// How many times each engine material has had its Items REBUILT under the
+    /// entries drawing it (a shading-model switch). Bumped by
+    /// onMaterialItemsRebuilt; an entry whose `materialItemSerial` is behind
+    /// re-pushes its query flags on its next visit. See that function for what
+    /// this replaced (an O(entries) walk per material, i.e. O(N^2) per open).
+    QHash<jahshaka::engine::MaterialId, quint32> mMaterialItemSerial;
     const MaterialSync &materialSyncFor(iris::Material *material);
+    /// The memo's validity key — see MaterialSync. `pbr` is the resolved cast
+    /// (null when the material is not a PbrMaterial), so this never runs one.
+    static quint64 materialFingerprint(iris::Material *material, iris::PbrMaterial *pbr);
     /// Binds a graph material's generated shader pieces (HLMS_ADOPTION P5).
     void syncCustomPieces(iris::Material *material, jahshaka::engine::MaterialId id);
     /// True once any mirrored material has carried a generated piece: the gate
@@ -1388,6 +1455,9 @@ private:
     quint64 mGiPushCount = 0;
     quint64 mGiRefreshCount = 0;
     quint64 mGiLightRefreshCount = 0;
+    /// materialBuildCount() — reset at the top of every sync, so it reports the
+    /// LAST walk rather than a running total.
+    quint64 mMaterialBuilds = 0;
     // ---- MOBILITY counters (REALTIME_REFLECTIONS_SPEC §3.3) ----------------
     /// Recomputed every sync (the walk resolves every node anyway), so this is
     /// a state, not a running total.
