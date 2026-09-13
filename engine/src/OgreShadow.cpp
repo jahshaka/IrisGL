@@ -52,6 +52,8 @@
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <OgreDepthBuffer.h>
 
+#include <limits>       // keepNearestLamps' "unplaceable lamp" distance
+
 namespace jahshaka { namespace engine { namespace detail {
 
 // ---------------------------------------------------------------------------
@@ -491,6 +493,7 @@ bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, b
         for (OgreView *v : rebuilt) v->recreateWorkspaceAfterShadowRebuild();
         for (OgreScene *s : planarRebuilt) s->recreatePlanarAfterShadowRebuild();
         for (OgreScene *s : giRebuilt) s->recreateGiAfterShadowRebuild();
+        ++mShadowAtlasRebuilds;                 // ShadowStatus::atlasRebuilds
         ok = true;
     } JAH_CATCH(mLastError, false);
     return ok;
@@ -539,11 +542,20 @@ unsigned stepShadowMapCount(unsigned casters) {
 }
 }   // namespace
 
-void OgreEngine::deriveShadowMapCount() {
-    if (!mHlmsRegistered || mHeadless) return;
+unsigned OgreEngine::shadowMapDemand() {
+    if (!mHlmsRegistered || mHeadless) return mShadowMapCount;
     // What the frame is about to draw — the same set the frame loop updates, so
     // a preview scene nobody is looking at cannot force the editor's atlas to
     // grow.
+    std::vector<OgreScene *> &scenes = mShadowSceneScratch;   // per frame; clean-2 lane
+    scenesFeedingEnabledViews(scenes);
+    unsigned casters = 0;
+    for (OgreScene *s : scenes) casters = std::max(casters, s->countLocalShadowCasters(nullptr));
+    return std::min(stepShadowMapCount(casters), effectiveShadowMapBudget());
+}
+
+void OgreEngine::deriveShadowMapCount() {
+    if (!mHlmsRegistered || mHeadless) return;
     std::vector<OgreScene *> &scenes = mShadowSceneScratch;   // per frame; clean-2 lane
     scenesFeedingEnabledViews(scenes);
     unsigned casters = 0;
@@ -587,7 +599,16 @@ void OgreEngine::deriveShadowMapCount() {
     Ogre::LogManager::getSingleton().logMessage(
         "Jahshaka shadows: growing the atlas to " + Ogre::StringConverter::toString(want) +
         " focused shadow maps for " + Ogre::StringConverter::toString(casters) + " casters");
-    rebuildShadowAtlas(mShadowResolution, want, mShadowPerMapClears);
+    // ...AND THE CLEAR FLIP RIDES ALONG (the "first-lamp atlas hitch"). A
+    // rebuild drops and recreates every workspace that names a shadow node —
+    // the views', the mirrors', and every reflection probe's, whose GI arm is
+    // built from scratch. A world opening with three or more casting lamps used
+    // to pay that TWICE for one event: the growth here, and the clear-strategy
+    // flip three frames later (applyShadowCache). Flipping inside a rebuild
+    // that is happening anyway is free, and it is the SAME hazard window the
+    // growth already opens — so the second rebuild simply stops existing.
+    rebuildShadowAtlas(mShadowResolution, want, mShadowPerMapClears || mShadowClearFlipWanted);
+    mShadowClearFlipFrames = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +617,7 @@ void OgreEngine::deriveShadowMapCount() {
 ShadowStatus OgreEngine::shadowStatus() const {
     ShadowStatus st;
     st.requestedBudget = mShadowMapBudget;
+    st.atlasRebuilds = mShadowAtlasRebuilds;        // cumulative; true even headless
     if (!mHlmsRegistered || mHeadless) return st;   // live stays false
     // ASKING TURNS THE COUNTERS ON, exactly like RenderStats::metricsRecording:
     // the shadow-pass listeners are not free (a callback per compositor pass
@@ -991,11 +1013,36 @@ void OgreEngine::applyShadowCache() {
                     break;
                 }
             }
+            // WHAT THE DERIVATION NEEDS TO KNOW (mShadowClearFlipWanted): the
+            // flip is coming, it is only waiting out its debounce. If the
+            // derivation has to rebuild the atlas for a bigger count in the
+            // meantime, it carries the flip in the same rebuild and this
+            // debounce never fires at all.
+            mShadowClearFlipWanted = anyLamp && presenting;
             if (!anyLamp || !presenting) {
                 mShadowClearFlipFrames = 0;
             } else if (++mShadowClearFlipFrames >= kShadowClearFlipDebounceFrames) {
                 mShadowClearFlipFrames = 0;
-                rebuildShadowAtlas(mShadowResolution, mShadowMapCount, true);
+                // ONE REBUILD, NOT TWO (E2 review, ledger 104/121 — the
+                // "first-lamp atlas hitch"). This used to rebuild at the count
+                // the atlas HAPPENED to have, and deriveShadowMapCount then
+                // rebuilt AGAIN, three frames later, when it noticed that the
+                // same lamps wanted a bigger one. A rebuild drops and recreates
+                // every workspace that names a shadow node — the views', the
+                // mirrors', and every reflection probe's, whose GI arm is built
+                // from scratch — so a world opening with three or more casting
+                // lamps paid that twice, in two separate frames, for one event.
+                // The flip now carries the demand the derivation is about to
+                // ask for; the derivation then finds `want <= mShadowMapCount`
+                // and does nothing. Never SHRINKS here either (owner decision
+                // D4): the demand is floored at what the atlas already has.
+                const unsigned want = std::max(mShadowMapCount, shadowMapDemand());
+                rebuildShadowAtlas(mShadowResolution, want, true);
+                // ...and the derivation's own debounce is reset with it, so a
+                // count it was part-way through counting up to is not applied
+                // a second time.
+                mDerivedShadowMapWant = 0;
+                mDerivedShadowMapFrames = 0;
             }
         }
 
@@ -1124,6 +1171,57 @@ void planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
     std::fill(plan.begin(), plan.end(), nullptr);
     for (size_t i = 0; i < fixed && i < maps; ++i) plan[i] = want[i];
 }
+/// THE NEAREST `maps` LAMPS, IN SLOT ORDER (E2 review finding, ledger 104/121).
+///
+/// The cache used to be all-or-nothing: `want.size() <= maps` or no caching at
+/// all. On the PROBE node that rule is a cliff, because its focused count is
+/// capped at four whatever the main atlas grew to
+/// (kProbeShadowMaxFocusedMaps — 32 probes x an R/4 atlas is the VRAM this cap
+/// exists to hold). A room with FIVE lamps therefore took every probe instance
+/// in the scene out of the cache at once: 32 instances re-rendering four lamp
+/// maps each, every capture, for ever, over one lamp too many.
+///
+/// A probe's camera never moves (it sits at the probe centre), so the four
+/// lamps nearest to it are a STABLE choice — which is exactly what the cache
+/// needs, and exactly what Ogre would have picked per frame anyway
+/// (OgreCompositorShadowNode.cpp:403-430 keeps the closest casters). Fixing
+/// them is the same picture at none of the cost.
+///
+/// TWO INVARIANTS ARE LOAD-BEARING HERE.
+///   * SLOT ORDER: the survivors keep their position in `want` (every point by
+///     id, then every spot by id). HlmsPbs reads the shadow-casting list as
+///     cumulative type ranges, so a spot promoted above a point would be shaded
+///     as a point (ShadowCacheFrame::lights' note).
+///   * STICKINESS: a lamp this instance already holds counts as 10% nearer
+///     (kShadowNearestStickiness on the SQUARED distance), so a lamp drifting
+///     across the boundary re-renders one map once instead of flapping two maps
+///     every frame.
+/// Ties break on the index, so the choice is deterministic frame to frame.
+void keepNearestLamps(std::vector<Ogre::Light *> &want, size_t maps, const Ogre::Vector3 &eye,
+                      const Ogre::LightClosestArray &held,
+                      std::vector<std::pair<float, size_t>> &order)
+{
+    if (want.size() <= maps || maps == 0u) return;
+    order.clear();
+    order.reserve(want.size());
+    for (size_t i = 0; i < want.size(); ++i) {
+        const Ogre::Node *n = want[i]->getParentNode();
+        float d = n ? float(eye.squaredDistance(n->_getDerivedPosition()))
+                    : std::numeric_limits<float>::max();
+        for (size_t j = 1; j < held.size(); ++j)
+            if (held[j].isStatic && held[j].light == want[i]) { d *= kShadowNearestStickiness; break; }
+        order.emplace_back(d, i);
+    }
+    std::sort(order.begin(), order.end());          // (distance, index)
+    order.resize(maps);
+    std::sort(order.begin(), order.end(),
+              [](const std::pair<float, size_t> &a, const std::pair<float, size_t> &b) {
+                  return a.second < b.second;       // back into slot order
+              });
+    for (size_t i = 0; i < maps; ++i) want[i] = want[order[i].second];   // i <= order[i].second
+    want.resize(maps);
+}
+
 }   // namespace
 
 void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) {
@@ -1181,15 +1279,28 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
             // honest for the frame it is shown again (the flags persist).
             for (auto &v : mViews)
                 if (v->ogreScene() == s)
-                    if (Ogre::CompositorShadowNode *n = v->shadowNodeInstance())
-                        instances.push_back({ n, ShadowNodeKind::View });
+                    if (Ogre::CompositorShadowNode *n = v->shadowNodeInstance()) {
+                        Ogre::Camera *c = v->camera();
+                        instances.push_back({ n, ShadowNodeKind::View,
+                                              c ? c->getDerivedPosition() : Ogre::Vector3::ZERO,
+                                              c != nullptr });
+                    }
             for (unsigned k = 1u; k < kShadowNodeKinds; ++k) {
                 std::vector<Ogre::CompositorWorkspace *> &ws = mShadowWsScratch;
                 ws.clear();
                 s->shadowWorkspaces(ShadowNodeKind(k), ws);
                 for (Ogre::CompositorWorkspace *w : ws)
-                    if (Ogre::CompositorShadowNode *n = w->findShadowNode(shadowNodeNameOf(ShadowNodeKind(k))))
-                        instances.push_back({ n, ShadowNodeKind(k) });
+                    if (Ogre::CompositorShadowNode *n = w->findShadowNode(shadowNodeNameOf(ShadowNodeKind(k)))) {
+                        // The workspace's own camera IS the eye this instance's
+                        // maps will be chosen for: a mirror slot's reflected
+                        // camera, and — the case this matters for — a probe's
+                        // capture camera, which CubemapProbe parks at the probe
+                        // centre and never moves (OgreCubemapProbe.cpp:562).
+                        Ogre::Camera *c = w->getDefaultCamera();
+                        instances.push_back({ n, ShadowNodeKind(k),
+                                              c ? c->getDerivedPosition() : Ogre::Vector3::ZERO,
+                                              c != nullptr });
+                    }
             }
             // THE FRAME'S ONE ITEM WALK: the GI movement records and — when
             // this scene has shadow nodes to cache into and lamps to cache — the
@@ -1210,6 +1321,17 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                 want.clear();
                 want.reserve(f.lights.size());
                 for (const OgreScene::ShadowCacheLight &l : f.lights) want.push_back(l.light);
+                // A PROBE WITH MORE LAMPS THAN MAPS CACHES ITS NEAREST FOUR
+                // rather than caching nothing (keepNearestLamps' note). Only the
+                // probe kind: its camera is parked at the probe centre, so the
+                // choice is stable and re-rendering it costs nothing to churn.
+                // A VIEW and a MIRROR keep the v1 rule (ENGINE_CACHE_POLICY_SPEC
+                // P2, tests/shadow T4) — their cameras follow the user, Ogre's
+                // per-frame closest-first choice IS the right picture there, and
+                // `viewCached` false / `uncachedInstances` is how the status
+                // says so.
+                if (in.kind == ShadowNodeKind::Probe && in.hasEye)
+                    keepNearestLamps(want, maps, in.eye, held, mShadowNearScratch);
                 // Cache only with per-map clears (a whole-atlas clear would wipe
                 // a cached map every frame) and only while every lamp fits.
                 const bool cache = mShadowPerMapClears && !want.empty() && want.size() <= maps;

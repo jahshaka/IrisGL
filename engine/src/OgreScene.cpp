@@ -384,9 +384,52 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giC
         // edge above misses it. A probe-only stale, no GI invalidation.
         if (probeSeesItem(*rec) != probeBefore) staleProbeGrid(GiStaleReason::Moved);
     }
+    // THE WALK NO LONGER DESCENDS INTO THE DOCUMENT (L12, ledger 153). What
+    // hangs under a registered node is, almost always, the DOCUMENT's own
+    // subtree — the engine ADOPTED the document's tree (SCENEGRAPH_SPEC D2) —
+    // and its host pushes every one of those nodes' EFFECTIVE visibility
+    // itself, parent-first, on change (SceneMirror::visit:
+    // `shown = parentShown && node->visible`, pushed through setNodeVisible,
+    // which lands right back here for that node). Recursing into them
+    // re-applied, per push, what N more pushes were about to apply anyway:
+    // N parent-first pushes walked Sum(subtree sizes), not N nodes. MEASURED
+    // on `bench_scenegraph --scales 10000 --quick` (10,502 document nodes):
+    // 10,703 setNodeVisible calls drove 67,176 visits — 6.3 per node — and
+    // cost +21.6 ms of e.first_sync (158.5 -> 180.1 ms, interleaved A/B).
+    //
+    // SO THE DESCENT IS A WHITELIST, NOT A BLACKLIST. "Skip the children that
+    // are registered as adopted" is NOT enough and was measured not to be: on
+    // a FIRST sync the host adopts parent-first, so at the moment it pushes
+    // node K's visibility, K's children are document nodes it has not adopted
+    // yet — unregistered, indistinguishable from a helper by the registry, and
+    // the walk went straight on down the rest of the document (measured: the
+    // visit count did not move at all). What this function is for is ONE
+    // closed set of children, and they are all ours:
+    //
+    //   * an ENGINE-OWNED registered child (createNode — a gizmo slot, a
+    //     selection wire, a bone-overlay bone). Nothing pushes visibility for
+    //     those from a document walk; setNodeVisible / setNodeParent on their
+    //     engine-owned parent is the only thing that reaches them, which is the
+    //     contract tests/shadow and tests/engine drive directly.
+    //   * the TWO unregistered helper children this engine creates under a
+    //     registered node and no push can reach: a light's -Y adapter
+    //     (setLight) and a decal's projector box (OgreDecals). They are the
+    //     reason the walk still exists at all — a hidden light must stop
+    //     lighting and stale the probe grid, a hidden decal must stop painting
+    //     the wall the probes capture.
+    //
+    // Everything else below a registered node belongs to the document, and the
+    // document's host owns its visibility.
     const size_t numChildren = sn->numChildren();
-    for (size_t i = 0; i < numChildren; ++i)
-        applyShownSubtree(static_cast<Ogre::SceneNode *>(sn->getChild(i)), shown, giChanged);
+    for (size_t i = 0; i < numChildren; ++i) {
+        Ogre::SceneNode *child = static_cast<Ogre::SceneNode *>(sn->getChild(i));
+        if (const Node *crec = registryNode(child)) {
+            if (crec->owned) applyShownSubtree(child, shown, giChanged);
+            continue;                     // adopted: its host pushes it, parent-first
+        }
+        if (rec && (child == rec->lightNode || child == rec->decalNode))
+            applyShownSubtree(child, shown, giChanged);
+    }
 }
 
 Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {

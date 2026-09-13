@@ -62,10 +62,32 @@ Ogre::TextureGpuManager *textureManager(Ogre::Root *root) {
 }   // namespace
 
 TextureCache &textureCache() {
-    // Function-local static: constructed on first use, destroyed at exit, and
-    // never before a translation unit that might still be talking to it.
-    static TextureCache instance;
-    return instance;
+    // LEAKED ON PURPOSE — THE STATIC DESTRUCTION ORDER FIASCO, MEASURED
+    // (ledger 150; crash artefact spikes/render-review-2026-09-13/lighting/
+    // crash-2026-09-13-showroom2-launch/). This used to be a plain
+    // function-local `static TextureCache instance`, on the comment "destroyed
+    // at exit, and never before a translation unit that might still be talking
+    // to it". That comment was wrong, and exactly backwards:
+    //
+    //   * `EngineHost` is a function-local static of its own
+    //     (src/bridge/enginehost.cpp) and is constructed FIRST — main() touches
+    //     it before the engine exists.
+    //   * THIS static is constructed later, on the first configure() inside
+    //     engine start.
+    //   * Exit handlers run in REVERSE order of construction, so this object is
+    //     destroyed FIRST and ~EngineHost — which calls shutdown() as its
+    //     safety net — then runs saveTextureCache() against a destroyed
+    //     std::map. `save()` iterates `mChannels` and calls `kv.first.find('\n')`
+    //     on a freed node: SIGSEGV, fault address 0x20, inside std::string::find,
+    //     AFTER "[shutdown] step 8/8".
+    //
+    // A never-destroyed singleton removes the whole class: the cache is a few
+    // hundred KB of strings whose lifetime IS the process, nothing it owns needs
+    // a destructor to be correct, and it can now be used from any exit-time
+    // path. (The Ogre side is still checked: save() returns early when the
+    // render system or the texture manager is gone.)
+    static TextureCache *instance = new TextureCache();
+    return *instance;
 }
 
 TextureCache::TextureCache() = default;
