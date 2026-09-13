@@ -468,7 +468,7 @@ bool OgreScene::refreshVctFast() {
 // updateSceneGraph() first: light injection reads each light's DERIVED position
 // (VctLighting::addLight -> getParentNode()->_getDerivedPosition()), and the
 // whole point of this call is that a light just moved.
-bool OgreScene::refreshGiLighting() {
+bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
         if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity) {
             rebuildGi();          // IR has no cheaper path: the re-trace IS it
@@ -476,13 +476,29 @@ bool OgreScene::refreshGiLighting() {
         }
         if (!mVctLighting || !mVctVoxelizer) return false;
         mSceneMgr->updateSceneGraph();
+        // NO EXTRA BOUNCES WHILE THE THING IS STILL MOVING (CPU-vs-GPU audit
+        // F4), and every one of them AT REST. Each extra bounce is a second
+        // full light-injection dispatch over the voxel volume plus its
+        // anisotropic mip chain (VctLighting::runBounce) — measured on an
+        // RTX 4080 at 128^3 in a closed room, a tick plus its read-back frame
+        // costs 5.37 ms at three bounces against 4.83 at one, i.e. 0.5-0.6 ms
+        // of GPU per tick — spent on a picture the next tick replaces a few
+        // frames later. The first bounce is what makes the light follow the
+        // lamp; two and three are a refinement of a frame nobody holds still
+        // enough to see.
+        //
+        // AT REST IT IS THE OPPOSITE (round-2 review F1): the frame the user is
+        // left looking at must be the one a full solve would have produced. For
+        // a DRAG that is the settle's own re-solve, but a MOVABLE lamp never
+        // arms a settle (REALTIME_REFLECTIONS_SPEC §3.3, O2: it re-injects on a
+        // cadence and nothing re-solves), so its room would have stayed at one
+        // bounce indefinitely. `inMotion` is the host's answer to "is it still
+        // moving", and the same flag chooses the ray march: coarse while
+        // moving, the scene's own at rest.
         const Ogre::uint32 extraBounces =
-            Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-        // IN MOTION, by definition: this path only runs while the mirror's
-        // stability window is open, i.e. while something is being dragged. B5's
-        // coarser ray march is charged here and nowhere else.
+            inMotion ? 0u : Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
         mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
-                             giRayMarchStepScale(true));
+                             giRayMarchStepScale(inMotion));
         // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
         // object, same voxel textures, same field geometry — only the radiance
         // in the volume changed. reset() re-arms the integration counter and
@@ -849,6 +865,14 @@ Ogre::Light *OgreScene::markGiLight(NodeId requested) {
 // it actually is. computeProbeRegion's slab search reads this one — an item's
 // SHAPE is its evidence there, and the morph below deliberately moves a trimmed
 // box's faces.
+// AN ITEM IS A SLAB FOR AN AXIS when it is at least kSlabAspect times broader
+// on BOTH other axes than it is thick on this one. Self-relative, so it is
+// scale-free and population-free — a wall is a wall whatever else is in the
+// scene, and nothing here reads a position or a size constant. The enclosure
+// search below is its other caller (it is the same reading, and deliberately so
+// — see the note on kSlabAspect there).
+static bool giIsSlab(const Ogre::Aabb &a, size_t ax);
+
 std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
     std::vector<Ogre::Aabb> all;
     all.reserve(mNodes.size());
@@ -897,6 +921,9 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     };
 
     std::vector<float> w(n, 1.0f);
+    // How far into the ramp each item is, kept because the SLAB CLIP below has
+    // its own, shorter ramp over the same axis (round-2 review F2).
+    std::vector<float> ramp(n, 0.0f);
     bool anyTrimmed = false;
     for (size_t i = 0; i < n; ++i) {
         const float t = (std::log(extents[i] / scale) - logStart) / logSpan;
@@ -904,6 +931,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         const float c = std::min(t, 1.0f);
         w[i] = 1.0f - (c * c * (3.0f - 2.0f * c));                // smoothstep
         if (coveredByPrev(all[i])) { w[i] = 1.0f; continue; }     // already lit: keep it whole
+        ramp[i] = c;
         if (w[i] < 1.0f) anyTrimmed = true;
     }
     if (!anyTrimmed) return all;      // the common case: the plain union, untouched
@@ -930,11 +958,136 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     const Ogre::Vector3 grow = (coreMax - coreMin) * (kRegionGrow * 0.5f);
     const Ogre::Vector3 regionMin = coreMin - grow, regionMax = coreMax + grow;
 
+    // THE CONTENT PATCH — what a SUPPORTING SLAB is clipped to (round-2 review
+    // F2). It is the union of the items that are NOT outliers at all (w == 1),
+    // i.e. the content itself, grown by a fraction of ITS OWN size — and that
+    // is the whole point of computing it separately from the core above: the
+    // core contains the collapsed outlier, so it carries the SLAB's own size
+    // into the answer (a 1 m cube on a 200 m ground resolved to a 2 m patch and
+    // on a 50 m ground to a 15 m one — the same scene, three answers). Nothing
+    // below reads the slab's extent.
+    //
+    // THE MARGIN IS A FRACTION OF THE CONTENT'S SMALLEST EXTENT, and that
+    // choice is measured rather than tasteful. A patch that ends exactly on the
+    // content's own boundary takes the floor's bounce away with the acres: on a
+    // bare scene — one 2 m crate on the default ground, the case
+    // scripting.e2e.live_texture_pixels photographs — the crate's lit surface
+    // reads 83 of 255 with a volume its own size, 162 at twice it, 179 at four
+    // times and 220 with the whole 46 m the old fit gave it (GI off reads 83,
+    // i.e. at its own size the bounce contributes NOTHING). So the patch has to
+    // reach a real distance past the content, and the honest scale for "how far
+    // does a floor's bounce matter" is the content's own SMALLEST dimension —
+    // its height, for anything standing on the ground — not its footprint,
+    // which would grow a room's patch by the width of the room.
+    //
+    // Half of it, each side: a 2 m crate gets a 4 m patch (162, the bounce back
+    // within a point of what it was) and an 18 m room whose storey is 4.75 m
+    // gets 2.4 m of floor past its walls. Nothing here reads the slab.
+    static const float kSlabPatchMargin = 0.5f;    // x the content's smallest extent, a side
+    Ogre::Vector3 contentMin(1e30f), contentMax(-1e30f);
+    bool haveContent = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (w[i] < 1.0f) continue;
+        contentMin.makeFloor(all[i].getMinimum());
+        contentMax.makeCeil(all[i].getMaximum());
+        haveContent = true;
+    }
+    Ogre::Vector3 patchMin = coreMin, patchMax = coreMax;
+    if (haveContent) {
+        const Ogre::Vector3 csize = contentMax - contentMin;
+        const float reach = kSlabPatchMargin *
+                            std::max(std::min(std::min(csize.x, csize.y), csize.z), 1e-4f);
+        patchMin = contentMin - Ogre::Vector3(reach);
+        patchMax = contentMax + Ogre::Vector3(reach);
+    }
+    // THE GEOMETRIC BLEND between two boxes, by `k` (0 = a, 1 = b): sizes
+    // interpolated in LOG space and centres linearly, which is exactly what the
+    // outlier morph below does and for the reason stated there (a linear blend
+    // of a 2-unit box and a 200-unit one spends almost all of its travel near
+    // the large end). Shared so the two paths cannot drift apart.
+    const auto blendBoxes = [](const Ogre::Vector3 &amn, const Ogre::Vector3 &amx,
+                               const Ogre::Vector3 &bmn, const Ogre::Vector3 &bmx, float k) {
+        Ogre::Vector3 omn, omx;
+        for (size_t ax = 0; ax < 3u; ++ax) {
+            const float ac = 0.5f * (amn[ax] + amx[ax]), ah = 0.5f * (amx[ax] - amn[ax]);
+            const float bc = 0.5f * (bmn[ax] + bmx[ax]), bh = 0.5f * (bmx[ax] - bmn[ax]);
+            const float eps = 1e-4f;
+            const float c = ac + (bc - ac) * k;
+            const float h = std::exp(std::log(std::max(ah, eps)) * (1.0f - k) +
+                                     std::log(std::max(bh, eps)) * k);
+            omn[ax] = c - h; omx[ax] = c + h;
+        }
+        return std::make_pair(omn, omx);
+    };
+
     std::vector<Ogre::Aabb> out;
     out.reserve(n);
     for (size_t i = 0; i < n; ++i) {
         const Ogre::Vector3 mn = all[i].getMinimum(), mx = all[i].getMaximum();
         if (w[i] >= 1.0f) { out.push_back(all[i]); continue; }
+        // WHAT THE GROUND SUPPORTS, AND NO MORE (UNPIN-1's measurement, lane
+        // ENGINE-4 item 5). An oversized item that is a SLAB — the same
+        // self-relative shape test the enclosure search uses, and the ONLY
+        // thing read here: no position, no size constant, no world origin — is
+        // the thing the rest of the scene stands on. Its extent past the
+        // content is empty ground, and lighting it costs resolution: on the
+        // three shipped rooms the morph below left the 100 m default ground
+        // measuring +-20.6 m around an 18 m room (41.3 m of volume at 0.32 m
+        // per voxel, with visible cone-trace banding), +-18.3 around 24, and
+        // +-32.5 around 48 — roughly twice the room, every time, and exactly
+        // the room once the ground was hidden.
+        //
+        // So a slab contributes on its BROAD axes only where the content is:
+        // clipped to the content core, which is the same box the trim region
+        // below is grown from. Its THIN axis is kept whole, because that is the
+        // surface itself — the floor stays in the volume, it just stops
+        // reaching past the walls. Non-slab outliers (a big prop, an imported
+        // vehicle) keep the geometric morph: they are content, not scenery.
+        //
+        // The probe ENCLOSURE is unaffected by construction: computeProbeRegion
+        // runs its slab search on giItemBoundsRaw(), the untrimmed gather, so
+        // the ground goes on being the floor that closes the Y axis.
+        size_t thin = 3u;
+        for (size_t ax = 0; ax < 3u; ++ax)
+            if (giIsSlab(all[i], ax) &&
+                (thin == 3u || all[i].mHalfSize[ax] < all[i].mHalfSize[thin]))
+                thin = ax;
+        if (thin != 3u) {
+            Ogre::Vector3 smn = mn, smx = mx;
+            for (size_t ax = 0; ax < 3u; ++ax) {
+                if (ax == thin) continue;
+                smn[ax] = std::max(smn[ax], patchMin[ax]);
+                smx[ax] = std::min(smx[ax], patchMax[ax]);
+                if (smn[ax] > smx[ax]) {                  // no overlap: a point at the patch
+                    const float c = std::min(std::max(all[i].mCenter[ax], patchMin[ax]), patchMax[ax]);
+                    smn[ax] = smx[ax] = c;
+                }
+            }
+            // CONTINUOUS AT THE RAMP ENTRANCE (round-2 review F2). Clipping a
+            // slab the instant its weight leaves 1 would be a cliff of exactly
+            // the kind the trim was rewritten to remove: a floor sitting near
+            // kOutlierSoftStart would snap between WHOLE and FOOTPRINT when one
+            // prop is added, and that snap is a GI brightness jump plus a full
+            // re-voxelise. So the clip has its own ramp over the FIRST QUARTER
+            // of the trim's — geometric, like every other blend here — and by
+            // the time an item is a quarter of the way to "pure scenery" it is
+            // the footprint, which is where every real ground plane already is
+            // (the 100 m default ground in an 18 m room sits at 0.62 of the
+            // trim ramp, and on a bare 100 m ground under one 2 m crate at
+            // 0.41). The width is a MEASURED choice, not a taste: at a quarter
+            // the ramp a 50 m ground under that same crate sat at 0.16, i.e.
+            // inside the blend, and answered 5.53 m where the 100 m and 200 m
+            // grounds both answered 2.23 — the slab size leaking back in
+            // through the blend, which is the very thing the patch removes. A
+            // tenth puts every one of them past the blend and leaves the
+            // transition continuous, which is what it is for.
+            static const float kSlabClipRamp = 0.1f;
+            const float k = std::min(ramp[i] / kSlabClipRamp, 1.0f);
+            const float kb = k * k * (3.0f - 2.0f * k);           // smoothstep
+            const auto blended = blendBoxes(mn, mx, smn, smx, kb);
+            out.push_back(Ogre::Aabb::newFromExtents(blended.first, blended.second));
+            continue;
+        }
         // The trimmed box...
         Ogre::Vector3 tmn = mn, tmx = mx;
         tmn.makeCeil(regionMin);  tmx.makeFloor(regionMax);
@@ -1364,6 +1517,12 @@ unsigned OgreScene::giVoxelResolution() const {
 // OUTERMOST slab on each side of the content closes a face, so a bookcase or a
 // display panel inside a room changes nothing.
 static const float kSlabAspect = 2.0f;
+static bool giIsSlab(const Ogre::Aabb &a, size_t ax) {
+    const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
+    const float thin  = std::max(a.mHalfSize[ax], 1e-5f);   // a plane has zero
+    const float broad = std::min(a.mHalfSize[o1], a.mHalfSize[o2]);
+    return broad > 0.0f && broad >= kSlabAspect * thin;
+}
 // How much of the SMALLER slab's extent the two must share on each of the other
 // two axes to be "facing each other" rather than merely parallel somewhere in
 // the world.
@@ -1407,12 +1566,9 @@ Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
     const std::vector<Ogre::Aabb> raw = giItemBoundsRaw();
     if (raw.empty()) return Ogre::Aabb::newFromExtents(mn, mx);
 
-    const auto isSlab = [](const Ogre::Aabb &a, size_t ax) {
-        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
-        const float thin  = std::max(a.mHalfSize[ax], 1e-5f);   // a plane has zero
-        const float broad = std::min(a.mHalfSize[o1], a.mHalfSize[o2]);
-        return broad > 0.0f && broad >= kSlabAspect * thin;
-    };
+    // The shape test itself is giIsSlab (file scope): the lit volume's fit reads
+    // it too, so that "what is scenery" is ONE reading in this file.
+    const auto isSlab = [](const Ogre::Aabb &a, size_t ax) { return giIsSlab(a, ax); };
 
     // What one axis' reading is: where its two faces ended up, whether each was
     // CLOSED by a slab (as opposed to left at the hull), and whether the axis
@@ -1880,6 +2036,41 @@ void OgreScene::runItemWalk(bool shadow) {
         mShadowVanished.clear();
     }
     if (!shadow) return;
+    // THE STILL-FRAME GATE (ENGINE-4 F5), the caster half's version of
+    // ensureGiWalk's. Everything this walk reads is either a TRANSFORM (the
+    // world AABB) or a PUSHED event that moves nothing — a pose, a rebuilt
+    // Item, a material's generated vertex piece, a per-object Cast Shadow flag,
+    // a render-queue refile, a visibility or channel change. The first half is
+    // the host's transform epoch; the second is why the GI half's gate could
+    // not simply be copied, and is now counted at its own seams
+    // (markShadowShapeDirty / noteShadowScanInput). With neither moved since
+    // the last walk, nothing a lamp map depends on can have changed and the
+    // walk is O(1) instead of O(items).
+    //
+    // TWO THINGS THE GATE MUST NOT SKIP, and neither is a transform:
+    //   * a caster whose Item DIED (mShadowVanished) — unindexItemNode notes a
+    //     scene transform write, so the epoch moves and the walk runs;
+    //   * a material with a VERTEX-STAGE generated piece, which moves vertices
+    //     every frame off the shader clock. Its items must be re-flagged every
+    //     frame, so the presence of one takes the gate out entirely. The list
+    //     is over MATERIALS (a handful), never items, and walkItems builds it
+    //     for its own use anyway.
+    bool deforms = false;
+    for (const auto &mk : mMaterials)
+        if (!mk.second.customPiece[1].empty()) { deforms = true; break; }
+    const unsigned long long epoch = shadowEpoch();
+    if (!deforms && mShadowScanPrimed && mShadowWalkEpochValid && epoch == mShadowWalkEpoch) {
+        // The changes are per frame by contract (walkItems clears them at its
+        // head), and "the walk ran and found nothing" is what the consumer
+        // must see — collectShadowCacheFrame walks for itself when the frame's
+        // walk did not happen, which would undo the whole gate.
+        mShadowChanges.clear();
+        mShadowWalked = true;
+        mCasterWalkMicros = 0.0;
+        return;
+    }
+    mShadowWalkEpoch = epoch;
+    mShadowWalkEpochValid = detail::gTransformWriteCounter != nullptr;
     const auto t0 = std::chrono::steady_clock::now();
     walkItems(false, true, false);
     mShadowWalked = true;
@@ -2084,6 +2275,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
             }
         }
         if (shadow) {
+            ++mCasterWalkItems;
             // THE CASTER PREDICATE. A helper carries kHelperBit and a distortion
             // item kDistortionBit — neither is in a shadow channel. The on-top
             // overlay queue (gizmos, bone overlays: unlit, depth test off,

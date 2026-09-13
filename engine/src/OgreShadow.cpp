@@ -659,6 +659,11 @@ ShadowStatus OgreEngine::shadowStatus() const {
     ShadowStatus st;
     st.requestedBudget = mShadowMapBudget;
     st.atlasRebuilds = mShadowAtlasRebuilds;        // cumulative; true even headless
+    // The caster walk's item visits, summed over every live scene (F5). Outside
+    // the poll gate below and before the headless return, like atlasRebuilds:
+    // it is a plain counter, not a listener-fed one, and a headless host can
+    // still read it.
+    for (const auto &s : mScenes) st.casterWalkItems += s->casterWalkItems();
     if (!mHlmsRegistered || mHeadless) return st;   // live stays false
     // ASKING TURNS THE COUNTERS ON, exactly like RenderStats::metricsRecording:
     // the shadow-pass listeners are not free (a callback per compositor pass

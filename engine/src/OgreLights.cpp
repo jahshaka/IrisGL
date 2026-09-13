@@ -479,13 +479,14 @@ bool OgreScene::hasCacheableShadowLights() const {
 
 void OgreScene::noteShadowShapeChanged(MaterialId mat) {
     for (auto &kv : mNodes)
-        if (kv.second.materialRef == mat && kv.second.item) kv.second.shadowShapeDirty = true;
+        if (kv.second.materialRef == mat && kv.second.item) markShadowShapeDirty(kv.second);
 }
 
 void OgreScene::noteNodePosed(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     ++it->second.poseEpoch;
+    noteShadowScanInput();          // the caster half reads poseEpoch (walkItems)
     // A POSE MOVES A SOCKET RIDER, and that is the ONLY thing about a pose the
     // GI movement scan can see (a skinned Item keeps its bind-pose bounds,
     // which is why the raster field has a rig epoch of its own). So a rig with

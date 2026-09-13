@@ -2618,6 +2618,21 @@ struct ShadowStatus {
     /// Monotonic for the life of the engine; the monitor's `shadow.atlas` event
     /// is the same fact with a reason attached.
     unsigned atlasRebuilds = 0;
+    /// ITEM VISITS MADE BY THE CASTER WALK, cumulative over every live scene
+    /// (ENGINE-4 F5). The lamp-map cache has to notice a caster that moved,
+    /// posed, changed shape or stopped casting, and it does it by walking the
+    /// scene's items once a frame. That walk is O(items) and it used to run on
+    /// EVERY frame of every drawn scene with a cacheable lamp — including
+    /// frames in which nothing at all had happened. It is now gated on the same
+    /// kind of epoch the GI movement scan uses (a transform write, or one of
+    /// the pushed events that change a caster without moving it), so a STILL
+    /// frame visits nothing: this number holding still across rendered frames
+    /// IS the statement, and it is the one a test or the monitor can read.
+    /// (It needs a host transform counter to be installed —
+    /// Engine::setTransformWriteCounter — exactly like the GI half; without one
+    /// the engine cannot know a host is not writing behind its back and the
+    /// walk runs every frame, as it always did.)
+    unsigned long long casterWalkItems = 0;
 };
 
 /// A CENSUS of everything alive behind the boundary (fps audit F11).

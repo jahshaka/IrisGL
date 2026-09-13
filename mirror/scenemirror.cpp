@@ -1918,7 +1918,12 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
     const bool shown = parentShown && node->visible;
     const int wantVisible = shown ? 1 : 0;
     if (e.visiblePushed != wantVisible) {
-        mTarget->setNodeVisible(e.node, shown);
+        // THROUGH THE PARENT-FIRST VERB (ledger 179): this walk knows
+        // `parentShown` — it is the argument — and the plain setNodeVisible
+        // would derive the same answer again by walking up to the nearest
+        // registered ancestor, one registry lookup per push. On a first sync
+        // that is one per adopted node, for a value sitting in a local.
+        mTarget->setNodeVisibleUnder(e.node, shown, parentShown);
         e.visiblePushed = wantVisible;
     }
 
@@ -5338,6 +5343,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mGiLightSignature = readEngineSignature();
             mGiMovableLightSignature = movableLightSig;
             mGiMovableLightsMoving = false;
+            mGiMovableSettleOwed = false;
             mGiMaterialSignature = mTarget->giMaterialSignature();
             mGiPushed = true;
             mGiPendingRefresh = false;
@@ -5445,6 +5451,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 if (vctLike) mGiLightSignature = readEngineSignature();
                 mGiMaterialSignature = mTarget->giMaterialSignature();
                 mGiPendingInject = false;
+                // A full re-solve IS the rest frame, at the full bounce count:
+                // the movable path's owed one would only redo it (F1).
+                mGiMovableSettleOwed = false;
             };
             if (explicitRefresh) {
                 mGiRefreshSerialSeen = mSource->giRefreshSerial;
@@ -5461,15 +5470,29 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 mTarget->refreshGlobalIllumination();
                 ++mGiRefreshCount;
                 adoptSignature();
-            } else if ((mGiPendingRefresh && mGiPendingInject) || mGiMovableLightsMoving) {
+            } else if ((mGiPendingRefresh && mGiPendingInject) || mGiMovableLightsMoving ||
+                       mGiMovableSettleOwed) {
                 // Still moving: the cheap path, rate-limited. (A material-only
                 // edit waits for the settle without it.) A MOVING LAMP reaches
                 // this branch on its own, with no settle pending — that is the
                 // whole of O2: its bounce follows it, and nothing re-solves.
                 if (++mGiFramesSinceLightOnly >= kGiLightOnlyEveryN) {
                     mGiFramesSinceLightOnly = 0;
+                    // IS IT STILL MOVING? A drag has its settle coming and is in
+                    // motion by construction; a movable lamp is in motion while
+                    // its signature is still changing. When neither is true this
+                    // is the tick the latch kept alive — the REST frame, run at
+                    // the scene's full bounce count (F1).
+                    const bool inMotion = mGiMovableLightsMoving ||
+                                          (mGiPendingRefresh && mGiPendingInject);
                     mGiMovableLightsMoving = false;   // re-armed by the next move
-                    if (mTarget->refreshGiLighting()) ++mGiLightRefreshCount;
+                    // Owe one rest tick after any moving tick, and only after a
+                    // MOVABLE one: the drag path's settle does it properly.
+                    mGiMovableSettleOwed = inMotion && !(mGiPendingRefresh && mGiPendingInject);
+                    if (mTarget->refreshGiLighting(inMotion)) {
+                        ++mGiLightRefreshCount;
+                        if (!inMotion) ++mGiLightRefreshAtRestCount;
+                    }
                 }
             }
         }

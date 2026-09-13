@@ -1974,6 +1974,7 @@ public:
     bool setNodeParent(NodeId id, NodeId parent) override;
     void setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) override;
     void setNodeVisible(NodeId id, bool visible) override;
+    void setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) override;
 
     // ---- Meshes and materials ----
     MeshId createMesh(const MeshData &data) override;
@@ -2102,7 +2103,7 @@ public:
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
     unsigned long long giMaterialSignature() const override;
-    bool refreshGiLighting() override;
+    bool refreshGiLighting(bool inMotion) override;
     void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
     bool nodeGiBoundsExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
@@ -2285,6 +2286,10 @@ public:
     double shadowScanMicros() const { return mShadowScanMicros; }
     double casterWalkMicros() const { return mCasterWalkMicros; }
     double giScanMicros() const { return mGiScanMicros; }
+    /// ITEM VISITS made by the CASTER half of the walk, ever (ENGINE-4 F5).
+    /// The still-frame statement in one number: a frame in which nothing that
+    /// a lamp map depends on changed must not move it at all.
+    unsigned long long casterWalkItems() const { return mCasterWalkItems; }
     /// AN INPUT TO THIS SCENE'S GI SCANS CHANGED — a transform this scene
     /// itself wrote (setNodeTransform, a socket rider's placement, a decal's
     /// box), or a STRUCTURAL change that moves what the scans would read
@@ -2295,6 +2300,13 @@ public:
     /// question answered — "could the answer have changed since I last
     /// looked?" — and a false yes costs one scan.
     void noteSceneTransformWrite() { ++mSceneTransformWrites; }
+    /// AN INPUT TO THE CASTER HALF OF THE WALK CHANGED, and it is not a
+    /// transform (ENGINE-4 F5): a rig posed, a caster-shape seam (a mesh or
+    /// material swap, a rebuilt Item, a per-object Cast Shadow flag, a
+    /// generated vertex piece), a render-queue refile. The GI half's epoch
+    /// cannot carry these — none of them moves anything — so the caster half
+    /// adds its own counter on top of it (shadowEpoch below).
+    void noteShadowScanInput() { ++mShadowScanWrites; }
     void recreatePlanarAfterShadowRebuild();
 
     Ogre::SceneManager *sceneManager() const;
@@ -2508,7 +2520,22 @@ private:
         /// (POST_LOOKS_SPEC.md §5.3): the item's own flags cannot answer it once
         /// kVisibleBit is gone, and the helper flag can be toggled afterwards.
         bool                      materialDistortion = false;
+        /// ENGINE-OWNED REGISTERED CHILDREN this node has ever been given
+        /// (createNode with a parent, setNodeParent onto it): a gizmo slot, a
+        /// selection wire, a bone-overlay bone. The visibility walk descends
+        /// into those and into the two unregistered helper children named
+        /// above, and into nothing else — so a node with none of them needs no
+        /// per-child registry lookup at all (ledger 179). It only ever grows:
+        /// over-counting costs one lookup per child on a node that once had an
+        /// engine-owned child, under-counting would lose a wire's visibility.
+        unsigned                  ownedChildren = 0;
     };
+
+    /// THE ONE PLACE `shadowShapeDirty` IS RAISED (ENGINE-4 F5), so that
+    /// raising it and telling the caster walk's still-frame gate about it
+    /// cannot come apart. Here rather than beside noteShadowScanInput because
+    /// it needs `Node` to be complete.
+    void markShadowShapeDirty(Node &n) { n.shadowShapeDirty = true; noteShadowScanInput(); }
 
     /// A definition's frozen shape. Two systems can share a recycled def only if
     /// every element of this matches, because none of it can be changed after
@@ -3089,6 +3116,13 @@ private:
     /// helper child such as a light's -Y adapter, a document node the host has
     /// not adopted yet, the scene root).
     Node *registryNode(const Ogre::Node *sn);
+    /// This scene's record for `id`, or null — the one-lookup form of
+    /// `node(id)` + `mNodes.find(id)`, for the callers that need both the Ogre
+    /// node and the record (round-2 review F9).
+    Node *record(NodeId id) {
+        auto it = mNodes.find(id);
+        return it == mNodes.end() ? nullptr : &it->second;
+    }
     /// The EFFECTIVE visibility `sn`'s children inherit from above it: the
     /// `shown` of the nearest registered ancestor, true when there is none.
     bool inheritedShown(const Ogre::Node *sn);
@@ -3103,6 +3137,11 @@ private:
     /// invalidate GI ONCE for the whole subtree.
     /// (RENDER_PIPELINE_AUDIT 1.1/1.2)
     void applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giChanged);
+    void applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited, bool &giChanged);
+    /// setNodeVisible / setNodeVisibleUnder, in one body: `parentShown` null
+    /// means "derive it" (inheritedShown), non-null means the host walked its
+    /// tree parent-first and already knows.
+    void setNodeVisibleImpl(NodeId id, bool visible, const bool *parentShown);
     /// Voxel volume resolution per axis for the current quality.
     unsigned giVoxelResolution() const;
     /// The GI items' world AABBs after the exclude flag and the extent-outlier
@@ -3386,6 +3425,19 @@ private:
     unsigned long long transformEpoch() const;
     unsigned long long mGiWalkEpoch = 0;          ///< the epoch the last scan ran at
     bool mGiWalkEpochValid = false;               ///< ...and whether it was ever set
+    /// THE SAME SKIP FOR THE CASTER HALF (ENGINE-4 F5). It was left out when
+    /// the GI half got its gate because a caster's inputs are not all
+    /// transforms — a pose, a material's vertex piece, a rebuilt Item, a Cast
+    /// Shadow flag — so it ran O(items) every frame for every drawn scene with
+    /// a cacheable lamp, still or not. Those inputs are PUSHED at their own
+    /// seams, and each of them now bumps mShadowScanWrites, so the caster half
+    /// can ask the same question the GI half asks: could anything I read have
+    /// changed since I last looked?
+    unsigned long long shadowEpoch() const { return transformEpoch() + mShadowScanWrites; }
+    unsigned long long mShadowScanWrites = 0;     ///< pushed caster inputs that move nothing
+    unsigned long long mShadowWalkEpoch = 0;      ///< the epoch the last caster walk ran at
+    bool mShadowWalkEpochValid = false;
+    unsigned long long mCasterWalkItems = 0;      ///< item visits by the caster half, ever
     unsigned long long mSceneTransformWrites = 0; ///< OUR writes: setNodeTransform, riders
     unsigned long long mGiScans = 0;              ///< movement scans actually run, ever
     /// getWorldAabbUpdated calls made by OUR GI code, ever (GiStatus::

@@ -68,18 +68,32 @@ void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
                           (upper.b - lower.b) * 0.5f * kFlat };
     float sh[27] = { 0 };
     for (int c = 0; c < 3; ++c) { sh[c] = c0[c]; sh[3 + c] = c1[c]; }
+    // AND THAT IS THE VALUE THE VCT ARM GETS TOO — setAmbientSh derives
+    // mAmbientRadiance from these very coefficients (c0 +- c1 is the pair back
+    // again) and pushes it, so this function ends here. It used to overwrite
+    // that pair with the UNSCALED one (LIGHTING_FIX fix 3), on the argument
+    // that "VctLighting has no such split, so the darkened value would make a
+    // VCT scene pi times darker than the same scene without VCT". That
+    // argument is wrong in its premise and it was the owner's black rectangle
+    // (ledger 177 defect A, gi.volume_edge):
+    //
+    //   * this engine forces HlmsPbs::AmbientSh, so a scene WITHOUT VCT renders
+    //     a flat ambient through the SH arm above — i.e. through kFlat, the
+    //     DARKENED value. That is what "the same scene without VCT" actually
+    //     looks like, and what every pixel suite, the selftest hash and every
+    //     authored scene were calibrated against;
+    //   * VctLighting's ambient is used in exactly the same convention the SH
+    //     arm is in: `light.xyz += ambient * light.w` lands in envColourD
+    //     (Vct_piece_ps.any:470-477 -> :613), which the BRDF multiplies by pi
+    //     against a kD carrying 1/pi. Radiance in, radiance out, same units.
+    //
+    // So the unscaled pair made a flat ambient pi times BRIGHTER the moment a
+    // voxel volume was bound — measured at 3.25x on an unlit slab — and the two
+    // values met at the edge of the field's confidence region, where the
+    // irradiance field's fallback hands out the VCT pair and its reconstruction
+    // hands out the SH one (JahIfd_piece_ps.any). One ambient, one convention,
+    // no edge.
     setAmbientSh(sh);
-    // ...but VCT gets the RADIANCE pair, not the 1/pi one (LIGHTING_FIX fix 3).
-    // The scale factor above exists to reproduce HlmsPbs' own pi discrepancy
-    // between its AmbientFixed and AmbientHemisphere paths; VctLighting has no
-    // such split — its ambient is added to the cone-trace result as plain
-    // radiance (`light.xyz += ambient * light.w`, Vct_piece_ps.any) — so pushing
-    // the darkened value there would make a VCT scene's ambient pi times darker
-    // than the same scene without VCT. setAmbientSh has already recorded the
-    // (possibly scaled) SH-derived pair; overwrite it with the true one.
-    mAmbientRadiance[0] = upper;
-    mAmbientRadiance[1] = lower;
-    applyVctAmbient();
 }
 
 // THE VCT AMBIENT (LIGHTING_FIX fix 3 / F-V1). Ogre's VctLighting is born with
@@ -158,9 +172,11 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
         mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, 1.0f, 0u);
         // The VCT arm's own copy of the same ambient, in RADIANCE units — which
-        // for an SH push (the sky path) is what the coefficients already are.
-        // f(n) = c0 + c1 * n.y, so the poles are c0 +- c1. setAmbient overwrites
-        // this afterwards with its unscaled pair; see applyVctAmbient.
+        // is what the coefficients already are, for a sky push and for
+        // setAmbient's scaled pair alike: f(n) = c0 + c1 * n.y, so the poles
+        // are c0 +- c1. ONE ambient reaches both arms, through here (ledger 177
+        // defect A: setAmbient used to overwrite this with an unscaled pair,
+        // which made a flat ambient pi times brighter inside a VCT scene).
         mAmbientRadiance[0] = Colour(sh[0] + sh[3], sh[1] + sh[4], sh[2] + sh[5], 1.0f);
         mAmbientRadiance[1] = Colour(sh[0] - sh[3], sh[1] - sh[4], sh[2] - sh[5], 1.0f);
         applyVctAmbient();
@@ -189,9 +205,15 @@ bool OgreScene::removeNode(NodeId id) {
 // ---- Hierarchy and transforms ----
 NodeId OgreScene::createNode(NodeId parent) {
     JAH_TRY {
-        Ogre::SceneNode *p = parent ? node(parent) : nullptr;
+        Node *prec = parent ? record(parent) : nullptr;          // one lookup (F9)
+        Ogre::SceneNode *p = prec ? prec->node : nullptr;
         if (parent && !p) { mError = "createNode: unknown parent"; return 0; }
         if (!p) p = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
+        // AN ENGINE-OWNED CHILD OF A REGISTERED NODE: the one case
+        // applyShownSubtree still has to descend into (a gizmo slot, a
+        // selection wire, a bone-overlay bone), recorded so that walk does not
+        // have to ask the registry about every child to find out.
+        if (prec) ++prec->ownedChildren;
         Node rec; rec.node = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
         return track(rec);
     } JAH_CATCH(mError, 0);
@@ -216,15 +238,23 @@ void *OgreScene::nativeSceneManager() const { return mSceneMgr; }
 
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
     JAH_TRY {
-        Ogre::SceneNode *n = node(id);
+        Node *rec = record(id);                                  // one lookup each (F9)
+        Ogre::SceneNode *n = rec ? rec->node : nullptr;
         if (!n) { mError = "setNodeParent: unknown node"; return false; }
         // An adopted node's place in the tree is the DOCUMENT's (one tree).
-        if (!mNodes[id].owned) { mError = "setNodeParent: node is adopted"; return false; }
-        Ogre::SceneNode *p = parent ? node(parent) : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
+        if (!rec->owned) { mError = "setNodeParent: node is adopted"; return false; }
+        Node *prec = parent ? record(parent) : nullptr;
+        Ogre::SceneNode *p = parent ? (prec ? prec->node : nullptr)
+                                    : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
         if (!p) { mError = "setNodeParent: unknown parent"; return false; }
         if (n->getParent() == p) return true;
         if (n->getParent()) n->getParent()->removeChild(n);
         p->addChild(n);
+        // ...and the same record as createNode's (it is a COUNT that only ever
+        // grows: a node that once had an engine-owned child keeps walking its
+        // children, which costs a lookup per child on a node that has had one
+        // and is never wrong).
+        if (prec) ++prec->ownedChildren;
         // A move under a hidden parent hides the subtree, a move out from
         // under one shows it again (as far as each node's own flag allows).
         bool giChanged = false;
@@ -341,7 +371,14 @@ bool OgreScene::inheritedShown(const Ogre::Node *sn) {
 }
 
 void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giChanged) {
-    Node *rec = registryNode(sn);
+    applyShownSubtree(sn, registryNode(sn), inherited, giChanged);
+}
+
+/// ...and the same walk when the caller ALREADY HAS the record (the push site
+/// looked it up to write `visible` into it a line earlier). `rec` may be null:
+/// that is an unregistered helper child — a light's -Y adapter, a decal's
+/// projector box — and the walk exists for exactly those.
+void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited, bool &giChanged) {
     const bool shown = rec ? (inherited && rec->visible) : inherited;
     // OGRE'S HALF: LAYER_VISIBILITY on everything attached HERE — the Item, a
     // PFX2 instance — and, one level down through the unregistered helper
@@ -420,6 +457,21 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giC
     //
     // Everything else below a registered node belongs to the document, and the
     // document's host owns its visibility.
+    // AND THE LOOKUP PER CHILD GOES WITH IT (ledger 179). The whitelist above is
+    // a closed set: engine-owned registered children (createNode / setNodeParent
+    // put them there, and `ownedChildren` records that they did — sticky, never
+    // cleared, so it can only over-approximate) and the two unregistered helper
+    // children this engine makes, both of which the record names by pointer. A
+    // node with neither has nothing below it this walk may touch, and asking the
+    // registry about each of its children — 10,503 lookups on a first sync of
+    // the 10 k bench, every one of them answering "a document node, skip it" —
+    // is the dead work this removes. The mirror pushes those children itself,
+    // parent-first, which is why the descent stopped at them in the first place.
+    if (rec && !rec->ownedChildren) {
+        if (rec->lightNode) applyShownSubtree(rec->lightNode, nullptr, shown, giChanged);
+        if (rec->decalNode) applyShownSubtree(rec->decalNode, nullptr, shown, giChanged);
+        return;
+    }
     const size_t numChildren = sn->numChildren();
     for (size_t i = 0; i < numChildren; ++i) {
         Ogre::SceneNode *child = static_cast<Ogre::SceneNode *>(sn->getChild(i));
@@ -579,7 +631,7 @@ void OgreScene::setNodeCastShadow(NodeId id, bool on) {
     if (it->second.item) it->second.item->setCastShadows(on);
     // A caster that just appeared or vanished is exactly what the lamp-map
     // cache exists to notice.
-    if (changed && it->second.item) it->second.shadowShapeDirty = true;
+    if (changed && it->second.item) markShadowShapeDirty(it->second);
 }
 
 bool OgreScene::nodeCastShadow(NodeId id) const {
@@ -588,6 +640,21 @@ bool OgreScene::nodeCastShadow(NodeId id) const {
 }
 
 void OgreScene::setNodeVisible(NodeId id, bool visible) {
+    setNodeVisibleImpl(id, visible, nullptr);
+}
+
+// THE SAME PUSH FROM A PARENT-FIRST HOST (L12 follow-up, ledger 179). The
+// mirror computes `shown = parentShown && node->visible` for every node it
+// walks and then pushed it through setNodeVisible, which derived the very same
+// parent state again by walking up to the nearest registered ancestor: on a
+// bulk first sync that is one registryNode (two hash lookups) per adopted node
+// for an answer the caller had in a local variable. Measured at 10,503 nodes:
+// 21,006 inheritedShown calls, of which half were this one.
+void OgreScene::setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) {
+    setNodeVisibleImpl(id, visible, &parentShown);
+}
+
+void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentShown) {
     JAH_TRY {
         auto it = mNodes.find(id);
         if (it == mNodes.end()) return;
@@ -604,7 +671,8 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
         // carries the GI bit, the billboard and the PFX2 halves with it.
         bool giChanged = false;
         if (n.node) {
-            applyShownSubtree(n.node, inheritedShown(n.node), giChanged);
+            applyShownSubtree(n.node, &n, parentShown ? *parentShown : inheritedShown(n.node),
+                              giChanged);
         } else {
             const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
             const bool probeBefore = probeSeesItem(n);

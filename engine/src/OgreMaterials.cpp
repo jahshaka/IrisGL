@@ -16,6 +16,7 @@ Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
 }
 
 void OgreScene::refileItems(MaterialId id, const MaterialRec &m) {
+    noteShadowScanInput();          // the caster predicate reads the render queue
     const Ogre::uint8 rq = renderQueueFor(m);
     for (auto &kv : mNodes)
         if (kv.second.materialRef == id && kv.second.item)
@@ -998,7 +999,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // allocator routinely hands the new Item the freed one's address — same
         // pointer, same bounds, same channels — so the caster scan cannot tell
         // on its own that a cutout just landed on a quad. Said here.
-        n.shadowShapeDirty = true;
+        markShadowShapeDirty(n);
         indexItemNode(n);   // the item walk's index (walkItems)
         // Only lit (PBR) surfaces participate in GI; unlit overlays, wires and
         // line meshes must neither bounce nor occlude the radiosity rays.
