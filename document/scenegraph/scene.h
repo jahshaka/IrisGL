@@ -194,22 +194,19 @@ public:
     }
 
     // global illumination (world panel; rendered by the engine viewport only).
-    // giBounds min == max means "automatic" (scene bounds + margin).
+    //
+    // THE LIT VOLUME IS THE RENDERER'S (owner decision D8, 2026-09-13): the
+    // document carries no bounds at all any more — no min/max pin and no
+    // ceiling on the automatic fit. The engine fits the volume to the scene's
+    // content on every solve, and `world.giStatus()` reports what it decided,
+    // which is the only reading anyone ever needed. The three fields that used
+    // to live here (giBoundsMin, giBoundsMax, giAutoBoundsMax), their World
+    // panel rows, the Fit button and world.fitGiBounds are deleted under the
+    // CRUD law; an old scene that pinned a volume opens with the automatic one.
     GiMode giMode;
     GiQuality giQuality;
-    iris::Vec3 giBoundsMin;
-    iris::Vec3 giBoundsMax;
     QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
     int giNumBounces;          // 1..4
-    /// THE AUTOMATIC VOLUME'S CEILING, in METRES (SMOKE_FIX S14). While
-    /// giBounds is automatic (min == max) the lit volume's largest axis is
-    /// capped at this, centred on the scene's CONTENT — 64 m is half a metre
-    /// per voxel at the default Epic tier (128^3). It exists because the
-    /// default ground was 1024 m across, which fitted 8 m voxels over a square
-    /// kilometre. 0 disables the cap; a pinned volume ignores it. Rationale
-    /// (including why the ceiling is not expressed per voxel): OgreGi.cpp
-    /// clampAutoGiBounds.
-    float giAutoBoundsMax = 64.0f;
     /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
     /// renderer may spend per frame, and the single "is GI live?" switch.
     ///
