@@ -101,7 +101,14 @@ struct DecalAtlas {
 
 DecalAtlas &decalAtlas(DecalMap kind)
 {
-    static DecalAtlas sAtlases[3];
+    // LEAKED ON PURPOSE — the third instance of the TextureCache exit crash
+    // (OgreTextureCache.cpp, 2026-09-13): these std::maps are first
+    // constructed on the first decal, AFTER EngineHost's own function-local
+    // static, so the exit handlers (reverse order of construction) destroyed
+    // them BEFORE the host tore the engine down and resetDecalAtlases()
+    // walked freed memory. The only lifetime anything depends on is the
+    // clear between Engines, and resetDecalAtlases still does that.
+    static auto *sAtlases = new DecalAtlas[3];
     return sAtlases[static_cast<int>(kind)];
 }
 
