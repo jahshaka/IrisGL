@@ -83,6 +83,10 @@ public:
     /// (Scene::atmosphereSunTint), so the disc, the sky and the light agree.
     /// Off is the old behaviour: the picked colour at every elevation.
     ///
+    /// AT NIGHT THE SUN IS DARK. Below the horizon the tint is zero to every
+    /// decimal a frame can hold, so the mirror also drops the sun's SHADOW (three
+    /// full-frustum PSSM passes a frame) and its disc while it is down.
+    ///
     /// INERT ON EVERY OTHER SKY. A photograph, a gradient or a picked colour
     /// knows nothing about the air, so the tint is white and the row says so.
     /// Meaningful on the scene's SUN only, like sunAngle above.

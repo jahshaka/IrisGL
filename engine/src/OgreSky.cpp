@@ -401,8 +401,9 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
 // Divided by its own value with the sun at the zenith, so the answer is exactly
 // (1,1,1) at noon — the user's picked colour IS the noon colour — and falls,
 // blue first, as the sun goes down. On the shipped preset a sun 5 degrees above
-// the horizon comes out at about (0.72, 0.57, 0.38): reddened AND dimmed, which
-// is what a low sun really does.
+// the horizon comes out at (0.57, 0.38, 0.18) and one at 30 degrees at
+// (0.93, 0.88, 0.80) — reddened AND dimmed, which is what a low sun really does
+// (test_engine's atmosphere_sun_tint_reddens_a_low_sun prints all three).
 //
 // WHY NOT THE COMPONENT'S OWN LIGHT LINK. `setLight` takes the light over
 // completely — type, direction, diffuse, specular and power — so it would

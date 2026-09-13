@@ -1317,6 +1317,14 @@ private:
         iris::Vec3 authoredPos;
         iris::Quat authoredRot;
         iris::Vec3 authoredScale{1, 1, 1};
+        /// Is `authored*` a real reading? (round-2 review, item 3.) It is
+        /// recorded on every sync the rider spends ON ITS TAG, where its local
+        /// IS the offset — because by the time the rig goes away the local is
+        /// no longer trustworthy: the ENGINE frees every rider on a skeleton
+        /// it rebuilds, and Ogre's own detach re-expresses the node's local as
+        /// it does so. Reading the offset at that point gave whatever the
+        /// detach left (measured: zero), and the re-arm restored THAT.
+        bool authoredValid = false;
         /// The rider's local TRS as of the last sync that looked at it. What it
         /// is FOR: when the attachment goes away, the rider "keeps the pose it
         /// was last resolved to" — so its world transform is baked into its new
