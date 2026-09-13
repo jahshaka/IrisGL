@@ -187,7 +187,9 @@ public:
 
     void setLightType(LightType type)
     {
-        this->lightType = type;
+        if (lightType == type) return;
+        lightType = type;
+        notifyChanged(NodeChange::Params);
     }
 
     LightType getLightType()
@@ -218,7 +220,9 @@ public:
 
 	void setShadowMapType(ShadowMapType shadowType)
 	{
+		if (shadowMap->shadowType == shadowType) return;
 		shadowMap->shadowType = shadowType;
+		notifyChanged(NodeChange::Params);
 	}
 
 	ShadowMapType getShadowMapType()
@@ -229,6 +233,7 @@ public:
 	void setShadowMapResolution(int size)
 	{
 		shadowMap->setResolution(size);
+		notifyChanged(NodeChange::Params);
 	}
 
 	int getShadowMapResolution()

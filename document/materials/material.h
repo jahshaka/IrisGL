@@ -15,6 +15,9 @@ For more information see the LICENSE file
 #include "irisglfwd.h"
 #include "document/materials/renderstates.h"
 
+#include <QtGlobal>
+#include <atomic>
+
 namespace iris
 {
 struct RenderLayer
@@ -69,6 +72,39 @@ public:
     // scene reader can drive any material without knowing its concrete type.
     // Default is a no-op: materials with no editable parameters ignore it.
     virtual void setValue(const QString& name, const QVariant& value) { Q_UNUSED(name); Q_UNUSED(value); }
+
+    // ---- THE CHANGE MARK (SPECS/DIRTY_SET_MIRROR_SPEC.md §3.6) ------------
+    //
+    // A MATERIAL edit moves no NODE, so the node-level dirty set cannot see
+    // one: the panel writes a colour and the object it paints never changed.
+    // This is the material's own half of the same signal.
+    //
+    // TWO NUMBERS, and they answer different questions. `revision()` is THIS
+    // material's — the mirror's per-material memo keys its validity on it.
+    // `globalRevision()` is "did ANY material in the process change", which is
+    // what lets a still frame answer the whole question with ONE relaxed
+    // atomic read instead of a per-material compare: the editor makes a
+    // material per primitive, so an 8,404-node scene is 8,404 materials and a
+    // per-material poll is the very cost this design exists to remove.
+    //
+    // THE FINGERPRINT SURVIVES AS THE ORACLE, not as the fast path
+    // (SceneMirror::materialFingerprint): a counter is only as good as the
+    // writer that remembers to bump it, so the mirror's verifier re-reads the
+    // fields of a few materials a frame and COUNTS anything this missed.
+    quint32 revision() const { return mRevision; }
+    /// "Something in this material changed." Called by every setter below and
+    /// by host code that writes a field by hand.
+    void touch()
+    {
+        ++mRevision;
+        sGlobalRevision.fetch_add(1, std::memory_order_relaxed);
+    }
+    /// How many material writes this process has made, ever. Relaxed: the only
+    /// requirement is that a change moves it, never that it orders anything.
+    static quint64 globalRevision()
+    {
+        return sGlobalRevision.load(std::memory_order_relaxed);
+    }
 
     bool acceptsLighting;
     RenderStates renderStates;
@@ -137,6 +173,10 @@ public:
 
 protected:
 	QSet<QString> flags;
+
+private:
+    quint32 mRevision = 1;
+    static std::atomic<quint64> sGlobalRevision;
 };
 
 }

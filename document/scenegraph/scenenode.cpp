@@ -45,10 +45,6 @@ namespace iris
 /// that no two calls return the same value, not that ids order anything.
 static std::atomic<qint64> sNextNodeId{0};
 
-SceneNode::ChangeObserver SceneNode::sChangeObserver = nullptr;
-
-void SceneNode::setChangeObserver(ChangeObserver observer) { sChangeObserver = observer; }
-
 SceneNode::SceneNode()
 {
     sceneNodeType = SceneNodeType::Empty;
@@ -88,6 +84,25 @@ SceneNode::SceneNode()
     }
 
 	setGUID(IrisUtils::generateGUID());
+}
+
+void SceneNode::notifyChangedSubtree(NodeChange what)
+{
+    if (!mDirtySet) return;
+    // PRUNED ON THE SUBTREE BIT, never on the plain one: this node has already
+    // been cascaded for this kind, so its whole subtree carries the mark and a
+    // second cascade over the same branch costs one test. (A reader that hides
+    // a hundred nodes one by one inside one subtree would otherwise walk that
+    // subtree a hundred times.)
+    const quint16 sub = nodeSubtreeBit(what);
+    if (mDirtyMask & sub) return;
+    notifyChanged(what);
+    mDirtyMask |= sub;
+    // childAt(), not children(): a cascade over an 8,000-node subtree must not
+    // allocate a QList and bump a refcount per child on the way.
+    const int n = childCount();
+    for (int i = 0; i < n; ++i)
+        if (SceneNode *c = childAt(i)) c->notifyChangedSubtree(what);
 }
 
 SceneNode::~SceneNode()
@@ -215,8 +230,12 @@ void SceneNode::setAttached(bool attached)
 
 void SceneNode::setVisible(bool flag)
 {
+    if (visible == flag) return;
     visible = flag;
-    notifyChanged(NodeChange::Visibility);
+    // EFFECTIVE VISIBILITY IS PARENT-AND and the mirror is its SOLE pusher
+    // (ENGINE-3): hiding a model root has to mark every descendant, or they
+    // stay drawn — and voxelised — with nothing to correct them.
+    notifyChangedSubtree(NodeChange::Visibility);
 }
 
 bool SceneNode::isVisibleInScene() const
@@ -421,7 +440,9 @@ void SceneNode::setMobility(Mobility m)
     // driver needs. It records no user decision of its own (only this
     // function's `mMobility` write is the decision).
     applyStaticDefaults();
-    notifyChanged(NodeChange::Flags);
+    // ...and the mark follows the classification: every node under this one
+    // resolves differently now (DIRTY_SET_MIRROR_SPEC §3.4, the mobility row).
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 void SceneNode::_applyStaticHint(bool value)
@@ -499,6 +520,11 @@ void SceneNode::applyStaticDefaultsFrom(bool parentMovable)
 void SceneNode::addAnimation(AnimationPtr anim)
 {
     animations.append(anim);
+    // AN ANIMATION IS A MOBILITY DRIVER (resolveMobility rule 1) and takes the
+    // node out of the static half (isStaticEligible), so attaching or dropping
+    // one changes what the renderer is told about it. Flags, and over the
+    // subtree, because rule 2 makes a child travel with its parent.
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 QList<AnimationPtr> SceneNode::getAnimations()
@@ -508,7 +534,9 @@ QList<AnimationPtr> SceneNode::getAnimations()
 
 void SceneNode::setAnimation(AnimationPtr anim)
 {
+    if (animation == anim) return;
     animation = anim;
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 AnimationPtr SceneNode::getAnimation()
@@ -524,11 +552,13 @@ bool SceneNode::hasActiveAnimation()
 void SceneNode::deleteAnimation(int index)
 {
     animations.removeAt(index);
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 void SceneNode::deleteAnimation(AnimationPtr anim)
 {
     animations.removeOne(anim);
+    notifyChangedSubtree(NodeChange::Flags);
 }
 
 QList<Property*> SceneNode::getProperties()
@@ -746,7 +776,11 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
         if (wantedStatic) node->_applyStaticHint(true);
     }
 
-    node->notifyChanged(NodeChange::Structure);
+    // THE WHOLE MOVED SUBTREE: inherited visibility and mobility come from the
+    // new parent, so every descendant owes a re-resolve (§3.4). A fragment
+    // that just joined a scene marks here for the first time — its nodes had
+    // no collector until setScene above gave them one.
+    node->notifyChangedSubtree(NodeChange::Structure);
     notifyChanged(NodeChange::Structure);
 }
 
@@ -779,7 +813,11 @@ void SceneNode::removeChildInternal(const SceneNodePtr &node, bool detachGraph,
     // to be re-attached under a parent in the SAME scene, so registries stay.
     if (!keepSceneMembership) node->removeFromScene();
     mChildRefs.removeOne(node);
-    node->notifyChanged(NodeChange::Structure);
+    // A SAME-SCENE REPARENT keeps its membership (and its collector): the
+    // subtree is marked by the insertChild that follows. A real removal has
+    // already been recorded as an EVICTION by removeFromScene above, and the
+    // mark below would be dropped on the floor with the node's collector.
+    node->notifyChangedSubtree(NodeChange::Structure);
     notifyChanged(NodeChange::Structure);
 }
 
@@ -853,6 +891,11 @@ void SceneNode::setScene(ScenePtr scene)
     Q_ASSERT(!hasScene());
 
     this->scene = scene.toWeakRef();
+    // THE CHANGE COLLECTOR travels with scene membership, and only with it: a
+    // node outside a scene records nothing (there is no mirror that could ever
+    // be asked about it), and joining one is a Structure event that marks the
+    // whole subtree below.
+    _setDirtySet(scene->dirtySet());
     scene->addNode(this->sharedFromThis());
 
     // add children
@@ -865,6 +908,12 @@ void SceneNode::removeFromScene()
 {
     auto sc = getScene();
     this->scene.clear();
+    // OUT OF THE DOCUMENT: the mirror still holds an entry keyed by this
+    // pointer and has to release it. The pointer is RECORDED, never followed —
+    // releaseEntry reads the entry alone — and it is processed before the next
+    // frame's dirty list so an address a same-frame insert recycles is freed
+    // before it is adopted again (DIRTY_SET_MIRROR_SPEC §3.4).
+    _leaveDirtySet();
     if (sc) sc->removeNode(this->sharedFromThis());
 
     // ...and the children
