@@ -921,6 +921,9 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     };
 
     std::vector<float> w(n, 1.0f);
+    // How far into the ramp each item is, kept because the SLAB CLIP below has
+    // its own, shorter ramp over the same axis (round-2 review F2).
+    std::vector<float> ramp(n, 0.0f);
     bool anyTrimmed = false;
     for (size_t i = 0; i < n; ++i) {
         const float t = (std::log(extents[i] / scale) - logStart) / logSpan;
@@ -928,6 +931,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         const float c = std::min(t, 1.0f);
         w[i] = 1.0f - (c * c * (3.0f - 2.0f * c));                // smoothstep
         if (coveredByPrev(all[i])) { w[i] = 1.0f; continue; }     // already lit: keep it whole
+        ramp[i] = c;
         if (w[i] < 1.0f) anyTrimmed = true;
     }
     if (!anyTrimmed) return all;      // the common case: the plain union, untouched
@@ -953,6 +957,59 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     static const float kRegionGrow = 0.5f;
     const Ogre::Vector3 grow = (coreMax - coreMin) * (kRegionGrow * 0.5f);
     const Ogre::Vector3 regionMin = coreMin - grow, regionMax = coreMax + grow;
+
+    // THE CONTENT PATCH — what a SUPPORTING SLAB is clipped to (round-2 review
+    // F2). It is the union of the items that are NOT outliers at all (w == 1),
+    // i.e. the content itself, grown by a fraction of ITS OWN size — and that
+    // is the whole point of computing it separately from the core above: the
+    // core contains the collapsed outlier, so it carries the SLAB's own size
+    // into the answer (a 1 m cube on a 200 m ground resolved to a 2 m patch and
+    // on a 50 m ground to a 15 m one — the same scene, three answers). Nothing
+    // below reads the slab's extent.
+    //
+    // The margin is deliberately small and content-relative: it exists so the
+    // clipped floor reaches just PAST the content it supports rather than
+    // ending exactly on its boundary (the same question computeGiBounds' one
+    // voxel of slack answers for the volume as a whole), not so that empty
+    // ground is lit. It is charged to every scene, so it is small: at 5% an
+    // 18 m room's floor reaches 0.45 m past its walls and a 2 m crate's patch
+    // is 2.1 m. With no content at all (a scene of nothing but oversized slabs)
+    // there is nothing to be a patch around and the core stands in, which is
+    // the old behaviour.
+    static const float kSlabPatchMargin = 0.05f;   // 5% of the content, 2.5% a side
+    Ogre::Vector3 contentMin(1e30f), contentMax(-1e30f);
+    bool haveContent = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (w[i] < 1.0f) continue;
+        contentMin.makeFloor(all[i].getMinimum());
+        contentMax.makeCeil(all[i].getMaximum());
+        haveContent = true;
+    }
+    Ogre::Vector3 patchMin = coreMin, patchMax = coreMax;
+    if (haveContent) {
+        const Ogre::Vector3 pgrow = (contentMax - contentMin) * (kSlabPatchMargin * 0.5f);
+        patchMin = contentMin - pgrow;
+        patchMax = contentMax + pgrow;
+    }
+    // THE GEOMETRIC BLEND between two boxes, by `k` (0 = a, 1 = b): sizes
+    // interpolated in LOG space and centres linearly, which is exactly what the
+    // outlier morph below does and for the reason stated there (a linear blend
+    // of a 2-unit box and a 200-unit one spends almost all of its travel near
+    // the large end). Shared so the two paths cannot drift apart.
+    const auto blendBoxes = [](const Ogre::Vector3 &amn, const Ogre::Vector3 &amx,
+                               const Ogre::Vector3 &bmn, const Ogre::Vector3 &bmx, float k) {
+        Ogre::Vector3 omn, omx;
+        for (size_t ax = 0; ax < 3u; ++ax) {
+            const float ac = 0.5f * (amn[ax] + amx[ax]), ah = 0.5f * (amx[ax] - amn[ax]);
+            const float bc = 0.5f * (bmn[ax] + bmx[ax]), bh = 0.5f * (bmx[ax] - bmn[ax]);
+            const float eps = 1e-4f;
+            const float c = ac + (bc - ac) * k;
+            const float h = std::exp(std::log(std::max(ah, eps)) * (1.0f - k) +
+                                     std::log(std::max(bh, eps)) * k);
+            omn[ax] = c - h; omx[ax] = c + h;
+        }
+        return std::make_pair(omn, omx);
+    };
 
     std::vector<Ogre::Aabb> out;
     out.reserve(n);
@@ -990,14 +1047,36 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
             Ogre::Vector3 smn = mn, smx = mx;
             for (size_t ax = 0; ax < 3u; ++ax) {
                 if (ax == thin) continue;
-                smn[ax] = std::max(smn[ax], coreMin[ax]);
-                smx[ax] = std::min(smx[ax], coreMax[ax]);
-                if (smn[ax] > smx[ax]) {                  // no overlap: a point at the core
-                    const float c = std::min(std::max(all[i].mCenter[ax], coreMin[ax]), coreMax[ax]);
+                smn[ax] = std::max(smn[ax], patchMin[ax]);
+                smx[ax] = std::min(smx[ax], patchMax[ax]);
+                if (smn[ax] > smx[ax]) {                  // no overlap: a point at the patch
+                    const float c = std::min(std::max(all[i].mCenter[ax], patchMin[ax]), patchMax[ax]);
                     smn[ax] = smx[ax] = c;
                 }
             }
-            out.push_back(Ogre::Aabb::newFromExtents(smn, smx));
+            // CONTINUOUS AT THE RAMP ENTRANCE (round-2 review F2). Clipping a
+            // slab the instant its weight leaves 1 would be a cliff of exactly
+            // the kind the trim was rewritten to remove: a floor sitting near
+            // kOutlierSoftStart would snap between WHOLE and FOOTPRINT when one
+            // prop is added, and that snap is a GI brightness jump plus a full
+            // re-voxelise. So the clip has its own ramp over the FIRST QUARTER
+            // of the trim's — geometric, like every other blend here — and by
+            // the time an item is a quarter of the way to "pure scenery" it is
+            // the footprint, which is where every real ground plane already is
+            // (the 100 m default ground in an 18 m room sits at 0.62 of the
+            // trim ramp, and on a bare 100 m ground under one 2 m crate at
+            // 0.41). The width is a MEASURED choice, not a taste: at a quarter
+            // the ramp a 50 m ground under that same crate sat at 0.16, i.e.
+            // inside the blend, and answered 5.53 m where the 100 m and 200 m
+            // grounds both answered 2.23 — the slab size leaking back in
+            // through the blend, which is the very thing the patch removes. A
+            // tenth puts every one of them past the blend and leaves the
+            // transition continuous, which is what it is for.
+            static const float kSlabClipRamp = 0.1f;
+            const float k = std::min(ramp[i] / kSlabClipRamp, 1.0f);
+            const float kb = k * k * (3.0f - 2.0f * k);           // smoothstep
+            const auto blended = blendBoxes(mn, mx, smn, smx, kb);
+            out.push_back(Ogre::Aabb::newFromExtents(blended.first, blended.second));
             continue;
         }
         // The trimmed box...
