@@ -126,7 +126,25 @@ bool OgreScene::setSky(const SkyDesc &desc) {
     // default, and when it is not, moving the sun already stales them through
     // the light itself.
     const bool sunChanged  = !(mSkyDesc.sun == desc.sun);
-    if (sunChanged) { applySunDisc(desc.sun); mSkyDesc.sun = desc.sun; }
+    if (sunChanged) {
+        // ...WITH ONE EXCEPTION, and it is the whole of ENGINE-6 item 5: while
+        // the disc IS in the probe captures it is part of what they
+        // photograph, so a change to it has to invalidate them exactly as a sky
+        // change does. Nothing did, and since the probe captures became CACHED
+        // (ENGINE_CACHE_POLICY_SPEC) a cached face is what a mirror keeps
+        // showing — which is why `world.sunDisc({inProbes:true})` appeared to
+        // do nothing at all in a reflection while the disc drew perfectly in
+        // every ordinary camera. It was never a cull or a mask: it was a stale
+        // capture. The test is the disc's probe participation BEFORE or AFTER,
+        // so turning it off invalidates too (the disc has to leave the faces it
+        // is baked into), and the ordinary case — a sun rotating with the disc
+        // out of the probes — still stales nothing.
+        const bool inCaptures = (mSkyDesc.sun.enabled && mSkyDesc.sun.inProbes) ||
+                                (desc.sun.enabled && desc.sun.inProbes);
+        applySunDisc(desc.sun);
+        mSkyDesc.sun = desc.sun;
+        if (inCaptures) staleProbeGrid(GiStaleReason::Sky);
+    }
     if (!skyChanged && !reflChanged) return true;   // idempotent: nothing else to do
     // THE PROBE CACHE'S SKY INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
     // faces capture the sky (RQ 0 is inside their range) and the reflection
@@ -494,9 +512,17 @@ void OgreScene::applyPendingSkyCapture() {
 
         integrateSkyShFromCube(cube);
 
-        if (mSkyDesc.mode == SkyMode::Cubemap) {
-            // The cubemap sky's own faces are the convolution's input (at their
-            // full resolution): the capture existed for the ambient only.
+        // WHO OWNS THE ENVIRONMENT. Two descriptions say "not the capture":
+        //   * a CUBEMAP sky — its own faces are already the cube, at their full
+        //     resolution, and a 128^2 capture would throw detail away;
+        //   * a description that carries EXPLICIT reflectionFaces — the host
+        //     has stated what the environment is, and SkyDesc says that is what
+        //     a datablock samples. A visible sky and a reflected environment are
+        //     allowed to differ (gi.probe_open's two-toned sky rests on it), and
+        //     the capture must not quietly overrule the host.
+        // In both cases the capture still ran, because the AMBIENT is the sky's
+        // own light either way.
+        if (mSkyDesc.mode == SkyMode::Cubemap || mSkyDesc.reflections) {
             tm->destroyTexture(cube);
         } else {
             // ...and for every other sky the capture IS the environment. The
