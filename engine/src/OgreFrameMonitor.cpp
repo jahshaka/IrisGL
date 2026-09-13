@@ -118,6 +118,7 @@ void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool o
     const auto t0 = std::chrono::steady_clock::now();
     mCurrent = FrameRecord();
     mCurrent.frame = frame;
+    mLastFrameNumber = frame;
     mCurrent.cause = cause;
     mCurrent.onscreen = onscreen;
     mCurrent.startMs = nowMs();
@@ -127,6 +128,7 @@ void FrameMonitor::beginFrame(unsigned long long frame, FrameCause cause, bool o
     mPassStack.clear();
     mWorkspaceDepths.clear();
     mPassSampleIds.clear();
+    mCacheSampleIds.clear();
     // Host stages pushed before the frame opened (the driver's tick wraps the
     // engine's frame, so `tick` and the mirror's sub-stages are known first)
     // lead the stage list.
@@ -168,10 +170,13 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     PendingFrame pf;
     pf.rec = std::move(mCurrent);
     pf.passSampleIds.swap(mPassSampleIds);
+    pf.cacheSampleIds.swap(mCacheSampleIds);
     if (mGpu) {
         const unsigned slot = unsigned(mPending.size());
         for (unsigned i = 0; i < pf.passSampleIds.size(); ++i)
-            if (pf.passSampleIds[i]) mGpuSampleIndex[pf.passSampleIds[i]] = { slot, i };
+            if (pf.passSampleIds[i]) mGpuSampleIndex[pf.passSampleIds[i]] = { slot, i, false };
+        for (unsigned i = 0; i < pf.cacheSampleIds.size(); ++i)
+            if (pf.cacheSampleIds[i]) mGpuSampleIndex[pf.cacheSampleIds[i]] = { slot, i, true };
     }
     mPending.push_back(std::move(pf));
     retirePending(false);
@@ -183,9 +188,15 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
 void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
     auto it = mGpuSampleIndex.find(sampleId);
     if (it == mGpuSampleIndex.end()) return;     // its frame already aged out
-    const unsigned slot = it->second.first, pass = it->second.second;
-    if (slot < mPending.size() && pass < mPending[slot].rec.passes.size())
-        mPending[slot].rec.passes[pass].gpuMs = ms;
+    const GpuSampleSlot where = it->second;
+    if (where.frame < mPending.size()) {
+        FrameRecord &rec = mPending[where.frame].rec;
+        if (where.cache) {
+            if (where.row < rec.cacheWork.size()) rec.cacheWork[where.row].gpuMs = ms;
+        } else if (where.row < rec.passes.size()) {
+            rec.passes[where.row].gpuMs = ms;
+        }
+    }
     mGpuSampleIndex.erase(it);
 }
 
@@ -202,10 +213,15 @@ void FrameMonitor::retirePending(bool all) {
                 pf.rec.gpuMs += p.gpuMs;
             }
         for (unsigned id : pf.passSampleIds) mGpuSampleIndex.erase(id);
+        for (unsigned id : pf.cacheSampleIds) mGpuSampleIndex.erase(id);
+        // The frame's GPU total stays the sum of its PASSES. A cache row's
+        // gpuMs is a compute dispatch outside every pass, reported on the row
+        // and only there, so `passes sum to the frame` keeps meaning what it
+        // says (the invariant monitor_passes_sum_to_the_frame asserts).
         push(std::move(pf.rec));
         // Every surviving frame moved down one slot.
         for (auto &kv : mGpuSampleIndex)
-            if (kv.second.first > 0u) --kv.second.first;
+            if (kv.second.frame > 0u) --kv.second.frame;
     }
 }
 
@@ -270,9 +286,20 @@ void FrameMonitor::hostStage(const std::string &name, float ms) {
     if (mInFrame) mCurrent.stages.push_back({ name, ms });
     else          bankPending(name, ms);
 }
-void FrameMonitor::cacheWork(const CacheWork &w) {
-    if (mInFrame) mCurrent.cacheWork.push_back(w);
-    else          mPendingCacheWork.push_back(w);
+void FrameMonitor::cacheWork(const CacheWork &w, unsigned gpuSampleId) {
+    if (mInFrame) {
+        mCurrent.cacheWork.push_back(w);
+        // INDEX-PARALLEL, always — including the rows that carry no sample, or
+        // a late result would be filed against the wrong row.
+        if (mGpu) mCacheSampleIds.push_back(gpuSampleId);
+    } else {
+        // BETWEEN FRAMES the row is adopted by the next frame — and so is its
+        // sample id: the timestamp pair was written into the command buffer
+        // that frame's passes will also write into, so the result comes back
+        // on the same two-frame schedule as theirs.
+        mPendingCacheWork.push_back(w);
+        if (mGpu) mPendingCacheSampleIds.push_back(gpuSampleId);
+    }
 }
 void FrameMonitor::pass(FramePass &&p, unsigned gpuSampleId) {
     if (!mInFrame) return;
@@ -281,13 +308,25 @@ void FrameMonitor::pass(FramePass &&p, unsigned gpuSampleId) {
 }
 void FrameMonitor::event(MonitorEvent &&e) {
     if (mEvents.size() >= kEventCapacity) { ++mEventsDropped; return; }
-    if (e.frame == 0) e.frame = mCurrent.frame;
+    // BETWEEN FRAMES the frame being built is a default record whose number is
+    // 0, and every mark a script dropped outside a frame said "frame 0" — which
+    // made a capture's marks useless for windowing (ENGINE-5 item 2). The last
+    // frame that RAN is the honest answer there.
+    if (e.frame == 0) e.frame = mInFrame ? mCurrent.frame : mLastFrameNumber;
     if (e.startMs == 0.0) e.startMs = nowMs();
     mEvents.push_back(std::move(e));
 }
 void FrameMonitor::adoptPendingCacheWork() {
-    for (CacheWork &w : mPendingCacheWork) mCurrent.cacheWork.push_back(std::move(w));
+    for (size_t i = 0; i < mPendingCacheWork.size(); ++i) {
+        mCurrent.cacheWork.push_back(std::move(mPendingCacheWork[i]));
+        // Index-parallel, always: a row banked before GPU sampling started
+        // carries 0 and simply reports no GPU time.
+        if (mGpu)
+            mCacheSampleIds.push_back(i < mPendingCacheSampleIds.size()
+                                          ? mPendingCacheSampleIds[i] : 0u);
+    }
     mPendingCacheWork.clear();
+    mPendingCacheSampleIds.clear();
 }
 
 bool FrameSplitListener::frameRenderingQueued(const Ogre::FrameEvent &) {
@@ -511,6 +550,47 @@ void noteEvent(MonitorEventKind kind, WorkReason reason, const std::string &labe
     e.ms = ms;
     e.value = value;
     gMonitor->event(std::move(e));
+}
+
+CacheScope::CacheScope(CacheKind cache, WorkReason reason, unsigned long long id,
+                       const char *detail, Ogre::RenderSystem *rs)
+    : mId(id), mCache(cache), mReason(reason) {
+    if (!gMonitor) return;
+    mArmed = true;
+    mDetail = detail;
+    mStart = std::chrono::steady_clock::now();
+    // THE GPU PAIR (ogre-patch 0027). This is the ONLY way a compute dispatch
+    // can report GPU time: every other sample in the monitor rides a compositor
+    // pass callback, and a GI voxelisation, a light injection or an irradiance
+    // field's integration is not a pass. Work between frames samples too — the
+    // pair goes into the command buffer the next frame will keep writing, and
+    // the row it belongs to is adopted by that frame.
+    if (rs && gMonitor->mGpu) {
+        mGpuSampleId = gMonitor->nextGpuSampleId();
+        if (mGpuSampleId) {
+            mRs = rs;
+            unsigned hash = mGpuSampleId;
+            try { rs->beginGPUSampleProfile(detail ? detail : "cache", &hash); } catch (...) {}
+        }
+    }
+}
+
+CacheScope::~CacheScope() { close(); }
+
+void CacheScope::close() {
+    if (!mArmed || !gMonitor) return;
+    mArmed = false;                       // idempotent: the destructor follows
+    if (mRs) { try { mRs->endGPUSampleProfile(mDetail ? mDetail : "cache"); } catch (...) {} }
+    if (mCancelled) return;
+    CacheWork w;
+    w.cache = mCache;
+    w.reason = mReason;
+    w.id = mId;
+    if (mDetail) w.detail = mDetail;
+    w.units = mUnits;
+    w.ms = float(std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - mStart).count());
+    gMonitor->cacheWork(w, mGpuSampleId);
 }
 
 EventScope::EventScope(MonitorEventKind kind, WorkReason reason, const char *label,
