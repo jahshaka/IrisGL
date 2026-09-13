@@ -5172,6 +5172,23 @@ quint64 offsetKeyOf(const iris::Socket &socket)
     return h;
 }
 
+/// The 16 floats of a world transform, hashed — the fallback push's change
+/// guard (lane ENGINE-7 item 4). Raw bytes, like every other change key in this
+/// file: it answers "is this the same matrix as last sync?", never "how far did
+/// it move?".
+quint64 worldKeyOf(const iris::Mat4 &m)
+{
+    quint64 h = 1469598103934665603ull;
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) {
+            quint32 bits;
+            const float f = m(r, c);
+            std::memcpy(&bits, &f, sizeof(bits));
+            for (int i = 0; i < 4; ++i) { h ^= (bits & 0xFF); h *= 1099511628211ull; bits >>= 8; }
+        }
+    return h;
+}
+
 }  // namespace
 
 int SceneMirror::reconcileSockets()
@@ -5205,7 +5222,15 @@ int SceneMirror::reconcileSockets()
             seen.insert(rider);
 
             if (!rigged) {
-                releaseRider(rider);        // it may have been on a tag a moment ago
+                // ONLY IF IT IS ON A TAG. releaseRider used to run here every
+                // sync ("it may have been on a tag a moment ago") and it is not
+                // free: it writes the rider's world transform back and REMOVES
+                // its row — so on the fallback path the row was rebuilt every
+                // frame, and with it the "authored local" snapshot below, whose
+                // whole job is to survive the spell on the fallback (D4). Taken
+                // from the current local each frame, that snapshot recorded the
+                // WORLD transform the previous frame had written into it.
+                if (iris::graph::isSocketRider(rider->graphNode())) releaseRider(rider);
                 iris::Mat4 world;
                 if (!iris::socketWorldTransform(owner, rider->socketName,
                                                 iris::BonePoseSource(), world)) {
@@ -5222,8 +5247,38 @@ int SceneMirror::reconcileSockets()
                     st.authoredRot = rider->getLocalRot();
                     st.authoredScale = rider->getLocalScale();
                 }
-                rider->setGlobalTransform(world);
-                rider->update(0.0f);
+                // CHANGE-GUARDED (lane ENGINE-7 item 4). This is a DOCUMENT
+                // write through the marking setters, so a still scene holding a
+                // socketed prop on an unrigged owner bumped the transform-write
+                // epoch on every frame and re-ran every O(scene) walk hanging
+                // off it (nodegraph.h). It happens when the socket's world
+                // really moved — or when something else wrote the rider's local
+                // since we did, because while a rider is attached the socket
+                // owns its placement and an outside write must still be
+                // overwritten, exactly as the unguarded push did.
+                const quint64 key = worldKeyOf(world);
+                const auto differs = [](float a, float b) {
+                    return std::fabs(double(a) - double(b)) > 1e-5;
+                };
+                const iris::Vec3 lp = rider->getLocalPos(), ls = rider->getLocalScale();
+                const iris::Quat lr = rider->getLocalRot();
+                const bool drifted =
+                    differs(lp.x(), st.lastLocalPos.x()) || differs(lp.y(), st.lastLocalPos.y()) ||
+                    differs(lp.z(), st.lastLocalPos.z()) ||
+                    differs(ls.x(), st.lastLocalScale.x()) || differs(ls.y(), st.lastLocalScale.y()) ||
+                    differs(ls.z(), st.lastLocalScale.z()) ||
+                    differs(lr.x(), st.lastLocalRot.x()) || differs(lr.y(), st.lastLocalRot.y()) ||
+                    differs(lr.z(), st.lastLocalRot.z()) || differs(lr.scalar(), st.lastLocalRot.scalar());
+                if (!st.fallbackWorldPushed || st.fallbackWorldKey != key || drifted) {
+                    rider->setGlobalTransform(world);
+                    rider->update(0.0f);
+                    st.fallbackWorldKey = key;
+                    st.fallbackWorldPushed = true;
+                    st.lastLocalPos = rider->getLocalPos();
+                    st.lastLocalRot = rider->getLocalRot();
+                    st.lastLocalScale = rider->getLocalScale();
+                    notePush(rider, "socket fallback");
+                }
                 ++riding;
                 continue;
             }

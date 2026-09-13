@@ -1346,6 +1346,17 @@ private:
         iris::Vec3 lastLocalPos;
         iris::Quat lastLocalRot;
         iris::Vec3 lastLocalScale{1, 1, 1};
+        /// THE FALLBACK PUSH'S CHANGE GUARD (lane ENGINE-7 item 4). A hash of
+        /// the 16 floats of the world transform the fallback last wrote. With
+        /// no engine rig the rider is placed by WRITING its world every sync —
+        /// through the document's marking setters, so a still scene holding a
+        /// socketed prop bumped the transform-write epoch on every frame and
+        /// re-ran every walk hanging off it (nodegraph.h). The write happens
+        /// when the socket's world really moved, or when something else wrote
+        /// the rider's local since ours (lastLocal* above is that test), and
+        /// not otherwise.
+        quint64 fallbackWorldKey = 0;
+        bool    fallbackWorldPushed = false;
     };
     QHash<const iris::SceneNode *, RiderState> mBoneRiders;
     /// The riders the reconciler saw this sync — what the end-of-sync sweep
