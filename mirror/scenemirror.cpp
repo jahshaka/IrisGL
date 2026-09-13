@@ -642,6 +642,25 @@ int SceneMirror::sync()
             mVerifying = true;
             mVerifyMaterialQuota = ~0u;
         }
+        // THE LIST IS DISCARDED BEFORE THE WALK, not after: the walk is about
+        // to look at every node, so nothing standing on it is worth visiting —
+        // but the walk itself RAISES marks (the mirror's own soft-mobility
+        // promotion, the users of a material whose shading model just
+        // switched), and those belong to the NEXT sync. Clearing afterwards
+        // would throw them away.
+        if (marks) {
+            marks->takeDirty(mDirtyScratch);
+            for (iris::SceneNode *n : mDirtyScratch) if (n) n->_takeDirtyMask();
+            mDirtyScratch.clear();
+            // Evictions are safe to drop here: those nodes are out of the tree,
+            // so the walk cannot stamp them and removeMissing releases them.
+            marks->takeEvicted(mEvictedScratch);
+            mEvictedScratch.clear();
+        }
+        // ...and the same for the material epoch: read BEFORE, so a material
+        // touched DURING the walk is caught by the next sync rather than
+        // assumed to have been seen.
+        mMaterialRevision = iris::Material::globalRevision();
         // RAW children, no QList: SceneNode::children() builds a
         // QList<QSharedPointer> — a heap allocation plus an atomic refcount per
         // child — and this walk runs over the whole document.
@@ -658,17 +677,6 @@ int SceneMirror::sync()
         mVerifying = false;
         mVerifyMaterialQuota = 0;
         mFullWalkPending = false;
-        // The walk covered every node the list could have named, and each node
-        // it reached had its own mask cleared. Anything still standing on the
-        // list is stale by construction.
-        if (marks) {
-            marks->takeDirty(mDirtyScratch);
-            for (iris::SceneNode *n : mDirtyScratch) if (n) n->_takeDirtyMask();
-            mDirtyScratch.clear();
-            marks->takeEvicted(mEvictedScratch);
-            mEvictedScratch.clear();
-        }
-        mMaterialRevision = iris::Material::globalRevision();
     } else {
         // EVICTIONS FIRST (§3.4): an address a same-frame insert recycled must
         // be released before it is adopted again.
@@ -838,8 +846,26 @@ void SceneMirror::consumeEvicted()
     }
     mEvictedScratch.clear();
     // A character that lost a piece has a stale union cached against a host
-    // node that may itself be gone (removeMissing's own note).
-    if (droppedRigged) mCharacterRigs.clear();
+    // node that may itself be gone (removeMissing's own note) — AND every
+    // SURVIVING piece has to re-attach onto the rig that replaces it: the union
+    // is derived from the pieces that are there, so one leaving changes the
+    // bone list every other piece is skinned against (skeletal.union_rig S16).
+    // The walk used to find that by visiting them all; the change list has to
+    // be told, because nothing wrote those nodes.
+    if (droppedRigged) {
+        mCharacterRigs.clear();
+        for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
+            if (!it->gpuSkinned || !it->docNode) continue;
+            // The epoch the entry remembers names a rig that no longer exists;
+            // a cleared cache re-derives from zero and could hand out the same
+            // number, so force the re-attach rather than compare to it.
+            it->characterEpoch = ~quint32(0);
+            // Onto the DOCUMENT's list, not this sync's scratch: consumeDirty
+            // takes the document's list after this pass, so a mark made here
+            // is consumed on the same frame.
+            it->docNode->markChanged(iris::NodeChange::Content);
+        }
+    }
 }
 
 /// A MATERIAL EDIT MOVES NO NODE (§3.6), so the change list cannot see one.
@@ -855,6 +881,16 @@ void SceneMirror::markChangedMaterials()
         iris::Material *m = it.key();
         if (!m || m->revision() == it->revision) continue;
         markMaterialUsersDirty(m);
+    }
+}
+
+/// Queues a character's skinned pieces for a visit this sync.
+void SceneMirror::markPiecesDirty(const QVector<iris::SceneNode *> &pieces)
+{
+    for (iris::SceneNode *n : pieces) {
+        if (!n) continue;
+        if (mConsumingDirty) mDirtyScratch.push_back(n);   // THIS sync, not the next
+        else n->markChanged(iris::NodeChange::Content);
     }
 }
 
@@ -4736,12 +4772,16 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
         for (int i = 0; i < 8; ++i) { sig ^= (v & 0xFF); sig *= 1099511628211ull; v >>= 8; }
     };
     QVector<iris::SceneNode *> stack;
+    QVector<iris::SceneNode *> pieceNodes;
     stack.append(const_cast<iris::SceneNode *>(host));
     for (int i = 0; i < stack.size(); ++i) {
         iris::SceneNode *n = stack[i];
         if (n->getSceneNodeType() == iris::SceneNodeType::Mesh) {
             auto *mn = static_cast<iris::MeshNode *>(n);
-            if (!mn->skeleton.isNull()) { skels.append(mn->skeleton); hashPtr(mn->skeleton.data()); }
+            if (!mn->skeleton.isNull()) {
+                skels.append(mn->skeleton); hashPtr(mn->skeleton.data());
+                pieceNodes.append(n);
+            }
         }
         const int cn = n->childCount();
         for (int k = 0; k < cn; ++k) if (iris::SceneNode *c = n->childAt(k)) stack.append(c);
@@ -4766,6 +4806,7 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
         rec.host = host;
         rec.signature = sig;
         rec.epoch = epoch;
+        markPiecesDirty(pieceNodes);
         return nullptr;
     }
     SkeletonDesc desc;
@@ -4780,6 +4821,11 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
     // entry was released and re-adopted must not drag the whole character
     // through a re-attach because a pointer moved.
     fresh.epoch = rec.epoch + (rec.rigId == fresh.rigId ? 0 : 1);
+    // ...AND EVERY OTHER PIECE OWES A RE-ATTACH when it moved (§3.6's shape,
+    // for rigs): a piece joining or leaving changes the bone list all of them
+    // are skinned against, and nothing WROTE those other nodes. The walk found
+    // it by visiting them; the change list has to be told.
+    if (fresh.epoch != rec.epoch) markPiecesDirty(pieceNodes);
     for (int i = 0; i < skels.size(); ++i) {
         if (excluded.contains(i)) continue;
         QVector<unsigned short> map;

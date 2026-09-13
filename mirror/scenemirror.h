@@ -985,6 +985,9 @@ private:
     void markChangedMaterials();
     /// Queues every node drawing `material` for a visit this sync.
     void markMaterialUsersDirty(iris::Material *material);
+    /// Queues a character's skinned pieces for a visit this sync (a piece
+    /// joining or leaving changes the union rig every other piece binds).
+    void markPiecesDirty(const QVector<iris::SceneNode *> &pieces);
     /// The light-derived aggregates, folded over Scene::lights instead of over
     /// the walk (§3.7): the sun, whether anything casts, the strongest filter
     /// and the largest shadow resolution asked for.
