@@ -476,12 +476,22 @@ bool OgreScene::refreshGiLighting() {
         }
         if (!mVctLighting || !mVctVoxelizer) return false;
         mSceneMgr->updateSceneGraph();
-        const Ogre::uint32 extraBounces =
-            Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
         // IN MOTION, by definition: this path only runs while the mirror's
         // stability window is open, i.e. while something is being dragged. B5's
-        // coarser ray march is charged here and nowhere else.
-        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+        // coarser ray march is charged here and nowhere else — and so is this:
+        //
+        // NO EXTRA BOUNCES WHILE THE THING IS STILL MOVING (CPU-vs-GPU audit
+        // F4). Every bounce is a second full light-injection dispatch over the
+        // voxel volume plus its anisotropic mip chain (VctLighting::runBounce),
+        // and this tick ran the scene's FULL count — 40 ms of GPU per tick at
+        // 128^3 with three bounces, spent on a picture that is replaced a few
+        // frames later by the next tick and, at the end of the drag, by the
+        // settle's own from-scratch or reuse refresh at the full count
+        // (rebuildVct / refreshVctFast, both unchanged). The first bounce is
+        // what makes the lamp's light follow it; bounces two and three are a
+        // refinement of a frame nobody holds still enough to see.
+        mVctLighting->update(mSceneMgr, 0u /*extraBounces: see above*/,
+                             1.0f /*thinWallCounter*/, hasVctLights(),
                              giRayMarchStepScale(true));
         // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
         // object, same voxel textures, same field geometry — only the radiance
