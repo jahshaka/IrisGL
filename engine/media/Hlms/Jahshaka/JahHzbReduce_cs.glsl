@@ -8,12 +8,19 @@
 // rather than being assumed, so a build that ever turns reverse-Z off still
 // produces a conservative pyramid.
 //
-// CONSERVATIVE ON ODD SIZES. Mip dimensions floor, so a 2x2 gather would drop
-// the last column/row of an odd-sized level and the pyramid would claim a
-// footprint is FARTHER than something inside it — the one error a hierarchical
-// depth test must never make. When the source dimension is odd the gather
-// extends to 3 samples on that axis, so a level's texel always covers at least
-// its footprint.
+// CONSERVATIVE ON ODD SIZES, AND ONLY WHERE IT HAS TO BE. Mip dimensions floor,
+// so on an odd-sized level the LAST column/row of the source is covered by no
+// destination texel at all, and a plain 2x2 gather would claim a footprint is
+// FARTHER than something inside it — the one error a hierarchical depth test
+// must never make. The gather therefore extends to 3 samples on that axis for
+// the LAST destination texel of the axis, and only for it.
+//
+// The distinction matters: extending every texel is also conservative, but it
+// makes each interior texel absorb its neighbour's first column/row, so the
+// whole level reads closer than it is and the pyramid rejects less than it
+// could. Nvidia's and Epic's reducers make the same last-texel-only choice.
+// Measured here as the difference between an exactly-8-wide footprint at mip 3
+// and a 9- or 10-wide one on every odd level (at 1080p: 15, 7 and 3).
 @insertpiece( SetCrossPlatformSettings )
 @insertpiece( DeclUavCrossPlatform )
 
@@ -50,8 +57,10 @@ void main()
 	ivec2 srcSize = imageSize( srcMip );
 	ivec2 base = dstUv * 2;
 
-	int extraX = ( srcSize.x & 1 ) != 0 ? 1 : 0;
-	int extraY = ( srcSize.y & 1 ) != 0 ? 1 : 0;
+	// The uncovered source column/row is the LAST one, so only the last
+	// destination texel of each axis gathers a third sample.
+	int extraX = ( ( srcSize.x & 1 ) != 0 && dstUv.x == dstSize.x - 1 ) ? 1 : 0;
+	int extraY = ( ( srcSize.y & 1 ) != 0 && dstUv.y == dstSize.y - 1 ) ? 1 : 0;
 
 	float closest = HZB_FARTHEST;
 	for( int y = 0; y <= 1 + extraY; ++y )

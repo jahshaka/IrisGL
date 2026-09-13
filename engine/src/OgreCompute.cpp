@@ -94,6 +94,35 @@ void tallyStamps(const std::vector<Ogre::uint32> &stamps, unsigned &ranOut, unsi
     }
 }
 
+/// Clears every binding the probe makes. Safe on a job that was never bound, and
+/// it must stay that way: the failure path calls it at any point in the sequence.
+void unbindProbeJobs(Ogre::HlmsComputeJob *countJob, Ogre::HlmsComputeJob *workJob,
+                     Ogre::HlmsComputeJob *cpuJob) {
+    const Ogre::DescriptorSetUav::BufferSlot empty =
+        Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
+    if (countJob) {
+        countJob->_setUavBuffer(0, empty);
+        countJob->_setUavBuffer(1, empty);
+    }
+    if (workJob) {
+        workJob->_setUavBuffer(0, empty);
+        workJob->setIndirectDispatchBuffer(0);
+    }
+    if (cpuJob) cpuJob->_setUavBuffer(0, empty);
+}
+
+/// Frees whatever was created, in reverse order. Nulls are skipped, so it serves
+/// a partial failure as well as a complete run.
+void destroyProbeBuffers(Ogre::VaoManager *vao, Ogre::UavBufferPacked *srcBuf,
+                         Ogre::UavBufferPacked *argBuf, Ogre::UavBufferPacked *outIndirect,
+                         Ogre::UavBufferPacked *outCpu, Ogre::UavBufferPacked *outNoBarrier) {
+    if (outNoBarrier) vao->destroyUavBuffer(outNoBarrier);
+    if (outCpu) vao->destroyUavBuffer(outCpu);
+    if (outIndirect) vao->destroyUavBuffer(outIndirect);
+    if (argBuf) vao->destroyUavBuffer(argBuf);
+    if (srcBuf) vao->destroyUavBuffer(srcBuf);
+}
+
 }  // namespace
 
 bool OgreEngine::indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe &out) {
@@ -110,8 +139,15 @@ bool OgreEngine::indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe
     if (!vao || !hc) return false;
 
     Ogre::HlmsComputeJob *countJob = hc->findComputeJobNoThrow("Jahshaka/IndirectCount");
+    // TWO DEFINITIONS OF THE SAME SHADER, deliberately. `Jahshaka/IndirectWork`
+    // declares no thread_groups at all, so its CPU-side count is zero and it can
+    // only compile because patch 0032 relaxes that requirement for an indirectly
+    // dispatched job — the relaxation is therefore EXERCISED by every run of this
+    // probe rather than merely present in the patch. `Jahshaka/IndirectWorkCpu`
+    // carries a real count and is the control.
     Ogre::HlmsComputeJob *workJob = hc->findComputeJobNoThrow("Jahshaka/IndirectWork");
-    if (!countJob || !workJob) {
+    Ogre::HlmsComputeJob *cpuJob = hc->findComputeJobNoThrow("Jahshaka/IndirectWorkCpu");
+    if (!countJob || !workJob || !cpuJob) {
         mLastError = "engine: the indirect-dispatch compute jobs are missing — "
                      "media/Hlms/Jahshaka/JahshakaCompute.material.json is not staged";
         return false;
@@ -170,7 +206,7 @@ bool OgreEngine::indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe
         readBack(argBuf, argsBack);
         out.groupsRequested = argsBack.size() > 3u ? argsBack[3] : 0u;
 
-        // ---- the control: the SAME job, sized from the CPU ---------------------
+        // ---- the control: the SAME SHADER, sized from the CPU ------------------
         // WITH ONE ASYMMETRY WORTH RECORDING: a CPU-sized dispatch cannot express
         // "run nothing". Ogre refuses to compile a job whose num_thread_groups
         // multiply to zero (HlmsCompute::compileShader), so the CPU-side
@@ -179,14 +215,13 @@ bool OgreEngine::indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe
         // get to take, because the CPU does not know the list is empty. The
         // control below therefore skips the dispatch at zero and compares
         // against the untouched (zeroed) buffer, which is the honest comparison.
-        workJob->_setUavBuffer(0, bufferSlot(outCpu, Ogre::ResourceAccess::Write));
-        workJob->setIndirectDispatchBuffer(0);
+        cpuJob->_setUavBuffer(0, bufferSlot(outCpu, Ogre::ResourceAccess::Write));
         if (out.groupsRequested > 0u) {
-            workJob->setNumThreadGroups(out.groupsRequested, 1u, 1u);
+            cpuJob->setNumThreadGroups(out.groupsRequested, 1u, 1u);
             Ogre::ResourceTransitionArray &rt = solver.getNewResourceTransitionsArrayTmp();
-            workJob->analyzeBarriers(rt);
+            cpuJob->analyzeBarriers(rt);
             rs->executeResourceTransition(rt);
-            hc->dispatch(workJob, 0, 0);
+            hc->dispatch(cpuJob, 0, 0);
         }
 
         std::vector<Ogre::uint32> cpuStamps;
@@ -223,27 +258,19 @@ bool OgreEngine::indirectDispatchProbe(unsigned survivors, IndirectDispatchProbe
             out.noBarrierDiffered = (nbStamps != stamps);
         }
 
-        // Unbind before the buffers die: the jobs are long-lived (they live in
-        // HlmsCompute) and their descriptor sets hold raw pointers.
-        countJob->_setUavBuffer(0, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
-        countJob->_setUavBuffer(1, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
-        workJob->_setUavBuffer(0, Ogre::DescriptorSetUav::BufferSlot::makeEmpty());
-        workJob->setIndirectDispatchBuffer(0);
-
-        vao->destroyUavBuffer(outNoBarrier);
-        vao->destroyUavBuffer(outCpu);
-        vao->destroyUavBuffer(outIndirect);
-        vao->destroyUavBuffer(argBuf);
-        vao->destroyUavBuffer(srcBuf);
+        unbindProbeJobs(countJob, workJob, cpuJob);
+        destroyProbeBuffers(vao, srcBuf, argBuf, outIndirect, outCpu, outNoBarrier);
         return true;
     }
     catch (Ogre::Exception &e) {
+        // THE SAME UNBIND ON THE FAILURE PATH. The jobs outlive this call (they
+        // live in HlmsCompute) and their descriptor sets hold RAW pointers, so a
+        // throw between binding and freeing would otherwise leave three UAV slots
+        // and an indirect-dispatch buffer pointing at freed memory — and the next
+        // caller of this probe, or of those jobs, would dereference them.
         mLastError = e.getFullDescription();
-        if (outNoBarrier) vao->destroyUavBuffer(outNoBarrier);
-        if (outCpu) vao->destroyUavBuffer(outCpu);
-        if (outIndirect) vao->destroyUavBuffer(outIndirect);
-        if (argBuf) vao->destroyUavBuffer(argBuf);
-        if (srcBuf) vao->destroyUavBuffer(srcBuf);
+        unbindProbeJobs(countJob, workJob, cpuJob);
+        destroyProbeBuffers(vao, srcBuf, argBuf, outIndirect, outCpu, outNoBarrier);
         return false;
     }
 }

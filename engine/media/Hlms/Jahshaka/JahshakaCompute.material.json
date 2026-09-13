@@ -13,6 +13,14 @@
 		"Jahshaka/IndirectWork" :
 		{
 			"threads_per_group" : [1, 1, 1],
+			"source" : "JahIndirectWork_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all"],
+			"uav_units" : 1
+		},
+
+		"Jahshaka/IndirectWorkCpu" :
+		{
+			"threads_per_group" : [1, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahIndirectWork_cs",
 			"pieces" : ["CrossPlatformSettings_piece_all"],

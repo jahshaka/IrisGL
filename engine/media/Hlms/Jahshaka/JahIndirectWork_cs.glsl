@@ -6,6 +6,14 @@
 // two-sided assertion: the number of written slots says how many groups RAN, and
 // their value says what count the dispatch was actually issued with. A CPU-sized
 // dispatch of the same job must produce the identical buffer.
+//
+// TWO JOB DEFINITIONS SHARE THIS SOURCE, on purpose (JahshakaCompute.material.json).
+// `Jahshaka/IndirectWork` deliberately declares NO `thread_groups` at all, so its
+// CPU-side count stays zero and the job can only compile because patch 0032
+// relaxes HlmsCompute::compileShader's non-zero requirement for an indirectly
+// dispatched job — which makes that hunk of the patch load-bearing for the suite
+// rather than merely present. `Jahshaka/IndirectWorkCpu` carries a real count and
+// is the CPU-sized control.
 @insertpiece( SetCrossPlatformSettings )
 
 @property( syntax == glsl )

@@ -79,6 +79,12 @@ VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT"; with it, the layer is silent. The data
 hazard itself did not reproduce on this driver in four runs — which is why the
 barrier is unconditional rather than opt-in.
 
+The two argument-buffer preconditions (4-byte alignment, 12 bytes in range) are
+OGRE_EXCEPTs and not OGRE_ASSERT_LOWs on purpose: this engine ships
+RelWithDebInfo, where OGRE_ASSERT_LOW compiles to `(void)0`, so the named failure
+the API promises would never fire in any build anyone runs — the alternative is a
+validation-layer message, or silence, from inside somebody's render loop.
+
 ABI: `HlmsComputeJob` grows three members. This is a SOURCE patch: every tree
 must re-run irisgl/scripts/build-ogre.sh.
 
@@ -211,7 +217,7 @@ must re-run irisgl/scripts/build-ogre.sh.
      {
          memset( mThreadsPerGroup, 0, sizeof( mThreadsPerGroup ) );
          memset( mNumThreadGroups, 0, sizeof( mNumThreadGroups ) );
-@@ -685,6 +688,19 @@
+@@ -685,6 +688,33 @@
          }
      }
      //-----------------------------------------------------------------------------------
@@ -219,10 +225,24 @@ must re-run irisgl/scripts/build-ogre.sh.
 +                                                    bool issueBarrier )
 +    {
 +        // Jahshaka patch 0032. See the header. Vulkan's vkCmdDispatchIndirect requires the
-+        // offset to be 4-byte aligned and three uint32s to fit; catching it here beats a
-+        // validation-layer error inside somebody's render loop.
-+        OGRE_ASSERT_LOW( !buffer || ( offsetBytes & 0x03u ) == 0u );
-+        OGRE_ASSERT_LOW( !buffer || offsetBytes + 12u <= buffer->getTotalSizeBytes() );
++        // offset to be 4-byte aligned and three uint32s to fit.
++        //
++        // OGRE_EXCEPT and not OGRE_ASSERT_LOW: this engine ships RelWithDebInfo, where
++        // OGRE_ASSERT_LOW compiles to (void)0 — the named failure would never fire in any
++        // build anyone runs, and the alternative is a validation-layer message (or silence)
++        // from inside somebody's render loop.
++        if( buffer && ( offsetBytes & 0x03u ) != 0u )
++        {
++            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
++                         "Indirect dispatch offset must be a multiple of 4 bytes.",
++                         "HlmsComputeJob::setIndirectDispatchBuffer" );
++        }
++        if( buffer && offsetBytes + sizeof( uint32 ) * 3u > buffer->getTotalSizeBytes() )
++        {
++            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
++                         "Indirect dispatch offset + 12 bytes is past the end of the buffer.",
++                         "HlmsComputeJob::setIndirectDispatchBuffer" );
++        }
 +        mIndirectDispatchBuffer = buffer;
 +        mIndirectDispatchOffset = offsetBytes;
 +        mIndirectDispatchBarrier = issueBarrier;
