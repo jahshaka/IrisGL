@@ -5217,6 +5217,20 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.probeShadows = toggle(mSource->giProbeShadows);
         gi.probeOverlap = mSource->giProbeOverlap;
         gi.autoBoundsMax = qMax(0.0f, mSource->giAutoBoundsMax);
+        // PHOTON cascades (SPECS/PHOTON_SPEC.md P0): the switch and, optionally,
+        // the table. A row with a non-positive half size or resolution is not a
+        // request the renderer can honour halfway, so the whole table is dropped
+        // and the tier's own decides — the same rule the engine states.
+        gi.cascades = mSource->giCascades;
+        gi.cascadeCount = 0;
+        for (const iris::Vec3 &row : mSource->giCascadeSet) {
+            if (gi.cascadeCount >= 8) break;
+            if (row.x() <= 0.0f || row.y() <= 0.0f) { gi.cascadeCount = 0; break; }
+            gi.cascadeSet[gi.cascadeCount].halfSize   = row.x();
+            gi.cascadeSet[gi.cascadeCount].resolution = int(row.y());
+            gi.cascadeSet[gi.cascadeCount].stepCells  = row.z();
+            ++gi.cascadeCount;
+        }
         gi.probeSnapDeviation = mSource->giProbeSnapDeviation;
         gi.probeSnapSidesMin = mSource->giProbeSnapSidesMin;
         gi.probeSnapSidesMax = mSource->giProbeSnapSidesMax;

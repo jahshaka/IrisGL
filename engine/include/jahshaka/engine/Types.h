@@ -1700,6 +1700,48 @@ struct GiParams {
     /// diffuse still carries it).
     float     ddgiAmbient = 1.0f;
 
+    // ---- PHOTON: camera-centred voxel cascades (PHOTON_SPEC P0) -------------
+
+    /// ONE camera-centred cascade of the Photon cascade chain.
+    ///
+    /// `halfSize` is the half-extent in METRES of the cube this cascade covers
+    /// (the sample set's inner cascade is 5 m, i.e. a 10 m box); `resolution`
+    /// its voxel resolution per axis; `stepCells` how many CELLS the camera may
+    /// travel before the cascade re-centres (the pin's `cameraStepSize`, so
+    /// the scroll distance is `stepCells * 2 * halfSize / resolution`).
+    ///
+    /// The step is in cells and not in metres on purpose: it is what keeps a
+    /// re-centred cascade aligned to the same world lattice it was built on,
+    /// which is the property that makes a scroll a whole number of cells and
+    /// stops the bounce sliding under the geometry.
+    struct GiCascadeDesc {
+        float halfSize   = 0.0f;
+        int   resolution = 0;
+        float stepCells  = 0.0f;
+        bool operator==(const GiCascadeDesc &o) const {
+            return halfSize == o.halfSize && resolution == o.resolution &&
+                   stepCells == o.stepCells;
+        }
+    };
+    /// THE PHOTON SWITCH. False (the default) is the single scene-fitted voxel
+    /// volume this engine has always built: one box around the content, and
+    /// nothing outside it bounces. True builds N camera-centred cascades
+    /// instead, chained through `VctLighting::addCascade`, so the bounce
+    /// follows the camera and what escapes the outermost cascade reads the
+    /// ambient (the Sky Light) rather than a wall of darkness.
+    ///
+    /// Only meaningful in `Vct` and `VctPccHybrid`. It changes NOTHING about
+    /// the picture when off — the arm it selects is chosen in `rebuildVct`.
+    bool      cascades = false;
+    /// How many cascades to build, 1..8. 0 means "the table below decides", and
+    /// when the table is empty too, the engine's own tier table does.
+    int       cascadeCount = 0;
+    /// The cascade table. Entries [0, cascadeCount) are used; a zero
+    /// `resolution` or `halfSize` in a used entry falls back to the tier table.
+    /// The engine's default is the Ogre sample's set (5 m@128, 10 m@128,
+    /// 15 m@64, 60 m@64), which PHOTON_SPEC §5 measured the cadence of.
+    GiCascadeDesc cascadeSet[8];
+
     /// "Is this the same GI configuration I last pushed?" Exact, like every
     /// other change guard here — and load-bearing rather than cosmetic: a GI
     /// push is a teardown plus a re-voxelize plus (in the hybrid) every probe
@@ -1724,7 +1766,16 @@ struct GiParams {
                rayMarchStepScale == o.rayMarchStepScale &&
                ddgi == o.ddgi && ddgiIntensity == o.ddgiIntensity &&
                ddgiAmbient == o.ddgiAmbient && ddgiSource == o.ddgiSource &&
-               boundsMin == o.boundsMin && boundsMax == o.boundsMax;
+               boundsMin == o.boundsMin && boundsMax == o.boundsMax &&
+               cascades == o.cascades && cascadeCount == o.cascadeCount &&
+               cascadeSetEqual(o);
+    }
+    /// The cascade table, compared only over the entries in USE — a table
+    /// beyond `cascadeCount` is not part of the configuration.
+    bool cascadeSetEqual(const GiParams &o) const {
+        for (int i = 0; i < cascadeCount && i < 8; ++i)
+            if (!(cascadeSet[i] == o.cascadeSet[i])) return false;
+        return true;
     }
     bool operator!=(const GiParams &o) const { return !(*this == o); }
 };
@@ -1966,6 +2017,51 @@ struct GiStatus {
     /// frame in thirty). The acceptance for all four is this counter: its
     /// delta over a STILL frame is 0.
     unsigned long long giAabbReads = 0;
+
+    // ---- PHOTON cascades (PHOTON_SPEC P0) ----------------------------------
+    /// ONE live cascade, as BUILT — the counterpart of GiParams::GiCascadeDesc.
+    struct CascadeStatus {
+        /// Half-extent in metres of the box this cascade covers.
+        float halfSize = 0.0f;
+        /// Voxel resolution per axis.
+        int   resolution = 0;
+        /// Metres per voxel (halfSize * 2 / resolution) — the number that says
+        /// what this cascade can actually resolve.
+        float cell = 0.0f;
+        /// Metres of camera travel between re-centres (stepCells * cell).
+        float step = 0.0f;
+        /// The world-space centre it is currently built at (quantised to its
+        /// own lattice, so it is NOT the camera position).
+        Vec3  centre;
+        /// How many times this cascade has been (re)voxelised since the arm was
+        /// built. At rest it does not move: a still camera scrolls nothing.
+        unsigned long long rebuilds = 0;
+        /// Rebuilds this cascade owes and has not been given a frame for (the
+        /// bounded queue: at most one cascade is rebuilt per frame). Non-zero
+        /// only while the camera is outrunning the scheduler.
+        int   pending = 0;
+        /// CPU milliseconds of that same rebuild (the submission cost on the
+        /// frame's own thread). The GPU half is NOT here and cannot be: a
+        /// timestamp pair is read back two frames later, so it is reported
+        /// where a two-frame-late number belongs — the monitor's `vct.cascadeN`
+        /// cacheWork rows (ogre-patch 0027).
+        float lastCpuMs = -1.0f;
+    };
+    /// The live cascade chain, innermost first. Empty unless
+    /// GiParams::cascades built one.
+    std::vector<CascadeStatus> cascades;
+    /// How many whole-chain rebuilds the two DIRTY_ALL guards have forced — a
+    /// teleport, a jump longer than a cascade, or a queue overflow. Cumulative.
+    unsigned long long cascadeFullRebuilds = 0;
+    /// Cascade rebuilds SKIPPED because the frame's budget (one per frame) was
+    /// already spent. Cumulative; it is the queue pressure reading.
+    unsigned long long cascadeDeferrals = 0;
+    /// Scrolls where MORE THAN HALF of the cascade's volume was new — the
+    /// second DIRTY_ALL guard, counted rather than acted on in the whole-rebuild
+    /// arm. It is the reading that says whether an incremental (slab-shifting)
+    /// arm could save anything at this speed: a scroll that is already
+    /// majority-dirty has nothing to shift.
+    unsigned long long cascadeDirtyMajority = 0;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------
