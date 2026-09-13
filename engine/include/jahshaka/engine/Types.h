@@ -2607,6 +2607,17 @@ struct ShadowStatus {
     unsigned uncachedInstances = 0;
     bool     viewCached = false;
     unsigned mapsDirtiedLastFrame = 0;
+    /// HOW MANY TIMES THIS PROCESS HAS REBUILT THE SHADOW ATLAS, cumulative.
+    /// The hitch counter: a rebuild swaps the three shadow-node DEFINITIONS,
+    /// which means dropping and recreating EVERY workspace that names one —
+    /// every view, every planar-mirror slot, and every reflection probe, whose
+    /// GI arm is then built from scratch. It is the single most expensive thing
+    /// the shadow system does and it is invisible in every other reading, so a
+    /// test can hold it still: a world that opens with casting lamps costs ONE
+    /// (the count and the clear strategy settle together) and none afterwards.
+    /// Monotonic for the life of the engine; the monitor's `shadow.atlas` event
+    /// is the same fact with a reason attached.
+    unsigned atlasRebuilds = 0;
 };
 
 /// A CENSUS of everything alive behind the boundary (fps audit F11).

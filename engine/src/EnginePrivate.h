@@ -286,6 +286,12 @@ constexpr unsigned     kMaxShadowMaps     = 16u;
 /// (2048 -> 1024).
 constexpr unsigned     kProbeShadowMaxResolution  = 512u;
 constexpr unsigned     kProbeShadowMaxFocusedMaps = 4u;
+/// HOW MUCH NEARER A LAMP THIS INSTANCE ALREADY HOLDS COUNTS, on the SQUARED
+/// distance (0.81 = 10% of range), when a probe has to choose which
+/// kProbeShadowMaxFocusedMaps lamps to cache (keepNearestLamps). Without it a
+/// lamp drifting across the boundary would evict and re-admit itself — two
+/// re-rendered maps a frame — instead of one re-render once.
+constexpr float        kShadowNearestStickiness   = 0.81f;
 inline unsigned probeShadowResolution(unsigned mainResolution) {
     return std::min(kProbeShadowMaxResolution, std::max(256u, mainResolution / 4u));
 }
@@ -3086,11 +3092,16 @@ private:
     /// The EFFECTIVE visibility `sn`'s children inherit from above it: the
     /// `shown` of the nearest registered ancestor, true when there is none.
     bool inheritedShown(const Ogre::Node *sn);
-    /// Applies EFFECTIVE visibility to `sn` and everything under it in Ogre's
-    /// graph: a registered node shows iff `inherited` and its own flag; an
-    /// unregistered one (a helper child) passes `inherited` through. Sets
+    /// Applies EFFECTIVE visibility to `sn` and to the children THIS ENGINE
+    /// owns — an engine-created registered node (createNode) and the two
+    /// unregistered helper children it makes itself, a light's -Y adapter and
+    /// a decal's projector box. It does NOT descend into the adopted document
+    /// subtree: the document's host pushes every node's effective visibility
+    /// parent-first, and walking it here made N pushes cost Sum(subtree sizes)
+    /// — 6.3 visits per node and +21.6 ms of first sync at 10k (L12). Sets
     /// `giChanged` when any Item's kGiGeometryBit moved, so the caller can
-    /// invalidate GI ONCE for the whole subtree. (RENDER_PIPELINE_AUDIT 1.1/1.2)
+    /// invalidate GI ONCE for the whole subtree.
+    /// (RENDER_PIPELINE_AUDIT 1.1/1.2)
     void applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giChanged);
     /// Voxel volume resolution per axis for the current quality.
     unsigned giVoxelResolution() const;
@@ -4089,6 +4100,24 @@ public:
     /// within a session (owner decision D4) and never runs on a frame that
     /// would be the first of a burst — see the definition.
     void deriveShadowMapCount();
+    /// The focused-map count the scenes about to be drawn WANT right now:
+    /// stepped {2,4,8,16} from their shadow-casting point/spot lights and
+    /// clamped to effectiveShadowMapBudget(). No debounce — the raw demand, so
+    /// the clear-strategy flip can size the atlas in the SAME rebuild instead
+    /// of leaving a second one to the derivation. It also owns the over-budget
+    /// warning's bookkeeping, so both growth paths keep it (F3). `castersOut`
+    /// receives the caster count the answer was derived from.
+    unsigned shadowMapDemand(unsigned *castersOut = nullptr);
+    /// The one log line either growth path writes.
+    void logShadowAtlasGrowth(unsigned want, unsigned casters, const char *why);
+    /// Has any ENABLED view of a scene this frame draws put pixels on its target
+    /// yet (View::framesPresented)? The gate deriveShadowMapCount shares with
+    /// the clear-strategy flip: neither may rebuild the atlas while a world is
+    /// still BINDING. Deliberately independent of lamps and shadow nodes — the
+    /// flip's own `presenting` is computed inside its lamp scan, and reusing
+    /// that would have stalled the GROWTH for ever in a scene whose casters are
+    /// not cacheable. (F1, round 2.)
+    bool anyDrawnViewPresented();
     /// What the atlas currently HAS: `mShadowMapCount` focused maps at
     /// `mShadowResolution`. Read by shadowStatus() and by the derivation.
     unsigned shadowMapCount() const { return mShadowMapCount; }
@@ -4267,6 +4296,19 @@ private:
     /// upstream's pass list exactly; then true for the rest of the session
     /// (one-way — applyShadowCache).
     bool            mShadowPerMapClears = false;
+    /// Set each frame by applyShadowCache while the clear strategy is still
+    /// upstream's: a drawn, PRESENTING scene holds a cacheable lamp, so the
+    /// per-map-clear flip WILL happen — it is only waiting out its debounce.
+    /// deriveShadowMapCount reads it so that a rebuild it has to do anyway
+    /// carries the flip with it: one atlas rebuild for one event, instead of a
+    /// growth now and a flip three frames later, each dropping and recreating
+    /// every workspace that names a shadow node (the "first-lamp atlas hitch",
+    /// E2 review / ledger 104/121). One frame stale by construction — the
+    /// derivation runs first in the frame — which costs nothing: it can only
+    /// be true one frame later than it might have been.
+    bool            mShadowClearFlipWanted = false;
+    /// Cumulative atlas rebuilds — ShadowStatus::atlasRebuilds.
+    unsigned        mShadowAtlasRebuilds = 0;
     /// Derivation bookkeeping: the count the last few frames asked for and how
     /// many frames in a row have asked for it. A scene LOADS its lights over
     /// many frames, and each rebuild drops and recreates every workspace that
@@ -4393,9 +4435,21 @@ private:
     /// and used to build five containers per call (plus one per shadow-node
     /// instance): a still scene allocated and freed them at 60 Hz. Cleared and
     /// refilled instead, so a steady frame allocates nothing here.
-    struct ShadowInstance { Ogre::CompositorShadowNode *node; ShadowNodeKind kind; };
+    /// One shadow-node instance about to be updated, with the position of the
+    /// camera that will update it: a view's editor camera, a mirror slot's
+    /// reflected camera, a probe's capture camera (fixed at the probe centre).
+    /// `hasEye` is false when the workspace has no default camera.
+    struct ShadowInstance {
+        Ogre::CompositorShadowNode *node;
+        ShadowNodeKind              kind;
+        Ogre::Vector3               eye;
+        bool                        hasEye;
+    };
     std::vector<ShadowInstance>              mShadowInstScratch;
     std::vector<Ogre::Light *>               mShadowWantScratch;
+    /// (squared distance, index into `want`) for the nearest-lamp selection a
+    /// probe instance makes when the scene has more lamps than it has maps.
+    std::vector<std::pair<float, size_t>>    mShadowNearScratch;
     std::vector<Ogre::Light *>               mShadowPlanScratch;
     std::vector<char>                        mShadowPlacedScratch;
     std::vector<Ogre::CompositorWorkspace *> mShadowWsScratch;

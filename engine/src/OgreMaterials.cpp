@@ -1274,8 +1274,19 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb) {
 // OgreScene texture call.
 namespace {
 std::unordered_map<Ogre::TextureGpu *, unsigned> &sharedTextureRefs() {
-    static std::unordered_map<Ogre::TextureGpu *, unsigned> sRefs;
-    return sRefs;
+    // LEAKED ON PURPOSE, for TextureCache's reason (OgreTextureCache.cpp, and
+    // the 2026-09-13 crash it explains). This map is first constructed on the
+    // first retainSharedTexture — i.e. AFTER EngineHost's own function-local
+    // static — so exit handlers, which run in reverse order of construction,
+    // destroy it FIRST. ~Engine then touches it unconditionally through
+    // detail::resetSharedTextures() (OgreEngine.cpp), and every scene teardown
+    // reaches it through releaseSharedTexture: a read-after-destroy on any exit
+    // path where the engine is torn down from ~EngineHost's safety net rather
+    // than from an ordered shutdown. Never destroying it removes the whole
+    // class; resetSharedTextures() still empties it between Engines
+    // (test_engine_recreate), which is the only lifetime anyone depends on.
+    static auto *sRefs = new std::unordered_map<Ogre::TextureGpu *, unsigned>();
+    return *sRefs;
 }
 }   // namespace
 
