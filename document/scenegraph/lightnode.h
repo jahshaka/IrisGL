@@ -29,6 +29,20 @@ enum class LightType:int
     Directional = 1,
     Spot = 2,
     Area = 3,       // rectangular area light (engine viewport only; legacy ignores it)
+    // THE SKY LIGHT (SKY_LIGHT_SPEC.md §2, owner decision D14). Unreal's model:
+    // the scene's SKY is the environment picture, and a Sky Light is the LIGHT
+    // that reads it and fills the scene with its diffuse ambient. It has no
+    // position, no direction, no range and casts no shadow — `color` is a TINT
+    // on the sky's own integral and `intensity` is the strength (1.0 = the sky
+    // at full physical strength). Every other LightNode field is meaningless on
+    // it and the panel hides them.
+    //
+    // THE FIRST VISIBLE ONE IS THE SKYLIGHT (Scene::skyLight(), the same shape
+    // as sunLight()); a second raises the `sky.duplicate` scene issue. NO Sky
+    // Light in a scene = no ambient at all: 27 zero SH coefficients, which is a
+    // black ambient term, which is the decided behaviour (a visible sky that
+    // does not light, as in Unreal).
+    Sky = 4,
 };
 
 class LightNode:public SceneNode
@@ -47,6 +61,17 @@ public:
     float distance;
     QColor color;
     float intensity;
+
+    /// THE SUN'S ANGULAR DIAMETER in degrees (SKY_LIGHT_SPEC.md §3; Unreal's
+    /// "Source Angle"). The real sun subtends 0.53 degrees, which is the
+    /// default. It sizes the sun DISC drawn in the sky where this light points
+    /// — and it is the row a future soft-shadow penumbra would read, which is
+    /// why it is a property of the light and not of the disc.
+    ///
+    /// Only meaningful on the scene's SUN (the first directional light): a
+    /// secondary directional draws no disc, and the panel only shows the row
+    /// on the sun.
+    float sunAngle = 0.53f;
 
 	/*
 	Shadow's color and trasnsparency

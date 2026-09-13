@@ -175,7 +175,11 @@ void buildWorkspace(Ogre::CompositorManager2 *cm, const std::string &workspaceDe
         // mirror floor is exactly where a walking character has to appear, in
         // the frame it moves. This is the "widen every mask except the probe
         // captures" half of the channel rule (EnginePrivate.h, kMovableBit).
-        pass->setVisibilityMask(kVisibleBit | kMovableBit);
+        // + kSunDiscBit: the sun disc carries its own channel instead of
+        // kVisibleBit (so the probe captures drop it), and a MIRROR SHOWS THE
+        // SUN — a planar reflection that lost the disc while keeping the sky
+        // would be a hole in the picture (SKY_LIGHT_SPEC.md §3).
+        pass->setVisibilityMask(kVisibleBit | kMovableBit | kSunDiscBit);
         // Overlays out by RENDER QUEUE as well (see kReflectLastRQ): the mask
         // above covers helpers, this covers the on-top overlay queue.
         pass->mFirstRQ = 0u;

@@ -247,6 +247,22 @@ constexpr Ogre::uint32 kDistortionBit  = 1u << 4;
 // gathers and deliberately does NOT invalidate, leaving the object's old bounce
 // light behind as a ghost until play stops, for no hitch at all.
 constexpr Ogre::uint32 kMovableBit     = 1u << 5;
+// THE SUN-DISC CHANNEL (SPECS/SKY_LIGHT_SPEC.md §3, owner pick 4). The disc
+// quad carries this bit INSTEAD OF kVisibleBit — the fourth use of the
+// inversion above — so that "the reflection probes must not capture it" is
+// expressible at all (the any-bit test cannot exclude).
+//   * IN, by the all-ones default: the main chain, the SSR prepass, the
+//     thumbnail/preview shapes. A user's picture has the sun in it.
+//   * IN, explicitly: the planar reflection pass asks for this bit beside
+//     kVisibleBit|kMovableBit (OgrePlanar.cpp) — a mirror shows the sun.
+//   * OUT, with no mask change anywhere: the reflection-probe faces and the
+//     raster irradiance-field faces (`visibility_mask 0x1`), and every shadow
+//     node (shadowCasterChannels). A probe that captured the disc would paint
+//     a SECOND sun highlight on every probe-lit glossy surface, on top of the
+//     directional light's own specular.
+// `world.sunDisc({inProbes: true})` puts kVisibleBit back ALONGSIDE this bit,
+// which is the "include it" half of the owner's "we can have both options".
+constexpr Ogre::uint32 kSunDiscBit     = 1u << 6;
 
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
@@ -2874,6 +2890,12 @@ private:
     /// on-top overlays at queue 200 still paint over it), and kVisibleBit only, so
     /// Instant Radiosity's visibility-masked ray casts never hit it.
     void tuneSkyRenderable();
+    /// THE SUN DISC (SKY_LIGHT_SPEC.md §3): creates (once) and updates the disc
+    /// quad — a Rectangle2D at render queue 1, additive, with kSunDiscBit. A
+    /// disabled disc hides the quad rather than destroying it (the sun is
+    /// switched on and off, not created and destroyed).
+    void applySunDisc(const SunDisc &sun);
+    void destroySunDisc();
     /// Frees a node's billboard set and its datablock, in that order (the set
     /// references the datablock until it is destroyed). Safe to call twice.
     void releaseBillboards(Node &n);
@@ -3275,6 +3297,10 @@ private:
     /// SceneManager::getSkyMethod() never reflects the method actually set
     /// (upstream's setSky forgets to assign mSkyMethod), so remember it.
     bool              mSkyIsEquirect = false;
+    /// The sun disc's quad and its cloned material (one per scene, like Ogre's
+    /// own sky material clone: the parameters are per-scene).
+    Ogre::Rectangle2D *mSunDisc = nullptr;
+    Ogre::MaterialPtr  mSunDiscMaterial;
     /// Textures WE own for Ogre's sky renderable (the equirect Type2DArray copy /
     /// the converted cube). Null when the sky uses a host texture directly.
     Ogre::TextureGpu *mSkyOwnedTex = nullptr;

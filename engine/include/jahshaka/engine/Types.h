@@ -272,6 +272,43 @@ enum class SkyMode { NoSky, Equirectangular, Cubemap };   // 'None' collides wit
 /// image is what this boundary consumes — see SceneMirror::applySky, which
 /// owns those bakes because they need an image decoder and this layer has
 /// none (no Qt, no image formats — Types.h's first line).
+/// THE SUN DISC (SKY_LIGHT_SPEC.md §3) — the bright disc drawn in the sky where
+/// the scene's sun light points, as part of the sky description.
+///
+/// It is the SUN'S, not the sky's, and there is exactly ONE of it. It used to
+/// be a term baked into the analytic sky's texels, which made it a property of
+/// one sky type, at the bake's resolution, in a place no capture mask could
+/// exclude it from. Here it is a quad the backend draws over WHATEVER sky is
+/// bound — a colour, a gradient, a Preetham bake, an equirect photograph — with
+/// its own visibility channel, so "not in the reflection probes" is expressible.
+///
+/// `colour` is the disc's RADIANCE, already multiplied by whatever the host
+/// wants (the sun light's colour, its intensity, an overdrive constant); the
+/// backend writes it additively and does not scale it. The disc is meant to
+/// CLIP in LDR and to bloom under the HDR chain — it is the sun.
+struct SunDisc {
+    bool  enabled = false;
+    /// Unit vector FROM the scene TOWARDS the sun, in world space.
+    float dir[3] = { 0.0f, 1.0f, 0.0f };
+    /// The disc's angular DIAMETER in degrees (the real sun is 0.53).
+    float angularDiameterDeg = 0.53f;
+    Colour colour { 1.0f, 1.0f, 1.0f, 1.0f };
+    /// Do reflection-probe captures contain it? Off by default: the sun's
+    /// energy already reaches glossy surfaces through the directional light's
+    /// own specular highlight, so a captured disc is a second sun.
+    bool  inProbes = false;
+
+    bool operator==(const SunDisc &o) const {
+        if (enabled != o.enabled) return false;
+        if (!enabled) return true;   // a disabled disc has no other state
+        return dir[0] == o.dir[0] && dir[1] == o.dir[1] && dir[2] == o.dir[2] &&
+               angularDiameterDeg == o.angularDiameterDeg &&
+               colour.r == o.colour.r && colour.g == o.colour.g &&
+               colour.b == o.colour.b && inProbes == o.inProbes;
+    }
+    bool operator!=(const SunDisc &o) const { return !(*this == o); }
+};
+
 struct SkyDesc {
     /// NoSky removes the sky (the View's background shows through).
     SkyMode   mode = SkyMode::NoSky;
@@ -307,8 +344,13 @@ struct SkyDesc {
     /// Exact equality, like every other change-guard on this boundary. Texture
     /// ids are monotonic per scene and never recycled, so equal ids really are
     /// the same pixels.
+    /// THE SUN DISC, drawn over this sky (SunDisc above). A THIRD independent
+    /// half: it changes every time the sun light is rotated, and re-uploading
+    /// the sky or rebuilding the IBL cubemap for that would be absurd.
+    SunDisc   sun;
+
     bool operator==(const SkyDesc &o) const {
-        return sameSky(o) && sameReflections(o);
+        return sameSky(o) && sameReflections(o) && sun == o.sun;
     }
     bool operator!=(const SkyDesc &o) const { return !(*this == o); }
 

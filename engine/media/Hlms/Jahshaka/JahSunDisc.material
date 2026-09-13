@@ -1,0 +1,90 @@
+// THE SUN DISC (SPECS/SKY_LIGHT_SPEC.md §3, owner decision D15).
+//
+// ONE mechanism for the sun's disc, owned by the SUN LIGHT and not by any sky.
+// It used to be a term inside the analytic sky's CPU bake (`sundisk` in
+// SceneMirror::bakeRealisticSky), which made it a property of exactly one sky
+// type, drawn at the bake's resolution, in a place no capture mask could
+// exclude it from. This composes over WHATEVER sky is bound — the uniform strip
+// a colour sky bakes, the gradient ramp, the Preetham image, an equirect
+// photograph — at render queue 1, immediately after the sky's own quad.
+//
+// ADDITIVE, depth CHECK on, depth WRITE off: the disc adds light to the sky
+// behind it and is occluded by geometry drawn afterwards (the whole scene: the
+// disc is at RQ 1 and opaque geometry starts at 10), exactly like the sky.
+//
+// GLSL + Vulkan only, like every other material we own in this folder.
+
+vertex_program Jahshaka/SunDisc_vs_GLSL glsl
+{
+	source JahSunDisc_vs.glsl
+}
+vertex_program Jahshaka/SunDisc_vs_VK glslvk
+{
+	source JahSunDisc_vs.glsl
+}
+vertex_program Jahshaka/SunDisc_vs unified
+{
+	delegate Jahshaka/SunDisc_vs_GLSL
+	delegate Jahshaka/SunDisc_vs_VK
+
+	// The three auto-params Ogre fills per CAMERA. `param_named_auto` in a
+	// program's default_params is the form that works under Vulkan (a plain
+	// `param_named` in a program_ref is applied before the constant table
+	// exists and fails with "setting of constant failed", which leaves the
+	// whole pass broken and the quad silently undrawn).
+	default_params
+	{
+		param_named_auto	rsDepthRange	rs_depth_range
+		param_named_auto	invViewProj		inverse_viewproj_matrix
+		param_named_auto	cameraPos		camera_position
+	}
+}
+
+fragment_program Jahshaka/SunDisc_ps_GLSL glsl
+{
+	source JahSunDisc_ps.glsl
+}
+fragment_program Jahshaka/SunDisc_ps_VK glslvk
+{
+	source JahSunDisc_ps.glsl
+}
+fragment_program Jahshaka/SunDisc_ps unified
+{
+	delegate Jahshaka/SunDisc_ps_GLSL
+	delegate Jahshaka/SunDisc_ps_VK
+}
+
+material Jahshaka/SunDisc
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write off
+			cull_hardware none
+			scene_blend add
+
+			// OURS, not the sky's: upstream's QuadCameraDirNoUV_vs reads the
+			// camera ray out of the quad's normals, and the only quad whose
+			// normals anything writes is Ogre's own sky (see JahSunDisc_vs).
+			vertex_program_ref Jahshaka/SunDisc_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/SunDisc_ps
+			{
+				// NO param_named DEFAULTS HERE, deliberately. Under the Vulkan
+				// backend a `param_named` in a fragment_program_ref is applied
+				// while the script is parsed, before the program's constant
+				// table exists, and it fails with "setting of constant failed"
+				// — which leaves the PASS broken and the quad silently never
+				// drawn (cost half an hour on 2026-09-13; upstream's own
+				// Sky.material carries the same note about `sliceIdx`).
+				// OgreScene::applySunDisc pushes both uniforms at runtime, and
+				// the shader's own zero-radiance guard is what a frame rendered
+				// before the first push falls back to.
+			}
+		}
+	}
+}

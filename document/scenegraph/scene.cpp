@@ -38,37 +38,6 @@ namespace iris
 
 static constexpr float kPi = 3.14159265358979f;
 
-// --- SkyRealistic sun angles ------------------------------------------------
-// The analytic sky uses the sun vector twice: normalized (the direction every
-// scattering term takes) and as `sunPosY / 450000` (the sunfade day/night
-// term). Storing it at radius kSunRadius makes both exact, and makes azimuth /
-// elevation a lossless view of the same three floats.
-void SkyRealistic::setSunAngles(float azimuthDegrees, float elevationDegrees)
-{
-    const float deg2rad = kPi / 180.0f;
-    const float az = azimuthDegrees * deg2rad;
-    const float el = qBound(-90.0f, elevationDegrees, 90.0f) * deg2rad;
-    const float cosEl = std::cos(el);
-    sunPosX = kSunRadius * cosEl * std::sin(az);
-    sunPosY = kSunRadius * std::sin(el);
-    sunPosZ = kSunRadius * cosEl * std::cos(az);
-}
-
-float SkyRealistic::sunAzimuth() const
-{
-    if (qFuzzyIsNull(sunPosX) && qFuzzyIsNull(sunPosZ)) return 0.0f;
-    float deg = std::atan2(sunPosX, sunPosZ) * 180.0f / kPi;
-    if (deg < 0.0f) deg += 360.0f;
-    return deg;
-}
-
-float SkyRealistic::sunElevation() const
-{
-    const float len = std::sqrt(sunPosX * sunPosX + sunPosY * sunPosY + sunPosZ * sunPosZ);
-    if (len < 1e-6f) return 0.0f;
-    return std::asin(qBound(-1.0f, sunPosY / len, 1.0f)) * 180.0f / kPi;
-}
-
 // The Preetham model's own working ranges, not the legacy panel's degenerate
 // corner (VISUAL_PARITY_SPEC item 1): the old turbidity .32 sat well below the
 // model's 1..20 band and the old sun vector (10, 7, 10) pinned `sunfade` to a
@@ -81,7 +50,6 @@ SkyRealistic SkyRealistic::defaults()
     s.mieCoefficient = 0.005f;
     s.mieDirectionalG = 0.8f;
     s.turbidity = 2.0f;
-    s.setSunAngles(135.0f, 40.0f);
     return s;
 }
 
@@ -93,7 +61,13 @@ Scene::Scene()
 
     clearColor = QColor(0,0,0,0);
     renderSky = true;
-    skyColor = QColor(72, 72, 72);
+    // THE DEFAULT SKY: 96 grey (owner pick 1, SKY_LIGHT_SPEC.md §9.1 option ii).
+    // It was 72 while the scene's light came from a separate 96-grey "Ambient
+    // Color"; with ambient BEING the sky (D14) the sky has to carry that level
+    // itself — srgb(96)/255 decoded is 0.117 of radiance against the old flat
+    // path's 0.120, so the level is preserved to 2.5% and the Sky Light's
+    // default stays an honest 1.0.
+    skyColor = QColor(96, 96, 96);
 
     fogColor = QColor(250, 250, 250);
     fogStart = 100;
@@ -213,13 +187,9 @@ Scene::Scene()
     // 256x128 equirect bake; 512/1024 are the sharper (slower) choices
     skyBakeResolution = 256;
 
-    // sky-driven ambient: on by default (owner decision, VISUAL_PARITY item 3b)
-    ambientFromSky = true;
-
-    // AUTOMATIC sun (the lowest forwardShadingPriority directional), and the
-    // sky steers nothing until asked (SUN_AND_LIGHT_DEFAULTS Q1).
+    // AUTOMATIC sun: the lowest forwardShadingPriority directional
+    // (SUN_AND_LIGHT_DEFAULTS Q1). The sky follows it; nothing steers it.
     sunLightGuid = QString();
-    skyDrivesSun = false;
 
 	gradientTop = QColor(255, 0, 0);
 	gradientMid = QColor(0, 255, 0);
@@ -243,9 +213,6 @@ Scene::Scene()
 	skyDataRealistic.insert("mieCoefficient", skyRealistic.mieCoefficient);
 	skyDataRealistic.insert("mieDirectionalG", skyRealistic.mieDirectionalG);
 	skyDataRealistic.insert("turbidity", skyRealistic.turbidity);
-	skyDataRealistic.insert("sunPosX", skyRealistic.sunPosX);
-	skyDataRealistic.insert("sunPosY", skyRealistic.sunPosY);
-	skyDataRealistic.insert("sunPosZ", skyRealistic.sunPosZ);
 
 	QJsonObject colTop;
 	QColor top(255, 146, 138);
@@ -281,8 +248,6 @@ Scene::Scene()
 	skyData.insert("Cubemap", QJsonObject());
 
     // end sky init
-
-    ambientColor = QColor(96, 96, 96);
 
     meshes.reserve(100);
     particleSystems.reserve(100);
@@ -346,11 +311,6 @@ void Scene::setSkyColor(QColor color)
     this->skyColor = color;
 }
 
-void Scene::setAmbientColor(QColor color)
-{
-    this->ambientColor = color;
-}
-
 void Scene::setAmbientMusic(QString path)
 {
 
@@ -379,38 +339,6 @@ void Scene::setAmbientMusicVolume(float volume)
 {
 	ambientMusicVolume = volume;
     // mediaPlayer->setVolume(volume);
-}
-
-bool Scene::applySunCoupling()
-{
-    if (!skyDrivesSun) return false;
-    // Only the analytic sky has a sun. A scene that switches to a colour or
-    // image sky keeps the switch on (switching back resumes it) but stops
-    // driving.
-    if (skyType != SkyType::REALISTIC) return false;
-
-    // THE ONE RESOLVER. The sky steers whichever light is the sun — pinned or
-    // automatic — instead of carrying its own idea of which light that is.
-    auto light = sunLight();
-    if (!light) return false;
-
-    // The light travels FROM the sun TOWARDS the scene, and a document light
-    // emits down its local -Y (LightNode::getLightDir) — so the rotation is the
-    // one that takes -Y onto that direction.
-    const iris::Vec3 sun(skyRealistic.sunPosX, skyRealistic.sunPosY, skyRealistic.sunPosZ);
-    if (sun.lengthSquared() < 1e-6f) return false;
-    const iris::Vec3 travel = -sun.normalized();
-    const iris::Quat want = iris::Quat::rotationTo(iris::Vec3(0.0f, -1.0f, 0.0f), travel);
-
-    // Cheap to call every frame: an unchanged sun re-pushes nothing, so a
-    // linked light is still freely keyable/animatable on every OTHER channel.
-    const iris::Quat have = light->getGlobalRotation();
-    const float dot = std::fabs(have.x() * want.x() + have.y() * want.y()
-                              + have.z() * want.z() + have.scalar() * want.scalar());
-    if (dot > 0.9999995f) return false;
-
-    light->setGlobalRot(want);
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +427,54 @@ int Scene::nextForwardShadingPriority() const
     return p;
 }
 
+// ---------------------------------------------------------------------------
+// THE SKY LIGHT — one resolver, asked by everything (SKY_LIGHT_SPEC.md §2)
+// ---------------------------------------------------------------------------
+// Deliberately the SAME shape as sunLight() above, for the same reason: three
+// consumers each with their own idea of "which one is the skylight" is how the
+// sun's three rules came to disagree with nobody being told. One rule, here:
+// the FIRST VISIBLE Sky Light in creation order. A hidden Sky Light does not
+// light (hiding one is how a user turns the skylight off without deleting it,
+// and how the `sky.duplicate` issue clears), and NO Sky Light means no ambient
+// at all — 27 zero coefficients, a black ambient term, as decided (D14).
+//
+// No pin: there is no `skyLightGuid` and there should not be one. The sun's pin
+// exists because a directional light is also a normal light an author places
+// for its shadow; a second Sky Light is never useful, so the answer to two of
+// them is the scene issue, not a picker.
+
+QVector<LightNodePtr> Scene::skyLights() const
+{
+    QVector<LightNodePtr> out;
+    for (const auto &light : lights) {
+        if (!light) continue;
+        if (light->lightType != LightType::Sky) continue;
+        out.append(light);
+    }
+    // `lights` is a QHash by guid — hash order is not an order. Sort, as
+    // directionalLights() does, so every reload resolves the same way.
+    std::sort(out.begin(), out.end(), [](const LightNodePtr &a, const LightNodePtr &b) {
+        return a->nodeId < b->nodeId;
+    });
+    return out;
+}
+
+LightNodePtr Scene::skyLight() const
+{
+    for (const auto &light : skyLights())
+        if (light->isVisibleInScene()) return light;
+    return LightNodePtr();
+}
+
+QString Scene::skyLightReason() const
+{
+    const auto all = skyLights();
+    if (all.isEmpty()) return QStringLiteral("none");
+    for (const auto &light : all)
+        if (light->isVisibleInScene()) return QStringLiteral("first");
+    return QStringLiteral("allHidden");
+}
+
 void Scene::updateSceneAnimation(float time)
 {
     animTime = time;
@@ -518,10 +494,6 @@ float Scene::advance(float dt)
     if (!rootNode || steps == 0) return simDt;
     const bool simulating = environment && environment->isSimulating();
     if (!playing && !simulating) return simDt;
-
-    // SUN COUPLING (re-audit F5): before anything reads a transform this frame,
-    // so the mirror, the gizmos and the shadow pass all see the same rotation.
-    applySunCoupling();
 
     // THE POSE, at the clock's time — once, not per step: clips and property
     // tracks are evaluated at an ABSOLUTE time (the document keeps the clock,

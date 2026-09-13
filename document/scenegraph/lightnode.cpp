@@ -104,6 +104,12 @@ QList<Property*> LightNode::getProperties()
     intProp->value = shadowMap->resolution;
     props.append(intProp);
 
+    prop = new FloatProperty();
+    prop->displayName = "Sun Angle";
+    prop->name = "sunAngle";
+    prop->value = sunAngle;
+    props.append(prop);
+
     // FORWARD SHADING PRIORITY — the slot this light takes in the renderer's
     // shadow-casting order, and which directional IS the sun (0 wins).
     // getPropertyValue/setPropertyValue have carried it since it landed, and the
@@ -169,6 +175,8 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return accurate;
     if(valueName == "forwardShadingPriority")
         return forwardShadingPriority;
+    if(valueName == "sunAngle")
+        return sunAngle;
     // The two asset BINDINGS are reflected read-only-ish: the guid is the
     // document's state, the resolved path and the normalisation are the host's
     // (they come from the asset store, which irisgl cannot reach).
@@ -208,6 +216,9 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return true; }
     if (valueName == "accurate")          { accurate = value.toBool();           return true; }
     if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return true; }
+    // THE SUN'S ANGULAR DIAMETER in degrees (the disc's size). Bounded where
+    // the disc stops being a disc: 0 draws nothing, 20 is a fifth of the sky.
+    if (valueName == "sunAngle")          { sunAngle = float(qBound(0.0, value.toDouble(), 20.0)); return true; }
     if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return true; }
     if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return true; }
     if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return true; }
@@ -298,6 +309,7 @@ SceneNodePtr LightNode::createDuplicate()
 	light->doubleSided = this->doubleSided;
 	light->accurate = this->accurate;
 	light->forwardShadingPriority = this->forwardShadingPriority;
+	light->sunAngle = this->sunAngle;
 	light->iesProfileGuid = this->iesProfileGuid;
 	light->iesProfilePath = this->iesProfilePath;
 	light->iesNormalisation = this->iesNormalisation;
