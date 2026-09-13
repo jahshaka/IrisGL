@@ -2406,6 +2406,22 @@ struct PostFxDesc {
     /// A kind must appear at most once — see LookDesc.
     std::vector<LookDesc> looks;
 
+    /// THE HIERARCHICAL DEPTH PYRAMID (SPECS/NANITE_SPEC.md §4.3) — PHOTON
+    /// SHARED INFRASTRUCTURE, not a picture effect.
+    ///
+    /// Builds a closest-depth mip chain of the scene depth once per frame, right
+    /// after the opaque pass: mip 0 is the depth buffer, and each level after it
+    /// holds the CLOSEST depth of its footprint in the level above, down to 1x1.
+    /// A stackless screen-space trace walks it instead of stepping pixel by
+    /// pixel — Epic measure the compaction that rides on it at up to a 50%
+    /// tracing speedup — and nothing in this engine reads it YET.
+    ///
+    /// So it is OFF by default and costs exactly nothing while off: no texture,
+    /// no pass, no shader. UNLIKE every flag above it, it is NOT cleared on an
+    /// offscreen view — an offscreen capture is where a trace will be measured,
+    /// and the pyramid changes no pixel of the picture either way.
+    bool  hzb = false;
+
     /// THE offscreen opt-in. Offscreen Views ignore every flag above unless this
     /// is set, because their exact colours are what thumbnails, previews and the
     /// pixel suites assert. Two callers set it, both deliberately: a screenshot
@@ -2429,7 +2445,7 @@ struct PostFxDesc {
                distortionStrength == o.distortionStrength &&
                tonemapFixed == o.tonemapFixed &&
                exposureScale == o.exposureScale &&
-               looks == o.looks &&
+               looks == o.looks && hzb == o.hzb &&
                allowOffscreen == o.allowOffscreen;
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
@@ -2763,6 +2779,62 @@ struct EngineThreading {
     /// pass can compile shaders on, and the count the disk cache's applyTo is
     /// given at load. 1 means "serial no matter what the flag says".
     unsigned hlmsThreads = 1;
+};
+
+/// GPU-DRIVEN COMPUTE DISPATCH, measured (ogre-patch 0032; suite
+/// compute.indirect_dispatch). Photon's shared infrastructure, not a feature: a
+/// compaction pass writes how many thread groups the next pass needs and the
+/// next pass runs exactly that many, instead of being dispatched at its worst
+/// case from the CPU. The pin had only vkCmdDispatch with CPU-side counts.
+///
+/// One call runs the whole two-job chain for one input size and reports what
+/// came back, so a suite asserts numbers rather than trusting a log line.
+struct IndirectDispatchProbe {
+    /// The render system implements it at all (false on every backend but
+    /// Vulkan, and on the NULL render system). Everything below is 0 then.
+    bool supported = false;
+    /// What the COUNTING job decided, read back from the argument buffer. Equals
+    /// the number of non-zero entries in the input list it was given.
+    unsigned groupsRequested = 0;
+    /// How many groups the indirectly-dispatched job actually ran, counted from
+    /// the output buffer (one stamped slot per group).
+    unsigned groupsRan = 0;
+    /// What those groups saw as gl_NumWorkGroups.x — the count the GPU read out
+    /// of the buffer, which must equal groupsRequested. 0 when none ran.
+    unsigned groupsSeen = 0;
+    /// The same job dispatched the ordinary way, from a CPU-side count. The
+    /// control: the two output buffers must be identical.
+    unsigned groupsRanCpuSized = 0;
+    /// True when the CPU-sized run and the indirect run produced byte-identical
+    /// output buffers.
+    bool matchesCpuSized = false;
+    /// THE CONTROL FOR THE BARRIER. The same chain run once more with the
+    /// compute-write -> indirect-read barrier suppressed
+    /// (HlmsComputeJob::setIndirectDispatchBuffer's issueBarrier = false). A
+    /// difference proves the barrier is load-bearing on this driver; agreement
+    /// proves nothing either way (the hazard is real whether or not this GPU
+    /// happens to lose the race), which is why the barrier is unconditional.
+    unsigned groupsRanNoBarrier = 0;
+    bool     noBarrierDiffered = false;
+};
+
+/// THE HIERARCHICAL DEPTH PYRAMID, as built (PostFxDesc::hzb; NANITE_SPEC
+/// §4.3). Photon shared infrastructure: reported so a suite can assert the
+/// shape instead of trusting it, and so a future consumer can ask whether there
+/// is anything to read before it binds one.
+struct HzbStatus {
+    /// A pyramid exists in this view's compositor graph right now.
+    bool built = false;
+    /// Mip levels, i.e. compute passes: 1 (the seed) + one per reduction, down
+    /// to 1x1. 11 at 1920x1080.
+    unsigned levels = 0;
+    /// Mip 0's size — the view's own, since the pyramid is full resolution.
+    unsigned width = 0, height = 0;
+    /// Which way is CLOSE (RenderSystem::isReverseDepth). True — the Vulkan
+    /// default at this pin — means the near plane is 1 and a level holds the
+    /// MAXIMUM of its footprint. Reported rather than assumed because the
+    /// reduction operator flips with it.
+    bool reverseDepth = true;
 };
 
 /// Where a corner-anchored readout sits in a View.

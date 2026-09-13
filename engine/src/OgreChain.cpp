@@ -87,6 +87,9 @@
 #include <Compositor/Pass/PassStencil/OgreCompositorPassStencilDef.h>
 #include <Compositor/Pass/PassWarmUp/OgreCompositorPassWarmUp.h>
 #include <Compositor/Pass/PassWarmUp/OgreCompositorPassWarmUpDef.h>
+#include <OgreHlmsCompute.h>
+#include <OgreHlmsComputeJob.h>
+#include <OgreHlmsManager.h>
 #include <OgreMaterialManager.h>
 #include <OgreMaterial.h>
 #include <OgreTechnique.h>
@@ -168,6 +171,15 @@ constexpr const char *kAoApplied   = "jahAoApplied";
 /// depth, refraction copies it, so the scene pass renders through an explicit
 /// RTV whose depth attachment is this texture.
 constexpr const char *kDepth    = "jahDepth";
+/// THE HIERARCHICAL DEPTH PYRAMID (NANITE_SPEC §4.3). One R32_FLOAT texture at
+/// the view's resolution with a FULL mip chain down to 1x1, each level holding
+/// the CLOSEST depth of its footprint in the level above. A single texture and
+/// not the N half-scale textures the spec sketched as the boring option,
+/// because a consumer wants to pick a level per ray step — which is a mip index
+/// on one binding, not N bindings. That forces compute rather than quads:
+/// `CompositorNodeDef::addTargetPass` has no mip parameter, while PASS_COMPUTE
+/// carries `mipmapLevel` on both its texture and its UAV sources.
+constexpr const char *kHzb      = "jahHzb";
 constexpr const char *kSceneRtv = "jahSceneRtv";
 /// SSR. The prepass' second G-buffer (HlmsPbs writes shadow term in x and
 /// packed roughness in y), the RTV the prepass renders through, the ray march's
@@ -360,7 +372,7 @@ void syncRtvDepth(Ogre::CompositorNodeDef *n, const char *name,
 /// copies still point at — a read-after-destroy the moment the next pass is added.
 /// So it is called EXACTLY ONCE, with a capacity no chain can exceed, before
 /// the first addTargetPass. Nothing below may call it again.
-constexpr size_t kMaxTargetPasses = 48;
+constexpr size_t kMaxTargetPasses = 64;   // 48 + up to 14 HZB mip passes
 
 /// THE STORE ACTION OF THE LAST PASS ANY WORKSPACE OF OURS PUTS ON A TARGET.
 ///
@@ -459,7 +471,7 @@ bool ChainDesc::anyEffect() const {
     // A stack of looks is an effect on its own: the LDR filters need the post
     // shape (they read a finished image out of a texture), and nothing else in
     // the description has to be on for that to be true.
-    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || refractions || distortion ||
+    return hdr || ssao || smaaPreset >= 0 || ssr > 0 || refractions || distortion || hzb ||
            !looks.empty();
 }
 
@@ -473,7 +485,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     if (a.looks.size() != b.looks.size()) return false;
     for (size_t i = 0; i < a.looks.size(); ++i)
         if (a.looks[i].kind != b.looks[i].kind) return false;
-    return a.distortion == b.distortion &&
+    return a.distortion == b.distortion && a.hzb == b.hzb && a.hzbLevels == b.hzbLevels &&
            a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
            a.tonemapFixed == b.tonemapFixed &&
            a.letterbox == b.letterbox &&
@@ -684,7 +696,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
     msaa = false;
-    n->setNumLocalTextureDefinitions(26);   // 25 + the letterbox swatch
+    n->setNumLocalTextureDefinitions(27);   // 25 + the letterbox swatch + the HZB
     if (desc.letterbox) addTex(n, kLetterboxFill, Ogre::PFG_RGBA8_UNORM, 4u, 4u);
 
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
@@ -759,7 +771,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // ...and DISTORTION, whose scene pass depth-tests against the opaque scene
     // (that is what makes haze behind a wall invisible) — so the depth has to be
     // a named attachment it can borrow, and the opaque pass has to STORE it.
-    const bool namedDepth = desc.ssao || desc.ssr || desc.refractions || desc.distortion;
+    // ...and the HZB, which is nothing BUT a consumer of the scene depth: it
+    // cannot read a depth buffer the compositor picked out of a pool.
+    const bool namedDepth = desc.ssao || desc.ssr || desc.refractions || desc.distortion ||
+                            desc.hzb;
     if (namedDepth) {
         auto *td = addTex(n, kDepth, Ogre::PFG_D32_FLOAT);
         td->preferDepthTexture = true;
@@ -831,6 +846,30 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
                               desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
         }
+    }
+
+    // THE HZB (NANITE_SPEC §4.3). Declared beside SSAO's depth downscale because
+    // it is the general form of it: one R32_FLOAT texture at the view's
+    // resolution carrying a full closest-depth mip chain. No RenderTargetView —
+    // nothing ever renders INTO it; every level is written by a compute pass
+    // through a UAV, which is the only way to address a mip level at all
+    // (addTargetPass has no mip parameter).
+    if (desc.hzb && desc.hzbLevels > 0u) {
+        auto *td = n->addTextureDefinition(kHzb);
+        td->width = 0u; td->height = 0u;
+        td->widthFactor = 1.0f; td->heightFactor = 1.0f;
+        td->format = Ogre::PFG_R32_FLOAT;
+        td->numMipmaps = Ogre::uint8(desc.hzbLevels);
+        td->depthBufferId = 0;
+        td->fsaa = "1";
+        // Uav AND RenderToTexture, even though nothing ever renders into it:
+        // TextureDefinitionBase::createTextures calls _setDepthBufferDefaults
+        // unconditionally, and that throws "Texture must've been created with
+        // TextureFlags::RenderToTexture" on anything else (OgreTextureGpu.cpp:676).
+        // DiscardableContent is deliberately NOT claimed — the seed rewrites
+        // every texel of mip 0 each frame and each reduce rewrites its own
+        // level, so no level is ever read before this frame wrote it.
+        td->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
     }
 
     if (desc.ssao) {
@@ -1096,7 +1135,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // pass, which is the whole reason haze can hide behind a wall. The VUID
         // lesson below applies verbatim: DontCare makes the contents UNDEFINED,
         // not "kept but unpromised".
-        p->mStoreActionDepth   = (desc.ssao || ssr || desc.refractions || desc.distortion)
+        p->mStoreActionDepth   = (desc.ssao || ssr || desc.refractions || desc.distortion ||
+                                  desc.hzb)
                                      ? Ogre::StoreAction::Store : Ogre::StoreAction::DontCare;
         p->mStoreActionStencil = Ogre::StoreAction::DontCare;
         // Ignored in a prepass mode (the flag's own documentation says so), and
@@ -1121,6 +1161,64 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         p->mProfilingId = "Jahshaka opaque";
         // THE PASS THAT UPDATES THE MIRRORS — see the other chain shape above.
         p->mIdentifier = planar::kPlanarUpdatePassIdentifier;
+    }
+
+    // ---- THE HZB, right after the opaque pass (NANITE_SPEC §4.3) ------------
+    //
+    // One compute pass per mip: the SEED copies the scene depth into mip 0 (a
+    // separate job because its source is a depth attachment, and a multisample
+    // one when the view is MSAA), then one REDUCE per level, each reading the
+    // level above as a UAV and writing its own. Reading the source as a UAV
+    // rather than as a texture is deliberate: an Ogre resource layout is
+    // per-TEXTURE, not per-mip, so binding one texture as Texture and Uav in the
+    // same pass would ask the barrier solver for two layouts at once. Both slots
+    // being Uav asks for one.
+    //
+    // The jobs are SHARED by every level: CompositorPassCompute::execute calls
+    // setResourcesToJob() every frame, so each pass re-binds its own mips before
+    // dispatching, and HlmsComputeJob::_calculateNumThreadGroupsBasedOnSetting
+    // reads the bound UAV's MIP dimensions — so the group counts follow the
+    // level with no arithmetic of ours.
+    if (desc.hzb && desc.hzbLevels > 0u) {
+        Ogre::Root &root = Ogre::Root::getSingleton();
+        Ogre::HlmsCompute *hc = root.getHlmsManager() ? root.getHlmsManager()->getComputeHlms()
+                                                      : nullptr;
+        const char *seedName = msaa ? "Jahshaka/HzbSeedMsaa" : "Jahshaka/HzbSeed";
+        Ogre::HlmsComputeJob *seed = hc ? hc->findComputeJobNoThrow(seedName) : nullptr;
+        Ogre::HlmsComputeJob *reduce = hc ? hc->findComputeJobNoThrow("Jahshaka/HzbReduce") : nullptr;
+        if (seed && reduce) {
+            // WHICH WAY IS CLOSE. Ogre's Vulkan render system defaults to
+            // REVERSE-Z (near = 1, far = 0), so the closest depth of a footprint
+            // is its MAXIMUM — but the shader is told rather than assuming it, so
+            // a build that turns reverse depth off still produces a conservative
+            // pyramid instead of an inverted one.
+            Ogre::RenderSystem *rs = root.getRenderSystem();
+            reduce->setProperty("hzb_reverse_z", (rs && rs->isReverseDepth()) ? 1 : 0);
+
+            {
+                Ogre::CompositorTargetDef *t = n->addTargetPass("");
+                t->setNumPasses(1);
+                auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
+                    t->addPass(Ogre::PASS_COMPUTE));
+                c->mJobName = seedName;
+                c->mProfilingId = "Jahshaka HZB 0";
+                c->addTextureSource(0, kDepth);
+                c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, 0,
+                                Ogre::PFG_UNKNOWN, false);
+            }
+            for (unsigned m = 1u; m < desc.hzbLevels; ++m) {
+                Ogre::CompositorTargetDef *t = n->addTargetPass("");
+                t->setNumPasses(1);
+                auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
+                    t->addPass(Ogre::PASS_COMPUTE));
+                c->mJobName = "Jahshaka/HzbReduce";
+                c->mProfilingId = std::string("Jahshaka HZB ") + std::to_string(m);
+                c->addUavSource(0, kHzb, Ogre::ResourceAccess::Write, 0, Ogre::uint8(m),
+                                Ogre::PFG_UNKNOWN, false);
+                c->addUavSource(1, kHzb, Ogre::ResourceAccess::Read, 0, Ogre::uint8(m - 1u),
+                                Ogre::PFG_UNKNOWN, false);
+            }
+        }
     }
 
     // MSAA resolve, in HDR space.

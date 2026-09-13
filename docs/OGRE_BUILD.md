@@ -545,10 +545,68 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     already carries 0028 must apply ONE NEW patch rather than reset the file.
     Covered by `gi.probe_gate` (h) and (i).
 
+32. **0032-compute-indirect-dispatch** — SOURCE (OgreMain + the Vulkan render
+    system; every tree must re-run `build-ogre.sh`). GPU-DRIVEN COMPUTE
+    DISPATCH: `HlmsComputeJob::setIndirectDispatchBuffer( BufferPacked*,
+    offsetBytes, issueBarrier = true )` + `RenderSystem::_dispatchIndirect` /
+    `supportsIndirectDispatch()`, implemented on Vulkan as
+    `vkCmdDispatchIndirect`. The base implementation throws
+    ERR_NOT_IMPLEMENTED and reports false, so D3D11, Metal, GL3Plus, GLES2 and
+    NULL compile unchanged.
+
+    WHY: every Lumen-shaped stage compacts between passes, and Epic call
+    indirect dispatch "essential" (up to a 50% tracing speedup from the
+    compaction it enables). The pin had ONLY `vkCmdDispatch` with CPU-side
+    counts; `setNumThreadGroupsBasedOn` is CPU-side arithmetic over a bound
+    resource's DIMENSIONS and can never see a number a shader computed. It is
+    the one mandatory piece of supporting technology for either Photon arm
+    (SPECS/research/LUMEN_SUPPORTING_TECH_2026-09-13.md §6, NANITE_SPEC §4.2).
+
+    THREE THINGS TO KNOW.
+    (a) The argument buffer must be a `UavBufferPacked`, not an
+    `IndirectBufferPacked`: `VulkanVaoManager` forces `mSupportsIndirectBuffers`
+    to false (:183-184) and emulates indirect DRAW buffers in system memory, so
+    such a buffer has no BufferInterface at all — while the ordinary VBO pools
+    are already created with `VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT` (:1122-1127),
+    so no allocator change was needed.
+    (b) THE BARRIER IS HAND-ROLLED AND DELIBERATELY NOT REGISTERED WITH THE
+    SOLVER. `executeResourceTransition`'s buffer branch only ever sets
+    SHADER_READ/SHADER_WRITE and `ogreToVkStageFlags` knows only the six shader
+    stages, so `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` at
+    `VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT` is unreachable from the BarrierSolver
+    — and `assumeTransition` exists only for textures, so it cannot be told
+    after the fact either. `_dispatchIndirect` therefore issues a
+    `VkBufferMemoryBarrier` over the twelve bytes it reads, covering both a
+    compute SHADER_WRITE and a TRANSFER_WRITE (Ogre's copy encoder does not end
+    with INDIRECT_COMMAND_READ in its destination mask either). It changes no
+    state the solver tracks, so the solver stays coherent by construction; and
+    routing it through `executeResourceTransition` would be wrong anyway —
+    that function begins with `endAllEncoders()`, which would close the compute
+    encoder the dispatch is being recorded into.
+    (c) `HlmsCompute::compileShader` no longer demands a non-zero
+    `num_thread_groups_*` for a job that carries an indirect buffer. That check
+    exists because Metal needs the counts on the C++ side; an indirectly
+    dispatched job has none by definition. The threads-per-group half is
+    untouched.
+
+    MEASURED by `compute.indirect_dispatch`: at 0, 7 and 4096 survivors the
+    count the counting job wrote, the number of groups that ran and the count
+    the groups read all agree, and the output is byte-identical to a CPU-sized
+    dispatch of the same job. With `issueBarrier = false`, Vulkan
+    synchronization validation reports SYNC-HAZARD-READ-AFTER-WRITE at
+    `vkCmdDispatchIndirect` naming exactly the missing access/stage pair; with
+    the barrier the layer is silent. (The data hazard itself did not reproduce
+    on this driver — which is why the barrier is unconditional.)
+
+    ALSO NOTE: a CPU-sized dispatch cannot express "run nothing" at all (Ogre
+    refuses to compile a job whose group counts multiply to zero), so the
+    empty-list case — the one a compaction hits most often — has no non-indirect
+    equivalent short of a CPU-side branch the CPU has no information to take.
+
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0023/0029/0030/0031) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026 and 0027 are SOURCE-only) — the Studio build stages the
+SOURCE + media; 0025, 0026, 0027 and 0032 are SOURCE-only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
 `jahOrthoParams` at a shader that does not declare it (Ogre's setNamedConstant
