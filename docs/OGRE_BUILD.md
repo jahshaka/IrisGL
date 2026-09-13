@@ -433,44 +433,121 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     claimed: the engine counts crossings
     (`world.giStatus().probeGateCrossings`) and `gi.probe_gate` gates 100
     non-crossing pushes at zero and a 41-push drag at two.
-    Covered by `gi.probe_gate`.
-**DEFERRED (not in the stack, and HOLDING NO NUMBER).**
-`thirdparty/ogre-patches/deferred/0029-pcc-probe-visibility-from-captured-depth.patch.DEFERRED`
-— a designed, measured patch that is NOT shipped. It lives in `deferred/` (out of
-`build-ogre.sh`'s `*.patch` glob, which only scans the stack directory) and its
-`0029` is a WORKING TITLE, not a claim on that number: numbers are claimed at
-merge (CLAUDE.md), so whoever revives it takes the next free one then. To apply
-it: move it back into `ogre-patches/`, renamed to the next free number.
+    Covered by `gi.probe_gate`. (The decal permutation that never COMPILED is
+    patch 0031, kept separate because it is an upstream bug that needs no probe
+    grid and no gate — this entry's decal exclusion only makes Studio generate
+    it far more often.)
+29. **0029-pcc-probe-visibility-from-captured-depth** — MEDIA-only (two Hlms
+    `.any` templates, both CRLF). A surface takes a probe's picture only if it
+    is IN that picture (owner decision 2026-09-13 Q2: "the engine should not
+    know if there is a room? Isn't it the layout of objects in a scene that
+    matters?"). The only spatial tests at this pin are two axis-aligned boxes
+    with three separate margins, and after Jahshaka's A2 shape clamp the
+    parallax box is ~the whole probe region indoors, so the entry gate excludes
+    nothing there: the outward face of a slab whose inward face a probe
+    photographed is inside the same box. The probe already holds the answer —
+    the DepthCompressor writes `min(0.5 * fDist/fApproxDist, 1)` into the cube's
+    alpha and the IBL convolution preserves it at mip 0 (roughness 0 makes the
+    GGX importance sample degenerate to the texel itself) — so the shader
+    marches from the probe camera towards the shaded point, reads what the probe
+    saw that way, and treats "it saw something nearer" as occlusion. The
+    confidence multiplies the CONTRIBUTION (folded into `probeFade`) while
+    `cubemapAccumWeight` keeps the full weight, so the unclaimed share returns to
+    VCT / the irradiance field / the sky through patch 0017's blend instead of
+    turning into black (lane E3's measured lesson). Slack is RELATIVE — 8% of
+    the probe-to-point distance, floored at 2% of the captured distance —
+    because the error is a texel's solid angle, 8-bit depth at the LDR tiers and
+    filtering across silhouettes. AND ONLY A PROBE IN FRONT OF THE SURFACE IS
+    ASKED (`saturate( dot( N, dirToProbe ) * 4 )`, both vectors in the probe's
+    local space): the thing most often standing between a probe and a shaded
+    point is the shaded point's OWN OBJECT — measured in `gi.probe_gate`'s room,
+    whose witnesses' only weighted probes stand behind them, the chrome box's
+    front face reads 79% of its own distance and the runtime plate 39%, and a
+    depth-only rule takes both to black. A probe behind the surface keeps
+    upstream's box reprojection; a probe in front is tested, and there the answer
+    means something — a partition, a wall, a second room. (A SINGLE-SIDED
+    material drawn with culling off keeps its front normal on its back face, so
+    a probe in front of that face reads as "behind" and is not tested — the leak
+    survives there; a two-sided material flips by `gl_FrontFacing` and is
+    tested.) The limit, stated because it is real: a surface separated from its probe by nothing but a thin
+    wall's own thickness is geometrically the mirror-box case and no depth rule
+    of any tightness separates them; what answers that is the enclosure
+    measurement that decides where probes are built at all, plus patch 0028's
+    material gate.
+    IT DEPENDS ON 0030 AND MUST NOT SHIP WITHOUT IT: this patch was designed and
+    measured on 2026-09-13, then PARKED for a day because it also took a
+    legitimate mirror in a sealed room to near-black — with 0030's encoding
+    defect live, a probe reports a surface 2.256 m away as 1.058 m and this test
+    honestly concludes "cannot see it". 0029 without 0030 = the leak closed and
+    the mirror black; both = the leak closed and the mirror at r 1.000.
+    Measured: a metal box sealed off from a red wall by a partition read
+    r 1.000 g 0.055 (the wall it cannot see) and reads r 0.000 with the patch;
+    the same room's legitimate mirror reads r 1.000.
+    Covered by `gi.probe_visibility` (both phases).
 
-It WORKS on the case it was written for — `gi.probe_visibility` measures
-r 1.000 -> 0.000 — but it also crushed a LEGITIMATE reflection in `gi.budget`
-(a mirror in a sealed 2x1x2 room fell to r 0.004, with the probe reporting a
-captured depth of about 10% of the distance to the shading point in that
-direction; root cause not established in-lane). Shipping "the mirror goes black
-in a sealed room" to fix "the roof shows the room" is the wrong trade.
-`gi.probe_visibility` is registered as a CHARACTERISATION of the leak meanwhile,
-so the defect is executable and the fix has a scene that flips in one place. The
-design below is unchanged and is the intended fix. MEDIA-only. A surface
-takes a probe's picture only if it is IN that picture (owner decision
-2026-09-13 Q2). The only spatial tests at this pin are two axis-aligned
-boxes with three separate margins, and after Jahshaka's A2 shape clamp the
-parallax box is ~the whole probe region indoors, so the entry gate excludes
-nothing there: the outward face of a slab whose inward face a probe
-photographed is inside the same box. The probe already holds the answer —
-the DepthCompressor writes `min(0.5 * fDist/fApproxDist, 1)` into the cube's
-alpha and the IBL convolution preserves it — so the shader marches from the
-probe camera towards the shaded point, reads what the probe saw that way,
-and treats "it saw something nearer" as occlusion. The confidence multiplies
-the CONTRIBUTION (folded into `probeFade`) while `cubemapAccumWeight` keeps
-the full weight, so the unclaimed share returns to VCT / the irradiance
-field / the sky through patch 0017's blend instead of turning into black.
-Measured fail-before: a mirror sealed off from a red wall by a partition
-read r 1.000 g 0.055 (the wall it cannot see) and reads 0.000 with the
-patch. Covered by `gi.probe_visibility`.
+30. **0030-pcc-depth-compressor-matrix-order** — MEDIA-only (a low-level
+    material's four shader files). A probe's captured DEPTH was encoded against
+    the WRONG DIRECTION on GLSL/Vulkan and Metal, so every probe that does not
+    sit at the centre of its own parallax box lied about how far it could see
+    along X and Y. `PccDepthCompressor_ps.any` does
+    `mul( p_viewSpaceToProbeLocalSpace, probeToPosDir )`, and `mul` is
+    `((x) * (y))` in those wrappers — but Ogre uploads a `Matrix3` ROW BY ROW
+    into the padded COLUMNS of a GLSL `mat3`
+    (`GpuProgramParameters::setNamedConstant(const String&, const Matrix3&)`,
+    OgreGpuProgramParams.cpp:3208-3224), so `M * v` there evaluates the
+    TRANSPOSE and `v * M` is the intended product. Upstream's own Hlms piece
+    splits exactly this product by syntax (`Cubemap_piece_all.any`,
+    `toProbeLocalSpace`); the compressor, a plain material rather than an Hlms
+    template, does not. It hid because the transpose of a rotation is its
+    inverse, the two Z faces' cubemap rotations are self-inverse (identity and
+    180° about Y) and the only consumer is `fApproxDist` — the distance from the
+    probe camera to its own box, which is symmetric for a centred probe. HLSL is
+    left exactly as upstream shipped it and is SUSPECTED WRONG FOR THE SAME
+    REASON — D3D11 packs cbuffer matrices column-major
+    (`D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR`, OgreD3D11HLSLProgram.cpp:494/1580)
+    and the Matrix3 upload has no transpose (OgreGpuProgramParams.cpp:1109-1122
+    covers Matrix4 only), so `mul( m, v )` is most likely the transpose there
+    too; what makes that form right in the Hlms pieces is that their matrix is
+    ROW-CONSTRUCTED in the shader rather than uploaded. Unmeasured here (no
+    D3D11 box), recorded in SPECS/OGRE_UPSTREAM_ISSUES.md, untouched by the
+    patch — which adds one macro, `OGRE_MUL_M3V`, per wrapper.
+    MEASURED by reading the probe cubes back texel by texel: in a sealed 20 m
+    room with a 2x1x1 grid, probe 0 recorded a surface 2.256 m away at 1.058 m
+    (47%) and probe 1 recorded the same surface 12.21 m off at 31.03 m (254%,
+    saturated); with the patch, 2.275 m and 12.168 m. In an asymmetric coloured
+    room the six face distances read 9.30 (saturated) / 0.49 / 2.00 / 2.00 /
+    6.00 / 2.00 against a true 4.50 / 1.50 / 2.00 / 2.00 / 6.00 / 2.00, and
+    every one of them is right with the patch. Three consumers were reading
+    those numbers: `PccPerPixelGridPlacement::buildEnd`'s shrink-fit (the fit
+    Jahshaka's A2 clamp exists to contain — with the patch the fitted shapes hug
+    the room), `getPccVctBlendWeight`'s PCC-vs-VCT trust window, and patch 0029.
+    Covered by `gi.probe_visibility` phase 2 (r 1.000 with, r 0.000 without).
+
+31. **0031-pbs-decals-f0-scalar-swizzle** — MEDIA-only (one Hlms `.any`, CRLF).
+    An UPSTREAM bug, reachable in Studio long before any patch of ours and found
+    by `gi.probe_gate` on 2026-09-13, which was logging eight of these per run
+    while passing: `ERROR: 'xyz' : vector swizzle selection out of range`, from
+    `ForwardPlus_DecalsCubemaps_piece_ps.any:99` writing `pixelData.F0.xyz` in a
+    permutation where `float_fresnel` is a SCALAR. F0 is a `midf3` only when
+    `fresnel_scalar` is set (the FresnelSwizzle pair,
+    `Main/500.Structs_piece_vs_piece_ps.any:283-287`), and the branch runs for
+    `metallic_workflow || fresnel_workflow || fresnel_scalar` — the middle one,
+    an authored F0 in the non-separate form, which is what
+    `HlmsPbsDatablock::setFresnel` writes for an ordinary material, keeps it
+    scalar. On Vulkan `VulkanProgram::compile` then throws and the permutation is
+    lost, and A PERMUTATION THAT DOES NOT COMPILE RENDERS BLACK, SILENTLY:
+    measured, the decal region of such a material reads 0.000/0.000/0.000 where
+    it should reflect the room (50 compile errors in the suite's log), and
+    r 0.071 g 0.012 b 0.012 with the patch (zero errors). Split on
+    `fresnel_scalar`, the property that decides the type — upstream's own idiom.
+    Kept OUT of 0028 deliberately: the bug needs no probe grid and no gate (0028
+    only makes Studio generate the permutation far more often), and a tree that
+    already carries 0028 must apply ONE NEW patch rather than reset the file.
+    Covered by `gi.probe_gate` (h) and (i).
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0023) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0023/0029/0030/0031) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026 and 0027 are SOURCE-only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
