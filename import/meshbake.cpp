@@ -66,7 +66,16 @@ namespace
 // DECLARED length (a double, after the clip name) — the only record of a
 // one-frame clip's length once the preset has merged its identical keys. A v3
 // blob replayed would bring the Mixamo T-pose clip back at zero seconds.
-constexpr int kFormatVersion = 4;
+// v5 (2026-09-13, SKY_LIGHT_SPEC.md §4 / round-2 review item 2): the MEANING of
+// every stored QColor changed. An imported material's colours are LINEAR at
+// their source (glTF says so for baseColorFactor, emissiveFactor and
+// specularColorFactor; assimp hands them through) and the importer used to put
+// the raw float into a QColor, which the renderer now decodes as sRGB — so a
+// bake made before the encode landed replays a colour that darkens by a gamma.
+// The LAYOUT is unchanged; the bump exists to re-bake every asset that carries
+// the old meaning, which no fingerprint could have caught (the source file did
+// not change, the reader of it did).
+constexpr int kFormatVersion = 5;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same

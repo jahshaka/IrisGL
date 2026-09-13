@@ -1324,7 +1324,7 @@ private:
         int     bakeResolution = 0;
         bool    hdr = false;
         /// Color: a SINGLE_COLOR sky is a REAL sky now (SKY_LIGHT_SPEC §2) —
-        /// baked as a 16x8 strip of the colour and pushed through the equirect
+        /// baked as a 64x32 strip of the colour and pushed through the equirect
         /// path, so its SH band 0 is linear(colour), its reflections are
         /// uniform, and the sun disc has a sky pass to compose over.
         QColor  skyColor;

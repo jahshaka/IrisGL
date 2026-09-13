@@ -744,6 +744,11 @@ void OgreScene::applySunDisc(const SunDisc &sun) {
 void OgreScene::destroySunDisc() {
     if (mSunDisc) { mSceneMgr->destroyRectangle2D(mSunDisc); mSunDisc = nullptr; }
     mSunDiscMaterial.reset();
+    // ...AND FORGET WHAT WAS PUSHED. destroySky() takes the disc with it (a
+    // NoSky description is a full clear), so the quad is gone while mSkyDesc
+    // still says a disc is enabled — and the next push, being value-equal,
+    // would do nothing and leave the sun missing until something else moved it.
+    mSkyDesc.sun = SunDisc();
 }
 
 void OgreScene::destroySky() {

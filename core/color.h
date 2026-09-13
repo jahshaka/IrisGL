@@ -85,6 +85,32 @@ inline LinearColor linearOf(const QColor &c)
     return out;
 }
 
+/// THE INVERSE, and the reason it exists: `linearOf` above is a DECODE applied
+/// to every colour on its way into the renderer, so the document's invariant is
+/// "a QColor is sRGB". An IMPORTER reading a format that specifies LINEAR
+/// values — glTF's baseColorFactor, specularColorFactor and emissiveFactor are
+/// all linear by spec, and assimp hands COLOR_DIFFUSE through unchanged — has
+/// a linear number in its hand and must ENCODE it before it becomes a QColor,
+/// or the renderer decodes it a second time and every flat-coloured import
+/// darkens by a gamma (round-2 review item 2).
+///
+/// 0 and 1 are fixed points, as they are for linearOf.
+inline float srgbOfChannel(float linear)
+{
+    if (linear <= 0.0f) return 0.0f;
+    if (linear >= 1.0f) return 1.0f;
+    return linear <= 0.0031308f ? linear * 12.92f
+                                : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+}
+
+/// A linear RGB triple as the sRGB QColor the document stores. Alpha is not a
+/// colour and passes through.
+inline QColor srgbOf(float r, float g, float b, float a = 1.0f)
+{
+    return QColor::fromRgbF(qreal(srgbOfChannel(r)), qreal(srgbOfChannel(g)),
+                            qreal(srgbOfChannel(b)), qreal(qBound(0.0f, a, 1.0f)));
+}
+
 }  // namespace iris
 
 #endif  // IRIS_CORE_COLOR_H

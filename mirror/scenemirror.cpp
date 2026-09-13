@@ -5588,6 +5588,12 @@ iris::LightNode *SceneMirror::resolveGiLight() const
     iris::LightNode *any = nullptr;
     for (const auto &l : mSource->lights) {
         if (l.isNull()) continue;
+        // ...but never a SKY LIGHT. It has no position and no direction to
+        // trace from — it IS the ambient (SKY_LIGHT_SPEC.md §2) — and Instant
+        // Radiosity given one would cast its virtual point lights from the
+        // world origin. It is also the first light in a scene built from the
+        // new template, so "the lowest nodeId of any type" would find it.
+        if (l->lightType == iris::LightType::Sky) continue;
         if (!any || l->nodeId < any->nodeId) any = l.data();
     }
     return any;
@@ -5924,7 +5930,11 @@ void SceneMirror::applySky(View *view)
         const auto sunLight = mSource->sunLight();
         if (mSource->sunDiscVisible && sunLight && sunLight->isVisibleInScene()) {
             const iris::Vec3 travel = sunLight->getLightDir();
-            if (travel.lengthSquared() > 1e-12f) {
+            // A ZERO ANGULAR SIZE IS NOT A DISC, and the shader cannot draw one:
+            // its edge is a smoothstep between cos(radius) and cos(0.88*radius),
+            // which are the SAME number at radius 0 — undefined behaviour, and
+            // in practice a full-screen flash. sunAngle 0 means "no disc".
+            if (travel.lengthSquared() > 1e-12f && sunLight->sunAngle > 0.0f) {
                 const iris::Vec3 toSun = -travel.normalized();
                 sun.enabled = true;
                 sun.dir[0] = toSun.x(); sun.dir[1] = toSun.y(); sun.dir[2] = toSun.z();
@@ -5967,6 +5977,11 @@ namespace {
 // below point-samples the result: without this a 4K sky is decimated ~30x and
 // small bright features (a sun disc) alias into a crawling speckle as the sky
 // changes (VISUAL_PARITY_SPEC item 3a).
+//
+// THIS ONE AVERAGES ENCODED BYTES, and that is correct for what it feeds: the
+// cube faces it produces are UPLOADED as sRGB textures, so the average has to
+// live in the same encoding the texels do. The SH integral is the other case
+// and uses decodeLinearTo below — see its header for why the two cannot share.
 QImage boxDownscaleTo(const QImage &src, int maxW)
 {
     QImage img = src;
@@ -5988,8 +6003,83 @@ QImage boxDownscaleTo(const QImage &src, int maxW)
     }
     return img;
 }
+
 /// Widest equirect the 9-band ambient integral ever runs on (SKY_LIGHT_SPEC §7).
 constexpr int kAmbientShMaxWidth = 256;
+/// ...and the cube path's per-face size, which has always been 32.
+constexpr int kAmbientShCubeFaceWidth = 32;
+
+/// An image in LINEAR light, r/g/b per texel.
+struct LinearImage {
+    int w = 0, h = 0;
+    std::vector<float> px;                       // 3 floats per texel
+    const float *at(int x, int y) const { return &px[(size_t(y) * size_t(w) + size_t(x)) * 3u]; }
+    float *at(int x, int y) { return &px[(size_t(y) * size_t(w) + size_t(x)) * 3u]; }
+};
+
+/// DECODE FIRST, THEN BOX-FILTER — the two do not commute, and the difference
+/// is not small. Averaging sRGB BYTES and decoding the average answers
+/// srgb((a+b)/2); the mean radiance of those two texels is (srgb(a)+srgb(b))/2.
+/// A black-and-white checker is the extreme: byte-first says 0.216 of radiance,
+/// linear-first says 0.5. A sky's SH bands are MEAN RADIANCE by definition, so
+/// every halving on the way to them has to happen in linear — which the bound
+/// added in this lane made load-bearing, because before it there was no halving
+/// at all on the equirect path.
+///
+/// The first halving is FUSED with the decode so a 4K sky's transient is a
+/// quarter of what a full-size float copy would be (25 MB rather than 100).
+LinearImage decodeLinearTo(const QImage &src8, int maxW)
+{
+    const float *lut = iris::srgbToLinearTable();
+    const QImage src = src8.format() == QImage::Format_RGBA8888
+                           ? src8 : src8.convertToFormat(QImage::Format_RGBA8888);
+    LinearImage out;
+    if (src.width() <= 0 || src.height() <= 0) return out;
+
+    if (src.width() > maxW && src.width() >= 2 && src.height() >= 2) {
+        out.w = src.width() / 2;
+        out.h = src.height() / 2;
+        out.px.resize(size_t(out.w) * size_t(out.h) * 3u);
+        for (int y = 0; y < out.h; ++y) {
+            const unsigned char *r0 = src.constScanLine(y * 2);
+            const unsigned char *r1 = src.constScanLine(y * 2 + 1);
+            for (int x = 0; x < out.w; ++x) {
+                const size_t a = size_t(x) * 8u;
+                float *o = out.at(x, y);
+                for (int c = 0; c < 3; ++c)
+                    o[c] = 0.25f * (lut[r0[a + c]] + lut[r0[a + 4 + c]] +
+                                    lut[r1[a + c]] + lut[r1[a + 4 + c]]);
+            }
+        }
+    } else {
+        out.w = src.width();
+        out.h = src.height();
+        out.px.resize(size_t(out.w) * size_t(out.h) * 3u);
+        for (int y = 0; y < out.h; ++y) {
+            const unsigned char *p = src.constScanLine(y);
+            for (int x = 0; x < out.w; ++x) {
+                float *o = out.at(x, y);
+                for (int c = 0; c < 3; ++c) o[c] = lut[p[size_t(x) * 4u + c]];
+            }
+        }
+    }
+    // ...and the rest of the way, in float.
+    while (out.w > maxW && out.w >= 2 && out.h >= 2) {
+        LinearImage half;
+        half.w = out.w / 2;
+        half.h = out.h / 2;
+        half.px.resize(size_t(half.w) * size_t(half.h) * 3u);
+        for (int y = 0; y < half.h; ++y)
+            for (int x = 0; x < half.w; ++x) {
+                const float *a = out.at(x * 2, y * 2), *b = out.at(x * 2 + 1, y * 2);
+                const float *c = out.at(x * 2, y * 2 + 1), *d = out.at(x * 2 + 1, y * 2 + 1);
+                float *o = half.at(x, y);
+                for (int k = 0; k < 3; ++k) o[k] = 0.25f * (a[k] + b[k] + c[k] + d[k]);
+            }
+        out = std::move(half);
+    }
+    return out;
+}
 } // namespace
 
 void SceneMirror::clearSkyAmbient()
@@ -6001,10 +6091,15 @@ void SceneMirror::clearSkyAmbient()
 bool SceneMirror::integrateSkyAmbientSh(const QImage &equirect, float shOut[27])
 {
     if (equirect.isNull()) return false;
-    const QImage src = equirect.convertToFormat(QImage::Format_RGBA8888);
-    const int W = src.width(), H = src.height();
+    // THE BOUND AND THE DECODE, both here (SKY_LIGHT_SPEC.md §7). Nine SH bands
+    // cannot see finer than a quarter-sphere lobe, so a 4K HDRI is integrated
+    // from a 256-wide box-filtered copy — a 40-130x cut with no look change —
+    // and every halving happens in LINEAR light, because an SH band is a mean
+    // RADIANCE and averaging sRGB bytes answers a different question
+    // (decodeLinearTo's header has the arithmetic).
+    const LinearImage src = decodeLinearTo(equirect, kAmbientShMaxWidth);
+    const int W = src.w, H = src.h;
     if (W <= 0 || H <= 0) return false;
-    const float *lut = srgbTable();
     // Per-column longitude, hoisted: every row shares it.
     std::vector<float> sinT(static_cast<std::vector<float>::size_type>(W)),
                        cosT(static_cast<std::vector<float>::size_type>(W));
@@ -6020,12 +6115,11 @@ bool SceneMirror::integrateSkyAmbientSh(const QImage &equirect, float shOut[27])
         // Solid angle of one texel in this row: sin(phi) * dphi * dtheta.
         const double w = double(sp) * (kPi / H) * (2.0 * kPi / W);
         if (w <= 0.0) continue;
-        const unsigned char *p = src.constScanLine(row);
         for (int col = 0; col < W; ++col) {
             const float x =  sp * sinT[size_t(col)];
             const float z = -sp * cosT[size_t(col)];
-            acc.add(x, y, z, lut[p[size_t(col) * 4u + 0]], lut[p[size_t(col) * 4u + 1]],
-                    lut[p[size_t(col) * 4u + 2]], w);
+            const float *t = src.at(col, row);
+            acc.add(x, y, z, t[0], t[1], t[2], w);
         }
     }
     acc.finish(shOut);
@@ -6043,21 +6137,20 @@ void SceneMirror::recordCubeAmbientSh(const QImage faces[6])
     static const float ax[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     static const float rt[6][3] = {{0,0,-1},{0,0,1},{1,0,0},{1,0,0},{1,0,0},{-1,0,0}};
     static const float upv[6][3] = {{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
-    const float *lut = srgbTable();
     ShAccum acc;
     bool any = false;
     for (int f = 0; f < 6; ++f) {
         // A face is uniform enough at 32x32 for an irradiance integral, and the
-        // downscale is a box filter, so this is cheap and stable.
-        const QImage img = boxDownscaleTo(faces[f].convertToFormat(QImage::Format_RGBA8888), 32);
-        const int N = img.width(), M = img.height();
+        // downscale is a box filter, so this is cheap and stable — IN LINEAR,
+        // for the same reason the equirect path is (decodeLinearTo's header).
+        const LinearImage img = decodeLinearTo(faces[f], kAmbientShCubeFaceWidth);
+        const int N = img.w, M = img.h;
         if (N <= 0 || M <= 0) continue;
         any = true;
         const float *a = ax[f], *r = rt[f], *u = upv[f];
         const double texel = (2.0 / N) * (2.0 / M);
         for (int py = 0; py < M; ++py) {
             const float uv = 1.0f - 2.0f * (py + 0.5f) / M;
-            const unsigned char *p = img.constScanLine(py);
             for (int px = 0; px < N; ++px) {
                 const float ur = 2.0f * (px + 0.5f) / N - 1.0f;
                 float dx = a[0] + r[0] * ur + u[0] * uv;
@@ -6067,8 +6160,8 @@ void SceneMirror::recordCubeAmbientSh(const QImage faces[6])
                 if (len < 1e-6f) continue;
                 const double w = texel / (double(len) * len * len);
                 dx /= len; dy /= len; dz /= len;
-                acc.add(dx, dy, dz, lut[p[size_t(px) * 4u + 0]], lut[p[size_t(px) * 4u + 1]],
-                        lut[p[size_t(px) * 4u + 2]], w);
+                const float *t = img.at(px, py);
+                acc.add(dx, dy, dz, t[0], t[1], t[2], w);
             }
         }
     }
@@ -6080,19 +6173,9 @@ void SceneMirror::recordCubeAmbientSh(const QImage faces[6])
 bool SceneMirror::buildSkyReflection(const QImage &equirect)
 {
     if (equirect.isNull()) return false;
-    // THE SH BOUND (SKY_LIGHT_SPEC.md §7, the piece that lands in this lane).
-    // The integral used to run over EVERY texel of the full-resolution image —
-    // 8.4 M texels x 9 bands for a 4K HDRI, on the UI thread, per sky change.
-    // Nine spherical-harmonic bands cannot represent anything finer than a
-    // quarter-sphere lobe, so the fine detail is projected onto zero either
-    // way; the CUBE path has always integrated 32^2 faces for exactly this
-    // reason. Box-downscale to at most 256 wide first (an exact 2x2 average per
-    // step, so it is a MEAN of the same texels the full integral averaged, not
-    // a decimation) and the answer is the same to well under a 255th while the
-    // work drops 40-130x.
-    const QImage forSh = boxDownscaleTo(equirect.convertToFormat(QImage::Format_RGBA8888),
-                                        kAmbientShMaxWidth);
-    if (integrateSkyAmbientSh(forSh, mSkyAmbientSh))
+    // The ambient integral (bounded and decoded inside — SKY_LIGHT_SPEC.md §7)
+    // runs on the image the caller passed, before anything else touches it.
+    if (integrateSkyAmbientSh(equirect, mSkyAmbientSh))
         mHasSkyAmbient = true;
 
     // The faces are only BUILT here; they reach the engine as the reflection
