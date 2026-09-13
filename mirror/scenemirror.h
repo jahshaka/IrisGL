@@ -151,6 +151,12 @@ public:
     /// re-solve (REFLECTIONS_ADOPTION_SPEC.md P2). During a light drag this is
     /// the counter that moves; giRefreshCount() stays still until the drag ends.
     quint64 giLightRefreshCount() const { return mGiLightRefreshCount; }
+    /// ...of which the ones taken AT REST (round-2 review F1): the injection is
+    /// deliberately cheap while something moves — one bounce, the coarse ray
+    /// march — so the tick that ENDS the motion must run the scene's full count
+    /// instead, and for a MOVABLE lamp this mirror is the only thing that knows
+    /// when that is (the path arms no settle). One per burst of movement.
+    quint64 giLightRefreshAtRestCount() const { return mGiLightRefreshAtRestCount; }
 
     /// HOW MANY MATERIAL DESCRIPTIONS THE LAST SYNC BUILT (MIRROR_SCALE lane).
     /// Building one converts the document material into a PbrParams and a
@@ -1575,6 +1581,17 @@ private:
     /// settle is pending at all.
     quint64 mGiMovableLightSignature = 0;
     bool    mGiMovableLightsMoving = false;
+    /// ...AND THE REST FRAME IT OWES (round-2 review F1). A cadence tick taken
+    /// while the lamp was moving injects at ONE bounce and the coarse ray march
+    /// (Scene::refreshGiLighting's `inMotion`), which is right while it moves
+    /// and wrong the moment it stops — and this path arms no settle, so nothing
+    /// else would ever run the full count again: a three-bounce room with a
+    /// Movable lamp stayed lit at one bounce for the rest of the session. The
+    /// latch keeps the cadence alive for exactly one more tick after the motion
+    /// stops, and that tick is the `inMotion = false` one. A full re-solve
+    /// (the settle, or an explicit refresh) supersedes it and clears it.
+    bool    mGiMovableSettleOwed = false;
+    quint64 mGiLightRefreshAtRestCount = 0;
     /// The play edge the soft-promotion rule is scoped to. Play STOP clears the
     /// document's soft flags (Scene::setPlaying) and the per-node warn latches
     /// here, so a second play session starts clean.

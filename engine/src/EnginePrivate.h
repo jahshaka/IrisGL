@@ -2103,7 +2103,7 @@ public:
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
     unsigned long long giMaterialSignature() const override;
-    bool refreshGiLighting() override;
+    bool refreshGiLighting(bool inMotion) override;
     void setNodeGiBoundsExcluded(NodeId id, bool excluded) override;
     bool nodeGiBoundsExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
@@ -3116,6 +3116,13 @@ private:
     /// helper child such as a light's -Y adapter, a document node the host has
     /// not adopted yet, the scene root).
     Node *registryNode(const Ogre::Node *sn);
+    /// This scene's record for `id`, or null — the one-lookup form of
+    /// `node(id)` + `mNodes.find(id)`, for the callers that need both the Ogre
+    /// node and the record (round-2 review F9).
+    Node *record(NodeId id) {
+        auto it = mNodes.find(id);
+        return it == mNodes.end() ? nullptr : &it->second;
+    }
     /// The EFFECTIVE visibility `sn`'s children inherit from above it: the
     /// `shown` of the nearest registered ancestor, true when there is none.
     bool inheritedShown(const Ogre::Node *sn);

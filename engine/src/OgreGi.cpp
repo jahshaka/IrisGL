@@ -468,7 +468,7 @@ bool OgreScene::refreshVctFast() {
 // updateSceneGraph() first: light injection reads each light's DERIVED position
 // (VctLighting::addLight -> getParentNode()->_getDerivedPosition()), and the
 // whole point of this call is that a light just moved.
-bool OgreScene::refreshGiLighting() {
+bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
         if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity) {
             rebuildGi();          // IR has no cheaper path: the re-trace IS it
@@ -476,23 +476,29 @@ bool OgreScene::refreshGiLighting() {
         }
         if (!mVctLighting || !mVctVoxelizer) return false;
         mSceneMgr->updateSceneGraph();
-        // IN MOTION, by definition: this path only runs while the mirror's
-        // stability window is open, i.e. while something is being dragged. B5's
-        // coarser ray march is charged here and nowhere else — and so is this:
-        //
         // NO EXTRA BOUNCES WHILE THE THING IS STILL MOVING (CPU-vs-GPU audit
-        // F4). Every bounce is a second full light-injection dispatch over the
-        // voxel volume plus its anisotropic mip chain (VctLighting::runBounce),
-        // and this tick ran the scene's FULL count — 40 ms of GPU per tick at
-        // 128^3 with three bounces, spent on a picture that is replaced a few
-        // frames later by the next tick and, at the end of the drag, by the
-        // settle's own from-scratch or reuse refresh at the full count
-        // (rebuildVct / refreshVctFast, both unchanged). The first bounce is
-        // what makes the lamp's light follow it; bounces two and three are a
-        // refinement of a frame nobody holds still enough to see.
-        mVctLighting->update(mSceneMgr, 0u /*extraBounces: see above*/,
-                             1.0f /*thinWallCounter*/, hasVctLights(),
-                             giRayMarchStepScale(true));
+        // F4), and every one of them AT REST. Each extra bounce is a second
+        // full light-injection dispatch over the voxel volume plus its
+        // anisotropic mip chain (VctLighting::runBounce) — measured on an
+        // RTX 4080 at 128^3 in a closed room, a tick plus its read-back frame
+        // costs 5.37 ms at three bounces against 4.83 at one, i.e. 0.5-0.6 ms
+        // of GPU per tick — spent on a picture the next tick replaces a few
+        // frames later. The first bounce is what makes the light follow the
+        // lamp; two and three are a refinement of a frame nobody holds still
+        // enough to see.
+        //
+        // AT REST IT IS THE OPPOSITE (round-2 review F1): the frame the user is
+        // left looking at must be the one a full solve would have produced. For
+        // a DRAG that is the settle's own re-solve, but a MOVABLE lamp never
+        // arms a settle (REALTIME_REFLECTIONS_SPEC §3.3, O2: it re-injects on a
+        // cadence and nothing re-solves), so its room would have stayed at one
+        // bounce indefinitely. `inMotion` is the host's answer to "is it still
+        // moving", and the same flag chooses the ray march: coarse while
+        // moving, the scene's own at rest.
+        const Ogre::uint32 extraBounces =
+            inMotion ? 0u : Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
+        mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+                             giRayMarchStepScale(inMotion));
         // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
         // object, same voxel textures, same field geometry — only the radiance
         // in the volume changed. reset() re-arms the integration counter and

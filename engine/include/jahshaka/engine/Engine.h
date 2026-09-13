@@ -643,7 +643,18 @@ public:
     /// there is no cheaper path than the re-trace, so there this IS the
     /// re-trace. Returns false when nothing could be done (GI off, or nothing
     /// built yet), so a caller can tell "cheap refresh done" from "no-op".
-    virtual bool        refreshGiLighting() = 0;
+    ///
+    /// `inMotion` says whether the thing that moved is STILL MOVING, and it
+    /// buys the drag economy: in motion the injection runs ONE bounce and the
+    /// coarser ray march, because the picture it produces is replaced by the
+    /// next tick a few frames later; at rest it runs the scene's full bounce
+    /// count and the fine march, so the frame the user is left looking at is
+    /// the one the full solve would have produced. A host that drives this on a
+    /// cadence must therefore fire ONE `inMotion = false` call after the motion
+    /// stops — the settle's own re-solve covers the drag path, but a MOVABLE
+    /// lamp (REALTIME_REFLECTIONS_SPEC §3.3, O2) never arms a settle at all,
+    /// and without that last call its room stays lit at one bounce for good.
+    virtual bool        refreshGiLighting(bool inMotion) = 0;
     /// What GI actually ACHIEVED, as opposed to what was requested — probe
     /// count and whether the probe/VCT bindings are live on this scene. The
     /// hybrid can degrade to plain VCT (a missing probe workspace definition);
