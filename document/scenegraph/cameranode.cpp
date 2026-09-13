@@ -132,20 +132,20 @@ bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
         const double v = value.toDouble(&ok);
         if (!ok) return false;
         postOverrides.insert(id, v);
-        return true;
+        return markedParams();
     }
     case CameraPostKeyType::Toggle: {
         // A toggle takes a bool or the 0/1 an int row uses — both spellings
         // reach here (a checkbox writes one, the row table the other).
         if (value.typeId() == QMetaType::Bool) {
             postOverrides.insert(id, value.toBool() ? 1 : 0);
-            return true;
+            return markedParams();
         }
         bool ok = false;
         const int v = value.toInt(&ok);
         if (!ok || (v != 0 && v != 1)) return false;
         postOverrides.insert(id, v);
-        return true;
+        return markedParams();
     }
     case CameraPostKeyType::Stack: {
         // Whatever spelling arrives — a QJsonArray from the reader, a
@@ -163,7 +163,7 @@ bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
         else
             return false;
         postOverrides.insert(id, normalizeLookStack(stack));
-        return true;
+        return markedParams();
     }
     case CameraPostKeyType::Enum: {
         bool ok = false;
@@ -174,7 +174,7 @@ bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
         // shader recompile and would hitch on every cut.
         if (id == QLatin1String("smaa") && v >= 0) return false;
         postOverrides.insert(id, v);
-        return true;
+        return markedParams();
     }
     }
     return false;
@@ -184,7 +184,7 @@ bool CameraNode::clearPostOverride(const QString &id)
 {
     if (!postOverrides.contains(id)) return false;
     postOverrides.remove(id);
-    return true;
+    return markedParams();
 }
 
 QList<Property*> CameraNode::getProperties()
@@ -484,26 +484,26 @@ QVariant CameraNode::getPropertyValue(QString valueName)
 
 bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
 {
-    if (valueName == "aspectRatio") { setAspectRatio(value.toFloat());          return true; }
-    if (valueName == "angle")       { setFieldOfViewDegrees(value.toFloat());   return true; }
-    if (valueName == "nearClip")    { nearClip = value.toFloat();               return true; }
-    if (valueName == "farClip")     { farClip = value.toFloat();                return true; }
-    if (valueName == "orthoSize")   { setOrthagonalZoom(value.toFloat());       return true; }
-    if (valueName == "vrViewScale") { setVrViewScale(value.toFloat());          return true; }
+    if (valueName == "aspectRatio") { setAspectRatio(value.toFloat());          return markedParams(); }
+    if (valueName == "angle")       { setFieldOfViewDegrees(value.toFloat());   return markedParams(); }
+    if (valueName == "nearClip")    { nearClip = value.toFloat();               return markedParams(); }
+    if (valueName == "farClip")     { farClip = value.toFloat();                return markedParams(); }
+    if (valueName == "orthoSize")   { setOrthagonalZoom(value.toFloat());       return markedParams(); }
+    if (valueName == "vrViewScale") { setVrViewScale(value.toFloat());          return markedParams(); }
     // setProjection, not a raw assignment: it keeps isPerspective in lock-step
     // with projMode (an out-of-sync pair renders previews orthographic).
-    if (valueName == "projMode")    { setProjection(static_cast<CameraProjection>(value.toInt())); return true; }
+    if (valueName == "projMode")    { setProjection(static_cast<CameraProjection>(value.toInt())); return markedParams(); }
 
     // CAMERAS_SPEC §2. The two lens rows go through their setters, which is
     // what keeps `angle` and the focal length the SAME value seen two ways.
-    if (valueName == "focalLength")  { setFocalLength(value.toFloat());              return true; }
-    if (valueName == "sensorWidth")  { setSensorSize(value.toFloat(), sensorHeight); return true; }
-    if (valueName == "sensorHeight") { setSensorSize(sensorWidth, value.toFloat());  return true; }
+    if (valueName == "focalLength")  { setFocalLength(value.toFloat());              return markedParams(); }
+    if (valueName == "sensorWidth")  { setSensorSize(value.toFloat(), sensorHeight); return markedParams(); }
+    if (valueName == "sensorHeight") { setSensorSize(sensorWidth, value.toFloat());  return markedParams(); }
     if (valueName == "authorMode") {
         const int m = value.toInt();
         authorMode = (m == static_cast<int>(CameraAuthorMode::Millimeters))
                          ? CameraAuthorMode::Millimeters : CameraAuthorMode::Degrees;
-        return true;
+        return markedParams();
     }
     // CAMERA_LENS_SPEC §3. The three filmback rows go through their setters for
     // the same reason the sensor pair does: each of them changes what a focal
@@ -514,37 +514,37 @@ bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
         setSensorFit(f == static_cast<int>(CameraSensorFit::Horizontal) ? CameraSensorFit::Horizontal
                    : f == static_cast<int>(CameraSensorFit::Auto)       ? CameraSensorFit::Auto
                                                                         : CameraSensorFit::Vertical);
-        return true;
+        return markedParams();
     }
-    if (valueName == "anamorphicSqueeze") { setAnamorphicSqueeze(value.toFloat()); return true; }
+    if (valueName == "anamorphicSqueeze") { setAnamorphicSqueeze(value.toFloat()); return markedParams(); }
     // Shift is clamped to a frame either way: past that the frustum's near rect
     // no longer contains the axis and the projection stops being useful.
-    if (valueName == "lensShiftX") { lensShiftX = qBound(-1.0f, value.toFloat(), 1.0f); return true; }
-    if (valueName == "lensShiftY") { lensShiftY = qBound(-1.0f, value.toFloat(), 1.0f); return true; }
-    if (valueName == "focusOffset")         { focusOffset = value.toFloat();               return true; }
-    if (valueName == "smoothFocus")         { smoothFocus = value.toBool();                return true; }
-    if (valueName == "focusSmoothingSpeed") { focusSmoothingSpeed = qMax(0.0f, value.toFloat()); return true; }
-    if (valueName == "minFocusDistance")    { minFocusDistance = qMax(0.0f, value.toFloat()); return true; }
-    if (valueName == "bladeCount")          { bladeCount = qBound(3, value.toInt(), 16);   return true; }
-    if (valueName == "focusPlaneVisible")   { focusPlaneVisible = value.toBool();          return true; }
-    if (valueName == "constrainAspect") { constrainAspect = value.toBool(); return true; }
-    if (valueName == "dofEnabled")      { dofEnabled = value.toBool();      return true; }
+    if (valueName == "lensShiftX") { lensShiftX = qBound(-1.0f, value.toFloat(), 1.0f); return markedParams(); }
+    if (valueName == "lensShiftY") { lensShiftY = qBound(-1.0f, value.toFloat(), 1.0f); return markedParams(); }
+    if (valueName == "focusOffset")         { focusOffset = value.toFloat();               return markedParams(); }
+    if (valueName == "smoothFocus")         { smoothFocus = value.toBool();                return markedParams(); }
+    if (valueName == "focusSmoothingSpeed") { focusSmoothingSpeed = qMax(0.0f, value.toFloat()); return markedParams(); }
+    if (valueName == "minFocusDistance")    { minFocusDistance = qMax(0.0f, value.toFloat()); return markedParams(); }
+    if (valueName == "bladeCount")          { bladeCount = qBound(3, value.toInt(), 16);   return markedParams(); }
+    if (valueName == "focusPlaneVisible")   { focusPlaneVisible = value.toBool();          return markedParams(); }
+    if (valueName == "constrainAspect") { constrainAspect = value.toBool(); return markedParams(); }
+    if (valueName == "dofEnabled")      { dofEnabled = value.toBool();      return markedParams(); }
     if (valueName == "focusMode") {
         const int m = value.toInt();
         focusMode = (m == static_cast<int>(CameraFocusMode::Track))   ? CameraFocusMode::Track
                   : (m == static_cast<int>(CameraFocusMode::Off))     ? CameraFocusMode::Off
                                                                       : CameraFocusMode::Manual;
-        return true;
+        return markedParams();
     }
     // Non-negative: a negative focus distance or f-stop has no meaning and the
     // DOF pass would divide by it.
-    if (valueName == "focusDistance") { focusDistance = qMax(0.0f, value.toFloat()); return true; }
-    if (valueName == "focusTarget")   { focusTarget = value.toString();              return true; }
-    if (valueName == "fStop")         { fStop = qMax(0.0f, value.toFloat());         return true; }
+    if (valueName == "focusDistance") { focusDistance = qMax(0.0f, value.toFloat()); return markedParams(); }
+    if (valueName == "focusTarget")   { focusTarget = value.toString();              return markedParams(); }
+    if (valueName == "fStop")         { fStop = qMax(0.0f, value.toFloat());         return markedParams(); }
     // One pixel is the floor; the cap is the largest render anyone can ask for
     // without wedging the machine on the offscreen path.
-    if (valueName == "outputHeight")  { outputHeight = qBound(1, value.toInt(), 16384); return true; }
-    if (valueName == "bodyVisible")   { bodyVisible = value.toBool();                return true; }
+    if (valueName == "outputHeight")  { outputHeight = qBound(1, value.toInt(), 16384); return markedParams(); }
+    if (valueName == "bodyVisible")   { bodyVisible = value.toBool();                return markedParams(); }
 
     // CAMERA_LENS_SPEC §4. The window stays ordered — the one cross-row rule,
     // and the same one world.postFx enforces on the scene's copy.
@@ -553,18 +553,18 @@ bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
         exposureMode = (m == static_cast<int>(CameraExposureMode::Auto))   ? CameraExposureMode::Auto
                      : (m == static_cast<int>(CameraExposureMode::Manual)) ? CameraExposureMode::Manual
                                                                            : CameraExposureMode::Inherit;
-        return true;
+        return markedParams();
     }
-    if (valueName == "exposure")    { exposure = value.toFloat();    return true; }
+    if (valueName == "exposure")    { exposure = value.toFloat();    return markedParams(); }
     if (valueName == "exposureMin") {
         exposureMin = value.toFloat();
         if (exposureMax < exposureMin) std::swap(exposureMin, exposureMax);
-        return true;
+        return markedParams();
     }
     if (valueName == "exposureMax") {
         exposureMax = value.toFloat();
         if (exposureMax < exposureMin) std::swap(exposureMin, exposureMax);
-        return true;
+        return markedParams();
     }
     // CAMERA_LENS_SPEC §5. A null (or invalid) value CLEARS the override —
     // "inherit" has to be expressible through the same door that sets, or a
@@ -580,8 +580,17 @@ bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
 
 void CameraNode::setProjection(CameraProjection projMode)
 {
+	// EVERY TYPED SETTER ON THIS CLASS MARKS (lead review R2 #9), and every one
+	// of them EARLY-OUTS on no change first. Both halves matter: the mirror
+	// only looks at a camera the document says changed, and several of these
+	// are written every frame by a host re-asserting a value it already set
+	// (the player's setAspectRatio on resize, the viewport's ortho zoom) — an
+	// unconditional mark would put a node on the change list per frame forever,
+	// which is the defect the selection push already taught this lane.
+	if (this->projMode == projMode) return;
 	this->projMode = projMode;
 	isPerspective = projMode == CameraProjection::Perspective ? true : false;
+	notifyChanged(NodeChange::Params);
 }
 
 CameraProjection CameraNode::getProjection()
@@ -596,7 +605,9 @@ float CameraNode::getVrViewScale()
 
 void CameraNode::setVrViewScale(float viewScale)
 {
+    if (vrViewScale == viewScale) return;
     vrViewScale = viewScale;
+    notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::setAspectRatio(float aspect)
@@ -608,6 +619,7 @@ void CameraNode::setAspectRatio(float aspect)
     // actually resolves horizontally — which is why the default (Vertical) and
     // every camera authored in degrees behave exactly as they always did: this
     // branch is not taken and the aspect is a plain assignment.
+    if (aspectRatio == aspect) return;
     const bool rebind = authorMode == CameraAuthorMode::Millimeters &&
                         iris::lens::fitAxis(sensorFit, aspect) == iris::lens::FitAxis::Horizontal &&
                         iris::lens::fitAxis(sensorFit, aspectRatio) == iris::lens::FitAxis::Horizontal;
@@ -617,6 +629,7 @@ void CameraNode::setAspectRatio(float aspect)
         const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
         if (v > 0.0f) angle = v;
     }
+    notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::updateCameraMatrices()
@@ -665,15 +678,20 @@ void CameraNode::updateCameraMatrices()
 
 void CameraNode::setFieldOfViewRadians(float fov)
 {
-    angle = qRadiansToDegrees(fov);
+    const float deg = qRadiansToDegrees(fov);
+    if (angle == deg) return;
+    angle = deg;
+    notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::setFieldOfViewDegrees(float fov)
 {
+    if (angle == fov && authorMode == CameraAuthorMode::Degrees) return;
     angle = fov;
     // The user just spoke in degrees; a later sensor change keeps THIS number
     // and moves the focal length (CAMERAS_SPEC §2).
     authorMode = CameraAuthorMode::Degrees;
+    notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::setFramingAspect(float aspect)
@@ -685,6 +703,7 @@ void CameraNode::setFramingAspect(float aspect)
     // very next thing that happens may be a pick (screenSegment re-derives too,
     // but the player's mouse controller reads projMatrix straight).
     updateCameraMatrices();
+    notifyChanged(NodeChange::Params);
 }
 
 float CameraNode::effectiveFovDegrees() const
@@ -730,13 +749,16 @@ void CameraNode::setFocalLength(float mm)
     if (mm <= 0.0f) return;   // a zero-length lens has no angle of view
     const float v = iris::lens::verticalFovDegFromFocal(filmback(), mm);
     if (v <= 0.0f) return;
+    if (angle == v && authorMode == CameraAuthorMode::Millimeters) return;
     angle = v;
     authorMode = CameraAuthorMode::Millimeters;
+    notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::setSensorSize(float widthMm, float heightMm)
 {
     if (widthMm <= 0.0f || heightMm <= 0.0f) return;
+    if (sensorWidth == widthMm && sensorHeight == heightMm) return;
     // Which of the two views survives is the WHOLE job of authorMode: a
     // photographer who typed "35 mm" expects a bigger sensor to widen the shot;
     // someone who typed "45 degrees" expects the framing to stay put.
@@ -747,6 +769,7 @@ void CameraNode::setSensorSize(float widthMm, float heightMm)
         const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
         if (v > 0.0f) angle = v;
     }
+    notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::setSensorFit(CameraSensorFit fit)
@@ -756,23 +779,27 @@ void CameraNode::setSensorFit(CameraSensorFit fit)
     // changes the angle a "35 mm" means. In Degrees the framing is what the
     // user authored and it stays; in Millimeters the lens is, and the framing
     // moves under it.
+    if (sensorFit == fit) return;
     const float keepMm = focalLength();
     sensorFit = fit;
     if (authorMode == CameraAuthorMode::Millimeters && keepMm > 0.0f) {
         const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
         if (v > 0.0f) angle = v;
     }
+    notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::setAnamorphicSqueeze(float squeeze)
 {
     if (!(squeeze > 0.0f)) return;   // a zero or negative squeeze is not a lens
+    if (anamorphicSqueeze == squeeze) return;
     const float keepMm = focalLength();
     anamorphicSqueeze = squeeze;
     if (authorMode == CameraAuthorMode::Millimeters && keepMm > 0.0f) {
         const float v = iris::lens::verticalFovDegFromFocal(filmback(), keepMm);
         if (v > 0.0f) angle = v;
     }
+    notifyChanged(NodeChange::Params);
 }
 
 float CameraNode::horizontalFov() const
@@ -840,8 +867,10 @@ void CameraNode::lookAt(iris::Vec3 target)
 
 void CameraNode::setOrthagonalZoom(float size)
 {
+	if (orthoSize == size) return;
 	orthoSize = size;
 	updateCameraMatrices();
+	notifyChanged(NodeChange::Params);
 }
 
 void CameraNode::update(float dt)

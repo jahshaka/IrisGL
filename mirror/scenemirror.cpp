@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <type_traits>
 
@@ -218,6 +219,20 @@ SceneMirror::SceneMirror(Scene *target) : mTarget(target)
     mSockets.setPoseSource([this](iris::MeshNode *node, QHash<QString, iris::Mat4> &out) {
         return boneWorldTransforms(node, out);
     });
+    // THE VERIFICATION SWITCH (DIRTY_SET_MIRROR_SPEC §3.8 item 2). `full` runs
+    // the whole walk EVERY sync — ruinous for frame time and exact by
+    // construction, which is what the differential suite runs under. A number
+    // sets the amortised verifier's per-sync budget (0 turns it off).
+    mTrace = std::getenv("JAH_MIRROR_TRACE") != nullptr;
+    if (const char *v = std::getenv("JAH_MIRROR_VERIFY")) {
+        const QByteArray mode(v);
+        if (mode == "full") mVerifyEverything = true;
+        else if (!mode.isEmpty()) {
+            bool ok = false;
+            const int k = mode.toInt(&ok);
+            if (ok && k >= 0) mVerifierBudget = unsigned(k);
+        }
+    }
 }
 
 SceneMirror::~SceneMirror()
@@ -243,6 +258,22 @@ SceneMirror::~SceneMirror()
 
 void SceneMirror::setSource(iris::ScenePtr scene)
 {
+    // A BIND IS A FULL-WALK TRIGGER (DIRTY_SET_MIRROR_SPEC §3.5): every entry
+    // below is released, so there is nothing incremental left to be right
+    // about. The aggregates the entries carried go with them.
+    mFullWalkPending = true;
+    mMaterialUsers.clear();
+    mDirtyScratch.clear();
+    mEvictedScratch.clear();
+    mMovableNodes = 0;
+    mMovableLights.clear();
+    mSkinnedNodes = 0;
+    mCharacterPieces = 0;
+    mRefractiveEntries = 0;
+    mDistortionEntries = 0;
+    mAnyRefractive = false;
+    mAnyDistortion = false;
+    mVerifierCursor = 0;
     mCharacterRigs.clear();
     // THE RIDERS COME OFF THEIR BONES FIRST, and this is not tidiness: a rider's
     // Ogre parent is a TagPoint of THIS engine scene, so a rider left on one is
@@ -295,6 +326,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mGiVolBuilt = false;
     mHighlighted.clear();
     mHighlightSet.clear();
+    mHighlightRequestedPrimary.clear();
     for (HighlightShell &s : mHighlightShells) if (s.node) mTarget->removeNode(s.node);
     mHighlightShells.clear();
     if (mHighlightMaterial) { mTarget->destroyMaterial(mHighlightMaterial); mHighlightMaterial = 0; }
@@ -340,6 +372,21 @@ void SceneMirror::setSource(iris::ScenePtr scene)
 
 void SceneMirror::evacuateEngineObjects()
 {
+    // Same as a bind: the entries go, so the mirror knows nothing about the
+    // document any more and the next sync has to look at all of it.
+    mFullWalkPending = true;
+    mMaterialUsers.clear();
+    mDirtyScratch.clear();
+    mEvictedScratch.clear();
+    mMovableNodes = 0;
+    mMovableLights.clear();
+    mSkinnedNodes = 0;
+    mCharacterPieces = 0;
+    mRefractiveEntries = 0;
+    mDistortionEntries = 0;
+    mAnyRefractive = false;
+    mAnyDistortion = false;
+    mVerifierCursor = 0;
     // Same reason as in setSource: the document's graph is about to migrate out
     // of this scene manager, and a rider hanging off one of its TagPoints would
     // not travel with it.
@@ -360,6 +407,7 @@ void SceneMirror::evacuateEngineObjects()
     mHighlightShells.clear();
     mHighlighted.clear();
     mHighlightSet.clear();
+    mHighlightRequestedPrimary.clear();
     // THE GROUND'S HORIZON GOES TOO (lead review). Its `mHorizonFloor` is a raw
     // pointer into the document that is leaving; its material PIN is what keeps
     // the floor's datablock out of the sweep, and every entry that referenced
@@ -436,6 +484,10 @@ int SceneMirror::sync()
     if (mSource->graphScene() != mBoundHandle) {
         mSource->setGraphScene(mBoundHandle);
         mSource->_setGraphEvacuationHook([this] { evacuateEngineObjects(); });
+        // A RE-TAKE IS A FULL-WALK TRIGGER (§3.5): the other mirror's
+        // evacuation hook released every entry, and the migration rebuilt every
+        // Ogre node under this manager.
+        mFullWalkPending = true;
     }
     // NO transform refresh. There is nothing to refresh: the document's world
     // transforms ARE Ogre's, resolved by the engine's threaded SIMD pass inside
@@ -457,8 +509,12 @@ int SceneMirror::sync()
     ++mSyncStamp;
     mVisited = 0;
     mMaterialBuilds = 0;    // per-walk, not a running total (materialBuildCount)
-    mCharacterPieces = 0;   // ...and so are the rig counts the two skeleton
-    mSkinnedNodes = 0;      //    passes early-out on
+    mDirtyNodes = 0;
+    mEvictedNodes = 0;
+    mVerifierVisits = 0;
+    // (mCharacterPieces / mSkinnedNodes are NOT reset here any more: they are
+    // maintained on each entry's own transition — noteRigCounts — because a
+    // still frame runs no walk to recount them. §3.7.)
     // SCENE_STATIC RE-PROMOTION, ON SETTLE (MIRROR_SCALE lane, 2026-09-13).
     //
     // Rule 4 (nodegraph.h) DEMOTES a static subtree on the first transform
@@ -530,11 +586,15 @@ int SceneMirror::sync()
     // it (Scene::sunLight -> directionalLights) — that ran per directional
     // light per sync, at 60 Hz, to answer the same question with the same
     // answer. The light list cannot change inside one walk.
-    mSyncSun = mSource->sunLight().data();
-    mAnyShadowCaster = false;
-    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): recounted by this walk.
-    mMovableNodes = 0;
-    mMovableLights.clear();      // capacity kept; contents are per sync
+    // ...and with it the rest of the light-derived aggregates, which are a
+    // fold over Scene::lights (bounded by the LIGHT count) rather than over the
+    // walk (bounded by the NODE count) since the dirty set: a still frame runs
+    // no walk at all, so nothing else could re-derive them. §3.7.
+    refreshLightAggregates();
+    // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): mMovableNodes and
+    // mMovableLights are INCREMENTAL now (syncMobility maintains them on each
+    // entry's transition, releaseEntry gives the contribution back) — only the
+    // per-frame EVENT flag is reset here.
     mMobilityChanged = false;
     // THE PLAY EDGE the soft-promotion rule is scoped to. On the FALLING edge
     // the document has already cleared every node's soft flag
@@ -548,26 +608,91 @@ int SceneMirror::sync()
                 it->mobilityWarned = false;
             }
             mWasPlaying = playing;
+            // A FULL-WALK TRIGGER (§3.5). The play edge clears soft mobility
+            // tree-wide and re-arms the surprise-mover watch, and a node has to
+            // be SEEN STANDING STILL before it can be seen moving — which means
+            // every entry needs one visit on this frame, not whenever it next
+            // happens to be written.
+            mFullWalkPending = true;
         }
     }
-    mHorizonFloor = nullptr;     // re-found by this walk (syncGroundHorizon)
-    mAnyRefractive = false;
-    mAnyDistortion = false;
-    mShadowFilter = ShadowFilter::Hard;
-    mMaxShadowResolution = 0;
-    // RAW children, no QList: SceneNode::children() builds a
-    // QList<QSharedPointer> — a heap allocation plus an atomic refcount per
-    // child — and the walk below runs over the whole document every frame.
+    // (mHorizonFloor / mAnyRefractive / mAnyDistortion are no longer reset
+    // here: the first is sticky and the other two are entry counts. A still
+    // frame would have reset them to nothing and left them there — the
+    // refraction pass turning off under a glass object nobody touched. §3.7.)
+    // ---- THE CHOICE (SPECS/DIRTY_SET_MIRROR_SPEC.md, owner option A) ------
+    //
+    // The FULL WALK is the explicit, rare answer: a bind, a graph re-take, an
+    // evacuation, the play edge, an eviction overflow, or the verification
+    // mode. Every other frame the document hands over the list of what it
+    // changed and the mirror handles that instead — which is why a still frame
+    // now costs the bounded passes and nothing else.
     iris::SceneNode *root = mSource->getRootNode().data();
-    const std::size_t rootChildren = iris::graph::childCount(root->graphNode());
-    const bool rootShown = root->isVisible();
-    { MirrorStage s(mon, "mirror.walk");
-    for (std::size_t i = 0; i < rootChildren; ++i)
-        if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
-            visit(c, rootShown, false);
+    iris::NodeDirtySet *marks = mSource->dirtySet();
+    // An eviction list that overflowed (a scene nobody was mirroring built and
+    // dropped thousands of nodes) is the one answer that cannot be reconciled
+    // incrementally: walk everything and let the stamp sweep find the dead.
+    if (marks && marks->takeOverflow()) mFullWalkPending = true;
+    const bool full = mFullWalkPending || mVerifyEverything;
+    mLastWalkWasFull = full;
+    if (full) {
+        // JAH_MIRROR_VERIFY=full: the walk IS the verification, so every
+        // material is re-fingerprinted and every push it makes is a catch.
+        if (mVerifyEverything && !mFullWalkPending) {
+            mVerifying = true;
+            mVerifyMaterialQuota = ~0u;
+        }
+        // THE LIST IS DISCARDED BEFORE THE WALK, not after: the walk is about
+        // to look at every node, so nothing standing on it is worth visiting —
+        // but the walk itself RAISES marks (the mirror's own soft-mobility
+        // promotion, the users of a material whose shading model just
+        // switched), and those belong to the NEXT sync. Clearing afterwards
+        // would throw them away.
+        if (marks) {
+            marks->takeDirty(mDirtyScratch);
+            for (iris::SceneNode *n : mDirtyScratch) if (n) n->_takeDirtyMask();
+            mDirtyScratch.clear();
+            // Evictions are safe to drop here: those nodes are out of the tree,
+            // so the walk cannot stamp them and removeMissing releases them.
+            marks->takeEvicted(mEvictedScratch);
+            mEvictedScratch.clear();
+        }
+        // ...and the same for the material epoch: read BEFORE, so a material
+        // touched DURING the walk is caught by the next sync rather than
+        // assumed to have been seen.
+        mMaterialRevision = iris::Material::globalRevision();
+        // RAW children, no QList: SceneNode::children() builds a
+        // QList<QSharedPointer> — a heap allocation plus an atomic refcount per
+        // child — and this walk runs over the whole document.
+        const std::size_t rootChildren = iris::graph::childCount(root->graphNode());
+        const bool rootShown = root->isVisible();
+        { MirrorStage s(mon, "mirror.walk");
+        for (std::size_t i = 0; i < rootChildren; ++i)
+            if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
+                visit(c, rootShown, false);
+        }
+        { MirrorStage s(mon, "mirror.removeMissing");
+        removeMissing();
+        }
+        mVerifying = false;
+        mVerifyMaterialQuota = 0;
+        mFullWalkPending = false;
+    } else {
+        // EVICTIONS FIRST (§3.4): an address a same-frame insert recycled must
+        // be released before it is adopted again.
+        { MirrorStage s(mon, "mirror.evict");
+        consumeEvicted();
+        }
+        { MirrorStage s(mon, "mirror.walk");
+        consumeDirty();
+        }
     }
-    { MirrorStage s(mon, "mirror.removeMissing");
-    removeMissing();
+    // The handful of things that legitimately cost something EVERY frame, all
+    // bounded by the scene's light and camera registries rather than by node
+    // count — and idempotent, so running them after a full walk costs a latch
+    // compare each.
+    { MirrorStage s(mon, "mirror.perframe");
+    syncPerFrameSet();
     }
     // THE CACHE SWEEP, ON DEMAND. reclaimUnused builds three QSets out of every
     // entry in the scene; at 10k nodes that was 20k+ set inserts a frame to
@@ -614,18 +739,364 @@ int SceneMirror::sync()
     { MirrorStage s(mon, "mirror.riders");
     sweepStaleRiders();
     }
-    // THE MATERIAL MEMO'S OWN SWEEP. Its keys are raw `iris::Material *`, like
-    // mMaterials' — so an entry the walk did not reach names a material that is
-    // no longer in the scene, and it goes now rather than waiting for a cache
-    // sweep that only runs when something was released. One pass over the
-    // materials, no allocation, and the hash can never hold a dangling key for
-    // longer than the walk that dropped it.
-    for (auto it = mMaterialSync.begin(); it != mMaterialSync.end();) {
-        if (it->lastSeen == mSyncStamp) ++it;
-        else it = mMaterialSync.erase(it);
-    }
+    // (THE MATERIAL MEMO'S END-OF-SYNC SWEEP IS GONE. It was one pass over
+    // every material in the scene, every frame — 8,404 of them on the render
+    // review's lattice — to conclude, almost always, that none had left; and a
+    // still frame runs no walk, so nothing would stamp them and the whole memo
+    // would be thrown away once a frame. The memo is pruned by reclaimUnused
+    // instead, which already drops a material's record WITH the material and
+    // which only runs when something was really released.)
+
+    // THE AMORTISED VERIFIER, last: the bounded passes above have already
+    // brought the helpers up to date, so anything this finds is a change the
+    // DOCUMENT failed to report. Off during a full walk (which just checked
+    // everything) and during the verification mode (which is the whole walk).
+    if (!full) { MirrorStage s(mon, "mirror.verify");
+                 runVerifier(); }
 
     return mVisited;
+}
+
+// ---- THE DIRTY SET (SPECS/DIRTY_SET_MIRROR_SPEC.md, owner option A) --------
+//
+// Everything below is the other half of sync(): the change list's consumers.
+// None of them knows anything the full walk does not — visitNode is shared, so
+// "run the full walk after the dirty one and demand it pushes nothing" is a
+// real oracle (verifyAgainstFullWalk) rather than two implementations that
+// agree by luck.
+
+/// The parent's EFFECTIVE visibility, read from the DOCUMENT rather than from
+/// the parent's entry. O(depth), and order-free: whatever order the change
+/// list happens to be in, a marked node resolves the same answer the walk would
+/// have threaded down to it. (isVisibleInScene answers a socket rider through
+/// its DOCUMENT parent, which is the same rule the walk applies.)
+/// MEMOISED FOR THE SYNC. A thousand crates under twenty groups is twenty
+/// distinct answers; without this it would be a thousand ancestor walks.
+/// Nothing in the document moves during a sync, so the memo cannot go stale
+/// inside one — the single exception is the mirror's own soft-mobility
+/// promotion, whose descendants are marked by the cascade and are re-resolved
+/// on the next sync anyway (the documented one-frame latency, §3.3).
+static const quint8 kParentShown = 1, kParentMovable = 2, kParentKnown = 4;
+
+quint8 SceneMirror::parentStateOf(iris::SceneNode *node)
+{
+    iris::SceneNode *parent = node ? iris::graph::ownerOf(iris::graph::parentOf(node->graphNode()))
+                                   : nullptr;
+    // A CHILD OF THE ROOT: the walk's own entry conditions — the root's flag is
+    // the parentShown it threads down, and the root never resolves movable.
+    if (!parent) {
+        const bool rootShown = mSource && mSource->getRootNode()
+                                   ? mSource->getRootNode()->isVisible() : true;
+        return quint8(kParentKnown | (rootShown ? kParentShown : 0));
+    }
+    auto it = mParentState.constFind(parent);
+    if (it != mParentState.constEnd()) return it.value();
+    quint8 v = kParentKnown;
+    if (parent->isVisibleInScene()) v |= kParentShown;
+    if (parent->resolvedMobility() == iris::Mobility::Movable) v |= kParentMovable;
+    mParentState.insert(parent, v);
+    return v;
+}
+
+bool SceneMirror::parentShownOf(iris::SceneNode *node)
+{
+    return (parentStateOf(node) & kParentShown) != 0;
+}
+
+/// ...and its resolved mobility, the same way (rule 2 is an OR up the chain).
+bool SceneMirror::parentMovableOf(iris::SceneNode *node)
+{
+    return (parentStateOf(node) & kParentMovable) != 0;
+}
+
+/// ONE MARKED NODE.
+void SceneMirror::visitDirty(iris::SceneNode *node)
+{
+    if (!node) return;
+    // THE ROOT IS NOT MIRRORED. The full walk starts at the root's CHILDREN —
+    // the World node is the document's container and has no engine object of
+    // its own — so a mark on it (addChild fires Structure on the parent as
+    // well as on the child) must not adopt it. Its own `visible` flag still
+    // reaches its children: setVisible cascades the whole subtree.
+    if (mSource && node == mSource->getRootNode().data()) return;
+    visitNode(node, parentShownOf(node), parentMovableOf(node));
+}
+
+/// Entries whose document nodes have left. This is what replaced
+/// removeMissing()'s stamp sweep — a pass over EVERY entry in the scene, every
+/// frame, to conclude that none had gone.
+///
+/// The pointers here are raw and their nodes may already be freed: nothing
+/// dereferences one. The entry map is keyed by pointer, releaseEntry reads only
+/// the entry, and mBoneRiders is removed by key.
+void SceneMirror::consumeEvicted()
+{
+    if (!mSource) return;
+    mSource->dirtySet()->takeEvicted(mEvictedScratch);
+    if (mEvictedScratch.empty()) return;
+    bool droppedRigged = false;
+    for (iris::SceneNode *n : mEvictedScratch) {
+        auto it = mEntries.find(n);
+        if (it == mEntries.end()) continue;
+        droppedRigged = droppedRigged || it->gpuSkinned;
+        mBoneRiders.remove(it.key());
+        releaseEntry(*it);
+        mEntries.erase(it);
+        ++mEvictedNodes;
+    }
+    mEvictedScratch.clear();
+    // A character that lost a piece has a stale union cached against a host
+    // node that may itself be gone (removeMissing's own note) — AND every
+    // SURVIVING piece has to re-attach onto the rig that replaces it: the union
+    // is derived from the pieces that are there, so one leaving changes the
+    // bone list every other piece is skinned against (skeletal.union_rig S16).
+    // The walk used to find that by visiting them all; the change list has to
+    // be told, because nothing wrote those nodes.
+    if (droppedRigged) {
+        mCharacterRigs.clear();
+        for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
+            if (!it->gpuSkinned || !it->docNode) continue;
+            // The epoch the entry remembers names a rig that no longer exists;
+            // a cleared cache re-derives from zero and could hand out the same
+            // number, so force the re-attach rather than compare to it.
+            it->characterEpoch = ~quint32(0);
+            // Onto the DOCUMENT's list, not this sync's scratch: consumeDirty
+            // takes the document's list after this pass, so a mark made here
+            // is consumed on the same frame.
+            it->docNode->markChanged(iris::NodeChange::Content);
+        }
+    }
+}
+
+/// A MATERIAL EDIT MOVES NO NODE (§3.6), so the change list cannot see one.
+/// The whole question is answered by ONE relaxed atomic read on a still frame;
+/// only when some material in the process really was written does this look at
+/// the memo, and only the materials whose own revision moved reach their nodes.
+void SceneMirror::markChangedMaterials()
+{
+    const quint64 now = iris::Material::globalRevision();
+    if (now == mMaterialRevision) return;
+    mMaterialRevision = now;
+    for (auto it = mMaterialSync.constBegin(); it != mMaterialSync.constEnd(); ++it) {
+        iris::Material *m = it.key();
+        if (!m || m->revision() == it->revision) continue;
+        markMaterialUsersDirty(m);
+    }
+}
+
+/// Queues a character's skinned pieces for a visit this sync.
+void SceneMirror::markPiecesDirty(const QVector<iris::SceneNode *> &pieces)
+{
+    for (iris::SceneNode *n : pieces) {
+        if (!n) continue;
+        if (mConsumingDirty) mDirtyScratch.push_back(n);   // THIS sync, not the next
+        else n->markChanged(iris::NodeChange::Content);
+    }
+}
+
+void SceneMirror::markMaterialUsersDirty(iris::Material *material)
+{
+    if (!material) return;
+    auto it = mMaterialUsers.constFind(material);
+    if (it == mMaterialUsers.constEnd()) return;
+    for (iris::SceneNode *n : it.value()) {
+        if (!n) continue;
+        if (mConsumingDirty) mDirtyScratch.push_back(n);   // THIS sync, not the next
+        else n->markChanged(iris::NodeChange::Content);
+    }
+}
+
+/// THE CHANGE LIST.
+void SceneMirror::consumeDirty()
+{
+    if (!mSource) return;
+    mParentState.clear();
+    mSource->dirtySet()->takeDirty(mDirtyScratch);
+    mDirtyNodes = quint64(mDirtyScratch.size());
+    mConsumingDirty = true;
+    // THE DOCUMENT'S OWN LIST FIRST, MATERIALS AFTER (lead review R2 #1).
+    //
+    // markChangedMaterials reads the REVISION of every material the memo holds
+    // — a dereference of a raw pointer — and a material the document dropped
+    // since the last sync is reachable there until something prunes it. The
+    // node that dropped it is ON THIS LIST (setMaterial marks Content), and
+    // visiting that node is what calls noteMaterialUser and takes the dead
+    // material out of the memo. So the pass over the list is also the pass
+    // that makes the material question safe to ask.
+    //
+    // ONE INDEX LOOP, because every phase APPENDS to the same list: a
+    // shading-model switch queues every other node drawing that material (their
+    // Items were rebuilt with the default query mask), a character's piece set
+    // changing queues its other pieces, and the material pass queues the users
+    // of every material whose revision moved. All of them have to be reached on
+    // THIS frame. A node queued twice is visited twice, which is idempotent and
+    // cheaper than a set.
+    bool materialsAsked = false;
+    for (std::size_t i = 0;; ++i) {
+        if (i >= mDirtyScratch.size()) {
+            if (materialsAsked) break;
+            materialsAsked = true;
+            markChangedMaterials();
+            if (i >= mDirtyScratch.size()) break;
+        }
+        iris::SceneNode *n = mDirtyScratch[i];
+        if (!n) continue;               // tombstoned: the node left the document
+        // CLEARED BEFORE THE VISIT, so a write the visit itself makes (the
+        // mirror's own soft-mobility promotion) is not lost.
+        const quint16 mask = n->_takeDirtyMask();
+        // JAH_MIRROR_TRACE=1 names what the document reported, per sync. The
+        // one question this design makes hard to answer by reading code — "why
+        // is anything on the list at all on a still frame?" — and the answer
+        // found the first defect it looked for (the viewport re-asserts the
+        // selection every frame, which was marking a node per frame forever).
+        if (mTrace)
+            qWarning("mirror.dirty: '%s' mask=0x%04x", qUtf8Printable(n->name), unsigned(mask));
+        visitDirty(n);
+    }
+    mConsumingDirty = false;
+    mDirtyScratch.clear();
+}
+
+/// WHAT LEGITIMATELY COSTS SOMETHING EVERY FRAME (§3.3).
+///
+/// Two kinds of thing, and both are bounded by the scene's own light and
+/// camera registries — never by node count:
+///
+///  * a TRACKING camera's focus smoothing, which advances by the frame's dt and
+///    is not a response to any document write at all;
+///  * the light and camera HELPERS, whose geometry follows a WORLD transform:
+///    a lamp on a moving car is not itself written when the car moves, and the
+///    icon has to travel with it. The pushes are all latched, so a still frame
+///    pays a hash of a short transform chain per light and nothing else — which
+///    is exactly what the full walk paid for them before.
+void SceneMirror::syncPerFrameSet()
+{
+    if (!mSource) return;
+    for (const iris::LightNodePtr &light : mSource->lights) {
+        if (!light) continue;
+        auto it = mEntries.find(light.data());
+        if (it == mEntries.end() || !it->node) continue;   // not adopted yet
+        syncLightWires(*it, light.data());
+        if (light->lightType == iris::LightType::Sky
+            || !it->wireNode) continue;
+        syncLightIcon(*it, light.data());
+    }
+    for (const iris::CameraNodePtr &cam : mSource->cameras) {
+        if (!cam) continue;
+        resolveFocusTracking(cam.data());
+        auto it = mEntries.find(cam.data());
+        if (it == mEntries.end() || !it->node) continue;
+        syncCameraWires(*it, cam.data());
+    }
+}
+
+/// THE AMORTISED VERIFIER (§3.8). `mVerifierBudget` entries a sync on a
+/// rotating cursor: a full pass over an 8,404-node scene every ~2.2 s at 60 Hz,
+/// for about a tenth of a millisecond a frame. Any push it makes is a change
+/// the document did not report — counted, named once, and healed by the push
+/// itself, so the screen catches up within one rotation instead of staying
+/// wrong until something else happens to touch the node.
+void SceneMirror::runVerifier()
+{
+    if (!mVerifierBudget || mEntries.isEmpty()) return;
+    const quint64 count = quint64(mEntries.size());
+    if (mVerifierCursor >= count) mVerifierCursor = 0;
+    // THE WALK TO THE CURSOR IS O(cursor), and that is a deliberate choice, not
+    // an oversight (the comment that stood here claimed otherwise — lead review
+    // R2 #8). QHash has no random access and no stable iterator across the
+    // insert/erase this map sees every time a node is adopted or released, so
+    // the alternatives are a stored iterator that has to be invalidated at five
+    // seams and re-found anyway, or this: skip to the cursor and take a
+    // contiguous run. The skip is a pointer-chase per bucket with no work in it
+    // — measured inside `mirror.verify`, which is 0.370 ms for the WHOLE pass
+    // on an 8,404-entry map, budget included. The order is stable between
+    // rehashes, and a rehash costs one rotation's coverage, never correctness:
+    // the cursor wraps and every entry is reached again.
+    quint64 i = 0;
+    unsigned done = 0;
+    mParentState.clear();
+    mVerifying = true;
+    mVerifyMaterialQuota = mVerifierMaterialBudget;
+    for (auto it = mEntries.begin(); it != mEntries.end() && done < mVerifierBudget; ++it, ++i) {
+        if (i < mVerifierCursor) continue;
+        iris::SceneNode *n = it->docNode;
+        ++done;
+        if (!n) continue;
+        visitNode(n, parentShownOf(n), parentMovableOf(n));
+    }
+    mVerifying = false;
+    mVerifierCursor += done;
+    if (done < mVerifierBudget) mVerifierCursor = 0;   // wrapped
+}
+
+/// THE ORACLE. Runs the whole walk without consuming the change list and
+/// answers how many engine pushes it made — zero after a correct dirty sync.
+quint64 SceneMirror::verifyAgainstFullWalk()
+{
+    if (!mSource || !mSource->getRootNode()) return 0;
+    const quint64 before = mVisitPushes;
+    iris::SceneNode *root = mSource->getRootNode().data();
+    const std::size_t n = iris::graph::childCount(root->graphNode());
+    const bool rootShown = root->isVisible();
+    mVerifying = true;
+    mVerifyMaterialQuota = ~0u;      // the ORACLE re-reads every material
+    for (std::size_t i = 0; i < n; ++i)
+        if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(root->graphNode(), i)))
+            visit(c, rootShown, false);
+    mVerifying = false;
+    mVerifyMaterialQuota = 0;
+    return mVisitPushes - before;
+}
+
+/// THE LIGHT-DERIVED AGGREGATES (§3.7), folded over Scene::lights.
+///
+/// The walk used to accumulate these as it passed each light: "is anything
+/// casting", the strongest filter anyone asked for and the biggest atlas. A
+/// still frame runs no walk, so the fold moves to the one enumeration that is
+/// bounded by the LIGHT count instead of the node count — the scene's own light
+/// registry, which holds exactly the lights the walk would have reached.
+void SceneMirror::refreshLightAggregates()
+{
+    mSyncSun = mSource ? mSource->sunLight().data() : nullptr;
+    mAnyShadowCaster = false;
+    mShadowFilter = ShadowFilter::Hard;
+    mMaxShadowResolution = 0;
+    if (!mSource) return;
+    for (const iris::LightNodePtr &lp : mSource->lights) {
+        iris::LightNode *light = lp.data();
+        if (!light) continue;
+        // Exactly the walk's own test, in the walk's own order: a Sky Light
+        // returns before the fold (it is the ambient, not a light), an Area
+        // light can never cast, and None is not a request.
+        if (light->lightType == iris::LightType::Sky) continue;
+        if (light->lightType == iris::LightType::Area) continue;
+        if (!light->shadowMap || light->shadowMap->shadowType == iris::ShadowMapType::None)
+            continue;
+        ShadowFilter f = ShadowFilter::Hard;
+        if (light->shadowMap->shadowType == iris::ShadowMapType::Soft)          f = ShadowFilter::Soft;
+        else if (light->shadowMap->shadowType == iris::ShadowMapType::VerySoft) f = ShadowFilter::VerySoft;
+        if (!mAnyShadowCaster || int(f) > int(mShadowFilter)) mShadowFilter = f;
+        mAnyShadowCaster = true;
+        if (light->shadowMap->resolution > 0)
+            mMaxShadowResolution = std::max(mMaxShadowResolution,
+                                            unsigned(light->shadowMap->resolution));
+    }
+}
+
+QStringList SceneMirror::mirroredNodeNames() const
+{
+    QStringList out;
+    for (auto it = mEntries.constBegin(); it != mEntries.constEnd(); ++it)
+        out << (it->docNode ? it->docNode->name : QStringLiteral("<released>"));
+    out.sort();
+    return out;
+}
+
+int SceneMirror::pushedVisibility(const iris::SceneNode *node) const
+{
+    if (!node) return -1;
+    auto it = mEntries.constFind(node);
+    return it == mEntries.constEnd() ? -1 : it->visiblePushed;
 }
 
 MeshId SceneMirror::engineMesh(iris::Mesh *mesh) const
@@ -659,6 +1130,27 @@ void SceneMirror::pushTransform(Scene *scene, NodeId node, const iris::Mat4 &t)
 void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
                                       const iris::SceneNodePtr &primary)
 {
+    // SELECTION CHANGES WHAT THE HELPERS DRAW (a selected light shows its
+    // falloff volume; a selected camera's body takes the highlight colour) and
+    // it is EDITOR state, so the document marks nothing. The mirror marks
+    // instead — the nodes leaving the selection and the ones joining it, which
+    // is a list of a handful and never the scene.
+    //
+    // ONLY ON A REAL CHANGE. The viewport re-asserts the selection EVERY FRAME
+    // (it hands the mirror the same list again, as it has always done), so
+    // marking unconditionally put one node on the change list per frame for as
+    // long as anything was selected — a still scene that was never still. The
+    // engine-side latches were already change-guarded; this is the same
+    // discipline one level up.
+    bool selectionMoved = nodes.size() != mHighlighted.size()
+                          || primary.data() != mHighlightRequestedPrimary.data();
+    if (!selectionMoved)
+        for (int i = 0; i < nodes.size(); ++i)
+            if (nodes[i].data() != mHighlighted[i].data()) { selectionMoved = true; break; }
+    if (!selectionMoved) return;
+    mHighlightRequestedPrimary = primary;
+    for (const auto &n : mHighlighted) if (n) n->markChanged(iris::NodeChange::Flags);
+    for (const auto &n : nodes)        if (n) n->markChanged(iris::NodeChange::Flags);
     mHighlighted.clear();
     mHighlightSet.clear();
     for (const auto &n : nodes) if (n) { mHighlighted.append(n); mHighlightSet.insert(n.data()); }
@@ -932,14 +1424,31 @@ void SceneMirror::syncHighlight()
 
 // ---- light wires ---------------------------------------------------------------
 
+// THE HELPER TOGGLES are EDITOR state, not document state, so nothing in the
+// document marks when they move — and the per-frame helper pass reaches every
+// light and camera anyway. The DECAL wires are the exception: they ride the
+// node visit, so a toggle has to make the decals look again.
 void SceneMirror::setLightWires(bool on)
 {
+    if (mLightWires == on) return;
     mLightWires = on;
+    markDecalsDirty();
 }
 
 void SceneMirror::setCameraBodies(bool on)
 {
+    if (mCameraBodies == on) return;
     mCameraBodies = on;
+}
+
+/// Queues every decal node for a visit. Decal wires are drawn from the node
+/// visit (they are the decal's SHAPE, derived from its own local scale), so the
+/// helpers toggle has to reach them.
+void SceneMirror::markDecalsDirty()
+{
+    if (!mSource) return;
+    for (const iris::DecalNodePtr &d : mSource->decals)
+        if (d) d->markChanged(iris::NodeChange::Flags);
 }
 
 // ---- camera helpers (CAMERAS_SPEC D2 / §3, phase 2b) ------------------------------
@@ -1042,6 +1551,7 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
         if (e.wireNode && e.wireVisible != 0) {
             mTarget->setNodeVisible(e.wireNode, false);
             e.wireVisible = 0;
+            notePush(camera, "camera body off");
         }
         return;
     }
@@ -1154,6 +1664,7 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
 
         const jahshaka::engine::MeshId built = mTarget->createLineMesh(pts, false);
         if (built) {
+            notePush(camera, "camera body");
             if (e.cameraMesh) mTarget->destroyMesh(e.cameraMesh);
             e.cameraMesh = built;
             e.cameraSignature = sig;
@@ -1186,8 +1697,9 @@ void SceneMirror::syncCameraWires(Entry &e, iris::CameraNode *camera)
                                                          sc.z() > 1e-6f ? 1.0f / sc.z() : 1.0f));
         e.wireXformKey = xk;
         e.wireXformPushed = true;
+        notePush(camera, "camera wire transform");
     }
-    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
+    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(camera, "camera wire visible"); }
 }
 
 // ---- ground grid (EDITOR_SHORTCUTS_SPEC §3) --------------------------------------
@@ -1680,6 +2192,7 @@ void SceneMirror::pushWireColour(Entry &e, const Colour &c)
     if (!e.wireMaterial) return;
     if (e.wireColourPushed && e.wireColour == c) return;
     if (mTarget->setUnlitMaterial(e.wireMaterial, c)) {
+        notePush(e.docNode, "wire colour");
         e.wireColour = c;
         e.wireColourPushed = true;
     }
@@ -1690,7 +2203,10 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     if (!mLightWires) {
         // Hides the wire lines AND the icon billboard set riding on wireNode
         // (the engine toggles a set's visibility flags with its owning node).
-        if (e.wireNode && e.wireVisible != 0) { mTarget->setNodeVisible(e.wireNode, false); e.wireVisible = 0; }
+        if (e.wireNode && e.wireVisible != 0) {
+            mTarget->setNodeVisible(e.wireNode, false); e.wireVisible = 0;
+            notePush(light, "light wires off");
+        }
         return;
     }
     // A SKY LIGHT HAS NO SHAPE: it is the sky, everywhere. Icon only, no wires
@@ -1702,8 +2218,8 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
             if (e.wireNode) mTarget->setNodeHelper(e.wireNode, true);
         }
         if (!e.wireNode) return;
-        if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; }
-        if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
+        if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; notePush(light, "sky wire"); }
+        if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(light, "sky wire visible"); }
         syncLightIcon(e, light);
         return;
     }
@@ -1732,9 +2248,9 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     }
     if (!e.wireNode) return;
     if (shape < 0) {
-        if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; }
+        if (e.wireKind != -1) { mTarget->detachMesh(e.wireNode); e.wireKind = -1; notePush(light, "wire shape"); }
         // the icon set rides this node
-        if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
+        if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(light, "wire visible"); }
         syncLightIcon(e, light);
         return;
     }
@@ -1742,7 +2258,7 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
     if (!m) return;
     if (!e.wireMaterial) e.wireMaterial = mTarget->createUnlitMaterial(Colour(1, 1, 1), false);
     if (!e.wireMaterial) return;
-    if (e.wireKind != shape) { if (mTarget->attachMesh(e.wireNode, m, e.wireMaterial)) e.wireKind = shape; }
+    if (e.wireKind != shape) { if (mTarget->attachMesh(e.wireNode, m, e.wireMaterial)) { e.wireKind = shape; notePush(light, "wire shape"); } }
     const QColor c = light->color;
     // On change only, like every other push here: setUnlitMaterial schedules a
     // const-buffer update, and a light's colour is edited by hand, not animated.
@@ -1777,8 +2293,9 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
         mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(), wireScale);
         e.wireXformKey = wireKey.h;
         e.wireXformPushed = true;
+        notePush(light, "wire transform");
     }
-    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
+    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; notePush(light, "wire visible"); }
     syncLightIcon(e, light);
 }
 
@@ -1839,6 +2356,7 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
     b.position = Vec3(p.x(), p.y(), p.z());
     b.size = light->iconSize > 0.0f ? light->iconSize : 0.5f;
     if (mTarget->setBillboards(e.wireNode, &b, 1)) {
+        notePush(light, "light icon");
         e.iconKey = key.h;
         e.iconPushed = true;
     }
@@ -1888,10 +2406,20 @@ TextureId SceneMirror::iconTextureFor(const QString &path)
     return id;
 }
 
-void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMovable)
+// ONE NODE, GIVEN ITS PARENT'S ANSWERS (DIRTY_SET_MIRROR_SPEC §4).
+//
+// This is the old visit()'s body with the child recursion lifted out of it and
+// nothing else moved: the three callers — the full walk, one marked node, and
+// the verifier — share every latch, which is what makes "run the full walk
+// after the dirty one and demand it pushes nothing" a real oracle rather than
+// two implementations agreeing by luck.
+SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool parentShown,
+                                                bool parentMovable)
 {
-    if (!node) return;
-    ++mVisited;
+    VisitResult out;
+    if (!node) { out.descend = false; return out; }
+    if (mVerifying) ++mVerifierVisits;
+    else            ++mVisited;
 
     Entry &e = mEntries[node];
     e.lastSeen = mSyncStamp;
@@ -1909,11 +2437,11 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
             // with it; drop the entry's engine state and adopt afresh.
             releaseEntry(e);
         }
-        if (!graphNode) return;
+        if (!graphNode) { out.descend = false; return out; }
         e.node = mTarget->adoptNode(const_cast<void *>(graphNode));
         e.graphNode = graphNode;
         e.graphEpoch = node->graphEpoch();
-        if (!e.node) return;
+        if (!e.node) { out.descend = false; return out; }
         e.visiblePushed = -1;      // force one visibility application
         e.pickablePushed = -1;     // ...and one query-flag application
         e.lightMaskEverPushed = false;   // ...and one lighting-channel application
@@ -1944,6 +2472,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // that is one per adopted node, for a value sitting in a local.
         mTarget->setNodeVisibleUnder(e.node, shown, parentShown);
         e.visiblePushed = wantVisible;
+        notePush(node, "visibility");
     }
 
     // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3). Resolved here, where the walk
@@ -1960,22 +2489,8 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
     // world, joined to the voxel bounce, and then taken out of it again: one
     // from-scratch GI rebuild each, at load time.
     const bool movable = syncMobility(e, node, parentMovable);
-
-    // Picking's broad phase is Ogre's RaySceneQuery (SCENEGRAPH_SPEC §2) and
-    // its mask is tested inside the SIMD sweep, so `pickable` has to reach the
-    // node's engine objects as QUERY FLAGS. Change-guarded; the document's flag
-    // stays the authority and is re-checked exactly on the candidates.
-    const int wantPickable = node->isPickable() ? 1 : 0;
-    // ...and a material whose Items were rebuilt under this entry (a
-    // shading-model switch) hands it Items born with the DEFAULT query mask,
-    // so the flag has to go out again even when the document's answer is
-    // unchanged. See onMaterialItemsRebuilt.
-    const quint32 wantItemSerial = e.material ? mMaterialItemSerial.value(e.material, 0) : 0;
-    if (e.pickablePushed != wantPickable || e.materialItemSerial != wantItemSerial) {
-        iris::graph::setPickable(node->graphNode(), wantPickable != 0);
-        e.pickablePushed = wantPickable;
-        e.materialItemSerial = wantItemSerial;
-    }
+    out.shown = shown;
+    out.movable = movable;
 
     // LIGHTING CHANNELS, object side. Change-guarded like everything else in
     // this walk; the engine holds the value and re-applies it to any Item it
@@ -1988,6 +2503,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         mTarget->setNodeLightMask(e.node, wantLightMask);
         e.lightMaskPushed = wantLightMask;
         e.lightMaskEverPushed = true;
+        notePush(node, "lightMask");
     }
 
     // PER-OBJECT SHADOW CASTING. `SceneNode::castShadow` has been in the
@@ -2002,6 +2518,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
     if (e.castShadowPushed != wantCastShadow) {
         mTarget->setNodeCastShadow(e.node, wantCastShadow != 0);
         e.castShadowPushed = wantCastShadow;
+        notePush(node, "castShadow");
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Mesh) {
@@ -2009,7 +2526,11 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // THE SCENE'S DEFAULT FLOOR, remembered for syncGroundHorizon. Recorded
         // here rather than searched for afterwards: the walk is already at every
         // mesh node, and the flag is the document's own (never the name).
-        if (meshNode->defaultFloor && !mHorizonFloor) mHorizonFloor = meshNode;
+        // STICKY, not re-found per walk (§3.7): a still frame runs no walk at
+        // all, so the pointer has to survive one. It is dropped when this node
+        // stops being the floor and when its entry is released.
+        if (meshNode->defaultFloor) { if (!mHorizonFloor) mHorizonFloor = meshNode; }
+        else if (mHorizonFloor == meshNode) mHorizonFloor = nullptr;
         // The members, not the by-value getters: `getMesh()`/`getMaterial()`/
         // `getSkeleton()` each return a QSharedPointer BY VALUE, so reading
         // them costs an atomic increment and decrement per mesh per frame for
@@ -2098,17 +2619,29 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
             }
             if (!attached && m && mat) attached = mTarget->attachMesh(e.node, m, mat);
             if (attached) {
+                notePush(node, "mesh attach");
+                if (e.materialPtr != material) noteMaterialUser(node, e.materialPtr, material);
                 e.hasMesh = true; e.material = mat; e.materialPtr = material; e.mesh = m; e.meshPtr = mesh;
                 mReclaimPending = true;   // the old mesh/material may now be unreferenced
                 e.texturesPushed = false;
                 e.shadingModelPushed = -1;   // a NEW engine material may be in either family
                 e.pickablePushed = -1;   // a NEW Item carries the default query mask
                 syncTextures(e, attachMs);
+                // The refractive/distortion contribution is this entry's from
+                // the frame it attaches, not the frame after: the aggregate is
+                // incremental now and nothing re-folds the scene (§3.7).
+                if (attachMs.hasPbr)
+                    noteRefractive(e, attachMs.pbr.alphaMode == PbrAlphaMode::Refractive,
+                                   attachMs.pbr.shadingModel == ShadingModel::Distortion);
             }
         } else if (!mesh && e.hasMesh) {
             // The document dropped the mesh (a node kept, its MeshPtr cleared).
             // Without this the engine kept drawing the old geometry forever.
             mTarget->detachMesh(e.node);
+            notePush(node, "mesh detach");
+            noteMaterialUser(node, e.materialPtr, nullptr);
+            e.materialPtr = nullptr;
+            noteRefractive(e, false, false);
             mReclaimPending = true;
             e.hasMesh = false;
             e.mesh = 0;
@@ -2120,7 +2653,15 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
             e.characterHost = nullptr;
             e.texturesPushed = false;
             e.boundTextures.clear();
-        } else if (e.hasMesh && e.material && material) {
+        }
+        // NOT `else if` (DIRTY_SET_MIRROR_SPEC): the attach above resets
+        // `shadingModelPushed` to -1 because a NEW engine material may be in
+        // either family, and the push that answers that used to happen on the
+        // NEXT frame's walk. There is no next frame now — so an attached node
+        // whose material asked for Unlit or Distortion rendered Lit forever.
+        // The memo makes this free on the attach frame (it was validated a few
+        // lines up and is keyed on the same sync stamp).
+        if (e.hasMesh && e.material && material) {
             // Parameters may change every frame from the property panel, so the
             // mirror LOOKS every frame — but it only PUSHES on a change.
             // setPbrMaterial re-applies the whole datablock (a const-buffer
@@ -2143,8 +2684,15 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                     // must not be retried every frame. The next real CHANGE
                     // tries again, exactly like the planar-reflector flag.
                     e.shadingModelPushed = wantModel;
-                    if (mTarget->setShadingModel(e.material, ms.pbr.shadingModel))
+                    if (mTarget->setShadingModel(e.material, ms.pbr.shadingModel)) {
+                        notePush(node, "shading model");
                         onMaterialItemsRebuilt(e.material);
+                        // ...and every OTHER node drawing this material owes a
+                        // query-flag re-push (its Items were rebuilt too). The
+                        // walk used to reach them by walking; the change list
+                        // has to be told (§3.6).
+                        markMaterialUsersDirty(material);
+                    }
                 }
                 // ONE COMPARE PER MATERIAL, not per node. See PbrPush in the
                 // header for what this replaced and why it mattered.
@@ -2155,12 +2703,14 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
                 if (!push.pushed || push.pushedTo != e.material
                     || push.pushedFingerprint != ms.fingerprint) {
                     if (mTarget->setPbrMaterial(e.material, ms.pbr)) {
+                        notePush(node, "pbr params");
                         push.pushedTo = e.material;
                         push.pushedFingerprint = ms.fingerprint;
                         push.pushed = true;
                     }
                 }
-                noteRefractive(ms.pbr);
+                noteRefractive(e, ms.pbr.alphaMode == PbrAlphaMode::Refractive,
+                               ms.pbr.shadingModel == ShadingModel::Distortion);
             }
             syncTextures(e, ms);
         }
@@ -2169,9 +2719,32 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // than the one after. Below two, syncSkeletonSharing has nothing to do
         // and returns without touching an entry (it used to iterate every entry
         // in the scene, every frame, to find that out).
-        if (e.gpuSkinned) {
-            ++mSkinnedNodes;
-            if (e.characterHost) ++mCharacterPieces;
+        noteRigCounts(e);
+    }
+
+    // PICKING'S QUERY FLAGS, AFTER the geometry (DIRTY_SET_MIRROR_SPEC).
+    //
+    // It used to stand above the mesh branch, which was harmless only because
+    // the walk came back next frame: an ATTACH resets `pickablePushed` to -1
+    // (a new Item carries Ogre's default query mask) and a shading-model switch
+    // bumps the material's item serial, and BOTH happen below — so the flag
+    // went out one frame late. With the dirty set there is no next frame: a
+    // node nobody writes again is never visited again, and an unpickable object
+    // stayed clickable for the life of the scene. Ordering it after the branch
+    // that invalidates it is the whole fix.
+    //
+    // Picking's broad phase is Ogre's RaySceneQuery (SCENEGRAPH_SPEC §2) and
+    // its mask is tested inside the SIMD sweep, so `pickable` has to reach the
+    // node's engine objects as QUERY FLAGS. Change-guarded; the document's flag
+    // stays the authority and is re-checked exactly on the candidates.
+    {
+        const int wantPickable = node->isPickable() ? 1 : 0;
+        const quint32 wantItemSerial = e.material ? mMaterialItemSerial.value(e.material, 0) : 0;
+        if (e.pickablePushed != wantPickable || e.materialItemSerial != wantItemSerial) {
+            iris::graph::setPickable(node->graphNode(), wantPickable != 0);
+            e.pickablePushed = wantPickable;
+            e.materialItemSerial = wantItemSerial;
+            notePush(node, "pickable");
         }
     }
 
@@ -2187,6 +2760,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         if (e.planarReflector != want) {
             mTarget->setNodePlanarReflector(e.node, want != 0);
             e.planarReflector = want;
+            notePush(node, "planar reflector");
         }
     }
 
@@ -2198,6 +2772,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         if (e.giBoundsExcluded != want) {
             mTarget->setNodeGiBoundsExcluded(e.node, want != 0);
             e.giBoundsExcluded = want;
+            notePush(node, "gi bounds");
         }
     }
 
@@ -2208,6 +2783,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // changes a node's type in place). removeParticleSystem is the explicit
         // counterpart setParticleSystem needs for exactly that.
         mTarget->removeParticleSystem(e.node);
+        notePush(node, "particles removed");
         e.hasParticles = false;
         e.particleSignature = 0;
         e.particleTexture = 0;
@@ -2225,48 +2801,56 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // shader already has. The NODE still exists (the icon is pickable and
         // selectable like any other light's) — only the engine light is absent.
         if (light->lightType == iris::LightType::Sky) {
-            if (e.hasLight) { mTarget->removeLight(e.node); e.hasLight = false; }
+            if (e.hasLight) {
+                mTarget->removeLight(e.node);
+                notePush(node, "sky light has no engine light");
+                e.hasLight = false;
+            }
             e.lightPushed = false;
             syncLightWires(e, light);
             syncLightIcon(e, light);
-            return;
-        }
-        // ON CHANGE ONLY (audit F7). setLight is ~20 Ogre setters — type,
-        // diffuse, specular, cast-shadows, power scale, an attenuation solve
-        // (setAttenuationBasedOnRadius takes a square root and rewrites the
-        // light's local AABB), spot range — plus two std::string compares for
-        // the profile/mask paths, and it ran for every light in the scene on
-        // every frame to re-push values a human edits by hand. It reads NOTHING
-        // from the node's transform (the light rides the adopted node and the
-        // graph carries position and direction), so skipping an unchanged push
-        // cannot freeze a moving light.
-        const LightDesc want = toLightDesc(light, mSyncSun, true);
-        // By value (LightDesc::operator==, beside the struct — every field
-        // setLight reads is in it, which is what keeps a new field from
-        // silently stopping at the first push).
-        if (!e.lightPushed || want != e.lastLight) {
-            if (mTarget->setLight(e.node, want)) {
-                e.hasLight = true;
-                e.lastLight = want;
-                e.lightPushed = true;
+            // THE EARLY RETURN IS GONE (lead review R2 #6). It used to skip the
+            // rest of the visit AND the child recursion, which made a Sky
+            // Light's children invisible to the full walk — removeMissing then
+            // released their entries every frame — while the dirty pass, which
+            // reaches a marked node directly and resolves its parent from the
+            // DOCUMENT, adopted them. Two modes disagreeing about the same
+            // scene is the one thing this lane cannot ship. A Sky Light's
+            // children are ordinary nodes; the sky-specific work above it (no
+            // engine light, the icon, no wires) is what makes it a Sky Light.
+            //
+            // Nothing below can misfire on it: it carries no mesh, no
+            // particles, no decal and is not a camera, and the light branch
+            // itself has already been answered.
+        } else {
+            // ON CHANGE ONLY (audit F7). setLight is ~20 Ogre setters — type,
+            // diffuse, specular, cast-shadows, power scale, an attenuation solve
+            // (setAttenuationBasedOnRadius takes a square root and rewrites the
+            // light's local AABB), spot range — plus two std::string compares for
+            // the profile/mask paths, and it ran for every light in the scene on
+            // every frame to re-push values a human edits by hand. It reads NOTHING
+            // from the node's transform (the light rides the adopted node and the
+            // graph carries position and direction), so skipping an unchanged push
+            // cannot freeze a moving light.
+            const LightDesc want = toLightDesc(light, mSyncSun, true);
+            // By value (LightDesc::operator==, beside the struct — every field
+            // setLight reads is in it, which is what keeps a new field from
+            // silently stopping at the first push).
+            if (!e.lightPushed || want != e.lastLight) {
+                if (mTarget->setLight(e.node, want)) {
+                    notePush(node, "light");
+                    e.hasLight = true;
+                    e.lastLight = want;
+                    e.lightPushed = true;
+                }
             }
+            // (The per-light shadow fold that stood here — strongest filter, largest
+            // atlas request, "does anything cast" — is refreshLightAggregates()
+            // now: it is a fold over Scene::lights, which is BOUNDED BY THE LIGHT
+            // COUNT and therefore free, and a still frame runs no walk to fold it
+            // over. Same answer, same order, once a sync.)
+            syncLightWires(e, light);
         }
-        // The document's per-light shadow type (Hard/Soft/VerySoft) has no per-light
-        // engine equivalent — the filter is global. Accumulate the strongest request;
-        // applyEnvironment pushes it (iris::ShadowMapType orders None<Hard<Soft<VerySoft).
-        if (light->lightType != iris::LightType::Area &&   // area lights cannot shadow
-            light->shadowMap && light->shadowMap->shadowType != iris::ShadowMapType::None) {
-            ShadowFilter f = ShadowFilter::Hard;
-            if (light->shadowMap->shadowType == iris::ShadowMapType::Soft)          f = ShadowFilter::Soft;
-            else if (light->shadowMap->shadowType == iris::ShadowMapType::VerySoft) f = ShadowFilter::VerySoft;
-            if (!mAnyShadowCaster || int(f) > int(mShadowFilter)) mShadowFilter = f;
-            mAnyShadowCaster = true;
-            // Shadow Size is global too (one atlas): the largest request wins.
-            if (light->shadowMap->resolution > 0)
-                mMaxShadowResolution = std::max(mMaxShadowResolution,
-                                                unsigned(light->shadowMap->resolution));
-        }
-        syncLightWires(e, light);
     }
 
     if (node->getSceneNodeType() == iris::SceneNodeType::Decal) {
@@ -2279,18 +2863,34 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
         // Phase 1 finally made CameraNode set its own type, which is what lets
         // this branch exist at all (CAMERAS_SPEC §1, the type-enum trap).
         auto *cam = static_cast<iris::CameraNode *>(node);
-        resolveFocusTracking(cam);
+        // FOCUS TRACKING IS NOT PART OF THE VISIT any more: it advances a
+        // SMOOTHING FILTER by the frame's dt, so running it twice in one frame
+        // (a dirty visit and then the verifier's oracle walk over the same
+        // camera) would double the travel. It belongs with the other things
+        // that legitimately cost something every frame — syncPerFrameSet().
         syncCameraWires(e, cam);
     }
 
+    return out;
+}
+
+// THE FULL WALK. It runs at the explicit triggers of DIRTY_SET_MIRROR_SPEC §3.5
+// — a bind, a graph re-take, an evacuation, the play edge, an eviction
+// overflow — and as the verifier's oracle. Every other frame the mirror handles
+// the change list instead (consumeDirty).
+void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMovable)
+{
+    const VisitResult r = visitNode(node, parentShown, parentMovable);
+    if (!r.descend || !node) return;
     // `e` is a reference into a QHash and the recursion INSERTS entries, which
     // QHash does not keep value references stable across (read-after-destroy under
-    // ASan) — so nothing below may touch `e`.
+    // ASan) — which is why visitNode hands its answers back BY VALUE rather
+    // than leaving the caller holding one.
     const iris::graph::NodeHandle h = node->graphNode();
     const std::size_t n = iris::graph::childCount(h);
     for (std::size_t i = 0; i < n; ++i)
         if (iris::SceneNode *c = iris::graph::ownerOf(iris::graph::childAt(h, i)))
-            visit(c, shown, movable);
+            visit(c, r.shown, r.movable);
 }
 
 // ---- mobility -------------------------------------------------------------------
@@ -2348,13 +2948,25 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
         }
     }
 
-    if (movable) {
-        ++mMovableNodes;
-        // The GI light signature needs this answer per light and cannot derive
-        // it (rule 2 is a question about the whole ancestor chain): recorded
-        // here, where the walk has it, and read by applyEnvironment later in
-        // the same frame.
-        if (node->getSceneNodeType() == iris::SceneNodeType::Light) mMovableLights.push_back(node);
+    // THE MOVABLE COUNT AND THE MOVABLE-LIGHT LIST are INCREMENTAL (§3.7): a
+    // still frame visits nothing, so neither can be re-folded by a walk. The
+    // entry carries its own contribution and gives it back at release.
+    if (e.countedMovable != movable) {
+        e.countedMovable = movable;
+        if (movable) {
+            ++mMovableNodes;
+            // The GI light signature needs this answer per light and cannot
+            // derive it (rule 2 is a question about the whole ancestor chain);
+            // applyEnvironment reads the list later in the same frame.
+            if (node->getSceneNodeType() == iris::SceneNodeType::Light)
+                mMovableLights.push_back(node);
+        } else {
+            if (mMovableNodes) --mMovableNodes;
+            if (node->getSceneNodeType() == iris::SceneNodeType::Light) {
+                auto it = std::find(mMovableLights.begin(), mMovableLights.end(), node);
+                if (it != mMovableLights.end()) mMovableLights.erase(it);
+            }
+        }
     }
     // ON CHANGE ONLY, like every other flag on this walk.
     const int want = movable ? 1 : 0;
@@ -2380,6 +2992,7 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
         mTarget->setNodeMovable(e.node, movable,
                                 soft ? jahshaka::engine::MobilityChange::Soft
                                      : jahshaka::engine::MobilityChange::Authoring);
+        notePush(node, "mobility");
         e.movable = want;
         e.movableSoft = movable && why == iris::MobilityReason::Play;
         if (known) mMobilityChanged = true;
@@ -2640,6 +3253,7 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     // silently keeping a stale one.
     const TextureId tex = texPath.isEmpty() ? 0 : textureFor(texPath, true);
     if (mTarget->setParticleSystem(e.node, toParticleDesc(ps, tex))) {
+        notePush(ps, "particles");
         e.hasParticles = true;
         e.particleSignature = sig;
         e.particleTexture = tex;   // the engine's definition holds it: keep it alive
@@ -2662,6 +3276,11 @@ void SceneMirror::reclaimUnused()
         if (usedMeshes.contains(it.value())) { ++it; continue; }
         mTarget->destroyMesh(it.value()); it = mMeshes.erase(it);
     }
+    // ...and the per-material MEMO with them. It used to be swept at the end of
+    // every sync — one pass over every material in the scene, every frame, and
+    // a still frame (which runs no walk, so stamps nothing) would have thrown
+    // the whole memo away once a second. It is dropped WITH the material here
+    // instead, which is the only moment a key can go stale.
     for (auto it = mMaterials.begin(); it != mMaterials.end();) {
         if (usedMaterials.contains(it.value())) { ++it; continue; }
         // The two per-material records go WITH the material (lead review F7).
@@ -2688,6 +3307,13 @@ void SceneMirror::reclaimUnused()
     // any material that still holds it first: an HlmsPbsDatablock keeps a raw
     // TextureGpu*, so reclaiming without that would have introduced exactly the
     // stale-binding crash this lane was told to close before opening.
+    // A memo entry whose material never reached mMaterials (a conversion that
+    // failed) has no other moment to die: sweep the memo against the cache.
+    for (auto it = mMaterialSync.begin(); it != mMaterialSync.end();) {
+        if (mMaterials.contains(it.key())) { ++it; continue; }
+        mMaterialUsers.remove(it.key());
+        it = mMaterialSync.erase(it);
+    }
     QSet<TextureId> usedTextures;
     for (const Entry &e : mEntries) {
         for (TextureId t : e.boundTextures) usedTextures.insert(t);
@@ -2716,6 +3342,22 @@ void SceneMirror::reclaimUnused()
 void SceneMirror::releaseEntry(Entry &e)
 {
     mReclaimPending = true;
+    // THE AGGREGATES ARE INCREMENTAL (DIRTY_SET_MIRROR_SPEC §3.7): an entry
+    // that goes has to give its contribution back, because nothing re-folds
+    // the scene any more.
+    noteRefractive(e, false, false);
+    e.gpuSkinned = false;
+    e.characterHost = nullptr;
+    noteRigCounts(e);
+    if (e.countedMovable) {
+        e.countedMovable = false;
+        if (mMovableNodes) --mMovableNodes;
+        auto it = std::find(mMovableLights.begin(), mMovableLights.end(), e.docNode);
+        if (it != mMovableLights.end()) mMovableLights.erase(it);
+    }
+    if (e.docNode && e.materialPtr) noteMaterialUser(e.docNode, e.materialPtr, nullptr);
+    if (mHorizonFloor && static_cast<const iris::SceneNode *>(mHorizonFloor) == e.docNode)
+        mHorizonFloor = nullptr;
     if (e.wireNode) mTarget->removeNode(e.wireNode);
     if (e.wireMaterial) mTarget->destroyMaterial(e.wireMaterial);
     // The camera body/frustum mesh belongs to this entry alone (it is derived
@@ -2791,10 +3433,10 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
     if (material) {
         auto hit = mMaterials.constFind(material);
         if (hit != mMaterials.constEnd()) {
-            // noteRefractive still has to see it: the refraction pass is armed
-            // from what the LAST walk saw, not from what was created.
-            const MaterialSync &ms = materialSyncFor(material);
-            if (ms.hasPbr) noteRefractive(ms.pbr);
+            // (The noteRefractive call that stood here is GONE: the counts
+            // are per ENTRY now, maintained by visitNode where the entry is —
+            // a cache HIT here told the old scene-wide flag about a material
+            // that may not be attached to anything this frame.)
             return hit.value();
         }
     }
@@ -2810,7 +3452,6 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
         }
         return mDefaultMaterial;
     }
-    noteRefractive(p);
     auto it = mMaterials.constFind(material);
     if (it != mMaterials.constEnd()) return it.value();
     MaterialId id = mTarget->createPbrMaterial(p);
@@ -2850,15 +3491,103 @@ void SceneMirror::syncCustomPieces(iris::Material *material, MaterialId id)
 /// Refraction "Auto" (POST_CHAIN_SPEC §9.5) needs to know whether the scene HAS
 /// a refractive material right now: the chain only grows its second scene pass
 /// and its full-res copy while one exists, so the cost when unused is exactly
-/// zero. Accumulated as materials are visited, consumed by applyEnvironment,
-/// reset by sync() — the same shape as mAnyShadowCaster.
-void SceneMirror::noteRefractive(const PbrParams &p)
+/// zero. Distortion "Auto" (POST_LOOKS_SPEC §5.3) is resolved the same way and
+/// for the same reason.
+///
+/// PER ENTRY AND INCREMENTAL (DIRTY_SET_MIRROR_SPEC §3.7). It used to be a
+/// boolean the walk re-raised every frame and sync() reset — which a still
+/// frame, running no walk, would have reset to false and left there, turning
+/// the refraction pass off under a glass object nobody touched. The entry owns
+/// its contribution and gives it back when it is released.
+void SceneMirror::noteRefractive(Entry &e, bool refractive, bool distortion)
 {
-    if (p.alphaMode == PbrAlphaMode::Refractive) mAnyRefractive = true;
-    // DISTORTION "Auto" (POST_LOOKS_SPEC §5.3) is resolved the same way and for
-    // the same reason: its target and its two passes only enter the graph while
-    // the scene actually holds a distortion material.
-    if (p.shadingModel == ShadingModel::Distortion) mAnyDistortion = true;
+    if (e.countedRefractive != refractive) {
+        e.countedRefractive = refractive;
+        if (refractive) ++mRefractiveEntries;
+        else if (mRefractiveEntries) --mRefractiveEntries;
+    }
+    if (e.countedDistortion != distortion) {
+        e.countedDistortion = distortion;
+        if (distortion) ++mDistortionEntries;
+        else if (mDistortionEntries) --mDistortionEntries;
+    }
+    mAnyRefractive = mRefractiveEntries > 0;
+    mAnyDistortion = mDistortionEntries > 0;
+}
+
+/// How many entries carry a GPU rig, and how many of those are pieces of a
+/// multi-piece character — the two numbers syncSkeletonSharing and syncClips
+/// early-out on. Incremental for the same reason as the counts above.
+void SceneMirror::noteRigCounts(Entry &e)
+{
+    const bool piece = e.gpuSkinned && e.characterHost != nullptr;
+    if (e.countedSkinned != e.gpuSkinned) {
+        e.countedSkinned = e.gpuSkinned;
+        if (e.gpuSkinned) ++mSkinnedNodes;
+        else if (mSkinnedNodes) --mSkinnedNodes;
+    }
+    if (e.countedPiece != piece) {
+        e.countedPiece = piece;
+        if (piece) ++mCharacterPieces;
+        else if (mCharacterPieces) --mCharacterPieces;
+    }
+}
+
+/// Which document nodes draw each material (§3.6). A MATERIAL edit moves no
+/// node, so the change list cannot see one — this index is how the edit reaches
+/// the nodes that have to re-push it, without a walk of the scene.
+void SceneMirror::noteMaterialUser(iris::SceneNode *node, iris::Material *from,
+                                   iris::Material *to)
+{
+    if (from == to) return;
+    if (from) {
+        auto it = mMaterialUsers.find(from);
+        if (it != mMaterialUsers.end()) {
+            auto &v = it.value();
+            auto at = std::find(v.begin(), v.end(), node);
+            if (at != v.end()) v.erase(at);
+            if (v.empty()) {
+                mMaterialUsers.erase(it);
+                // ...AND THE MEMO WITH IT (lead review R2 #1). Its key is a raw
+                // `iris::Material *` and markChangedMaterials DEREFERENCES
+                // every key it holds (to read the material's revision), while
+                // the memo was pruned only by reclaimUnused — which runs AFTER
+                // the change list is consumed. A material dropped by its last
+                // node is free to die the moment the caller's reference goes,
+                // and that is the ordinary rebake/replace path (materialsapi
+                // builds a fresh material, assigns it, and lets the old one go
+                // at scope end). Nothing else can reference a material no entry
+                // draws, so this is the exact moment its record must go.
+                mMaterialSync.remove(from);
+            }
+        }
+    }
+    if (to) {
+        auto &v = mMaterialUsers[to];
+        if (std::find(v.begin(), v.end(), node) == v.end()) v.push_back(node);
+    }
+}
+
+/// ONE ENGINE PUSH. Counted always; ATTRIBUTED when the verifier made it,
+/// because a push the verifier makes is by definition a change the document
+/// failed to report and the fix is a missing mark, named.
+void SceneMirror::notePush(const iris::SceneNode *node, const char *what)
+{
+    ++mVisitPushes;
+    if (!mVerifying) return;
+    ++mVerifierCatches;
+    // Once per node+latch pair per process: a miss that repeats every ~2 s for
+    // an hour must not fill the log with the same line.
+    static QSet<QString> reported;
+    const QString key = QStringLiteral("%1/%2")
+                            .arg(node ? node->name : QStringLiteral("<none>"))
+                            .arg(QLatin1String(what));
+    if (reported.contains(key)) return;
+    reported.insert(key);
+    qWarning("SceneMirror: the change list MISSED '%s' (%s) — the document changed it without "
+             "reporting it (SceneNode::notifyChanged / Material::touch). The verifier pushed it; "
+             "the fix is the missing mark, not this message.",
+             qUtf8Printable(node ? node->name : QStringLiteral("<unnamed>")), what);
 }
 
 TextureId SceneMirror::textureFor(const QString &path, bool srgb)
@@ -3053,23 +3782,55 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
 
 const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *material)
 {
+    // THE MATERIAL'S OWN REVISION IS THE FAST PATH (DIRTY_SET_MIRROR_SPEC
+    // §3.6); the FINGERPRINT stays as the ORACLE, computed when the revision
+    // moved and on every verification visit. A counter is only as good as the
+    // writer that bumps it — this is what makes a writer that forgot a
+    // COUNTED, self-healing event instead of a silent one.
+    const quint32 rev = material ? material->revision() : 0;
     auto it = mMaterialSync.find(material);
     if (it != mMaterialSync.end()) {
         // Already validated by THIS walk: however many nodes share the
         // material, it is fingerprinted once.
         if (it->lastSeen == mSyncStamp) return it.value();
         it->lastSeen = mSyncStamp;
+        // THE VERIFIER'S MATERIAL QUOTA. Re-hashing forty fields and a texture
+        // map is ~15x the cost of re-checking a node's latches, so the two
+        // budgets are separate: the node pass runs 64 a sync and this runs 8,
+        // and full coverage of a material per primitive takes seconds rather
+        // than milliseconds. The DIFFERENTIAL suite is what catches a miss at
+        // once; this is the always-on background net.
+        const bool forced = mVerifying && mVerifyMaterialQuota > 0;
+        if (!forced && it->revision == rev) return it.value();
+        if (forced) --mVerifyMaterialQuota;
         const quint64 fp = materialFingerprint(material, it->asPbr);
-        if (fp == it->fingerprint) return it.value();   // nothing the build reads moved
-        // It DID move: fall through and rebuild in place, keeping the cast.
+        if (fp == it->fingerprint) {          // nothing the build reads moved
+            it->revision = rev;
+            return it.value();
+        }
+        // The fields moved. If the REVISION did not, the write bypassed
+        // Material::touch() — count it, name it, and heal it.
+        if (it->revision == rev) {
+            // NAMED (lead review R2 #4): a material has a name and a guid, and
+            // "something was written without touch()" is useless without them.
+            const QByteArray reason =
+                QStringLiteral("material '%1' written without touch()")
+                    .arg(material->getName().isEmpty() ? material->getGuid()
+                                                       : material->getName())
+                    .toUtf8();
+            notePush(nullptr, reason.constData());
+        }
+        // Fall through and rebuild in place, keeping the cast.
         MaterialSync fresh;
         fresh.lastSeen = mSyncStamp;
         fresh.asPbr = it->asPbr;
+        fresh.revision = rev;
         it.value() = fresh;
     } else {
         MaterialSync fresh;
         fresh.lastSeen = mSyncStamp;
         fresh.asPbr = dynamic_cast<iris::PbrMaterial *>(material);
+        fresh.revision = rev;
         it = mMaterialSync.insert(material, fresh);
     }
     MaterialSync &ms = it.value();
@@ -3157,6 +3918,7 @@ void SceneMirror::syncTextures(Entry &e, const MaterialSync &ms)
     const std::vector<TextureBind> &binds = ms.binds;
     const quint64 signature = ms.textureSignature;
     if (e.texturesPushed && signature == e.textureSignature) return;
+    notePush(e.docNode, "textures");
     e.textureSignature = signature;
     e.texturesPushed = true;
     mReclaimPending = true;
@@ -3456,7 +4218,11 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
         // No image (yet), unreadable, or the atlas is full: the node exists and
         // draws its wire box, but projects nothing. Never leave a STALE decal
         // bound — that would keep painting the previous image.
-        if (e.hasDecal) { mTarget->removeDecal(e.node); e.hasDecal = false; }
+        if (e.hasDecal) {
+            mTarget->removeDecal(e.node);
+            notePush(decal, "decal removed");
+            e.hasDecal = false;
+        }
         e.decalSignature = sig;
         return;
     }
@@ -3465,9 +4231,24 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
     d.diffuse = diffuse;
     d.normal = decalTextureFor(decal->resolvedNormalPath, DecalMap::Normal);
     d.emissive = decalTextureFor(decal->resolvedEmissivePath, DecalMap::Emissive);
-    if (mTarget->setDecal(e.node, d)) {
-        e.hasDecal = true;
-        if (rebind) e.decalSignature = sig;
+    // ON CHANGE ONLY, like every other push in this walk (DIRTY_SET_MIRROR_SPEC
+    // §4). setDecal rebinds three atlas slices and rewrites the projector's
+    // parameters, and it ran EVERY frame for every decal in the scene — the
+    // last unlatched per-frame push left in the walk, and one the oracle
+    // (verifyAgainstFullWalk) would otherwise report as a miss forever.
+    Hasher dk;
+    dk << quint64(d.diffuse) << quint64(d.normal) << quint64(d.emissive)
+       << d.width << d.height << d.depth << d.metalness << d.roughness
+       << quint32(d.ignoreAlphaDiffuse ? 1 : 0);
+    if (!e.hasDecal || e.decalPushKey != dk.h) {
+        if (mTarget->setDecal(e.node, d)) {
+            notePush(decal, "decal");
+            e.hasDecal = true;
+            e.decalPushKey = dk.h;
+            if (rebind) e.decalSignature = sig;
+        }
+    } else if (rebind) {
+        e.decalSignature = sig;
     }
 }
 
@@ -3477,7 +4258,10 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
 void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
 {
     if (!mLightWires) {
-        if (e.wireNode) mTarget->setNodeVisible(e.wireNode, false);
+        if (e.wireNode && e.wireVisible != 0) {
+            mTarget->setNodeVisible(e.wireNode, false);
+            e.wireVisible = 0;
+        }
         return;
     }
     if (!e.wireNode) {
@@ -3502,11 +4286,22 @@ void SceneMirror::syncDecalWires(Entry &e, iris::DecalNode *decal)
     // box and undo the node's own scale, exactly as the light wires do (the box
     // mesh is authored as a UNIT cube, so the scale IS the extents).
     const iris::Vec3 s = decal->getLocalScale();
-    mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(),
-                              Vec3(std::max(decal->width, 0.001f) * (s.x() > 1e-6f ? 1.0f / s.x() : 1.0f),
-                                   std::max(decal->depth, 0.001f) * (s.y() > 1e-6f ? 1.0f / s.y() : 1.0f),
-                                   std::max(decal->height, 0.001f) * (s.z() > 1e-6f ? 1.0f / s.z() : 1.0f)));
-    mTarget->setNodeVisible(e.wireNode, true);
+    const Vec3 wireScale(std::max(decal->width, 0.001f) * (s.x() > 1e-6f ? 1.0f / s.x() : 1.0f),
+                         std::max(decal->depth, 0.001f) * (s.y() > 1e-6f ? 1.0f / s.y() : 1.0f),
+                         std::max(decal->height, 0.001f) * (s.z() > 1e-6f ? 1.0f / s.z() : 1.0f));
+    // ON CHANGE ONLY, exactly like the light wires' (which have had this latch
+    // since MIRROR_SCALE): setNodeTransform is a real engine write plus a node
+    // dirty, and this ran per decal per frame for a box whose size is three
+    // hand-edited numbers.
+    Hasher wireKey;
+    wireKey << wireScale.x << wireScale.y << wireScale.z;
+    if (!e.wireXformPushed || e.wireXformKey != wireKey.h) {
+        mTarget->setNodeTransform(e.wireNode, Vec3(), Quat(), wireScale);
+        e.wireXformKey = wireKey.h;
+        e.wireXformPushed = true;
+        notePush(decal, "decal wire");
+    }
+    if (e.wireVisible != 1) { mTarget->setNodeVisible(e.wireNode, true); e.wireVisible = 1; }
 }
 
 bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
@@ -4029,12 +4824,16 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
         for (int i = 0; i < 8; ++i) { sig ^= (v & 0xFF); sig *= 1099511628211ull; v >>= 8; }
     };
     QVector<iris::SceneNode *> stack;
+    QVector<iris::SceneNode *> pieceNodes;
     stack.append(const_cast<iris::SceneNode *>(host));
     for (int i = 0; i < stack.size(); ++i) {
         iris::SceneNode *n = stack[i];
         if (n->getSceneNodeType() == iris::SceneNodeType::Mesh) {
             auto *mn = static_cast<iris::MeshNode *>(n);
-            if (!mn->skeleton.isNull()) { skels.append(mn->skeleton); hashPtr(mn->skeleton.data()); }
+            if (!mn->skeleton.isNull()) {
+                skels.append(mn->skeleton); hashPtr(mn->skeleton.data());
+                pieceNodes.append(n);
+            }
         }
         const int cn = n->childCount();
         for (int k = 0; k < cn; ++k) if (iris::SceneNode *c = n->childAt(k)) stack.append(c);
@@ -4059,6 +4858,7 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
         rec.host = host;
         rec.signature = sig;
         rec.epoch = epoch;
+        markPiecesDirty(pieceNodes);
         return nullptr;
     }
     SkeletonDesc desc;
@@ -4073,6 +4873,11 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
     // entry was released and re-adopted must not drag the whole character
     // through a re-attach because a pointer moved.
     fresh.epoch = rec.epoch + (rec.rigId == fresh.rigId ? 0 : 1);
+    // ...AND EVERY OTHER PIECE OWES A RE-ATTACH when it moved (§3.6's shape,
+    // for rigs): a piece joining or leaving changes the bone list all of them
+    // are skinned against, and nothing WROTE those other nodes. The walk found
+    // it by visiting them; the change list has to be told.
+    if (fresh.epoch != rec.epoch) markPiecesDirty(pieceNodes);
     for (int i = 0; i < skels.size(); ++i) {
         if (excluded.contains(i)) continue;
         QVector<unsigned short> map;

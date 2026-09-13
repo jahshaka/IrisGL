@@ -21,6 +21,7 @@ For more information see the LICENSE file
 #include "document/assets/texture2d.h"
 #include "document/input/possession.h"
 #include "document/scenegraph/nodegraph.h"
+#include "document/scenegraph/nodedirtyset.h"
 #include "document/scenegraph/shadowmap.h"
 #include "document/scenegraph/simulationclock.h"
 #include "core/geometry/frustum.h"
@@ -109,6 +110,15 @@ class Scene: public QEnableSharedFromThis<Scene>
     /// The one possession slot (§8.4). Owned like `environment` — created in
     /// the constructor, destroyed with the scene, never serialized.
     QSharedPointer<AvatarPossession> possession;
+
+    /// WHAT CHANGED SINCE THE LAST FRAME (SPECS/DIRTY_SET_MIRROR_SPEC.md).
+    /// Every node in this scene points at it (SceneNode::_setDirtySet, wired
+    /// with scene membership) and SceneMirror is its one consumer. Runtime
+    /// only, never serialized, and per SCENE rather than per process on
+    /// purpose: a material preview and the editor mirror different documents
+    /// on the same thread, and one list between them would hand each other's
+    /// nodes to the wrong mirror.
+    NodeDirtySet mDirtySet;
 
 public:
     CameraNodePtr camera;
@@ -680,6 +690,10 @@ public:
     SceneNodePtr getRootNode() {
         return rootNode;
     }
+
+    /// The scene's change collector. Handed to every node that joins the scene
+    /// and consumed by SceneMirror::sync(); see NodeDirtySet.
+    NodeDirtySet *dirtySet() { return &mDirtySet; }
 
 	QStringList skyTypeToStr = {
 		"SingleColor",

@@ -15,6 +15,8 @@ For more information see the LICENSE file
 namespace iris
 {
 
+std::atomic<quint64> Material::sGlobalRevision{1};
+
 void Material::addTexture(QString name,Texture2DPtr texture)
 {
     // remove texture if it already exists
@@ -23,12 +25,14 @@ void Material::addTexture(QString name,Texture2DPtr texture)
     }
 
     textures.insert(name, texture);
+    touch();
 }
 
 void Material::removeTexture(QString name)
 {
     if (textures.contains(name)) {
         textures.remove(name);
+        touch();
     }
 }
 

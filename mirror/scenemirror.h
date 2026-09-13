@@ -169,8 +169,79 @@ public:
     /// mirror.scale's assertion on it.
     quint64 materialBuildCount() const { return mMaterialBuilds; }
     /// How many document nodes the last sync walked (sync()'s own return, kept
-    /// so a reader that did not call it can still ask).
+    /// so a reader that did not call it can still ask). Since the dirty set
+    /// (DIRTY_SET_MIRROR_SPEC) this is the MARKED set, not the scene: on a
+    /// still frame it is ZERO however big the document is.
     int visitedCount() const { return mVisited; }
+    /// HOW MANY DOCUMENT NODES THIS MIRROR CURRENTLY HOLDS AN ENTRY FOR. The
+    /// question `sync()`'s return value used to answer by accident, back when
+    /// the walk reached every node every frame; since the dirty set it is the
+    /// only honest spelling of "is this node still mirrored?".
+    quint64 mirroredNodeCount() const { return quint64(mEntries.size()); }
+    /// Every document node this mirror holds an entry for, by name. Diagnostic
+    /// (the mirror suites print it when a count assertion fails).
+    QStringList mirroredNodeNames() const;
+    /// The EFFECTIVE VISIBILITY this mirror last pushed for `node` (1 shown,
+    /// 0 hidden, -1 never pushed / not mirrored). The engine has no read-back
+    /// for it, and it is the contract the F6 case asserts: since ENGINE-3 the
+    /// mirror is the SOLE pusher of a document node's effective visibility.
+    int pushedVisibility(const iris::SceneNode *node) const;
+
+    // ---- THE DIRTY SET (SPECS/DIRTY_SET_MIRROR_SPEC.md, owner option A) ----
+    //
+    // The mirror handles what CHANGED instead of asking every object in the
+    // document once a frame. The counters below are the contract, and
+    // editor.mirrorStats() reports every one of them.
+
+    /// How many nodes the document handed over on the last sync — the size of
+    /// the change list, before the visit. ZERO on a still frame.
+    quint64 dirtyNodeCount() const { return mDirtyNodes; }
+    /// How many entries the last sync released because their nodes left the
+    /// document (the eviction list that replaced the stamp sweep).
+    quint64 evictedNodeCount() const { return mEvictedNodes; }
+    /// How many nodes the amortised VERIFIER re-checked on the last sync — the
+    /// rotating slow re-read that catches a write which bypassed the funnel.
+    quint64 verifierVisitCount() const { return mVerifierVisits; }
+    /// How many times the verifier has FOUND one: a latch it had to push, or a
+    /// material whose fields moved without its revision. Cumulative, and it
+    /// must be zero — every catch is a missing mark, named once in the log.
+    quint64 verifierCatchCount() const { return mVerifierCatches; }
+    /// How many engine pushes the node visits have made, ever. The oracle's
+    /// instrument: a full verification walk straight after a dirty sync must
+    /// not move it (see verifyAgainstFullWalk).
+    quint64 visitPushCount() const { return mVisitPushes; }
+    /// "dirty" or "full" — which mode the LAST sync ran in. A full walk is the
+    /// explicit, rare answer (a bind, a graph re-take, the play edge, an
+    /// eviction overflow, JAH_MIRROR_VERIFY=full).
+    const char *walkMode() const { return mLastWalkWasFull ? "full" : "dirty"; }
+
+    /// Forces the NEXT sync to walk the whole document. The hosts' explicit
+    /// "everything may have changed" (a bind, a re-take, a play edge); tests
+    /// use it to compare the two modes.
+    void requestFullWalk() { mFullWalkPending = true; }
+
+    /// THE ORACLE, and the one reason the full walk still exists: runs the
+    /// complete walk over the document WITHOUT consuming the change list, and
+    /// answers how many engine pushes it made. After a correct dirty sync that
+    /// is ZERO — anything else is a mark the document did not raise. A material
+    /// is re-FINGERPRINTED during this walk rather than trusted to its
+    /// revision, so a field written behind Material::touch()'s back is caught
+    /// too. `mirror.dirty_equals_full` drives it after every mutation class.
+    quint64 verifyAgainstFullWalk();
+
+    /// How many entries the amortised verifier re-checks per sync (default 64:
+    /// a full pass over an 8,404-node scene every ~2.2 s at 60 Hz, for about a
+    /// tenth of a millisecond a frame). 0 turns it off.
+    void setVerifierBudget(unsigned perSync) { mVerifierBudget = perSync; }
+    unsigned verifierBudget() const { return mVerifierBudget; }
+    /// ...and how many MATERIALS it re-fingerprints per sync (default 8).
+    void setVerifierMaterialBudget(unsigned perSync) { mVerifierMaterialBudget = perSync; }
+    unsigned verifierMaterialBudget() const { return mVerifierMaterialBudget; }
+    /// EVERY sync runs the whole verification walk. What `JAH_MIRROR_VERIFY=full`
+    /// sets and what the differential suite runs under; ruinous for frame time
+    /// and exact by construction.
+    void setVerifyEverything(bool on) { mVerifyEverything = on; }
+    bool verifyEverything() const { return mVerifyEverything; }
 
     /// ---- SCENE_STATIC, the settle half (MIRROR_SCALE lane) ---------------
     /// How many nodes are in a SCENE_STATIC memory manager right now
@@ -727,6 +798,19 @@ private:
         // Clip playback (ANIMATION_ENGINE_MIGRATION_SPEC M3). The document says
         // WHICH clip and WHEN; the engine samples and blends it.
         iris::SceneNode *docNode = nullptr;          // the document node this entry mirrors
+        // ---- WHAT THIS ENTRY CONTRIBUTES TO THE SCENE-WIDE AGGREGATES -----
+        // §1.4's folds used to be recomputed by the walk every frame. They are
+        // kept incrementally instead: an entry adjusts the counter on its own
+        // TRANSITION and gives its contribution back when it is released, so a
+        // still frame recomputes nothing and a dirty visit costs one compare.
+        bool countedRefractive = false;
+        bool countedDistortion = false;
+        bool countedSkinned = false;
+        bool countedPiece = false;
+        bool countedMovable = false;
+        /// The DecalDesc last pushed, as a hash. Decals were the one unlatched
+        /// per-frame push left in the walk (DIRTY_SET_MIRROR_SPEC §4).
+        quint64 decalPushKey = 0;
         std::string rigId;                           // for the clip def's content key
         /// The rig + clip set, as a HASH. It was a QString built by
         /// concatenation — a Mixamo character with 30 clips cost ~100
@@ -859,7 +943,66 @@ private:
     /// per node, never an ancestor walk.
     /// `parentMovable` is the parent's RESOLVED mobility (§3.3.2 rule 2),
     /// threaded down the walk so the resolution stays O(nodes).
+    /// What one node's visit concluded, so the recursion can thread it down.
+    struct VisitResult {
+        bool shown = false;      ///< this node's EFFECTIVE visibility
+        bool movable = false;    ///< ...and its resolved mobility
+        bool descend = true;     ///< false where the old walk returned early
+    };
+    /// ONE NODE, given its parent's answers. The body of the old visit() with
+    /// the child recursion taken out — the one piece of surgery the dirty set
+    /// needed (DIRTY_SET_MIRROR_SPEC §4). Every latch is unchanged.
+    VisitResult visitNode(iris::SceneNode *node, bool parentShown, bool parentMovable);
+    /// visitNode + the recursion: THE FULL WALK, which now runs only at the
+    /// explicit triggers and as the verifier's oracle.
     void visit(iris::SceneNode *node, bool parentShown, bool parentMovable);
+    /// ONE MARKED NODE. Resolves its parent's answers from the DOCUMENT
+    /// (isVisibleInScene / resolvedMobility, both O(depth)) rather than from a
+    /// walk, so the order the change list happens to be in cannot matter.
+    void visitDirty(iris::SceneNode *node);
+    /// The parent's effective visibility / resolved mobility, for visitDirty.
+    bool parentShownOf(iris::SceneNode *node);
+    bool parentMovableOf(iris::SceneNode *node);
+    /// Both answers in one memoised probe (bit 0 shown, bit 1 movable).
+    quint8 parentStateOf(iris::SceneNode *node);
+
+    /// Releases the entries of nodes that have left the document — what
+    /// replaced removeMissing()'s stamp sweep over every entry in the scene.
+    void consumeEvicted();
+    /// Visits the change list. Materials that moved are folded in first (a
+    /// material edit moves no node, so the node list cannot see one).
+    void consumeDirty();
+    /// The handful of things that legitimately cost something every frame: a
+    /// tracking camera's focus smoothing, and the light / camera / decal
+    /// HELPERS, whose geometry follows a world transform an ancestor can move
+    /// without the node itself being written. All bounded by the scene's own
+    /// light and camera registries, never by node count.
+    void syncPerFrameSet();
+    /// The amortised verifier: `mVerifierBudget` entries a sync, on a rotating
+    /// cursor. Any push it makes is a MISSED MARK and is counted.
+    void runVerifier();
+    /// Folds material revisions into the change list (§3.6).
+    void markChangedMaterials();
+    /// Queues every node drawing `material` for a visit this sync.
+    void markMaterialUsersDirty(iris::Material *material);
+    /// Queues a character's skinned pieces for a visit this sync (a piece
+    /// joining or leaving changes the union rig every other piece binds).
+    void markPiecesDirty(const QVector<iris::SceneNode *> &pieces);
+    /// The light-derived aggregates, folded over Scene::lights instead of over
+    /// the walk (§3.7): the sun, whether anything casts, the strongest filter
+    /// and the largest shadow resolution asked for.
+    void refreshLightAggregates();
+    /// Queues every decal node for a visit (the helpers toggle).
+    void markDecalsDirty();
+    /// ONE ENGINE PUSH, counted — the oracle's instrument. `what` names the
+    /// latch for the one-line report a verifier catch prints.
+    void notePush(const iris::SceneNode *node, const char *what);
+    /// This entry's contribution to the refractive / distortion counts (§3.7).
+    void noteRefractive(Entry &e, bool refractive, bool distortion);
+    /// ...and to the rig counts syncSkeletonSharing / syncClips early-out on.
+    void noteRigCounts(Entry &e);
+    /// Moves `node` between the two materials' user lists (§3.6).
+    void noteMaterialUser(iris::SceneNode *node, iris::Material *from, iris::Material *to);
     /// The mobility half of visit(): resolve, push on change, and watch for the
     /// play-time surprise mover. Returns what this node RESOLVED to, which its
     /// children inherit.
@@ -945,7 +1088,7 @@ private:
 public:
     static bool toPbrParams(iris::Material *material, jahshaka::engine::PbrParams &out);
     /// Records that this material is refractive, for the chain's Auto mode.
-    void noteRefractive(const jahshaka::engine::PbrParams &p);
+
     /// Re-arms the per-Item state the mirror owns after the engine re-created
     /// the renderables of every node using `material` (a shading-model switch).
     void onMaterialItemsRebuilt(jahshaka::engine::MaterialId material);
@@ -1056,6 +1199,15 @@ private:
         /// (so the hash never holds a pointer to a material that has left the
         /// document — the keys are raw, like mMaterials' own).
         quint32                       lastSeen = 0;
+        /// The MATERIAL'S OWN REVISION when this description was built
+        /// (iris::Material::revision — DIRTY_SET_MIRROR_SPEC §3.6). THE FAST
+        /// PATH: the fingerprint below is still computed, but only when this
+        /// number moved, and by the verifier. A material per primitive means
+        /// 8,404 fingerprints a frame on the render review's lattice, which is
+        /// ~4 ms the dirty design cannot afford; a compare of one quint32 is
+        /// what a still frame pays instead — and nothing at all, because a
+        /// still frame does not reach this function.
+        quint32                       revision = 0;
         /// The dynamic_cast, resolved once per material instead of twice per
         /// mesh per frame. Null for a material that is not a PbrMaterial.
         iris::PbrMaterial            *asPbr = nullptr;
@@ -1431,6 +1583,11 @@ private:
     /// The set's PRIMARY member, or null. Only distinguishes a colour when the
     /// set has more than one member (see setHighlightedNodes).
     iris::SceneNodePtr mHighlightPrimary;
+    /// The primary AS ASKED FOR, which is not the same as the one in force: a
+    /// primary the caller filtered out of the list colours nobody. Kept so that
+    /// re-asserting the SAME selection (which the viewport does every frame) is
+    /// recognisably no change at all.
+    iris::SceneNodePtr mHighlightRequestedPrimary;
     /// One highlight shell per mesh under the highlighted node: selecting an
     /// asset's root outlines the whole subtree. Pooled and reused across frames.
     struct HighlightShell {
@@ -1586,6 +1743,78 @@ private:
     /// instead — an Authoring flip's rebuild is owed on its own account
     /// (setNodeMovable invalidated), and a Soft one owes nothing at all.
     bool mMobilityChanged = false;
+
+    // ---- THE DIRTY SET'S OWN STATE (DIRTY_SET_MIRROR_SPEC) ----------------
+    /// The next sync walks the WHOLE document. True to begin with (the first
+    /// sync after a bind adopts everything) and re-armed at the explicit
+    /// triggers of §3.5.
+    bool mFullWalkPending = true;
+    /// Which mode the last sync ran in — what walkMode() reports.
+    bool mLastWalkWasFull = false;
+    /// Inside a verification visit: materials are re-fingerprinted rather than
+    /// trusted to their revision, and the visit's pushes are counted as
+    /// catches rather than as work.
+    bool mVerifying = false;
+    /// Inside consumeDirty: markMaterialUsersDirty appends to THIS sync's list
+    /// rather than to the document's (a shading-model switch must re-push the
+    /// query flags of every node sharing the material on the same frame).
+    bool mConsumingDirty = false;
+    bool mVerifyEverything = false;
+    /// JAH_MIRROR_TRACE=1: name every node the document reported, per sync.
+    bool mTrace = false;
+    /// MEASURED (8,404-node lattice, Debug + ASan, 2026-09-13): the verifier is
+    /// the DOMINANT term in a still frame's mirror once the walk is gone —
+    /// host.mirror 0.558 ms median, of which mirror.verify is 0.462. Most of
+    /// that is re-deriving each node's parent answers from the document
+    /// (isVisibleInScene + resolvedMobility, which the walk threads down for
+    /// free), which is exactly the work that makes it an independent check. 32
+    /// a sync is a full pass over that lattice every ~4.4 s at 60 Hz for about
+    /// a quarter of a millisecond — "the screen catches up within a second or
+    /// two" either way, and the differential suite is the real gate.
+    unsigned mVerifierBudget = 32;
+    /// How many MATERIALS the amortised verifier re-fingerprints per sync.
+    /// Separate from the node budget, and much smaller, because the two costs
+    /// are an order of magnitude apart: re-checking a node's latches is ~1 us,
+    /// re-hashing a material's forty-odd fields and its texture map is ~15 in a
+    /// Debug build. The node pass is what catches a missing mark on an object;
+    /// this is what catches one on a material, more slowly — and the
+    /// differential suite (JAH_MIRROR_VERIFY=full, verifyAgainstFullWalk) is
+    /// what catches either one at once.
+    unsigned mVerifierMaterialBudget = 8;
+    /// What is left of that budget inside the current verification pass.
+    /// Unbounded during verifyAgainstFullWalk: the oracle re-reads everything.
+    unsigned mVerifyMaterialQuota = 0;
+    /// Where the rotating verifier got to in mEntries.
+    quint64 mVerifierCursor = 0;
+    quint64 mDirtyNodes = 0;
+    quint64 mEvictedNodes = 0;
+    quint64 mVerifierVisits = 0;
+    quint64 mVerifierCatches = 0;
+    quint64 mVisitPushes = 0;
+    /// The last global material revision this mirror folded in (§3.6): one
+    /// relaxed atomic read is what a still frame pays to know that no material
+    /// in the process has been written.
+    quint64 mMaterialRevision = 0;
+    /// Scratch for the swapped change list and the eviction list — members so
+    /// that a frame's capacity is the previous frame's, never an allocation.
+    std::vector<iris::SceneNode *> mDirtyScratch;
+    std::vector<iris::SceneNode *> mEvictedScratch;
+    /// PER-SYNC MEMO of "what did this parent resolve to" — bit 0 shown, bit 1
+    /// movable. A marked node reads its parent's answers from the DOCUMENT
+    /// (O(depth)) so that the order of the change list cannot matter; a
+    /// thousand physics bodies under twenty groups would pay that walk a
+    /// thousand times for twenty answers. Cleared at the head of every
+    /// consumption, so it can never outlive the frame that filled it.
+    QHash<const iris::SceneNode *, quint8> mParentState;
+    /// Which document nodes draw each material. Maintained at attach and at
+    /// release, and read by markChangedMaterials — a material edit has to
+    /// reach the nodes that draw it without a walk of the scene.
+    QHash<iris::Material *, std::vector<iris::SceneNode *>> mMaterialUsers;
+    /// How many ENTRIES currently carry a refractive / distortion material and
+    /// a rig — the walk-derived aggregates of §1.4, kept incrementally so that
+    /// a still frame recomputes none of them.
+    quint32 mRefractiveEntries = 0;
+    quint32 mDistortionEntries = 0;
     /// The moving lamps' own change key, kept OUT of mGiLightSignature: a lamp
     /// that moves must re-inject its light into the voxels (owner decision O2)
     /// and must NOT arm the settle, or an animated torch would hold the

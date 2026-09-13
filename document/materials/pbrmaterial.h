@@ -404,7 +404,7 @@ public:
     static const QVector<QString> &mapRowNames();
     /// The address index for a map row (0 = Wrap when unset).
     int addressFor(const QString &mapRow) const { return mapAddress.value(mapRow, 0); }
-    void setAddressFor(const QString &mapRow, int mode) { mapAddress[mapRow] = mode; }
+    void setAddressFor(const QString &mapRow, int mode) { mapAddress[mapRow] = mode; touch(); }
     /// Row -> address index. A hash rather than N declared fields because the
     /// row NAMES are already the slot vocabulary (mapRowNames) and a second
     /// spelling of them is how a picker and a renderer drift apart.
