@@ -86,17 +86,17 @@ bool DecalNode::setPropertyValue(QString valueName, const QVariant &value)
     // Changing an image guid invalidates the resolved path: the host (reader /
     // edit service / property panel) re-resolves it through the CAS. Clearing
     // it here means the mirror can never bind a stale file for a new guid.
-    if (valueName == "decalTexture")  { textureGuid = value.toString();  resolvedTexturePath.clear();  return true; }
-    if (valueName == "decalNormal")   { normalGuid = value.toString();   resolvedNormalPath.clear();   return true; }
-    if (valueName == "decalEmissive") { emissiveGuid = value.toString(); resolvedEmissivePath.clear(); return true; }
+    if (valueName == "decalTexture")  { textureGuid = value.toString();  resolvedTexturePath.clear();  return markedParams(); }
+    if (valueName == "decalNormal")   { normalGuid = value.toString();   resolvedNormalPath.clear();   return markedParams(); }
+    if (valueName == "decalEmissive") { emissiveGuid = value.toString(); resolvedEmissivePath.clear(); return markedParams(); }
     // Non-positive extents would collapse the projector box (and a NEGATIVE
     // one flips the accept half-space in the shader — DECALS_SPEC §4).
-    if (valueName == "width")   { width  = std::max(0.001f, value.toFloat()); return true; }
-    if (valueName == "height")  { height = std::max(0.001f, value.toFloat()); return true; }
-    if (valueName == "depth")   { depth  = std::max(0.001f, value.toFloat()); return true; }
-    if (valueName == "metalness") { metalness = qBound(0.0f, value.toFloat(), 1.0f); return true; }
-    if (valueName == "roughness") { roughness = qBound(0.0f, value.toFloat(), 1.0f); return true; }
-    if (valueName == "ignoreAlphaDiffuse") { ignoreAlphaDiffuse = value.toBool(); return true; }
+    if (valueName == "width")   { width  = std::max(0.001f, value.toFloat()); return markedParams(); }
+    if (valueName == "height")  { height = std::max(0.001f, value.toFloat()); return markedParams(); }
+    if (valueName == "depth")   { depth  = std::max(0.001f, value.toFloat()); return markedParams(); }
+    if (valueName == "metalness") { metalness = qBound(0.0f, value.toFloat(), 1.0f); return markedParams(); }
+    if (valueName == "roughness") { roughness = qBound(0.0f, value.toFloat(), 1.0f); return markedParams(); }
+    if (valueName == "ignoreAlphaDiffuse") { ignoreAlphaDiffuse = value.toBool(); return markedParams(); }
 
     return SceneNode::setPropertyValue(valueName, value);
 }

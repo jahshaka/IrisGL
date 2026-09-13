@@ -151,9 +151,9 @@ bool MeshNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "meshIndex") return false;
     if (valueName == "faceCullingMode") {
         setFaceCullingMode(static_cast<FaceCullingMode>(value.toInt()));
-        return true;
+        return markedParams();
     }
-    if (valueName == "defaultFloor") { defaultFloor = value.toBool(); return true; }
+    if (valueName == "defaultFloor") { defaultFloor = value.toBool(); return markedParams(); }
 
     return SceneNode::setPropertyValue(valueName, value);
 }
@@ -164,6 +164,10 @@ void MeshNode::setMesh(QString source)
     meshPath = source;
     meshIndex = 0;
     adoptSkeletonFromMesh();
+    // CONTENT (DIRTY_SET_MIRROR_SPEC §3.1). Nothing reported a mesh or
+    // material swap before the dirty set — the mirror noticed one by comparing
+    // the pointers it kept, once per node per frame, forever.
+    notifyChanged(NodeChange::Content);
 }
 
 //should not be used on plain scene meshes
@@ -171,6 +175,7 @@ void MeshNode::setMesh(MeshPtr mesh)
 {
     this->mesh = mesh;
     adoptSkeletonFromMesh();
+    notifyChanged(NodeChange::Content);
 }
 
 // GPU_SKINNING_SPEC §7. The mesh asset's skeleton is the rig template and is
@@ -195,6 +200,7 @@ MeshPtr MeshNode::getMesh()
 void MeshNode::setMaterial(MaterialPtr material)
 {
     this->material = material;
+    notifyChanged(NodeChange::Content);
 
 	if (!!mesh) {
 		if (this->mesh->hasSkeleton()) {

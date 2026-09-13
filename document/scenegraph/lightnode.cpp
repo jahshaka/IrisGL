@@ -198,33 +198,33 @@ QVariant LightNode::getPropertyValue(QString valueName)
 
 bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
 {
-    if (valueName == "intensity")         { intensity = value.toFloat();         return true; }
-    if (valueName == "lightColor")        { color = value.value<QColor>();       return true; }
-    if (valueName == "distance")          { distance = value.toFloat();          return true; }
-    if (valueName == "spotCutOff")        { spotCutOff = value.toFloat();        return true; }
-    if (valueName == "spotCutOffSoftness"){ spotCutOffSoftness = value.toFloat();return true; }
-    if (valueName == "spotFalloff")       { spotFalloff = value.toFloat();       return true; }
-    if (valueName == "rectWidth")         { rectWidth = value.toFloat();         return true; }
-    if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return true; }
-    if (valueName == "lightType")         { setLightType(static_cast<LightType>(value.toInt())); return true; }
-    if (valueName == "shadowColor")       { shadowColor = value.value<QColor>(); return true; }
-    if (valueName == "shadowAlpha")       { shadowAlpha = value.toFloat();       return true; }
+    if (valueName == "intensity")         { intensity = value.toFloat();         return markedParams(); }
+    if (valueName == "lightColor")        { color = value.value<QColor>();       return markedParams(); }
+    if (valueName == "distance")          { distance = value.toFloat();          return markedParams(); }
+    if (valueName == "spotCutOff")        { spotCutOff = value.toFloat();        return markedParams(); }
+    if (valueName == "spotCutOffSoftness"){ spotCutOffSoftness = value.toFloat();return markedParams(); }
+    if (valueName == "spotFalloff")       { spotFalloff = value.toFloat();       return markedParams(); }
+    if (valueName == "rectWidth")         { rectWidth = value.toFloat();         return markedParams(); }
+    if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return markedParams(); }
+    if (valueName == "lightType")         { setLightType(static_cast<LightType>(value.toInt())); return markedParams(); }
+    if (valueName == "shadowColor")       { shadowColor = value.value<QColor>(); return markedParams(); }
+    if (valueName == "shadowAlpha")       { shadowAlpha = value.toFloat();       return markedParams(); }
     // The shadow-map fields live on the node's ShadowMap; reflect through it.
-    if (valueName == "shadowMapType")     { setShadowMapType(static_cast<ShadowMapType>(value.toInt())); return true; }
-    if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return true; }
-    if (valueName == "shadowBias")        { shadowMap->bias = value.toFloat();   return true; }
-    if (valueName == "doubleSided")       { doubleSided = value.toBool();        return true; }
-    if (valueName == "accurate")          { accurate = value.toBool();           return true; }
-    if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return true; }
+    if (valueName == "shadowMapType")     { setShadowMapType(static_cast<ShadowMapType>(value.toInt())); return markedParams(); }
+    if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return markedParams(); }
+    if (valueName == "shadowBias")        { shadowMap->bias = value.toFloat();   return markedParams(); }
+    if (valueName == "doubleSided")       { doubleSided = value.toBool();        return markedParams(); }
+    if (valueName == "accurate")          { accurate = value.toBool();           return markedParams(); }
+    if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return markedParams(); }
     // THE SUN'S ANGULAR DIAMETER in degrees (the disc's size). Bounded where
     // the disc stops being a disc: 0 draws nothing, 20 is a fifth of the sky.
-    if (valueName == "sunAngle")          { sunAngle = float(qBound(0.0, value.toDouble(), 20.0)); return true; }
-    if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return true; }
-    if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return true; }
-    if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return true; }
-    if (valueName == "lightTexture")      { lightTextureGuid = value.toString(); return true; }
-    if (valueName == "lightTexturePath")  { lightTexturePath = value.toString(); return true; }
-    if (valueName == "iconSize")          { iconSize = value.toFloat();          return true; }
+    if (valueName == "sunAngle")          { sunAngle = float(qBound(0.0, value.toDouble(), 20.0)); return markedParams(); }
+    if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return markedParams(); }
+    if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return markedParams(); }
+    if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return markedParams(); }
+    if (valueName == "lightTexture")      { lightTextureGuid = value.toString(); return markedParams(); }
+    if (valueName == "lightTexturePath")  { lightTexturePath = value.toString(); return markedParams(); }
+    if (valueName == "iconSize")          { iconSize = value.toFloat();          return markedParams(); }
 
     return SceneNode::setPropertyValue(valueName, value);
 }

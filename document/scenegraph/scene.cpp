@@ -949,6 +949,13 @@ void Scene::cleanup()
     // not cleared here at all, so even after MainWindow's close path called
     // cleanup() every node in the world was still reachable (and, with the old
     // strong `SceneNode::scene`, still pinned the scene itself).
+    // THE CHANGE COLLECTOR dies with this object, so nothing may still name
+    // it: a node the undo stack or a command still holds would otherwise carry
+    // a dangling NodeDirtySet* and mark into freed memory on its next write.
+    for (const auto &n : nodes) if (n) n->_setDirtySet(nullptr);
+    if (rootNode) rootNode->_setDirtySet(nullptr);
+    mDirtySet.clear();
+
     camera.clear();
     rootNode.clear();
 
