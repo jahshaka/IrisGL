@@ -1033,8 +1033,17 @@ void OgreEngine::releaseShadowLamp(OgreScene *scene, Ogre::Light *light) {
         for (Ogre::CompositorShadowNode *n : nodes) {
             const Ogre::LightClosestArray &held = n->getShadowCastingLights();
             for (size_t slot = 1; slot < held.size(); ++slot)
-                if (held[slot].isStatic && held[slot].light == light)
+                if (held[slot].isStatic && held[slot].light == light) {
                     n->setLightFixedToShadowMap(slot + 2u, nullptr);
+                    // A RELEASE IS AN ASSIGNMENT CHANGE, and this is the SECOND
+                    // place one happens (clean-2 lane review, F3): the cache's
+                    // pass-hash self-check only runs on nodes marked here and in
+                    // applyShadowCacheDirties, so without this the frame after a
+                    // lamp was destroyed went unchecked — exactly the frame in
+                    // which the node's slot array and its cached light count are
+                    // most likely to disagree.
+                    detail::FogHlmsListener::noteShadowAssignmentChanged(n);
+                }
         }
     } JAH_CATCH(mLastError, );
 }
@@ -1253,8 +1262,9 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                         // when the assignment CHANGED: every frame would keep it
                         // permanently dirty and cache nothing.
                         in.node->setLightFixedToShadowMap(mapIdx, w);
-                        // THE ONE PLACE AN ASSIGNMENT CHANGES: this frame's
-                        // passes on this node get the cache's self-check.
+                        // AN ASSIGNMENT CHANGES HERE (and on a lamp's
+                        // release, in releaseShadowLamp): this frame's passes on
+                        // this node get the cache's self-check.
                         detail::FogHlmsListener::noteShadowAssignmentChanged(in.node);
                         if (w) {
                             ++mShadowDirtiedMaps[k];

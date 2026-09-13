@@ -356,8 +356,18 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, bool inherited, bool &giC
         // would capture (ENGINE_CACHE_POLICY_SPEC P7). It is not geometry, so
         // nothing below would notice; the light rides its -Y adapter, one
         // unregistered level down, and is reached by this same loop there.
-        if (obj->getVisible() != shown && dynamic_cast<Ogre::Light *>(obj))
-            staleProbeGrid(GiStaleReason::Light);
+        //
+        // ...AND SO DOES A DECAL (clean-2 lane review, F2). A decal paints the
+        // surface the probes capture, and hiding or re-showing one changes
+        // nothing the movement scan can see — its projector box does not move,
+        // so the scan reports nothing and the probes keep the wall with (or
+        // without) the decal on it for ever. Same shape as the light: the
+        // decal rides the projector-box child, one unregistered level down,
+        // and is reached by this same loop there.
+        if (obj->getVisible() != shown) {
+            if (dynamic_cast<Ogre::Light *>(obj))      staleProbeGrid(GiStaleReason::Light);
+            else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
+        }
         obj->setVisible(shown);
     }
     if (rec) {

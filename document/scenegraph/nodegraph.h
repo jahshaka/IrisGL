@@ -247,8 +247,9 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 ///
 /// The consumer is the ENGINE, which cannot include this header: the host
 /// hands the engine the counter's address once (`Engine::
-/// setTransformWriteCounter`, irisgl/mirror/scenemirror.cpp), and an engine
-/// that was never given one keeps scanning every frame.
+/// setTransformWriteCounter` — Studio does it in src/bridge/enginehost.cpp
+/// beside `setStagingScene`, the suites in tests/support/documentgraph.h), and
+/// an engine that was never given one keeps scanning every frame.
 unsigned long long transformWrites();
 /// The counter itself, for the host that hands its address to the engine.
 /// Its lifetime is the process's.

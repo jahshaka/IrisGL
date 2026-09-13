@@ -1551,14 +1551,14 @@ public:
     static void     resetLightCountMismatches() { sLightCountMismatches = 0; sMismatchLogged = 0; }
 
     /// WHEN THE CHECK ABOVE RUNS (clean-2 lane, 2026-09-13). Only a node whose
-    /// SLOT ASSIGNMENT changed can have entered the broken state, and the
-    /// assignment is made in exactly one place —
-    /// OgreEngine::applyShadowCacheDirties' setLightFixedToShadowMap calls.
-    /// Every node it touches is marked here, and the marks are cleared at the
-    /// head of the NEXT frame's pass, so every pass hashed in the frame of a
-    /// change is checked (the pass count and its properties differ per pass:
-    /// the view, six probe faces, each planar arm) and a frame that changed
-    /// nothing costs one `empty()` test per pass.
+    /// SLOT ASSIGNMENT changed can have entered the broken state, and there are
+    /// exactly TWO places one changes: OgreEngine::applyShadowCacheDirties'
+    /// setLightFixedToShadowMap calls, and releaseShadowLamp's release of a
+    /// destroyed lamp's slot. Every node either touches is marked here, and the
+    /// marks are cleared at the head of the NEXT frame's pass, so every pass
+    /// hashed in the frame of a change is checked (the pass count and its
+    /// properties differ per pass: the view, six probe faces, each planar arm)
+    /// and a frame that changed nothing costs one `empty()` test per pass.
     ///
     /// It matters because the check's own comment said it must not run per
     /// pass: `anyCached` is true for every node in a scene with a cached lamp
@@ -3026,6 +3026,11 @@ private:
     /// the change reaches the voxelizer's conversion, bump the material
     /// generation (see mGiMaterialGeneration).
     void noteMaterialChanged(MaterialId id, bool voxelInputsChanged);
+    /// The rule noteMaterialChanged applies, as a QUESTION — so the batched
+    /// settle in settleTextureResidency can ask it per material and act ONCE
+    /// (F5: one probe stale and one material-generation bump per frame,
+    /// however many textures arrived together).
+    bool giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged, bool &bumpVoxels) const;
     /// P6/P7: the reuse arm's variant for a MATERIAL change — a fresh voxelizer
     /// and lighting (VctMaterial's by-pointer cache must go) under the SAME
     /// probe grid, whose shapes a material edit cannot move. Returns false

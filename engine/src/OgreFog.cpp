@@ -56,8 +56,9 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     if (casterPass || !shadowNode || !hlms) return;
     // ONLY WHERE AN ASSIGNMENT CHANGED (clean-2 lane, 2026-09-13). A node can
     // only ENTER the broken state when setLightFixedToShadowMap is called on
-    // it, and that happens in one place (applyShadowCacheDirties), which marks
-    // the node. On every other frame this is one empty() test per pass.
+    // it, which happens in two places — applyShadowCacheDirties and
+    // releaseShadowLamp — and both mark the node. On every other frame this is
+    // one empty() test per pass.
     //
     // It used to be gated on `anyCached` alone — true for every node in a
     // scene with a cached lamp, which since E2 made caching automatic is every

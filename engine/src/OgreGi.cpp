@@ -621,6 +621,13 @@ void OgreScene::settleTextureResidency() {
     // every frame once a scene has opened. Entries appear only in setPbrTexture,
     // and only for a bind whose texture was not resident yet.
     if (mMaterialsAwaitingTexture.empty()) return;
+    // EVERY ENTRY THAT BECAME READY THIS FRAME IS ONE EVENT (clean-2 lane
+    // review, F5). A scene's textures arrive in batches, and noting each
+    // material separately staled the grid once per material and — worse — bumped
+    // the material generation once per material, which is what the host re-reads
+    // to re-inject the voxel bounce. Ten maps landing together used to buy ten
+    // re-injects; they buy one.
+    bool stale = false, bumpVoxels = false;
     for (size_t i = 0; i < mMaterialsAwaitingTexture.size();) {
         const MaterialId mat = mMaterialsAwaitingTexture[i].first;
         const bool voxelInput = mMaterialsAwaitingTexture[i].second;
@@ -638,14 +645,25 @@ void OgreScene::settleTextureResidency() {
         if (waiting) { ++i; continue; }
         // The material (or the whole entry) is settled. A material that died
         // while waiting simply leaves, having staled nothing.
-        if (mit != mMaterials.end()) noteMaterialChanged(mat, voxelInput);
+        if (mit != mMaterials.end()) {
+            bool bump = false;
+            if (giMaterialChangeEffect(mat, voxelInput, bump)) { stale = true; bumpVoxels |= bump; }
+        }
         mMaterialsAwaitingTexture[i] = mMaterialsAwaitingTexture.back();
         mMaterialsAwaitingTexture.pop_back();
     }
+    if (stale) staleProbeGrid(GiStaleReason::Material);
+    if (bumpVoxels) ++mGiMaterialGeneration;
 }
 
-void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
-    if (mGi.mode == GiMode::Off) return;
+// WHAT A MATERIAL EDIT COSTS THE GI CACHES — THE ONE DEFINITION, so the single
+// edit and the batched settle below can never decide it differently.
+// Returns "the probe grid is stale because of this"; `bumpVoxels` says the
+// voxel/IR solve has to be re-read too.
+bool OgreScene::giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged,
+                                       bool &bumpVoxels) const {
+    bumpVoxels = false;
+    if (mGi.mode == GiMode::Off) return false;
     // NOTHING CACHED TO INVALIDATE: no probe grid and no voxelizer built yet,
     // or a from-scratch rebuild already owed (it reads every material fresh and
     // stales the whole grid itself). This is also what keeps the node walk
@@ -655,11 +673,18 @@ void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     // note). A live edit on a built arm walks once per push.
     // Instant Radiosity counts as a cache too: its trace reads the same
     // diffuse colours, and the generation is what makes the host re-trace it.
-    if (mGiCachesDirty || (!mPcc && !mVctVoxelizer && !mInstantRadiosity)) return;
+    if (mGiCachesDirty || (!mPcc && !mVctVoxelizer && !mInstantRadiosity)) return false;
     bool voxelized = false;
-    if (!materialSeenByGi(id, voxelized)) return;     // nothing GI can see wears it
+    if (!materialSeenByGi(id, voxelized)) return false;   // nothing GI can see wears it
+    bumpVoxels = voxelized && voxelInputsChanged;
+    return true;
+}
+
+void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
+    bool bumpVoxels = false;
+    if (!giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels)) return;
     staleProbeGrid(GiStaleReason::Material);
-    if (voxelized && voxelInputsChanged) ++mGiMaterialGeneration;
+    if (bumpVoxels) ++mGiMaterialGeneration;
 }
 
 void OgreScene::staleProbeGrid(GiStaleReason why) {
