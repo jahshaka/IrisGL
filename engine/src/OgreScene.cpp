@@ -205,17 +205,15 @@ bool OgreScene::removeNode(NodeId id) {
 // ---- Hierarchy and transforms ----
 NodeId OgreScene::createNode(NodeId parent) {
     JAH_TRY {
-        Ogre::SceneNode *p = parent ? node(parent) : nullptr;
+        Node *prec = parent ? record(parent) : nullptr;          // one lookup (F9)
+        Ogre::SceneNode *p = prec ? prec->node : nullptr;
         if (parent && !p) { mError = "createNode: unknown parent"; return 0; }
         if (!p) p = mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
         // AN ENGINE-OWNED CHILD OF A REGISTERED NODE: the one case
         // applyShownSubtree still has to descend into (a gizmo slot, a
         // selection wire, a bone-overlay bone), recorded so that walk does not
         // have to ask the registry about every child to find out.
-        if (parent) {
-            auto pit = mNodes.find(parent);
-            if (pit != mNodes.end()) ++pit->second.ownedChildren;
-        }
+        if (prec) ++prec->ownedChildren;
         Node rec; rec.node = p->createChildSceneNode(Ogre::SCENE_DYNAMIC);
         return track(rec);
     } JAH_CATCH(mError, 0);
@@ -240,11 +238,14 @@ void *OgreScene::nativeSceneManager() const { return mSceneMgr; }
 
 bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
     JAH_TRY {
-        Ogre::SceneNode *n = node(id);
+        Node *rec = record(id);                                  // one lookup each (F9)
+        Ogre::SceneNode *n = rec ? rec->node : nullptr;
         if (!n) { mError = "setNodeParent: unknown node"; return false; }
         // An adopted node's place in the tree is the DOCUMENT's (one tree).
-        if (!mNodes[id].owned) { mError = "setNodeParent: node is adopted"; return false; }
-        Ogre::SceneNode *p = parent ? node(parent) : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
+        if (!rec->owned) { mError = "setNodeParent: node is adopted"; return false; }
+        Node *prec = parent ? record(parent) : nullptr;
+        Ogre::SceneNode *p = parent ? (prec ? prec->node : nullptr)
+                                    : mSceneMgr->getRootSceneNode(Ogre::SCENE_DYNAMIC);
         if (!p) { mError = "setNodeParent: unknown parent"; return false; }
         if (n->getParent() == p) return true;
         if (n->getParent()) n->getParent()->removeChild(n);
@@ -253,10 +254,7 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
         // grows: a node that once had an engine-owned child keeps walking its
         // children, which costs a lookup per child on a node that has had one
         // and is never wrong).
-        if (parent) {
-            auto pit = mNodes.find(parent);
-            if (pit != mNodes.end()) ++pit->second.ownedChildren;
-        }
+        if (prec) ++prec->ownedChildren;
         // A move under a hidden parent hides the subtree, a move out from
         // under one shows it again (as far as each node's own flag allows).
         bool giChanged = false;

@@ -595,6 +595,13 @@ bool OgreScene::shareSkeleton(NodeId followerId, NodeId sourceId) {
         releaseBoneRiders(followerId, f);
         f.item->useSkeletonInstanceFrom(s.item);
         f.shareSource = sourceId;
+        // A CASTER-SHAPE INPUT (round-2 review F4): from this call the follower
+        // is posed by the MASTER's instance, so its silhouette can change with
+        // no transform write and no pose push of its own. The caster walk reads
+        // that through `pose` (it mixes in the shareSource's poseEpoch) — but
+        // only on a frame it actually runs, and its still-frame gate would
+        // otherwise sit out the very frame the sharing was armed.
+        markShadowShapeDirty(f);
         if (std::find(s.shareFollowers.begin(), s.shareFollowers.end(), followerId) ==
             s.shareFollowers.end())
             s.shareFollowers.push_back(followerId);
@@ -622,6 +629,10 @@ void OgreScene::unshareFollower(NodeId followerId, Node &f, Node *master) {
         }
     }
     if (!f.item || !f.item->sharesSkeletonInstance()) return;
+    // ...and the other side of the same statement (F4): the follower stops
+    // being posed by the master and gets its own instance back, which is a
+    // caster-shape change with no transform behind it.
+    markShadowShapeDirty(f);
     JAH_TRY {
         // The pose it was rendering, kept: `stopUsing...` hands back a fresh
         // instance at the BIND pose, and a piece that popped to bind for one
