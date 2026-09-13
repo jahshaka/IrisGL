@@ -912,8 +912,30 @@ std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
     return all;
 }
 
+// THE CONTENT THE CURRENT FIT WAS MADE FOR (lane ENGINE-7 item 2). A hash of
+// the gathered boxes, each quantized by its OWN largest extent — the same
+// quantum giGeometrySignature uses, so an idle sway or a settling physics body
+// reads as "unchanged" here exactly as it does there. Order is mNodes' order,
+// which is stable for a still scene.
+unsigned long long OgreScene::giContentSignature(const std::vector<Ogre::Aabb> &boxes) {
+    unsigned long long h = 1469598103934665603ull;      // FNV-1a
+    const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
+    for (const Ogre::Aabb &a : boxes) {
+        const float quantum = giAabbQuantum(a);
+        const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
+        for (size_t ax = 0; ax < 3u; ++ax) {
+            fold((unsigned long long)(long long)std::floor(mn[ax] / quantum));
+            fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
+        }
+    }
+    return h;
+}
+
 std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     std::vector<Ogre::Aabb> all = giItemBoundsRaw();
+    // What this fit is being made FOR, remembered by noteGiAutoVolume if the
+    // fit is adopted. The hysteresis floor below reads it.
+    mGiFitContentNow = giContentSignature(all);
     // One item IS the scene; there is no population to be an outlier against.
     mGiLastItemCount = all.size();
     if (all.size() < 2u) return all;
@@ -935,8 +957,29 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
     const float logStart = std::log(kOutlierSoftStart);
     const float logSpan  = std::log(kOutlierSoftEnd) - logStart;
 
-    // The hysteresis floor (property 3): items the previous auto volume covered.
-    const bool havePrev = mGiAutoVolumeValid;
+    // THE HYSTERESIS FLOOR (property 3): items the previous auto volume covered
+    // are kept whole, so ADDING an object can never take light away from
+    // something that was already lit (gi.cliff's live table).
+    //
+    // ...AND ONLY WHILE THE CONTENT IS CHANGING (lane ENGINE-7 item 2). The
+    // floor used to apply to every fit, including a re-fit of the SAME scene —
+    // and a re-fit is not idempotent under it: an outlier the first fit trimmed
+    // sits inside the volume that trim produced, so the second fit keeps it
+    // WHOLE and the volume grows to hold it. Measured on Showroom 2: the open's
+    // first solve fits 48.14 m and the second 56.62 (+17.6%, 0.376 -> 0.442 m
+    // per voxel), and it stays there for the session. That is a RATCHET, not
+    // hysteresis: the fit answered a different question the second time it was
+    // asked the same one.
+    //
+    // The floor is for the question it was written for — "did the scene's
+    // content change, and may that change take light away?" — so it is armed
+    // by a content change and by nothing else. Re-fitting unchanged content now
+    // re-derives the trim's own answer, which is deterministic, so frame 1,
+    // frame 2 and frame 60 are the same number. (Flicker is not what this
+    // guards against and never was: the trim's ramp is a smoothstep, so a
+    // small input change moves the fit by a small amount by construction.)
+    const bool contentChanged = !mGiFitContentValid || mGiFitContent != mGiFitContentNow;
+    const bool havePrev = mGiAutoVolumeValid && contentChanged;
     const Ogre::Vector3 prevMin = mGiAutoVolume.getMinimum();
     const Ogre::Vector3 prevMax = mGiAutoVolume.getMaximum();
     const auto coveredByPrev = [&](const Ogre::Aabb &a) {
@@ -1264,6 +1307,12 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
     // first object to appear in an empty-but-for-scenery scene legitimately
     // re-centres the volume onto it, and that is the heuristic working.
     mGiAutoVolumeValid = automatic && mGiLastItemCount >= 2u;
+    // WHAT THIS FIT WAS MADE FOR (ENGINE-7 item 2): the content signature the
+    // gather computed on the way here. The hysteresis floor is armed by a
+    // change to it, so a re-fit of unchanged content re-derives the same
+    // answer instead of ratcheting the volume outwards.
+    mGiFitContent = mGiFitContentNow;
+    mGiFitContentValid = true;
     noteSceneTransformWrite();      // the escape signature is relative to it
 }
 

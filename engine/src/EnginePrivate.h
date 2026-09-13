@@ -3189,6 +3189,9 @@ private:
     /// editor furniture — the gizmo, the bone overlay, wires, the grid — which
     /// is most of what goes through setNodeTransform at all.
     bool writeIsSceneMovement(const Node &n) const;
+    /// A hash of the GI gather's boxes — "is this the same content the current
+    /// automatic volume was fitted to?" (OgreGi.cpp, lane ENGINE-7 item 2).
+    static unsigned long long giContentSignature(const std::vector<Ogre::Aabb> &boxes);
     /// P7, materials: a visible material changed — stale the probes and, when
     /// the change reaches the voxelizer's conversion, bump the material
     /// generation (see mGiMaterialGeneration).
@@ -3581,6 +3584,15 @@ private:
     /// getWorldAabbUpdated calls made by OUR GI code, ever (GiStatus::
     /// giAabbReads). Mutable: two of the four readers are const signatures.
     mutable unsigned long long mGiAabbReads = 0;
+    /// THE CONTENT THE AUTOMATIC VOLUME WAS FITTED TO (ENGINE-7 item 2).
+    /// `mGiFitContentNow` is what the last gather saw (mutable: the gather is a
+    /// const signature); `mGiFitContent` is what the volume in force was made
+    /// for, adopted by noteGiAutoVolume. The hysteresis floor in giItemBounds
+    /// is armed by the difference, so a re-fit of unchanged content cannot
+    /// enlarge its own previous answer.
+    mutable unsigned long long mGiFitContentNow = 0;
+    unsigned long long mGiFitContent = 0;
+    bool mGiFitContentValid = false;
     /// THE TWO SIGNATURES THE MIRROR READS EVERY FRAME (giEscapeSignature,
     /// giGeometrySignature) ARE PURE FUNCTIONS OF THE SAME BOXES, and each was
     /// a full walk of mNodes with a root-recursive getWorldAabbUpdated per GI
