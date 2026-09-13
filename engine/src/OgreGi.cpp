@@ -483,7 +483,9 @@ bool OgreScene::refreshVctFast() {
 bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
         if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity) {
-            rebuildGi();          // IR has no cheaper path: the re-trace IS it
+            // IR has no cheaper path: the re-trace IS it — and the reason is the
+            // light that moved, which is why it is passed rather than read.
+            rebuildGi(GiStaleReason::Light);
             return true;
         }
         if (!mVctLighting || !mVctVoxelizer) return false;
@@ -2597,11 +2599,18 @@ float OgreScene::giRayMarchStepScale(bool inMotion) const {
     return inMotion ? std::max(rest, kMotionRayMarchStepScale) : rest;
 }
 
-void OgreScene::rebuildGi() {
+void OgreScene::rebuildGi(GiStaleReason why) {
     ++mGiRebuilds;
+    // WHAT THE MONITOR IS TOLD THIS COST WAS FOR (ENGINE-5 review, ledger §208).
+    // The IR arm records no stale reason of its own — nothing calls
+    // staleProbeGrid on this path, because Instant Radiosity has no probe grid —
+    // so reading `mLastStaleReason` here named whatever staled the grid last,
+    // which on a light drag was a `Moved` or a `Refresh` from minutes earlier.
+    // The caller knows; it passes it.
+    const GiStaleReason reason = why == GiStaleReason::None ? mLastStaleReason : why;
     // The Instant Radiosity arm's rebuild — the same event, the same reason
     // vocabulary; the detail says which arm paid for it.
-    monitor::EventScope giEvent(MonitorEventKind::GiRebuild, monitor::reasonOf(mLastStaleReason),
+    monitor::EventScope giEvent(MonitorEventKind::GiRebuild, monitor::reasonOf(reason),
                                 "gi.rebuild", "ir");
     // Every early return below leaves "nothing built" showing in giStatus.
     mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
@@ -2625,8 +2634,7 @@ void OgreScene::rebuildGi() {
         // as EVENTS and never as work in the frame that paid for it. The IR
         // trace is pure CPU (a ray trace on the UI thread), hence no render
         // system and no GPU pair.
-        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(mLastStaleReason), 0,
-                                 "ir.rebuild");
+        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ir.rebuild");
         mInstantRadiosity->build();
     }
     // Diagnostic: JAHSHAKA_GI_DEBUG=1 logs how many VPLs the trace planted.
@@ -2687,6 +2695,12 @@ void OgreScene::rebuildVct() {
                                  "vct.rebuild", mRoot->getRenderSystem());
         itemCount = buildVoxelArm(aabb);
         work.setUnits(unsigned(itemCount));
+        // NOTHING TO VOXELISE IS NOT WORK (ENGINE-5 review, ledger §208). An
+        // empty scene, or one whose every item is excluded, left a units-0
+        // `vct.rebuild` row in every capture — a cache row for a cache that was
+        // not filled. The row is abandoned, not zeroed: the early return below
+        // is the same decision.
+        if (!itemCount) work.cancel();
     }
     if (!itemCount) { teardownVct(); return; }   // stay armed; next churn re-flags
 

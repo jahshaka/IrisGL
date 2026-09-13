@@ -3094,7 +3094,12 @@ public:
     /// per-cell budget, and the budget itself (F-F2). See RenderStats.
     void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const;
 private:
-    void rebuildGi();
+    /// The Instant Radiosity arm's from-scratch re-trace. `why` NAMES THE CAUSE
+    /// for the render monitor: the default reads the grid's last recorded stale
+    /// reason, which is right for a refresh but wrong on the light-drag path,
+    /// where the IR arm records nothing of its own and the row came out
+    /// carrying whatever staled the grid last (ENGINE-5 review, ledger §208).
+    void rebuildGi(GiStaleReason why = GiStaleReason::None);
     /// Voxelizes the scene's PBR items over computeGiBounds at quality-mapped
     /// resolution, (re)builds VctLighting and binds it to HlmsPbs. The voxelizer
     /// and lighting are recreated from scratch every time (see invalidateGiCaches).
