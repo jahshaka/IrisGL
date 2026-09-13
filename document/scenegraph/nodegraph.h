@@ -256,8 +256,12 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s);
 /// 92% of FLYING frames, with the same scene and the same path costing
 /// 0.014 ms with GI off. Flying re-ran every scan in the program, every frame.
 /// A camera node says so once, at birth (`setCountsAsMovement(h, false)` in
-/// CameraNode's constructor), and a camera that has CHILDREN counts again —
-/// moving it moves whatever is parented under it, and that IS scene movement.
+/// CameraNode's constructor), and a camera that has DOCUMENT CHILDREN counts
+/// again — moving it moves whatever is parented under it, and that IS scene
+/// movement. Ogre children that carry no document node are the ENGINE's own
+/// (a camera's body wire, a light's -Y adapter, a decal's projector box) and
+/// are not content: counting those would un-exempt every camera the editor
+/// draws a body for.
 ///
 /// The consumer is the ENGINE, which cannot include this header: the host
 /// hands the engine the counter's address once (`Engine::

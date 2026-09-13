@@ -777,7 +777,21 @@ void promoteStaticChildren(Ogre::SceneNode *n);
 ///
 /// A CAMERA WITH CHILDREN COUNTS AGAIN, and that is not a detail: moving it
 /// moves whatever is parented under it, which is scene movement by any
-/// definition. `numChildren()` is one load on the node we are already writing.
+/// definition.
+///
+/// DOCUMENT CHILDREN, NOT OGRE'S (round-2 review, item 2). The two trees are
+/// one, and the ENGINE hangs its own nodes off document nodes: every non-view
+/// camera with a visible body gets a wire node (SceneMirror::syncCameraWires),
+/// a light gets its -Y adapter, a decal its projector box. Counting Ogre's
+/// children therefore un-exempted every camera the mirror draws a body for —
+/// the play-mode subject and every cinematic camera — which is exactly the
+/// per-frame cost this exemption exists to remove. An engine child is not
+/// scene content by construction: it carries no document node, the GI and
+/// shadow scans do not read it (OgreScene::writeIsSceneMovement asks the same
+/// question from the other side), and it moves only because we moved it.
+///
+/// The loop is reached ONLY for a node that already said it is not scene
+/// movement — a camera — and such a node has zero or one child.
 ///
 /// The flag itself lives on the document node (SceneNode::_countsAsMovement)
 /// and is read through the back-pointer table — two loads, no hashing — rather
@@ -787,7 +801,10 @@ inline bool writeIsSceneMovement(Ogre::SceneNode *n)
 {
     const SceneNode *owner = ownerById(n->getId());
     if (!owner || owner->_countsAsMovement()) return true;
-    return n->numChildren() != 0;
+    const std::size_t kids = n->numChildren();
+    for (std::size_t i = 0; i < kids; ++i)
+        if (ownerById(n->getChild(i)->getId())) return true;   // a DOCUMENT child
+    return false;
 }
 
 inline void markMoved(Ogre::SceneNode *n)
