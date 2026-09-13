@@ -536,33 +536,6 @@ public:
     void setGiVolumeOverlay(bool visible);
     bool giVolumeOverlay() const { return mGiVolumeVisible; }
 
-    /// The legacy Preetham "realistic" sky, CPU-baked to an equirect image —
-    /// exactly realisticsky.frag's math per direction. Public for tests.
-    /// CPU bake of the analytic (Preetham) sky into an equirect image.
-    ///
-    /// `forHdr` is the POST_CHAIN_SPEC §7.1 decision, adopted: the bake normally
-    /// applies its own Uncharted2 filmic curve and a gamma, because the result
-    /// goes straight to an LDR viewport. Feed THAT into an HDR chain and the sky
-    /// is tonemapped TWICE — washed-out, low-contrast skies in exactly the
-    /// scenes that look best today. With `forHdr` the bake stops after the
-    /// exposure and lets the chain's tonemapper do the grading, once.
-    /// THE SUN IS THE SCENE'S SUN LIGHT (SKY_LIGHT_SPEC.md §3, D15). `sunDir`
-    /// is the direction FROM the scene TOWARDS the sun — i.e. the reverse of
-    /// the sun light's travel, `-sunLight->getLightDir()`, normalized by the
-    /// bake. `hasSun == false` (a scene with no directional light) bakes the
-    /// model's own night: no solar term at all.
-    static QImage bakeRealisticSky(const iris::SkyRealistic &sky, int width, int height,
-                                   bool forHdr, const iris::Vec3 &sunDir, bool hasSun);
-
-    /// Cosine-convolved irradiance of an equirect sky image as 9 spherical-
-    /// harmonic bands (27 floats, r/g/b per band), in LINEAR light — what the
-    /// scene's ambient becomes, tinted and scaled by the scene's Sky Light
-    /// (SKY_LIGHT_SPEC.md §2). Basis, order and units are exactly what
-    /// `Scene::setAmbientSh` documents; row 0 of the image is the zenith and the
-    /// longitude follows Ogre's own sky shader. Returns false for a null image.
-    /// Public for tests.
-    static bool integrateSkyAmbientSh(const QImage &equirect, float shOut[27]);
-
 private:
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
     /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
@@ -1050,23 +1023,11 @@ private:
     /// Translates and attaches a node's clips. Idempotent: does nothing unless
     /// the rig or the clip set changed.
     void attachClipsFor(Entry &e);
-    /// Resamples an equirect sky image into six small cubemap faces, which
-    /// become the scene's environment reflections (SkyDesc::reflectionFaces) —
-    /// how equirect/gradient/realistic skies get the IBL cubemap skies have.
-    /// Also records the sky's ambient integral for applyEnvironment (item 3b).
-    /// The faces land in mReflFaceTextures; false leaves them zeroed, which
-    /// says "no opinion" to the engine and keeps the reflections already bound.
-    bool buildSkyReflection(const QImage &equirect);
     /// The six world-axis faces of an equirect panorama as engine textures the
-    /// caller owns (and destroys). Shared by the sky's reflection cube and by
-    /// the per-material override, so one projection serves both.
+    /// caller owns (and destroys). The SKY no longer uses it — the engine
+    /// captures its own sky on the GPU (SKY-GPU) — but the per-material
+    /// reflection override still projects an authored panorama here.
     bool buildEquirectCubeFaces(const QImage &equirect, jahshaka::engine::TextureId ids[6]);
-    /// Cubemap skies do not go through buildSkyReflection (the engine takes the
-    /// six faces directly), so their ambient integral is taken from the face
-    /// images: the same SH projection, per face texel.
-    void recordCubeAmbientSh(const QImage faces[6]);
-    /// Clears the recorded sky ambient (no sky, or a single-colour sky).
-    void clearSkyAmbient();
     jahshaka::engine::MeshId     meshFor(iris::Mesh *mesh, const QString &rigId = QString());
     jahshaka::engine::MaterialId materialFor(iris::Material *material);
     struct MaterialSync;
@@ -1472,20 +1433,19 @@ private:
         /// Gradient: the three stops and the horizon offset.
         QColor  gradientTop, gradientMid, gradientBot;
         float   gradientOffset = 0.0f;
-        /// Realistic: the eight scattering parameters, the bake width (Sky
-        /// Detail — changing it must re-bake like a parameter does) and HDR
-        /// (with the post chain on, the bake stops before its own tonemap,
-        /// POST_CHAIN_SPEC §7.1, so toggling it must re-bake too).
-        float   luminance = 0.0f, reileigh = 0.0f, mieCoefficient = 0.0f;
-        float   mieDirectionalG = 0.0f, turbidity = 0.0f;
+        /// Realistic: the analytic sky's five parameters. They are the
+        /// ENGINE's (SKY-GPU) — pushed into Ogre's AtmosphereNpr, evaluated per
+        /// pixel on the GPU — so a change here is a const-buffer write and a
+        /// re-capture of the environment, never a CPU bake. There is no
+        /// debounce any more for exactly that reason.
+        float   density = 0.0f, diffusion = 0.0f, horizon = 0.0f, power = 0.0f;
+        QColor  skyColour;
         /// Realistic: the SUN LIGHT's direction (towards the sun) and whether
-        /// the scene has one at all — the bake's only sun input since D15.
-        /// Compared with a dot-product band rather than exactly, so a keyed
-        /// slow rotation re-bakes at the debounce cadence and a still sun never.
+        /// the scene has one at all — the sky's only sun input since D15.
+        /// Compared with a dot-product band rather than exactly, so a gizmo
+        /// drag's float noise does not re-capture the environment every frame.
         iris::Vec3 sunDir;
         bool    hasSun = false;
-        int     bakeResolution = 0;
-        bool    hdr = false;
         /// Color: a SINGLE_COLOR sky is a REAL sky now (SKY_LIGHT_SPEC §2) —
         /// baked as a 64x32 strip of the colour and pushed through the equirect
         /// path, so its SH band 0 is linear(colour), its reflections are
@@ -1507,25 +1467,18 @@ private:
     /// reclaimUnused does not free what the engine's sky is sampling.
     jahshaka::engine::TextureId mSkyTexture = 0;
     jahshaka::engine::TextureId mSkyFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
-    // Faces the reflection (IBL) cubemap was built from; kept until the sky
-    // changes (the engine copies them, but destroy-after-copy stays ours).
-    jahshaka::engine::TextureId mReflFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
-    // Realistic-sky bake debounce: during a slider drag the 8 parameters change
-    // every event; re-bake at most every ~150 ms (the last change always lands —
-    // applySky recomputes the signature each frame until it sticks).
-    QElapsedTimer mRealisticBakeTimer;
-    // THE SKY'S OWN LIGHT (SKY_LIGHT_SPEC.md §2): the cosine-convolved integral
-    // of whatever sky is live, in linear light. Recomputed only when the sky
-    // signature changes; applyEnvironment scales it by the scene's Sky Light
-    // and pushes the result. No Sky Light => 27 zeros, whatever this holds.
-    bool mHasSkyAmbient = false;
     // Last ambient pair actually pushed. Ogre picks its ambient shader variant
     // from these (equal => fixed, different => hemisphere), so pushing an
     // unchanged value every frame is not free.
     bool mAmbientPushed = false;
     float mLastAmbientSh[27] = { 0.0f };
-    /// The sky's own SH ambient (before the World-panel gain). Valid while
-    /// mHasSkyAmbient; zeroed by clearSkyAmbient.
+    /// THE SKY'S OWN LIGHT (SKY_LIGHT_SPEC.md §2), READ FROM THE ENGINE
+    /// (SKY-GPU): the cosine-convolved integral of the sky the engine just
+    /// drew, in linear light, refreshed from Scene::skyAmbientSh each frame and
+    /// scaled here by the scene's Sky Light. The host has no sky image to
+    /// integrate any more — the analytic sky is a shader and an HDRI's integral
+    /// was the biggest CPU lighting computation left (CPU_GPU_LIGHTING_AUDIT
+    /// F2). No Sky Light => 27 zeros, whatever this holds.
     float mSkyAmbientSh[27] = { 0.0f };
     // directional, point, spot, area, decal box
     jahshaka::engine::MeshId mWireMeshes[5] = { 0, 0, 0, 0, 0 };

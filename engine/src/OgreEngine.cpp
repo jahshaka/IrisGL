@@ -848,6 +848,17 @@ void OgreEngine::renderOneFrame() {
                 // scan reads cached bounds instead of paying a root-recursive
                 // getWorldAabbUpdated per item (ENGINE_CACHE_POLICY_SPEC P3).
                 applyShadowCacheDirties(updated);
+                // THE SKY CAPTURE (SKY-GPU), here and not with the other
+                // pending work at the top of the frame: it is a SCENE pass over
+                // the sky's render queue, so it needs the scene graph this
+                // frame's updateSceneGraph just built — above, the static
+                // memory manager has not been walked yet and on a process's
+                // FIRST frame the sky quad has no world AABB at all, so the
+                // capture would read back black (measured). After
+                // applyShadowCacheDirties for the same reason that one runs
+                // where it does: it wants "nothing has rendered yet", and this
+                // renders six 128^2 faces.
+                for (OgreScene *s : updated) s->applyPendingSkyCapture();
                 // THE RECORD/SWAP SPLIT. One call does both; the frame listener
                 // marks the instant between them (see FrameSplitListener).
                 const auto monFrameStart = std::chrono::steady_clock::now();
