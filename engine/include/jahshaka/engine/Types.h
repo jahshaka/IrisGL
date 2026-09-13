@@ -2040,6 +2040,11 @@ struct GiStatus {
         /// bounded queue: at most one cascade is rebuilt per frame). Non-zero
         /// only while the camera is outrunning the scheduler.
         int   pending = 0;
+        /// How many GI items this cascade voxelises: the ones inside its box
+        /// that are big enough to fill half a voxel of it. A coarse cascade
+        /// declines sub-voxel objects — it cannot represent them, and they are
+        /// what a whole re-voxelisation spends its time on.
+        int   items = 0;
         /// CPU milliseconds of that same rebuild (the submission cost on the
         /// frame's own thread). The GPU half is NOT here and cannot be: a
         /// timestamp pair is read back two frames later, so it is reported

@@ -666,6 +666,7 @@ GiStatus OgreScene::giStatus() const {
             cs.centre     = toV(c.centre);
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
+            cs.items      = int(c.items);
             cs.lastCpuMs  = c.lastCpuMs;
             st.cascades.push_back(cs);
         }
@@ -3089,12 +3090,13 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         recentreCascade(c, camPos);
     }
 
+    // The GI items, recorded once; each cascade attaches them for itself (an
+    // empty cascade attaches none — see setCascadeItems).
     size_t itemCount = 0;
     mVctItemIds.clear();
     for (auto &kv : mNodes) {
         Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        for (VctCascade &c : mVctCascades) c.voxelizer->addItem(item, false);
         mVctItemIds.push_back(kv.first);
         ++itemCount;
     }
@@ -3110,10 +3112,21 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
     // (`addCascade` gives cascade i the chain i+1..N-1), so the coarse volumes
     // must hold light before the fine ones propagate through them. Upstream
     // iterates in reverse for the same reason and says so.
+    //
+    // AND IT IS ALL-OR-NOTHING. A build that throws half way through would
+    // otherwise leave a chain whose cascades EXIST but hold nothing — the arm
+    // reports four cascades, the shader samples four empty volumes, and the
+    // scene renders with no GI and no error anyone can see. Measured: the
+    // voxeliser's `VCT/AabbWorldSpace` job threw on an 8,404-node lattice at
+    // the two smallest cascade sizes (0.02-0.04 m cells), and that is exactly
+    // the state it left behind. A failure tears the whole chain down and
+    // reports nothing built, which is the state every caller already handles.
+    JAH_TRY {
     for (size_t i = table.size(); i--; ) {
         VctCascade &c = mVctCascades[i];
         const auto tCascade = std::chrono::steady_clock::now();
         c.voxelizer->dividideOctants(1u, 1u, 1u);
+        setCascadeItems(c, cascadeHasGeometry(c));
         c.voxelizer->build(mSceneMgr);
         c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
                                            c.voxelizer, anisotropic);
@@ -3136,6 +3149,8 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
     // The head IS cascade 0 — from here on every existing rule in this file
     // (binding, teardown, material generation, status) sees the arm it knows.
+    } JAH_CATCH(mError, abandonCascadeChain());
+    if (mVctCascades.empty() || !mVctCascades[0].lighting) return abandonCascadeChain();
     mVctVoxelizer = mVctCascades[0].voxelizer;
     mVctLighting  = mVctCascades[0].lighting;
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
@@ -3157,6 +3172,104 @@ void OgreScene::recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos) {
         c.voxelizer->setRegionToVoxelize(false, Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
 }
 
+// A CASCADE THAT LANDS IN EMPTY SPACE — and why this exists.
+//
+// `VctVoxelizer::build` sizes its instance-to-world job as
+// `(mTotalNumInstances + tpg - 1) / tpg` thread groups (OgreVctVoxelizer.cpp:1238),
+// and `mTotalNumInstances` counts the instances that SURVIVED the region cull.
+// When the region contains none, that is zero groups, and Ogre refuses to
+// compile a job whose group counts multiply to zero — `VCT/AabbWorldSpace:
+// Shader or C++ must set ... num_thread_groups`. It throws.
+//
+// It is not a corner case for a CAMERA-CENTRED volume: fly off the edge of a
+// scene and the inner cascade is empty by definition. Measured on the 8,404-node
+// lattice at 0.02-0.04 m cells, where the default camera starts just outside the
+// lattice: the build threw and left a chain of cascades holding nothing.
+//
+// The fix needs no source patch, because `build()` already has the path we
+// want — with NO items registered it creates the textures, clears them and
+// returns (`:1310`). So an empty cascade is built with its items detached: the
+// volume is correctly EMPTY rather than stale, at the cost of one AABB test per
+// item on a rebuild frame.
+
+// WHAT A CASCADE VOXELISES, and the two rules behind it.
+//
+// RULE 1 — THE ITEM SET IS ATTACHED ONCE, NOT PER REBUILD. Ogre's voxeliser
+// culls the attached items against the region on every build, and re-selecting
+// them ourselves per rebuild means `removeAllItems()` — which drops the mesh
+// bookkeeping, so the next build re-derives and re-uploads every mesh buffer.
+// (A per-rebuild selection was measured on the lattice at 39.7 / 40.5 / 40.7 ms
+// across three runs against 17.5-52.3 ms for attach-once; the lattice's
+// per-rebuild timings are too noisy run to run to call that a regression, so
+// this rule stands on the work it plainly does not do, not on those numbers.)
+//
+// RULE 2 — A COARSE CASCADE DECLINES SUB-VOXEL OBJECTS. The raster voxeliser's
+// price is the GEOMETRY INSIDE THE REGION, not the region (measured: in a
+// 16-item room one whole build is a flat 2.7-5.3 ms from a 16 m3 box to a
+// 1.7 million m3 one; on the lattice it goes 17.5 / 61.6 / 108 ms as the box
+// grows 5 / 10 / 20 m, i.e. ~13 us per enclosed instance). An outer cascade
+// encloses the most instances and resolves the least — the sample set's
+// outermost cell is 1.875 m — so anything that cannot fill half a voxel of it
+// is a smear the grid cannot represent. Declining it is not an approximation of
+// the picture, it is declining to compute something the grid cannot hold, and
+// it needs nothing from Ogre: WE choose what to addItem. Cascade 0 keeps
+// everything by construction (its cell is the finest).
+//
+// THE TRADEOFF, stated: a scene whose distant light comes from MANY small
+// objects (a field of lamps, a forest of leaves) loses their far bounce.
+// `GiStatus::cascades[].items` reports what each cascade kept, so it is visible
+// rather than mysterious. NOT PROVEN ON THE MEASURED SCENES: neither Showroom 2
+// nor the lattice has sub-voxel geometry (the lattice's cubes sit exactly on
+// the threshold), so this rule fired on nothing there and the numbers above are
+// its cost, not its benefit.
+static const float kCascadeSubVoxelFactor = 0.5f;
+
+// Does any GI item this cascade would voxelise reach into its box? The question
+// `build()` cannot be asked: with items attached and NONE of them in the region,
+// its instance-to-world job is sized to zero thread groups and Ogre refuses to
+// compile a job with none — `VCT/AabbWorldSpace: ... must set num_thread_groups`
+// — so it THROWS. For a camera-centred volume that is not a corner case: fly off
+// the edge of a scene and the inner cascade is empty by definition (measured on
+// the lattice at 0.02-0.04 m cells, where it left a chain of cascades holding
+// nothing and a scene rendering with no GI and no visible error). With NO items
+// attached, `build()` takes its own empty path — create the textures, clear
+// them, return — which is exactly the right picture for an empty cascade.
+bool OgreScene::cascadeHasGeometry(const VctCascade &c) const {
+    const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+    const float minExtent = c.cell() * kCascadeSubVoxelFactor;
+    for (const auto &kv : mNodes) {
+        Ogre::Item *item = kv.second.item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        const Ogre::Aabb wa = item->getWorldAabb();
+        const Ogre::Vector3 h = wa.mHalfSize;
+        if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;
+        if (box.intersects(wa)) return true;
+    }
+    return false;
+}
+
+void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
+    if (!c.voxelizer || c.itemsAttached == attach) return;   // rule 1: only on a change
+    if (!attach) {
+        c.voxelizer->removeAllItems();
+        c.itemsAttached = false;
+        c.items = 0;
+        return;
+    }
+    const float minExtent = c.cell() * kCascadeSubVoxelFactor;
+    unsigned kept = 0;
+    for (auto &kv : mNodes) {
+        Ogre::Item *item = kv.second.item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        const Ogre::Vector3 h = item->getWorldAabb().mHalfSize;
+        if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;   // rule 2
+        c.voxelizer->addItem(item, false);
+        ++kept;
+    }
+    c.items = kept;
+    c.itemsAttached = true;
+}
+
 void OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
     if (idx >= mVctCascades.size()) return;
     VctCascade &c = mVctCascades[idx];
@@ -3173,6 +3286,7 @@ void OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
     const auto t0 = std::chrono::steady_clock::now();
     JAH_TRY {
         mSceneMgr->updateSceneGraph();
+        setCascadeItems(c, cascadeHasGeometry(c));
         c.voxelizer->build(mSceneMgr);
         applyCascadeAmbient(c.lighting);
         c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/, hasVctLights(),
@@ -3251,6 +3365,20 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         c.pending = 0;
         spent = true;
     }
+}
+
+// The FAILED-BUILD path: nothing is bound yet (mVctVoxelizer/mVctLighting are
+// assigned only once the whole chain is up), so cascade 0's objects are owned
+// here too and every one of them must go — lighting before voxeliser, as
+// always. Returns 0 so it can be the value of a JAH_CATCH.
+size_t OgreScene::abandonCascadeChain() {
+    for (size_t i = mVctCascades.size(); i--; ) {
+        delete mVctCascades[i].lighting;  mVctCascades[i].lighting = nullptr;
+        delete mVctCascades[i].voxelizer; mVctCascades[i].voxelizer = nullptr;
+    }
+    mVctCascades.clear();
+    mVctItemIds.clear();
+    return 0;
 }
 
 void OgreScene::teardownExtraCascades() {

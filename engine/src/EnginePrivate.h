@@ -3211,6 +3211,12 @@ private:
         long long    latticeX = 0, latticeY = 0, latticeZ = 0;
         Ogre::Vector3 centre = Ogre::Vector3::ZERO;
         bool         built   = false;
+        /// Whether this cascade's voxeliser currently holds the GI items. A
+        /// cascade standing in empty space holds none (setCascadeItems).
+        bool         itemsAttached = false;
+        /// How many GI items this cascade actually voxelises — inside its box and
+        /// big enough to fill half a voxel of it.
+        unsigned     items = 0;
         int          pending = 0;                  ///< queued rebuilds (bounded)
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
@@ -3243,6 +3249,15 @@ private:
     void updateCascades(const Ogre::Vector3 &camPos);
     /// Destroys cascades 1..N-1 (cascade 0 is teardownVct's own business).
     void teardownExtraCascades();
+    /// Does any GI item this cascade would voxelise reach into its box?
+    bool cascadeHasGeometry(const VctCascade &c) const;
+    /// Attaches or detaches the GI items on one cascade's voxeliser. A cascade
+    /// with none builds an EMPTY volume instead of throwing (the pin's
+    /// zero-thread-group refusal).
+    void setCascadeItems(VctCascade &c, bool attach);
+    /// Destroys a chain that never finished building (nothing is bound yet, so
+    /// cascade 0 belongs to it too). Returns 0 — it is a JAH_CATCH value.
+    size_t abandonCascadeChain();
     /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
     /// records the camera it was placed for. Does not voxelise.
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
