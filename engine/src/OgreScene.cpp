@@ -68,18 +68,32 @@ void OgreScene::setAmbient(const Colour &upper, const Colour &lower) {
                           (upper.b - lower.b) * 0.5f * kFlat };
     float sh[27] = { 0 };
     for (int c = 0; c < 3; ++c) { sh[c] = c0[c]; sh[3 + c] = c1[c]; }
+    // AND THAT IS THE VALUE THE VCT ARM GETS TOO — setAmbientSh derives
+    // mAmbientRadiance from these very coefficients (c0 +- c1 is the pair back
+    // again) and pushes it, so this function ends here. It used to overwrite
+    // that pair with the UNSCALED one (LIGHTING_FIX fix 3), on the argument
+    // that "VctLighting has no such split, so the darkened value would make a
+    // VCT scene pi times darker than the same scene without VCT". That
+    // argument is wrong in its premise and it was the owner's black rectangle
+    // (ledger 177 defect A, gi.volume_edge):
+    //
+    //   * this engine forces HlmsPbs::AmbientSh, so a scene WITHOUT VCT renders
+    //     a flat ambient through the SH arm above — i.e. through kFlat, the
+    //     DARKENED value. That is what "the same scene without VCT" actually
+    //     looks like, and what every pixel suite, the selftest hash and every
+    //     authored scene were calibrated against;
+    //   * VctLighting's ambient is used in exactly the same convention the SH
+    //     arm is in: `light.xyz += ambient * light.w` lands in envColourD
+    //     (Vct_piece_ps.any:470-477 -> :613), which the BRDF multiplies by pi
+    //     against a kD carrying 1/pi. Radiance in, radiance out, same units.
+    //
+    // So the unscaled pair made a flat ambient pi times BRIGHTER the moment a
+    // voxel volume was bound — measured at 3.25x on an unlit slab — and the two
+    // values met at the edge of the field's confidence region, where the
+    // irradiance field's fallback hands out the VCT pair and its reconstruction
+    // hands out the SH one (JahIfd_piece_ps.any). One ambient, one convention,
+    // no edge.
     setAmbientSh(sh);
-    // ...but VCT gets the RADIANCE pair, not the 1/pi one (LIGHTING_FIX fix 3).
-    // The scale factor above exists to reproduce HlmsPbs' own pi discrepancy
-    // between its AmbientFixed and AmbientHemisphere paths; VctLighting has no
-    // such split — its ambient is added to the cone-trace result as plain
-    // radiance (`light.xyz += ambient * light.w`, Vct_piece_ps.any) — so pushing
-    // the darkened value there would make a VCT scene's ambient pi times darker
-    // than the same scene without VCT. setAmbientSh has already recorded the
-    // (possibly scaled) SH-derived pair; overwrite it with the true one.
-    mAmbientRadiance[0] = upper;
-    mAmbientRadiance[1] = lower;
-    applyVctAmbient();
 }
 
 // THE VCT AMBIENT (LIGHTING_FIX fix 3 / F-V1). Ogre's VctLighting is born with
@@ -158,9 +172,11 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
         mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, 1.0f, 0u);
         // The VCT arm's own copy of the same ambient, in RADIANCE units — which
-        // for an SH push (the sky path) is what the coefficients already are.
-        // f(n) = c0 + c1 * n.y, so the poles are c0 +- c1. setAmbient overwrites
-        // this afterwards with its unscaled pair; see applyVctAmbient.
+        // is what the coefficients already are, for a sky push and for
+        // setAmbient's scaled pair alike: f(n) = c0 + c1 * n.y, so the poles
+        // are c0 +- c1. ONE ambient reaches both arms, through here (ledger 177
+        // defect A: setAmbient used to overwrite this with an unscaled pair,
+        // which made a flat ambient pi times brighter inside a VCT scene).
         mAmbientRadiance[0] = Colour(sh[0] + sh[3], sh[1] + sh[4], sh[2] + sh[5], 1.0f);
         mAmbientRadiance[1] = Colour(sh[0] - sh[3], sh[1] - sh[4], sh[2] - sh[5], 1.0f);
         applyVctAmbient();
