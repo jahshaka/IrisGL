@@ -306,6 +306,9 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
 }
 
 void OgreScene::applyNodeVisibilityFlags(Node &n) {
+    // A STRUCTURAL INPUT to the GI scans and the two signatures: which channel
+    // an object is in decides whether they read it at all (clean-2 lane).
+    noteSceneTransformWrite();
     // The material's unlit-ness was recorded when the geometry attached, so a
     // lit mesh that is marked helper and then unmarked gets its kGiGeometryBit
     // back. Reading it off the item's CURRENT flags could not do that: a helper

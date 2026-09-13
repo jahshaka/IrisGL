@@ -1258,9 +1258,8 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                         detail::FogHlmsListener::noteShadowAssignmentChanged(in.node);
                         if (w) {
                             ++mShadowDirtiedMaps[k];
-                            if (monitor::live())
-                                monitor::noteCacheWork(CacheKind::ShadowMap, WorkReason::Added,
-                                                       s->nodeOfLight(w), kKindNames[k], 1u);
+                            if (monitor::live()) noteShadowMapWork(in.kind, WorkReason::Added,
+                                                                   s->nodeOfLight(w), kKindNames[k]);
                         }
                     } else if (w && (f.dirtyAll ||
                                      std::find(dirty.begin(), dirty.end(), w) != dirty.end())) {
@@ -1268,14 +1267,42 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                         // dirty map does not oblige its atlas neighbours to redraw.
                         in.node->setStaticShadowMapDirty(mapIdx, false);
                         ++mShadowDirtiedMaps[k];
-                        if (monitor::live())
-                            monitor::noteCacheWork(CacheKind::ShadowMap, reasonFor(w),
-                                                   s->nodeOfLight(w), kKindNames[k], 1u);
+                        if (monitor::live()) noteShadowMapWork(in.kind, reasonFor(w),
+                                                               s->nodeOfLight(w), kKindNames[k]);
                     }
                 }
             }
+            flushShadowProbeMarks();
         }
     } JAH_CATCH(mLastError, );
+}
+
+// THE MONITOR'S SHADOW-MAP RECORDS (§4.7), with the PROBE kind coalesced.
+//
+// A view has one shadow-node instance and a planar mirror one per slot, so
+// their records are already one per map render. A shadowed probe GRID has one
+// instance PER PROBE — 32 in the Grand Showroom — and the cache marks a moving
+// lamp's map dirty on every one of them, so one lamp wrote 35 identical records
+// into the frame and 32 of those instances render nothing this frame (the
+// budget captures one probe). The mark is the same fact 32 times; it is
+// reported once, with the instance count in `units`, so a capture reads
+// "1 light, 3 real map renders" instead of 35 lines. What is marked dirty does
+// not change.
+void OgreEngine::noteShadowMapWork(ShadowNodeKind kind, WorkReason reason,
+                                   unsigned long long node, const char *kindName) {
+    if (kind != ShadowNodeKind::Probe) {
+        monitor::noteCacheWork(CacheKind::ShadowMap, reason, node, kindName, 1u);
+        return;
+    }
+    for (ProbeMark &m : mShadowProbeMarks)
+        if (m.node == node && m.reason == reason) { ++m.instances; return; }
+    mShadowProbeMarks.push_back({ node, reason, 1u });
+}
+
+void OgreEngine::flushShadowProbeMarks() {
+    for (const ProbeMark &m : mShadowProbeMarks)
+        monitor::noteCacheWork(CacheKind::ShadowMap, m.reason, m.node, "probe", m.instances);
+    mShadowProbeMarks.clear();
 }
 
 void OgreEngine::latchShadowCounters() {

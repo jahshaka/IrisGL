@@ -1916,6 +1916,14 @@ struct GiStatus {
     /// skipped frame, which is the whole point.
     unsigned long long giScans = 0;
     double             giScanMicros = 0.0;
+    /// EVERY `getWorldAabbUpdated` THIS ENGINE'S OWN GI CODE HAS ASKED FOR,
+    /// cumulative. That call walks the node's parent chain and recomputes the
+    /// node's whole SIMD block, and there were three separate per-frame walks
+    /// making it per item: the movement scan and the two signatures the host
+    /// reads to decide whether to re-solve (plus the Forward+ slice walk one
+    /// frame in thirty). The acceptance for all four is this counter: its
+    /// delta over a STILL frame is 0.
+    unsigned long long giAabbReads = 0;
 };
 
 // ---- Fog (scene-level) ------------------------------------------------------

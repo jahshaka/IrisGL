@@ -1690,6 +1690,21 @@ namespace planar {
 /// and it composes with the chain's own RQ policy (OgreChain.cpp).
 constexpr Ogre::uint8 kReflectLastRQ = 199u;
 
+/// THE ONE PASS THAT UPDATES THE MIRRORS, by pass-definition identifier
+/// (clean-2 lane, 2026-09-13). `PlanarReflections::update()` renders every
+/// active actor's workspace synchronously — a full scene render per mirror,
+/// with its own shadow node — and the listener that calls it used to fire on
+/// every PASS_SCENE drawn with the view's camera. At Epic that is the SSR
+/// prepass, the opaque pass, the refractive pass and the overlays pass: the
+/// mirror was rendered three times a frame (measured 1.04 / 0.70 / 0.70 ms GPU
+/// and 2.08 / 0.15 / 0.15 ms CPU on the alive room) and the second and third
+/// produced a picture nobody sampled. Upstream's own sample gates the same
+/// callback on ONE pass by identifier (Samples/2.0/ApiUsage/PlanarReflections),
+/// which is what this is: `chain::build` stamps it on the OPAQUE pass — the
+/// pass that actually samples the reflection — and nothing else carries it, so
+/// the exclusion is by construction rather than by frame order.
+constexpr Ogre::uint32 kPlanarUpdatePassIdentifier = 25001u;
+
 /// Builds the private workspace definition the reflection cameras render
 /// through, under `workspaceDef` (node definitions appended to `nodeDefsOut`).
 /// Deliberately NOT a copy of Samples/.../PlanarReflections.compositor: that
@@ -2264,9 +2279,15 @@ public:
     double shadowScanMicros() const { return mShadowScanMicros; }
     double casterWalkMicros() const { return mCasterWalkMicros; }
     double giScanMicros() const { return mGiScanMicros; }
-    /// A write to a node this scene owns (setNodeTransform, a socket rider's
-    /// per-frame placement, a decal's box): the half of the movement epoch the
-    /// host's counter cannot see.
+    /// AN INPUT TO THIS SCENE'S GI SCANS CHANGED — a transform this scene
+    /// itself wrote (setNodeTransform, a socket rider's placement, a decal's
+    /// box), or a STRUCTURAL change that moves what the scans would read
+    /// (an Item arriving or leaving, a visibility/helper/mobility flag, the
+    /// lit volume). The host's transform counter cannot see any of it.
+    ///
+    /// It is the same counter for both because every reader wants the same
+    /// question answered — "could the answer have changed since I last
+    /// looked?" — and a false yes costs one scan.
     void noteSceneTransformWrite() { ++mSceneTransformWrites; }
     void recreatePlanarAfterShadowRebuild();
 
@@ -3351,6 +3372,29 @@ private:
     bool mGiWalkEpochValid = false;               ///< ...and whether it was ever set
     unsigned long long mSceneTransformWrites = 0; ///< OUR writes: setNodeTransform, riders
     unsigned long long mGiScans = 0;              ///< movement scans actually run, ever
+    /// getWorldAabbUpdated calls made by OUR GI code, ever (GiStatus::
+    /// giAabbReads). Mutable: two of the four readers are const signatures.
+    mutable unsigned long long mGiAabbReads = 0;
+    /// THE TWO SIGNATURES THE MIRROR READS EVERY FRAME (giEscapeSignature,
+    /// giGeometrySignature) ARE PURE FUNCTIONS OF THE SAME BOXES, and each was
+    /// a full walk of mNodes with a root-recursive getWorldAabbUpdated per GI
+    /// item — so a still frame paid THREE such walks (these two plus
+    /// ensureGiWalk) before Ogre's own update. Cached against the movement
+    /// epoch, with the volume the escape test is relative to in the key
+    /// (clean-2 lane, 2026-09-13).
+    mutable unsigned long long mEscapeSigEpoch = 0, mEscapeSig = 0;
+    mutable bool               mEscapeSigValid = false;
+    mutable Ogre::Aabb         mEscapeSigVolume;
+    mutable bool               mEscapeSigVolumeValid = false;
+    mutable GiMode             mEscapeSigMode = GiMode::Off;
+    mutable unsigned long long mGeomSigEpoch = 0, mGeomSig = 0;
+    mutable bool               mGeomSigValid = false;
+    mutable GiMode             mGeomSigMode = GiMode::Off;
+    /// ...and the same for the Forward+ slice walk's scene bounds, which runs
+    /// one frame in thirty and read every item's updated AABB to do it.
+    Ogre::Aabb         mFwdPlusBounds;
+    bool               mFwdPlusBoundsValid = false;
+    unsigned long long mFwdPlusBoundsEpoch = 0;
     double   mShadowScanMicros = 0.0;
     double   mCasterWalkMicros = 0.0;
     double   mGiScanMicros = 0.0;
@@ -4350,6 +4394,17 @@ private:
     std::vector<Ogre::Light *>               mShadowPlanScratch;
     std::vector<char>                        mShadowPlacedScratch;
     std::vector<Ogre::CompositorWorkspace *> mShadowWsScratch;
+    /// THE PROBE KIND'S CACHE-WORK RECORDS, COALESCED PER FRAME (clean-2 lane,
+    /// 2026-09-13). A shadowed probe grid holds one shadow-node INSTANCE per
+    /// probe, so one moving lamp used to write 35 identical "reason: light"
+    /// records into a capture's frame (1 view + 2 reflect + 32 probe), 32 of
+    /// them for instances that will not render this frame at all. One record
+    /// per lamp per frame instead, with `units` = the instances marked.
+    struct ProbeMark { unsigned long long node; WorkReason reason; unsigned instances; };
+    std::vector<ProbeMark> mShadowProbeMarks;
+    void noteShadowMapWork(ShadowNodeKind kind, WorkReason reason, unsigned long long node,
+                           const char *kindName);
+    void flushShadowProbeMarks();
     std::vector<OgreScene *>                 mShadowSceneScratch;
     OgreScene::ShadowCacheFrame              mShadowFrameScratch;
     std::vector<std::unique_ptr<OgreView>>  mViews;

@@ -93,12 +93,21 @@ void WorkspaceListener::passEarlyPreExecute(Ogre::CompositorPass *pass) {
     // A shadow-caster pass renders from a light, not from a camera.
     if (def->mShadowNodeRecalculation == Ogre::SHADOW_NODE_CASTER_PASS) return;
     auto *scenePass = static_cast<Ogre::CompositorPassScene *>(pass);
-    // THE discriminator. Ogre's sample tags its main pass with the magic
-    // identifier 25001; matching the view's own camera pointer is stronger (it
-    // cannot be copied wrong into a new chain phase) and, crucially, it is what
-    // stops this callback from recursing: update() runs the reflection
-    // workspaces synchronously, and those draw from the reflection cameras.
+    // THE CAMERA GUARD, which is what stops this callback from RECURSING:
+    // update() runs the reflection workspaces synchronously and those draw from
+    // the reflection cameras.
     if (scenePass->getCamera() != mCamera) return;
+    // ...AND THE ONE PASS (clean-2 lane, 2026-09-13). The camera is not a
+    // discriminator: at Epic the SSR prepass, the opaque pass, the refractive
+    // pass and the overlays pass all draw with it, so the mirrors were
+    // re-rendered on each — three full reflection workspaces a frame, two of
+    // them producing a picture nobody samples (the prepass writes normals and
+    // depth; the overlays pass draws gizmos). The chain stamps
+    // kPlanarUpdatePassIdentifier on the OPAQUE pass, which is the pass that
+    // samples the reflection, and this runs there and nowhere else. See the
+    // constant for the measurement, and Ogre's PlanarReflections sample for the
+    // same idiom upstream.
+    if (def->mIdentifier != kPlanarUpdatePassIdentifier) return;
     // The aspect ratio must be the one the pass is actually rendering at. Our
     // view cameras are setAutoAspectRatio(true), so the camera's own cached
     // value is stale until Ogre updates it — read the viewport's.

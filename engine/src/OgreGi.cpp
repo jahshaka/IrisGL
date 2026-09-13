@@ -589,6 +589,7 @@ GiStatus OgreScene::giStatus() const {
         st.rebuilds        = mGiRebuilds;
         st.giScans         = mGiScans;
         st.giScanMicros    = mGiScanMicros;
+        st.giAabbReads     = mGiAabbReads;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -723,6 +724,7 @@ void OgreScene::setNodeGiBoundsExcluded(NodeId id, bool excluded) {
     if (it == mNodes.end()) return;
     if (it->second.giBoundsExcluded == excluded) return;
     it->second.giBoundsExcluded = excluded;
+    noteSceneTransformWrite();      // the escape signature reads this flag
     // The flag changes WHERE GI happens, so it is exactly as much of a change
     // as moving the geometry: flag the caches and let the frame-time flush
     // rebuild once, however many nodes the caller toggles in a burst.
@@ -829,6 +831,7 @@ std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.giBoundsExcluded) continue;
+        ++mGiAabbReads;
         all.push_back(const_cast<Ogre::Item *>(item)->getWorldAabbUpdated());
     }
     return all;
@@ -959,6 +962,18 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
 unsigned long long OgreScene::giEscapeSignature() const {
     if (mGi.mode == GiMode::Off) return 0ull;
     if (!mGiAutoVolumeValid) return 0ull;      // nothing resolved yet, or hand-typed bounds
+    // CACHED AGAINST THE MOVEMENT EPOCH (clean-2 lane, 2026-09-13). The mirror
+    // reads this every frame of every VCT-like scene, and it is a pure function
+    // of the GI items' boxes and the volume they are tested against — so on a
+    // frame where nothing wrote a transform and nothing structural changed, the
+    // answer is last frame's and the walk (a root-recursive
+    // getWorldAabbUpdated per GI item) is skipped outright.
+    const unsigned long long epoch = transformEpoch();
+    if (mEscapeSigValid && mEscapeSigEpoch == epoch && mEscapeSigMode == mGi.mode &&
+        mEscapeSigVolumeValid == mGiAutoVolumeValid &&
+        mEscapeSigVolume.mCenter == mGiAutoVolume.mCenter &&
+        mEscapeSigVolume.mHalfSize == mGiAutoVolume.mHalfSize)
+        return mEscapeSig;
     const Ogre::Vector3 vmn = mGiAutoVolume.getMinimum(), vmx = mGiAutoVolume.getMaximum();
     const Ogre::Vector3 size = vmx - vmn;
     const float quantum = std::max(std::max(std::max(size.x, size.y), size.z) / 64.0f, 1e-4f);
@@ -970,6 +985,7 @@ unsigned long long OgreScene::giEscapeSignature() const {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.giBoundsExcluded) continue;
+        ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
         if (mn.x >= vmn.x && mn.y >= vmn.y && mn.z >= vmn.z &&
@@ -980,7 +996,13 @@ unsigned long long OgreScene::giEscapeSignature() const {
             fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
         }
     }
-    return h == 1469598103934665603ull ? 0ull : h;      // untouched hash == nothing escaped
+    mEscapeSig = h == 1469598103934665603ull ? 0ull : h;   // untouched hash == nothing escaped
+    mEscapeSigEpoch = epoch;
+    mEscapeSigMode = mGi.mode;
+    mEscapeSigVolume = mGiAutoVolume;
+    mEscapeSigVolumeValid = mGiAutoVolumeValid;
+    mEscapeSigValid = true;
+    return mEscapeSig;
 }
 
 // A SCENE WITH NO LIGHTS AT ALL BREAKS VctLighting's AUTO MULTIPLIER, and after
@@ -1031,6 +1053,7 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
     // first object to appear in an empty-but-for-scenery scene legitimately
     // re-centres the volume onto it, and that is the heuristic working.
     mGiAutoVolumeValid = automatic && mGiLastItemCount >= 2u;
+    noteSceneTransformWrite();      // the escape signature is relative to it
 }
 
 bool OgreScene::giBoundsExplicit() const {
@@ -1093,6 +1116,7 @@ bool OgreScene::giContentCentre(float maxEdge, Ogre::Vector3 &centre) const {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         if (kv.second.giBoundsExcluded) continue;
+        ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const Ogre::Vector3 size = a.getSize();
         if (std::max(std::max(size.x, size.y), size.z) > maxEdge) continue;   // scenery
@@ -1653,19 +1677,31 @@ void OgreScene::updateForwardPlusRanges(const Ogre::Camera *cam) {
     if (++mFwdPlusTick < kFwdPlusEveryNFrames) return;
     mFwdPlusTick = 0;
     JAH_TRY {
-        Ogre::Vector3 mn(1e30f), mx(-1e30f);
-        size_t count = 0;
-        for (auto &kv : mNodes) {
-            Ogre::Item *item = kv.second.item;
-            // Everything the VIEW draws — the still world and the movers
-            // (kMovableBit) — because this is the camera's clustered grid, not
-            // a capture's.
-            if (!item || !(item->getVisibilityFlags() & (kVisibleBit | kMovableBit))) continue;
-            const Ogre::Aabb a = item->getWorldAabbUpdated();
-            mn.makeFloor(a.getMinimum()); mx.makeCeil(a.getMaximum());
-            ++count;
+        // THE SCENE'S EXTENT IS CACHED AGAINST THE MOVEMENT EPOCH (clean-2
+        // lane): the walk below is a root-recursive getWorldAabbUpdated per
+        // drawn item, and a still scene's answer cannot have changed. Only the
+        // CAMERA half below is recomputed on every tick.
+        const unsigned long long epoch = transformEpoch();
+        if (!mFwdPlusBoundsValid || mFwdPlusBoundsEpoch != epoch) {
+            Ogre::Vector3 bmn(1e30f), bmx(-1e30f);
+            size_t found = 0;
+            for (auto &kv : mNodes) {
+                Ogre::Item *item = kv.second.item;
+                // Everything the VIEW draws — the still world and the movers
+                // (kMovableBit) — because this is the camera's clustered grid,
+                // not a capture's.
+                if (!item || !(item->getVisibilityFlags() & (kVisibleBit | kMovableBit))) continue;
+                ++mGiAabbReads;
+                const Ogre::Aabb a = item->getWorldAabbUpdated();
+                bmn.makeFloor(a.getMinimum()); bmx.makeCeil(a.getMaximum());
+                ++found;
+            }
+            mFwdPlusBoundsValid = found != 0;
+            if (mFwdPlusBoundsValid) mFwdPlusBounds = Ogre::Aabb::newFromExtents(bmn, bmx);
+            mFwdPlusBoundsEpoch = epoch;
         }
-        if (!count) return;                 // an empty scene keeps whatever it has
+        if (!mFwdPlusBoundsValid) return;   // an empty scene keeps whatever it has
+        const Ogre::Vector3 mn = mFwdPlusBounds.getMinimum(), mx = mFwdPlusBounds.getMaximum();
         const Ogre::Vector3 camPos = cam->getDerivedPosition();
         // The far end: the distance to the furthest corner of what exists.
         float far2 = 0.0f;
@@ -1869,6 +1905,7 @@ unsigned long long OgreScene::transformEpoch() const {
 }
 
 void OgreScene::indexItemNode(Node &n) {
+    noteSceneTransformWrite();      // an Item arriving is an input to every scan
     if (n.itemSlot != size_t(-1)) return;
     n.itemSlot = mItemNodes.size();
     mItemNodes.push_back(&n);
@@ -1892,6 +1929,7 @@ void OgreScene::unindexDecalNode(Node &n) {
 }
 
 void OgreScene::unindexItemNode(Node &n) {
+    noteSceneTransformWrite();      // ...and so is one leaving
     // A CASTER LEAVING: its last box is what the lamps around it must re-render
     // without it (the scan never sees a node that has no Item).
     if (n.scan.shadowPresent && mShadowScanPrimed)
@@ -1959,6 +1997,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
         // would let the fresh walk skip the update where nothing moved, exists
         // only in OGRE_DEBUG_MEDIUM builds — an engine-side movement epoch is
         // the way to cut this, and it is a lane of its own.)
+        if (fresh) ++mGiAabbReads;
         const Ogre::Aabb a = fresh ? item->getWorldAabbUpdated() : item->getWorldAabb();
         // Read once per item, both halves use them (each is an SoA read, and
         // this loop is the per-frame cost the whole walk is measured by).
@@ -2237,11 +2276,17 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
 // item, so the hash of a still scene is still whatever the volume does.
 unsigned long long OgreScene::giGeometrySignature() const {
     if (mGi.mode == GiMode::Off) return 0ull;
+    // CACHED AGAINST THE MOVEMENT EPOCH, exactly as giEscapeSignature is and
+    // for the same reason: the mirror reads it once a frame and it is a pure
+    // function of the GI items' boxes (clean-2 lane, 2026-09-13).
+    const unsigned long long epoch = transformEpoch();
+    if (mGeomSigValid && mGeomSigEpoch == epoch && mGeomSigMode == mGi.mode) return mGeomSig;
     unsigned long long h = 1469598103934665603ull;      // FNV-1a
     const auto fold = [&h](unsigned long long v) { h ^= v; h *= 1099511628211ull; };
     for (const auto &kv : mNodes) {
         const Ogre::Item *item = kv.second.item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        ++mGiAabbReads;
         const Ogre::Aabb a = const_cast<Ogre::Item *>(item)->getWorldAabbUpdated();
         const float quantum = giAabbQuantum(a);
         const Ogre::Vector3 mn = a.getMinimum(), mx = a.getMaximum();
@@ -2251,7 +2296,11 @@ unsigned long long OgreScene::giGeometrySignature() const {
             fold((unsigned long long)(long long)std::floor(mx[ax] / quantum));
         }
     }
-    return h;
+    mGeomSig = h;
+    mGeomSigEpoch = epoch;
+    mGeomSigMode = mGi.mode;
+    mGeomSigValid = true;
+    return mGeomSig;
 }
 
 // THE MATERIAL TERM (ENGINE_CACHE_POLICY_SPEC P7), deliberately NOT folded into
