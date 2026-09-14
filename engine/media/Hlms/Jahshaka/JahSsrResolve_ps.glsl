@@ -76,6 +76,17 @@
 // thing a feedback loop cannot argue with. The relative firefly clamp stays
 // exactly as it was; a pixel already inside the ceiling comes out of this
 // shader bit for bit unchanged, which is why no existing frame moves.
+// CONFIDENCE, AND WHAT IT IS FOR (lane SSR-1, 2026-09-14). Two of the fades this
+// shader multiplies into `weight` were added because of the owner's Mirror Room:
+// a chrome sphere reflected the teapot as green shards and dots, while the same
+// sphere with SSR switched off showed a clean probe reflection. Both are
+// statements about whether nine neighbouring rays agree — see the block comment
+// above each. The two others live in the march (the arrival angle at the
+// surface a ray hit, and how marginal the thickness test's crossing was), and
+// the whole point of all four is that where a screen-space trace cannot be
+// trusted the pixel must fall back to the probe or sky the surface already has,
+// which a confidence below 1 does for free through upstream's lerp.
+
 #version ogre_glsl_ver_330
 
 vulkan_layout( ogre_t0 ) uniform texture2D rayTexture;
@@ -234,6 +245,44 @@ void main()
 	const vec2 hitUv = sumUvW > 0.0 ? sumUv / sumUvW : refUv;
 	const vec4 ray	 = vec4( hitUv, sumFade / sumW, sumW * ( 1.0 / 9.0 ) );
 
+	// COHERENCE: DO THE NINE RAYS AGREE? (lane SSR-1, the Mirror Room's shredded
+	// chrome sphere.)
+	//
+	// Everything above is written for a neighbourhood that agrees — a flat floor,
+	// where nine neighbouring rays leave in nine nearly identical directions and
+	// land nine nearly identical places. On a CURVED mirror they do not: the
+	// sphere's normal turns under every pixel, the rays fan out, and the nine
+	// hits are nine unrelated places in the frame. Each pixel then paints
+	// whatever its own ray happened to graze, and the result is the shredded
+	// green confetti the owner photographed where the sphere should have shown
+	// the teapot.
+	//
+	// The measure is free, because the loop above already computed it: `sumUvW`
+	// is the weight of the taps that AGREE with the reference hit. Measured
+	// against the WHOLE NEIGHBOURHOOD — nine, not `sumW` — and deliberately:
+	// against sumW a single lucky ray surrounded by eight misses scores a
+	// perfect 1.0, because it agrees with itself. That degenerate case IS the
+	// artefact (one ray in nine painting a dot), so the denominator has to be
+	// the nine rays that were fired, not the ones that came back.
+	//
+	// THE RAMP IS DELIBERATELY LOW (full confidence from 55 % of the
+	// neighbourhood agreeing) because a legitimate reflection edge — the
+	// silhouette of the thing being reflected — has a disagreeing neighbourhood
+	// by construction and must not vanish. A flat floor scores 1.0 everywhere
+	// except across such an edge, which is why the flat-floor frame does not
+	// move.
+	const float agreement = sumUvW * ( 1.0 / 9.0 );
+	const float cohFade	  = smoothstep( 0.35, 0.7, agreement );
+
+	// AND THE BORROW HAS TO EARN IT. When this pixel's OWN ray missed, the block
+	// above hands it the most confident NEIGHBOUR's hit. That is a sound
+	// interpolation inside a coherent reflection (it is what stops the
+	// half-resolution ray buffer from checkerboarding) and pure invention when
+	// the neighbourhood is mostly misses: one lucky ray in nine then paints a
+	// dot on eight pixels that never hit anything. So a borrowed hit fades with
+	// how much of the neighbourhood stands behind it.
+	const float borrow = taps[4].w > 0.0 ? 1.0 : smoothstep( 2.0, 5.0, sumW );
+
 	// Full-resolution roughness, undoing HlmsPbs' prepass packing. The ramp
 	// below the cutoff is what stops the reflection from appearing and
 	// vanishing as a hard boundary across a floor whose roughness varies.
@@ -242,7 +291,8 @@ void main()
 	const float cutoff	  = resolveParams.x;
 	const float roughFade = 1.0 - smoothstep( cutoff * 0.5, cutoff, roughness );
 
-	const float weight = clamp( ray.w * ray.z * roughFade * resolveParams.y, 0.0, 1.0 );
+	const float weight =
+		clamp( ray.w * ray.z * roughFade * cohFade * borrow * resolveParams.y, 0.0, 1.0 );
 	if( weight <= 0.0 )
 	{
 		fragColour = vec4( 0.0 );

@@ -1,0 +1,90 @@
+Jahshaka patch 0036 — a screen-space reflection REPLACES the environment term
+it supersedes; it never adds to it.
+
+WHY (lane SSR-1, 2026-09-14, defect C of the owner's push #34 smoke). Upstream
+composites SSR into the specular environment term two different ways, chosen by
+a DATABLOCK property:
+
+    @property( use_envprobe_map )
+        pixelData.envColourS = lerp( pixelData.envColourS.xyz,
+                                     ssrReflection.xyz, ssrReflection.w );
+    @else
+        pixelData.envColourS += ssrReflection.xyz * ssrReflection.w;
+    @end
+
+The lerp is the physics: `pixelData.envColourS` and the screen-space trace are
+two ESTIMATES OF ONE INTEGRAL — the radiance arriving along the specular lobe —
+and `ssrReflection.w` is how much of that integral the screen was able to answer
+for. What the screen answered, the probe must not answer again.
+
+The `@else` is not a second opinion about that, it is an accident of which
+property happens to be set. `use_envprobe_map` is raised in
+`HlmsPbs::notifyPropertiesMergedPreGenerationStep` only for a datablock with its
+own reflection cubemap or one covered by parallax-corrected cubemaps — but three
+other things write `pixelData.envColourS` BEFORE this line and none of them
+raises it: `applyVoxelConeTracing` (the voxel cone's specular), `applyIrradianceField`
+and `applyIrradianceVolumes`. So a scene lit by VCT or the irradiance field with
+no sky cube and no probe grid — which is an ordinary configuration in this
+editor, and the one a sealed room with Photon at medium produces — shades every
+mirror as "the screen's answer PLUS the voxel cone's answer for the same
+directions". That is the same lobe counted twice, and on a near-mirror surface
+the second copy is the whole reflection again.
+
+IT COMPOUNDS, because this renderer's SSR is a closed loop: the shaded colour is
+copied into the history the next frame's resolve reads (OgreChain.cpp kSsrPrev),
+so a doubled reflection is re-reflected doubled. The energy the owner metered on
+a mirror floor is this series, not a brighter reflection.
+
+WHY IT CANNOT MOVE A SHIPPED FRAME. Where `envColourS` is zero at this line the
+two spellings are the same arithmetic: lerp(0, R, w) == 0 + R*w, exactly, with
+no rounding to argue about. Where it is NOT zero the old code was double-counting
+by construction. And every scene that has a sky or probes already took the lerp
+branch: OgreSky.cpp binds the IBL cube as PBSM_REFLECTION on every material when
+no automatic PCC is bound, and the PCC path sets `parallax_correct_cubemaps` when
+it is — either way `use_envprobe_map` is 1. Measured: the Mirror Room, the
+ShadowMapFromCode port and the default scene are bit-identical across this patch,
+and `--engine-selftest` keeps its hash.
+
+MEDIA-ONLY: Studio stages this file from the ogre-next SOURCE tree
+(cmake/IncludeOgre.cmake), so every tree needs the patch loop, but no engine
+rebuild.
+
+A TRAP THIS PATCH FELL INTO FIRST, recorded because the symptom is far from the
+cause: the Hlms template parser reads `@property`, `@else` and `@end` ANYWHERE in
+the text, comments included. The first version of the comment below wrote
+"Upstream's @else branch", which the parser took as a real directive, unbalanced
+the surrounding block and emitted a shader that failed to compile a thousand
+lines away ("'branch' : undeclared identifier") for SOME property permutations
+only — with VCT on here, so the fixture rendered black. Never write an @keyword
+in a comment inside a .any file.
+
+And the file is CRLF: it was edited in binary mode, and `git diff --numstat`
+reports 13 added / 5 removed lines rather than the whole file.
+
+--- a/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any
+@@ -992,11 +992,19 @@
+ 			@property( hlms_use_ssr )
+ 				//TODO: SSR pass should be able to combine global & local cubemap.
+ 				float4 ssrReflection = OGRE_Load2D( ssrTexture, iFragCoord, 0 ).xyzw;
+-				@property( use_envprobe_map )
+-					pixelData.envColourS = lerp( pixelData.envColourS.xyz, ssrReflection.xyz, ssrReflection.w );
+-				@else
+-					pixelData.envColourS += ssrReflection.xyz * ssrReflection.w;
+-				@end
++				/// JAHSHAKA PATCH 0036: a screen-space reflection REPLACES the
++				/// environment term it supersedes, always -- it never adds to it.
++				/// The two are estimates of ONE integral (the radiance arriving
++				/// along the specular lobe) and ssrReflection.w is how much of
++				/// that integral the screen could answer for; the rest stays with
++				/// the probe. Upstream's second branch added another copy of the
++				/// lobe wherever an environment source exists that does not raise
++				/// use_envprobe_map -- the voxel cone's specular, the irradiance
++				/// field and irradiance volumes all write envColourS above this
++				/// line and none of them sets it. Where envColourS really is zero
++				/// the two spellings are the same arithmetic, which is why this
++				/// moves no frame that has a sky or a probe. Patch header: why.
++				pixelData.envColourS = lerp( pixelData.envColourS.xyz, ssrReflection.xyz, ssrReflection.w );
+ 			@end
+ 
+ 			@insertpiece( DoPlanarReflectionsPS )
