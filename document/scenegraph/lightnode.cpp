@@ -104,12 +104,6 @@ QList<Property*> LightNode::getProperties()
     intProp->value = shadowMap->resolution;
     props.append(intProp);
 
-    prop = new FloatProperty();
-    prop->displayName = "Sun Angle";
-    prop->name = "sunAngle";
-    prop->value = sunAngle;
-    props.append(prop);
-
     // FOLLOWS ATMOSPHERE (the sun only; lightnode.h says what it means).
     auto atmoProp = new BoolProperty();
     atmoProp->displayName = "Follows Atmosphere";
@@ -182,8 +176,6 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return accurate;
     if(valueName == "forwardShadingPriority")
         return forwardShadingPriority;
-    if(valueName == "sunAngle")
-        return sunAngle;
     if(valueName == "followsAtmosphere")
         return followsAtmosphere;
     // The two asset BINDINGS are reflected read-only-ish: the guid is the
@@ -225,9 +217,6 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return markedParams(); }
     if (valueName == "accurate")          { accurate = value.toBool();           return markedParams(); }
     if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return markedParams(); }
-    // THE SUN'S ANGULAR DIAMETER in degrees (the disc's size). Bounded where
-    // the disc stops being a disc: 0 draws nothing, 20 is a fifth of the sky.
-    if (valueName == "sunAngle")          { sunAngle = float(qBound(0.0, value.toDouble(), 20.0)); return markedParams(); }
     // The sun's direct light is tinted by the atmosphere at its own elevation
     // (lightnode.h). A LIGHT change, so the shadow and probe caches see it
     // through the same staleness path a colour edit already travels.
@@ -322,7 +311,6 @@ SceneNodePtr LightNode::createDuplicate()
 	light->doubleSided = this->doubleSided;
 	light->accurate = this->accurate;
 	light->forwardShadingPriority = this->forwardShadingPriority;
-	light->sunAngle = this->sunAngle;
 	light->followsAtmosphere = this->followsAtmosphere;
 	light->iesProfileGuid = this->iesProfileGuid;
 	light->iesProfilePath = this->iesProfilePath;
