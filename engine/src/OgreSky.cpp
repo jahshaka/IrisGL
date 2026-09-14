@@ -21,6 +21,19 @@
 namespace jahshaka { namespace engine { namespace detail {
 
 namespace {
+
+// DESTROY A TEXTURE AND GIVE ITS NAME BACK (lane shadercache-2). Every cube
+// this file creates wears a RECYCLED name — see recycledName() in
+// EnginePrivate.h for why a fresh one per capture costs a permanent Hlms
+// pass-cache entry and a shader compile — and a recycled name is only recycled
+// if it is released when the texture dies. Safe for any texture: a name this
+// pool never handed out is ignored.
+void destroyRecycled(Ogre::TextureGpuManager *tm, Ogre::TextureGpu *tex) {
+    if (!tm || !tex) return;
+    const std::string name = tex->getNameStr();
+    tm->destroyTexture(tex);
+    releaseRecycledName(name);
+}
 // Ogre's cubemap lookups are LEFT-handed (see buildCubeFromWorldFaces' comment).
 // Destination slice d takes source WORLD face kSrcFace[d], mirrored as flagged.
 const int  kSrcFace[6] = { 0, 1, 2, 3, 5, 4 };   // +Z and -Z swap
@@ -233,7 +246,7 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
                 mIblPending = false;
                 mIblSourceTex = nullptr;
             }
-            mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(previous);
+            destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), previous);
         }
         return true;
     } JAH_CATCH(mError, false);
@@ -282,7 +295,7 @@ bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
         mSceneMgr->setSky(true, Ogre::SceneManager::SkyCubemap, cube);
         tuneSkyRenderable();
         if (previous)
-            mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(previous);
+            destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), previous);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -334,7 +347,7 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         if (mSceneMgr->getSky())
             mSceneMgr->setSky(false, mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
         if (mSkyOwnedTex) {
-            mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mSkyOwnedTex);
+            destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
         mSkyIsEquirect = false;
@@ -613,7 +626,7 @@ void OgreScene::applyPendingSkyCapture() {
     Ogre::CompositorWorkspace *ws = nullptr;
     JAH_TRY {
         cube = tm->createTexture(
-            processUniqueName("skycapture"), Ogre::GpuPageOutStrategy::Discard,
+            recycledName("skycapture"), Ogre::GpuPageOutStrategy::Discard,
             // RenderToTexture because the compositor draws into it;
             // AllowAutomipmaps because BOTH readers want a chain — the SH from
             // the 32^2 level, the ibl_specular pass from all of them (it
@@ -668,7 +681,7 @@ void OgreScene::applyPendingSkyCapture() {
         // In both cases the capture still ran, because the AMBIENT is the sky's
         // own light either way.
         if (mSkyDesc.mode == SkyMode::Cubemap || mSkyDesc.reflections) {
-            tm->destroyTexture(cube);
+            destroyRecycled(tm, cube);
         } else {
             // ...and for every other sky the capture IS the environment. The
             // convolution it queues runs at the top of the NEXT frame
@@ -685,7 +698,7 @@ void OgreScene::applyPendingSkyCapture() {
     }
     Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky capture failed: " + mError);
     if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
-    if (cube) { try { tm->destroyTexture(cube); } catch (...) {} }
+    if (cube) { try { destroyRecycled(tm, cube); } catch (...) {} }
     mSkyShValid = false;
 }
 
@@ -890,7 +903,7 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
     const size_t bpp = Ogre::PixelFormatGpuUtils::getBytesPerPixel(pf);
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::TextureGpu *cube = tm->createTexture(
-        processUniqueName(namePrefix.c_str()), Ogre::GpuPageOutStrategy::Discard,
+        recycledName(namePrefix.c_str()), Ogre::GpuPageOutStrategy::Discard,
         Ogre::TextureFlags::ManualTexture | extraFlags, Ogre::TextureTypes::TypeCube);
     cube->setResolution(w, h, 6u);
     cube->setPixelFormat(pf);
@@ -1026,7 +1039,7 @@ void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsS
     // The OUTPUT the PBR datablocks sample: same size, mipped, and a UAV, which
     // is what the compute integrator writes through.
     Ogre::TextureGpu *cube = tm->createTexture(
-        processUniqueName("skyrefl"), Ogre::GpuPageOutStrategy::Discard,
+        recycledName("skyrefl"), Ogre::GpuPageOutStrategy::Discard,
         Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::Uav |
             // Reinterpretable: the sky faces are sRGB, and a Vulkan storage image
             // may not be — the integrator binds the UAV through a linear view and
@@ -1065,8 +1078,8 @@ void OgreScene::applyPendingIbl() {
         ~FreeSource() {
             if (!self->mIblSourceOwned || !self->mIblSourceTex) return;
             try {
-                self->mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(
-                    self->mIblSourceTex);
+                destroyRecycled(self->mRoot->getRenderSystem()->getTextureGpuManager(),
+                                self->mIblSourceTex);
             } catch (...) {}
             self->mIblSourceTex = nullptr;
             self->mIblSourceOwned = false;
@@ -1118,7 +1131,7 @@ void OgreScene::applyPendingIbl() {
 void OgreScene::destroyReflection() {
     mIblPending = false;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-    if (mIblSourceTex && mIblSourceOwned) tm->destroyTexture(mIblSourceTex);
+    if (mIblSourceTex && mIblSourceOwned) destroyRecycled(tm, mIblSourceTex);
     mIblSourceTex = nullptr;
     mIblSourceOwned = false;
     if (!mReflectionTex) return;
@@ -1147,7 +1160,7 @@ void OgreScene::destroyReflection() {
     // Not JAH_CATCH: that returns, and the unbind below must happen even if the
     // destroy throws (a double-destroy would otherwise leave every datablock
     // pointing at the old cubemap).
-    try { tm->destroyTexture(tex); }
+    try { destroyRecycled(tm, tex); }
     catch (Ogre::Exception &e)  { mError = e.getFullDescription(); }
     catch (std::exception &e)   { mError = std::string("engine: ") + e.what(); }
     applyReflectionToAll();
@@ -1348,7 +1361,7 @@ void OgreScene::destroySky() {
     if (mSceneMgr->getSky())
         mSceneMgr->setSky(false, mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
     if (mSkyOwnedTex) {
-        mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mSkyOwnedTex);
+        destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
         mSkyOwnedTex = nullptr;
     }
     if (mIblCamera) { mSceneMgr->destroyCamera(mIblCamera); mIblCamera = nullptr; }
