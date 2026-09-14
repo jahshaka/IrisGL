@@ -642,14 +642,74 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     Nothing that ships today enters either loop (the flag is off in every scene),
     so no existing picture can move — selftest hash unchanged, A/B'd.
 
-THE STACK IS 0001-0033 (this list; `build-ogre.sh` globs `*.patch`, so the file
+34. **0034-hdr-nan-must-not-latch-adapted-luminance** — MEDIA-only (one HDR GLSL
+    shader). `HDR/DownScale03_SumLumEnd` is the ONLY recurrence in the HDR
+    chain: it writes a 1x1 `keep_content` texture and mixes that same texture's
+    previous value back in every frame. An +Inf measurement is survivable —
+    `clamp()` pins it to `exposure.z` and the next frame carries on — but a NaN
+    is not: `clamp()` is `min(max(x,lo),hi)` and `max(NaN,lo)` returns NaN on
+    every driver measured, so `exp(NaN)`, then `mix(NaN, oldLum, w)`, and the
+    adapted luminance is NaN for the rest of the workspace's life. Measured
+    (SMOKE-ENGINE-1, 2026-09-14): entering the Player on a bright scene froze
+    the exposure from frame one and only a WORKSPACE REBUILD — the one thing
+    that re-runs this texture's initial clear — brought it back. Fix: two
+    `x == x` guards (false only for a NaN), `fLumAvg` falling back to
+    `exposure.y` (the log-luminance floor the very next line clamps to, i.e.
+    "a dark frame") and `oldLum` falling back to `newLum`. A chain that was
+    already producing numbers produces exactly the same numbers, Inf included —
+    selftest hash unchanged, A/B'd.
+    DELIBERATELY NOT IN THIS PATCH: `FilmicTonemap(Inf)` is `Inf/Inf == NaN` in
+    `FinalToneMapping`, and `DownScale01_SumLumStart` takes `log()` of whatever
+    the scene holds. Both were built and measured in the same lane and both MOVE
+    EXISTING PICTURES — clamping the scene colour before the tonemapper removes
+    black holes and replaces them with white sparkle over 20 % of the Shadow
+    Maps port's viewport, because that port really does produce a large
+    population of unrepresentable specular texels. That belongs upstream of the
+    tonemapper and is recorded as a separate finding.
+    GLSL only: this tree compiles Vulkan on every platform it ships on, so the
+    HLSL and Metal copies are never built here and patching them would be
+    unverifiable.
+
+35. **0035-hlms-disk-cache-bounds-check-shader-hash-indices** — SOURCE
+    (OgreMain; every tree must re-run `build-ogre.sh`). `HlmsDiskCache::copyFrom`
+    unpacks a RENDERABLE index (21 bits) and a PASS index (8 bits) out of a
+    32-bit shader hash and subscripts `mRenderableCache` / `mPassCache` with
+    them, checking neither. On 2026-09-14 that killed the owner's editor and two
+    rig instances inside forty minutes, always the same stack: `ShaderCache::save`
+    -> `copyFrom` -> `Hlms::getProperty` -> `IdString::operator<`, SIGSEGV at
+    0x0 — `std::lower_bound` walking a `HlmsPropertyVec` that is not one, out of
+    the periodic save timer.
+    The patch SKIPS an entry whose indices cannot be resolved and logs the hash,
+    both indices against both sizes, and the Hlms TYPE the hash claims against
+    the one it was filed under. Same contract as 0026 (which skips an entry whose
+    compile failed and left a null PSO) — and 0026's guard sits AFTER this
+    subscript, which is why it did not catch these three. Second hunk:
+    `Hlms::preparePassHashFinal` says so, once and loudly, the moment `mPassCache`
+    grows past what its 8 bits can address, because the only thing guarding that
+    overflow today is an `assert()` release builds compile out and its only
+    symptom would be exactly this crash.
+    CAUSE NOT PROVEN, deliberately recorded as such: the lane could not
+    reproduce the crash in 600+ saves across two harsh sessions. It ELIMINATED
+    a worker-thread race (`RenderQueue::render` calls
+    `ParallelHlmsCompileQueue::stopAndWait` before returning and
+    `SceneManager::_fireWarmUpShadersCompile` syncs its barrier twice, so no
+    compile thread outlives the call that started it) and MEASURED the pass-cache
+    overflow as latent rather than current (86 of 256 after thirteen scene opens,
+    every post row toggled and the player entered in each). The remaining
+    hypothesis — a renderable hash filed under the wrong Hlms, where an index
+    valid for HLMS_PBS's 33 entries is far out of range for HLMS_UNLIT's 8 — is
+    exactly what the new log line answers.
+    No picture can move: the patch only ever skips an entry that would have
+    crashed the process. Selftest hash unchanged, A/B'd.
+
+THE STACK IS 0001-0035 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027 and 0032 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,

@@ -1142,6 +1142,14 @@ Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
 }
 
 void OgreScene::applyReflectionToAllImpl() {
+    // THE ENV SLOT'S OCCUPANT JUST CHANGED, AND SO DID ITS SCALE. This runs on
+    // every PCC bind/unbind (rebuildVct/teardownVct call it for exactly that
+    // reason), and the Sky Light's gain applies to the SKY CUBE and not to a
+    // probe capture — see envmapScaleForPass(). The gain is written into the
+    // ambient pass data, which nothing else here touches, so it has to be
+    // re-written here or a scene that acquired its probes after its ambient
+    // keeps the sky-cube answer.
+    refreshEnvmapScale();
     auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
     for (auto &kv : mMaterials) {
         if (kv.second.unlit) continue;

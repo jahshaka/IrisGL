@@ -1343,8 +1343,17 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // reflection. Refraction is already folded in at this point (glass reflects
     // what is behind it, correctly); ambient occlusion is not, which is the
     // right way round — AO is a shading term of the RECEIVING surface.
+    //
+    // THE COPY SANITIZES (SMOKE-ENGINE-1 item 1): Jahshaka/SsrHistory is
+    // Ogre/Copy/4xFP32 with a finite, bounded result. This texture is the
+    // STORAGE of the renderer's one closed loop — its own output comes back to
+    // it through HlmsPbs — and a half-float history that has once held +Inf
+    // hands the resolve a NaN it then circulates for the life of the workspace
+    // (the owner's black holes, and the stuck exposure that follows when the
+    // HDR luminance reduction averages one in). Bounding what is WRITTEN is the
+    // half of that the resolve's own guard cannot do.
     if (ssr) {
-        auto *q = addQuad(n, kSsrPrev, "Ogre/Copy/4xFP32", "Jahshaka SSR history");
+        auto *q = addQuad(n, kSsrPrev, "Jahshaka/SsrHistory", "Jahshaka SSR history");
         q->addQuadTextureSource(0, sceneResult);
         q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         if (desc.letterbox) scissor(handlesOut, q);
