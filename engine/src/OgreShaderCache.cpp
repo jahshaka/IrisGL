@@ -688,6 +688,25 @@ bool ShaderCache::dirty(Ogre::Root *root) const {
 
 bool ShaderCache::save(Ogre::Root *root) {
     if (!mEnabled || !root) return false;
+    // NOT RE-ENTRANT, AND THE APP HAS NESTED EVENT LOOPS (SMOKE-ENGINE-1 item
+    // 3). A save serializes about a megabyte through a scratch file whose name
+    // is derived from the layer, walks Ogre's Hlms caches through
+    // HlmsDiskCache::copyFrom, and calls vkGetPipelineCacheData — and it is
+    // reachable from THREE places that can interleave: the host's watchdog
+    // QTimer, the `app.saveShaderCache()` verb (scripts and MCP), and the
+    // clean-quit save. Several of the app's waits pump the event loop with
+    // ExcludeUserInputEvents, which does NOT exclude timers, so a second save
+    // starting inside the first is a thing this code could not previously say
+    // no to: two writers on the same `*.building` path, and copyFrom walking
+    // the same vectors twice with a partially-written disk cache between them.
+    // One bool closes it. It is not a lock: every caller is the main thread,
+    // and a save arriving from anywhere else is a bug this would hide.
+    if (mSaving) { logLine("save already in progress — skipped the re-entrant call"); return false; }
+    struct Reentry {
+        bool &flag;
+        explicit Reentry(bool &f) : flag(f) { flag = true; }
+        ~Reentry() { flag = false; }
+    } reentry(mSaving);
     if (!mWriter && !acquireLock()) return false;   // read-only run: not an error
     Ogre::RenderSystem *rs = root->getRenderSystem();
     if (!rs || !Ogre::GpuProgramManager::getSingletonPtr()) return false;

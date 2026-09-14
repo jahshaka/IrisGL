@@ -1616,6 +1616,9 @@ private:
     unsigned    mSavedAtCompileCount = 0;
     /// Set by clear(): the next save writes even though nothing new compiled.
     bool        mForceSave = false;
+    /// save() is running. Guards the re-entrant call a nested event loop can
+    /// make (see the note at the top of ShaderCache::save).
+    bool        mSaving = false;
     class Counter;
     std::unique_ptr<Counter> mCounter;
 };
