@@ -2920,6 +2920,9 @@ private:
     /// HlmsPbs' envmapScale for the next pass: the environment light's gain,
     /// except while PCC owns the env-probe slot (see the note at the definition).
     float envmapScaleForPass() const;
+    /// Re-writes the ambient pass data with the CURRENT envmapScaleForPass().
+    /// Runs on every PCC binding transition, not only on a Sky Light edit.
+    void refreshEnvmapScale();
 public:
     /// Is a refraction pass present in EVERY view that draws this scene?
     ///

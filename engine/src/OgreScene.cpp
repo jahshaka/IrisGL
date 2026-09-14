@@ -230,11 +230,25 @@ void OgreScene::setEnvironmentLightScale(float gain) {
     const float g = gain > 0.0f ? gain : 0.0f;
     if (g == mEnvLightScale) return;
     mEnvLightScale = g;
-    // The value lives in the ambient pass data, so re-push what we already
-    // hold rather than waiting for the next ambient edit. setAmbientSh's own
-    // change guard compares the COEFFICIENTS, which have not moved, so this
-    // costs no probe re-capture and no raster-field re-integration — exactly
-    // right, because a probe capture is not lit by envmapScale.
+    refreshEnvmapScale();
+}
+
+// THE SCALE IS A SNAPSHOT AND THE EXEMPTION IS NOT (round-1 self-review, caught
+// by gi.budget and gi.probe_inputs going red). envmapScaleForPass() asks
+// whether PCC owns the env-probe slot, and that answer changes when the hybrid
+// arm is built or torn down — long after the Sky Light was last pushed. The
+// scale lives in the ambient pass data, which is written once per push, so a
+// scene that acquired its probes after its ambient kept the sky-cube answer and
+// dimmed its PROBE reflections with the sky's gain: a closed room whose Sky
+// Light is 0 (gi.probe_inputs) or which has none at all (gi.budget) stopped
+// reflecting its own walls. So the binding change re-pushes, through the one
+// funnel that already runs on every PCC transition.
+void OgreScene::refreshEnvmapScale() {
+    // Re-push what we already hold rather than waiting for the next ambient
+    // edit. setAmbientSh's own change guard compares the COEFFICIENTS, which
+    // have not moved, so this costs no probe re-capture and no raster-field
+    // re-integration — exactly right, because a probe capture is not lit by
+    // envmapScale.
     JAH_TRY {
         const float *sh = mLastAmbientSh;
         const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
