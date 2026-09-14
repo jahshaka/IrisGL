@@ -99,6 +99,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <mutex>
 #include <map>
 #include <chrono>
 #include <deque>
@@ -142,6 +143,59 @@ extern const std::atomic<unsigned long long> *gTransformWriteCounter;
 inline std::string processUniqueName(const char *prefix) {
     static std::atomic<unsigned> counter{0};
     return std::string(prefix) + "_" + std::to_string(++counter);
+}
+
+/// A NAME THAT IS UNIQUE WHILE IT IS WORN, AND REUSED AFTERWARDS — for the
+/// CUBE RENDER TARGETS, where processUniqueName above is a slow leak.
+///
+/// `HlmsPbs::preparePassHash` hashes the render target's NAME into the pass
+/// shader properties when that target is a cubemap — `target_envprobe_map`,
+/// OgreHlmsPbs.cpp:1813, there so a shader never samples the probe it is
+/// drawing into. So a cube render target with a FRESH name every time mints,
+/// per capture and for the life of the process:
+///   * one permanent entry in `Hlms::mPassCache`, and
+///   * one shader compile for everything drawn into it.
+/// The pass cache is indexed by EIGHT BITS of the 32-bit shader hash
+/// (HlmsBits::PassBits): at entry 256 the index spills into the RENDERABLE
+/// field beside it and every later hash names the wrong renderable — which is
+/// the crash ogre-patch 0035 now catches at the disk-cache save (lane
+/// shadercache-2: the owner's session reached 1847 pass entries in an hour, and
+/// ONE SKY CHANGE = ONE ENTRY, measured; 30 changes, +30 entries).
+///
+/// The fix is to stop minting names: a slot is taken while the texture lives
+/// and returned when it dies, so a session that captures the sky ten thousand
+/// times uses one name and one pass-cache entry. Slots are per PREFIX, and the
+/// lowest free one always wins, so concurrent scenes get 0,1,2...
+///
+/// Thread-safe (the sky capture runs on the render thread; texture teardown can
+/// run from a host thread during scene destruction). The statics are
+/// function-local and deliberately never freed.
+inline std::mutex &recycledNameMutex() { static std::mutex m; return m; }
+inline std::map<std::string, std::vector<bool>> &recycledNameSlots() {
+    static auto *slots = new std::map<std::string, std::vector<bool>>();
+    return *slots;
+}
+inline std::string recycledName(const char *prefix) {
+    std::lock_guard<std::mutex> lock(recycledNameMutex());
+    std::vector<bool> &used = recycledNameSlots()[prefix];
+    size_t slot = 0;
+    while (slot < used.size() && used[slot]) ++slot;
+    if (slot == used.size()) used.push_back(true); else used[slot] = true;
+    return std::string(prefix) + "_" + std::to_string(slot);
+}
+/// Returns a name taken from recycledName. A name this pool never handed out
+/// (every other Ogre name in this engine) is ignored, so a caller may route
+/// every teardown through it without knowing which kind it holds.
+inline void releaseRecycledName(const std::string &name) {
+    const size_t sep = name.rfind('_');
+    if (sep == std::string::npos || sep + 1 >= name.size()) return;
+    for (size_t i = sep + 1; i < name.size(); ++i)
+        if (name[i] < '0' || name[i] > '9') return;
+    std::lock_guard<std::mutex> lock(recycledNameMutex());
+    auto it = recycledNameSlots().find(name.substr(0, sep));
+    if (it == recycledNameSlots().end()) return;
+    const size_t slot = std::strtoul(name.c_str() + sep + 1, nullptr, 10);
+    if (slot < it->second.size()) it->second[slot] = false;
 }
 
 // Every backend virtual is wrapped: `JAH_TRY { ... } JAH_CATCH(errSink, failValue)`.
