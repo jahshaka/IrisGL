@@ -4,11 +4,20 @@
 // `ssrTexture`: rgb = the reflected radiance, w = confidence. Upstream's pixel
 // shader then does the composite for us —
 //     envColourS = lerp( envColourS, ssrReflection.rgb, ssrReflection.w )
-// (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any, `hlms_use_ssr`) — so w is
-// literally "how much of the probe/sky answer does the screen replace", and a
-// zero here is EXACTLY today's picture. That is what makes the roughness cutoff
-// and the edge fades safe: every one of them just hands the pixel back to the
-// IBL cube.
+// (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any, `hlms_use_ssr`, with
+// ogre-patch 0036 making that lerp the only spelling) — so w is literally "how
+// much of the probe/sky answer does the screen replace", and a zero here is
+// EXACTLY today's picture. That is what makes the roughness cutoff and the edge
+// fades safe: every one of them just hands the pixel back to the IBL cube.
+//
+// AND ON A MIRROR, w IS 0 OR 1 (lane SSR-2 — the rule lives at the end of
+// main()). "How much does the screen replace" is a fraction only where the
+// surface's own lobe is wide enough to make the two sources one blurred
+// answer. Below a roughness threshold derived from the probe's blur it is a
+// VERDICT, because the probe's image and the screen's are the same object in
+// two PLACES there — parallax-corrected onto a box against the true position —
+// and a fraction of two places is two images. The confidence terms below all
+// still run; they decide VALID vs NONE instead of scaling a blend.
 //
 // THE COLOUR IS THE PREVIOUS FRAME'S, AND IT HAS TO BE. HlmsPbs consumes the
 // reflection while it shades, so the reflection must exist BEFORE the colour
@@ -226,19 +235,54 @@ void main()
 	// geometrically correct for this pixel and merely less smooth; too loose
 	// and the luminance clamp further down is the second line of defence.
 	const float kCoordSpreadTexels = 4.0;
+	// THE MIRROR MASK RIDES THE SAME NINE TAPS (lane SSR-2; the rule itself is
+	// the block below the roughness ramp). It is a COVERAGE: how much of this
+	// pixel's neighbourhood is a hit the march TRUSTS and that is looking at the
+	// same thing the reference tap is. Two details, both deliberate:
+	//
+	//  * THE WEIGHTS ARE A TENT over the pixel's position INSIDE the ray texel,
+	//    not a box. The nine taps are fetched at integer ray coordinates, so a
+	//    box-filtered count is constant across a whole ray texel and its ramp is
+	//    a staircase two texels wide with one step — at Half-Res that is a 2 px
+	//    hard edge. Weighting each tap by its distance to the pixel's true
+	//    (fractional) position instead makes the coverage a continuous function
+	//    of the SCREEN pixel, so the mask's boundary is a smooth ramp ~1.5 ray
+	//    texels wide — 3 screen pixels on the Half-Res row, 1.5 on Full-Res —
+	//    for no extra fetch. That ramp IS the feather: the hit region's edge is
+	//    dilated by it, rather than the confidence being lerped.
+	//  * THE DENOMINATOR IS ALL NINE TAPS, misses included, for the same reason
+	//    the coherence count's is: a single lucky ray surrounded by misses
+	//    agrees with itself, and that degenerate case is the artefact.
+	const float kMirrorTrust = 0.5;			// "more likely than not", per ray
+	const vec2	tentF	 = inPs.uv0 * rayBufferRes.xy - ( vec2( rayCoord ) + 0.5 );
+	float		covHit	 = 0.0;
+	float		covAll	 = 0.0;
+	int			nTrust	 = 0;			// rays the march TRUSTS (the mirror rule's "valid")
+	int			nTrustAgree = 0;		// ...of those, the ones looking at one thing
 	vec2  sumUv	 = vec2( 0.0 );
 	float sumUvW = 0.0;
 	int	  nHit	 = 0;				// rays that came back at all
 	int	  nAgree = 0;				// ...of those, the ones looking at one thing
 	for( int i = 0; i < 9; ++i )
 	{
+		const vec2	tentD = vec2( float( i % 3 - 1 ), float( i / 3 - 1 ) ) - tentF;
+		const float tentW = max( 0.0, 1.5 - abs( tentD.x ) ) * max( 0.0, 1.5 - abs( tentD.y ) );
+		covAll += tentW;
 		if( taps[i].w <= 0.0 )
 			continue;
 		++nHit;
+		const bool trusted = taps[i].w >= kMirrorTrust;
+		if( trusted )
+		{
+			covHit += tentW;
+			++nTrust;
+		}
 		const vec2 d = abs( taps[i].xy - refUv ) * rayBufferRes.xy;
 		if( max( d.x, d.y ) > kCoordSpreadTexels )
 			continue;
 		++nAgree;
+		if( trusted )
+			++nTrustAgree;
 		sumUv  += taps[i].xy * taps[i].w;
 		sumUvW += taps[i].w;
 	}
@@ -247,6 +291,12 @@ void main()
 	// in the same order as before this fix, and the frame is bit-identical. The
 	// picture only moves where the old mean was inventing a coordinate.
 	const vec2 hitUv = sumUvW > 0.0 ? sumUv / sumUvW : refUv;
+	// .z = the ENVELOPE (distance, screen edge, away-from-camera), averaged over
+	// the taps that hit and weighted by how much each is trusted; .w = the mean
+	// TRUST over the nine rays fired. Their PRODUCT is sum( z_i * w_i ) / 9 —
+	// the same sum, in the same order, as before lane SSR-2 moved two of the
+	// march's fades from the w channel to the z channel, which is why the blend
+	// path below is arithmetically untouched.
 	const vec4 ray	 = vec4( hitUv, sumFade / sumW, sumW * ( 1.0 / 9.0 ) );
 
 	// COHERENCE: DO THE NINE RAYS AGREE? (lane SSR-1, the Mirror Room's shredded
@@ -308,8 +358,119 @@ void main()
 	const float cutoff	  = resolveParams.x;
 	const float roughFade = 1.0 - smoothstep( cutoff * 0.5, cutoff, roughness );
 
+	// ---- THE RULE ON A MIRROR (lane SSR-2, the owner's dual image) ----------
+	//
+	// THE MEASUREMENT. On the Mirror Room's chrome sphere the confidence terms
+	// above leave a field of PARTIAL weights, and upstream's composite lerps the
+	// screen's answer over the probe's by it. The two answers are not two
+	// samples of one thing there: the probe is parallax-corrected onto the
+	// room's box and the trace is at the true position, so they are the same
+	// object drawn in two places — and a lerp of two places is both of them, at
+	// a weight that changes from pixel to pixel because the counts and the
+	// margins do. That is the stippled ghost the rig photographed over the
+	// smooth probe image.
+	//
+	// THE RULE. Below `kMirrorRoughLo` a VALID hit WINS OUTRIGHT and the probe
+	// fills only where there is none. The confidence still decides VALID vs
+	// NONE — the arrival angle, the thickness margin, the agreement and the
+	// quorum all still reject back-faces, thin-object leaks, undersampled fans
+	// and lone rays, through `covHit` — it just no longer SCALES the blend.
+	// What survives as a fraction is the ENVELOPE (`ray.z`: the distance fade,
+	// the screen-edge ramp, the away-from-the-camera ramp) and the roughness
+	// ramp, because those are not doubts about the hit, they are the places
+	// where the technique runs out of data and the probe must take over without
+	// a seam. The mask's own boundary is feathered by the tent above.
+	//
+	// WHERE THE THRESHOLD COMES FROM, since it is the one number here that is
+	// not a decision but a measurement. The two sources disagree by an angle
+	// Dtheta in the reflected direction (the probe's box intersection is not the
+	// real hit point, and its capture is not this frame). The probe's answer is
+	// PREFILTERED: a GGX lobe of perceptual roughness r has alpha = r^2 and a
+	// reflected-lobe half-width of about 2*alpha, because a normal perturbed by
+	// an angle turns the reflected ray by twice it. The screen's answer carries
+	// no roughness blur at all in this v1 — it is one sharp ray per pixel at
+	// every roughness below the cutoff. So the two images are DISTINGUISHABLE
+	// exactly while the probe's blur is narrower than the disagreement,
+	//
+	//     2 * r^2  <  Dtheta       ->      r  <  sqrt( Dtheta / 2 )
+	//
+	// and only above that is the probe's copy a wash the sharp copy merely sits
+	// on, which is the one case a lerp is honest in.
+	//
+	// MEASURED (lane SSR-2, the Mirror Room at the owner's pose, 1600x900; the
+	// pictures are in spikes/ssr-2/): the two sources were rendered ALONE — the
+	// probe's by switching SSR off, the screen's by forcing the rule's mask to
+	// 1 wherever the march has a trusted hit — and compared over the chrome
+	// sphere. Where the trace is well sampled (the sphere's face-on middle, the
+	// reflected teapot) they AGREE: best cross-correlation shift (0,0), rmse
+	// 2.6 of 255. Where they disagree they do not disagree by a shift at all —
+	// they show DIFFERENT OBJECTS (at the left limb the probe answers with the
+	// blue wall and the screen with the west wall, the gold torus and a red
+	// patch), and those two directions are of order 90 degrees apart as seen
+	// from the sphere. Taking a deliberately conservative 30 degrees (0.52 rad)
+	// for the disagreement puts the crossover at r = sqrt(0.52/2) = 0.51, so
+	// the ramp below straddles it. That is ABOVE `ssrRoughnessCutoff`'s default
+	// of 0.35, which is the honest conclusion and worth saying plainly: at the
+	// shipped cutoff there is NO roughness at which this renderer draws a
+	// screen-space reflection and the probe's blur is wide enough to hide the
+	// disagreement — so the rule covers every surface SSR draws on, and the
+	// lerp survives for a user who raises the cutoff past the band.
+	//
+	// THE ONE THING THIS DOES NOT FIX, said here because the constant looks
+	// like it should: between about 0.2 and the cutoff the screen's image is
+	// too SHARP for the surface (v1 has no roughness-varying blur). Winning
+	// outright does not make that worse — the old lerp drew the same sharp
+	// image, with a second copy behind it — but a roughness-aware blur on the
+	// resolve is the follow-up that would.
+	const float kMirrorRoughLo = 0.40;
+	const float kMirrorRoughHi = 0.55;
+	// THE MASK IS THREE FACTORS, AND WHICH QUESTION EACH ANSWERS IS THE WHOLE
+	// DESIGN — the first round of this lane got it wrong by asking one question
+	// with one number, and paid for it on BOTH sides (the sphere's dither
+	// survived at a loose threshold; a flat floor's reflection lost 8 % of its
+	// mass at a tight one, all of it the legitimate silhouette of the thing
+	// being reflected).
+	//
+	//  1. COVERAGE — how much of this pixel's neighbourhood is a trusted hit.
+	//     This is the ANTI-ALIASED HIT MASK and it is what the blend path's
+	//     `ray.w` already was: 1 inside a reflection, 0 outside it, a ramp
+	//     across the boundary. It stays a fraction, because a hit mask's edge
+	//     is a coverage and not a doubt — it is the feather the rule needs, now
+	//     tent-weighted so it is smooth in SCREEN pixels rather than a
+	//     staircase in ray texels.
+	//  2. THE QUORUM — a lone trusted ray with no neighbours behind it is the
+	//     degenerate case the blend path's `borrow` term exists for, and the
+	//     tent gives a lone centre tap a third of the coverage, which is a
+	//     visible dot. Same counts, same ramp as `borrow`.
+	//  3. THE SAMPLING VERDICT — of the rays that DID come back, how many are
+	//     looking at one thing. This is the fan test, and the denominator is
+	//     what makes it one: measured against the nine rays FIRED it cannot
+	//     tell a fan from the edge of a reflected object (both leave about half
+	//     the neighbourhood disagreeing, which is why the strict version ate
+	//     the flat floor's silhouettes), while measured against the rays that
+	//     RETURNED it separates them cleanly — at a silhouette the returning
+	//     rays are one cluster and the ratio is ~1, in a fan they are nine
+	//     unrelated places and it collapses. This is the term that becomes a
+	//     VERDICT on a mirror: the screen may overrule the probe only where the
+	//     reflected image is sampled well enough to be described at one sample
+	//     per pixel.
+	const float kFanLo = 0.55;
+	const float kFanHi = 0.85;
+	const float mirrorCov = covAll > 0.0 ? covHit / covAll : 0.0;
+	const float quorum	  = smoothstep( 1.5, 4.0, float( nTrust ) );
+	const float fanGate	  = nTrust > 0
+								? smoothstep( kFanLo, kFanHi,
+											  float( nTrustAgree ) / float( nTrust ) )
+								: 0.0;
+	const float mirrorW	  = ray.z * roughFade * mirrorCov * quorum * fanGate;
+	const float blendW	   = ray.w * ray.z * roughFade * cohFade * borrow;
+	const float mirrorFade = 1.0 - smoothstep( kMirrorRoughLo, kMirrorRoughHi, roughness );
+	// A FLAT MIRROR IS THE SAME FRAME EITHER WAY, by construction and not by
+	// tuning: every tap trusts (face-on arrival, well inside the thickness),
+	// every tap agrees, so mirrorCov is 1 and mirrorMask, cohFade, borrow and
+	// ray.w are all 1 — and both branches evaluate to ray.z * roughFade.
 	const float weight =
-		clamp( ray.w * ray.z * roughFade * cohFade * borrow * resolveParams.y, 0.0, 1.0 );
+		clamp( mix( blendW, mirrorW, mirrorFade ) * resolveParams.y, 0.0, 1.0 );
 	if( weight <= 0.0 )
 	{
 		fragColour = vec4( 0.0 );
