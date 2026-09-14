@@ -38,6 +38,22 @@ namespace iris
 
 class Environment;
 
+/// THE SUN DISC'S SIZE (Scene::sunDiscSize, lane SUN-DISC-1) — ONE definition
+/// of the default, because a reader default that disagrees with a constructor
+/// default is a shipped defect this codebase has already paid for twice (the
+/// reader-defaults trap). SceneReader's absent-key answer, the World panel's
+/// row, the `world.sunDisc` verb and the mirror's per-solid-angle
+/// normalisation all read these two numbers and never a literal.
+///
+/// `kPhysicalSunDiscSize` is the real sun's angular diameter seen from Earth.
+/// `kDefaultSunDiscSize` is four times it — what a photograph's sun looks like
+/// once glare has spread the saturated core (owner, 2026-09-14).
+constexpr float kPhysicalSunDiscSize = 0.53f;
+constexpr float kDefaultSunDiscSize  = 4.0f * kPhysicalSunDiscSize;   // 2.12 degrees
+/// The dial's limits, shared by the verb, the reader and the panel row.
+constexpr float kMinSunDiscSize = 0.1f;
+constexpr float kMaxSunDiscSize = 10.0f;
+
 enum class SceneRenderFlags : int
 {
     Vr = 0x1
@@ -580,8 +596,11 @@ public:
 	//
 	// A SCENE setting, not a per-light row (owner, §193a: "we need a World
 	// setting to hide the sun disc") — the disc is part of the world's picture,
-	// like the sky it is drawn on. Its angular SIZE stays on the light
-	// (LightNode::sunAngle), because that is a property of the sun itself.
+	// like the sky it is drawn on. Its SIZE is here too, for the same reason:
+	// the drawn disc is a PICTURE of the sun and not the sun's geometry (the
+	// tooltip says so, and the default is four times the physical angle), so
+	// it belongs beside the two rows that decide where the picture is shown
+	// — the old LightNode::sunAngle row is gone (lane SUN-DISC-1).
 	//
 	// Drawn over EVERY sky type by default (owner pick 2). An image sky usually
 	// has a sun PAINTED into it, so a disc that is not aimed at the painted one
@@ -593,6 +612,20 @@ public:
 	/// through the directional light's own specular highlight, so capturing the
 	/// disc as well paints a SECOND sun on everything the probes light.
 	bool sunDiscInProbes = false;
+	/// THE DISC'S ANGULAR DIAMETER IN DEGREES (owner 2026-09-14: "the sun disc
+	/// is too small — make it about 4x larger").
+	///
+	/// The real sun subtends 0.53 degrees — `kPhysicalSunDiscSize` above — and
+	/// a physically sized disc is eight pixels across on a 1080p frame, which
+	/// is not what a photograph of the sun looks like: glare in the lens and in
+	/// the eye spreads the saturated core over several times its true angle.
+	/// The default is that appearance, four times the physical angle.
+	///
+	/// IT COSTS NO EXTRA LIGHT. The mirror normalises the disc's radiance per
+	/// SOLID ANGLE around this default (SceneMirror::applySky), so turning the
+	/// dial up spreads the same energy over a wider disc instead of adding any
+	/// — bloom and an `inProbes` capture read the same total at every size.
+	float sunDiscSize = kDefaultSunDiscSize;
 
 
 	// ---- THE SUN -------------------------------------------------------

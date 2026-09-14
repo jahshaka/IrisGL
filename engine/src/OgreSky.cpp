@@ -452,6 +452,44 @@ Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
         };
         tint = Colour(ratio(float(here.x), float(noon.x)), ratio(float(here.y), float(noon.y)),
                       ratio(float(here.z), float(noon.z)), 1.0f);
+        // ...AND THEN THE EARTH GETS IN THE WAY (lane SUN-DISC-1; the rig's
+        // horizon-crossing capture, 2026-09-14).
+        //
+        // THE MODEL HAS NO ANSWER BELOW THE HORIZON. `normalizedTimeOfDay` is
+        // clamped at 0 and `sunHeight` at 0.0035, so every elevation from +0.2
+        // degrees down to -90 returns the SAME absorption — the sun that has
+        // set goes on lighting the scene, drawing its disc and casting its
+        // shadow, at a constant value, for ever. On the shipped preset that
+        // value is 0.00058 of noon, which the night rule (SceneMirror's
+        // kSunNightTint) cuts off as a special case; dial the sky's density
+        // down to 0.1 and the same frozen plateau is 0.20 of noon — a fifth of
+        // the noon sun arriving from 30 degrees BELOW the ground, with a disc
+        // drawn under the horizon and shadows cast upwards (measured).
+        //
+        // The missing term is geometry, not chemistry: the Earth occludes the
+        // sun. The sun's own disc is 0.53 degrees wide (0.265 of radius) and
+        // refraction lifts the apparent disc by about 0.57 degrees at the
+        // horizon, so direct sunlight starts to be cut at a GEOMETRIC centre
+        // elevation of -(0.57 - 0.265) = -0.305 degrees and has ended by
+        // -(0.57 + 0.265) = -0.835 — the astronomical definition of sunset.
+        // A smoothstep across that band is the whole fix, and it makes the
+        // crossing CONTINUOUS: the light, the disc and the shadow all ride the
+        // same tint, so they fade together and the night rule now trips on a
+        // value that is already zero instead of deciding when night begins.
+        {
+            const float elevDeg = float(std::asin(std::max(-1.0, std::min(1.0, double(toSun.y))))
+                                        * 180.0 / M_PI);
+            constexpr float kSunSetStartDeg = -0.305f;   // lower limb touches the horizon
+            constexpr float kSunSetEndDeg   = -0.835f;   // upper limb goes under
+            float occl = 1.0f;
+            if (elevDeg <= kSunSetEndDeg) {
+                occl = 0.0f;
+            } else if (elevDeg < kSunSetStartDeg) {
+                const float t = (elevDeg - kSunSetEndDeg) / (kSunSetStartDeg - kSunSetEndDeg);
+                occl = t * t * (3.0f - 2.0f * t);        // smoothstep, C1 at both ends
+            }
+            tint = Colour(tint.r * occl, tint.g * occl, tint.b * occl, 1.0f);
+        }
     } JAH_CATCH(mError, white);
     mAtmoTintDir = toSun;
     mAtmoTint = tint;

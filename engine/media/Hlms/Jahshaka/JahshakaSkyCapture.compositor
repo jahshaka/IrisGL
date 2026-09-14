@@ -31,7 +31,7 @@
 // at render queue 5 now (OgreSky.cpp's applySunDisc), which no capture pass in
 // this engine asks for. The sun's energy reaches surfaces through the
 // DIRECTIONAL LIGHT; a disc in the 9-band integral would be that light twice,
-// and `sunAngle` is a dial that goes to 170 degrees.
+// and the disc's size is a dial that goes to 10 degrees.
 //
 // A scene render with no geometry in range still walks the cull, which is why
 // this runs on a sky CHANGE and never per frame.
