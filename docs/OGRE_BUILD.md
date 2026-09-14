@@ -702,14 +702,42 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     No picture can move: the patch only ever skips an entry that would have
     crashed the process. Selftest hash unchanged, A/B'd.
 
-THE STACK IS 0001-0035 (this list; `build-ogre.sh` globs `*.patch`, so the file
+36. **0036-pbs-ssr-replaces-the-environment-term** — MEDIA-only (one Hlms Pbs
+    piece; every tree needs the patch loop, no Ogre rebuild). Upstream composites
+    a screen-space reflection into `pixelData.envColourS` two ways, chosen by the
+    datablock property `use_envprobe_map`: a LERP when the material has a
+    reflection cubemap or parallax-corrected probes, and `envColourS += ssr * w`
+    when it has neither. The lerp is the physics — the probe and the screen are
+    two estimates of ONE integral and `w` is how much of it the screen answered —
+    and the add is the same specular lobe counted twice, because
+    `applyVoxelConeTracing` adds its cone-traced SPECULAR to `envColourS` earlier
+    in the same shader (Vct_piece_ps.any:647) without raising `use_envprobe_map`.
+    It is the ONLY other writer of that term: the irradiance field and the
+    irradiance volumes write `envColourD`. A VCT-lit scene with no sky cube and
+    no probe grid therefore shaded every mirror as "the screen's answer PLUS the
+    voxel cone's answer", and since this renderer's SSR is a closed loop (the
+    shaded colour becomes the next frame's history) the error compounded
+    through it.
+    The patch makes the composite the lerp unconditionally.
+    NO SHIPPED FRAME MOVES: where `envColourS` is zero, lerp(0, R, w) is exactly
+    0 + R*w, and every scene with a sky or probes was already on the lerp branch
+    (OgreSky.cpp binds the IBL cube when no automatic PCC is bound; the PCC path
+    raises the property when it is). Selftest hash unchanged, A/B'd; the Mirror
+    Room and the ShadowMapFromCode port are bit-identical across it.
+    Gate: `ssr.engine` section 15 (a VCT-lit mirror with no sky — the exact
+    configuration that takes the old branch) is RED on unpatched media.
+    TRAP recorded in the patch header: an `@else` written inside a `///` COMMENT
+    in a .any file is still read by the Hlms parser, unbalances the block and
+    breaks the generated shader a thousand lines away.
+
+THE STACK IS 0001-0036 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027 and 0032 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,

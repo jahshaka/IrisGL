@@ -46,8 +46,13 @@
 // OUTPUT (PFG_RGBA16_UNORM, so every channel must be [0,1]):
 //    xy = the texture-space coordinate the ray hit
 //    z  = distance fade, 1 at the origin falling to 0 at maxDistance
-//    w  = geometric confidence: 0 for a miss, otherwise screen-edge fade times
-//         the "this reflection points back at the camera" fade
+//    w  = geometric confidence: 0 for a miss, otherwise the product of four
+//         fades — the screen edge, the "this reflection points back at the
+//         camera" one, the ARRIVAL ANGLE at the surface the ray hit (a backface
+//         or a grazing arrival is a hit the depth buffer cannot vouch for) and
+//         the THICKNESS MARGIN (how much of the gap between the ray and the
+//         surface the march's own step cannot explain). The last two are lane
+//         SSR-1's; see the block comment where each is computed.
 // The ROUGHNESS mask is deliberately NOT folded in here: this pass may run at
 // half resolution, and a roughness cutoff evaluated at half res has visibly
 // blocky edges. The resolve pass re-reads roughness at FULL resolution. The
@@ -185,6 +190,7 @@ void main()
 	float travelled = maxDistance;
 	vec2  hitUv		= vec2( 0.0 );
 	float prevT		= 0.0;
+	float hitDiff	= 0.0;			// the crossing's depth error, as a fraction of the tolerance
 
 	// The loop bound must be a COMPILE-TIME constant for the shader to unroll
 	// sanely on every driver; `steps` is the runtime budget inside it.
@@ -217,8 +223,30 @@ void main()
 			// is the whole reason SSR needs a thickness guess at all. The
 			// step's own length is added so a coarse march cannot straddle a
 			// legitimately thin hit.
-			if( diff > 0.0 && diff < thickness + stepLen * 0.5 )
+			const float crossTol = thickness + stepLen * 0.5;
+			if( diff > 0.0 && diff < crossTol )
 			{
+				// HOW MARGINAL THE CROSSING WAS, kept for the confidence below:
+				// a ray that passed a hair behind the surface really met it; one
+				// that only counts because the tolerance is fat may have passed
+				// BEHIND the object entirely, through the part of the world the
+				// depth buffer cannot describe.
+				//
+				// THE STEP'S OWN OVERSHOOT IS SUBTRACTED FIRST, and that
+				// subtraction is what makes this a measure of the WORLD rather
+				// than of the march's phase. `diff` is read at a coarse step, so
+				// even a perfectly face-on crossing lands anywhere in
+				// (0, stepLen * rayDir.z] depending on where the checkerboard
+				// jitter put this pixel's samples — at the High tier's 48 steps
+				// that bound is 0.52 m against a 0.5 m thickness, so a
+				// legitimate hit would score "marginal" for about a quarter of
+				// the jitter phases and the confidence would checkerboard. What
+				// is left after the subtraction is the part of the gap the STEP
+				// cannot explain, which is the only part the thickness guess is
+				// being asked about, and it is normalised by the thickness
+				// itself (round 2, lane SSR-1).
+				hitDiff = max( 0.0, diff - stepLen * max( rayDir.z, 0.0 ) ) /
+						  max( thickness, 1e-6 );
 				// Binary refinement between the last miss and this hit. Five
 				// iterations take the hit to 1/32 of a step, which is what
 				// stops the reflection from looking quantised along the ray.
@@ -299,5 +327,41 @@ void main()
 	const float camFade	  = 1.0 - smoothstep( 0.25, 0.85, towardEye );
 	const float distFade  = 1.0 - clamp( travelled / maxDistance, 0.0, 1.0 );
 
-	fragColour = vec4( hitUv, distFade, edgeFade * camFade );
+	// ...AND THE TWO THAT ASK WHETHER THE HIT ITSELF MEANS ANYTHING (lane SSR-1,
+	// the Mirror Room's shredded chrome sphere). Everything above is about the
+	// RAY — where it went and where it was pointing. Neither says anything about
+	// the SURFACE it landed on, and on a curved mirror that is exactly what goes
+	// wrong: the rays leave in every direction, most of them arrive somewhere
+	// they cannot be checked against, and the march used to hand every one of
+	// them back with full confidence.
+	//
+	//  * THE ARRIVAL ANGLE. A depth buffer records the FRONT of each surface.
+	//    A ray that "crossed" a surface whose normal points the same way the
+	//    ray travels arrived at its BACK — the depth buffer has no idea what is
+	//    there, and the colour at that pixel is the front face's, which faces
+	//    somewhere else entirely. At exactly grazing arrival the answer is just
+	//    as meaningless: one texel either way is a different surface. So the
+	//    confidence ramps from nothing at a backface or a grazing arrival to
+	//    full at 0.2 (about 11 degrees off the surface).
+	//  * THE THICKNESS TEST'S OWN MARGIN. `thickness` is a GUESS at how thick
+	//    the world is; a crossing that only qualified because the guess is
+	//    generous is a maybe, not a hit. Full confidence up to half of it,
+	//    falling to nothing at the whole of it — measured on the part of the gap
+	//    the march's own step cannot explain (see where hitDiff is computed).
+	//
+	// Both are ZERO-COST where the trace was already trustworthy — a flat floor
+	// reflecting the room in front of it arrives at its hits face-on and well
+	// inside the tolerance, so both terms are 1 and the frame does not move.
+	vec3 hitNormal = texture( vkSampler2D( gBufNormals, samplerState ), hitUv ).xyz * 2.0 - 1.0;
+	float arrival = 0.0;
+	if( dot( hitNormal, hitNormal ) > 1e-6 )
+	{
+		hitNormal = normalize( hitNormal );
+		hitNormal.z = -hitNormal.z;				// right-handed G-buffer -> left-handed march
+		arrival = -dot( rayDir, hitNormal );
+	}
+	const float faceFade  = smoothstep( 0.0, 0.2, arrival );
+	const float thickFade = 1.0 - smoothstep( 0.5, 1.0, hitDiff );
+
+	fragColour = vec4( hitUv, distFade, edgeFade * camFade * faceFade * thickFade );
 }
