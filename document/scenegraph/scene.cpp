@@ -147,8 +147,18 @@ Scene::Scene()
     // which is what the editor's new-scene path and the reader do.
     giTier = 3;
 
-    // anti-aliasing is opt-in like GI: off (1 sample) by default
-    antiAliasing = 1;
+    // ANTI-ALIASING: 2x MSAA is the document's default (owner 2026-09-15).
+    // It is the count an on-screen view renders at when NOTHING ELSE decides:
+    // a scene in Custom mode, a document built by a script or a test, anything
+    // with no World Mode tier applied. Every tier still writes its own value
+    // through (src/services/worldmodes.cpp), and the post chain forces its own
+    // targets to 1x whenever any effect is on — hardware MSAA and the chain do
+    // not combine on this pin — so this number is what a scene RENDERING
+    // WITHOUT the chain anti-aliases with, and 2 samples is the cheapest count
+    // that is not "none".  Offscreen views (thumbnails, previews, screenshots,
+    // every pixel suite) stay 1x regardless: SceneMirror pushes this only to
+    // on-screen views, which is what keeps readbacks exact.
+    antiAliasing = 2;
 
     // shadow-map resolution: 0 = Auto, i.e. derive the one global atlas base
     // from the largest per-light request (the historical behaviour)
