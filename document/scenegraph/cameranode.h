@@ -469,6 +469,13 @@ private:
 		// false. Keep it in lock-step with projMode.
 		isPerspective = true;
 		vrViewScale = 2.0f; // good default
+        // THE VIEWER IS NOT THE VIEWED (nodegraph.h, the transform-write
+        // epoch; lane ENGINE-7 item 1). Flying the camera cannot change
+        // anything the renderer scans off that counter — the GI items' boxes,
+        // the shadow casters, the scene extent — and counting it re-ran every
+        // one of those O(scene) walks on every frame of an orbit. A camera
+        // that is given CHILDREN counts again; the graph layer asks.
+        graph::setCountsAsMovement(mGraphNode, false);
         updateCameraMatrices();
     }
 

@@ -2067,6 +2067,19 @@ public:
     /// and off the default visibility flags — see tuneAtmosphereRenderable.
     Ogre::Rectangle2D *mAtmoQuad = nullptr;
     void tuneAtmosphereRenderable();
+    /// WHAT applySkyAtmosphere PUSHED INTO THE COMPONENT, kept because the
+    /// component offers no getter for either and atmosphereSunTint has to put
+    /// them back after asking it a question about a different sun.
+    Ogre::Vector3 mAtmoSunDir = Ogre::Vector3::UNIT_Y;   // the direction the light TRAVELS
+    float         mAtmoTimeOfDay = 0.0f;
+    /// atmosphereSunTint's memo: the direction asked about, the answer, and the
+    /// preset generation it was computed under (bumped by every setPreset).
+    /// A sun that has not moved costs a compare.
+    mutable Ogre::Vector3 mAtmoTintDir = Ogre::Vector3::ZERO;
+    mutable Colour        mAtmoTint = Colour(1.0f, 1.0f, 1.0f, 1.0f);
+    mutable unsigned long long mAtmoTintGeneration = 0;
+    unsigned long long    mAtmoPresetGeneration = 0;
+    Colour atmosphereSunTint(const Vec3 &toSun) const override;
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
     /// environment reflections and its ambient SH, for every sky that is not
@@ -3236,6 +3249,14 @@ private:
     /// face pass's render-queue range (rq_last 200: gizmos and selection
     /// outlines at RQ 210 are never captured, so they never stale anything).
     bool probeSeesItem(const Node &n) const;
+    /// Can a transform write on this node change what any of the epoch's scans
+    /// reads? (OgreScene.cpp, beside the bit scheme it asks about.) No for
+    /// editor furniture — the gizmo, the bone overlay, wires, the grid — which
+    /// is most of what goes through setNodeTransform at all.
+    bool writeIsSceneMovement(const Node &n) const;
+    /// A hash of the GI gather's boxes — "is this the same content the current
+    /// automatic volume was fitted to?" (OgreGi.cpp, lane ENGINE-7 item 2).
+    static unsigned long long giContentSignature(const std::vector<Ogre::Aabb> &boxes);
     /// P7, materials: a visible material changed — stale the probes and, when
     /// the change reaches the voxelizer's conversion, bump the material
     /// generation (see mGiMaterialGeneration).
@@ -3628,6 +3649,18 @@ private:
     /// getWorldAabbUpdated calls made by OUR GI code, ever (GiStatus::
     /// giAabbReads). Mutable: two of the four readers are const signatures.
     mutable unsigned long long mGiAabbReads = 0;
+    /// THE FIT, MEMOISED AGAINST THE CONTENT IT WAS MADE FOR (ENGINE-7 item 2).
+    /// giItemBounds is a pure function of the gathered boxes AND of the volume
+    /// the last fit produced, which is what makes a re-fit non-idempotent: it
+    /// would read its own output through the hysteresis floor. Computing it
+    /// ONCE PER CONTENT removes both failures at once — the ratchet (a re-fit
+    /// growing its own answer) and the oscillation (a later re-solve dropping a
+    /// floor an earlier one granted). `mGiFitContentNow` is what the last
+    /// gather saw; the rest is the answer adopted for it.
+    mutable unsigned long long mGiFitContentNow = 0;
+    mutable std::vector<Ogre::Aabb> mGiFitBoxes;
+    mutable unsigned long long mGiFitBoxesKey = 0;
+    mutable bool mGiFitBoxesValid = false;
     /// THE TWO SIGNATURES THE MIRROR READS EVERY FRAME (giEscapeSignature,
     /// giGeometrySignature) ARE PURE FUNCTIONS OF THE SAME BOXES, and each was
     /// a full walk of mNodes with a root-recursive getWorldAabbUpdated per GI

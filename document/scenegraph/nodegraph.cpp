@@ -765,9 +765,51 @@ namespace
 void promoteOnWrite(Ogre::SceneNode *n);
 void promoteStaticChildren(Ogre::SceneNode *n);
 
+/// IS THIS WRITE SCENE MOVEMENT? (nodegraph.h, the transform-write epoch.)
+///
+/// Everything is, except the VIEWER: a camera's transform cannot change
+/// anything any consumer of the epoch scans — the GI items' world boxes, the
+/// shadow casters, the forward-plus scene extent, the floor's world, the
+/// skeleton share's world comparisons — and counting it made a camera ORBIT
+/// re-run every one of those scans on every frame of the orbit (RR2: 10.28 ms
+/// of `host.env` on 92% of flying frames on the 8,404-node lattice, against
+/// 0.024 ms still).
+///
+/// A CAMERA WITH CHILDREN COUNTS AGAIN, and that is not a detail: moving it
+/// moves whatever is parented under it, which is scene movement by any
+/// definition.
+///
+/// DOCUMENT CHILDREN, NOT OGRE'S (round-2 review, item 2). The two trees are
+/// one, and the ENGINE hangs its own nodes off document nodes: every non-view
+/// camera with a visible body gets a wire node (SceneMirror::syncCameraWires),
+/// a light gets its -Y adapter, a decal its projector box. Counting Ogre's
+/// children therefore un-exempted every camera the mirror draws a body for —
+/// the play-mode subject and every cinematic camera — which is exactly the
+/// per-frame cost this exemption exists to remove. An engine child is not
+/// scene content by construction: it carries no document node, the GI and
+/// shadow scans do not read it (OgreScene::writeIsSceneMovement asks the same
+/// question from the other side), and it moves only because we moved it.
+///
+/// The loop is reached ONLY for a node that already said it is not scene
+/// movement — a camera — and such a node has zero or one child.
+///
+/// The flag itself lives on the document node (SceneNode::_countsAsMovement)
+/// and is read through the back-pointer table — two loads, no hashing — rather
+/// than in a second table of its own. A graph node with NO document owner (one
+/// the engine made for itself) counts, like everything else.
+inline bool writeIsSceneMovement(Ogre::SceneNode *n)
+{
+    const SceneNode *owner = ownerById(n->getId());
+    if (!owner || owner->_countsAsMovement()) return true;
+    const std::size_t kids = n->numChildren();
+    for (std::size_t i = 0; i < kids; ++i)
+        if (ownerById(n->getChild(i)->getId())) return true;   // a DOCUMENT child
+    return false;
+}
+
 inline void markMoved(Ogre::SceneNode *n)
 {
-    gTransformWrites.fetch_add(1, std::memory_order_relaxed);
+    if (writeIsSceneMovement(n)) gTransformWrites.fetch_add(1, std::memory_order_relaxed);
     if (n->isStatic()) { promoteOnWrite(n); return; }
     // The root-moved case (see promoteStaticChildren). Two loads, and only in a
     // process that has static nodes at all.
@@ -885,6 +927,20 @@ void setLocalTrs(NodeHandle n, const Vec3 &p, const Quat &r, const Vec3 &s)
 unsigned long long transformWrites()
 {
     return gTransformWrites.load(std::memory_order_relaxed);
+}
+
+void setCountsAsMovement(NodeHandle n, bool counts)
+{
+    if (!n) return;
+    std::lock_guard<std::recursive_mutex> lock(graphMutex());
+    if (SceneNode *owner = ownerById(nd(n)->getId())) owner->_setCountsAsMovement(counts);
+}
+
+bool countsAsMovement(NodeHandle n)
+{
+    if (!n) return true;
+    const SceneNode *owner = ownerById(nd(n)->getId());
+    return !owner || owner->_countsAsMovement();
 }
 
 const std::atomic<unsigned long long> &transformWriteCounter()

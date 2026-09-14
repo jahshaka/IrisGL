@@ -77,6 +77,21 @@ namespace {
 inline Vec3 toVec3(const iris::Vec3 &v) { return Vec3(v.x(), v.y(), v.z()); }
 inline Quat toQuat(const iris::Quat &q) { return Quat(q.x(), q.y(), q.z(), q.scalar()); }
 
+/// A SUN THAT HAS SET (SUN_FOLLOWS_ATMOSPHERE, round-2 review item 4). At and
+/// below the horizon the atmosphere's tint runs to nothing — measured on the
+/// shipped preset, 6e-4 / 2.5e-6 / 1.4e-10 at elevation zero — so the light
+/// contributes no pixel anywhere. Its SHADOW is not free, though: a directional
+/// caster renders three full-view-frustum PSSM passes every frame it is on, and
+/// the sun disc would go on being drawn in a night sky. Both are dropped once
+/// the brightest channel falls below this, which is a thousandth of the noon
+/// value and three hundred times below one 8-bit step.
+constexpr float kSunNightTint = 1e-3f;
+inline bool sunTintIsNight(const jahshaka::engine::Colour &t)
+{
+    return std::max(std::max(t.r, t.g), t.b) < kSunNightTint;
+}
+
+
 /// The mirror's per-frame "has anything changed?" hash (deep audit 2026-09,
 /// area 8 — the biggest measurable Qt cost in the hot path).
 ///
@@ -590,6 +605,10 @@ int SceneMirror::sync()
     // walk (bounded by the NODE count) since the dirty set: a still frame runs
     // no walk at all, so nothing else could re-derive them. §3.7.
     refreshLightAggregates();
+    // ...and the one light property that follows a TRANSFORM rather than an
+    // edit: the sun's atmosphere tint (syncSunAtmosphere says why it cannot
+    // ride the dirty set).
+    syncSunAtmosphere();
     // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3): mMovableNodes and
     // mMovableLights are INCREMENTAL now (syncMobility maintains them on each
     // entry's transition, releaseEntry gives the contribution back) — only the
@@ -1079,6 +1098,32 @@ void SceneMirror::refreshLightAggregates()
         if (light->shadowMap->resolution > 0)
             mMaxShadowResolution = std::max(mMaxShadowResolution,
                                             unsigned(light->shadowMap->resolution));
+    }
+}
+
+// THE SUN'S EFFECTIVE COLOUR, PUSHED WHEN THE SUN MOVES (SUN_FOLLOWS_
+// ATMOSPHERE, lane ENGINE-7 item 6).
+//
+// The walk's light push is driven by the DIRTY SET, and a transform write does
+// not mark a node: it does not have to, because the light rides the adopted
+// node and the graph carries its direction (the push's own comment says so).
+// The atmosphere tint is the one thing about a light that DOES depend on its
+// transform — rotating the sun down to the horizon reddens it — so it needs a
+// per-frame test of its own. It is over ONE light and the tint is memoised by
+// the renderer, so a still sun costs a compare and pushes nothing.
+void SceneMirror::syncSunAtmosphere()
+{
+    if (!mTarget || !mSource || !mSyncSun) return;
+    if (!mSyncSun->followsAtmosphere) return;     // nothing to follow
+    auto it = mEntries.find(mSyncSun);
+    if (it == mEntries.end() || !it->node || !it->lightPushed) return;
+    const LightDesc want = toLightDesc(mSyncSun, mSyncSun, true,
+                                       atmosphereTintFor(mSyncSun, mSyncSun));
+    if (want == it->lastLight) return;            // the still case, every frame
+    if (mTarget->setLight(it->node, want)) {
+        notePush(mSyncSun, "sun atmosphere tint");
+        it->hasLight = true;
+        it->lastLight = want;
     }
 }
 
@@ -2831,7 +2876,8 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // from the node's transform (the light rides the adopted node and the
             // graph carries position and direction), so skipping an unchanged push
             // cannot freeze a moving light.
-            const LightDesc want = toLightDesc(light, mSyncSun, true);
+            const LightDesc want = toLightDesc(light, mSyncSun, true,
+                                               atmosphereTintFor(light, mSyncSun));
             // By value (LightDesc::operator==, beside the struct — every field
             // setLight reads is in it, which is what keeps a new field from
             // silently stopping at the first push).
@@ -4093,7 +4139,33 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light)
     return toLightDesc(light, nullptr, false);
 }
 
-LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown)
+Colour SceneMirror::atmosphereTintFor(const iris::LightNode *light,
+                                      const iris::LightNode *sun) const
+{
+    const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
+    if (!mTarget || !light || light->lightType != iris::LightType::Directional) return white;
+    if (!light->followsAtmosphere) return white;
+    // THE SUN ONLY. A secondary directional is not the sun (it draws no disc
+    // and casts no shadow), and tinting it would be a second, invisible sun
+    // following the sky.
+    const iris::LightNode *resolved = sun;
+    if (!resolved) {
+        const auto scene = const_cast<iris::LightNode *>(light)->getScene();
+        const auto own = scene ? scene->sunLight() : iris::LightNodePtr();
+        resolved = own.data();
+    }
+    if (resolved != light) return white;
+    const iris::Vec3 travel = const_cast<iris::LightNode *>(light)->getLightDir();
+    if (travel.lengthSquared() < 1e-12f) return white;
+    const iris::Vec3 toSun = -travel.normalized();
+    // The ENGINE decides whether there is an atmosphere to ask at all: it
+    // answers white for every other sky, so "is the realistic sky on?" is not
+    // a second opinion kept here.
+    return mTarget->atmosphereSunTint(Vec3(toSun.x(), toSun.y(), toSun.z()));
+}
+
+LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown,
+                                   const Colour &sunTint)
 {
     LightDesc d;
     switch (light->lightType) {
@@ -4105,9 +4177,16 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     // A LIGHT'S COLOUR IS A COLOUR THE USER PICKED (§4, pick 3): decoded, like
     // every other one. White is 1.0 either way; a tinted light's saturation
     // moves, which is the point — the picker means one thing everywhere now.
+    //
+    // ...TIMES WHAT THE AIR DOES TO IT (SUN_FOLLOWS_ATMOSPHERE, lane ENGINE-7
+    // item 6). White for every light but a sun that follows the atmosphere, so
+    // this line is the picked colour itself in every other scene; on the sun it
+    // makes the picked colour the NOON colour and lets a low sun arrive red and
+    // dim. The sun DISC is multiplied by the same value at the same moment
+    // (applySky), so the two cannot disagree.
     {
         const iris::LinearColor lc = iris::linearOf(light->color);
-        d.colour = Colour(lc.r, lc.g, lc.b, 1.0f);
+        d.colour = Colour(lc.r * sunTint.r, lc.g * sunTint.g, lc.b * sunTint.b, 1.0f);
     }
     // A photometric profile multiplies the renderer's attenuation by the raw
     // IES magnitude (peak candela / 1024 * multiplier * ballast factors), which
@@ -4165,6 +4244,12 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
         }
         d.primaryDirectional = !resolved || resolved == light;
         if (!d.primaryDirectional) d.castShadows = false;
+        // ...AND A SUN THAT HAS SET CASTS NOTHING (round-2 review item 4): its
+        // three PSSM passes would render every frame for a light whose colour
+        // the atmosphere has taken to zero. `sunTint` is white for every light
+        // that does not follow the atmosphere, so this can only fire on a sun
+        // that does.
+        if (sunTintIsNight(sunTint)) d.castShadows = false;
     }
     // LIGHTING CHANNELS, light side. The document field is on SceneNode (one
     // field, one meaning, both ends of the test) — the light's copy says which
@@ -5171,6 +5256,23 @@ quint64 offsetKeyOf(const iris::Socket &socket)
     return h;
 }
 
+/// The 16 floats of a world transform, hashed — the fallback push's change
+/// guard (lane ENGINE-7 item 4). Raw bytes, like every other change key in this
+/// file: it answers "is this the same matrix as last sync?", never "how far did
+/// it move?".
+quint64 worldKeyOf(const iris::Mat4 &m)
+{
+    quint64 h = 1469598103934665603ull;
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) {
+            quint32 bits;
+            const float f = m(r, c);
+            std::memcpy(&bits, &f, sizeof(bits));
+            for (int i = 0; i < 4; ++i) { h ^= (bits & 0xFF); h *= 1099511628211ull; bits >>= 8; }
+        }
+    return h;
+}
+
 }  // namespace
 
 int SceneMirror::reconcileSockets()
@@ -5204,7 +5306,59 @@ int SceneMirror::reconcileSockets()
             seen.insert(rider);
 
             if (!rigged) {
-                releaseRider(rider);        // it may have been on a tag a moment ago
+                // ONLY IF IT IS ON A TAG. releaseRider used to run here every
+                // sync ("it may have been on a tag a moment ago") and it is not
+                // free: it writes the rider's world transform back and REMOVES
+                // its row — so on the fallback path the row was rebuilt every
+                // frame, and with it the "authored local" snapshot below, whose
+                // whole job is to survive the spell on the fallback (D4). Taken
+                // from the current local each frame, that snapshot recorded the
+                // WORLD transform the previous frame had written into it.
+                // WHAT THE RIDER'S LOCAL MEANS RIGHT NOW, read BEFORE anything
+                // bakes a world into it (round-2 review, item 3). While a rider
+                // is on a tag its local IS its socket offset (D4) — and
+                // releaseRider writes the tag's WORLD into that same field,
+                // which is the pose-keeping promise for a rider that is being
+                // let go for good. Snapshotting `authored*` AFTER the release
+                // therefore recorded a world transform as the offset, and the
+                // re-arm when the rig came back restored THAT: after any spell
+                // without a rig — a model swap, a mesh reload, a re-import —
+                // the prop rode off the bone by its own world position.
+                iris::Vec3 keepPos = rider->getLocalPos(), keepScale = rider->getLocalScale();
+                iris::Quat keepRot = rider->getLocalRot();
+                {
+                    const auto prior = mBoneRiders.constFind(rider);
+                    // THE ROW KNOWS BETTER THAN THE NODE. While the rider was on
+                    // its tag we recorded the offset every sync, precisely
+                    // because it is gone by the time we get here: the engine
+                    // frees every rider on a skeleton it rebuilds, and Ogre's
+                    // detach re-expresses the node's local as it does so
+                    // (measured: it reads zero on the frame a model swap takes
+                    // the rig away). Only a rider we have never seen armed
+                    // falls back to reading the node.
+                    if (prior != mBoneRiders.constEnd() &&
+                        (prior->fallbackDriven || prior->authoredValid)) {
+                        keepPos = prior->authoredPos;
+                        keepRot = prior->authoredRot;
+                        keepScale = prior->authoredScale;
+                    }
+                }
+                if (iris::graph::isSocketRider(rider->graphNode())) releaseRider(rider);
+                // ...AND STRAIGHT BACK INTO THE ROW. releaseRider drops it, and
+                // the resolve below can fail (a socket whose bone the rig has
+                // not, a frame where the owner has no pose yet) — which used to
+                // `continue` past the snapshot and lose the offset for good.
+                // The authored offset is the one thing about a rider that must
+                // outlive every one of those.
+                {
+                    RiderState &kept = mBoneRiders[rider];
+                    if (!kept.authoredValid) {
+                        kept.authoredPos = keepPos;
+                        kept.authoredRot = keepRot;
+                        kept.authoredScale = keepScale;
+                        kept.authoredValid = true;
+                    }
+                }
                 iris::Mat4 world;
                 if (!iris::socketWorldTransform(owner, rider->socketName,
                                                 iris::BonePoseSource(), world)) {
@@ -5215,14 +5369,39 @@ int SceneMirror::reconcileSockets()
                 // its offset from the socket — so the authored value is kept
                 // first and restored the moment a tag can be armed.
                 RiderState &st = mBoneRiders[rider];
-                if (!st.fallbackDriven) {
-                    st.fallbackDriven = true;
-                    st.authoredPos = rider->getLocalPos();
-                    st.authoredRot = rider->getLocalRot();
-                    st.authoredScale = rider->getLocalScale();
+                st.fallbackDriven = true;    // the authored offset is already kept, above
+                // CHANGE-GUARDED (lane ENGINE-7 item 4). This is a DOCUMENT
+                // write through the marking setters, so a still scene holding a
+                // socketed prop on an unrigged owner bumped the transform-write
+                // epoch on every frame and re-ran every O(scene) walk hanging
+                // off it (nodegraph.h). It happens when the socket's world
+                // really moved — or when something else wrote the rider's local
+                // since we did, because while a rider is attached the socket
+                // owns its placement and an outside write must still be
+                // overwritten, exactly as the unguarded push did.
+                const quint64 key = worldKeyOf(world);
+                const auto differs = [](float a, float b) {
+                    return std::fabs(double(a) - double(b)) > 1e-5;
+                };
+                const iris::Vec3 lp = rider->getLocalPos(), ls = rider->getLocalScale();
+                const iris::Quat lr = rider->getLocalRot();
+                const bool drifted =
+                    differs(lp.x(), st.lastLocalPos.x()) || differs(lp.y(), st.lastLocalPos.y()) ||
+                    differs(lp.z(), st.lastLocalPos.z()) ||
+                    differs(ls.x(), st.lastLocalScale.x()) || differs(ls.y(), st.lastLocalScale.y()) ||
+                    differs(ls.z(), st.lastLocalScale.z()) ||
+                    differs(lr.x(), st.lastLocalRot.x()) || differs(lr.y(), st.lastLocalRot.y()) ||
+                    differs(lr.z(), st.lastLocalRot.z()) || differs(lr.scalar(), st.lastLocalRot.scalar());
+                if (!st.fallbackWorldPushed || st.fallbackWorldKey != key || drifted) {
+                    rider->setGlobalTransform(world);
+                    rider->update(0.0f);
+                    st.fallbackWorldKey = key;
+                    st.fallbackWorldPushed = true;
+                    st.lastLocalPos = rider->getLocalPos();
+                    st.lastLocalRot = rider->getLocalRot();
+                    st.lastLocalScale = rider->getLocalScale();
+                    notePush(rider, "socket fallback");
                 }
-                rider->setGlobalTransform(world);
-                rider->update(0.0f);
                 ++riding;
                 continue;
             }
@@ -5259,7 +5438,17 @@ int SceneMirror::reconcileSockets()
                                            toVec3(socket->position), toQuat(socket->rotation),
                                            toVec3(socket->scale))) {
                     iris::graph::clearSocketRider(rider->graphNode());
-                    mBoneRiders.remove(rider);
+                    // THE ROW SURVIVES A FAILED ARM (round-2 review, item 3).
+                    // It used to be removed — and with it the AUTHORED OFFSET
+                    // this rider must get back when the rig returns. A failed
+                    // arm is exactly the moment that matters: the owner's model
+                    // was swapped, so its rig is gone for a few frames, and the
+                    // engine's own free has already re-expressed the rider's
+                    // local (measured: it reads zero). What must not survive is
+                    // the claim to be ATTACHED, so that is what is cleared.
+                    state.owner = 0;
+                    state.bone.clear();
+                    state.offsetKey = 0;
                     ++mSocketDangling;
                     continue;
                 }
@@ -5290,6 +5479,14 @@ int SceneMirror::reconcileSockets()
             state.lastLocalPos = rider->getLocalPos();
             state.lastLocalRot = rider->getLocalRot();
             state.lastLocalScale = rider->getLocalScale();
+            // ...AND THE OFFSET IN FORCE, which is the same reading while the
+            // rider is ON its tag (D4) and is the only place it can be taken
+            // from: a spell without a rig starts with the engine freeing the
+            // tag, which re-expresses this very field (round-2 review, item 3).
+            state.authoredPos = state.lastLocalPos;
+            state.authoredRot = state.lastLocalRot;
+            state.authoredScale = state.lastLocalScale;
+            state.authoredValid = true;
             ++riding;
         }
     }
@@ -6683,7 +6880,16 @@ void SceneMirror::applySky(View *view)
                 const float kDiscRadiance = 8.0f;
                 const iris::LinearColor c = iris::linearOf(sunLight->color);
                 const float k = kDiscRadiance * std::max(0.0f, sunLight->intensity);
-                sun.colour = Colour(c.r * k, c.g * k, c.b * k, 1.0f);
+                // THE SAME EFFECTIVE COLOUR THE LIGHT GETS (SUN_FOLLOWS_
+                // ATMOSPHERE): a sun that looks white in the sky while lighting
+                // the room orange would be the defect this toggle exists to
+                // avoid, so the disc reads the identical tint.
+                const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
+                // A SUN THAT HAS SET DRAWS NO DISC (round-2 review item 4).
+                // Below the horizon the tint is zero to every decimal an 8-bit
+                // frame can hold, and a black disc in a night sky is a hole.
+                if (sunTintIsNight(tint)) sun.enabled = false;
+                sun.colour = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
             }
         }
     }

@@ -185,6 +185,9 @@ protected:
     /// SCENE_STATIC, the document's side of it — the GRAPH class only, which
     /// rule 4 (a transform write) may clear at any time. Never the mobility.
     bool mStaticHint = false;
+    /// See _countsAsMovement(). Every node is scene content until it says
+    /// otherwise; only CameraNode does.
+    bool mCountsAsMovement = true;
 
     /// The USER's word on mobility, when there is one. See Mobility.
     Mobility mMobility = Mobility::Auto;
@@ -872,6 +875,14 @@ public:
     /// on, an editor drag is authoring, and silently clearing it made the
     /// setting impossible to keep. The GRAPH class is all this clears.
     void _clearStaticHint() { mStaticHint = false; }
+    /// DOES A WRITE TO THIS NODE'S TRANSFORM COUNT AS SCENE MOVEMENT?
+    /// (nodegraph.h, the transform-write epoch — lane ENGINE-7 item 1.) True
+    /// for everything the renderer draws; false for the VIEWER, which is a
+    /// CameraNode and says so in its constructor. Read by iris::graph on the
+    /// write path through the back-pointer table, so it lives here rather than
+    /// in a second table of its own.
+    bool _countsAsMovement() const { return mCountsAsMovement; }
+    void _setCountsAsMovement(bool on) { mCountsAsMovement = on; }
     /// Is this node the KIND of thing that may be in the GRAPH's static half at
     /// all? A light, a particle system, a decal, a camera or a viewer carries an
     /// engine object that cannot switch memory-manager class; a physics body, a

@@ -89,6 +89,26 @@ public:
     virtual bool        skyAmbientSh(float out[27]) const = 0;
     /// The description currently in force (default-constructed = no sky).
     virtual SkyDesc     sky() const = 0;
+    /// THE ATMOSPHERE'S TINT ON A LIGHT COMING FROM `toSun` (SUN_FOLLOWS_
+    /// ATMOSPHERE, lane ENGINE-7 item 6). White (1,1,1) unless the scene's sky
+    /// IS the analytic atmosphere — every other sky is a picture, and a picture
+    /// knows nothing about what the air does to sunlight.
+    ///
+    /// WHAT IT IS. The scattering model's own answer for the colour of the sky
+    /// looking straight at the sun, divided by its answer with the sun at the
+    /// zenith, per channel. So it is 1,1,1 at noon — the user's picked colour
+    /// IS the noon value — and falls, blue first, as the sun goes down: the
+    /// reddening AND the dimming a low sun really does to direct light. It is
+    /// the same evaluation the component's own light link uses
+    /// (AtmosphereNpr::syncToLight -> getAtmosphereAt), so the disc, the sky
+    /// and the direct light cannot disagree; the link itself is never armed
+    /// here (it would take the light's colour and power over entirely).
+    ///
+    /// `toSun` points AT the sun (the opposite of the direction the light
+    /// travels), in world space; it does not have to be normalised. Cheap to
+    /// call per frame: the answer is memoised against the direction and the
+    /// preset, and an unchanged sun costs a compare.
+    virtual Colour      atmosphereSunTint(const Vec3 &toSun) const = 0;
     /// THIS SCENE'S SHADOW REQUEST — ShadowDesc says what the shape means and
     /// why it exists (the backend's filter and atlas are global; this hides
     /// that rather than pretending otherwise). Idempotent, and cheap when
