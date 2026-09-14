@@ -764,6 +764,39 @@ public:
     /// without this nothing, not even a pixel test, could tell the difference.
     /// Cheap: reads live pointers, renders nothing.
     virtual GiStatus    giStatus() const = 0;
+    /// WHAT THE RAY-QUERY TIER HOLDS FOR THIS SCENE (PHOTON_SPEC §7 R1) — the
+    /// acceleration structures, their size, and what the last frame's update
+    /// cost. The same "what it ACHIEVED, not what was asked for" contract as
+    /// giStatus() above, and it is reported beside it (`world.giStatus()
+    /// .rayQuery`). Cheap: reads counters, renders nothing.
+    ///
+    /// NOT part of GiStatus itself on purpose: the tier is not global
+    /// illumination — it is a geometry service GI happens to be the first
+    /// consumer of.
+    virtual RayQueryStatus rayQueryStatus() const { return RayQueryStatus(); }
+    /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
+    /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
+    ///
+    /// It exists because the honest proof that a ray tier works is a ray whose
+    /// hit distance can be compared with the analytic answer, and because R2's
+    /// probe-visibility array is this call with a different set of directions.
+    /// The product consumers (R3's sun contact, R5's reflections) will trace
+    /// from a compute pass INSIDE the frame instead and never come through
+    /// here; this one submits its own command buffer and BLOCKS on a fence.
+    ///
+    /// `rays` is 12 floats per ray — origin.xyz, tMin, direction.xyz, tMax,
+    /// instance mask (bit 0 casters, bit 1 movers, bit 2 still world; 0xFF =
+    /// everything), and three unused. `hits` comes back as 4 floats per ray:
+    /// distance to the first hit (< 0 = miss), the hit node's index in the
+    /// scene's item order, the hit triangle's index, and 1 or 0.
+    ///
+    /// False when the tier is off, unavailable, or the scene has no structure
+    /// yet (render one frame first).
+    virtual bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) {
+        (void)rays;
+        hits.clear();
+        return false;
+    }
     /// "THIS SCENE IS ON SCREEN AGAIN" — re-points the process-wide HlmsPbs GI
     /// binding (voxel lighting, reflection-probe grid, irradiance field) at
     /// this scene's own arms, WITHOUT rebuilding anything
@@ -1536,6 +1569,31 @@ public:
     /// never per frame. A no-op when the value is unchanged.
     virtual void setVsync(bool) = 0;
     virtual bool vsync() const = 0;
+
+    // ---- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------
+    /// THE NO-RAYS SWITCH at runtime. True lets the tier run wherever the
+    /// device advertises VK_KHR_ray_query; false tears its structures down and
+    /// renders the picture a machine WITHOUT ray tracing renders — which is the
+    /// point: the fallback is not a second authoring path, it is the same
+    /// scene with one term computed differently, and every ray-consuming suite
+    /// runs both on this GPU.
+    ///
+    /// A no-op where the device has no rays (there is nothing to switch off).
+    /// Boots from EngineConfig::rayTracing.
+    virtual void setRayTracing(bool) = 0;
+    virtual bool rayTracing() const = 0;
+    /// The DEVICE's answer, once and for all: were the extensions and features
+    /// enabled at vkCreateDevice? False on macOS, on a pre-RTX GPU, on
+    /// lavapipe builds without ray query, and in a headless (NULL render
+    /// system) engine.
+    ///
+    /// ASK IT AFTER THE FIRST VIEW EXISTS. Ogre creates the VkDevice with the
+    /// first render target, not with Root — the same startup-order law that
+    /// makes a render window a prerequisite for registerHlms() and
+    /// createSceneManager() — so between Engine::create() and the first
+    /// createView()/createOffscreenView() there is no device to ask and this
+    /// reads false on hardware that has rays.
+    virtual bool rayQueryAvailable() const = 0;
 
     // ---- Simulation clock (PARTICLES_FX2_SPEC.md; ENGINEERING_DEBT_SPEC A4.2) ----
     // The engine advances its own simulations inside renderOneFrame — the

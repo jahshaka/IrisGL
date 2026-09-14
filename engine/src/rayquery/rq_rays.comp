@@ -1,0 +1,74 @@
+#version 460
+// PHOTON R1 — THE RAY BATCH. One inline hardware ray query per invocation
+// against the scene's TLAS, answering the only question this tier exists to
+// answer: what does this ray hit, and how far away is it.
+//
+// It is deliberately GEOMETRY ONLY — no material, no shading, no light. Every
+// later consumer is a different reading of the same answer: R2 reads it as
+// probe visibility (one ray per probe direction), R3 as a sun-contact shadow
+// (one ray towards the sun per pixel), R5 as a reflection's hit point. Radiance
+// AT the hit is a separate question with its own answer (the cascade's lit
+// voxels) and is not this shader's business.
+//
+// NOTE FOR ANY EDIT: this is compiled AT BUILD TIME by glslangValidator at
+// --target-env spirv1.4 (SPV_KHR_ray_query's documented requirement) into a
+// generated header. Ogre's own GLSL path never sets a target environment
+// (OgreVulkanProgram.cpp: setEnvClient/setEnvTarget are commented out), which
+// is why this does not go through Ogre's shader compiler at all.
+#extension GL_EXT_ray_query : require
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+/// One ray. `origin.w` is tMin, `dir.w` is tMax, `mask.x` is the instance mask
+/// the ray tests against (the per-consumer masks audit C-15 asks for: bit 0 a
+/// shadow caster, bit 1 a mover, bit 2 still world; 0xFF = everything).
+struct Ray
+{
+    vec4  origin;
+    vec4  dir;
+    uvec4 mask;
+};
+layout( std430, set = 0, binding = 1 ) readonly buffer Rays { Ray r[]; } rays;
+
+/// One answer: x = distance to the first hit (< 0 = miss), y = the hit
+/// instance's customIndex (the node's slot in the scene's item index),
+/// z = the hit primitive index inside its geometry, w = 1 on a hit, 0 on a miss.
+layout( std430, set = 0, binding = 2 ) writeonly buffer Hits { vec4 h[]; } hits;
+
+layout( set = 0, binding = 3 ) uniform Params
+{
+    uvec4 counts;   // x = how many rays are in the batch
+} p;
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if( id >= p.counts.x )
+        return;
+
+    const Ray ray = rays.r[id];
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, ray.mask.x, ray.origin.xyz,
+                           ray.origin.w, ray.dir.xyz, ray.dir.w );
+    // OPAQUE, ALWAYS (audit C-16): every BLAS this tier builds carries
+    // VK_GEOMETRY_OPAQUE_BIT_KHR and alpha-tested datablocks are kept OUT of the
+    // traced set, because without ray-tracing PIPELINES there is no any-hit
+    // shader and a cut-out leaf would intersect as a solid quad. The loop is
+    // therefore a formality on this path and stays because the spec's shape is
+    // "proceed until committed".
+    while( rayQueryProceedEXT( rq ) ) {}
+
+    vec4 answer = vec4( -1.0, -1.0, -1.0, 0.0 );
+    if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
+        gl_RayQueryCommittedIntersectionTriangleEXT )
+    {
+        answer.x = rayQueryGetIntersectionTEXT( rq, true );
+        answer.y = float( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+        answer.z = float( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+        answer.w = 1.0;
+    }
+    hits.h[id] = answer;
+}

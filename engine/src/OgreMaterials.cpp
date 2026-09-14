@@ -659,8 +659,26 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // it — which is also how gi.probe_gate proves the other half, that a
         // NON-crossing edit flushes nothing at all.
         const bool wasGated = db->hasZeroSpecularResponse();
+        // THE RAY TIER'S TRACED SET READS THE ALPHA TEST (PHOTON_SPEC §7 R1).
+        // An alpha-tested datablock is kept OUT of the acceleration structure —
+        // every BLAS is opaque and there is no any-hit shader, so a cut-out
+        // would intersect as a solid quad — and the tier only re-gathers when
+        // the caster-walk epoch moves, so a flip that moved no epoch would
+        // leave a STILL scene tracing the old set indefinitely.
+        //
+        // TODAY THAT CANNOT HAPPEN: the shadow-shape guard above already calls
+        // noteShadowShapeChanged for every edit that can reach setAlphaTest
+        // (alphaMode, alphaCutoff, twoSided, the cutout inputs), and that ends
+        // in noteShadowScanInput. This line states the same invariant WHERE THE
+        // STATE CHANGES instead of inferring it from a parameter list that has
+        // to be kept in step with applyPbr: "did the caster shape change" and
+        // "did the traced set change" are two questions that merely happen to
+        // share an answer today. Derived from the datablock, this one cannot
+        // drift. Only the CHANGE is noted; an ordinary push stays free.
+        const Ogre::CompareFunction wasAlphaTest = db->getAlphaTest();
         applyPbr(db, p, mRefractionsActive);
         if (wasGated != db->hasZeroSpecularResponse()) ++mProbeGateCrossings;
+        if (wasAlphaTest != db->getAlphaTest()) noteShadowScanInput();
         // An alpha-mode change moves the item between render queues, and the
         // items already exist: re-file them or a material turned refractive
         // keeps rendering in the opaque pass (as plain glass) until something

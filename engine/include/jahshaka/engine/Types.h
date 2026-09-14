@@ -2273,6 +2273,68 @@ constexpr unsigned kSceneMainThreadOnly = ~0u;
 /// call back into the engine.
 using EngineLogSink = std::function<void(int level, const std::string &message)>;
 
+/// WHAT THE HARDWARE RAY-QUERY TIER IS DOING (PHOTON_SPEC §7 R1).
+///
+/// The tier keeps a ray-traceable copy of the scene — one bottom-level
+/// acceleration structure per mesh, one top-level structure over the instances
+/// — built from Ogre's OWN vertex and index buffers (ogre-patches 0038/0039)
+/// and recorded into the frame's command buffer. Nothing consumes it yet: R2
+/// (probe visibility), R3 (sun contact shadows) and R5 (reflections) are the
+/// consumers, and each of them reads the SAME structure.
+///
+/// `available` is the DEVICE's answer (VK_KHR_acceleration_structure +
+/// VK_KHR_ray_query enabled at vkCreateDevice) and cannot be changed by
+/// anything but the hardware and the driver; `enabled` is ours — the no-rays
+/// switch, which is how a machine WITH rays renders the picture a machine
+/// without them gets, so every ray-consuming suite can assert both. Off, every
+/// other field reads zero.
+struct RayQueryStatus {
+    /// The device has the extensions and the features (never true on macOS:
+    /// MoltenVK exposes neither, SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
+    bool available = false;
+    /// ...and we are using them. False with `available` true is the switch in
+    /// force (app.rayTracing("off") / Engine::setRayTracing / --no-ray-query /
+    /// JAHSHAKA_NO_RAY_QUERY=1).
+    bool enabled = false;
+    /// Bottom-level structures held — one per unique mesh in the traced set.
+    int  blasCount = 0;
+    /// Instances in the top-level structure: the traced set's size. It is NOT
+    /// the scene's Item count — editor helpers, backdrops, the sun disc,
+    /// overlay-queue objects, SKINNED Items (they would trace at bind pose
+    /// until R4) and alpha-tested ones (no any-hit without ray-tracing
+    /// pipelines) are all out.
+    int  instances = 0;
+    /// Triangles in the bottom-level structures (unique geometry, not
+    /// instanced).
+    int  triangles = 0;
+    /// Bytes of acceleration structure resident: the bottom level after
+    /// compaction plus the top level.
+    unsigned long long blasBytes = 0;
+    unsigned long long tlasBytes = 0;
+    /// GPU milliseconds of the LAST top-level build or refit, read back from a
+    /// timestamp pair several frames later (never with a wait on the frame
+    /// thread). -1 until one has been measured.
+    float tlasMs = -1.0f;
+    /// GPU milliseconds of the last batch of bottom-level builds, same reading.
+    /// -1 until one has been measured; a still scene never rebuilds one.
+    float blasMs = -1.0f;
+    /// CPU milliseconds THE INSTANCE WALK cost — only the walk that writes the
+    /// transforms into the mapped buffer, not the command recording around it.
+    /// This is the number that scales with instance count and the one a budget
+    /// is kept on.
+    float gatherMs = -1.0f;
+    /// True when the last top-level update was a REFIT rather than a full
+    /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
+    /// 0.5 ms at 8k instances buys the better tree); the refit is the
+    /// optimisation behind the transform-epoch gate.
+    bool lastWasRefit = false;
+    /// Cumulative counters over the scene's life: how many times the top level
+    /// was rebuilt, refitted, and how many bottom-level structures were built.
+    unsigned long long tlasBuilds = 0;
+    unsigned long long tlasRefits = 0;
+    unsigned long long blasBuilds = 0;
+};
+
 /// Everything the engine needs to start. All paths are resolved by the HOST at
 /// runtime (next to the executable, an env override, or a compile-time default).
 /// Nothing in the engine is baked to a build-machine path.
@@ -2334,6 +2396,29 @@ struct EngineConfig {
     bool optimizeShadowMeshes = true;
     /// Host's display connection; required only for on-screen Views (see above).
     NativeDisplayHandle display = 0;
+    /// HARDWARE RAY TRACING, at boot (PHOTON_SPEC §7 R1). True (the default)
+    /// lets the tier come up wherever the device advertises it; false is the
+    /// fallback picture a machine without ray tracing gets — the one path a Mac
+    /// takes, and the one every ray-consuming suite must be able to run on this
+    /// GPU so the fallback is proved on every push.
+    ///
+    /// FALSE REACHES THE DEVICE, not just this tier. The host sets
+    /// JAHSHAKA_NO_RAY_QUERY alongside it, which ogre-patch 0038 reads at
+    /// vkCreateDevice, so the process comes up on exactly the instance,
+    /// extension list and feature set it would have had if the tier did not
+    /// exist. "The picture a machine without ray tracing renders" is therefore
+    /// literal and not a manner of speaking — which is what makes the suites
+    /// that assert the fallback worth anything.
+    ///
+    /// THE HOST OWNS THIS ANSWER. It is an APPLICATION preference, not a
+    /// document setting: ray tracing is a property of the machine, and a
+    /// picture that changed with the file open would be a second authoring
+    /// path. Studio fills it from Preferences > Rendering ANDed with
+    /// `--no-ray-query`. Change it at runtime with Engine::setRayTracing.
+    ///
+    /// It is NOT a quality dial: with rays off the tier builds nothing at all,
+    /// costs nothing at all, and `giStatus().rayQuery.enabled` reads false.
+    bool rayTracing = true;
     /// Vertical sync for ON-SCREEN views, as they are created (fps audit F1).
     /// True is what every window did unconditionally before this field existed.
     /// False asks for an immediate, tearing present mode — the "unlimited"
