@@ -6308,6 +6308,17 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             Hasher h, m;
             for (const auto &l : mSource->lights) {
                 if (l.isNull()) continue;
+                // THE SKY LIGHT IS NOT A VOXEL LIGHT (audit A F3). It never
+                // becomes an Ogre::Light at all: its colour and intensity reach
+                // the renderer as the scene's ambient SH (applyEnvironment ->
+                // setAmbientSh -> applyVctAmbient), which is pushed into every
+                // voxel volume directly and stales the probe grid with its own
+                // reason. Hashing it here made releasing its intensity slider —
+                // or hiding it, the documented way to switch ambient off — arm
+                // the settle and fire a whole from-scratch GI re-solve (under
+                // Photon's cascades, the whole chain) for a change that was
+                // already applied the cheap way.
+                if (l->lightType == iris::LightType::Sky) continue;
                 Hasher &into = movingLamp(l.data()) ? m : h;
                 into << worldTrsSignatureMemo(l->graphNode(), mGiChainMemo)
                      << lightGiParamSignature(l.data());

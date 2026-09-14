@@ -1,5 +1,6 @@
 // Jahshaka's DDGI diffuse INTENSITY — the one thing upstream's IrradianceField
-// has no knob for (GI_UNIFIED_SPEC.md §4 P1 / addendum item 2).
+// has no knob for (GI_UNIFIED_SPEC.md §4 P1 / addendum item 2 — that is the
+// earlier spec of the program now called PHOTON; SPECS/PHOTON_SPEC.md is live).
 //
 // WHY THIS FILE EXISTS. Binding an IrradianceField makes HlmsPbs set
 // `VctDisableDiffuse` (OgreHlmsPbs.cpp:1846-1850): DDGI does not ADD to voxel
@@ -39,7 +40,7 @@
 // above, never written with its at-sign.
 //
 // THE SECOND THING THAT IS NOT UPSTREAM'S: THE AMBIENT SKY-VISIBILITY TERM
-// (the Rayon ambient fix; GI_UNIFIED_SPEC.md ADDENDUM CORRECTION, and the
+// (the Photon ambient fix; GI_UNIFIED_SPEC.md ADDENDUM CORRECTION, and the
 // ledger entries "Vct_piece_ps.any: volume-local ambient blend commented out"
 // and "IrradianceField nits" in SPECS/OGRE_UPSTREAM_ISSUES.md).
 //
@@ -68,7 +69,7 @@
 // expression the job uses to convert march distance into the units the pixel
 // shader compares against. Anything shorter means the ray hit geometry.
 //
-// WHAT A DEPTH TEXEL ACTUALLY HOLDS — corrected 2026-09-09 (rayon2 S1), and
+// WHAT A DEPTH TEXEL ACTUALLY HOLDS — corrected 2026-09-09 (spikes/rayon2 S1), and
 // the correction is the whole design. The first version of this file claimed
 // a texel was ONE ray at our settings (depthRes 12, raysPerPixel 1). It is
 // not: upstream's generation workspace runs `IrradianceField/Integration/Depth`
@@ -113,7 +114,7 @@
 //      exact rather than merely small — the constants are just below.
 //
 // TAPS: ONE, along the field-space normal, and that is a measured decision
-// (build record, rayon2 S1). The atlas already integrates the pixel's cosine
+// (build record, spikes/rayon2 S1). The atlas already integrates the pixel's cosine
 // hemisphere, so a tap tilted away from the normal has a lobe that dips below
 // the surface's own horizon and reads its own floor as occlusion: upstream's
 // 6-cone diffuse set on a tangent frame around the normal (the machinery is
@@ -299,7 +300,7 @@
 	float3 ifdVisB = cross( ifdSpaceNormal, ifdVisT );
 	float3 ifdNumProbes = float3( passBuf.irradianceField.numProbesAggregated.x,
 								  passBuf.jahIfd.z, passBuf.jahIfd.w );
-	// CALIBRATION, two constants, both measured (build record, rayon2 S1):
+	// CALIBRATION, two constants, both measured (build record, spikes/rayon2 S1):
 	// ifdVisEscapeScale scales the integrated escape distance so that OPEN
 	// FLOOR reads 1 -- the rays whose cone footprint grazes the floor exit the
 	// march early, and they are the near-horizontal ones carrying the largest
@@ -450,7 +451,7 @@
 				// The integrated escape distance for this tap's lobe (header,
 				// item 1), then the Chebyshev test at it (item 2).
 				float3 ifdVisA = float3( 0.396, 0.396, 0.396 ) + 0.275 * ifdTapDir * ifdTapDir;
-				// THE SOURCE DECIDES THE UNIT (rayon2 S3). A voxel-fed probe stores a
+				// THE SOURCE DECIDES THE UNIT (spikes/rayon2 S3). A voxel-fed probe stores a
 				// miss at the march limit, 1.414 x dot( |dir|, numProbes ); a
 				// raster-fed probe (IrradianceFieldRaster, CubemapToIfd) stores it
 				// at the capture camera's FAR plane x dot( |dir|, probes per unit ),

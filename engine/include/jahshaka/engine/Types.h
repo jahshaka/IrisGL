@@ -1466,7 +1466,9 @@ using NativeDisplayHandle = unsigned long long;
 /// monotonic: a removed node's id is NEVER reused, so a stale id is harmless.
 using NodeId = unsigned int;
 
-// ---- Global illumination (scene-level, GI_SPEC.md) ----
+// ---- Global illumination (scene-level; SPECS/PHOTON_SPEC.md is the live
+// ---- program doc — GI_SPEC.md and GI_UNIFIED_SPEC.md are its earlier specs,
+// ---- written when the program was called Rayon) ----
 /// Which GI system lights the scene. Off is the default everywhere — GI must
 /// never cost anything unless the author turns it on.
 enum class GiMode {
@@ -1525,6 +1527,11 @@ enum class GiSource { Auto, Voxel, Raster };
 ///   `Mobility`  an object's mobility class changed, so it left (or joined) the
 ///               channel the probes capture — the probes holding its photograph
 ///               owe one re-capture (see MobilityChange)
+///   `Camera`    the CAMERA moved, and a camera-following cache had to redo work
+///               (Photon's cascade chain re-centring — the one reason in this
+///               list that is not an edit, which is exactly why it needs its own
+///               name: a capture must be able to separate the cost of walking
+///               around a scene from the cost of changing it)
 ///   `None`      nothing has staled the grid since the scene was created
 ///
 /// TIME-VARYING CONTENT IS FROZEN in the probes (REALTIME_REFLECTIONS_SPEC O4,
@@ -1532,7 +1539,8 @@ enum class GiSource { Auto, Voxel, Raster };
 /// material or a live/video texture is captured as it was when the grid last
 /// re-captured, and stales nothing on its own. SSR and planar reflections show
 /// such content live; probes are the static-environment layer.
-enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog, Mobility };
+enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, Ambient, Fog, Mobility,
+                           Camera };
 
 /// Scene-level GI state, pushed idempotently via Scene::setGlobalIllumination.
 struct GiParams {
@@ -1690,7 +1698,7 @@ struct GiParams {
     /// correction.
     ///
     /// GiToggle::Auto means "let the quality tier decide", and the deciding
-    /// happens DOCUMENT-SIDE: the Rayon tier (GI_UNIFIED P2) writes a concrete
+    /// happens DOCUMENT-SIDE: the Photon tier (GI_UNIFIED P2) writes a concrete
     /// on/off through into the document field the mirror pushes here, so Auto
     /// reaching the engine means "no tier was ever applied to this scene" and
     /// resolves to OFF — which is what makes every already-serialized scene
@@ -1727,7 +1735,7 @@ struct GiParams {
     /// a scene may want the trim; clamped to [0, 64], and 0 is a legitimate
     /// "field bound, contributing nothing" for A/B measurement.
     float     ddgiIntensity = 1.0f;
-    /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Rayon ambient fix's one dial
+    /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Photon ambient fix's one dial
     /// (GI_UNIFIED_SPEC.md ADDENDUM CORRECTION; the mechanism is documented at
     /// length on media/Hlms/Jahshaka/JahIfd_piece_ps.any).
     ///
@@ -2095,14 +2103,18 @@ struct GiStatus {
         /// How many times this cascade has been (re)voxelised since the arm was
         /// built. At rest it does not move: a still camera scrolls nothing.
         unsigned long long rebuilds = 0;
-        /// Rebuilds this cascade owes and has not been given a frame for (the
-        /// bounded queue: at most one cascade is rebuilt per frame). Non-zero
-        /// only while the camera is outrunning the scheduler.
+        /// This cascade is BEHIND the camera and owes a rebuild it has not been
+        /// given a frame for (at most one cascade is rebuilt per frame).
+        /// A FLAG, not a queue: a rebuild always happens at the CURRENT camera,
+        /// so owing two is the same as owing one. Non-zero only while the
+        /// camera is outrunning the scheduler.
         int   pending = 0;
-        /// How many GI items this cascade voxelises: the ones inside its box
-        /// that are big enough to fill half a voxel of it. A coarse cascade
-        /// declines sub-voxel objects — it cannot represent them, and they are
-        /// what a whole re-voxelisation spends its time on.
+        /// How many GI items this cascade's LAST REBUILD voxelised: the ones
+        /// inside its box that are big enough to fill half a voxel of it,
+        /// re-counted on every rebuild — so it follows the cascade as it
+        /// scrolls, and reads 0 for one standing in empty space. A coarse
+        /// cascade declines sub-voxel objects — it cannot represent them, and
+        /// they are what a whole re-voxelisation spends its time on.
         int   items = 0;
         /// CPU milliseconds of that same rebuild (the submission cost on the
         /// frame's own thread). The GPU half is NOT here and cannot be: a
@@ -2114,8 +2126,14 @@ struct GiStatus {
     /// The live cascade chain, innermost first. Empty unless
     /// GiParams::cascades built one.
     std::vector<CascadeStatus> cascades;
+    /// The chain is WANTED but has not been built, because no view has tracked a
+    /// camera yet — a camera-centred arm is built around the camera and there is
+    /// no honest place to put it before one exists. Distinguishes "no view yet"
+    /// from "the build failed", which both read as an empty `cascades` list.
+    bool cascadesAwaitingCamera = false;
     /// How many whole-chain rebuilds the two DIRTY_ALL guards have forced — a
-    /// teleport, a jump longer than a cascade, or a queue overflow. Cumulative.
+    /// teleport, or a jump longer than a cascade. Cumulative over the scene's
+    /// life: a re-solve of the arm does not reset it, only GI going off does.
     unsigned long long cascadeFullRebuilds = 0;
     /// Cascade rebuilds SKIPPED because the frame's budget (one per frame) was
     /// already spent. Cumulative; it is the queue pressure reading.
@@ -3335,6 +3353,10 @@ struct FrameRecord {
     unsigned    draws = 0, batches = 0, instances = 0;
     unsigned long long triangles = 0;
     unsigned    probeCaptures = 0;      ///< probe cube faces captured
+    /// Photon cascade re-voxelisations in THIS frame. The scheduler's contract
+    /// is "at most one per frame", and this is what makes that assertable from
+    /// a bundle without parsing the `vct.cascadeN` rows out of cacheWork.
+    unsigned    cascadeRebuilds = 0;
     unsigned    shadowPasses = 0;       ///< the view's shadow node
     unsigned    shadowPassesReflect = 0;///< planar mirrors' shadow nodes
     unsigned    shadowPassesProbe = 0;  ///< probes' shadow nodes

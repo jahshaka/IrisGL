@@ -613,23 +613,34 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     equivalent short of a CPU-side branch the CPU has no information to take.
 
 33. **0033-vct-cascade-escape-opacity-composite** — MEDIA-only (one Hlms `.any`).
+    **AMENDED IN PLACE 2026-09-14 (PHOTON E0, audit B5) — same number, and a
+    tree that carries the older version must reset the file before re-running
+    `build-ogre.sh`** (`git -C irisgl/thirdparty/ogre-next checkout -- . &&
+    git -C irisgl/thirdparty/ogre-next clean -fd`, the usual loop).
     On a CASCADE CHAIN (`vct_num_probes > 1`, which only Photon's camera-centred
-    cascade arm builds) the ambient escape weight collapsed to zero, so every
-    surface the bounce did not reach rendered BLACK instead of ambient-lit.
-    `voxelConeTraceDiff` starts its escape accumulator at the alpha it is handed
-    (patch 0021), so the value it returns is already the running total; the
-    cascade continuation loop then ADDED that total to the one it already held,
-    compounding the opacity once per cascade. Measured on `gi.cascades` case 4
-    (a ground lit by nothing but a flat ambient, four cascades at Epic): 0.0902
-    luminance with GI off, 0.0000 with the chain, back to the GI-off value with
-    the patch. Fix: assign instead of add. Nothing that ships today enters that
-    loop, so no existing picture can move (selftest hash unchanged).
-
-    UPSTREAM FINDING recorded with it: `result.alpha += newRes.alpha` on the
-    line above has the same shape and doubles the colour alpha at every cascade
-    hop — it both darkens the `( 1.0 - result.alpha )` composite and can exit
-    the cascade walk early. Left alone deliberately (it changes the bounce) and
-    reported for `SPECS/OGRE_UPSTREAM_ISSUES.md`.
+    cascade arm builds) the ambient collapsed to zero, so every surface the
+    bounce did not reach rendered BLACK instead of ambient-lit. The cascade
+    continuation is run TWICE per pixel — once over the diffuse cones and once
+    over the specular one — and both loops carried the same two defects:
+    (1) `voxelConeTrace*` starts its accumulators at the alpha it is handed
+    (upstream's, and patch 0021's escape one), so the value each returns is
+    already the running total for the whole cone; the loops then ADDED that
+    total to the one they already held, doubling the opacity once per hop; and
+    (2) the self-occlusion bias `computeVctProbe` applies before the first cone
+    was never re-applied at a cascade ENTRY, so the surface occluded its own
+    cone once per hop. Fix: assign instead of add, and re-apply the bias in the
+    new cascade's units at every entry (on the specular walk along the GEOMETRIC
+    NORMAL, measured by its own `normalBias` — the loop's `startBias` is
+    upstream's seam term along the reflection ray and stays).
+    Measured — diffuse, `gi.cascades` case 4 (a ground lit by nothing but a flat
+    ambient, four cascades at Epic): 0.0902 luminance with GI off, 0.0000 with
+    the chain, 0.0462 (0.51x) with the patch, the residual being upstream's
+    march-distance restart (recorded for `SPECS/OGRE_UPSTREAM_ISSUES.md`).
+    Specular, case 7 (a chrome plate lit by nothing but the ambient): at
+    roughness 0.15 the plate read 0.0264 with one cascade, 0.0148 with two and
+    0.0001 with four before the amendment.
+    Nothing that ships today enters either loop (the flag is off in every scene),
+    so no existing picture can move — selftest hash unchanged, A/B'd.
 
 THE STACK IS 0001-0033 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
