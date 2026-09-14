@@ -1846,17 +1846,30 @@ private:
     bool     mGiPendingRefresh = false;
     int      mGiStableFrames = 0;
     int      mGiFramesSinceLightOnly = 0;
-    QElapsedTimer mGiPendingTimer;
     /// The value of Scene::giRefreshSerial this mirror has already acted on
     /// (P1d). An EXPLICIT refresh never waits for the stability window.
     quint64  mGiRefreshSerialSeen = 0;
     /// Frames of a still light signature before the full rebuild fires. 15 at
     /// 60 Hz is a quarter second — long enough that no drag ever crosses it,
     /// short enough that letting go feels immediate.
+    ///
+    /// FRAMES ONLY, AND NEVER A WALL CLOCK (COLDGI-1, 2026-09-15). This gate
+    /// used to fire on `kGiStableFrames` frames OR 250 ms, whichever came
+    /// first, so that a slow Debug frame rate could not stretch the wait into
+    /// seconds. That made the number of GI RE-SOLVES a function of how fast
+    /// the machine rendered: the same script, stepping the same frames, fired
+    /// one extra full re-solve on a cold shader cache (where the first frames
+    /// cost seconds) and none on a warm one. `threading.mode_pixels` caught it
+    /// as two halves of one comparison running different GI histories
+    /// (staleSerial 8 against 9). It is the `cameras.exposure` lesson in its
+    /// second guise: a wall-clock settle measures nothing in an engine whose
+    /// clock is the simulated 1/60 s frame — count frames, and the answer is
+    /// the same on every machine and in every gate. The cost of dropping the
+    /// clock is honest and small: on a box rendering the scene at 10 fps the
+    /// settle after a drag takes 1.5 s instead of 250 ms. A picture that
+    /// depends on the machine is worse than a settle that depends on the
+    /// frame rate, which is what the user is watching anyway.
     static constexpr int kGiStableFrames = 15;
-    /// ...or this many milliseconds, whichever comes FIRST. A slow Debug frame
-    /// rate must not stretch the wait into seconds.
-    static constexpr qint64 kGiStableMs = 250;
     /// While waiting, run the cheap light-only re-inject this often, so bounced
     /// light follows a light that is being dragged.
     static constexpr int kGiLightOnlyEveryN = 10;
