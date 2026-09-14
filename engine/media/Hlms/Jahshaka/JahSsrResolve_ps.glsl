@@ -56,6 +56,26 @@
 // A luminance clamp catches the rest (a valid coordinate that lands on one
 // texel of a highlight is a firefly too), and it too is a no-op on any pixel
 // that is not one.
+//
+// THE FINITE GUARD (SMOKE-ENGINE-1 item 1, 2026-09-14). Everything above
+// assumes the history holds a radiance. It is a CLOSED LOOP and nothing in it
+// guaranteed that: scene colour -> the kSsrPrev history -> `prevFrame` here ->
+// jahSsrReflection -> HlmsPbs' envColourS -> scene colour, with the RELATIVE
+// firefly clamp below as its only defence. A relative clamp cannot bound a
+// runaway (every frame is measured against the previous one, so a gain above 1
+// is invisible to it), the history is RGBA16_FLOAT so 65504 is +Inf, and the
+// clamp's own `reflected *= ceiling / lum` is Inf * 0 == NaN the moment lum is
+// Inf. A NaN tonemaps to BLACK and circulates for the life of the workspace —
+// the owner's "black holes in the textures when I move the sun" — and the HDR
+// luminance reduction averages it into a 1x1 keep_content history that never
+// recovers, which is the same defect's "all white, stuck exposure".
+//
+// So every value read out of `prevFrame` goes through sanitizeRadiance()
+// first: non-finite becomes black, and an absolute ceiling bounds what the
+// loop can circulate. The ceiling is ABSOLUTE on purpose — it is the only
+// thing a feedback loop cannot argue with. The relative firefly clamp stays
+// exactly as it was; a pixel already inside the ceiling comes out of this
+// shader bit for bit unchanged, which is why no existing frame moves.
 #version ogre_glsl_ver_330
 
 vulkan_layout( ogre_t0 ) uniform texture2D rayTexture;
@@ -79,6 +99,51 @@ vulkan( }; )
 
 vulkan_layout( location = 0 )
 out vec4 fragColour;
+
+// THE LOOP'S CEILING, in linear radiance. Mid-grey is 0.18 and the half-float
+// history saturates at 65504, so 1024 is about twelve stops above white and six
+// below the format's own ceiling: far above anything a scene legitimately
+// reflects, far below the overflow that turns the history into +Inf. A
+// reflection clamped here is still white after any exposure the tonemapper
+// arrives at, so the ceiling costs no picture and buys a bounded loop.
+const float kSsrMaxRadiance = 1024.0;
+
+/// One history tap, with its own verdict attached: .xyz is a radiance this
+/// shader can do arithmetic on, and .w is 1 only when the texel really was
+/// finite and inside the ceiling.
+///
+/// WHAT IS OUT THERE, and why .w has to exist. The scene target is
+/// RGBA16_FLOAT, and a punctual light's specular lobe on a near-mirror surface
+/// is very nearly a delta — the GGX D term goes as 1 / (pi * alpha^2), so a
+/// roughness clamped at 1e-4 reaches 1e7 before anything else is applied. That
+/// texel is stored as +Inf, and it is a COLOURED Inf when the light is
+/// coloured: the warm spot overflows red a stop before it overflows blue. A
+/// clamp — per channel or hue-preserving, it makes no difference — turns such a
+/// texel into a saturated primary at the ceiling, which is the red/green/blue
+/// confetti this shader used to scatter over the Shadow Maps port's floor. So
+/// the clamp is only ever a SAFE INTERMEDIATE: the caller reads .w and uses the
+/// neighbourhood instead, because a single sample of a value the buffer could
+/// not represent carries no information about the lobe, and the neighbourhood
+/// does.
+vec4 ssrHistoryTap( vec2 uv )
+{
+	const vec3	c = texture( vkSampler2D( prevFrame, linearSampler ), uv ).xyz;
+	const float m = max( abs( c.x ), max( abs( c.y ), abs( c.z ) ) );
+	if( m <= kSsrMaxRadiance )
+		return vec4( c, 1.0 );							// the ordinary texel, untouched
+	if( m < 3.0e38 )
+		return vec4( min( c, vec3( kSsrMaxRadiance ) ), 0.0 );	// finite, unusably bright
+	// NOT A COLOUR AT ALL, and it contributes NOTHING — neither to this pixel
+	// (.w says so, and the caller takes the neighbourhood instead) nor to the
+	// neighbourhood mean. MEASURED, because the alternative is tempting and
+	// wrong: developing a non-finite tap as the CEILING instead — "it was too
+	// bright to store, so call it white" — removes the same black holes but
+	// scatters white sparkle where they were, and on the Shadow Maps port that
+	// is 20.5 % of the viewport against 3.3 % for this line (SMOKE-ENGINE-1,
+	// same drag, same frame). A value nobody can read is worth zero, and the
+	// four taps that ARE readable carry the pixel.
+	return vec4( 0.0, 0.0, 0.0, 0.0 );
+}
 
 void main()
 {
@@ -171,7 +236,8 @@ void main()
 		return;
 	}
 
-	vec3 reflected = texture( vkSampler2D( prevFrame, linearSampler ), ray.xy ).xyz;
+	const vec4 centreTap = ssrHistoryTap( ray.xy );
+	vec3	   reflected  = centreTap.xyz;
 
 	// THE FIREFLY CLAMP, the second line of defence and the only one that also
 	// covers a coordinate that is perfectly valid and simply unlucky — a ray
@@ -194,12 +260,23 @@ void main()
 		const float kFireflyRatio = 4.0;
 		const float kFireflyFloor = 1.0;	// linear HDR: "as bright as white"
 		const vec2	t			  = 1.5 / prevFrameRes.xy;
-		const vec3	nbr =
-			( texture( vkSampler2D( prevFrame, linearSampler ), ray.xy + vec2( -t.x, -t.y ) ).xyz +
-			  texture( vkSampler2D( prevFrame, linearSampler ), ray.xy + vec2( t.x, -t.y ) ).xyz +
-			  texture( vkSampler2D( prevFrame, linearSampler ), ray.xy + vec2( -t.x, t.y ) ).xyz +
-			  texture( vkSampler2D( prevFrame, linearSampler ), ray.xy + vec2( t.x, t.y ) ).xyz ) *
-			0.25;
+		// Each tap goes through ssrHistoryTap on its OWN, not after the
+		// average: one +Inf neighbour must not drag the other three to zero and
+		// collapse the ceiling this pixel is measured against.
+		const vec3	nbr = ( ssrHistoryTap( ray.xy + vec2( -t.x, -t.y ) ).xyz +
+							ssrHistoryTap( ray.xy + vec2( t.x, -t.y ) ).xyz +
+							ssrHistoryTap( ray.xy + vec2( -t.x, t.y ) ).xyz +
+							ssrHistoryTap( ray.xy + vec2( t.x, t.y ) ).xyz ) *
+						  0.25;
+		// THE UNREPRESENTABLE SAMPLE TAKES THE NEIGHBOURHOOD, not a clamped
+		// version of itself (see ssrHistoryTap): the lobe stand-in the firefly
+		// clamp already computes is the best answer available for a texel the
+		// history could not hold, and it is bounded by construction, since
+		// every tap that went into it is. A pixel whose centre tap WAS in range
+		// skips this line entirely and comes out of the shader exactly as it
+		// did before the guard existed.
+		if( centreTap.w < 1.0 )
+			reflected = nbr;
 		const float lum		= dot( reflected, kLum );
 		const float ceiling = max( dot( nbr, kLum ) * kFireflyRatio, kFireflyFloor );
 		if( lum > ceiling )
