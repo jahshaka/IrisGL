@@ -2273,9 +2273,6 @@ constexpr unsigned kSceneMainThreadOnly = ~0u;
 /// call back into the engine.
 using EngineLogSink = std::function<void(int level, const std::string &message)>;
 
-/// Everything the engine needs to start. All paths are resolved by the HOST at
-/// runtime (next to the executable, an env override, or a compile-time default).
-/// Nothing in the engine is baked to a build-machine path.
 /// WHAT THE HARDWARE RAY-QUERY TIER IS DOING (PHOTON_SPEC §7 R1).
 ///
 /// The tier keeps a ray-traceable copy of the scene — one bottom-level
@@ -2295,8 +2292,8 @@ struct RayQueryStatus {
     /// The device has the extensions and the features (never true on macOS:
     /// MoltenVK exposes neither, SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
     bool available = false;
-    /// ...and we are using them. False with `available` true is the no-rays
-    /// switch in force (Engine::setRayTracing / --no-ray-query /
+    /// ...and we are using them. False with `available` true is the switch in
+    /// force (app.rayTracing("off") / Engine::setRayTracing / --no-ray-query /
     /// JAHSHAKA_NO_RAY_QUERY=1).
     bool enabled = false;
     /// Bottom-level structures held — one per unique mesh in the traced set.
@@ -2321,10 +2318,10 @@ struct RayQueryStatus {
     /// GPU milliseconds of the last batch of bottom-level builds, same reading.
     /// -1 until one has been measured; a still scene never rebuilds one.
     float blasMs = -1.0f;
-    /// CPU milliseconds the last instance gather cost — the walk that writes
-    /// the transforms straight into the mapped instance buffer. This is the
-    /// number that scales with instance count (S3 measured 4-6 ms at 8,026
-    /// instances in its naive form) and the one a budget is kept on.
+    /// CPU milliseconds THE INSTANCE WALK cost — only the walk that writes the
+    /// transforms into the mapped buffer, not the command recording around it.
+    /// This is the number that scales with instance count and the one a budget
+    /// is kept on.
     float gatherMs = -1.0f;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
@@ -2338,6 +2335,9 @@ struct RayQueryStatus {
     unsigned long long blasBuilds = 0;
 };
 
+/// Everything the engine needs to start. All paths are resolved by the HOST at
+/// runtime (next to the executable, an env override, or a compile-time default).
+/// Nothing in the engine is baked to a build-machine path.
 struct EngineConfig {
     Backend     backend = Backend::Vulkan;
     /// HEADLESS: boot the backend's NULL render system instead of `backend`
@@ -2396,13 +2396,17 @@ struct EngineConfig {
     bool optimizeShadowMeshes = true;
     /// Host's display connection; required only for on-screen Views (see above).
     NativeDisplayHandle display = 0;
-    /// THE NO-RAYS SWITCH, at boot (PHOTON_SPEC §7 R1). True (the default) lets
-    /// the hardware ray-query tier come up wherever the device advertises it;
-    /// false is the fallback picture a machine without ray tracing gets — the
-    /// one path a Mac takes, and the one every ray-consuming suite must be able
-    /// to run on this GPU so the fallback is proved on every push. Studio sets
-    /// it from `--no-ray-query` / `JAHSHAKA_NO_RAY_QUERY=1`; change it at
-    /// runtime with Engine::setRayTracing.
+    /// HARDWARE RAY TRACING, at boot (PHOTON_SPEC §7 R1). True (the default)
+    /// lets the tier come up wherever the device advertises it; false is the
+    /// fallback picture a machine without ray tracing gets — the one path a Mac
+    /// takes, and the one every ray-consuming suite must be able to run on this
+    /// GPU so the fallback is proved on every push.
+    ///
+    /// THE HOST OWNS THIS ANSWER. It is an APPLICATION preference, not a
+    /// document setting: ray tracing is a property of the machine, and a
+    /// picture that changed with the file open would be a second authoring
+    /// path. Studio fills it from Preferences > Rendering ANDed with
+    /// `--no-ray-query`. Change it at runtime with Engine::setRayTracing.
     ///
     /// It is NOT a quality dial: with rays off the tier builds nothing at all,
     /// costs nothing at all, and `giStatus().rayQuery.enabled` reads false.

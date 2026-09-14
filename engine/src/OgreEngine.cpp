@@ -45,10 +45,13 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
 #endif
     mDefaultSamples = OgreView::sanitizeSamples(cfg.sampleCount);
     mVsync = cfg.vsync;
-    // THE NO-RAYS SWITCH at boot (PHOTON_SPEC §7 R1): the hardware ray-query
-    // tier comes up only where the device advertises it AND this says yes.
-    // Studio sets it from --no-ray-query; the env var is the same switch for a
-    // suite that cannot pass an argument.
+    // THE HARDWARE RAY-TRACING PREFERENCE at boot (PHOTON_SPEC §7 R1): the tier
+    // comes up only where the device advertises it AND this says yes.
+    // `EngineConfig::rayTracing` is the HOST's answer — Studio fills it from the
+    // application preference (Preferences > Rendering) ANDed with
+    // --no-ray-query. The environment variable is kept as the override a suite
+    // can set when it cannot reach the config (it is also what ogre-patch 0038
+    // reads at vkCreateDevice, so the two must agree).
     mRayTracingWanted = cfg.rayTracing && getenv("JAHSHAKA_NO_RAY_QUERY") == nullptr;
     // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it

@@ -61,12 +61,14 @@
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanQueue.h"
 #include "Vao/OgreVulkanBufferInterface.h"
+#include "Vao/OgreVulkanVaoManager.h"
 
 #include "rayquery/rq_rays_spv.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
 #include <unordered_map>
 #include <vector>
 
@@ -87,7 +89,17 @@ inline double msSince(const Clock::time_point &t0) {
 constexpr unsigned kFramesInFlight = 3u;
 /// Two timestamps per pass (BLAS batch, TLAS), per frame slot.
 constexpr unsigned kQueriesPerFrame = 4u;
-constexpr unsigned kQueryCount = kFramesInFlight * kQueriesPerFrame;
+/// HOW MANY SCENES MAY HOLD TIMESTAMP SLOTS AT ONCE. The product case is more
+/// than one drawn scene per frame — the editor plus a material-preview or
+/// thumbnail scene — and each needs its OWN query range, or the second scene of
+/// a frame overwrites the first's timestamps before they are read.
+constexpr unsigned kMaxTimedScenes = 8u;
+constexpr unsigned kQueryCount = kMaxTimedScenes * kFramesInFlight * kQueriesPerFrame;
+/// Compaction size queries live in a RING, not at slots 0..n: two BLAS batches
+/// within the read-back window would otherwise write the same slots and the
+/// second batch's sizes would be read as the first's — a COMPACT copy into a
+/// buffer sized for a different structure.
+constexpr unsigned kCompactRing = 64u;
 
 /// A plain owned VkBuffer. Ogre's VaoManager cannot make one with the usage
 /// bits an acceleration structure needs (AS storage, scratch, instance arrays),
@@ -201,12 +213,11 @@ private:
         /// written, waiting; 2 = compacted (or declined).
         unsigned compactState = 0;
         unsigned compactSlot = 0;
-        unsigned compactFrame = 0;
-        /// The uncompacted structure, kept alive until the copy has certainly
-        /// executed, then freed.
-        VkAccelerationStructureKHR oldAs = VK_NULL_HANDLE;
-        RawBuffer oldStorage;
-        unsigned oldFreeFrame = 0;
+        uint32_t compactFrame = 0;
+        /// The last frame an instance referenced this mesh (finding 5). A BLAS
+        /// nothing has traced for a while is memory — and a held MeshPtr — kept
+        /// for a mesh the scene may never show again.
+        uint32_t lastSeen = 0;
     };
 
     struct SceneAs {
@@ -231,6 +242,18 @@ private:
         /// forces a rebuild rather than a refit.
         unsigned long long setSignature = 0;
 
+        /// THIS SCENE'S OWN timestamp range in the shared pool, and its own
+        /// in-flight record. Both are per SCENE, not per frame: two scenes
+        /// drawn in one frame each write timestamps, and a single shared ring
+        /// indexed by the frame number would have the second overwrite the
+        /// first (audit round 2, finding 3).
+        unsigned queryBase = 0;
+        bool     hasQueryBase = false;
+        struct PendingTimes {
+            unsigned frame = 0; bool blas = false; bool tlas = false; bool live = false;
+        };
+        PendingTimes pending[kFramesInFlight];
+
         RayQueryStatus st;
     };
 
@@ -248,7 +271,7 @@ private:
                     unsigned &built, std::string &err);
     void runCompaction(SceneAs &sa, VkCommandBuffer cmd);
     bool buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::string &err);
-    void readTimestamps();
+    void readTimestamps(SceneAs &sa);
 
     /// Ogre's frame command buffer, with every encoder closed first: an
     /// acceleration-structure build may not be recorded inside a render pass,
@@ -270,17 +293,39 @@ private:
 
     VkQueryPool mTimestamps = VK_NULL_HANDLE;
     VkQueryPool mCompactSizes = VK_NULL_HANDLE;
+    /// The compaction ring's write cursor (finding 4). `mCompactSlot` existed
+    /// for this and was never used; batches wrote 0..n every time.
     unsigned mCompactSlot = 0;
-    /// Which timestamp pairs were WRITTEN in which frame, so the read-back
-    /// never touches a query nobody wrote.
-    struct PendingTimes { unsigned frame = 0; bool blas = false; bool tlas = false; OgreScene *scene = nullptr; };
-    PendingTimes mPending[kFramesInFlight];
-    unsigned mFrame = 0;
+    /// Which compaction slots are still owed a read, so a new batch never
+    /// overwrites a pending one.
+    unsigned mCompactPending = 0;
+    /// How many scenes have been handed a timestamp range.
+    unsigned mTimedScenes = 0;
+
+    /// THE FRAME CLOCK IS OGRE'S, NOT OURS (finding 3). The counter this used to
+    /// keep was incremented once per updateScene CALL, and updateRayQuery calls
+    /// that once per DRAWN scene — so with the editor plus one preview scene it
+    /// ran at twice the frame rate and every "wait N frames in flight" guard
+    /// waited half as long as it claimed. A scratch arena could be freed while
+    /// the build that reads it was still queued.
+    ///
+    /// VaoManager::getFrameCount() is the number the PIN retires its own
+    /// resources on, and getDynamicBufferMultiplier() is the depth it considers
+    /// in flight, so taking both means the tier and the pin agree by
+    /// construction rather than by a matching constant.
+    uint32_t frameNow() const;
+    uint32_t framesInFlight() const;
+    /// A structure or buffer that must not be freed until the frames that could
+    /// still be reading it have retired.
+    struct Retired { RawBuffer buf; VkAccelerationStructureKHR as = VK_NULL_HANDLE; uint32_t frame = 0; };
+    std::vector<Retired> mRetireBin;
+    void retire(RawBuffer &b);
+    void retire(VkAccelerationStructureKHR &as, RawBuffer &storage);
+    void drainRetired();
+    void evictStaleBlas(SceneAs &sa);
 
     std::unordered_map<OgreScene *, SceneAs> mScenes;
     std::vector<ScratchArena> mRetired;      ///< scratch arenas awaiting their frame
-    struct RetiredScratch { RawBuffer buf; unsigned frame; };
-    std::vector<RetiredScratch> mScratchBin;
 };
 
 // ---------------------------------------------------------------------------
@@ -348,6 +393,90 @@ VkDeviceAddress RayQueryTier::addressOf(VkBuffer b) const {
     return mFn.getBufferDeviceAddress(mVk, &info);
 }
 
+uint32_t RayQueryTier::frameNow() const {
+    // Ogre's own frame counter — the one it retires its dynamic buffers on.
+    return mDev && mDev->mVaoManager ? mDev->mVaoManager->getFrameCount() : 0u;
+}
+
+uint32_t RayQueryTier::framesInFlight() const {
+    const uint32_t n = mDev && mDev->mVaoManager
+                           ? uint32_t(mDev->mVaoManager->getDynamicBufferMultiplier())
+                           : kFramesInFlight;
+    return n ? n : kFramesInFlight;
+}
+
+/// RETIRE, NEVER FREE IN PLACE. Anything this frame recorded a reference to —
+/// a scratch arena a queued build reads, a structure a queued trace reads, the
+/// instance array a queued TLAS build reads — is released only once Ogre's own
+/// frame counter has moved past the depth it keeps in flight. This is what
+/// replaces the vkDeviceWaitIdle calls (finding 6): the GPU is never drained,
+/// the memory is simply handed back later.
+void RayQueryTier::retire(RawBuffer &b) {
+    if (!b.buffer && !b.memory) return;
+    Retired r;
+    r.buf = b;
+    r.frame = frameNow();
+    mRetireBin.push_back(r);
+    b = RawBuffer();
+}
+
+void RayQueryTier::retire(VkAccelerationStructureKHR &as, RawBuffer &storage) {
+    Retired r;
+    r.as = as;
+    r.buf = storage;
+    r.frame = frameNow();
+    mRetireBin.push_back(r);
+    as = VK_NULL_HANDLE;
+    storage = RawBuffer();
+}
+
+/// EVICT A BLAS NOTHING POINTS AT ANY MORE (finding 5). A bottom-level
+/// structure is memory AND a held MeshPtr, and the hold is what keeps a mesh's
+/// vertex buffers alive under a structure built over them. Keeping one for a
+/// mesh no instance has referenced for a long while pins geometry the scene has
+/// finished with — and it compounds the compaction ring, because every stale
+/// entry is a slot the ring may still be waiting on.
+///
+/// The window is generous on purpose: a mesh that flickers in and out of the
+/// traced set (an object hidden and shown) must not pay a rebuild each time.
+void RayQueryTier::evictStaleBlas(SceneAs &sa) {
+    static constexpr uint32_t kEvictAfterFrames = 600u;      // ~10 s at 60 Hz
+    const uint32_t now = frameNow();
+    for (size_t i = 0; i < sa.blas.size(); ++i) {
+        Blas &bl = sa.blas[i];
+        if (!bl.as || bl.compactState == 1u) continue;        // a size query is still owed
+        if (bl.lastSeen == 0u || uint32_t(now - bl.lastSeen) < kEvictAfterFrames) continue;
+        // The slot stays (indices are referenced by blasOfMesh and by the
+        // instance patches); only its contents go, and the map entry with them,
+        // so the next sighting rebuilds into a fresh slot.
+        for (auto it = sa.blasOfMesh.begin(); it != sa.blasOfMesh.end();) {
+            if (it->second == i) it = sa.blasOfMesh.erase(it); else ++it;
+        }
+        retire(bl.as, bl.storage);
+        bl.mesh.reset();
+        bl.triangles = 0;
+        bl.address = 0;
+        bl.compactState = 0;
+        bl.lastSeen = 0;
+        sa.setSignature = 0;      // the set changed: the next TLAS is a rebuild
+    }
+}
+
+void RayQueryTier::drainRetired() {
+    const uint32_t now = frameNow(), keep = framesInFlight() + 1u;
+    for (size_t i = 0; i < mRetireBin.size();) {
+        // Unsigned subtraction: the pin's counter wraps, and "now - then" is
+        // the elapsed count either way as long as the gap is small.
+        if (uint32_t(now - mRetireBin[i].frame) >= keep) {
+            if (mRetireBin[i].as) mFn.destroyAccelerationStructure(mVk, mRetireBin[i].as, nullptr);
+            dropBuffer(mRetireBin[i].buf);
+            mRetireBin.erase(mRetireBin.begin() + long(i));
+        } else {
+            ++i;
+        }
+    }
+}
+
 VkCommandBuffer RayQueryTier::frameCmd() {
     // OUTSIDE ANY ENCODER. Ogre tracks whether it is inside a render, compute
     // or copy encoder; vkCmdBuildAccelerationStructuresKHR may not be recorded
@@ -357,8 +486,13 @@ VkCommandBuffer RayQueryTier::frameCmd() {
     // The pin's own public accessor — usable from outside the plugin since
     // ogre-patch 0040 exported Ogre::onVulkanFailure, which its device-lost
     // branch calls and which the Vulkan render system did not export (so this
-    // line compiled and failed to LINK). It returns null only when the device
-    // was lost near a submit; the caller records nothing that frame.
+    // line compiled and failed to LINK).
+    //
+    // IT NEVER RETURNS NULL: on a lost device the accessor's checkVkResult
+    // THROWS (the pin's onVulkanFailure raises, OgreVulkanRenderSystem.cpp).
+    // The null guard at the call site is therefore belt-and-braces, not the
+    // device-lost path it once claimed to be — the honest device-lost question
+    // is the render system's own reason string, asked before we record.
     return mDev->mGraphicsQueue.getCurrentCmdBuffer();
 }
 
@@ -370,6 +504,21 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
         return false;
     }
     mDev = mRs->getVulkanDevice();
+    if (mDev && mDev->mPhysicalDevice) {
+        // SPIR-V 1.4 NEEDS A 1.2 DEVICE (audit C-7). Our module is compiled at
+        // --target-env spirv1.4 and is only legal on a device whose own
+        // apiVersion is at least 1.2; the extension check below does not imply
+        // it. Refusing here is a supported no-rays boot, not a failure.
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(mDev->mPhysicalDevice, &props);
+        if (props.apiVersion < VK_API_VERSION_1_2) {
+            err = "rayquery: the device reports Vulkan " +
+                  std::to_string(VK_VERSION_MAJOR(props.apiVersion)) + "." +
+                  std::to_string(VK_VERSION_MINOR(props.apiVersion)) +
+                  ", and the tier's SPIR-V 1.4 module needs 1.2";
+            return false;
+        }
+    }
     if (!mDev || !mDev->hasRayQuery()) {
         err = "rayquery: the device has no VK_KHR_ray_query (ogre-patch 0038 missing, or the "
               "driver does not advertise it)";
@@ -492,9 +641,7 @@ void RayQueryTier::close() {
         SceneAs &sa = kv.second;
         for (Blas &bl : sa.blas) {
             if (bl.as) mFn.destroyAccelerationStructure(mVk, bl.as, nullptr);
-            if (bl.oldAs) mFn.destroyAccelerationStructure(mVk, bl.oldAs, nullptr);
             dropBuffer(bl.storage);
-            dropBuffer(bl.oldStorage);
             bl.mesh.reset();
         }
         if (sa.tlas) mFn.destroyAccelerationStructure(mVk, sa.tlas, nullptr);
@@ -503,8 +650,11 @@ void RayQueryTier::close() {
         dropBuffer(sa.instances);
     }
     mScenes.clear();
-    for (RetiredScratch &r : mScratchBin) dropBuffer(r.buf);
-    mScratchBin.clear();
+    for (Retired &r : mRetireBin) {
+        if (r.as) mFn.destroyAccelerationStructure(mVk, r.as, nullptr);
+        dropBuffer(r.buf);
+    }
+    mRetireBin.clear();
     if (mDescPool) vkDestroyDescriptorPool(mVk, mDescPool, nullptr);
     if (mPipeline) vkDestroyPipeline(mVk, mPipeline, nullptr);
     if (mPipeLayout) vkDestroyPipelineLayout(mVk, mPipeLayout, nullptr);
@@ -522,22 +672,38 @@ void RayQueryTier::close() {
     mVk = VK_NULL_HANDLE;
 }
 
+/// A SCENE IS GONE. Called from OgreScene::destroy(), which is the only place
+/// that knows it — without that call (and there was none until audit round 2's
+/// finding 2) every destroyed preview or thumbnail scene left its structures,
+/// its instance buffer and the MeshPtrs it holds alive for the process's life
+/// under a dangling key, and a recycled OgreScene ADDRESS inherited a dead
+/// scene's structures: a TLAS built for someone else's items, a blasOfMesh
+/// pointing at meshes this scene never had, and an epoch that made the tier
+/// think nothing had moved. That is exactly the aliasing the held MeshPtr
+/// exists to prevent, arriving by another door.
+///
+/// Everything retires through the frame-tagged bin rather than behind a device
+/// wait: a scene can be destroyed on any frame, and draining the GPU to free a
+/// thumbnail's structures would be a stall the user feels.
 void RayQueryTier::forgetScene(OgreScene *scene) {
     auto it = mScenes.find(scene);
     if (it == mScenes.end()) return;
-    vkDeviceWaitIdle(mVk);
     SceneAs &sa = it->second;
     for (Blas &bl : sa.blas) {
-        if (bl.as) mFn.destroyAccelerationStructure(mVk, bl.as, nullptr);
-        if (bl.oldAs) mFn.destroyAccelerationStructure(mVk, bl.oldAs, nullptr);
-        dropBuffer(bl.storage);
-        dropBuffer(bl.oldStorage);
+        retire(bl.as, bl.storage);
+        // The mesh hold ends with the RETIRE WINDOW, not here: the structure
+        // may still be read for a few frames, and it is built over that mesh's
+        // vertex buffers (finding 5).
         bl.mesh.reset();
     }
-    if (sa.tlas) mFn.destroyAccelerationStructure(mVk, sa.tlas, nullptr);
-    dropBuffer(sa.tlasStorage);
-    dropBuffer(sa.tlasScratch);
-    dropBuffer(sa.instances);
+    retire(sa.tlas, sa.tlasStorage);
+    retire(sa.tlasScratch);
+    retire(sa.instances);
+    // The compaction slots this scene still owed a read are never going to be
+    // read; hand them back or the ring leaks capacity until it stops compacting.
+    for (const Blas &bl : sa.blas)
+        if (bl.compactState == 1u && mCompactPending) --mCompactPending;
+    if (sa.hasQueryBase && mTimedScenes) --mTimedScenes;   // only exact on the last one out
     mScenes.erase(it);
 }
 
@@ -560,6 +726,9 @@ struct InstanceWriter final : public RayInstanceSink {
     bool wantSignature = false;
     std::unordered_map<const Ogre::Mesh *, size_t> *blasOfMesh = nullptr;
     const std::vector<VkDeviceAddress> *blasAddress = nullptr;
+    /// Slots referenced by this gather, so a BLAS nothing points at any more can
+    /// be evicted (finding 5).
+    std::vector<unsigned char> *seen = nullptr;
     /// Meshes seen this gather that have no BLAS yet, in first-seen order, and
     /// the instances that must have their reference patched once they do.
     std::vector<Ogre::MeshPtr> newMeshes;
@@ -612,6 +781,7 @@ struct InstanceWriter final : public RayInstanceSink {
 
         if (mesh == lastMesh && lastFound) {
             inst.accelerationStructureReference = (*blasAddress)[lastSlot];
+            if (seen && lastSlot < seen->size()) (*seen)[lastSlot] = 1u;
             if (wantSignature) { hash(1ull + lastSlot); hash(customIndex); hash(mask); }
             std::memcpy(&dst[idx], &inst, sizeof(inst));
             return;
@@ -619,6 +789,7 @@ struct InstanceWriter final : public RayInstanceSink {
         auto it = blasOfMesh->find(mesh);
         if (it != blasOfMesh->end()) {
             lastMesh = mesh; lastSlot = it->second; lastFound = true;
+            if (seen && it->second < seen->size()) (*seen)[it->second] = 1u;
             inst.accelerationStructureReference = (*blasAddress)[it->second];
             if (wantSignature) hash(1ull + it->second);
         } else {
@@ -888,35 +1059,59 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<Ogre::MeshPtr> &mes
 
     // COMPACTION, PHASE A: ask for the compacted sizes of what we just built.
     // The answer is read WITHOUT waiting, several frames later (runCompaction).
-    if (mCompactSizes && built <= 64u) {
-        VkMemoryBarrier mb{};
-        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-        mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0,
-                             nullptr, 0, nullptr);
+    // BUILD -> BUILD, ALWAYS (finding 1): the builds above share one arena and
+    // the reads below (compaction's size query, and the next frame's build over
+    // the same structures) must not start until they have finished. This barrier
+    // used to live INSIDE the compaction block, so a batch of more than
+    // kCompactRing structures — which skips compaction — emitted no barrier at
+    // all.
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    mb.dstAccessMask =
+        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0,
+                         nullptr, 0, nullptr);
+
+    // COMPACTION, PHASE A: ask for the compacted sizes of what we just built.
+    // The slots come from a RING with a write cursor (finding 4). Writing
+    // 0..n every time meant a second batch inside the read-back window
+    // overwrote a pending batch's sizes, and phase B then compacted a structure
+    // into a buffer sized for a different one. A batch the ring cannot hold
+    // without trampling something still pending simply skips compaction — it
+    // costs memory, never correctness.
+    if (mCompactSizes && built <= kCompactRing && mCompactPending + built <= kCompactRing) {
         std::vector<VkAccelerationStructureKHR> handles;
         handles.reserve(built);
         for (const Job &j : jobs)
             if (j.build.dstAccelerationStructure) handles.push_back(j.build.dstAccelerationStructure);
-        vkCmdResetQueryPool(cmd, mCompactSizes, 0, uint32_t(handles.size()));
-        mFn.cmdWriteProperties(cmd, uint32_t(handles.size()), handles.data(),
-                               VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
-                               mCompactSizes, 0);
-        unsigned q = 0;
-        for (const Job &j : jobs) {
-            Blas &bl = sa.blas[j.slot];
-            bl.compactState = 1;
-            bl.compactSlot = q++;
-            bl.compactFrame = mFrame;
+        const unsigned n = unsigned(handles.size());
+        // The ring is not allowed to wrap mid-batch: a contiguous run keeps the
+        // single cmdWriteProperties call, which is what the pin's API takes.
+        if (mCompactSlot + n > kCompactRing) mCompactSlot = 0;
+        if (mCompactSlot + n <= kCompactRing) {
+            vkCmdResetQueryPool(cmd, mCompactSizes, mCompactSlot, n);
+            mFn.cmdWriteProperties(cmd, n, handles.data(),
+                                   VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+                                   mCompactSizes, mCompactSlot);
+            unsigned q = mCompactSlot;
+            const uint32_t stamp = frameNow();
+            for (const Job &j : jobs) {
+                Blas &bl = sa.blas[j.slot];
+                bl.compactState = 1;
+                bl.compactSlot = q++;
+                bl.compactFrame = stamp;
+            }
+            mCompactSlot += n;
+            mCompactPending += n;
         }
     }
 
     // The arena is freed once the frames that could still be reading it are
     // certainly done — never immediately (it is referenced by a build this
     // command buffer has not submitted yet).
-    mScratchBin.push_back({ scratch, mFrame });
+    retire(scratch);
     return true;
 }
 
@@ -928,20 +1123,18 @@ bool RayQueryTier::ensureBlas(SceneAs &sa, const std::vector<Ogre::MeshPtr> &mes
 // when nothing can still be reading it.
 void RayQueryTier::runCompaction(SceneAs &sa, VkCommandBuffer cmd) {
     if (!mCompactSizes) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
     for (Blas &bl : sa.blas) {
-        if (bl.oldAs && mFrame >= bl.oldFreeFrame) {
-            mFn.destroyAccelerationStructure(mVk, bl.oldAs, nullptr);
-            bl.oldAs = VK_NULL_HANDLE;
-            dropBuffer(bl.oldStorage);
-        }
         if (bl.compactState != 1u) continue;
-        if (mFrame < bl.compactFrame + kFramesInFlight) continue;   // not submitted yet
+        if (uint32_t(now - bl.compactFrame) < inFlight) continue;   // not submitted yet
         VkDeviceSize compacted = 0;
         const VkResult r = vkGetQueryPoolResults(mVk, mCompactSizes, bl.compactSlot, 1,
                                                  sizeof(compacted), &compacted, sizeof(compacted),
                                                  VK_QUERY_RESULT_64_BIT);
         if (r != VK_SUCCESS || compacted == 0) continue;            // not available yet
         bl.compactState = 2;
+        // The slot is answered: the ring may reuse it.
+        if (mCompactPending) --mCompactPending;
         if (compacted >= bl.storage.size) continue;                 // nothing to win
         RawBuffer small;
         std::string err;
@@ -964,9 +1157,9 @@ void RayQueryTier::runCompaction(SceneAs &sa, VkCommandBuffer cmd) {
         cp.dst = dst;
         cp.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
         mFn.cmdCopy(cmd, &cp);
-        bl.oldAs = bl.as;
-        bl.oldStorage = bl.storage;
-        bl.oldFreeFrame = mFrame + kFramesInFlight + 1u;
+        // The uncompacted structure is RETIRED, not freed: this frame's copy
+        // still reads it, and so may a trace already queued.
+        retire(bl.as, bl.storage);
         bl.as = dst;
         bl.storage = small;
         VkAccelerationStructureDeviceAddressInfoKHR ai{};
@@ -993,25 +1186,33 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     VkAccelerationStructureBuildGeometryInfoKHR build{};
     build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-                  VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    // ALLOW_UPDATE costs tree quality and memory, and is useless unless a refit
+    // is actually going to be taken (finding 13). The default is a full rebuild
+    // — NVIDIA's own guidance for a TLAS, 0.21-0.24 ms at 8,001 instances — so
+    // the flag rides the same switch the refit does.
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    if (preferRefit()) build.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     build.mode = refit ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
                        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     build.geometryCount = 1;
     build.pGeometries = &geom;
 
+    // SIZE TO THE CAPACITY, NOT THE COUNT (finding 6). A build may use FEWER
+    // primitives than the size query was made for, so asking once per CAPACITY
+    // step and building with the live count is legal and means adding objects
+    // one at a time does not reallocate — and therefore does not drain the GPU
+    // — on every single add. The storage only grows when the capacity does.
     VkAccelerationStructureBuildSizesInfoKHR sizes{};
     sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-    mFn.getBuildSizes(mVk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build,
-                      &sa.instanceCount, &sizes);
+    const uint32_t sizeFor = std::max(sa.instanceCapacity, sa.instanceCount);
+    mFn.getBuildSizes(mVk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build, &sizeFor,
+                      &sizes);
 
     if (!sa.tlas || sa.tlasStorage.size < sizes.accelerationStructureSize) {
         if (sa.tlas) {
-            vkDeviceWaitIdle(mVk);
-            mFn.destroyAccelerationStructure(mVk, sa.tlas, nullptr);
-            sa.tlas = VK_NULL_HANDLE;
-            dropBuffer(sa.tlasStorage);
-            dropBuffer(sa.tlasScratch);
+            // RETIRED, not waited on: a queued trace may still be reading it.
+            retire(sa.tlas, sa.tlasStorage);
+            retire(sa.tlasScratch);
         }
         if (!makeBuffer(sizes.accelerationStructureSize,
                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, true,
@@ -1033,8 +1234,7 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
         mAsProps.minAccelerationStructureScratchOffsetAlignment, 1u);
     const VkDeviceSize need = std::max(sizes.buildScratchSize, sizes.updateScratchSize) + align;
     if (sa.tlasScratch.size < need) {
-        vkDeviceWaitIdle(mVk);
-        dropBuffer(sa.tlasScratch);
+        retire(sa.tlasScratch);      // a queued build may still be reading it
         if (!makeBuffer(need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, true, sa.tlasScratch, err))
             return false;
     }
@@ -1048,16 +1248,28 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     range.primitiveCount = sa.instanceCount;
     const VkAccelerationStructureBuildRangeInfoKHR *rangePtr = &range;
 
-    // A PREVIOUS FRAME MAY STILL BE TRACING THIS STRUCTURE. On one queue the
-    // dependency is not free: a trace (compute, AS read) must finish before the
-    // next frame's build writes over it. One memory barrier expresses it, and
-    // it costs nothing on a frame where nothing traced.
+    // WHAT THIS BUILD MUST WAIT FOR — all of it (finding 1). The old barrier
+    // named only a previous TRACE (compute, AS read), and missed three writers:
+    //
+    //   * LAST FRAME'S TLAS BUILD, which wrote this same structure and this
+    //     same scratch buffer. A write-after-write across command buffers is
+    //     not ordered for free.
+    //   * THE COMPACTION COPY recorded into THIS command buffer a few lines
+    //     earlier (runCompaction), which writes acceleration-structure memory.
+    //   * THE BLAS BUILDS of this same frame, whose structures this build
+    //     reads through the instance array's references.
+    //
+    // So the source is both stages and both accesses; the destination stays the
+    // build. It costs nothing on a frame where none of them happened.
     VkMemoryBarrier pre{};
     pre.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    pre.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    pre.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
     pre.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
                         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &pre, 0,
                          nullptr, 0, nullptr);
     mFn.cmdBuild(cmd, 1, &build, &rangePtr);
@@ -1081,27 +1293,26 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
 // ---------------------------------------------------------------------------
 /// Reads back the timestamp pairs a frame old enough to have finished wrote —
 /// with the availability bit, NEVER with a wait.
-void RayQueryTier::readTimestamps() {
-    if (!mTimestamps) return;
+void RayQueryTier::readTimestamps(SceneAs &sa) {
+    if (!mTimestamps || !sa.hasQueryBase) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
     for (unsigned i = 0; i < kFramesInFlight; ++i) {
-        PendingTimes &p = mPending[i];
-        if (!p.scene || mFrame < p.frame + kFramesInFlight) continue;
-        auto it = mScenes.find(p.scene);
+        SceneAs::PendingTimes &p = sa.pending[i];
+        if (!p.live || uint32_t(now - p.frame) < inFlight) continue;
         uint64_t data[kQueriesPerFrame * 2] = {};   // value + availability per query
         const VkResult r = vkGetQueryPoolResults(
-            mVk, mTimestamps, i * kQueriesPerFrame, kQueriesPerFrame, sizeof(data), data,
-            2 * sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-        if (r != VK_SUCCESS && r != VK_NOT_READY) { p.scene = nullptr; continue; }
+            mVk, mTimestamps, sa.queryBase + i * kQueriesPerFrame, kQueriesPerFrame, sizeof(data),
+            data, 2 * sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (r != VK_SUCCESS && r != VK_NOT_READY) { p.live = false; continue; }
         auto span = [&](unsigned a, unsigned b, float &out) {
             if (!data[a * 2 + 1] || !data[b * 2 + 1]) return;        // not available
             if (data[b * 2] <= data[a * 2]) return;
             out = float(double(data[b * 2] - data[a * 2]) * double(mTimestampPeriod) / 1.0e6);
         };
-        if (it != mScenes.end()) {
-            if (p.blas) span(0, 1, it->second.st.blasMs);
-            if (p.tlas) span(2, 3, it->second.st.tlasMs);
-        }
-        p.scene = nullptr;
+        if (p.blas) span(0, 1, sa.st.blasMs);
+        if (p.tlas) span(2, 3, sa.st.tlasMs);
+        p.live = false;
     }
 }
 
@@ -1121,23 +1332,46 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // editor with an alive TLAS cost nothing at rest.
     const unsigned long long epoch = scene->shadowEpoch();
     const bool moved = !sa.haveEpoch || epoch != sa.lastEpoch;
-    readTimestamps();
-    for (size_t i = 0; i < mScratchBin.size();) {
-        if (mFrame >= mScratchBin[i].frame + kFramesInFlight + 1u) {
-            dropBuffer(mScratchBin[i].buf);
-            mScratchBin.erase(mScratchBin.begin() + long(i));
-        } else {
-            ++i;
-        }
+    // THIS SCENE'S OWN timestamp range, handed out once. Past the budget a
+    // scene simply reports no GPU milliseconds — a thumbnail scene's timings
+    // are worth nothing and a missing number is better than a wrong one.
+    if (!sa.hasQueryBase && mTimedScenes < kMaxTimedScenes) {
+        sa.queryBase = mTimedScenes * kFramesInFlight * kQueriesPerFrame;
+        sa.hasQueryBase = true;
+        ++mTimedScenes;
     }
+    readTimestamps(sa);
+    drainRetired();
     bool compactionPending = false;
     for (const Blas &bl : sa.blas)
-        if (bl.compactState == 1u || bl.oldAs) { compactionPending = true; break; }
-    if (!moved && sa.tlas && !compactionPending) { ++mFrame; return; }
+        if (bl.compactState == 1u) { compactionPending = true; break; }
+    if (!moved && sa.tlas && !compactionPending) return;
 
     // --- the gather, straight into this frame's instance slot ---------------
-    const Clock::time_point t0 = Clock::now();
+    // gatherMs MEASURES THE GATHER (finding 14). It used to span everything
+    // from here to the end of command recording — the BLAS descriptions, the
+    // buffer creation, the compaction pass — and was read as "the cost of the
+    // instance walk", which it was not. Only the walk is timed now; the rest is
+    // GPU-side work whose cost the timestamps report.
+    double gatherMs = 0.0;
     sa.slot = (sa.slot + 1u) % kFramesInFlight;
+    const uint32_t frame = frameNow();
+
+    // COMPACTION FIRST, BEFORE THE GATHER. It REPLACES a bottom-level
+    // structure's device address, and the gather writes those addresses into
+    // the instance array — so running it after the gather (as this did) built a
+    // top-level structure pointing at the structures compaction had just
+    // retired. They stayed alive for the retire window and were then freed
+    // under a TLAS that a still scene never rebuilds: a device loss a few
+    // frames after any compaction, which is exactly what two drawn scenes made
+    // reproducible (round 2, cases 7/8).
+    //
+    // Run here, the addresses are already the new ones when the gather reads
+    // them, and compaction's own `setSignature = 0` forces the full rebuild
+    // that publishes them.
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    runCompaction(sa, cmd);
     std::string err;
     for (int attempt = 0; attempt < 2; ++attempt) {
         InstanceWriter w;
@@ -1148,28 +1382,33 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         w.blasAddress = &addresses;
         w.capacity = sa.instanceCapacity;
         w.wantSignature = preferRefit();
+        std::vector<unsigned char> seen(sa.blas.size(), 0u);
+        w.seen = &seen;
         w.dst = sa.instances.mapped
                     ? static_cast<VkAccelerationStructureInstanceKHR *>(sa.instances.mapped) +
                           size_t(sa.slot) * sa.instanceCapacity
                     : nullptr;
+        const Clock::time_point tGather = Clock::now();
         scene->gatherRayInstances(w);
+        gatherMs += msSince(tGather);
 
         if (w.count > sa.instanceCapacity || !sa.instances.mapped) {
-            if (attempt == 1) { sa.st.enabled = false; ++mFrame; return; }
+            if (attempt == 1) { sa.st.enabled = false; return; }
             // GROW. One buffer, kFramesInFlight slots: the gather writes into
             // the slot this frame builds from, so a transform never passes
             // through an intermediate vector and the GPU is never reading the
             // slot being written.
             const unsigned want = std::max<unsigned>(64u, w.count + w.count / 2u + 16u);
-            vkDeviceWaitIdle(mVk);
-            dropBuffer(sa.instances);
+            // RETIRED, not waited on (finding 6): a TLAS build queued last
+            // frame still reads the old array. This runs on every scene's FIRST
+            // frame, so a device wait here was a stall every scene paid.
+            retire(sa.instances);
             if (!makeBuffer(VkDeviceSize(want) * kFramesInFlight *
                                 sizeof(VkAccelerationStructureInstanceKHR),
                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                             true, true, sa.instances, err)) {
                 Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
                 sa.st.enabled = false;
-                ++mFrame;
                 return;
             }
             sa.instanceCapacity = want;
@@ -1177,34 +1416,28 @@ void RayQueryTier::updateScene(OgreScene *scene) {
             continue;
         }
 
-        VkCommandBuffer cmd = frameCmd();
-        // NULL = the device was lost near a submit and Ogre has no open buffer.
-        // Record nothing, keep every structure, and try again next frame; the
-        // epoch is deliberately NOT advanced, so the next frame still sees the
-        // scene as moved and does the work then.
-        if (!cmd) { ++mFrame; return; }
-        if (mTimestamps) vkCmdResetQueryPool(cmd, mTimestamps, (mFrame % kFramesInFlight) * kQueriesPerFrame,
-                                             kQueriesPerFrame);
-        PendingTimes &pend = mPending[mFrame % kFramesInFlight];
-        pend = PendingTimes();
-        pend.frame = mFrame;
-        pend.scene = scene;
-        const unsigned qBase = (mFrame % kFramesInFlight) * kQueriesPerFrame;
+        const bool timed = mTimestamps && sa.hasQueryBase;
+        const unsigned ring = frame % kFramesInFlight;
+        const unsigned qBase = sa.queryBase + ring * kQueriesPerFrame;
+        if (timed) vkCmdResetQueryPool(cmd, mTimestamps, qBase, kQueriesPerFrame);
+        SceneAs::PendingTimes &pend = sa.pending[ring];
+        pend = SceneAs::PendingTimes();
+        pend.frame = frame;
+        pend.live = timed;
 
         unsigned built = 0;
         if (!w.newMeshes.empty()) {
-            if (mTimestamps)
+            if (timed)
                 vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 0);
             monitor::CacheScope scope(CacheKind::Gi, WorkReason::Added, 0, "rq.blas", mRs);
             if (!ensureBlas(sa, w.newMeshes, cmd, built, err)) {
                 Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
                 scope.cancel();
                 sa.st.enabled = false;
-                ++mFrame;
                 return;
             }
             scope.setUnits(built);
-            if (mTimestamps)
+            if (timed)
                 vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps,
                                     qBase + 1);
             pend.blas = built != 0u;
@@ -1217,8 +1450,6 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 w.dst[p.instance].accelerationStructureReference = sa.blas[it->second].address;
             }
         }
-        runCompaction(sa, cmd);
-
         sa.instanceCount = w.count;
         // REBUILD IS THE DEFAULT, refit the optimisation (NVIDIA's own guidance
         // for a TLAS: "consider PREFER_FAST_TRACE and perform only rebuilds").
@@ -1228,7 +1459,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         const bool sameSet = (sa.setSignature == w.signature) && sa.tlas;
         const bool refit = preferRefit() && sameSet;
         sa.setSignature = w.signature;
-        if (mTimestamps)
+        if (timed)
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mTimestamps, qBase + 2);
         {
             monitor::CacheScope scope(CacheKind::Gi, refit ? WorkReason::Moved : WorkReason::Rebuild,
@@ -1237,20 +1468,22 @@ void RayQueryTier::updateScene(OgreScene *scene) {
                 Ogre::LogManager::getSingleton().logMessage("rayquery: " + err);
                 scope.cancel();
                 sa.st.enabled = false;
-                ++mFrame;
                 return;
             }
             scope.setUnits(sa.instanceCount);
         }
-        if (mTimestamps)
+        if (timed)
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, mTimestamps, qBase + 3);
         pend.tlas = true;
+        for (size_t i = 0; i < seen.size() && i < sa.blas.size(); ++i)
+            if (seen[i]) sa.blas[i].lastSeen = frame;
         break;
     }
 
     sa.lastEpoch = epoch;
     sa.haveEpoch = true;
-    sa.st.gatherMs = float(msSince(t0));
+    evictStaleBlas(sa);
+    sa.st.gatherMs = float(gatherMs);
     sa.st.blasCount = int(sa.blas.size());
     sa.st.instances = int(sa.instanceCount);
     sa.st.triangles = 0;
@@ -1259,14 +1492,19 @@ void RayQueryTier::updateScene(OgreScene *scene) {
         sa.st.triangles += int(bl.triangles);
         sa.st.blasBytes += bl.storage.size;
     }
-    ++mFrame;
 }
 
 RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     auto it = mScenes.find(const_cast<OgreScene *>(scene));
     if (it == mScenes.end()) {
+        // A scene the tier has not seen yet (nothing has drawn it). `enabled`
+        // is the SWITCH's answer, not "false because there is no structure":
+        // the tier being open at all means the switch is on, and reporting
+        // false here made a fresh scene indistinguishable from a machine with
+        // rays switched off (round 2, finding 18).
         RayQueryStatus st;
         st.available = isOpen();
+        st.enabled = isOpen();
         return st;
     }
     return it->second.st;
@@ -1371,6 +1609,16 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeLayout, 0, 1, &set, 0,
                             nullptr);
     vkCmdDispatch(cmd, uint32_t((count + 63u) / 64u), 1, 1);
+    // THE HIT BUFFER IS READ BY THE HOST as soon as the fence signals, and a
+    // fence does not make a shader's writes visible to the CPU by itself
+    // (finding 12). The memory is HOST_COHERENT, so no invalidate is needed —
+    // but the availability operation is, and this is it.
+    VkMemoryBarrier toHost{};
+    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                         1, &toHost, 0, nullptr, 0, nullptr);
     vkEndCommandBuffer(cmd);
 
     VkFenceCreateInfo fci{};
@@ -1383,7 +1631,11 @@ bool RayQueryTier::traceBlocking(OgreScene *scene, const std::vector<float> &ray
     si.pCommandBuffers = &cmd;
     bool ok = vkQueueSubmit(mDev->mGraphicsQueue.mQueue, 1, &si, fence) == VK_SUCCESS;
     // NEVER WAIT ON A FENCE WHOSE SUBMIT FAILED — that is an infinite hang.
-    if (ok) vkWaitForFences(mVk, 1, &fence, VK_TRUE, UINT64_MAX);
+    // The WAIT's result matters as much as the submit's: on a lost device it
+    // returns VK_ERROR_DEVICE_LOST and the hit buffer holds nothing. Reporting
+    // success there would hand a caller a batch of zeros as if they were
+    // answers.
+    if (ok) ok = vkWaitForFences(mVk, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
     if (ok) {
         hits.resize(count * 4u);
         memcpy(hits.data(), hitBuf.mapped, hits.size() * sizeof(float));
@@ -1442,11 +1694,23 @@ void OgreEngine::shutdownRayQuery() {
     mRayTier = nullptr;
 }
 
+void OgreScene::forgetRayQuery() {
+    if (mEngine && mEngine->mRayTier) mEngine->mRayTier->forgetScene(this);
+}
+
 RayQueryStatus OgreScene::rayQueryStatus() const {
     RayQueryStatus st;
     if (!mEngine) return st;
     st.available = mEngine->rayQueryAvailable();
-    if (!mEngine->mRayTier) return st;
+    if (!mEngine->mRayTier) {
+        // NO TIER YET — either nothing has drawn since it was switched on, or
+        // it is off. `enabled` must say WHICH (round 2, finding 18): reporting
+        // false for both made "switched on, first frame not drawn" look exactly
+        // like "this machine has ray tracing switched off", and a caller
+        // reading straight after app.rayTracing("auto") would be told no.
+        st.enabled = st.available && mEngine->rayTracing();
+        return st;
+    }
     return mEngine->mRayTier->status(this);
 }
 
@@ -1486,6 +1750,7 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
     return false;
 }
 void OgreScene::gatherRayInstances(RayInstanceSink &) const {}
+void OgreScene::forgetRayQuery() {}
 
 }   // namespace detail
 }   // namespace engine

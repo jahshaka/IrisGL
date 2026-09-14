@@ -2424,6 +2424,9 @@ public:
     /// skin cache) and alpha-tested datablocks (no any-hit without ray-tracing
     /// pipelines — a cut-out leaf would intersect as a solid quad).
     void gatherRayInstances(RayInstanceSink &sink) const;
+    /// DROP THIS SCENE'S acceleration structures (OgreScene::destroy calls it).
+    /// A no-op when the tier never held any. Defined in OgreRayQuery.cpp.
+    void forgetRayQuery();
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
     /// The tier reads this scene's PRIVATE caster epoch (shadowEpoch) to decide
     /// whether the acceleration structure can possibly be out of date — the same
