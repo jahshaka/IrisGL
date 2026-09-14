@@ -1062,8 +1062,18 @@ public:
     /// user switched pages. Seeding it from the view that was just showing
     /// removes that walk without making the two views share a history.
     ///
-    /// Same no-ops as resetExposureHistory: no workspace, no HDR, the fixed
-    /// form. Takes effect on the next rendered frame (the seed is a clear pass).
+    /// IT SURVIVES A CHAIN THAT CANNOT TAKE IT YET, which is the case it exists
+    /// for: a view that has not been shown carries the PASSTHROUGH chain, which
+    /// has no seed pass at all, and its HDR chain is built a moment later by
+    /// the host's first world push. A value handed over in that window is
+    /// REMEMBERED and spent on the chain the view next builds, before that
+    /// chain has rendered anything — exactly once; a build with no automatic
+    /// exposure drops it rather than holding a stale value for some later
+    /// rebuild. `scale` <= 0 (or non-finite) clears anything remembered and
+    /// means "the descriptor's own seed", which is resetExposureHistory().
+    ///
+    /// Otherwise it takes effect on the next rendered frame (the seed is a
+    /// clear pass).
     virtual void seedExposureHistory(float scale) = 0;
 
     /// DOES THIS VIEW DRAW THE EDITOR'S FURNITURE? (lane PLAYER-1.)

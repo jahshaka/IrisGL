@@ -4473,6 +4473,10 @@ private:
     /// Does this view draw the editor's furniture (View::setHelpersVisible)?
     /// Graph shape — it is a per-pass visibility mask, ChainDesc::helpers.
     bool                       mHelpersVisible = true;
+    /// An exposure multiplier a host handed over before this view had a chain
+    /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
+    /// on the chain it builds, once; 0 = nothing owed.
+    float                      mPendingExposureSeed = 0.0f;
     std::string               &mError;
 };
 

@@ -490,11 +490,22 @@ void SceneMirror::onMaterialItemsRebuilt(MaterialId material)
 int SceneMirror::sync()
 {
     if (!mSource || !mSource->getRootNode()) return 0;
-    // RE-TAKE the graph if another mirror took it while this view was hidden
-    // (player and editor share one document; whichever page is visible syncs,
-    // so the visible page owns). The previous owner's evacuation hook releases
-    // its engine objects before the migration; our own entries were emptied
-    // the same way when WE lost it, so the walk below rebuilds from scratch.
+    // RE-TAKE the graph if another mirror took this document while we were not
+    // looking. NOTHING IN THE TREE DOES THAT ANY MORE (lane PLAYER-1, owner
+    // decision 2026-09-14): the Player page used to be a second engine scene
+    // with a second mirror over the editor's document, and it is now a second
+    // VIEW on the editor's scene; every other host — thumbnails, the asset and
+    // material previews, the avatar module — builds its OWN document. So this
+    // branch is not taken in any shipping path and the cost of keeping it is
+    // one pointer compare per sync.
+    //
+    // It is KEPT as the guard it was written to be (the 2026-09-05 crash):
+    // should a host ever bind two mirrors to one document again, the result is
+    // a full re-walk here instead of particle systems and the planar pass
+    // reading nodes the migration had already destroyed. The previous owner's
+    // evacuation hook releases its engine objects before the migration; our own
+    // entries were emptied the same way when WE lost it, so the walk below
+    // rebuilds from scratch.
     if (mSource->graphScene() != mBoundHandle) {
         mSource->setGraphScene(mBoundHandle);
         mSource->_setGraphEvacuationHook([this] { evacuateEngineObjects(); });

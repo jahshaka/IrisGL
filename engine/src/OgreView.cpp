@@ -514,19 +514,37 @@ const PostFxDesc &OgreView::postFx() const { return mPostFx; }
 void OgreView::resetExposureHistory() { seedExposureHistory(0.0f); }
 
 void OgreView::seedExposureHistory(float scale) {
-    // NOTHING TO RE-SEED unless the automatic exposure is actually in the graph:
-    // the seed pass only exists for `hdr && !tonemapFixed` (chain::build), and
-    // an offscreen view without allowOffscreen has no chain at all.
-    if (!mWorkspace || !mChainHandles.exposureSeed) return;
-    const ChainDesc d = chainDesc();
-    if (!d.hdr || d.tonemapFixed) return;
     // A CALLER'S VALUE IS THE TONEMAPPER'S MULTIPLIER, which is exactly what
     // the seed pass writes and what measuredExposureScale() reads back — one
-    // unit, three places. Anything that is not a positive finite number falls
-    // back to the descriptor's own seed rather than poisoning the history
-    // (the reflection_map class of defect: `isfinite && > 0` is the gate).
-    const float seed = (scale > 0.0f && std::isfinite(scale))
-                           ? scale : chain::exposureSeed(d.exposure);
+    // unit, three places. Anything that is not a positive finite number means
+    // "the descriptor's own seed" (the reflection_map class of defect:
+    // `isfinite && > 0` is the gate), which is what resetExposureHistory is.
+    const bool haveValue = scale > 0.0f && std::isfinite(scale);
+    // THE GRAPH MAY NOT HAVE A SEED PASS YET, and the caller cannot be expected
+    // to know (lead review round 2). The seed pass only exists for
+    // `hdr && !tonemapFixed` (chain::build), and an offscreen view without
+    // allowOffscreen has no chain at all — but the one caller that matters is a
+    // SECOND ON-SCREEN VIEW taking the screen, whose chain is still the
+    // passthrough one at that moment and becomes an HDR chain on its first
+    // synced frame. Returning quietly there is how the hand-over became a
+    // silent no-op followed by a fresh chain seeding itself at 1.0.
+    //
+    // So a value the graph cannot take yet is REMEMBERED, and attachWorkspace —
+    // the one seam every (re)build goes through — spends it on the chain it
+    // just built, before that chain has rendered anything. Exactly once: a
+    // build that has no seed pass DROPS it rather than holding a stale
+    // exposure for some later, unrelated rebuild.
+    if (!mWorkspace || !mChainHandles.exposureSeed) {
+        mPendingExposureSeed = haveValue ? scale : 0.0f;
+        return;
+    }
+    const ChainDesc d = chainDesc();
+    if (!d.hdr || d.tonemapFixed) {
+        mPendingExposureSeed = haveValue ? scale : 0.0f;
+        return;
+    }
+    mPendingExposureSeed = 0.0f;
+    const float seed = haveValue ? scale : chain::exposureSeed(d.exposure);
     const Ogre::ColourValue colour(seed, seed, seed, seed);
     JAH_TRY {
         writeLiveClearColour(mWorkspace, mChainHandles.exposureSeed, colour);
@@ -704,6 +722,18 @@ bool OgreView::attachWorkspace() {
         // particular graph has not written it yet (measuredExposureScale says
         // why that is not the same question as mFramesPresented).
         mWorkspaceFramesPresented = 0;
+        // THE REMEMBERED EXPOSURE SEED (seedExposureHistory's note). This is
+        // the frame-zero of a brand-new graph: its keep_content textures have
+        // just been created and the seed pass still owes its one initial
+        // execution, so a value the caller handed over before this chain
+        // existed lands here and nowhere else. Spent exactly once — a chain
+        // with no seed pass drops it rather than holding it for a later,
+        // unrelated rebuild.
+        if (mPendingExposureSeed > 0.0f) {
+            const float pending = mPendingExposureSeed;
+            mPendingExposureSeed = 0.0f;
+            seedExposureHistory(pending);
+        }
         // RE-ASSERT THE INSET'S POSITION (CAMERAS_SPEC §7.2's ordering trap).
         // The main workspace has just been appended, so it is now LAST on the
         // target and would paint over the inset. There is no reorder API: the
