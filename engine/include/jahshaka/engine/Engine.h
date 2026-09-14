@@ -136,6 +136,16 @@ public:
     /// and the direct light cannot disagree; the link itself is never armed
     /// here (it would take the light's colour and power over entirely).
     ///
+    /// ...TIMES THE EARTH. The scattering model is frozen below the horizon
+    /// (its own inputs clamp there), so on its own it would light the scene
+    /// from a sun that has set — at 0.2 of noon with a thin sky. The answer is
+    /// multiplied by a smooth occlusion that runs 1 to 0 between geometric
+    /// elevations -0.305 and -0.835 degrees: the sun's own 0.53-degree disc
+    /// setting through the horizon, lifted by 0.57 degrees of refraction. So
+    /// this value REACHES ZERO, continuously, and a host does not need a
+    /// threshold to decide when night starts — the light, the sun disc and the
+    /// sun's shadow all ride this one number and fade together.
+    ///
     /// `toSun` points AT the sun (the opposite of the direction the light
     /// travels), in world space; it does not have to be normalised. Cheap to
     /// call per frame: the answer is memoised against the direction and the

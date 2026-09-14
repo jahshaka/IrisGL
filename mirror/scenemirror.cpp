@@ -6920,22 +6920,48 @@ void SceneMirror::applySky(View *view)
             // A ZERO ANGULAR SIZE IS NOT A DISC, and the shader cannot draw one:
             // its edge is a smoothstep between cos(radius) and cos(0.88*radius),
             // which are the SAME number at radius 0 — undefined behaviour, and
-            // in practice a full-screen flash. sunAngle 0 means "no disc".
-            if (travel.lengthSquared() > 1e-12f && sunLight->sunAngle > 0.0f) {
+            // in practice a full-screen flash. A size of 0 means "no disc".
+            // (The dial cannot reach 0 — the verb, the reader and the panel row
+            // all clamp at iris::kMinSunDiscSize — so this is the guard that
+            // keeps a hand-edited document out of the undefined case.)
+            const float discSizeDeg = mSource->sunDiscSize;
+            if (travel.lengthSquared() > 1e-12f && discSizeDeg > 0.0f) {
                 const iris::Vec3 toSun = -travel.normalized();
                 sun.enabled = true;
                 sun.dir[0] = toSun.x(); sun.dir[1] = toSun.y(); sun.dir[2] = toSun.z();
-                sun.angularDiameterDeg = sunLight->sunAngle;
+                sun.angularDiameterDeg = discSizeDeg;
                 sun.inProbes = mSource->sunDiscInProbes;
                 // THE DISC'S RADIANCE. The sun light's colour (decoded, §4)
                 // times its intensity times an overdrive: the disc must CLIP
                 // white in an LDR frame and bloom under the HDR chain, which a
                 // radiance of 1.0 does not do once the tonemapper has had it.
                 // Not a dial — a sun that does not read as a sun is a defect,
-                // not a setting (the SIZE is the dial, on the light).
+                // not a setting; the SIZE is the dial (Scene::sunDiscSize).
+                //
+                // ...DIVIDED BY THE SOLID ANGLE THE DIAL ASKED FOR (lane
+                // SUN-DISC-1). Radiance times solid angle is IRRADIANCE, and
+                // the solid angle of a small disc goes as the square of its
+                // angular diameter — so a disc drawn at twice the size with the
+                // same radiance puts four times the energy into the frame, into
+                // the bloom pass and, with `inProbes` on, into the reflection
+                // captures. That would make a picture setting a lighting
+                // setting. Normalising by (default/size)^2 keeps the TOTAL
+                // fixed: the dial spreads the same energy over a wider disc,
+                // and only the default's own level — the look constant below —
+                // says how bright the sun is.
+                //
+                // The default is the reference point rather than the physical
+                // 0.53 degrees on purpose: normalising to the physical angle
+                // would put the shipped disc at 1/16 of this radiance, far
+                // under the HDR chain's bright-pass threshold (5.0), and a sun
+                // that does not bloom is exactly the complaint this lane
+                // answers ("the sun disc is too small", owner 2026-09-14). The
+                // disc is a PICTURE of the sun, glare included.
                 const float kDiscRadiance = 8.0f;
+                const float sizeRatio = iris::kDefaultSunDiscSize / discSizeDeg;
                 const iris::LinearColor c = iris::linearOf(sunLight->color);
-                const float k = kDiscRadiance * std::max(0.0f, sunLight->intensity);
+                const float k = kDiscRadiance * std::max(0.0f, sunLight->intensity)
+                                * sizeRatio * sizeRatio;
                 // THE SAME EFFECTIVE COLOUR THE LIGHT GETS (SUN_FOLLOWS_
                 // ATMOSPHERE): a sun that looks white in the sky while lighting
                 // the room orange would be the defect this toggle exists to

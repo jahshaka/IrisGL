@@ -62,16 +62,15 @@ public:
     QColor color;
     float intensity;
 
-    /// THE SUN'S ANGULAR DIAMETER in degrees (SKY_LIGHT_SPEC.md §3; Unreal's
-    /// "Source Angle"). The real sun subtends 0.53 degrees, which is the
-    /// default. It sizes the sun DISC drawn in the sky where this light points
-    /// — and it is the row a future soft-shadow penumbra would read, which is
-    /// why it is a property of the light and not of the disc.
-    ///
-    /// Only meaningful on the scene's SUN (the first directional light): a
-    /// secondary directional draws no disc, and the panel only shows the row
-    /// on the sun.
-    float sunAngle = 0.53f;
+    // THE SUN'S ANGULAR SIZE USED TO LIVE HERE (`sunAngle`, 0.53 degrees).
+    // It is GONE (lane SUN-DISC-1, CRUD): the only thing that ever read it was
+    // the sun DISC, the disc's drawn size is deliberately NOT the sun's
+    // physical angle any more (the default is four times it, because that is
+    // what a photograph's sun looks like), and two rows in two panels for one
+    // number is how they came to disagree. The dial is Scene::sunDiscSize,
+    // beside the other two disc rows in the World panel. A soft-shadow
+    // penumbra, when it is built, reads the PHYSICAL angle
+    // (iris::kPhysicalSunDiscSize) and not a picture setting.
 
     /// FOLLOWS ATMOSPHERE (SUN_FOLLOWS_ATMOSPHERE, owner 2026-09-14 — Unreal's
     /// Sun Sky does the same thing). ON by default.
@@ -89,7 +88,7 @@ public:
     ///
     /// INERT ON EVERY OTHER SKY. A photograph, a gradient or a picked colour
     /// knows nothing about the air, so the tint is white and the row says so.
-    /// Meaningful on the scene's SUN only, like sunAngle above.
+    /// Meaningful on the scene's SUN only.
     ///
     /// A document written before this reads TRUE (the reader's absent-key
     /// answer and this default agree — the trap SceneReader's own header
