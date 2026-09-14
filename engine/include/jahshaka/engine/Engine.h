@@ -49,6 +49,38 @@ public:
     /// radiance L is sh[0..2] = L and the rest zero.
     /// This is the only ambient path the backend has: setAmbient() converts.
     virtual void        setAmbientSh(const float sh[27]) = 0;
+    /// THE ENVIRONMENT'S GAIN AS A SPECULAR LIGHT — the other half of
+    /// setAmbientSh, and the half that used to be missing.
+    ///
+    /// setAmbientSh carries the environment's DIFFUSE contribution, already
+    /// scaled by whatever light the host decided the environment is: 27 zeros
+    /// mean "no environment light" and a matte surface goes black. Its
+    /// SPECULAR contribution does not travel in those coefficients — it is
+    /// sampled from the prefiltered environment cube — so a host that scaled
+    /// the coefficients and stopped there left a mirror reflecting a sky that
+    /// was lighting nothing (measured: a metal sphere reflected the sky
+    /// byte-identically with every light in the scene hidden, Sky Light
+    /// included).
+    ///
+    /// This is that scale, and the two are meant to be pushed together: the
+    /// gain of the environment light in the same units, so 1.0 is "the cube's
+    /// own radiance" and 0.0 is "there is no environment light", which makes
+    /// the sky a BACKDROP — still drawn, still visible behind the scene,
+    /// reflecting nothing into it.
+    ///
+    /// It is a SCALAR because the pin's is: the value rides
+    /// `ambientUpperHemi.w` and HlmsPbs broadcasts it over the three channels
+    /// (`envS.xyz *= midf3_c( passBuf.ambientUpperHemi.w )`). A host with a
+    /// TINTED environment light should therefore pass its luminance and accept
+    /// that the tint shows in the diffuse half only.
+    ///
+    /// NOT APPLIED WHILE PARALLAX-CORRECTED PROBES ARE BOUND. A probe is a
+    /// photograph of the scene's real radiance — mostly of GEOMETRY lit by the
+    /// scene's own lamps — and dimming it with the sky's gain would put a room
+    /// out because its skylight was turned down. The gate is about the SKY, and
+    /// under PCC the sky reaches a surface only through what a probe captured.
+    /// 1.0 is the default, and the value is clamped at zero.
+    virtual void        setEnvironmentLightScale(float gain) = 0;
     /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
     /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
     /// the sky are never fogged. Off by default, and OFF IS EXACT: a disabled

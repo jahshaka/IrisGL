@@ -6058,13 +6058,44 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // that asked for it, exactly like the IBL convolution.
         const bool hasSky = mTarget->skyAmbientSh(mSkyAmbientSh);
         const auto skyLight = mSource->skyLight();
-        if (skyLight && hasSky) {
+        // The SPECULAR half of the same light (SMOKE-ENGINE-1 item 2). The
+        // coefficients below carry the sky's DIFFUSE contribution scaled by
+        // this light; its reflection in a mirror is sampled from the captured
+        // cube instead and used to arrive unscaled, so the sky went on
+        // reflecting into a scene it was lighting not at all. One scalar closes
+        // it, and it has to be a scalar: the pin's envmapScale rides
+        // `ambientUpperHemi.w` and HlmsPbs broadcasts it over the channels, so a
+        // TINTED Sky Light tints the diffuse half and scales the specular half
+        // by the tint's LUMINANCE. Exactly 1.0 for the default (white, intensity
+        // 1), which is the value at which HlmsPbs does not even set the
+        // `envmap_scale` property — so no shipped scene's pixels move.
+        //
+        // NO SKY LIGHT IS 0, on the same predicate the coefficients use
+        // (skyLight() is the first VISIBLE one), so hiding it takes the
+        // reflections with it. `hasSky` is deliberately NOT in this condition:
+        // with no sky there is no cube bound and the scale is moot, and making
+        // it 0 for one frame while the capture lands would flicker every
+        // reflection in the scene on a sky change.
+        float envScale = 0.0f;
+        if (skyLight) {
             const iris::LinearColor tint = iris::linearOf(skyLight->color);
             const float gain[3] = { tint.r * skyLight->intensity,
                                     tint.g * skyLight->intensity,
                                     tint.b * skyLight->intensity };
-            for (int i = 0; i < 9; ++i)
-                for (int c = 0; c < 3; ++c) sh[i * 3 + c] = mSkyAmbientSh[i * 3 + c] * gain[c];
+            // Rec.709 luminance, the same weights the renderer uses everywhere
+            // else; they sum to exactly 1.0f in float, so a white light at
+            // intensity 1 is exactly 1.0f and not a neighbour of it.
+            envScale = 0.2126f * gain[0] + 0.7152f * gain[1] + 0.0722f * gain[2];
+            if (hasSky) {
+                for (int i = 0; i < 9; ++i)
+                    for (int c = 0; c < 3; ++c)
+                        sh[i * 3 + c] = mSkyAmbientSh[i * 3 + c] * gain[c];
+            }
+        }
+        if (!mEnvScalePushed || envScale != mLastEnvScale) {
+            mTarget->setEnvironmentLightScale(envScale);
+            mLastEnvScale = envScale;
+            mEnvScalePushed = true;
         }
         // Push on CHANGE only. The coefficients feed a pass buffer that HlmsPbs
         // rebuilds per pass anyway, but setSphericalHarmonics also re-decides the

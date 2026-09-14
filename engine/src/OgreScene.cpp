@@ -190,7 +190,7 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         // exactly this: "do not set this flag ... because the diffuse GI is
         // already gathered from another source of information".
         const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
-        mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, 1.0f, 0u);
+        mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, envmapScaleForPass(), 0u);
         // The VCT arm's own copy of the same ambient, in RADIANCE units — which
         // is what the coefficients already are, for a sky push and for
         // setAmbient's scaled pair alike: f(n) = c0 + c1 * n.y, so the poles
@@ -201,6 +201,62 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         mAmbientRadiance[1] = Colour(sh[0] - sh[3], sh[1] - sh[4], sh[2] - sh[5], 1.0f);
         applyVctAmbient();
     } JAH_CATCH(mError, );
+}
+
+// THE ENVIRONMENT'S GAIN AS A SPECULAR LIGHT (SMOKE-ENGINE-1 item 2, the
+// owner's "with all lights off the GPU sky still lights the scene").
+//
+// The DIFFUSE half of the sky has been gated on the Sky Light since SKY-GPU:
+// the mirror scales the sky's own integral by the light's intensity and tint
+// and pushes the product through setAmbientSh, so with no Sky Light it pushes
+// 27 zeros and a matte surface goes black. The SPECULAR half had no gate at
+// all — reflectionTexFor handed every material the sky's captured cube
+// whatever the scene's lights were doing, and a mirror sphere reflected the sky
+// BYTE-IDENTICALLY with every light hidden, the Sky Light included.
+//
+// One number closes it, because the pin already has the right one:
+// `SceneManager::setAmbientLight`'s fourth argument is HlmsPbs' envmapScale, it
+// rides `ambientUpperHemi.w`, and the pixel shader multiplies every env-probe
+// sample by it (`envS.xyz *= midf3_c( passBuf.ambientUpperHemi.w )`, plus the
+// `ApplyEnvMapScale` piece on the clear-coat and diffuse-GI paths). So the sky
+// reflects at the Sky Light's gain and vanishes with it, while the sky itself
+// stays VISIBLE: it is a picture until a Sky Light makes it a light.
+//
+// AT EXACTLY 1.0 NOTHING MOVES, and that is not a hope: HlmsPbs sets the
+// `envmap_scale` property only `if( envMapScale != 1.0f )`, so a default scene
+// (Sky Light intensity 1, white) generates the identical shader it always did
+// and renders the identical pixels.
+void OgreScene::setEnvironmentLightScale(float gain) {
+    const float g = gain > 0.0f ? gain : 0.0f;
+    if (g == mEnvLightScale) return;
+    mEnvLightScale = g;
+    // The value lives in the ambient pass data, so re-push what we already
+    // hold rather than waiting for the next ambient edit. setAmbientSh's own
+    // change guard compares the COEFFICIENTS, which have not moved, so this
+    // costs no probe re-capture and no raster-field re-integration — exactly
+    // right, because a probe capture is not lit by envmapScale.
+    JAH_TRY {
+        const float *sh = mLastAmbientSh;
+        const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
+        mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, envmapScaleForPass(), 0u);
+    } JAH_CATCH(mError, );
+}
+
+// WHY PCC IS EXEMPT. Under automatic parallax-corrected cubemaps the env-probe
+// slot holds a cube ARRAY of probe captures, not the sky — reflectionTexFor
+// returns nullptr for the sky cube there, deliberately (OgreSky.cpp's note on
+// the slot having one occupant). A probe capture is a photograph of the scene's
+// real radiance, most of it GEOMETRY lit by the scene's own lamps, and
+// upstream's shader scales those samples by the same `ambientUpperHemi.w`
+// (ForwardPlus_DecalsCubemaps_piece_ps.any:372). Applying the sky's gain there
+// would put a lamp-lit room out because its skylight was turned down, which is
+// a worse error than the one this gate fixes. The residual is recorded: a probe
+// PHOTOGRAPHS the sky as drawn, so at a tier that places probes a sky with no
+// Sky Light can still reach a rough metal through one. Closing that means
+// drawing the sky into probe captures at the Sky Light's gain, which is a probe
+// capture change with its own cache-invalidation contract.
+float OgreScene::envmapScaleForPass() const {
+    return mPcc ? 1.0f : mEnvLightScale;
 }
 
 bool OgreScene::removeNode(NodeId id) {

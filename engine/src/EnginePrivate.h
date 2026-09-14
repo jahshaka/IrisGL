@@ -2009,6 +2009,7 @@ public:
 
     void setAmbient(const Colour &upper, const Colour &lower) override;
     void setAmbientSh(const float sh[27]) override;
+    void setEnvironmentLightScale(float gain) override;
 
     void setFog(const FogDesc &desc) override;
     /// Creates the scene's AtmosphereNpr (fog only — the sky quad is created and
@@ -2137,6 +2138,13 @@ public:
     /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
     void applyPendingIbl();
     Ogre::TextureGpu *mReflectionTex = nullptr;   // prefiltered cube on PBSM_REFLECTION
+    /// The environment light's gain (Scene::setEnvironmentLightScale). Rides
+    /// `ambientUpperHemi.w`, which is HlmsPbs' envmapScale, so it scales
+    /// everything in the env-probe slot — the sky cube and a material's own
+    /// reflection override alike. 1.0 is "exactly the cube's radiance", which
+    /// is what every scene rendered before this existed, and at exactly 1.0
+    /// HlmsPbs does not even set the `envmap_scale` shader property.
+    float mEnvLightScale = 1.0f;
     void destroySky();
     bool removeNode(NodeId id) override;
 
@@ -2909,6 +2917,9 @@ private:
     /// so a PCC change cannot leave a per-material cubemap behind — which would
     /// not merely look wrong, it would fail to compile the shader.
     Ogre::TextureGpu *reflectionTexFor(const MaterialRec &rec) const;
+    /// HlmsPbs' envmapScale for the next pass: the environment light's gain,
+    /// except while PCC owns the env-probe slot (see the note at the definition).
+    float envmapScaleForPass() const;
 public:
     /// Is a refraction pass present in EVERY view that draws this scene?
     ///
