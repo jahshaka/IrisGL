@@ -45,6 +45,11 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
 #endif
     mDefaultSamples = OgreView::sanitizeSamples(cfg.sampleCount);
     mVsync = cfg.vsync;
+    // THE NO-RAYS SWITCH at boot (PHOTON_SPEC §7 R1): the hardware ray-query
+    // tier comes up only where the device advertises it AND this says yes.
+    // Studio sets it from --no-ray-query; the env var is the same switch for a
+    // suite that cannot pass an argument.
+    mRayTracingWanted = cfg.rayTracing && getenv("JAHSHAKA_NO_RAY_QUERY") == nullptr;
     // Process-wide static, read by Mesh::prepareForShadowMapping at mesh-build
     // time (POST_CHAIN_SPEC.md §11). Setting it before Root exists is fine — it
     // is a plain static, not engine state.
@@ -1618,6 +1623,11 @@ OgreEngine::~OgreEngine() {
     // to saveShaderCache) — this is the point that runs even when the Engine
     // outlives that call, and save() is idempotent.
     if (mRoot) { try { textureCache().save(mRoot); } catch (...) {} }
+    // THE RAY-QUERY TIER'S acceleration structures, buffers and pipeline: all
+    // of them are VkDevice objects and the device dies with the render system a
+    // few lines below. Same rule, same reason, as the MeshPtrs — and the tier
+    // holds MeshPtrs of its own, which it releases here.
+    try { shutdownRayQuery(); } catch (...) {}
     // The SSAO rotation-noise texture is ours and must not outlive Root.
     // Its own try/catch, NOT JAH_TRY: that macro's handler ends in `return`,
     // which inside a destructor abandons the rest of the teardown — views,

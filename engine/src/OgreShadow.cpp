@@ -1462,6 +1462,14 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
             }
             flushShadowProbeMarks();
         }
+        // THE RAY-QUERY TIER'S FRAME (PHOTON_SPEC §7 R1) — here, and here only.
+        // This is the frame's one point where the scene graph is current
+        // (updateSceneGraph ran), the item walk has just been done, and nothing
+        // has rendered yet; the acceleration-structure builds are recorded into
+        // the SAME command buffer, outside every encoder, with no submit and no
+        // stall. A scene that did not move records nothing (the tier gates on
+        // the same transform epoch the caster walk does).
+        updateRayQuery(drawn);
     } JAH_CATCH(mLastError, );
 }
 

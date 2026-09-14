@@ -207,6 +207,34 @@ inline void releaseRecycledName(const std::string &name) {
 
 class OgreEngine;
 
+/// THE RAY-QUERY TIER (PHOTON_SPEC §7 R1) — the whole of it lives in
+/// OgreRayQuery.cpp, the one TU that may include Vulkan. Declared here so the
+/// engine can hold one and the frame can call it; nothing else in this header
+/// knows what a VkAccelerationStructure is.
+class RayQueryTier;
+
+/// Where the traced set is WRITTEN. `OgreScene::gatherRayInstances` walks the
+/// scene's item index once and hands each traceable Item to the sink, which
+/// (in the product path) writes the transform straight into a persistently
+/// mapped instance buffer — no intermediate vector, which is the whole point:
+/// the CPU-side per-instance gather is the cost that scales (S3 measured
+/// 4-6 ms at 8,026 instances doing it the naive way).
+struct RayInstanceSink {
+    virtual ~RayInstanceSink() = default;
+    /// One traceable Item. `xform` is the node's full world transform (Ogre
+    /// row-major; the top 3x4 is what an instance descriptor takes verbatim).
+    /// `mask` is the instance mask a consumer's rays test against (bit 0 = a
+    /// shadow caster, bit 1 = a mover, bit 2 = still world — audit C-15's
+    /// per-consumer masks). `customIndex` is the node's slot in the scene's
+    /// item index, so a hit names the object that was hit.
+    /// The mesh is passed as a STRONG reference: a bottom-level structure is
+    /// built over the mesh's own vertex and index buffers, so the tier holds
+    /// the mesh alive for as long as it holds the structure (and drops both
+    /// before Root is deleted — the MeshPtr rule).
+    virtual void add(const Ogre::MeshPtr &mesh, const Ogre::Matrix4 &xform, unsigned mask,
+                     unsigned customIndex) = 0;
+};
+
 // ---------------------------------------------------------------------------
 // Visibility-flag bits (user bits; Ogre reserves the top two for layer state).
 // Every object keeps kVisibleBit so default cameras/compositor masks (all ones)
@@ -2383,6 +2411,26 @@ public:
     bool setGlobalIllumination(const GiParams &p) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
+    /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
+    /// OgreRayQuery.cpp — like gatherRayInstances below, so that not one line
+    /// of the ray tier lives in a TU that does not include Vulkan.
+    RayQueryStatus rayQueryStatus() const override;
+    /// THE TRACED SET, walked out of `mItemNodes` — the scene's own item index,
+    /// never `SceneManager::getMovableObjectIterator` (audit C-4: that list is
+    /// where the editor's gizmo arrows and light icons come from, and the S3
+    /// spike traced them). The predicate is documented at the definition; what
+    /// it excludes is load-bearing: helpers, backdrops, the sun disc, the
+    /// overlay queues, SKINNED Items (bind-pose geometry until R4 gives them a
+    /// skin cache) and alpha-tested datablocks (no any-hit without ray-tracing
+    /// pipelines — a cut-out leaf would intersect as a solid quad).
+    void gatherRayInstances(RayInstanceSink &sink) const;
+    bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
+    /// The tier reads this scene's PRIVATE caster epoch (shadowEpoch) to decide
+    /// whether the acceleration structure can possibly be out of date — the same
+    /// question, and the same answer, as the caster walk's own gate. A friend
+    /// rather than a new public getter: nothing outside the ray tier has any
+    /// business with that counter, and it lives in the same TU as the walk.
+    friend class RayQueryTier;
     bool reassertGiBinding() override;
     unsigned long long giEscapeSignature() const override;
     unsigned long long giGeometrySignature() const override;
@@ -4663,6 +4711,28 @@ public:
     /// ones created later (createView and the MSAA-recreate hook both read it).
     void setVsync(bool on) override;
     bool vsync() const override { return mVsync; }
+
+    // ---- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------
+    void setRayTracing(bool on) override;
+    bool rayTracing() const override { return mRayTracingWanted; }
+    bool rayQueryAvailable() const override;
+    /// THE FRAME'S RAY-TIER UPDATE: the acceleration structures for every drawn
+    /// scene, recorded into the frame's OWN command buffer at the item walk's
+    /// point (applyShadowCacheDirties, after updateSceneGraph and before any
+    /// workspace renders). No private submit, no fence wait, no stall.
+    void updateRayQuery(const std::vector<OgreScene *> &drawn);
+    /// Drops every acceleration structure and the tier's device objects. MUST
+    /// run while the VkDevice is still alive — i.e. before Root is deleted, on
+    /// the same rule as every MeshPtr the engine holds.
+    void shutdownRayQuery();
+    /// Null until the first frame that wants the tier (and on every device
+    /// without VK_KHR_ray_query, where it stays null forever). A RAW pointer
+    /// on purpose: the type is incomplete in every TU but OgreRayQuery.cpp, and
+    /// a unique_ptr would need it complete wherever ~OgreEngine is compiled.
+    /// shutdownRayQuery() is the one owner-side delete.
+    RayQueryTier *mRayTier = nullptr;
+    /// The no-rays switch (EngineConfig::rayTracing, Engine::setRayTracing).
+    bool mRayTracingWanted = true;
     const std::string &lastError() const override;
     std::string takeLastError() override;
 

@@ -1,0 +1,79 @@
+Jahshaka patch 0039 — make the GPU-resident Vulkan VBO pools legal
+acceleration-structure build input, so a BLAS is built FROM Ogre's own v2 vertex
+and index buffers instead of from a copy.
+
+WHY (Photon lane R1; spikes/photon-s3/FINDINGS.md §4;
+SPECS/audits/PHOTON_AUDIT_C_2026-09-14.md finding 9;
+SPECS/research/VULKAN_RAY_QUERY_NVIDIA_2026-09-15.md §1.3). A bottom-level
+acceleration structure is built from DEVICE ADDRESSES of vertex and index data.
+Ogre's VBO pools are created with
+  TRANSFER_SRC|DST | UNIFORM_TEXEL | UNIFORM | STORAGE | INDEX | VERTEX | INDIRECT
+(OgreVulkanVaoManager.cpp, allocateVbo, ~:1122-1127) — no
+VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, no
+VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR — and the
+memory behind them is allocated with no VkMemoryAllocateFlagsInfo. Without this
+patch the only legal route is to COPY every mesh's vertex and index data into our
+own VkBuffers at BLAS-build time: a second full copy of the world's geometry
+resident in VRAM forever, plus a GPU->CPU readback per mesh through
+BufferPacked::readRequest() to produce it. Measured on a 9,672-triangle sample:
++7-8 ms CPU and +496 KB, scaling with the scene, not with the sample.
+
+WHAT IT DOES. Two usage bits on the pool buffer and one allocate flag on its
+memory, both guarded on `mDevice->hasRayQuery()` (patch 0038). The guard is not
+cosmetic: SHADER_DEVICE_ADDRESS without the bufferDeviceAddress feature enabled
+is invalid usage, and so is the usage bit without the matching allocate flag.
+
+SCOPE — narrowed against the spike (audit C-9). The spike decorated every pool
+with `vboFlag != CPU_READ_WRITE`, which also covers the host-visible
+dynamic/staging pools that never feed a BLAS. This patch decorates exactly
+`vboFlag == CPU_INACCESSIBLE` — the device-local pools the v2 vertex and index
+buffers live in, which are the only ones a BLAS build reads.
+
+COST. Measured on the RTX 4080 SUPER (PHOTON-S3 §4): no measurable change to
+allocation time or to VRAM; the bits only make an existing allocation
+addressable.
+
+SOURCE patch: every tree re-runs ./irisgl/scripts/build-ogre.sh.
+Depends on 0038 (it calls hasRayQuery()).
+
+diff --git a/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp b/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp
+index 601a4e5c3..3ee8f2a0f 100644
+--- a/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp
++++ b/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp
+@@ -1127,6 +1127,19 @@ namespace Ogre
+                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+                 if( vboFlag == CPU_READ_WRITE )
+                     bufferCi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++                // Jahshaka (ogre-patch 0039): when the device came up with hardware ray
++                // query, the DEVICE-LOCAL VBO pools (the ones v2 vertex and index buffers
++                // live in) also become legal BLAS build input and get a device address.
++                // Without this a Jahshaka-owned acceleration structure would have to COPY
++                // every vertex and index buffer into its own VkBuffers (a second full copy
++                // of the world's geometry in VRAM, plus a readback per mesh). The two bits
++                // cost nothing when unused, and both are illegal unless the
++                // bufferDeviceAddress feature is on - hence the guard.
++                if( mDevice->hasRayQuery() && vboFlag == CPU_INACCESSIBLE )
++                {
++                    bufferCi.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
++                                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
++                }
+                 VkResult result = vkCreateBuffer( mDevice->mDevice, &bufferCi, 0, &newVbo.vkBuffer );
+                 checkVkResult( mDevice, result, "vkCreateBuffer" );
+ 
+@@ -1142,6 +1155,16 @@ namespace Ogre
+             memAllocInfo.allocationSize = poolSize;
+             memAllocInfo.memoryTypeIndex = chosenMemoryTypeIdx;
+ 
++            // Jahshaka (ogre-patch 0039): memory backing a buffer created with
++            // VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT must carry this allocate flag.
++            VkMemoryAllocateFlagsInfo memAllocFlags;
++            makeVkStruct( memAllocFlags, VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO );
++            if( mDevice->hasRayQuery() && !bIsTextureOnly && vboFlag == CPU_INACCESSIBLE )
++            {
++                memAllocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
++                memAllocInfo.pNext = &memAllocFlags;
++            }
++
+             VkResult result = vkAllocateMemory( mDevice->mDevice, &memAllocInfo, NULL, &newVbo.vboName );
+             checkVkResult( mDevice, result, "vkAllocateMemory" );
+ 
