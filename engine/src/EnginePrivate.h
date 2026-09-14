@@ -2326,6 +2326,7 @@ public:
     MaterialId createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe) override;
     MaterialId createOutlineMaterial(const Colour &c, bool skinnable) override;
     bool setUnlitMaterial(MaterialId id, const Colour &c) override;
+    bool setMaterialDepthPriority(MaterialId id, bool on) override;
     MeshId createLineMesh(const std::vector<Vec3> &points, bool strip) override;
 
     // ---- Particles (billboard sets) ----
@@ -2958,6 +2959,11 @@ private:
         /// has to be swapped rather than written. This is what it currently is,
         /// so the swap happens only on a real crossing.
         bool blended = false;
+        /// setMaterialDepthPriority: the material's depth is biased towards the
+        /// camera so a coplanar helper (the editor's ground grid) wins against
+        /// the surface it is drawn on. Remembered so the macroblock is swapped
+        /// only on a real change.
+        bool depthPriority = false;
         /// PbrAlphaMode::Refractive. Refractive items must render in the chain's
         /// OWN pass (kRefractiveRenderQueue) — Ogre's words: "the compositor
         /// scene pass must be set to render refractive objects in its own pass".

@@ -1772,13 +1772,6 @@ void SceneMirror::setGridExtent(float extent)
     mGridExtent = std::min(std::max(extent, 1.0f), 100000.0f);
 }
 
-void SceneMirror::setGridFloorOffset(float offsetY)
-{
-    // A hand's breadth either side of the floor is all this is for; a large
-    // value would put the "ground grid" in the air.
-    mGridFloorOffset = std::min(std::max(offsetY, -1.0f), 1.0f);
-}
-
 void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
 {
     if (mGridMinorColour.r == minor.r && mGridMinorColour.g == minor.g &&
@@ -1812,6 +1805,8 @@ void SceneMirror::syncGrid()
         if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
         mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
         mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
+        mTarget->setMaterialDepthPriority(mGridMinorMaterial, true);
+        mTarget->setMaterialDepthPriority(mGridMajorMaterial, true);
         if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
         if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
         mGridColoursDirty = false;
@@ -1830,31 +1825,37 @@ void SceneMirror::syncGrid()
         // per node, not inherited.
         mTarget->setNodeHelper(mGridMinorNode, true);
         mTarget->setNodeHelper(mGridMajorNode, true);
-        // Unlit (never fogged), depth-tested (occluded by geometry), blended.
+        // Unlit (never fogged), depth-tested (occluded by geometry), blended —
+        // and DEPTH-PRIORITISED (GIZMO-2 item 5, owner §370: "the grid should
+        // always be on top of the floor, but objects on top of it should cover
+        // it"). The depth test is what makes a box standing on the floor cover
+        // the grid; the bias towards the camera is what makes the grid win
+        // against the FLOOR itself, which is at the same height as it and used
+        // to be resolved by pushing the grid a hair underneath.
         mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
         mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
+        mTarget->setMaterialDepthPriority(mGridMinorMaterial, true);
+        mTarget->setMaterialDepthPriority(mGridMajorMaterial, true);
     }
-    if (freshNode || mGridBuiltPlane != mGridPlane ||
-        mGridBuiltFloorOffset != mGridFloorOffset) {
+    if (freshNode || mGridBuiltPlane != mGridPlane) {
         // The mesh is authored in XZ; the node rotates it into the plane that
-        // faces the requesting view. Floor sits at mGridFloorOffset — by
-        // default a hair BELOW y=0, so geometry resting on the plane (the
-        // default ground is at +1e-4) occludes it cleanly instead of
-        // z-fighting; a top/bottom view flips that sign, or the ground hides
-        // the grid entirely (setGridFloorOffset). The vertical planes pass
-        // through the origin — they are alignment aids for the orthographic
-        // views and nothing habitually coexists at exactly x=0 / z=0.
+        // faces the requesting view. Every plane passes through the ORIGIN
+        // (GIZMO-2 item 5): the floor grid sits at exactly y=0, where the
+        // ground is, and wins the depth test against it through its material's
+        // depth bias rather than by being moved out of the way. It used to be
+        // pushed a hair below y=0 so the ground would occlude it — which hid it
+        // completely from above (a top view had to flip the sign) and still
+        // fought with the ground wherever it poked through.
         static const float s = 0.70710678f;   // sin/cos 45°: a 90° rotation
-        Vec3 pos(0, mGridFloorOffset, 0);
+        Vec3 pos;
         Quat rot;                             // Floor: identity
         switch (mGridPlane) {
-        case GridPlane::FrontXY: pos = Vec3(); rot = Quat(s, 0, 0, s); break;
-        case GridPlane::SideYZ:  pos = Vec3(); rot = Quat(0, 0, s, s); break;
+        case GridPlane::FrontXY: rot = Quat(s, 0, 0, s); break;
+        case GridPlane::SideYZ:  rot = Quat(0, 0, s, s); break;
         case GridPlane::Floor: break;
         }
         mTarget->setNodeTransform(mGridNode, pos, rot, Vec3(1, 1, 1));
         mGridBuiltPlane = mGridPlane;
-        mGridBuiltFloorOffset = mGridFloorOffset;
     }
     if (mGridBuiltSpacing != mGridSpacing || mGridBuiltExtent != mGridExtent) {
         if (mGridMinorMesh) { mTarget->detachMesh(mGridMinorNode); mTarget->destroyMesh(mGridMinorMesh); mGridMinorMesh = 0; }
