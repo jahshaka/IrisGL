@@ -229,8 +229,15 @@ void OgreScene::setAmbientSh(const float sh[27]) {
 void OgreScene::setEnvironmentLightScale(float gain) {
     const float g = gain > 0.0f ? gain : 0.0f;
     if (g == mEnvLightScale) return;
+    const bool wasLit = mEnvLightScale > 0.0f;
     mEnvLightScale = g;
-    refreshEnvmapScale();
+    // CROSSING ZERO UNBINDS THE SKY CUBE, it does not merely scale it by zero
+    // (reflectionTexFor carries that gate). Rebinding is what makes "no Sky
+    // Light, no sky reflection" EXACT even in a pass whose scale has to stay at
+    // 1.0 for somebody else's sake — see envmapScaleForPass. Only on the edge:
+    // a slider drag between two lit values costs one float.
+    if (wasLit != (g > 0.0f)) applyReflectionToAll();
+    else                      refreshEnvmapScale();
 }
 
 // THE SCALE IS A SNAPSHOT AND THE EXEMPTION IS NOT (round-1 self-review, caught
@@ -269,8 +276,44 @@ void OgreScene::refreshEnvmapScale() {
 // Sky Light can still reach a rough metal through one. Closing that means
 // drawing the sky into probe captures at the Sky Light's gain, which is a probe
 // capture change with its own cache-invalidation contract.
+// ...AND AN AUTHORED REFLECTION MAP IS EXEMPT FOR THE SAME REASON (round-2
+// review item 2, the lead's decision). `ambientUpperHemi.w` is a PASS value and
+// HlmsPbs has no per-datablock env scale, so it scales EVERY PBSM_REFLECTION
+// texture in the pass — including a cubemap the author assigned to one
+// material. That map is not the sky: it is the material's own environment, and
+// the sky's gain has no business touching it. A scene with no Sky Light was
+// zeroing it.
+//
+// THE PASS IS THE UNIT AND MATERIALS MIX IN IT, so this cannot be decided per
+// material through the scale. It is decided in two places instead:
+//
+//   * the SCALE stays at 1.0 as soon as ANY live material carries an authored
+//     map, because 1.0 is the only value that is right for that material and
+//     the alternative is silently wrong for it; and
+//   * the SKY CUBE is UNBOUND when the gain is zero (reflectionTexFor), so "no
+//     Sky Light, no sky reflection" stays exact in that mixed pass too — it is
+//     done by not binding rather than by scaling, and binding IS per material.
+//
+// THE DOCUMENTED LIMITATION, because there is one: in a scene that mixes an
+// authored reflection map with sky-lit materials, the sky's reflection no
+// longer follows Sky Light INTENSITY between 0 and 1 — it is full or it is off.
+// Zero is exact, one is exact, and the in-between is not. Closing that needs a
+// per-datablock env scale, which this pin does not have; the alternatives are a
+// second pass for the authored-map materials (a real cost for a rare scene) or
+// pre-scaling the sky cube at convolution time (a reconvolution per slider
+// frame). Neither is worth it until a scene asks.
+bool OgreScene::hasAuthoredReflectionMap() const {
+    for (const auto &kv : mMaterials) {
+        if (kv.second.unlit) continue;
+        if (kv.second.boundTextures[size_t(PbrTextureSlot::Reflection)]) return true;
+    }
+    return false;
+}
+
 float OgreScene::envmapScaleForPass() const {
-    return mPcc ? 1.0f : mEnvLightScale;
+    if (mPcc) return 1.0f;
+    if (hasAuthoredReflectionMap()) return 1.0f;
+    return mEnvLightScale;
 }
 
 bool OgreScene::removeNode(NodeId id) {
