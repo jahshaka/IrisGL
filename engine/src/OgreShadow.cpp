@@ -1469,7 +1469,19 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // the SAME command buffer, outside every encoder, with no submit and no
         // stall. A scene that did not move records nothing (the tier gates on
         // the same transform epoch the caster walk does).
-        updateRayQuery(drawn);
+        //
+        // IT IS A MEASURED STAGE. The monitor's stages are exclusive and must
+        // account for the frame within 5% (`monitor_passes_sum_to_the_frame`),
+        // and this work is real CPU inside renderOneFrame that belongs to no
+        // compositor pass — unattributed, it read as frame time nobody spent.
+        {
+            const auto rqStart = std::chrono::steady_clock::now();
+            updateRayQuery(drawn);
+            if (monitor::live())
+                monitor::gMonitor->stage("engine.rayquery",
+                                         std::chrono::duration<double, std::milli>(
+                                             std::chrono::steady_clock::now() - rqStart).count());
+        }
     } JAH_CATCH(mLastError, );
 }
 
