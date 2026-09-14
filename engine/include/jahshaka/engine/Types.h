@@ -2402,6 +2402,14 @@ struct EngineConfig {
     /// takes, and the one every ray-consuming suite must be able to run on this
     /// GPU so the fallback is proved on every push.
     ///
+    /// FALSE REACHES THE DEVICE, not just this tier. The host sets
+    /// JAHSHAKA_NO_RAY_QUERY alongside it, which ogre-patch 0038 reads at
+    /// vkCreateDevice, so the process comes up on exactly the instance,
+    /// extension list and feature set it would have had if the tier did not
+    /// exist. "The picture a machine without ray tracing renders" is therefore
+    /// literal and not a manner of speaking — which is what makes the suites
+    /// that assert the fallback worth anything.
+    ///
     /// THE HOST OWNS THIS ANSWER. It is an APPLICATION preference, not a
     /// document setting: ray tracing is a property of the machine, and a
     /// picture that changed with the file open would be a second authoring
