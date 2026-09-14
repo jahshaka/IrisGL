@@ -265,17 +265,27 @@ enum class SkyMode { NoSky, Equirectangular, Cubemap, Atmosphere };   // 'None' 
 /// (see OgreSky.cpp): the light keeps the colour and the power the user gave it.
 /// The component's own sun DISC is off too — the disc is SunDisc's, one
 /// mechanism over every sky type.
+/// THESE FIVE DEFAULTS ARE THE CLEAR-SKY FIT (lane SKY-TUNE-1, 2026-09-14) and
+/// they MUST stay equal to `iris::SkyRealistic::defaults()` in the document
+/// (irisgl/document/scenegraph/scene.cpp), which carries the derivation. They
+/// are written out twice because the engine's public headers may not include
+/// the document's — the boundary — and a host that pushes a whole sky
+/// overwrites all five anyway; what this default decides is what a DIRECT
+/// engine caller (test_engine, the spikes) gets. Ogre's own shipped preset
+/// (0.47 / 2.0 / 1.0) is tuned for sunsets and is what these used to be.
 struct AtmosphereSky {
     /// How much atmosphere the ray travels through: the blue's depth. (0; 1]-ish.
-    float density   = 0.47f;
+    float density   = 0.25f;
     /// How fast the colour changes with altitude — the horizon's spread.
     float diffusion = 2.0f;
     /// The lowest the sky is drawn at; raises the horizon band in a sunset.
     float horizon   = 0.025f;
     /// The sky's own colour, before absorption. Ogre's default is a daylight blue.
     Colour skyColour { 0.334f, 0.57f, 1.0f, 1.0f };
-    /// Multiplies the whole sky (HDR).
-    float skyPower  = 1.0f;
+    /// Multiplies the whole sky (HDR). 1.5 re-anchors the Sky Light's ambient to
+    /// the level the tree is tuned around after the density fit dropped it to
+    /// 0.66 (the model's radiance is proportional to densityCoeff).
+    float skyPower  = 1.5f;
     /// Unit vector FROM the scene TOWARDS the sun, in world space — the scene's
     /// sun light's direction, reversed, pushed by the host. With `hasSun` false
     /// the sky is evaluated with the sun straight overhead at its lowest time

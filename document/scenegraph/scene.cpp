@@ -44,14 +44,54 @@ static constexpr float kPi = 3.14159265358979f;
 SkyRealistic SkyRealistic::defaults()
 {
     SkyRealistic s;
-    // Ogre's AtmosphereNpr preset defaults, with its linear skyColour
-    // (0.334, 0.57, 1.0) expressed as the sRGB colour a user would pick to mean
-    // it — the decode at the boundary turns it back into those three numbers.
-    s.density   = 0.47f;
+    // THE CLEAR-SKY FIT (lane SKY-TUNE-1, 2026-09-14; spikes/sky-tune-1/).
+    //
+    // These were Ogre's own SHIPPED preset (densityCoeff 0.47, densityDiffusion
+    // 2.0), which is TUNED FOR SUNSETS: it turns the whole horizon ring golden
+    // from a sun 24 degrees up and the zenith reads 107,000 K — four times the
+    // colour temperature a clear zenith has — so a mid-afternoon sun rendered as
+    // evening and every ported Ogre sample came out warmer and darker than
+    // Ogre's own screenshots.  (Upstream's older 0.27 / 0.75, commented out in
+    // OgreAtmosphereNpr.h, is not the answer either: it deletes the sunset.)
+    //
+    // AtmosphereNpr is not a physical model, so these are a FIT, not a
+    // derivation.  The reference is Preetham's analytic daylight model
+    // (SIGGRAPH 1999) at turbidity 2.5, evaluated at ten sky directions over sun
+    // elevations 5..90 degrees; the fitted quantity is CIE u'v' chromaticity
+    // plus the scale-free luminance ratios (probe/zenith and elevation/45 deg),
+    // weighted to the 30-75 degree working range.  The mean chromatic residual
+    // falls from du'v' 0.0196 to 0.0137 and the worst probe at a 36-degree sun
+    // from 0.0306 to 0.0146; the zenith at 36 degrees lands at 33,900 K against
+    // the reference's 25,600 (it was 107,000).  The same density also sets the
+    // SUN's transmittance (OgreSky.cpp atmosphereSunTint), which is checkable
+    // against Rayleigh optical depth directly, and 0.25 is inside the flat joint
+    // optimum of the two (0.22..0.32).  Sunset warmth now begins at a 10-degree
+    // sun instead of a 25-degree one.
+    //
+    // DIFFUSION AND HORIZON DO NOT MOVE.  2.0 sits inside the fit's optimum
+    // basin (1.5..3.05 is within 1% of the minimum), and horizonLimit is INERT
+    // in this application: the diffusion warp lifts every direction down to
+    // about -11 degrees elevation above 0.025 before the clamp is reached, and
+    // the ground covers what is below that.
+    //
+    // POWER IS THE LEVEL RE-ANCHOR, not a look choice.  The model's radiance is
+    // proportional to densityCoeff, so the fit alone would drop the Sky Light's
+    // ambient to 0.66 of what the tree is tuned around; 1.5 puts it back (0.99
+    // at a 45-degree sun, measured as the cosine-weighted hemisphere integral).
+    // The elevation FALL-OFF stays where the fit put it, which is the physical
+    // part: the ambient from a 15-degree sun is now 4.8x below noon's, against
+    // 1.7x before and Preetham's 7.5x.
+    //
+    // skyColour is Ogre's (0.334, 0.57, 1.0) linear, written as the sRGB colour
+    // a user would pick to mean it — the decode at the boundary turns it back
+    // into those three numbers.  It is very nearly the Rayleigh spectral shape
+    // (lambda^-4 at 600/550/450 nm normalises to 0.30 / 0.45 / 1.0) and is left
+    // alone.
+    s.density   = 0.25f;
     s.diffusion = 2.0f;
     s.horizon   = 0.025f;
     s.skyColour = QColor(157, 198, 255);
-    s.power     = 1.0f;
+    s.power     = 1.5f;
     return s;
 }
 
