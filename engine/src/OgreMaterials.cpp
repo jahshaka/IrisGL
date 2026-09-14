@@ -1939,9 +1939,17 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
 }
 
 // ---- Overlay primitives ----
+
+// WHEN AN OVERLAY COLOUR IS TRANSPARENT (GIZMO-2 item 4, owner §369: "can the
+// gizmos have transparency? not needed now, but built in it is useful for later
+// polish"). One threshold, read by BOTH the creation path and the live setter,
+// so a material cannot disagree with itself about what it is.
+static constexpr float kUnlitOpaqueAlpha = 0.999f;
+
 MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool wireframe) {
     JAH_TRY {
         MaterialRec rec; rec.datablockName = processUniqueName("unlit"); rec.unlit = true; rec.onTop = !depthTest;
+        rec.blended = c.a < kUnlitOpaqueAlpha;
         auto *hlmsUnlit = static_cast<Ogre::HlmsUnlit *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_UNLIT));
         Ogre::HlmsMacroblock macro;
         macro.mDepthCheck = depthTest;
@@ -1949,7 +1957,7 @@ MaterialId OgreScene::createUnlitMaterial(const Colour &c, bool depthTest, bool 
         macro.mCullMode = Ogre::CULL_NONE;
         if (wireframe) macro.mPolygonMode = Ogre::PM_WIREFRAME;
         Ogre::HlmsBlendblock blend;
-        if (c.a < 0.999f) blend.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
+        if (rec.blended) blend.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
         auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsUnlit->createDatablock(
             Ogre::IdString(rec.datablockName), rec.datablockName, macro, blend, Ogre::HlmsParamVec()));
         db->setUseColour(true);
@@ -2025,6 +2033,30 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
         }
         auto *db = static_cast<Ogre::HlmsUnlitDatablock *>(hlmsFor(it->second)->getDatablock(Ogre::IdString(it->second.datablockName)));
         if (!db) return false;
+        // A LIVE ALPHA CROSSING SWAPS THE BLENDBLOCK (GIZMO-2 item 4). The
+        // colour is a shader constant and costs a const-buffer write; whether
+        // the surface BLENDS is rasterizer state, chosen once at creation from
+        // the same threshold — so an overlay handed a half-alpha colour after
+        // it was created would have kept writing an opaque pixel and simply
+        // ignored the alpha. Swapping it here is all it takes:
+        //   * SBT_TRANSPARENT_ALPHA is exactly what createUnlitMaterial picks
+        //     for an alpha < 1 colour, so the two paths cannot diverge;
+        //   * a transparent blendblock carries mIsTransparent, which sits ABOVE
+        //     the depth and material fields in RenderQueue's sort hash
+        //     (OgreRenderQueue.cpp:285-311) — so a blended overlay is drawn
+        //     after the opaque ones of the same queue, back to front, with no
+        //     ordering work of ours;
+        //   * the macroblock is left alone: an ON-TOP overlay
+        //     (createUnlitMaterial's depthTest=false) already has depth write
+        //     off, and a depth-TESTED one keeps whatever it was created with
+        //     rather than having its depth behaviour changed by a colour.
+        const bool wantBlend = c.a < kUnlitOpaqueAlpha;
+        if (wantBlend != it->second.blended) {
+            Ogre::HlmsBlendblock blend;
+            if (wantBlend) blend.setBlendType(Ogre::SBT_TRANSPARENT_ALPHA);
+            db->setBlendblock(blend);
+            it->second.blended = wantBlend;
+        }
         db->setColour(toOgre(c));
         return true;
     } JAH_CATCH(mError, false);

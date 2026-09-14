@@ -491,6 +491,15 @@ public:
     /// what gizmo handles need. Alpha < 1 blends.
     /// `wireframe` draws only the triangle edges — the selection outline uses it.
     virtual MaterialId  createUnlitMaterial(const Colour &, bool depthTest, bool wireframe = false) = 0;
+    /// The colour, LIVE — and the alpha with it (GIZMO-2 item 4). Passing an
+    /// alpha below 1 to a material created opaque turns it into a blended one
+    /// (and back): whether a surface blends is rasterizer state rather than a
+    /// shader constant, so the engine swaps that state here instead of
+    /// silently ignoring the alpha. A blended overlay is drawn after the opaque
+    /// ones of its own render queue, back to front, by Ogre's own sort — the
+    /// host passes a Colour and nothing else changes. Depth behaviour is NOT
+    /// touched: an on-top overlay already has depth write off, and a
+    /// depth-tested one keeps what it was created with.
     virtual bool        setUnlitMaterial(MaterialId, const Colour &) = 0;
     /// Selection silhouette: unlit colour drawn on BACK faces only, so a copy of the
     /// mesh scaled up slightly (~4%) renders as a clean outline band around the

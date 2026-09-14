@@ -2951,6 +2951,13 @@ private:
         /// Invariant: shadingUnlit => unlit && !pbsBacked.
         bool shadingUnlit = false;
         bool onTop = false;
+        /// THE OVERLAY'S BLEND STATE (GIZMO-2 item 4). An unlit overlay
+        /// material's blendblock is chosen from its colour's ALPHA at creation,
+        /// and setUnlitMaterial can move a live material across that line — a
+        /// blendblock is a whole rasterizer state, not a shader constant, so it
+        /// has to be swapped rather than written. This is what it currently is,
+        /// so the swap happens only on a real crossing.
+        bool blended = false;
         /// PbrAlphaMode::Refractive. Refractive items must render in the chain's
         /// OWN pass (kRefractiveRenderQueue) — Ogre's words: "the compositor
         /// scene pass must be set to render refractive objects in its own pass".
