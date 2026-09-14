@@ -906,7 +906,17 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
         // only: the mirror pushes visibility on change, and a push that moves
         // no GI bit (an empty node, an unlit helper, a subtree already hidden
         // by an ancestor) costs no re-solve.
-        if (giChanged) invalidateGiCaches();
+        // ...AND THE BOX, where this was ONE node rather than a subtree (G1):
+        // a single item hidden or shown is only the cascades that reach it. A
+        // subtree edge says nothing about where, and marks the chain.
+        if (giChanged) {
+            if (!n.node && n.item) {
+                const Ogre::Aabb box = n.item->getWorldAabb();
+                invalidateGiCaches(&box);
+            } else {
+                invalidateGiCaches();
+            }
+        }
     } JAH_CATCH(mError, );
 }
 
@@ -1164,7 +1174,11 @@ bool OgreScene::removeLight(NodeId id) {
         it->second.lightProfilePath.clear();
         it->second.lightMaskPath.clear();
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
-        invalidateGiCaches();   // a vanished light must stop bouncing (VCT re-injects)
+        // A VANISHED LIGHT MUST STOP BOUNCING — and that is a re-INJECTION over
+        // the voxels that are already there, never a re-voxelisation: not one
+        // voxel's albedo changed (G1). The false says so; Instant Radiosity's
+        // by-pointer caches and the single arm's reuse rule are unaffected.
+        invalidateGiCaches(nullptr, false);
         // Its cached maps need nothing: the lamp leaves the cache's light list,
         // so the next frame releases its slot in every shadow-node instance.
         it->second.lightShadowKey = 0;
@@ -1292,7 +1306,12 @@ void OgreScene::detachItem(NodeId id, Node &n) {
         // Only GI-participating (lit) geometry invalidates — detaching a selection
         // outline or wire overlay must not trigger a re-voxelize. BEFORE the
         // destroy: the voxelizer/IR hold raw pointers into the dying geometry.
-        if (n.item->getVisibilityFlags() & kGiGeometryBit) invalidateGiCaches();
+        // ...WITH THE BOX IT IS LEAVING (G1): under a cascade chain only the
+        // cascades that can see this item owe a re-voxelisation for its going.
+        if (n.item->getVisibilityFlags() & kGiGeometryBit) {
+            const Ogre::Aabb gone = n.item->getWorldAabb();
+            invalidateGiCaches(&gone);
+        }
         // An UNLIT item the probes capture (P7): leaving the scene is a probe
         // input and nothing else — no voxel ever held it.
         else if (probeSeesItem(n)) staleProbeGrid(GiStaleReason::Moved);
@@ -1369,8 +1388,15 @@ void OgreScene::releaseNode(NodeId id, Node &n) {
     mReflectors.erase(id);
     // Invalidate BEFORE anything dies (IR frees its by-pointer caches inside):
     // VCT holds the raw Item*, IR caches the mesh's VAO and any node-owned mesh.
-    if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit)))
-        invalidateGiCaches();
+    if (n.mesh || (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit))) {
+        // The box it occupied, where there is one (G1) — see detachItem.
+        if (n.item && (n.item->getVisibilityFlags() & kGiGeometryBit)) {
+            const Ogre::Aabb gone = n.item->getWorldAabb();
+            invalidateGiCaches(&gone);
+        } else {
+            invalidateGiCaches();
+        }
+    }
     else if (probeSeesItem(n))
         staleProbeGrid(GiStaleReason::Moved);   // an unlit item the probes captured (P7)
     // The node is going away for good, so its pose-following pairings go with

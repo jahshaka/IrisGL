@@ -2431,8 +2431,17 @@ public:
     /// freed memory. Reproduced as a SEGV in Hlms::preparePassHashBase
     /// (tests/shadow, mode r3) before this existed. Returns true when the arm
     /// was dropped and the caller must call the recreate below.
+    /// THE SHADOW-ATLAS REBUILD'S GI HALF (PHOTON_SPEC G2). Drops exactly the
+    /// WORKSPACES that instantiate the probe shadow node — each PCC probe's and
+    /// the raster field's — and nothing else. The voxels, the cascade chain and
+    /// the probes' own shapes survive: a shadow atlas growing on the 3rd, 5th or
+    /// 9th casting lamp is shadow bookkeeping, not a statement about the scene's
+    /// geometry. Returns false when this scene holds no such workspace.
     bool dropGiForShadowRebuild();
     void recreateGiAfterShadowRebuild();
+    /// The near/far the probe cameras were placed with — remembered so the
+    /// workspaces above can be re-created exactly as they were (G2).
+    float mProbeCamNear = 0.5f, mProbeCamFar = 500.0f;
     /// THE LAMP-MAP CACHE'S REACH INTO THIS SCENE'S PRIVATE WORKSPACES
     /// (ENGINE_CACHE_POLICY_SPEC P4/P5): the live workspaces that instantiate
     /// the shadow node of `kind` — each planar budget slot (Reflect) and each
@@ -3268,7 +3277,18 @@ private:
     /// The rebuild still happens ONCE at frame time (bursty destroys = one
     /// rebuild); for VCT the flush tears the whole arm down and re-voxelizes
     /// from the LIVE scene, so a recycled pointer can never alias.
-    void invalidateGiCaches();
+    void invalidateGiCaches() { invalidateGiCaches(nullptr, true); }
+    /// ...with the world box the edit touched, where the call site knows it:
+    /// under a cascade chain that box is what decides which cascades owe a
+    /// rebuild (G1). nullptr = "somewhere in the scene".
+    void invalidateGiCaches(const Ogre::Aabb *where) { invalidateGiCaches(where, true); }
+    /// `geometryVoxelsChanged == false` says NOTHING A VOXEL HOLDS MOVED — a
+    /// LIGHT left the scene. The destruction generation still moves (Instant
+    /// Radiosity's by-pointer caches, the single arm's reuse rule) and the
+    /// cascades still re-select their item sets, but no cascade owes a
+    /// RE-VOXELISATION: a light is answered by a re-injection, which is what the
+    /// dirty path does when nothing geometric is marked (G1).
+    void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged);
 public:
     /// ADDS this scene's registry sizes into `out` (nodes/meshes/materials/
     /// textures). Additive because Engine::objectCounts sums every live scene
@@ -3443,6 +3463,15 @@ private:
         /// rebuild, never immediately: nothing about the picture is wrong until
         /// the cascade re-voxelises anyway.
         bool         itemsStale = false;
+        /// THIS CASCADE'S VOXELISER ITSELF IS UNSAFE OR STALE (G1). `VctMaterial`
+        /// converts each datablock once and caches the result by RAW POINTER for
+        /// the voxeliser's whole life, so a material parameter that changed — or
+        /// a datablock that died and whose address may be recycled — can only be
+        /// answered by a NEW voxeliser. Serviced one cascade per frame by
+        /// `rebuildCascade`, which swaps the replacement into the EXISTING
+        /// lighting (JahVctLighting::jahSwapVoxelizer) so the chain's raw
+        /// `mExtraCascades` pointers never dangle.
+        bool         freshVoxels = false;
         /// How many GI items THIS cascade's last rebuild voxelised — inside its
         /// box and big enough to fill half a voxel of it, re-counted on every
         /// rebuild (the attach set is bigger and deliberately so: rule 1).
@@ -3451,6 +3480,11 @@ private:
         /// queue: a rebuild always happens at the CURRENT camera, so owing two
         /// of them is the same as owing one.
         int          pending = 0;
+        /// WHY it is pending — the reason the monitor row and the event carry.
+        /// `Camera` for an ordinary scroll (E0's B12/D5), the edit's own reason
+        /// when the dirty path marked it (G1), so a capture can separate the
+        /// cost of walking around a scene from the cost of changing it.
+        GiStaleReason pendingReason = GiStaleReason::Camera;
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
         /// Cleared when the rebuild is serviced, and counted there, so the
@@ -3484,6 +3518,27 @@ private:
     /// because the voxeliser's region (read live by the shader) has already
     /// moved and the voxels have not (audit B4).
     bool rebuildCascade(size_t idx, GiStaleReason reason);
+    /// THE PER-CASCADE DIRTY PATH (PHOTON_SPEC G1). An EDIT under the cascade
+    /// arm, answered without tearing the chain down: the cascades the edit can
+    /// be seen from are marked `pending` and spent by `updateCascades` ONE PER
+    /// FRAME, with every voxeliser, texture and mesh-buffer upload KEPT. False
+    /// when the chain cannot answer at all (no chain, or nothing built yet), in
+    /// which case the caller takes the from-scratch `rebuildVct`.
+    bool refreshCascadesFast();
+    /// Records WHERE the scene changed, for the dirty path above. `box` is the
+    /// region the edit touched (a mover's old box united with its new one, or a
+    /// vanishing item's last box); nullptr means "somewhere" and marks the whole
+    /// chain. A no-op unless a cascade chain is live, so every call site can
+    /// call it unconditionally.
+    void noteGiCascadeDirty(const Ogre::Aabb *box);
+    /// A DATABLOCK OR TEXTURE THE VOXELISERS' MATERIAL CACHE HOLDS IS DYING.
+    /// Bumps mGiDatablockGeneration and, under cascades, marks every cascade for
+    /// a voxeliser REPLACEMENT (one per frame) — see VctCascade::freshVoxels.
+    void noteGiDatablockDied();
+    /// Marks every cascade whose box intersects the recorded dirty region (or
+    /// all of them when the region is unknown) `pending`, and clears the region.
+    /// Returns how many cascades it marked.
+    size_t markDirtyCascadesPending();
     /// THE SCHEDULER, called once a frame from updateGiTracking with the
     /// authoritative camera. Re-quantises every cascade, queues the ones that
     /// moved, and spends AT MOST ONE rebuild this frame, innermost first.
@@ -3753,6 +3808,17 @@ private:
     unsigned long long mCascadeDirtyMajority = 0;
     /// One log line per scene for a cascade rebuild that threw (B4).
     bool mCascadeFailureLogged = false;
+    /// WHERE THE SCENE CHANGED SINCE THE CHAIN LAST ANSWERED FOR IT (G1) — the
+    /// union of each mover's old and new world AABB (the movement scan's own
+    /// boxes) plus the box of every edit that carried one. A cascade is marked
+    /// `pending` only when its own box intersects one of these, which is what
+    /// makes dragging a chair in one corner cost the cascades that can see the
+    /// chair and nothing else. Bounded: past `kGiCascadeDirtyBoxCap` the list
+    /// collapses into `mGiCascadeDirtyAll`, because a scene-wide edit is cheaper
+    /// to answer whole than to describe.
+    std::vector<Ogre::Aabb> mGiCascadeDirtyBoxes;
+    bool mGiCascadeDirtyAll = false;
+    static const size_t kGiCascadeDirtyBoxCap = 16;
     /// The authoritative camera position the GI tracker last saw, and whether
     /// any view has ever tracked one. A cascade arm is built AROUND it, so a
     /// rebuild that arrives before the first tracked frame (every scene open:
@@ -3944,6 +4010,10 @@ private:
     mutable unsigned long long mGeomSigEpoch = 0, mGeomSig = 0;
     mutable bool               mGeomSigValid = false;
     mutable GiMode             mGeomSigMode = GiMode::Off;
+    /// ONE WALK FOR BOTH SIGNATURES (audit D4). They are pure functions of the
+    /// same boxes and the host reads them in the same statement, so a miss on
+    /// either computes both — over `mItemNodes`, never the node map.
+    void computeGiSignatures() const;
     /// ...and the same for the Forward+ slice walk's scene bounds, which runs
     /// one frame in thirty and read every item's updated AABB to do it.
     Ogre::Aabb         mFwdPlusBounds;
@@ -4051,6 +4121,16 @@ private:
     /// cache keys, VctMaterial's datablock-pointer cache) exactly as strong.
     unsigned long long mGiDestroyGeneration = 0;
     unsigned long long mGiBuiltGeneration   = ~0ull;   // no build yet
+    /// THE DATABLOCK GENERATION (G1), a strictly narrower thing than the
+    /// destruction generation above. A dead Item or Mesh is answered by
+    /// re-selecting a voxeliser's item set (`removeAllItems` drops every raw
+    /// `Item*` and every cached mesh in one call); only a dead DATABLOCK or
+    /// TEXTURE can outlive that, because `VctMaterial` keys its conversion cache
+    /// on the datablock POINTER and a recycled address would alias. So the three
+    /// material-side call sites bump this one as well, and it — not the broad
+    /// counter — is what forces a cascade's voxeliser to be REPLACED.
+    unsigned long long mGiDatablockGeneration      = 0;
+    unsigned long long mGiBuiltDatablockGeneration = 0;
     /// THE MATERIAL GENERATION (ENGINE_CACHE_POLICY_SPEC P7). Bumped when a
     /// parameter the VOXELIZER reads (albedo, emissive, alpha, workflow, the
     /// albedo/emissive maps) changes on a material that GI geometry uses.

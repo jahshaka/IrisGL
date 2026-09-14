@@ -725,8 +725,11 @@ bool OgreScene::setShadingModel(MaterialId id, ShadingModel model) {
 
     JAH_TRY {
         // BEFORE the datablock pointer dies: VctMaterial caches its conversions
-        // by raw datablock pointer, and a recycled address would alias.
+        // by raw datablock pointer, and a recycled address would alias. Under a
+        // cascade chain that is the ONE case a kept voxeliser cannot survive, so
+        // it is recorded separately (G1) and answered one cascade per frame.
         invalidateGiCaches();
+        noteGiDatablockDied();
 
         // Remember who was rendering with this material, then take the
         // renderables down. attachMesh below rebuilds each one from scratch,
@@ -951,7 +954,8 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
     JAH_TRY {
-        invalidateGiCaches();   // VctMaterial caches conversions by raw datablock pointer
+        invalidateGiCaches();
+        noteGiDatablockDied();  // VctMaterial caches conversions by raw datablock pointer
         for (auto &kv : mNodes) if (kv.second.materialRef == id) detachItem(kv.first, kv.second);
         Ogre::Hlms *hlms = hlmsFor(it->second);
         if (hlms->getDatablock(Ogre::IdString(it->second.datablockName)))
@@ -1535,7 +1539,7 @@ bool OgreScene::destroyTexture(TextureId id) {
             if (hit) noteShadowShapeChanged(kv.first);
         }
         // ...and now, if it really was in play, the caches that hold it.
-        if (boundSomewhere) invalidateGiCaches();
+        if (boundSomewhere) { invalidateGiCaches(); noteGiDatablockDied(); }
         if (!it->second.path.empty()) {
             const std::string key = textureKey(it->second.path, it->second.decal,
                                                it->second.decalKind, it->second.srgb);
