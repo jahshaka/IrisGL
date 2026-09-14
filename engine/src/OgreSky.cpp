@@ -400,10 +400,27 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
 //
 // Divided by its own value with the sun at the zenith, so the answer is exactly
 // (1,1,1) at noon — the user's picked colour IS the noon colour — and falls,
-// blue first, as the sun goes down. On the shipped preset a sun 5 degrees above
-// the horizon comes out at (0.57, 0.38, 0.18) and one at 30 degrees at
-// (0.93, 0.88, 0.80) — reddened AND dimmed, which is what a low sun really does
-// (test_engine's atmosphere_sun_tint_reddens_a_low_sun prints all three).
+// blue first, as the sun goes down. On the shipped preset (density 0.25 since
+// SKY-TUNE-1) a sun 5 degrees above the horizon comes out at (0.74, 0.60, 0.40)
+// and one at 30 degrees at (0.96, 0.93, 0.89) — reddened AND dimmed, which is
+// what a low sun really does (test_engine's
+// atmosphere_sun_tint_reddens_a_low_sun prints all three).
+//
+// HOW FAITHFUL IT IS, MEASURED (SKY-TUNE-1, spikes/sky-tune-1/): the physical
+// answer for this quantity is the direct beam's Rayleigh transmittance,
+// exp(-tau*airmass) / exp(-tau*airmass(90)), with tau(550 nm) = 0.0975 scaled
+// by lambda^-4.05 and Kasten-Young airmass — which is 0.53/0.40/0.13 at 5
+// degrees and 0.95/0.93/0.86 at 36. The model above tracks that shape because
+// its softer airmass (sunHeight^0.75 instead of 1/sin) is compensated by an
+// optical depth about 1.5x Rayleigh's, and how well it tracks depends ENTIRELY
+// on densityCoeff: the residual is 0.046 stops at density 0.47, 0.189 at 0.25
+// and 0.27 at 0.15. THAT IS A KNOWN COUPLING AND A RECORDED FINDING: one dial
+// sets both the SKY's look (where the fit wants 0.20-0.25) and the SUNLIGHT's
+// colour (where physics wants ~0.47), and 0.25 is inside the flat joint optimum
+// of the two rather than the best of either. The clean separation — deriving
+// this from Rayleigh optical depth directly, with the density dial only as a
+// multiplier — is deliberately NOT done here; it is the lead's call, not a sky
+// preset lane's.
 //
 // WHY NOT THE COMPONENT'S OWN LIGHT LINK. `setLight` takes the light over
 // completely — type, direction, diffuse, specular and power — so it would
