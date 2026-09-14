@@ -4,11 +4,26 @@
 // `ssrTexture`: rgb = the reflected radiance, w = confidence. Upstream's pixel
 // shader then does the composite for us —
 //     envColourS = lerp( envColourS, ssrReflection.rgb, ssrReflection.w )
-// (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any, `hlms_use_ssr`) — so w is
-// literally "how much of the probe/sky answer does the screen replace", and a
-// zero here is EXACTLY today's picture. That is what makes the roughness cutoff
-// and the edge fades safe: every one of them just hands the pixel back to the
-// IBL cube.
+// (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any, `hlms_use_ssr`, with
+// ogre-patch 0036 making that lerp the only spelling) — so w is literally "how
+// much of the probe/sky answer does the screen replace", and a zero here is
+// EXACTLY today's picture. That is what makes the roughness cutoff and the edge
+// fades safe: every one of them just hands the pixel back to the IBL cube.
+//
+// AND w IS A VERDICT, NOT A FRACTION (lane SSR-2 — the rule lives at the end
+// of main()). The probe's image and the screen's are the same objects in two
+// PLACES — parallax-corrected onto a box, captured from a grid point, against
+// the true position this frame — and a fraction of two places is two images,
+// which is what the owner photographed on the Mirror Room's chrome sphere. So
+// a valid hit wins outright and the probe fills only where there is none. The
+// confidence terms below all still run; they decide VALID vs NONE instead of
+// scaling a blend. The fractions that remain are the ENVELOPE (where the
+// technique runs out of reach), the ROUGHNESS ramp and the mask's own
+// COVERAGE — a hit region's antialiased edge — and never a doubt about a hit.
+// There is no lerp branch: a lerp would only be honest above the roughness at
+// which the probe's own blur hides its parallax error, and this renderer stops
+// drawing screen-space reflections well below it (the derivation is with the
+// rule).
 //
 // THE COLOUR IS THE PREVIOUS FRAME'S, AND IT HAS TO BE. HlmsPbs consumes the
 // reflection while it shades, so the reflection must exist BEFORE the colour
@@ -226,79 +241,99 @@ void main()
 	// geometrically correct for this pixel and merely less smooth; too loose
 	// and the luminance clamp further down is the second line of defence.
 	const float kCoordSpreadTexels = 4.0;
+	// THE MIRROR MASK RIDES THE SAME NINE TAPS (lane SSR-2; the rule itself is
+	// the block below the roughness ramp). It is a COVERAGE: how much of this
+	// pixel's neighbourhood is a hit the march TRUSTS and that is looking at the
+	// same thing the reference tap is. Two details, both deliberate:
+	//
+	//  * THE WEIGHTS ARE A TENT over the pixel's position INSIDE the ray texel,
+	//    not a box. The nine taps are fetched at integer ray coordinates, so a
+	//    box-filtered count is constant across a whole ray texel and its ramp is
+	//    a staircase two texels wide with one step — at Half-Res that is a 2 px
+	//    hard edge. Weighting each tap by its distance to the pixel's true
+	//    (fractional) position instead makes the coverage a continuous function
+	//    of the SCREEN pixel, so the mask's boundary is a smooth ramp ~1.5 ray
+	//    texels wide — 3 screen pixels on the Half-Res row, 1.5 on Full-Res —
+	//    for no extra fetch. That ramp IS the feather: the hit region's edge is
+	//    dilated by it, rather than the confidence being lerped.
+	//  * THE DENOMINATOR IS ALL NINE TAPS, misses included, for the same reason
+	//    the coherence count's is: a single lucky ray surrounded by misses
+	//    agrees with itself, and that degenerate case is the artefact.
+	//  * THE TRUST TEST IS A RAMP, NOT A STEP, and that is a defect this lane
+	//    shipped in its first round. `taps[i].w` is the product of two SMOOTH
+	//    fields (the arrival angle and the thickness margin); admitting a tap
+	//    at exactly 0.5 draws the ISO-LINE of that field into the picture — the
+	//    coverage jumps by one ninth wherever the field crosses the threshold,
+	//    which on the ssr.engine fixture came out as three horizontal contour
+	//    stripes across the reflected cube's underside, inside a real reflected
+	//    surface. A tap's contribution to the coverage therefore ramps over
+	//    0.35..0.65 of its own trust. The DECISION the rule makes is still a
+	//    decision — a tap below 0.35 contributes nothing at all, and the mask
+	//    is still a coverage and not a confidence — it is only the admission
+	//    that is continuous, which is what turns a contour back into the short
+	//    ramp the underlying field actually has. The COUNTS (`nTrust`,
+	//    `nTrustAgree`) stay integer at the same midpoint: they are a quorum
+	//    and a ratio, and half a ray is not a ray.
+	const float kMirrorTrust   = 0.5;		// "more likely than not", per ray
+	const float kMirrorTrustLo = 0.35;		// ...and the ramp the coverage admits it over
+	const float kMirrorTrustHi = 0.65;
+	const vec2	tentF	 = inPs.uv0 * rayBufferRes.xy - ( vec2( rayCoord ) + 0.5 );
+	float		covHit	 = 0.0;
+	float		covAll	 = 0.0;
+	int			nTrust	 = 0;			// rays the march TRUSTS (the mirror rule's "valid")
+	int			nTrustAgree = 0;		// ...of those, the ones looking at one thing
 	vec2  sumUv	 = vec2( 0.0 );
 	float sumUvW = 0.0;
-	int	  nHit	 = 0;				// rays that came back at all
-	int	  nAgree = 0;				// ...of those, the ones looking at one thing
 	for( int i = 0; i < 9; ++i )
 	{
+		const vec2	tentD = vec2( float( i % 3 - 1 ), float( i / 3 - 1 ) ) - tentF;
+		const float tentW = max( 0.0, 1.5 - abs( tentD.x ) ) * max( 0.0, 1.5 - abs( tentD.y ) );
+		covAll += tentW;
 		if( taps[i].w <= 0.0 )
 			continue;
-		++nHit;
+		const bool trusted = taps[i].w >= kMirrorTrust;
+		covHit += tentW * smoothstep( kMirrorTrustLo, kMirrorTrustHi, taps[i].w );
+		if( trusted )
+			++nTrust;
 		const vec2 d = abs( taps[i].xy - refUv ) * rayBufferRes.xy;
 		if( max( d.x, d.y ) > kCoordSpreadTexels )
 			continue;
-		++nAgree;
+		if( trusted )
+			++nTrustAgree;
 		sumUv  += taps[i].xy * taps[i].w;
 		sumUvW += taps[i].w;
 	}
 	// NOTE ON THE HALF-RESOLUTION ROW: where the neighbourhood agrees (which is
 	// everywhere except a silhouette) every tap passes, the sum is the same sum
-	// in the same order as before this fix, and the frame is bit-identical. The
-	// picture only moves where the old mean was inventing a coordinate.
+	// in the same order as before the firefly fix, and the frame is
+	// bit-identical. The picture only moves where the old mean was inventing a
+	// coordinate.
+	//
+	// AND ONE THING LANE SSR-2's REPACK DID CHANGE HERE, which "the product is
+	// unchanged" does NOT cover (second reader, round 2): `w > 0` now means a
+	// TRUSTED hit rather than a trusted hit with a non-zero envelope, so a hit
+	// whose envelope has gone to zero — the last-step ring at travelled >=
+	// maxDistance, a reflection pointing back at the camera past towardEye 0.85
+	// — is a HIT to everything downstream: it can be the reference coordinate,
+	// it enters the coordinate mean, and it counts towards the quorum and the
+	// sampling verdict (it counted towards the coherence and borrow terms too,
+	// while those existed). That is the more
+	// correct reading: those rays did find geometry, and it is the ENVELOPE
+	// that is refusing to draw it, not the hit that is in doubt. It cannot
+	// brighten anything either way — every path out of here is multiplied by
+	// that same zero envelope — and the fixture's reflection interior is
+	// byte-identical across the repack, which is the evidence.
 	const vec2 hitUv = sumUvW > 0.0 ? sumUv / sumUvW : refUv;
+	// .z = the ENVELOPE (distance, screen edge, away-from-camera), averaged over
+	// the taps that hit and weighted by how much each is trusted; .w = the mean
+	// TRUST over the nine rays fired. Their PRODUCT is sum( z_i * w_i ) / 9 —
+	// the same five factors per tap as before lane SSR-2 moved two of the
+	// march's fades from the w channel to the z channel. Not bit-identical,
+	// because the ray buffer is RGBA16_UNORM and the two channels are now
+	// quantised at different places in the product (about 2 parts in 65535 per
+	// term); the evidence that it does not reach a picture is the fixture's
+	// byte-identical reflection interior.
 	const vec4 ray	 = vec4( hitUv, sumFade / sumW, sumW * ( 1.0 / 9.0 ) );
-
-	// COHERENCE: DO THE NINE RAYS AGREE? (lane SSR-1, the Mirror Room's shredded
-	// chrome sphere.)
-	//
-	// Everything above is written for a neighbourhood that agrees — a flat floor,
-	// where nine neighbouring rays leave in nine nearly identical directions and
-	// land nine nearly identical places. On a CURVED mirror they do not: the
-	// sphere's normal turns under every pixel, the rays fan out, and the nine
-	// hits are nine unrelated places in the frame. Each pixel then paints
-	// whatever its own ray happened to graze, and the result is the shredded
-	// green confetti the owner photographed where the sphere should have shown
-	// the teapot.
-	//
-	// THE MEASURE IS A COUNT, and it has to be. The obvious spelling —
-	// `sumUvW / 9`, the agreeing taps' CONFIDENCE over the neighbourhood — is
-	// not a coherence measure at all: on a perfectly coherent floor every tap
-	// agrees, so it evaluates to the mean confidence and the weight becomes
-	// w * smoothstep(0.35, 0.7, w), which re-shapes every march-side ramp (edge,
-	// camera, arrival, thickness) and drives their tails to zero at w = 0.35
-	// instead of at 0. Measured: it cost 2.9 points of the flat floor's
-	// footprint, all of it real reflection inside those ramps (round 2). Counting
-	// instead asks the question that was meant — HOW MANY of the nine rays are
-	// looking at one thing — and is exactly orthogonal to how confident they are.
-	//
-	// The denominator is the NINE RAYS FIRED, not the ones that came back: a
-	// single lucky ray surrounded by eight misses agrees with itself, and that
-	// degenerate case IS the artefact.
-	//
-	// WHAT IT MEANS IN ONE SENTENCE, because it is a design decision and not a
-	// tuning constant: SSR is off wherever the reflected image is magnified by
-	// more than about four ray-buffer texels per pixel — which is what
-	// `kCoordSpreadTexels` measures — because a screen-space trace samples that
-	// image at one sample per pixel and cannot describe it any finer.
-	//
-	// THE RAMP IS DELIBERATELY LOW (full confidence from 55 % of the
-	// neighbourhood agreeing) because a legitimate reflection edge — the
-	// silhouette of the thing being reflected — has a disagreeing neighbourhood
-	// by construction and must not vanish. A flat floor scores 1.0 everywhere
-	// except across such an edge, which is why the flat-floor frame does not
-	// move.
-	const float agreement = float( nAgree ) * ( 1.0 / 9.0 );
-	const float cohFade	  = smoothstep( 0.35, 0.7, agreement );
-
-	// AND THE BORROW HAS TO EARN IT. When this pixel's OWN ray missed, the block
-	// above hands it the most confident NEIGHBOUR's hit. That is a sound
-	// interpolation inside a coherent reflection (it is what stops the
-	// half-resolution ray buffer from checkerboarding) and pure invention when
-	// the neighbourhood is mostly misses: one lucky ray in nine then paints a
-	// dot on eight pixels that never hit anything. So a borrowed hit fades with
-	// HOW MANY neighbours stand behind it — a count again, for the same reason.
-	const float borrow = taps[4].w > 0.0 ? 1.0 : smoothstep( 2.0, 5.0, float( nHit ) );
 
 	// Full-resolution roughness, undoing HlmsPbs' prepass packing. The ramp
 	// below the cutoff is what stops the reflection from appearing and
@@ -308,8 +343,111 @@ void main()
 	const float cutoff	  = resolveParams.x;
 	const float roughFade = 1.0 - smoothstep( cutoff * 0.5, cutoff, roughness );
 
+	// ---- THE RULE ON A MIRROR (lane SSR-2, the owner's dual image) ----------
+	//
+	// THE DEFECT. On the Mirror Room's chrome sphere the confidence terms left a
+	// field of PARTIAL weights and upstream's composite lerped the screen's
+	// answer over the probe's by it. The two answers are not two samples of one
+	// thing there: the probe is parallax-corrected onto the room's box and
+	// captured from a grid point, the trace is at the true position and from
+	// this frame, so they are the same objects drawn in two PLACES. A lerp of
+	// two places is both of them, at a weight that changes from pixel to pixel
+	// because the counts and the margins do — the stippled ghost the rig
+	// photographed over the smooth probe image.
+	//
+	// THE RULE, and it is the ONLY rule this shader has below the cutoff: a
+	// VALID hit WINS OUTRIGHT and the probe fills only where there is none. The
+	// confidence decides VALID vs NONE — the arrival angle, the thickness
+	// margin, the sampling verdict and the quorum still reject back-faces,
+	// thin-object leaks, undersampled fans and lone rays — it never SCALES the
+	// composite. What remains a fraction is the ENVELOPE (`ray.z`: distance,
+	// screen edge, away-from-the-camera), the roughness ramp and the mask's own
+	// COVERAGE, because none of those is a doubt about the hit: two are where
+	// the technique runs out of data and the probe must take over without a
+	// seam, and the third is a hit region's antialiased edge.
+	//
+	// WHY THERE IS NO LERP BRANCH LEFT (round 2, and it is a CRUD deletion).
+	// A lerp is honest only where the probe's own blur is wide enough to make
+	// the two answers one: the probe's cube is prefiltered, so a GGX lobe of
+	// perceptual roughness r (alpha = r^2) has a reflected-lobe half-width of
+	// about 2*alpha — a normal perturbed by an angle turns the reflected ray by
+	// twice it — while the screen's answer carries NO roughness blur at all in
+	// this v1. The two are therefore distinguishable exactly while
+	//
+	//     2 * r^2  <  Dtheta       ->      r  <  sqrt( Dtheta / 2 )
+	//
+	// where Dtheta is not a renderer constant but THE PROBE'S OWN PARALLAX
+	// ERROR AT THIS PIXEL: the angle between the direction the surface really
+	// reflects and the direction the probe was asked for, which grows with how
+	// far the probe stands from the shading point and shrinks with how far away
+	// the reflected object is. Measured on the Mirror Room's sphere (spikes/
+	// ssr-2/): where the trace is well sampled the two AGREE (cross-correlation
+	// shift (0,0), rmse 2.6 of 255 on the reflected teapot); where they disagree
+	// they are not a shifted copy at all but DIFFERENT OBJECTS — the probe's
+	// blue wall against the screen's west wall, gold torus and red patch at the
+	// limb — tens of degrees apart. At a deliberately conservative 30 degrees
+	// (0.52 rad) the crossover is r = 0.51, and `ssrRoughnessCutoff` is 0.35
+	// with no writer anywhere outside this engine (Types.h's default, OgreView
+	// and OgreChain; nothing in Studio or the mirror ever pushes one). So the
+	// lerp's honest range begins well above the roughness at which this
+	// renderer stops drawing a screen-space reflection at all, and a branch for
+	// it would be code no shipped frame can reach. Raising the cutoff would not
+	// bring it back either: the screen's image is a sharp mirror image at every
+	// roughness, so a raised cutoff paints a sharp reflection on a rough
+	// surface whether it wins or blends. The fix for THAT is a roughness-aware
+	// blur on the resolve, and it is a different piece of work.
+	//
+	// THE MASK IS THREE FACTORS, AND WHICH QUESTION EACH ANSWERS IS THE WHOLE
+	// DESIGN — the first round of this lane got it wrong by asking one question
+	// with one number, and paid for it on BOTH sides (the sphere's dither
+	// survived at a loose threshold; a flat floor's reflection lost 8 % of its
+	// mass at a tight one, all of it the legitimate silhouette of the thing
+	// being reflected).
+	//
+	//  1. COVERAGE — how much of this pixel's neighbourhood is a trusted hit.
+	//     This is the ANTI-ALIASED HIT MASK: 1 inside a reflection, 0 outside
+	//     it, a ramp across the boundary. It stays a fraction, because a hit
+	//     mask's edge is a coverage and not a doubt — it is the feather the
+	//     rule needs, tent-weighted so it is smooth in SCREEN pixels rather
+	//     than a staircase in ray texels.
+	//     ITS RAMP STAYS A RAMP, measured (round 2). A HARD quorum (nTrust >= 3
+	//     or nothing) was tried because a count that is 0.07 at two rays and
+	//     0.43 at three is itself a fraction born of doubt: it removed the
+	//     half-resolution row's faint marginal bands but DOUBLED the
+	//     full-resolution row's (the same bands then passed at full quorum),
+	//     and the flat floor's moved-pixel count only fell from 958 to 784 for
+	//     it. The soft ramp is the better of the two measured answers.
+	//  2. THE QUORUM — a lone trusted ray with no neighbours behind it paints a
+	//     dot on a neighbourhood that never hit anything, and the tent gives a
+	//     lone centre tap a third of the coverage. Same counts and the same
+	//     ramp as the borrow term this replaced.
+	//  3. THE SAMPLING VERDICT — of the TRUSTED rays, how many are looking at
+	//     one thing. This is the fan test, and the denominator is what makes it
+	//     one: measured against the nine rays FIRED it cannot tell a fan from
+	//     the edge of a reflected object (both leave about half the
+	//     neighbourhood disagreeing, which is why the strict version ate the
+	//     flat floor's silhouettes), while measured against the rays that came
+	//     back and are trusted it separates them cleanly — at a silhouette
+	//     those rays are one cluster and the ratio is ~1, in a fan they are
+	//     unrelated places and it collapses. This is the term that makes the
+	//     rule a VERDICT: the screen may overrule the probe only where the
+	//     reflected image is sampled well enough to be described at one sample
+	//     per pixel.
+	const float kFanLo = 0.55;
+	const float kFanHi = 0.85;
+	const float mirrorCov = covAll > 0.0 ? covHit / covAll : 0.0;
+	const float quorum	  = smoothstep( 1.5, 4.0, float( nTrust ) );
+	const float fanGate	  = nTrust > 0
+								? smoothstep( kFanLo, kFanHi,
+											  float( nTrustAgree ) / float( nTrust ) )
+								: 0.0;
+	// A FLAT MIRROR IS THE FRAME IT WAS, by construction and not by tuning:
+	// every tap trusts (face-on arrival, well inside the thickness) and every
+	// tap agrees, so mirrorCov, quorum and fanGate are all 1 and the weight is
+	// the envelope times the roughness ramp — which is what the old
+	// ray.w * ray.z * roughFade * cohFade * borrow evaluated to there.
 	const float weight =
-		clamp( ray.w * ray.z * roughFade * cohFade * borrow * resolveParams.y, 0.0, 1.0 );
+		clamp( ray.z * roughFade * mirrorCov * quorum * fanGate * resolveParams.y, 0.0, 1.0 );
 	if( weight <= 0.0 )
 	{
 		fragColour = vec4( 0.0 );

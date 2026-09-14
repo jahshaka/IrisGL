@@ -45,14 +45,33 @@
 //
 // OUTPUT (PFG_RGBA16_UNORM, so every channel must be [0,1]):
 //    xy = the texture-space coordinate the ray hit
-//    z  = distance fade, 1 at the origin falling to 0 at maxDistance
-//    w  = geometric confidence: 0 for a miss, otherwise the product of four
-//         fades — the screen edge, the "this reflection points back at the
-//         camera" one, the ARRIVAL ANGLE at the surface the ray hit (a backface
-//         or a grazing arrival is a hit the depth buffer cannot vouch for) and
-//         the THICKNESS MARGIN (how much of the gap between the ray and the
-//         surface the march's own step cannot explain). The last two are lane
-//         SSR-1's; see the block comment where each is computed.
+//    z  = the ENVELOPE: how gracefully the technique has to stop here. The
+//         distance fade (1 at the origin falling to 0 at maxDistance), the
+//         SCREEN EDGE ramp and the "this reflection points back at the camera"
+//         ramp, multiplied. All three are smooth functions of screen position
+//         and none of them is a doubt about the hit: they are the places where
+//         a screen-space trace runs out of data and the probe has to take over
+//         without a seam.
+//    w  = the TRUST: 0 for a miss, otherwise the ARRIVAL ANGLE at the surface
+//         the ray hit (a backface or a grazing arrival is a hit the depth
+//         buffer cannot vouch for) times the THICKNESS MARGIN (how much of the
+//         gap between the ray and the surface the march's own step cannot
+//         explain). Both are lane SSR-1's; see the block comment where each is
+//         computed.
+//
+// THE SPLIT IS LANE SSR-2's AND IT CARRIES A DECISION (the owner's dual image
+// on the Mirror Room's chrome sphere). The four fades used to be one product in
+// w, which forced the resolve to treat them all as one number: "what fraction
+// of the probe's answer does the screen replace". On a MIRROR that fraction is
+// not a physical quantity — the lobe is a delta, the screen either answered it
+// or it did not, and a fraction paints the screen's image over the probe's
+// misregistered one at partial strength, which is two images and reads as a
+// dither. The ENVELOPE terms may still be fractions there (they are the ramps
+// that keep the frame's edge from being a moving hard line), the TRUST terms
+// must become a verdict. Nothing about the arithmetic of the old weight changes
+// — the resolve still multiplies z by w, in the same order, so the terms'
+// product is the number it always was; what changes is that the resolve can now
+// ASK THE TWO QUESTIONS SEPARATELY.
 // The ROUGHNESS mask is deliberately NOT folded in here: this pass may run at
 // half resolution, and a roughness cutoff evaluated at half res has visibly
 // blocky edges. The resolve pass re-reads roughness at FULL resolution. The
@@ -363,5 +382,11 @@ void main()
 	const float faceFade  = smoothstep( 0.0, 0.2, arrival );
 	const float thickFade = 1.0 - smoothstep( 0.5, 1.0, hitDiff );
 
-	fragColour = vec4( hitUv, distFade, edgeFade * camFade * faceFade * thickFade );
+	// THE TWO GROUPS GO IN SEPARATE CHANNELS (lane SSR-2 — see OUTPUT at the
+	// top): z carries the three ENVELOPE ramps, w the two TRUST terms. Their
+	// product is unchanged and the resolve still forms it, so no frame that
+	// merely blends moves; the resolve needs them apart to tell "the data runs
+	// out here" from "this hit means nothing", which are the same number today
+	// and opposite decisions on a mirror.
+	fragColour = vec4( hitUv, distFade * edgeFade * camFade, faceFade * thickFade );
 }

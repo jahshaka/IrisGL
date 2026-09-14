@@ -730,6 +730,30 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     in a .any file is still read by the Hlms parser, unbalances the block and
     breaks the generated shader a thousand lines away.
 
+37. **0037-vctlighting-setvoxelizer-and-three-lifetime-defects** — SOURCE
+    (Components/Hlms/Pbs: every tree resets the submodule and re-runs
+    `build-ogre.sh`). PHOTON-G12 (2026-09-15), the first patch under the "a patch
+    beats a workaround" rule. The hook: a public `VctLighting::setVoxelizer()`
+    that points an EXISTING lighting at a replacement voxeliser — it moves the
+    texture listeners and re-creates the light voxels through the pin's own
+    lost-residency recovery (`mVoxelizerTexturesChanged` +
+    `mVoxelizerListenersRemoved` → `checkTextures()`), which is what lets a
+    cascade chain rebuild ONE cascade's voxels without replacing its lighting
+    (`VctLighting::mExtraCascades` is a FastArray walked by `fillConstBufferData`
+    every pass, so replacing a lighting dangles every cascade inside it). Three
+    pin lifetime defects fixed in the same patch: (1) `checkTextures()` never
+    cleared `mVoxelizerTexturesChanged` (set on a lost residency, assigned false
+    only in the ctor) — a voxeliser that lost residency once re-created its light
+    voxels on EVERY later `update()` for ever; (2) `correct_area_light_shadows`
+    on the SHARED "VCT/LightInjection" compute job was written only by
+    `createTextures` from the last-built voxeliser, so a per-cascade rebuild
+    left the outer cascade's value standing for the chain — re-asserted per
+    injection from THIS lighting's voxeliser (the pin's own chain never
+    re-voxelises a cascade alone, so it never noticed); (3)
+    `IrradianceFieldRaster::destroyWorkspace` removed two of its three
+    workspaces and then destroyed the `Camera*` the third was built against —
+    one dangling disabled workspace per atlas rebuild. Replaces the engine's
+    former `JahVctLighting` protected-member reach-in (deleted).
 38. **0038-vulkan-ray-query-device-enablement** — SOURCE (one render-system
     file plus its header; every tree re-runs `build-ogre.sh`). Ogre-Next 4.0 has
     no ray-tracing support of any kind, and three things in `OgreVulkanDevice`

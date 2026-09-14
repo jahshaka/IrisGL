@@ -4208,21 +4208,38 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     // the per-scene override that now sits beside it in the World panel
     // (owner, 2026-09-13 Q4: "yes halve it but add it to the world settings").
     //
-    // HIGH WAS 512 AND IS NOW 256. A probe costs 6 faces x size^2 x mips, so the
-    // halving quarters the grid: at High/HDR one probe drops 16.0 MiB -> 4.0 MiB
-    // and a 32-probe room drops 512 MiB -> 128 MiB (REFLECTION_PROBE_AUDIT
-    // §4.2's table, which the 2026-09-11 lighting audit's measured "288 MB /
-    // 108 slices" corroborates exactly). What is lost is detail the specular
-    // mip chain blurs away before it reaches a pixel: the cube is convolved for
-    // roughness, and only a roughness-0 mirror ever reads mip 0.
+    // HIGH WAS 512, WAS HALVED TO 256 ON 2026-09-13, AND IS 512 AGAIN (owner,
+    // 2026-09-15, ledger §324, after the rig measured both ends of the trade on
+    // the Mirror Room's chrome sphere). A probe costs 6 faces x size^2 x mips,
+    // so the size is the grid's biggest memory lever: at High/HDR one probe is
+    // 4.0 MiB at 256 and 16.0 MiB at 512 (REFLECTION_PROBE_AUDIT §4.2's table).
+    // What the halving lost was NOT only "detail the specular mip chain blurs
+    // away": mip 0 is what a near-mirror reads, and a chrome sphere in a room
+    // reads it over most of its disc. The rig's measurement of the restore, on
+    // that sphere: +85 % strong reflection edges for +152 MB of VRAM and
+    // +2.5 ms of still-frame GPU (spikes/smoke-2026-09-15/reportB). 1024 was
+    // measured too and refused: +131 % for +1.3 GB and 12.5 ms.
+    //
+    // WHY IT LIVES HERE AND NOT IN STUDIO'S TIER TABLE (lane SSR-2): the tier
+    // table's probeSize column is 0 = "follow this dial" in every row, and a
+    // scene stores the RESOLVED value it was given. Writing 512 into the High
+    // and Epic rows instead would move only scenes authored after the change —
+    // every document already saved carries 0, would keep rendering at 256, and
+    // would additionally read as "Custom" in the World panel because its 0 no
+    // longer matches the tier's 512 (worldmodes::photonDeviations). The dial is
+    // the one place that reaches every scene at once, and it is where Low's 128
+    // and Medium's 256 already live.
+    //
+    // High AND Epic take this branch: they share GiQuality::High (the tier
+    // table's quality column), which is exactly the pair the decision names.
     //
     // 0 = follow the dial; anything else is the author's, clamped to a sane
     // power of two because Ogre sizes the IBL mip chain from it.
-    Ogre::uint32 probeRes = 256u;
+    Ogre::uint32 probeRes = 512u;
     switch (mGi.quality) {
     case GiQuality::Low:    probeRes = 128u; break;
     case GiQuality::Medium: probeRes = 256u; break;
-    case GiQuality::High:   probeRes = 256u; break;
+    case GiQuality::High:   probeRes = 512u; break;
     }
     if (mGi.probeCaptureSize > 0) {
         unsigned want = unsigned(std::min(std::max(mGi.probeCaptureSize, 64), 1024));
