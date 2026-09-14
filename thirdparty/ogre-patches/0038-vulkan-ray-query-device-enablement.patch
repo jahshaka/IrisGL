@@ -40,6 +40,24 @@ code. A patch beats a workaround (owner, 2026-09-15).
 
 WHAT THIS PATCH DOES.
 
+ (0) THE NO-RAYS SWITCH, HONOURED AT THE DEVICE. With JAHSHAKA_NO_RAY_QUERY set,
+     NOTHING below happens: the instance stays at 1.0.2, not one ray extension is
+     requested and not one feature bit is set, so the process runs on EXACTLY the
+     device it would have had if this patch did not exist. That is what makes the
+     switch a real fallback picture rather than a cosmetic one - Studio's
+     --no-ray-query and Engine::setRayTracing read the same variable to decide
+     whether to build acceleration structures - and it is the reason a suite can
+     prove the no-rays path on ray-capable hardware.
+
+     IT IS ALSO A NECESSARY ESCAPE HATCH, measured: on NVIDIA 595.84,
+     vkCreateDevice returns VK_ERROR_INITIALIZATION_FAILED with these features
+     enabled UNDER AddressSanitizer, on the very GPU where the same call
+     succeeds without it (no validation error is reported; the driver simply
+     refuses). Every ASan engine suite therefore boots with the variable set and
+     gets its historical device back, byte for byte. This is a DRIVER limit, not
+     a defect in the patch: the non-ASan build of the same code creates the
+     device, builds structures and traces correctly.
+
  (a) INSTANCE VERSION. Asks vkEnumerateInstanceVersion (itself a Vulkan 1.1 entry
      point) what the loader supports and raises apiVersion to 1.2 only when the
      loader can give it. A 1.0 loader, or one that does not export the function,
@@ -91,7 +109,7 @@ SOURCE patch: every tree re-runs ./irisgl/scripts/build-ogre.sh.
 Companion: 0039 (the VBO pools as BLAS build input) depends on hasRayQuery().
 
 diff --git a/RenderSystems/Vulkan/include/OgreVulkanDevice.h b/RenderSystems/Vulkan/include/OgreVulkanDevice.h
-index 5f2f19e1b..40c2222cc 100644
+index 5f2f19e1b..10efb0da0 100644
 --- a/RenderSystems/Vulkan/include/OgreVulkanDevice.h
 +++ b/RenderSystems/Vulkan/include/OgreVulkanDevice.h
 @@ -136,6 +136,21 @@ namespace Ogre
@@ -139,10 +157,35 @@ index 5f2f19e1b..40c2222cc 100644
  
          void commitAndNextCommandBuffer(
 diff --git a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
-index 57d308ea4..fc02adeef 100644
+index 57d308ea4..d5e3943d0 100644
 --- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
 +++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
-@@ -288,7 +288,30 @@ namespace Ogre
+@@ -58,6 +58,24 @@ THE SOFTWARE.
+ 
+ namespace Ogre
+ {
++    /// Jahshaka (ogre-patch 0038): THE NO-RAYS SWITCH, honoured at the DEVICE.
++    /// With it in force nothing this patch adds happens at all - the instance
++    /// stays at 1.0.2, not one ray extension is requested and not one feature
++    /// bit is set - so the process runs on EXACTLY the device it would have had
++    /// if this patch did not exist. That is what makes the switch a real
++    /// fallback picture rather than a cosmetic one (Jahshaka reads the same
++    /// variable to decide whether to build acceleration structures at all).
++    ///
++    /// It is also the escape hatch for a driver that cannot build a ray-tracing
++    /// device in a particular process: MEASURED on NVIDIA 595.84, vkCreateDevice
++    /// returns VK_ERROR_INITIALIZATION_FAILED with these features enabled under
++    /// AddressSanitizer, on the very GPU where the same call succeeds without it.
++    static bool jahNoRayQuery()
++    {
++        static const bool noRays = getenv( "JAHSHAKA_NO_RAY_QUERY" ) != 0;
++        return noRays;
++    }
++
+     FastArray<const char *> VulkanInstance::enabledExtensions;  // sorted
+     FastArray<const char *> VulkanInstance::enabledLayers;      // sorted
+ #if OGRE_DEBUG_MODE >= OGRE_DEBUG_HIGH
+@@ -288,7 +306,31 @@ namespace Ogre
                  appInfo.pApplicationName = appName.c_str();
              appInfo.pEngineName = "Ogre3D Vulkan Engine";
              appInfo.engineVersion = OGRE_VERSION;
@@ -152,6 +195,7 @@ index 57d308ea4..fc02adeef 100644
 +            // process. vkEnumerateInstanceVersion is itself a 1.1 entry point, so a
 +            // 1.0 loader (or a null return) keeps the historical 1.0.2 exactly.
              appInfo.apiVersion = VK_MAKE_VERSION( 1, 0, 2 );
++            if( !jahNoRayQuery() )
 +            {
 +                PFN_vkEnumerateInstanceVersion enumerateInstanceVersion =
 +                    (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(
@@ -173,7 +217,7 @@ index 57d308ea4..fc02adeef 100644
  
              VkInstanceCreateInfo createInfo;
              makeVkStruct( createInfo, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO );
-@@ -666,12 +689,80 @@ namespace Ogre
+@@ -666,12 +708,81 @@ namespace Ogre
              lastNext = &deviceCacheControlFeatures.pNext;
          }
  
@@ -190,6 +234,7 @@ index 57d308ea4..fc02adeef 100644
 +        makeVkStruct( mRayQueryFeatures.descriptorIndexing,
 +                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES );
 +        const bool bWantRayQuery =
++            !jahNoRayQuery() &&
 +            hasDeviceExtension( VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ) &&
 +            hasDeviceExtension( VK_KHR_RAY_QUERY_EXTENSION_NAME ) &&
 +            hasDeviceExtension( VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME ) &&
@@ -254,7 +299,7 @@ index 57d308ea4..fc02adeef 100644
          return true;
      }
      //-------------------------------------------------------------------------
-@@ -970,6 +1061,25 @@ namespace Ogre
+@@ -970,6 +1081,33 @@ namespace Ogre
              // purpose: the name macro lives behind VK_ENABLE_BETA_EXTENSIONS.
              else if( extensionName == "VK_KHR_portability_subset" )
                  deviceExtensions.push_back( "VK_KHR_portability_subset" );
@@ -263,19 +308,27 @@ index 57d308ea4..fc02adeef 100644
 +            // names above; on a device without them nothing changes. Ogre itself uses
 +            // none of them - they exist so a Jahshaka-owned compute pass can build
 +            // acceleration structures and run inline ray queries.
-+            else if( extensionName == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME )
++            // Each arm pushes the MACRO, which is a string literal with static
++            // storage - never extensionName.c_str(), which dies with this loop
++            // iteration while deviceExtensions keeps the pointer.
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME )
 +                deviceExtensions.push_back( VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME );
-+            else if( extensionName == VK_KHR_RAY_QUERY_EXTENSION_NAME )
++            else if( !jahNoRayQuery() && extensionName == VK_KHR_RAY_QUERY_EXTENSION_NAME )
 +                deviceExtensions.push_back( VK_KHR_RAY_QUERY_EXTENSION_NAME );
-+            else if( extensionName == VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME )
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME )
 +                deviceExtensions.push_back( VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME );
-+            else if( extensionName == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME )
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME )
 +                deviceExtensions.push_back( VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME );
-+            else if( extensionName == VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME )
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME )
 +                deviceExtensions.push_back( VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME );
-+            else if( extensionName == VK_KHR_SPIRV_1_4_EXTENSION_NAME )
++            else if( !jahNoRayQuery() && extensionName == VK_KHR_SPIRV_1_4_EXTENSION_NAME )
 +                deviceExtensions.push_back( VK_KHR_SPIRV_1_4_EXTENSION_NAME );
-+            else if( extensionName == VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME )
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME )
 +                deviceExtensions.push_back( VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME );
          }
  
