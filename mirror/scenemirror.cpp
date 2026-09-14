@@ -6478,20 +6478,18 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             // So a changed light signature no longer refreshes. It ARMS a
             // pending refresh and resets a stability counter; the expensive
             // rebuild fires once the signature has held still for
-            // kGiStableFrames frames or kGiStableMs milliseconds, whichever
-            // comes first. During the wait the CHEAP path runs every
+            // kGiStableFrames frames. During the wait the CHEAP path runs every
             // kGiLightOnlyEveryN frames — re-inject the lights into the voxels
             // that are already there — so bounced light follows the light being
             // dragged instead of freezing until the mouse is released. Probes
             // deliberately do not update on that path; they come back at the
             // stability fire.
             //
-            // Both a frame count AND a clock, because neither alone is right:
-            // frames alone make the delay depend on how fast the scene renders
-            // (and tests that step frames by hand would never fire), a clock
-            // alone makes a stepped test depend on wall time. Whichever arrives
-            // first wins, so a headless test that pumps 15 frames instantly
-            // still gets its refresh.
+            // FRAMES, AND ONLY FRAMES (COLDGI-1 — the reasoning is at
+            // kGiStableFrames). A wall clock beside the frame count makes the
+            // NUMBER OF GI RE-SOLVES a function of machine speed, which makes
+            // the picture a function of machine speed; a headless test that
+            // pumps 15 frames instantly still gets its refresh.
             const bool sigChanged = lightSig != mGiLightSignature;
             // world.refreshGi() / the panel's Refresh button (P1d): an explicit
             // demand, so it does NOT wait for the stability window.
@@ -6511,7 +6509,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             if (matChanged && mSource->giUpdateBudget > 0) {
                 // Arms the settle — and only the settle (see matSig above).
                 mGiMaterialSignature = matSig;
-                mGiPendingTimer.restart();
                 mGiPendingRefresh = true;
                 mGiStableFrames = 0;
             }
@@ -6539,13 +6536,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                     // the scene at all, so un-pausing must notice the moves that
                     // happened meanwhile rather than adopting them silently.
                     mGiLightSignature = lightSig;
-                    // Both gates measure STABILITY, so both restart on every
+                    // The gate measures STABILITY, so it restarts on every
                     // change: a drag that keeps changing the signature never
-                    // satisfies either, which is the whole point. (Arming the
-                    // clock once instead would fire a full re-solve mid-drag as
-                    // soon as the drag outlasted 250 ms — the exact cost this
-                    // phase exists to remove, just less often.)
-                    mGiPendingTimer.restart();
+                    // satisfies it, which is the whole point.
                     if (!mGiPendingInject) mGiFramesSinceLightOnly = 0;
                     mGiPendingRefresh = true;
                     mGiPendingInject = true;      // lights/geometry: the cheap path runs
@@ -6575,9 +6568,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 mTarget->refreshGlobalIllumination();
                 ++mGiRefreshCount;
                 adoptSignature();
-            } else if (mGiPendingRefresh &&
-                       (mGiStableFrames >= kGiStableFrames ||
-                        mGiPendingTimer.elapsed() >= kGiStableMs)) {
+            } else if (mGiPendingRefresh && mGiStableFrames >= kGiStableFrames) {
                 mGiPendingRefresh = false;
                 mGiStableFrames = 0;
                 mTarget->refreshGlobalIllumination();
