@@ -478,7 +478,10 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // writes a screen-space displacement field, and the only pass in this
     // engine that may draw it is the distortion pass (kDistortionBit's note).
     if (distortion) return kDistortionBit;
-    if (n.helper) return kHelperBit;
+    // A BACKDROP IS A HELPER THE PICTURE KEEPS (kBackdropBit's note): the same
+    // exclusion from every capture, a channel a view can NOT mask out as
+    // furniture.
+    if (n.helper) return n.backdrop ? kBackdropBit : kHelperBit;
     // MOVING THINGS ARE THEIR OWN CHANNEL (REALTIME_REFLECTIONS_SPEC §3.3.4,
     // kMovableBit's note): a movable item carries kMovableBit INSTEAD OF
     // kVisibleBit, which takes it out of every capture pass that asks for
@@ -538,7 +541,8 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
     if (giBefore != giAfter)
         for (VctCascade &c : mVctCascades) c.itemsStale = true;
-    const Ogre::uint32 on = n.helper ? kHelperBit : (n.movable ? kMovableBit : kVisibleBit);
+    const Ogre::uint32 on = n.helper ? (n.backdrop ? kBackdropBit : kHelperBit)
+                                     : (n.movable ? kMovableBit : kVisibleBit);
     if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? on : 0u);
     if (n.particleDef) n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
 }
@@ -685,7 +689,8 @@ Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {
     // resolves every emitter movable (spec §3.6, owner decision O4): the probes
     // freeze whatever they last captured of it and SSR and the mirrors show it
     // live. The channel is what implements that here.
-    return n.helper ? kHelperBit : (n.movable ? kMovableBit : kVisibleBit);
+    return n.helper ? (n.backdrop ? kBackdropBit : kHelperBit)
+                    : (n.movable ? kMovableBit : kVisibleBit);
 }
 
 void OgreScene::setNodeHelper(NodeId id, bool helper) {
@@ -694,6 +699,7 @@ void OgreScene::setNodeHelper(NodeId id, bool helper) {
     if (it->second.helper == helper) return;
     const bool probeBefore = probeSeesItem(it->second);
     it->second.helper = helper;
+    if (!helper) it->second.backdrop = false;   // one flag pair, one meaning
     applyNodeVisibilityFlags(it->second);
     // A helper is exactly "the probes must not capture this" (kHelperBit
     // instead of kVisibleBit), so the flag flipping is a probe input (P7).
@@ -703,6 +709,26 @@ void OgreScene::setNodeHelper(NodeId id, bool helper) {
 bool OgreScene::nodeHelper(NodeId id) const {
     auto it = mNodes.find(id);
     return it != mNodes.end() && it->second.helper;
+}
+
+// A BACKDROP IS A HELPER (kBackdropBit's note), so this goes through the same
+// door: the probe-visibility edge, the item re-flag and the cascade staleness
+// are all setNodeHelper's, and the only thing that differs is WHICH channel the
+// item lands in. Clearing the helper flag clears this one — one flag pair, one
+// meaning, so `setNodeHelper(id,false)` cannot leave an object claiming to be a
+// backdrop that no capture excludes.
+void OgreScene::setNodeBackdrop(NodeId id, bool backdrop) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    if (it->second.backdrop == backdrop && (!backdrop || it->second.helper)) return;
+    it->second.backdrop = backdrop;
+    if (backdrop && !it->second.helper) { setNodeHelper(id, true); return; }
+    applyNodeVisibilityFlags(it->second);
+}
+
+bool OgreScene::nodeBackdrop(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it != mNodes.end() && it->second.backdrop && it->second.helper;
 }
 
 // ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R2: spent) ------------

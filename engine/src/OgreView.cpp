@@ -70,6 +70,11 @@ ChainDesc OgreView::chainDesc() const {
     // so an offscreen view may legitimately keep the passthrough shape AND be
     // allowed to draw the HUD — which is exactly what the engine suite does.
     d.overlays   = overlaysAllowed();
+    // EDITOR FURNITURE, per view (ChainDesc::helpers). Set before the offscreen
+    // early-out for the same reason `overlays` is: it is not a post effect, and
+    // an offscreen shot of a view that hides the furniture must hide it too
+    // (that is what makes player.screenshot a picture of the PLAYER).
+    d.helpers    = mHelpersVisible;
     // LETTERBOX (CAMERAS_SPEC §7.4) is a property of the CAMERA the host
     // pushed, not of the view — a camera that constrains its aspect does so in
     // every view that shows it. Unlike the effects below it is NOT cleared for
@@ -506,14 +511,22 @@ void OgreView::setPostFx(const PostFxDesc &fx) {
 
 const PostFxDesc &OgreView::postFx() const { return mPostFx; }
 
-void OgreView::resetExposureHistory() {
+void OgreView::resetExposureHistory() { seedExposureHistory(0.0f); }
+
+void OgreView::seedExposureHistory(float scale) {
     // NOTHING TO RE-SEED unless the automatic exposure is actually in the graph:
     // the seed pass only exists for `hdr && !tonemapFixed` (chain::build), and
     // an offscreen view without allowOffscreen has no chain at all.
     if (!mWorkspace || !mChainHandles.exposureSeed) return;
     const ChainDesc d = chainDesc();
     if (!d.hdr || d.tonemapFixed) return;
-    const float seed = chain::exposureSeed(d.exposure);
+    // A CALLER'S VALUE IS THE TONEMAPPER'S MULTIPLIER, which is exactly what
+    // the seed pass writes and what measuredExposureScale() reads back — one
+    // unit, three places. Anything that is not a positive finite number falls
+    // back to the descriptor's own seed rather than poisoning the history
+    // (the reflection_map class of defect: `isfinite && > 0` is the gate).
+    const float seed = (scale > 0.0f && std::isfinite(scale))
+                           ? scale : chain::exposureSeed(d.exposure);
     const Ogre::ColourValue colour(seed, seed, seed, seed);
     JAH_TRY {
         writeLiveClearColour(mWorkspace, mChainHandles.exposureSeed, colour);
@@ -942,6 +955,18 @@ bool OgreView::shadows() const { return mShadows; }
 void OgreView::setShadows(bool on) {
     if (on == mShadows) return;
     mShadows = on;
+    rebuildWorkspaceDef();
+}
+
+// ONE VIEW'S FURNITURE (ChainDesc::helpers). A full workspace rebuild and not a
+// live pass-definition write, deliberately: the mask is read from the
+// DEFINITION at execute time, but a definition is shared by every workspace
+// built from it and the rebuild path is the one seam that keeps mChainDesc, the
+// handles and the adaptation history consistent. Hosts set it once, at view
+// creation, so the rebuild is free.
+void OgreView::setHelpersVisible(bool on) {
+    if (on == mHelpersVisible) return;
+    mHelpersVisible = on;
     rebuildWorkspaceDef();
 }
 

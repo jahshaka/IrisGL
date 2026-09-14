@@ -1978,13 +1978,18 @@ void SceneMirror::syncGroundHorizon()
     if (!mHorizonNode) {
         mHorizonNode = mTarget->createNode();
         if (!mHorizonNode) return;
-        // AN EDITOR HELPER, in the engine's sense (EnginePrivate.h's bit
-        // scheme): kHelperBit instead of kVisibleBit takes the plane out of
-        // every reflection-probe capture, out of the shadow nodes (nothing this
-        // size may ever be a shadow caster or the atlas fits the horizon
-        // instead of the scene) and out of kGiGeometryBit, while the main chain
-        // -- which sets no visibility mask at all -- goes on drawing it.
-        mTarget->setNodeHelper(mHorizonNode, true);
+        // A BACKDROP, in the engine's sense (EnginePrivate.h's bit scheme):
+        // kBackdropBit instead of kVisibleBit takes the plane out of every
+        // reflection-probe capture, out of the shadow nodes (nothing this size
+        // may ever be a shadow caster or the atlas fits the horizon instead of
+        // the scene) and out of kGiGeometryBit — exactly what setNodeHelper
+        // used to buy here — while EVERY view goes on drawing it.
+        //
+        // Not setNodeHelper any more (lane PLAYER-1): the Player page is a
+        // second View on the editor's scene and hides the editor's FURNITURE by
+        // masking kHelperBit out of its passes. The horizon is not furniture,
+        // it is the ground; it needed the other half of the old flag's meaning.
+        mTarget->setNodeBackdrop(mHorizonNode, true);
     }
     // THE FLOOR'S MESH decides the horizon's UV map, so a floor that changes
     // mesh rebuilds it (the map is measured off that mesh, above).

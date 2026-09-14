@@ -264,6 +264,33 @@ constexpr Ogre::uint32 kMovableBit     = 1u << 5;
 // which is the "include it" half of the owner's "we can have both options".
 constexpr Ogre::uint32 kSunDiscBit     = 1u << 6;
 
+// THE BACKDROP CHANNEL (PLAYER_ONE_SCENE, lane PLAYER-1). A backdrop carries
+// this bit INSTEAD OF kVisibleBit — the fifth use of the inversion above — and
+// it exists because kHelperBit had come to mean two different things at once.
+//
+// `setNodeHelper` says "no capture may see this": the probes, the shadow nodes
+// and the GI gathers all ask for kVisibleBit, so a helper drops out of every
+// one of them for free. That is exactly what the ground's 2 km HORIZON plane
+// wants (nothing that size may size a shadow atlas or a voxel volume) — but the
+// horizon is PART OF THE PICTURE, not editor furniture, and the moment one view
+// of a scene has to hide the furniture (the Player page, which is a second View
+// on the editor's scene) "helper" can no longer answer both questions.
+//
+// So the two meanings split. kHelperBit is EDITOR FURNITURE — the grid, the
+// wires and icons, the gizmo, the selection shell, the GI volume boxes — and a
+// view may mask it out per pass (ChainDesc::helpers). kBackdropBit is the other
+// half of the old meaning, unchanged in every capture pass:
+//   * OUT, with no mask change anywhere: the reflection-probe faces, the raster
+//     irradiance-field faces (`visibility_mask 0x1`), every shadow node
+//     (shadowCasterChannels), and kGiGeometryBit (itemVisibilityFlags never
+//     grants it to a helper of either kind).
+//   * IN, by the all-ones default: the main chain and the thumbnail/preview
+//     shapes, for EVERY view — including a view that hides the furniture.
+//   * OUT of the planar mirrors, exactly as it was: the planar pass asks for
+//     kVisibleBit|kMovableBit|kSunDiscBit and is deliberately not widened, so
+//     the pixels a mirror shows do not move with this split.
+constexpr Ogre::uint32 kBackdropBit    = 1u << 7;
+
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
 // ---------------------------------------------------------------------------
@@ -665,6 +692,24 @@ struct ChainDesc {
     /// rebuild a workspace (STATS_OVERLAY_SPEC §6.6 test 3). Every OTHER scene
     /// pass in this file sets mIncludeOverlays = false unconditionally.
     bool  overlays = false;
+
+    // ---- Editor furniture, per view (lane PLAYER-1) ----
+    /// Does THIS view draw the editor's helper geometry — the grid, the light
+    /// and camera wires and icons, the gizmo, the selection shell, the GI
+    /// volume boxes (everything Scene::setNodeHelper marks)?
+    ///
+    /// The Player page is a second View on the EDITOR'S scene, so "the player
+    /// shows no wires" cannot be mirror state any more: one mirror pushes one
+    /// scene and two views draw it. It is a per-pass VISIBILITY MASK instead —
+    /// every scene pass in this view's node gets kHelperBit taken out of its
+    /// mask (chain::build) — which is free, needs no second scene and cannot
+    /// desynchronise. Backdrops (kBackdropBit: the ground's horizon) and the
+    /// sun disc are NOT furniture and stay in every view.
+    ///
+    /// GRAPH SHAPE (sameShape): the mask lives on the pass DEFINITION, so a
+    /// flip re-writes those definitions and the workspace is rebuilt — which
+    /// happens once, when the Player page's view is created.
+    bool  helpers = true;
 
     /// Does this description need anything beyond the passthrough graph?
     bool anyEffect() const;
@@ -2296,6 +2341,8 @@ public:
     bool nodeMovable(NodeId id) const override;
     MobilityStatus mobilityStatus() const override;
     bool nodeHelper(NodeId id) const override;
+    void setNodeBackdrop(NodeId id, bool backdrop) override;
+    bool nodeBackdrop(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
     unsigned nodeLightMask(NodeId id) const override;
     void setNodeCastShadow(NodeId id, bool on) override;
@@ -2665,6 +2712,11 @@ private:
         /// icons, range wires — things the user must see but a reflection probe
         /// must not capture. Carries kHelperBit instead of kVisibleBit.
         bool                      helper = false;
+        /// A helper that is PART OF THE PICTURE (kBackdropBit's note): the
+        /// ground's horizon plane. Implies `helper` — same exclusion from every
+        /// capture — but carries kBackdropBit instead of kHelperBit, so a view
+        /// that masks the editor's furniture out still draws it.
+        bool                      backdrop = false;
         /// MOBILITY, as the document RESOLVED it (REALTIME_REFLECTIONS_SPEC
         /// §3.3). True = this node moves, and the renderer keeps it OUT of the
         /// still-world layer: its item carries kMovableBit instead of
@@ -4145,6 +4197,9 @@ public:
     void setPostFx(const PostFxDesc &fx) override;
     const PostFxDesc &postFx() const override;
     void resetExposureHistory() override;
+    void seedExposureHistory(float scale) override;
+    void setHelpersVisible(bool on) override;
+    bool helpersVisible() const override { return mHelpersVisible; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -4415,6 +4470,9 @@ private:
     Colour                     mBackground;
     bool                       mEnabled = true;
     bool                       mShadows = false;
+    /// Does this view draw the editor's furniture (View::setHelpersVisible)?
+    /// Graph shape — it is a per-pass visibility mask, ChainDesc::helpers.
+    bool                       mHelpersVisible = true;
     std::string               &mError;
 };
 

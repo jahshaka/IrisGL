@@ -492,7 +492,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
            a.refractions == b.refractions && a.samples == b.samples &&
-           a.overlays == b.overlays &&
+           a.overlays == b.overlays && a.helpers == b.helpers &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
            a.background.b == b.background.b && a.background.a == b.background.a;
 }
@@ -576,6 +576,39 @@ void addLetterboxPrologue(Ogre::CompositorNodeDef *n, const ChainDesc &desc,
     q->mStoreActionStencil   = Ogre::StoreAction::DontCare;
     q->mProfilingId = "Jahshaka letterbox";
     inset(handles, q);                                 // ...and the background inside
+}
+
+}   // namespace
+
+namespace {
+
+/// THE EDITOR'S FURNITURE, TAKEN OUT OF ONE VIEW (ChainDesc::helpers).
+///
+/// One scene, two views: the editor draws the grid, the wires, the icons and
+/// the gizmo; the Player page — a second View on the same scene — must not.
+/// The objects are the SAME objects, so this cannot be visibility state on the
+/// node; it is a per-pass mask, applied once to every scene pass this view's
+/// node def carries, whatever shape the chain came out as.
+///
+/// AND-ed, never assigned: the distortion pass already carries kDistortionBit
+/// alone and the overlay passes carry overlayVisibilityMask(), and both must
+/// keep what they say. The AND with RESERVED_VISIBILITY_FLAGS is the law from
+/// overlayVisibilityMask's note — a mask carrying LAYER_VISIBILITY into
+/// cullFrustum's second term excludes nothing at all, silently. Every pass
+/// definition is born holding exactly RESERVED, so the default case comes out
+/// as `RESERVED & ~kHelperBit` and nothing else moves.
+void maskOutHelpers(Ogre::CompositorNodeDef *n) {
+    const Ogre::uint32 keep =
+        Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS & ~kHelperBit;
+    const size_t targets = n->getNumTargetPasses();
+    for (size_t t = 0; t < targets; ++t) {
+        Ogre::CompositorTargetDef *td = n->getTargetPass(t);
+        if (!td) continue;
+        for (Ogre::CompositorPassDef *p : td->getCompositorPasses()) {
+            if (!p || p->getType() != Ogre::PASS_SCENE) continue;
+            static_cast<Ogre::CompositorPassSceneDef *>(p)->mVisibilityMask &= keep;
+        }
+    }
 }
 
 }   // namespace
@@ -666,6 +699,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // Gizmos and wires belong to the SHOT, not to the bars.
             if (desc.letterbox) inset(handlesOut, p);
         }
+        if (!desc.helpers) maskOutHelpers(n);
         Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
         workDef->connectExternal(0, n->getName(), 0);
         return;
@@ -1618,6 +1652,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         if (desc.letterbox) inset(handlesOut, p);
     }
 
+    if (!desc.helpers) maskOutHelpers(n);
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
     workDef->connectExternal(0, n->getName(), 0);
 }
