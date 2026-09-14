@@ -50,9 +50,9 @@
 //         fades — the screen edge, the "this reflection points back at the
 //         camera" one, the ARRIVAL ANGLE at the surface the ray hit (a backface
 //         or a grazing arrival is a hit the depth buffer cannot vouch for) and
-//         the THICKNESS MARGIN (a crossing that only qualified because the
-//         thickness guess is generous). The last two are lane SSR-1's; see the
-//         block comment where they are computed.
+//         the THICKNESS MARGIN (how much of the gap between the ray and the
+//         surface the march's own step cannot explain). The last two are lane
+//         SSR-1's; see the block comment where each is computed.
 // The ROUGHNESS mask is deliberately NOT folded in here: this pass may run at
 // half resolution, and a roughness cutoff evaluated at half res has visibly
 // blocky edges. The resolve pass re-reads roughness at FULL resolution. The
@@ -231,7 +231,22 @@ void main()
 				// that only counts because the tolerance is fat may have passed
 				// BEHIND the object entirely, through the part of the world the
 				// depth buffer cannot describe.
-				hitDiff = diff / crossTol;
+				//
+				// THE STEP'S OWN OVERSHOOT IS SUBTRACTED FIRST, and that
+				// subtraction is what makes this a measure of the WORLD rather
+				// than of the march's phase. `diff` is read at a coarse step, so
+				// even a perfectly face-on crossing lands anywhere in
+				// (0, stepLen * rayDir.z] depending on where the checkerboard
+				// jitter put this pixel's samples — at the High tier's 48 steps
+				// that bound is 0.52 m against a 0.5 m thickness, so a
+				// legitimate hit would score "marginal" for about a quarter of
+				// the jitter phases and the confidence would checkerboard. What
+				// is left after the subtraction is the part of the gap the STEP
+				// cannot explain, which is the only part the thickness guess is
+				// being asked about, and it is normalised by the thickness
+				// itself (round 2, lane SSR-1).
+				hitDiff = max( 0.0, diff - stepLen * max( rayDir.z, 0.0 ) ) /
+						  max( thickness, 1e-6 );
 				// Binary refinement between the last miss and this hit. Five
 				// iterations take the hit to 1/32 of a step, which is what
 				// stops the reflection from looking quantised along the ray.
@@ -328,10 +343,11 @@ void main()
 	//    as meaningless: one texel either way is a different surface. So the
 	//    confidence ramps from nothing at a backface or a grazing arrival to
 	//    full at 0.2 (about 11 degrees off the surface).
-	//  * THE THICKNESS TEST'S OWN MARGIN. `crossTol` is a GUESS at how thick the
-	//    world is; a crossing that only qualified because the guess is generous
-	//    is a maybe, not a hit. Full confidence up to half the tolerance,
-	//    falling to nothing at the tolerance itself.
+	//  * THE THICKNESS TEST'S OWN MARGIN. `thickness` is a GUESS at how thick
+	//    the world is; a crossing that only qualified because the guess is
+	//    generous is a maybe, not a hit. Full confidence up to half of it,
+	//    falling to nothing at the whole of it — measured on the part of the gap
+	//    the march's own step cannot explain (see where hitDiff is computed).
 	//
 	// Both are ZERO-COST where the trace was already trustworthy — a flat floor
 	// reflecting the room in front of it arrives at its hits face-on and well
@@ -347,58 +363,5 @@ void main()
 	const float faceFade  = smoothstep( 0.0, 0.2, arrival );
 	const float thickFade = 1.0 - smoothstep( 0.5, 1.0, hitDiff );
 
-	// RAY DIVERGENCE — THE CURVATURE TERM, and the one that answers the owner's
-	// sphere directly.
-	//
-	// A screen-space trace is a pixel-rate sampling of a reflected image. That
-	// is sound while neighbouring pixels reflect in nearly the same direction:
-	// the reflected image then has roughly the same scale as the frame, one
-	// sample per pixel is a fair estimate of it, and the resolve's 3x3
-	// neighbourhood is a filter over a coherent signal. On a CURVED mirror it
-	// stops being sound long before it stops returning hits — at a sphere's limb
-	// the reflected direction sweeps tens of degrees between one pixel and the
-	// next, so one pixel covers an enormous solid angle of the room, its single
-	// sample of the history is not an estimate of anything, and the neighbouring
-	// samples are of unrelated places. That is the shredded chrome ball.
-	//
-	// Measured from the G-BUFFER NORMAL at the two neighbouring texels, NOT with
-	// fwidth(): every rejection above is an early `return`, so the 2x2 quads
-	// this shader runs in are not uniform and a derivative taken after them is
-	// undefined by the specification (and measured to be useless here — it
-	// changed the picture by 0.004 %). Two taps are well defined everywhere and
-	// let the shader say what "no neighbour" means instead of guessing: the
-	// prepass CLEARS the normals target to white, which decodes to a vector of
-	// length 1.7, so a neighbour that is sky or was never drawn is skipped
-	// rather than counted as infinite curvature — otherwise every silhouette in
-	// the frame would fade its own reflection.
-	//
-	// A reflected direction turns about twice as fast as the normal it bounces
-	// off, hence the 2. A flat floor — at ANY view angle, which is why this is a
-	// curvature test and not a grazing-angle one — measures a few thousandths
-	// and keeps every bit of its reflection; a sphere's silhouette measures a
-	// quarter of a radian and hands the pixel back to the probe.
-	//
-	// The band: full confidence to 0.08 rad/px (a reflected image compressed
-	// about fivefold, still resolvable), nothing past 0.25 (twenty-fold and up).
-	const vec2	texel	= 1.0 / rayBufferRes.xy;
-	float		curv	= 0.0;
-	{
-		const vec3 nR = texture( vkSampler2D( gBufNormals, samplerState ),
-								 inPs.uv0 + vec2( texel.x, 0.0 ) ).xyz * 2.0 - 1.0;
-		const vec3 nD = texture( vkSampler2D( gBufNormals, samplerState ),
-								 inPs.uv0 + vec2( 0.0, texel.y ) ).xyz * 2.0 - 1.0;
-		// normalVS is already normalized and z-flipped; compare in the G-buffer's
-		// own handedness by flipping back, which costs nothing and keeps the two
-		// sides of the subtraction in one space.
-		const vec3 nC = vec3( normalVS.x, normalVS.y, -normalVS.z );
-		if( dot( nR, nR ) < 2.0 )
-			curv = max( curv, length( nR - nC ) );
-		if( dot( nD, nD ) < 2.0 )
-			curv = max( curv, length( nD - nC ) );
-	}
-	const float divergence = 2.0 * curv;
-	const float divFade	   = 1.0 - smoothstep( 0.08, 0.25, divergence );
-
-	fragColour = vec4( hitUv, distFade,
-					   edgeFade * camFade * faceFade * thickFade * divFade );
+	fragColour = vec4( hitUv, distFade, edgeFade * camFade * faceFade * thickFade );
 }

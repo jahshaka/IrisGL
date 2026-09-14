@@ -228,13 +228,17 @@ void main()
 	const float kCoordSpreadTexels = 4.0;
 	vec2  sumUv	 = vec2( 0.0 );
 	float sumUvW = 0.0;
+	int	  nHit	 = 0;				// rays that came back at all
+	int	  nAgree = 0;				// ...of those, the ones looking at one thing
 	for( int i = 0; i < 9; ++i )
 	{
 		if( taps[i].w <= 0.0 )
 			continue;
+		++nHit;
 		const vec2 d = abs( taps[i].xy - refUv ) * rayBufferRes.xy;
 		if( max( d.x, d.y ) > kCoordSpreadTexels )
 			continue;
+		++nAgree;
 		sumUv  += taps[i].xy * taps[i].w;
 		sumUvW += taps[i].w;
 	}
@@ -257,13 +261,26 @@ void main()
 	// green confetti the owner photographed where the sphere should have shown
 	// the teapot.
 	//
-	// The measure is free, because the loop above already computed it: `sumUvW`
-	// is the weight of the taps that AGREE with the reference hit. Measured
-	// against the WHOLE NEIGHBOURHOOD — nine, not `sumW` — and deliberately:
-	// against sumW a single lucky ray surrounded by eight misses scores a
-	// perfect 1.0, because it agrees with itself. That degenerate case IS the
-	// artefact (one ray in nine painting a dot), so the denominator has to be
-	// the nine rays that were fired, not the ones that came back.
+	// THE MEASURE IS A COUNT, and it has to be. The obvious spelling —
+	// `sumUvW / 9`, the agreeing taps' CONFIDENCE over the neighbourhood — is
+	// not a coherence measure at all: on a perfectly coherent floor every tap
+	// agrees, so it evaluates to the mean confidence and the weight becomes
+	// w * smoothstep(0.35, 0.7, w), which re-shapes every march-side ramp (edge,
+	// camera, arrival, thickness) and drives their tails to zero at w = 0.35
+	// instead of at 0. Measured: it cost 2.9 points of the flat floor's
+	// footprint, all of it real reflection inside those ramps (round 2). Counting
+	// instead asks the question that was meant — HOW MANY of the nine rays are
+	// looking at one thing — and is exactly orthogonal to how confident they are.
+	//
+	// The denominator is the NINE RAYS FIRED, not the ones that came back: a
+	// single lucky ray surrounded by eight misses agrees with itself, and that
+	// degenerate case IS the artefact.
+	//
+	// WHAT IT MEANS IN ONE SENTENCE, because it is a design decision and not a
+	// tuning constant: SSR is off wherever the reflected image is magnified by
+	// more than about four ray-buffer texels per pixel — which is what
+	// `kCoordSpreadTexels` measures — because a screen-space trace samples that
+	// image at one sample per pixel and cannot describe it any finer.
 	//
 	// THE RAMP IS DELIBERATELY LOW (full confidence from 55 % of the
 	// neighbourhood agreeing) because a legitimate reflection edge — the
@@ -271,7 +288,7 @@ void main()
 	// by construction and must not vanish. A flat floor scores 1.0 everywhere
 	// except across such an edge, which is why the flat-floor frame does not
 	// move.
-	const float agreement = sumUvW * ( 1.0 / 9.0 );
+	const float agreement = float( nAgree ) * ( 1.0 / 9.0 );
 	const float cohFade	  = smoothstep( 0.35, 0.7, agreement );
 
 	// AND THE BORROW HAS TO EARN IT. When this pixel's OWN ray missed, the block
@@ -280,8 +297,8 @@ void main()
 	// half-resolution ray buffer from checkerboarding) and pure invention when
 	// the neighbourhood is mostly misses: one lucky ray in nine then paints a
 	// dot on eight pixels that never hit anything. So a borrowed hit fades with
-	// how much of the neighbourhood stands behind it.
-	const float borrow = taps[4].w > 0.0 ? 1.0 : smoothstep( 2.0, 5.0, sumW );
+	// HOW MANY neighbours stand behind it — a count again, for the same reason.
+	const float borrow = taps[4].w > 0.0 ? 1.0 : smoothstep( 2.0, 5.0, float( nHit ) );
 
 	// Full-resolution roughness, undoing HlmsPbs' prepass packing. The ramp
 	// below the cutoff is what stops the reflection from appearing and

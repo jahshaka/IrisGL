@@ -710,12 +710,14 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     when it has neither. The lerp is the physics — the probe and the screen are
     two estimates of ONE integral and `w` is how much of it the screen answered —
     and the add is the same specular lobe counted twice, because
-    `applyVoxelConeTracing`, `applyIrradianceField` and `applyIrradianceVolumes`
-    all write `envColourS` earlier in the same shader and none of them raises
-    `use_envprobe_map`. A VCT- or field-lit scene with no sky cube and no probe
-    grid therefore shaded every mirror as "the screen's answer PLUS the voxel
-    cone's answer", and since this renderer's SSR is a closed loop (the shaded
-    colour becomes the next frame's history) the error compounded through it.
+    `applyVoxelConeTracing` adds its cone-traced SPECULAR to `envColourS` earlier
+    in the same shader (Vct_piece_ps.any:647) without raising `use_envprobe_map`.
+    It is the ONLY other writer of that term: the irradiance field and the
+    irradiance volumes write `envColourD`. A VCT-lit scene with no sky cube and
+    no probe grid therefore shaded every mirror as "the screen's answer PLUS the
+    voxel cone's answer", and since this renderer's SSR is a closed loop (the
+    shaded colour becomes the next frame's history) the error compounded
+    through it.
     The patch makes the composite the lerp unconditionally.
     NO SHIPPED FRAME MOVES: where `envColourS` is zero, lerp(0, R, w) is exactly
     0 + R*w, and every scene with a sky or probes was already on the lerp branch
