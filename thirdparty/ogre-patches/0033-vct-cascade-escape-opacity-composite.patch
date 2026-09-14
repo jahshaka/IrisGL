@@ -47,6 +47,36 @@ starting surface again, at its own coarser mip, and the escape opacity climbs a
 step per hop. Fix: apply the same expression the initial call uses, in the NEW
 cascade's units, at every cascade entry.
 
+AMENDED 2026-09-14 (PHOTON E0, audit B5) — THE SAME TWO FIXES ON THE SPECULAR
+WALK. The first version of this patch fixed the DIFFUSE cone loop only. The
+cascade continuation is run twice per pixel, and the specular one (the sky in a
+reflection) carried both defects unchanged: `irrLight.alpha += newRes.alpha`
+(the same doubling, `voxelConeTraceSpec` also starts its accumulator at the
+`startingAlpha` it is handed) and no self-occlusion bias at the new cascade's
+entry. So once the inner cascade's opacity reached 0.475 the doubled total
+crossed the walk's own `< 0.95f` exit after ONE hop and
+`specAlpha = 1 - min( 1, alpha / 0.95 )` was 0 — the ambient term in the
+specular result vanished at 2+ cascades. Measured on a chrome plate lit by
+nothing but the ambient, `gi.cascades` case 7 (mean luminance of the plate):
+
+    roughness      0.15     0.35     0.55     0.75
+    1 cascade    0.0264   0.0036   0.0019   0.0039   (the reference)
+    2 cascades   0.0148   0.0000   0.0000   0.0000   before this amendment
+    4 cascades   0.0001   0.0000   0.0000   0.0000   before this amendment
+
+The bias term differs from the diffuse one in one detail, and deliberately:
+`startBias` in the specular loop measures the new cascade's voxel along the
+REFLECTION ray (it is upstream's seam-gap term and stays as it is), while the
+self-occlusion bias must be along the GEOMETRIC NORMAL — so the amendment
+computes `normalBias` in the new cascade's units, which is exactly what
+`computeVctProbe`'s initial `vctInvResolution` is for cascade 0.
+
+IT IS AN AMENDMENT, NOT A NEW PATCH: the number stays 0033, because the two
+halves are one fix to one defect and a tree that carries the old 0033 and not
+this one is in a state nobody should have to reason about. A tree that already
+applied the old 0033 must reset the file (`git checkout -- Samples/Media` in the
+ogre-next submodule + the usual `clean -fd`) before re-running build-ogre.sh.
+
 RESIDUAL, STATED HONESTLY: 0.51x at four cascades, not 1.00x. The rest is
 upstream's march bookkeeping — `voxelConeTraceDiff` RESTARTS `dist` at one voxel
 in each cascade (`float dist = vctInvResolution;`) instead of carrying the
@@ -103,3 +133,44 @@ diff --git a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any b/Samples/Media/Hlms/Pb
  						result.lodLevel = newRes.lodLevel;
  						result.posLS = newRes.posLS;
  					}
+@@ -502,8 +511,21 @@
+ 						dot( abs( reflVecLS ), probeParams.vctInvResolution_cascadeMaxLod[j].xyz );
+ 					float prevCascadeMaxLod = probeParams.vctInvResolution_cascadeMaxLod[j - 1].w;
+ 
++					// Jahshaka patch 0033 (amended): THE SELF-OCCLUSION BIAS, ONCE PER
++					// CASCADE, on the specular walk too. computeVctProbe starts the
++					// first cone one bias along the GEOMETRIC NORMAL away from the
++					// surface it stands on; this continuation re-enters the march at
++					// the point the previous cascade stopped, which is inside one cell
++					// of the coarser volume, so without the same bias in the NEW
++					// cascade's units the surface occludes its own reflection once per
++					// hop. `startBias` measures the new cascade's voxel along the
++					// REFLECTION ray (upstream's gap term); the bias is along the
++					// normal, so it needs its own measure in the same units.
++					float normalBias =
++						dot( abs( dirLS ), probeParams.vctInvResolution_cascadeMaxLod[j].xyz );
+ 					float3 newPosLS =
+-						fromVctProbeToNext( irrLight.posLS, j, probeParams ) - reflVecLS * startBias;
++						fromVctProbeToNext( irrLight.posLS, j, probeParams ) - reflVecLS * startBias +
++						(dirLS / maxVal) * normalBias * lerp( 15.0f, 1.0f, maxVal );
+ 
+ 					VctResult newRes = voxelConeTraceSpec(
+ 						probeParams, newPosLS, reflVecLS, specConeAngleTan,
+@@ -518,7 +540,16 @@
+ 
+ 					// See VctCascadedVoxelizer::update comments on ( 1.0 - irrLight.alpha )
+ 					irrLight.colour += newRes.colour * strength * ( 1.0 - irrLight.alpha );
+-					irrLight.alpha += newRes.alpha;
++					// Jahshaka patch 0033 (amended; this line was `+=`): the same
++					// doubling the diffuse loop had. voxelConeTraceSpec starts its
++					// accumulator at `startingAlpha` -- this very `irrLight.alpha` --
++					// so what it returns is already the running total for the whole
++					// cone; adding it doubles the opacity at every hop, the walk exits
++					// through `irrLight.alpha < 0.95f` after one, and specAlpha below
++					// goes to 0 -- the ambient (the sky in a reflection) disappears at
++					// 2+ cascades. The colour composite above deliberately reads the
++					// PREVIOUS alpha, and is evaluated first.
++					irrLight.alpha = newRes.alpha;
+ 					irrLight.lodLevel = newRes.lodLevel;
+ 					irrLight.posLS = newRes.posLS;
+ 				}

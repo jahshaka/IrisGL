@@ -522,6 +522,7 @@ WorkReason reasonOf(GiStaleReason why) {
     case GiStaleReason::Ambient:  return WorkReason::Ambient;
     case GiStaleReason::Fog:      return WorkReason::Fog;
     case GiStaleReason::Mobility: return WorkReason::Mobility;
+    case GiStaleReason::Camera:   return WorkReason::Camera;
     }
     return WorkReason::None;
 }
@@ -617,6 +618,9 @@ void noteShaderCompiles(unsigned n) {
 }
 void noteProbeCaptures(unsigned captures) {
     if (gMonitor && gMonitor->inFrame()) gMonitor->current().probeCaptures += captures;
+}
+void noteCascadeRebuild() {
+    if (gMonitor && gMonitor->inFrame()) ++gMonitor->current().cascadeRebuilds;
 }
 void notePlanarRender(unsigned slots) {
     if (gMonitor && gMonitor->inFrame()) gMonitor->current().planarRenders += slots;
