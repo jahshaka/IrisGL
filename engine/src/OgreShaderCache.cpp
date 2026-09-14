@@ -688,19 +688,27 @@ bool ShaderCache::dirty(Ogre::Root *root) const {
 
 bool ShaderCache::save(Ogre::Root *root) {
     if (!mEnabled || !root) return false;
-    // NOT RE-ENTRANT, AND THE APP HAS NESTED EVENT LOOPS (SMOKE-ENGINE-1 item
-    // 3). A save serializes about a megabyte through a scratch file whose name
-    // is derived from the layer, walks Ogre's Hlms caches through
-    // HlmsDiskCache::copyFrom, and calls vkGetPipelineCacheData — and it is
-    // reachable from THREE places that can interleave: the host's watchdog
-    // QTimer, the `app.saveShaderCache()` verb (scripts and MCP), and the
-    // clean-quit save. Several of the app's waits pump the event loop with
-    // ExcludeUserInputEvents, which does NOT exclude timers, so a second save
-    // starting inside the first is a thing this code could not previously say
-    // no to: two writers on the same `*.building` path, and copyFrom walking
-    // the same vectors twice with a partially-written disk cache between them.
-    // One bool closes it. It is not a lock: every caller is the main thread,
-    // and a save arriving from anywhere else is a bug this would hide.
+    // NOT RE-ENTRANT, AND IT IS CHEAP TO SAY SO — but read the second paragraph
+    // before believing it fixed anything.
+    //
+    // A save serializes about a megabyte through a scratch file whose name is
+    // derived from the layer, walks Ogre's Hlms caches through
+    // HlmsDiskCache::copyFrom, and calls vkGetPipelineCacheData. It is reachable
+    // from three places — the host's watchdog QTimer, the
+    // `app.saveShaderCache()` verb (scripts and MCP), and the clean-quit save —
+    // and two of them running at once would mean two writers on the same
+    // `*.building` path. One bool closes that. It is deliberately not a lock:
+    // every caller is the main thread, and a save arriving from anywhere else
+    // is a bug this would hide rather than fix.
+    //
+    // IT DID NOT CONTRIBUTE TO THE 2026-09-14 CRASHES, and the first version of
+    // this comment implied it did (round-2 review item 4). The reasoning was
+    // that the app's waits pump the event loop with ExcludeUserInputEvents,
+    // which does not exclude timers — true, but irrelevant HERE: nothing in
+    // this function's body pumps an event loop, so the window a nested pump
+    // would need is a window save() never opens. The crash was Ogre indexing
+    // its own vectors with unvalidated indices and ogre-patch 0035 is the guard
+    // for it. This bool is hygiene, kept on its own merits.
     if (mSaving) { logLine("save already in progress — skipped the re-entrant call"); return false; }
     struct Reentry {
         bool &flag;

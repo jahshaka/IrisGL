@@ -2926,6 +2926,10 @@ private:
     /// Re-writes the ambient pass data with the CURRENT envmapScaleForPass().
     /// Runs on every PCC binding transition, not only on a Sky Light edit.
     void refreshEnvmapScale();
+    /// Any live PBR material carrying its OWN reflection cubemap. Such a pass
+    /// keeps envmapScale at 1.0 (see the note at envmapScaleForPass): the
+    /// author's map is not the sky and the Sky Light's gain must not dim it.
+    bool hasAuthoredReflectionMap() const;
 public:
     /// Is a refraction pass present in EVERY view that draws this scene?
     ///

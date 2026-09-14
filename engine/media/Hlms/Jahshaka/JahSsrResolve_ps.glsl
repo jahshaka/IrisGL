@@ -70,8 +70,8 @@
 // luminance reduction averages it into a 1x1 keep_content history that never
 // recovers, which is the same defect's "all white, stuck exposure".
 //
-// So every value read out of `prevFrame` goes through sanitizeRadiance()
-// first: non-finite becomes black, and an absolute ceiling bounds what the
+// So every value read out of `prevFrame` goes through ssrHistoryTap() first:
+// non-finite becomes black and says so, and an absolute ceiling bounds what the
 // loop can circulate. The ceiling is ABSOLUTE on purpose — it is the only
 // thing a feedback loop cannot argue with. The relative firefly clamp stays
 // exactly as it was; a pixel already inside the ceiling comes out of this
@@ -127,12 +127,25 @@ const float kSsrMaxRadiance = 1024.0;
 /// does.
 vec4 ssrHistoryTap( vec2 uv )
 {
-	const vec3	c = texture( vkSampler2D( prevFrame, linearSampler ), uv ).xyz;
-	const float m = max( abs( c.x ), max( abs( c.y ), abs( c.z ) ) );
-	if( m <= kSsrMaxRadiance )
+	const vec3 c = texture( vkSampler2D( prevFrame, linearSampler ), uv ).xyz;
+	// PER-CHANNEL, ORDERED COMPARISONS, AND NOT max(). GLSL and SPIR-V leave
+	// `max` with a NaN operand UNDEFINED, and the hardware instruction it maps
+	// to is a maxNum on the platforms we ship (Metal/MoltenVK documents it,
+	// NVIDIA's FMNMX does it): maxNum returns the NON-NaN operand, so
+	// max(abs(NaN), max(abs(0), abs(0))) is 0 and a single-channel NaN reads as
+	// finite and in range. That is not hypothetical here — it is this shader's
+	// own mechanism, since a COLOURED overflow reaches (Inf, 0, 0) and the
+	// arithmetic below turns it into (NaN, 0, 0).
+	//
+	// lessThan/lessThanEqual are ORDERED (OpFOrdLessThan): every comparison is
+	// FALSE for a NaN, so `all(...)` is false for a NaN in any channel and
+	// false for an Inf, and a value that passes both really is finite and in
+	// range. A pixel that passes comes out untouched, bit for bit.
+	if( all( lessThanEqual( abs( c ), vec3( kSsrMaxRadiance ) ) ) )
 		return vec4( c, 1.0 );							// the ordinary texel, untouched
-	if( m < 3.0e38 )
-		return vec4( min( c, vec3( kSsrMaxRadiance ) ), 0.0 );	// finite, unusably bright
+	if( all( lessThan( abs( c ), vec3( 3.0e38 ) ) ) )
+		// clamp, not min: a channel BELOW -kSsrMaxRadiance must come back too.
+		return vec4( clamp( c, vec3( -kSsrMaxRadiance ), vec3( kSsrMaxRadiance ) ), 0.0 );
 	// NOT A COLOUR AT ALL, and it contributes NOTHING — neither to this pixel
 	// (.w says so, and the caller takes the neighbourhood instead) nor to the
 	// neighbourhood mean. MEASURED, because the alternative is tempting and
