@@ -80,60 +80,6 @@ public:
     void recreateRasterWorkspace()  { if (mIfRaster) mIfRaster->createWorkspace(); }
 };
 
-// THE VOXELISER SWAP — how one cascade gets FRESH voxels without the chain
-// being rebuilt (PHOTON_SPEC G1).
-//
-// `VctMaterial` converts each datablock ONCE and caches the result by raw
-// pointer for the voxeliser's whole life (OgreVctMaterial.cpp addDatablock: a
-// cache hit never re-reads the colour), so a material whose parameters changed
-// — or one whose datablock died and whose address may since have been recycled
-// — can only be answered by a NEW voxeliser. In the single-volume arm that is
-// `freshVoxelArm`: a new voxeliser AND a new VctLighting under the probes it
-// keeps.
-//
-// A CASCADE CHAIN CANNOT DO THAT. `VctLighting::addCascade` hands each cascade
-// raw pointers to the ones outside it (`mExtraCascades`, a FastArray with no
-// way to clear it) and `fillConstBufferData` walks them on EVERY pass, so
-// replacing one cascade's LIGHTING dangles every cascade inside it — the whole
-// chain would have to be rebuilt in one frame, which is the very thing G1
-// exists to stop.
-//
-// The lighting does not need replacing. Everything it holds that depends on the
-// voxeliser is re-derived on demand, and the pin says so itself: a voxeliser
-// whose textures are lost sets `mVoxelizerTexturesChanged` (the light voxels
-// are re-created from the new resolution) and `mVoxelizerListenersRemoved` (it
-// re-registers as a TextureGpuListener on the new albedo/normal textures), both
-// honoured by `checkTextures()`. That is the pin's recovery path for a device
-// loss; this drives it on purpose. All four members are `protected`, so this
-// needs no source patch — the same reach-in `JahIrradianceField` above uses.
-//
-// UPSTREAM DEFECT, worked around here: nothing in the pin ever CLEARS
-// `mVoxelizerTexturesChanged` (it is set in `notifyTextureChanged`, read in
-// `checkTextures` and `resetTexturesFromBuildRelative`, and assigned false only
-// in the constructor), so a voxeliser that loses residency once makes every
-// later `update()` destroy and re-create the light voxel textures for ever.
-// The swap below drives `checkTextures()` itself and puts the flag back.
-class JahVctLighting : public Ogre::VctLighting {
-public:
-    JahVctLighting(Ogre::IdType id, Ogre::VctVoxelizerSourceBase *voxelizer, bool anisotropic)
-        : Ogre::VctLighting(id, voxelizer, anisotropic) {}
-    /// Point this lighting at a REPLACEMENT voxeliser. The caller owns both and
-    /// must delete the old one only AFTER this returns (the de-registration
-    /// below reads it), and the replacement must already have been built (the
-    /// light voxels are sized from its albedo texture).
-    void jahSwapVoxelizer(Ogre::VctVoxelizerSourceBase *replacement) {
-        if (!replacement || replacement == mVoxelizer) return;
-        if (!mVoxelizerListenersRemoved) {
-            mVoxelizer->getAlbedoVox()->removeListener(this);
-            mVoxelizer->getNormalVox()->removeListener(this);
-        }
-        mVoxelizer = replacement;
-        mVoxelizerListenersRemoved = true;   // checkTextures() re-adds, on the NEW textures
-        mVoxelizerTexturesChanged  = true;   // ...and re-creates the light voxels
-        checkTextures();
-        mVoxelizerTexturesChanged  = false;  // the pin never clears it (see above)
-    }
-};
 
 // ---- Raster-source constants (the spikes/rayon2 S3 measurements) ----------
 
@@ -1454,12 +1400,20 @@ void OgreScene::computeGiSignatures() const {
     mGeomSigEpoch = epoch;
     mGeomSigMode = mGi.mode;
     mGeomSigValid = true;
-    mEscapeSig = (!wantEscape || he == kFnvBasis) ? 0ull : he;  // untouched == nothing escaped
-    mEscapeSigEpoch = epoch;
-    mEscapeSigMode = mGi.mode;
-    mEscapeSigVolume = mGiAutoVolume;
-    mEscapeSigVolumeValid = mGiAutoVolumeValid;
-    mEscapeSigValid = true;
+    // THE ESCAPE HALF IS ONLY CACHED WHEN IT WAS COMPUTED (round-2 F9). A walk
+    // entered through `giGeometrySignature` with no fitted volume to escape from
+    // never folded a single item into `he`, and marking that answer valid would
+    // have served a 0 to the next `giEscapeSignature` call at the same epoch —
+    // after a `noteGiAutoVolume` had given the scene a volume, which is exactly
+    // when the term starts meaning something. Its own keys, its own validity.
+    if (wantEscape) {
+        mEscapeSig = he == kFnvBasis ? 0ull : he;    // untouched == nothing escaped
+        mEscapeSigEpoch = epoch;
+        mEscapeSigMode = mGi.mode;
+        mEscapeSigVolume = mGiAutoVolume;
+        mEscapeSigVolumeValid = mGiAutoVolumeValid;
+        mEscapeSigValid = true;
+    }
 }
 
 // A SCENE WITH NO LIGHTS AT ALL BREAKS VctLighting's AUTO MULTIPLIER, and after
@@ -2094,7 +2048,9 @@ void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsC
     }
     if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid)
         mGiCachesDirty = true;   // VCT never dereferences stale keys: the flush
-                                 // rebuilds the whole arm from scratch
+                                 // rebuilds the whole arm from scratch — or,
+                                 // under a cascade chain, marks the cascades the
+                                 // change reaches and keeps everything else (G1)
     // THE DESTRUCTION GENERATION (FIX WAVE B4). Bumped unconditionally, and
     // unconditionally is the point: every caller of this function either
     // destroys something the GI arms hold a raw pointer into, or wants a
@@ -2146,7 +2102,6 @@ void OgreScene::noteGiCascadeDirty(const Ogre::Aabb *box) {
 // voxeliser REPLACEMENT, and under cascades that replacement is spread one
 // cascade per frame (VctCascade::freshVoxels).
 void OgreScene::noteGiDatablockDied() {
-    ++mGiDatablockGeneration;
     for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
 }
 
@@ -2155,7 +2110,16 @@ void OgreScene::noteGiDatablockDied() {
 size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
     size_t marked = 0;
     for (VctCascade &c : mVctCascades) {
-        bool hit = mGiCascadeDirtyAll || c.freshVoxels || c.itemsStale;
+        // `itemsStale` IS NOT A HIT (round-2 F2). It is a re-select-BEFORE-build
+        // contract, not a statement that this cascade's picture is wrong:
+        // `setCascadeItems` honours it at the cascade's next rebuild, whenever
+        // that comes, and a voxeliser dereferences its raw `Item*`s only inside
+        // `build()` (its destructor touches none). Treating it as a hit made the
+        // box test inert for every structural edit — `invalidateGiCaches` sets
+        // it on EVERY cascade — so a delete in one corner, or a light REMOVAL
+        // that moved no geometry at all, marked the whole chain and the removed
+        // light's bounce vanished cascade by cascade over N frames.
+        bool hit = mGiCascadeDirtyAll || c.freshVoxels;
         if (!hit) {
             const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
             for (const Ogre::Aabb &d : mGiCascadeDirtyBoxes)
@@ -2193,7 +2157,7 @@ size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
 //   * whether a DATABLOCK died or a material PARAMETER changed — the only case
 //     that needs a new voxeliser, and it gets one per cascade per frame with
 //     the chain's lighting objects (and so its raw `mExtraCascades` pointers)
-//     untouched (JahVctLighting::jahSwapVoxelizer).
+//     untouched (`VctLighting::setVoxelizer`, ogre-patch 0037).
 //   * and, when nothing geometric moved at all, that a LIGHT changed — which is
 //     a re-INJECTION over the voxels that are already there, on every cascade,
 //     and never a re-voxelisation.
@@ -2220,15 +2184,12 @@ bool OgreScene::refreshCascadesFast() {
             for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
             mGiBuiltMaterialGeneration = mGiMaterialGeneration;
         }
-        // ...and a datablock that DIED (noteGiDatablockDied already flagged the
-        // cascades; this is the bookkeeping that says the chain has answered).
-        mGiBuiltDatablockGeneration = mGiDatablockGeneration;
-        // Whatever the walk saw move since the last answer is part of the
-        // region, whether or not anything else asked for this refresh. (Under a
-        // live view most of these have already been marked and spent while the
-        // object moved — see updateGiTracking; this is the belt for a scene
-        // whose GI is driven with no frame in between.)
-        for (const Ogre::Aabb &b : mGiMovedBoxes) noteGiCascadeDirty(&b);
+        // (THE MOVERS ARE NOT RE-RECORDED HERE, round-2 F4. `walkItems` folds
+        // every mover's box into the region as it finds it — once, at the one
+        // place that knows a box moved — and re-reading `mGiMovedBoxes` on this
+        // path recorded the same boxes a second and a third time, spending the
+        // 16-box cap three times as fast and collapsing a two-object edit into
+        // "mark the whole chain".)
         const size_t marked = markDirtyCascadesPending(
             mLastStaleReason == GiStaleReason::None ? GiStaleReason::Refresh : mLastStaleReason);
         // NOTHING GEOMETRIC CHANGED — so this refresh was asked for by a LIGHT
@@ -2458,12 +2419,13 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
     // `applyPendingGi` runs LATER IN THIS SAME FRAME and its `rebuildVct`
     // rebuilds the chain at this very camera, so a scroll rebuild spent here
     // would be torn down within the frame that paid for it.
-    // THE MOVEMENT SCAN, UNDER A CHAIN (G1). Without it `mGiMovedBoxes` is only
+            // THE MOVEMENT SCAN, UNDER A CHAIN (G1). Without it `mGiMovedBoxes` is only
     // ever filled for a scene with a live probe budget or a converged raster
     // field, so a plain-VCT cascade scene would have no idea WHERE anything
     // moved and every edit would mark the whole chain. It is epoch-gated like
     // every other consumer — a still scene runs no walk at all — and D4 makes
-    // it the one walk the frame pays for.
+    // it the one walk the frame pays for. The walk itself records the boxes
+    // (round-2 F4); this only spends them.
     if (!mVctCascades.empty()) {
         JAH_TRY {
             ensureGiWalk();
@@ -2491,10 +2453,8 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
             // The MONOLITHIC arm is deliberately unchanged here: one volume
             // cannot be re-voxelised per frame at any useful resolution, and
             // what to do there is the owner's call, not this lane's.
-            if (!mGiMovedBoxes.empty()) {
-                for (const Ogre::Aabb &b : mGiMovedBoxes) noteGiCascadeDirty(&b);
+            if (!mGiCascadeDirtyBoxes.empty() || mGiCascadeDirtyAll)
                 markDirtyCascadesPending(GiStaleReason::Moved);
-            }
         } JAH_CATCH(mError, );
     }
     if (!mGiCachesDirty) updateCascades(camPos);
@@ -3215,7 +3175,6 @@ void OgreScene::rebuildVct() {
     // What this arm was built AT (B4): the reuse path re-runs it only while the
     // count still matches, i.e. while nothing it points into can have died.
     mGiBuiltGeneration = mGiDestroyGeneration;
-    mGiBuiltDatablockGeneration = mGiDatablockGeneration;   // ...and the narrower one (G1)
     mGiReusedLastRefresh = false;
 
     // WHAT THE ARM LIT. For the cascade arm that is the OUTERMOST cascade's
@@ -3613,14 +3572,8 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         c.items = cascadeGeometryCount(c);
         setCascadeItems(c, c.items > 0u);
         c.voxelizer->build(mSceneMgr);
-        // OUR OWN SUBCLASS, and every cascade lighting in the engine comes from
-        // this one line — which is what lets `rebuildCascade` static_cast back
-        // to it to swap a voxeliser under a live chain (G1). The single-volume
-        // arm's lighting is built in buildVoxelArm/freshVoxelArm and is never a
-        // cascade. Deleting through `Ogre::VctLighting*` is well defined:
-        // VctLighting inherits TextureGpuListener's virtual destructor.
-        c.lighting = new JahVctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
-                                        c.voxelizer, anisotropic);
+        c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
+                                           c.voxelizer, anisotropic);
         const Ogre::uint32 extraBounces =
             Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
         c.lighting->setAllowMultipleBounces(extraBounces > 0u);
@@ -3644,8 +3597,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
     if (mVctCascades.empty() || !mVctCascades[0].lighting) return abandonCascadeChain();
     mVctVoxelizer = mVctCascades[0].voxelizer;
     mVctLighting  = mVctCascades[0].lighting;
-    mGiBuiltMaterialGeneration  = mGiMaterialGeneration;
-    mGiBuiltDatablockGeneration = mGiDatablockGeneration;
+    mGiBuiltMaterialGeneration = mGiMaterialGeneration;
     // A FROM-SCRATCH CHAIN OWES NOTHING: every cascade was just built from the
     // live scene, so whatever the dirty path had recorded is answered (G1).
     mGiCascadeDirtyBoxes.clear();
@@ -3785,7 +3737,8 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     c.itemsAttached = true;
 }
 
-bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
+bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placementCommitted) {
+    if (placementCommitted) *placementCommitted = false;
     if (idx >= mVctCascades.size()) return false;
     VctCascade &c = mVctCascades[idx];
     if (!c.voxelizer || !c.lighting) return false;
@@ -3817,6 +3770,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
     // voxeliser stays alive until the swap has happened, because the lighting
     // de-registers its texture listeners from it.
     Ogre::VctVoxelizer *retired = nullptr;
+    bool swapped = false;             // the lighting is reading the replacement
     const bool wasAttached = c.itemsAttached;
     if (c.freshVoxels) {
         Ogre::VctVoxelizer *fresh = nullptr;
@@ -3868,8 +3822,20 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
             // reading the replacement (the swap re-creates its light voxels and
             // re-registers its texture listeners). A build that threw leaves the
             // lighting pointed at voxels that are still correct.
-            if (retired)
-                static_cast<JahVctLighting *>(c.lighting)->jahSwapVoxelizer(c.voxelizer);
+            if (retired) {
+                c.lighting->setVoxelizer(c.voxelizer);
+                swapped = true;             // FROM HERE THE OLD VOXELISER IS DEAD WEIGHT
+            }
+            // THE SECOND FAULT ARM (round-2 F1): everything above this line can
+            // throw BEFORE the swap and everything below it AFTER, and the two
+            // failure paths are opposites — one puts the replacement back in the
+            // bin, the other commits it. Both are proven by the suite.
+            if (const char *fault = std::getenv("JAH_GI_CASCADE_FAULT_POST")) {
+                if (std::strtol(fault, nullptr, 10) == (long)idx)
+                    OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
+                                "JAH_GI_CASCADE_FAULT_POST: forced failure after the swap",
+                                "OgreScene::rebuildCascade");
+            }
             applyCascadeAmbient(c.lighting);
             c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/,
                                hasVctLights(), giRayMarchStepScale(false));
@@ -3878,13 +3844,31 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
     };
     const bool ok = attempt();
     if (retired) {
-        if (ok) {
+        if (ok || swapped) {
+            // THE SWAP IS COMMITTED — and on the FAILURE branch that is a
+            // decision, not an accident (round-2 F1). Everything that can throw
+            // after the swap (`applyCascadeAmbient`, `VctLighting::update`'s
+            // dispatch — the VK_ERROR_OUT_OF_DEVICE_MEMORY class is real on this
+            // box) throws with the replacement's `build()` ALREADY SUCCEEDED, so
+            // the voxels on the GPU are correct and current for the new
+            // placement and only the light INJECTION is missing. Putting the old
+            // voxeliser back instead would (i) run `checkTextures()` a second
+            // time on a device that has just failed, (ii) leave the lighting
+            // holding light voxels that call has just destroyed and re-created
+            // EMPTY, over the old voxels — a black cascade rather than a
+            // slightly stale one — and (iii) add a second throwing operation to
+            // a failure path. Deleting the replacement while the lighting points
+            // at it, which is what this branch used to do, is a use-after-free
+            // on the next frame's `fillConstBufferData`.
             delete retired;                       // the lighting no longer reads it
-            c.freshVoxels = false;
+            c.freshVoxels = false;                // the material cache IS fresh now
             if (idx == 0u) mVctVoxelizer = c.voxelizer;   // the head's alias follows
+            // ...and the caller must NOT put the placement back: the region the
+            // shader reads live is the one these voxels were built for.
+            if (!ok && placementCommitted) *placementCommitted = true;
         } else {
-            // PUT IT BACK EXACTLY AS IT WAS. The lighting was never swapped, so
-            // the old voxeliser is still the one the shader samples, and the
+            // A THROW BEFORE THE SWAP. The lighting still reads `retired`, so
+            // the old voxeliser is still the one the shader samples and the
             // replacement — which may have thrown half-built — goes.
             delete c.voxelizer;
             c.voxelizer = retired;
@@ -4002,12 +3986,21 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         // thing that staled the PROBE grid, possibly minutes ago — said
         // "material" or "light" for it. `Rebuild` stays the reason for a
         // teleport-forced one, which is what `cascadeFullRebuilds` counts.
-        if (!rebuildCascade(i, c.jumped ? GiStaleReason::Rebuild : c.pendingReason)) {
-            c.latticeX = lx; c.latticeY = ly; c.latticeZ = lz;
-            c.centre = prevCentre; c.builtCam = prevCam; c.jumped = wasJumped;
-            if (c.voxelizer)
-                c.voxelizer->setRegionToVoxelize(
-                    false, Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
+        bool placementCommitted = false;
+        if (!rebuildCascade(i, c.jumped ? GiStaleReason::Rebuild : c.pendingReason,
+                            &placementCommitted)) {
+            // ...UNLESS THE CASCADE KEPT IT (round-2 F1). A rebuild that failed
+            // AFTER its replacement voxeliser was swapped in has current voxels
+            // for the NEW box; putting the old box back would describe them
+            // wrong, which is exactly the defect the revert exists to prevent,
+            // pointing the other way.
+            if (!placementCommitted) {
+                c.latticeX = lx; c.latticeY = ly; c.latticeZ = lz;
+                c.centre = prevCentre; c.builtCam = prevCam; c.jumped = wasJumped;
+                if (c.voxelizer)
+                    c.voxelizer->setRegionToVoxelize(
+                        false, Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
+            }
             // ONE RETRY, THEN STAND DOWN (round-2 review F3). The next frame
             // tries again — a build can fail for a reason that passes (a
             // transient allocation, a device that has just come back) — but a

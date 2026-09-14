@@ -3469,8 +3469,8 @@ private:
         /// a datablock that died and whose address may be recycled — can only be
         /// answered by a NEW voxeliser. Serviced one cascade per frame by
         /// `rebuildCascade`, which swaps the replacement into the EXISTING
-        /// lighting (JahVctLighting::jahSwapVoxelizer) so the chain's raw
-        /// `mExtraCascades` pointers never dangle.
+        /// lighting (`VctLighting::setVoxelizer`, ogre-patch 0037) so the
+        /// chain's raw `mExtraCascades` pointers never dangle.
         bool         freshVoxels = false;
         /// How many GI items THIS cascade's last rebuild voxelised — inside its
         /// box and big enough to fill half a voxel of it, re-counted on every
@@ -3517,7 +3517,14 @@ private:
     /// FALSE when the build threw: the caller must then put the placement back,
     /// because the voxeliser's region (read live by the shader) has already
     /// moved and the voxels have not (audit B4).
-    bool rebuildCascade(size_t idx, GiStaleReason reason);
+    /// `placementCommitted` (out, optional) is set when the rebuild FAILED but
+    /// the cascade's new placement must NOT be put back: the replacement
+    /// voxeliser's `build()` had already succeeded and the lighting already
+    /// reads it, so the voxels on the GPU describe the NEW region and reverting
+    /// the region would point the shader at the new voxels through the old box
+    /// (audit B4's defect, in reverse). See the failure paths inside.
+    bool rebuildCascade(size_t idx, GiStaleReason reason,
+                        bool *placementCommitted = nullptr);
     /// THE PER-CASCADE DIRTY PATH (PHOTON_SPEC G1). An EDIT under the cascade
     /// arm, answered without tearing the chain down: the cascades the edit can
     /// be seen from are marked `pending` and spent by `updateCascades` ONE PER
@@ -3529,11 +3536,18 @@ private:
     /// region the edit touched (a mover's old box united with its new one, or a
     /// vanishing item's last box); nullptr means "somewhere" and marks the whole
     /// chain. A no-op unless a cascade chain is live, so every call site can
-    /// call it unconditionally.
+    /// call it unconditionally. NOT called at all where nothing a voxel holds
+    /// moved — a light leaving the scene — which is what makes that a
+    /// re-injection and nothing else.
     void noteGiCascadeDirty(const Ogre::Aabb *box);
     /// A DATABLOCK OR TEXTURE THE VOXELISERS' MATERIAL CACHE HOLDS IS DYING.
-    /// Bumps mGiDatablockGeneration and, under cascades, marks every cascade for
-    /// a voxeliser REPLACEMENT (one per frame) — see VctCascade::freshVoxels.
+    /// Under cascades, marks every cascade for a voxeliser REPLACEMENT, spent
+    /// one per frame — see VctCascade::freshVoxels. A strictly narrower thing
+    /// than `invalidateGiCaches`: a dead Item or Mesh is answered by re-selecting
+    /// a voxeliser's item set (`removeAllItems` drops every raw `Item*` and every
+    /// cached mesh in one call), while only a dead DATABLOCK or TEXTURE can
+    /// outlive that, because `VctMaterial` keys its conversion cache on the
+    /// datablock POINTER and a recycled address would alias.
     void noteGiDatablockDied();
     /// Marks every cascade whose box intersects the recorded dirty region (or
     /// all of them when the region is unknown) `pending`, and clears the region.
@@ -4122,16 +4136,6 @@ private:
     /// cache keys, VctMaterial's datablock-pointer cache) exactly as strong.
     unsigned long long mGiDestroyGeneration = 0;
     unsigned long long mGiBuiltGeneration   = ~0ull;   // no build yet
-    /// THE DATABLOCK GENERATION (G1), a strictly narrower thing than the
-    /// destruction generation above. A dead Item or Mesh is answered by
-    /// re-selecting a voxeliser's item set (`removeAllItems` drops every raw
-    /// `Item*` and every cached mesh in one call); only a dead DATABLOCK or
-    /// TEXTURE can outlive that, because `VctMaterial` keys its conversion cache
-    /// on the datablock POINTER and a recycled address would alias. So the three
-    /// material-side call sites bump this one as well, and it — not the broad
-    /// counter — is what forces a cascade's voxeliser to be REPLACED.
-    unsigned long long mGiDatablockGeneration      = 0;
-    unsigned long long mGiBuiltDatablockGeneration = 0;
     /// THE MATERIAL GENERATION (ENGINE_CACHE_POLICY_SPEC P7). Bumped when a
     /// parameter the VOXELIZER reads (albedo, emissive, alpha, workflow, the
     /// albedo/emissive maps) changes on a material that GI geometry uses.
