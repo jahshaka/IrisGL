@@ -101,7 +101,7 @@ Scene::Scene()
     giDdgi = -1;                // auto: no tier has been applied to this scene yet
     giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
     giDdgiAmbient = 1.0f;       // the ambient fix on; see scene.h
-    // The Rayon quality tier this scene comes back at when GI is switched on
+    // The Photon quality tier this scene comes back at when GI is switched on
     // (GI_UNIFIED_SPEC P2, owner decision D2 — new scenes are Epic). GI itself
     // stays OFF here: a bare document renders nothing until a tier is applied,
     // which is what the editor's new-scene path and the reader do.

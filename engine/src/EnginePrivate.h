@@ -1714,7 +1714,7 @@ public:
     static void  setSceneTime(const Ogre::SceneManager *sm, float seconds);
     static float sceneTime(const Ogre::SceneManager *sm);
 
-    /// THE DDGI SHADER STATE (GI_UNIFIED_SPEC.md §4 P1 and the Rayon ambient
+    /// THE DDGI SHADER STATE (GI_UNIFIED_SPEC.md §4 P1 and the Photon ambient
     /// fix), riding the same pass-buffer extension for the same reason the
     /// clock does: every member is read by a piece of ours inside the PIXEL
     /// shader, once per pass, and all of it must be changeable without a shader
@@ -1729,7 +1729,7 @@ public:
     /// Defaults to GiParams' defaults so a scene that never pushes state still
     /// reads sane values.
     struct IfdState {
-        /// THE ESCAPE VECTOR FOR THE RASTER SOURCE (rayon2 S3), jahIfd2.xyz, and
+        /// THE ESCAPE VECTOR FOR THE RASTER SOURCE (spikes/rayon2 S3), jahIfd2.xyz, and
         /// jahIfd2.w = 1 while it applies. The voxel path's threshold stays the
         /// shader's own expression (byte-identical); a raster field stores
         /// misses at camera-far x dot(|dir|, probesPerUnit), so the host sends
@@ -2254,7 +2254,8 @@ public:
     unsigned decalAtlasCapacity(DecalMap kind) const override;
     unsigned decalAtlasUsed(DecalMap kind) const override;
 
-    // ---- Global illumination (GI_SPEC.md phases 1-3) ----
+    // ---- Global illumination (PHOTON_SPEC.md; GI_SPEC.md phases 1-3 is its
+    // ---- earlier spec, history like the Rayon name) ----
     // Instant Radiosity traces rays from ONE chosen light against the scene's
     // PBR items and plants virtual point lights (LT_VPL) where the rays bounce.
     // The VPLs live in THIS SceneManager and ride its Forward+ clustered list —
@@ -3315,13 +3316,10 @@ private:
         /// rebuild, never immediately: nothing about the picture is wrong until
         /// the cascade re-voxelises anyway.
         bool         itemsStale = false;
-        /// How many GI items this cascade actually voxelises — inside its box and
-        /// big enough to fill half a voxel of it, measured at the last attach.
+        /// How many GI items THIS cascade's last rebuild voxelised — inside its
+        /// box and big enough to fill half a voxel of it, re-counted on every
+        /// rebuild (the attach set is bigger and deliberately so: rule 1).
         unsigned     items = 0;
-        /// How many are ATTACHED to its voxeliser (rule 1 attaches the whole
-        /// big-enough set once and lets Ogre cull it to the region per build),
-        /// so the difference between the two is what the region cull removes.
-        unsigned     attached = 0;
         /// This cascade is BEHIND the camera and owes a rebuild — a flag, not a
         /// queue: a rebuild always happens at the CURRENT camera, so owing two
         /// of them is the same as owing one.
@@ -3332,6 +3330,11 @@ private:
         /// counter is one per cascade per teleport rather than one per frame
         /// the camera spends far away.
         bool         jumped  = false;
+        /// Consecutive failed rebuilds. One retry on the next frame, then the
+        /// cascade stands down and waits for the camera to move again (round-2
+        /// review F3) — a cascade that cannot build must not spend the frame's
+        /// whole GI budget for ever and starve the ones that still can.
+        unsigned     failures = 0;
         unsigned long long rebuilds = 0;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
@@ -3360,11 +3363,15 @@ private:
     void updateCascades(const Ogre::Vector3 &camPos);
     /// Destroys cascades 1..N-1 (cascade 0 is teardownVct's own business).
     void teardownExtraCascades();
-    /// Does any GI item this cascade would voxelise reach into its box?
-    bool cascadeHasGeometry(const VctCascade &c) const;
-    /// Attaches or detaches the GI items on one cascade's voxeliser. A cascade
-    /// with none builds an EMPTY volume instead of throwing (the pin's
-    /// zero-thread-group refusal).
+    /// How many GI items this cascade would voxelise reach into its box — the
+    /// per-rebuild count `GiStatus::cascades[].items` reports, and (as
+    /// `count > 0`) the answer to "may this cascade be built with items
+    /// attached at all", which Ogre cannot be asked.
+    unsigned cascadeGeometryCount(const VctCascade &c) const;
+    /// Attaches or detaches the SIZE-FILTERED GI item set on one cascade's
+    /// voxeliser (whole, never box-filtered: Ogre culls it to the region per
+    /// build). A cascade with nothing in its box builds an EMPTY volume instead
+    /// of throwing (the pin's zero-thread-group refusal).
     void setCascadeItems(VctCascade &c, bool attach);
     /// Destroys a chain that never finished building (nothing is bound yet, so
     /// cascade 0 belongs to it too). Returns 0 — it is a JAH_CATCH value.
@@ -3378,7 +3385,13 @@ private:
     /// (a coarser cell loses light, so it gets more bounces). 0 when the
     /// document asks for a single indirect bounce, which is the default.
     Ogre::uint32 cascadeBounces(size_t idx) const;
-    /// rayon2 S3 — the raster probe source. resolveSource: GiParams::ddgiSource
+    /// Re-arms a RASTER-sourced irradiance field's integration (its probes
+    /// RENDER the scene, so a changed ambient is baked into the faces they
+    /// captured). Progressive over the converged atlas — nothing flashes — and
+    /// a no-op for a voxel-fed field, which reads the volume live. Defined in
+    /// OgreGi.cpp because JahIrradianceField lives there (F6).
+    void resetRasterFieldIntegration();
+    /// spikes/rayon2 S3 — the raster probe source. resolveSource: GiParams::ddgiSource
     /// with Auto = Voxel at every tier. applyRasterSource: re-sources a just
     /// converged voxel field to the raster workspace in place (refused, logged,
     /// when the workspace or patch 0023's media is missing). pushIfdState: the

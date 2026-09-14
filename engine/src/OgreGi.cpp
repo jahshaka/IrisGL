@@ -1,10 +1,17 @@
-// Global illumination (GI_SPEC.md phases 1-3): Instant Radiosity, voxel cone
-// tracing (VCT) and the VCT + parallax-corrected-cubemap hybrid — the public
-// verbs and the internals that drive Ogre's InstantRadiosity, VctVoxelizer/
-// VctLighting and ParallaxCorrectedCubemapAuto.
+// Global illumination: Instant Radiosity, voxel cone tracing (VCT), the VCT +
+// parallax-corrected-cubemap hybrid and Photon's camera-centred cascade chain —
+// the public verbs and the internals that drive Ogre's InstantRadiosity,
+// VctVoxelizer/VctLighting, IrradianceField and ParallaxCorrectedCubemapAuto.
+//
+// THE LIVE PROGRAM DOC IS SPECS/PHOTON_SPEC.md. The realtime-GI program was
+// called RAYON until 2026-09-13 and GI_SPEC.md / GI_UNIFIED_SPEC.md are its
+// earlier specs: section numbers cited below still live in those files, and
+// every one of them is HISTORY, not a second live design. The `gi*` identifiers
+// keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 #include <IrradianceField/OgreIrradianceFieldRaster.h>
@@ -67,7 +74,7 @@ public:
     }
 };
 
-// ---- Raster-source constants (rayon2 S3) ----------------------------------
+// ---- Raster-source constants (the spikes/rayon2 S3 measurements) ----------
 
 // HOW MANY RASTER PROBES ONE UNIT OF THE UPDATE BUDGET BUYS PER FRAME: ONE.
 // The dial's unit is reflection-probe equivalents (one PCC probe = six 512^2
@@ -75,7 +82,7 @@ public:
 // six 32^2 faces plus a depth copy per face and one CubemapToIfd dispatch —
 // 256x fewer pixels per face, but the same twelve compositor passes, camera
 // moves and barriers per probe, and that overhead is what it costs, not the
-// fill. MEASURED (rayon2 S3 gate, app.renderStats on a fresh Epic project,
+// fill. MEASURED (spikes/rayon2 S3 gate, app.renderStats on a fresh Epic project,
 // Debug, RTX 4080S, a sibling gate live): 64 probes/frame re-converging =
 // 244 ms/frame against 27-30 ms converged, i.e. ~3.4 ms per raster probe —
 // about 1.6 PCC-probe equivalents. One per budget unit is the nearest whole
@@ -167,7 +174,7 @@ static const int kMinEnclosedAxes = 2;
 // 12.25 MB depth RG32F at depthRes 12), ~5 ms of GPU work to converge once,
 // ~0.8 ms/frame CHEAPER than plain VCT once bound. Deliberately NOT tiered off
 // GiQuality: the quality dial already moves the voxel resolution the field is
-// fed FROM, and the Rayon tier table (owner option (b), 2026-09-09) decided
+// fed FROM, and the Photon tier table (owner option (b), 2026-09-09) decided
 // against a probe-count column too — every DDGI-fed tier (Medium, High, Epic)
 // gets this same fitted grid; Epic's columns are bounces and dynamic probes.
 static const Ogre::uint32 kIfdTotalProbes = 8192u;
@@ -679,6 +686,7 @@ GiStatus OgreScene::giStatus() const {
             cs.lastCpuMs  = c.lastCpuMs;
             st.cascades.push_back(cs);
         }
+        st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;
         st.cascadeFullRebuilds = mCascadeFullRebuilds;
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
@@ -2806,20 +2814,6 @@ void OgreScene::rebuildGi(GiStaleReason why) {
 }
 
 void OgreScene::rebuildVct() {
-    ++mGiRebuilds;
-    // THE MONITOR'S GI EVENT (§4.7 / §4.8). A rebuild is the single most
-    // expensive thing this engine does on the UI thread — measured in seconds
-    // on a page return — so it is timed and tagged with the stale reason that
-    // asked for it, or `None` when nothing recorded one.
-    monitor::EventScope giEvent(MonitorEventKind::GiRebuild, monitor::reasonOf(mLastStaleReason),
-                                "gi.rebuild", "vct");
-    // Every early return below leaves "nothing built" showing in giStatus.
-    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
-    // ALWAYS from scratch: VctVoxelizer keeps raw Item* until removeAllItems and
-    // VctMaterial caches conversions by raw datablock pointer across builds — a
-    // recycled address would alias. A fresh voxelizer per (re)build can't.
-    teardownVct();
-
     // THE PHOTON ARM (GiParams::cascades): camera-centred cascades instead of
     // one scene-fitted box. The scene's own bounds are still computed — the
     // probe half below is placed in the room, not around the camera — but the
@@ -2839,12 +2833,35 @@ void OgreScene::rebuildVct() {
     // the tracking update runs before `applyPendingGi` in `renderOneFrame`.
     // A scene that never gets a view never builds a camera-centred arm, which
     // is the honest answer rather than one built around a camera that does not
-    // exist.
+    // exist — and `giStatus().cascadesAwaitingCamera` says so, which is what
+    // tells "no view yet" apart from "the build failed".
+    //
+    // BEFORE THE REBUILD IS COUNTED OR TIMED (round-2 review F4/F5): waiting is
+    // not a rebuild. Counting it left a cascade open reporting `rebuilds` 2 for
+    // one build and filed a zero-length `gi.rebuild` event in every capture.
+    // The teardown still happens — a scene that had a single-volume arm and is
+    // then switched to cascades before its first frame must not keep it bound.
     if (cascadeArm && !mGiCamPosKnown) {
+        mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+        teardownVct();
         mGiCascadeAwaitingCamera = true;
         return;
     }
     mGiCascadeAwaitingCamera = false;
+
+    ++mGiRebuilds;
+    // THE MONITOR'S GI EVENT (§4.7 / §4.8). A rebuild is the single most
+    // expensive thing this engine does on the UI thread — measured in seconds
+    // on a page return — so it is timed and tagged with the stale reason that
+    // asked for it, or `None` when nothing recorded one.
+    monitor::EventScope giEvent(MonitorEventKind::GiRebuild, monitor::reasonOf(mLastStaleReason),
+                                "gi.rebuild", "vct");
+    // Every early return below leaves "nothing built" showing in giStatus.
+    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+    // ALWAYS from scratch: VctVoxelizer keeps raw Item* until removeAllItems and
+    // VctMaterial caches conversions by raw datablock pointer across builds — a
+    // recycled address would alias. A fresh voxelizer per (re)build can't.
+    teardownVct();
 
     Ogre::Vector3 mn, mx;
     const bool haveBounds = computeGiBounds(mn, mx);
@@ -3270,7 +3287,8 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         VctCascade &c = mVctCascades[i];
         const auto tCascade = std::chrono::steady_clock::now();
         c.voxelizer->dividideOctants(1u, 1u, 1u);
-        setCascadeItems(c, cascadeHasGeometry(c));
+        c.items = cascadeGeometryCount(c);
+        setCascadeItems(c, c.items > 0u);
         c.voxelizer->build(mSceneMgr);
         c.lighting = new Ogre::VctLighting(Ogre::Id::generateNewId<Ogre::VctLighting>(),
                                            c.voxelizer, anisotropic);
@@ -3368,28 +3386,38 @@ void OgreScene::recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos) {
 // its cost, not its benefit.
 static const float kCascadeSubVoxelFactor = 0.5f;
 
-// Does any GI item this cascade would voxelise reach into its box? The question
-// `build()` cannot be asked: with items attached and NONE of them in the region,
-// its instance-to-world job is sized to zero thread groups and Ogre refuses to
-// compile a job with none — `VCT/AabbWorldSpace: ... must set num_thread_groups`
-// — so it THROWS. For a camera-centred volume that is not a corner case: fly off
-// the edge of a scene and the inner cascade is empty by definition (measured on
-// the lattice at 0.02-0.04 m cells, where it left a chain of cascades holding
-// nothing and a scene rendering with no GI and no visible error). With NO items
-// attached, `build()` takes its own empty path — create the textures, clear
-// them, return — which is exactly the right picture for an empty cascade.
-bool OgreScene::cascadeHasGeometry(const VctCascade &c) const {
+// HOW MANY GI items this cascade would voxelise reach into its box — and the
+// question `build()` cannot be asked: with items attached and NONE of them in
+// the region, its instance-to-world job is sized to zero thread groups and Ogre
+// refuses to compile a job with none — `VCT/AabbWorldSpace: ... must set
+// num_thread_groups` — so it THROWS. For a camera-centred volume that is not a
+// corner case: fly off the edge of a scene and the inner cascade is empty by
+// definition (measured on the lattice at 0.02-0.04 m cells, where it left a
+// chain of cascades holding nothing and a scene rendering with no GI and no
+// visible error). With NO items attached, `build()` takes its own empty path —
+// create the textures, clear them, return — which is exactly the right picture
+// for an empty cascade.
+//
+// IT COUNTS RATHER THAN ANSWERING YES (round-2 review F1). The walk is already
+// O(N) with an AABB test per GI item on every rebuild frame, and the count it
+// throws away is exactly what `GiStatus::cascades[].items` promises: what THIS
+// rebuild voxelises. Taken from `setCascadeItems` — which runs only when the
+// attach set changes (rule 1) and therefore froze the number at the last
+// SELECTION, so a cascade that scrolled across a room kept reporting the
+// contents of the room it left.
+unsigned OgreScene::cascadeGeometryCount(const VctCascade &c) const {
     const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
     const float minExtent = c.cell() * kCascadeSubVoxelFactor;
+    unsigned inside = 0;
     for (const Node *np : mItemNodes) {          // the item index, not the map (B6)
         Ogre::Item *item = np->item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         const Ogre::Aabb wa = item->getWorldAabb();
         const Ogre::Vector3 h = wa.mHalfSize;
         if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;
-        if (box.intersects(wa)) return true;
+        if (box.intersects(wa)) ++inside;
     }
-    return false;
+    return inside;
 }
 
 void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
@@ -3404,33 +3432,22 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
         c.voxelizer->removeAllItems();
         c.itemsAttached = false;
         c.itemsStale = false;
-        c.items = c.attached = 0;
         return;
     }
     if (c.itemsStale && c.itemsAttached) c.voxelizer->removeAllItems();
     c.itemsStale = false;
-    const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+    // THE ATTACH SET IS SIZE-FILTERED AND WHOLE — not box-filtered (rule 1:
+    // Ogre culls it to the region on every build, and re-selecting it per
+    // rebuild would drop the mesh bookkeeping and re-upload every buffer).
+    // What each rebuild actually voxelises is counted by cascadeGeometryCount.
     const float minExtent = c.cell() * kCascadeSubVoxelFactor;
-    unsigned kept = 0, inside = 0;
     for (const Node *np : mItemNodes) {          // the item index, not the map (B6)
         Ogre::Item *item = np->item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        const Ogre::Aabb wa = item->getWorldAabb();
-        const Ogre::Vector3 h = wa.mHalfSize;
+        const Ogre::Vector3 h = item->getWorldAabb().mHalfSize;
         if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;   // rule 2
         c.voxelizer->addItem(item, false);
-        ++kept;
-        // WHAT `items` MEANS (audit B6): Types.h says "inside its box and big
-        // enough to fill half a voxel of it", and the count used to be the
-        // whole scene's big-enough items — the attach set, which Ogre then
-        // culls to the region on every build. The number the status reports is
-        // the one the sentence promises; the ATTACH set stays whole on purpose
-        // (rule 1: re-selecting per rebuild drops the mesh bookkeeping and
-        // re-uploads every buffer).
-        if (box.intersects(wa)) ++inside;
     }
-    c.attached = kept;
-    c.items = inside;
     c.itemsAttached = true;
 }
 
@@ -3457,10 +3474,29 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
     // which puts the placement back and leaves the rebuild owed.
     // The body is a lambda because JAH_CATCH RETURNS: the bookkeeping below has
     // to run either way, and a failure has to be answerable rather than silent.
+    unsigned inside = 0;
     const auto attempt = [&]() -> bool {
         JAH_TRY {
             mSceneMgr->updateSceneGraph();
-            setCascadeItems(c, cascadeHasGeometry(c));
+            // WHAT THIS REBUILD VOXELISES, counted now (round-2 F1) — not what
+            // the last SELECTION held. Kept in a local until the build has
+            // actually succeeded, for the same reason the placement is: a
+            // failed rebuild must describe the volume that is still on the GPU.
+            inside = cascadeGeometryCount(c);
+            setCascadeItems(c, inside > 0u);
+            // FAULT INJECTION, for the suite that proves the revert path (F2).
+            // The same shape as JAH_TEXTURE_WAIT_FAULT (OgreEngine.cpp): read
+            // per rebuild rather than cached, because the test arms it between
+            // frames — a getenv against a rebuild that costs milliseconds is
+            // not a cost anyone can measure. The region has already moved and
+            // the items are attached at this point, which is exactly the state
+            // a real `build()` throw leaves behind.
+            if (const char *fault = std::getenv("JAH_GI_CASCADE_FAULT")) {
+                if (std::strtol(fault, nullptr, 10) == (long)idx)
+                    OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
+                                "JAH_GI_CASCADE_FAULT: forced cascade build failure",
+                                "OgreScene::rebuildCascade");
+            }
             c.voxelizer->build(mSceneMgr);
             applyCascadeAmbient(c.lighting);
             c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/,
@@ -3481,17 +3517,21 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason) {
             mCascadeFailureLogged = true;
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: cascade " + std::to_string(idx) + " failed to rebuild (" +
-                mError + ") — its placement is kept and the rebuild stays owed");
+                mError + ") — its placement is kept, the next frame retries, and a second "
+                "failure stands the cascade down until the camera moves again");
         }
         return false;
     }
     c.built = true;
     ++c.rebuilds;
+    c.items = inside;
     monitor::noteCascadeRebuild();     // the frame's own "<= 1 per frame" counter
-    // WHAT THIS CASCADE VOXELISED, not what the scene holds (audit D6): the
-    // row used to report `mVctItemIds.size()`, the whole GI item set, for every
-    // cascade — so a capture could not tell the outer cascade's work from the
-    // inner one's, which is the whole point of a per-cascade row.
+    // WHAT THIS REBUILD VOXELISED, not what the scene holds (audit D6, round-2
+    // F1): the row used to report `mVctItemIds.size()`, the whole GI item set,
+    // for every cascade — so a capture could not tell the outer cascade's work
+    // from the inner one's, which is the whole point of a per-cascade row. It
+    // is re-counted above, per rebuild, so a cascade that scrolls into an empty
+    // corner reports 0 and one that scrolls into a crowd reports the crowd.
     work.setUnits(c.items);
     return true;
 }
@@ -3574,9 +3614,20 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
             if (c.voxelizer)
                 c.voxelizer->setRegionToVoxelize(
                     false, Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));
-            spent = true;          // the frame paid for it either way
-            continue;              // ...and `pending` stays set
+            // ONE RETRY, THEN STAND DOWN (round-2 review F3). The next frame
+            // tries again — a build can fail for a reason that passes (a
+            // transient allocation, a device that has just come back) — but a
+            // cascade whose build is genuinely impossible must not spend the
+            // frame's whole GI budget for ever, starving the cascades that
+            // still work. After the second failure it keeps the volume it has
+            // and waits: the next step of the camera re-arms `pending` through
+            // the ordinary scroll test, which is also when its box (and so the
+            // reason it threw) has actually changed.
+            spent = true;                          // the frame paid for it either way
+            if (++c.failures >= 2u) c.pending = 0; // ...otherwise `pending` stays set
+            continue;
         }
+        c.failures = 0;
         if (c.jumped) { ++mCascadeFullRebuilds; c.jumped = false; }
         c.pending = 0;
         spent = true;
@@ -4025,7 +4076,7 @@ bool OgreScene::ddgiWanted() const {
     // Fed by VctLighting: there is nothing to build without a voxel volume.
     if (mGi.mode != GiMode::Vct && mGi.mode != GiMode::VctPccHybrid) return false;
     // Auto = "the quality tier decides", and the tier is resolved DOCUMENT-SIDE
-    // (GI_UNIFIED P2: the Rayon tier writes a concrete 0/1 through into
+    // (GI_UNIFIED P2: the Photon tier writes a concrete 0/1 through into
     // Scene::giDdgi, the same write-through every other tiered field uses), so
     // what reaches the engine as Auto is a scene no tier has ever touched —
     // OFF, which is what keeps every already-serialized scene rendering exactly
@@ -4205,7 +4256,7 @@ void OgreScene::buildIrradianceField() {
         mIfdProbesDone = mIfdTotalProbes;
         mIfdRigEpochSeen = mRigPoseEpoch;
 
-        // THE RASTER SOURCE (GI_UNIFIED_SPEC.md P3 "A2", rayon2 S3), switched
+        // THE RASTER SOURCE (GI_UNIFIED_SPEC.md P3 "A2", spikes/rayon2 S3), switched
         // in AFTER the voxel converge above so the atlases start from the voxel
         // answer (JahIrradianceField). Refused — logged, the field stays
         // voxel-fed and giStatus says so — when the raster workspace is not
@@ -4250,6 +4301,14 @@ GiSource OgreScene::resolveSource() const {
     // Auto is the tier's choice, and the tier's choice is voxel at EVERY tier
     // (Epic included, by decree): raster is an Advanced opt-in, never a default.
     return mGi.ddgiSource == GiSource::Raster ? GiSource::Raster : GiSource::Voxel;
+}
+
+void OgreScene::resetRasterFieldIntegration() {
+    if (!mIfd || mIfdSource != GiSource::Raster) return;
+    JAH_TRY {
+        mIfd->reset();
+        mIfdProbesDone = 0u;
+    } JAH_CATCH(mError, );
 }
 
 void OgreScene::pushIfdState(const Ogre::IrradianceFieldSettings &settings) {
@@ -4501,6 +4560,7 @@ void OgreScene::teardownGi() {
     teardownIr();
     teardownVct();
     // ...and only here: the scene's GI history starts again (B9).
+    mGiCascadeAwaitingCamera = false;   // no arm is wanted at all now (F5)
     mCascadeDeferrals = 0;
     mCascadeFullRebuilds = 0;
     mCascadeDirtyMajority = 0;

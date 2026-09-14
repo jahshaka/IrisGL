@@ -292,7 +292,7 @@ public:
     /// PROBE CAPTURE SIZE in pixels per cube face, 0 = follow the quality dial
     /// (128 Low, 256 Medium and High). The hybrid's single biggest VRAM lever:
     /// a probe costs 6 faces x size^2 x mips, so halving it quarters the grid
-    /// (REFLECTION_PROBE_AUDIT §4.2). A Rayon-tiered row, like the technique
+    /// (REFLECTION_PROBE_AUDIT §4.2). A Photon-tiered row, like the technique
     /// and quality above — setting it in the World panel PINS it.
     int giProbeCaptureSize = 0;
     float giProbeSnapDeviation = 0.05f;  // shrink-fit snap-back tolerances: the pin's
@@ -306,13 +306,13 @@ public:
     float giRayMarchStepScale = 1.0f;
     /// DDGI — the irradiance-field diffuse layer (GI_UNIFIED_SPEC.md §4 P1).
     /// TRI-STATE, like giProbeHdr/giProbeShadows and for the same reason: -1
-    /// auto, 0 off, 1 on. The Rayon tier (GI_UNIFIED_SPEC P2) RESOLVES it
+    /// auto, 0 off, 1 on. The Photon tier (GI_UNIFIED_SPEC P2) RESOLVES it
     /// document-side and writes a concrete 0/1 through, exactly like giMode and
     /// giQuality (services/worldmodes.h — a backing field is always the
     /// resolved value), so -1 survives only in a scene no tier has ever been
     /// applied to. The engine reads a bare -1 as OFF; the reader never lets one
     /// reach it, because a document without a tier DERIVES one and -1 then
-    /// means "the derived tier decides" (worldmodes::deriveRayonFromDocument,
+    /// means "the derived tier decides" (worldmodes::derivePhotonFromDocument,
     /// owner option (b) 2026-09-09: Medium and High are DDGI-fed, so the
     /// shipped vct+medium samples come up with the field on).
     /// Only meaningful in the VCT modes: the field is fed by the voxel volume.
@@ -325,7 +325,7 @@ public:
     /// knob exists because the two terms are different integrals and a scene may
     /// want to trim one against the other.
     float giDdgiIntensity = 1.0f;
-    /// THE DDGI AMBIENT SKY-VISIBILITY STRENGTH — the Rayon ambient fix
+    /// THE DDGI AMBIENT SKY-VISIBILITY STRENGTH — the Photon ambient fix
     /// (GI_UNIFIED_SPEC.md ADDENDUM CORRECTION). Inside a VCT volume the
     /// shader's own ambient term is gated off and the cone diffuse carried it
     /// instead; binding a field deletes that branch, so DDGI scenes lost their
@@ -339,7 +339,7 @@ public:
     float giDdgiAmbient = 1.0f;
     /// WHERE THE FIELD'S PROBES GET THEIR LIGHT (GI_UNIFIED_SPEC.md P3 "A2"):
     /// -1 auto (the tier's choice — voxel at every tier, Epic included; the
-    /// raster feed costs 3.4-9 ms per probe in Debug, rayon2 S3, which is no
+    /// raster feed costs 3.4-9 ms per probe in Debug, spikes/rayon2 S3, which is no
     /// default for anyone), 0 voxel cone tracing,
     /// 1 rasterised probe captures (six 32x32 scene renders per probe, under the
     /// same update budget; sees skinned/animated geometry the voxels cannot).
@@ -350,7 +350,7 @@ public:
     ///
     /// It is a REQUEST, never a second source of truth: the tier resolves
     /// WRITE-THROUGH into giMode / giQuality / giDdgi / giNumBounces
-    /// (services/worldmodes.cpp, setRayon) exactly the way a World Mode resolves into its rows, so the
+    /// (services/worldmodes.cpp, setPhoton) exactly the way a World Mode resolves into its rows, so the
     /// mirror, the serializer, the engine and every existing verb keep reading
     /// the one field they always read. A field the user pinned deviates from
     /// the tier and survives tier switches, which is what makes the panel's
@@ -358,7 +358,7 @@ public:
     ///
     /// WHETHER RAYON IS ON is `giMode != OFF` and nothing else — there is no
     /// second enable flag to disagree with the renderer. This field keeps the
-    /// quality the scene would come back at, so turning Rayon off and on is not
+    /// quality the scene would come back at, so turning Photon off and on is not
     /// destructive. New scenes are born Epic (owner decision D2).
     int giTier = 3;
     /// MONOTONIC, never serialized: bumped by world.refreshGi() and by the

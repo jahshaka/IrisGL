@@ -1466,7 +1466,9 @@ using NativeDisplayHandle = unsigned long long;
 /// monotonic: a removed node's id is NEVER reused, so a stale id is harmless.
 using NodeId = unsigned int;
 
-// ---- Global illumination (scene-level, GI_SPEC.md) ----
+// ---- Global illumination (scene-level; SPECS/PHOTON_SPEC.md is the live
+// ---- program doc — GI_SPEC.md and GI_UNIFIED_SPEC.md are its earlier specs,
+// ---- written when the program was called Rayon) ----
 /// Which GI system lights the scene. Off is the default everywhere — GI must
 /// never cost anything unless the author turns it on.
 enum class GiMode {
@@ -1696,7 +1698,7 @@ struct GiParams {
     /// correction.
     ///
     /// GiToggle::Auto means "let the quality tier decide", and the deciding
-    /// happens DOCUMENT-SIDE: the Rayon tier (GI_UNIFIED P2) writes a concrete
+    /// happens DOCUMENT-SIDE: the Photon tier (GI_UNIFIED P2) writes a concrete
     /// on/off through into the document field the mirror pushes here, so Auto
     /// reaching the engine means "no tier was ever applied to this scene" and
     /// resolves to OFF — which is what makes every already-serialized scene
@@ -1733,7 +1735,7 @@ struct GiParams {
     /// a scene may want the trim; clamped to [0, 64], and 0 is a legitimate
     /// "field bound, contributing nothing" for A/B measurement.
     float     ddgiIntensity = 1.0f;
-    /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Rayon ambient fix's one dial
+    /// THE AMBIENT SKY-VISIBILITY STRENGTH — the Photon ambient fix's one dial
     /// (GI_UNIFIED_SPEC.md ADDENDUM CORRECTION; the mechanism is documented at
     /// length on media/Hlms/Jahshaka/JahIfd_piece_ps.any).
     ///
@@ -2107,11 +2109,12 @@ struct GiStatus {
         /// so owing two is the same as owing one. Non-zero only while the
         /// camera is outrunning the scheduler.
         int   pending = 0;
-        /// How many GI items this cascade voxelises: the ones inside its box
-        /// that are big enough to fill half a voxel of it, counted when the
-        /// set was last selected. A coarse cascade declines sub-voxel objects —
-        /// it cannot represent them, and they are what a whole re-voxelisation
-        /// spends its time on.
+        /// How many GI items this cascade's LAST REBUILD voxelised: the ones
+        /// inside its box that are big enough to fill half a voxel of it,
+        /// re-counted on every rebuild — so it follows the cascade as it
+        /// scrolls, and reads 0 for one standing in empty space. A coarse
+        /// cascade declines sub-voxel objects — it cannot represent them, and
+        /// they are what a whole re-voxelisation spends its time on.
         int   items = 0;
         /// CPU milliseconds of that same rebuild (the submission cost on the
         /// frame's own thread). The GPU half is NOT here and cannot be: a
@@ -2123,6 +2126,11 @@ struct GiStatus {
     /// The live cascade chain, innermost first. Empty unless
     /// GiParams::cascades built one.
     std::vector<CascadeStatus> cascades;
+    /// The chain is WANTED but has not been built, because no view has tracked a
+    /// camera yet — a camera-centred arm is built around the camera and there is
+    /// no honest place to put it before one exists. Distinguishes "no view yet"
+    /// from "the build failed", which both read as an empty `cascades` list.
+    bool cascadesAwaitingCamera = false;
     /// How many whole-chain rebuilds the two DIRTY_ALL guards have forced — a
     /// teleport, or a jump longer than a cascade. Cumulative over the scene's
     /// life: a re-solve of the arm does not reset it, only GI going off does.
