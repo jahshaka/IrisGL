@@ -681,7 +681,28 @@ void OgreEngine::renderOneFrame() {
             // no inset.
             v->applyLetterboxAndPip();
         }
-        for (auto &s : mScenes) { s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar(); }
+        // THE SCENES THIS FRAME BELONGS TO (THREADING_ADOPTION_SPEC.md P3).
+        // Computed ONCE, here, and read four times below: by the deferred GI /
+        // IBL / planar work on the next line, by the refraction interlock, by
+        // the frame loop's update/clear passes, and by the engineObjects
+        // census. Nothing between this line and the frame can change a View's
+        // enabled flag, so one snapshot is honest.
+        std::vector<OgreScene *> updated;
+        scenesFeedingEnabledViews(updated);
+        const auto drawnThisFrame = [&updated](const OgreScene *s) {
+            return std::find(updated.begin(), updated.end(), s) != updated.end();
+        };
+        // GATED ON "IS ANYONE LOOKING AT IT" (audit F5, lane PLAYER-1). These
+        // three are the expensive deferred rebuilds — a from-scratch
+        // voxelisation is measured in seconds — and they used to run for EVERY
+        // scene the engine owns, drawn or not. A scene with no enabled view
+        // cannot present the result, and its pendings are latches: they are
+        // still set when a view of it is enabled again, so nothing is skipped,
+        // only postponed to the frame it can be seen in.
+        for (auto &s : mScenes)
+            if (drawnThisFrame(s.get())) {
+                s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
+            }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
         // applyGlobals in two). The MSAA resolve weights and the SMAA preset
         // are SHADER RELOADS — a hitch — so they cannot be per view without
@@ -707,16 +728,6 @@ void OgreEngine::renderOneFrame() {
             chain::applyRecompileGlobals(mRoot, d);
             break;
         }
-        // THE SCENES THIS FRAME BELONGS TO (THREADING_ADOPTION_SPEC.md P3).
-        // Computed ONCE, here, and read three times below: by the refraction
-        // interlock, by the frame loop's update/clear passes, and by the
-        // engineObjects census. Nothing between this line and the frame can
-        // change a View's enabled flag, so one snapshot is honest.
-        std::vector<OgreScene *> updated;
-        scenesFeedingEnabledViews(updated);
-        const auto drawnThisFrame = [&updated](const OgreScene *s) {
-            return std::find(updated.begin(), updated.end(), s) != updated.end();
-        };
         // THE PROBE CACHE'S FRAME COUNTER (ENGINE_CACHE_POLICY_SPEC P1): after
         // the budget spent itself (updateGi) and any flush rebuilt (applyPendingGi),
         // and before the frame renders the dirty probes.

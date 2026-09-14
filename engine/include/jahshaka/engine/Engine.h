@@ -812,6 +812,20 @@ public:
     virtual void        setNodeHelper(NodeId, bool) = 0;
     virtual bool        nodeHelper(NodeId) const = 0;
 
+    /// "This node is a BACKDROP" — a helper that is part of the PICTURE.
+    ///
+    /// Same exclusions as setNodeHelper (no reflection-probe capture, no shadow
+    /// map, no GI geometry), and it IMPLIES setNodeHelper — but a view that
+    /// hides the editor's furniture (View::setHelpersVisible(false), what the
+    /// Player page is) still draws it. The case it exists for is the ground's
+    /// 2 km horizon plane: real picture, and nothing that size may ever size a
+    /// shadow atlas or a voxel volume.
+    ///
+    /// setNodeHelper(id, false) clears it too — one flag pair, one meaning.
+    /// Not inherited; may be set before the geometry arrives.
+    virtual void        setNodeBackdrop(NodeId, bool) = 0;
+    virtual bool        nodeBackdrop(NodeId) const = 0;
+
     /// "DOES THIS THING MOVE?" — the document's resolved MOBILITY for one node
     /// (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3). The host decides it
     /// PREDICTIVELY (a physics body, an avatar, a socket rider, a playing clip,
@@ -1034,6 +1048,51 @@ public:
     /// HDR, a fixed tonemap, an offscreen view with no chain, or no workspace
     /// yet: nothing to re-seed, no error.
     virtual void resetExposureHistory() = 0;
+
+    /// THE SAME RE-SEED, TO A KNOWN VALUE (lane PLAYER-1). `scale` is the
+    /// tonemapper's own multiplier — i.e. exactly what measuredExposureScale()
+    /// reports — and 0 means "the descriptor's own seed", which is what
+    /// resetExposureHistory() is.
+    ///
+    /// WHAT IT IS FOR: a SECOND on-screen view of the same scene taking the
+    /// screen. The adaptation history is per view by design (two views may be
+    /// pointed at different parts of a world), but a view that has never
+    /// presented starts from the authored exposure midpoint and walks to the
+    /// scene's real luminance over the next second — visibly, on the frame the
+    /// user switched pages. Seeding it from the view that was just showing
+    /// removes that walk without making the two views share a history.
+    ///
+    /// IT SURVIVES A CHAIN THAT CANNOT TAKE IT YET, which is the case it exists
+    /// for: a view that has not been shown carries the PASSTHROUGH chain, which
+    /// has no seed pass at all, and its HDR chain is built a moment later by
+    /// the host's first world push. A value handed over in that window is
+    /// REMEMBERED and spent on the chain the view next builds, before that
+    /// chain has rendered anything — exactly once; a build with no automatic
+    /// exposure drops it rather than holding a stale value for some later
+    /// rebuild. `scale` <= 0 (or non-finite) clears anything remembered and
+    /// means "the descriptor's own seed", which is resetExposureHistory().
+    ///
+    /// Otherwise it takes effect on the next rendered frame (the seed is a
+    /// clear pass).
+    virtual void seedExposureHistory(float scale) = 0;
+
+    /// DOES THIS VIEW DRAW THE EDITOR'S FURNITURE? (lane PLAYER-1.)
+    ///
+    /// The grid, the light/camera/decal wires and icons, the gizmo, the
+    /// selection shell, the GI volume boxes — everything a host marked with
+    /// Scene::setNodeHelper. True by default; false is what the Player page
+    /// asks for, because the Player is a second View on the EDITOR'S scene and
+    /// the furniture is in that scene.
+    ///
+    /// It is a per-pass visibility mask, so it costs nothing per frame and
+    /// cannot desynchronise from the scene — but it IS graph shape, so setting
+    /// it rebuilds this view's workspace (and restarts its adaptation history:
+    /// see seedExposureHistory). Set it once, when the view is created.
+    ///
+    /// NOT affected: backdrops (Scene::setNodeBackdrop — the ground's horizon),
+    /// the sun disc, and every piece of real scene content.
+    virtual void setHelpersVisible(bool) = 0;
+    virtual bool helpersVisible() const = 0;
 
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
     /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader
