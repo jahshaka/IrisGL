@@ -27,8 +27,98 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreClips.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
+
+# --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------
+# OgreRayQuery.cpp is the ONE TU that includes Vulkan itself: it needs the
+# Vulkan render system's own headers (VulkanDevice, VulkanQueue,
+# VulkanBufferInterface), the loader, and a compute shader compiled at SPIR-V
+# 1.4 — which is what SPV_KHR_ray_query documents and what the pin's own GLSL
+# path can never emit (OgreVulkanProgram.cpp never sets a target environment).
+#
+# NOTHING HERE IS FATAL. A platform without the Vulkan plugin (macOS: MoltenVK
+# exposes neither VK_KHR_ray_query nor VK_KHR_acceleration_structure), without
+# the Vulkan headers, or without glslang simply compiles the TU to nothing and
+# takes the no-rays path — which is a supported picture, not a degraded build.
+# (The S3 spike's find_library + FATAL_ERROR was audit C-6's macOS defect; this
+# is the correction.)
+set(JAH_RAY_QUERY_OK OFF)
+if(UNIX AND NOT APPLE)
+    # THE PLUGIN IS NOT A "lib" (both platforms). Ogre installs its render
+    # systems UNPREFIXED — `RenderSystem_Vulkan.so` on Linux,
+    # `RenderSystem_Vulkan.dylib` on macOS — and find_library() only ever tries
+    # the prefixes in CMAKE_FIND_LIBRARY_PREFIXES, which is exactly `lib` here.
+    # So a bare NAMES entry finds NOTHING on either platform, and the failure is
+    # SILENT: the tier compiles out and the build stays green. (The S3 spike hid
+    # this behind a `.so` literal that broke macOS — audit C-6; dropping the
+    # literal to fix macOS broke Linux the same way. Name the file, with its
+    # suffix, for each platform, and the question does not arise again.)
+    unset(OGRE_NEXT_VULKAN_RS_LIB CACHE)
+    find_library(OGRE_NEXT_VULKAN_RS_LIB
+                 NAMES RenderSystem_Vulkan.so RenderSystem_Vulkan.dylib RenderSystem_Vulkan
+                 PATHS "${OGRE_NEXT_PLUGIN_DIR}" "${OGRE_NEXT_PREFIX}/lib/OGRE-Next"
+                       "${OGRE_NEXT_PREFIX}/lib"
+                 NO_DEFAULT_PATH)
+    find_package(Vulkan QUIET)
+    find_program(JAH_GLSLANG_VALIDATOR NAMES glslangValidator glslang)
+    if(OGRE_NEXT_VULKAN_RS_LIB AND Vulkan_FOUND AND JAH_GLSLANG_VALIDATOR
+       AND EXISTS "${OGRE_NEXT_PREFIX}/include/OGRE-Next/RenderSystems/Vulkan/OgreVulkanDevice.h")
+        set(JAH_RAY_QUERY_OK ON)
+    endif()
+    # SAY WHICH PICTURE THIS BUILD RENDERS. A tier that compiles out is a
+    # supported outcome, but never a silent one: a lane that expected rays and
+    # got the fallback must be able to see it in the configure log.
+    if(JAH_RAY_QUERY_OK)
+        message(STATUS "Jahshaka: hardware ray-query tier COMPILED IN "
+                       "(${OGRE_NEXT_VULKAN_RS_LIB})")
+    else()
+        message(STATUS "Jahshaka: hardware ray-query tier COMPILED OUT — plugin="
+                       "'${OGRE_NEXT_VULKAN_RS_LIB}' vulkan=${Vulkan_FOUND} "
+                       "glslang='${JAH_GLSLANG_VALIDATOR}'")
+    endif()
+endif()
+
+if(JAH_RAY_QUERY_OK)
+    set(JAH_RQ_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/rayquery")
+    file(MAKE_DIRECTORY "${JAH_RQ_GEN_DIR}")
+    # BUILD-TIME SPIR-V, at spirv1.4 — never committed bytes (the spike
+    # committed SPIR-V 1.5 headers, which are legal only on a device at
+    # apiVersion >= 1.2 and which no reviewer can read: audit C-7/C-10).
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_raysSpv -o "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
+        COMMENT "Compiling the ray-query compute shader at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_target(JahshakaRayQuerySpv DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h")
+    set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)
+endif()
+set(JAH_RAY_QUERY_OK "${JAH_RAY_QUERY_OK}" PARENT_SCOPE)
+set(OGRE_NEXT_VULKAN_RS_LIB "${OGRE_NEXT_VULKAN_RS_LIB}" PARENT_SCOPE)
+
+# Applied to BOTH the engine library and the tests' sanitised copy of the same
+# sources, so `test_engine_asan` instruments the tier too.
+function(jahshaka_engine_ray_query target)
+    if(NOT JAH_RAY_QUERY_OK)
+        return()
+    endif()
+    target_compile_definitions(${target} PRIVATE JAH_RAY_QUERY=1)
+    # BOTH Vulkan header roots: the install flattens the render system's own
+    # headers into RenderSystems/Vulkan, but those headers include their
+    # siblings as `Vao/OgreVulkanBufferInterface.h`, which only resolves under
+    # RenderSystems/Vulkan/include.
+    target_include_directories(${target} PRIVATE
+        "${OGRE_NEXT_PREFIX}/include/OGRE-Next/RenderSystems/Vulkan"
+        "${OGRE_NEXT_PREFIX}/include/OGRE-Next/RenderSystems/Vulkan/include"
+        ${Vulkan_INCLUDE_DIRS}
+        "${JAH_RQ_GEN_DIR}/..")
+    target_link_libraries(${target} PRIVATE "${OGRE_NEXT_VULKAN_RS_LIB}" ${Vulkan_LIBRARIES})
+    add_dependencies(${target} JahshakaRayQuerySpv)
+endfunction()
 
 # --- Shader-cache fingerprint terms (SHADER_CACHE_SPEC.md §4.2) --------------
 # Two things no hash inside Ogre can see, baked in at configure time:
@@ -96,6 +186,7 @@ set(JAHSHAKA_OGRE_PATCH_SERIES "${_ogre_patch_series}" PARENT_SCOPE)
 
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
+jahshaka_engine_ray_query(JahshakaEngine)
 target_compile_definitions(JahshakaEngine PRIVATE
     JAHSHAKA_OGRE_PATCH_SERIES="${_ogre_patch_series}")
 target_include_directories(JahshakaEngine

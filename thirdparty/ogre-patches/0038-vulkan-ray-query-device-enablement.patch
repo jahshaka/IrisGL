@@ -1,0 +1,335 @@
+Jahshaka patch 0038 — enable VK_KHR_acceleration_structure + VK_KHR_ray_query on
+the device, so a Jahshaka-owned compute pass can run inline hardware ray queries.
+NOTHING IN OGRE USES IT.
+
+WHY (Photon lane R1; SPECS/PHOTON_SPEC.md §7 R1,
+SPECS/research/VULKAN_RAY_QUERY_NVIDIA_2026-09-15.md §1,
+SPECS/audits/PHOTON_AUDIT_C_2026-09-14.md finding 8; measured by spike PHOTON-S3,
+spikes/photon-s3/FINDINGS.md §2). Photon's ray tier traces the ACTUAL triangles —
+the one representation that is exact for movers, and the answer to probe
+visibility, hard sun contact and (R5) reflections without any notion of a room.
+The rays live entirely in an Ogre-private TU of ours (irisgl/engine/src/
+OgreRayQuery.cpp) with its own pipeline and descriptor set; Ogre's Hlms,
+RootLayout, BarrierSolver and compositor are not involved in the trace. The only
+thing the pin must give us is a DEVICE that has the extensions on.
+
+WHAT THE PIN HAS. Nothing: grepping the whole tree for ray_query /
+acceleration_structure returns one barrier access-bit constant and SPIR-V enum
+values in a vendored header. Three things block the extensions:
+
+ 1. The VkInstance is created at `appInfo.apiVersion = VK_MAKE_VERSION( 1, 0, 2 )`
+    (OgreVulkanDevice.cpp, ~:291). The instance's apiVersion is the ceiling for
+    the whole process, and VK_KHR_acceleration_structure needs Vulkan 1.1 +
+    descriptor_indexing + buffer_device_address, or 1.2, plus
+    VK_KHR_deferred_host_operations.
+ 2. Device extensions are a hardcoded if/else whitelist (~:948-973): a name not
+    in that chain never reaches vkCreateDevice, whatever the driver advertises.
+ 3. The feature pNext chain handed to vkCreateDevice is a fixed set of three
+    structs, so the acceleration-structure / ray-query / buffer-device-address
+    feature bits can never be turned on.
+
+WHY A PATCH AND NOT A HOOK. The pin does accept an externally created instance
+and device (`external_instance` / `external_device` in the RS options), and our
+engine owns those miscParams — but taking that route means owning physical-device
+selection, queue-family selection, the feature fill, swapchain-extension
+correctness and present-queue discovery forever, permanently divergent from the
+pin and re-validated at every Ogre bump (est. 300-500 lines of ours). This patch
+is 135 lines in one render-system file plus its header, re-applied by
+build-ogre.sh, and it fails loudly at the next pin bump if upstream moves the
+code. A patch beats a workaround (owner, 2026-09-15).
+
+WHAT THIS PATCH DOES.
+
+ (0) THE NO-RAYS SWITCH, HONOURED AT THE DEVICE. With JAHSHAKA_NO_RAY_QUERY set,
+     NOTHING below happens: the instance stays at 1.0.2, not one ray extension is
+     requested and not one feature bit is set, so the process runs on EXACTLY the
+     device it would have had if this patch did not exist. That is what makes the
+     switch a real fallback picture rather than a cosmetic one - Studio's
+     --no-ray-query and Engine::setRayTracing read the same variable to decide
+     whether to build acceleration structures - and it is the reason a suite can
+     prove the no-rays path on ray-capable hardware.
+
+     IT IS ALSO A NECESSARY ESCAPE HATCH, measured: on NVIDIA 595.84,
+     vkCreateDevice returns VK_ERROR_INITIALIZATION_FAILED with these features
+     enabled UNDER AddressSanitizer, on the very GPU where the same call
+     succeeds without it (no validation error is reported; the driver simply
+     refuses). Every ASan engine suite therefore boots with the variable set and
+     gets its historical device back, byte for byte. This is a DRIVER limit, not
+     a defect in the patch: the non-ASan build of the same code creates the
+     device, builds structures and traces correctly.
+
+ (a) INSTANCE VERSION. Asks vkEnumerateInstanceVersion (itself a Vulkan 1.1 entry
+     point) what the loader supports and raises apiVersion to 1.2 only when the
+     loader can give it. A 1.0 loader, or one that does not export the function,
+     keeps the historical 1.0.2 byte for byte. The chosen version is logged.
+     NOTE for macOS (audit C-6): LunarG's loader there reports >= 1.2, so the
+     instance DOES go to 1.2 on a MoltenVK box — MoltenVK supports 1.2 and the
+     extensions are simply absent, so hunk (c) leaves the tier off; the Mac's
+     path is the no-rays path either way. This is recorded, not assumed: the
+     deferred Mac session logs the line this hunk prints.
+
+ (b) EXTENSIONS. Seven names join the whitelist, each guarded by the same
+     "only if the driver advertises it" rule as every name already there:
+     VK_KHR_acceleration_structure, VK_KHR_ray_query,
+     VK_KHR_deferred_host_operations, VK_KHR_buffer_device_address,
+     VK_EXT_descriptor_indexing, VK_KHR_spirv_1_4, VK_KHR_shader_float_controls.
+     The last four are dependencies of the first two (promoted to core in 1.2;
+     requested explicitly so the patch is also correct on a 1.1 clamp).
+
+ (c) FEATURES. A VulkanDevice::RayQueryVkFeatures MEMBER (not a local — the chain
+     must stay valid until vkCreateDevice reads it, which is after
+     fillDeviceFeatures2 has returned) holds the four feature structs, chained
+     only when all five required extensions were requested.
+
+     THE FOOT-GUN THIS PATCH MUST KEEP, and every later feature patch must copy:
+     upstream uses the SAME pNext chain to QUERY the driver
+     (vkGetPhysicalDeviceFeatures2) and to ENABLE features (vkCreateDevice), so
+     whatever the query leaves set gets turned on. This patch therefore clears
+     every reported bit and puts back exactly three: accelerationStructure,
+     rayQuery and bufferDeviceAddress. No capture-replay, no host commands, no
+     indirect build, and not one descriptor-indexing feature (the extension is a
+     DEPENDENCY of VK_KHR_acceleration_structure; none of its features are
+     needed). Without the mask, enabling the tier would quietly change driver
+     behaviour for the whole engine.
+
+ (d) `VulkanDevice::hasRayQuery()` — the one accessor our compute pass needs to
+     know whether it may build acceleration structures here. Ogre never calls it;
+     patch 0039 does.
+
+WHAT DOES NOT CHANGE. Ogre's swapchain, present path, Hlms, RootLayout, shaders
+and descriptor sets are untouched; no Ogre code path branches on the instance's
+apiVersion (the debug-utils check makes its own vkEnumerateInstanceVersion call,
+and properties read deviceProps.apiVersion). On a device without the extensions
+every hunk is inert. Measured on the RTX 4080 SUPER, driver 595.84: the app
+boots, renders and presents identically, the validation layer reports zero
+errors, and --engine-selftest produces the unchanged expected hash with the tier
+enabled and no tracing (PHOTON-S3 §2, re-proved by PHOTON-R1).
+
+SOURCE patch: every tree re-runs ./irisgl/scripts/build-ogre.sh.
+Companion: 0039 (the VBO pools as BLAS build input) depends on hasRayQuery().
+
+diff --git a/RenderSystems/Vulkan/include/OgreVulkanDevice.h b/RenderSystems/Vulkan/include/OgreVulkanDevice.h
+index 5f2f19e1b..10efb0da0 100644
+--- a/RenderSystems/Vulkan/include/OgreVulkanDevice.h
++++ b/RenderSystems/Vulkan/include/OgreVulkanDevice.h
+@@ -136,6 +136,21 @@ namespace Ogre
+             VkBool32 pipelineCreationCacheControl;
+         };
+ 
++        /// Jahshaka (ogre-patch 0038): the feature structs a hardware ray-query tier
++        /// needs at vkCreateDevice time. They are MEMBERS, not locals, because the
++        /// pNext chain they are linked into must outlive fillDeviceFeatures2() and
++        /// stay valid until vkCreateDevice() reads it.
++        struct RayQueryVkFeatures
++        {
++            VkPhysicalDeviceAccelerationStructureFeaturesKHR accelStruct;
++            VkPhysicalDeviceRayQueryFeaturesKHR rayQuery;
++            VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddress;
++            VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexing;
++            /// True only when every extension the tier needs was found AND the
++            /// driver reported both accelerationStructure and rayQuery.
++            bool enabled;
++        };
++
+         // clang-format off
+         std::shared_ptr<VulkanInstance> mInstance;
+         VkPhysicalDevice    mPhysicalDevice;
+@@ -156,6 +171,7 @@ namespace Ogre
+         VkPhysicalDeviceMemoryProperties mDeviceMemoryProperties;
+         VkPhysicalDeviceFeatures mDeviceFeatures;
+         ExtraVkFeatures mDeviceExtraFeatures;
++        RayQueryVkFeatures mRayQueryFeatures;
+         FastArray<VkQueueFamilyProperties> mQueueProps;
+ 
+         /// Extensions requested when created. Sorted
+@@ -200,6 +216,13 @@ namespace Ogre
+ 
+         bool hasDeviceExtension( const IdString extension ) const;
+ 
++        /// Jahshaka (ogre-patch 0038): true when VK_KHR_acceleration_structure +
++        /// VK_KHR_ray_query were requested at vkCreateDevice and the driver reported
++        /// their features. Nothing in Ogre reads this; it is the one honest way for a
++        /// Jahshaka-owned compute pass to know whether it may build acceleration
++        /// structures on this device.
++        bool hasRayQuery() const { return mRayQueryFeatures.enabled; }
++
+         void initQueues();
+ 
+         void commitAndNextCommandBuffer(
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+index 57d308ea4..d5e3943d0 100644
+--- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+@@ -58,6 +58,24 @@ THE SOFTWARE.
+ 
+ namespace Ogre
+ {
++    /// Jahshaka (ogre-patch 0038): THE NO-RAYS SWITCH, honoured at the DEVICE.
++    /// With it in force nothing this patch adds happens at all - the instance
++    /// stays at 1.0.2, not one ray extension is requested and not one feature
++    /// bit is set - so the process runs on EXACTLY the device it would have had
++    /// if this patch did not exist. That is what makes the switch a real
++    /// fallback picture rather than a cosmetic one (Jahshaka reads the same
++    /// variable to decide whether to build acceleration structures at all).
++    ///
++    /// It is also the escape hatch for a driver that cannot build a ray-tracing
++    /// device in a particular process: MEASURED on NVIDIA 595.84, vkCreateDevice
++    /// returns VK_ERROR_INITIALIZATION_FAILED with these features enabled under
++    /// AddressSanitizer, on the very GPU where the same call succeeds without it.
++    static bool jahNoRayQuery()
++    {
++        static const bool noRays = getenv( "JAHSHAKA_NO_RAY_QUERY" ) != 0;
++        return noRays;
++    }
++
+     FastArray<const char *> VulkanInstance::enabledExtensions;  // sorted
+     FastArray<const char *> VulkanInstance::enabledLayers;      // sorted
+ #if OGRE_DEBUG_MODE >= OGRE_DEBUG_HIGH
+@@ -288,7 +306,31 @@ namespace Ogre
+                 appInfo.pApplicationName = appName.c_str();
+             appInfo.pEngineName = "Ogre3D Vulkan Engine";
+             appInfo.engineVersion = OGRE_VERSION;
++            // Jahshaka (ogre-patch 0038): ask for Vulkan 1.2 when the LOADER can give
++            // it. VK_KHR_acceleration_structure and VK_KHR_ray_query are only usable
++            // above 1.0, and the instance's apiVersion is the ceiling for the whole
++            // process. vkEnumerateInstanceVersion is itself a 1.1 entry point, so a
++            // 1.0 loader (or a null return) keeps the historical 1.0.2 exactly.
+             appInfo.apiVersion = VK_MAKE_VERSION( 1, 0, 2 );
++            if( !jahNoRayQuery() )
++            {
++                PFN_vkEnumerateInstanceVersion enumerateInstanceVersion =
++                    (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(
++                        VK_NULL_HANDLE, "vkEnumerateInstanceVersion" );
++                if( enumerateInstanceVersion )
++                {
++                    uint32_t loaderVersion = 0u;
++                    if( enumerateInstanceVersion( &loaderVersion ) == VK_SUCCESS &&
++                        loaderVersion >= VK_API_VERSION_1_2 )
++                    {
++                        appInfo.apiVersion = VK_API_VERSION_1_2;
++                    }
++                }
++            }
++            LogManager::getSingleton().logMessage(
++                "Vulkan: Instance apiVersion " +
++                StringConverter::toString( VK_VERSION_MAJOR( appInfo.apiVersion ) ) + "." +
++                StringConverter::toString( VK_VERSION_MINOR( appInfo.apiVersion ) ) );
+ 
+             VkInstanceCreateInfo createInfo;
+             makeVkStruct( createInfo, VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO );
+@@ -666,12 +708,81 @@ namespace Ogre
+             lastNext = &deviceCacheControlFeatures.pNext;
+         }
+ 
++        // Jahshaka (ogre-patch 0038): the ray-query feature structs. Chained only
++        // when every extension they belong to was requested; the structs live on the
++        // device object so the chain survives until vkCreateDevice reads it.
++        memset( &mRayQueryFeatures, 0, sizeof( mRayQueryFeatures ) );
++        makeVkStruct( mRayQueryFeatures.accelStruct,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR );
++        makeVkStruct( mRayQueryFeatures.rayQuery,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR );
++        makeVkStruct( mRayQueryFeatures.bufferDeviceAddress,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES );
++        makeVkStruct( mRayQueryFeatures.descriptorIndexing,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES );
++        const bool bWantRayQuery =
++            !jahNoRayQuery() &&
++            hasDeviceExtension( VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ) &&
++            hasDeviceExtension( VK_KHR_RAY_QUERY_EXTENSION_NAME ) &&
++            hasDeviceExtension( VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME ) &&
++            hasDeviceExtension( VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME ) &&
++            hasDeviceExtension( VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME );
++        if( bWantRayQuery )
++        {
++            *lastNext = &mRayQueryFeatures.accelStruct;
++            lastNext = &mRayQueryFeatures.accelStruct.pNext;
++            *lastNext = &mRayQueryFeatures.rayQuery;
++            lastNext = &mRayQueryFeatures.rayQuery.pNext;
++            *lastNext = &mRayQueryFeatures.bufferDeviceAddress;
++            lastNext = &mRayQueryFeatures.bufferDeviceAddress.pNext;
++            *lastNext = &mRayQueryFeatures.descriptorIndexing;
++            lastNext = &mRayQueryFeatures.descriptorIndexing.pNext;
++        }
++
+         GetPhysicalDeviceFeatures2KHR( mPhysicalDevice, &deviceFeatures2 );
+         mDeviceExtraFeatures.storageInputOutput16 = device16BitStorageFeatures.storageInputOutput16;
+         mDeviceExtraFeatures.shaderFloat16 = deviceShaderFloat16Int8Features.shaderFloat16;
+         mDeviceExtraFeatures.shaderInt8 = deviceShaderFloat16Int8Features.shaderInt8;
+         mDeviceExtraFeatures.pipelineCreationCacheControl =
+             deviceCacheControlFeatures.pipelineCreationCacheControl;
++
++        // Jahshaka (ogre-patch 0038): the query above FILLED these structs with
++        // everything the driver can do, and this same chain is handed straight to
++        // vkCreateDevice - so anything left set here is ENABLED. Keep exactly the
++        // four bits a ray-query tier needs and clear the rest, so enabling the tier
++        // cannot quietly change driver behaviour for the rest of the engine. The
++        // descriptor-indexing struct is chained but left entirely off: the extension
++        // is a dependency of VK_KHR_acceleration_structure, none of its features are.
++        mRayQueryFeatures.enabled =
++            bWantRayQuery && mRayQueryFeatures.accelStruct.accelerationStructure &&
++            mRayQueryFeatures.rayQuery.rayQuery &&
++            mRayQueryFeatures.bufferDeviceAddress.bufferDeviceAddress;
++        {
++            // Clear every reported bit, then put back only the ones we use. sType and
++            // pNext are restored so the chain vkCreateDevice is about to walk survives.
++            auto clearBody = []( auto &featureStruct ) {
++                const VkStructureType sType = featureStruct.sType;
++                void *const pNext = featureStruct.pNext;
++                memset( &featureStruct, 0, sizeof( featureStruct ) );
++                featureStruct.sType = sType;
++                featureStruct.pNext = pNext;
++            };
++            clearBody( mRayQueryFeatures.accelStruct );
++            clearBody( mRayQueryFeatures.rayQuery );
++            clearBody( mRayQueryFeatures.bufferDeviceAddress );
++            clearBody( mRayQueryFeatures.descriptorIndexing );
++            if( mRayQueryFeatures.enabled )
++            {
++                mRayQueryFeatures.accelStruct.accelerationStructure = VK_TRUE;
++                mRayQueryFeatures.rayQuery.rayQuery = VK_TRUE;
++                mRayQueryFeatures.bufferDeviceAddress.bufferDeviceAddress = VK_TRUE;
++            }
++            LogManager::getSingleton().logMessage(
++                String( "Vulkan: hardware ray query " ) +
++                ( mRayQueryFeatures.enabled
++                      ? "AVAILABLE (VK_KHR_acceleration_structure + VK_KHR_ray_query enabled)"
++                      : "not available" ) );
++        }
+         return true;
+     }
+     //-------------------------------------------------------------------------
+@@ -970,6 +1081,33 @@ namespace Ogre
+             // purpose: the name macro lives behind VK_ENABLE_BETA_EXTENSIONS.
+             else if( extensionName == "VK_KHR_portability_subset" )
+                 deviceExtensions.push_back( "VK_KHR_portability_subset" );
++            // Jahshaka (ogre-patch 0038): the hardware ray-query set. Every one of
++            // these is requested ONLY if the driver advertises it, exactly like the
++            // names above; on a device without them nothing changes. Ogre itself uses
++            // none of them - they exist so a Jahshaka-owned compute pass can build
++            // acceleration structures and run inline ray queries.
++            // Each arm pushes the MACRO, which is a string literal with static
++            // storage - never extensionName.c_str(), which dies with this loop
++            // iteration while deviceExtensions keeps the pointer.
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME )
++                deviceExtensions.push_back( VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME );
++            else if( !jahNoRayQuery() && extensionName == VK_KHR_RAY_QUERY_EXTENSION_NAME )
++                deviceExtensions.push_back( VK_KHR_RAY_QUERY_EXTENSION_NAME );
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME )
++                deviceExtensions.push_back( VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME );
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME )
++                deviceExtensions.push_back( VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME );
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME )
++                deviceExtensions.push_back( VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME );
++            else if( !jahNoRayQuery() && extensionName == VK_KHR_SPIRV_1_4_EXTENSION_NAME )
++                deviceExtensions.push_back( VK_KHR_SPIRV_1_4_EXTENSION_NAME );
++            else if( !jahNoRayQuery() &&
++                     extensionName == VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME )
++                deviceExtensions.push_back( VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME );
+         }
+ 
+         deviceExtensions.push_back( VK_KHR_SWAPCHAIN_EXTENSION_NAME );

@@ -1217,6 +1217,13 @@ NodeId OgreScene::nodeOfLight(const Ogre::Light *light) const {
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
     JAH_TRY {
+        // THE RAY TIER'S STRUCTURES FOR THIS SCENE, FIRST. They are keyed by
+        // this object's ADDRESS and they hold MeshPtrs, so leaving them behind
+        // would pin this scene's geometry for the process's life and let the
+        // next scene allocated at the same address inherit a TLAS built for
+        // someone else's items. Defined in OgreRayQuery.cpp — like every other
+        // line of the tier — so no TU without Vulkan ever sees it.
+        forgetRayQuery();
         // FIRST, before anything else in this scene goes: the overlay system's
         // render-queue listener is registered on THIS SceneManager, and the
         // teardown order the component needs is

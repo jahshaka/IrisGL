@@ -754,8 +754,58 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     workspaces and then destroyed the `Camera*` the third was built against —
     one dangling disabled workspace per atlas rebuild. Replaces the engine's
     former `JahVctLighting` protected-member reach-in (deleted).
+38. **0038-vulkan-ray-query-device-enablement** — SOURCE (one render-system
+    file plus its header; every tree re-runs `build-ogre.sh`). Ogre-Next 4.0 has
+    no ray-tracing support of any kind, and three things in `OgreVulkanDevice`
+    block Vulkan's own: the instance is created at apiVersion 1.0.2, device
+    extensions come from a hardcoded if/else whitelist, and the feature pNext
+    chain is a fixed set of three structs. The patch raises the instance to 1.2
+    ONLY when `vkEnumerateInstanceVersion` says the loader can (a 1.0 loader
+    keeps 1.0.2 byte for byte), adds seven extension names each gated on the
+    driver advertising it exactly like every name already there, and chains four
+    feature structs held as a MEMBER of VulkanDevice (the chain must outlive
+    `fillDeviceFeatures2`, which returns before `vkCreateDevice` reads it).
+    THE FOOT-GUN EVERY LATER FEATURE PATCH MUST COPY: upstream uses the SAME
+    chain to QUERY the driver and to ENABLE features, so whatever the query
+    leaves set gets turned on — this patch clears every reported bit and puts
+    back exactly three (accelerationStructure, rayQuery, bufferDeviceAddress).
+    That mask is why enabling the tier moves no pixel. Adds
+    `VulkanDevice::hasRayQuery()`, which Ogre never calls and 0039 does.
+    Inert on a device without the extensions; that is the Mac's path.
+    Gate: `gi.rayquery` + the unchanged `--engine-selftest` hash with the tier
+    live and holding structures.
+39. **0039-vulkan-vbo-pools-as-blas-build-input** — SOURCE. Two buffer usage
+    bits and one memory-allocate flag on the DEVICE-LOCAL VBO pools
+    (`vboFlag == CPU_INACCESSIBLE`), guarded on `hasRayQuery()`. Without it a
+    bottom-level acceleration structure must be built from a COPY of every
+    vertex and index buffer — a second resident copy of the world's geometry
+    plus a readback per mesh. The guard is not cosmetic:
+    SHADER_DEVICE_ADDRESS without the bufferDeviceAddress feature is invalid
+    usage, and so is the usage bit without the matching allocate flag. Narrower
+    than the S3 spike's `!= CPU_READ_WRITE`, which also decorated the
+    host-visible staging pools that never feed a BLAS (audit C-9).
+40. **0040-vulkan-export-onvulkanfailure** — SOURCE, one declaration. A PIN
+    DEFECT found by building against the pin as its installed headers invite:
+    `VulkanQueue` is declared `_OgreVulkanExport` and offers the PUBLIC INLINE
+    `getCurrentCmdBuffer()` in an installed public header, whose device-lost
+    branch expands `checkVkResult` → `Ogre::onVulkanFailure` — and that function
+    is declared with NO export macro, so the render system's
+    `-fvisibility=hidden` keeps it out of `RenderSystem_Vulkan.so`'s dynamic
+    table. Any code outside the plugin calling the pin's own public accessor
+    compiles and then fails to LINK (`undefined reference to
+    Ogre::onVulkanFailure`); the out-of-line members of the same class
+    (`endAllEncoders`, `getComputeEncoder`) export and link fine.
+    The patch adds the macro and MOVES the declaration (with the `checkVkResult`
+    macro) to the bottom of `OgreVulkanPrerequisites.h`, because upstream
+    defines `_OgreVulkanExport` at the END of that same header — below where the
+    function was declared. No behaviour change: same definition, same callers,
+    same expansion. Worth reporting upstream; the same class of defect exists
+    for every `checkVkResult` inside a public inline in an installed header.
+    The alternative was reaching for `VulkanQueue::mCurrentCmdBuffer`, which is
+    PROTECTED — a derived-class reach-in that lives only as long as the pin's
+    layout. A patch beats a workaround (owner, 2026-09-15).
 
-THE STACK IS 0001-0037 (this list; `build-ogre.sh` globs `*.patch`, so the file
+THE STACK IS 0001-0040 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
@@ -763,7 +813,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027 and 0032 are SOURCE-only, and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039 and 0040 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
