@@ -1,0 +1,105 @@
+Jahshaka local patch 0033 (upstream-reportable): a CASCADE CHAIN loses the
+ambient. Every surface the bounce does not reach renders BLACK instead of
+ambient-lit, and the loss compounds once per cascade.
+
+Measured on `gi.cascades` case 4 — a ground lit by NOTHING but a flat ambient,
+Epic, the Ogre sample's four-cascade set — as a fraction of the same ground with
+GI off (the single scene-fitted volume and a chain of ONE cascade both read
+1.00x, so neither the ambient push nor the cascade placement is at fault):
+
+    chain length              1       2       3       4
+    shipped media             -       -       -     0.00x   (black)
+    fix 1, escape line only   -       -       -     0.02x
+    fix 1, both lines       1.00x   0.61x   0.27x   0.16x
+    fix 1 + fix 2           1.00x   0.75x   0.56x   0.51x
+
+(A dash is a combination that was not measured; the two sweeps were.)
+
+FIX 1 — TWO ACCUMULATORS THAT DOUBLE AT EVERY HOP. `voxelConeTraceDiff` starts
+both of its accumulators at the alpha it is handed (`float alpha = startingAlpha;`
+upstream, `float escapeAlpha = startingAlpha;` Jahshaka patch 0021), and that
+argument is the caller's own `result.alpha` — so what the call RETURNS is already
+the running total for the whole cone. The cascade continuation loop then ADDED
+those totals to the values it already held:
+
+    result.alpha       += newRes.alpha;          // upstream's
+    result.escapeAlpha += newRes.escapeAlpha;    // patch 0021's, same shape
+
+Both opacities therefore double per hop: the walk exits early through
+`result.alpha < 0.95f` so the outer cascades are never gathered from, and —
+because the doubled alpha is what seeds the next call's escapeAlpha —
+`1 - min(1, escapeAlpha / 0.95)`, the weight the ambient rides on (`light.w`,
+`light.xyz += ambient * light.w`), reaches exactly 0 after three hops. Fix:
+assign, because the returned value IS the running total. The colour composite on
+the line above deliberately reads the PREVIOUS `result.alpha` (upstream's
+de-amplification of the coarser cascade, `VctCascadedVoxelizer::update`'s own
+comment) and is evaluated before either assignment, so it is unchanged.
+
+FIX 2 — THE SELF-OCCLUSION BIAS IS APPLIED ONCE, NOT ONCE PER CASCADE.
+`computeVctProbe` starts the cone one bias away from the surface it stands on
+(`posLS += (dirLS / maxVal) * vctInvResolution * lerp( 15.0f, 1.0f, maxVal )`),
+which is what stops a floor occluding its own cone. The continuation into the
+next cascade re-enters at the point the previous march stopped — about two of
+the PREVIOUS cascade's voxels above the floor, i.e. inside one cell of the
+coarser one — and applies no such bias at all (it moves BACKWARD by one voxel,
+`- dir * startBias`, to avoid a gap at the seam). So every cascade samples the
+starting surface again, at its own coarser mip, and the escape opacity climbs a
+step per hop. Fix: apply the same expression the initial call uses, in the NEW
+cascade's units, at every cascade entry.
+
+RESIDUAL, STATED HONESTLY: 0.51x at four cascades, not 1.00x. The rest is
+upstream's march bookkeeping — `voxelConeTraceDiff` RESTARTS `dist` at one voxel
+in each cascade (`float dist = vctInvResolution;`) instead of carrying the
+distance the cone has already travelled, so the continuation re-marches the near
+field with a footprint computed for a cone one voxel long. Carrying the travelled
+distance across the hop (a `VctResult::dist` scaled by
+`fromPreviousProbeToNext[j-1][0].xyz`) is the real fix and it is a bigger change
+than this patch: recorded for SPECS/OGRE_UPSTREAM_ISSUES.md and for PHOTON P1.
+It is bounded: with the irradiance field on, the field REPLACES the cone diffuse
+(`vct_disable_diffuse`), so this term only lights tiers that run without it.
+
+NO EXISTING PICTURE CAN MOVE. Both hunks are inside `@property( vct_num_probes >
+1 )`, which is only true when a cascade CHAIN is bound, and nothing in this tree
+builds one except Photon's arm (`GiParams::cascades`, off by default and off in
+every shipped scene). Verified: the `--engine-selftest` hash is byte-identical
+with the patch staged.
+
+MEDIA-ONLY (Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any): no Ogre rebuild, but
+every tree must run the patch loop — Studio stages Hlms media from the SOURCE
+tree. Applies after patch 0021, whose line fix 1 corrects. Verified with
+`git apply --check` against the patched-through-0032 tree and
+`git apply --reverse --check` after applying. Rationale also in
+irisgl/docs/OGRE_BUILD.md, entry 33.
+
+diff --git a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+@@ -443,7 +443,8 @@
+ 						float prevCascadeMaxLod = probeParams.vctInvResolution_cascadeMaxLod[j - 1].w;
+ 
+ 						float3 newPosLS =
+-							fromVctProbeToNext( result.posLS, j, probeParams ) - dir * startBias;
++							fromVctProbeToNext( result.posLS, j, probeParams ) - dir * startBias +
++							(dirLS / maxVal) * startBias * lerp( 15.0f, 1.0f, maxVal );
+ 
+ 						VctResult newRes = voxelConeTraceDiff(
+ 							probeParams, newPosLS, dir, coneAngleTan,
+@@ -455,8 +456,16 @@
+ 						result.colour += newRes.colour *
+ 										 probeParams.fromPreviousProbeToNext[j - 1][0].w *
+ 										 ( 1.0 - result.alpha );
+-						result.alpha += newRes.alpha;
+-						result.escapeAlpha += newRes.escapeAlpha;	// Jahshaka patch 0021
++						// Jahshaka patch 0033 (both lines were `+=`): what the
++						// continuation RETURNS is already the running total for the
++						// whole cone -- voxelConeTraceDiff starts both accumulators
++						// at `startingAlpha`, which is this very `result.alpha` --
++						// so adding it doubles the opacity at every cascade hop. The
++						// colour composite above deliberately keeps reading the
++						// PREVIOUS value (upstream's de-amplification), so it is
++						// unaffected by the order of these two assignments.
++						result.alpha = newRes.alpha;
++						result.escapeAlpha = newRes.escapeAlpha;
+ 						result.lodLevel = newRes.lodLevel;
+ 						result.posLS = newRes.posLS;
+ 					}

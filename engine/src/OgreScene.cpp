@@ -121,6 +121,14 @@ void OgreScene::applyVctAmbient() {
         mVctLighting->setAmbient(
             Ogre::ColourValue(u.r, u.g, u.b + kHemiEpsilon, 1.0f),
             Ogre::ColourValue(l.r, l.g, l.b, 1.0f));
+        // EVERY CASCADE, not just the head (PHOTON_SPEC P0 rule 4). Upstream's
+        // cascade manager never pushes the ambient into any cascade and the
+        // room renders 2,2,2 as a result (spikes/photon-s1 §4.3): binding a
+        // VctLighting suppresses HlmsPbs' own ambient scene-wide, so a cascade
+        // with black hemispheres contributes darkness where it should
+        // contribute the sky. Cascade 0 is mVctLighting and was just done.
+        for (size_t i = 1; i < mVctCascades.size(); ++i)
+            applyCascadeAmbient(mVctCascades[i].lighting);
         if (std::getenv("JAHSHAKA_GI_DEBUG"))
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: vct ambient upper " + std::to_string(u.r) + "," + std::to_string(u.g) +

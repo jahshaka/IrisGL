@@ -3276,6 +3276,90 @@ private:
     /// Returns the item count (0 = nothing built, both left null).
     size_t buildVoxelArm(const Ogre::Aabb &aabb);
 
+    // ---- PHOTON: the camera-centred cascade scheduler (PHOTON_SPEC P0) ------
+    //
+    // N camera-centred rasterising VctVoxelizer + VctLighting pairs, chained
+    // through VctLighting::addCascade on the innermost one, scheduled BY US.
+    // Upstream's VctCascadedVoxelizer is not used and cannot be: it hard-wires
+    // VctImageVoxelizer (measured in spikes/photon-s1 to reproduce none of the
+    // rasteriser's bounce), it rebuilds every dirty cascade in one frame with
+    // no budget, and its buildRelative has no guard against a camera jump
+    // longer than a cascade (three GPU losses in that spike).
+    //
+    // Cascade 0 IS mVctVoxelizer/mVctLighting — the head of the chain, the
+    // object bound to HlmsPbs — so every existing binding, teardown, status
+    // and irradiance-field rule keeps working unchanged; mVctCascades[0]
+    // mirrors those two pointers and 1..N-1 are owned here.
+    struct VctCascade {
+        Ogre::VctVoxelizer *voxelizer = nullptr;   ///< owned, except [0]
+        Ogre::VctLighting  *lighting  = nullptr;   ///< owned, except [0]
+        float        halfSize   = 0.0f;
+        Ogre::uint32 resolution = 64u;
+        float        stepCells  = 4.0f;
+        /// The lattice cell this cascade is centred on (integer coordinates in
+        /// units of `step`), and the world centre that resolves to.
+        long long    latticeX = 0, latticeY = 0, latticeZ = 0;
+        Ogre::Vector3 centre = Ogre::Vector3::ZERO;
+        bool         built   = false;
+        /// Whether this cascade's voxeliser currently holds the GI items. A
+        /// cascade standing in empty space holds none (setCascadeItems).
+        bool         itemsAttached = false;
+        /// How many GI items this cascade actually voxelises — inside its box and
+        /// big enough to fill half a voxel of it.
+        unsigned     items = 0;
+        int          pending = 0;                  ///< queued rebuilds (bounded)
+        /// This cascade's queued rebuild came from the JUMP guard, not from an
+        /// ordinary scroll — i.e. nothing of its old volume was reusable.
+        /// Cleared when the rebuild is serviced, and counted there, so the
+        /// counter is one per cascade per teleport rather than one per frame
+        /// the camera spends far away.
+        bool         jumped  = false;
+        unsigned long long rebuilds = 0;
+        float        lastCpuMs = -1.0f;
+        /// The camera position this cascade was last BUILT for. The scroll test
+        /// is quantize(cam, cell*stepCells) != quantize(builtCam, cell*stepCells)
+        /// — the pin's `consistentCascadeSteps` reading, which is what keeps two
+        /// cascades from stepping on different frames for the same metre.
+        Ogre::Vector3 builtCam = Ogre::Vector3::ZERO;
+        float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
+        float cell() const { return halfSize * 2.0f / float(resolution); }
+    };
+    /// Builds the whole chain around `camPos` from scratch. Returns the item
+    /// count (0 = nothing built). The cascade arm's counterpart of
+    /// buildVoxelArm, and it calls into it for cascade 0.
+    size_t buildCascadeArm(const Ogre::Vector3 &camPos);
+    /// The resolved cascade table (GiParams::cascadeSet, else the tier table).
+    std::vector<GiParams::GiCascadeDesc> resolveCascadeTable() const;
+    /// One cascade's whole re-voxelisation at its current centre: region ->
+    /// build -> ambient -> light. `reason` only labels the monitor row.
+    void rebuildCascade(size_t idx, GiStaleReason reason);
+    /// THE SCHEDULER, called once a frame from updateGiTracking with the
+    /// authoritative camera. Re-quantises every cascade, queues the ones that
+    /// moved, and spends AT MOST ONE rebuild this frame, innermost first.
+    void updateCascades(const Ogre::Vector3 &camPos);
+    /// Destroys cascades 1..N-1 (cascade 0 is teardownVct's own business).
+    void teardownExtraCascades();
+    /// Does any GI item this cascade would voxelise reach into its box?
+    bool cascadeHasGeometry(const VctCascade &c) const;
+    /// Attaches or detaches the GI items on one cascade's voxeliser. A cascade
+    /// with none builds an EMPTY volume instead of throwing (the pin's
+    /// zero-thread-group refusal).
+    void setCascadeItems(VctCascade &c, bool attach);
+    /// Destroys a chain that never finished building (nothing is bound yet, so
+    /// cascade 0 belongs to it too). Returns 0 — it is a JAH_CATCH value.
+    size_t abandonCascadeChain();
+    /// Re-centres one cascade's region on ITS cell lattice around `camPos` and
+    /// records the camera it was placed for. Does not voxelise.
+    void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
+    /// The ambient pair into ONE cascade's lighting (applyVctAmbient, aimed).
+    void applyCascadeAmbient(Ogre::VctLighting *lighting);
+    /// Extra bounces for cascade `idx` — the pin's own brightness stabilisation
+    /// (a coarser cell loses light, so it gets more bounces). 0 when the
+    /// document asks for a single indirect bounce, which is the default.
+    Ogre::uint32 cascadeBounces(size_t idx) const;
+    /// True when the live arm is a cascade chain.
+    bool cascadeArmLive() const { return mVctCascades.size() > 1u || (mGi.cascades && !mVctCascades.empty()); }
+
     /// rayon2 S3 — the raster probe source. resolveSource: GiParams::ddgiSource
     /// with Auto = Voxel at every tier. applyRasterSource: re-sources a just
     /// converged voxel field to the raster workspace in place (refused, logged,
@@ -3498,6 +3582,21 @@ private:
     // SceneManager (probe workspaces and the GI camera live in it).
     Ogre::VctVoxelizer               *mVctVoxelizer = nullptr;
     Ogre::VctLighting                *mVctLighting  = nullptr;
+    /// THE PHOTON CASCADE CHAIN, innermost first. Empty in the single-volume
+    /// arm. [0] mirrors mVctVoxelizer/mVctLighting (NOT owned through here).
+    std::vector<VctCascade> mVctCascades;
+    /// The scheduler's counters, reported through GiStatus.
+    unsigned long long mCascadeFullRebuilds = 0;
+    unsigned long long mCascadeDeferrals = 0;
+    unsigned long long mCascadeDirtyMajority = 0;
+    /// Set while buildCascadeArm/rebuildCascade is running, so the ambient push
+    /// knows to walk the chain instead of the head alone.
+    /// The authoritative camera position the GI tracker last saw. The cascade
+    /// arm is built around it, so a rebuild that arrives BEFORE any frame has
+    /// tracked a camera (a scene opened and immediately re-solved) still places
+    /// its cascades where the camera is rather than at the origin.
+    Ogre::Vector3 mGiCamPos = Ogre::Vector3::ZERO;
+    bool mGiCamPosKnown = false;
     Ogre::ParallaxCorrectedCubemapAuto *mPcc        = nullptr;
     Ogre::Camera                     *mGiCamera     = nullptr;   // PCC build + tracking
     /// The DDGI field, owned, null unless GiParams::ddgi resolved on over a

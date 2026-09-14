@@ -240,6 +240,23 @@ public:
     GiQuality giQuality;
     QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
     int giNumBounces;          // 1..4
+    /// PHOTON — CAMERA-CENTRED VOXEL CASCADES (SPECS/PHOTON_SPEC.md P0).
+    ///
+    /// False (the default) is the single scene-fitted voxel volume: one box
+    /// around the content, and nothing outside it
+    /// bounces. True builds a chain of camera-centred cascades instead — fine
+    /// cells near the eye, coarse ones far out — so the bounce follows the
+    /// camera and what escapes the outermost cascade reads the Sky Light
+    /// instead of going dark. Only meaningful in the two VCT modes; a scene
+    /// that never sets it renders exactly as it did.
+    ///
+    /// `giCascadeSet` optionally pins the table, one entry per cascade as
+    /// (halfSize metres, resolution, stepCells); empty = the quality tier's own
+    /// table. A zero or negative halfSize/resolution in any entry means the
+    /// whole request is ignored — a half-specified cascade is not a request the
+    /// renderer can honour halfway.
+    bool giCascades = false;
+    QVector<iris::Vec3> giCascadeSet;
     /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
     /// renderer may spend per frame, and the single "is GI live?" switch.
     ///
