@@ -3537,8 +3537,9 @@ private:
     void noteGiDatablockDied();
     /// Marks every cascade whose box intersects the recorded dirty region (or
     /// all of them when the region is unknown) `pending`, and clears the region.
-    /// Returns how many cascades it marked.
-    size_t markDirtyCascadesPending();
+    /// `why` is the reason the monitor row will carry. Returns how many cascades
+    /// it marked.
+    size_t markDirtyCascadesPending(GiStaleReason why);
     /// THE SCHEDULER, called once a frame from updateGiTracking with the
     /// authoritative camera. Re-quantises every cascade, queues the ones that
     /// moved, and spends AT MOST ONE rebuild this frame, innermost first.

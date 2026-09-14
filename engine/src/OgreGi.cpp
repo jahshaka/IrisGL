@@ -2152,7 +2152,7 @@ void OgreScene::noteGiDatablockDied() {
 
 // The cascades the recorded dirty region can be seen from, marked `pending`.
 // Returns how many were marked; clears the region either way.
-size_t OgreScene::markDirtyCascadesPending() {
+size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
     size_t marked = 0;
     for (VctCascade &c : mVctCascades) {
         bool hit = mGiCascadeDirtyAll || c.freshVoxels || c.itemsStale;
@@ -2163,8 +2163,7 @@ size_t OgreScene::markDirtyCascadesPending() {
         }
         if (!hit) continue;
         c.pending = 1;
-        c.pendingReason = mLastStaleReason == GiStaleReason::None ? GiStaleReason::Refresh
-                                                                 : mLastStaleReason;
+        c.pendingReason = why;
         ++marked;
     }
     mGiCascadeDirtyBoxes.clear();
@@ -2225,9 +2224,13 @@ bool OgreScene::refreshCascadesFast() {
         // cascades; this is the bookkeeping that says the chain has answered).
         mGiBuiltDatablockGeneration = mGiDatablockGeneration;
         // Whatever the walk saw move since the last answer is part of the
-        // region, whether or not anything else asked for this refresh.
+        // region, whether or not anything else asked for this refresh. (Under a
+        // live view most of these have already been marked and spent while the
+        // object moved — see updateGiTracking; this is the belt for a scene
+        // whose GI is driven with no frame in between.)
         for (const Ogre::Aabb &b : mGiMovedBoxes) noteGiCascadeDirty(&b);
-        const size_t marked = markDirtyCascadesPending();
+        const size_t marked = markDirtyCascadesPending(
+            mLastStaleReason == GiStaleReason::None ? GiStaleReason::Refresh : mLastStaleReason);
         // NOTHING GEOMETRIC CHANGED — so this refresh was asked for by a LIGHT
         // (or by the host's explicit Refresh with nothing moved). Re-inject over
         // the voxels that are already there, on every cascade, at the full
@@ -2461,7 +2464,39 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
     // moved and every edit would mark the whole chain. It is epoch-gated like
     // every other consumer — a still scene runs no walk at all — and D4 makes
     // it the one walk the frame pays for.
-    if (!mVctCascades.empty()) { JAH_TRY { ensureGiWalk(); } JAH_CATCH(mError, ); }
+    if (!mVctCascades.empty()) {
+        JAH_TRY {
+            ensureGiWalk();
+            // A STILL OBJECT THAT IS MOVING RIGHT NOW IS RE-VOXELISED WHILE IT
+            // MOVES (smoke rig 2026-09-15, ledger §320) — not left until the
+            // settle. THE DEFECT, measured on the monolithic arm: a STILL-
+            // classified cube dragged in the editor keeps a voxel copy of
+            // itself at its OLD pose, because a geometry move restarts BOTH of
+            // the mirror's stability gates on every frame of the gesture, so
+            // the full re-solve never fires during it; the every-tenth-frame
+            // `refreshGiLighting(inMotion)` then re-injects light over those
+            // stale voxels and the cone's self-occlusion start bias paints
+            // vertical stripes on the lit face (a 15 degree turn of a 2 m cube
+            // displaces its corners 4.4 voxels at High).
+            //
+            // The settle was the right place to answer it only while an answer
+            // cost a WHOLE from-scratch arm. It no longer does: the cascades the
+            // mover's box (old united with new) actually reaches are marked
+            // here, and the scheduler below spends AT MOST ONE of them in this
+            // frame, innermost first — so the near field, which is what the user
+            // is looking at, follows the object live and the outer cascades
+            // drain within N frames of the gesture ending. The frame budget is
+            // the same one a camera scroll lives inside.
+            //
+            // The MONOLITHIC arm is deliberately unchanged here: one volume
+            // cannot be re-voxelised per frame at any useful resolution, and
+            // what to do there is the owner's call, not this lane's.
+            if (!mGiMovedBoxes.empty()) {
+                for (const Ogre::Aabb &b : mGiMovedBoxes) noteGiCascadeDirty(&b);
+                markDirtyCascadesPending(GiStaleReason::Moved);
+            }
+        } JAH_CATCH(mError, );
+    }
     if (!mGiCachesDirty) updateCascades(camPos);
     if (!mPcc || !mGiCamera) return;
     JAH_TRY {
