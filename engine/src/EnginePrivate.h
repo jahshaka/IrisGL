@@ -757,6 +757,9 @@ struct ChainDesc {
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
     float ssrRoughnessCutoff = 0.35f;
     float ssrIntensity = 1.0f;
+    /// The ray-traced reflection's per-project roughness cutoff (PostFxDesc's
+    /// note). A uniform, never a shape term.
+    float rayReflectRoughness = 0.4f;
     /// RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5). SCREEN FIRST, RAYS FOR THE
     /// REST: the march keeps every pixel it is confident about and a ray fills
     /// only the rest — off screen, behind an occluder, past the edge fade, or
@@ -2491,6 +2494,19 @@ public:
     /// DROP THIS SCENE'S acceleration structures (OgreScene::destroy calls it).
     /// A no-op when the tier never held any. Defined in OgreRayQuery.cpp.
     void forgetRayQuery();
+    /// THE ONE PREDICATE that decides whether this scene's reflections are
+    /// traced (PHOTON_SPEC §7 R5 item 5). It answers the DOCUMENT's half —
+    /// "does this project want rays" — resolved against the MACHINE's
+    /// (`rayQueryAvailable()`); the view adds the third term, its SSR row,
+    /// because that is a property of the view's chain and not of the scene.
+    ///
+    /// TODAY it reads the application latch (`Engine::rayTracing()`, R1's
+    /// `app.rayTracing` / `--no-ray-query`). LANE RAYROW-1 replaces that ONE
+    /// line with the project's own World row — off / auto / on, with "on"
+    /// additionally raising a scene issue on a machine that cannot trace
+    /// (owner, ledger §425). Everything downstream reads this function, so that
+    /// lane changes an input and not a pass.
+    bool rayReflectionsWanted() const;
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
     /// The tier reads this scene's PRIVATE caster epoch (shadowEpoch) to decide
     /// whether the acceleration structure can possibly be out of date — the same
@@ -4734,6 +4750,12 @@ private:
     /// the rest of the engine never dereferences.
     std::unique_ptr<ReflectPassListener> mReflectListener;
     unsigned                   mWorkspaceGeneration = 0;
+    /// What `ChainDesc::rayReflect` was when the CURRENT workspace definition
+    /// was built. The scene arrives AFTER the chain is first built (the
+    /// constructor has no scene), and the project's ray row can change under a
+    /// live view, so the shape is re-checked once a frame in
+    /// syncReflectListener rather than only when a host pushes a PostFxDesc.
+    bool                       mChainRayReflect = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.

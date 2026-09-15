@@ -69,13 +69,16 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 rayDown;
 	vec4 fwd;
 	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
-	/// z = the far plane (the orthographic depth scale), w unused.
+	/// z = the far plane (the orthographic depth scale), w = the roughness
+	/// gate's FEATHER half-width (kRayReflectFeather).
 	vec4 projParams;
 	/// xy = the trace resolution in pixels, zw = the full-resolution size of
 	/// jahSsrReflection.
 	vec4 resolution;
-	/// x = the roughness gate (above it the probe/field photograph is good
-	/// enough and a ray is spent for nothing), y = the ray's maximum length in
+	/// x = the roughness gate — the PROJECT's dial, not a renderer constant:
+	/// above it the probe/field photograph is a good enough integral of a wide
+	/// lobe and a ray is spent for nothing. The transition is FEATHERED over
+	/// projParams.w either side of it. y = the ray's maximum length in
 	/// world units, z = the frame index (the sample sequence's only input),
 	/// w = how many cascades are bound.
 	vec4 knobs;
@@ -341,9 +344,13 @@ void main()
 		return;
 	}
 	const float roughGate = p.knobs.x;
+	const float feather = p.projParams.w;
 	const float roughness =
 		texture( gBufShadowRoughness, uv ).y * 0.98 + 0.02;
-	if( roughness > roughGate )
+	// TRACED UP TO THE FEATHER'S FAR EDGE, not to the cutoff: the band above the
+	// cutoff is exactly where the two answers are being crossfaded, and a pixel
+	// in it with no ray would make the crossfade a step again.
+	if( roughness > roughGate + feather )
 	{
 		imageStore( historyDistCur, tc, vec4( 0.0 ) );
 		return;
@@ -460,16 +467,19 @@ void main()
 			if( fd <= 0.0 || fd >= 1.0 )
 				continue;
 			const float fr = texture( gBufShadowRoughness, fuv ).y * 0.98 + 0.02;
-			if( fr > roughGate )
+			if( fr > roughGate + feather )
 				continue;
 			const vec4 screen = imageLoad( ssrReflection, fc );
 			const float screenW = clamp( screen.w, 0.0, 1.0 );
 			if( screenW >= 1.0 )
 				continue;				// the march owns this pixel outright
-			// The gate ramps to nothing at the roughness where the probe's own
-			// prefiltered blur is the better photograph, so there is no hard
-			// boundary across a floor whose roughness varies.
-			const float gate = 1.0 - smoothstep( roughGate * 0.75, roughGate, fr );
+			// THE FEATHER (owner, ledger §426). Full confidence up to
+			// `cutoff - feather`, none at `cutoff + feather`, smooth between —
+			// and what the ray gives up the probe takes through the SAME
+			// confidence composite, so a floor whose roughness varies across it
+			// crossfades instead of stepping.
+			const float gate =
+				1.0 - smoothstep( roughGate - feather, roughGate + feather, fr );
 			if( gate <= 0.0 )
 				continue;
 			const vec3 rgb = mix( mean, screen.xyz, screenW );

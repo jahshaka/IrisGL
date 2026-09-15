@@ -174,13 +174,30 @@ struct ScratchArena {
 /// just above `ssrRoughnessCutoff`'s 0.35 default on purpose: the band between
 /// the two is where the screen-space march declines and only a ray can answer.
 constexpr float kRayReflectRoughness = 0.4f;
+/// HOW WIDE THE GATE'S FEATHER IS, either side of the cutoff (owner, ledger
+/// §426). The ray's confidence runs from full at `cutoff - kRayReflectFeather`
+/// to zero at `cutoff + kRayReflectFeather`, and the existing confidence
+/// composite hands the remainder to the probe — so a surface whose roughness
+/// varies across it has no seam in it. A CONSTANT and deliberately not a second
+/// dial: the cutoff says WHERE the technique stops being worth it (content), the
+/// feather only says that it stops smoothly (renderer). 0.1 is about two and a
+/// half times the ±0.04 that a roughness map's 8-bit quantisation can move a
+/// neighbouring pixel by, so the ramp is always wider than the noise it hides.
+constexpr float kRayReflectFeather = 0.1f;
 /// THE TEMPORAL MEAN'S FLOOR on 1/n. The mean starts as a true running average
 /// (fastest convergence) and settles into an exponential one at this weight, so
 /// it keeps following a scene whose lighting changes: 1/16 remembers about
 /// sixteen frames, which at 60 Hz is a quarter of a second of lag on a moving
 /// light and converges a roughness-0.3 lobe well inside the sixteen frames the
 /// suite asserts.
-constexpr float kReflectHistoryFloor = 1.0f / 16.0f;
+/// 1/32 and not 1/16, MEASURED (the convergence case of gi.rt_reflect): one
+/// ray per pixel per frame is a BINARY estimator at a reflected silhouette —
+/// the ray either finds the bright thing or it does not — so the residual
+/// frame-to-frame movement is the floor times that contrast. At 1/16 the worst
+/// pixel of the fixture still moved 16/255 after sixteen frames; at 1/32 it is
+/// half that and the 99th percentile is inside 2/255. Half a second of lag at
+/// 60 Hz on a light that moves, which is the other side of the same number.
+constexpr float kReflectHistoryFloor = 1.0f / 32.0f;
 /// HOW MANY CASCADES THE HIT SHADING READS — the shader's `kMaxCascades`, and
 /// the two must agree.
 constexpr unsigned kMaxReflectCascades = 4u;
@@ -402,6 +419,19 @@ private:
     void retireImage(ReflectImage &img);
     void retireView(VkImageView v);
     void retireSet(VkDescriptorSet set);
+    /// THE BLACK STAND-INS. Every descriptor in a set must be a real view,
+    /// whether the shader reads it or not, and two of this pass' inputs can
+    /// legitimately be absent: a scene with no captured environment cube (no
+    /// sky, no IBL) and a scene whose voxel arm is not built. Rather than
+    /// decline the whole trace there — which would mean no reflections at all in
+    /// exactly the scene where an escaping ray is the WHOLE answer — the empty
+    /// slots take a 1x1 black image of the right TYPE. They are made once,
+    /// cleared once, and left in SHADER_READ_ONLY_OPTIMAL for the process' life.
+    bool ensureDummyImages(std::string &err);
+    void clearDummyImages(VkCommandBuffer cmd);
+    ReflectImage mDummyCube, mDummyVolume;
+    bool mDummiesReady = false;
+    bool mDummiesNeedClear = false;
     bool makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
                           std::string &err);
     void drainRetired();
@@ -675,6 +705,97 @@ void RayQueryTier::retireImage(ReflectImage &img) {
     img = ReflectImage();
 }
 
+bool RayQueryTier::ensureDummyImages(std::string &err) {
+    if (mDummiesReady) return true;
+    const VkFormat fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    struct Spec { ReflectImage *img; VkImageType type; VkImageViewType viewType; uint32_t layers;
+                  VkImageCreateFlags flags; };
+    const Spec specs[2] = {
+        { &mDummyCube, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_CUBE, 6u,
+          VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT },
+        { &mDummyVolume, VK_IMAGE_TYPE_3D, VK_IMAGE_VIEW_TYPE_3D, 1u, 0u },
+    };
+    for (const Spec &sp : specs) {
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.flags = sp.flags;
+        ici.imageType = sp.type;
+        ici.format = fmt;
+        ici.extent = { 1u, 1u, 1u };
+        ici.mipLevels = 1;
+        ici.arrayLayers = sp.layers;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(mVk, &ici, nullptr, &sp.img->image) != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateImage (stand-in) failed";
+            return false;
+        }
+        VkMemoryRequirements req{};
+        vkGetImageMemoryRequirements(mVk, sp.img->image, &req);
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mai.memoryTypeIndex == uint32_t(-1) ||
+            vkAllocateMemory(mVk, &mai, nullptr, &sp.img->memory) != VK_SUCCESS) {
+            err = "rayquery/reflect: no memory for the stand-in image";
+            return false;
+        }
+        vkBindImageMemory(mVk, sp.img->image, sp.img->memory, 0);
+        VkImageViewCreateInfo vci{};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = sp.img->image;
+        vci.viewType = sp.viewType;
+        vci.format = fmt;
+        vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.levelCount = 1;
+        vci.subresourceRange.layerCount = sp.layers;
+        if (vkCreateImageView(mVk, &vci, nullptr, &sp.img->view) != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateImageView (stand-in) failed";
+            return false;
+        }
+    }
+    mDummiesReady = true;
+    mDummiesNeedClear = true;
+    return true;
+}
+
+void RayQueryTier::clearDummyImages(VkCommandBuffer cmd) {
+    if (!mDummiesNeedClear) return;
+    mDummiesNeedClear = false;
+    ReflectImage *imgs[2] = { &mDummyCube, &mDummyVolume };
+    const uint32_t layers[2] = { 6u, 1u };
+    for (int i = 0; i < 2; ++i) {
+        VkImageSubresourceRange range{};
+        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.levelCount = 1;
+        range.layerCount = layers[i];
+        VkImageMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = imgs[i]->image;
+        b.subresourceRange = range;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        VkClearColorValue zero{};
+        vkCmdClearColorImage(cmd, imgs[i]->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1,
+                             &range);
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &b);
+    }
+}
+
 bool RayQueryTier::makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
                                     std::string &err) {
     VkImageCreateInfo ici{};
@@ -934,6 +1055,14 @@ void RayQueryTier::close() {
     mScenes.clear();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
+    for (ReflectImage *d : { &mDummyCube, &mDummyVolume }) {
+        if (d->view) vkDestroyImageView(mVk, d->view, nullptr);
+        if (d->image) vkDestroyImage(mVk, d->image, nullptr);
+        if (d->memory) vkFreeMemory(mVk, d->memory, nullptr);
+        *d = ReflectImage();
+    }
+    mDummiesReady = false;
+    mDummiesNeedClear = false;
     for (Retired &r : mRetireBin) {
         if (r.as) mFn.destroyAccelerationStructure(mVk, r.as, nullptr);
         dropBuffer(r.buf);
@@ -2379,6 +2508,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
     rv.scene = scene;
+    /// EVERY EARLY RETURN BELOW IS A LEGITIMATE "not this frame" and leaves
+    /// `jahSsrReflection` holding exactly what the resolve wrote — today's
+    /// picture. `JAH_R5_WHY=1` names which one, because a silent decline is
+    /// indistinguishable from a trace that draws nothing.
+    const auto bail = [](const char *reason) {
+        if (getenv("JAH_R5_WHY"))
+            Ogre::LogManager::getSingleton().logMessage(std::string("R5 declined: ") + reason);
+    };
     readReflectTimestamps(rv);
     if (!rv.hasQueryBase && mReflectTimestamps) {
         for (unsigned s = 0; s < kMaxTimedScenes; ++s) {
@@ -2392,6 +2529,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
 
     std::string err;
+    if (!ensureDummyImages(err)) {
+        mReflectFailed = true;
+        Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-traced reflections off — " + err);
+        return;
+    }
     if (!ensureReflectImages(rv, traceW, traceH, err)) {
         mReflectFailed = true;
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-traced reflections off — " + err);
@@ -2401,7 +2543,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!rv.params[ring].buffer &&
         !makeBuffer(sizeof(ReflectParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
                     rv.params[ring], err))
-        return;
+        { bail("makeBuffer(params)"); return; }
     if (!rv.sets[ring]) {
         VkDescriptorSetAllocateInfo dai{};
         dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -2410,7 +2552,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         dai.pSetLayouts = &mReflectSetLayout;
         if (vkAllocateDescriptorSets(mVk, &dai, &rv.sets[ring]) != VK_SUCCESS) {
             rv.sets[ring] = VK_NULL_HANDLE;
-            return;
+            bail("vkAllocateDescriptorSets"); return;
         }
     }
 
@@ -2444,9 +2586,12 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.projParams[0] = projAB.x;
     pp.projParams[1] = projAB.y;
     pp.projParams[2] = cam->getFarClipDistance();
+    pp.projParams[3] = kRayReflectFeather;
     pp.resolution[0] = float(traceW); pp.resolution[1] = float(traceH);
     pp.resolution[2] = float(fullW);  pp.resolution[3] = float(fullH);
-    pp.knobs[0] = kRayReflectRoughness;
+    // THE CUTOFF IS THE PROJECT'S (PostFxDesc::rayReflectRoughness); the engine
+    // only clamps it into the range a reflection means anything in.
+    pp.knobs[0] = std::min(std::max(view->chainDesc().rayReflectRoughness, 0.0f), 1.0f);
     // THE RAY'S LENGTH. Long enough to cross the lit volume it will be shaded
     // from — a ray that outruns the cache finds geometry nothing can colour —
     // and bounded by the camera's own far plane so an open scene's ray reaches
@@ -2567,23 +2712,22 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     for (int axis = 0; axis < 4; ++axis)
         for (unsigned c = 0; c < kMaxReflectCascades; ++c) {
             const unsigned src = c < voxCount ? c : (voxCount ? voxCount - 1u : 0u);
-            Ogre::TextureGpu *t = voxCount ? vox[src][axis] : skyTex;
+            Ogre::TextureGpu *t = voxCount ? vox[src][axis] : nullptr;
             volumes[axis][c].sampler = mLinearSampler;
-            volumes[axis][c].imageView = t ? sampledView(t) : VK_NULL_HANDLE;
+            volumes[axis][c].imageView = t ? sampledView(t) : mDummyVolume.view;
             volumes[axis][c].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
     sky.sampler = mLinearSampler;
-    sky.imageView = skyTex ? sampledView(skyTex) : VK_NULL_HANDLE;
+    sky.imageView = skyTex ? sampledView(skyTex) : mDummyCube.view;
     sky.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    // EVERY DESCRIPTOR MUST BE A REAL VIEW. A scene with no voxels and no sky
-    // cube has nothing to bind into slots 10-14, and a null image view in a set
-    // the shader may index is undefined behaviour rather than a black sample —
-    // so the whole trace is declined instead. (The shader never READS them in
-    // that state, but a descriptor is written whether it is read or not.)
+    // EVERY DESCRIPTOR MUST BE A REAL VIEW — a null one in a set the shader may
+    // index is undefined behaviour, not a black sample — which is what the 1x1
+    // black stand-ins above are for. A slot still empty here is a failure to
+    // make one, and declining the frame is the honest answer.
     for (int axis = 0; axis < 4; ++axis)
         for (unsigned c = 0; c < kMaxReflectCascades; ++c)
-            if (!volumes[axis][c].imageView) return;
-    if (!sky.imageView) return;
+            if (!volumes[axis][c].imageView) { bail("a voxel view is null"); return; }
+    if (!sky.imageView) { bail("the sky view is null"); return; }
 
     VkWriteDescriptorSet w[kReflectBindings] = {};
     for (unsigned i = 0; i < kReflectBindings; ++i) {
@@ -2617,7 +2761,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // The command buffer is taken HERE, after everything above that could roll
     // it over (a descriptor allocation cannot, but a transition can).
     VkCommandBuffer cmd = frameCmd();
-    if (!cmd) return;                 // device lost: record nothing, claim nothing
+    if (!cmd) { bail("frameCmd"); return; }   // device lost: record nothing
+    clearDummyImages(cmd);
     clearReflectImages(rv, cmd);
 
     // ---- THE LAYOUTS --------------------------------------------------------
@@ -2743,11 +2888,18 @@ void OgreView::dropReflectState() {
 }
 
 void OgreView::syncReflectListener() {
+    // THE CHAIN'S SHAPE IS RE-CHECKED HERE, once a frame, and that is not
+    // belt-and-braces: `ChainDesc::rayReflect` depends on the SCENE (the
+    // project's ray row, lane RAYROW-1) and a view has no scene when its chain
+    // is first built, nor does `setScene` rebuild one. Without this a view
+    // would render its whole life with the shape it was constructed with.
+    // Cheap: a comparison against what the current definition was built with.
+    if (mChainRayReflect != chainDesc().rayReflect) rebuildWorkspaceDef();
     // The same arming rule as the planar and globals listeners, and the same
-    // reason it is re-evaluated every frame: the chain rebuilds when the SSR row
-    // or the machine's answer changes, and a view can gain or lose its scene.
-    const bool wanted = mEnabled && mScene && mCamera && chainDesc().rayReflect &&
-                        mEngine && mEngine->rayTracing() && mEngine->rayQueryAvailable();
+    // reason it is re-evaluated every frame: the shape above can change, and a
+    // view can gain or lose its scene.
+    const bool wanted = mEnabled && mScene && mCamera && mEngine && mEngine->mRayTier != nullptr &&
+                        chainDesc().rayReflect;
     if (!wanted) {
         if (mReflectListener) {
             removeWorkspaceListener(mReflectListener.get());
@@ -2809,6 +2961,17 @@ void OgreScene::forgetRayQuery() {
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->forgetScene(this);
 }
 
+bool OgreScene::rayReflectionsWanted() const {
+    if (!mEngine) return false;
+    // LANE RAYROW-1 REPLACES THIS ONE LINE with the project's own World row
+    // (off / auto / on; owner, ledger §425). Until then the application latch —
+    // `app.rayTracing`, `--no-ray-query`, `JAHSHAKA_NO_RAY_QUERY` — is the
+    // document's stand-in, which is what lets every ray-consuming suite run
+    // BOTH pictures on one GPU.
+    const bool documentWantsRays = mEngine->rayTracing();
+    return documentWantsRays && mEngine->rayQueryAvailable();
+}
+
 RayQueryStatus OgreScene::rayQueryStatus() const {
     RayQueryStatus st;
     if (!mEngine) return st;
@@ -2867,6 +3030,7 @@ bool OgreScene::traceRays(const std::vector<float> &, std::vector<float> &hits) 
 }
 void OgreScene::gatherRayInstances(RayInstanceSink &) const {}
 void OgreScene::forgetRayQuery() {}
+bool OgreScene::rayReflectionsWanted() const { return false; }
 void OgreView::dropReflectState() {}
 
 // R5 takes the same road: with no tier there is nothing to hook, so the
@@ -2876,6 +3040,9 @@ void OgreView::dropReflectState() {}
 ReflectPassListener::~ReflectPassListener() {}
 void ReflectPassListener::passPreExecute(Ogre::CompositorPass *) {}
 void OgreView::syncReflectListener() {
+    // No tier on this platform: the chain is built with `rayReflect` false by
+    // construction (the predicate above answers false), so there is nothing to
+    // arm and nothing to rebuild.
     if (mReflectListener) {
         removeWorkspaceListener(mReflectListener.get());
         mReflectListener.reset();

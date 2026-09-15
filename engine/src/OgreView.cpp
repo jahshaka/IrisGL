@@ -48,6 +48,7 @@ OgreView::OgreView(Ogre::Root *root, Ogre::Window *window, Ogre::TextureGpu *tex
     // passthrough shape, but the graph is ours to grow.
     chain::build(mRoot->getCompositorManager2(), mWorkspaceDef, chainDesc(), mNodeDefs,
                  mChainHandles);
+    mChainRayReflect = chainDesc().rayReflect;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -129,6 +130,7 @@ ChainDesc OgreView::chainDesc() const {
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrRoughnessCutoff = mPostFx.ssrRoughnessCutoff;
     d.ssrIntensity   = mPostFx.ssrIntensity;
+    d.rayReflectRoughness = mPostFx.rayReflectRoughness;
     // RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5), and the whole tier rule in one
     // line: AUTO means "traced wherever the machine can", which is this view's
     // SSR row being on (the SSR contract already keeps that to High and Epic —
@@ -140,8 +142,7 @@ ChainDesc OgreView::chainDesc() const {
     // The RESOLUTION comes free with the same row: `ssr == 2` (Epic) traces
     // every pixel, `ssr == 1` (High) one in four, exactly as the march does —
     // which is why the row is a scale factor here too and not a second setting.
-    d.rayReflect     = d.ssr > 0 && mEngine && mEngine->rayTracing() &&
-                       mEngine->rayQueryAvailable();
+    d.rayReflect     = d.ssr > 0 && mScene && mScene->rayReflectionsWanted();
     d.refractions    = mPostFx.refractions;
     // DISTORTION (POST_LOOKS_SPEC §5.3), below the offscreen early-out with the
     // rest: a distortion object is invisible in the passthrough shape anyway (it
@@ -1030,6 +1031,7 @@ void OgreView::rebuildWorkspaceDef() {
         const bool hadWorkspace = detachWorkspace();
         chain::destroy(cm, mWorkspaceDef, mNodeDefs);
         chain::build(cm, mWorkspaceDef, chainDesc(), mNodeDefs, mChainHandles);
+        mChainRayReflect = chainDesc().rayReflect;
         if (hadWorkspace) attachWorkspace();
     } JAH_CATCH(mError, );
 }
