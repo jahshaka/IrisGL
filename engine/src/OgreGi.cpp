@@ -673,6 +673,11 @@ GiStatus OgreScene::giStatus() const {
         st.ifdConverged      = mIfd && mIfdProbesDone >= mIfdTotalProbes;
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
         st.ifdSource         = (mIfd && st.ifdBound) ? mIfdSource : GiSource::Voxel;
+        if (mIfd) {
+            st.ifdMin = toV(mIfdVolumeOrigin);
+            st.ifdMax = toV(mIfdVolumeOrigin + mIfdVolumeSize);
+        }
+        st.ifdFollows = mIfdFollows;
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
         int stale = 0;
@@ -3205,29 +3210,29 @@ void OgreScene::rebuildVct() {
     // which items exist.
     if (haveBounds) noteGiAutoVolume(aabb, !giBoundsExplicit());
 
-    // THE IRRADIANCE FIELD DOES NOT RIDE A CASCADE, and this is a measured
-    // refusal rather than an omission: `IrradianceField` captures the voxel
-    // origin ONCE, at `initialize()` (`irrProbeToVctTransform` from
-    // `getVoxelOrigin()/getVoxelSize()`), and its generation job binds the
-    // NO-ARGUMENT `getLightVoxelTextures()` — cascade 0 only. A cascade 0 that
-    // scrolls therefore makes the field sample the wrong place from the first
-    // camera step (spikes/photon-s1 §6, verified at the pin). Letting it build
-    // anyway would put a WRONG picture on screen, so the cascade arm runs
-    // without it and says so; the source patch that lets the field follow a
-    // cascade is PHOTON_SPEC P1's, not this lane's.
-    //
-    // What that costs, stated plainly (spikes/photon-s2 §3b): without the field
-    // the diffuse is plain VCT cone diffuse, which does not stop at a wall —
-    // a 0.5 m wall leaks 0.97 of the light behind it. The cascade arm is a
-    // flagged, measured arm until P1 lands, and this is the reason.
     // The DDGI layer, over the volume this build just lit. After the VCT
     // binding (it takes the same process-wide ownership) and after the PCC
     // build (the field is diffuse-only; the probes keep the specular they had).
     // A no-op — including a teardown of any previous field — when the toggle is
     // off, which is what makes `rebuildVct` the single place the arm's shape is
     // decided.
-    if (cascadeArm) teardownIrradianceField();
-    else            buildIrradianceField();
+    //
+    // THE FIELD RIDES CASCADE 0 (PHOTON_SPEC E1). It needs no cascade-specific
+    // code here at all: cascade 0 IS `mVctVoxelizer`/`mVctLighting` by the
+    // chain's own rule 5, so `buildIrradianceField` fits its probes to the
+    // voxel box the innermost cascade was just built over, exactly as it fits
+    // them to the scene's box in the single-volume arm. What the cascade arm
+    // owes on top of that is the FOLLOWING — `followCascade0Field`, called from
+    // the scheduler whenever cascade 0 is re-placed or re-voxelised.
+    //
+    // (This is where the arm used to REFUSE the field and say so. The refusal
+    // was correct at the pin it was written against: `initialize()` is
+    // upstream's only placement API and it re-creates the atlases, so a field
+    // on a scrolling cascade was either wrong or black. ogre-patch 0044 adds
+    // the two hooks that were missing — `setFieldVolume` and `setVctLighting` —
+    // and the refusal, and the measured cost it quoted (plain cone diffuse
+    // leaking 0.97 of the light through a 0.5 m wall), are history.)
+    buildIrradianceField();
 
     if (std::getenv("JAHSHAKA_GI_DEBUG"))
         Ogre::LogManager::getSingleton().logMessage(
@@ -3987,8 +3992,8 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         // "material" or "light" for it. `Rebuild` stays the reason for a
         // teleport-forced one, which is what `cascadeFullRebuilds` counts.
         bool placementCommitted = false;
-        if (!rebuildCascade(i, c.jumped ? GiStaleReason::Rebuild : c.pendingReason,
-                            &placementCommitted)) {
+        const GiStaleReason reason = c.jumped ? GiStaleReason::Rebuild : c.pendingReason;
+        if (!rebuildCascade(i, reason, &placementCommitted)) {
             // ...UNLESS THE CASCADE KEPT IT (round-2 F1). A rebuild that failed
             // AFTER its replacement voxeliser was swapped in has current voxels
             // for the NEW box; putting the old box back would describe them
@@ -4010,6 +4015,11 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
             // and waits: the next step of the camera re-arms `pending` through
             // the ordinary scroll test, which is also when its box (and so the
             // reason it threw) has actually changed.
+            // A FAILURE THAT KEPT ITS PLACEMENT STILL MOVED CASCADE 0, and the
+            // field must not be left describing the place the chain has left:
+            // its volume follows (the voxels there are current — only the light
+            // injection is missing, which the next rebuild supplies).
+            if (i == 0u && placementCommitted) followCascade0Field(reason);
             spent = true;                          // the frame paid for it either way
             if (++c.failures >= 2u) c.pending = 0; // ...otherwise `pending` stays set
             continue;
@@ -4018,6 +4028,11 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         if (c.jumped) { ++mCascadeFullRebuilds; c.jumped = false; }
         c.pending = 0;
         c.pendingReason = GiStaleReason::Camera;
+        // THE FIELD RIDES CASCADE 0 (E1 item 1), and it follows in the SAME
+        // frame the cascade moved: the pixel transform is rebuilt from the
+        // field's volume on the next pass, so a frame between the two would
+        // sample this frame's probes through last frame's placement.
+        if (i == 0u) followCascade0Field(reason);
         spent = true;
     }
     // WHAT THE ARM LIT, KEPT CURRENT (audit B9). `giStatus().boundsMin/Max` is
@@ -4596,10 +4611,20 @@ void OgreScene::buildIrradianceField() {
         settings.mNumRaysPerPixel        = kIfdRaysPerPixel;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
-        // SCENE-FITTED, NEVER CAMERA-CENTRED. The volume is the one the
-        // voxelizer was given — REFLECTIONS P5b measured a camera-centred GI
-        // volume deleting the bounce outright (floor 0.475 -> 0.353 = off), and
-        // that finding is the design constraint here, not a preference.
+        // THE VOLUME IS THE VOXEL VOLUME THE FIELD READS FROM — whichever arm
+        // built it. In the single-volume arm that is the scene's fitted box; in
+        // the cascade chain it is cascade 0's camera-centred box (the chain's
+        // rule 5: cascade 0 IS mVctVoxelizer/mVctLighting), and the scheduler
+        // keeps it there as that cascade scrolls (followCascade0Field).
+        //
+        // The old law here was "SCENE-FITTED, NEVER CAMERA-CENTRED", from
+        // REFLECTIONS P5b, which measured a camera-centred GI volume deleting
+        // the bounce outright (floor 0.475 -> 0.353 = off). What that measured
+        // was ONE volume small enough to follow the camera: the far field then
+        // has no representation at all. It is not an argument against a field
+        // on the innermost box of a CHAIN, where the outer cascades hold the
+        // far field and (PHOTON_SPEC G3) hand the ring its bounce — and the
+        // pixel at 20 m is the bar that says so, not this comment.
         const Ogre::Vector3 origin = mVctVoxelizer->getVoxelOrigin();
         const Ogre::Vector3 size   = mVctVoxelizer->getVoxelSize();
         ifdProbeCounts(size, settings.mNumProbes);
@@ -4632,6 +4657,13 @@ void OgreScene::buildIrradianceField() {
         // for "major changes to VctLighting" is exactly this call.
         if (!mIfd) mIfd = new JahIrradianceField(mRoot, mSceneMgr);
         mIfd->initialize(settings, origin, size, mVctLighting);
+        // WHERE THE FIELD IS, recorded as asked for (the field enlarges it by a
+        // probe block per side for itself): the scheduler compares against this
+        // to tell a re-placement from a re-voxelisation at the same place.
+        mIfdVolumeOrigin = origin;
+        mIfdVolumeSize   = size;
+        for (size_t i = 0; i < 3u; ++i) mIfdProbeCounts[i] = settings.mNumProbes[i];
+        mIfdFollows = 0;
         mIfdSource = GiSource::Voxel;
         mIfdRasterFar = 0.0f;
         mIfdTotalProbes    = total;
@@ -4675,7 +4707,7 @@ void OgreScene::buildIrradianceField() {
         // Our two scalars, and the two probe counts the shader's sky-visibility
         // threshold needs but upstream's own IrradianceField block does not
         // carry, reach the shader through the pass buffer.
-        pushIfdState(settings);
+        pushIfdState(settings.mNumProbes);
         // The process-wide binding, under the same discipline as VctLighting's,
         // and ONLY when the shader is reading THIS scene's voxel lighting: a
         // rebuild has just bound it (rebuildVct), a re-solve of a background
@@ -4719,21 +4751,21 @@ void OgreScene::resetRasterFieldIntegration() {
     } JAH_CATCH(mError, );
 }
 
-void OgreScene::pushIfdState(const Ogre::IrradianceFieldSettings &settings) {
+void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
     FogHlmsListener::IfdState st;
     st.intensity  = std::max(0.0f, std::min(mGi.ddgiIntensity, 64.0f));
     st.ambient    = std::max(0.0f, std::min(mGi.ddgiAmbient, 8.0f));
-    st.numProbesY = float(settings.mNumProbes[1]);
-    st.numProbesZ = float(settings.mNumProbes[2]);
+    st.numProbesY = float(numProbes[1]);
+    st.numProbesZ = float(numProbes[2]);
     if (mIfd && mIfdSource == GiSource::Raster) {
         // THE RASTER ESCAPE VECTOR: a miss is stored at far x dot( |dir|,
         // probesPerUnit ) (CubemapToIfd with patch 0023), so the shader's
         // integrated threshold is dot( A(d), far x scale x probesPerUnit ).
         const Ogre::Vector3 fieldSize = mIfd->enlargedFieldSize();
         const Ogre::Vector3 probesPerUnit(
-            float(settings.mNumProbes[0]) / std::max(fieldSize.x, 1e-4f),
-            float(settings.mNumProbes[1]) / std::max(fieldSize.y, 1e-4f),
-            float(settings.mNumProbes[2]) / std::max(fieldSize.z, 1e-4f));
+            float(numProbes[0]) / std::max(fieldSize.x, 1e-4f),
+            float(numProbes[1]) / std::max(fieldSize.y, 1e-4f),
+            float(numProbes[2]) / std::max(fieldSize.z, 1e-4f));
         const Ogre::Vector3 esc = probesPerUnit * (mIfdRasterFar * kIfdRasterEscapeScale);
         st.escapeX = esc.x; st.escapeY = esc.y; st.escapeZ = esc.z;
         st.rasterSource = 1.0f;
@@ -4823,6 +4855,9 @@ Ogre::uint32 OgreScene::ifdRasterProbesPerFrame(int updateBudget, Ogre::uint32 t
 
 void OgreScene::teardownIrradianceField() {
     mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = mIfdMinProbes = 0u;
+    mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
+    mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
+    mIfdFollows = 0;
     mIfdSource = GiSource::Voxel;
     mIfdRasterFar = 0.0f;
     mIfdShadowed = false;
@@ -4901,6 +4936,110 @@ void OgreScene::updateIrradianceField() {
             work.setUnits(batch);
         }
         mIfdProbesDone = std::min(mIfdTotalProbes, mIfdProbesDone + batch);
+    } JAH_CATCH(mError, );
+}
+
+// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1).
+//
+// WHAT MOVES. The probes are a grid in the field's own volume, and every
+// consumer reads that volume LIVE — the pixel transform is rebuilt from it per
+// pass, the generation job's probe-to-voxel transform is re-derived from it and
+// from the voxel volume, a raster probe's camera is derived from it per capture.
+// So "the field follows cascade 0" is two numbers (origin, size) plus a
+// re-integration; ogre-patch 0044 adds the setter that moves them without
+// destroying the atlases, which is what made the refusal in `rebuildVct`
+// necessary before it.
+//
+// WHY THE RE-INTEGRATION IS WHOLE WHEN THE VOLUME MOVED, and progressive when
+// it did not. The atlas has NO per-probe validity: a probe's texels are its
+// irradiance at the place the probe stood when it was last integrated, and the
+// shader reads whichever probe now surrounds the pixel. Re-placing the volume
+// therefore invalidates EVERY probe at once — at the High table cascade 0 steps
+// 5 m with a 10 m box, so half the grid lands where the other half stood and
+// the rest lands on ground the field has never seen. A progressive re-converge
+// would light those pixels with another place's irradiance for as long as the
+// budget takes (8 frames at budget 1) — not a lag, a wrong answer, and one that
+// moves with the camera. So a moved field is converged WHOLE, in the frame that
+// moved it, before anything reads it: the same whole-then-bind rule the build
+// path follows and for the same reason.
+//
+// WHAT IT COSTS, measured (gi.field_follows' monitor rows, RTX 4080S, Debug,
+// the High table): the whole 8,192-probe re-integration is 4.9 ms GPU and
+// 0.05 ms CPU, on a frame whose cascade-0 rebuild is another 1.8 ms GPU /
+// 1.3 ms CPU — worst frame of the walk 2-5 ms. It is not extra work: a
+// progressive re-converge dispatches the SAME 8,192 probes, spread over the
+// budget's frames (1,024 a frame at budget 1). What it buys is that the frame
+// which moved the field is already showing the right answer; measured with the
+// progressive policy forced, the field is never converged at all while the
+// camera keeps walking (`ifdConverged` false for the whole 100 m), so every
+// frame of a walk would carry a mixture of two placements. In a uniform scene
+// that mixture is invisible (the lane measured 0.0 % difference on the suite's
+// ground band, both policies); the size of the error is exactly how much the
+// irradiance differs between the place the camera left and the place it is,
+// which is the difference between one room and the next.
+//
+// A re-voxelisation AT THE SAME PLACE is the opposite case and keeps the
+// shipped progressive policy: every probe still stands where it stood, only the
+// radiance it gathers changed, so re-converging over the previous atlas shows
+// slightly stale bounce and never a wrong place — exactly what `refreshGiLighting`
+// does for a light drag.
+//
+// A RASTER-SOURCED field is progressive either way: converging it whole is
+// 8,192 probes x 6 scene renders in one frame. It re-sweeps from the new place
+// at its own budget, which is the source's own bargain (kIfdRasterProbesPerBudget).
+void OgreScene::followCascade0Field(GiStaleReason reason) {
+    if (!mIfd || mVctCascades.empty()) return;
+    const VctCascade &c0 = mVctCascades[0];
+    if (!c0.voxelizer || !c0.lighting) return;
+    JAH_TRY {
+        // THE BINDING FIRST, AND UNCONDITIONALLY (ogre-patch 0044's second
+        // half). Cascade 0's lighting re-creates its light voxel textures
+        // whenever it is moved to a replacement voxeliser — which is exactly
+        // what a material edit under a chain does (G1's `freshVoxels` arm) —
+        // and the field bound those textures once, by pointer, at initialize().
+        // Re-binding costs five descriptor writes on a rebuild frame; deciding
+        // whether it is needed would mean comparing raw pointers that may have
+        // been recycled, which is the defect class patch 0041 exists for.
+        mIfd->setVctLighting(c0.lighting);
+
+        const Ogre::Vector3 origin = c0.voxelizer->getVoxelOrigin();
+        const Ogre::Vector3 size   = c0.voxelizer->getVoxelSize();
+        const float tol = 1e-4f;
+        const bool resized = std::fabs(size.x - mIfdVolumeSize.x) > tol ||
+                             std::fabs(size.y - mIfdVolumeSize.y) > tol ||
+                             std::fabs(size.z - mIfdVolumeSize.z) > tol;
+        const bool moved = resized ||
+                           std::fabs(origin.x - mIfdVolumeOrigin.x) > tol ||
+                           std::fabs(origin.y - mIfdVolumeOrigin.y) > tol ||
+                           std::fabs(origin.z - mIfdVolumeOrigin.z) > tol;
+        if (moved) {
+            mIfd->setFieldVolume(origin, size);
+            mIfdVolumeOrigin = origin;
+            mIfdVolumeSize   = size;
+            ++mIfdFollows;
+            // The raster escape threshold is probes-per-unit x the capture far
+            // plane, so it is a function of the field's SIZE — re-pushed only
+            // when that changes (a scroll never does; a table change does).
+            if (resized) pushIfdState(mIfdProbeCounts);
+        }
+
+        // RE-INTEGRATE. `reset()` rewinds the counter and keeps the atlases,
+        // which is what makes the progressive case safe and the whole case
+        // correct (the whole case overwrites every probe in this dispatch).
+        mIfd->reset();
+        mIfdProbesDone   = 0u;
+        mIfdRigEpochSeen = mRigPoseEpoch;
+        const bool raster = mIfdSource == GiSource::Raster;
+        // ...and a PAUSED budget (updateBudget 0) converges inline for the same
+        // reason the light path does: nothing would ever spend the counter down,
+        // so a reset there would freeze the field half-updated for ever.
+        if (!raster && (moved || !mIfdProbesPerFrame)) {
+            monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0,
+                                     "ifd.follow", mRoot->getRenderSystem());
+            mIfd->update(mIfdTotalProbes);
+            mIfdProbesDone = mIfdTotalProbes;
+            work.setUnits(mIfdTotalProbes);
+        }
     } JAH_CATCH(mError, );
 }
 
