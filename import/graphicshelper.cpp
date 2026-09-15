@@ -28,29 +28,28 @@ For more information see the LICENSE file
 namespace iris
 {
 
-QList<iris::MeshPtr> GraphicsHelper::loadAllMeshesFromFile(QString filePath)
+QList<iris::MeshPtr> GraphicsHelper::loadAllMeshesFromFile(QString filePath,
+                                                           const ImportTransform &xf)
 {
     Assimp::Importer importer;
-    const aiScene *scene = [&]() {
-        ParseCensus::Record census(filePath);
-        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
-    }();
+    // THE CHOKE POINT (import/scenesource.h): the asset's import transform is
+    // applied here or the geometry is a different size from its bake.
+    const aiScene *scene = readSceneFile(importer, filePath, iris::ImportFlags::Canonical, xf);
     return loadAllMeshesFromAssimpScene(scene);
 }
 
 void GraphicsHelper::loadAllMeshesAndAnimationsFromFile(
     QString filePath,
     QList<MeshPtr> &meshes,
-    QMap<QString, SkeletalAnimationPtr> &animations)
+    QMap<QString, SkeletalAnimationPtr> &animations,
+    const ImportTransform &xf)
 {
     Assimp::Importer importer;
-    // THE PARSE, COUNTED AND ATTRIBUTED TO ITS THREAD (import/parsecensus.h):
-    // this is the read a project open pays when no bake and no prewarm served
-    // the file, and open.responsive asserts it never runs on the UI thread.
-    const aiScene *scene = [&]() {
-        ParseCensus::Record census(filePath);
-        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
-    }();
+    // THE PARSE, COUNTED AND ATTRIBUTED TO ITS THREAD (import/parsecensus.h,
+    // through the choke point): this is the read a project open pays when no
+    // bake and no prewarm served the file, and open.responsive asserts it
+    // never runs on the UI thread.
+    const aiScene *scene = readSceneFile(importer, filePath, iris::ImportFlags::Canonical, xf);
 
     if (scene != nullptr) {
         meshes = loadAllMeshesFromAssimpScene(scene);
@@ -59,14 +58,17 @@ void GraphicsHelper::loadAllMeshesAndAnimationsFromFile(
 }
 
 QMap<QString, SkeletalAnimationPtr> GraphicsHelper::loadAnimationsFromClipFile(const QString &filePath,
-                                                                              QString *error)
+                                                                              QString *error,
+                                                                              const ImportTransform &xf)
 {
     if (error) error->clear();
     Assimp::Importer importer;
-    const aiScene *scene = [&]() {
-        ParseCensus::Record census(filePath);
-        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::ClipNamesOnly);
-    }();
+    // A CLIP FILE TAKES THE RIG'S TRANSFORM, not its own: a clip's translation
+    // keys are in the FILE's units and drive a skeleton that was parsed — and
+    // baked — under the character asset's import settings. Read with identity
+    // (the default) they exploded a rescaled rig, which is the same defect
+    // ImportFlags::ClipNamesOnly was created to close for the unit factor.
+    const aiScene *scene = readSceneFile(importer, filePath, iris::ImportFlags::ClipNamesOnly, xf);
     if (!scene) {
         if (error) {
             *error = QString::fromUtf8(importer.GetErrorString());

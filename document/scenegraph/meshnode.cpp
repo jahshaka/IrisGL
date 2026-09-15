@@ -260,7 +260,11 @@ QJsonObject readJahShader(const QString &filePath)
 static bool _findMeshNodeTransform(const aiNode* node, unsigned meshIndex,
                                    const aiMatrix4x4& parent, aiMatrix4x4& out)
 {
-    const aiMatrix4x4 global = node->mTransformation * parent;
+    // parent * child: aiMatrix4x4 multiplies COLUMN vectors, so the ancestor
+    // goes on the left (IMPORT-1: it read child * parent, which only agreed
+    // with ModelSceneInfo's own walk while every ancestor was identity — and
+    // an import transform pre-multiplied onto the root is not).
+    const aiMatrix4x4 global = parent * node->mTransformation;
     for (unsigned i = 0; i < node->mNumMeshes; ++i) {
         if (node->mMeshes[i] == meshIndex) { out = global; return true; }
     }
@@ -384,7 +388,7 @@ QSharedPointer<iris::SceneNode>
 MeshNode::loadAsSceneFragment(QString filePath,
                               std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
                               SceneSource *scene_, IModelReadProgress* progressReader,
-                              const QString &extractDir)
+                              const QString &extractDir, const ImportTransform &xf)
 {
     // scene_ defaults to null in the declaration but was dereferenced
     // unconditionally — every caller had to allocate a SceneSource just to
@@ -399,12 +403,10 @@ MeshNode::loadAsSceneFragment(QString filePath,
 
     scene_->importer().SetProgressHandler(new ModelProgressHandler(progressReader));
     // The session entry's parse (Studio's ProjectAssets::registerSessionAsset
-    // on a bake-and-prewarm miss), counted by thread — import/parsecensus.h.
-    const aiScene *scene = [&]() {
-        ParseCensus::Record census(filePath);
-        return scene_->importer().ReadFile(filePath.toStdString().c_str(),
-                                           iris::ImportFlags::Canonical);
-    }();
+    // on a bake-and-prewarm miss), counted by thread and carrying the ASSET's
+    // import transform — through the choke point, import/scenesource.h.
+    const aiScene *scene = readSceneFile(scene_->importer(), filePath,
+                                         iris::ImportFlags::Canonical, xf);
 
     // ReadFile returns null on failure (corrupt file, or an importer feature
     // that is not compiled in, e.g. KHR_draco_mesh_compression): dereferencing

@@ -17,10 +17,12 @@ For more information see the LICENSE file
 #include <limits>
 #include <vector>
 
+#include "assimp/Importer.hpp"
 #include "assimp/material.h"
 #include "assimp/scene.h"
 #include "assimp/version.h"
 
+#include "import/parsecensus.h"
 #include "import/scenesource.h"
 
 namespace iris
@@ -92,7 +94,7 @@ void measureExtent(const aiScene *scene, ModelSceneInfo &out)
 /// FBX is the only format in the set that declares a unit
 /// (GlobalSettings::UnitScaleFactor, centimetres per unit); glTF fixes the
 /// metre by spec and .obj/.ply/.stl declare nothing, so they read 1.
-double declaredUnitScale(const aiScene *scene)
+double declaredUnitScaleOf(const aiScene *scene)
 {
     if (!scene || !scene->mMetaData) return 1.0;
     double factor = 0.0;
@@ -172,7 +174,7 @@ ModelSceneInfo describe(const aiScene *scene)
     }
 
     measureExtent(scene, out);
-    out.declaredUnitScale = declaredUnitScale(scene);
+    out.declaredUnitScale = declaredUnitScaleOf(scene);
     return out;
 }
 
@@ -183,6 +185,23 @@ ModelSceneInfo ModelSceneInfo::fromSource(const SceneSource &source)
     ModelSceneInfo out = describe(source.scene());
     if (!out.parsed) out.error = source.errorString();
     return out;
+}
+
+double ModelSceneInfo::readDeclaredUnitScale(const QString &filePath)
+{
+    // THE LIGHT PARSE: no post-processing at all, which is what makes it the
+    // cheap half of a read (the clip parsers measured it at ~3x faster than
+    // the canonical preset — import/importflags.h). It exists for ONE caller:
+    // readSceneFile resolving a UNIT OVERRIDE, where assimp has to be told a
+    // factor BEFORE it parses and the factor depends on what the file
+    // declares. A file that cannot be read declares nothing: 1 metre per unit.
+    // Through the choke point like every other parse (identity transform, no
+    // flags): readSceneFile only ever calls back into here for a UNIT
+    // OVERRIDE, which an identity transform is not, so there is no recursion.
+    Assimp::Importer importer;
+    const aiScene *scene = readSceneFile(importer, filePath, 0u);
+    if (!scene) return 1.0;
+    return declaredUnitScaleOf(scene);
 }
 
 ModelSceneInfo ModelSceneInfo::read(const QString &filePath)

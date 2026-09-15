@@ -103,12 +103,17 @@ public:
     /// `extractDir`: where embedded textures and derived maps are WRITTEN
     /// (import staging). Empty = beside the source file (legacy behavior —
     /// wrong for read-only sources; the import pipeline always passes one).
+    /// `xf`: the ASSET's import transform (import/importsettings.h) — the
+    /// scale, rotation and origin its import settings baked in. Identity for a
+    /// raw path with no library row behind it; a library asset's parse that
+    /// passes identity renders a DIFFERENT SIZE from the asset's bake.
     static SceneNodePtr loadAsSceneFragment(
         QString path,
         std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
         SceneSource *scene_ = Q_NULLPTR,
         IModelReadProgress* progressReader = Q_NULLPTR,
-        const QString &extractDir = QString()
+        const QString &extractDir = QString(),
+        const ImportTransform &xf = ImportTransform()
     );
 
     /// The fragment from a parse a caller already holds (the threaded open's

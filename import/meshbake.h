@@ -49,9 +49,13 @@ For more information see the LICENSE file
 // The bake therefore lives on the DOCUMENT side, is pure CPU, and is engine
 // independent by construction: nothing an Ogre rebuild can change is in it.
 //
-// FINGERPRINT. `<format>|<producer>|<assimp>|<flags>|<sourceOid>` — a bake
-// whose fingerprint does not match what this build would produce is ignored
-// and rebuilt, exactly like the shader cache.
+// FINGERPRINT. `<format>|<producer>|<assimp>|<flags>|<sourceOid>|<settings>` —
+// a bake whose fingerprint does not match what this build would produce is
+// ignored and rebuilt, exactly like the shader cache. The SETTINGS term
+// (IMPORT-1, import/importsettings.h) is what makes two imports of one source
+// file under different import settings two different bakes: since the import
+// dialog an asset's scale, rotation and origin are BAKED, so the same bytes
+// legitimately produce different geometry.
 //
 // THE KEY HAS THREE PARTS, and each answers a different question (BAKEKEY-1,
 // 2026-09-15; irisgl/CMakeLists.txt carries the measurement and the per-file
@@ -172,12 +176,23 @@ public:
     /// Empty when any file cannot be read.
     static QString producerHashOf(const QStringList &absolutePaths);
 
-    /// The full key for a source whose content id is `sourceOid`. Empty
-    /// `sourceOid` yields a fingerprint that can never match a stored bake.
-    static QString fingerprintFor(const QString &sourceOid);
+    /// The full key for a source whose content id is `sourceOid`, imported
+    /// under the import settings whose hash is `settingsHash`
+    /// (import/importsettings.h). Empty `sourceOid` yields a fingerprint that
+    /// can never match a stored bake; an EMPTY `settingsHash` means IDENTITY
+    /// settings — what every row imported before the import dialog, every
+    /// shipped sample and every `.jaf` archive carries — and keys exactly as a
+    /// fully-defaulted record does.
+    static QString fingerprintFor(const QString &sourceOid,
+                                  const QString &settingsHash = QString());
 
-    /// The canonical bake file name for a source content id.
-    static QString fileNameFor(const QString &sourceOid);
+    /// The canonical bake file name, `<oid16>-<settingsHash>.jmb`. The settings
+    /// term is part of the NAME and not only of the fingerprint because the
+    /// catalog lookup is BY NAME (services/meshbakestore.cpp): two imports of
+    /// one source under different settings are two bakes that must coexist,
+    /// and a shared name would make the newest one shadow the other forever.
+    static QString fileNameFor(const QString &sourceOid,
+                               const QString &settingsHash = QString());
 
     /// The role bakes are recorded under in the CAS (`asset_files.role`).
     static QString casRole();
@@ -210,7 +225,8 @@ public:
     /// Parse `filePath` and bake it. Used by the lazy re-bake of an existing
     /// library, where no parse is in flight.
     static Model buildFromFile(const QString &filePath, const QString &fingerprint,
-                               const QString &extractDir = QString());
+                               const QString &extractDir = QString(),
+                               const ImportTransform &xf = ImportTransform());
 
     /// Deterministic: the same Model always serializes to the same bytes
     /// (assets.checkConsistency re-derives the object set and compares oids).

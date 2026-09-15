@@ -45,6 +45,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/meshnode.h"
 #include "document/scenegraph/scenenode.h"
 #include "import/importflags.h"
+#include "import/importsettings.h"
 #include "import/materialhelper.h"
 #include "import/modelsceneinfo.h"
 
@@ -111,7 +112,18 @@ namespace
 // a length in mesh units). A v6 blob has no chain at all, so replaying one
 // would silently ship a library whose models never drop a triangle, with no way
 // for any fingerprint to notice; and the block is a layout change besides.
-constexpr int kFormatVersion = 7;
+// v8 (2026-09-16, IMPORT-1, SPECS/IMPORT_DIALOG_SPEC.md §4.4): the MEANING of
+// baked geometry changed. An asset's scale, rotation and origin are decided
+// ONCE at import and BAKED (the import-settings record, import/importsettings.h),
+// so a bake is no longer "the file as authored" but "the file as this asset's
+// import settings transformed it" — and the single-mesh shortcut no longer
+// carries the file's own node transform on the fragment root, it folds it into
+// the vertices and emits an identity root. Neither is visible to any
+// fingerprint: the source bytes did not change, the reader of them did. The key
+// gains a SETTINGS term at the same time (fingerprintFor/fileNameFor below), so
+// two imports of one source with different settings stop colliding; the bump is
+// what rejects every bake produced under the old meaning.
+constexpr int kFormatVersion = 8;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -586,17 +598,20 @@ QString MeshBake::producerHashOf(const QStringList &absolutePaths)
         QCryptographicHash::hash(blob, QCryptographicHash::Sha256).toHex());
 }
 
-QString MeshBake::fingerprintFor(const QString &sourceOid)
+QString MeshBake::fingerprintFor(const QString &sourceOid, const QString &settingsHash)
 {
     if (sourceOid.isEmpty()) return QString();
-    const QByteArray key = (producerId() + QLatin1Char('|') + sourceOid).toUtf8();
+    const QString settings = settingsHash.isEmpty() ? ImportSettings::identityHash() : settingsHash;
+    const QByteArray key = (producerId() + QLatin1Char('|') + sourceOid
+                            + QLatin1Char('|') + settings).toUtf8();
     return QString::fromLatin1(
         QCryptographicHash::hash(key, QCryptographicHash::Sha256).toHex());
 }
 
-QString MeshBake::fileNameFor(const QString &sourceOid)
+QString MeshBake::fileNameFor(const QString &sourceOid, const QString &settingsHash)
 {
-    return QStringLiteral("%1.jmb").arg(sourceOid.left(16));
+    const QString settings = settingsHash.isEmpty() ? ImportSettings::identityHash() : settingsHash;
+    return QStringLiteral("%1-%2.jmb").arg(sourceOid.left(16), settings);
 }
 
 QString MeshBake::casRole() { return QStringLiteral("bake"); }
@@ -655,7 +670,11 @@ BakedNode bakeNode(const aiScene *scene, const aiNode *node, QVector<int> &mater
 bool findMeshNodeTransform(const aiNode *node, unsigned meshIndex,
                            const aiMatrix4x4 &parent, aiMatrix4x4 &out)
 {
-    const aiMatrix4x4 global = node->mTransformation * parent;
+    // parent * child: aiMatrix4x4 multiplies COLUMN vectors, so the ancestor
+    // goes on the left (IMPORT-1: it read child * parent, which only agreed
+    // with ModelSceneInfo's own walk while every ancestor was identity — and
+    // an import transform pre-multiplied onto the root is not).
+    const aiMatrix4x4 global = parent * node->mTransformation;
     for (unsigned i = 0; i < node->mNumMeshes; ++i)
         if (node->mMeshes[i] == meshIndex) { out = global; return true; }
     for (unsigned i = 0; i < node->mNumChildren; ++i)
@@ -981,13 +1000,14 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
 }
 
 MeshBake::Model MeshBake::buildFromFile(const QString &filePath, const QString &fingerprint,
-                                        const QString &extractDir)
+                                        const QString &extractDir, const ImportTransform &xf)
 {
     Assimp::Importer importer;
-    const aiScene *scene = [&]() {
-        ParseCensus::Record census(filePath);
-        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
-    }();
+    // The lazy re-bake's parse, through the choke point with the ASSET's
+    // import transform — the bake IS the transformed geometry, so a re-bake
+    // that dropped the transform would quietly un-scale a library
+    // (import/scenesource.h).
+    const aiScene *scene = readSceneFile(importer, filePath, iris::ImportFlags::Canonical, xf);
     if (!scene) {
         irisLog("mesh bake: assimp could not read " + filePath);
         return Model();

@@ -94,6 +94,13 @@ struct ModelSceneInfo
     /// is false when the importer refused the file.
     static ModelSceneInfo read(const QString &filePath);
 
+    /// The file's OWN unit declaration alone, from a LIGHT parse (no
+    /// post-processing): metres per source unit, 1.0 for a format that
+    /// declares nothing and for a file that cannot be read. The one caller is
+    /// readSceneFile resolving a unit OVERRIDE, which needs the declaration
+    /// before it can hand assimp a scale (import/scenesource.h).
+    static double readDeclaredUnitScale(const QString &filePath);
+
     /// The version of the import library these facts come from ("6.0.<rev>"
     /// at the pin), for the import determinism record (ASSET_PIPELINE_SPEC
     /// §3.2.2): same content + same settings + same importer version = same
