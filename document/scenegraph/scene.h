@@ -54,6 +54,42 @@ constexpr float kDefaultSunDiscSize  = 4.0f * kPhysicalSunDiscSize;   // 2.12 de
 constexpr float kMinSunDiscSize = 0.1f;
 constexpr float kMaxSunDiscSize = 10.0f;
 
+/// HARDWARE RAY TRACING, AS A PROPERTY OF THE PROJECT (owner, 2026-09-15 —
+/// ledger §425; it was an application preference for two days and that was the
+/// wrong shape). A scene says what it was AUTHORED for; the machine says what
+/// it can do; the renderer resolves the two. Nothing here can conjure ray
+/// hardware, and nothing here changes the picture between Auto and On — the
+/// difference is whether the editor SAYS SO when the machine falls short.
+///
+///   Auto  trace wherever the machine can, fall back silently. The default,
+///         and the honest answer for a scene nobody has thought about: the
+///         same file looks right on a ray-capable desktop and on a Mac.
+///   Off   never trace, even where the GPU can. What a scene that must look
+///         and cost the SAME on every machine asks for.
+///   On    authored for rays. It traces where it can and falls back where it
+///         cannot, exactly like Auto, and additionally raises a scene issue
+///         ("this project expects hardware ray tracing; this machine has
+///         none") so the author learns that this machine is not showing them
+///         what they built.
+///
+/// SERIALIZED AS A STABLE STRING ("auto"/"off"/"on"), like `playMode` and the
+/// GI modes, so the enum's ints stay free to be reordered. Auto is 0 on
+/// purpose: a value that arrives as a bare int from anywhere (an undo blob, a
+/// default-constructed field) then means the documented default rather than
+/// the most restrictive state.
+enum class RayTracingMode : int
+{
+    Auto = 0,
+    Off  = 1,
+    On   = 2
+};
+
+/// Stable strings for the file, the verb and the panel row.
+const char *rayTracingModeName(RayTracingMode mode);
+/// Case-insensitive; false (and `out` untouched) when `name` names no mode —
+/// the verb REFUSES rather than guessing, and the reader keeps its default.
+bool rayTracingModeFromName(const QString &name, RayTracingMode &out);
+
 enum class SceneRenderFlags : int
 {
     Vr = 0x1
@@ -643,6 +679,14 @@ public:
 	/// dial up spreads the same energy over a wider disc instead of adding any
 	/// — bloom and an `inProbes` capture read the same total at every size.
 	float sunDiscSize = kDefaultSunDiscSize;
+
+	// ---- HARDWARE RAY TRACING (owner, 2026-09-15; ledger §425) ----------
+	/// What this PROJECT was authored for — see RayTracingMode above for what
+	/// each state means and why this is a document field and not an
+	/// application preference. Saved with the scene, so it travels with the
+	/// asset; pushed to the renderer by SceneMirror, which is where it meets
+	/// the machine's own answer. Default Auto.
+	RayTracingMode rayTracing = RayTracingMode::Auto;
 
 
 	// ---- THE SUN -------------------------------------------------------

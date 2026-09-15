@@ -1664,6 +1664,13 @@ private:
     // applyEnvironment only re-pushes on change and re-traces on light movement.
     jahshaka::engine::GiParams mLastGi;
     bool mGiPushed = false;
+    /// HARDWARE RAY TRACING (ledger §425): the project's state as last pushed.
+    /// Pushed on CHANGE only, like fog and GI — the engine stores an enum and
+    /// builds nothing, but a per-frame call for a field nobody moved is still a
+    /// per-frame call.
+    jahshaka::engine::RayTracingMode mLastRayTracing =
+        jahshaka::engine::RayTracingMode::Auto;
+    bool mRayTracingPushed = false;
     /// Set by invalidateEnvironment: the next applyEnvironment re-asserts the
     /// process-wide GI binding for this scene instead of re-pushing (P10).
     bool mGiReassertPending = false;

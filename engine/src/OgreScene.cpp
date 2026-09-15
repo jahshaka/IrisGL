@@ -1499,4 +1499,25 @@ void OgreScene::addObjectCounts(ObjectCounts &out) const {
     out.textures  += unsigned(mTextures.size());
 }
 
+// ---------------------------------------------------------------------------
+// HARDWARE RAY TRACING, RESOLVED (owner, 2026-09-15; ledger §425)
+// ---------------------------------------------------------------------------
+// The scene says what it was authored for and the machine says what it can do;
+// this is the AND of the two, and it is the only question any ray-consuming
+// stage asks. Deliberately here, beside the scene's other render state, and not
+// in the ray tier's own TU: the tier is one consumer of this answer, not its
+// owner.
+//
+// `Engine::rayTracing()` is the PROCESS latch (`--no-ray-query` /
+// JAHSHAKA_NO_RAY_QUERY): a diagnostic that makes this box render the picture a
+// machine without ray hardware renders, so the fallback is proved on every push
+// instead of assumed. `rayQueryAvailable()` is the DEVICE's own answer and
+// nothing in the document can move it — which is the whole point of the row:
+// On does not force hardware, it asks the editor to SAY when there is none.
+bool OgreScene::rayTracingResolved() const {
+    if (mRayTracing == RayTracingMode::Off) return false;
+    if (!mEngine) return false;
+    return mEngine->rayTracing() && mEngine->rayQueryAvailable();
+}
+
 }}}  // namespace jahshaka::engine::detail

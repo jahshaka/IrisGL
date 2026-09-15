@@ -2477,6 +2477,11 @@ public:
     bool setNodePlanarReflector(NodeId id, bool on) override;
     bool nodePlanarReflector(NodeId id) const override;
     int  activePlanarReflectors() const override;
+
+    // ---- Hardware ray tracing, per scene (ledger §425; impl OgreScene.cpp) ----
+    void setRayTracing(RayTracingMode mode) override { mRayTracing = mode; }
+    RayTracingMode rayTracingMode() const override { return mRayTracing; }
+    bool rayTracingResolved() const override;
     /// The scene's live PlanarReflections, or null when the budget is 0. Views
     /// read this once a frame to decide whether to arm their listener.
     Ogre::PlanarReflections *planarReflections() const { return mPlanar; }
@@ -4291,6 +4296,10 @@ private:
     std::vector<std::string> mPlanarNodeDefs;
     std::set<NodeId>         mReflectors;
     std::map<NodeId, Ogre::PlanarReflectionActor *> mActors;
+    /// WHAT THIS SCENE WAS AUTHORED FOR, as far as rays go (ledger §425). The
+    /// document's field, pushed by SceneMirror; `rayTracingResolved()` is the
+    /// only thing that reads it, and that is what the ray stages ask.
+    RayTracingMode           mRayTracing = RayTracingMode::Auto;
     /// Abandoned particle definitions, keyed by ParticleTopology::key(). They
     /// cannot be destroyed (no such API on ParticleSystemManager2 — defs are
     /// freed only in its destructor, i.e. with the SceneManager), so a released

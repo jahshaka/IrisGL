@@ -6243,6 +6243,27 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             mLastFog.breakFalloff != fog.breakFalloff;
         if (changed) { mTarget->setFog(fog); mLastFog = fog; mFogPushed = true; }
     }
+    // HARDWARE RAY TRACING (owner, 2026-09-15; ledger §425). The PROJECT's
+    // state, which is half of the answer — the machine's own capability is the
+    // other half and lives in the renderer, where Scene::rayTracingResolved()
+    // ANDs the two. Nothing here can turn rays on where the hardware has none,
+    // and Auto and On push the same thing on purpose: they render identically,
+    // and the difference between them (telling the author this machine falls
+    // short) belongs to the editor, not to the renderer.
+    {
+        using jahshaka::engine::RayTracingMode;
+        RayTracingMode rt = RayTracingMode::Auto;
+        switch (mSource->rayTracing) {
+        case iris::RayTracingMode::Off: rt = RayTracingMode::Off; break;
+        case iris::RayTracingMode::On:  rt = RayTracingMode::On;  break;
+        case iris::RayTracingMode::Auto: default: rt = RayTracingMode::Auto; break;
+        }
+        if (!mRayTracingPushed || rt != mLastRayTracing) {
+            mTarget->setRayTracing(rt);
+            mLastRayTracing = rt;
+            mRayTracingPushed = true;
+        }
+    }
     // Global Illumination panel. setGlobalIllumination re-traces, so like fog it is
     // pushed on CHANGE only (the per-frame compare is the debounce) — and it also
     // re-traces when the driving light itself moved — Instant

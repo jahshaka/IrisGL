@@ -990,6 +990,27 @@ public:
     /// number against the requested budget (planes off screen do not render).
     /// 0 when reflections are off or nothing has rendered yet.
     virtual int         activePlanarReflectors() const = 0;
+
+    // ---- Hardware ray tracing (owner, 2026-09-15; ledger §425) -----------
+    /// WHAT THE SCENE WAS AUTHORED FOR (RayTracingMode). Scene-level, like GI
+    /// and planar reflections, and pushed by the host from the document — ray
+    /// tracing is a property of the PROJECT, and whether it happens is that
+    /// property met with what the machine can do. Idempotent and free: it
+    /// stores an enum, builds nothing and destroys nothing.
+    virtual void           setRayTracing(RayTracingMode) = 0;
+    /// What was last pushed (Auto until a host says otherwise).
+    virtual RayTracingMode rayTracingMode() const = 0;
+    /// THE ONE PREDICATE EVERY RAY-CONSUMING STAGE READS: does THIS scene trace
+    /// on THIS machine? = the scene's state is not Off, AND the device
+    /// advertises ray queries, AND the process is not latched off
+    /// (`--no-ray-query` / JAHSHAKA_NO_RAY_QUERY, the diagnostic switch that
+    /// makes a ray-capable box render the picture a machine without the
+    /// hardware renders). False in every headless engine.
+    ///
+    /// Auto and On answer identically here, on purpose: they render the same
+    /// picture and differ only in whether the EDITOR tells the author that this
+    /// machine fell short (SceneIssues, "rays.absent").
+    virtual bool           rayTracingResolved() const = 0;
 };
 
 /// A view onto a Scene, rendering into a native window supplied by the host or

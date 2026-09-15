@@ -1524,6 +1524,20 @@ enum class GiToggle { Auto, Off, On };
 /// opt-in under the Advanced disclosure, never a default.
 enum class GiSource { Auto, Voxel, Raster };
 
+/// WHAT THE SCENE WAS AUTHORED FOR, as far as hardware ray tracing goes
+/// (Scene::setRayTracing; iris::RayTracingMode is the document's twin, and the
+/// owner's decision is recorded there in full).
+///
+/// `Auto` traces wherever the machine can and falls back silently; `On` does
+/// exactly the same in the renderer and differs only OUTSIDE it (the editor
+/// tells the author when the machine falls short — nothing here can conjure
+/// ray hardware); `Off` never traces, even on a device that advertises ray
+/// queries, so a scene can look and cost the same on every machine.
+///
+/// The renderer asks ONE question of all this — `Scene::rayTracingResolved()`
+/// — and every ray-consuming stage reads that predicate and nothing else.
+enum class RayTracingMode { Auto, Off, On };
+
 /// WHY THE REFLECTION-PROBE GRID WAS LAST MARKED STALE (ENGINE_CACHE_POLICY_SPEC
 /// §2 P1/P7) — GiStatus::lastStaleReason.
 ///
@@ -2325,9 +2339,11 @@ struct RayQueryStatus {
     /// The device has the extensions and the features (never true on macOS:
     /// MoltenVK exposes neither, SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
     bool available = false;
-    /// ...and we are using them. False with `available` true is the switch in
-    /// force (app.rayTracing("off") / Engine::setRayTracing / --no-ray-query /
-    /// JAHSHAKA_NO_RAY_QUERY=1).
+    /// ...and we are using them. False with `available` true is the PROCESS
+    /// switch in force (Engine::setRayTracing / --no-ray-query /
+    /// JAHSHAKA_NO_RAY_QUERY=1). It is engine-wide: what one SCENE resolves to
+    /// is `Scene::rayTracingResolved()`, which ANDs this with the project's own
+    /// state (iris::Scene::rayTracing, the World panel's row).
     bool enabled = false;
     /// Bottom-level structures held — one per unique mesh in the traced set.
     int  blasCount = 0;
@@ -2443,11 +2459,14 @@ struct EngineConfig {
     /// literal and not a manner of speaking — which is what makes the suites
     /// that assert the fallback worth anything.
     ///
-    /// THE HOST OWNS THIS ANSWER. It is an APPLICATION preference, not a
-    /// document setting: ray tracing is a property of the machine, and a
-    /// picture that changed with the file open would be a second authoring
-    /// path. Studio fills it from Preferences > Rendering ANDed with
-    /// `--no-ray-query`. Change it at runtime with Engine::setRayTracing.
+    /// THE HOST OWNS THIS ANSWER, and since 2026-09-15 (ledger §425) it is the
+    /// DIAGNOSTIC LATCH and nothing else: Studio fills it from
+    /// `--no-ray-query` alone. What a PROJECT asks for is a document field
+    /// pushed per scene (Scene::setRayTracing / RayTracingMode), because ray
+    /// tracing is a property of the project met with a property of the machine
+    /// — an application preference beside the document's row would be two
+    /// layers that can disagree. Change this one at runtime with
+    /// Engine::setRayTracing.
     ///
     /// It is NOT a quality dial: with rays off the tier builds nothing at all,
     /// costs nothing at all, and `giStatus().rayQuery.enabled` reads false.

@@ -38,6 +38,28 @@ namespace iris
 
 static constexpr float kPi = 3.14159265358979f;
 
+// THE PROJECT'S RAY-TRACING STATE, as stable strings (scene.h RayTracingMode).
+// The file, the `world.rayTracing` verb and the World-panel row all spell it
+// exactly one way.
+const char *rayTracingModeName(RayTracingMode mode)
+{
+    switch (mode) {
+    case RayTracingMode::Off: return "off";
+    case RayTracingMode::On:  return "on";
+    case RayTracingMode::Auto: break;
+    }
+    return "auto";
+}
+
+bool rayTracingModeFromName(const QString &name, RayTracingMode &out)
+{
+    const QString n = name.trimmed().toLower();
+    if (n == QLatin1String("auto")) { out = RayTracingMode::Auto; return true; }
+    if (n == QLatin1String("off"))  { out = RayTracingMode::Off;  return true; }
+    if (n == QLatin1String("on"))   { out = RayTracingMode::On;   return true; }
+    return false;
+}
+
 // The ENGINE's own defaults (SKY-GPU): these are Ogre AtmosphereNpr's preset
 // values, which is what the sky is drawn with. The dials they replace described
 // a CPU bake that no longer exists.
