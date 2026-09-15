@@ -1785,6 +1785,9 @@ public:
     /// false when `budgetMs` ran out first (the write continues; nothing is
     /// abandoned). A no-op when no write is in flight.
     bool flushWrites(unsigned budgetMs);
+    /// True while the writer holds or is running a job (FSYNC-1): a save that
+    /// meets one SKIPS — it never waits on the calling thread.
+    bool writeInFlight() const;
     /// True when something has been compiled since the last save — the
     /// burst-settle timer's condition, and what makes save() a cheap no-op.
     bool dirty(Ogre::Root *root) const;
@@ -1882,7 +1885,7 @@ private:
     // std::thread and not a pool: the engine has exactly one of these, it
     // sleeps on a condition variable between saves, and a pool would only add
     // a scheduler between the bytes and the disk.
-    std::mutex              mWriteMutex;
+    mutable std::mutex      mWriteMutex;
     std::condition_variable mWriteCv;       ///< wakes the writer
     std::condition_variable mWriteDoneCv;   ///< wakes a flushWrites() caller
     std::unique_ptr<PendingWrite> mWriteJob;    ///< handed over, not yet taken

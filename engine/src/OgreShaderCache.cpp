@@ -796,19 +796,16 @@ bool ShaderCache::save(Ogre::Root *root) {
         ~Reentry() { flag = false; }
     } reentry(mSaving);
     // ONE WRITER, ONE JOB (FSYNC-1). Everything below this line serializes a
-    // fresh copy of the layers, so meeting a write that is still in flight
-    // means waiting for it — not queueing a second one behind it. In practice
-    // no caller meets it: the host's timer dispatches once per settled compile
-    // burst (seconds apart) and the other two callers are a script's explicit
-    // save and the clean quit. A script saving in a LOOP is the case this
-    // covers, and waiting is what it should do: its next save would otherwise
-    // serialize a megabyte the disk has not caught up with.
-    //
-    // The wait is bounded so that a wedged filesystem cannot turn a save into a
-    // hang; on the timeout the write below is skipped rather than started
-    // beside the old one (two writers on one `.tmp` name is the thing the
-    // single-job rule exists to prevent).
-    if (!flushWrites(kWriteWaitMs)) {
+    // fresh copy of the layers, so a write still in flight means THIS SAVE IS
+    // SKIPPED — never waited for. The layers stay dirty and the next save
+    // writes them, so skipping costs nothing; waiting would cost the calling
+    // thread (the UI thread, for the host's timer) the rest of a write that is
+    // slow for exactly the reason this writer thread exists — a disk behind a
+    // stream of dirty pages — which is the block this lane removed. The callers
+    // that MEAN to wait (the clean quit, the destructor, a wipe) call
+    // flushWrites() themselves. (Lead's merge read, 2026-09-15: the first cut
+    // waited here with a 30 s bound.)
+    if (writeInFlight()) {
         logLine("the previous write is still in flight — skipping this save");
         return false;
     }
@@ -1020,6 +1017,11 @@ bool ShaderCache::dispatchWrite(std::unique_ptr<PendingWrite> job) {
     lock.unlock();
     mWriteCv.notify_one();
     return true;
+}
+
+bool ShaderCache::writeInFlight() const {
+    std::lock_guard<std::mutex> lock(mWriteMutex);
+    return mWriteJob || mWriteBusy;
 }
 
 bool ShaderCache::flushWrites(unsigned budgetMs) {
