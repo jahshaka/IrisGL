@@ -1014,22 +1014,28 @@ void OgreEngine::renderOneFrame() {
 // posted-event chain starves the render timer — accumulates every one of those
 // blocks until `VulkanVaoManager::allocateVbo` notices it is holding more than
 // `mDelayedBlocksFlushThreshold` (512 MB) and force-flushes from INSIDE the
-// allocation (OgreVulkanVaoManager.cpp:965). The process heap is corrupt after
-// that; the fault surfaces later, anywhere.
+// allocation (OgreVulkanVaoManager.cpp:965). THAT FLUSH IS A SYMPTOM, NOT THE
+// FAULT (the lane's own measurement: it fires once in every CLEAN run too);
+// the corrupting write is somewhere in or under Ogre, still unnamed, and a
+// frame between the slices masks it — see the numbers on the shell side.
 //
 // THIS IS EXACTLY THAT CALL AND NOTHING MORE. No scene graph update, no cull,
 // no draw, no present, and no streaming WAIT (`waitForTextureLoads` is the
 // call that blocks; this one must not, because it runs between the slices of
 // an install that has to stay responsive).
 //
-// CALLING IT OUTSIDE A FRAME IS THE PIN'S OWN DOCUMENTED SHAPE, not an
-// improvisation: `VulkanVaoManager::_update` opens with a block headed "we
-// could only reach here if _update() was called twice in a row without
-// completing a full frame" (OgreVulkanVaoManager.cpp:2043-2070) and inserts the
-// `commitAndNextCommandBuffer( NewFrameIdx )` that advances the frame index for
-// exactly that case. Upstream's own offline capture paths do the same thing
-// between workspace updates (OgreParallaxCorrectedCubemapAuto.cpp:387,
-// OgreIrradianceFieldRaster.cpp:286).
+// CALLING IT OUTSIDE A FRAME IS THE PIN'S TOLERATED SHAPE (its issue #433),
+// not its documented practice — the two upstream offline capture paths one
+// might cite (OgreParallaxCorrectedCubemapAuto.cpp:385-388,
+// OgreIrradianceFieldRaster.cpp:284-288) complete the bracket with
+// `_endFrameOnce()` every time. AND IT COMMITS ONLY EVERY SECOND CALL:
+// `VulkanVaoManager::_update` (OgreVulkanVaoManager.cpp:2041-2070) issues the
+// `commitAndNextCommandBuffer( NewFrameIdx )` only when the previous _update was
+// not followed by a commit, so one bare call after a normal frame ARMS and the
+// next one advances the frame index and releases the delayed blocks — a
+// one-call lag. destroyScene's pair (before and after the erase) works because
+// it is a pair. The same bare `vao->_update()` has run inside the texture drain
+// since 2026-09-08.
 //
 // WHAT IS DELIBERATELY NOT HERE: `_beginFrameOnce()` / `_endFrameOnce()`. Those
 // are the frame's brackets — `_endFrameOnce` commits with

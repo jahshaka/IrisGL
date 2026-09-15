@@ -1438,8 +1438,11 @@ public:
     /// open — can upload a whole world and destroy the previous one while a
     /// chain of posted events starves the render timer, and NOTHING advances
     /// until the backend's own emergency threshold trips inside an allocation.
-    /// (Measured: 33 crashes in 59 runs of a scripted open that renders no
-    /// frame; 0 in 24 with one frame per turn.)
+    /// (Measured by the diagnosis: 33 crashes in 59 runs of a scripted open
+    /// that renders no frame, 0 in 24 with one frame per turn; by the lane on
+    /// its own build: 9/12 base, 6/12 with THIS advance alone, 0/12 with a
+    /// frame per slice — so the advance is the primitive, the frame the cure.)
+    /// NOTE: the backend commits only every SECOND bare call (see OgreEngine.cpp).
     ///
     /// THIS IS THAT ADVANCE, AND NOTHING ELSE. It updates no scene graph,
     /// culls nothing, submits no draw and presents no window; it does not wait
