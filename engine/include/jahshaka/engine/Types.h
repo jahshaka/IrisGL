@@ -2531,6 +2531,19 @@ struct ShaderCacheStats {
     unsigned  expectedShaders = 0;
     /// Wall-clock of the last successful save, ms since the Unix epoch; 0 = never.
     long long lastSavedUnixMs = 0;
+
+    // ---- the two caches the shader HASH addresses (HLMSBITS-1) -------------
+    /// THE NUMBER THAT CRASHED THE EDITOR ON 2026-09-14, now readable while the
+    /// session is alive. Every shader is looked up by a 32-bit hash built from a
+    /// PASS index and a RENDERABLE index; both caches grow for the life of the
+    /// process and neither is ever evicted, so "how full are they" is a real
+    /// health reading — and past the field's capacity the indices used to spill
+    /// into each other silently. Reported as the WORST Hlms (the largest of PBS,
+    /// Unlit, low-level), because one full cache is the problem whichever it is.
+    unsigned passCacheEntries = 0;
+    unsigned passCacheCapacity = 0;        ///< what the hash's pass field addresses
+    unsigned renderableCacheEntries = 0;
+    unsigned renderableCacheCapacity = 0;  ///< what the hash's renderable field addresses
 };
 
 /// ONE LDR image filter — a "look" (POST_LOOKS_SPEC.md §4).

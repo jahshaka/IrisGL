@@ -918,7 +918,48 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     (0.51× of the single volume's bounce beyond cascade 0, bar ≥ 0.40) and the
     red-on-grey bounce (0.0960 with the gate open, 0.0001 without).
 
-THE STACK IS 0001-0045 (this list; `build-ogre.sh` globs `*.patch`, so the file
+46. **0046-hlms-shader-hash-field-sizes** (SOURCE) — THE SHADER HASH'S FIELDS,
+    MEASURED AND REBALANCED. Every shader lookup is a 32-bit hash of
+    `[type][renderable][pass]`, upstream 3/21/8, and the PASS index's eight bits
+    are 256 distinct sets of pass properties for the life of a process, guarded
+    by an `assert` every release build compiles out. Entry 256 carries into the
+    renderable field beside it, which is the 2026-09-14 crash (patch 0035's guard
+    and lane SHADERCACHE-2's recycled capture name fixed the symptom and the
+    driver; the field stayed). MEASURED on the instrumented pin, in one session
+    that opened the eight shipped samples, walked Low→Epic on each, drove every
+    World Mode row through every option, changed the sky forty times, played and
+    screenshotted: HlmsPbs peaked at **115** pass entries (45 % of the field),
+    HlmsLowLevel 94, HlmsUnlit 12; renderable peaks 24 / 104 / 16; and a WARM
+    boot replays 79 of the previous session's pass entries out of the disk cache
+    before a frame is drawn. The split is now **3 / 16 / 13** — 8,192 pass
+    entries (71× the peak) and 65,536 renderable ones (630×), the fields tiling
+    the uint32 exactly under a `static_assert`. Both caches now REFUSE rather
+    than overflow, through ONE appender (`Hlms::findOrAddPassCache`) that
+    replaced three open-coded copies — HlmsUnlit's had no warning at all — and
+    that throws on the render path, returns false while a disk cache is being
+    replayed (a slow start, never a dead boot) and warns once at three quarters
+    full; `getMaterial` asserts the two halves of the hash cannot overlap. The
+    RENDER QUEUE's 10-bit shader sort field is part of the patch: it used to be
+    the LOW bits of the renderable hash, which is the hole the pass field lives
+    in (two arbitrary bits before, a constant at any wider pass field), and is
+    now composed from the hash's type and renderable FIELDS — what
+    `RqBits::ShaderBits`' comment always claimed. Draw order changes; opaque
+    pixels cannot (depth-tested), transparents sort by depth above this term so
+    only ties inside one depth bucket move — measured identical on the selftest,
+    13 sample ports and every deterministic shipped sample. CRUD: `InputLayoutShift`/`InputLayoutMask` were declared and never
+    defined; deleted. Adds `Hlms::getPassCacheSize`/`getRenderableCacheSize` +
+    capacities, which Jahshaka reports through `app.shaderCache()` and
+    `shadercache.app` run 5 now asserts as a NUMBER instead of the absence of a
+    warning. On-disk formats are layout-INDEPENDENT (HlmsDiskCache stores
+    property vectors and re-derives the indices; the Vulkan microcode map is
+    keyed by shader source text), so `c_hlmsDiskCacheVersion` stays at 6.
+    `--engine-selftest` hash UNCHANGED (`b55e2d5d…`); 13/13 Ogre sample ports and
+    7/8 shipped samples byte-identical (Particles differs by the same pixels
+    between two runs of the UNPATCHED binary). **It touches the same files as
+    0035, so a tree carrying 0035 must reset its ogre-next submodule before
+    `build-ogre.sh`.**
+
+THE STACK IS 0001-0046 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
@@ -926,7 +967,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041 and 0044 are SOURCE-only, and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044 and 0046 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
