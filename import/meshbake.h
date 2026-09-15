@@ -51,10 +51,40 @@ For more information see the LICENSE file
 //
 // FINGERPRINT. `<format>|<producer>|<assimp>|<flags>|<sourceOid>` — a bake
 // whose fingerprint does not match what this build would produce is ignored
-// and rebuilt, exactly like the shader cache. `producer` is a compile-time
-// hash of the TUs that BUILD the bake (JAHSHAKA_MESH_BAKE_PRODUCER_ID, set by
-// irisgl/CMakeLists.txt with the same file(SHA256) mechanism the engine's
-// shader-cache fingerprint uses).
+// and rebuilt, exactly like the shader cache.
+//
+// THE KEY HAS THREE PARTS, and each answers a different question (BAKEKEY-1,
+// 2026-09-15; irisgl/CMakeLists.txt carries the measurement and the per-file
+// justification, MESH_BAKE_SPEC.md the decision):
+//
+//   `format`   = kFormatVersion in meshbake.cpp, HAND-BUMPED. It covers the
+//                on-disk layout AND the document-side meaning of what is
+//                serialized — the vertex layout, the skeleton, the material
+//                fields and the colour space they are recorded in. The classes
+//                that produce those bytes (document/assets/mesh.*,
+//                document/assets/skeleton.*, document/scenegraph/meshnode.cpp,
+//                core/geometry/trimesh.cpp) are covered HERE, by hand, because
+//                they are edited constantly for reasons that cannot move a
+//                baked byte: hashing them threw every library's bakes away
+//                about once a day (25 of 408 irisgl commits, 10 of 11 working
+//                days). tests/hygiene/bake_key_guard.sh (ctest:
+//                source.bake_key_guard) is the gate that keeps the hand bump
+//                from being forgotten — it fails on a commit touching one of
+//                those files unless the version moved in the same range or the
+//                commit message carries the line `bake-output: unchanged`.
+//   `producer` = JAHSHAKA_MESH_BAKE_PRODUCER_ID, a configure-time SHA256 over
+//                the THREE files that WRITE a bake and whose text change means
+//                the produced bytes can change: import/meshbake.cpp (the
+//                builder and the serializer), import/meshbake.h (the
+//                declarations the serializer walks) and
+//                import/materialhelper.cpp (extractMaterialData fills every
+//                material record). Same file(SHA256) mechanism the engine's
+//                shader-cache fingerprint uses; `hashedSources()` reports the
+//                list this build was compiled with.
+//   `assimp` / `flags` = the importer version and the EXACT value of
+//                ImportFlags::Canonical — which is why the importflags files
+//                themselves are not hashed (the integer is more precise than a
+//                hash of the prose around it).
 //
 // THREADING: everything here is plain data. build/serialize run on the import
 // worker; read/deserialize run on the open worker; buildFragment runs on
@@ -66,6 +96,7 @@ For more information see the LICENSE file
 #include <QList>
 #include <QMap>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <functional>
 
@@ -123,6 +154,23 @@ public:
 
     /// `<format>|<producer>|<assimp>|<flags>` — everything except the content.
     static QString producerId();
+
+    /// The producer HASH term alone, as this build was compiled with it
+    /// ("dev" when CMake supplied none).
+    static QString producerHash();
+
+    /// The repo-root-relative files whose text is hashed into that term — the
+    /// list irisgl/CMakeLists.txt hashes, handed to the compiler so the suite
+    /// can prove the two agree (and that the document-side classes are out of
+    /// it). Empty in a build without the define.
+    static QStringList hashedSources();
+
+    /// The producer hash for an arbitrary ordered list of files, by the SAME
+    /// algorithm irisgl/CMakeLists.txt uses. Exists so the key's definition is
+    /// TESTABLE without rebuilding: the suite checks it reproduces the
+    /// compiled-in term for the real sources, then varies scratch copies.
+    /// Empty when any file cannot be read.
+    static QString producerHashOf(const QStringList &absolutePaths);
 
     /// The full key for a source whose content id is `sourceOid`. Empty
     /// `sourceOid` yields a fingerprint that can never match a stored bake.
