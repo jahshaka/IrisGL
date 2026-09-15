@@ -501,23 +501,6 @@ public:
     /// touched: an on-top overlay already has depth write off, and a
     /// depth-tested one keeps what it was created with.
     virtual bool        setUnlitMaterial(MaterialId, const Colour &) = 0;
-    /// DEPTH PRIORITY FOR A COPLANAR HELPER (GIZMO-2 item 5, owner §370: "the
-    /// grid should always be on top of the floor, but objects on top of it
-    /// should cover it").
-    ///
-    /// The material keeps its depth TEST — so anything genuinely in front of
-    /// the surface still covers it — but its depth is biased TOWARDS the
-    /// camera by a constant plus a slope term, so where it is drawn on another
-    /// surface at the same depth it wins, at every angle and every distance,
-    /// with no offset in the world and no z-fighting. The editor's ground grid
-    /// is what it exists for: a grid pushed a hair below the floor to avoid the
-    /// fight is hidden by the floor from below and still fights wherever it
-    /// pokes through.
-    ///
-    /// Ogre normalises the bias sign for reverse-Z depth
-    /// (OgreVulkanRenderSystem.cpp:3784), so "towards the camera" is the only
-    /// meaning this has, on every backend.
-    virtual bool        setMaterialDepthPriority(MaterialId, bool) = 0;
     /// Selection silhouette: unlit colour drawn on BACK faces only, so a copy of the
     /// mesh scaled up slightly (~4%) renders as a clean outline band around the
     /// original (inverted hull). Depth-tested, so occluders still hide it.

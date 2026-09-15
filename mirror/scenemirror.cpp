@@ -1805,8 +1805,6 @@ void SceneMirror::syncGrid()
         if (mGridMajorMaterial) { mTarget->destroyMaterial(mGridMajorMaterial); mGridMajorMaterial = 0; }
         mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
         mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
-        mTarget->setMaterialDepthPriority(mGridMinorMaterial, true);
-        mTarget->setMaterialDepthPriority(mGridMajorMaterial, true);
         if (mGridMinorMesh) mTarget->attachMesh(mGridMinorNode, mGridMinorMesh, mGridMinorMaterial);
         if (mGridMajorMesh) mTarget->attachMesh(mGridMajorNode, mGridMajorMesh, mGridMajorMaterial);
         mGridColoursDirty = false;
@@ -1825,29 +1823,35 @@ void SceneMirror::syncGrid()
         // per node, not inherited.
         mTarget->setNodeHelper(mGridMinorNode, true);
         mTarget->setNodeHelper(mGridMajorNode, true);
-        // Unlit (never fogged), depth-tested (occluded by geometry), blended —
-        // and DEPTH-PRIORITISED (GIZMO-2 item 5, owner §370: "the grid should
-        // always be on top of the floor, but objects on top of it should cover
-        // it"). The depth test is what makes a box standing on the floor cover
-        // the grid; the bias towards the camera is what makes the grid win
-        // against the FLOOR itself, which is at the same height as it and used
-        // to be resolved by pushing the grid a hair underneath.
+        // Unlit (never fogged), depth-tested (occluded by geometry), blended.
         mGridMinorMaterial = mTarget->createUnlitMaterial(mGridMinorColour, true);
         mGridMajorMaterial = mTarget->createUnlitMaterial(mGridMajorColour, true);
-        mTarget->setMaterialDepthPriority(mGridMinorMaterial, true);
-        mTarget->setMaterialDepthPriority(mGridMajorMaterial, true);
     }
     if (freshNode || mGridBuiltPlane != mGridPlane) {
         // The mesh is authored in XZ; the node rotates it into the plane that
-        // faces the requesting view. Every plane passes through the ORIGIN
-        // (GIZMO-2 item 5): the floor grid sits at exactly y=0, where the
-        // ground is, and wins the depth test against it through its material's
-        // depth bias rather than by being moved out of the way. It used to be
-        // pushed a hair below y=0 so the ground would occlude it — which hid it
-        // completely from above (a top view had to flip the sign) and still
-        // fought with the ground wherever it poked through.
+        // faces the requesting view.
+        //
+        // THE FLOOR GRID SITS 1 cm ABOVE ITS PLANE (GIZMO-2 item 5, owner §370:
+        // "it should always be on top of the floor, but objects on top of it
+        // should cover it"), and the sign is the whole change: it used to sit
+        // 1 cm BELOW, so a ground plane occluded it — invisible from above
+        // (the axis views had to flip the sign by hand) and fighting with the
+        // ground wherever it poked through, which is the "merges with the
+        // floor" the owner reported.
+        //
+        // WHY A GEOMETRIC LIFT AND NOT A DEPTH BIAS, measured (GIZMO-2 round 2,
+        // tests/mirror/test_grid_floor.cpp): a macroblock depth bias does
+        // NOTHING for this grid, because Vulkan applies depth bias to POLYGONS
+        // and the grid is LINE primitives — the same scene renders
+        // byte-identically with mDepthBiasConstant at 0, 2, 16, 256 and
+        // 100,000, and a render-queue bump changes nothing either. What does
+        // work is distance: over a coplanar floor, 1 cm of lift takes the
+        // grid's visible pixels from 11,218 to 19,075 (the z-fight's dashed
+        // lines to solid ones) and 2 cm adds only 500 more — the knee is here.
+        // The cost, stated: something THINNER than 1 cm lying on the floor
+        // (a decal, a coin) is drawn under the grid rather than over it.
         static const float s = 0.70710678f;   // sin/cos 45°: a 90° rotation
-        Vec3 pos;
+        Vec3 pos(0, kGridFloorLift, 0);
         Quat rot;                             // Floor: identity
         switch (mGridPlane) {
         case GridPlane::FrontXY: rot = Quat(s, 0, 0, s); break;

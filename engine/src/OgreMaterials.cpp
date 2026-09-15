@@ -2080,36 +2080,4 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
     } JAH_CATCH(mError, false);
 }
 
-// DEPTH PRIORITY FOR A COPLANAR HELPER (GIZMO-2 item 5, owner §370). The
-// numbers: Vulkan multiplies mDepthBiasConstant by r, the smallest resolvable
-// depth difference for the buffer's format, so 2 r is two ticks of the depth
-// buffer towards the camera — enough to win against a surface at the same
-// depth, and ~9 orders of magnitude short of the metre-scale difference between
-// a floor and a box standing on it, which is what keeps "objects on top of it
-// cover it" true. The slope term is what handles a floor seen at a grazing
-// angle, where one pixel spans a large depth range; 2.0 is the value Ogre's own
-// shadow-bias defaults use for the same reason.
-static constexpr float kDepthPriorityConstant = 2.0f;
-static constexpr float kDepthPrioritySlope    = 2.0f;
-
-bool OgreScene::setMaterialDepthPriority(MaterialId id, bool on) {
-    auto it = mMaterials.find(id);
-    if (it == mMaterials.end()) return false;
-    if (it->second.depthPriority == on) return true;
-    JAH_TRY {
-        auto *db = hlmsFor(it->second)->getDatablock(Ogre::IdString(it->second.datablockName));
-        if (!db) return false;
-        // A macroblock is immutable state held by the HlmsManager: read the
-        // one the datablock has, change the two fields, hand it back — which
-        // is a lookup of an existing block or the creation of one, never a
-        // write through the pointer other datablocks share.
-        Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        macro.mDepthBiasConstant   = on ? kDepthPriorityConstant : 0.0f;
-        macro.mDepthBiasSlopeScale = on ? kDepthPrioritySlope : 0.0f;
-        db->setMacroblock(macro);
-        it->second.depthPriority = on;
-        return true;
-    } JAH_CATCH(mError, false);
-}
-
 }}}  // namespace jahshaka::engine::detail

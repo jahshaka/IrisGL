@@ -508,6 +508,12 @@ public:
     /// character needs a bigger one, or the "floor" is smaller than the thing
     /// standing on it. Changing it rebuilds the grid meshes on the next sync.
     void setGridExtent(float extent);
+    /// HOW FAR ABOVE ITS OWN PLANE THE FLOOR GRID IS DRAWN, in world units
+    /// (GIZMO-2 item 5). The grid is a helper drawn WITH the depth test, so
+    /// geometry in front of it covers it; this lift is what keeps it from
+    /// z-fighting with a ground plane at the same height. Measured at the knee
+    /// of the curve — see syncGrid.
+    static constexpr float kGridFloorLift = 0.01f;
     /// Grid line colours (minor, major). Alpha is the line's opacity. The
     /// editor keeps its blue-grey default; the avatar preview asks for white,
     /// and the canonical axis views ask for a per-plane tint.
