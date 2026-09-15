@@ -298,10 +298,10 @@ if(WIN32 AND MSVC)
     set(USE_MSVC_RUNTIME_LIBRARY_DLL 1)
 endif()
 
-# --- Mesh-bake producer id (MESH_BAKE_SPEC.md phase 1) -----------------------
+# --- Mesh-bake producer key (MESH_BAKE_SPEC.md phase 1; REDEFINED 2026-09-15) -
 # The same mechanism the engine uses for its shader-cache fingerprint
-# (irisgl/engine/CMakeLists.txt): a configure-time SHA256 over the TUs that
-# PRODUCE a bake. A bake is derived data whose validity depends on the code
+# (irisgl/engine/CMakeLists.txt): a configure-time SHA256 over the source files
+# that PRODUCE a bake. A bake is derived data whose validity depends on the code
 # that built it, and nothing inside the blob can see a source edit — so the
 # producer hash is a term of the bake's fingerprint, exactly as
 # JAHSHAKA_ENGINE_BUILD_ID is a term of the shader cache's.
@@ -310,18 +310,100 @@ endif()
 # bytes (see the rationale at the top of import/meshbake.h), so an engine
 # rebuild cannot invalidate one, and folding it in would throw the whole
 # library's bakes away on every OgreEngine.cpp edit for no correctness gain.
+#
+# WHY THE LIST IS THREE FILES AND NOT TWELVE (BAKEKEY-1, measured 2026-09-15).
+# The list used to carry the document's mesh/mesh-node/skeleton classes too.
+# Those files are edited for reasons that have nothing to do with a bake's
+# bytes — a getter, a render-side field, a comment — and the measurement said
+# so: of the 408 irisgl commits since the bake landed (2026-09-05), 25 touched
+# one of the twelve, on 10 of the 11 working days, document/scenegraph/
+# meshnode.cpp alone on 12 of them. Every one of those builds produced a new
+# producer id, and every new producer id stales EVERY bake in EVERY library:
+# the whole point of the bake — an open is a file read — was being thrown away
+# about once a day, for edits that could not change a single baked byte.
+#
+# So the key is now three parts, and each part answers a different question:
+#
+#   1. THE FORMAT VERSION (kFormatVersion in import/meshbake.cpp, the `v%1`
+#      term of MeshBake::producerId) — hand-bumped. It covers the DOCUMENT-side
+#      layout and MEANING of what the bake serializes: the vertex layout, the
+#      skeleton, the material fields and the colour space they are recorded in.
+#      A change in document/assets/mesh.{cpp,h}, document/assets/skeleton.*,
+#      document/scenegraph/meshnode.cpp or core/geometry/trimesh.cpp that
+#      really does move a baked byte is declared by bumping that constant —
+#      which is exactly what v2, v4 and v5 already were.
+#   2. THIS HASH, over the files that WRITE the bake and whose text change
+#      means the produced bytes can change:
+#        import/meshbake.cpp    — the builder AND the serializer: every byte of
+#                                 the blob is written by this file, and the
+#                                 aiScene walk that decides what goes in it.
+#        import/meshbake.h      — the declarations the serializer walks
+#                                 (MeshBake::Model, BakedNode): a field added
+#                                 or removed here changes the written record
+#                                 without meshbake.cpp having to change.
+#        import/materialhelper.cpp — MeshBake::buildFromScene CALLS
+#                                 MaterialHelper::extractMaterialData for every
+#                                 material record it writes (spec-gloss →
+#                                 metallic-roughness, texture-name resolution,
+#                                 embedded-texture naming). Its numbers ARE
+#                                 baked bytes.
+#   3. A LINT, tests/hygiene/bake_key_guard.sh (ctest: source.bake_key_guard),
+#      which fails when one of the document-side files that LEFT this hash is
+#      touched without either bumping the format version or saying, in the
+#      commit message, `bake-output: unchanged`. The version is a hand bump, so
+#      it needs a gate that makes forgetting it loud.
+#
+# NOT HASHED, and why — each of these was in the old twelve:
+#   import/importflags.{h,cpp} — the only thing in them that reaches a bake is
+#       the VALUE of ImportFlags::Canonical, and producerId already hashes that
+#       value NUMERICALLY (`flags%4`). Hashing the files adds nothing the exact
+#       integer misses and would stale every library on a comment edit; the
+#       headers are ~90% prose. (ClipNamesOnly never reaches a bake at all.)
+#   import/graphicshelper.cpp — holds no conversion of its own: five thin
+#       wrappers around `new Mesh(aiMesh*)`, Mesh::extractSkeleton/
+#       extractAnimations and ReadFile(ImportFlags::…). MeshBake does its own
+#       ReadFile and its own loop, so no baked byte passes through this file.
+#       It is the PARSE twin the bake must agree with, which is what the lint
+#       watches it for.
+#   import/materialhelper.h — declarations only: no inline bodies, no
+#       constants. A behaviour change there cannot avoid editing the .cpp.
+#   document/assets/mesh.{cpp,h}, document/assets/skeleton.{cpp,h},
+#   document/scenegraph/meshnode.cpp, core/geometry/trimesh.cpp — the
+#       version's job (part 1), guarded by the lint (part 3). meshnode.cpp, the
+#       biggest churner of the twelve, does not write a bake at all: it
+#       CONSUMES one (MeshBake::buildFragment builds MeshNodes).
+#
+# The list is exported to the compiler as well, so the suite can prove that
+# what this file hashes is what MeshBake::hashedSources() reports and that the
+# C++ re-implementation of this algorithm agrees with CMake's output
+# (tests/meshbake, section 6). ONE list, two consumers.
+set(_mesh_bake_hashed_sources
+    import/meshbake.cpp
+    import/meshbake.h
+    import/materialhelper.cpp)
+# A CONFIGURE-TIME hash goes STALE (found by this lane's own suite, 2026-09-15):
+# editing import/meshbake.cpp does not re-run CMake, so the compiled-in term
+# kept describing the PREVIOUS contents of the file until something unrelated
+# triggered a reconfigure — a build could write bakes under a key that does not
+# name the code that wrote them. Three files can say "re-configure when I
+# change" for nothing; the old twelve could not (every mesh.cpp edit would have
+# re-run CMake as well as re-baked the library).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_mesh_bake_hashed_sources})
+
 set(_mesh_bake_blob "")
-foreach(_s import/meshbake.cpp import/meshbake.h
-            import/importflags.h import/importflags.cpp
-            import/materialhelper.cpp import/graphicshelper.cpp
-            document/assets/mesh.cpp document/assets/mesh.h
-            document/assets/skeleton.cpp document/assets/skeleton.h
-            document/scenegraph/meshnode.cpp core/geometry/trimesh.cpp)
+foreach(_s ${_mesh_bake_hashed_sources})
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_s}")
+        message(FATAL_ERROR "mesh-bake key: ${_s} does not exist — fix the list "
+                            "in irisgl/CMakeLists.txt (and tests/hygiene/bake_key_guard.sh)")
+    endif()
     file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${_s}" _h)
     string(APPEND _mesh_bake_blob "${_h};")
 endforeach()
 string(SHA256 _mesh_bake_producer_id "${_mesh_bake_blob}")
-set(JAHSHAKA_MESH_BAKE_PRODUCER_ID "${_mesh_bake_producer_id}" PARENT_SCOPE)
+# '|' separated, not ';': a semicolon inside a compile definition is a CMake
+# list separator and would become three defines.
+string(REPLACE ";" "|" _mesh_bake_hashed_list "${_mesh_bake_hashed_sources}")
 
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
@@ -355,7 +437,8 @@ target_link_libraries (IrisGL PRIVATE assimp)
 target_link_libraries(IrisGL PRIVATE OgreNext)
 target_compile_options(IrisGL PUBLIC)
 target_compile_definitions(IrisGL PRIVATE
-    JAHSHAKA_MESH_BAKE_PRODUCER_ID="${_mesh_bake_producer_id}")
+    JAHSHAKA_MESH_BAKE_PRODUCER_ID="${_mesh_bake_producer_id}"
+    JAHSHAKA_MESH_BAKE_HASHED_SOURCES="${_mesh_bake_hashed_list}")
 
 # A6: these two warning classes are undefined behaviour, not style - keep them fixed.
 if (NOT MSVC)

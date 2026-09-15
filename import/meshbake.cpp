@@ -53,6 +53,13 @@ namespace
 #define JAHSHAKA_MESH_BAKE_PRODUCER_ID "dev"
 #endif
 
+// The same list, as text, so the suite can check that what CMake hashes is what
+// this build reports — and that the document-side classes are NOT in it.
+// '|' separated (a ';' inside a compile definition is a CMake list separator).
+#ifndef JAHSHAKA_MESH_BAKE_HASHED_SOURCES
+#define JAHSHAKA_MESH_BAKE_HASHED_SOURCES ""
+#endif
+
 // v2 (2026-09-08): materials carry `unlit`, and the shading factors changed
 // MEANING — a v1 blob recorded the full-metal misreading of every spec-gloss
 // and block-less glTF material, so v1 bakes must be re-baked, not replayed.
@@ -76,7 +83,18 @@ namespace
 // The LAYOUT is unchanged; the bump exists to re-bake every asset that carries
 // the old meaning, which no fingerprint could have caught (the source file did
 // not change, the reader of it did).
-constexpr int kFormatVersion = 5;
+// v6 (2026-09-15, BAKEKEY-1): the KEY ITSELF was redefined. The producer hash
+// used to cover twelve files, including the document's mesh/mesh-node/skeleton
+// classes, which every lane edits for reasons that cannot move a baked byte —
+// measured: 25 of the 408 irisgl commits since 2026-09-05 touched one, on 10 of
+// 11 working days, so nearly every build staled every bake in every library.
+// The hash is now the three files that WRITE a bake, and THIS CONSTANT carries
+// the document-side layout and meaning instead (irisgl/CMakeLists.txt has the
+// full reasoning; tests/hygiene/bake_key_guard.sh is the gate that keeps the
+// hand bump from being forgotten). The LAYOUT is unchanged from v5 — the bump
+// exists because the key's DEFINITION changed, so every bake in every library
+// is rejected and rebuilt exactly once more, under the new key.
+constexpr int kFormatVersion = 6;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -483,6 +501,38 @@ QString MeshBake::producerId()
         .arg(QLatin1String(JAHSHAKA_MESH_BAKE_PRODUCER_ID))
         .arg(ModelSceneInfo::importerVersion())
         .arg(quint64(iris::ImportFlags::Canonical));
+}
+
+QString MeshBake::producerHash()
+{
+    return QString::fromLatin1(JAHSHAKA_MESH_BAKE_PRODUCER_ID);
+}
+
+QStringList MeshBake::hashedSources()
+{
+    const QString list = QString::fromLatin1(JAHSHAKA_MESH_BAKE_HASHED_SOURCES);
+    if (list.isEmpty()) return QStringList();
+    return list.split(QLatin1Char('|'), Qt::SkipEmptyParts);
+}
+
+QString MeshBake::producerHashOf(const QStringList &absolutePaths)
+{
+    // EXACTLY irisgl/CMakeLists.txt's algorithm, so the suite can prove the two
+    // agree on the real tree and then reason about scratch copies: each file's
+    // lowercase hex SHA256, each followed by ';', concatenated in list order,
+    // and the SHA256 of that ASCII string. An unreadable file yields an empty
+    // result rather than a hash that silently means "one file less".
+    QByteArray blob;
+    for (const QString &path : absolutePaths) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) return QString();
+        QCryptographicHash h(QCryptographicHash::Sha256);
+        if (!h.addData(&file)) return QString();
+        blob += h.result().toHex();
+        blob += ';';
+    }
+    return QString::fromLatin1(
+        QCryptographicHash::hash(blob, QCryptographicHash::Sha256).toHex());
 }
 
 QString MeshBake::fingerprintFor(const QString &sourceOid)
