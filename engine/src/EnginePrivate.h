@@ -755,10 +755,10 @@ struct ChainDesc {
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
-    float ssrRoughnessCutoff = 0.35f;
     float ssrIntensity = 1.0f;
-    /// The ray-traced reflection's per-project roughness cutoff (PostFxDesc's
-    /// note). A uniform, never a shape term.
+    /// THE reflection roughness cutoff, in PERCEPTUAL roughness: the project's
+    /// one number for both the screen-space march and the traced ray
+    /// (PostFxDesc's note). A uniform, never a shape term.
     float rayReflectRoughness = 0.4f;
     /// RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5). SCREEN FIRST, RAYS FOR THE
     /// REST: the march keeps every pixel it is confident about and a ray fills

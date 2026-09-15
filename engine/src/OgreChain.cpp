@@ -2474,15 +2474,24 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
     // The step budget IS the quality row's other half: half-resolution rays get
     // 48 steps, full-resolution rays 96. Both are inside the shader's
     // compile-time loop bound of 128.
+    //
+    // THE ROUGHNESS CUTOFF IS THE PROJECT'S, and it is the SAME number the
+    // traced half gates on (lane SSR-3). The World panel's "Roughness Cutoff"
+    // row reaches here as `rayReflectRoughness`, in PERCEPTUAL roughness; the
+    // march decodes the G-buffer's GGX alpha and square-roots it to compare
+    // (JahSsrRayMarch_ps.glsl). There used to be a second cutoff here
+    // (`ssrRoughnessCutoff`, 0.35) that nothing in the document could write and
+    // that the shader compared against an un-square-rooted alpha, so the band
+    // the frame applied was perceptual 0.581 — deleted, not re-plumbed.
     ps->setNamedConstant("rayParams",
                          Ogre::Vector4(desc.ssrMaxDistance, desc.ssrThickness,
                                        desc.ssr >= 2 ? 96.0f : 48.0f,
-                                       desc.ssrRoughnessCutoff));
+                                       desc.rayReflectRoughness));
 
     if (Ogre::Pass *resolve = materialPass("Jahshaka/SsrResolve"))
         resolve->getFragmentProgramParameters()->setNamedConstant(
             "resolveParams",
-            Ogre::Vector4(desc.ssrRoughnessCutoff, desc.ssrIntensity, 0.0f, 0.0f));
+            Ogre::Vector4(desc.rayReflectRoughness, desc.ssrIntensity, 0.0f, 0.0f));
 }
 
 // ---- DISTORTION -----------------------------------------------------------

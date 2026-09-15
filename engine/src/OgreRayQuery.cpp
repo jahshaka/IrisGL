@@ -169,12 +169,16 @@ struct ScratchArena {
 
 // ---- R5: ray-traced reflections (PHOTON_SPEC §7 R5) ------------------------
 
-/// THE ROUGHNESS GATE. Above it a reflection is a wide lobe, the probe's own
-/// prefiltered photograph is a good enough integral of it, and a ray per pixel
-/// buys a blurrier answer for the same cost — so the budget stops here. It sits
-/// just above `ssrRoughnessCutoff`'s 0.35 default on purpose: the band between
-/// the two is where the screen-space march declines and only a ray can answer.
-constexpr float kRayReflectRoughness = 0.4f;
+// THE GATE'S VALUE IS NOT HERE. It used to be, as `kRayReflectRoughness = 0.4f`,
+// documented as sitting "just above `ssrRoughnessCutoff`'s 0.35 default on
+// purpose" — and by the time lane SSR-3 read it, every part of that was wrong:
+// the constant was DEAD (RAYROW-1 made the cutoff the project's, read at the one
+// call site below), and the 0.35 it claimed to sit above was never a perceptual
+// number at all (the march compared it to an un-square-rooted GGX alpha, so it
+// was a band at perceptual 0.581, ABOVE this constant rather than below it).
+// Deleted with the second cutoff it described; there is one cutoff now and the
+// project owns it.
+
 /// HOW WIDE THE GATE'S FEATHER IS, either side of the cutoff (owner, ledger
 /// §426). The ray's confidence runs from full at `cutoff - kRayReflectFeather`
 /// to zero at `cutoff + kRayReflectFeather`, and the existing confidence
@@ -2640,8 +2644,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.projParams[3] = kRayReflectFeather;
     pp.resolution[0] = float(traceW); pp.resolution[1] = float(traceH);
     pp.resolution[2] = float(fullW);  pp.resolution[3] = float(fullH);
-    // THE CUTOFF IS THE PROJECT'S (PostFxDesc::rayReflectRoughness); the engine
-    // only clamps it into the range a reflection means anything in.
+    // THE CUTOFF IS THE PROJECT'S (PostFxDesc::rayReflectRoughness) and the same
+    // one the screen-space march gates on since lane SSR-3; the engine only
+    // clamps it into the range a reflection means anything in.
     pp.knobs[0] = std::min(std::max(view->chainDesc().rayReflectRoughness, 0.0f), 1.0f);
     // THE RAY'S LENGTH. Long enough to cross the lit volume it will be shaded
     // from — a ray that outruns the cache finds geometry nothing can colour —

@@ -77,6 +77,11 @@
 // blocky edges. The resolve pass re-reads roughness at FULL resolution. The
 // only thing roughness does here is skip the march entirely for a surface that
 // could never show a sharp reflection — a pure cost saving with no visual term.
+// THE CUTOFF ITSELF IS THE PROJECT'S (lane SSR-3): `rayParams.w` is the World
+// panel's "Roughness Cutoff" row, in PERCEPTUAL roughness, the same one number
+// the ray-traced half gates on — below it the reflection is marched here and,
+// on a ray-capable machine, traced for whatever the screen cannot see; above it
+// the probe's own prefiltered photograph answers. See where it is decoded.
 #version ogre_glsl_ver_330
 
 vulkan_layout( ogre_t0 ) uniform texture2D depthTexture;
@@ -143,11 +148,28 @@ void main()
 		return;
 	}
 
-	// HlmsPbs' prepass packs roughness as (r - 0.02) * 1.02040816; this is the
-	// inverse. Anything rougher than the cutoff cannot show a screen-space
-	// reflection worth marching for — see the note at the top of the file.
-	const float roughness =
-		texture( vkSampler2D( gBufShadowRoughness, samplerState ), inPs.uv0 ).y * 0.98 + 0.02;
+	// WHAT THE G-BUFFER'S .y ACTUALLY IS, and reading it wrong was worth half
+	// again the cutoff the user asked for (lane SSR-3; the finding is the R5
+	// readers', ledger 432/440). It is the GGX ALPHA and not a perceptual
+	// roughness: HlmsPbs runs with `mPerceptualRoughness` true, so the
+	// `pixelData.roughness` the prepass packs into this channel is the perceptual
+	// value SQUARED, and ogre-patch 0043 packs it over [0.001, 1] — the shader's
+	// own alpha floor — not over upstream's old [0.02, 1].
+	//
+	// This line used the PRE-0043 range and then compared the result to the
+	// cutoff as though it were perceptual, so the band the frame actually applied
+	// was `0.980981 * alpha + 0.019019 > 0.35`, i.e. alpha 0.3374, i.e.
+	// PERCEPTUAL 0.581 — a number nobody chose and nobody could read anywhere.
+	//
+	// So: undo the range patch 0043 wrote, then take the square root, because the
+	// cutoff is stated in PERCEPTUAL roughness. That is the number the material
+	// panel shows, the number the World row's "Roughness Cutoff" is in, and the
+	// number the ray-traced half of the same reflection gates on
+	// (rq_reflect.comp does exactly this decode, for exactly this reason).
+	const float alpha = max(
+		texture( vkSampler2D( gBufShadowRoughness, samplerState ), inPs.uv0 ).y * 0.999 + 0.001,
+		1e-6 );
+	const float roughness = sqrt( alpha );
 	if( roughness > rayParams.w )
 	{
 		fragColour = vec4( 0.0 );

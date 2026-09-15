@@ -338,8 +338,18 @@ void main()
 	// Full-resolution roughness, undoing HlmsPbs' prepass packing. The ramp
 	// below the cutoff is what stops the reflection from appearing and
 	// vanishing as a hard boundary across a floor whose roughness varies.
-	const float roughness =
-		texture( vkSampler2D( gBufShadowRoughness, pointSampler ), inPs.uv0 ).y * 0.98 + 0.02;
+	//
+	// THE DECODE IS THE MARCH'S (lane SSR-3, and the same defect was here): the
+	// channel is the GGX ALPHA packed by ogre-patch 0043 over [0.001, 1], so the
+	// perceptual roughness the cutoff is stated in is its square root. Read with
+	// the pre-0043 range and no square root, this ramp ran over perceptual
+	// 0.399 -> 0.581 for a cutoff of 0.35; it now runs over `cutoff/2 -> cutoff`
+	// in the number the World row shows, which for the default 0.40 is
+	// perceptual 0.20 -> 0.40.
+	const float alpha = max(
+		texture( vkSampler2D( gBufShadowRoughness, pointSampler ), inPs.uv0 ).y * 0.999 + 0.001,
+		1e-6 );
+	const float roughness = sqrt( alpha );
 	const float cutoff	  = resolveParams.x;
 	const float roughFade = 1.0 - smoothstep( cutoff * 0.5, cutoff, roughness );
 
@@ -386,16 +396,22 @@ void main()
 	// they are not a shifted copy at all but DIFFERENT OBJECTS — the probe's
 	// blue wall against the screen's west wall, gold torus and red patch at the
 	// limb — tens of degrees apart. At a deliberately conservative 30 degrees
-	// (0.52 rad) the crossover is r = 0.51, and `ssrRoughnessCutoff` is 0.35
-	// with no writer anywhere outside this engine (Types.h's default, OgreView
-	// and OgreChain; nothing in Studio or the mirror ever pushes one). So the
-	// lerp's honest range begins well above the roughness at which this
-	// renderer stops drawing a screen-space reflection at all, and a branch for
-	// it would be code no shipped frame can reach. Raising the cutoff would not
-	// bring it back either: the screen's image is a sharp mirror image at every
-	// roughness, so a raised cutoff paints a sharp reflection on a rough
-	// surface whether it wins or blends. The fix for THAT is a roughness-aware
-	// blur on the resolve, and it is a different piece of work.
+	// (0.52 rad) the crossover is r = 0.51, and the cutoff is the World panel's
+	// "Roughness Cutoff" row, in PERCEPTUAL roughness, default 0.40 (lane SSR-3
+	// wired it; it used to be a renderer constant nothing in the document could
+	// write, and a constant the shader then compared against an un-square-rooted
+	// alpha, so the band the frame applied was perceptual 0.581). At the default
+	// the lerp's honest range therefore still begins above the roughness at
+	// which this renderer stops drawing a screen-space reflection at all.
+	//
+	// WHAT IS NEW SINCE SSR-3, stated honestly: the row reaches 100 %, so a
+	// project CAN now set a cutoff above that crossover, which the old constant
+	// could not. The answer is still not a lerp branch — the screen's image is a
+	// sharp mirror image at EVERY roughness, so a raised cutoff paints a sharp
+	// reflection on a rough surface whether it wins or blends, and lerping two
+	// answers that sit in two PLACES is the dither this rule exists to remove.
+	// The fix for a raised cutoff is a roughness-aware blur on the resolve, and
+	// it is a different piece of work.
 	//
 	// THE MASK IS THREE FACTORS, AND WHICH QUESTION EACH ANSWERS IS THE WHOLE
 	// DESIGN — the first round of this lane got it wrong by asking one question

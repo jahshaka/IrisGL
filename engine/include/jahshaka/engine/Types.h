@@ -2732,28 +2732,33 @@ struct PostFxDesc {
     /// is only accepted when the ray passed within this much of it — too small
     /// and reflections drop out behind objects, too large and they smear.
     float ssrThickness = 0.5f;
-    /// Above this roughness a surface shows no screen-space reflection at all
-    /// (with a ramp starting at half the value). V1 has no roughness-varying
-    /// blur, so the cutoff is what keeps a matte floor from showing a sharp
-    /// mirror image; raising it without a blur chain looks wrong, not better.
-    float ssrRoughnessCutoff = 0.35f;
     /// A straight multiplier on the composite confidence. 1.0 is physical —
     /// the reflection replaces the probe answer where the march is confident.
     float ssrIntensity = 1.0f;
-    /// THE RAY-TRACED REFLECTION'S ROUGHNESS CUTOFF (PHOTON_SPEC §7 R5; owner,
-    /// ledger §426). A PER-PROJECT dial and not a renderer constant: above it a
-    /// reflection is a wide lobe, the probe's own prefiltered photograph is a
-    /// good enough integral of it, and a ray per pixel buys a blurrier answer
-    /// for the same cost — but where that point falls is a property of the
-    /// content, not of the renderer. It sits beside `ssrRoughnessCutoff` here
-    /// because it is the same kind of number about the same lobe, and a scene
-    /// stores both.
+    /// THE REFLECTION ROUGHNESS CUTOFF, in PERCEPTUAL roughness (PHOTON_SPEC
+    /// §7 R5; owner, ledger §426). ONE number for BOTH sources of a per-pixel
+    /// reflection (lane SSR-3): below it the reflection is MARCHED in screen
+    /// space and, on a ray-capable machine, TRACED for whatever the screen
+    /// cannot see; above it the reflection probes' own prefiltered photograph
+    /// answers. A PER-PROJECT dial and not a renderer constant: above the cutoff
+    /// a reflection is a wide lobe and the probe's photograph is a good enough
+    /// integral of it, so a ray or a march per pixel buys a blurrier answer for
+    /// the same cost — but WHERE that point falls is a property of the content,
+    /// not of the renderer.
     ///
-    /// THE TRANSITION IS FEATHERED, not a step: the ray's confidence runs from
-    /// full at `cutoff - kRayReflectFeather` to zero at `cutoff + feather`, so
-    /// a surface whose roughness varies across it — a scratched floor — hands
-    /// the pixel to the probe through the existing confidence composite with no
-    /// seam. The feather's half-width is a named constant in the engine
+    /// THERE USED TO BE A SECOND ONE. `ssrRoughnessCutoff` (0.35) gated the
+    /// march, nothing in the document ever wrote it, and it was compared
+    /// against a G-buffer channel the march decoded with the pre-ogre-patch-0043
+    /// range and never square-rooted — so the band the frame applied was
+    /// perceptual 0.581, not 0.35 and not anything a user could read. It is
+    /// deleted; the march reads this field (OgreChain::updateSsr).
+    ///
+    /// THE TRANSITION IS FEATHERED, not a step. The ray's confidence runs from
+    /// full at `cutoff - kRayReflectFeather` to zero at `cutoff + feather`, and
+    /// the march's own roughness ramp runs from full at `cutoff/2` to zero at
+    /// `cutoff`, so a surface whose roughness varies across it — a scratched
+    /// floor — hands the pixel over through the existing confidence composite
+    /// with no seam. The feather's half-width is a named constant in the engine
     /// (0.1), deliberately not a second dial.
     ///
     /// It is a UNIFORM, not a graph change: moving it must not rebuild a
@@ -2867,7 +2872,6 @@ struct PostFxDesc {
                ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrMaxDistance == o.ssrMaxDistance &&
                ssrThickness == o.ssrThickness &&
-               ssrRoughnessCutoff == o.ssrRoughnessCutoff &&
                rayReflectRoughness == o.rayReflectRoughness &&
                ssrIntensity == o.ssrIntensity &&
                refractions == o.refractions &&

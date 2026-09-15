@@ -540,6 +540,11 @@ public:
     /// different roughnesses — which is why it is a per-project dial and not a
     /// renderer constant.
     ///
+    /// IT DRIVES BOTH SOURCES since lane SSR-3: the screen-space march and the
+    /// traced ray are two ways of answering the same lobe and there is one
+    /// number for them. The march used to carry a second cutoff of its own that
+    /// no document could write.
+    ///
     /// PERCENT AND NOT A FLOAT, deliberately: every World row in this document
     /// is an int (worldmodes::Row), the tier table's columns are ints, and a
     /// float field here would need a second row type, a second widget and a

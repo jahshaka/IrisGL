@@ -128,7 +128,6 @@ ChainDesc OgreView::chainDesc() const {
     d.ssr            = mPostFx.ssr;
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
     d.ssrThickness   = mPostFx.ssrThickness;
-    d.ssrRoughnessCutoff = mPostFx.ssrRoughnessCutoff;
     d.ssrIntensity   = mPostFx.ssrIntensity;
     d.rayReflectRoughness = mPostFx.rayReflectRoughness;
     // RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5), and the whole tier rule in one
