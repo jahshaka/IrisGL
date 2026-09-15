@@ -1184,7 +1184,28 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the composite's scale is a variable instead of a post-multiply (it keeps the
     arithmetic and its order identical to the copy's).
 
-THE STACK IS 0001-0058 (this list; `build-ogre.sh` globs `*.patch`, so the file
+59. **0059-mesh2-set-lod-values** (SOURCE — `OgreMain/include/OgreMesh2.h`,
+    `OgreMain/src/OgreMesh2.cpp`; **every tree re-runs `build-ogre.sh`**; no
+    other patch touches those two files, so there is no overlap to reset for) —
+    adds `void Mesh::_setLodValues( const LodValueArray & )`, ~10 lines. There
+    is otherwise NO public way to give a v2 mesh built in memory its LOD levels:
+    `mLodValues` is protected with only a const getter (OgreMesh2.h:417),
+    `_setLodInfo`'s entire body is commented out (OgreMesh2.cpp:360-373) so
+    calling it does nothing silently, and the only writers left are the
+    serializer (a friend) and `importV1`. Everything else already works — a
+    SubMesh takes as many VAOs as you push into `mVao[VpNormal]`,
+    `SceneManager::updateAllLods` runs every frame, `LodStrategy::lodSet`
+    binary-searches the array and `RenderQueue` indexes the VAO list with the
+    result — so an importer-driven engine can build a perfect LOD chain that
+    Ogre will never select from. Required by ATOM stage 1 (SPECS/NANITE_SPEC.md
+    §7), which bakes the chain at import; the header documents the contract
+    (one entry per level in VAO order, entry 0 the strategy's base value, sorted
+    the way the active strategy sorts, set before any Item is created because
+    `Item::_initialise` caches the array's address). It restores a capability
+    upstream commented out and is a good upstream PR as it stands.
+    `--engine-selftest` byte-identical (`b55e2d5d…`).
+
+THE STACK IS 0001-0059 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
@@ -1192,7 +1213,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049 and 0050-0057 are SOURCE-only, and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057 and 0059 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

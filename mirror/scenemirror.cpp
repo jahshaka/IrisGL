@@ -4610,6 +4610,20 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     }
     if (out.normals.size() != out.positions.size()) out.normals.clear();
     if (out.uvs.size() != nv * 2) out.uvs.clear();
+
+    // ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the LOD chain the bake built,
+    // handed across as-is. The levels index the SAME vertices as `indices`, and
+    // the V flip above moves no vertex, so nothing here has to be remapped. A
+    // mesh with no chain (every skinned mesh, every mesh too small to simplify,
+    // and every model opened without a bake) carries empty vectors, which is
+    // what the engine already does today.
+    const int levels = std::min(mesh->lodIndices.size(), mesh->lodErrors.size());
+    for (int i = 0; i < levels; ++i) {
+        const QVector<quint32> &level = mesh->lodIndices.at(i);
+        if (level.size() < 3 || level.size() % 3 != 0) break;
+        out.lodIndices.emplace_back(level.constBegin(), level.constEnd());
+        out.lodErrors.push_back(mesh->lodErrors.at(i));
+    }
     return out.indices.size() >= 3;
 }
 

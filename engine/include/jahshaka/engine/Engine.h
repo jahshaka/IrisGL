@@ -301,6 +301,16 @@ public:
     /// Materials with no generated piece do not read it and are unaffected.
     virtual void        setShaderTime(float seconds) = 0;
     virtual float       shaderTime() const = 0;
+    /// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the scene-wide LOD dial. 1 is the
+    /// reference — every mesh switches level where its baked geometric error
+    /// reaches one pixel at the reference projection (Types.h, LodReference).
+    /// Larger swaps earlier (coarser); 0 PINS every object at level 0, which is
+    /// how a pixel test asserts one level at a time and how a user turns the
+    /// whole thing off. Applies immediately to meshes that already exist: the
+    /// values are re-derived in place and every Item reads them through a
+    /// pointer. Meshes with no baked chain are unaffected by any value.
+    virtual void        setLodBias(float bias) = 0;
+    virtual float       lodBias() const = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
     /// text. Empty (lastError()) for an unknown material.
     ///

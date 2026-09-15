@@ -2506,6 +2506,13 @@ public:
                                 CustomPieceStage stage) override;
     void setShaderTime(float seconds) override;
     float shaderTime() const override;
+    /// ATOM stage 1: the scene-wide LOD dial (OgreMesh.cpp).
+    void  setLodBias(float bias) override;
+    float lodBias() const override { return mLodBias; }
+    /// Writes `errors` (level 1 first, a length in mesh units each) into
+    /// `mesh`'s LOD value array at the current bias. Patch 0059 added the
+    /// setter this needs.
+    void  applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &errors) const;
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool detachMesh(NodeId id) override;
@@ -3165,6 +3172,13 @@ private:
         /// DIFFERENT map has to be refused rather than silently re-target the
         /// first node's weights.
         std::vector<Ogre::uint16> blendToRig;
+        /// ATOM stage 1: the per-level geometric errors this mesh was built
+        /// with (a length in mesh units, level 1 first — level 0 has none).
+        /// Empty for a mesh with no LOD chain, which is most of them. Kept so a
+        /// LOD-bias change can re-derive the mesh's switch distances without
+        /// rebuilding a buffer: the Items hold a POINTER to the Ogre mesh's
+        /// value array, so rewriting that array in place moves every instance.
+        std::vector<float> lodErrors;
     };
     /// A rig, as this scene knows it. The Ogre-side SkeletonDef is cached
     /// PROCESS-wide by SkeletonManager under the same id (GPU_SKINNING_SPEC R6),
@@ -4023,6 +4037,9 @@ private:
     /// than the node address, which Ogre recycles.
     std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
     std::map<MeshId, MeshRec> mMeshes;
+    /// ATOM stage 1: the scene-wide LOD dial. 1 = the reference budget of one
+    /// pixel of geometric error; 0 pins every object at level 0.
+    float mLodBias = 1.0f;
     std::map<std::string, RigRec> mRigs;
     std::map<NodeId, NodeClips> mClips;
     std::map<MaterialId, MaterialRec> mMaterials;
