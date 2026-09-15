@@ -3503,8 +3503,11 @@ private:
     /// In hybrid mode also (re)builds the PCC probe grid.
     void rebuildVct();
     /// Builds the ParallaxCorrectedCubemapAuto probe grid over `region` — the
-    /// FREE SPACE from computeProbeRegion, NOT the voxel volume — and binds it
-    /// with distance-blended VCT specular (PccVctMinDistance).
+    /// scene's own fitted box — and binds it with distance-blended VCT specular
+    /// (PccVctMinDistance). Every candidate probe photographs its surroundings
+    /// during the placement; the ones that saw nothing within twice their own
+    /// region are DROPPED, and a grid left with none is not built at all (the
+    /// sky stays the reflection source). See the long note on the definition.
     void buildPcc(const Ogre::Aabb &region);
 
     // ---- DDGI: the IrradianceField arm (GI_UNIFIED_SPEC.md §4 P1) ---------
@@ -3849,7 +3852,7 @@ private:
     /// trimming: the one place that decides which objects define the lit world.
     std::vector<Ogre::Aabb> giItemBounds() const;
     /// The same list BEFORE the outlier trim — every GI item's world AABB as it
-    /// is. computeProbeRegion's slab search reads shapes, not fitted volumes.
+    /// is.
     std::vector<Ogre::Aabb> giItemBoundsRaw() const;
     /// Records (or clears) mGiAutoVolume after a rebuild. `fitted` is what the
     /// AUTO path resolved; a hand-typed bounds box clears the record instead.
@@ -3862,13 +3865,6 @@ private:
     /// Pushes mAmbientRadiance into the VCT arm (no-op without one). Called on
     /// every ambient change and whenever the arm is (re)built.
     void applyVctAmbient();
-    /// Where the reflection probes live: the free space inside `litVolume`.
-    /// See the long-form argument on the definition — handing the padded voxel
-    /// volume here instead is what made P4's finding-2 reflections go black.
-    /// `enclosedAxesOut` (optional) receives how many of the three world axes
-    /// are closed by two FACING slabs — the measured enclosure that decides
-    /// whether a probe grid is worth building at all (buildPcc, refreshVctFast).
-    Ogre::Aabb computeProbeRegion(const Ogre::Aabb &litVolume, int *enclosedAxesOut = nullptr) const;
     /// Unbinds from HlmsPbs (when this scene owns the binding) and deletes the
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
@@ -4263,11 +4259,13 @@ private:
     /// RESOLVED probe capture size (pixels per cube face) of the live grid, 0
     /// when there is none. GiParams::probeCaptureSize is the request.
     int  mPccCaptureSize = 0;
-    /// The enclosure measurement of the last probe-region fit, and whether it
-    /// made buildPcc decline the grid (GiStatus::probeEnclosedAxes /
-    /// probeGridRefused — the owner's "the sky is your first reflection asset").
-    int  mProbeEnclosedAxes = 0;
-    bool mProbeGridRefused  = false;
+    /// How many candidate probes the last buildPcc DROPPED because their own
+    /// captured depth showed nothing within twice their region (GiStatus::
+    /// probesDropped — the owner's "the sky is your first reflection asset",
+    /// measured per probe instead of by measuring the scene for a room).
+    /// Non-zero with no grid at all means every probe saw nothing, which is a
+    /// built state; zero with no grid in the hybrid means the build failed.
+    int  mProbesDropped = 0;
     /// The raster IrradianceField's one workspace names the probe shadow node
     /// (dropGiForShadowRebuild must tear the field down before an atlas rebuild).
     bool mIfdShadowed = false;
