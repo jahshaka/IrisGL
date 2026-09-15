@@ -10,6 +10,7 @@
 // keep their names by the rename's own mapping rule.
 #include "EnginePrivate.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -163,11 +164,22 @@ static bool resolveToggle(GiToggle t, bool autoValue) {
 // anyway) and tight enough that a fit which escaped the room is caught.
 static const float kProbeShapeCellAllowance = 8.0f;
 
-// HOW MANY ENCLOSED AXES MAKE A ROOM (buildPcc, refreshVctFast). Two: a floor
-// and a ceiling with no walls, or four walls with no roof, are both spaces a
-// probe can photograph. One — a ground plane, and nothing else — is the open
-// sky, which the sky IBL already holds perfectly and for free.
-static const int kMinEnclosedAxes = 2;
+// HOW BIG A PROBE'S PHOTOGRAPHED BOX MAY BE, AS A FRACTION OF THE VOLUME THE
+// RENDERER LIT, AND STILL BE WORTH BUILDING (buildPcc's depth rule, R5-ROOM).
+// 1.0 is the physical line rather than a tuned number: at 1 the probe's own box
+// IS the lit world, which is what the depth encoding returns for faces that saw
+// nothing, and below it the probe photographed a smaller space — something is
+// near it. Measured on the suites' scenes: probes inside a room 0.10 - 0.55,
+// probes with nothing near them 1.3 - 6.0.
+static const float kProbeSeesGeometry = 1.0f;
+
+// WHAT THE SCOUT PASS CAPTURES AT (buildPcc). The placement's shrink-fit reads
+// ONE 1x1 AVERAGED TEXEL per cube face — the smallest mip — so the only thing
+// the scout's resolution buys is how faithfully that average represents the
+// face. 32 is 1024 samples per face: enough that a wall, a column or a doorway
+// is in the average, small enough that the whole scout costs a fraction of one
+// real capture (a real one is 256 or 512 per face, 64x-256x the pixels).
+static const Ogre::uint32 kProbeScoutResolution = 32u;
 
 // ---- DDGI (GI_UNIFIED_SPEC.md §4 P1) constants ---------------------------
 
@@ -347,11 +359,13 @@ bool OgreScene::refreshVctFast() {
     if (!mVctCascades.empty()) return false;
     if (mGiCachesDirty) return false;                  // a flush is already owed; it rebuilds
     if (mGiBuiltGeneration != mGiDestroyGeneration) return false;   // something may have died
-    // `mProbeGridRefused` is a BUILT state, not a failed one (buildPcc's
-    // enclosure rule): an open scene has no grid on purpose, and forcing a
+    // NO GRID CAN BE A BUILT STATE, not a failed one (buildPcc's depth rule):
+    // when every candidate probe photographed nothing but distance the scene has
+    // no grid ON PURPOSE and the sky is its reflection, and forcing a
     // from-scratch rebuild on every refresh because it has none would make the
-    // cheapest scene in the editor pay the most.
-    if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbeGridRefused) return false;
+    // cheapest scene in the editor pay the most. `mProbesDropped` is what
+    // separates that from a grid that failed to build at all.
+    if (mGi.mode == GiMode::VctPccHybrid && !mPcc && !mProbesDropped) return false;
 
     Ogre::Vector3 mn, mx;
     if (!computeGiBounds(mn, mx)) return false;
@@ -367,22 +381,22 @@ bool OgreScene::refreshVctFast() {
             if (std::fabs(dc[ax]) > tol || std::fabs(dh[ax]) > tol) return false;
         return true;
     };
-    Ogre::Aabb region = mGiProbeRegion;
     if (mGi.mode == GiMode::VctPccHybrid) {
-        // THE ENCLOSURE IS RE-MEASURED HERE TOO, and a change of VERDICT takes
-        // the full rebuild (round-2 send-back, 2026-09-13). Reading it without
-        // the out-param left two defects: the reported `probeEnclosedAxes` went
-        // stale for as long as the fast path kept the grid, and — worse —
-        // raising walls at the EXISTING hull faces changes the enclosure
-        // WITHOUT moving the region, so `sameBox` accepted the reuse and the
-        // scene stayed probe-less (or kept a grid it should no longer have)
-        // until something else forced a from-scratch rebuild.
-        int enclosed = 0;
-        region = computeProbeRegion(aabb, &enclosed);
-        const bool wouldRefuse = enclosed < kMinEnclosedAxes && !giBoundsExplicit();
-        if (wouldRefuse != mProbeGridRefused) return false;   // the grid itself is wrong now
-        if (!sameBox(region, mGiProbeRegion)) return false;   // shapes must be re-derived
-        mProbeEnclosedAxes = enclosed;                        // keep giStatus honest
+        // THE PROBE GRID IS A FUNCTION OF THE LIT VOLUME (R5-ROOM): the scout
+        // is spread through it, the space it measures is inside it, and the
+        // grid is placed in that. So THIS is the box to compare — not the probe
+        // region, which is the scout's ANSWER and is smaller by construction
+        // (comparing the answer against the question refused every reuse, and
+        // an albedo edit then paid for a from-scratch re-placement: measured
+        // 12 captures in one frame against a budget of 1, gi.probe_inputs).
+        //
+        // WHAT IS NOT RE-DECIDED HERE, and deliberately: which probes the rule
+        // keeps and where the space is. Both are PHOTOGRAPHS and can only be
+        // re-taken by re-capturing, which is the from-scratch rebuild this path
+        // exists to avoid. Small edits inside a space keep the space, so they
+        // keep its probes; a change big enough to move the lit volume takes the
+        // rebuild and is re-photographed there.
+        if (!sameBox(aabb, mGiLitVolume)) return false;
     }
 
     JAH_TRY {
@@ -428,8 +442,7 @@ bool OgreScene::refreshVctFast() {
         const auto tVoxels = std::chrono::steady_clock::now();
         voxelWork.setUnits(unsigned(mVctItemIds.size()));
         voxelWork.close();
-        mGiLitVolume = aabb;
-        mGiProbeRegion = region;
+        mGiLitVolume = aabb;      // materially the box the grid was placed from
         noteGiAutoVolume(aabb, !giBoundsExplicit());
         // NOT re-bound to HlmsPbs, deliberately. `rebuildVct` takes the
         // process-wide binding because a BUILD is a statement about which
@@ -626,11 +639,10 @@ GiStatus OgreScene::giStatus() const {
         // RESOLVED, not requested: both default to GiToggle::Auto, and the
         // shadow half additionally falls back when there is no shadow node.
         st.probeCaptureSize   = mPcc ? mPccCaptureSize : 0;
-        // The enclosure decision (buildPcc). Reported in EVERY mode so a caller
-        // can tell "no grid because this is an open scene" from "no grid
-        // because the mode does not build one".
-        st.probeEnclosedAxes  = mProbeEnclosedAxes;
-        st.probeGridRefused   = mProbeGridRefused;
+        // The depth rule's verdict (buildPcc). Reported in EVERY mode so a
+        // caller can tell "no grid because every candidate probe saw nothing"
+        // from "no grid because the mode does not build one".
+        st.probesDropped      = mProbesDropped;
         st.probeHdr     = mPcc && mPccHdr;
         st.probeShadows = (mPcc && mPccShadowed) || (mIfd && mIfdShadowed);   // either shadowed capture arm
         // RESOLVED, like the two above: the request is clamped to the probes
@@ -979,15 +991,12 @@ Ogre::Light *OgreScene::markGiLight(NodeId requested) {
 // population, cannot be protected by the hysteresis floor, and therefore still
 // shrinks the volume the instant it is flagged.
 // The PLAIN gather, before any outlier trimming: every GI item's world AABB as
-// it actually is. computeProbeRegion's slab search reads this one — an item's
-// SHAPE is its evidence there, and the morph below deliberately moves a trimmed
-// box's faces.
+// it actually is.
 // AN ITEM IS A SLAB FOR AN AXIS when it is at least kSlabAspect times broader
 // on BOTH other axes than it is thick on this one. Self-relative, so it is
-// scale-free and population-free — a wall is a wall whatever else is in the
-// scene, and nothing here reads a position or a size constant. The enclosure
-// search below is its other caller (it is the same reading, and deliberately so
-// — see the note on kSlabAspect there).
+// scale-free and population-free — a floor is a floor whatever else is in the
+// scene, and nothing here reads a position or a size constant. The lit volume's
+// ground clip (giItemBounds) is its ONE caller.
 static bool giIsSlab(const Ogre::Aabb &a, size_t ax);
 
 std::vector<Ogre::Aabb> OgreScene::giItemBoundsRaw() const {
@@ -1211,10 +1220,6 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         // surface itself — the floor stays in the volume, it just stops
         // reaching past the walls. Non-slab outliers (a big prop, an imported
         // vehicle) keep the geometric morph: they are content, not scenery.
-        //
-        // The probe ENCLOSURE is unaffected by construction: computeProbeRegion
-        // runs its slab search on giItemBoundsRaw(), the untrimmed gather, so
-        // the ground goes on being the floor that closes the Y axis.
         size_t thin = 3u;
         for (size_t ax = 0; ax < 3u; ++ax)
             if (giIsSlab(all[i], ax) &&
@@ -1623,311 +1628,40 @@ unsigned OgreScene::giVoxelResolution() const {
     }
 }
 
-// THE PROBE REGION AND THE ENCLOSURE, FROM ONE MEASUREMENT OF THE LAYOUT
-// (REFLECTIONS_ADOPTION_SPEC.md P1a + owner decision 2026-09-13 Q3).
+// THE ONE SHAPE READING LEFT IN THIS FILE (ENGINE-4 item 5's ground clip).
 //
-// Two answers come out of here and they are the SAME reading, deliberately:
-//   * WHERE the probes live — `PccPerPixelGridPlacement::setFullRegion` does
-//     NOT take a bounding box of the geometry, it takes the FREE SPACE the
-//     probes will occupy (upstream's own sample hands it a 1x1x1 room's exact
-//     interior, no margin at all);
-//   * WHETHER there is anything to photograph — `enclosedAxesOut` counts the
-//     world axes that are closed on BOTH sides. buildPcc declines the grid
-//     below two of them.
-// They cannot be two measurements. If the walls are not found, the region is
-// ALSO wrong — it keeps the empty acres of whatever the content is standing on,
-// which is the A1/A2 shrink-fit pathology — so a scene either has a room (its
-// region is that room's interior, its probes are worth building) or it has not.
-//
-// WHY THE REGION MATTERS, measured (gi.pcc_bounds, 2x1x2 probes, identical
-// geometry, ONLY the region changing):
-//     region = geometry + 0.2   mirror pixel r = 0.251
-//     region = geometry + 0.4                   0.063
-//     region = geometry + 0.6                   0.000   <- black
-//     region = geometry + 1.6                   0.000
-// The chain: buildEnd shrink-fits each probe by reading ONE 1x1 averaged depth
-// value per cube face, encoded as 0.5 * fDist / fApproxDist where fApproxDist
-// is measured to the REGION box. Averaging that ratio over a 90-degree face is
-// only well behaved while the region is close to the geometry; once it is not,
-// the fitted parallax boxes overshoot the room by many units (measured: a probe
-// in a room spanning x in [-4,4] fitted to x in [-4.6, +7.7]). The PBS hybrid
-// then compares the probe's parallax-reconstructed hit against the VCT cone hit
-// (getPccVctBlendWeight -> distToVct), finds them further apart than
-// pccVctMinDistance, and hands the pixel to VCT — which in a sealed room has
-// nothing, i.e. black. probeCount and pccBound stay perfectly healthy
-// throughout, which is exactly why P4 could not see it.
-//
-// ---- THE MEASUREMENT: FACING SLABS, NOT A HULL ----------------------------
-//
-// It asks the question the owner asked — "isn't it the layout of objects in a
-// scene that matters" — directly, and of the objects THEMSELVES:
-//
-//   1. an item is a SLAB for an axis when it is thin on that axis and broad on
-//      the other two RELATIVE TO ITSELF (kSlabAspect). A wall, a floor, a
-//      ceiling, a partition and a billboard are slabs; a chair, a car, a column
-//      and a crate are not, at any scale, in any scene;
-//   2. a slab may CLOSE a face of the region only if it COVERS the region —
-//      at least half its cross-section on each of the other two axes, counting
-//      only axes something actually bounds (R1). Being thin and broad is what
-//      makes an item a slab; spanning the space is what makes it a wall. A
-//      shelf, a tabletop, a rug and a hanging light box are slabs by shape and
-//      none of them is a ceiling;
-//   3. an axis is ENCLOSED by a FACING PAIR of covering slabs across a REAL gap
-//      — two different slabs, one entirely beyond the other, overlapping
-//      substantially on the other two axes (R2). A floor and a ceiling; two
-//      facing walls. The OUTERMOST pair is the shell and anything between them
-//      is furniture, whatever its size;
-//   4. a LONE covering slab closes its one face only when NOTHING lies beyond
-//      it (R3): the ground has nothing below it and is the floor; a partition
-//      standing across a hall has the hall on both sides and closes nothing.
-//
-// THERE IS NO WORLD-ORIGIN TERM AND NO "WHICH SIDE OF THE CONTENT" TERM IN ANY
-// OF IT, and that is a correction, not a decoration (round-3 send-back,
-// 2026-09-13). Round 2 decided a slab's side by comparing its centre against
-// the midpoint of every NON-slab item — and on the default 100 m ground that
-// midpoint IS the world origin, because the ground is the content on X and Z.
-// Measured on this file's own contract geometry: the room of case 1 at the
-// origin read enclosed 2 with region x = [-4.90, 4.90]; THE SAME ROOM built at
-// x = +25 read enclosed 1 with x = [-50.00, 29.90] and lost its reflections
-// outright, and the roofed one kept them over a region spanning the whole 80 m
-// from the origin to the far wall — the oversized-region shrink-fit chain,
-// reached by translation. Contract rows 7 and 8 are that pair.
-//
-// WHY IT REPLACED THE HULL TEST (round-2 send-back, 2026-09-13; the lead's
-// measurement). The old test asked whether a slab covered half of the CONTENT
-// HULL on the other two axes and had its outer face at that hull's face — and
-// the hull is `giItemBounds()`, in which a trimmed outlier's half-size is
-// blended GEOMETRICALLY back towards its full one. For the ordinary case this
-// whole feature is about — a new project, the default 100 m ground, four 10 m
-// walls, a mirror — that blend put the hull at +-31 m: the walls covered 10 of
-// the 31 m required, failed before the outer-face test was even reached, and
-// the room measured OPEN. Raising the walls to 30 m does not help either (the
-// ground stops being an outlier at all, the hull becomes +-50, and 30 < 50), so
-// "build the hull from untrimmed items" repairs the small room and breaks the
-// large one. The defect is the hull itself: whatever the scene stands ON
-// dominates a measurement that is supposed to be about what stands on IT.
-// Slab-ness is self-relative and the pairing is slab-to-slab, so the ground
-// takes part in the Y answer (it is the floor) and never becomes a wall of the
-// X or Z ones — it is not thin on those axes. What it DOES still do there is
-// set the hull those axes fall back to when nothing closes them, which is the
-// honest answer ("this axis is open") rather than a verdict. Nothing here is
-// tuned to a size, and nothing here reads a position.
-//
-// THE A1 FIX IS STRUCTURAL NOW, not a condition. The Mirror Room sample's
-// free-standing MirrorPanel — a 5.2 x 3.0 x 0.24 slab standing at z = -2.2 in a
-// room whose walls are at z = +-5.25 — IS a slab for Z, and used to be read as
-// the room's -Z wall, truncating the probe region at its own face (measured:
-// probeRegionMin.z came back EQUAL to the panel's zMax to five decimals; every
-// probe was then fitted inside a third of a room, the parallax boxes
-// disagreed with the voxel volume, and `getPccVctBlendWeight` handed those
-// pixels to VCT — black, in a sealed room). It cannot be read that way here:
-// the outermost Z slabs are the two walls, and the panel is simply inside the
-// room. Any partition, screen, counter or bookcase is covered by the same
-// sentence. Covered by gi.pcc_bounds' A1 case.
-//
-// KNOWN LIMIT, documented rather than papered over: a room imported as ONE
-// hollow mesh has an AABB that IS its outer shell — it is not a slab on any
-// axis, so it has no walls to find and the scene measures OPEN. Such a scene
-// needs the explicit bounds rows (which clamp this region AND stand the
-// enclosure rule down — see buildPcc) or the per-node exclude flag. Only a
-// second depth-readback pass could do better, and that doubles the probe render
-// cost.
-
 // An item is a SLAB for an axis when it is at least this many times broader on
 // BOTH other axes than it is thick on this one. Self-relative, so it is
 // scale-free and population-free: nothing about the rest of the scene can make
-// a wall stop being a wall.
+// a floor stop being a floor, and nothing here reads a position, a count or a
+// world origin. Its ONE caller is `giItemBounds`, which clips an oversized slab
+// to the content it supports — a statement about ONE item's own shape, not
+// about the layout of a scene and not about any enclosure.
 //
 // 2.0 IS MEASURED, not chosen. The two populations it has to separate, taken
 // from the shapes the suites and the shipped samples actually contain:
-//   walls and floors    gi.pcc_bounds' THICK room — a 1.4 m wall over a 5 m
+//   floors and walls    gi.pcc_bounds' THICK room — a 1.4 m wall over a 5 m
 //                       storey — is the slimmest real one at 3.57; the thin
 //                       rooms are 12.5, a ground plane is hundreds;
 //   everything else     a column or pillar is 1.00 whatever its size (square
 //                       cross-section, by definition), an imported car 1.36,
 //                       a sofa ~1.1.
 // So the honest split is the geometric middle of 1.36 and 3.57, and it costs
-// 1.8x of margin on the wall side and 1.5x on the other. Two REDS in
-// gi.pcc_bounds found it: at 4.0 the thick room's walls were read as furniture,
-// its probe region stayed at the walls' outer faces and its auto-bounds twin
-// measured OPEN and lost its grid.
+// 1.8x of margin on the slab side and 1.5x on the other.
 //
-// Being read as a slab is not, by itself, being read as a wall: only the
-// OUTERMOST slab on each side of the content closes a face, so a bookcase or a
-// display panel inside a room changes nothing.
+// (THE ROOM-MEASURING PROBE RULE THAT USED TO LIVE HERE IS GONE — lane R5-ROOM,
+// 2026-09-15, owner+lead joint decision "no room in any definition", PHOTON_SPEC
+// §13. `computeProbeRegion` read the LAYOUT of a scene's items — facing slabs,
+// covering faces, an enclosed-axis count — to decide both where the probe grid
+// lived and whether it was built at all. No lighting decision may test for a
+// room, an enclosure, a wall or an axis count: the replacement is what each
+// probe SEES, measured from its own captured depth, and it is in `buildPcc`.)
 static const float kSlabAspect = 2.0f;
 static bool giIsSlab(const Ogre::Aabb &a, size_t ax) {
     const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
     const float thin  = std::max(a.mHalfSize[ax], 1e-5f);   // a plane has zero
     const float broad = std::min(a.mHalfSize[o1], a.mHalfSize[o2]);
     return broad > 0.0f && broad >= kSlabAspect * thin;
-}
-// How much of the SMALLER slab's extent the two must share on each of the other
-// two axes to be "facing each other" rather than merely parallel somewhere in
-// the world.
-static const float kSlabFacingOverlap = 0.5f;
-// ...and how big the gap between them must be, as a fraction of the smaller
-// slab's own cross-section, for the space between to be a VOLUME. A rug lying
-// on a floor is two parallel Y slabs 5 mm apart; a crawlspace is not.
-static const float kSlabMinGapFraction = 0.05f;
-// HOW MUCH OF THE ROOM A SLAB MUST COVER TO BE ALLOWED TO CLOSE A FACE OF IT
-// (round-3 rule R1). Being thin and broad makes an item a slab; being a WALL
-// or a CEILING additionally means spanning the space it is supposed to close.
-// A shelf, a tabletop, a rug, a hanging panel and a light box are all slabs by
-// shape and none of them covers the room. Half is the same threshold the
-// facing test already uses for slab-to-slab overlap, applied to the region.
-static const float kSlabRegionCover = 0.5f;
-
-Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
-                                         int *enclosedAxesOut) const {
-    if (enclosedAxesOut) *enclosedAxesOut = 0;
-    const std::vector<Ogre::Aabb> items = giItemBounds();
-    if (items.empty()) return litVolume;
-
-    // THE STARTING BOX is still the TIGHT union (no margin) of the same items
-    // the lit volume uses, clamped into the lit volume — so an explicit user
-    // bounds box still governs the extent, and a user who types the room's
-    // interior gets the room's interior. Every face below is only ever pulled
-    // INWARDS from here (the A2 shape clamp depends on that).
-    Ogre::Vector3 mn(1e30f), mx(-1e30f);
-    for (const Ogre::Aabb &a : items) { mn.makeFloor(a.getMinimum()); mx.makeCeil(a.getMaximum()); }
-    mn.makeCeil(litVolume.getMinimum());
-    mx.makeFloor(litVolume.getMaximum());
-    for (size_t ax = 0; ax < 3u; ++ax)
-        if (!(mn[ax] < mx[ax])) return litVolume;   // clamped to nothing: keep the caller's box
-
-    const Ogre::Vector3 hullMin = mn, hullMax = mx;
-
-    // THE SLAB SEARCH runs on the RAW world AABBs, not the trimmed ones: an
-    // item's SHAPE is the evidence here, and giItemBounds' outlier morph moves
-    // a trimmed box's faces (that is its job — it is fitting a lit volume, not
-    // describing geometry). This is the same list, before the trim.
-    const std::vector<Ogre::Aabb> raw = giItemBoundsRaw();
-    if (raw.empty()) return Ogre::Aabb::newFromExtents(mn, mx);
-
-    // The shape test itself is giIsSlab (file scope): the lit volume's fit reads
-    // it too, so that "what is scenery" is ONE reading in this file.
-    const auto isSlab = [](const Ogre::Aabb &a, size_t ax) { return giIsSlab(a, ax); };
-
-    // What one axis' reading is: where its two faces ended up, whether each was
-    // CLOSED by a slab (as opposed to left at the hull), and whether the axis
-    // ENCLOSES — which only a facing PAIR can make true.
-    struct AxisRead { float lo = 0.0f, hi = 0.0f; bool closedLo = false, closedHi = false, enclosed = false; };
-
-    // THE READING FOR ONE AXIS. `coverAgainst` is null on the first pass (the
-    // seed) and points at the first pass' answer on the second (see R1 below).
-    const auto readAxis = [&](size_t ax, const AxisRead *coverAgainst) -> AxisRead {
-        const size_t o1 = (ax + 1u) % 3u, o2 = (ax + 2u) % 3u;
-        AxisRead out;
-        out.lo = hullMin[ax];
-        out.hi = hullMax[ax];
-
-        // R1: A SLAB MAY CLOSE A FACE ONLY IF IT COVERS THE ROOM. Coverage is
-        // measured against the REGION, per other axis — and ONLY against an
-        // axis something actually bounds. An axis with no slab of its own still
-        // carries the whole ground plane, and nothing real covers half of a
-        // hundred metres: measuring against it would reject the two long walls
-        // of an open-ended hall, which are exactly the walls that make it one.
-        const auto covers = [&](const Ogre::Aabb &a) {
-            if (!coverAgainst) return true;                   // pass 1: the seed
-            for (size_t k : { o1, o2 }) {
-                const AxisRead &r = coverAgainst[k];
-                if (!r.closedLo && !r.closedHi) continue;     // nothing bounds it: not evidence
-                const float span = r.hi - r.lo;
-                if (!(span > 1e-5f)) continue;
-                const float overlap = std::min(a.getMaximum()[k], r.hi) - std::max(a.getMinimum()[k], r.lo);
-                if (overlap < kSlabRegionCover * span) return false;
-            }
-            return true;
-        };
-
-        // The OUTERMOST covering slab on either side. Anything between them is
-        // furniture whatever its size — which is the structural form of the A1
-        // fix (the Mirror Room's free-standing panel is a Z slab and is simply
-        // inside the room).
-        const Ogre::Aabb *lo = nullptr, *hi = nullptr;
-        for (const Ogre::Aabb &a : raw) {
-            if (!isSlab(a, ax) || !covers(a)) continue;
-            if (!lo || a.mCenter[ax] < lo->mCenter[ax]) lo = &a;
-            if (!hi || a.mCenter[ax] > hi->mCenter[ax]) hi = &a;
-        }
-        if (!lo) return out;                                  // no shell on this axis
-
-        // R2: TWO-SIDED CLOSURE IS A FACING PAIR ACROSS A REAL GAP. Two
-        // different slabs, one entirely below the other on this axis, sharing
-        // most of their extent on the other two, with a volume between them.
-        // There is NO world-origin term and no "which side of the content" term
-        // anywhere in this: a room is a room wherever on the ground it stands.
-        if (lo != hi && lo->getMaximum()[ax] < hi->getMinimum()[ax]) {
-            const auto shares = [&](size_t k) {
-                const float l = std::max(lo->getMinimum()[k], hi->getMinimum()[k]);
-                const float h = std::min(lo->getMaximum()[k], hi->getMaximum()[k]);
-                const float smaller = 2.0f * std::min(lo->mHalfSize[k], hi->mHalfSize[k]);
-                return (h - l) >= std::max(smaller * kSlabFacingOverlap, 1e-5f);
-            };
-            const float smallestSpan =
-                2.0f * std::min(std::min(lo->mHalfSize[o1], hi->mHalfSize[o1]),
-                                std::min(lo->mHalfSize[o2], hi->mHalfSize[o2]));
-            const float gap = hi->getMinimum()[ax] - lo->getMaximum()[ax];
-            if (shares(o1) && shares(o2) && gap >= smallestSpan * kSlabMinGapFraction) {
-                out.lo = std::min(std::max(lo->getMaximum()[ax], hullMin[ax]), hullMax[ax]);
-                out.hi = std::max(std::min(hi->getMinimum()[ax], hullMax[ax]), hullMin[ax]);
-                out.closedLo = out.closedHi = true;
-                out.enclosed = true;
-                if (!(out.lo < out.hi)) return AxisRead{ hullMin[ax], hullMax[ax], false, false, false };
-                return out;
-            }
-        }
-
-        // R3: A LONE SLAB CLOSES ITS ONE FACE ONLY WHEN NOTHING IS BEYOND IT.
-        // The ground has nothing below it and is the floor; a partition
-        // standing in a hall has the hall on both sides and is a partition. The
-        // old code pulled a face towards any slab that sat past the middle of
-        // the content, so one partition in an open-ended hall dropped half of
-        // it — and which half depended on where the world origin was.
-        const float eps = 1e-4f * std::max(hullMax[ax] - hullMin[ax], 1.0f);
-        const auto beyond = [&](const Ogre::Aabb *s, bool below) {
-            for (const Ogre::Aabb &a : raw) {
-                if (&a == s) continue;
-                if (below ? (a.getMinimum()[ax] < s->getMinimum()[ax] - eps)
-                          : (a.getMaximum()[ax] > s->getMaximum()[ax] + eps))
-                    return true;
-            }
-            return false;
-        };
-        // The outermost slab on each side gets to close THAT side, and only if
-        // its outside is empty. A slab that is the whole extent of the scene on
-        // this axis (nothing beyond it either way) says nothing about which
-        // side the room is on, so it closes nothing.
-        if (!beyond(lo, true) && beyond(lo, false)) {
-            out.lo = std::min(std::max(lo->getMaximum()[ax], hullMin[ax]), hullMax[ax]);
-            out.closedLo = true;
-        }
-        if (!beyond(hi, false) && beyond(hi, true)) {
-            out.hi = std::max(std::min(hi->getMinimum()[ax], hullMax[ax]), hullMin[ax]);
-            out.closedHi = true;
-        }
-        if (!(out.lo < out.hi)) return AxisRead{ hullMin[ax], hullMax[ax], false, false, false };
-        return out;
-    };
-
-    // TWO PASSES, because R1 measures a slab against the region and the region
-    // is what the slabs decide. Pass 1 seeds it with the closure rules alone;
-    // pass 2 re-reads every axis with the cover test aimed at pass 1's answer
-    // and its per-axis "did anything bound this" flags. One iteration is
-    // enough: a pass-1 face can only ever be pulled INWARDS from the hull, and
-    // a smaller region only makes coverage easier, so no real wall can be
-    // rejected because of a pass-1 mistake — only a spurious closer removed.
-    AxisRead seed[3], final[3];
-    for (size_t ax = 0; ax < 3u; ++ax) seed[ax] = readAxis(ax, nullptr);
-    for (size_t ax = 0; ax < 3u; ++ax) final[ax] = readAxis(ax, seed);
-
-    for (size_t ax = 0; ax < 3u; ++ax) {
-        mn[ax] = final[ax].lo;
-        mx[ax] = final[ax].hi;
-        if (final[ax].enclosed && enclosedAxesOut) ++*enclosedAxesOut;
-    }
-    return Ogre::Aabb::newFromExtents(mn, mx);
 }
 
 // THE PARALLAX SHAPE CANNOT BE BIGGER THAN THE SPACE THE PROBES LIVE IN
@@ -1953,11 +1687,17 @@ Ogre::Aabb OgreScene::computeProbeRegion(const Ogre::Aabb &litVolume,
 // metal as the camera moves.
 //
 // A parallax box larger than the probe REGION is never right — the region IS
-// the free space the grid was fitted to, and the fix for the region itself
-// (P1a's computeProbeRegion, plus A1 above) is what makes that statement true.
-// So every fitted shape is clamped into it, per axis. This does not fight the
-// shrink-fit: a shape that fits inside the region is untouched, which is the
-// case for every probe in a plain empty room.
+// the space the grid was placed in, i.e. the scene's own fitted box, and a
+// reflection reprojected onto a box bigger than everything the renderer knows
+// about is reprojecting onto nothing. So every fitted shape is clamped into it,
+// per axis. This does not fight the shrink-fit: a shape that fits inside the
+// region is untouched, which is the case for every probe in a plain empty room.
+//
+// IT RUNS AFTER THE DEPTH RULE HAS ALREADY READ THE FIT (R5-ROOM), and that
+// order is load-bearing in both directions: this clamp is what makes an
+// unshrunk box harmless, and it is also what makes an unshrunk box
+// indistinguishable from a shrunk one — so the rule that decides which probes
+// are worth keeping reads the placement's own ratios BEFORE this runs.
 //
 // Ogre's own bookkeeping is respected rather than poked around: the shape is
 // re-published through `CubemapProbe::set`, keeping the probe's camera
@@ -3188,15 +2928,18 @@ void OgreScene::rebuildVct() {
     mGiLitVolume = cascadeArm ? Ogre::Aabb(mVctCascades.back().centre,
                                            Ogre::Vector3(mVctCascades.back().halfSize))
                               : aabb;
-    // The probe grid gets its OWN region — the free space, not the padded voxel
-    // volume. computeProbeRegion's header is the whole argument (P4 finding 2).
+    // THE PROBE REGION IS THE SCENE'S OWN FITTED BOX (R5-ROOM). It used to be a
+    // separate, tighter box derived by measuring the scene's walls — and the
+    // measuring was the rule that retired, so what is left is the one box the
+    // renderer already fits to the content. The probes are spread through it and
+    // each one then photographs its own surroundings; `buildPcc` keeps the ones
+    // that saw something and drops the rest.
     if (mGi.mode == GiMode::VctPccHybrid && haveBounds) {
-        mProbeEnclosedAxes = 0;
-        // DELIBERATELY the scene's fitted box and not a cascade: a reflection
-        // probe is a photograph of an ENCLOSURE, and an enclosure is a property
-        // of the room, not of where the camera stands. The cascade arm changes
-        // where the BOUNCE is computed and nothing about where the probes live.
-        mGiProbeRegion = computeProbeRegion(aabb, &mProbeEnclosedAxes);
+        // DELIBERATELY the scene's fitted box and not a cascade: where the
+        // probes live is a property of the content, not of where the camera
+        // stands. The cascade arm changes where the BOUNCE is computed and
+        // nothing about where the probes live.
+        mGiProbeRegion = aabb;
         buildPcc(mGiProbeRegion);
         // The probe grid now owns the shader's one env-probe slot, so the IBL
         // cubemap must come OFF every datablock — see the long note at
@@ -3204,10 +2947,9 @@ void OgreScene::rebuildVct() {
         // applyReflectionToAll is a no-op walk when there is no sky reflection.
         applyReflectionToAll();
     }
-    // LAST, not beside `mGiLitVolume = aabb` above: computeProbeRegion calls
-    // giItemBounds again, and the hysteresis floor inside it must see the same
-    // record the lit volume was fitted against or the two could disagree about
-    // which items exist.
+    // LAST, not beside `mGiLitVolume = aabb` above: the hysteresis floor inside
+    // giItemBounds must see the same record the lit volume was fitted against or
+    // the two could disagree about which items exist.
     if (haveBounds) noteGiAutoVolume(aabb, !giBoundsExplicit());
 
     // The DDGI layer, over the volume this build just lit. After the VCT
@@ -4073,7 +3815,14 @@ void OgreScene::teardownExtraCascades() {
     mVctCascades.clear();
 }
 
-void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
+void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
+    // BY VALUE, and it has to be: the caller passes `mGiProbeRegion` itself and
+    // this function assigns that member below, so a reference would alias — the
+    // volume every measurement here is relative to would silently become the
+    // answer halfway through (it did: every probe of a pinned room read as
+    // having seen nothing, because its span was divided by the region instead
+    // of by the volume).
+    const Ogre::Aabb aabb = litVolume;
     // The probe GRID is (re)placed here: every probe workspace in the scene is
     // destroyed and rebuilt, which is why the monitor re-syncs its listeners
     // every frame rather than once.
@@ -4083,72 +3832,8 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     mPccHdr = mPccShadowed = false;
     mPccCaptureSize = 0;
-    mProbeGridRefused = false;
+    mProbesDropped = 0;
 
-    // NO ENCLOSURE MEANS NO PROBE GRID (owner decision 2026-09-13, Q3:
-    // "a user starts in the editor in a new project with an open scene and then
-    // builds by adding assets and objects... I would think the sky is your
-    // first reflection asset.").
-    //
-    // A reflection probe is a photograph of an enclosure taken from a point.
-    // `computeProbeRegion` has just MEASURED whether this scene has one, out of
-    // the same reading that fitted the region — rules R1-R3, stated in full at
-    // that function: an item is a SLAB for an axis when it is thin on that axis
-    // and broad on the other two relative to itself; a slab may CLOSE a face
-    // only if it also COVERS the region (half its cross-section on each of the
-    // other two axes), which is what separates a wall from a shelf; an axis is
-    // ENCLOSED by a FACING PAIR of covering slabs across a real gap, and a LONE
-    // covering slab closes its one face only when nothing at all lies beyond
-    // it. Nothing here assumes a "room" — the engine has no such concept, only
-    // geometry and where it stands — nothing is tuned to a size, and nothing
-    // reads a POSITION: the same room measures the same wherever it is built.
-    // The ground a scene sits on is the floor by R3 (nothing is below it) and
-    // decides nothing on X and Z, where it is the content rather than a wall.
-    //
-    // Below two such axes the probes would be photographing sky, and the cost
-    // of doing so is not small: at the shipped Epic grid that is 18-32 cube
-    // captures, 288-512 MiB of probe array, a probe shadow atlas per probe, and
-    // the per-pixel probe loop on every lit surface — to reproduce, badly and
-    // with a visible grid seam, exactly what the sky IBL already holds
-    // perfectly. The 2026-09-11 lighting audit measured the result of doing it
-    // anyway and called it finding #4: "moving the quality dial up replaced a
-    // correct sky reflection with a banded probe artifact", eighteen probes
-    // 346 m apart, nine of them buried under the ground plane.
-    //
-    // Declining is therefore the CHEAPER AND BETTER picture, and it costs no
-    // extra code to re-bind the sky: `reflectionTexForDatablocks()` already
-    // hands the IBL cubemap back to every datablock the moment `mPcc` is null
-    // (OgreSky.cpp — the env-probe slot has one occupant), and the caller runs
-    // applyReflectionToAll() right after this. The hybrid degrades to plain VCT
-    // + sky IBL, which is what Medium already looked like and what the owner's
-    // A/B preferred.
-    //
-    // It is reported rather than logged and forgotten: GiStatus carries
-    // `probeEnclosedAxes` and `probeGridRefused`, so "probeCount 0 in the
-    // hybrid" can be read as a decision instead of as the silent build failure
-    // gi.pcc_mirror was written to catch.
-    //
-    // ...AND IT IS A HEURISTIC ABOUT AN UNSTATED SPACE, so it stands down when
-    // the author has STATED one. Explicit `giBounds` rows are this engine's
-    // documented remedy for the one case the measurement provably cannot make
-    // (computeProbeRegion's own KNOWN LIMIT: a room imported as a single hollow
-    // mesh has an AABB that IS its outer shell, and no axis-aligned test can
-    // find its interior). A scene that has typed its lit volume has told the
-    // renderer where the space is; guessing over the top of that would be the
-    // renderer overruling the author. The auto path — which is every new
-    // project, every open scene and the case the owner described — is where the
-    // measurement decides, and it is the case the decision was about.
-    if (mProbeEnclosedAxes < kMinEnclosedAxes && !giBoundsExplicit()) {
-        mProbeGridRefused = true;
-        mProbeSlots.clear();
-        mProbeUpdatesPerFrame = 0;
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: no probe grid — the scene is enclosed on " +
-            std::to_string(mProbeEnclosedAxes) +
-            " of 3 axes and no bounds were pinned, so reflections come from the "
-            "sky and cone tracing");
-        return;
-    }
     // The slots name probes that are about to be (re)created; the first
     // updateProbeBudget after the build re-sizes and re-fills them.
     mProbeSlots.clear();
@@ -4190,20 +3875,132 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
                 "defined; capturing unshadowed");
         }
     }
-    mPcc = new Ogre::ParallaxCorrectedCubemapAuto(
-        Ogre::Id::generateNewId<Ogre::ParallaxCorrectedCubemapAuto>(),
-        mRoot, mSceneMgr, cm->getWorkspaceDefinition(probeWorkspace));
-
     if (!mGiCamera) mGiCamera = mSceneMgr->createCamera(processUniqueName("giPccCamera"));
     mGiCamera->setPosition(aabb.mCenter);
 
     const auto clampProbes = [](int n) { return Ogre::uint32(std::min(std::max(n, 1), 8)); };
     Ogre::uint32 numProbes[3] = { clampProbes(mGi.pccProbesX), clampProbes(mGi.pccProbesY),
                                   clampProbes(mGi.pccProbesZ) };
+
+    // ---- WHERE THE PROBES LIVE: ONE PHOTOGRAPH (lane R5-ROOM, 2026-09-15) --
+    //
+    // The probes are about to be spread through a box, and WHICH box decides
+    // the picture. `aabb` is the scene's fitted LIT VOLUME — the content's union
+    // plus a voxel of margin — and that is a box around the GEOMETRY, not
+    // around the space inside it. The two differ by a lot in ordinary scenes,
+    // because a room's floor and ceiling slabs overhang its walls and every
+    // scene stands on a ground. Handing the volume to the placement is
+    // measurably wrong, twice over:
+    //   * gi.probe_inputs' room — an 8 x 5 x 8 interior on a 17.6 m floor, so
+    //     the volume is +-9.07 — puts all four probes of a 2x1x2 grid at +-4.54,
+    //     i.e. INSIDE the wall slabs, each photographing the inside of a wall.
+    //     No probe's fitted shape then covers the middle of the room and the
+    //     mirror there renders BLACK (measured: r 0.004 against 1.000).
+    //   * gi.pcc_bounds' columned room renders 467 of its 1344 metal pixels as
+    //     hard black holes with the region at the volume (+-8.66), 467 at 0.96x
+    //     of it and ZERO at 0.924x — i.e. at the +-8.0 interior. Eight per cent
+    //     of slack brings back the artifact clampProbeShapesToRegion documents.
+    //
+    // THE RULE THAT USED TO COMPUTE THE TIGHT BOX HERE is deleted, not patched:
+    // it measured the scene for a ROOM — facing slabs, covering faces, an
+    // enclosed-axis count — and no lighting decision may do that any more
+    // (PHOTON_SPEC §13, owner+lead joint decision 2026-09-14). So the space is
+    // PHOTOGRAPHED instead, by ONE probe at the centre of the scene's own box,
+    // captured once at 32 px: its six averaged depth values are exactly "how
+    // far is the nearest surface in each direction", `PccPerPixelGridPlacement`
+    // fits its shape from them, and that shape — clamped into the volume — is
+    // where the grid goes. It reads no wall, counts no axis, and knows nothing
+    // about rooms; a room translated across the world measures identically
+    // (gi.probe_open cases 7 and 8).
+    //
+    // TWO THINGS ABOUT THE READING, both measured rather than assumed:
+    //
+    // 1. IT IS TAKEN AS SYMMETRIC ABOUT THE VIEWPOINT — the FURTHER of the two
+    //    readings on each axis sets both faces. A single viewpoint is truncated
+    //    by whatever stands in front of it, and taking its raw box reproduced
+    //    defect A1 exactly (the Mirror Room's free-standing panel: the region
+    //    stopped at the panel's face, the parallax boxes lost the room and the
+    //    mirror went black — measured on gi.pcc_bounds' A1 case and on the
+    //    partitioned hall of gi.probe_open case 10, whose whole -X half was
+    //    lost). The near side of a photograph can only be wrong SHORT — an
+    //    occluder — while the far side saw past it, so the far reading is the
+    //    one that bounds the space. It cannot over-reach: the volume clamps it.
+    //
+    // 2. A GRID OF VIEWPOINTS IS NOT BETTER, it is worse, and three ways of
+    //    combining one were built and measured before this was written. Each
+    //    probe's reading is LOCAL to it, so they cannot be pooled into a
+    //    boundary: the UNION of 27 scout boxes is dragged out by the viewpoints
+    //    standing outside the space (that same room read +-7.30 instead of
+    //    +-3.80, because a probe on the floor's overhang sees floor in the lower
+    //    half of every horizontal face); the MINIMUM is dragged across the scene
+    //    by the ones beyond the far wall (their "+X boundary" sits behind the
+    //    opposite wall); and the MEDIAN mixes readings that are not of the same
+    //    boundary at all (measured: a -X median of +2.02 for a room spanning
+    //    +-3.8). One viewpoint, from the middle, is the honest reading.
+    //
+    // The cost is six 32 px renders — the fit consumes ONE 1x1 AVERAGED TEXEL
+    // per face, so resolution buys nothing above that — measured at 5-10 ms on
+    // this box against 20-150 ms for the real placement, and paid for several
+    // times over by the closing re-capture the placement no longer does (see
+    // buildEnd below). A centre that opens inside something, or a scene with
+    // nothing near it, gives a degenerate or unchanged box and the volume is
+    // kept, which is the honest answer in both cases.
+    Ogre::Aabb region = aabb;
+    {
+        Ogre::ParallaxCorrectedCubemapAuto scoutPcc(
+            Ogre::Id::generateNewId<Ogre::ParallaxCorrectedCubemapAuto>(), mRoot, mSceneMgr,
+            cm->getWorkspaceDefinition("JahshakaPccProbeWorkspace"));
+        Ogre::PccPerPixelGridPlacement scout;
+        scout.setParallaxCorrectedCubemapAuto(&scoutPcc);
+        Ogre::uint32 one[3] = { 1u, 1u, 1u };
+        scout.setNumProbes(one);
+        scout.setFullRegion(aabb);
+        scout.setOverlap(Ogre::Vector3::UNIT_SCALE);
+        scout.setSnapDeviationError(Ogre::Vector3::ZERO);
+        scout.setSnapSides(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
+        const float scoutDiag = aabb.getSize().length();
+        scout.buildStart(kProbeScoutResolution, mGiCamera, Ogre::PFG_RGBA8_UNORM_SRGB,
+                         std::max(0.02f, scoutDiag * 0.001f), std::max(1.0f, scoutDiag * 2.0f));
+        scout.buildEnd(false);
+        if (!scoutPcc.getProbes().empty()) {
+            const Ogre::Aabb saw = scoutPcc.getProbes()[0]->getProbeShape();
+            const Ogre::Vector3 c = aabb.mCenter;
+            Ogre::Vector3 mn = saw.getMinimum(), mx = saw.getMaximum();
+            // Symmetric about the viewpoint, per axis — point 1 above.
+            for (size_t ax = 0; ax < 3u; ++ax) {
+                const float h = std::max(c[ax] - mn[ax], mx[ax] - c[ax]);
+                mn[ax] = c[ax] - h; mx[ax] = c[ax] + h;
+            }
+            mn.makeCeil(aabb.getMinimum());
+            mx.makeFloor(aabb.getMaximum());
+            const Ogre::Vector3 size = mx - mn, whole = aabb.getSize();
+            bool usable = true;
+            for (size_t ax = 0; ax < 3u; ++ax)
+                if (!(size[ax] > 0.05f * std::max(whole[ax], 1e-4f))) usable = false;
+            if (usable) region = Ogre::Aabb::newFromExtents(mn, mx);
+            if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+                const auto toS = [](const Ogre::Vector3 &v) {
+                    return Ogre::StringConverter::toString(v);
+                };
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka GI: scout — volume " + toS(aabb.getMinimum()) + " .. " +
+                    toS(aabb.getMaximum()) + " -> space " + toS(region.getMinimum()) + " .. " +
+                    toS(region.getMaximum()) + (usable ? "" : " (unusable)"));
+            }
+        }
+        scoutPcc.destroyAllProbes();
+    }
+    mGiProbeRegion = region;
+    mGiCamera->setPosition(region.mCenter);
+
+    mPcc = new Ogre::ParallaxCorrectedCubemapAuto(
+        Ogre::Id::generateNewId<Ogre::ParallaxCorrectedCubemapAuto>(),
+        mRoot, mSceneMgr, cm->getWorkspaceDefinition(probeWorkspace));
+
     Ogre::PccPerPixelGridPlacement placement;
     placement.setParallaxCorrectedCubemapAuto(mPcc);
     placement.setNumProbes(numProbes);
-    placement.setFullRegion(aabb);
+    placement.setFullRegion(region);
     // PLACEMENT KNOBS (P3c). All three were previously left at the pin's ctor
     // defaults — overlap 1.5 by inheritance rather than by choice, and the snap
     // tolerances never touched at all. They are now OURS and set explicitly, so
@@ -4274,23 +4071,154 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
     mPccHdr = resolveToggle(mGi.probeHdr, mGi.quality == GiQuality::High);
     const Ogre::PixelFormatGpu probeFormat =
         mPccHdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM_SRGB;
-    const float diag = aabb.getSize().length();
+    const float diag = region.getSize().length();
     // ...REMEMBERED, because a shadow-atlas rebuild re-creates the probe
     // workspaces (and so their cameras) without re-placing the grid (G2).
     mProbeCamNear = std::max(0.02f, diag * 0.001f);
     mProbeCamFar  = std::max(1.0f, diag * 2.0f);
+    const auto tPlace = std::chrono::steady_clock::now();
     placement.buildStart(probeRes, mGiCamera, probeFormat, mProbeCamNear, mProbeCamFar);
-    placement.buildEnd();   // reads probe depth back and re-fits probe shapes
-    clampProbeShapesToRegion(aabb);
+    // ...AND THE FIT'S CLOSING RE-CAPTURE IS SKIPPED (patch 0047's flag). It
+    // re-renders every probe through its corrected shape, which is half of what
+    // this call costs and was already dead work here: every probe is marked
+    // STALE a few lines below, because the placement's captures were taken
+    // before the grid was bound to HlmsPbs and before this build's irradiance
+    // field existed, so the budget re-captures each one anyway. A probe's cube
+    // holds the same colour either way — a capture renders the scene from the
+    // probe's camera, and the shape is a shading-time reprojection, not an
+    // input to it (verified: the probe suites' pixels are unchanged).
+    placement.buildEnd(false);   // reads probe depth back and re-fits probe shapes
+    // ---- WHICH OF THESE PROBES IS WORTH BUILDING (lane R5-ROOM) ------------
+    //
+    // The rule this replaced measured the SCENE — facing slabs, covering faces,
+    // an enclosed-axis count — and built the whole grid or none of it. It is
+    // deleted, not patched: no lighting decision may test for a room, an
+    // enclosure, a wall or an axis count (PHOTON_SPEC §13, owner+lead joint
+    // decision 2026-09-14). The unit is the PROBE now, and the instrument is
+    // the probe itself.
+    //
+    // The placement has just read one averaged depth value per cube face and
+    // ogre-patch 0047 hands those six numbers back: each is the distance that
+    // face could see as a multiple of the distance from this probe's camera to
+    // the region's face in the same direction — 1 means "on the region's face",
+    // 2 means "nothing within twice it", which is the encoding's saturation and
+    // what a face full of sky returns. From them the probe's fitted box follows
+    // (the placement's own arithmetic): on each axis it reaches
+    //     (H - cam) * ratio(+face) + (H + cam) * ratio(-face)
+    // with H the region's half size and cam the probe's camera in the region's
+    // frame. That is a LENGTH IN WORLD UNITS on each axis, and dividing the
+    // three by the extents of THE VOLUME THE RENDERER LIT gives the probe's box
+    // as a fraction of that world: their product is its VOLUME RATIO. Below 1
+    // this probe photographed a space materially smaller than the world it
+    // stands in — something is near it — and at 1 or above it saw nothing that
+    // the world does not already hold.
+    //
+    // THE READING IS RELATIVE TO THE BOX THE PROBE WAS PLACED IN, which is the
+    // scene's own fitted volume, and that is what makes it scale-free: the same
+    // room measures the same at any size, anywhere in the world, in any units.
+    // It is NOT independent of that box — a scene whose author pins very tight
+    // bounds is telling the renderer that its whole world is that box, and a
+    // probe in it then has less "inside the world" left to see. Measured, with
+    // the same roofless 10 m room: at the automatic +-7.4 volume the grid is
+    // kept (worst span 0.53), with bounds pinned at +-5.5 it is dropped (1.37)
+    // — the walls of a roofless room subtend less of a probe's view than a
+    // first reading suggests, and most of what those probes see is sky.
+    //
+    // It is per probe, positionless, scale-free, and costs no capture of its
+    // own: the measurement is a by-product of the placement that already ran.
+    // It is read BEFORE `clampProbeShapesToRegion`, and that ordering is the
+    // whole measurement — the A2 clamp pins an unshrunk box back to exactly the
+    // region, and upstream's padding and its two snaps do the same for anything
+    // near it, so the fitted SHAPE cannot tell "saw a wall just inside the
+    // region" from "saw nothing and was snapped back to it". The ratios can.
+    {
+        const Ogre::FastArray<float> &ratios = placement.getProbeDepthRatios();
+        const Ogre::CubemapProbeVec &built = mPcc->getProbes();
+        const Ogre::Vector3 H = region.mHalfSize, W = aabb.getSize();
+        const bool debugFit = std::getenv("JAHSHAKA_GI_DEBUG") != nullptr;
+        std::vector<Ogre::CubemapProbe *> drop;
+        for (size_t i = 0; i < built.size(); ++i) {
+            if ((i + 1u) * 6u > ratios.size()) break;      // no reading: keep it
+            const float *r = &ratios[i * 6u];
+            const Ogre::Vector3 cam = built[i]->getProbeCameraPos() - region.mCenter;
+            float spanVol = 1.0f;
+            float span[3];
+            for (size_t ax = 0; ax < 3u; ++ax) {
+                // CubemapSide order is PX, NX, PY, NY, PZ, NZ — the positive
+                // face of axis `ax` is 2*ax, the negative 2*ax+1.
+                const float reach = (H[ax] - cam[ax]) * r[ax * 2u] +
+                                    (H[ax] + cam[ax]) * r[ax * 2u + 1u];
+                span[ax] = reach / std::max(W[ax], 1e-6f);
+                spanVol *= span[ax];
+            }
+            // THE PRODUCT OF THE THREE, i.e. the box against the world BY
+            // VOLUME, and the alternative was built and measured before this
+            // was written. Taking the SMALLEST of the three instead — "smaller
+            // on any one axis" — keeps every probe that stands near a FLOOR,
+            // because every scene has one, it fills the lower half of every
+            // probe's view and it shrinks exactly one axis: measured, a brand
+            // new project with a cube kept 7 of its 18 probes and the avatar
+            // preview kept 9 of 18, and a scene that gains a grid LOSES the sky
+            // cubemap on every datablock (`reflectionTexForDatablocks` — the
+            // shader's environment slot has one occupant), which rendered that
+            // preview's character black (r 3 g 3 b 4 of 255). A volume is the
+            // honest reading of "is this probe's world smaller than the
+            // renderer's": a floor alone does not make one.
+            const bool keep = spanVol < kProbeSeesGeometry;
+            if (!keep) drop.push_back(built[i]);
+            if (debugFit)
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka GI:  probe " + std::to_string(i) + (keep ? " KEPT" : " DROPPED") +
+                    " — faces " + Ogre::StringConverter::toString(r[0]) + " " +
+                    Ogre::StringConverter::toString(r[1]) + " " +
+                    Ogre::StringConverter::toString(r[2]) + " " +
+                    Ogre::StringConverter::toString(r[3]) + " " +
+                    Ogre::StringConverter::toString(r[4]) + " " +
+                    Ogre::StringConverter::toString(r[5]) + ", spans " +
+                    Ogre::StringConverter::toString(span[0]) + " " +
+                    Ogre::StringConverter::toString(span[1]) + " " +
+                    Ogre::StringConverter::toString(span[2]) + " vol " +
+                    Ogre::StringConverter::toString(spanVol) + " (keep below " +
+                    Ogre::StringConverter::toString(kProbeSeesGeometry) + ")");
+        }
+        mProbesDropped = int(drop.size());
+        for (Ogre::CubemapProbe *p : drop) mPcc->destroyProbe(p);
+        if (mPcc->getProbes().empty()) {
+            // NOTHING TO PHOTOGRAPH. No grid, and the sky cubemap goes back onto
+            // every datablock — `reflectionTexForDatablocks` hands it back the
+            // moment mPcc is null (OgreSky.cpp), and the caller runs
+            // applyReflectionToAll right after this. Cheaper and sharper than a
+            // grid of photographs of the sky, which is the owner's rule
+            // (2026-09-13 Q3) measured per probe instead of per scene.
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: no probe grid — all " + std::to_string(mProbesDropped) +
+                " probes photographed nothing inside the lit volume, so reflections come "
+                "from the sky and cone tracing");
+            delete mPcc; mPcc = nullptr;
+            mProbeSlots.clear();
+            mProbeUpdatesPerFrame = 0;
+            mPccCaptureSize = 0;
+            mPccHdr = mPccShadowed = false;
+            hlmsPbs(mRoot)->setParallaxCorrectedCubemap(nullptr);
+            return;
+        }
+        if (mProbesDropped)
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: " + std::to_string(mProbesDropped) + " of " +
+                std::to_string(mProbesDropped + int(mPcc->getProbes().size())) +
+                " probes saw nothing inside the lit volume and were dropped");
+    }
+    clampProbeShapesToRegion(region);
     // EVERY probe renders in the INLINE stage from now on (B2 point 2). Set once,
     // here, rather than flipped as probes come and go: in automatic mode this
     // selects a render stage, not an amount of work, and the budget already
     // decides how many probes render at all.
     for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mNumIterations = 1u;
-    // The placement above captured the whole grid TWICE, synchronously
-    // (buildStart and buildEnd each run updateAllDirtyProbes) — counted, so a
-    // rebuild frame reports what it cost (GiStatus::probeCapturesLastFrame).
-    mPlacementCapturesThisFrame += int(2u * mPcc->getProbes().size());
+    // The placement above captured the whole grid ONCE, synchronously
+    // (buildStart's updateAllDirtyProbes; buildEnd's closing one is skipped
+    // above) — counted, so a rebuild frame reports what it cost
+    // (GiStatus::probeCapturesLastFrame).
+    mPlacementCapturesThisFrame += int(mPcc->getProbes().size());
     // ...and every probe is STALE all the same: the placement captured before
     // the grid was bound to HlmsPbs and before this build's irradiance field
     // existed, so those captures show neither probe reflections nor the DDGI
@@ -4317,8 +4245,8 @@ void OgreScene::buildPcc(const Ogre::Aabb &aabb) {
         const auto toS = [](const Ogre::Vector3 &v) {
             return Ogre::StringConverter::toString(v);
         };
-        lm.logMessage("Jahshaka GI: PCC region " + toS(aabb.getMinimum()) + " .. " +
-                      toS(aabb.getMaximum()) + " grid " + std::to_string(numProbes[0]) + "x" +
+        lm.logMessage("Jahshaka GI: PCC region " + toS(region.getMinimum()) + " .. " +
+                      toS(region.getMaximum()) + " grid " + std::to_string(numProbes[0]) + "x" +
                       std::to_string(numProbes[1]) + "x" + std::to_string(numProbes[2]) +
                       " res " + std::to_string(probeRes) +
                       (mPccHdr ? " RGBA16F" : " RGBA8_SRGB") +
@@ -5062,8 +4990,7 @@ void OgreScene::teardownVct() {
     mProbeUpdatesPerFrame = 0;
     mProbesClampedToRegion = 0;
     mPccCaptureSize = 0;
-    mProbeEnclosedAxes = 0;
-    mProbeGridRefused = false;
+    mProbesDropped = 0;
     mVctItemIds.clear();
     // A CHAIN THAT NO LONGER EXISTS OWES NO CASCADE ANYTHING (G1): whatever the
     // dirty path recorded is answered by the build that follows, and carrying it

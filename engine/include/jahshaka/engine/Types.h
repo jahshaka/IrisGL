@@ -1942,30 +1942,29 @@ struct GiStatus {
     /// became. 0 when no grid was built.
     int    probeCaptureSize = 0;
 
-    // ---- ENCLOSURE: why there is (or is not) a probe grid -------------------
+    // ---- WHAT THE PROBES SAW: why there is (or is not) a grid ---------------
     // Owner decision 2026-09-13: "a user starts in the editor in a new project
     // with an open scene ... I would think the sky is your first reflection
-    // asset." A reflection probe is a photograph of an enclosure; where the
-    // renderer measured no enclosure there is nothing to photograph but the
-    // sky, and the sky IBL is both cheaper and sharper than 18-32 captures of
-    // it. So the hybrid builds NO probe grid in an open scene, and these two
-    // say so out loud instead of leaving `probeCount 0` looking like a failure.
+    // asset." A probe that can see nothing but distance photographs the sky,
+    // and the sky IBL is both cheaper and sharper than 18-32 captures of it. So
+    // each candidate probe is kept or dropped by WHAT IT SAW — its own captured
+    // depth, measured during the placement — and a scene whose probes all saw
+    // nothing has no grid at all, which this says out loud instead of leaving
+    // `probeCount 0` looking like a failure.
+    //
+    // (The rule that used to live here measured the scene for an ENCLOSURE —
+    // facing walls, an axis count — and reported `probeEnclosedAxes` /
+    // `probeGridRefused`. Both are deleted with it: owner+lead joint decision
+    // 2026-09-14, "no room in any definition".)
 
-    /// How many world axes `computeProbeRegion` found ENCLOSED — two SLABS
-    /// facing each other across a real gap (a floor and a ceiling; two facing
-    /// walls), measured out of the same reading that fits the probe region.
-    /// 0..3, and 0 in every mode but the hybrid. Two is the threshold: at two
-    /// the probes are photographing something, below it they are photographing
-    /// the sky.
-    int    probeEnclosedAxes = 0;
-    /// True when the hybrid deliberately declined to build a probe grid because
-    /// `probeEnclosedAxes` was below the threshold AND no explicit
-    /// `boundsMin`/`boundsMax` were pinned (a scene that has typed its lit
-    /// volume has stated where the space is, and the measurement stands down). `probeCount 0` with this
-    /// TRUE is the open-scene answer (and the sky IBL is bound instead);
-    /// `probeCount 0` with this FALSE while the mode is the hybrid is the old
-    /// silent-degradation failure gi.pcc_mirror exists to catch.
-    bool   probeGridRefused = false;
+    /// How many candidate probes the renderer built, photographed and then
+    /// DROPPED because nothing they could see was within twice the distance to
+    /// their own region's faces. 0 in every mode but the hybrid.
+    /// `probeCount 0` with this NON-ZERO is the open-scene answer (and the sky
+    /// IBL is bound instead); `probeCount 0` with this ZERO while the mode is
+    /// the hybrid is the silent-degradation failure gi.pcc_mirror exists to
+    /// catch.
+    int    probesDropped = 0;
     /// How many probes the renderer re-captures per frame — the RESOLVED
     /// `GiParams::updateBudget`, clamped to the probes that actually exist, and
     /// 0 whenever the probe arm did not build (FIX WAVE B1/B2). 0 in every mode
