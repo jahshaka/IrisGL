@@ -518,56 +518,6 @@ inline float relativeAirmass(float elevDeg) {
 }
 }   // namespace
 
-// THE ATMOSPHERE'S TINT ON THE DIRECT SUNLIGHT (SUN_FOLLOWS_ATMOSPHERE, lane
-// ENGINE-7 item 6; Engine.h states the contract).
-//
-// WHAT IT IS, AND WHERE IT COMES FROM. AtmosphereNpr's model carries its own
-// term for what the air takes out of SUNLIGHT on the way down — upstream calls
-// it `skyLightAbsorption`, it is the factor the model multiplies its own sun
-// disc by, and it is two lines (OgreAtmosphereNpr.cpp:154-161 and :163-193):
-//
-//     lightDensity = densityCoeff / max(sunHeight, 0.0035)^0.75
-//     absorption   = 2 * exp2(-lightDensity * skyColour)
-//
-// with `sunHeight = sin(normalizedTimeOfDay * PI)`. Both inputs are PRESET
-// fields, which the component hands out (getPreset), so this reads the model
-// rather than inventing one — the same numbers the sky on screen is drawn from.
-//
-// Divided by its own value with the sun at the zenith, so the answer is exactly
-// (1,1,1) at noon — the user's picked colour IS the noon colour — and falls,
-// blue first, as the sun goes down. On the shipped preset (density 0.25 since
-// SKY-TUNE-1) a sun 5 degrees above the horizon comes out at (0.74, 0.60, 0.40)
-// and one at 30 degrees at (0.96, 0.93, 0.89) — reddened AND dimmed, which is
-// what a low sun really does (test_engine's
-// atmosphere_sun_tint_reddens_a_low_sun prints all three).
-//
-// HOW FAITHFUL IT IS, MEASURED (SKY-TUNE-1, spikes/sky-tune-1/): the physical
-// answer for this quantity is the direct beam's Rayleigh transmittance,
-// exp(-tau*airmass) / exp(-tau*airmass(90)), with tau(550 nm) = 0.0975 scaled
-// by lambda^-4.05 and Kasten-Young airmass — which is 0.53/0.40/0.13 at 5
-// degrees and 0.95/0.93/0.86 at 36. The model above tracks that shape because
-// its softer airmass (sunHeight^0.75 instead of 1/sin) is compensated by an
-// optical depth about 1.5x Rayleigh's, and how well it tracks depends ENTIRELY
-// on densityCoeff: the residual is 0.046 stops at density 0.47, 0.189 at 0.25
-// and 0.27 at 0.15. THAT IS A KNOWN COUPLING AND A RECORDED FINDING: one dial
-// sets both the SKY's look (where the fit wants 0.20-0.25) and the SUNLIGHT's
-// colour (where physics wants ~0.47), and 0.25 is inside the flat joint optimum
-// of the two rather than the best of either. The clean separation — deriving
-// this from Rayleigh optical depth directly, with the density dial only as a
-// multiplier — is deliberately NOT done here; it is the lead's call, not a sky
-// preset lane's.
-//
-// WHY NOT THE COMPONENT'S OWN LIGHT LINK. `setLight` takes the light over
-// completely — type, direction, diffuse, specular and power — so it would
-// delete the user's colour and intensity rather than tint them, and its colour
-// is normalised to max 1, i.e. it reddens without dimming (and makes the NOON
-// sun blue, because the quantity it normalises is the sky's radiance looking at
-// the sun, not the sunlight). The link stays unarmed, as SKY-GPU left it.
-//
-// WHY NOT getAtmosphereAt. That is the sky's in-scattered radiance in a
-// direction — it gets BRIGHTER as the sun sets (measured: 0.09/0.24/0.55 at the
-// zenith against 6.92/3.38/0.69 at 5 degrees, which is the sunset glow) — so it
-// is the wrong quantity for "what reached the ground".
 Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
     const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
     if (!mAtmosphere || !mAtmoSkyOn) return white;
