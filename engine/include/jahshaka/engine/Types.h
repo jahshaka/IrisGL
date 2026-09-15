@@ -3029,12 +3029,33 @@ struct ShadowStatus {
     /// Shadow-casting point/spot lights with NO map this frame — the lights
     /// whose shadows are silently missing. Empty is the healthy state.
     std::vector<NodeId> unmapped;
+    /// WAS THE LAST RENDERED FRAME MEASURED AT ALL?
+    ///
+    /// The pass counters below are OPT-IN and the opt-in EXPIRES: asking for a
+    /// status attaches a callback per compositor pass per frame, and 120
+    /// rendered frames without a read detach it again. So the counters have two
+    /// distinct zeroes — "the frame rendered no shadow passes", which is a
+    /// measurement, and "nobody was counting", which is not.
+    ///
+    /// They used to be indistinguishable, and the first read after a quiet
+    /// spell reported a hard 0 for a scene plainly casting shadows. A suite read
+    /// that as a document write being lost (lane SKY-SMALL's diagnosis); the
+    /// only reason it had ever worked was that the World panel's shadow rows
+    /// poll the same status on every rebind, so an unrelated UI refresh kept the
+    /// counters armed.
+    ///
+    /// FALSE here means every `*PassesLastFrame` / `*RendersLastFrame` /
+    /// `mapsDirtiedLastFrame` field below is UNMEASURED, not zero. Ask again
+    /// after one more rendered frame — the first ask is what arms them. The
+    /// scripting layer reports them as `null` in that state.
+    bool countersMeasured = false;
     /// THE COST READINGS OF THE LAST RENDERED FRAME (counted only while
-    /// somebody polls — see Engine::shadowStatus). `shadowPassesLastFrame` =
-    /// the shadow-node passes the COUNTED view executed (the first enabled view
-    /// with shadows; 0 when none has any), and `cachedMapRendersLastFrame` how
-    /// many of those re-rendered a CACHED lamp map: zero at rest, which is what
-    /// "renders once" means, measurably.
+    /// somebody polls — see Engine::shadowStatus, and `countersMeasured` above,
+    /// which says whether these are a reading at all). `shadowPassesLastFrame`
+    /// = the shadow-node passes the COUNTED view executed (the first enabled
+    /// view with shadows; 0 when none has any), and `cachedMapRendersLastFrame`
+    /// how many of those re-rendered a CACHED lamp map: zero at rest, which is
+    /// what "renders once" means, measurably.
     unsigned shadowPassesLastFrame = 0;
     unsigned cachedMapRendersLastFrame = 0;
     /// THE CACHE'S SELF-CHECK, cumulative for the session: passes hashed while

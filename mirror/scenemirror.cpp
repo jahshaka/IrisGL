@@ -77,10 +77,10 @@ namespace {
 inline Vec3 toVec3(const iris::Vec3 &v) { return Vec3(v.x(), v.y(), v.z()); }
 inline Quat toQuat(const iris::Quat &q) { return Quat(q.x(), q.y(), q.z(), q.scalar()); }
 
-/// ONE 8-BIT CODE, IN THE ENGINE'S LINEAR RADIANCE UNITS (lane SKY-SMALL,
-/// item SKY-NIGHT-1). The threshold below which a sun stops being able to
-/// change any pixel of the picture — and therefore the point at which its disc
-/// and its three PSSM shadow passes may be dropped.
+/// ONE 8-BIT CODE, IN POST-EXPOSURE UNITS (lane SKY-SMALL, item SKY-NIGHT-1).
+/// The smallest change to the frame that can still move an output code — and
+/// therefore the point below which the sun's disc, and its three PSSM shadow
+/// passes, buy nothing that can be shown.
 ///
 /// WHAT IT REPLACES, AND WHY IT HAD TO GO. The rule here used to be a RELATIVE
 /// one: drop both once the atmosphere's tint fell below a thousandth of its
@@ -94,53 +94,100 @@ inline Quat toQuat(const iris::Quat &q) { return Quat(q.x(), q.y(), q.z(), q.sca
 /// the cut the disc still carried 8 x intensity x 1e-3 of radiance, a 5-10/255
 /// dot that vanished between two frames.
 ///
-/// THE ABSOLUTE FORM. What matters is not how much of noon is left, it is
-/// whether what is left can still move an 8-bit output code. Follow the disc's
-/// radiance to the screen (irisgl/engine/media/Hlms/Jahshaka/JahSunDisc_ps.glsl
-/// writes it ADDITIVELY into the HDR target, so its gain to the frame is
-/// exactly one) through the chain the view applies:
+/// THE ABSOLUTE FORM. Follow the disc's radiance to the screen. The shader
+/// (irisgl/engine/media/Hlms/Jahshaka/JahSunDisc_ps.glsl) writes it ADDITIVELY
+/// into the HDR target, so its gain to the frame is exactly one, and what
+/// happens after is the view's chain:
 ///
-///   1. AUTO EXPOSURE (HDR/DownScale03_SumLumEnd_ps.glsl). The frame is
-///      multiplied by `exposure.x / exp(clamp(meanLogLum, 7.5 - exposureMax,
-///      7.5 - exposureMin))` with `exposure.x = 1024 * e^(exposure - 2)`. The
-///      clamp is the load-bearing part: the multiplier is BOUNDED, and its
-///      upper bound is reached by every scene darker than mean luminance
-///      e^5/1024 = 0.145 — which is every twilight scene there is. At the
-///      document defaults (Scene: exposure +0.6, exposureMin -2.5, exposureMax
-///      +2.5) that bound is 1024 * e^(0.6 - 9.5 + 2.5) = 1.7014. So the
-///      brightest grade this chain can put on a dark frame is a known number,
-///      not a property of the display.
-///   2. THE FILMIC CURVE (HDR/FinalToneMapping_ps.glsl, Hable). Its slope is
-///      steepest at black: f'(0) = C*B/(D*F) - D*E*B/(D*F)^2 = 1/3, normalised
-///      by f(W=11.2) = 0.8673, so d(tonemapped)/d(linear) = 0.38433 at 0.
-///   3. THE CONTRAST STRETCH the same shader ends with, x = (x - 0.5)*1.25 +
-///      0.61: a gain of exactly 1.25. Total 0.48042.
-///   4. THE sRGB ENCODE on the way to the 8-bit target, whose slope is largest
-///      on its linear toe: 12.92 (the toe reaches to a tonemapped 0.0031, i.e.
-///      a post-exposure scene value of 0.0327 — a twilight frame lives there).
+///   1. AUTO EXPOSURE multiplies the whole frame — that is `sunExposureGain`
+///      below, and it is NOT a constant. It is carried separately because it
+///      depends on two document dials the user can move eight stops either way.
+///   2-4. THE TONEMAP, THE CONTRAST STRETCH AND THE sRGB ENCODE, which between
+///      them decide how many output codes one unit of POST-EXPOSURE radiance is
+///      worth. That number is what is frozen here.
 ///
-/// Multiply: one unit of post-exposure radiance is worth at most
-/// 255 * 12.92 * 0.48042 = 1582.8 output codes, so ONE code needs at least
-/// 1/1582.8 = 6.318e-4 of post-exposure radiance, and at the brightest grade
-/// 6.318e-4 / 1.7014 = 3.713e-4 of scene radiance. Rounded DOWN (the safe
-/// direction — a lower threshold keeps the disc a moment longer):
-constexpr float kSunVisibleRadiance = 3.7e-4f;
+/// THE NUMBER, AND WHY IT IS A MAXIMUM AND NOT A SLOPE AT ZERO. The chain is
+///
+///     code(x) = 255 * srgbEncode( 1.25 * ( f(x)/f(W) - 0.5 ) + 0.61 )
+///
+/// with f = Hable's filmic curve and W = 11.2 (HDR/FinalToneMapping_ps.glsl),
+/// so the codes per unit of post-exposure radiance are
+///
+///     g(x) = 255 * srgbEncode'(c(x)) * 1.25 * f'(x) / f(W).
+///
+/// The first cut of this lane evaluated that at x = 0 and got 1582.8. THAT IS
+/// THE WRONG END OF THE CURVE: Hable with these constants has a TOE, so f'(0)
+/// = 1/3 is its MINIMUM slope, not its maximum (f' is 0.4276 by x = 0.033), and
+/// the sRGB encode's own slope is largest on its linear toe, which ends at a
+/// tonemapped 0.0031. Both terms are therefore at their largest at the SAME
+/// place, and g PEAKS there: measured on this exact arithmetic,
+///
+///     g_max = 2030.4 codes per unit, at x = 0.0327 post-exposure,
+///
+/// so ONE CODE IS 1/2030.4 = 4.93e-4 of post-exposure radiance. (The old
+/// 3.7e-4-of-scene-radiance figure was 28 % ABOVE the true bound at the default
+/// grade, and the "rounded down for safety" in its comment rounded the wrong
+/// way.)
+///
+/// WHY THE PEAK IS THE OPERATING POINT AND NOT A CORNER CASE. The contrast
+/// stretch ends at 0.61 with a 0.5 pivot, so c(0) = -0.015: a BLACK background
+/// stays at code 0 until 0.0275 of post-exposure radiance, and a disc on black
+/// needs that much before it shows at all. But a sun disc is never on black —
+/// it is drawn over a TWILIGHT SKY, and what makes it visible is the
+/// DIFFERENCE it adds to that sky. A twilight sky sits exactly in the region
+/// where g is largest (a post-exposure value of a few hundredths), so the peak
+/// is where this decision is actually made. Taking the maximum is also the only
+/// safe direction: it is the most sensitive the picture can be to the disc, so
+/// a disc below it cannot be visible anywhere in the frame.
+constexpr float kOneCodePostExposure = 4.93e-4f;
 
-/// ...AND THE SHADOW GETS THE SAME STEP WITH A SPECULAR HEADROOM. A shadow's
-/// visible effect is the DIFFERENCE between a lit and an unlit surface, which
-/// for the diffuse term is at most the sun's own radiance (albedo <= 1,
-/// NdotL <= 1, and HlmsPbs' 1/pi cancels against `powerScale = intensity*pi`)
-/// — gain one, like the disc. A SPECULAR highlight is not bounded by one: the
-/// pin's BRDF concentrates the beam by 1/(pi*alpha^2) at the peak
-/// (200.BRDFs_piece_ps.any:105, alpha = the GGX alpha, floored at 0.001 in
-/// 800.PixelShader_piece_ps.any:362 and the whole expression capped at 65504),
-/// so a mirror-smooth surface in shadow can show a sun far dimmer than one
-/// code of diffuse. There is no finite bound to take — 65504 is the shader's
-/// clamp, not physics — so this is a STATED headroom rather than a derivation:
-/// 1024 covers every material down to alpha 0.0176, i.e. a perceptual
-/// roughness of 0.133, polished metal; below that the highlight is a sub-pixel
-/// glint on a sun that is already a thousandth of a code.
-constexpr float kSunShadowSpecularHeadroom = 1024.0f;
+/// ...AND THE SHADOW GETS THE SAME STEP WITH THE PIPELINE'S OWN HEADROOM. A
+/// shadow's visible effect is the DIFFERENCE between a lit and an unlit
+/// surface. For the diffuse term that is at most the sun's own radiance
+/// (albedo <= 1, NdotL <= 1, and HlmsPbs' 1/pi cancels against
+/// `powerScale = intensity*pi`) — gain one, like the disc. A SPECULAR
+/// highlight is not bounded by one: the pin's BRDF concentrates the beam by
+/// 1/(pi*alpha^2) at the peak (Main/200.BRDFs_piece_ps.any:105, alpha = the
+/// GGX alpha, floored at 0.001 in Main/800.PixelShader_piece_ps.any:362).
+///
+/// That expression is CLAMPED BY THE SHADER ITSELF at 65504 (the same line,
+/// `min( roughness_a, _h( 65504.0 ) )` — half-float's largest finite value), so
+/// the pipeline states its own bound and there is nothing here to judge. The
+/// first cut of this lane picked 1024 by hand and said so; taking the real
+/// clamp instead costs 0.66 degrees more PSSM at haze 6 (the shadow's crossing
+/// moves from +0.88 to +0.22 degrees of sun elevation) and 0.63 at haze 10
+/// (+2.49 to +1.86) — about three minutes of a real sunset — and removes a
+/// number somebody chose from a rule that is otherwise all measurement.
+constexpr float kSunShadowSpecularHeadroom = 65504.0f;
+
+/// HOW MUCH THE VIEW'S CHAIN MULTIPLIES THE FRAME BY BEFORE THE TONEMAP.
+///
+/// `HDR/DownScale03_SumLumEnd_ps.glsl` computes
+/// `exposure.x / exp(clamp(meanLogLum, 7.5 - exposureMax, 7.5 - exposureMin))`
+/// with `exposure.x = 1024 * e^(exposure - 2)`. The CLAMP is what makes this
+/// knowable: the multiplier is bounded, and its upper bound is reached by every
+/// scene darker than mean luminance e^5/1024 = 0.145 — which is every twilight
+/// scene there is, i.e. every scene where this decision is made. So the gain a
+/// sunset frame actually gets is
+///
+///     1024 * e^(exposure - 2 - (7.5 - exposureMax)).
+///
+/// IT IS NOT A CONSTANT, and the first cut of this lane wrongly froze it at the
+/// document default (exposure +0.6, exposureMax +2.5 -> 1.7014). Both are
+/// document dials with an eight-stop range on the World panel, and a camera can
+/// override them per shot (applyCameraPostFx); at exposure +2 with exposureMax
+/// +4 the gain is 30.92, eighteen times the default, and a disc this rule would
+/// have dropped is worth twenty-odd output codes — exactly the pop the rule
+/// exists to remove. It is read from the EFFECTIVE description instead, once
+/// per sync, by the function below.
+///
+/// With HDR off there is no tonemap and no exposure: the scene value reaches
+/// the target as it is, and the gain is one.
+inline float sunExposureGain(const jahshaka::engine::PostFxDesc &fx)
+{
+    if (!fx.hdr) return 1.0f;
+    return 1024.0f * std::exp(fx.exposure - 2.0f - (7.5f - fx.exposureMax));
+}
 
 inline float brightestChannel(const jahshaka::engine::Colour &c)
 {
@@ -1185,7 +1232,7 @@ void SceneMirror::syncSunAtmosphere()
     auto it = mEntries.find(mSyncSun);
     if (it == mEntries.end() || !it->node || !it->lightPushed) return;
     const LightDesc want = toLightDesc(mSyncSun, mSyncSun, true,
-                                       atmosphereTintFor(mSyncSun, mSyncSun));
+                                       atmosphereTintFor(mSyncSun, mSyncSun), mSunExposureGain);
     if (want == it->lastLight) return;            // the still case, every frame
     if (mTarget->setLight(it->node, want)) {
         notePush(mSyncSun, "sun atmosphere tint");
@@ -2954,7 +3001,8 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
             // graph carries position and direction), so skipping an unchanged push
             // cannot freeze a moving light.
             const LightDesc want = toLightDesc(light, mSyncSun, true,
-                                               atmosphereTintFor(light, mSyncSun));
+                                               atmosphereTintFor(light, mSyncSun),
+                                               mSunExposureGain);
             // By value (LightDesc::operator==, beside the struct — every field
             // setLight reads is in it, which is what keeps a new field from
             // silently stopping at the first push).
@@ -4242,7 +4290,7 @@ Colour SceneMirror::atmosphereTintFor(const iris::LightNode *light,
 }
 
 LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun, bool sunKnown,
-                                   const Colour &sunTint)
+                                   const Colour &sunTint, float exposureGain)
 {
     LightDesc d;
     switch (light->lightType) {
@@ -4336,8 +4384,11 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
         // to black, stops paying for shadows too — the same physics, and the
         // old rule missed it because `sunTint` is white for such a light.
         {
+            // Multiplied rather than divided on purpose: the gain spans eight
+            // stops each way, so a division here would be an infinity at one
+            // end of the dial and a denormal at the other.
             const float sunRadiance = brightestChannel(d.colour) * std::max(0.0f, d.intensity);
-            if (sunRadiance < kSunVisibleRadiance / kSunShadowSpecularHeadroom)
+            if (sunRadiance * exposureGain * kSunShadowSpecularHeadroom < kOneCodePostExposure)
                 d.castShadows = false;
         }
     }
@@ -6282,6 +6333,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         mWorldPostFx = fx;
         if (const iris::CameraNodePtr driving = drivingCameraFor(view))
             if (cameraOverridesAnything(driving)) applyCameraPostFx(driving, fx);
+        // THE GRADE THE SUN'S NIGHT RULE DECIDES AGAINST (SKY-NIGHT-1), from
+        // the EFFECTIVE description — the camera's override included, since a
+        // shot that opens up two stops makes a disc this rule would otherwise
+        // have dropped worth twenty output codes.
+        mSunExposureGain = sunExposureGain(fx);
         view->setPostFx(fx);
     }
     // Fog panel: exponential distance fog (+ optional height layer) on lit
@@ -7086,7 +7142,8 @@ void SceneMirror::applySky(View *view)
                 // shader writes this value ADDITIVELY into the HDR target, so
                 // its gain to the frame is one and the threshold is the plain
                 // one-code step.
-                if (brightestChannel(sun.colour) < kSunVisibleRadiance) sun.enabled = false;
+                if (brightestChannel(sun.colour) * mSunExposureGain < kOneCodePostExposure)
+                    sun.enabled = false;
             }
         }
     }
