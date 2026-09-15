@@ -2425,6 +2425,10 @@ public:
     /// slot's occupancy really turns on — not "does THIS scene have one". See
     /// the long note above reflectionTexForDatablocks.
     bool anyProbeGridBound() const;
+    /// Re-pushes the mip count of whatever this scene's datablocks hold in the
+    /// env-probe slot. Called ONLY from the probe-transition walk — see the note
+    /// on the definition for why it must not run on every reflection re-apply.
+    void renotifyReflectionMipmaps();
     /// Set by destroy() when THIS scene's teardown released the process-wide
     /// probe binding; read by OgreEngine::destroyScene after the erase, which is
     /// the only safe place to walk the remaining scenes.

@@ -520,8 +520,15 @@ void OgreEngine::reapplyReflectionsAllScenes() {
     // a thumbnail scene that is re-shown later must already hold the right
     // answer, and the walk is a handful of datablock binds per scene on a
     // transition that happens when a grid is built or torn down.
-    for (auto &s : mScenes)
-        if (s) s->applyReflectionToAll();
+    for (auto &s : mScenes) {
+        if (!s) continue;
+        s->applyReflectionToAll();
+        // ...and the roughness-to-LOD map with it: the grid that just came or
+        // went pushed ITS mip count into the one number the whole pass shares,
+        // and only a transition can leave that number describing a texture
+        // nobody is sampling any more (OgreScene::renotifyReflectionMipmaps).
+        s->renotifyReflectionMipmaps();
+    }
 }
 
 void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const {

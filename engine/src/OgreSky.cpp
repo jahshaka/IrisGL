@@ -1307,6 +1307,41 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // per SceneManager — FogHlmsListener::SkyEnvState). Every site that binds or
 // unbinds a grid calls OgreEngine::reapplyReflectionsAllScenes so the binding
 // follows the singleton for every scene, not just the one that changed.
+// THE ROUGHNESS-TO-LOD MAP AFTER A PROBE TRANSITION (lane SKY-FALLBACK-1,
+// second read). `passBuf.envMapNumMipmaps` is ONE number for the whole pass and
+// `_notifyIblSpecMipmap` only ever GROWS it.
+// `ParallaxCorrectedCubemapAuto::setEnabled` pushes the PROBE ARRAY's count into
+// it (6 while the placement holds the scout's 32 px, 10 at a 512 px tier) and
+// the engine pushed the SKY cube's count only when the cube was BUILT, never
+// again — so once a grid had come and gone, every manual cube in every scene
+// mapped its roughness against a chain it does not have. The scene-wide walk
+// this lane added would spread one scene's transition to all of them.
+//
+// SO IT RUNS ON THE TRANSITION AND NOWHERE ELSE, which is the whole of the fix
+// and was measured the hard way. Putting it inside applyReflectionToAllImpl —
+// which every sky build, gain edge and material edit funnels through — changes
+// scenes that never had a grid at all: `scripting.e2e.ssr_mirror`'s "SSR is
+// still in this picture" bar fell 11 -> 7 against a bar of 8, reproducibly at
+// -j2 and in BOTH forms (the growth-only notify and the stricter
+// `resetIblSpecMipmap(0)` re-derivation), because a blurrier environment term is
+// a smaller difference between SSR on and off. That is a real picture question
+// about scenes with an authored cube and no probes, it is not this lane's, and
+// it is recorded for the lead rather than absorbed by widening somebody's bar.
+void OgreScene::renotifyReflectionMipmaps() {
+    JAH_TRY {
+        auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(
+            mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+        if (!hlmsPbs) return;
+        unsigned mips = 0;
+        for (const auto &kv : mMaterials) {
+            if (kv.second.unlit) continue;
+            if (Ogre::TextureGpu *bound = reflectionTexFor(kv.second))
+                mips = std::max(mips, unsigned(bound->getNumMipmaps()));
+        }
+        if (mips > 1u) hlmsPbs->_notifyIblSpecMipmap(Ogre::uint8(mips));
+    } JAH_CATCH(mError, );
+}
+
 bool OgreScene::anyProbeGridBound() const {
     auto *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
     return pbs && pbs->getParallaxCorrectedCubemap() != nullptr;
@@ -1336,27 +1371,6 @@ void OgreScene::applyReflectionToAllImpl() {
         // scene, which is exactly what an override cannot survive.
         if (db) db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(kv.second));
     }
-    // ...AND THE ROUGHNESS-TO-LOD MAP FOLLOWS THE BINDING (lane SKY-FALLBACK-1,
-    // second read). `passBuf.envMapNumMipmaps` is ONE number for the whole pass
-    // and `_notifyIblSpecMipmap` only ever GROWS it, so a probe grid coming and
-    // going leaves it at the PROBE ARRAY's mip count: 6 while the placement
-    // holds the scout's 32 px, 10 at a 512 px tier, and it stays there after the
-    // grid is gone. Every manual sky cube in every scene then maps its roughness
-    // against a mip chain it does not have and reads over-blurred — and since
-    // this walk is now scene-wide (reapplyReflectionsAllScenes), one scene's
-    // grid transition would do that to all of them.
-    //
-    // `resetIblSpecMipmap(0)` is the pin's own answer and the only one that can
-    // bring the number DOWN: it re-derives the maximum from every datablock's
-    // PBSM_REFLECTION plus the bound PCC's array, which is exactly "what is
-    // bound now" — computed AFTER the loop above, so the cubes this scene just
-    // bound are in it. Every walker computes the same answer from the same
-    // global state, so the last one wins and they agree.
-    //
-    // The pass-level sky slot is deliberately NOT in that maximum: it carries
-    // its own cube's mip count in `passBuf.jahSky.y` (ogre-patch 0048) precisely
-    // so that it does not have to share this number with the probe array.
-    static_cast<Ogre::HlmsPbs *>(hlmsPbs)->resetIblSpecMipmap(0u);
 }
 
 // ---------------------------------------------------------------------------
