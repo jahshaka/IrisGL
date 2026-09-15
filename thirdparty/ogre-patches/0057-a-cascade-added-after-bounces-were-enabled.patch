@@ -1,0 +1,94 @@
+Jahshaka patch 0057 — a cascade added AFTER bounces were enabled must not break
+the bounce shader.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this. It overlaps patches 0037 and 0050 in
+`Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp` (different functions); they
+apply in stack order, and a per-patch reverse-check on a tree that already
+carries 0037/0050 reports this one "unapplied" for that file — judge by content
+(CLAUDE.md, the overlap blind spot).
+
+THE DEFECT, measured (lane PATCHES-1 / GI-REENABLE-1, 2026-09-15;
+spikes/patches-1/gi-probe2.log). Enabling Photon's cascade chain raised, EVERY
+time, on a fresh enable and on a re-enable:
+
+    OGRE EXCEPTION(3:RenderingAPIException): Fragment Program
+    34LightVctBounceInject_cs failed to compile … 'ogre_t6' : unrecognized
+    layout identifier
+
+and left `giStatus.vctBound = false` / `ifdBound = false`: the whole VCT arm
+dead, no GI in the picture, and nothing but that one line in the engine log to
+say so.
+
+THE CAUSE. `runBounce()` sets `hlms_num_vct_cascades` from
+`mExtraCascades.size() + 1` on every injection, and the generated compute shader
+declares one light-voxel texture per cascade (four per cascade with anisotropy).
+The job's TEXTURE UNIT COUNT and its bindings, though, are only ever derived in
+`setupBounceTextures()` — which upstream calls from `setAllowMultipleBounces()`
+and from `resetTexturesFromBuildRelative()`, and from nowhere else. So a caller
+that enables bounces and THEN chains the inner cascades (`reserveExtraCascades`
++ `addCascade`) leaves the property saying "N cascades" while the root layout
+still holds the six units of a chain of one: the shader references `ogre_t6`,
+which does not exist, and the program never compiles.
+
+Nothing in `VctLighting`'s header documents an order for those calls, and
+upstream's own `VctCascadedVoxelizer` happens to chain BEFORE it enables bounces
+(`OgreVctCascadedVoxelizer.cpp:449-458`), which is the only reason upstream
+never meets this. `addCascade()` now re-derives the job when bounces are on, so
+either order works — three lines where the alternative was an undocumented
+ordering contract every caller has to know.
+
+KNOWN RESIDUAL, recorded rather than fixed here: "VCT/LightVctBounceInject" is
+found BY NAME, so every `VctLighting` in the process shares ONE
+`HlmsComputeJob`, while the property is per-injection and the bindings belong to
+whichever instance called `setupBounceTextures()` last — the same shared-job
+class as patch 0037's defect 2. Two cascade chains alive at once (two scenes
+with Photon cascades) would therefore inject one chain's voxels through the
+other's textures. Jahshaka binds VCT process-wide to one scene
+(`sVctBindingOwner`), so it is not reachable today; the robust fix is to
+re-assert the bindings per dispatch in `runBounce()`, which upstream should
+weigh against the per-iteration samplerblock reference-counting it does under
+GL.
+
+VERIFICATION. `git apply --check` on a tree carrying 0001-0056 and `git apply
+--reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
+`--engine-selftest` byte-identical
+(`b55e2d5d03dce4059b71a65f8e61dc4773fb0b048e3de05428aca83cabae0ec7`) — the
+default scene runs no cascade chain. BEFORE/AFTER on the rig: the probe script
+`spikes/patches-1/p1-gi-probe2.js` (fourteen GI flips, `app.engineErrors`
+sampled after each) reports 1 recorded engine error on each cascade enable
+before the patch and 0 after, with `vctBound` true. The suite is
+`gi.reenable` (tests/gi/test_gi_reenable.cpp).
+
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
+@@ -839,7 +839,28 @@
+         mExtraCascades.reserve( numExtraCascades );
+     }
+     //-------------------------------------------------------------------------
+-    void VctLighting::addCascade( VctLighting *cascade ) { mExtraCascades.push_back( cascade ); }
++    void VctLighting::addCascade( VctLighting *cascade )
++    {
++        mExtraCascades.push_back( cascade );
++
++        // THE CHAIN DECIDES HOW MANY TEXTURES THE BOUNCE SHADER DECLARES, so the job has
++        // to be told the moment the chain grows. runBounce() sets
++        // hlms_num_vct_cascades from mExtraCascades.size() + 1 on every injection, and
++        // the generated compute shader declares one light-voxel texture per cascade
++        // (four with anisotropy) — but the job's TEXTURE UNIT COUNT and its bindings are
++        // only ever derived in setupBounceTextures(), which upstream calls from
++        // setAllowMultipleBounces() and resetTexturesFromBuildRelative(). Add a cascade
++        // after enabling bounces and the shader asks for ogre_t6 while the root layout
++        // still has six units: "'ogre_t6': unrecognized layout identifier", the compute
++        // program fails to compile, and the whole VctLighting arm renders no GI at all
++        // with nothing but that one log line to say so.
++        //
++        // Nothing documents an order for these two calls (VctLighting's header does not),
++        // and upstream's own VctCascadedVoxelizer happens to chain BEFORE it enables
++        // bounces, which is why upstream never meets this. Now either order works.
++        if( getAllowMultipleBounces() )
++            setupBounceTextures();
++    }
+     //-------------------------------------------------------------------------
+     void VctLighting::setAllowMultipleBounces( bool bAllowMultipleBounces )
+     {

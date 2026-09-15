@@ -1136,7 +1136,25 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     `mErrorFallbackTexData`. A missing resource group becomes a logged error and
     a visible error texture instead of a process death. Audit F17.
 
-THE STACK IS 0001-0056 (this list; `build-ogre.sh` globs `*.patch`, so the file
+57. **0057-a-cascade-added-after-bounces-were-enabled** (SOURCE —
+    `OgreVctLighting.cpp`, overlapping 0037 and 0050 in that file; **rerun
+    COMPILES**) — `runBounce()` sets `hlms_num_vct_cascades` from the chain's
+    length on every injection and the generated compute shader declares one
+    light-voxel texture per cascade (four with anisotropy), but the job's texture
+    UNIT COUNT is only ever derived in
+    `setAllowMultipleBounces()`/`resetTexturesFromBuildRelative()`. Chaining the
+    cascades AFTER enabling bounces — an order the header does not forbid, and
+    the order this engine uses — therefore produced
+    `'ogre_t6' : unrecognized layout identifier`, the bounce program failed to
+    compile, and the WHOLE VCT arm stayed unbound: Photon's cascade chain with
+    multiple bounces rendered no GI at all, every time, with one log line to say
+    so (measured, `spikes/patches-1/gi-reenable-before-0057.log`). `addCascade()`
+    now re-derives the job when bounces are on, so either order works. The
+    shared-job residual (one `HlmsComputeJob` found by name for every
+    `VctLighting` in the process, the class of 0037's defect 2) is recorded in
+    the patch header; the gate is `gi.reenable`.
+
+THE STACK IS 0001-0057 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
@@ -1144,7 +1162,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049 and 0050-0056 are SOURCE-only, and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049 and 0050-0057 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
