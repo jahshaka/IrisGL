@@ -166,11 +166,26 @@ static const float kProbeShapeCellAllowance = 8.0f;
 
 // HOW BIG A PROBE'S PHOTOGRAPHED BOX MAY BE, AS A FRACTION OF THE VOLUME THE
 // RENDERER LIT, AND STILL BE WORTH BUILDING (buildPcc's depth rule, R5-ROOM).
-// 1.0 is the physical line rather than a tuned number: at 1 the probe's own box
-// IS the lit world, which is what the depth encoding returns for faces that saw
-// nothing, and below it the probe photographed a smaller space — something is
-// near it. Measured on the suites' scenes: probes inside a room 0.10 - 0.55,
-// probes with nothing near them 1.3 - 6.0.
+// At 1 the box the probe's six faces measured IS the lit world; below it the
+// probe photographed a smaller space, i.e. something is near it. Measured on
+// the suites' scenes: probes inside a room 0.10 - 0.55, probes with nothing
+// near them 1.3 - 6.0.
+//
+// SAID HONESTLY: THE COMPARISON IS AGAINST THE LIT VOLUME'S OWN EXTENT, so a
+// room's verdict depends on how much slack the fit leaves around its walls.
+// The same roofless 10 m room keeps its four probes over the automatic +-7.43
+// fit and loses them over a +-5.5 volume pinned tight around it (measured; it
+// is why gi.probe_open case 13 pins the room's own +-8), and a 30 m yard with
+// 6 m walls keeps none of the shipped grid's 18 while the 10 m room keeps all
+// four — from inside the yard, most of what a probe sees is sky.
+//
+// That coupling is a STOPGAP and is stated as one. It exists because a grid,
+// once it exists at all, takes the sky cubemap off EVERY material in the scene
+// (one environment slot — the defect SKY-FALLBACK-1 is about), so the cost of
+// keeping a marginal probe is paid scene-wide; with the sky kept as the
+// fallback where no probe covers a pixel, the line could be drawn far more
+// generously. R2's rays retire the question altogether by making the probe
+// fallback rare.
 static const float kProbeSeesGeometry = 1.0f;
 
 // WHAT THE SCOUT PASS CAPTURES AT (buildPcc). The placement's shrink-fit reads
@@ -845,10 +860,10 @@ void OgreScene::staleProbeGrid(GiStaleReason why) {
 // Counted at the last moment before the render, from the probes' own dirty
 // flags, so it covers every source that can raise one — the budget, a shape
 // clamp's CubemapProbe::set — rather than trusting any one of them to report
-// itself. A from-scratch placement captures the whole
-// grid synchronously inside buildPcc (PccPerPixelGridPlacement's buildStart AND
-// buildEnd each run updateAllDirtyProbes), bypassing the flags, so it reports
-// its own count through mPlacementCapturesThisFrame.
+// itself. A from-scratch placement captures synchronously inside buildPcc —
+// buildStart's updateAllDirtyProbes over every CANDIDATE probe, and a closing
+// one of our own over the survivors once their shapes are final — bypassing
+// the flags, so it reports its own count through mPlacementCapturesThisFrame.
 void OgreScene::latchProbeCaptures(bool drawn) {
     // A SCENE NOTHING DRAWS THIS FRAME CAPTURES NO PROBES. Ogre's automatic PCC
     // captures from its own frame listener (allWorkspacesBeginUpdate) for every
@@ -1203,9 +1218,9 @@ std::vector<Ogre::Aabb> OgreScene::giItemBounds() const {
         const Ogre::Vector3 mn = all[i].getMinimum(), mx = all[i].getMaximum();
         if (w[i] >= 1.0f) { out.push_back(all[i]); continue; }
         // WHAT THE GROUND SUPPORTS, AND NO MORE (UNPIN-1's measurement, lane
-        // ENGINE-4 item 5). An oversized item that is a SLAB — the same
-        // self-relative shape test the enclosure search uses, and the ONLY
-        // thing read here: no position, no size constant, no world origin — is
+        // ENGINE-4 item 5). An oversized item that is a SLAB — a self-relative
+        // shape test of this ONE item, and the only thing read here: no
+        // position, no size constant, no world origin — is
         // the thing the rest of the scene stands on. Its extent past the
         // content is empty ground, and lighting it costs resolution: on the
         // three shipped rooms the morph below left the 100 m default ground
@@ -4087,6 +4102,18 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // holds the same colour either way — a capture renders the scene from the
     // probe's camera, and the shape is a shading-time reprojection, not an
     // input to it (verified: the probe suites' pixels are unchanged).
+    // buildEnd's CLOSING RE-CAPTURE IS DEFERRED, not skipped (patch 0047's flag;
+    // second read, 2026-09-15). Upstream ends the fit by re-rendering every
+    // probe, and that render is NOT redundant: `processProbeDepth` re-publishes
+    // each probe through `CubemapProbe::set`, which raises mDirty
+    // unconditionally, and the packed depth in a probe's alpha was encoded
+    // against the FULL REGION while the shader decodes it against the probe's
+    // FITTED SHAPE (Cubemap_piece_all.any) — so the closing capture is exactly
+    // the re-encode, and without it the Auto would also collect every
+    // still-dirty probe in frameStarted and render ALL of them, unbudgeted, in
+    // the next frame. What IS wasted is doing it before the probes this build
+    // is about to throw away have been thrown away, and before their shapes
+    // have been clamped. So it happens below instead, over the survivors, once.
     placement.buildEnd(false);   // reads probe depth back and re-fits probe shapes
     // ---- WHICH OF THESE PROBES IS WORTH BUILDING (lane R5-ROOM) ------------
     //
@@ -4100,9 +4127,11 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // The placement has just read one averaged depth value per cube face and
     // ogre-patch 0047 hands those six numbers back: each is the distance that
     // face could see as a multiple of the distance from this probe's camera to
-    // the region's face in the same direction — 1 means "on the region's face",
-    // 2 means "nothing within twice it", which is the encoding's saturation and
-    // what a face full of sky returns. From them the probe's fitted box follows
+    // the region's face in the same direction: 1 means "on the region's face",
+    // and 2 is the encoding's SATURATION — the compressor stores
+    // min(0.5 * dist / approxDist, 1) and the decode doubles it, so 2 means
+    // "nothing within twice that distance", which is what a face full of sky
+    // returns and is the largest value there is. From them the box follows
     // (the placement's own arithmetic): on each axis it reaches
     //     (H - cam) * ratio(+face) + (H + cam) * ratio(-face)
     // with H the region's half size and cam the probe's camera in the region's
@@ -4161,9 +4190,10 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
             // preview kept 9 of 18, and a scene that gains a grid LOSES the sky
             // cubemap on every datablock (`reflectionTexForDatablocks` — the
             // shader's environment slot has one occupant), which rendered that
-            // preview's character black (r 3 g 3 b 4 of 255). A volume is the
-            // honest reading of "is this probe's world smaller than the
-            // renderer's": a floor alone does not make one.
+            // preview's character black (r 3 g 3 b 4 of 255). A volume answers
+            // "is the space this probe measured smaller than the world the
+            // renderer lit?" in all three directions at once: a floor alone
+            // does not make it so.
             const bool keep = spanVol < kProbeSeesGeometry;
             if (!keep) drop.push_back(built[i]);
             if (debugFit)
@@ -4194,12 +4224,20 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
                 "Jahshaka GI: no probe grid — all " + std::to_string(mProbesDropped) +
                 " probes photographed nothing inside the lit volume, so reflections come "
                 "from the sky and cone tracing");
+            // BY POINTER IDENTITY, like teardownVct's unbind: the process-wide
+            // HlmsPbs binding may belong to ANOTHER scene, and clearing it from
+            // here would blank that scene's reflections for a grid this one
+            // never built. (This scene's own pointer is the one being deleted.)
+            {
+                Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
+                if (pbs->getParallaxCorrectedCubemap() == mPcc)
+                    pbs->setParallaxCorrectedCubemap(nullptr);
+            }
             delete mPcc; mPcc = nullptr;
             mProbeSlots.clear();
             mProbeUpdatesPerFrame = 0;
             mPccCaptureSize = 0;
             mPccHdr = mPccShadowed = false;
-            hlmsPbs(mRoot)->setParallaxCorrectedCubemap(nullptr);
             return;
         }
         if (mProbesDropped)
@@ -4209,16 +4247,27 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
                 " probes saw nothing inside the lit volume and were dropped");
     }
     clampProbeShapesToRegion(region);
+    // ...AND NOW THE CLOSING CAPTURE, over the survivors and with their final
+    // shapes (see the note at buildEnd above). Every one of them is dirty at
+    // this point — the fit re-published them and the clamp re-published the
+    // ones it corrected — so this is the single render that re-encodes their
+    // depth against the shape the shader will decode it against, and it leaves
+    // the Auto with nothing dirty to collect on the next frame.
+    mPcc->updateAllDirtyProbes();
     // EVERY probe renders in the INLINE stage from now on (B2 point 2). Set once,
     // here, rather than flipped as probes come and go: in automatic mode this
     // selects a render stage, not an amount of work, and the budget already
     // decides how many probes render at all.
     for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mNumIterations = 1u;
-    // The placement above captured the whole grid ONCE, synchronously
-    // (buildStart's updateAllDirtyProbes; buildEnd's closing one is skipped
-    // above) — counted, so a rebuild frame reports what it cost
-    // (GiStatus::probeCapturesLastFrame).
-    mPlacementCapturesThisFrame += int(mPcc->getProbes().size());
+    // TWICE for every probe that survived, synchronously: buildStart's
+    // updateAllDirtyProbes captured every CANDIDATE, and the closing one above
+    // captured the survivors again through their fitted shapes. Counted, so a
+    // rebuild frame reports what it cost (GiStatus::probeCapturesLastFrame).
+    // (The candidates that were dropped cost their first capture and nothing
+    // else — see the lane's debt note: paying full resolution for a probe that
+    // is about to be discarded is answered by placing at the scout's
+    // resolution and re-creating the grid at the kept count.)
+    mPlacementCapturesThisFrame += int(2u * mPcc->getProbes().size());
     // ...and every probe is STALE all the same: the placement captured before
     // the grid was bound to HlmsPbs and before this build's irradiance field
     // existed, so those captures show neither probe reflections nor the DDGI

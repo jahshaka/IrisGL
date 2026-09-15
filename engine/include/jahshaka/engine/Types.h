@@ -1958,8 +1958,9 @@ struct GiStatus {
     // 2026-09-14, "no room in any definition".)
 
     /// How many candidate probes the renderer built, photographed and then
-    /// DROPPED because nothing they could see was within twice the distance to
-    /// their own region's faces. 0 in every mode but the hybrid.
+    /// DROPPED because the VOLUME of the box their six faces measured was not
+    /// smaller than the volume the renderer lit — i.e. what they could see was
+    /// no nearer than the world itself. 0 in every mode but the hybrid.
     /// `probeCount 0` with this NON-ZERO is the open-scene answer (and the sky
     /// IBL is bound instead); `probeCount 0` with this ZERO while the mode is
     /// the hybrid is the silent-degradation failure gi.pcc_mirror exists to
