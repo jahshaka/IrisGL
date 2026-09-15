@@ -23,6 +23,7 @@ For more information see the LICENSE file
 #include "document/assets/mesh.h"
 #include "assimp/postprocess.h"
 #include "import/importflags.h"
+#include "import/parsecensus.h"
 #include "assimp/Importer.hpp"
 #include "assimp/ProgressHandler.hpp"
 #include "assimp/scene.h"
@@ -397,7 +398,13 @@ MeshNode::loadAsSceneFragment(QString filePath,
     }
 
     scene_->importer().SetProgressHandler(new ModelProgressHandler(progressReader));
-    const aiScene *scene = scene_->importer().ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    // The session entry's parse (Studio's ProjectAssets::registerSessionAsset
+    // on a bake-and-prewarm miss), counted by thread — import/parsecensus.h.
+    const aiScene *scene = [&]() {
+        ParseCensus::Record census(filePath);
+        return scene_->importer().ReadFile(filePath.toStdString().c_str(),
+                                           iris::ImportFlags::Canonical);
+    }();
 
     // ReadFile returns null on failure (corrupt file, or an importer feature
     // that is not compiled in, e.g. KHR_draco_mesh_compression): dereferencing

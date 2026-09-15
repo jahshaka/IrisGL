@@ -15,6 +15,7 @@ For more information see the LICENSE file
 
 #include "assimp/postprocess.h"
 #include "import/importflags.h"
+#include "import/parsecensus.h"
 #include "assimp/Importer.hpp"
 #include "assimp/mesh.h"
 #include "assimp/matrix4x4.h"
@@ -30,6 +31,7 @@ namespace iris
 QList<iris::MeshPtr> GraphicsHelper::loadAllMeshesFromFile(QString filePath)
 {
     Assimp::Importer importer;
+    ParseCensus::Record census(filePath);
     const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
     return loadAllMeshesFromAssimpScene(scene);
 }
@@ -40,7 +42,13 @@ void GraphicsHelper::loadAllMeshesAndAnimationsFromFile(
     QMap<QString, SkeletalAnimationPtr> &animations)
 {
     Assimp::Importer importer;
-    const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    // THE PARSE, COUNTED AND ATTRIBUTED TO ITS THREAD (import/parsecensus.h):
+    // this is the read a project open pays when no bake and no prewarm served
+    // the file, and open.responsive asserts it never runs on the UI thread.
+    const aiScene *scene = [&]() {
+        ParseCensus::Record census(filePath);
+        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    }();
 
     if (scene != nullptr) {
         meshes = loadAllMeshesFromAssimpScene(scene);
@@ -53,8 +61,10 @@ QMap<QString, SkeletalAnimationPtr> GraphicsHelper::loadAnimationsFromClipFile(c
 {
     if (error) error->clear();
     Assimp::Importer importer;
-    const aiScene *scene =
-        importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::ClipNamesOnly);
+    const aiScene *scene = [&]() {
+        ParseCensus::Record census(filePath);
+        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::ClipNamesOnly);
+    }();
     if (!scene) {
         if (error) {
             *error = QString::fromUtf8(importer.GetErrorString());

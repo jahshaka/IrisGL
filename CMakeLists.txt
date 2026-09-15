@@ -156,6 +156,7 @@ set(SRCS
     document/scenegraph/meshnode.cpp
     import/graphicshelper.cpp
     import/meshprewarm.cpp
+    import/parsecensus.cpp
     import/meshbake.cpp
     import/importflags.cpp
     import/scenesource.cpp
@@ -228,6 +229,7 @@ set (HEADERS
     core/viewport.h
     import/graphicshelper.h
     import/meshprewarm.h
+    import/parsecensus.h
     import/meshbake.h
     import/importflags.h
     import/scenesource.h
