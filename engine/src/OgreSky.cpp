@@ -1336,6 +1336,27 @@ void OgreScene::applyReflectionToAllImpl() {
         // scene, which is exactly what an override cannot survive.
         if (db) db->setTexture(Ogre::PBSM_REFLECTION, reflectionTexFor(kv.second));
     }
+    // ...AND THE ROUGHNESS-TO-LOD MAP FOLLOWS THE BINDING (lane SKY-FALLBACK-1,
+    // second read). `passBuf.envMapNumMipmaps` is ONE number for the whole pass
+    // and `_notifyIblSpecMipmap` only ever GROWS it, so a probe grid coming and
+    // going leaves it at the PROBE ARRAY's mip count: 6 while the placement
+    // holds the scout's 32 px, 10 at a 512 px tier, and it stays there after the
+    // grid is gone. Every manual sky cube in every scene then maps its roughness
+    // against a mip chain it does not have and reads over-blurred — and since
+    // this walk is now scene-wide (reapplyReflectionsAllScenes), one scene's
+    // grid transition would do that to all of them.
+    //
+    // `resetIblSpecMipmap(0)` is the pin's own answer and the only one that can
+    // bring the number DOWN: it re-derives the maximum from every datablock's
+    // PBSM_REFLECTION plus the bound PCC's array, which is exactly "what is
+    // bound now" — computed AFTER the loop above, so the cubes this scene just
+    // bound are in it. Every walker computes the same answer from the same
+    // global state, so the last one wins and they agree.
+    //
+    // The pass-level sky slot is deliberately NOT in that maximum: it carries
+    // its own cube's mip count in `passBuf.jahSky.y` (ogre-patch 0048) precisely
+    // so that it does not have to share this number with the probe array.
+    static_cast<Ogre::HlmsPbs *>(hlmsPbs)->resetIblSpecMipmap(0u);
 }
 
 // ---------------------------------------------------------------------------

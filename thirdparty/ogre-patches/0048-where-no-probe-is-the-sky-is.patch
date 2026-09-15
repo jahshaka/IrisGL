@@ -4,7 +4,7 @@ MEDIA-only patch (two Hlms pieces). Studio stages its media from the SOURCE tree
 (cmake/IncludeOgre.cmake), so every tree still has to re-run
 `irisgl/scripts/build-ogre.sh` to get it — no engine COMPILE is needed beyond the
 staging, which is the whole difference from a SOURCE patch. It OVERLAPS patches
-0017, 0028 and 0029 in `ForwardPlus_DecalsCubemaps_piece_ps.any` and 0021, 0033
+0017, 0029 and 0031 in `ForwardPlus_DecalsCubemaps_piece_ps.any` and 0021, 0033
 and 0045 in `Vct_piece_ps.any`: a tree that already carries those hits
 `build-ogre.sh`'s "Upstream changed the patched file" on a re-run, which is the
 documented per-patch reverse-check blind spot and NOT an upstream change. The
@@ -151,7 +151,7 @@ sky) and one 25 m outside them reads the green IBL cube exactly.
 +	// survivable while a probe grid was an all-or-nothing scene-wide decision.
 +	// It stopped being survivable when the grid became a PER PROBE decision
 +	// (lane R5-ROOM): a PARTIAL grid is the normal case now -- one crate in an
-+	// open scene keeps 7 of 18 candidates -- and every pixel that no surviving
++	// open scene keeps 2 of 18 candidates -- and every pixel that no surviving
 +	// probe's box contains had no environment left but the cones, whose own
 +	// escape term is a flat, pi-dimmed copy of the same sky.
 +	//

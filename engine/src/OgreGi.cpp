@@ -1717,13 +1717,18 @@ static bool giIsSlab(const Ogre::Aabb &a, size_t ax) {
 // Ogre's own bookkeeping is respected rather than poked around: the shape is
 // re-published through `CubemapProbe::set`, keeping the probe's camera
 // position, influence AREA, inner region and orientation exactly as the
-// placement left them. `set` re-applies its own 1.005 padding to whatever it is
-// handed, so both boxes are un-padded on the way in and the values that land in
-// the probe are exactly the intended ones. It also raises `mDirty`, so the
-// clamped probes re-capture on the next frame, which is what we want anyway.
+// placement left them. It also raises `mDirty`, so the clamped probes
+// re-capture on the next frame, which is what we want anyway.
+//
+// AND THE RE-PUBLISH SAYS SO (lane SKY-FALLBACK-1, second read). `set` used to
+// re-apply its own 1.005 padding to anything it was handed, so this function
+// divided both boxes by a copy of that constant on the way in — a private
+// number copied out of the pin, and a divide-then-multiply round trip that is
+// not even bit-exact. ogre-patch 0049 gave `set` a `bValuesAlreadyPadded`
+// argument for exactly this: these ARE the probe's own boxes, padding included,
+// so they are handed back as they are and the constant is gone.
 void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
     if (!mPcc) return;
-    static const float kSetPadding = 1.005f;    // CubemapProbe::set's own padding
     // The clamp target is the region grown slightly. Clamping to the region
     // EXACTLY puts a box face on the floor plane the region was pulled in to,
     // and a parallax ray that leaves a surface lying in its own box face
@@ -1769,9 +1774,8 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
         ++mProbesClampedToRegion;
         const Ogre::Aabb area = p->getArea();
         const Ogre::Aabb clamped = Ogre::Aabb::newFromExtents(cmn, cmx);
-        p->set(cam, Ogre::Aabb(area.mCenter, area.mHalfSize / kSetPadding),
-               p->getAreaInnerRegion(), p->getOrientation(),
-               Ogre::Aabb(clamped.mCenter, clamped.mHalfSize / kSetPadding));
+        p->set(cam, area, p->getAreaInnerRegion(), p->getOrientation(), clamped,
+               /*bValuesAlreadyPadded*/ true);   // ogre-patch 0049
         if (debug) {
             const auto toS = [](const Ogre::Vector3 &v) {
                 return Ogre::StringConverter::toString(v);

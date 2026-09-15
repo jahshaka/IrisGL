@@ -973,8 +973,9 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     byte-for-byte the code it was. Upstream-worthy as it stands.
 
 48. **0048-where-no-probe-is-the-sky-is** (MEDIA — `ForwardPlus_DecalsCubemaps_piece_ps.any`
-    and `Vct_piece_ps.any`; OVERLAPS 0017, 0028 and 0029 in the first and 0021,
-    0033 and 0045 in the second: a tree carrying them fails
+    and `Vct_piece_ps.any`; OVERLAPS 0017, 0029 and 0031 in the first and 0021,
+    0033 and 0045 in the second (0028 names that file in its prose but has no
+    hunk in it): a tree carrying them fails
     `build-ogre.sh`'s reverse-check with "Upstream changed the patched file" —
     the documented blind spot, cured by the submodule reset) — the PBS env-probe
     slot has ONE occupant, and under automatic PCC it is the probe cube ARRAY, so
@@ -982,7 +983,7 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     exists (a manual cube there does not compile — three ways, listed on
     `OgreScene::reflectionTexFor`). Harmless while a grid meant a room; a
     REGRESSION since patch 0047 made the grid a per-probe decision, because a
-    PARTIAL grid is now the normal case (one crate in a new project keeps 7 of
+    PARTIAL grid is now the normal case (one crate in a new project keeps 2 of
     18) and every pixel no surviving probe's box contains was left with cone
     tracing alone — measured as `scripting.e2e.default_ground`'s grazing margin
     falling 5/255 → 3/255. The sky gets a SECOND slot at the pass level through
