@@ -2488,10 +2488,18 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
                                        desc.ssr >= 2 ? 96.0f : 48.0f,
                                        desc.rayReflectRoughness));
 
+    // ...AND THE FEATHER TRAVELS WITH IT (lane SSR-3 round 2, lead's call). The
+    // resolve's roughness ramp is `cutoff - feather -> cutoff`, the same 0.1 the
+    // traced half fades over, so a surface more than a feather below the cutoff
+    // keeps its screen reflection whole and the two halves of one reflection
+    // hand over on one number. The value is `kRayReflectFeather` in
+    // EnginePrivate.h - a shared constant rather than a literal here and another
+    // in OgreRayQuery.cpp, which is how two halves drift apart.
     if (Ogre::Pass *resolve = materialPass("Jahshaka/SsrResolve"))
         resolve->getFragmentProgramParameters()->setNamedConstant(
             "resolveParams",
-            Ogre::Vector4(desc.rayReflectRoughness, desc.ssrIntensity, 0.0f, 0.0f));
+            Ogre::Vector4(desc.rayReflectRoughness, desc.ssrIntensity,
+                          kRayReflectFeather, 0.0f));
 }
 
 // ---- DISTORTION -----------------------------------------------------------

@@ -120,7 +120,8 @@ in block
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4 rayBufferRes;		// auto texture_size 0: xy = the ray buffer's pixels
 	uniform vec4 prevFrameRes;		// auto texture_size 2: xy = the colour history's pixels
-	uniform vec4 resolveParams;		// x roughness cutoff, y intensity, zw unused
+	uniform vec4 resolveParams;		// x roughness cutoff, y intensity,
+									// z the cutoff's feather, w unused
 vulkan( }; )
 
 vulkan_layout( location = 0 )
@@ -343,15 +344,34 @@ void main()
 	// channel is the GGX ALPHA packed by ogre-patch 0043 over [0.001, 1], so the
 	// perceptual roughness the cutoff is stated in is its square root. Read with
 	// the pre-0043 range and no square root, this ramp ran over perceptual
-	// 0.399 -> 0.581 for a cutoff of 0.35; it now runs over `cutoff/2 -> cutoff`
-	// in the number the World row shows, which for the default 0.40 is
-	// perceptual 0.20 -> 0.40.
+	// 0.399 -> 0.581 for a cutoff of 0.35.
+	//
+	// AND THE RAMP IS THE FEATHER THE TRACED HALF USES (lane SSR-3 round 2, the
+	// lead's call on the measurement). It was `cutoff/2 -> cutoff`, a width that
+	// was never chosen -- it was half of a number in the WRONG UNIT -- and read
+	// in perceptual roughness it took half the screen reflection off a satin
+	// surface at 0.30 under the default cutoff of 0.40 (measured, tests/ssr
+	// section 13: red excess 0.847 -> 0.424). It is now
+	// `cutoff - feather -> cutoff` with the feather the ray tier fades over,
+	// `kRayReflectFeather` = 0.1, arriving in resolveParams.z from
+	// EnginePrivate.h through OgreChain::updateSsr. A surface more than a
+	// feather below the cutoff keeps its reflection WHOLE, one authored inside
+	// the feather crossfades to the probe, and the screen and the ray now hand
+	// over on one number instead of two.
+	//
+	// The ray fades to zero at `cutoff + feather` and this fades to zero AT the
+	// cutoff, and that asymmetry is not an oversight: a ray may be spent above
+	// the cutoff and its answer crossfaded, while the march is SKIPPED there
+	// (JahSsrRayMarch_ps.glsl returns before it starts), so above the cutoff
+	// there is no screen answer to fade.
 	const float alpha = max(
 		texture( vkSampler2D( gBufShadowRoughness, pointSampler ), inPs.uv0 ).y * 0.999 + 0.001,
 		1e-6 );
 	const float roughness = sqrt( alpha );
 	const float cutoff	  = resolveParams.x;
-	const float roughFade = 1.0 - smoothstep( cutoff * 0.5, cutoff, roughness );
+	const float feather	  = resolveParams.z;
+	const float roughFade =
+		1.0 - smoothstep( max( cutoff - feather, 0.0 ), cutoff, roughness );
 
 	// ---- THE RULE ON A MIRROR (lane SSR-2, the owner's dual image) ----------
 	//

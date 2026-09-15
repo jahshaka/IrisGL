@@ -2753,13 +2753,16 @@ struct PostFxDesc {
     /// perceptual 0.581, not 0.35 and not anything a user could read. It is
     /// deleted; the march reads this field (OgreChain::updateSsr).
     ///
-    /// THE TRANSITION IS FEATHERED, not a step. The ray's confidence runs from
-    /// full at `cutoff - kRayReflectFeather` to zero at `cutoff + feather`, and
-    /// the march's own roughness ramp runs from full at `cutoff/2` to zero at
-    /// `cutoff`, so a surface whose roughness varies across it — a scratched
-    /// floor — hands the pixel over through the existing confidence composite
-    /// with no seam. The feather's half-width is a named constant in the engine
-    /// (0.1), deliberately not a second dial.
+    /// THE TRANSITION IS FEATHERED, not a step, and BOTH SOURCES FADE OVER THE
+    /// SAME 0.1 (`kRayReflectFeather`, one constant in EnginePrivate.h since
+    /// lane SSR-3 so the two cannot drift). The ray's confidence runs from full
+    /// at `cutoff - feather` to zero at `cutoff + feather`; the march's
+    /// roughness ramp runs from full at `cutoff - feather` to zero AT `cutoff`,
+    /// because the march is skipped above the cutoff and has nothing there to
+    /// fade. So a surface more than a feather below the cutoff keeps its screen
+    /// reflection whole, and one whose roughness varies across the cutoff — a
+    /// scratched floor — hands the pixel over through the existing confidence
+    /// composite with no seam. A constant, deliberately not a second dial.
     ///
     /// It is a UNIFORM, not a graph change: moving it must not rebuild a
     /// workspace (see ChainDesc::sameShape).

@@ -179,16 +179,11 @@ struct ScratchArena {
 // Deleted with the second cutoff it described; there is one cutoff now and the
 // project owns it.
 
-/// HOW WIDE THE GATE'S FEATHER IS, either side of the cutoff (owner, ledger
-/// §426). The ray's confidence runs from full at `cutoff - kRayReflectFeather`
-/// to zero at `cutoff + kRayReflectFeather`, and the existing confidence
-/// composite hands the remainder to the probe — so a surface whose roughness
-/// varies across it has no seam in it. A CONSTANT and deliberately not a second
-/// dial: the cutoff says WHERE the technique stops being worth it (content), the
-/// feather only says that it stops smoothly (renderer). 0.1 is about two and a
-/// half times the ±0.04 that a roughness map's 8-bit quantisation can move a
-/// neighbouring pixel by, so the ramp is always wider than the noise it hides.
-constexpr float kRayReflectFeather = 0.1f;
+// THE GATE'S FEATHER IS NOT HERE EITHER, and for a reason worth the line: since
+// lane SSR-3 the screen-space march fades over the SAME 0.1, so a copy of it in
+// this file would be two numbers one edit apart. `kRayReflectFeather` lives in
+// EnginePrivate.h, which both this TU and OgreChain.cpp already include, and its
+// note there says what each half does with it.
 /// THE TEMPORAL MEAN'S FLOOR on 1/n. The mean starts as a true running average
 /// (fastest convergence) and settles into an exponential one at this weight, so
 /// it keeps following a scene whose lighting changes: 1/16 remembers about

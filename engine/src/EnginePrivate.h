@@ -718,6 +718,33 @@ constexpr Ogre::uint8 kQueueDepthAnchorRenderQueue = kDistortionParticleRenderQu
 /// stays because MaterialRec and every loop over the slots use it.
 constexpr size_t kPbrTextureSlotCount = size_t(PbrTextureSlot::Count);
 
+/// HOW WIDE THE REFLECTION CUTOFF'S FEATHER IS, and it is ONE number for BOTH
+/// halves of a per-pixel reflection (owner, ledger §426; lane SSR-3 moved it
+/// here and gave the march its share). The cutoff itself is the project's
+/// (`ChainDesc::rayReflectRoughness`, the World panel's "Roughness Cutoff" row,
+/// in PERCEPTUAL roughness); this says only that the technique stops SMOOTHLY:
+///
+///   * the TRACED half runs from full confidence at `cutoff - kRayReflectFeather`
+///     to zero at `cutoff + kRayReflectFeather` (OgreRayQuery.cpp pushes it as
+///     `projParams.w`), because a ray may be spent above the cutoff and its
+///     answer crossfaded;
+///   * the MARCHED half runs from full at `cutoff - kRayReflectFeather` to zero
+///     AT the cutoff (OgreChain::updateSsr pushes it as `resolveParams.z`,
+///     JahSsrResolve_ps.glsl reads it), because the march is SKIPPED above the
+///     cutoff — there is nothing there to crossfade.
+///
+/// IT LIVES IN THIS HEADER SO THE TWO CANNOT DRIFT. It was a file-scope constant
+/// in OgreRayQuery.cpp while only the ray tier had a feather; the moment the
+/// screen-space march took the same dial (SSR-3) a second copy of 0.1 would have
+/// been two numbers one edit apart.
+///
+/// A CONSTANT and deliberately not a second dial: the cutoff says WHERE the
+/// technique stops being worth it (content), the feather only says that it stops
+/// smoothly (renderer). 0.1 is about two and a half times the ±0.04 that a
+/// roughness map's 8-bit quantisation can move a neighbouring pixel by, so the
+/// ramp is always wider than the noise it hides.
+constexpr float kRayReflectFeather = 0.1f;
+
 // ---------------------------------------------------------------------------
 // What shape of compositor chain a view wants. Phase 1 carries only what every
 // view has always had; the effect switches (HDR + tonemap, bloom, SSAO, SMAA,
