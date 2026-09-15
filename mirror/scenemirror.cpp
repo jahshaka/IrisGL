@@ -77,18 +77,74 @@ namespace {
 inline Vec3 toVec3(const iris::Vec3 &v) { return Vec3(v.x(), v.y(), v.z()); }
 inline Quat toQuat(const iris::Quat &q) { return Quat(q.x(), q.y(), q.z(), q.scalar()); }
 
-/// A SUN THAT HAS SET (SUN_FOLLOWS_ATMOSPHERE, round-2 review item 4). At and
-/// below the horizon the atmosphere's tint runs to nothing — measured on the
-/// shipped preset, 6e-4 / 2.5e-6 / 1.4e-10 at elevation zero — so the light
-/// contributes no pixel anywhere. Its SHADOW is not free, though: a directional
-/// caster renders three full-view-frustum PSSM passes every frame it is on, and
-/// the sun disc would go on being drawn in a night sky. Both are dropped once
-/// the brightest channel falls below this, which is a thousandth of the noon
-/// value and three hundred times below one 8-bit step.
-constexpr float kSunNightTint = 1e-3f;
-inline bool sunTintIsNight(const jahshaka::engine::Colour &t)
+/// ONE 8-BIT CODE, IN THE ENGINE'S LINEAR RADIANCE UNITS (lane SKY-SMALL,
+/// item SKY-NIGHT-1). The threshold below which a sun stops being able to
+/// change any pixel of the picture — and therefore the point at which its disc
+/// and its three PSSM shadow passes may be dropped.
+///
+/// WHAT IT REPLACES, AND WHY IT HAD TO GO. The rule here used to be a RELATIVE
+/// one: drop both once the atmosphere's tint fell below a thousandth of its
+/// noon value. A tint is a transmittance, so a fraction of noon is a fraction
+/// of a quantity nobody measured, and the elevation at which it is crossed
+/// moves with the air: with SKY-DENSITY-1's physical transmittance (Beer-
+/// Lambert with a Kasten-Young airmass, OgreSky.cpp::atmosphereSunTint) the
+/// crossing sits at +0.74 degrees of sun elevation at the default haze 2.5, at
+/// +3.61 at haze 6 and at +6.27 at haze 10 — measured, this lane. A hazy dial
+/// therefore took the disc and the shadow off while the sun was VISIBLY UP: at
+/// the cut the disc still carried 8 x intensity x 1e-3 of radiance, a 5-10/255
+/// dot that vanished between two frames.
+///
+/// THE ABSOLUTE FORM. What matters is not how much of noon is left, it is
+/// whether what is left can still move an 8-bit output code. Follow the disc's
+/// radiance to the screen (irisgl/engine/media/Hlms/Jahshaka/JahSunDisc_ps.glsl
+/// writes it ADDITIVELY into the HDR target, so its gain to the frame is
+/// exactly one) through the chain the view applies:
+///
+///   1. AUTO EXPOSURE (HDR/DownScale03_SumLumEnd_ps.glsl). The frame is
+///      multiplied by `exposure.x / exp(clamp(meanLogLum, 7.5 - exposureMax,
+///      7.5 - exposureMin))` with `exposure.x = 1024 * e^(exposure - 2)`. The
+///      clamp is the load-bearing part: the multiplier is BOUNDED, and its
+///      upper bound is reached by every scene darker than mean luminance
+///      e^5/1024 = 0.145 — which is every twilight scene there is. At the
+///      document defaults (Scene: exposure +0.6, exposureMin -2.5, exposureMax
+///      +2.5) that bound is 1024 * e^(0.6 - 9.5 + 2.5) = 1.7014. So the
+///      brightest grade this chain can put on a dark frame is a known number,
+///      not a property of the display.
+///   2. THE FILMIC CURVE (HDR/FinalToneMapping_ps.glsl, Hable). Its slope is
+///      steepest at black: f'(0) = C*B/(D*F) - D*E*B/(D*F)^2 = 1/3, normalised
+///      by f(W=11.2) = 0.8673, so d(tonemapped)/d(linear) = 0.38433 at 0.
+///   3. THE CONTRAST STRETCH the same shader ends with, x = (x - 0.5)*1.25 +
+///      0.61: a gain of exactly 1.25. Total 0.48042.
+///   4. THE sRGB ENCODE on the way to the 8-bit target, whose slope is largest
+///      on its linear toe: 12.92 (the toe reaches to a tonemapped 0.0031, i.e.
+///      a post-exposure scene value of 0.0327 — a twilight frame lives there).
+///
+/// Multiply: one unit of post-exposure radiance is worth at most
+/// 255 * 12.92 * 0.48042 = 1582.8 output codes, so ONE code needs at least
+/// 1/1582.8 = 6.318e-4 of post-exposure radiance, and at the brightest grade
+/// 6.318e-4 / 1.7014 = 3.713e-4 of scene radiance. Rounded DOWN (the safe
+/// direction — a lower threshold keeps the disc a moment longer):
+constexpr float kSunVisibleRadiance = 3.7e-4f;
+
+/// ...AND THE SHADOW GETS THE SAME STEP WITH A SPECULAR HEADROOM. A shadow's
+/// visible effect is the DIFFERENCE between a lit and an unlit surface, which
+/// for the diffuse term is at most the sun's own radiance (albedo <= 1,
+/// NdotL <= 1, and HlmsPbs' 1/pi cancels against `powerScale = intensity*pi`)
+/// — gain one, like the disc. A SPECULAR highlight is not bounded by one: the
+/// pin's BRDF concentrates the beam by 1/(pi*alpha^2) at the peak
+/// (200.BRDFs_piece_ps.any:105, alpha = the GGX alpha, floored at 0.001 in
+/// 800.PixelShader_piece_ps.any:362 and the whole expression capped at 65504),
+/// so a mirror-smooth surface in shadow can show a sun far dimmer than one
+/// code of diffuse. There is no finite bound to take — 65504 is the shader's
+/// clamp, not physics — so this is a STATED headroom rather than a derivation:
+/// 1024 covers every material down to alpha 0.0176, i.e. a perceptual
+/// roughness of 0.133, polished metal; below that the highlight is a sub-pixel
+/// glint on a sun that is already a thousandth of a code.
+constexpr float kSunShadowSpecularHeadroom = 1024.0f;
+
+inline float brightestChannel(const jahshaka::engine::Colour &c)
 {
-    return std::max(std::max(t.r, t.g), t.b) < kSunNightTint;
+    return std::max(std::max(c.r, c.g), c.b);
 }
 
 
@@ -4265,12 +4321,25 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
         }
         d.primaryDirectional = !resolved || resolved == light;
         if (!d.primaryDirectional) d.castShadows = false;
-        // ...AND A SUN THAT HAS SET CASTS NOTHING (round-2 review item 4): its
-        // three PSSM passes would render every frame for a light whose colour
-        // the atmosphere has taken to zero. `sunTint` is white for every light
-        // that does not follow the atmosphere, so this can only fire on a sun
-        // that does.
-        if (sunTintIsNight(sunTint)) d.castShadows = false;
+        // ...AND A SUN THAT CANNOT MOVE A PIXEL CASTS NOTHING (round-2 review
+        // item 4; made ABSOLUTE by lane SKY-SMALL). Three full-view-frustum
+        // PSSM passes every frame buy a shadow whose depth is the difference
+        // between a lit and an unlit surface — i.e. at most this light's own
+        // radiance, which is what reaches `d.colour` (the picked colour,
+        // decoded, times the air) times `d.intensity`. Below one 8-bit code of
+        // it, divided by the specular headroom, the passes buy nothing that
+        // can be shown.
+        //
+        // Absolute, so it no longer moves with the haze dial, and no longer
+        // relative to a noon value nobody measured. Note it is also no longer
+        // ONLY about the atmosphere: a sun turned down to zero intensity, or
+        // to black, stops paying for shadows too — the same physics, and the
+        // old rule missed it because `sunTint` is white for such a light.
+        {
+            const float sunRadiance = brightestChannel(d.colour) * std::max(0.0f, d.intensity);
+            if (sunRadiance < kSunVisibleRadiance / kSunShadowSpecularHeadroom)
+                d.castShadows = false;
+        }
     }
     // LIGHTING CHANNELS, light side. The document field is on SceneNode (one
     // field, one meaning, both ends of the test) — the light's copy says which
@@ -7007,11 +7076,17 @@ void SceneMirror::applySky(View *view)
                 // the room orange would be the defect this toggle exists to
                 // avoid, so the disc reads the identical tint.
                 const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
-                // A SUN THAT HAS SET DRAWS NO DISC (round-2 review item 4).
-                // Below the horizon the tint is zero to every decimal an 8-bit
-                // frame can hold, and a black disc in a night sky is a hole.
-                if (sunTintIsNight(tint)) sun.enabled = false;
                 sun.colour = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
+                // A DISC THAT CANNOT MOVE A PIXEL IS NOT DRAWN (round-2 review
+                // item 4; made ABSOLUTE by lane SKY-SMALL). The test is on the
+                // radiance this very line just assembled — colour, intensity,
+                // the size normalisation and the air, all of it — and not on
+                // the tint alone, so lowering the sun's intensity or shrinking
+                // the disc moves the cut exactly as much as the air does. The
+                // shader writes this value ADDITIVELY into the HDR target, so
+                // its gain to the frame is one and the threshold is the plain
+                // one-code step.
+                if (brightestChannel(sun.colour) < kSunVisibleRadiance) sun.enabled = false;
             }
         }
     }

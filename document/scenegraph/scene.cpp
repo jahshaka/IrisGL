@@ -130,6 +130,104 @@ SkyRealistic SkyRealistic::defaults()
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// THE REALISTIC SKY: ONE WRITER, TWO REPRESENTATIONS (lane SKY-SMALL, item
+// SKY-WRITE-1).
+//
+// The dials live in this document twice — as `skyRealistic`, which SceneMirror
+// reads and the renderer therefore draws, and as `skyData["Realistic"]`, which
+// SceneWriter serialises and every panel binds from. That is a hazard with a
+// shape: a writer that sets one half and forgets the other is silently
+// reverted at the next bind or the next save, and nothing anywhere says so.
+//
+// It was live code. FOUR writers kept both halves by hand (the `world.sky`
+// verb, the sky panel's six dials, the undo command's capture/apply pair, and
+// two file readers), each carrying its own copy of the clamps and its own
+// per-key defaults — the verb clamped only `sunHaze` where the panel clamped
+// all five, so a scripted `density: 50` survived until somebody opened the
+// panel, and the undo blob carried the six dials as SIX MORE keys beside the
+// JSON block, so a field added to SkyRealistic and forgotten there would be
+// reverted by any undo. All of that is deleted; this is the one path.
+// ---------------------------------------------------------------------------
+namespace {
+QJsonObject skyColourJson(const QColor &c)
+{
+    QJsonObject o;
+    o["r"] = c.red(); o["g"] = c.green(); o["b"] = c.blue(); o["a"] = c.alpha();
+    return o;
+}
+QColor skyColourFromJson(const QJsonObject &o, const QColor &fallback)
+{
+    if (o.isEmpty()) return fallback;
+    QColor c;
+    c.setRed(o["r"].toInt(0));
+    c.setGreen(o["g"].toInt(0));
+    c.setBlue(o["b"].toInt(0));
+    c.setAlpha(o.contains("a") ? o["a"].toInt(255) : 255);
+    return c;
+}
+}   // namespace
+
+SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
+{
+    // The panel rows' own ranges, in the DOCUMENT: a value a dial cannot
+    // express must not survive a visit to the panel, and must not reach the
+    // renderer from a verb either.
+    r.density   = qBound(0.01f, r.density,   1.0f);
+    r.diffusion = qBound(0.0f,  r.diffusion, 4.0f);
+    r.horizon   = qBound(0.0f,  r.horizon,   0.5f);
+    r.power     = qBound(0.0f,  r.power,     4.0f);
+    // Held at or above a purely molecular atmosphere, where the aerosol term is
+    // zero: below that it would amplify the sun's beam instead of absorbing it.
+    // Above 10 every non-zenith sun is black.
+    r.sunHaze   = qBound(1.0f,  r.sunHaze,   10.0f);
+    return r;
+}
+
+QJsonObject Scene::skyRealisticJson(const SkyRealistic &r)
+{
+    QJsonObject o;
+    o.insert("density",   double(r.density));
+    o.insert("diffusion", double(r.diffusion));
+    o.insert("horizon",   double(r.horizon));
+    o.insert("power",     double(r.power));
+    o.insert("sunHaze",   double(r.sunHaze));
+    o.insert("skyColour", skyColourJson(r.skyColour));
+    return o;
+}
+
+SkyRealistic Scene::skyRealisticFromJson(const QJsonObject &o)
+{
+    // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults trap): a
+    // document written before a dial existed opens at the fitted default, never
+    // at zero and never at an uninitialised float.
+    const SkyRealistic d = SkyRealistic::defaults();
+    SkyRealistic r = d;
+    r.density   = float(o.value("density").toDouble(d.density));
+    r.diffusion = float(o.value("diffusion").toDouble(d.diffusion));
+    r.horizon   = float(o.value("horizon").toDouble(d.horizon));
+    r.power     = float(o.value("power").toDouble(d.power));
+    r.sunHaze   = float(o.value("sunHaze").toDouble(d.sunHaze));
+    r.skyColour = skyColourFromJson(o.value("skyColour").toObject(), d.skyColour);
+    return r;
+}
+
+void Scene::setSkyRealistic(const SkyRealistic &r)
+{
+    skyRealistic = clampSkyRealistic(r);
+    skyData.insert(QStringLiteral("Realistic"), skyRealisticJson(skyRealistic));
+}
+
+bool Scene::skyRealisticInSync() const
+{
+    // Through the JSON both ways, so the comparison is of the two things that
+    // actually exist rather than of six floats somebody remembered to list.
+    const QJsonObject mine = skyRealisticJson(skyRealistic);
+    const auto it = skyData.constFind(QStringLiteral("Realistic"));
+    if (it == skyData.constEnd()) return false;
+    return skyRealisticJson(skyRealisticFromJson(*it)) == mine;
+}
+
 Scene::Scene()
 {
     mGraphScene = graph::stagingScene();
@@ -282,60 +380,26 @@ Scene::Scene()
 
 	skyGuid = IrisUtils::generateGUID();
 
-	QJsonObject colObj;
-	colObj["r"] = skyColor.red();
-	colObj["g"] = skyColor.green();
-	colObj["b"] = skyColor.blue();
-	colObj["a"] = skyColor.alpha();
+	const auto jsonColour = [](const QColor &c) {
+		QJsonObject o;
+		o["r"] = c.red(); o["g"] = c.green(); o["b"] = c.blue(); o["a"] = c.alpha();
+		return o;
+	};
 
-	skyDataSingleColor = QJsonObject();
-	skyDataSingleColor.insert("skyColor", colObj);
+	QJsonObject singleColourBlock;
+	singleColourBlock.insert("skyColor", jsonColour(skyColor));
 
-	skyDataRealistic = QJsonObject();
-	skyDataRealistic.insert("density", skyRealistic.density);
-	skyDataRealistic.insert("diffusion", skyRealistic.diffusion);
-	skyDataRealistic.insert("horizon", skyRealistic.horizon);
-	skyDataRealistic.insert("power", skyRealistic.power);
-	skyDataRealistic.insert("sunHaze", skyRealistic.sunHaze);
-	{
-		QJsonObject skyCol;
-		skyCol["r"] = skyRealistic.skyColour.red();
-		skyCol["g"] = skyRealistic.skyColour.green();
-		skyCol["b"] = skyRealistic.skyColour.blue();
-		skyCol["a"] = skyRealistic.skyColour.alpha();
-		skyDataRealistic.insert("skyColour", skyCol);
-	}
+	QJsonObject gradientBlock;
+	gradientBlock.insert("gradientTop", jsonColour(QColor(255, 146, 138)));
+	gradientBlock.insert("gradientMid", jsonColour(QColor("white")));
+	gradientBlock.insert("gradientBot", jsonColour(QColor(64, 128, 255)));
+	gradientBlock.insert("gradientOffset", .73f);
 
-	QJsonObject colTop;
-	QColor top(255, 146, 138);
-	colTop["r"] = top.red();
-	colTop["g"] = top.green();
-	colTop["b"] = top.blue();
-	colTop["a"] = top.alpha();
-
-	QJsonObject colMid;
-	QColor mid("white");
-	colMid["r"] = mid.red();
-	colMid["g"] = mid.green();
-	colMid["b"] = mid.blue();
-	colMid["a"] = mid.alpha();
-
-	QJsonObject colBot;
-	QColor bot(64, 128, 255);
-	colBot["r"] = bot.red();
-	colBot["g"] = bot.green();
-	colBot["b"] = bot.blue();
-	colBot["a"] = bot.alpha();
-
-	skyDataGradient = QJsonObject();
-	skyDataGradient.insert("gradientTop", colTop);
-	skyDataGradient.insert("gradientMid", colMid);
-	skyDataGradient.insert("gradientBot", colBot);
-	skyDataGradient.insert("gradientOffset", .73f);
-
-	skyData.insert("SingleColor", skyDataSingleColor);
-	skyData.insert("Realistic", skyDataRealistic);
-	skyData.insert("Gradient", skyDataGradient);
+	skyData.insert("SingleColor", singleColourBlock);
+	// THROUGH THE ONE PATH, like every other write of these dials: the typed
+	// fields and the JSON block cannot start out disagreeing either.
+	setSkyRealistic(skyRealistic);
+	skyData.insert("Gradient", gradientBlock);
 	skyData.insert("Equirectangular", QJsonObject());
 	skyData.insert("Cubemap", QJsonObject());
 

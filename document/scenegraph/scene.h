@@ -642,7 +642,47 @@ public:
     bool shadowEnabled;
 
 	SkyType skyType;
+	/// THE REALISTIC SKY'S DIALS — READ THIS, WRITE `setSkyRealistic`.
+	///
+	/// The realistic sky lives in this document TWICE: as these typed fields,
+	/// which is what SceneMirror reads and what the renderer therefore draws,
+	/// and as `skyData["Realistic"]`, which is what SceneWriter serialises and
+	/// what every panel binds from. Two representations of one fact is a hazard
+	/// with a shape: a writer that sets one half and forgets the other is
+	/// SILENTLY REVERTED at the next bind or the next save, and nothing says so.
+	/// Four writers used to keep both halves by hand — the verb, six panel
+	/// dials, the undo command and two file readers — each with its own copy of
+	/// the clamps and its own per-key defaults.
+	///
+	/// `setSkyRealistic` is the ONE path now: it clamps once, writes these
+	/// fields, and writes the JSON half from the same values. `skyRealisticInSync`
+	/// is the assertion that the two agree, and suites make it.
 	SkyRealistic skyRealistic;
+
+	/// Write the realistic sky's dials — BOTH representations, clamped once.
+	/// The only supported way to change them.
+	void setSkyRealistic(const SkyRealistic &r);
+
+	/// Every dial held inside the band the model can actually use. The ranges
+	/// are the panel rows' own (density past ~1 is a night sky at noon,
+	/// diffusion past 4 flattens the gradient into a wall, the horizon limit is
+	/// a fraction of the sphere, and sunHaze below 1 would amplify the sun's
+	/// beam rather than absorb it — see SkyRealistic::sunHaze). Clamping in the
+	/// DOCUMENT, not in the display, is what keeps a value no dial can express
+	/// from surviving a visit to the panel.
+	static SkyRealistic clampSkyRealistic(SkyRealistic r);
+
+	/// The JSON half of the same fact, in the shape the serializer and the
+	/// panels use, and the way back. `fromJson` gives an ABSENT key the value a
+	/// NEW scene has (the reader-defaults trap: an absent key must mean exactly
+	/// what a new scene means, never 0), so a document written before a dial
+	/// existed opens at the fitted default.
+	static QJsonObject skyRealisticJson(const SkyRealistic &r);
+	static SkyRealistic skyRealisticFromJson(const QJsonObject &o);
+
+	/// DO THE TWO HALVES AGREE? The document-level assertion that the hazard
+	/// above has not come back. False means somebody wrote one half directly.
+	bool skyRealisticInSync() const;
 
 	// THE SUN PIN (SUN_AND_LIGHT_DEFAULTS Q1): the guid of the DIRECTIONAL
 	// light the author has pinned as this scene's sun. Empty (the default) =
@@ -774,13 +814,13 @@ public:
     QString skyGuid;
     QString ambientMusicGuid;
 
-	QJsonObject skyDataSingleColor;
-	QJsonObject skyDataRealistic;
-	QJsonObject skyDataGradient;
-	QJsonObject skyDataEqui;
-	QJsonObject skyDataCubemap;
-	QJsonObject skyDataMaterial;
-
+	/// THE SKY, AS THE SERIALIZER AND THE PANELS SEE IT: one block per sky
+	/// type, keyed "SingleColor" / "Realistic" / "Gradient" / "Equirectangular"
+	/// / "Cubemap". SceneWriter writes this map and nothing else.
+	///
+	/// (The six `skyData<Type>` members that stood beside it are GONE — they
+	/// were filled by the constructor, copied into this map on the next line
+	/// and never read again by anything, in either repo.)
 	QMap<QString, QJsonObject> skyData;
 
 	void setWorldGravity(float gravity);
