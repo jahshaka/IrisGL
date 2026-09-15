@@ -17,6 +17,7 @@ For more information see the LICENSE file
 #include <QString>
 #include <QStringList>
 #include <QColor>
+#include <QVector>
 
 #include "irisglfwd.h"
 #include "document/animation/skeletalanimation.h"
@@ -145,6 +146,25 @@ public:
     int numFaces;
 
     TriMesh* triMesh;
+
+    /// ATOM stage 1 — the automatic LOD chain, built at IMPORT by MeshBake and
+    /// carried in the .jmb bake (SPECS/NANITE_SPEC.md §7). Empty for every mesh
+    /// that has none, which is today's behaviour exactly.
+    ///
+    /// `lodIndices[i]` is LEVEL i+1 and indexes the SAME vertex buffers as
+    /// `idxBuffer` (level 0). meshopt_simplify REMOVES vertices, it never
+    /// creates them, and nothing re-orders the vertex buffer per level on
+    /// purpose: one vertex buffer, N index buffers is what keeps every level of
+    /// a mesh inside ONE draw call downstream (finding B).
+    ///
+    /// `lodErrors[i]` is that level's geometric error as a LENGTH in mesh
+    /// units, monotonically non-decreasing. It is the currency the whole
+    /// program is judged in: divided by the view distance it is a screen-space
+    /// error, and compared against a world-space cell size it answers "is this
+    /// level fine enough for a voxel of that size".
+    QVector<QVector<quint32>> lodIndices;
+    QVector<float>            lodErrors;
+
     /// CPU-side geometry, read-only. The engine mirror and importers convert from
     /// these.
     const QList<VertexBufferPtr>& getVertexBuffers() const { return vertexBuffers; }

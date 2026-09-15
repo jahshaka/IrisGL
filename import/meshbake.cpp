@@ -15,6 +15,11 @@ For more information see the LICENSE file
 #include "import/meshbake.h"
 #include "import/parsecensus.h"
 
+#include <algorithm>
+#include <cfloat>
+#include <cstring>
+#include <vector>
+
 #include <QCryptographicHash>
 #include <QDataStream>
 #include <QDir>
@@ -24,6 +29,11 @@ For more information see the LICENSE file
 
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
+
+// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the LOD chain is built HERE, once, at
+// import. Vendored at thirdparty/meshoptimizer, pinned to the release tag v1.2;
+// this is the ONLY translation unit in the tree that includes it.
+#include "meshoptimizer.h"
 
 #include "core/geometry/trimesh.h"
 #include "core/logger.h"
@@ -94,7 +104,13 @@ namespace
 // hand bump from being forgotten). The LAYOUT is unchanged from v5 — the bump
 // exists because the key's DEFINITION changed, so every bake in every library
 // is rejected and rebuilt exactly once more, under the new key.
-constexpr int kFormatVersion = 6;
+// v7 (2026-09-15, ATOM stage 1, SPECS/NANITE_SPEC.md §7): every mesh record
+// carries a TRAILING LOD BLOCK — the automatic simplification chain built at
+// import (levelCount, then per level its index list and its geometric error as
+// a length in mesh units). A v6 blob has no chain at all, so replaying one
+// would silently ship a library whose models never drop a triangle, with no way
+// for any fingerprint to notice; and the block is a layout change besides.
+constexpr int kFormatVersion = 7;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -280,6 +296,19 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
     else                                     s << QByteArray();
 
     writeSkeleton(s, mesh->getSkeleton());
+
+    // ATOM stage 1's trailing block (format v7). `levelCount` is the number of
+    // levels ABOVE level 0 — zero for every mesh that has no chain, which is
+    // most of them, and costs four bytes. Each level is {indexCount, error,
+    // indices}; the indices name the vertex buffers written above, unchanged.
+    const int levels = std::min(mesh->lodIndices.size(), mesh->lodErrors.size());
+    s << qint32(levels);
+    for (int i = 0; i < levels; ++i) {
+        const QVector<quint32> &idx = mesh->lodIndices.at(i);
+        s << qint32(idx.size()) << float(mesh->lodErrors.at(i));
+        s << QByteArray(reinterpret_cast<const char *>(idx.constData()),
+                        idx.size() * int(sizeof(quint32)));
+    }
 }
 
 MeshPtr readMesh(QDataStream &s, bool *okOut)
@@ -343,6 +372,27 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
     auto skel = readSkeleton(s, okOut);
     if (!*okOut) return MeshPtr();
     if (!skel.isNull()) mesh->setSkeleton(skel);
+
+    // ATOM stage 1's trailing block (format v7).
+    qint32 levels = 0;
+    s >> levels;
+    if (s.status() != QDataStream::Ok || levels < 0 || levels > 32) { *okOut = false; return MeshPtr(); }
+    const int vertexCount = positionFloats / 3;
+    for (qint32 i = 0; i < levels; ++i) {
+        qint32 indexCount = 0; float error = 0.0f;
+        s >> indexCount >> error;
+        QByteArray levelBytes;
+        s >> levelBytes;
+        if (s.status() != QDataStream::Ok || indexCount < 3 || indexCount % 3 != 0 ||
+            levelBytes.size() != indexCount * int(sizeof(quint32))) { *okOut = false; return MeshPtr(); }
+        QVector<quint32> idx(indexCount);
+        std::memcpy(idx.data(), levelBytes.constData(), size_t(levelBytes.size()));
+        // A level that names a vertex the mesh does not have would draw
+        // garbage the moment the camera backs off — refuse the blob instead.
+        for (quint32 v : idx) if (int(v) >= vertexCount) { *okOut = false; return MeshPtr(); }
+        mesh->lodIndices.append(idx);
+        mesh->lodErrors.append(error);
+    }
 
     // THE PICKING MESH IS REBUILT, NOT STORED. It is positions + indices with
     // one cross product per triangle — cheaper to recompute than to read, and
@@ -612,6 +662,211 @@ bool findMeshNodeTransform(const aiNode *node, unsigned meshIndex,
     return false;
 }
 
+
+// ---- ATOM stage 1: the automatic LOD chain ---------------------------------
+//
+// SPECS/NANITE_SPEC.md §7. The artist authors nothing: the machine simplifies
+// each STATIC mesh a few times at import, records each level's index list and
+// its geometric ERROR, and the engine picks a level per object per frame from
+// that error (irisgl/engine/src/OgreMesh.cpp, lodValuesFromErrors).
+//
+// THE THREE RULES THIS OBEYS, each with its reason:
+//
+//  1. ONE VERTEX BUFFER, N INDEX BUFFERS. meshopt_simplify REMOVES vertices, it
+//     never creates them, and the output indexes the ORIGINAL vertex buffer.
+//     meshopt_optimizeVertexFetch would compact each level — and REMAP the
+//     vertices, which changes the VAO's vertex-buffer set, which changes the
+//     vaoName (OgreVulkanVaoManager::findVao matches on {opType, indexBufferVbo,
+//     indexType, vertexBuffers}), which splits the auto-instancing merge in
+//     RenderQueue::render into one draw command per level. The unused-vertex
+//     waste at the coarse levels is accepted; the draw count is not negotiable.
+//
+//  2. THE ERROR IS A LENGTH IN MESH UNITS, not a ratio. meshopt_simplify's
+//     result_error is relative to the mesh extent unless meshopt_SimplifyErrorAbsolute
+//     is passed; we pass it, so the number that reaches the bake is the one the
+//     projection formula divides by a view distance
+//     (thirdparty/meshoptimizer-clusterlod/clusterlod.h:94-97). That is the
+//     scale-invariant currency the Nanite paper insists on
+//     (SPECS/research/NANITE_2021_PDF_AUDIT_2026-09-15.md §1: Epic normalise the
+//     quadric by the average triangle area for exactly this reason — an error
+//     that is not comparable across meshes cannot drive one global threshold).
+//     Errors ACCUMULATE monotonically down the chain by clusterlod.h's own rule
+//     at its default config: error_i = max(error_{i-1}, step_error_i).
+//
+//  3. THE ATTRIBUTE METRIC IS NORMALS AND UVs, and the UV weight is DERIVED,
+//     not chosen: `0.5 * extent / uvRange`. Normals ride at 0.5, the weight
+//     meshoptimizer's own reference code uses (demo/main.cpp:316,
+//     demo/nanite.cpp:88). A UV delta is not a length, so a FIXED uv weight is
+//     not scale-invariant — a mesh with tiled UVs (0..20) would be penalised
+//     twenty times harder than the same mesh at 0..1; dividing by the mesh's
+//     own UV range and multiplying by its extent makes "slide the texture
+//     across the whole UV range" cost the same as "move the surface by the
+//     whole model", on every mesh, in world units.
+//
+//  4. PERMISSIVE, AND THE SEAMS ARE PAID FOR IN THE ERROR RATHER THAN LOCKED.
+//     MEASURED, not chosen. Without meshopt_SimplifyPermissive the simplifier
+//     never collapses across an attribute discontinuity, and a split asset is
+//     discontinuous almost everywhere: on the Matcaps sample's Stanford Dragon
+//     (89,067 verts over 34,110 distinct POSITIONS — the fan-out is UV splits;
+//     68,220 triangles) plain simplification STALLED at 68% of the triangles on
+//     the first level and produced no second level, and on the gizmo gear it
+//     blew an error of 36% of the mesh extent on the first level. With
+//     Permissive the same dragon runs the full chain 50/25/12.5/6.2% at a final
+//     error of 1.2% of its extent. Upstream marks the flag experimental;
+//     clusterlod.h — the reference implementation of the cluster DAG stage 2
+//     builds on — turns it ON in its DEFAULT config (`simplify_permissive`).
+//
+//     clusterlod.h pairs it with an attribute_protect_mask that LOCKS every UV
+//     seam vertex. We measured that too, and it is the wrong trade HERE: on the
+//     dragon 29,151 of 89,067 vertices (33%) are UV-seam vertices, so locking
+//     them is locking the mesh — the chain died at level 2 with an error of
+//     0.57 (12% of the extent) instead of running four levels at 0.059. Locking
+//     is right for a CLUSTER (stage 2 must keep a group's boundary watertight
+//     against its neighbours); for a whole object the seam is interior to the
+//     draw and the honest cost of collapsing it is texture stretch — which the
+//     UV term in the metric CHARGES, as error, which pushes the level further
+//     away. Measured: +17% error per level versus normals alone, same chain.
+//
+// SKINNED MESHES GET NO CHAIN (stage 1 ships static only): the CPU-skinning
+// path writes poses into mVao[VpNormal][0]'s buffer alone
+// (irisgl/engine/src/OgreMesh.cpp), and blend indices/weights surviving
+// simplification is its own gate. A mesh with a skeleton is skipped here.
+
+namespace lodchain {
+
+/// The knobs, in one place, with the reason each exists. These are BAKE INPUTS:
+/// meshbake.cpp is hashed into the producer id, so editing any of them
+/// re-bakes every library by itself.
+constexpr int   kMaxLevels     = 4;      ///< levels ABOVE 0. mCurrentMeshLod is a uint8; four is what §7.2 asks for.
+constexpr float kRatio         = 0.5f;   ///< each level targets half the previous triangle count (the paper's step).
+constexpr int   kMinTriangles  = 128;    ///< below this a level saves nothing worth a buffer — and is clusterlod's own leaf size.
+constexpr float kAcceptRatio   = 0.85f;  ///< a level that could not shed 15% is topology-locked: stop, do not store it.
+constexpr float kMaxRelError   = 0.05f;  ///< and stop once the error passes 5% of the mesh extent — beyond that it is a blob, not the object.
+constexpr float kNormalWeight  = 0.5f;   ///< meshoptimizer's own reference weight for unit normals.
+constexpr float kUvWeight      = 0.5f;   ///< the same relative priority, times extent/uvRange (see 3 above).
+
+/// The first vertex buffer carrying `usage`, as floats: pointer, component
+/// count and how many vertices it holds. Null when the mesh has no such buffer.
+const float *attribData(const MeshPtr &mesh, VertexAttribUsage usage,
+                        int *componentsOut, size_t *countOut)
+{
+    for (const VertexBufferPtr &vb : mesh->getVertexBuffers()) {
+        if (!vb || !vb->data || vb->dataSize <= 0) continue;
+        const QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        if (attribs.isEmpty()) continue;
+        const VertexAttribute &a = attribs.first();
+        if (a.usage != usage) continue;
+        const int comps = a.count > 0 ? a.count : 3;
+        if (componentsOut) *componentsOut = comps;
+        if (countOut) *countOut = size_t(vb->dataSize) / (sizeof(float) * size_t(comps));
+        return reinterpret_cast<const float *>(vb->data);
+    }
+    return nullptr;
+}
+
+void build(const MeshPtr &mesh)
+{
+    if (mesh.isNull()) return;
+    mesh->lodIndices.clear();
+    mesh->lodErrors.clear();
+    if (!mesh->getSkeleton().isNull()) return;           // static meshes only, stage 1
+    if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
+
+    int posComps = 3; size_t nv = 0;
+    const float *positions = attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
+    if (!positions || posComps < 3 || nv < 3) return;
+    const IndexBufferPtr ib = mesh->getIndexBuffer();
+    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return;
+
+    std::vector<unsigned> base(reinterpret_cast<const unsigned *>(ib->data),
+                               reinterpret_cast<const unsigned *>(ib->data) +
+                                   size_t(ib->dataSize) / sizeof(unsigned));
+    if (base.size() < 3 || base.size() % 3 != 0) return;
+    for (unsigned i : base) if (size_t(i) >= nv) return;   // a malformed index list simplifies to nothing good
+    if (base.size() / 3 < size_t(kMinTriangles) * 2) return;
+
+    int nrmComps = 3; size_t nrmCount = 0;
+    const float *normals = attribData(mesh, VertexAttribUsage::Normal, &nrmComps, &nrmCount);
+    if (normals && nrmCount < nv) normals = nullptr;   // a short normal buffer is not a metric
+    int uvComps = 2; size_t uvCount = 0;
+    const float *uvs = attribData(mesh, VertexAttribUsage::TexCoord0, &uvComps, &uvCount);
+    if (uvs && (uvCount < nv || uvComps < 2)) uvs = nullptr;
+    const size_t posStride = sizeof(float) * size_t(posComps);
+
+    // The extent the relative-error cap is measured against, and the length the
+    // UV weight is derived from — meshoptimizer's own scaling factor, i.e. the
+    // mesh's largest axis extent.
+    const float extent = meshopt_simplifyScale(positions, nv, posStride);
+
+    // The attribute buffer, interleaved once: [nx ny nz] [u v], whichever of
+    // the two the mesh has.
+    std::vector<float> attribs;
+    std::vector<float> weights;
+    const size_t attrCount = (normals ? 3u : 0u) + (uvs ? 2u : 0u);
+    if (attrCount) {
+        attribs.assign(nv * attrCount, 0.0f);
+        weights.assign(attrCount, kNormalWeight);
+        for (size_t v = 0; v < nv; ++v) {
+            float *dst = &attribs[v * attrCount];
+            if (normals) { for (int c = 0; c < 3; ++c) dst[c] = normals[v * size_t(nrmComps) + size_t(c)]; dst += 3; }
+            if (uvs)     { for (int c = 0; c < 2; ++c) dst[c] = uvs[v * size_t(uvComps) + size_t(c)]; }
+        }
+        if (uvs) {
+            float umin = FLT_MAX, umax = -FLT_MAX, vmin = FLT_MAX, vmax = -FLT_MAX;
+            for (size_t v = 0; v < nv; ++v) {
+                const float u = uvs[v * size_t(uvComps)], w = uvs[v * size_t(uvComps) + 1];
+                umin = std::min(umin, u); umax = std::max(umax, u);
+                vmin = std::min(vmin, w); vmax = std::max(vmax, w);
+            }
+            float range = std::max(umax - umin, vmax - vmin);
+            if (!(range > 1e-6f)) range = 1.0f;
+            const float uvWeight = kUvWeight * (extent > 0.0f ? extent : 1.0f) / range;
+            weights[attrCount - 2] = uvWeight;
+            weights[attrCount - 1] = uvWeight;
+        }
+    }
+
+    std::vector<unsigned> prev = base;
+    float accumulated = 0.0f;
+    for (int level = 0; level < kMaxLevels; ++level) {
+        size_t target = size_t(float(prev.size()) * kRatio);
+        target -= target % 3;
+        if (target / 3 < size_t(kMinTriangles)) break;
+
+        std::vector<unsigned> out(prev.size());
+        float stepError = 0.0f;
+        const unsigned options = meshopt_SimplifyErrorAbsolute | meshopt_SimplifyPermissive;
+        const size_t n = attrCount
+            ? meshopt_simplifyWithAttributes(out.data(), prev.data(), prev.size(),
+                                             positions, nv, posStride,
+                                             attribs.data(), sizeof(float) * attrCount,
+                                             weights.data(), attrCount,
+                                             nullptr, target, FLT_MAX, options, &stepError)
+            : meshopt_simplify(out.data(), prev.data(), prev.size(),
+                               positions, nv, posStride,
+                               target, FLT_MAX, options, &stepError);
+        if (n < 3 || n % 3 != 0) break;
+        // Topology can stop the simplifier short. A level that did not shed at
+        // least 15% costs a buffer and a switch for nothing.
+        if (float(n) > float(prev.size()) * kAcceptRatio) break;
+
+        const float error = std::max(accumulated, stepError);
+        if (extent > 0.0f && error > extent * kMaxRelError) break;
+
+        out.resize(n);
+        QVector<quint32> levelIndices;
+        levelIndices.resize(int(n));
+        std::memcpy(levelIndices.data(), out.data(), n * sizeof(unsigned));
+        mesh->lodIndices.append(levelIndices);
+        mesh->lodErrors.append(error);
+
+        accumulated = error;
+        prev.swap(out);
+    }
+}
+
+}   // namespace lodchain
+
 }   // namespace
 
 MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QString &filePath,
@@ -637,6 +892,11 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         const aiMesh *m = scene->mMeshes[i];
         auto mesh = MeshPtr(new Mesh(const_cast<aiMesh *>(m)));
         if (m->HasBones()) mesh->setSkeleton(Mesh::extractSkeleton(m, scene));
+        // ATOM stage 1: the LOD chain is a product of the bake, built here and
+        // nowhere else. The fallback parse path (a library with no bake yet)
+        // gets no chain — which is the same "no LOD" behaviour the tree has
+        // today, and one more reason a bake is worth having.
+        lodchain::build(mesh);
         model.meshes.append(mesh);
 
         const unsigned aiMatIndex = m->mMaterialIndex;

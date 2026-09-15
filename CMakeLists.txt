@@ -391,10 +391,23 @@ endif()
 # what this file hashes is what MeshBake::hashedSources() reports and that the
 # C++ re-implementation of this algorithm agrees with CMake's output
 # (tests/meshbake, section 6). ONE list, two consumers.
+#   thirdparty/meshoptimizer/src/{meshoptimizer.h,simplifier.cpp} — ADDED by
+#       ATOM stage 1 (2026-09-15). meshbake.cpp now calls meshopt_simplify* and
+#       WRITES ITS OUTPUT into the bake, so the simplifier's text is as much a
+#       producer of baked bytes as meshbake.cpp is: a submodule bump that
+#       changes the algorithm changes every LOD level in every library, and
+#       nothing else in the key could notice (the version constant describes the
+#       LAYOUT, and the layout would not move). Two files, not the whole
+#       library: `simplifier.cpp` IS the algorithm, and the header carries
+#       MESHOPTIMIZER_VERSION plus every signature we call. They are vendored,
+#       so they change only when someone deliberately moves the pin — exactly
+#       when a re-bake is wanted.
 set(_mesh_bake_hashed_sources
     import/meshbake.cpp
     import/meshbake.h
-    import/materialhelper.cpp)
+    import/materialhelper.cpp
+    thirdparty/meshoptimizer/src/meshoptimizer.h
+    thirdparty/meshoptimizer/src/simplifier.cpp)
 # A CONFIGURE-TIME hash goes STALE (found by this lane's own suite, 2026-09-15):
 # editing import/meshbake.cpp does not re-run CMake, so the compiled-in term
 # kept describing the PREVIOUS contents of the file until something unrelated
