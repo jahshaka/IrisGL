@@ -954,18 +954,13 @@ void OgreEngine::renderOneFrame() {
         std::unique_ptr<monitor::Stage> monPost;
         if (monitor::live()) monPost.reset(new monitor::Stage("engine.post"));
         for (auto &s : mScenes) s->applySkeletonFollowers();
-        // THE ONE-SHOT RE-CAPTION (OgreOverlayHud.cpp's `Caption`): a TextArea
-        // whose caption was set before its first rendered frame built its
-        // geometry against an unloaded font and renders nothing, for ever,
-        // silently. This is the "after the first frame" the workaround needs.
-        hud::afterFrame();
         // The frame is drawn and (for window views) presented: every view that
         // took part in it now has its OWN pixels on its target. This is the
         // signal hosts gate a loading cover on (View::framesPresented).
         for (auto &v : mViews) v->notePresented();
         // THE FRAME IS CLOSED HERE, after everything the loop does — the pose
-        // followers and the HUD's one-shot re-caption included — so `totalMs`
-        // is what one renderOneFrame cost the caller, not what the render cost.
+        // followers included — so `totalMs` is what one renderOneFrame cost the
+        // caller, not what the render cost.
         monPost.reset();
         if (monitor::live()) {
             // Was the render system counting at all while this frame ran? The
@@ -1784,12 +1779,11 @@ void OgreEngine::ensureHlms() {
         mRoot->getHlmsManager()->registerHlms(
             OGRE_NEW Ogre::HlmsPbs(am.load(mMediaDir + mainPath, "FileSystem", true), &libs));
     }
-    // The pass-buffer listener needs to know when an irradiance field is bound
-    // — not for the DDGI intensity (that is per scene) but for the FOUR-FLOAT
-    // ALIGNMENT PAD that corrects the size upstream's IrradianceField block
-    // under-reports (FogHlmsListener::ifdAlignFloats says why). Asking HlmsPbs
-    // itself, rather than mirroring the state in a flag of ours, is what makes
-    // the pad and the shader property that declares it impossible to disagree.
+    // The pass-buffer listener asks HlmsPbs, on the render thread, for the state
+    // of the pass it is building: which PCC owns the env-probe slot (the sky
+    // cube's register, SKY-FALLBACK-1). Asking the Hlms itself rather than
+    // mirroring the state in a flag of ours is what makes the two impossible to
+    // disagree.
     FogHlmsListener::setPbs(
         static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)));
     // Ambient is SPHERICAL HARMONICS, always and everywhere (Scene::setAmbientSh;

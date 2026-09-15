@@ -327,53 +327,8 @@ FogState FogHlmsListener::lookup(const Ogre::SceneManager *sm) {
 
 void FogHlmsListener::setPbs(Ogre::HlmsPbs *pbs) { sPbs = pbs; }
 
-// THE IRRADIANCE-FIELD ALIGNMENT COMPENSATION — an UPSTREAM DEFECT worked
-// around from our side, and the only reason DDGI can share a pass buffer with
-// this listener at all.
-//
-// `IrradianceField::getConstBufferSize()` returns `sizeof(float) * (4*3 + 4 + 4)`
-// = 80 bytes (OgreIrradianceField.cpp:770). But the struct
-// `fillConstBufferData` writes through — and the `IrradianceField` struct the
-// generated shader declares (Hlms/Pbs/Any/IrradianceField_piece_ps.any's
-// uniform block) — is 96 bytes: a float4x3, then THREE float4s
-// (numProbesAggregated + 2 padding, the depth pair, the irradiance pair). The
-// last one is missing from the size. So HlmsPbs:
-//
-//   * reserves 16 bytes too few for the pass buffer, and
-//   * advances the write pointer by 20 floats after a 24-float write,
-//
-// which puts THIS listener's first float4 on top of the field's irradiance
-// atlas parameters (irradBorderedRes / irradFullWidth / irradInvFullResolution).
-// The symptom is not a crash: the irradiance UVs collapse to texel 0 and DDGI
-// contributes an almost-black constant, which reads as "the technique is
-// broken" rather than as a buffer bug. Measured exactly that way in this lane.
-//
-// The compensation is to RESERVE four extra floats and then SKIP them —
-// deliberately not to write them. The shader declares nothing extra: its
-// IrradianceField struct already occupies those four floats, and they already
-// hold the values fillConstBufferData put there. Writing anything (even zeros)
-// would reproduce the defect. With the skip, the CPU and the shader agree from
-// the field's first float to our last, and the reservation finally covers the
-// field's real write — upstream's own samples, which attach no listener at all,
-// still overrun their pass-buffer map by those 16 bytes.
-//
-// Conditions match HlmsPbs's own exactly (OgreHlmsPbs.cpp:1784, inside
-// `if(!casterPass)`): a bound field, and not a shadow-caster pass. A caster
-// pass neither sets the property nor fills the block, so it must get no
-// padding either.
-//
-// FOR UPSTREAM (reported by this lane; belongs in SPECS/OGRE_UPSTREAM_ISSUES.md
-// once the lead files it): the one-line fix is `4u*3u + 4u + 4u + 4u`. We do not
-// patch it — a patch here would move the engine ABI and force a build-ogre.sh
-// rerun on every tree, for something a host-side four-float skip fixes
-// completely.
-Ogre::uint32 FogHlmsListener::ifdAlignFloats(bool casterPass) {
-    if (casterPass || !sPbs) return 0u;
-    return sPbs->getIrradianceField() ? 4u : 0u;
-}
-
-Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool casterPass,
-                                                bool, Ogre::SceneManager *) const {
+Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool, bool,
+                                                Ogre::SceneManager *) const {
     // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
     // than the buffer (it is, whenever fog is off), never longer. Four for the
     // shader clock (HLMS_ADOPTION P5) — declared only by materials that carry a
@@ -382,23 +337,23 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // written always, because this hook cannot know which materials the pass
     // will draw, and sixteen unconditional bytes are cheaper than a size that
     // varies per pass.
-    // Plus the irradiance-field alignment pad, which is the one thing here that
-    // MUST vary per pass (see ifdAlignFloats above).
     // Plus the second DDGI float4 (jahIfd2: the raster escape vector).
     // Plus jahSky (lane SKY-FALLBACK-1): the sky cube's gain and mip count,
     // declared only by a pass that claimed the sky's extra texture slot.
-    return (24u + ifdAlignFloats(casterPass)) * sizeof(float);
+    //
+    // Nothing here compensates for the irradiance field's block any more: its
+    // own getConstBufferSize() under-reported by one float4 until ogre-patch
+    // 0050, and this listener used to reserve four extra floats on a
+    // field-bound non-caster pass and then deliberately SKIP them, so that the
+    // field's 24-float write and HlmsPbs's 20-float pointer advance could not
+    // collide with our first float4. That correction depended on HlmsPbs
+    // filling the field's block BEFORE calling this listener; the size is
+    // simply right now.
+    return 24u * sizeof(float);
 }
 
-float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
+float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool, bool,
                                           Ogre::SceneManager *sceneManager, float *passBufferPtr) {
-    // SKIP the four floats upstream's IrradianceField block wrote but did not
-    // count — SKIP, never write: `fillConstBufferData` already put the field's
-    // irradiance-atlas parameters there, and zeroing them collapses every
-    // irradiance UV onto texel 0 (measured: DDGI goes to an almost-black
-    // constant). The shader declares nothing for them; its IrradianceField
-    // struct already occupies them, which is exactly the discrepancy.
-    passBufferPtr += ifdAlignFloats(casterPass);
     const FogState p = lookup(sceneManager);
     // The height layer integrates from the CAMERA's altitude, so the shader needs
     // it; this hook runs inside HlmsPbs::preparePassBuffer, where the camera of
@@ -471,29 +426,13 @@ void OgreScene::ensureAtmosphere() {
     // caller satisfies — scenes exist only after Engine::createView().
     JAH_TRY {
         mAtmosphere = new Ogre::AtmosphereNpr(vao);
-        // WHICH Rectangle2D IS THE COMPONENT'S. It keeps its per-SceneManager
-        // map private and offers no accessor, and the quad needs two things
-        // done to it that upstream cannot know about (render queue 0 instead of
-        // 212, kVisibleBit instead of the default flags —
-        // tuneAtmosphereRenderable says why). So: the set of Rectangle2Ds
-        // before its first setSky, the set after, and the one that appeared is
-        // its. Deterministic, and it survives upstream changing how many it
-        // makes — unlike matching on the material name.
-        std::set<Ogre::MovableObject *> before;
-        {
-            Ogre::SceneManager::MovableObjectIterator it =
-                mSceneMgr->getMovableObjectIterator(Ogre::Rectangle2DFactory::FACTORY_TYPE_NAME);
-            while (it.hasMoreElements()) before.insert(it.getNext());
-        }
+        // The quad needs two things done to it that the component cannot know
+        // about (render queue 0 instead of 212, kVisibleBit instead of the
+        // default flags — tuneAtmosphereRenderable says why), and it names it
+        // since ogre-patch 0054. It used to be found by diffing the
+        // SceneManager's Rectangle2D set across the setSky call.
         mAtmosphere->setSky(mSceneMgr, true);      // creates the sky quad, registers
-        {
-            Ogre::SceneManager::MovableObjectIterator it =
-                mSceneMgr->getMovableObjectIterator(Ogre::Rectangle2DFactory::FACTORY_TYPE_NAME);
-            while (it.hasMoreElements()) {
-                Ogre::MovableObject *mo = it.getNext();
-                if (!before.count(mo)) mAtmoQuad = static_cast<Ogre::Rectangle2D *>(mo);
-            }
-        }
+        mAtmoQuad = mAtmosphere->getSky(mSceneMgr);
         tuneAtmosphereRenderable();
         // The state the two customers left behind decides what happens next
         // (ONE component, two customers — syncAtmosphere's header). A first

@@ -93,7 +93,6 @@ void detach(Ogre::SceneManager *) {}
 void apply(const ViewOverlayDesc &, const RenderStats &, unsigned, unsigned) {}
 void setAtlasTiles(std::vector<AtlasTileDesc>) {}
 void hide() {}
-void afterFrame() {}
 void destroySystem() {
     // The tiles' datablocks belong to HlmsUnlit and their panels to the
     // OverlayManager; both die below. Unbinding first keeps the "no datablock
@@ -130,29 +129,28 @@ constexpr float kStatsPx    = 14.0f;
 constexpr float kShadowOffset = 0.002f;
 
 // ---------------------------------------------------------------------------
-/// A TextArea caption that survives THE ONE-SHOT TRAP.
+/// A TextArea caption: the text, and no re-layout when it has not changed.
 ///
-/// spikes/overlay-v1-vulkan/FINDINGS.md, "THE GOTCHA": a TextArea whose caption
-/// is set ONCE, before its first rendered frame, renders NOTHING — for ever,
-/// with no warning, no exception and no validation error.
-/// `TextAreaOverlayElement::_update` calls `OverlayElement::_update` FIRST,
-/// which runs updatePositionGeometry() and then clears mGeomPositionsOutOfDate
-/// (OgreOverlayElement.cpp:384-397; only GMM_PIXELS keeps it dirty), and only
-/// AFTERWARDS does `mFont->load()`. The one and only geometry build therefore
-/// happens against an unloaded font — whose getGlyphAspectRatio returns 1.0 for
-/// every codepoint, so the quads are built WRONG rather than degenerate — and
-/// nothing ever re-flags it. Re-setting the caption at any point after the
-/// first frame fixes it permanently. Reproduced identically on GL3Plus, so it
-/// is not a Vulkan issue.
+/// IT USED TO BE MORE THAN THAT. spikes/overlay-v1-vulkan/FINDINGS.md, "THE
+/// GOTCHA": a TextArea whose caption was set ONCE, before its first rendered
+/// frame, rendered NOTHING — for ever, with no warning, no exception and no
+/// validation error, because `TextAreaOverlayElement::_update` called
+/// `OverlayElement::_update` (which builds the geometry and clears
+/// mGeomPositionsOutOfDate) BEFORE `mFont->load()`, so the one and only
+/// geometry build ran against an unloaded font whose getGlyphAspectRatio
+/// returns 1.0 for every codepoint. Ogre's own samples never see it because
+/// TutorialGameState re-captions every frame; a LIVE stats readout is immune
+/// for the same reason; a STATIC caption — the loading cover's title, the thing
+/// a user stares at while a world opens — was not.
 ///
-/// Ogre's own samples never see it because TutorialGameState re-captions every
-/// single frame. A LIVE stats readout is immune for the same reason. A STATIC
-/// caption — the loading cover's title and subtitle, the thing a user stares at
-/// while a world opens — is not, which is why this exists.
-///
-/// set() records the text and arms a one-shot; afterFrame() (called right after
-/// Root::renderOneFrame) re-applies it exactly once and disarms. Cost: one
-/// extra setCaption per CHANGE, and nothing at all when nothing changed.
+/// THAT CAUSE IS FIXED IN THE PIN (ogre-patch 0014, 2026-09-06): the font load
+/// and the datablock assignment now run before `OverlayElement::_update()`, so
+/// the first build is against a loaded font. The one-shot re-caption this class
+/// used to arm (and the per-frame `hud::afterFrame()` walk that disarmed it)
+/// were a second mechanism for a bug with one fix, and are gone;
+/// test_engine's `hud_overlay_draws_where_it_says_when_allowed` asserts a
+/// static caption's pixels on the FIRST rendered frame, which is the assertion
+/// that catches a pin bump losing patch 0014.
 class Caption {
 public:
     void bind(Ogre::v1::TextAreaOverlayElement *el) { mEl = el; }
@@ -164,15 +162,6 @@ public:
         mText = text;
         mHasText = true;
         mEl->setCaption(text);
-        mPending = true;                          // arm the one-shot
-    }
-
-    /// Re-applies the pending caption. Called once per frame, after the frame
-    /// that the caption was set in has actually been drawn.
-    void afterFrame() {
-        if (!mPending || !mEl) return;
-        mEl->setCaption(mText);
-        mPending = false;
     }
 
     void show() { if (mEl) mEl->show(); }
@@ -182,7 +171,6 @@ private:
     Ogre::v1::TextAreaOverlayElement *mEl = nullptr;
     std::string mText;
     bool        mHasText = false;
-    bool        mPending = false;
 };
 
 // ---- process-wide state ---------------------------------------------------
@@ -568,17 +556,6 @@ void apply(const ViewOverlayDesc &desc, const RenderStats &stats,
         gStatsDrop.hide();
         gStats.hide();
     }
-}
-
-void afterFrame() {
-    if (!gBuilt) return;
-    gTitle.afterFrame();
-    gSubtitle.afterFrame();
-    gStatsDrop.afterFrame();
-    gStats.afterFrame();
-    // The atlas tile captions ride the same one-shot: they are STATIC strings
-    // ("M3 point static"), which is exactly the shape the trap kills.
-    for (AtlasTile &t : gAtlasTiles) t.caption.afterFrame();
 }
 
 void destroySystem() {

@@ -242,7 +242,6 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
         }
         Ogre::TextureGpu *previous = mSkyOwnedTex;
         mSkyOwnedTex = owned;
-        mSkyIsEquirect = true;
         // Leaving the analytic sky: its quad is hidden here rather than in
         // destroySky, because an image sky does not tear anything down — and
         // two sky quads at render queue 0 would both draw.
@@ -302,7 +301,6 @@ bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
         if (square) buildReflectionCubemapFrom(cube, false);
         else        destroyReflection();
         mSkyOwnedTex = cube;
-        mSkyIsEquirect = false;
         if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
         mSceneMgr->setSky(true, Ogre::SceneManager::SkyCubemap, cube);
         tuneSkyRenderable();
@@ -362,7 +360,6 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
-        mSkyIsEquirect = false;
 
         Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
         preset.densityCoeff     = std::max(0.0f, sky.density);
@@ -905,7 +902,8 @@ void OgreScene::tuneSkyRenderable() {
     // u leaves a seam column where the bilinear filter stops wrapping. Our own
     // sky sphere wrapped u; keep it.
     Ogre::MaterialPtr skyMat = mSceneMgr->getSkyMaterial();
-    if (mSkyIsEquirect && skyMat && skyMat->getNumTechniques() > 0 &&
+    if (mSceneMgr->getSkyMethod() == Ogre::SceneManager::SkyEquirectangular && skyMat &&
+        skyMat->getNumTechniques() > 0 &&
         skyMat->getTechnique(0)->getNumPasses() > 0 &&
         skyMat->getTechnique(0)->getPass(0)->getNumTextureUnitStates() > 0) {
         Ogre::HlmsSamplerblock sampler;

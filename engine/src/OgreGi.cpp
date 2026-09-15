@@ -33,55 +33,6 @@ static Ogre::HlmsPbs *hlmsPbs(Ogre::Root *root) {
     return static_cast<Ogre::HlmsPbs *>(root->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
 }
 
-// ---- JahIrradianceField: the field, plus the source switch ---------------
-//
-// Ogre's IrradianceField feeds its probes from ONE of two places, decided at
-// initialize(): the VctLighting it is handed (cone tracing the voxel volume) or,
-// when the settings name a raster workspace, six 32x32 scene renders per probe
-// (IrradianceFieldRaster). Switching means another initialize() — and
-// initialize() calls createTextures(), which DESTROYS the atlases. A raster
-// field would therefore be born black and stay black for as long as its
-// budget takes to render 8192 probes six faces at a time.
-//
-// Every member the switch needs is `protected` (OgreIrradianceField.h:152-214)
-// and IrradianceFieldRaster's constructor and createWorkspace() are public, so
-// this derived class does the switch IN PLACE: same textures, same settings,
-// same field geometry; only the source and the probe counter change. The
-// atlases keep the voxel field's converged answer and the raster captures
-// overwrite it probe by probe under the budget — "never dark", by
-// construction. The ledger's note applies: ~IrradianceField is non-virtual, so
-// the field is held and deleted as THIS type (EnginePrivate.h mIfd).
-//
-// The reverse switch is not needed: a source change arrives through
-// setGlobalIllumination, which rebuilds the VCT arm from scratch, and the
-// field is rebuilt voxel-fed at the end of that as it always was.
-class JahIrradianceField : public Ogre::IrradianceField {
-public:
-    JahIrradianceField(Ogre::Root *root, Ogre::SceneManager *sm)
-        : Ogre::IrradianceField(root, sm) {}
-    bool rasterFed() const { return mSettings.isRaster(); }
-    /// The field the probes integrate over — initialize() enlarges the volume
-    /// it was given by one probe cell on every side, and the raster depth's
-    /// grid-unit conversion (patch 0023) must use THAT size.
-    Ogre::Vector3 enlargedFieldSize() const { return mFieldSize; }
-    Ogre::uint32  probesProcessed() const { return mNumProbesProcessed; }
-    void sourceFromRaster(const Ogre::RasterParams &rp) {
-        mSettings.mRasterParams = rp;
-        mVctLighting = nullptr;
-        mNumProbesProcessed = 0u;
-        setIrradianceFieldGenParams();          // zeroes the gen params for raster
-        if (!mIfRaster) mIfRaster = OGRE_NEW Ogre::IrradianceFieldRaster(this);
-        mIfRaster->createWorkspace();           // binds the EXISTING atlases as channels
-    }
-    /// The raster field's ONE workspace, which instantiates the probe shadow
-    /// node exactly like a probe's does — dropped and re-created on its own for
-    /// a shadow-atlas rebuild (G2). A no-op on a voxel-fed field.
-    bool hasRasterWorkspace() const { return mIfRaster != nullptr; }
-    void dropRasterWorkspace()      { if (mIfRaster) mIfRaster->destroyWorkspace(); }
-    void recreateRasterWorkspace()  { if (mIfRaster) mIfRaster->createWorkspace(); }
-};
-
-
 // ---- Raster-source constants (the spikes/rayon2 S3 measurements) ----------
 
 // HOW MANY RASTER PROBES ONE UNIT OF THE UPDATE BUDGET BUYS PER FRAME: ONE.
@@ -119,23 +70,20 @@ static const float kIfdRasterEscapeScale = 1.05f;
 // which is what the escape threshold compares against.
 static const float kIfdRasterFarDiagonals = 2.0f;
 
-/// The one raster job is SHARED across every field (IrradianceFieldRaster finds
-/// it, it does not clone it), so patch 0023's grid-unit conversion is pushed to
-/// it right before every raster update. A media tree that predates the patch
-/// has no such parameter: logged once, and the raster source is then refused
-/// at build (buildIrradianceField checks the same thing) rather than run with
-/// world-unit depths.
-static bool setIfdRasterInvFieldSize(Ogre::Root *root, const Ogre::Vector3 &invFieldSize) {
+/// PATCH 0023's PARAMETER, CHECKED not pushed. The conversion of the raster
+/// probe depths into field units is the raster source's own business since
+/// ogre-patch 0050 (IrradianceFieldRaster pushes `invFieldSize` beside
+/// `numProbes`, on the shared "IrradianceField/CubemapToIfd" job, per sweep).
+/// What is left here is the REFUSAL: a media tree that predates patch 0023 has
+/// no such parameter at all, and a raster field running with world-unit depths
+/// leaks light through everything, so the source is declined at build time
+/// rather than run wrong.
+static bool ifdRasterMediaHasInvFieldSize(Ogre::Root *root) {
     Ogre::HlmsCompute *hc = root->getHlmsManager()->getComputeHlms();
     if (!hc) return false;
     Ogre::HlmsComputeJob *job = hc->findComputeJobNoThrow("IrradianceField/CubemapToIfd");
     if (!job) return false;
-    Ogre::ShaderParams &sp = job->getShaderParams("default");
-    Ogre::ShaderParams::Param *param = sp.findParameter("invFieldSize");
-    if (!param) return false;
-    param->setManualValue(invFieldSize);
-    sp.setDirty();
-    return true;
+    return job->getShaderParams("default").findParameter("invFieldSize") != nullptr;
 }
 
 /// GiToggle::Auto defers to the quality dial; Off/On pin it either way. Exists
@@ -451,7 +399,7 @@ bool OgreScene::refreshVctFast() {
             applyVctAmbient();
             const Ogre::uint32 extraBounces =
                 Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-            mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+            mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                                  giRayMarchStepScale(false));
         }
         const auto tVoxels = std::chrono::steady_clock::now();
@@ -586,12 +534,12 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                     if (!mVctCascades[i].lighting) continue;
                     applyCascadeAmbient(mVctCascades[i].lighting);
                     mVctCascades[i].lighting->update(mSceneMgr, inMotion ? 0u : cascadeBounces(i),
-                                                     1.0f /*thinWallCounter*/, hasVctLights(),
+                                                     1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                                                      giRayMarchStepScale(inMotion));
                 }
             } else {
                 mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
-                                     hasVctLights(), giRayMarchStepScale(inMotion));
+                                     true /*autoMultiplier*/, giRayMarchStepScale(inMotion));
             }
             work.setUnits(extraBounces + 1u);
         }
@@ -1439,35 +1387,6 @@ void OgreScene::computeGiSignatures() const {
         mEscapeSigVolumeValid = mGiAutoVolumeValid;
         mEscapeSigValid = true;
     }
-}
-
-// A SCENE WITH NO LIGHTS AT ALL BREAKS VctLighting's AUTO MULTIPLIER, and after
-// LIGHTING_FIX fix 3 that is visible rather than academic. `update()`'s
-// auto-multiplier pass takes the maximum radiance over the scene's lights, then
-// inverts it (OgreVctLighting.cpp:952-956): with no lights the maximum is 0, the
-// inverse is infinity, `mInvBakingMultiplier` comes out 0, and the shader's
-// `blendWeight = blendFade * blend * multiplier` is 0 — so the VCT arm
-// contributes NOTHING. That used to be invisible (nothing to contribute), but
-// the ambient now rides the same multiplier, and the PBS ambient pieces are
-// switched off inside a VCT volume, so an ambient-lit scene with no lights went
-// BLACK the moment VCT was enabled. Passing autoMultiplier = false falls back to
-// `mBakingMultiplier` (1.0), which is the right answer when there is nothing to
-// normalise against. Upstream behaviour, reported, worked around here.
-bool OgreScene::hasVctLights() const {
-    for (const auto &kv : mNodes) {
-        const Ogre::Light *l = kv.second.light;
-        // A HIDDEN light is no light to VctLighting (update() gathers only
-        // LAYER_VISIBILITY lights), so switching off a room's only lamp is the
-        // no-lights case below, not a scene with one light and a zero maximum.
-        if (!l || !l->getVisible()) continue;
-        switch (l->getType()) {
-        case Ogre::Light::LT_DIRECTIONAL: case Ogre::Light::LT_POINT:
-        case Ogre::Light::LT_SPOTLIGHT:   case Ogre::Light::LT_AREA_APPROX:
-        case Ogre::Light::LT_AREA_LTC:    return true;
-        default: break;
-        }
-    }
-    return false;
 }
 
 void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
@@ -3057,7 +2976,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
     // shows a black ambient for the frame between build and the next ambient
     // push. See applyVctAmbient (OgreScene.cpp) for why it is a genuine pair.
     applyVctAmbient();
-    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, hasVctLights(),
+    mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                          giRayMarchStepScale(false));
     // The materials this voxelizer converted are the ones in force NOW.
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
@@ -3349,7 +3268,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
                 c.lighting->addCascade(mVctCascades[j].lighting);
         }
         applyCascadeAmbient(c.lighting);
-        c.lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, hasVctLights(),
+        c.lighting->update(mSceneMgr, cascadeBounces(i), 1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
                            giRayMarchStepScale(false));
         c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - tCascade).count());
@@ -3604,7 +3523,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
             }
             applyCascadeAmbient(c.lighting);
             c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/,
-                               hasVctLights(), giRayMarchStepScale(false));
+                               true /*autoMultiplier*/, giRayMarchStepScale(false));
             return true;
         } JAH_CATCH(mError, false);
     };
@@ -4756,7 +4675,7 @@ void OgreScene::buildIrradianceField() {
         // field is bound to HlmsPbs by POINTER, and initialize() re-creates the
         // atlases for the new settings on its own. Upstream's own instruction
         // for "major changes to VctLighting" is exactly this call.
-        if (!mIfd) mIfd = new JahIrradianceField(mRoot, mSceneMgr);
+        if (!mIfd) mIfd = new Ogre::IrradianceField(mRoot, mSceneMgr);
         mIfd->initialize(settings, origin, size, mVctLighting);
         // WHERE THE FIELD IS, recorded as asked for (the field enlarges it by a
         // probe block per side for itself): the scheduler compares against this
@@ -4799,7 +4718,8 @@ void OgreScene::buildIrradianceField() {
 
         // THE RASTER SOURCE (GI_UNIFIED_SPEC.md P3 "A2", spikes/rayon2 S3), switched
         // in AFTER the voxel converge above so the atlases start from the voxel
-        // answer (JahIrradianceField). Refused — logged, the field stays
+        // answer (IrradianceField::switchToRasterSource, ogre-patch 0050).
+        // Refused — logged, the field stays
         // voxel-fed and giStatus says so — when the raster workspace is not
         // staged or the media predates patch 0023 (world-unit depths would
         // defeat the cage visibility test the field exists for).
@@ -4862,7 +4782,7 @@ void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
         // THE RASTER ESCAPE VECTOR: a miss is stored at far x dot( |dir|,
         // probesPerUnit ) (CubemapToIfd with patch 0023), so the shader's
         // integrated threshold is dot( A(d), far x scale x probesPerUnit ).
-        const Ogre::Vector3 fieldSize = mIfd->enlargedFieldSize();
+        const Ogre::Vector3 fieldSize = mIfd->getFieldSize();
         const Ogre::Vector3 probesPerUnit(
             float(numProbes[0]) / std::max(fieldSize.x, 1e-4f),
             float(numProbes[1]) / std::max(fieldSize.y, 1e-4f),
@@ -4892,7 +4812,7 @@ void OgreScene::applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
     }
     // Patch 0023's parameter must exist or the raster depths are in world units
     // and the field leaks through everything (the refusal is deliberate).
-    if (!setIfdRasterInvFieldSize(mRoot, Ogre::Vector3(1.0f, 1.0f, 1.0f))) {
+    if (!ifdRasterMediaHasInvFieldSize(mRoot)) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: raster probe source requested but the staged IrradianceField media "
             "predates ogre-patch 0023 (no invFieldSize on CubemapToIfd); the field stays "
@@ -4929,16 +4849,9 @@ void OgreScene::applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
     const Ogre::Vector3 enlarged = size + cell * 2.0f;
     rp.mCameraFar  = std::max(enlarged.length() * kIfdRasterFarDiagonals, rp.mCameraNear * 10.0f);
 
-    mIfd->sourceFromRaster(rp);
+    mIfd->switchToRasterSource(rp);
     mIfdSource    = GiSource::Raster;
     mIfdRasterFar = rp.mCameraFar;
-    // The grid-unit conversion, from the field the probes actually integrate
-    // over (initialize enlarged it by one cell per side; enlargedFieldSize is
-    // that number, not our `size`).
-    const Ogre::Vector3 fieldSize = mIfd->enlargedFieldSize();
-    setIfdRasterInvFieldSize(mRoot, Ogre::Vector3(1.0f / std::max(fieldSize.x, 1e-4f),
-                                                  1.0f / std::max(fieldSize.y, 1e-4f),
-                                                  1.0f / std::max(fieldSize.z, 1e-4f)));
     // The raster re-converge: the same dial, in raster probes. No thread-group
     // floor here (the raster path renders whole probes), so the only clamp is
     // the field itself. NOT converged inline: that is 8192 x 6 scene renders.
@@ -4999,14 +4912,6 @@ void OgreScene::updateIrradianceField() {
     }
     if (mIfdProbesDone >= mIfdTotalProbes) return;              // converged (voxel)
     JAH_TRY {
-        if (raster) {
-            // The shared CubemapToIfd job: patch 0023's conversion, every time,
-            // because another scene's raster field may have set its own.
-            const Ogre::Vector3 fieldSize = mIfd->enlargedFieldSize();
-            setIfdRasterInvFieldSize(mRoot, Ogre::Vector3(1.0f / std::max(fieldSize.x, 1e-4f),
-                                                          1.0f / std::max(fieldSize.y, 1e-4f),
-                                                          1.0f / std::max(fieldSize.z, 1e-4f)));
-        }
         const Ogre::uint32 remaining = mIfdTotalProbes - mIfdProbesDone;
         const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, remaining);
         // THE CRASH FLOOR, checked at the dispatch rather than trusted from the
@@ -5286,7 +5191,8 @@ bool OgreScene::dropGiForShadowRebuild() {
     JAH_TRY {
         if (pccShadowed)
             for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->destroyWorkspace();
-        if (ifdShadowed) mIfd->dropRasterWorkspace();
+        if (ifdShadowed)
+            if (Ogre::IrradianceFieldRaster *r = mIfd->getRasterSource()) r->destroyWorkspace();
     } JAH_CATCH(mError, false);
     return true;
 }
@@ -5319,7 +5225,7 @@ void OgreScene::recreateGiAfterShadowRebuild() {
             }
         }
         if (mIfd && mIfdShadowed) {
-            mIfd->recreateRasterWorkspace();
+            if (Ogre::IrradianceFieldRaster *r = mIfd->getRasterSource()) r->createWorkspace();
             // The field's atlases survived; its sweep restarts so the new
             // workspace re-renders the probes it is responsible for.
             resetRasterFieldIntegration();

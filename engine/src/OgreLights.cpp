@@ -393,8 +393,8 @@ void OgreScene::shadowWorkspaces(ShadowNodeKind kind,
     if (kind == ShadowNodeKind::Reflect) {
         // Only while the reflect pass names the node at all (rebuildPlanar).
         if (!mPlanar || !mPlanarParams.shadows) return;
-        for (size_t i = 0; i < mPlanar->slotCount(); ++i)
-            if (Ogre::CompositorWorkspace *ws = mPlanar->slotWorkspace(i)) out.push_back(ws);
+        for (size_t i = 0; i < mPlanar->getNumActiveActorSlots(); ++i)
+            if (Ogre::CompositorWorkspace *ws = mPlanar->getActiveActorWorkspace(i)) out.push_back(ws);
     } else if (kind == ShadowNodeKind::Probe) {
         if (!mPcc || !mPccShadowed) return;
         for (const Ogre::CubemapProbe *p : mPcc->getProbes())
@@ -407,8 +407,8 @@ void OgreScene::monitorWorkspaces(std::vector<Ogre::CompositorWorkspace *> &out,
     // UNCONDITIONAL, unlike shadowWorkspaces: the monitor wants every pass a
     // planar mirror or a probe executes, not only the shadowed ones.
     if (mPlanar) {
-        for (size_t i = 0; i < mPlanar->slotCount(); ++i)
-            if (Ogre::CompositorWorkspace *ws = mPlanar->slotWorkspace(i)) {
+        for (size_t i = 0; i < mPlanar->getNumActiveActorSlots(); ++i)
+            if (Ogre::CompositorWorkspace *ws = mPlanar->getActiveActorWorkspace(i)) {
                 out.push_back(ws);
                 if (owners) owners->push_back("planar:" + std::to_string(i));
             }

@@ -1,0 +1,50 @@
+Jahshaka patch 0053 — setSky() records the method it was given.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this. `OgreMain/src/OgreSceneManager.cpp` is also touched by patch 0016
+(`_warmUpShadersCollect`), far from this hunk; the two apply in stack order.
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325; audit
+SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md finding F14).
+`SceneManager::mSkyMethod` is assigned in the CONSTRUCTOR and nowhere else:
+`setSky( bEnabled, skyMethod, texture )` uses its argument to pick the material
+and to validate the texture type, and never stores it. So
+`SceneManager::getSkyMethod()` answers `SkyCubemap` for the life of the scene
+manager, whatever sky is actually up — a getter that cannot be used for
+anything, including the round trip that turning the sky off reads as
+(`setSky( false, getSkyMethod(), … )`, which is what upstream's own API shape
+invites).
+
+The engine kept its own `bool mSkyIsEquirect` beside the sky it had set, in
+three writes and one read, because the engine's equirect sky needs a WRAPPED u
+axis on the sampler (a lat-long image's left and right edges are the same
+meridian; `Sky.material` clamps both axes) and a cube sky must not get it. That
+mirror is deleted with this patch: the engine asks the SceneManager what its
+sky is.
+
+No picture changes anywhere: the assignment feeds one getter nothing upstream
+reads.
+
+VERIFICATION. `git apply --check` against the pristine pin and `git apply
+--reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
+`--engine-selftest` byte-identical (`b55e2d5d…`) — the default scene's sky is
+the colour sky. The behavioural gate is the sky suites (`sky.*`,
+`gi.probe_sky`, `scripting.e2e.sky*`), which cover both methods and the
+equirect seam.
+
+--- a/OgreMain/src/OgreSceneManager.cpp
++++ b/OgreMain/src/OgreSceneManager.cpp
+@@ -1081,6 +1081,13 @@
+ 
+         if( bEnabled )
+         {
++            // The method the sky is actually using. getSkyMethod() used to report the
++            // constructor's SkyCubemap for the life of the SceneManager no matter what
++            // was set here, so it could not be used for anything -- including the
++            // round trip setSky( false, getSkyMethod(), ... ) that turning the sky off
++            // reads as.
++            mSkyMethod = skyMethod;
++
+             if( !mSky )
+             {
+                 mSky = createRectangle2D( SCENE_STATIC );

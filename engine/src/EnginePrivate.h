@@ -1535,10 +1535,6 @@ struct AtlasTileDesc {
 void setAtlasTiles(std::vector<AtlasTileDesc> tiles);
 /// Hides everything (no eligible view this frame).
 void hide();
-/// THE ONE-SHOT RE-CAPTION, run right after Root::renderOneFrame — see
-/// OgreOverlayHud.cpp's `Caption` for the trap it exists for. Cheap: it does
-/// nothing unless a caption changed in the frame just drawn.
-void afterFrame();
 /// Teardown: removeRenderQueueListener (per scene) -> destroy scenes -> THIS ->
 /// delete Root. An OverlaySystem outliving Root is the same class of bug as a
 /// MeshPtr outliving Root: ~OverlaySystem deletes the FontManager, and
@@ -1976,21 +1972,11 @@ public:
     static void     setIfdState(const Ogre::SceneManager *sm, const IfdState &state);
     static IfdState ifdState(const Ogre::SceneManager *sm);
 
-    /// THE IRRADIANCE-FIELD PASS-BUFFER ALIGNMENT, and it is a correctness fix
-    /// rather than a feature — see the long note on the definition
-    /// (OgreFog.cpp). Upstream's `IrradianceField::getConstBufferSize()`
-    /// UNDER-REPORTS its own block by one float4: it declares 20 floats and
-    /// `fillConstBufferData` writes 24, which is also what the shader's
-    /// `IrradianceField` struct declares. HlmsPbs advances the write pointer by
-    /// the reported 20, so whatever this listener writes next lands FOUR FLOATS
-    /// EARLY, on top of the field's own irradiance-atlas parameters. The fix is
-    /// four floats of leading padding whenever a field is bound to a non-caster
-    /// pass, matched by a padding member in the shader piece.
-    ///
-    /// Global, not per scene, because the binding is: HlmsPbs is a singleton
-    /// and sets `irradiance_field` for EVERY scene's pass while any field is
-    /// bound. The listener therefore asks HlmsPbs itself rather than keeping a
-    /// mirror that could drift.
+    /// Hands the listener the HlmsPbs singleton it queries on the render thread
+    /// for the state of the pass being built (which PCC owns the env-probe
+    /// slot). Global, not per scene, because the binding is. Asking HlmsPbs
+    /// itself rather than keeping a mirror is what makes the two impossible to
+    /// disagree.
     static void setPbs(Ogre::HlmsPbs *pbs);
 
     /// THE SKY'S OWN ENVIRONMENT SLOT (lane SKY-FALLBACK-1, PHOTON_SPEC §7).
@@ -2051,9 +2037,6 @@ private:
     static Ogre::TextureGpu             *sPassSkyCube;                 // render thread only
     static const Ogre::HlmsSamplerblock *sPassSkySampler;              // render thread only
     static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
-    /// 4 while a field is bound and this is not a shadow-caster pass (the two
-    /// conditions HlmsPbs itself uses to emit the block), 0 otherwise.
-    static Ogre::uint32 ifdAlignFloats(bool casterPass);
     static Ogre::HlmsPbs *sPbs;                                        // render thread only
     static unsigned       sLightCountMismatches;                       // render thread only
     static unsigned       sMismatchLogged;                             // render thread only
@@ -2152,23 +2135,6 @@ public:
 
     void workspacePreUpdate(Ogre::CompositorWorkspace *) override;
     void passEarlyPreExecute(Ogre::CompositorPass *pass) override;
-};
-
-/// Ogre's component plus ONE accessor: the per-slot reflection workspaces
-/// (ENGINE_CACHE_POLICY_SPEC P5). Each budget slot renders through its own
-/// private workspace, and each of those instantiates its own reflect shadow
-/// node — per-workspace state the lamp-map cache has to reach
-/// (OgreEngine::applyShadowCache). `mActiveActorData` is protected
-/// (OgrePlanarReflections.h:131), so this is engine API through inheritance,
-/// the JahIrradianceField shape, not a patch. ~PlanarReflections is NOT
-/// virtual: OgreScene holds and deletes this exact type.
-class JahPlanarReflections final : public Ogre::PlanarReflections {
-public:
-    using Ogre::PlanarReflections::PlanarReflections;
-    size_t slotCount() const { return mActiveActorData.size(); }
-    Ogre::CompositorWorkspace *slotWorkspace(size_t i) const {
-        return i < mActiveActorData.size() ? mActiveActorData[i].workspace : nullptr;
-    }
 };
 
 }   // namespace planar
@@ -2274,11 +2240,6 @@ void retainSharedTexture(Ogre::TextureGpu *tex);
 /// True when this was the LAST reference (the caller destroys the texture).
 bool releaseSharedTexture(Ogre::TextureGpu *tex);
 void resetSharedTextures();
-
-// ---------------------------------------------------------------------------
-/// OgreGi.cpp: Ogre::IrradianceField with the protected surface a source
-/// switch needs (see there). Forward-declared here, defined beside its use.
-class JahIrradianceField;
 
 class OgreScene final : public Scene {
 public:
@@ -3839,8 +3800,7 @@ private:
     /// Re-arms a RASTER-sourced irradiance field's integration (its probes
     /// RENDER the scene, so a changed ambient is baked into the faces they
     /// captured). Progressive over the converged atlas — nothing flashes — and
-    /// a no-op for a voxel-fed field, which reads the volume live. Defined in
-    /// OgreGi.cpp because JahIrradianceField lives there (F6).
+    /// a no-op for a voxel-fed field, which reads the volume live.
     void resetRasterFieldIntegration();
     /// spikes/rayon2 S3 — the raster probe source. resolveSource: GiParams::ddgiSource
     /// with Auto = Voxel at every tier. applyRasterSource: re-sources a just
@@ -3932,9 +3892,6 @@ private:
     void noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic);
     /// True when the document typed a bounds box by hand (min != max).
     bool giBoundsExplicit() const;
-    /// True when the scene holds a light VctLighting's injection pass collects.
-    /// Drives the auto-multiplier guard — see the note on the definition.
-    bool hasVctLights() const;
     /// Pushes mAmbientRadiance into the VCT arm (no-op without one). Called on
     /// every ambient change and whenever the arm is (re)built.
     void applyVctAmbient();
@@ -4042,9 +3999,6 @@ private:
     /// thread reads; this copy exists so shaderTime() can answer without
     /// touching render-thread state.
     float mShaderTime = 0.0f;
-    /// SceneManager::getSkyMethod() never reflects the method actually set
-    /// (upstream's setSky forgets to assign mSkyMethod), so remember it.
-    bool              mSkyIsEquirect = false;
     /// The sun disc's quad and its cloned material (one per scene, like Ogre's
     /// own sky material clone: the parameters are per-scene).
     Ogre::Rectangle2D *mSunDisc = nullptr;
@@ -4106,10 +4060,12 @@ private:
     Ogre::ParallaxCorrectedCubemapAuto *mPcc        = nullptr;
     Ogre::Camera                     *mGiCamera     = nullptr;   // PCC build + tracking
     /// The DDGI field, owned, null unless GiParams::ddgi resolved on over a
-    /// live VCT arm. Dies BEFORE mVctLighting (it holds that pointer). Held
-    /// DERIVED-typed: ~IrradianceField is non-virtual (OGRE_UPSTREAM_ISSUES),
-    /// and the derived class is what re-sources the field in place.
-    JahIrradianceField               *mIfd          = nullptr;
+    /// live VCT arm. Dies BEFORE mVctLighting (it holds that pointer). The
+    /// source switch, the placement and the accessors it needs are all public
+    /// API since ogre-patches 0044 and 0050, so this is the engine's own type —
+    /// which also retires the slicing hazard of holding a derived type through
+    /// a non-virtual ~IrradianceField.
+    Ogre::IrradianceField            *mIfd          = nullptr;
     /// What is feeding the probes (GiStatus::ifdSource): Raster only once the
     /// field has been re-sourced to the raster workspace, Voxel otherwise.
     GiSource                          mIfdSource    = GiSource::Voxel;
@@ -4457,7 +4413,11 @@ private:
     // Planar-reflection arm. mPlanar is null unless mPlanarParams.budget > 0.
     // mReflectors is the DOCUMENT's set of reflector nodes and survives the arm
     // going up and down; mActors only exists while the arm is up.
-    planar::JahPlanarReflections *mPlanar = nullptr;
+    /// Ogre's own type since ogre-patch 0052 gave PlanarReflections the two
+    /// per-slot accessors the lamp-map cache and the frame monitor need
+    /// (getNumActiveActorSlots / getActiveActorWorkspace) — it used to be a
+    /// derived class of ours reaching into `mActiveActorData`.
+    Ogre::PlanarReflections *mPlanar = nullptr;
     PlanarReflectionParams   mPlanarParams;
     std::string              mPlanarWorkspaceDef;
     std::vector<std::string> mPlanarNodeDefs;

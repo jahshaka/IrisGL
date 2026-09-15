@@ -1,0 +1,55 @@
+Jahshaka patch 0054 — AtmosphereNpr names its own sky quad.
+
+SOURCE patch (a header). EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh`
+after pulling this. It touches a file no other patch in the stack touches
+(`Components/Atmosphere/include/OgreAtmosphereNpr.h`).
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325; audit
+SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md finding F15).
+`AtmosphereNpr::setSky( sceneManager, true )` creates a `Rectangle2D` per
+SceneManager and files it in the `protected` `mSkies` map with no accessor. The
+quad needs two things done to it that the component cannot know about in
+Jahshaka: it must sit at render queue 0 rather than upstream's 212 (which is
+AFTER our on-top overlays, and those deliberately write no depth, so a gizmo
+over empty sky would be painted out), and it must carry the engine's own
+visibility bit rather than the default flags (Instant Radiosity casts rays with
+a GI-geometry mask the sky must never be hit by). With no accessor the engine
+took the SceneManager's whole Rectangle2D set before `setSky`, took it again
+after, and used the one that had appeared — deterministic, and it works, and it
+is eighteen lines and two movable-object iterations to ask a question the
+component can answer in three.
+
+VERIFICATION. `git apply --check` against the pristine pin and `git apply
+--reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
+`--engine-selftest` byte-identical (`b55e2d5d…`) — the engine finds the same
+quad and does the same two things to it, which the selftest's realistic-sky
+path exercises. The behavioural gate is `sky.*` plus `test_engine`'s fog and
+atmosphere cases.
+
+--- a/Components/Atmosphere/include/OgreAtmosphereNpr.h
++++ b/Components/Atmosphere/include/OgreAtmosphereNpr.h
+@@ -210,6 +210,24 @@
+         void setSky( Ogre::SceneManager *sceneManager, bool bEnabled );
+         void destroySky( Ogre::SceneManager *sceneManager );
+ 
++        /** The sky quad this component created for that SceneManager, or null if it has
++            none (setSky was never called for it, or destroySky was).
++
++            setSky() creates a Rectangle2D per SceneManager and keeps it in a private
++            map, which leaves a caller that must adjust the quad -- its render queue
++            (upstream parks it where SceneManager's own sky goes, which is AFTER
++            anything a host draws on top), its visibility flags, its static-ness -- with
++            nothing to adjust: the only way to find it was to diff the SceneManager's
++            Rectangle2D set before and after setSky() and take the one that appeared.
++            The quad stays owned by this component (the destructor destroys it).
++        */
++        Rectangle2D *ogre_nullable getSky( Ogre::SceneManager *sceneManager ) const
++        {
++            std::map<Ogre::SceneManager *, Rectangle2D *>::const_iterator itor =
++                mSkies.find( sceneManager );
++            return itor != mSkies.end() ? itor->second : 0;
++        }
++
+         /** Links an existing directional to be updated using the Atmosphere's parameters
+         @param light
+             Light to associate with.
