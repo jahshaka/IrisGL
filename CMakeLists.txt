@@ -147,6 +147,20 @@ set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory_with_folder("Dependencies/Bullet" thirdparty/bullet3)
 add_subdirectory_with_folder("Dependencies/Zip" thirdparty/zip)
+# meshoptimizer (ATOM stage 1, SPECS/NANITE_SPEC.md §7): the simplifier that
+# builds a mesh's LOD chain at IMPORT time, inside MeshBake. Same policy as
+# bullet3 and zip — STATIC and position-independent, because it links into the
+# shared libIrisGL — and its own install rules are OFF: it is an implementation
+# detail of the bake, not something a consumer of IrisGL links or includes.
+# MESHOPT_BUILD_DEMO stays OFF; demo/clusterlod.h is vendored separately by COPY
+# (thirdparty/meshoptimizer-clusterlod/, with its provenance) because it is an
+# example file, not part of the library.
+option(MESHOPT_INSTALL "" OFF)
+option(MESHOPT_BUILD_DEMO "" OFF)
+option(MESHOPT_BUILD_GLTFPACK "" OFF)
+option(MESHOPT_BUILD_SHARED_LIBS "" OFF)
+add_subdirectory_with_folder("Dependencies/MeshOptimizer" thirdparty/meshoptimizer)
+set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(BUILD_SHARED_LIBS "${_jah_outer_shared_libs}")
 set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
@@ -377,10 +391,23 @@ endif()
 # what this file hashes is what MeshBake::hashedSources() reports and that the
 # C++ re-implementation of this algorithm agrees with CMake's output
 # (tests/meshbake, section 6). ONE list, two consumers.
+#   thirdparty/meshoptimizer/src/{meshoptimizer.h,simplifier.cpp} — ADDED by
+#       ATOM stage 1 (2026-09-15). meshbake.cpp now calls meshopt_simplify* and
+#       WRITES ITS OUTPUT into the bake, so the simplifier's text is as much a
+#       producer of baked bytes as meshbake.cpp is: a submodule bump that
+#       changes the algorithm changes every LOD level in every library, and
+#       nothing else in the key could notice (the version constant describes the
+#       LAYOUT, and the layout would not move). Two files, not the whole
+#       library: `simplifier.cpp` IS the algorithm, and the header carries
+#       MESHOPTIMIZER_VERSION plus every signature we call. They are vendored,
+#       so they change only when someone deliberately moves the pin — exactly
+#       when a re-bake is wanted.
 set(_mesh_bake_hashed_sources
     import/meshbake.cpp
     import/meshbake.h
-    import/materialhelper.cpp)
+    import/materialhelper.cpp
+    thirdparty/meshoptimizer/src/meshoptimizer.h
+    thirdparty/meshoptimizer/src/simplifier.cpp)
 # A CONFIGURE-TIME hash goes STALE (found by this lane's own suite, 2026-09-15):
 # editing import/meshbake.cpp does not re-run CMake, so the compiled-in term
 # kept describing the PREVIOUS contents of the file until something unrelated
@@ -429,6 +456,13 @@ target_include_directories(IrisGL PRIVATE
 
 target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network Qt6::Concurrent)
 target_link_libraries (IrisGL PRIVATE assimp)
+# meshoptimizer is PRIVATE for the same reason assimp is: the LOD chain it builds
+# crosses to the engine as plain data (iris::Mesh::lodIndices), never as one of
+# its types, and no public IrisGL header includes it. import/meshbake.cpp is the
+# only TU that does.
+target_link_libraries (IrisGL PRIVATE meshoptimizer)
+target_include_directories(IrisGL PRIVATE
+    "${PROJECT_SOURCE_DIR}/thirdparty/meshoptimizer/src")
 
 # THE scene graph is Ogre-Next's (SPECS/SCENEGRAPH_SPEC.md D2), so the document
 # library links it. PRIVATE, exactly like the engine does: Ogre must not reach

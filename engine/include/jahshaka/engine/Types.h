@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -70,13 +71,110 @@ struct MeshData {
     /// this false and keep the immutable fast path. GPU-skinned meshes are
     /// IMMUTABLE: the pose reaches the GPU as bone matrices, never as vertices.
     bool dynamic = false;
+
+    // ---- ATOM stage 1: the automatic LOD chain (SPECS/NANITE_SPEC.md §7) ----
+    //
+    // Built at IMPORT by MeshBake (irisgl/import/meshbake.cpp) and carried here
+    // as plain data. Both empty = today's behaviour exactly: one level, no
+    // selection, nothing changes.
+    //
+    // `lodIndices[i]` is LEVEL i+1 — level 0 IS `indices` — and it indexes the
+    // SAME vertices. That is a rule, not an accident: one vertex buffer and N
+    // index buffers is what keeps every level of a mesh inside ONE draw call
+    // (the VAO is matched on {opType, indexBufferVbo, indexType, vertexBuffers},
+    // so a per-level vertex remap would break the auto-instancing merge).
+    //
+    // `lodErrors[i]` is level i+1's SIMPLIFIER error as a LENGTH IN MESH UNITS —
+    // meshoptimizer's combined position + attribute (UV, normal) quadric error,
+    // which is >= the pure geometric error (the second read of ATOM-1): every
+    // consumer that compares it with a world-space size is CONSERVATIVE (a finer
+    // level than the geometry alone would need). A true geometric bound is a
+    // recorded follow-up;
+    // monotonically non-decreasing. It is the currency of the whole program:
+    //   * divided by the view distance it is a screen-space error (this is what
+    //     the backend turns into per-mesh distance thresholds), and
+    //   * compared against a world-space cell size it answers "is this level
+    //     fine enough to stand in for the mesh at that resolution" —
+    //     `lodForCellSize`, which is how a VOXELIZER or a far-field proxy picks
+    //     a level (PHOTON's outer cascades and its ray-tier proxy: the coarsest
+    //     level whose error is below the cell size is the cheapest geometry
+    //     that cannot be wrong by more than one cell).
+    std::vector<std::vector<unsigned>> lodIndices;
+    std::vector<float>                 lodErrors;
+
     size_t vertexCount() const { return positions.size() / 3; }
     size_t triangleCount() const { return indices.size() / 3; }
+    /// Levels including level 0 — always at least 1.
+    size_t lodLevelCount() const { return lodIndices.size() + 1; }
+    /// The index list of a level; level 0 is `indices`. Out-of-range clamps to
+    /// the coarsest level rather than reading past the end.
+    const std::vector<unsigned> &lodLevelIndices(size_t level) const {
+        if (level == 0 || lodIndices.empty()) return indices;
+        return lodIndices[std::min(level, lodIndices.size()) - 1];
+    }
+    /// The COARSEST level whose simplifier error (>= the geometric error, see
+    /// `lodErrors`) is below `cellSize` (a length in
+    /// the same units as the positions), or 0 when even level 1 is too coarse.
+    /// A non-positive or non-finite cell size means "the finest", i.e. 0.
+    size_t lodForCellSize(float cellSize) const {
+        if (!(cellSize > 0.0f)) return 0;
+        size_t level = 0;
+        for (size_t i = 0; i < lodErrors.size() && i < lodIndices.size(); ++i) {
+            if (!(lodErrors[i] < cellSize)) break;   // errors are non-decreasing
+            level = i + 1;
+        }
+        return level;
+    }
     bool hasSkinData() const {
         return !blendIndices.empty() && blendIndices.size() == vertexCount() * 4 &&
                blendWeights.size() == vertexCount() * 4;
     }
 };
+
+// ---- ATOM stage 1: turning a baked error into a switch distance -------------
+//
+// The projection formula is clusterlod.h's, verbatim (its own comment, lines
+// 94-97; the file is vendored at irisgl/thirdparty/meshoptimizer-clusterlod/):
+//
+//     screen error (0..1) = error / max(distance(centre, eye) - radius, znear)
+//                                 * (proj[1][1] * 0.5)
+//
+// multiply by the screen height for pixels. INVERTED, it answers the question
+// the LOD strategy asks: at what distance does a level's error fall under the
+// pixel budget?
+//
+//     distance - radius = error * proj[1][1] * 0.5 * height / budgetPixels
+//
+// and `distance - radius` is EXACTLY the value Ogre's distance_sphere strategy
+// computes per object per frame, so the number below can be handed to the mesh
+// as its LOD value with nothing in between.
+//
+// WHY A REFERENCE RESOLUTION AND FOV RATHER THAN THE LIVE CAMERA'S: the LOD
+// strategy is process-wide and distance-based, and its value carries no
+// projection term at all — Ogre's `pixel_count` strategies do, and switching to
+// one is a global change that moves every mesh in the application at once. So
+// stage 1 derives its thresholds at a stated reference (1080 lines at a 45°
+// vertical field of view) and records `pixel_count` as the follow-on with its
+// own pixel gate (NANITE_SPEC §7.2, finding C). The consequence, stated plainly:
+// on a taller window or a narrower lens the switch happens at the same distance,
+// not at the same pixel error.
+struct LodReference {
+    static constexpr float kScreenHeight      = 1080.0f;   ///< the rig's and the reference display's height
+    static constexpr float kFovYDegrees       = 45.0f;     ///< the document camera's default vertical angle
+    static constexpr float kProj11            = 2.4142136f;///< cot(45°/2) = projection[1][1] at that angle
+    static constexpr float kScreenErrorPixels = 1.0f;      ///< the budget: one pixel of the simplifier's (combined, >= geometric) error
+};
+
+/// The LOD value (a distance from the object's bounding sphere, in world units)
+/// at which a level carrying `error` reaches the pixel budget. `bias` scales the
+/// budget: 1 is the reference, larger swaps earlier (coarser), and 0 or less
+/// means "never swap", which pins the object at level 0.
+inline float lodSwitchDistance(float error, float bias = 1.0f) {
+    if (!(error > 0.0f) || !std::isfinite(error)) return 0.0f;
+    const float budget = LodReference::kScreenErrorPixels * (bias > 0.0f ? bias : 0.0f);
+    if (!(budget > 0.0f)) return std::numeric_limits<float>::max();
+    return error * LodReference::kProj11 * 0.5f * LodReference::kScreenHeight / budget;
+}
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
 /// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent

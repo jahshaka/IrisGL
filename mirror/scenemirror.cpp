@@ -4610,6 +4610,20 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     }
     if (out.normals.size() != out.positions.size()) out.normals.clear();
     if (out.uvs.size() != nv * 2) out.uvs.clear();
+
+    // ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the LOD chain the bake built,
+    // handed across as-is. The levels index the SAME vertices as `indices`, and
+    // the V flip above moves no vertex, so nothing here has to be remapped. A
+    // mesh with no chain (every skinned mesh, every mesh too small to simplify,
+    // and every model opened without a bake) carries empty vectors, which is
+    // what the engine already does today.
+    const int levels = std::min(mesh->lodIndices.size(), mesh->lodErrors.size());
+    for (int i = 0; i < levels; ++i) {
+        const QVector<quint32> &level = mesh->lodIndices.at(i);
+        if (level.size() < 3 || level.size() % 3 != 0) break;
+        out.lodIndices.emplace_back(level.constBegin(), level.constEnd());
+        out.lodErrors.push_back(mesh->lodErrors.at(i));
+    }
     return out.indices.size() >= 3;
 }
 
@@ -6179,6 +6193,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         if (budget > 0 && engine->shadowMapBudget() != budget)
             engine->setShadowMapBudget(budget);
     }
+    // ATOM stage 1: the LOD dial. A plain push of the document value — the
+    // engine re-derives every mesh's switch distances in place when it changes,
+    // so this costs nothing on the frames it does not move.
+    if (mTarget && mTarget->lodBias() != mSource->lodBias)
+        mTarget->setLodBias(mSource->lodBias);
     // AMBIENT IS THE SKY LIGHT, AND NOTHING ELSE (SKY_LIGHT_SPEC.md §2, owner
     // decision D14). There is one path and one seam: the sky's own
     // cosine-convolved integral, scaled by the scene's Sky Light — its

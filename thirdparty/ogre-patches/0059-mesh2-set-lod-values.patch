@@ -1,0 +1,111 @@
+Jahshaka patch 0059 — a v2 Mesh built in memory can be given its LOD values.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this. It touches `OgreMain/include/OgreMesh2.h` and
+`OgreMain/src/OgreMesh2.cpp`, which NO other patch in this stack touches, so
+there is no overlap to reset for.
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325).
+There is NO public way to give a v2 `Ogre::Mesh` its LOD level values:
+
+  * `Mesh::mLodValues` is protected, with only a const getter
+    (`_getLodValueArray()`, OgreMesh2.h:417);
+  * `Mesh::_setLodInfo( unsigned short )` exists but its ENTIRE BODY is
+    commented out (OgreMesh2.cpp:360-373) — calling it does nothing at all,
+    silently;
+  * the only code that writes the array is `MeshSerializerImpl` (a friend) and
+    `Mesh::importV1`, i.e. loading a .mesh file off disk or converting a v1
+    mesh.
+
+Everything else is already public and already works: a `SubMesh` takes as many
+VAOs as you push into `mVao[VpNormal]`/`mVao[VpShadow]`,
+`SceneManager::updateAllLods` computes a LOD value per object every frame, and
+`LodStrategy::lodSet` binary-searches the mesh's value array to pick the index
+`RenderQueue` then uses (`vaos[meshLod]`). The ONE missing link is handing the
+mesh the values to search. An application that builds its meshes in memory —
+which is this application, and any importer-driven engine — can therefore build
+a perfect LOD chain that Ogre will never select from.
+
+The alternatives were weighed and rejected:
+  * reaching into `mLodValues` from a derived class is impossible (`Mesh` is
+    `final`) and from a friend is a fork of the pin by another name;
+  * building a `v1::Mesh` and calling `importV1` re-introduces the v1 path this
+    codebase deleted, runs LOD GENERATION at load time instead of using the
+    levels our importer already baked, and picks a different simplifier;
+  * writing a .mesh file just to read it back pays a full GPU readback per mesh
+    (`BufferPacked::readRequest` has no shadow-copy short-circuit).
+
+This restores a capability upstream commented out rather than adding a new one,
+and it is a good upstream PR as it stands.
+
+WHAT IT DOES. Adds `void Mesh::_setLodValues( const LodValueArray & )` — an
+assignment, plus an OGRE_ASSERT_LOW that the array is not empty — with the
+contract documented in the header: one entry per level in the SubMeshes' VAO
+order, entry 0 the strategy's base value, sorted the way the active strategy
+sorts, and set BEFORE any Item is created from the mesh (`Item::_initialise`
+caches the array's address).
+
+VERIFICATION. `git apply --check` against the pristine pin and `git apply
+--reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
+`--engine-selftest` byte-identical (`b55e2d5d…`) — the default scene's meshes
+have no LOD chain, so nothing calls it there. The behavioural gate is ATOM's own
+`atom.lod_levels` suite (one mesh, the LOD bias swept, a PNG and a triangle
+count per level) plus `test_engine` and the mesh suites.
+diff --git a/OgreMain/include/OgreMesh2.h b/OgreMain/include/OgreMesh2.h
+index e51f087aa..d2674fa88 100644
+--- a/OgreMain/include/OgreMesh2.h
++++ b/OgreMain/include/OgreMesh2.h
+@@ -354,6 +354,35 @@ namespace Ogre
+ 
+         /** Internal methods for loading LOD, do not use. */
+         void _setLodInfo( unsigned short numLevels );
++
++        /** Sets the LOD values this mesh's levels switch at.
++
++            The array is what LodStrategy::lodSet() binary-searches every frame
++            (through MovableObject::mLodMesh, which Item::_initialise points at
++            this array), so:
++              - it must hold one entry per LOD level, in the same order as each
++                SubMesh's mVao[VpNormal]/mVao[VpShadow];
++              - entry 0 must be the strategy's base value (see
++                LodStrategy::getBaseValue), and the rest must be sorted the way
++                that strategy sorts - ascending for the distance strategies,
++                descending for the pixel-count ones;
++              - it must be set BEFORE any Item is created from this mesh: an
++                Item caches the address of this array, and while the address
++                survives a resize through FastArray, an Item created earlier
++                would have cached an array of a different LENGTH than its
++                SubItems' VAO lists.
++
++            Without this there is no public way to give a v2 Mesh built in
++            memory its LOD levels at all: mLodValues is protected with only a
++            const getter, _setLodInfo's body is commented out, and the only
++            writers left are the serializer (a friend) and importV1(). A mesh
++            built by hand - which is every mesh in an application that does its
++            own import - could therefore carry as many VAOs per SubMesh as it
++            liked and Ogre would never select any of them.
++        @param lodValues
++            The LOD values, level 0 first.
++        */
++        void _setLodValues( const LodValueArray &lodValues );
+         /** Internal methods for loading LOD, do not use. */
+         // void _setSubMeshLodFaceList(unsigned short subIdx, unsigned short level, IndexData* facedata);
+ 
+diff --git a/OgreMain/src/OgreMesh2.cpp b/OgreMain/src/OgreMesh2.cpp
+index 4923de57a..1591c2af7 100644
+--- a/OgreMain/src/OgreMesh2.cpp
++++ b/OgreMain/src/OgreMesh2.cpp
+@@ -372,6 +372,13 @@ namespace Ogre
+         */
+     }
+     //---------------------------------------------------------------------
++    void Mesh::_setLodValues( const LodValueArray &lodValues )
++    {
++        OGRE_ASSERT_LOW( !lodValues.empty() &&
++                         "A mesh must have at least the base LOD value (level 0)" );
++        mLodValues = lodValues;
++    }
++    //---------------------------------------------------------------------
+     /*void Mesh::_setSubMeshLodFaceList(unsigned short subIdx, unsigned short level,
+         IndexData* facedata)
+     {

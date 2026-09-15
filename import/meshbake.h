@@ -182,6 +182,19 @@ public:
     /// The role bakes are recorded under in the CAS (`asset_files.role`).
     static QString casRole();
 
+    /// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): build `mesh`'s automatic LOD
+    /// chain, in place — `lodIndices` + `lodErrors`, or both cleared when the
+    /// mesh gets no chain (it is skinned, it is not triangles, it is too small
+    /// to be worth a level, or its topology stopped the simplifier early).
+    ///
+    /// buildFromScene calls this for every mesh it bakes; it is public because
+    /// the chain is a PRODUCT of the bake with its own policy, and a caller that
+    /// builds an iris::Mesh by other means (a procedural mesh, a benchmark
+    /// fixture, a re-bake path) must be able to ask for the same levels the
+    /// importer would have produced rather than a second implementation of them.
+    /// Pure CPU, no assimp, no engine; safe from any thread.
+    static void buildLodChain(const MeshPtr &mesh);
+
     /// Build the bake from an ALREADY PARSED scene (the import side pays no
     /// second parse). `extractDir` is handed to MaterialHelper exactly as
     /// loadAsSceneFragment would.
