@@ -146,7 +146,7 @@ material Jahshaka/SsrResolve
 				// firefly clamp's neighbourhood taps are measured in.
 				param_named_auto	prevFrameRes	texture_size 2
 				// Intensity 0 = no reflection, the safe pre-update value.
-				param_named			resolveParams	float4	0.35 0 0 0
+				param_named			resolveParams	float4	0.4 0 0.1 0
 			}
 
 			texture_unit rayTexture

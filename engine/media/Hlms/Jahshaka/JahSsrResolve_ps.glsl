@@ -370,8 +370,23 @@ void main()
 	const float roughness = sqrt( alpha );
 	const float cutoff	  = resolveParams.x;
 	const float feather	  = resolveParams.z;
+	// The ramp starts where CONTENT starts: the G-buffer cannot hold an alpha
+	// below 0.001 (patch 0043's floor), i.e. a perceptual roughness below
+	// 0.0316, so a ramp whose lower edge sat at 0 gave a perfect mirror only
+	// part of its screen reflection at a low cutoff (31 % at the row's 5 %).
+	// Clamped at the floor, a mirror is always at full strength and the ramp
+	// compresses toward it as the cutoff comes down. A cutoff at or below the
+	// floor (the row cannot produce one; a test can) marches nothing: the
+	// smoothstep edges must not coincide (undefined in GLSL — a NaN that only
+	// this driver's clamp happens to kill).
+	const float kGBufferRoughnessFloor = 0.0316;
+	if( cutoff <= kGBufferRoughnessFloor )
+	{
+		fragColour = vec4( 0.0 );
+		return;
+	}
 	const float roughFade =
-		1.0 - smoothstep( max( cutoff - feather, 0.0 ), cutoff, roughness );
+		1.0 - smoothstep( max( cutoff - feather, kGBufferRoughnessFloor ), cutoff, roughness );
 
 	// ---- THE RULE ON A MIRROR (lane SSR-2, the owner's dual image) ----------
 	//
