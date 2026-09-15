@@ -1,0 +1,226 @@
+From: jahshaka <jahshaka@gmail.com>
+Subject: [PATCH 0042] HDR: the luminance meter must not be poisoned by one sample
+
+MEDIA-ONLY (GLSL; Studio restages media from the SOURCE tree, so every tree
+still needs the patch loop). Overlaps patch 0034 in DownScale03_SumLumEnd_ps.glsl
+and REPLACES both of its `x == x` guards — a tree that carries 0034 must reset
+its ogre-next submodule before build-ogre.sh, as the whole 0037+ stack already
+requires.
+
+WHY (Jahshaka lane HDR-1, 2026-09-15 — measured on the live editor viewport)
+
+THE SYMPTOM the owner reported: with HDR on, dragging a light makes the whole
+picture — materials, sky, everything — shimmer, and it settles the moment the
+light stops. Lane SSR-1 falsified the reflection as the cause (a resolve forced
+to zero confidence flickers identically) and located it in the HDR auto-exposure,
+which SSR merely makes worse.
+
+THE CAUSE, in two parts, both in this chain's METER.
+
+1. THE METER IS A MEAN, AND A MEAN HAS NO RESISTANCE. DownScale01 takes
+   log( luminance ) over a sparse grid and DownScale02/03 average those means, so
+   ONE unusable sample makes the WHOLE FRAME's measurement unusable. Two things
+   produce one:
+     * the scene target is RGBA16F, and a punctual light's specular lobe goes as
+       1 / (pi * alpha^2) — a near-mirror surface at the shader's roughness floor
+       reaches ~1e6 and stores +Inf. The bilinear fetch then weights that texel by
+       zero on some frames and not others, and 0 * Inf is a NaN.
+     * the target is a SUM of shading terms, and a filtered fetch across a blown
+       neighbourhood comes back BELOW ZERO. log() of that is a NaN too, and on the
+       fixture below it was the source of every NaN the pass produced.
+   Which texels are blown, and which weights are zero, changes every frame while a
+   light turns — so the measurement flickers between usable and unusable.
+
+2. AN UNUSABLE MEASUREMENT WAS READ AS "A VERY DARK SCENE". Patch 0034 made a NaN
+   survivable by reading fLumAvg as exposure.y. That is the LOG-LUMINANCE FLOOR,
+   and exposure.x / exp( exposure.y ) is the LARGEST exposure this chain can
+   produce — so every measurement failure yanked the grade towards its brightest
+   limit, which is the loudest thing it could have done.
+
+3. AND PATCH 0034'S GUARD NEVER FIRED. `x == x` is folded to TRUE by the shader
+   compiler on this stack (NVIDIA 595.84, Vulkan/SPIR-V): a deliberately absurd
+   value placed on its NaN branch never appeared in 120 frames that demonstrably
+   carried NaN texels. What actually produced 0034's constant was the DRIVER's
+   clamp( NaN, lo, hi ) returning lo — the same number by accident. Every guard
+   here is therefore on the BITS (an IEEE float is a NaN exactly when the
+   magnitude of its bit pattern exceeds +Inf's), which is integer arithmetic no
+   optimiser may remove. THIS IS A GENERAL WARNING FOR THIS TREE: an `x == x`
+   NaN test in any shader we ship is a no-op.
+
+THE MEASUREMENT (Ogre's ShadowMapFromCode port, the live editor viewport, the sun
+stepped a constant 0.35 deg per frame, the adapted luminance read back off the 1x1
+history every frame, and the 4x4 rtIter2 — the meter's own output — read with it):
+
+  configuration          NaN frames   max exposure step   adapted range over
+                         in the meter    per frame          the 60-frame drag
+  ---------------------------------------------------------------------------
+  base,  SSR Full-Res      24 / 120        1.715 %          0.9619 .. 1.0771
+  base,  SSR off            9 / 120        1.799 %          0.9502 .. 0.9976
+  fixed, SSR Full-Res       0 / 120        1.978 % (*)      0.7983 .. 0.8169
+  fixed, SSR off            0 / 120        0.058 %          0.8364 .. 0.8447
+
+  at rest the base moves 0.363 % per frame and the fix 0.060 %.
+  (*) one frame, and a REAL one: the meter legitimately read 7.71 instead of 5.70
+      because the frame contained unrepresentably bright pixels, which now read as
+      the brightest value the target CAN hold instead of poisoning the frame.
+
+Every NaN frame in the base reconstructed to newLum = exposure.x / exp( exposure.y )
+to four figures; widening exposureMin from -2.5 to -6 moved those same frames to the
+new constant exactly, which is what proves they were the fallback and not a scene
+that got dark.
+
+DELIBERATELY NOT FIXED HERE, because it is not this pass's business and because it
+MOVES EVERY EXISTING PICTURE: the scene target still stores +Inf, and the
+tonemapper still turns it into a black hole. That belongs upstream of the
+tonemapper (the specular lobe, or the roughness floor the prepass quantises to);
+patch 0034's header records the measurement that rejected clamping it in the last
+pass. This patch fixes the METER and changes no pixel of any frame whose samples
+were all finite and non-negative.
+
+SCOPE: the GLSL copies only, for the same reason patch 0034 gives — Jahshaka runs
+Vulkan on every platform it ships on, so the HLSL and Metal copies are never
+compiled in this tree and patching them would be unverifiable. Upstream would want
+all three.
+
+diff --git a/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale01_SumLumStart_ps.glsl b/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale01_SumLumStart_ps.glsl
+--- a/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale01_SumLumStart_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale01_SumLumStart_ps.glsl
+@@ -46,6 +46,69 @@
+ 	uniform vec4 viewportSize;
+ vulkan( }; )
+ 
++// JAHSHAKA patch 0042 - A SAMPLE THAT IS NOT A NUMBER MUST NOT POISON THE FRAME.
++//
++// This pass is the WHOLE SCENE's luminance measurement: it takes the mean of
++// log( luminance ) over a sparse grid, and DownScale02/03 then average those
++// means. A mean has no resistance at all - ONE unusable sample makes the
++// frame's measurement unusable, and DownScale03 then has to guess an exposure
++// for the whole picture.
++//
++// Unusable samples really do occur, measured (Jahshaka lane HDR-1, 2026-09-15,
++// Ogre's ShadowMapFromCode port, a 0.35 deg per frame sun drag): 24 of 120
++// dragging frames with SSR on and 9 with SSR off produced a NaN measurement,
++// and the exposure lurched on every one of them. As the light turns, which
++// texels are unrepresentable and which filter weights are zero changes every
++// frame, so the measurement flickers between usable and unusable - which is the
++// owner's 'materials shimmer while I drag the light', arriving as a grade that
++// lurches while the light moves and settles the moment it stops.
++//
++// THE RULE: a sample's influence on the frame must be BOUNDED. See the two ways
++// a sample stops being a luminance in the function below.
++//
++// NOT FIXED HERE, deliberately, because it is not this pass's business and
++// because it MOVES EVERY EXISTING PICTURE: the scene target still stores +Inf,
++// and the tonemapper still turns it into a black hole. That belongs upstream of
++// the tonemapper (the specular lobe, or the roughness floor), and Jahshaka patch
++// 0034's header records the measurement that rejected clamping it in the last
++// pass. This patch fixes the METER, and changes no pixel of any frame whose
++// samples were all finite and non-negative.
++const float c_jahMaxRepresentableLum = 65504.0;	// the largest half float
++const float c_jahMinLuminance = 0.0001;			// the epsilon the caller already adds
++float jahUsableLuminance( float lum )
++{
++	// TWO WAYS A SAMPLE STOPS BEING A LUMINANCE, and log() turns both into a NaN
++	// that a MEAN cannot survive:
++	//   * NOT REPRESENTABLE. The scene target is RGBA16F and a punctual light's
++	//     specular lobe goes as 1/(pi*alpha^2), so a near-mirror surface stores
++	//     +Inf; the bilinear fetch above then weights that texel by zero on some
++	//     frames and not others, and 0 * Inf is a NaN.
++	//   * NEGATIVE. Luminance is non-negative by construction, but the scene
++	//     target is a SUM of shading terms and a filtered fetch across a blown
++	//     neighbourhood does come back below zero - measured, and the source of
++	//     every NaN this pass produced on the fixture above. log() of it is a
++	//     NaN. The caller already adds 0.0001 as its floor, so the lower bound
++	//     only bites a sample that was already not a measurement.
++	//
++	// THE TEST IS ON THE BITS, NOT `lum == lum`, AND THAT IS NOT A STYLE CHOICE.
++	// Jahshaka measured (lane HDR-1, NVIDIA 595.84, Vulkan/SPIR-V) that `x == x`
++	// is FOLDED TO TRUE by the shader compiler on this stack: a deliberately
++	// absurd value placed on the NaN branch of patch 0034's guard in DownScale03
++	// never appeared in 120 frames that demonstrably carried NaN texels. An
++	// IEEE-754 float is a NaN exactly when its exponent is all ones and its
++	// mantissa is not zero, i.e. when the magnitude of its bit pattern exceeds
++	// +Inf's; that is integer arithmetic and no optimiser may remove it.
++	//
++	// An unrepresentable sample reads as the brightest value the target CAN hold,
++	// which is a statement about that one sample and is worth at most
++	// log(65504*1024) = 18 against an ordinary 7 - 1.7e-4 of the frame's mean.
++	// Every sample that IS a luminance is returned unchanged, bit for bit.
++	uint jahBits = floatBitsToUint( lum ) & 0x7FFFFFFFu;	// magnitude only
++	bool jahFinite = jahBits < 0x7F800000u;					// 0x7F800000 is +Inf
++	return jahFinite ? clamp( lum, c_jahMinLuminance, c_jahMaxRepresentableLum )
++					 : c_jahMaxRepresentableLum;
++}
++
+ void main()
+ {
+ 	//Compute how many pixels we have to skip because we can't sample them all
+@@ -57,6 +120,7 @@
+ 
+ 	vec3 vSample	= texture( vkSampler2D( rt0, samplerState ), inPs.uv0 ).xyz;
+ 	float sampleLum	= dot( vSample, c_luminanceCoeffs ) + 0.0001;
++	sampleLum = jahUsableLuminance( sampleLum );
+ 	//float fLogLuminance = log( clamp( sampleLum, c_minLuminance, c_maxLuminance ) );
+ 	float fLogLuminance = log( sampleLum * 1024.0 );
+ 
+@@ -65,7 +129,7 @@
+ 		//TODO: Precompute c_offsets[i] * ratio in CPU and upload it as c_offset, probably using a listener
+ 		vSample		= texture( vkSampler2D( rt0, samplerState ),
+ 							   inPs.uv0 + ((c_offsets[i] * ratio) * tex0Size.zw) ).xyz;
+-		sampleLum	= dot( vSample, c_luminanceCoeffs ) + 0.0001;
++		sampleLum	= jahUsableLuminance( dot( vSample, c_luminanceCoeffs ) + 0.0001 );
+ 		//fLogLuminance += log( clamp( sampleLum, c_minLuminance, c_maxLuminance ) );
+ 		fLogLuminance += log( sampleLum * 1024.0 );
+ 	}
+diff --git a/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale03_SumLumEnd_ps.glsl b/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale03_SumLumEnd_ps.glsl
+--- a/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale03_SumLumEnd_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/HDR/GLSL/DownScale03_SumLumEnd_ps.glsl
+@@ -57,10 +57,45 @@
+ 	// so a chain that was already producing numbers produces exactly the same
+ 	// numbers. exposure.y is the log-luminance floor the clamp below already
+ 	// uses, i.e. what this pass would have written for a dark frame.
+-	fLumAvg = ( fLumAvg == fLumAvg ) ? fLumAvg : exposure.y;
+-	float newLum = exposure.x / exp( clamp( fLumAvg, exposure.y, exposure.z ) );
++	// JAHSHAKA patch 0042 - AN UNUSABLE MEASUREMENT MUST MOVE THE EXPOSURE NOWHERE.
++	//
++	// Patch 0034 made a NaN survivable (it can no longer latch this 1x1 history
++	// for ever) by reading it as exposure.y. That is the LOG-LUMINANCE FLOOR, so
++	// an unusable frame was read as 'the darkest scene this chain admits' - and
++	// exposure.x / exp( exposure.y ) is the LARGEST exposure the chain can
++	// produce. A measurement failure therefore yanked the grade towards its
++	// brightest limit, which is the loudest thing it could possibly do.
++	//
++	// Measured (lane HDR-1, 2026-09-15, ShadowMapFromCode, 0.35 deg/frame sun
++	// drag, the adaptation history read back per frame): every anomalous frame
++	// reconstructed to newLum = exposure.x / exp( exposure.y ) to four figures,
++	// against a neighbourhood median of 0.84 - and when exposureMin was widened
++	// from -2.5 to -6 the same frames moved to the new constant exactly, tracking
++	// exposure.y. That is this fallback, not a scene that got dark.
++	//
++	// A missing measurement carries NO information about the scene, so the only
++	// answer that cannot invent a grade change is the one already on the books:
++	// hold the adapted luminance for this frame and adapt normally on the next.
++	// The dark-frame reading survives for the ONE case it was written for - a
++	// history that is ALSO unusable, where there is nothing to hold.
++	//
++	// ON THE BITS, NOT `x == x`: measured on this stack (NVIDIA 595.84,
++	// Vulkan/SPIR-V), patch 0034's `x == x` tests are FOLDED TO TRUE by the
++	// shader compiler and never fire; what produced 0034's constant was the
++	// DRIVER's clamp( NaN, lo, hi ) returning lo, the same number by accident. A
++	// float is a NaN exactly when the magnitude of its bit pattern exceeds +Inf's,
++	// which is integer arithmetic and survives every optimiser. (An Inf reads as
++	// 'no measurement' too: with DownScale01 bounded above, fLumAvg cannot reach
++	// one from a real frame.)
++	//
++	// Every finite frame takes the same arithmetic it took before, bit for bit.
++	bool jahHaveMeasurement = ( ( floatBitsToUint( fLumAvg ) & 0x7FFFFFFFu ) < 0x7F800000u );
++	float newLum = exposure.x / exp( clamp( jahHaveMeasurement ? fLumAvg : exposure.y,
++											exposure.y, exposure.z ) );
+ 	float oldLum = texture( vkSampler2D( oldLumRt, samplerPoint ), vec2( 0.0, 0.0 ) ).x;
+-	oldLum = ( oldLum == oldLum ) ? oldLum : newLum;
++	bool jahHaveHistory = ( ( floatBitsToUint( oldLum ) & 0x7FFFFFFFu ) < 0x7F800000u );
++	oldLum = jahHaveHistory ? oldLum : newLum;
++	newLum = ( !jahHaveMeasurement && jahHaveHistory ) ? oldLum : newLum;
+ 
+ 	//Adapt luminicense based 75% per second.
+ 	fragColour = mix( newLum, oldLum, pow( 0.25, timeSinceLast ) );
