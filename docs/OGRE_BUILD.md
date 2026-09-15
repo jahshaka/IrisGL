@@ -878,15 +878,55 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     nothing else). `--engine-selftest` hash UNCHANGED — the default scene has no
     SSR. Guarded by `ssr.engine` case 13.
 
-THE STACK IS 0001-0043 (this list; `build-ogre.sh` globs `*.patch`, so the file
+44. **0044-irradiance-field-movable-volume-and-lighting-rebind** (SOURCE — every
+    tree re-runs `build-ogre.sh`) — Photon E1 puts the irradiance field on the
+    INNERMOST cascade of a camera-centred chain, so the field's volume has to
+    follow that cascade as it scrolls. Upstream's only placement API is
+    `initialize()`, which destroys and re-creates both atlases (a field
+    re-initialised on every step is born black on every step), and the members
+    a placement needs are protected — the reach-in the patch rule forbids. Two
+    hooks on `IrradianceField`: `setFieldVolume(origin, size)` moves/resizes the
+    volume in place with the same one-probe-block enlargement `initialize()`
+    applies and re-derives the generation params (the probe counts are settings
+    and untouched, so the atlases stay valid); and `setVctLighting(l)`, which is
+    also a PIN-DEFECT fix: `createTextures()` binds the light voxel textures
+    ONCE by pointer, and a `VctLighting` re-creates them on LostResidency and on
+    `setVoxelizer()` (patch 0037) — after which a bound field integrates from
+    DESTROYED textures, silently. The setter re-binds the generation job's
+    slots (the only consumer; the integration jobs read the atlases) and
+    re-reads the light voxel width for the start bias. Recorded in
+    OGRE_UPSTREAM_ISSUES ("IrradianceField binds the light voxels by pointer").
+    Guarded by `gi.field_follows` (the field rides cascade 0; a 100 m walk =
+    20 follows; the raster source follows) and `gi.leak_room`.
+
+45. **0045-vct-cone-diffuse-yields-to-a-partial-field** (MEDIA — `Vct_piece_ps.any`;
+    OVERLAPS 0021 and 0033 in that file: a tree carrying them fails
+    `build-ogre.sh`'s reverse-check with "Upstream changed the patched file" —
+    the documented blind spot, cured by the submodule reset) — upstream sets
+    `vct_disable_diffuse` whenever a field is bound because ITS field covers the
+    whole voxel volume. Under a Photon chain the field covers only cascade 0, and
+    "field instead of cones" would leave every pixel in the ring with no diffuse
+    bounce at all. The engine's Hlms listener re-opens the gate when
+    `irradiance_field && vct_num_probes > 1` (both already in the pass
+    properties, so the pass hash and the code-cache key cover a chain on/off);
+    this patch makes the cone diffuse no longer ACCUMULATED where a field is
+    bound (it is still computed), and Jahshaka's `JahIfd` piece adds
+    `vctDiffuse × (1 − ifdConfidence)` under a chain — the cone term arrives
+    exactly once in all four permutations (chain/single × field/no field). The
+    single-volume arm keeps the hemisphere fallback; `--engine-selftest` hash
+    UNCHANGED (one volume). Guarded by `gi.cascades` case 4's field variant
+    (0.51× of the single volume's bounce beyond cascade 0, bar ≥ 0.40) and the
+    red-on-grey bounce (0.0960 with the gate open, 0.0001 without).
+
+THE STACK IS 0001-0045 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040 and 0041 are SOURCE-only, and 0020 touches the
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045) need no Ogre rebuild (0024 and 0028 are
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041 and 0044 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

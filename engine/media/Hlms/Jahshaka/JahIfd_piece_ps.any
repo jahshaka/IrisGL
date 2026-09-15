@@ -606,6 +606,7 @@
 	// bound (AmbientLighting_piece_ps.any:64-72), which is the gap this file's
 	// sky-visibility term exists to fill in the first place.
 	float ifdFallbackAmbient = 1.0 - ifdConfidence;
+@property( vct_disable_diffuse )
 	if( ifdFallbackAmbient > 0.0 )
 	{
 	@property( vct_ambient_hemisphere )
@@ -618,6 +619,33 @@
 														 passBuf.vctProbeParams.multiplier *
 														 ifdFallbackAmbient );
 	}
+@else
+	// ...AND UNDER A CASCADE CHAIN THE FALLBACK IS THE CHAIN'S OWN BOUNCE, not
+	// its ambient (PHOTON_SPEC §13 G3, option (a) as decided).
+	//
+	// The paragraph above is the single-volume case, where the field covers the
+	// whole lit box and the only thing outside its confidence is the world
+	// beyond the volume -- for which an unoccluded ambient IS the answer the
+	// pixel had before the field existed. A chain is a different geometry: the
+	// field rides cascade 0 and the cascades around it hold real, voxelised,
+	// light-injected radiance out to the outermost box. Handing the ring a flat
+	// ambient there would throw away exactly what the outer cascades were built
+	// to compute.
+	//
+	// So the cone-traced diffuse is switched back on for a chain (the engine's
+	// Hlms listener re-opens the gate HlmsPbs closes for any bound field -- see
+	// FogHlmsListener::propertiesMergedPreGenerationStep) and the two terms are
+	// blended by the field's confidence: the field inside cascade 0, the cones
+	// outside it, never both. That is the same hand-off the sky-visibility term
+	// above already makes, and it keeps the accounting this file's header
+	// states -- envColourD receives exactly ONE diffuse-GI term in every regime.
+	//
+	// `vctDiffuse` is the cone block's result, and it is already ambient-aware:
+	// the escape weight it accumulates (light.w) multiplies the hemisphere pair
+	// inside it, so the ring gets precisely the picture it had before any field
+	// existed, weighted out as the pixel enters the field's reach.
+	pixelData.envColourD.xyz += vctDiffuse.xyz * ifdFallbackAmbient;
+@end
 @end
 
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )

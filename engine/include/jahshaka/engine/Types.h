@@ -2029,8 +2029,10 @@ struct GiStatus {
     int    ifdProbes = 0;
     /// Every probe in the field has been integrated at least once since the
     /// last build or reset. A bound field is ALWAYS converged on the frame it
-    /// binds (the build converges it in one dispatch); this reads false only
-    /// while a progressive re-converge after `refreshGiLighting` is in flight.
+    /// binds (the build converges it in one dispatch) and on the frame it is
+    /// re-placed under a cascade chain (a follow converges it whole); it reads
+    /// false while a progressive re-converge is in flight — after
+    /// `refreshGiLighting`, or after cascade 0 re-voxelised at the same place.
     bool   ifdConverged = false;
     /// Probes the field is re-integrating per frame while a re-converge is in
     /// flight — the resolved figure, derived from `GiParams::updateBudget` and
@@ -2046,6 +2048,22 @@ struct GiStatus {
     /// and then reads Voxel while `GiParams::ddgiSource` says Raster: the same
     /// "asked for it, did not get it" reading as ifdBound.
     GiSource ifdSource = GiSource::Voxel;
+    /// WHERE THE FIELD IS: the corners of the volume its probe grid spans, as
+    /// the engine placed it (the field enlarges that volume by one probe block
+    /// per side for its own borders; this is the volume it was given). Equal
+    /// corners = no field.
+    ///
+    /// In the single-volume arm this is the lit volume — the scene's fitted box
+    /// — and it never moves without a rebuild. Under a Photon cascade chain it
+    /// is CASCADE 0's box and it follows that cascade as the camera walks
+    /// (PHOTON_SPEC E1), which is the only way to see, from outside, where the
+    /// leak-free diffuse actually is.
+    Vec3 ifdMin;
+    Vec3 ifdMax;
+    /// How many times the field has been re-placed onto cascade 0 since the
+    /// last build: 0 in the single-volume arm and on a still camera, one per
+    /// cascade-0 step while walking. Reset by a build, never by a scroll.
+    unsigned long long ifdFollows = 0;
 
     // ---- THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC §2 P1/P6/P7) -------------
     // Reflection probes are re-captured only while STALE. These say what the

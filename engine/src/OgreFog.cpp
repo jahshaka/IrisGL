@@ -51,6 +51,49 @@ FogHlmsListener gFogListener;
 // The first comes from a count only buildClosestLightList maintains, the second
 // from the array setLightFixedToShadowMap writes — which is why ogre-patch 0025
 // makes the second invalidate the first's cache.
+// G3-a — THE CONE DIFFUSE COMES BACK UNDER A CASCADE CHAIN (PHOTON_SPEC §13 G3,
+// the decided option; audit B1 is the finding).
+//
+// HlmsPbs sets `vct_disable_diffuse` whenever an irradiance field is bound
+// (OgreHlmsPbs.cpp:1846-1850) and the whole cone-diffuse block in
+// Vct_piece_ps.any is `@property( !vct_disable_diffuse )`. For ONE volume that
+// is right: the field covers the entire lit box, so the cones would be a second
+// computation of the same term. For a CHAIN it is wrong — the field rides
+// cascade 0 (a 10 m box at the High table) and every pixel from there out to the
+// outermost cascade would get specular cones and ambient and NO diffuse bounce
+// at all, which is the reason the outer cascades exist, discarded by the field's
+// binding.
+//
+// So under a chain the gate is re-opened here, and the two terms are blended by
+// the field's own confidence in our JahIfd piece: inside cascade 0 the field
+// wins (and its leak fix with it), outside it the chain's cone bounce does.
+//
+// WHY THIS IS CACHE-SAFE, which the hook's documentation is strict about ("you
+// can only set new properties that are DERIVED from existing properties ... a
+// property set from external information will break caches"): the condition is
+// exactly that. `irradiance_field` and `vct_num_probes` are both already in the
+// merged set — the second is the bound VctLighting's cascade count, written by
+// HlmsPbs::preparePassHash (OgreHlmsPbs.cpp:1832-1834) — so two passes with the
+// same properties always generate the same shader, and a pass that turns the
+// chain on or off changes `vct_num_probes` and therefore the pass hash.
+//
+// WHY NOT A SOURCE PATCH on HlmsPbs, which would be the other honest answer
+// (ledger §325): the decision "does a bound field replace the cone diffuse
+// everywhere" belongs to whoever placed the field, and here that is us. Upstream
+// has one field over one volume and its rule is right for that case; there is
+// no defect to fix and no hook missing. This is the hook.
+void FogHlmsListener::propertiesMergedPreGenerationStep(
+    Ogre::Hlms *hlms, const Ogre::HlmsCache &, const Ogre::HlmsPropertyVec &,
+    const Ogre::PiecesMap *, const Ogre::HlmsPropertyVec &, const Ogre::QueuedRenderable &,
+    size_t tid) {
+    static const Ogre::IdString kIrradianceField("irradiance_field");
+    static const Ogre::IdString kVctNumProbes("vct_num_probes");
+    static const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");
+    if (!hlms->_getProperty(tid, kIrradianceField)) return;
+    if (hlms->_getProperty(tid, kVctNumProbes) <= 1) return;
+    hlms->_setProperty(tid, kVctDisableDiffuse, 0);
+}
+
 void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
                                       bool, Ogre::SceneManager *sceneManager, Ogre::Hlms *hlms) {
     // THE FOG'S COLOUR MODE, first and unconditionally for a colour pass: it is

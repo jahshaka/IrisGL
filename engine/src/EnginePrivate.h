@@ -1793,6 +1793,19 @@ public:
     void preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
                          bool dualParaboloid, Ogre::SceneManager *sceneManager,
                          Ogre::Hlms *hlms) override;
+    /// G3-a (PHOTON_SPEC §13 G3): under a CASCADE CHAIN with an irradiance
+    /// field bound, re-open the cone-diffuse gate HlmsPbs closes for any bound
+    /// field. The field rides cascade 0, so leaving the gate shut would leave
+    /// every pixel in the ring out to the outermost cascade with no diffuse
+    /// bounce at all. Derived from properties already in the merged set
+    /// (`irradiance_field`, `vct_num_probes`), which is what the hook's own
+    /// documentation requires of anything set here — see the definition.
+    void propertiesMergedPreGenerationStep(Ogre::Hlms *hlms, const Ogre::HlmsCache &passCache,
+                                           const Ogre::HlmsPropertyVec &renderableCacheProperties,
+                                           const Ogre::PiecesMap renderableCachePieces[Ogre::NumShaderTypes],
+                                           const Ogre::HlmsPropertyVec &properties,
+                                           const Ogre::QueuedRenderable &queuedRenderable,
+                                           size_t tid) override;
     /// How many passes have been hashed in that broken state this session, and
     /// a reset for the suites. Reported by Engine::shadowStatus.
     static unsigned lightCountMismatches() { return sLightCountMismatches; }
@@ -3654,7 +3667,16 @@ private:
     GiSource      resolveSource() const;
     void          applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
                                     const Ogre::Vector3 &origin, const Ogre::Vector3 &size);
-    void          pushIfdState(const Ogre::IrradianceFieldSettings &settings);
+    void          pushIfdState(const Ogre::uint32 numProbes[3]);
+    /// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1). Called by the
+    /// cascade scheduler whenever cascade 0 has been re-placed or re-voxelised:
+    /// moves the field's volume onto cascade 0's voxel box (ogre-patch 0044's
+    /// `setFieldVolume`), re-binds it if that cascade's lighting re-created its
+    /// light voxel textures, and re-integrates — whole when the volume MOVED
+    /// (the atlases describe another place and there is no per-probe validity),
+    /// progressively over the converged atlas when only the voxels changed.
+    /// A no-op in the single-volume arm, with no field, or with the toggle off.
+    void          followCascade0Field(GiStaleReason reason);
     static Ogre::uint32 ifdRasterProbesPerFrame(int updateBudget, Ogre::uint32 totalProbes);
     /// The movement quantum for one item's world AABB (a 64th of its own
     /// largest extent), and "did this AABB move by at least that much?". Shared
@@ -3934,6 +3956,21 @@ private:
     /// nothing catches it (spike §4) — so it is a floor the engine enforces,
     /// not a number it reports.
     Ogre::uint32                      mIfdMinProbes       = 0;
+    /// THE VOLUME THE FIELD IS PLACED OVER, as asked for (the field enlarges it
+    /// by one probe block per side for itself). Recorded so the scheduler can
+    /// tell a cascade-0 re-placement from a plain re-voxelisation at the same
+    /// place — the first invalidates every probe in the atlas, the second does
+    /// not — and so giStatus can report where the field actually is.
+    Ogre::Vector3                     mIfdVolumeOrigin = Ogre::Vector3::ZERO;
+    Ogre::Vector3                     mIfdVolumeSize   = Ogre::Vector3::ZERO;
+    /// The field's probe counts, kept because the raster escape scale in
+    /// pushIfdState is derived from them and the volume can move without a
+    /// rebuild (E1).
+    Ogre::uint32                      mIfdProbeCounts[3] = { 0u, 0u, 0u };
+    /// How many times the field has been re-placed onto cascade 0 since the
+    /// last build (GiStatus::ifdFollows) — the counter the follow suite reads,
+    /// and the honest answer to "is the field tracking the chain at all".
+    unsigned long long                mIfdFollows = 0;
     bool mRefractionsActive = false;   // see setRefractionsActive
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
