@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include <QString>
+#include <QStringList>
 #include <QColor>
 
 #include "irisglfwd.h"
@@ -171,8 +172,25 @@ public:
     /// cache holds WEAK references: it never keeps a mesh alive, and a file
     /// whose last node is gone is parsed again next time.
     static MeshPtr loadMesh(QString filePath);
-    /// Forgets every cached parse. For tests and for a tool that has just
-    /// rewritten a model file on disk; nothing in the editor needs it.
+    /// PINS these paths: once parsed, a pinned model is held for the life of
+    /// the process instead of being let go with its last node.
+    ///
+    /// The weak cache above is right for CONTENT — a hundred imported models
+    /// must not be kept alive by a cache — and wrong for the handful of models
+    /// that are compiled into the binary and reappear in every world the user
+    /// opens. Those were re-parsed on the UI thread on every open, after every
+    /// close dropped them: measured 1-4 parses and 17-95 ms per open of a
+    /// shipped sample (OPEN-ASSIMP-1). The shell pins exactly the built-in
+    /// primitives; nothing else in the tree calls this, and an unpinned path
+    /// keeps the weak behaviour untouched.
+    ///
+    /// Registering a path does NOT parse it: the first real load does, and the
+    /// strong reference is taken then. Safe from any thread, idempotent.
+    static void pinLoadPaths(const QStringList &paths);
+    /// Forgets every cached parse, pinned models included. For tests and for a
+    /// tool that has just rewritten a model file on disk; nothing in the
+    /// editor needs it. The pin REGISTRATIONS survive — they are a statement
+    /// about which paths are shipped, not a cache.
     static void clearLoadCache();
     /// How many parses the cache is currently able to answer from.
     static int loadCacheSize();

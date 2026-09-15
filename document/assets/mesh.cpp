@@ -41,6 +41,7 @@ For more information see the LICENSE file
 #include <functional>
 #include <QHash>
 #include <QMutex>
+#include <QSet>
 #include <QWeakPointer>
 
 namespace iris
@@ -286,6 +287,21 @@ QHash<QString, QWeakPointer<Mesh>> &meshCache()
     return c;
 }
 
+/// The paths whose parse is HELD for the life of the process (Mesh::
+/// pinLoadPaths), and the strong references that hold them. Guarded by
+/// meshCacheMutex like the cache itself.
+QSet<QString> &pinnedPaths()
+{
+    static QSet<QString> p;
+    return p;
+}
+
+QHash<QString, MeshPtr> &pinnedMeshes()
+{
+    static QHash<QString, MeshPtr> m;
+    return m;
+}
+
 MeshPtr cachedMesh(const QString &filePath)
 {
     QMutexLocker lock(&meshCacheMutex());
@@ -313,6 +329,10 @@ MeshPtr publishMesh(const QString &filePath, const MeshPtr &parsed)
         else ++e;
     }
     cache.insert(filePath, parsed.toWeakRef());
+    // A PINNED path keeps its parse (Mesh::pinLoadPaths says why): the strong
+    // reference is taken here, on the first real load, and released only by
+    // clearLoadCache or by the process ending.
+    if (pinnedPaths().contains(filePath)) pinnedMeshes().insert(filePath, parsed);
     return parsed;
 }
 
@@ -365,10 +385,17 @@ MeshPtr Mesh::loadMesh(QString filePath)
 	return publishMesh(filePath, MeshPtr(meshObj));
 }
 
+void Mesh::pinLoadPaths(const QStringList &paths)
+{
+    QMutexLocker lock(&meshCacheMutex());
+    for (const QString &path : paths) pinnedPaths().insert(path);
+}
+
 void Mesh::clearLoadCache()
 {
     QMutexLocker lock(&meshCacheMutex());
     meshCache().clear();
+    pinnedMeshes().clear();
 }
 
 int Mesh::loadCacheSize()

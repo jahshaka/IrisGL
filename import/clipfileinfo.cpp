@@ -20,6 +20,7 @@ For more information see the LICENSE file
 #include "assimp/scene.h"
 
 #include "import/importflags.h"
+#include "import/parsecensus.h"
 
 namespace iris
 {
@@ -104,8 +105,10 @@ ClipFileInfo ClipFileInfo::read(const QString &filePath, const QVector<double> &
 {
     ClipFileInfo out;
     Assimp::Importer importer;
-    const aiScene *scene =
-        importer.ReadFile(filePath.toStdString().c_str(), ImportFlags::ClipNamesOnly);
+    const aiScene *scene = [&]() {
+        ParseCensus::Record census(filePath);
+        return importer.ReadFile(filePath.toStdString().c_str(), ImportFlags::ClipNamesOnly);
+    }();
     if (!scene) {
         out.error = QString::fromUtf8(importer.GetErrorString());
         if (out.error.isEmpty()) out.error = QStringLiteral("the file could not be read");

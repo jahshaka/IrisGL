@@ -10,6 +10,7 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "import/meshprewarm.h"
+#include "import/parsecensus.h"
 
 #include <QFileInfo>
 #include <QMutexLocker>
@@ -43,6 +44,7 @@ void MeshPrewarm::parse(const PrewarmItem &item)
     // fingerprint) returns an invalid model and falls through.
     if (!item.bakePath.isEmpty()) {
         MeshBake::Model model = MeshBake::read(item.bakePath, item.bakeFingerprint);
+        ParseCensus::recordBake(model.valid);   // app.openStats(): why a parse follows
         if (model.valid) {
             QMutexLocker locked(&mLock);
             mBaked.insert(path, std::make_shared<const MeshBake::Model>(std::move(model)));
@@ -50,6 +52,9 @@ void MeshPrewarm::parse(const PrewarmItem &item)
             return;
         }
     }
+
+    if (item.bakePath.isEmpty())
+        ParseCensus::recordBake(false);   // no bake exists for this content yet
 
     if (!QFileInfo::exists(path)) {
         QMutexLocker locked(&mLock);

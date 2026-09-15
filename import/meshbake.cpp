@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "import/meshbake.h"
+#include "import/parsecensus.h"
 
 #include <QCryptographicHash>
 #include <QDataStream>
@@ -669,8 +670,10 @@ MeshBake::Model MeshBake::buildFromFile(const QString &filePath, const QString &
                                         const QString &extractDir)
 {
     Assimp::Importer importer;
-    const aiScene *scene =
-        importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    const aiScene *scene = [&]() {
+        ParseCensus::Record census(filePath);
+        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    }();
     if (!scene) {
         irisLog("mesh bake: assimp could not read " + filePath);
         return Model();

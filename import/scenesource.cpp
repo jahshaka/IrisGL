@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include "assimp/scene.h"
 
 #include "import/importflags.h"
+#include "import/parsecensus.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -25,6 +26,10 @@ namespace iris
 const aiScene *readSceneFile(Assimp::Importer &importer, const QString &filePath,
                              unsigned int flags)
 {
+    // Counted and attributed to the thread that pays for it
+    // (import/parsecensus.h) — including the resource read below, which is a
+    // parse like any other.
+    ParseCensus::Record census(filePath);
     QString resource;
     if (filePath.startsWith(QLatin1String("qrc:"))) resource = filePath.mid(3);   // "qrc:/x" -> ":/x"
     else if (filePath.startsWith(QLatin1Char(':'))) resource = filePath;
