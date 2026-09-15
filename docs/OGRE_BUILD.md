@@ -805,7 +805,35 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     PROTECTED — a derived-class reach-in that lives only as long as the pin's
     layout. A patch beats a workaround (owner, 2026-09-15).
 
-THE STACK IS 0001-0040 (this list; `build-ogre.sh` globs `*.patch`, so the file
+41. **0041-descriptor-cache-buffer-creation-serial** (SOURCE) — a descriptor-set
+    cache keyed on a raw pointer must not outlive the pointee.
+    `HlmsManager::getDescriptorSetTexture2`/`getDescriptorSetUav` cache whole
+    descriptor sets keyed on `BufferSlot`, whose identity is the raw
+    `BufferPacked *` + offset + size, and NOTHING tells that cache when a buffer
+    dies. An entry outlives its buffer for as long as any job still references it,
+    so a new buffer handed the ADDRESS of a destroyed one gets the DEAD buffer's
+    API view — wrong suballocation offset, wrong pixel format. MEASURED: VCT's
+    `VCT/AabbCalculator` read IrradianceField's destroyed integration-taps buffer
+    (`PFG_RG32_FLOAT`) as its `PFG_RGBA32_UINT` mesh table — Vulkan core
+    validation `VUID-vkCmdDispatch-format-07753` names it — so every mesh AABB
+    came back as the sentinel and the voxelization wrote ZERO voxels: a scene with
+    no bounce light at all whenever a GI re-solve landed one frame after a cold
+    inline shader compile (ledger §373, PHOTON_SPEC §7 E1 item 0). The fix is a
+    process-wide monotonic creation serial on `BufferPacked` that the two
+    `BufferSlot`s carry and compare, STAMPED by
+    `HlmsComputeJob::setTexBuffer`/`_setUavBuffer` while the buffer is alive (never
+    read through the pointer inside the comparison — that would be the very
+    use-after-free it prevents). Two more hunks of the same bug class ride with it:
+    `VulkanRenderSystem::_descriptorSetSamplerDestroyed` stored the dying object's
+    own address instead of clearing the table slot (the compute twin eight lines
+    below has always been right), and `HlmsComputeJob::analyzeBarriers` registered
+    no transition at all for a plain `TexBufferPacked` read by a compute job.
+    Verified: `--engine-selftest` hash UNCHANGED (`b55e2d5d…`), `gi.*` + `engine.*`
+    35/35, `test_engine` + every ASan twin 12/12, and `threading.gi_resolve*` —
+    the guard this patch exists for — green 3/3 cold on both compile branches.
+    Guarded by `threading.gi_resolve` / `.gi_resolve_serial` / `.gi_resolve_pixels`.
+
+THE STACK IS 0001-0041 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
@@ -813,7 +841,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039 and 0040 are SOURCE-only, and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040 and 0041 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

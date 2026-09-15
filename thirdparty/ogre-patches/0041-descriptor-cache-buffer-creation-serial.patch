@@ -1,0 +1,349 @@
+Jahshaka patch 0041 — a descriptor-set cache keyed on a raw pointer must not
+outlive the pointee: the buffer creation serial, plus a dangling-pointer twin.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after pulling
+this (reset the ogre-next submodule first if it already carries an earlier
+revision of any patch: `git -C irisgl/thirdparty/ogre-next checkout -- . &&
+git -C irisgl/thirdparty/ogre-next clean -fd`).
+
+THE DEFECT, AS THE USER MET IT (Jahshaka ledger §373, PHOTON_SPEC §7 E1 item 0).
+On a cold shader cache, a global-illumination re-solve issued ONE rendered frame
+after Ogre's inline (serial) shader compile baked a picture with no voxel bounce
+in it at all — a material edit or a light drag in the first second of a scene,
+and the scene stayed wrongly lit until something else re-solved. Reproduced 3/3
+on an RTX 4080S: the same scene, same content, same everything, centre pixel
+(54,36,1) with the parallel compile queue and (46,32,1) with the serial one; the
+VctVoxelizer's albedo volume held 14,036 occupied voxels in the first and ZERO in
+the second. The irradiance field, where the search started, was a victim: it cone
+traces those voxels, so an empty volume bakes an empty field.
+
+THE CAUSE, named by the driver. Under Vulkan core validation the failing half —
+and only the failing half — raises
+
+  VUID-vkCmdDispatch-format-07753: the uniform texel buffer descriptor
+  [Set 1, Binding 0, variable "inMeshBuffer"] requires UINT component type, but
+  bound descriptor format is VK_FORMAT_R32G32_SFLOAT.
+
+`inMeshBuffer` is VCT/AabbCalculator's mesh table, a PFG_RGBA32_UINT TexBuffer
+(VctVoxelizer::prepareAabbCalculatorMeshData). VK_FORMAT_R32G32_SFLOAT is
+IrradianceField's integration-taps buffer (PFG_RG32_FLOAT,
+IrradianceField::setupIntegrationTaps). The AABB job was reading the irradiance
+field's weights as mesh records, so every mesh reported zero indices, the
+parallel reduction never ran, every mesh AABB came back as the ±FLT_MAX sentinel
+the shader initialises with, every instance AABB was degenerate and the
+voxelization wrote nothing.
+
+HOW THE TWO MET. Traced through HlmsManager, HlmsComputeJob, VulkanRootLayout and
+VulkanDescriptorSetTexture2, in the failing run:
+
+  create  partsub=0x5a10115dd6f0 vbo=14966944          <- new mesh table
+  cacheT2 HIT set=... rsData=... slot0buf=0x5a10115dd6f0 refs=2
+  rlBind  set=1 ... {b0 t4 n1 view=0x5a100fd3d020}     <- the WRONG view
+
+and ~100 log lines earlier:
+
+  vkSetCtor this=... view=0x5a100fd3d020 buf=0x5a10115dd6f0 fmt=13 vbo=11141552
+
+fmt 13 is PFG_RG32_FLOAT. The irradiance field's taps buffer had lived at
+0x5a10115dd6f0, was destroyed when the field was rebuilt, and the allocator handed
+that address to the voxelizer's new mesh table. `HlmsManager::getDescriptorSetTexture2`
+keys its cache on `DescriptorSetTexture2::BufferSlot`, whose identity is the raw
+`BufferPacked *` plus offset and size — so the lookup HIT the dead buffer's entry
+(still referenced by the field's own compute jobs, refs=1 before the hit) and
+handed the AABB job the dead buffer's VkBufferView: wrong suballocation offset,
+wrong format. The parallel half MISSED the same cache only because its allocation
+history put the new buffer somewhere else. That is the whole dependence on the
+shader-compile branch, and the whole reason it needs a cold cache.
+
+NOT the site, ruled out by the same trace and reported here so nobody re-walks it:
+HlmsComputeJob::setTexBuffer's "same pointer, same offset, same size = unchanged"
+short circuit took the CHANGED branch (the cache lookup only happens because it
+did), and VulkanRootLayout::bind reported firstDirtySet 0 and wrote the texel
+buffer binding on every dispatch — it bound faithfully the view it was given.
+
+THE FIX, AT THE CLASS. A pointer is not an identity for anything that outlives the
+pointee, and the engine has no buffer-destroyed notification to hang invalidation
+on. So BufferPacked gains a process-wide, monotonic, never-reused creation serial,
+and the two descriptor BufferSlots carry it and compare it. A buffer created at a
+dead one's address now compares DIFFERENT: the cache misses, a correct descriptor
+set is built, and the slot comparison in HlmsComputeJob sees the change too. The
+serial is a STORED field stamped by whoever fills the slot while the buffer is
+alive, never read through the pointer inside the comparison — the comparison runs
+against slots that may already name a destroyed buffer, and dereferencing one
+would be the very use-after-free this prevents.
+
+Call sites that assign `BufferSlot::buffer` directly leave the serial at 0 and keep
+the pre-patch behaviour exactly: nothing regresses, they are simply not protected.
+The two that matter — HlmsComputeJob::setTexBuffer and ::_setUavBuffer, which every
+compute job and every compositor compute pass goes through — stamp it.
+
+AND TWO MORE OF THE SAME BUG CLASS, found on the way and fixed here:
+
+  * VulkanRenderSystem::_descriptorSetSamplerDestroyed wrote the address of the
+    object it was about to delete back into mGlobalTable.bakedDescriptorSets
+    [Samplers] instead of clearing it — a dangling pointer that _setSamplers then
+    matches against a recycled allocation and skips the rebind. The compute twin
+    eight lines below has always cleared it correctly; this is a copy-paste slip.
+
+  * HlmsComputeJob::analyzeBarriers resolved no transition at all for a PLAIN
+    TexBufferPacked read by a compute job: the existing branch only fires for a
+    read-only VIEW of a UAV buffer. The solver therefore had no record of such a
+    buffer and could not order a later write against the read. Registering it emits
+    no barrier by itself (BarrierSolver::resolveTransition produces nothing for a
+    first-seen resource) — it only lets the solver see a hazard if one appears.
+
+WHAT IT IS NOT. It is not an invalidate-on-destroy notification from VaoManager to
+HlmsManager. That was considered and rejected: erasing a cached descriptor set
+whose buffer has died would dangle the pointers of every job still holding it
+(the field's integration jobs hold exactly such references), and with the serial in
+place the invalidation is not needed for correctness — a dead entry can never be
+matched again. The absence of that notification remains an upstream issue: those
+entries leak until their holders release them, which is what they did before.
+
+VERIFIED. `git apply --check` and `--reverse --check` against the pristine pin with
+0001-0040 applied. Repro, both compile branches, cold cache, virgin homes, 3/3:
+both halves now (54,36,1), PNGs byte-identical. Under core validation
+VUID-vkCmdDispatch-format-07753 is gone from both halves and the two pre-existing
+VUIDs are unchanged in count. `--engine-selftest` sha256 unchanged.
+
+--- a/OgreMain/include/Vao/OgreBufferPacked.h
++++ b/OgreMain/include/Vao/OgreBufferPacked.h
+@@ -31,6 +31,8 @@
+ 
+ #include "OgreResourceTransition.h"
+ 
++#include <atomic>
++
+ namespace Ogre
+ {
+     enum BufferType
+@@ -200,6 +202,22 @@
+         uint32 mBytesPerElement;
+         uint32 mNumElementsPadding;
+ 
++        /** JAHSHAKA PATCH 0041 — the per-INSTANCE identity a raw pointer cannot give.
++        @remarks
++            Descriptor-set slots (DescriptorSetTexture2::BufferSlot, DescriptorSetUav::BufferSlot)
++            identify a buffer by its ADDRESS, and HlmsManager caches whole descriptor sets keyed
++            on those slots. Nothing tells that cache when a buffer dies, so an allocator that hands
++            a freshly created buffer the address a destroyed one had makes the cache return the DEAD
++            buffer's descriptor set — with the dead buffer's API view, its old suballocation offset
++            and its old pixel format. This counter is assigned once per constructed BufferPacked and
++            never reused, so a slot that carries it can tell two buffers apart even when they share
++            an address.
++        */
++        uint32 mCreationSerial;
++
++        /// JAHSHAKA PATCH 0041. Process-wide, monotonic, never reused.
++        static std::atomic<uint32> msNextCreationSerial;
++
+         BufferType  mBufferType;
+         VaoManager *mVaoManager;
+ 
+@@ -365,6 +383,10 @@
+         uint32 getBytesPerElement() const { return mBytesPerElement; }
+         size_t getTotalSizeBytes() const { return mNumElements * mBytesPerElement; }
+ 
++        /// JAHSHAKA PATCH 0041. Unique for the lifetime of the process; never 0 for a real
++        /// buffer, so 0 is usable as "no buffer" in a descriptor slot.
++        uint32 getCreationSerial() const { return mCreationSerial; }
++
+         size_t _getInternalBufferStart() const { return mInternalBufferStart; }
+         size_t _getFinalBufferStart() const { return mFinalBufferStart; }
+         size_t _getInternalTotalSizeBytes() const
+--- a/OgreMain/src/Vao/OgreBufferPacked.cpp
++++ b/OgreMain/src/Vao/OgreBufferPacked.cpp
+@@ -38,6 +38,9 @@
+ 
+ namespace Ogre
+ {
++    // JAHSHAKA PATCH 0041. Starts at 1 so that 0 means "no buffer" in a descriptor slot.
++    std::atomic<uint32> BufferPacked::msNextCreationSerial( 1u );
++
+     BufferPacked::BufferPacked( size_t internalBufferStartBytes, size_t numElements,
+                                 uint32 bytesPerElement, uint32 numElementsPadding, BufferType bufferType,
+                                 void *initialData, bool keepAsShadow, VaoManager *vaoManager,
+@@ -47,6 +50,9 @@
+         mNumElements( numElements ),
+         mBytesPerElement( bytesPerElement ),
+         mNumElementsPadding( numElementsPadding ),
++        // JAHSHAKA PATCH 0041: a monotonic per-instance identity. Relaxed ordering is enough --
++        // all we need is uniqueness, never a happens-before relationship.
++        mCreationSerial( msNextCreationSerial.fetch_add( 1u, std::memory_order_relaxed ) ),
+         mBufferType( bufferType ),
+         mVaoManager( vaoManager ),
+         mMappingState( MS_UNMAPPED ),
+--- a/OgreMain/include/OgreDescriptorSetTexture.h
++++ b/OgreMain/include/OgreDescriptorSetTexture.h
+@@ -151,10 +151,30 @@
+             /// binds from offset until the end of the buffer.
+             size_t sizeBytes;
+ 
++            /** JAHSHAKA PATCH 0041 — `buffer` alone is not an identity.
++            @remarks
++                HlmsManager caches whole descriptor sets keyed on these slots and nothing
++                invalidates an entry when a buffer is destroyed, so a new buffer handed the
++                ADDRESS of a dead one makes the cache return the dead one's set (its API view,
++                its old suballocation offset, its old pixel format). Carrying the buffer's
++                per-instance creation serial makes two buffers that share an address compare
++                DIFFERENT, so the cache misses and a correct set is built.
++
++                It is a plain field rather than a call to buffer->getCreationSerial() inside the
++                comparison ON PURPOSE: the comparison runs against slots that may already name a
++                destroyed buffer, and dereferencing one would be the very use-after-free this is
++                here to prevent. Whoever fills the slot stamps it while the buffer is alive
++                (HlmsComputeJob::setTexBuffer / _setUavBuffer do). 0 = unstamped, which is what
++                makeEmpty() leaves and what call sites that assign `buffer` directly get: those
++                keep the pre-patch behaviour exactly, they are simply not protected.
++            */
++            uint32 creationSerial;
++
+             bool operator!=( const BufferSlot &other ) const
+             {
+                 return this->buffer != other.buffer || this->offset != other.offset ||
+-                       this->sizeBytes != other.sizeBytes;
++                       this->sizeBytes != other.sizeBytes ||
++                       this->creationSerial != other.creationSerial;
+             }
+ 
+             bool operator<( const BufferSlot &other ) const
+@@ -165,6 +185,8 @@
+                     return this->offset < other.offset;
+                 if( this->sizeBytes != other.sizeBytes )
+                     return this->sizeBytes < other.sizeBytes;
++                if( this->creationSerial != other.creationSerial )
++                    return this->creationSerial < other.creationSerial;
+ 
+                 return false;
+             }
+--- a/OgreMain/include/OgreDescriptorSetUav.h
++++ b/OgreMain/include/OgreDescriptorSetUav.h
+@@ -74,10 +74,17 @@
+             /// resolve memory barrier dependencies.
+             ResourceAccess::ResourceAccess access;
+ 
++            /// JAHSHAKA PATCH 0041 — the buffer's per-instance creation serial, so a new buffer
++            /// that reuses a dead one's ADDRESS is not mistaken for it by the descriptor-set
++            /// cache. See DescriptorSetTexture2::BufferSlot::creationSerial for the whole story.
++            /// 0 = unstamped (makeEmpty, and every call site that assigns `buffer` directly).
++            uint32 creationSerial;
++
+             bool operator!=( const BufferSlot &other ) const
+             {
+                 return this->buffer != other.buffer || this->offset != other.offset ||
+-                       this->sizeBytes != other.sizeBytes || this->access != other.access;
++                       this->sizeBytes != other.sizeBytes || this->access != other.access ||
++                       this->creationSerial != other.creationSerial;
+             }
+ 
+             bool operator<( const BufferSlot &other ) const
+@@ -90,6 +97,8 @@
+                     return this->sizeBytes < other.sizeBytes;
+                 if( this->access != other.access )
+                     return this->access < other.access;
++                if( this->creationSerial != other.creationSerial )
++                    return this->creationSerial < other.creationSerial;
+ 
+                 return false;
+             }
+--- a/OgreMain/src/OgreHlmsComputeJob.cpp
++++ b/OgreMain/src/OgreHlmsComputeJob.cpp
+@@ -1060,8 +1060,19 @@
+     {
+         OGRE_ASSERT_LOW( slotIdx < mTexSlots.size() );
+ 
++        // JAHSHAKA PATCH 0041. Stamp the buffer's per-instance identity HERE, where the buffer is
++        // known to be alive, so neither the comparison below nor the HlmsManager cache lookup that
++        // follows has to dereference a pointer that may already be dangling. Without it a buffer
++        // created at the address of a destroyed one compares EQUAL to the dead one's slot, the
++        // comparison says "unchanged" and/or getDescriptorSetTexture2() returns the dead buffer's
++        // cached set -- which still holds the dead buffer's API view, at its old suballocation
++        // offset and in its old pixel format.
++        DescriptorSetTexture2::BufferSlot stampedSlot = newSlot;
++        stampedSlot.creationSerial = newSlot.buffer ? newSlot.buffer->getCreationSerial() : 0u;
++
+         DescriptorSetTexture2::Slot &slot = mTexSlots[slotIdx];
+-        if( slot.slotType != DescriptorSetTexture2::SlotTypeBuffer || slot.getBuffer() != newSlot )
++        if( slot.slotType != DescriptorSetTexture2::SlotTypeBuffer ||
++            slot.getBuffer() != stampedSlot )
+         {
+             if( mInformHlmsOfTextureData && slot.slotType == DescriptorSetTexture2::SlotTypeTexture &&
+                 slot.getTexture().texture )
+@@ -1071,7 +1082,7 @@
+ 
+             slot.slotType = DescriptorSetTexture2::SlotTypeBuffer;
+             DescriptorSetTexture2::BufferSlot &bufferSlot = slot.getBuffer();
+-            bufferSlot = newSlot;
++            bufferSlot = stampedSlot;  // JAHSHAKA PATCH 0041
+             destroyDescriptorTextures();  // Descriptor is dirty
+ 
+             // Remove sampler
+@@ -1173,8 +1184,12 @@
+     {
+         assert( slotIdx < mUavSlots.size() );
+ 
++        // JAHSHAKA PATCH 0041 -- see setTexBuffer above.
++        DescriptorSetUav::BufferSlot stampedSlot = newSlot;
++        stampedSlot.creationSerial = newSlot.buffer ? newSlot.buffer->getCreationSerial() : 0u;
++
+         DescriptorSetUav::Slot &slot = mUavSlots[slotIdx];
+-        if( slot.slotType != DescriptorSetUav::SlotTypeBuffer || slot.getBuffer() != newSlot )
++        if( slot.slotType != DescriptorSetUav::SlotTypeBuffer || slot.getBuffer() != stampedSlot )
+         {
+             if( mInformHlmsOfTextureData && slot.slotType == DescriptorSetUav::SlotTypeTexture &&
+                 slot.getTexture().texture )
+@@ -1185,7 +1200,7 @@
+             slot.slotType = DescriptorSetUav::SlotTypeBuffer;
+             DescriptorSetUav::BufferSlot &bufferSlot = slot.getBuffer();
+ 
+-            bufferSlot = newSlot;
++            bufferSlot = stampedSlot;  // JAHSHAKA PATCH 0041
+             destroyDescriptorUavs();  // Descriptor is dirty
+         }
+     }
+@@ -1312,14 +1327,27 @@
+                 else
+                 {
+                     const DescriptorSetTexture2::BufferSlot &bufferSlot = itor->getBuffer();
+-                    BufferPacked *origBuffer = bufferSlot.buffer->getOriginalBufferType();
+-                    if( origBuffer != bufferSlot.buffer )
++                    BufferPacked *origBuffer =
++                        bufferSlot.buffer ? bufferSlot.buffer->getOriginalBufferType() : 0;
++                    if( origBuffer && origBuffer != bufferSlot.buffer )
+                     {
+                         OGRE_ASSERT_HIGH( dynamic_cast<UavBufferPacked *>( origBuffer ) );
+                         UavBufferPacked *uavBuffer = static_cast<UavBufferPacked *>( origBuffer );
+                         solver.resolveTransition( resourceTransitions, uavBuffer, ResourceAccess::Read,
+                                                   1u << GPT_COMPUTE_PROGRAM );
+                     }
++                    else if( origBuffer )
++                    {
++                        // JAHSHAKA PATCH 0041. A PLAIN TexBufferPacked read by a compute job got no
++                        // transition resolved at all: the branch above only fires for a read-only
++                        // VIEW of a UAV buffer. The solver then has no record of the buffer, so a
++                        // later write to it cannot be ordered against this read. Registering it
++                        // emits nothing on its own (a first-seen buffer produces no barrier,
++                        // BarrierSolver::resolveTransition) -- it only makes the solver able to see
++                        // the hazard if one ever appears.
++                        solver.resolveTransition( resourceTransitions, origBuffer,
++                                                  ResourceAccess::Read, 1u << GPT_COMPUTE_PROGRAM );
++                    }
+                 }
+                 ++itor;
+             }
+--- a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
+@@ -4154,7 +4154,12 @@
+         if( mGlobalTable.bakedDescriptorSets[BakedDescriptorSets::Samplers] ==
+             &vulkanSet->mWriteDescSet )
+         {
+-            mGlobalTable.bakedDescriptorSets[BakedDescriptorSets::Samplers] = &vulkanSet->mWriteDescSet;
++            // JAHSHAKA PATCH 0041. Was `= &vulkanSet->mWriteDescSet`, i.e. the address of the
++            // object being destroyed on the very next line -- a dangling pointer that the
++            // comparison in _setSamplers then matches against a recycled allocation, skipping the
++            // rebind. The compute twin eight lines below has always cleared it correctly; this is
++            // the same bug class as the descriptor-cache ABA this patch's other hunks fix.
++            mGlobalTable.bakedDescriptorSets[BakedDescriptorSets::Samplers] = 0;
+             mGlobalTable.dirtyBakedSamplers = true;
+             mTableDirty = true;
+         }
