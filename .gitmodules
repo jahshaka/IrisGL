@@ -10,3 +10,6 @@
 [submodule "thirdparty/ogre-next"]
 	path = thirdparty/ogre-next
 	url = https://github.com/OGRECave/ogre-next.git
+[submodule "thirdparty/meshoptimizer"]
+	path = thirdparty/meshoptimizer
+	url = https://github.com/zeux/meshoptimizer.git
