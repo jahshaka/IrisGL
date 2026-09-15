@@ -2351,6 +2351,21 @@ struct RayQueryStatus {
     unsigned long long tlasBuilds = 0;
     unsigned long long tlasRefits = 0;
     unsigned long long blasBuilds = 0;
+    /// RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5). True when this scene's
+    /// drawn views are tracing reflections — which needs `enabled`, a view
+    /// whose SSR row is on (High and Epic; the SSR contract, not a second
+    /// setting) and a chain that carries the SSR textures. With it false the
+    /// reflections are the screen-space march alone, which is the picture this
+    /// renderer drew before R5 existed.
+    bool reflect = false;
+    /// How many rays the last frame traced for reflections — one per pixel of
+    /// the trace's own resolution (full at Epic, one in four at High), before
+    /// the shader's own gates (the sky, the roughness band, a pixel the march
+    /// already answered) decline most of them.
+    int  reflectRays = 0;
+    /// GPU milliseconds of that dispatch, read back from a timestamp pair
+    /// several frames later and never with a wait. -1 until measured.
+    float reflectMs = -1.0f;
 };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at
