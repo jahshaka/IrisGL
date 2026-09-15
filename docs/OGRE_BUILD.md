@@ -1184,7 +1184,33 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the composite's scale is a variable instead of a post-multiply (it keeps the
     arithmetic and its order identical to the copy's).
 
-THE STACK IS 0001-0058 (this list; `build-ogre.sh` globs `*.patch`, so the file
+60. **0060-bounce-bindings-per-dispatch** (SOURCE —
+    `Components/Hlms/Pbs/{include,src}/Vct/OgreVctLighting.{h,cpp}`; **every tree
+    re-runs `build-ogre.sh`**; it overlaps 0037/0050/0057 in the .cpp and 0050 in
+    the header, different functions, so a per-patch reverse-check reports it
+    "unapplied" for those files on a tree that carries them — judge by content)
+    — `runBounce()` re-asserts the injection job's texture bindings before it
+    dispatches. The pin writes the EXTRA CASCADES' light-voxel slots ONCE, in
+    `setupBounceTextures()`, and every cascade swaps its own `mLightVoxel[0]` at
+    the end of every bounce iteration it runs; after an ODD number of them the
+    job reads the texture that cascade has just stopped writing, so the
+    cross-cascade term integrates the PREVIOUS injection's radiance — silently,
+    at the same cost, with no validation error. Even counts come back to where
+    they started (a swap is an involution), which is why upstream never meets it:
+    its own cascade manager gives every cascade the same count. Ours does not —
+    upstream's own per-cascade stabilisation resolves to 1/3/7 on a four-cascade
+    chain at three total bounces, which is Photon's Epic tier (PHOTON_SPEC §7
+    E2). The same hunk closes patch 0057's recorded residual and the shared-job
+    class of 0037's defect 2: the job is found BY NAME, so its bindings belonged
+    to whichever `VctLighting` called setup last, and now they belong to the one
+    dispatching. `setupBounceTextures` gained a `bSetSamplerRefs` parameter
+    (default true — every existing caller is unchanged) so the per-dispatch call
+    skips the OpenGL-only samplerblock reference counting, which would otherwise
+    leak a reference per bounce; everything else it does is change-guarded.
+    Suite: `gi.cascade_bounce_bindings` — the same light reached by two
+    different histories must render the same picture.
+
+THE STACK IS 0001-0060 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
@@ -1192,7 +1218,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049 and 0050-0057 are SOURCE-only, and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059 and 0060 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

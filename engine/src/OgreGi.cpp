@@ -1397,7 +1397,7 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
 }
 
 bool OgreScene::giBoundsExplicit() const {
-    const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
+    const Vec3 &a = mGi.testBoundsMin, &b = mGi.testBoundsMax;
     return a.x != b.x || a.y != b.y || a.z != b.z;
 }
 
@@ -1469,7 +1469,25 @@ bool OgreScene::giContentCentre(float maxEdge, Ogre::Vector3 &centre) const {
 }
 
 void OgreScene::clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
-    const float maxEdge = mGi.autoBoundsMax;
+    // THE 64 m CEILING IS THE ENGINE'S, NOT A PUSHED FIELD (PHOTON_SPEC §10's
+    // E2 row): nothing a user can reach has ever varied it — the document
+    // carries no bounds, `world.gi` refuses the key by name, and the mirror
+    // never writes it — so it is a constant here and `testAutoBoundsMax` is a
+    // suite's lever over it (negative = this value).
+    //
+    // WHY 64 METRES AND NOT METRES-PER-VOXEL, which is the quantity that really
+    // decides whether GI means anything (LIGHTING_PIPELINE_AUDIT L4.4) and would
+    // be tier-independent: a per-voxel ceiling SHRINKS the lit world as the
+    // quality dial goes down (0.5 m/voxel is 64 m at High but 16 m at Low), and
+    // that breaks standing contracts — measured, it took gi.cliff's "a scene
+    // that is only a ground plane" and gi.pcc_bounds' "a scene that IS one big
+    // mesh keeps the whole mesh" red at Low, the "scenes go dark when a dial
+    // moves" class the LIGHTING_FIX lane exists to prevent. A fixed 64 m holds
+    // at every tier and still kills the 8 m voxel a 1 km ground plane used to
+    // produce: High 0.5, Medium 1.0, Low 2.0 m per voxel.
+    static const float kAutoGiBoundsMax = 64.0f;
+    const float maxEdge = mGi.testAutoBoundsMax < 0.0f ? kAutoGiBoundsMax
+                                                       : mGi.testAutoBoundsMax;
     if (!(maxEdge > 0.0f)) return;
     const Ogre::Vector3 size = mx - mn;
     if (size.x <= maxEdge && size.y <= maxEdge && size.z <= maxEdge) return;
@@ -1490,7 +1508,7 @@ void OgreScene::clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
 }
 
 bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
-    const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
+    const Vec3 &a = mGi.testBoundsMin, &b = mGi.testBoundsMax;
     if (giBoundsExplicit()) {
         mn = Ogre::Vector3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
         mx = Ogre::Vector3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));

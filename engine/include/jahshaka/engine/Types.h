@@ -1598,39 +1598,30 @@ enum class GiStaleReason { None, Rebuild, Refresh, Moved, Light, Material, Sky, 
 struct GiParams {
     GiMode    mode    = GiMode::Off;
     GiQuality quality = GiQuality::Medium;
-    /// World-space bounds GI operates in (VCT voxel volume; IR area of interest
-    /// for directional lights). min == max means "auto": the backend derives it
-    /// from the scene's lit geometry plus a margin.
-    Vec3      boundsMin, boundsMax;
-    /// THE CEILING ON AN AUTOMATIC FIT, in METRES (SMOKE_FIX S14).
+    /// THE LIT VOLUME IS THE RENDERER'S, AND THESE THREE ARE TEST LEVERS
+    /// (owner decision D8, 2026-09-13; PHOTON_SPEC §10's E2 row).
     ///
-    /// The automatic volume's largest axis may not exceed this, and what
-    /// survives is centred on the scene's CONTENT. 64 m at the default tier
-    /// (Epic, 128^3) is half a metre per voxel.
+    /// Nothing a user can reach writes them: the document carries no bounds at
+    /// all, `world.gi` refuses `boundsMin`/`boundsMax`/`autoBoundsMax` BY NAME,
+    /// the World panel's rows and its Fit Bounds button are deleted, and
+    /// SceneMirror never touches them. They survive for one reason — roughly
+    /// fifteen engine suites PIN a volume so that a pixel assertion is about the
+    /// thing it names and not about where the automatic fit happened to land —
+    /// and they carry `test` in their names so that reading this struct cannot
+    /// suggest otherwise. They stay inside `operator==` on purpose: a test that
+    /// moves the pinned volume must get a rebuild, like any other configuration.
     ///
-    /// It exists because a new project's ground plane WAS 1024 m across (100 m
-    /// since the same fix re-staged it) and one item cannot be trimmed by a
-    /// heuristic that needs a population — the geometric mean of one extent is
-    /// that extent, so `giItemBounds`' ramp is a no-op by construction. Out of
-    /// the box that fitted 8.1 m voxels, an irradiance field two probes tall
-    /// and eighteen reflection probes 346 m apart over a square kilometre.
-    ///
-    /// WHY METRES AND NOT METRES-PER-VOXEL, which is the quantity that actually
-    /// decides whether GI means anything (LIGHTING_PIPELINE_AUDIT L4.4) and
-    /// would be tier-independent: a per-voxel ceiling SHRINKS the lit world as
-    /// the quality dial goes down (0.5 m/voxel is 64 m at High but 16 m at
-    /// Low), and that breaks standing contracts — measured, it took gi.cliff's
-    /// "a scene that is only a ground plane" and gi.pcc_bounds' "a scene that
-    /// IS one big mesh keeps the whole mesh" red at Low, which is the
-    /// "scenes go dark when a dial moves" class the LIGHTING_FIX lane exists to
-    /// prevent. A fixed 64 m holds at every tier and still kills the 8 m voxel:
-    /// High 0.5, Medium 1.0, Low 2.0 m per voxel. `GiStatus::voxelMetres`
-    /// reports the resolved figure so the per-voxel reading is still available.
-    ///
-    /// 0 disables the ceiling. It is ignored entirely once boundsMin/boundsMax
-    /// pin a volume — that, and world.fitGiBounds, is how a scene larger than
-    /// the ceiling asks for more. Full rationale: OgreGi.cpp clampAutoGiBounds.
-    float     autoBoundsMax = 64.0f;
+    /// `testBoundsMin == testBoundsMax` (the default) is "no pin": the backend
+    /// fits the volume to the scene's lit geometry, under `kAutoGiBoundsMax`.
+    Vec3      testBoundsMin, testBoundsMax;
+    /// The ceiling on an AUTOMATIC fit, in metres — a test lever over
+    /// `kAutoGiBoundsMax` (OgreGi.cpp), which is the shipped 64 m and the only
+    /// value anything outside a suite has ever used. Negative (the default) is
+    /// "the engine's own"; 0 disables the ceiling; anything else replaces it.
+    /// The rationale for 64 m — and for why the ceiling is in METRES rather
+    /// than metres-per-voxel, which would shrink the lit world as the quality
+    /// dial goes down — is at the constant.
+    float     testAutoBoundsMax = -1.0f;
     /// Total light bounces, 1..4 (1 = a single indirect bounce).
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
@@ -1906,7 +1897,7 @@ struct GiParams {
     /// for the tuning.
     bool operator==(const GiParams &o) const {
         return mode == o.mode && quality == o.quality &&
-               numBounces == o.numBounces && autoBoundsMax == o.autoBoundsMax &&
+               numBounces == o.numBounces && testAutoBoundsMax == o.testAutoBoundsMax &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
                probeHdr == o.probeHdr && probeShadows == o.probeShadows &&
@@ -1917,7 +1908,7 @@ struct GiParams {
                probeSnapSidesMax == o.probeSnapSidesMax &&
                updateBudget == o.updateBudget &&
                ddgi == o.ddgi && ddgiSource == o.ddgiSource &&
-               boundsMin == o.boundsMin && boundsMax == o.boundsMax &&
+               testBoundsMin == o.testBoundsMin && testBoundsMax == o.testBoundsMax &&
                cascades == o.cascades && cascadeCount == o.cascadeCount &&
                cascadeInstanceCap == o.cascadeInstanceCap &&
                cascadeSetEqual(o);
