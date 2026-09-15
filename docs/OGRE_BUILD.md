@@ -903,8 +903,10 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the LOW bits of the renderable hash, which is the hole the pass field lives
     in (two arbitrary bits before, a constant at any wider pass field), and is
     now composed from the hash's type and renderable FIELDS — what
-    `RqBits::ShaderBits`' comment always claimed. Draw order changes, pixels do
-    not. CRUD: `InputLayoutShift`/`InputLayoutMask` were declared and never
+    `RqBits::ShaderBits`' comment always claimed. Draw order changes; opaque
+    pixels cannot (depth-tested), transparents sort by depth above this term so
+    only ties inside one depth bucket move — measured identical on the selftest,
+    13 sample ports and every deterministic shipped sample. CRUD: `InputLayoutShift`/`InputLayoutMask` were declared and never
     defined; deleted. Adds `Hlms::getPassCacheSize`/`getRenderableCacheSize` +
     capacities, which Jahshaka reports through `app.shaderCache()` and
     `shadercache.app` run 5 now asserts as a NUMBER instead of the absence of a

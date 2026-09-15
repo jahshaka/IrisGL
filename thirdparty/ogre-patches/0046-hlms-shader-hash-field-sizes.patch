@@ -64,7 +64,7 @@ THE SPLIT, and why this one:
 AND THE FIELDS NOW REFUSE INSTEAD OF OVERFLOWING. `assert` is not a guard in a
 release build. There is ONE appender for the pass cache now
 (`Hlms::findOrAddPassCache`) where there were three open-coded copies —
-Hlms::preparePassHashFinal, HlmsUnlit::preparePassHash (which had no warning of
+Hlms::preparePassHashBase, HlmsUnlit::preparePassHash (which had no warning of
 any kind, only the compiled-out assert) and HlmsDiskCache::applyTo — and it:
   * THROWS on the render path, naming the Hlms, the count and the field width,
     because there is no correct shader to return once the index cannot be
@@ -87,8 +87,8 @@ has always claimed "the higher 3 bits contain HlmsTypes"; now they do. The field
 is composed from the hash's TYPE and RENDERABLE fields explicitly, so objects
 drawn by the same shader sort together again and this line never depends on the
 split again. Draw order changes (it was ordering by two arbitrary bits before);
-pixels do not — opaque draws are depth-tested and transparent ones sort by depth
-ABOVE the shader term. Proven, see below.
+opaque pixels cannot (depth-tested); transparents sort by depth ABOVE this term,
+so only ties inside one depth bucket move. Measured identical, see below.
 
 CRUD: `HlmsBits::InputLayoutShift` / `InputLayoutMask` are deleted. They were
 declared in the header and defined nowhere — any use was a link error — and the
@@ -135,7 +135,7 @@ build-ogre.sh — the script's per-patch reverse check cannot see the overlap.
 +            INDEX — the one place in the engine that may grow the pass cache.
 +
 +            THE ONLY WAY TO GROW IT (Jahshaka lane HLMSBITS-1). It used to be open-coded
-+            in three places (Hlms::preparePassHashFinal, HlmsUnlit::preparePassHash and
++            in three places (Hlms::preparePassHashBase, HlmsUnlit::preparePassHash and
 +            HlmsDiskCache::applyTo), each with a copy of the same `assert` that release
 +            builds compile out, and HlmsUnlit's copy had no warning of any kind. The
 +            overflow they failed to stop is not a wrap: index 8,192 spills into the
