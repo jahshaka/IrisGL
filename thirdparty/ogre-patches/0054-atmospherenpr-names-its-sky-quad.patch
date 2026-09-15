@@ -23,7 +23,7 @@ VERIFICATION. `git apply --check` against the pristine pin and `git apply
 --reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
 `--engine-selftest` byte-identical (`b55e2d5d…`) — the engine finds the same
 quad and does the same two things to it, which the selftest's realistic-sky
-path exercises. The behavioural gate is `sky.*` plus `test_engine`'s fog and
+path exercises. The behavioural gate is `scripting.e2e.sky_ibl_churn` + `gi.sky_light` plus `test_engine`'s fog and
 atmosphere cases.
 
 --- a/Components/Atmosphere/include/OgreAtmosphereNpr.h

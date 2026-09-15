@@ -61,7 +61,9 @@ VERIFICATION. `git apply --check` against the pristine pin and `git apply
 measured, not argued: `--engine-selftest` is byte-identical
 (`b55e2d5d03dce4059b71a65f8e61dc4773fb0b048e3de05428aca83cabae0ec7`) with the
 engine's five hook pieces replacing the copied body — and the default scene has
-an irradiance field bound, so that hash covers this piece's every term. The
+an irradiance field bound, so that hash covers the SHIPPED permutation of this
+piece (one volume, no cascade chain, the sky-visibility dial at its default); the
+cascade and hemisphere permutations rest on the gi.* suites (50/50 at delivery). The
 composite is `ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight )` rather than
 a post-multiply for exactly that reason: it keeps the arithmetic and its order
 identical to the copy's. 50/50 on gi.*, scripting.e2e.gi_*, page_gi, lights.*

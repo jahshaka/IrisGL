@@ -1073,7 +1073,7 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     walking EVERY node before every injection (`OgreScene::hasVctLights`, three
     call sites, deleted).
 
-51. **0051-reserved-texture-pool-is-resident-next-too** (SOURCE —
+51. **0051-reserved-texture-pool-is-resident-next-too** (SOURCE — overlaps 0056 in `OgreTextureGpuManager.cpp`;
     `OgreTextureGpuManager.cpp`; **rerun COMPILES**) —
     `TextureGpuManager::reservePoolId` transitions the pool master to Resident
     but never sets its NEXT residency, because `_transitionTo` only syncs the two

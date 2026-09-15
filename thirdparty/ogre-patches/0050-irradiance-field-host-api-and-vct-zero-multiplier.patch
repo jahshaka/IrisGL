@@ -99,6 +99,11 @@ now computes), which the lane measured rather than assumed. The GI suites
 (gi.ddgi_*, gi.modes, gi.tiers, gi.budget, gi.coalesce) are the behavioural
 gate.
 
+NOTE (second read): of the accessors, the engine uses `switchToRasterSource`,
+`getRasterSource` and `getFieldSize`; `getSettings`, `getFieldOrigin` and
+`getNumProbesProcessed` have no caller here and are kept as the upstream-facing
+shape of the API (a host that owns a field wants all of them).
+
 --- a/Components/Hlms/Pbs/include/IrradianceField/OgreIrradianceField.h
 +++ b/Components/Hlms/Pbs/include/IrradianceField/OgreIrradianceField.h
 @@ -313,6 +313,48 @@

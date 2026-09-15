@@ -32,6 +32,10 @@ the colour sky. The behavioural gate is the sky suites (`sky.*`,
 `gi.probe_sky`, `scripting.e2e.sky*`), which cover both methods and the
 equirect seam.
 
+NOTE (second read): the method is assigned in the ENABLED branch only, so after
+a disable `getSkyMethod()` reports the last enabled method — upstream's own shape,
+and no reader in this tree calls it after a disable.
+
 --- a/OgreMain/src/OgreSceneManager.cpp
 +++ b/OgreMain/src/OgreSceneManager.cpp
 @@ -1081,6 +1081,13 @@

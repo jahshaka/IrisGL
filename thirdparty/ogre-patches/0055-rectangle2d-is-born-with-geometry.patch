@@ -29,7 +29,7 @@ rays are the same trap one level down.
 VERIFICATION. `git apply --check` against the pristine pin and `git apply
 --reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
 `--engine-selftest` byte-identical (`b55e2d5d…`) — every quad Jahshaka creates
-already sets its own geometry. The behavioural gate is `sky.*` (the sun disc
+already sets its own geometry. The behavioural gate is `scripting.e2e.sky_ibl_churn` + `gi.sky_light` (the sun disc
 and the analytic sky are the two quads in the tree) and `test_engine`.
 
 --- a/OgreMain/src/OgreRectangle2D2.cpp

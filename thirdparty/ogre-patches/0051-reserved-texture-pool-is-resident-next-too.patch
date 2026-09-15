@@ -1,8 +1,8 @@
 Jahshaka patch 0051 — a manually reserved texture pool is Resident NEXT, too.
 
 SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
-pulling this. It touches a file no other patch in the stack touches
-(`OgreMain/src/OgreTextureGpuManager.cpp`).
+pulling this. It touches `OgreMain/src/OgreTextureGpuManager.cpp`, which patch 0056 also
+touches (the overlap reset recipe applies to a tree that carries one of them).
 
 WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325; audit
 SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md finding F12).
@@ -28,7 +28,7 @@ manager. The nine engine lines are deleted with this patch.
 VERIFICATION. `git apply --check` against the pristine pin and `git apply
 --reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
 `--engine-selftest` byte-identical (`b55e2d5d…`). The behavioural gate is the
-decal suites (`gi.probe_decals`, `scripting.e2e.decals`) plus test_engine — a
+decal suite (`decals.engine`) plus test_engine — a
 pool master that never loses residency renders exactly as before, which is the
 point: the defect only fires on a transition that should never have been
 queued.

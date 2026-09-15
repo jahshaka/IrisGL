@@ -1732,7 +1732,7 @@ struct GiParams {
     /// rather than adding to it. The replacement is smooth and leak-resistant
     /// where the cone-traced term blew out corners, and — once the pass-buffer
     /// alignment defect this lane found is corrected (FogHlmsListener::
-    /// ifdAlignFloats) — it lands within about 15% of the brightness it takes
+    /// the pass-buffer under-report, fixed by ogre-patch 0050) — it lands within about 15% of the brightness it takes
     /// over from, which is what makes `ddgiIntensity` a trim rather than a
     /// correction.
     ///
@@ -1767,7 +1767,7 @@ struct GiParams {
     /// against the VCT diffuse's 0.169 that it replaces — 86%, the same visual
     /// class, no trim needed. (The P0 spike's "~13x dimmer" reading was an
     /// artifact of the pass-buffer misalignment described on
-    /// FogHlmsListener::ifdAlignFloats, which was collapsing every irradiance
+    /// the pass-buffer under-report (fixed by ogre-patch 0050), which was collapsing every irradiance
     /// lookup onto one texel; it is corrected here and the number does not
     /// survive it. GI_UNIFIED_SPEC addendum item 2 should be read with that in
     /// mind.) The knob stays because the two terms are different integrals and
