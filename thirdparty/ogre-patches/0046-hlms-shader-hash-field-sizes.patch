@@ -1,0 +1,572 @@
+From: Jahshaka <jahshaka@gmail.com>
+Subject: [PATCH] Hlms: the shader hash's field sizes, measured and rebalanced (3/16/13)
+
+WHY (Jahshaka lane HLMSBITS-1, 2026-09-15 — the structural half of the
+2026-09-14 crash that lane SHADERCACHE-2 fixed the cause of)
+
+Every shader lookup in Ogre-Next is a 32-bit hash of three packed fields:
+
+    [ Hlms type : 3 ][ renderable index : 21 ][ pass index : 8 ]        upstream
+
+`Hlms::getMaterial` ORs a renderable half and a pass half together, and nothing
+checks that the halves fit their fields. The pass index has EIGHT of them — 256
+distinct sets of pass properties for the life of a process, guarded by an
+`assert()` that every release build compiles out. Entry 256 does not saturate
+and does not wrap in place: it carries into the RENDERABLE field beside it, and
+the next reader of that field indexes `mRenderableCache` out of range. That is
+exactly how the owner's editor and two rig instances died on 2026-09-14
+(HlmsDiskCache::copyFrom -> Hlms::getProperty -> std::lower_bound, SIGSEGV at
+address 0, from the periodic shader-cache save; the first guard line decodes as
+renderable 3228 of 3227 = pass 86 + 512). SHADERCACHE-2 removed the DRIVER that
+got there (a sky capture cube named uniquely per capture, hashed into the pass
+properties as `target_envprobe_map`); the 8-bit field it overflowed stayed.
+
+MEASURED, BECAUSE 256 IS EITHER GENEROUS OR ABSURD AND GUESSING IS NOT ALLOWED.
+The pin was instrumented (a log line on every growth of either cache, with the
+property diff that caused it) and driven through one session that opened the
+eight shipped samples, walked Low -> Epic on each, drove every World Mode row
+through every one of its options, changed the sky forty times, entered and left
+play, took screenshots at three grades and toggled planar reflections:
+
+    Hlms                  pass cache peak      renderable cache peak
+    HlmsPbs                    115                     24
+    HlmsLowLevel                94                    104
+    HlmsUnlit                   12                     16
+
+115 of 256 — 45 % of the field, from ONE session, on an app whose pass
+properties legitimately include the render-pass shape (view, shadow atlas,
+reflection, probe capture, prepass, SSR, refractions), the MSAA count, the
+shadow filter and its PCF iterations, the Forward+ cluster geometry, the GI
+technique and every reflection/probe TARGET NAME. The properties that differed
+most often on a new PBS pass entry, in order: has_planar_reflections,
+hlms_gen_normals_gbuffer, hlms_prepass, target_envprobe_map,
+StrongMacroblockBits, pcf/pcf_iterations, fwd_clustered_lights_per_cell,
+hlms_msaa_samples, hlms_use_ssr, irradiance_field, vct_disable_diffuse.
+A warm boot re-populates the cache from the disk cache BEFORE a frame is drawn
+(measured: 79 of the previous session's entries replayed by
+HlmsDiskCache::applyTo), so the working set a session starts from is not zero.
+
+THE SPLIT, and why this one:
+
+    [ Hlms type : 3 ][ renderable index : 16 ][ pass index : 13 ]        ours
+
+  * PASS 13 bits = 8,192 entries = 71x the measured peak, and 32x a session
+    eight times as varied as the one measured. This is the side with the
+    pressure, the side with no eviction, and the side an app can re-enter.
+  * RENDERABLE 16 bits = 65,536 entries = 630x the measured peak. This cache
+    counts distinct MATERIAL+MESH property sets, and every entry costs a shader
+    compile per pass entry it meets — 65,536 of them is far past anything a
+    machine will ever compile, which is why the bits are better spent on the
+    pass side.
+  * TYPE stays 3: HLMS_MAX is 8 and a static_assert now says so.
+  * The three fields tile the uint32 exactly, asserted at compile time.
+
+AND THE FIELDS NOW REFUSE INSTEAD OF OVERFLOWING. `assert` is not a guard in a
+release build. There is ONE appender for the pass cache now
+(`Hlms::findOrAddPassCache`) where there were three open-coded copies —
+Hlms::preparePassHashFinal, HlmsUnlit::preparePassHash (which had no warning of
+any kind, only the compiled-out assert) and HlmsDiskCache::applyTo — and it:
+  * THROWS on the render path, naming the Hlms, the count and the field width,
+    because there is no correct shader to return once the index cannot be
+    addressed and a wrong one is worse than an exception;
+  * RETURNS FALSE when a disk cache is being replayed, so a too-large cache file
+    costs a slower start instead of a dead boot;
+  * WARNS ONCE at three quarters full, while there is still room to act on it,
+    naming the unique-name class of bug that causes unbounded growth.
+`Hlms::addRenderableCache` refuses the same way. `Hlms::getMaterial` and
+getMaterialSerial01 additionally assert `(renderableHalf & passHalf) == 0` — one
+AND that says "these fields overlap" whatever the split happens to be.
+
+THE RENDER QUEUE'S SORT KEY IS PART OF THIS PATCH, and it has to be: RqBits
+gives the shader 10 bits and `addRenderable` filled them by MASKING THE LOW BITS
+of the renderable hash. Those low bits are the hole the pass field lives in —
+two bits of the renderable index at upstream's split, and NOTHING AT ALL (a
+constant, so the whole shader term of the sort key vanishes) at any split whose
+pass field is at least ShaderBits wide. The comment beside RqBits::ShaderBits
+has always claimed "the higher 3 bits contain HlmsTypes"; now they do. The field
+is composed from the hash's TYPE and RENDERABLE fields explicitly, so objects
+drawn by the same shader sort together again and this line never depends on the
+split again. Draw order changes (it was ordering by two arbitrary bits before);
+pixels do not — opaque draws are depth-tested and transparent ones sort by depth
+ABOVE the shader term. Proven, see below.
+
+CRUD: `HlmsBits::InputLayoutShift` / `InputLayoutMask` are deleted. They were
+declared in the header and defined nowhere — any use was a link error — and the
+only references in the tree are two commented-out lines in HlmsDiskCache. The
+constants also become `constexpr` in the header (the compile-time asserts need
+them there, and every TU that shifts by them now gets an immediate).
+
+TWO PUBLIC ACCESSORS ARE ADDED (`getPassCacheSize`, `getRenderableCacheSize`,
+plus the two capacities): both vectors are protected, never evicted, and their
+size is the health reading nobody could take until a crash took it for them.
+Jahshaka reports them through `app.shaderCache()` and the shader-cache suite
+asserts the number instead of the absence of a warning.
+
+DISK FORMAT: unchanged, and it does NOT encode the layout — verified, not
+assumed. HlmsDiskCache serialises pass and renderable PROPERTY VECTORS and
+re-derives both indices on load (OgreHlmsDiskCache.cpp save/applyTo), and the
+Vulkan microcode map is keyed by the shader SOURCE TEXT
+(VulkanProgram::getNameForMicrocodeCache), not by the hash. `c_hlmsDiskCacheVersion`
+therefore stays at 6. Jahshaka's own cache fingerprint folds a hash of this
+patch directory, so every existing cache is discarded once anyway.
+
+PIXELS: byte-identical. `--engine-selftest` =
+b55e2d5d03dce4059b71a65f8e61dc4773fb0b048e3de05428aca83cabae0ec7 (unchanged);
+13 of 13 Ogre-Next sample ports byte-identical from the same recorded pose
+(PbsMaterials, LocalCubemaps, Refractions, Hdr, AreaApproxLights, IesProfiles,
+ShadowMapFromCode, PlanarReflections, ScreenSpaceReflections, Tutorial_SSAO,
+Tutorial_SMAA, Decals, ImageVoxelizer); 7 of the 8 shipped samples
+byte-identical at two grades, the eighth (Particles) differing by the same
+22,787 pixels between two runs of the UNPATCHED binary — its documented
+open-to-open non-determinism, not this patch.
+
+SOURCE: OgreMain + the Unlit component. Every tree must re-run build-ogre.sh.
+It TOUCHES THE SAME FILES AS PATCH 0035 (OgreHlms.cpp, OgreHlmsDiskCache.cpp),
+so a tree that already carries 0035 must reset its ogre-next submodule before
+build-ogre.sh — the script's per-patch reverse check cannot see the overlap.
+
+--- a/OgreMain/include/OgreHlms.h
++++ b/OgreMain/include/OgreHlms.h
+@@ -478,6 +478,28 @@
+         uint32 addRenderableCache( const HlmsPropertyVec &renderableSetProperties,
+                                    const PiecesMap       *pieces );
+ 
++        /** Finds `passCache` in mPassCache, appending it when it is new, and returns its
++            INDEX — the one place in the engine that may grow the pass cache.
++
++            THE ONLY WAY TO GROW IT (Jahshaka lane HLMSBITS-1). It used to be open-coded
++            in three places (Hlms::preparePassHashFinal, HlmsUnlit::preparePassHash and
++            HlmsDiskCache::applyTo), each with a copy of the same `assert` that release
++            builds compile out, and HlmsUnlit's copy had no warning of any kind. The
++            overflow they failed to stop is not a wrap: index 8,192 spills into the
++            renderable field and the next reader of that field indexes mRenderableCache
++            out of range.
++        @param bThrowOnOverflow
++            true (the render path): refuse, loudly, with the counts. There is no correct
++            shader to return once the index cannot be addressed, and a wrong one is worse
++            than an exception that names the cache that filled up.
++            false (loading a disk cache): return false instead, so a too-large cache file
++            costs a slower start rather than a dead boot.
++        @return
++            false only when the cache is full and bThrowOnOverflow is false.
++        */
++        bool findOrAddPassCache( const PassCache &passCache, bool bThrowOnOverflow,
++                                 size_t &outIdx );
++
+         /// Retrieves a cache entry using the returned value from @addRenderableCache
+         const RenderableCache &getRenderableCache( uint32 hash ) const;
+ 
+@@ -653,6 +675,23 @@
+         virtual ~Hlms();
+ 
+         HlmsTypes getType() const { return mType; }
++
++        /** How full the two caches the shader hash addresses are, and how much they
++            can address at all (Jahshaka lane HLMSBITS-1).
++
++            THE ONLY WAY TO SEE THIS FROM OUTSIDE. Both vectors are protected, never
++            evicted, and their SIZE is the quantity that decides whether a long editing
++            session is safe: the pass cache filled up and corrupted the renderable index
++            on 2026-09-14 with nothing able to report the number until a crash. An app
++            that watches these can say "115 of 8192" in its own diagnostics instead of
++            discovering the limit the way we did.
++        */
++        size_t getPassCacheSize() const { return mPassCache.size(); }
++        size_t getRenderableCacheSize() const { return mRenderableCache.size(); }
++        /// Entries the shader hash's pass / renderable fields can address. Defined in
++        /// the .cpp: HlmsBits is declared below this class.
++        static size_t getMaxPassCacheEntries();
++        static size_t getMaxRenderableCacheEntries();
+         IdString  getTypeName() const { return mTypeName; }
+ 
+         const String &getTypeNameStr() const { return mTypeNameStr; }
+@@ -1415,22 +1454,65 @@
+         static const IdString AlphaTestCmpFunc;
+     };
+ 
++    /** How Hlms::getMaterial packs a 32-bit shader hash: [type][renderable][pass],
++        most significant field first.
++
++        THE SPLIT IS JAHSHAKA'S (lane HLMSBITS-1, 2026-09-15), upstream's was 3/21/8.
++        Eight bits for the PASS index is 256 distinct sets of pass properties per Hlms
++        for the lifetime of a process, and it is the pass index that an EDITOR grows:
++        every render_pass shape (view, shadow atlas, reflection, probe capture, prepass,
++        SSR, refractions), every MSAA count, every shadow filter, every GI mode and
++        every probe/reflection target NAME is a pass property. Measured on this app
++        (instrumented pin, one session that opened the eight shipped samples, walked
++        Low->Epic on each, drove every World Mode row through every option, changed the
++        sky forty times, entered play and took screenshots): HlmsPbs peaked at 115 pass
++        entries, HlmsLowLevel at 94, HlmsUnlit at 12 — 45 % of what the field can
++        address, from one session. Past 256 the index does not saturate or wrap in
++        place: it spills into the RENDERABLE field beside it and the renderable index
++        read back is somebody else's, which is how the 2026-09-14 crash happened
++        (HlmsDiskCache::copyFrom subscripting mRenderableCache out of range, SIGSEGV at
++        address 0 from the periodic shader-cache save).
++
++        RENDERABLE 16 / PASS 13 buys 65,536 renderable and 8,192 pass entries: 630x and
++        71x the measured peaks. The renderable cache counts distinct MATERIAL+MESH
++        property sets (24 for HlmsPbs, 104 for HlmsLowLevel here) and every entry it
++        holds costs a shader compile per pass entry it meets, so 16 bits is far past
++        anything a machine could compile; the pass side gets the rest because it is the
++        side with the measured pressure and the side a session can re-enter (a warm boot
++        re-populates it from the disk cache before a frame is drawn — measured 79 of the
++        previous session's entries).
++
++        BOTH CACHES NOW REFUSE rather than overflow (Hlms::findOrAddPassCache /
++        addRenderableCache): an assert is compiled out of every release build, which is
++        exactly where the silent corruption happened.
++
++        InputLayoutShift/InputLayoutMask are GONE: they were declared here and defined
++        nowhere, so any use was a link error; the only references in the tree are two
++        commented-out lines in HlmsDiskCache.
++    */
+     struct _OgreExport HlmsBits
+     {
+-        static const int HlmsTypeBits;
+-        static const int RenderableBits;
+-        static const int PassBits;
+-
+-        static const int HlmsTypeShift;
+-        static const int RenderableShift;
+-        static const int PassShift;
+-        static const int InputLayoutShift;
+-
+-        static const int RendarebleHlmsTypeMask;
+-        static const int HlmsTypeMask;
+-        static const int RenderableMask;
+-        static const int PassMask;
+-        static const int InputLayoutMask;
++        static constexpr int HlmsTypeBits = 3;
++        static constexpr int RenderableBits = 16;
++        static constexpr int PassBits = 13;
++
++        static constexpr int HlmsTypeShift = 32 - HlmsTypeBits;
++        static constexpr int RenderableShift = HlmsTypeShift - RenderableBits;
++        static constexpr int PassShift = RenderableShift - PassBits;
++
++        static constexpr int RendarebleHlmsTypeMask = ( 1 << ( HlmsTypeBits + RenderableBits ) ) - 1;
++        static constexpr int HlmsTypeMask = ( 1 << HlmsTypeBits ) - 1;
++        static constexpr int RenderableMask = ( 1 << RenderableBits ) - 1;
++        static constexpr int PassMask = ( 1 << PassBits ) - 1;
++
++        /// The three fields must tile the 32 bits exactly: no gap (a gap is wasted
++        /// address space) and no overlap (an overlap is the silent corruption above).
++        static_assert( HlmsTypeBits + RenderableBits + PassBits == 32,
++                       "The Hlms shader hash must tile a uint32 exactly" );
++        static_assert( PassShift == 0, "The pass field must sit in the low bits" );
++        /// HLMS_MAX (8) types must fit the type field, or type 8 would eat the
++        /// renderable index's top bit on its way into the hash.
++        static_assert( ( 1 << HlmsTypeBits ) >= HLMS_MAX, "HlmsTypeBits is too small" );
+     };
+ 
+     /** @} */
+--- a/OgreMain/src/OgreHlms.cpp
++++ b/OgreMain/src/OgreHlms.cpp
+@@ -77,18 +77,9 @@
+ 
+ namespace Ogre
+ {
+-    const int HlmsBits::HlmsTypeBits = 3;
+-    const int HlmsBits::RenderableBits = 21;
+-    const int HlmsBits::PassBits = 8;
+-
+-    const int HlmsBits::HlmsTypeShift = 32 - HlmsTypeBits;
+-    const int HlmsBits::RenderableShift = HlmsTypeShift - RenderableBits;
+-    const int HlmsBits::PassShift = RenderableShift - PassBits;
+-
+-    const int HlmsBits::RendarebleHlmsTypeMask = ( 1 << ( HlmsTypeBits + RenderableBits ) ) - 1;
+-    const int HlmsBits::HlmsTypeMask = ( 1 << HlmsTypeBits ) - 1;
+-    const int HlmsBits::RenderableMask = ( 1 << RenderableBits ) - 1;
+-    const int HlmsBits::PassMask = ( 1 << PassBits ) - 1;
++    // HlmsBits' values are constexpr in OgreHlms.h since the Jahshaka rebalance
++    // (lane HLMSBITS-1): the split is asserted at compile time there, and every TU
++    // that shifts by them gets an immediate instead of a load from the data segment.
+ 
+     // Change per mesh (hash can be cached on the renderable)
+     const IdString HlmsBaseProp::Skeleton = IdString( "hlms_skeleton" );
+@@ -1729,17 +1720,97 @@
+         return syntaxError;
+     }
+     //-----------------------------------------------------------------------------------
++    size_t Hlms::getMaxPassCacheEntries() { return size_t( HlmsBits::PassMask ) + 1u; }
++    //-----------------------------------------------------------------------------------
++    size_t Hlms::getMaxRenderableCacheEntries()
++    {
++        return size_t( HlmsBits::RenderableMask ) + 1u;
++    }
++    //-----------------------------------------------------------------------------------
++    bool Hlms::findOrAddPassCache( const PassCache &passCache, const bool bThrowOnOverflow,
++                                   size_t &outIdx )
++    {
++        PassCacheVec::iterator it = std::find( mPassCache.begin(), mPassCache.end(), passCache );
++        if( it != mPassCache.end() )
++        {
++            outIdx = size_t( it - mPassCache.begin() );
++            return true;
++        }
++
++        // THE ONE PLACE THE PASS CACHE GROWS (Jahshaka lane HLMSBITS-1), because the
++        // three places it used to grow in disagreed about what to do when it could not:
++        // Hlms and HlmsDiskCache asserted (compiled out of every release build) and
++        // HlmsUnlit said nothing at all. Index PassMask + 1 spills into the RENDERABLE
++        // field of the hash, and the first consumer to index mRenderableCache with that
++        // field walks off the end — a SIGSEGV an hour later, in a function that has
++        // nothing to do with the cause.
++        if( mPassCache.size() > (size_t)HlmsBits::PassMask )
++        {
++            const String msg =
++                "Hlms type " + StringConverter::toString( mType ) +
++                " ran out of pass cache slots: " + StringConverter::toString( mPassCache.size() ) +
++                " distinct sets of pass properties is everything the " +
++                StringConverter::toString( HlmsBits::PassBits ) +
++                " bits of the shader hash can address. A pass property that carries a "
++                "UNIQUE NAME (a render target's, a probe's) makes this cache grow "
++                "without bound - that is the bug to look for.";
++            if( bThrowOnOverflow )
++                OGRE_EXCEPT( Exception::ERR_INVALID_STATE, msg, "Hlms::findOrAddPassCache" );
++            LogManager::getSingleton().logMessage( msg, LML_CRITICAL );
++            return false;
++        }
++
++        // Say it while there is still room to act on it. Once a session is three
++        // quarters of the way through a field this wide, something is generating pass
++        // property sets in a loop; the count and the Hlms are everything a diagnosis
++        // needs to start.
++        if( mPassCache.size() == (size_t)( ( HlmsBits::PassMask + 1 ) * 3 / 4 ) )
++        {
++            LogManager::getSingleton().logMessage(
++                "WARNING: Hlms type " + StringConverter::toString( mType ) + " now holds " +
++                    StringConverter::toString( mPassCache.size() ) +
++                    " distinct pass property combinations, three quarters of the " +
++                    StringConverter::toString( HlmsBits::PassMask + 1 ) +
++                    " the shader hash can address. This cache is never evicted; if it "
++                    "keeps growing, find the pass property that carries a unique name.",
++                LML_CRITICAL );
++        }
++
++        mPassCache.push_back( passCache );
++        outIdx = mPassCache.size() - 1u;
++        return true;
++    }
++    //-----------------------------------------------------------------------------------
+     uint32 Hlms::addRenderableCache( const HlmsPropertyVec &renderableSetProperties,
+                                      const PiecesMap *pieces )
+     {
+-        assert( mRenderableCache.size() <= HlmsBits::RenderableMask );
+-
+         RenderableCache cacheEntry( renderableSetProperties, pieces );
+ 
+         RenderableCacheVec::iterator it =
+             std::find( mRenderableCache.begin(), mRenderableCache.end(), cacheEntry );
+         if( it == mRenderableCache.end() )
+         {
++            // REFUSE, DO NOT OVERFLOW (Jahshaka lane HLMSBITS-1). The `assert` that
++            // used to stand here is compiled out of every release build, and index
++            // RenderableMask + 1 does not wrap in place: it carries into the Hlms TYPE
++            // field above it, so the hash starts naming a different Hlms entirely.
++            // 16 bits is 65,536 distinct material+mesh property sets, each of which
++            // costs a shader compile per pass entry it meets — a process that reaches
++            // this limit has a bug upstream of it, and saying so here is the only way
++            // that bug is ever seen.
++            if( mRenderableCache.size() > (size_t)HlmsBits::RenderableMask )
++            {
++                OGRE_EXCEPT( Exception::ERR_INVALID_STATE,
++                             "Hlms type " + StringConverter::toString( mType ) +
++                                 " ran out of renderable cache slots: " +
++                                 StringConverter::toString( mRenderableCache.size() ) +
++                                 " entries is everything the " +
++                                 StringConverter::toString( HlmsBits::RenderableBits ) +
++                                 " bits of the shader hash can address. Something is "
++                                 "creating unbounded material/mesh property "
++                                 "combinations.",
++                             "Hlms::addRenderableCache" );
++            }
+             mRenderableCache.push_back( cacheEntry );
+             it = mRenderableCache.end() - 1;
+         }
+@@ -3785,37 +3856,10 @@
+         passCache.passPso = getPassPsoForScene( sceneManager, bForceCullNone );
+         passCache.properties = mT[kNoTid].setProperties;
+ 
+-        assert( mPassCache.size() <= HlmsBits::PassMask &&
+-                "Too many passes combinations, we'll overflow the bits assigned in the hash!" );
+-        PassCacheVec::iterator it = std::find( mPassCache.begin(), mPassCache.end(), passCache );
+-        if( it == mPassCache.end() )
+-        {
+-            // THE ASSERT ABOVE IS COMPILED OUT OF EVERY RELEASE BUILD, AND THE
+-            // OVERFLOW IT GUARDS IS SILENT AND FATAL LATER (Jahshaka). The pass
+-            // index gets 8 bits of `finalHash`; entry 256 spills into the
+-            // RENDERABLE field beside it, and the next consumer to index
+-            // mRenderableCache with that field walks off the end —
+-            // HlmsDiskCache::copyFrom did, from the app's periodic shader-cache
+-            // save, as a SIGSEGV at address 0. Say it ONCE, loudly, at the
+-            // moment the cache grows past what the hash can address, so the
+-            // real question ("why does this process produce 257 distinct pass
+-            // property sets?") is asked where it can be answered instead of in
+-            // a backtrace an hour later.
+-            if( mPassCache.size() == (size_t)HlmsBits::PassMask + 1u )
+-            {
+-                LogManager::getSingleton().logMessage(
+-                    "WARNING: Hlms type " + StringConverter::toString( mType ) +
+-                        " has more than " + StringConverter::toString( HlmsBits::PassMask + 1 ) +
+-                        " distinct pass property combinations. The pass index no longer fits the "
+-                        "bits assigned to it in the shader hash and will collide with the "
+-                        "renderable index. Shader caching is degraded from here on.",
+-                    LML_CRITICAL );
+-            }
+-            mPassCache.push_back( passCache );
+-            it = mPassCache.end() - 1;
+-        }
++        size_t passIdx = 0u;
++        findOrAddPassCache( passCache, true, passIdx );
+ 
+-        const uint32 hash = static_cast<uint32>( it - mPassCache.begin() ) << HlmsBits::PassShift;
++        const uint32 hash = static_cast<uint32>( passIdx ) << HlmsBits::PassShift;
+ 
+         HlmsCache retVal( hash, mType, HLMS_CACHE_FLAGS_NONE, HlmsPso() );
+         retVal.setProperties = mT[kNoTid].setProperties;
+@@ -3964,6 +4008,12 @@
+                          "Too many material / meshes variations" );
+         OGRE_ASSERT_LOW( ( hash[1] >> HlmsBits::PassShift ) <= HlmsBits::PassMask &&
+                          "Should never happen (we assert in preparePassHash)" );
++        // THE TWO HALVES MUST NOT SHARE A BIT (Jahshaka lane HLMSBITS-1). The hash is an
++        // OR of a renderable half and a pass half, so an overflow on either side is not
++        // a wrong number, it is a number that decodes as somebody else's index. One AND
++        // says so exactly, whatever the field split happens to be.
++        OGRE_ASSERT_LOW( ( hash[0] & hash[1] ) == 0u &&
++                         "The renderable and pass halves of the shader hash overlap" );
+ 
+         finalHash = hash[0] | hash[1];
+ 
+@@ -4027,6 +4077,12 @@
+                          "Too many material / meshes variations" );
+         OGRE_ASSERT_LOW( ( hash[1] >> HlmsBits::PassShift ) <= HlmsBits::PassMask &&
+                          "Should never happen (we assert in preparePassHash)" );
++        // THE TWO HALVES MUST NOT SHARE A BIT (Jahshaka lane HLMSBITS-1). The hash is an
++        // OR of a renderable half and a pass half, so an overflow on either side is not
++        // a wrong number, it is a number that decodes as somebody else's index. One AND
++        // says so exactly, whatever the field split happens to be.
++        OGRE_ASSERT_LOW( ( hash[0] & hash[1] ) == 0u &&
++                         "The renderable and pass halves of the shader hash overlap" );
+ 
+         finalHash = hash[0] | hash[1];
+ 
+--- a/Components/Hlms/Unlit/src/OgreHlmsUnlit.cpp
++++ b/Components/Hlms/Unlit/src/OgreHlmsUnlit.cpp
+@@ -719,16 +719,14 @@
+         passCache.passPso = getPassPsoForScene( sceneManager, false );
+         passCache.properties = mT[kNoTid].setProperties;
+ 
+-        assert( mPassCache.size() <= (size_t)HlmsBits::PassMask &&
+-                "Too many passes combinations, we'll overflow the bits assigned in the hash!" );
+-        PassCacheVec::iterator it = std::find( mPassCache.begin(), mPassCache.end(), passCache );
+-        if( it == mPassCache.end() )
+-        {
+-            mPassCache.push_back( passCache );
+-            it = mPassCache.end() - 1;
+-        }
++        // Through the base class' appender (Jahshaka lane HLMSBITS-1): this copy of the
++        // find-or-append had the `assert` and NOT the overflow warning its Hlms
++        // counterpart carries, so an Unlit pass cache that outgrew the hash said
++        // nothing at all before corrupting the renderable index.
++        size_t passIdx = 0u;
++        findOrAddPassCache( passCache, true, passIdx );
+ 
+-        const uint32 hash = uint32( it - mPassCache.begin() ) << HlmsBits::PassShift;
++        const uint32 hash = uint32( passIdx ) << HlmsBits::PassShift;
+ 
+         // Fill the buffers
+         HlmsCache retVal( hash, mType, HLMS_CACHE_FLAGS_NONE, HlmsPso() );
+--- a/OgreMain/src/OgreHlmsDiskCache.cpp
++++ b/OgreMain/src/OgreHlmsDiskCache.cpp
+@@ -499,23 +499,23 @@
+ 
+                 // uint32 passHash = 0;
+                 {
+-                    assert( hlms->mPassCache.size() <= (uint32)HlmsBits::PassMask &&
+-                            "Too many passes combinations, we'll overflow "
+-                            "the bits assigned in the hash!" );
+-
+                     Hlms::PassCache passCache;
+                     passCache.passPso = itor->pso.pass;
+                     passCache.properties = itor->passProperties;
+ 
+-                    Hlms::PassCacheVec::iterator it =
+-                        std::find( hlms->mPassCache.begin(), hlms->mPassCache.end(), passCache );
+-                    if( it == hlms->mPassCache.end() )
+-                    {
+-                        hlms->mPassCache.push_back( passCache );
+-                        it = hlms->mPassCache.end() - 1u;
+-                    }
++                    // A CACHE FILE MUST NOT BE ABLE TO KILL A BOOT (Jahshaka lane
++                    // HLMSBITS-1): this is the one caller that may hit the limit with
++                    // no live scene behind it — a previous session's pass sets are
++                    // replayed here before a frame is drawn — so it asks the appender
++                    // NOT to throw and simply stops filling the cache. A slower start
++                    // is the whole cost. (The third copy of the open-coded
++                    // find-or-append, with the same compiled-out assert as the other
++                    // two, is what this replaces.)
++                    size_t passIdx = 0u;
++                    if( !hlms->findOrAddPassCache( passCache, false, passIdx ) )
++                        break;
+ 
+-                    // passHash = (uint32)(it - hlms->mPassCache.begin()) << (uint32)HlmsBits::PassShift;
++                    // passHash = (uint32)passIdx << (uint32)HlmsBits::PassShift;
+                 }
+ 
+                 // const uint32 finalHash = renderableHash | passHash;
+--- a/OgreMain/src/OgreRenderQueue.cpp
++++ b/OgreMain/src/OgreRenderQueue.cpp
+@@ -66,6 +66,10 @@
+     const int RqBits::TransparencyBits      = 1;
+     const int RqBits::MacroblockBits        = 10;
+     const int RqBits::ShaderBits            = 10;    //The higher 3 bits contain HlmsTypes
++                                                     //(true since the Jahshaka HLMSBITS-1 patch:
++                                                     //addRenderable composes this field from the
++                                                     //shader hash's type and renderable FIELDS,
++                                                     //not from its low bits)
+     const int RqBits::MeshBits              = 14;
+     const int RqBits::TextureBits           = 11;
+     const int RqBits::DepthBits             = 15;
+@@ -236,6 +240,23 @@
+         assert( subId <= OGRE_RQ_MAKE_MASK( RqBits::SubRqIdBits ) );
+ 
+         uint32 hlmsHash = casterPass ? pRend->getHlmsCasterHash() : pRend->getHlmsHash();
++
++        // THE SORT KEY'S SHADER FIELD, READ FROM THE HASH'S FIELDS INSTEAD OF ITS LOW
++        // BITS (Jahshaka lane HLMSBITS-1). `hlmsHash` is [type][renderable][pass-sized
++        // hole]; masking its low ShaderBits bits, which is what this line used to hand
++        // to OGRE_RQ_HASH, therefore samples whatever happens to sit at the BOTTOM of
++        // the renderable field — two bits of the index at upstream's 3/21/8 split, and
++        // NOTHING AT ALL (a constant) at any split whose pass field is at least as wide
++        // as ShaderBits. The comment beside RqBits::ShaderBits has always said "the
++        // higher 3 bits contain HlmsTypes", and this is what makes that true: the Hlms
++        // type in the top 3 bits of the field and as much of the renderable index as
++        // the remaining 7 hold. Objects drawn by the same shader sort together again,
++        // and this line no longer depends on how the hash's fields are split.
++        const uint32 shaderKey =
++            ( ( ( hlmsHash >> HlmsBits::HlmsTypeShift ) & (uint32)HlmsBits::HlmsTypeMask )
++              << ( RqBits::ShaderBits - HlmsBits::HlmsTypeBits ) ) |
++            ( ( hlmsHash >> HlmsBits::RenderableShift ) &
++              OGRE_RQ_MAKE_MASK( RqBits::ShaderBits - HlmsBits::HlmsTypeBits ) );
+         const HlmsDatablock *datablock = pRend->getDatablock();
+ 
+         const bool transparent = datablock->mBlendblock[casterPass]->mIsTransparent != 0u;
+@@ -290,7 +311,7 @@
+             OGRE_RQ_HASH( subId,            RqBits::SubRqIdBits,        RqBits::SubRqIdShift )      |
+             OGRE_RQ_HASH( transparent,      RqBits::TransparencyBits,   RqBits::TransparencyShift ) |
+             OGRE_RQ_HASH( macroblock,       RqBits::MacroblockBits,     RqBits::MacroblockShift )   |
+-            OGRE_RQ_HASH( hlmsHash,         RqBits::ShaderBits,         RqBits::ShaderShift )       |
++            OGRE_RQ_HASH( shaderKey,        RqBits::ShaderBits,         RqBits::ShaderShift )       |
+             OGRE_RQ_HASH( meshHash,         RqBits::MeshBits,           RqBits::MeshShift )         |
+             OGRE_RQ_HASH( texturehash,      RqBits::TextureBits,        RqBits::TextureShift )      |
+             OGRE_RQ_HASH( quantizedDepth,   RqBits::DepthBits,          RqBits::DepthShift );
+@@ -306,7 +327,7 @@
+             OGRE_RQ_HASH( transparent,      RqBits::TransparencyBits,   RqBits::TransparencyShift )     |
+             OGRE_RQ_HASH( quantizedDepth,   RqBits::DepthBits,          RqBits::DepthShiftTransp )      |
+             OGRE_RQ_HASH( macroblock,       RqBits::MacroblockBits,     RqBits::MacroblockShiftTransp ) |
+-            OGRE_RQ_HASH( hlmsHash,         RqBits::ShaderBits,         RqBits::ShaderShiftTransp )     |
++            OGRE_RQ_HASH( shaderKey,        RqBits::ShaderBits,         RqBits::ShaderShiftTransp )     |
+             OGRE_RQ_HASH( meshHash,         RqBits::MeshBits,           RqBits::MeshShiftTransp );
+             // clang-format on
+         }

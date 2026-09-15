@@ -24,7 +24,9 @@
 #include "jahshaka_engine_build_id.h"
 
 #include <OgreGpuProgramManager.h>
+#include <OgreHlms.h>
 #include <OgreHlmsDiskCache.h>
+#include <OgreHlmsManager.h>
 #include <OgreRenderSystem.h>
 #include <OgreRenderSystemCapabilities.h>
 #include <OgreLog.h>
@@ -853,12 +855,34 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.pipelineCacheReason = mPipelineReason;
     s.microcodeLoaded = mMicrocodeLoaded;
     s.hlmsCachesLoaded = mHlmsLoaded;
-    (void)root;
     s.microcodeEntries = static_cast<unsigned>(mMicrocodeAtLoad);
     s.compiledThisRun = mCounter ? mCounter->compiled.load() : 0u;
     s.loadedThisRun   = mCounter ? mCounter->fromCache.load() : 0u;
     s.expectedShaders = mExpectedShaders;
     s.lastSavedUnixMs = mLastSavedUnixMs;
+
+    // THE SHADER HASH'S TWO INDEX SPACES, LIVE (HLMSBITS-1). Ogre packs every
+    // shader lookup as [type:3][renderable:16][pass:13] and grows both caches
+    // for the life of the process with no eviction anywhere; the pass side ran
+    // out of its EIGHT bits on 2026-09-14 and corrupted the renderable index,
+    // which is the crash ogre-patch 0046 rebalanced the fields for. The worst
+    // Hlms is reported because one exhausted cache is the fault whichever Hlms
+    // owns it, and the capacities travel with the counts so a reading is
+    // self-describing ("115 of 8192") on any future split.
+    if (root) {
+        if (Ogre::HlmsManager *hlmsManager = root->getHlmsManager()) {
+            for (int i = 0; i < Ogre::HLMS_MAX; ++i) {
+                Ogre::Hlms *hlms = hlmsManager->getHlms(static_cast<Ogre::HlmsTypes>(i));
+                if (!hlms) continue;
+                s.passCacheEntries =
+                    std::max(s.passCacheEntries, unsigned(hlms->getPassCacheSize()));
+                s.renderableCacheEntries =
+                    std::max(s.renderableCacheEntries, unsigned(hlms->getRenderableCacheSize()));
+            }
+            s.passCacheCapacity = unsigned(Ogre::Hlms::getMaxPassCacheEntries());
+            s.renderableCacheCapacity = unsigned(Ogre::Hlms::getMaxRenderableCacheEntries());
+        }
+    }
     return s;
 }
 
