@@ -87,11 +87,24 @@ SkyRealistic SkyRealistic::defaults()
     // into those three numbers.  It is very nearly the Rayleigh spectral shape
     // (lambda^-4 at 600/550/450 nm normalises to 0.30 / 0.45 / 1.0) and is left
     // alone.
+    //
+    // ...AND THE SUN'S OWN AIR IS NO LONGER THIS DIAL (lane SKY-DENSITY-1,
+    // 2026-09-15; the follow-up the paragraph above asked for).  `density` was
+    // doing two jobs: the sky's look AND the transmittance that colours the
+    // SUNLIGHT, where the fit wanted 0.20-0.25 and the physics wanted ~0.47.
+    // The sun's half is now derived rather than borrowed — Beer-Lambert along
+    // the ray to the sun, at Kasten-Young airmass, from Rayleigh + Angstrom
+    // aerosol + ozone optical depths (OgreSky.cpp::atmosphereSunTint carries
+    // the formula and its reference) — and `sunHaze` is its one input: the
+    // atmosphere's turbidity.  2.5 is the turbidity the sky above was FITTED
+    // to, so the sky and the sunlight now describe the same air through two
+    // dials instead of disagreeing through one.
     s.density   = 0.25f;
     s.diffusion = 2.0f;
     s.horizon   = 0.025f;
     s.skyColour = QColor(157, 198, 255);
     s.power     = 1.5f;
+    s.sunHaze   = 2.5f;
     return s;
 }
 
@@ -260,6 +273,7 @@ Scene::Scene()
 	skyDataRealistic.insert("diffusion", skyRealistic.diffusion);
 	skyDataRealistic.insert("horizon", skyRealistic.horizon);
 	skyDataRealistic.insert("power", skyRealistic.power);
+	skyDataRealistic.insert("sunHaze", skyRealistic.sunHaze);
 	{
 		QJsonObject skyCol;
 		skyCol["r"] = skyRealistic.skyColour.red();

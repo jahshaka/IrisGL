@@ -1467,6 +1467,10 @@ private:
         /// debounce any more for exactly that reason.
         float   density = 0.0f, diffusion = 0.0f, horizon = 0.0f, power = 0.0f;
         QColor  skyColour;
+        /// Realistic: the SUN ray's air (the atmosphere's turbidity). It is a
+        /// sky-source field because it lives on the sky block, but it changes
+        /// no sky pixel — it is the only input to the engine's sun-tint model.
+        float   sunHaze = 0.0f;
         /// Realistic: the SUN LIGHT's direction (towards the sun) and whether
         /// the scene has one at all — the sky's only sun input since D15.
         /// Compared with a dot-product band rather than exactly, so a gizmo

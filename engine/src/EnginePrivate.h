@@ -2205,6 +2205,12 @@ public:
     /// them back after asking it a question about a different sun.
     Ogre::Vector3 mAtmoSunDir = Ogre::Vector3::UNIT_Y;   // the direction the light TRAVELS
     float         mAtmoTimeOfDay = 0.0f;
+    /// THE SUN RAY'S AIR (lane SKY-DENSITY-1) — the atmosphere's turbidity, the
+    /// one input to atmosphereSunTint. Deliberately NOT a field of the
+    /// component's preset: the sky pass never reads it, and the sky's own
+    /// density never reaches the sunlight. The default matches
+    /// `AtmosphereSky::sunHaze` and `iris::SkyRealistic::defaults()`.
+    float         mAtmoSunHaze = 2.5f;
     /// atmosphereSunTint's memo: the direction asked about, the answer, and the
     /// preset generation it was computed under (bumped by every setPreset).
     /// A sun that has not moved costs a compare.

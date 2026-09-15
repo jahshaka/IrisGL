@@ -286,6 +286,21 @@ struct AtmosphereSky {
     /// the level the tree is tuned around after the density fit dropped it to
     /// 0.66 (the model's radiance is proportional to densityCoeff).
     float skyPower  = 1.5f;
+    /// THE AIR ON THE WAY TO THE SUN — the atmosphere's turbidity, and the only
+    /// input to `Scene::atmosphereSunTint` (lane SKY-DENSITY-1). It is NOT a
+    /// sky-look dial and it reaches AtmosphereNpr's preset nowhere: the sky's
+    /// radiance is the NPR model's business (`density` above), the direct
+    /// beam's extinction is Beer-Lambert physics, and one number could not
+    /// serve both without each edit moving the other. 1 = a purely molecular
+    /// atmosphere, 2.5 = the clear day the sky's own defaults were fitted to,
+    /// 4-6 = hazy; held at or above 1 (below it the aerosol term amplifies).
+    ///
+    /// It is deliberately ABSENT from the comparison below, which asks "is this
+    /// the same SKY?" and decides whether the backend tears the sky down,
+    /// re-captures the environment and stales the probe grid. This dial changes
+    /// no sky pixel and no reflection — only the colour of the direct sunlight
+    /// — so it is applied on its own, like the sun disc (Scene::setSky).
+    float sunHaze   = 2.5f;
     /// Unit vector FROM the scene TOWARDS the sun, in world space — the scene's
     /// sun light's direction, reversed, pushed by the host. With `hasSun` false
     /// the sky is evaluated with the sun straight overhead at its lowest time

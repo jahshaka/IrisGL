@@ -6728,7 +6728,7 @@ bool SceneMirror::SkySource::operator==(const SkySource &o) const
     case Kind::Realistic: {
         if (!(same(density, o.density) && same(diffusion, o.diffusion) &&
               same(horizon, o.horizon) && same(power, o.power) &&
-              skyColour == o.skyColour))
+              same(sunHaze, o.sunHaze) && skyColour == o.skyColour))
             return false;
         if (hasSun != o.hasSun) return false;
         if (!hasSun) return true;
@@ -6775,6 +6775,7 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
         src.horizon = r.horizon;
         src.power = r.power;
         src.skyColour = r.skyColour;
+        src.sunHaze = r.sunHaze;
         // D15: the analytic sky's sun is the SCENE'S SUN LIGHT, and there is no
         // other source for it. A document light emits down its local -Y, so the
         // direction TOWARDS the sun is the reverse of the light's travel.
@@ -6885,6 +6886,9 @@ void SceneMirror::applySky(View *view)
             a.diffusion = mSource->skyRealistic.diffusion;
             a.horizon   = mSource->skyRealistic.horizon;
             a.skyPower  = mSource->skyRealistic.power;
+            // The SUN's air, not the sky's (lane SKY-DENSITY-1): it reaches the
+            // engine's transmittance model and no sky pixel at all.
+            a.sunHaze   = mSource->skyRealistic.sunHaze;
             // The sky's colour is a colour a user PICKS, so it is decoded like
             // every other one (§4) — the component's own numbers are linear.
             const iris::LinearColor c = iris::linearOf(mSource->skyRealistic.skyColour);
