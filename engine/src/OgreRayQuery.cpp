@@ -69,6 +69,7 @@
 
 #include "rayquery/rq_rays_spv.h"
 #include "rayquery/rq_reflect_spv.h"
+#include "rayquery/rq_reflect_filter_spv.h"
 
 #include <algorithm>
 #include <chrono>
@@ -517,6 +518,14 @@ private:
     VkPipelineLayout      mReflectPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mReflectPipeline = VK_NULL_HANDLE;
     VkShaderModule        mReflectModule = VK_NULL_HANDLE;
+    /// THE SPATIAL FILTER + COMPOSITE (round C). A second pipeline on the
+    /// SAME layout and the same descriptor set: it reads the temporal mean
+    /// the first dispatch wrote, blurs it by the pixel's own lobe (guided by
+    /// depth and normal) and writes `jahSsrReflection`. A pixel cannot blur
+    /// with neighbours its own dispatch has not finished writing, which is why
+    /// it is a second dispatch and not more code in the first.
+    VkPipeline            mFilterPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mFilterModule = VK_NULL_HANDLE;
     VkDescriptorPool      mReflectPool = VK_NULL_HANDLE;
     VkSampler             mPointSampler = VK_NULL_HANDLE;
     VkSampler             mLinearSampler = VK_NULL_HANDLE;
@@ -1081,6 +1090,8 @@ void RayQueryTier::close() {
     mRetireBin.clear();
     if (mReflectPool) vkDestroyDescriptorPool(mVk, mReflectPool, nullptr);
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
+    if (mFilterPipeline) vkDestroyPipeline(mVk, mFilterPipeline, nullptr);
+    if (mFilterModule) vkDestroyShaderModule(mVk, mFilterModule, nullptr);
     if (mReflectPipeLayout) vkDestroyPipelineLayout(mVk, mReflectPipeLayout, nullptr);
     if (mReflectSetLayout) vkDestroyDescriptorSetLayout(mVk, mReflectSetLayout, nullptr);
     if (mReflectModule) vkDestroyShaderModule(mVk, mReflectModule, nullptr);
@@ -1090,6 +1101,7 @@ void RayQueryTier::close() {
     mReflectPool = VK_NULL_HANDLE; mReflectPipeline = VK_NULL_HANDLE;
     mReflectPipeLayout = VK_NULL_HANDLE; mReflectSetLayout = VK_NULL_HANDLE;
     mReflectModule = VK_NULL_HANDLE; mReflectTimestamps = VK_NULL_HANDLE;
+    mFilterPipeline = VK_NULL_HANDLE; mFilterModule = VK_NULL_HANDLE;
     mPointSampler = VK_NULL_HANDLE; mLinearSampler = VK_NULL_HANDLE;
     if (mDescPool) vkDestroyDescriptorPool(mVk, mDescPool, nullptr);
     if (mPipeline) vkDestroyPipeline(mVk, mPipeline, nullptr);
@@ -2257,6 +2269,28 @@ bool RayQueryTier::makeReflectPipeline(std::string &err) {
         err = "rayquery/reflect: vkCreateComputePipelines failed";
         return false;
     }
+    {
+        VkShaderModuleCreateInfo fsmi{};
+        fsmi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        fsmi.codeSize = sizeof(krq_reflectFilterSpv);
+        fsmi.pCode = krq_reflectFilterSpv;
+        if (vkCreateShaderModule(mVk, &fsmi, nullptr, &mFilterModule) != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateShaderModule (filter) failed";
+            return false;
+        }
+        VkComputePipelineCreateInfo fcpi{};
+        fcpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        fcpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fcpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        fcpi.stage.module = mFilterModule;
+        fcpi.stage.pName = "main";
+        fcpi.layout = mReflectPipeLayout;
+        if (vkCreateComputePipelines(mVk, VK_NULL_HANDLE, 1, &fcpi, nullptr, &mFilterPipeline) !=
+            VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateComputePipelines (filter) failed";
+            return false;
+        }
+    }
     // Sized for kMaxTimedScenes views' worth of rings, which is the same ceiling
     // the timestamp pool uses and far more views than a product frame draws.
     const unsigned sets = kMaxTimedScenes * kReflectRing;
@@ -2827,6 +2861,24 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
+    vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
+    // THE MEAN IS WRITTEN; NOW IT IS READ BY ITS NEIGHBOURS. A plain memory
+    // barrier is enough and an image barrier would be wrong: the temporal mean
+    // stays in GENERAL for both passes and only the ACCESS has to be ordered.
+    {
+        VkMemoryBarrier meanReady{};
+        meanReady.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        meanReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        meanReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &meanReady, 0, nullptr, 0,
+                             nullptr);
+    }
+    // THE FILTER AND THE COMPOSITE — the same descriptor set, a different
+    // pipeline. Its timestamp is the SAME pair as the trace's, deliberately:
+    // what a budget cares about is what the reflection costs, and the split
+    // between tracing and filtering is ours, not the frame's.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mFilterPipeline);
     vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, 1u);
     if (mReflectTimestamps && rv.hasQueryBase) {
         const uint32_t base = rv.queryBase + (rv.frame % kFramesInFlight) * 2u;

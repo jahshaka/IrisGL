@@ -1,0 +1,321 @@
+#version 460
+// PHOTON R5 — THE SPATIAL FILTER, and the composite that follows it (round C).
+//
+// WHY THERE IS A SECOND PASS AT ALL. One ray per pixel per frame is an
+// unbiased estimator of the specular lobe and a TERRIBLE one: its variance is
+// the lobe's own, and the temporal mean reduces it only as fast as the history
+// is allowed to remember. Round B measured exactly that — with the roughness
+// decode corrected, a surface at perceptual 0.3 left 5/255 of frame-to-frame
+// movement at the 99th percentile after sixteen frames, against a bar of 2 —
+// and named the answer: a SPATIAL filter, which is what every shipping
+// implementation of this uses, because neighbouring pixels of a rough surface
+// are samples of very nearly the same integral and averaging them costs
+// nothing in bias.
+//
+// WHAT IT IS. One à-trous / bilateral pass at the trace's own resolution over
+// the temporal mean, guided by three things and nothing else:
+//
+//   * THE LOBE. A MIRROR IS NOT FILTERED AT ALL — radius 0 at or below
+//     kMirrorAlpha. There is no variance to remove there (every sample is the
+//     same ray) and any blur would be a real loss of a real image: a mirror
+//     shows the world at the world's own sharpness. The radius grows with
+//     sqrt(alpha), i.e. with the PERCEPTUAL roughness, because that is what the
+//     reflected lobe's angular width goes as — the blur tracks the blur the
+//     surface itself is applying.
+//   * DEPTH. A tap on the other side of a silhouette is a different surface and
+//     its reflection is a different integral; the weight falls off with the
+//     relative depth difference, so the filter never leaks across an edge.
+//   * THE NORMAL. Two texels of the same wall at different orientations reflect
+//     different directions. The weight is a power of the cosine between them.
+//
+// AND IT ALSO DOES THE COMPOSITE, for one reason: the composite has to read the
+// FILTERED mean, and a third dispatch to move one value would cost another
+// full-resolution read of everything the composite already has in registers.
+//
+// SAME DESCRIPTOR SET as rq_reflect.comp — the same layout, the same bound set,
+// the same Params — so the second pipeline costs a module and a bind, not a
+// second set of plumbing.
+// The acceleration-structure BINDING is declared below purely to keep one
+// descriptor set layout for both pipelines, so the extension has to be here
+// even though this shader traces nothing.
+#extension GL_EXT_ray_query : require
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+/// Must match rq_reflect.comp.
+const int kMaxCascades = 4;
+
+/// The acceleration structure is in the shared layout and is NOT used here; a
+/// binding may be declared and unread, and declaring it is what keeps one
+/// layout for two pipelines.
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+layout( set = 0, binding = 1 ) uniform Params
+{
+	/// xyz = the camera in world space, w = 1 for a perspective camera and 0
+	/// for an orthographic one (the reconstruction differs — see worldAt()).
+	vec4 camPos;
+	/// The world-space ray basis: worldDir(u,v) = rayTL + rayRight*u + rayDown*v,
+	/// scaled so its component along the camera's forward axis is exactly 1.
+	/// Then `camPos + worldDir * viewDistance` is the surface. Under an
+	/// orthographic camera rayTL/rayRight/rayDown carry the image PLANE instead
+	/// (an offset, not a ray) and `fwd` is the one view direction.
+	vec4 rayTL;
+	vec4 rayRight;
+	vec4 rayDown;
+	vec4 fwd;
+	/// x = A, y = B of Camera::getProjectionParamsAB() (reverse-Z safe),
+	/// z = the far plane (the orthographic depth scale), w = the roughness
+	/// gate's FEATHER half-width (kRayReflectFeather).
+	vec4 projParams;
+	/// xy = the trace resolution in pixels, zw = the full-resolution size of
+	/// jahSsrReflection.
+	vec4 resolution;
+	/// x = the roughness gate — the PROJECT's dial, not a renderer constant:
+	/// above it the probe/field photograph is a good enough integral of a wide
+	/// lobe and a ray is spent for nothing. The transition is FEATHERED over
+	/// projParams.w either side of it. y = the ray's maximum length in
+	/// world units, z = the frame index (the sample sequence's only input),
+	/// w = how many cascades are bound.
+	vec4 knobs;
+	/// x = 1 when the voxel textures carry the anisotropic slots, y = the
+	/// surface bias in world units (a ray starts this far off its own surface),
+	/// z = 1 when a sky cubemap is bound, w = the history's minimum blend
+	/// weight (the floor on 1/n — how long the temporal mean remembers).
+	vec4 knobs2;
+	/// The colour an escaping ray reads when no sky cubemap is bound.
+	vec4 skyColour;
+	/// The VIEW space's three axes in world space (the camera's orientation as
+	/// a rotation): what turns the G-buffer's view-space normal back into one.
+	vec4 viewAxisX;
+	vec4 viewAxisY;
+	vec4 viewAxisZ;
+	/// Per cascade: xyz = the voxel box's world origin, w = the box's largest
+	/// side in world units (the cell size times the resolution).
+	vec4 voxelOrigin[kMaxCascades];
+	/// Per cascade: xyz = 1 / the voxel box's world size, w = one cell in world
+	/// units (the sample point's bias along the ray).
+	vec4 voxelInvSize[kMaxCascades];
+	/// THE PREVIOUS FRAME'S CAMERA, in exactly the same five numbers as this
+	/// frame's (camPos, rayTL, rayRight, rayDown, fwd). Not a view-projection
+	/// matrix, deliberately: inverting the basis above is the same arithmetic
+	/// forwards and backwards, so the reprojection cannot disagree with the
+	/// reconstruction about a handedness, a y-flip or a depth convention — and
+	/// each of those is a silent half-pixel-to-whole-image error that only shows
+	/// up as a smear while the camera moves.
+	vec4 prevCamPos;
+	vec4 prevRayTL;
+	vec4 prevRayRight;
+	vec4 prevRayDown;
+	vec4 prevFwd;
+} p;
+
+layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
+layout( set = 0, binding = 3 ) uniform sampler2D gBufShadowRoughness;
+layout( set = 0, binding = 4 ) uniform sampler2D sceneDepth;
+layout( rgba16f, set = 0, binding = 5 ) uniform image2D ssrReflection;
+/// THE TEMPORAL MEAN, PING-PONGED. Two buffers and not one, because a pixel
+/// reads the mean at its own REPROJECTED coordinate — any pixel of the buffer —
+/// while its neighbours are writing theirs. One buffer makes that a read/write
+/// race within a single dispatch (the value read would be this frame's or last
+/// frame's depending on the scheduler), and a temporal filter fed by a race is
+/// how a stable picture acquires a shimmer nobody can reproduce. The pair costs
+/// one extra image of 8 bytes per traced pixel.
+layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2D historyPrev;
+layout( rgba16f, set = 0, binding = 7 ) uniform image2D historyCur;
+/// ...and the distance beside it, which is what makes the reprojection a TEST
+/// rather than a hope: the surface found at the reprojected pixel is the same
+/// surface only if it was the same distance away.
+layout( r32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
+layout( r32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
+layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
+layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
+layout( set = 0, binding = 13 ) uniform sampler3D voxelZ[kMaxCascades];
+layout( set = 0, binding = 14 ) uniform samplerCube skyCube;
+
+/// The same ceiling the trace and the SSR loop hold their radiance to.
+const float kMaxRadiance = 1024.0;
+/// The alpha at or below which nothing is filtered (rq_reflect.comp's own
+/// kMirrorAlpha: perceptual 0.1, where the reflected lobe first exceeds a pixel).
+const float kMirrorAlpha = 0.01;
+/// How many frames a glossy lobe warms up over before its answer is shown
+/// (rq_reflect.comp's kWarmupFrames).
+const float kWarmupFrames = 8.0;
+/// THE KERNEL'S REACH. radius = kFilterScale * sqrt(alpha), capped: at
+/// perceptual 0.3 that is 3 texels, at the 0.4 default cutoff it saturates. A
+/// 7x7 neighbourhood at the trace resolution is ~49 samples of one lobe, which
+/// is the variance reduction the temporal mean alone could only buy with
+/// half a second of lag.
+const float kFilterScale = 10.0;
+const int   kMaxRadius = 3;
+/// How fast a tap loses its vote with depth and with orientation. The depth
+/// term is RELATIVE so it is scale-free; the normal term is a cosine power.
+const float kDepthTolerance = 0.02;
+const float kNormalPower = 32.0;
+
+bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
+bool finite3( vec3 v ) { return finite1( v.x ) && finite1( v.y ) && finite1( v.z ); }
+
+float viewDistance( float rawDepth )
+{
+	if( p.camPos.w < 0.5 )
+		return abs( ( rawDepth - p.projParams.x ) / p.projParams.y );
+	return p.projParams.y / ( rawDepth - p.projParams.x );
+}
+
+/// This trace texel's own full-resolution sample point, in uv.
+vec2 traceUv( ivec2 tc, ivec2 scale, ivec2 fullRes )
+{
+	return ( vec2( tc * scale ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
+}
+
+void main()
+{
+	const ivec2 traceRes = ivec2( p.resolution.xy );
+	const ivec2 tc = ivec2( gl_GlobalInvocationID.xy );
+	if( any( greaterThanEqual( tc, traceRes ) ) )
+		return;
+
+	const ivec2 fullRes = ivec2( p.resolution.zw );
+	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
+	const ivec2 blockOrigin = tc * scale;
+	const vec2 uv = traceUv( tc, scale, fullRes );
+
+	const float rawDepth = texture( sceneDepth, uv ).x;
+	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
+		return;						// nothing was drawn here; the trace wrote nothing either
+
+	const float roughGate = p.knobs.x;
+	const float feather = p.projParams.w;
+	// The SAME decode as the trace: ogre-patch 0043 packs the GGX ALPHA over
+	// [0.001, 1], and the gate is stated in PERCEPTUAL roughness.
+	const float lobeAlpha = max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 );
+	const float roughness = sqrt( lobeAlpha );
+	if( roughness > roughGate + feather )
+		return;
+
+	const vec4 centre = imageLoad( historyCur, tc );
+	if( centre.w <= 0.0 )
+		return;						// this texel has no answer to filter or composite
+
+	vec3 mean = clamp( centre.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	float count = centre.w;
+
+	// ---- THE FILTER ---------------------------------------------------------
+	// A MIRROR SKIPS IT ENTIRELY, and not as an optimisation: blurring a mirror
+	// destroys a correct image to remove a variance it does not have.
+	const int radius = int( min( float( kMaxRadius ),
+								 floor( kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) ) ) );
+	if( radius > 0 && lobeAlpha > kMirrorAlpha )
+	{
+		const float centreDist = viewDistance( rawDepth );
+		const vec3 centreN = normalize( texture( gBufNormals, uv ).xyz * 2.0 - 1.0 );
+		vec3  sum = mean;
+		float sumW = 1.0;
+		float sumCount = count;
+		for( int dy = -radius; dy <= radius; ++dy )
+		{
+			for( int dx = -radius; dx <= radius; ++dx )
+			{
+				if( dx == 0 && dy == 0 )
+					continue;
+				const ivec2 t = tc + ivec2( dx, dy );
+				if( any( lessThan( t, ivec2( 0 ) ) ) || any( greaterThanEqual( t, traceRes ) ) )
+					continue;
+				const vec4 h = imageLoad( historyCur, t );
+				if( h.w <= 0.0 || !finite3( h.xyz ) )
+					continue;
+				const vec2 tuv = traceUv( t, scale, fullRes );
+				const float td = texture( sceneDepth, tuv ).x;
+				if( td <= 0.0 || td >= 1.0 )
+					continue;
+				// DEPTH: relative, so the tolerance means the same thing at one
+				// metre and at one kilometre.
+				const float tDist = viewDistance( td );
+				const float dRel = abs( tDist - centreDist ) / max( centreDist, 1e-3 );
+				if( dRel > kDepthTolerance )
+					continue;
+				// ORIENTATION: two texels that face differently reflect
+				// differently, however close they are.
+				const vec3 tn = normalize( texture( gBufNormals, tuv ).xyz * 2.0 - 1.0 );
+				const float ndot = max( dot( tn, centreN ), 0.0 );
+				// SPATIAL: a plain tent over the kernel, which is what an
+				// à-trous step of 1 is at this radius.
+				const float sw = max( 0.0, 1.0 - length( vec2( dx, dy ) ) / float( radius + 1 ) );
+				const float w = sw * pow( ndot, kNormalPower ) *
+								( 1.0 - dRel / kDepthTolerance );
+				if( w <= 0.0 )
+					continue;
+				sum += h.xyz * w;
+				sumW += w;
+				// The WARM-UP reads the neighbourhood too: a pixel whose own
+				// history is young but whose neighbours are converged is, after
+				// this filter, holding a converged answer.
+				sumCount += h.w * w;
+			}
+		}
+		mean = sum / sumW;
+		count = sumCount / sumW;
+	}
+	if( !finite3( mean ) )
+		return;
+
+	// ---- THE WRITE, per full-resolution texel of this block ------------------
+	// Every texel decides for ITSELF whether the ray answers for it: its own
+	// roughness, its own screen confidence, its own depth. A half-resolution
+	// trace must not hand its neighbours' pixels an answer their own march
+	// already had, and must not paint a ray over the sky.
+	for( int dy = 0; dy < scale.y; ++dy )
+	{
+		for( int dx = 0; dx < scale.x; ++dx )
+		{
+			const ivec2 fc = blockOrigin + ivec2( dx, dy );
+			if( any( greaterThanEqual( fc, fullRes ) ) )
+				continue;
+			const vec2 fuv = ( vec2( fc ) + 0.5 ) / vec2( fullRes );
+			const float fd = texture( sceneDepth, fuv ).x;
+			if( fd <= 0.0 || fd >= 1.0 )
+				continue;
+			// PERCEPTUAL again, from the same 0043 packing (see the decode above):
+			// this texel's own gate, in the same units as the dial.
+			const float fr = sqrt( max( texture( gBufShadowRoughness, fuv ).y * 0.999 + 0.001,
+										1e-6 ) );
+			if( fr > roughGate + feather )
+				continue;
+			const vec4 screen = imageLoad( ssrReflection, fc );
+			const float screenW = clamp( screen.w, 0.0, 1.0 );
+			if( screenW >= 1.0 )
+				continue;				// the march owns this pixel outright
+			// THE FEATHER (owner, ledger §426). Full confidence up to
+			// `cutoff - feather`, none at `cutoff + feather`, smooth between —
+			// and what the ray gives up the probe takes through the SAME
+			// confidence composite, so a floor whose roughness varies across it
+			// crossfades instead of stepping.
+			float gate =
+				1.0 - smoothstep( roughGate - feather, roughGate + feather, fr );
+			// THE RAY FADES IN AS THE MEAN CONVERGES (second reader, M2). A
+			// GRADED SCREENSHOT's view lives about two frames, so a glossy
+			// traced reflection in a user's shot would be one or two samples of
+			// a lobe — visible noise in a picture that is supposed to be the
+			// editor's own. Weighting the trace's confidence by how much of the
+			// integral it actually holds hands those pixels back to the probe,
+			// which is today's picture: noise-free, deterministic, and the
+			// worst case is "the shot looks like the renderer without rays".
+			//
+			// It is the SAME physics as the blend above, so it is the same
+			// term: a MIRROR has no variance and needs no warm-up (one sample
+			// is the whole integral), and the warm-up's length grows with the
+			// lobe. A live viewport passes it within a few frames and is
+			// unaffected; a two-frame view never reaches it on a glossy
+			// surface, which is the point.
+			const float warm = max( 1.0 - smoothstep( 0.0, kMirrorAlpha, lobeAlpha ),
+									min( count * ( 1.0 / kWarmupFrames ), 1.0 ) );
+			gate *= warm;
+			if( gate <= 0.0 )
+				continue;
+			const vec3 rgb = mix( mean, screen.xyz, screenW );
+			imageStore( ssrReflection, fc, vec4( rgb, mix( screenW, 1.0, gate ) ) );
+		}
+	}
+}

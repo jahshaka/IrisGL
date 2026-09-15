@@ -126,12 +126,12 @@ layout( rgba16f, set = 0, binding = 5 ) uniform image2D ssrReflection;
 /// how a stable picture acquires a shimmer nobody can reproduce. The pair costs
 /// one extra image of 8 bytes per traced pixel.
 layout( rgba16f, set = 0, binding = 6 ) uniform readonly  image2D historyPrev;
-layout( rgba16f, set = 0, binding = 7 ) uniform writeonly image2D historyCur;
+layout( rgba16f, set = 0, binding = 7 ) uniform image2D historyCur;
 /// ...and the distance beside it, which is what makes the reprojection a TEST
 /// rather than a hope: the surface found at the reprojected pixel is the same
 /// surface only if it was the same distance away.
 layout( r32f, set = 0, binding = 8 ) uniform readonly  image2D historyDistPrev;
-layout( r32f, set = 0, binding = 9 ) uniform writeonly image2D historyDistCur;
+layout( r32f, set = 0, binding = 9 ) uniform image2D historyDistCur;
 layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
@@ -498,61 +498,9 @@ void main()
 	imageStore( historyCur, tc, vec4( mean, count ) );
 	imageStore( historyDistCur, tc, vec4( dist, 0.0, 0.0, 0.0 ) );
 
-	// ---- THE WRITE, per full-resolution texel of this block ------------------
-	// Every texel decides for ITSELF whether the ray answers for it: its own
-	// roughness, its own screen confidence, its own depth. A half-resolution
-	// trace must not hand its neighbours' pixels an answer their own march
-	// already had, and must not paint a ray over the sky.
-	for( int dy = 0; dy < scale.y; ++dy )
-	{
-		for( int dx = 0; dx < scale.x; ++dx )
-		{
-			const ivec2 fc = blockOrigin + ivec2( dx, dy );
-			if( any( greaterThanEqual( fc, fullRes ) ) )
-				continue;
-			const vec2 fuv = ( vec2( fc ) + 0.5 ) / vec2( fullRes );
-			const float fd = texture( sceneDepth, fuv ).x;
-			if( fd <= 0.0 || fd >= 1.0 )
-				continue;
-			// PERCEPTUAL again, from the same 0043 packing (see the decode above):
-			// this texel's own gate, in the same units as the dial.
-			const float fr = sqrt( max( texture( gBufShadowRoughness, fuv ).y * 0.999 + 0.001,
-										1e-6 ) );
-			if( fr > roughGate + feather )
-				continue;
-			const vec4 screen = imageLoad( ssrReflection, fc );
-			const float screenW = clamp( screen.w, 0.0, 1.0 );
-			if( screenW >= 1.0 )
-				continue;				// the march owns this pixel outright
-			// THE FEATHER (owner, ledger §426). Full confidence up to
-			// `cutoff - feather`, none at `cutoff + feather`, smooth between —
-			// and what the ray gives up the probe takes through the SAME
-			// confidence composite, so a floor whose roughness varies across it
-			// crossfades instead of stepping.
-			float gate =
-				1.0 - smoothstep( roughGate - feather, roughGate + feather, fr );
-			// THE RAY FADES IN AS THE MEAN CONVERGES (second reader, M2). A
-			// GRADED SCREENSHOT's view lives about two frames, so a glossy
-			// traced reflection in a user's shot would be one or two samples of
-			// a lobe — visible noise in a picture that is supposed to be the
-			// editor's own. Weighting the trace's confidence by how much of the
-			// integral it actually holds hands those pixels back to the probe,
-			// which is today's picture: noise-free, deterministic, and the
-			// worst case is "the shot looks like the renderer without rays".
-			//
-			// It is the SAME physics as the blend above, so it is the same
-			// term: a MIRROR has no variance and needs no warm-up (one sample
-			// is the whole integral), and the warm-up's length grows with the
-			// lobe. A live viewport passes it within a few frames and is
-			// unaffected; a two-frame view never reaches it on a glossy
-			// surface, which is the point.
-			const float warm = max( 1.0 - smoothstep( 0.0, kMirrorAlpha, lobeAlpha ),
-									min( count * ( 1.0 / kWarmupFrames ), 1.0 ) );
-			gate *= warm;
-			if( gate <= 0.0 )
-				continue;
-			const vec3 rgb = mix( mean, screen.xyz, screenW );
-			imageStore( ssrReflection, fc, vec4( rgb, mix( screenW, 1.0, gate ) ) );
-		}
-	}
+	// THE COMPOSITE IS THE FILTER PASS' (round C). This shader now ends at the
+	// temporal mean: `rq_reflect_filter.comp` reads it back through a
+	// lobe-guided bilateral kernel and writes `jahSsrReflection`. Splitting
+	// them is what makes a SPATIAL filter possible at all — a pixel cannot
+	// blur with neighbours its own dispatch has not finished writing.
 }
