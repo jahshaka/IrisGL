@@ -2029,8 +2029,10 @@ struct GiStatus {
     int    ifdProbes = 0;
     /// Every probe in the field has been integrated at least once since the
     /// last build or reset. A bound field is ALWAYS converged on the frame it
-    /// binds (the build converges it in one dispatch); this reads false only
-    /// while a progressive re-converge after `refreshGiLighting` is in flight.
+    /// binds (the build converges it in one dispatch) and on the frame it is
+    /// re-placed under a cascade chain (a follow converges it whole); it reads
+    /// false while a progressive re-converge is in flight — after
+    /// `refreshGiLighting`, or after cascade 0 re-voxelised at the same place.
     bool   ifdConverged = false;
     /// Probes the field is re-integrating per frame while a re-converge is in
     /// flight — the resolved figure, derived from `GiParams::updateBudget` and

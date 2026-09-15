@@ -4615,16 +4615,11 @@ void OgreScene::buildIrradianceField() {
         // built it. In the single-volume arm that is the scene's fitted box; in
         // the cascade chain it is cascade 0's camera-centred box (the chain's
         // rule 5: cascade 0 IS mVctVoxelizer/mVctLighting), and the scheduler
-        // keeps it there as that cascade scrolls (followCascade0Field).
-        //
-        // The old law here was "SCENE-FITTED, NEVER CAMERA-CENTRED", from
-        // REFLECTIONS P5b, which measured a camera-centred GI volume deleting
-        // the bounce outright (floor 0.475 -> 0.353 = off). What that measured
-        // was ONE volume small enough to follow the camera: the far field then
-        // has no representation at all. It is not an argument against a field
-        // on the innermost box of a CHAIN, where the outer cascades hold the
-        // far field and (PHOTON_SPEC G3) hand the ring its bounce — and the
-        // pixel at 20 m is the bar that says so, not this comment.
+        // keeps it there as that cascade scrolls (followCascade0Field). A
+        // single volume small enough to follow the camera would delete the
+        // far bounce (REFLECTIONS P5b measured it); under a chain the outer
+        // cascades hold the far field and hand the ring its bounce (G3), and
+        // gi.cascades' 20 m pixel is the bar that says so.
         const Ogre::Vector3 origin = mVctVoxelizer->getVoxelOrigin();
         const Ogre::Vector3 size   = mVctVoxelizer->getVoxelSize();
         ifdProbeCounts(size, settings.mNumProbes);
@@ -4988,7 +4983,10 @@ void OgreScene::updateIrradianceField() {
 // 8,192 probes x 6 scene renders in one frame. It re-sweeps from the new place
 // at its own budget, which is the source's own bargain (kIfdRasterProbesPerBudget).
 void OgreScene::followCascade0Field(GiStaleReason reason) {
-    if (!mIfd || mVctCascades.empty()) return;
+    // A field whose initialize() threw is a non-null mIfd with no atlases;
+    // mIfdTotalProbes is written only after a successful build, so it is the
+    // "built" reading (setIrradianceFieldGenParams would read a null atlas).
+    if (!mIfd || mIfdTotalProbes == 0u || mVctCascades.empty()) return;
     const VctCascade &c0 = mVctCascades[0];
     if (!c0.voxelizer || !c0.lighting) return;
     JAH_TRY {
@@ -5012,6 +5010,14 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
                            std::fabs(origin.x - mIfdVolumeOrigin.x) > tol ||
                            std::fabs(origin.y - mIfdVolumeOrigin.y) > tol ||
                            std::fabs(origin.z - mIfdVolumeOrigin.z) > tol;
+        const bool raster = mIfdSource == GiSource::Raster;
+        // A RASTER-FED field with a PAUSED budget cannot re-sweep, so moving it
+        // would show the old place's irradiance at the new placement for as
+        // long as the budget stays at 0 — the wrong-place picture this
+        // function refuses for the voxel source. It keeps its old placement
+        // (still correct where it is) and follows on the frame the budget
+        // returns, because `moved` is re-derived every call.
+        if (moved && raster && !mIfdProbesPerFrame) return;
         if (moved) {
             mIfd->setFieldVolume(origin, size);
             mIfdVolumeOrigin = origin;
@@ -5029,7 +5035,6 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         mIfd->reset();
         mIfdProbesDone   = 0u;
         mIfdRigEpochSeen = mRigPoseEpoch;
-        const bool raster = mIfdSource == GiSource::Raster;
         // ...and a PAUSED budget (updateBudget 0) converges inline for the same
         // reason the light path does: nothing would ever spend the counter down,
         // so a reset there would freeze the field half-updated for ever.
