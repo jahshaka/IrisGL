@@ -1520,8 +1520,6 @@ bool OgreScene::rayTracingResolved() const {
     return mEngine->rayTracing() && mEngine->rayQueryAvailable();
 }
 
-}}}  // namespace jahshaka::engine::detail
-
 void OgreScene::setRayTracing(RayTracingMode mode) {
     const bool wasOn = mRayTracing != RayTracingMode::Off;
     mRayTracing = mode;
@@ -1529,3 +1527,5 @@ void OgreScene::setRayTracing(RayTracingMode mode) {
     // scene holds are released now, and updateRayQuery skips it from here.
     if (wasOn && mode == RayTracingMode::Off) forgetRayQuery();
 }
+
+}}}  // namespace jahshaka::engine::detail
