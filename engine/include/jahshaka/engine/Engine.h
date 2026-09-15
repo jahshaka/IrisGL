@@ -1423,6 +1423,39 @@ public:
     /// Draws every enabled View once. The host owns the loop and calls this.
     virtual void renderOneFrame() = 0;
 
+    /// ADVANCES THE RENDERER'S RESOURCE BOOKKEEPING WITHOUT DRAWING ANYTHING
+    /// (lane OPEN-FRAMES-1, 2026-09-15).
+    ///
+    /// A FRAME IS NOT ONLY PIXELS. Every mesh upload, every texture and every
+    /// buffer this engine frees is handed back through per-frame machinery that
+    /// only a frame turns: the texture manager's worker command buffer and its
+    /// staging recycle, and the buffer manager's frame counter, which is what
+    /// releases the blocks a destroyed mesh left behind. The host's render tick
+    /// is the only thing that calls it.
+    ///
+    /// SO A HOST THAT DOES GPU WORK WITHOUT RENDERING IS ACCUMULATING IT. An
+    /// install that runs over many event-loop turns — Studio's threaded project
+    /// open — can upload a whole world and destroy the previous one while a
+    /// chain of posted events starves the render timer, and NOTHING advances
+    /// until the backend's own emergency threshold trips inside an allocation.
+    /// (Measured by the diagnosis: 33 crashes in 59 runs of a scripted open
+    /// that renders no frame, 0 in 24 with one frame per turn; by the lane on
+    /// its own build: 9/12 base, 6/12 with THIS advance alone, 0/12 with a
+    /// frame per slice — so the advance is the primitive, the frame the cure.)
+    /// NOTE: the backend commits only every SECOND bare call (see OgreEngine.cpp).
+    ///
+    /// THIS IS THAT ADVANCE, AND NOTHING ELSE. It updates no scene graph,
+    /// culls nothing, submits no draw and presents no window; it does not wait
+    /// for a texture to finish streaming (`waitForTextureLoads` is that call).
+    /// It is what the frame does with the resources and none of what the frame
+    /// does with the picture, so it is safe at any point a frame would be safe
+    /// and costs microseconds when there is nothing outstanding.
+    ///
+    /// Call it at the boundaries of work that allocates or frees GPU
+    /// resources outside the render loop. A no-op before the render system
+    /// exists (a headless engine, or between Root and initialise).
+    virtual void advanceResources() = 0;
+
     /// RESOLVES ONE SCENE'S GRAPH WITHOUT DRAWING ANYTHING — transforms,
     /// skeletal animations, tag points, bounds and the light list, exactly the
     /// pass `renderOneFrame` runs for the scenes it draws.

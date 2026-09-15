@@ -4989,6 +4989,7 @@ public:
 
     void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) override;
     void renderOneFrame() override;
+    void advanceResources() override;
     bool updateScene(Scene *scene) override;
     bool hasEnabledViews() const override;
     void listViews(std::vector<View *> &out) const override;
@@ -5443,6 +5444,8 @@ private:
     /// only way to prove the give-up path, because the real trigger kills a
     /// decode worker before the main thread can time anything.
     bool            mTextureWaitFault = false;
+    /// How many times advanceResources() has run (RenderStats::resourceAdvances).
+    unsigned long long mResourceAdvances = 0ull;
 
     /// Drains the texture streaming queues, bounded. Returns true when the
     /// queues really did empty; false when the no-progress budget expired, in

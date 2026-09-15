@@ -317,6 +317,18 @@ void OgreEngine::destroyScene(Scene *scene) {
         if (it->get() != scene) continue;
         for (auto &v : mViews)
             if (v->scene() == scene) v->detachScene();
+        // THE BELT ON THE TEARDOWN (lane OPEN-FRAMES-1). Destroying a scene
+        // frees every mesh, texture and buffer it owned, and each of those
+        // goes onto the backend's delayed-release lists — which only
+        // advanceResources()/a frame drains. A host that closes a world and
+        // opens the next one without rendering in between would otherwise hand
+        // the whole previous world to those lists in one go.
+        //
+        // ONCE BEFORE, so the lists start this teardown empty, and once AFTER
+        // (below, past the erase) so what the teardown just freed is submitted
+        // and recycled rather than waiting for a frame that may not come.
+        // Cheap on a healthy process: a scene destroy is not a hot path.
+        advanceResources();
         (*it)->destroy();
         const bool releasedPcc = (*it)->mReleasedPccOnDestroy;
         mScenes.erase(it);
@@ -324,6 +336,7 @@ void OgreEngine::destroyScene(Scene *scene) {
         // REMAINING scene bind its own sky cube again (reflectionTexForDatablocks'
         // note). After the erase: the walk must not see the corpse.
         if (releasedPcc) reapplyReflectionsAllScenes();
+        advanceResources();   // see the note above the first call
         return;
     }
     mLastError = "destroyScene: unknown Scene";
@@ -979,6 +992,75 @@ void OgreEngine::renderOneFrame() {
         monitor::gMonitor->endFrame(mUpdatedScenes);
 }
 
+// THE RESOURCE HALF OF A FRAME, ON ITS OWN (lane OPEN-FRAMES-1, 2026-09-15).
+//
+// WHAT A FRAME DOES THAT NOTHING ELSE DOES. Inside
+// `CompositorManager2::_updateImplementation` (OgreCompositorManager2.cpp:806),
+// after every workspace has been recorded and before the final swap, upstream
+// calls `RenderSystem::_update()` — and that call is two lines
+// (OgreRenderSystem.cpp:1325-1333):
+//
+//     mTextureGpuManager->_update( false );   // the worker's command buffer,
+//                                             // the staging-texture recycle
+//     mVaoManager->_update();                 // the frame counter, and with it
+//                                             // the delayed-block release
+//
+// `VulkanVaoManager::_update` is where a destroyed mesh's VBO blocks are
+// actually handed back (`flushGpuDelayedBlocks`, one frame after they were
+// freed) and where zero-ref staging buffers, used semaphores and delayed
+// destroys retire. Nothing else in the process calls it. So a host that
+// uploads and destroys GPU resources WITHOUT rendering — Studio's threaded
+// project open, whose install slices each take one event-loop turn while a
+// posted-event chain starves the render timer — accumulates every one of those
+// blocks until `VulkanVaoManager::allocateVbo` notices it is holding more than
+// `mDelayedBlocksFlushThreshold` (512 MB) and force-flushes from INSIDE the
+// allocation (OgreVulkanVaoManager.cpp:965). THAT FLUSH IS A SYMPTOM, NOT THE
+// FAULT (the lane's own measurement: it fires once in every CLEAN run too);
+// the corrupting write is somewhere in or under Ogre, still unnamed, and a
+// frame between the slices masks it — see the numbers on the shell side.
+//
+// THIS IS EXACTLY THAT CALL AND NOTHING MORE. No scene graph update, no cull,
+// no draw, no present, and no streaming WAIT (`waitForTextureLoads` is the
+// call that blocks; this one must not, because it runs between the slices of
+// an install that has to stay responsive).
+//
+// CALLING IT OUTSIDE A FRAME IS THE PIN'S TOLERATED SHAPE (its issue #433),
+// not its documented practice — the two upstream offline capture paths one
+// might cite (OgreParallaxCorrectedCubemapAuto.cpp:385-388,
+// OgreIrradianceFieldRaster.cpp:284-288) complete the bracket with
+// `_endFrameOnce()` every time. AND IT COMMITS ONLY EVERY SECOND CALL:
+// `VulkanVaoManager::_update` (OgreVulkanVaoManager.cpp:2041-2070) issues the
+// `commitAndNextCommandBuffer( NewFrameIdx )` only when the previous _update was
+// not followed by a commit, so one bare call after a normal frame ARMS and the
+// next one advances the frame index and releases the delayed blocks — a
+// one-call lag. destroyScene's pair (before and after the erase) works because
+// it is a pair. The same bare `vao->_update()` has run inside the texture drain
+// since 2026-09-08.
+//
+// WHAT IS DELIBERATELY NOT HERE: `_beginFrameOnce()` / `_endFrameOnce()`. Those
+// are the frame's brackets — `_endFrameOnce` commits with
+// `SubmissionType::EndFrameAndSwap` and presents whatever windows were acquired
+// — and the pin warns in as many words when they are used without an `_update`
+// between them (`_notifyNewCommandBuffer`, OgreVulkanVaoManager.cpp:2186-2195).
+// The advance needs neither: `_update` alone both recycles and, from the second
+// consecutive call on, submits.
+void OgreEngine::advanceResources() {
+    if (!mRoot) return;
+    JAH_TRY {
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        // A NULL render system is a headless boot (EngineConfig::headless) or
+        // the window between Root and initialise: nothing has been allocated
+        // through a VaoManager, so there is nothing to advance.
+        if (!rs || !rs->getVaoManager()) return;
+        // COUNTED BEFORE THE CALL, on purpose: the count answers "was the
+        // renderer asked to advance?", which is the question a host's suite
+        // has (an advance that threw is a failure to report, not an advance
+        // that never happened).
+        ++mResourceAdvances;
+        rs->_update();
+    } JAH_CATCH(mLastError, );
+}
+
 bool OgreEngine::updateScene(Scene *scene) {
     if (!mRoot || !scene) { mLastError = "updateScene: no engine or no scene"; return false; }
     // Ownership check, not politeness: a Scene* from a destroyed engine, or a
@@ -1330,6 +1412,10 @@ ShaderCacheStats OgreEngine::shaderCacheStats() const {
 
 bool OgreEngine::renderStats(RenderStats &out) const {
     out = RenderStats();
+    // BEFORE the early return: the advance counter is the engine's own and is
+    // meaningful with no render system at all (it reads 0). A host asking
+    // "did the resource bookkeeping move?" must get an answer.
+    out.resourceAdvances = mResourceAdvances;
     if (!mRoot) return false;
     JAH_TRY {
         // ---- timing. Already live: Root::renderOneFrame samples FrameStats

@@ -2966,6 +2966,16 @@ struct RenderStats {
     unsigned           forwardPlusLights = 0;
     unsigned           forwardPlusBudget = 0;
     unsigned           forwardPlusOverBudget = 0;
+
+    /// HOW MANY TIMES `Engine::advanceResources()` HAS RUN in this process
+    /// (lane OPEN-FRAMES-1). Monotonic, never reset, and reported here because
+    /// the question it answers belongs with the frame counters: "did the
+    /// renderer's resource bookkeeping move while nothing was being drawn?"
+    ///
+    /// Only differences mean anything. A host whose long install runs without
+    /// frames proves it is still recycling by watching this rise across the
+    /// install — which is exactly what `open.frames` asserts.
+    unsigned long long resourceAdvances = 0;
 };
 
 /// One SHADOW-MAP SLOT, as the renderer currently holds it
