@@ -142,16 +142,31 @@ const float kMirrorAlpha = 0.01;
 /// How many frames a glossy lobe warms up over before its answer is shown
 /// (rq_reflect.comp's kWarmupFrames).
 const float kWarmupFrames = 8.0;
-/// THE KERNEL'S REACH. radius = kFilterScale * sqrt(alpha), capped: at
-/// perceptual 0.3 that is 3 texels, at the 0.4 default cutoff it saturates. A
+/// THE KERNEL'S REACH. radius = kFilterScale * sqrt(alpha) = kFilterScale times
+/// the PERCEPTUAL roughness, capped at kMaxRadius — so it saturates at
+/// perceptual 0.30 and everything rougher than that shares the widest kernel. A
 /// 7x7 neighbourhood at the trace resolution is ~49 samples of one lobe, which
 /// is the variance reduction the temporal mean alone could only buy with
 /// half a second of lag.
 const float kFilterScale = 10.0;
 const int   kMaxRadius = 3;
-/// How fast a tap loses its vote with depth and with orientation. The depth
-/// term is RELATIVE so it is scale-free; the normal term is a cosine power.
-const float kDepthTolerance = 0.02;
+/// HOW FAR A TAP'S DEPTH MAY DEPART FROM THE PLANE THROUGH THE CENTRE, as a
+/// multiple of how far the surface itself moves over that many texels (third
+/// reader, item 4). The first form here was a flat 2 % of the distance, and it
+/// was underived and wrong in the one case the fixtures never showed: a floor
+/// seen from eye height at ten to twenty metres changes half a per cent to one
+/// per cent PER PIXEL, so a 2 % window admits at most two rows and the kernel
+/// collapses to a horizontal line — the filter silently stops filtering exactly
+/// where a glossy floor needs it most.
+///
+/// This is SVGF's form (Schied et al. 2017): the tap is compared against the
+/// depth the CENTRE'S OWN GRADIENT predicts for it, so a surface at any slope
+/// is flat in this measure and only a real discontinuity — a silhouette — is
+/// rejected. Three of the predicted change, plus a floor for a face-on plane
+/// whose gradient is zero and whose only spread is the depth buffer's own
+/// precision.
+const float kDepthSigma = 3.0;
+const float kDepthFloorRel = 0.002;
 const float kNormalPower = 32.0;
 
 bool finite1( float x ) { return ( floatBitsToUint( x ) & 0x7FFFFFFFu ) < 0x7F800000u; }
@@ -195,6 +210,15 @@ void main()
 	if( roughness > roughGate + feather )
 		return;
 
+	// WRITTEN THIS FRAME? THE DISTANCE IS THE FLAG (third reader, item 1). The
+	// two history buffers PING-PONG, so `historyCur` at a texel the trace
+	// declined this frame still holds the value from TWO frames ago — with a
+	// live count — and compositing it would silently reverse the one thing the
+	// decline is for: handing that pixel back to the probe. `historyDistCur` is
+	// zeroed by every decline and written by every answer, so it is exactly the
+	// "this texel has an answer this frame" bit, and it costs one r32 load.
+	if( imageLoad( historyDistCur, tc ).x <= 0.0 )
+		return;
 	const vec4 centre = imageLoad( historyCur, tc );
 	if( centre.w <= 0.0 )
 		return;						// this texel has no answer to filter or composite
@@ -205,12 +229,44 @@ void main()
 	// ---- THE FILTER ---------------------------------------------------------
 	// A MIRROR SKIPS IT ENTIRELY, and not as an optimisation: blurring a mirror
 	// destroys a correct image to remove a variance it does not have.
+	// THE REACH IS AN ANGLE, SO IT IS A COUNT OF SCREEN PIXELS — AND A TRACE
+	// TEXEL IS NOT ONE (round D). The kernel exists to span the lobe's own
+	// angular width, and at half resolution one trace texel already covers two
+	// screen pixels, so the same angle is HALF as many texels. Ignoring that
+	// made the half-resolution row blur twice as far as the full-resolution one
+	// for four times the relative cost — 0.222 ms against a 0.2 ms bar on the
+	// saturated fixture, while full-res sat at 0.634 against 0.8.
+	const float texelsPerPixel = max( float( scale.x ), 1.0 );
 	const int radius = int( min( float( kMaxRadius ),
-								 floor( kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) ) ) );
+								 floor( kFilterScale * sqrt( max( lobeAlpha, 0.0 ) ) /
+										texelsPerPixel ) ) );
 	if( radius > 0 && lobeAlpha > kMirrorAlpha )
 	{
 		const float centreDist = viewDistance( rawDepth );
 		const vec3 centreN = normalize( texture( gBufNormals, uv ).xyz * 2.0 - 1.0 );
+		// THE DEPTH GRADIENT, per trace texel, by central difference. Four
+		// depth taps once per pixel — not per tap — and they are what makes the
+		// kernel slope-aware. A tap off the edge of the buffer contributes a
+		// one-sided difference, which is what `clamp` below gives for free.
+		vec2 grad = vec2( 0.0 );
+		{
+			const ivec2 lim = traceRes - ivec2( 1 );
+			const ivec2 xr = clamp( tc + ivec2( 1, 0 ), ivec2( 0 ), lim );
+			const ivec2 xl = clamp( tc - ivec2( 1, 0 ), ivec2( 0 ), lim );
+			const ivec2 yu = clamp( tc + ivec2( 0, 1 ), ivec2( 0 ), lim );
+			const ivec2 yd = clamp( tc - ivec2( 0, 1 ), ivec2( 0 ), lim );
+			const float dxr = texture( sceneDepth, traceUv( xr, scale, fullRes ) ).x;
+			const float dxl = texture( sceneDepth, traceUv( xl, scale, fullRes ) ).x;
+			const float dyu = texture( sceneDepth, traceUv( yu, scale, fullRes ) ).x;
+			const float dyd = texture( sceneDepth, traceUv( yd, scale, fullRes ) ).x;
+			const float sx = float( max( xr.x - xl.x, 1 ) ), sy = float( max( yu.y - yd.y, 1 ) );
+			// A neighbour that drew nothing contributes no gradient rather than
+			// a gradient to the far plane.
+			if( dxr > 0.0 && dxr < 1.0 && dxl > 0.0 && dxl < 1.0 )
+				grad.x = ( viewDistance( dxr ) - viewDistance( dxl ) ) / sx;
+			if( dyu > 0.0 && dyu < 1.0 && dyd > 0.0 && dyd < 1.0 )
+				grad.y = ( viewDistance( dyu ) - viewDistance( dyd ) ) / sy;
+		}
 		vec3  sum = mean;
 		float sumW = 1.0;
 		float sumCount = count;
@@ -223,6 +279,13 @@ void main()
 				const ivec2 t = tc + ivec2( dx, dy );
 				if( any( lessThan( t, ivec2( 0 ) ) ) || any( greaterThanEqual( t, traceRes ) ) )
 					continue;
+				// The SAME flag for a tap, and for a sharper reason: without it
+				// a neighbour that was traced before a dial drag took it above
+				// the cutoff is averaged into this pixel FOR EVER, because
+				// nothing ever writes over it again.
+				const float tapDist = imageLoad( historyDistCur, t ).x;
+				if( tapDist <= 0.0 )
+					continue;
 				const vec4 h = imageLoad( historyCur, t );
 				if( h.w <= 0.0 || !finite3( h.xyz ) )
 					continue;
@@ -230,11 +293,16 @@ void main()
 				const float td = texture( sceneDepth, tuv ).x;
 				if( td <= 0.0 || td >= 1.0 )
 					continue;
-				// DEPTH: relative, so the tolerance means the same thing at one
-				// metre and at one kilometre.
+				// DEPTH: against the plane the centre's own gradient predicts,
+				// so a floor at a grazing angle is FLAT in this measure and only
+				// a silhouette is rejected.
 				const float tDist = viewDistance( td );
-				const float dRel = abs( tDist - centreDist ) / max( centreDist, 1e-3 );
-				if( dRel > kDepthTolerance )
+				const vec2  d2 = vec2( dx, dy );
+				const float predicted = centreDist + dot( grad, d2 );
+				const float tol = kDepthSigma * ( abs( dot( grad, d2 ) ) +
+												  kDepthFloorRel * centreDist );
+				const float dz = abs( tDist - predicted );
+				if( dz > tol )
 					continue;
 				// ORIENTATION: two texels that face differently reflect
 				// differently, however close they are.
@@ -243,8 +311,7 @@ void main()
 				// SPATIAL: a plain tent over the kernel, which is what an
 				// à-trous step of 1 is at this radius.
 				const float sw = max( 0.0, 1.0 - length( vec2( dx, dy ) ) / float( radius + 1 ) );
-				const float w = sw * pow( ndot, kNormalPower ) *
-								( 1.0 - dRel / kDepthTolerance );
+				const float w = sw * pow( ndot, kNormalPower ) * ( 1.0 - dz / tol );
 				if( w <= 0.0 )
 					continue;
 				sum += h.xyz * w;
@@ -309,7 +376,10 @@ void main()
 			// lobe. A live viewport passes it within a few frames and is
 			// unaffected; a two-frame view never reaches it on a glossy
 			// surface, which is the point.
-			const float warm = max( 1.0 - smoothstep( 0.0, kMirrorAlpha, lobeAlpha ),
+			// FROM THE PACKING FLOOR (third reader, item 3): 0.001 is the
+			// sharpest alpha the G-buffer can hold, so it IS a mirror and must
+			// warm up instantly rather than to 97.2 %.
+			const float warm = max( 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ),
 									min( count * ( 1.0 / kWarmupFrames ), 1.0 ) );
 			gate *= warm;
 			if( gate <= 0.0 )

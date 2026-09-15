@@ -422,6 +422,16 @@ void main()
 	if( dot( L, worldN ) <= 0.0 )
 		L = reflect( -V, worldN );		// the lobe left the surface: take the mirror
 
+	// THE REPROJECTED HISTORY IS READ BEFORE THE RAY IS TRACED, because a
+	// sample this frame cannot shade must not THROW IT AWAY (third reader,
+	// item 2). A ray that finds geometry the voxels do not reach is a failure
+	// of the CACHE, not evidence about the surface: storing a zero distance
+	// there makes the next frame's reprojection reject, which resets the count
+	// to 1, discards thirty frames of integral, and — through the warm-up —
+	// throttles the ray to an eighth for eight frames afterwards. A glossy lobe
+	// grazing the voxel volume's edge would never converge at all.
+	const vec4 prev = historyAt( world, traceRes );
+
 	// THE RAY. The origin is lifted off its own surface along the NORMAL rather
 	// than along the ray, so a grazing reflection cannot re-enter the surface it
 	// started on; tMin carries the same bias again for the same reason.
@@ -447,7 +457,14 @@ void main()
 		// texture, by writing nothing at all.
 		if( !ok )
 		{
-			imageStore( historyDistCur, tc, vec4( 0.0 ) );
+			// A HIT THE CACHE CANNOT SHADE IS NOT EVIDENCE ABOUT THIS PIXEL.
+			// The history is carried through UNCHANGED — same radiance, same
+			// count, and a live distance so the next frame's reprojection still
+			// finds it. A texel that has never had an answer (prev.w == 0)
+			// writes a zero distance and the filter skips it this frame, which
+			// is the honest "hand it back to the probe".
+			imageStore( historyCur, tc, prev );
+			imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, 0.0, 0.0, 0.0 ) );
 			return;
 		}
 	}
@@ -458,7 +475,14 @@ void main()
 	}
 	if( !finite3( traced ) )
 	{
-		imageStore( historyDistCur, tc, vec4( 0.0 ) );
+		// A HIT THE CACHE CANNOT SHADE IS NOT EVIDENCE ABOUT THIS PIXEL.
+		// The history is carried through UNCHANGED — same radiance, same
+		// count, and a live distance so the next frame's reprojection still
+		// finds it. A texel that has never had an answer (prev.w == 0)
+		// writes a zero distance and the filter skips it this frame, which
+		// is the honest "hand it back to the probe".
+		imageStore( historyCur, tc, prev );
+		imageStore( historyDistCur, tc, vec4( prev.w > 0.0 ? dist : 0.0, 0.0, 0.0, 0.0 ) );
 		return;
 	}
 	traced = clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) );
@@ -467,7 +491,6 @@ void main()
 	// which is what converges fastest — with a floor so it keeps following a
 	// scene that changes. A mirror (alpha at the clamp) converges on the first
 	// frame anyway: every sample is the same ray.
-	const vec4 prev = historyAt( world, traceRes );
 	const float n = min( prev.w, 1.0 / max( p.knobs2.w, 1e-3 ) );
 	float blend = prev.w > 0.0 ? max( 1.0 / ( n + 1.0 ), p.knobs2.w ) : 1.0;
 	// THE MEAN IS FOR VARIANCE, AND A MIRROR HAS NONE (second reader, H1). The
@@ -487,12 +510,13 @@ void main()
 	// reflected lobe's half-width (~2*alpha) first exceeds a pixel of a 1080p
 	// frame at a typical field of view.
 	const float kMirrorAlpha = 0.01;
-	/// HOW MANY FRAMES A GLOSSY LOBE TAKES TO BE WORTH SHOWING. Eight is where
-	/// the running mean's standard error has fallen by ~2.8x, which on the
-	/// fixture is the point at which the frame-to-frame movement drops below
-	/// the eye's threshold on a reflection.
-	const float kWarmupFrames = 8.0;
-	blend = max( blend, 1.0 - smoothstep( 0.0, kMirrorAlpha, lobeAlpha ) );
+	// FROM THE PACKING FLOOR, not from zero (third reader, item 3). The
+	// G-buffer cannot hold an alpha below 0.001 — ogre-patch 0043 packs over
+	// [0.001, 1] — so 0.001 IS a mirror, and a ramp starting at 0 gives the
+	// sharpest surface this renderer can express a blend of 0.972 rather than
+	// 1: a mirror in a two-frame view would show 2.8 % probe, and a
+	// perceptual-0.08 surface 30 % of it on its first frame.
+	blend = max( blend, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
 	const vec3 mean = mix( prev.xyz, traced, blend );
 	const float count = min( prev.w + 1.0, 4096.0 );
 	imageStore( historyCur, tc, vec4( mean, count ) );
