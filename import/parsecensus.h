@@ -49,20 +49,31 @@ struct Counts
     double mainThreadMs     = 0.0;
     /// Main-thread parses of a QT RESOURCE (":/..." / "qrc:/..."), counted
     /// apart because they are a different animal: a built-in primitive is a
-    /// few kilobytes compiled into the binary, it is parsed ONCE per process
-    /// (iris::Mesh::loadMesh caches by path), and no prewarm can hoist it
-    /// because every caller asks for it by name. A project's model file is
-    /// arbitrary content on disk and is the parse this census exists for.
+    /// few kilobytes compiled into the binary, and no prewarm can hoist it
+    /// because every caller asks for it by name.
+    ///
+    /// NOT "once per process" unless somebody PINS it: iris::Mesh's load cache
+    /// holds WEAK references by design (a cache that kept every imported model
+    /// alive would be a leak with a nice name), so a world that closes drops
+    /// its primitives and the next open parses them again — measured at 1-4
+    /// parses and 17-95 ms per open before iris::Mesh::pinLoadPaths, which the
+    /// shell uses to hold exactly the shipped primitives and nothing else.
     int    mainThreadResourceParses = 0;
     double mainThreadResourceMs     = 0.0;
     int    workerParses     = 0;   ///< parses that ran on any other thread
     double workerMs         = 0.0;
-    /// Bake reads ASKED FOR, and how they went: a hit is a model that came
-    /// out of MESH_BAKE (a few memcpys), a miss is a source whose content has
-    /// no usable bake yet — which is exactly when a parse has to happen.
-    /// Counted wherever a bake is asked for FOR A SOURCE FILE: the prewarm
-    /// worker and Studio's MeshBakeStore both report here, so one number
-    /// covers both halves of an open.
+    /// Bake LOOKUPS, and how they went: a hit is a model that came out of
+    /// MESH_BAKE (a few memcpys), a miss is a lookup that found no usable bake
+    /// — which is exactly when a parse has to happen. Counted wherever a bake
+    /// is asked for FOR A SOURCE FILE: the prewarm worker and Studio's
+    /// MeshBakeStore both report here, so one number covers both halves of an
+    /// open.
+    ///
+    /// THEY ARE LOOKUPS, NOT MODELS, and the distinction is not pedantry: one
+    /// bake-less model is asked for TWICE on a cold open (the worker's plan
+    /// item, then MeshBakeStore::load when the reader reaches the same file),
+    /// so it shows as bakeMisses 2. Read them as "how often the open had to
+    /// fall back to a parse", never as a model count.
     int bakeHits   = 0;
     int bakeMisses = 0;
     /// The last FILE parsed on the main thread — the one a failing assertion

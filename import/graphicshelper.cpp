@@ -31,8 +31,10 @@ namespace iris
 QList<iris::MeshPtr> GraphicsHelper::loadAllMeshesFromFile(QString filePath)
 {
     Assimp::Importer importer;
-    ParseCensus::Record census(filePath);
-    const aiScene *scene = importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    const aiScene *scene = [&]() {
+        ParseCensus::Record census(filePath);
+        return importer.ReadFile(filePath.toStdString().c_str(), iris::ImportFlags::Canonical);
+    }();
     return loadAllMeshesFromAssimpScene(scene);
 }
 
