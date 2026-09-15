@@ -57,6 +57,15 @@ const AxisName kAxes[] = {
 
 // ---------------------------------------------------------------------------
 
+bool ImportTransform::wantsClip(const QString &name) const
+{
+    if (!clips) return false;
+    if (clipNames.isEmpty()) return true;
+    for (const QString &wanted : clipNames)
+        if (wanted.compare(name, Qt::CaseInsensitive) == 0) return true;
+    return false;
+}
+
 double ImportTransform::globalScaleFactor(double declared) const
 {
     if (!overridesUnit()) return scale;
@@ -366,6 +375,13 @@ ImportTransform ImportSettings::transform(double declaredUnitScale) const
         out.rotation = Quat();   // EXACTLY identity, not identity to 1e-7
 
     out.translation = Vec3(float(translate[0]), float(translate[1]), float(translate[2]));
+
+    // The TUNING half, carried on the same object because it is the same
+    // decision and it reaches the same two builders (importsettings.h).
+    out.skeleton = skeleton;
+    out.clips = clips;
+    out.clipNames = clipNames;
+    out.materials = materials == MaterialMode::Import;
     return out;
 }
 

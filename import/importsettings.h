@@ -60,9 +60,22 @@ For more information see the LICENSE file
 namespace iris
 {
 
-/// The RESOLVED geometric transform one parse applies — the form the choke
-/// point (readSceneFile) consumes. Default-constructed = identity: no scale,
-/// no rotation, no translation, the file's own unit declaration honoured.
+/// THE RESOLVED EFFECT OF AN ASSET'S IMPORT SETTINGS ON ONE PARSE — the form
+/// the choke point (readSceneFile) and the two builders that consume a parse
+/// (MeshBake::buildFromScene, MeshNode::loadAsSceneFragment) take.
+///
+/// It has two halves, and they are applied in different places, which is why
+/// they travel together: the GEOMETRY half (scale, rotation, origin) is handed
+/// to assimp and to the parsed scene's root node at READ time, and the TUNING
+/// half (§4.3 — skeleton, clips, materials) decides what is BUILT from that
+/// parse. Both are keyed into the bake hash, so a change to either produces a
+/// different bake rather than quietly replacing one.
+///
+/// Default-constructed = identity and everything built: no scale, no rotation,
+/// no translation, the file's own unit declaration honoured, the skeleton, all
+/// the clips and the materials imported. That is what a raw path with no
+/// library row behind it gets, and what every row imported before the import
+/// dialog carries.
 struct ImportTransform
 {
     /// The user's uniform scale (> 0). Composed with the unit terms below.
@@ -87,20 +100,62 @@ struct ImportTransform
     /// Metres, applied LAST (post scale, post rotation) at the same root node.
     Vec3 translation;
 
+    // ---- the TUNING half (§4.3): what to BUILD from the parse -------------
+    //
+    // These act on OUR products, never on assimp's flag word: the bake's
+    // producer key hashes ImportFlags::Canonical as a constant, so the parse
+    // is byte-for-byte the same parse whatever these say.
+
+    /// false: no skeleton is extracted and no bone index/weight vertex arrays
+    /// are built — a rigged file bakes as STATIC geometry.
+    bool skeleton = true;
+    /// false: no animation clip is carried at all.
+    bool clips = true;
+    /// Non-empty: only these clips, matched case-insensitively against the
+    /// names Mesh::extractAnimations produces (the names assets.metadata and
+    /// the clip list show).
+    QStringList clipNames;
+    /// false: no material data is read from the file — the fragment gets the
+    /// consumer's default material, and the bake records no material record.
+    bool materials = true;
+
+    /// True when `name` survives the clip filter.
+    bool wantsClip(const QString &name) const;
+
     bool hasRotation() const { return !rotation.isIdentity(); }
     bool hasTranslation() const
     {
         return translation.x() != 0.0f || translation.y() != 0.0f || translation.z() != 0.0f;
     }
     bool overridesUnit() const { return unitOverride > 0.0; }
+    bool buildsEverything() const
+    {
+        return skeleton && clips && clipNames.isEmpty() && materials;
+    }
     bool isIdentity() const
     {
-        return scale == 1.0 && !overridesUnit() && !hasRotation() && !hasTranslation();
+        return scale == 1.0 && !overridesUnit() && !hasRotation() && !hasTranslation()
+               && buildsEverything();
     }
 
     /// The number assimp's GLOBAL_SCALE_FACTOR gets, given what the file
     /// declares. `declared` <= 0 reads as 1 (a format that declares nothing).
     double globalScaleFactor(double declared) const;
+
+    /// THE FORM A SEPARATE CLIP FILE IS READ WITH (§10's second half): the
+    /// UNIFORM FACTOR only. A clip's position keys are in its own file's units
+    /// and have to land on a rig that was baked under the CHARACTER's settings,
+    /// so the rig's k applies — while its rotation and origin do NOT: those are
+    /// a transform of the character's root node, and a clip has no geometry for
+    /// them to move. Applying them would rotate a rig twice.
+    ImportTransform keysOnly() const
+    {
+        ImportTransform out;
+        out.scale = scale;
+        out.unitOverride = unitOverride;
+        out.declaredUnitScale = declaredUnitScale;
+        return out;
+    }
 };
 
 /// The import-settings RECORD: the JSON the asset carries, parsed.

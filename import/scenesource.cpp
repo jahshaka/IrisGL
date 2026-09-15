@@ -29,6 +29,7 @@ For more information see the LICENSE file
 #include <QFile>
 #include <QFileInfo>
 #include <QVector>
+#include <algorithm>
 #include <cmath>
 
 namespace iris
@@ -101,6 +102,23 @@ bool findMeshNodeChain(aiNode *node, unsigned meshIndex, QVector<aiNode *> &chai
 /// a non-uniform node scale shears them otherwise. Positions take the matrix
 /// itself. A singular (zero-scale) transform is left alone — folding it would
 /// destroy the geometry, and a degenerate node is the file's problem, not ours.
+///
+/// A MIRROR (negative determinant) ALSO REVERSES FACE WINDING. A node scale
+/// with an odd number of negative axes turns the mesh inside out, and while the
+/// transform sat on the NODE the renderer compensated (Ogre flips culling on a
+/// negative node scale, `mFlipCullingOnNegativeScale`); folded into the
+/// vertices there is no node left to notice, so the winding has to be reversed
+/// here. assimp's own pre-transform does exactly this
+/// (PretransformVertices.cpp:302-305 hands a mirrored mesh to
+/// FlipWindingOrderProcess). The bitangents are negated with it: handedness is
+/// part of the tangent FRAME, and the inverse transpose does not carry it.
+///
+/// THE WHOLE CHAIN root..mesh-node is zeroed, not just the mesh node. In a
+/// one-mesh scene that is the only geometry, but a file whose chain also
+/// carries a CAMERA or a LIGHT node would have those moved by it. We import
+/// neither from a model file (every consumer builds a MeshNode and nothing
+/// else), so nothing observes it today — recorded because a future importer
+/// that did read them would inherit a silent bug.
 void foldSingleMeshTransform(const aiScene *scene)
 {
     if (!scene || scene->mNumMeshes != 1 || !scene->mRootNode) return;
@@ -135,6 +153,23 @@ void foldSingleMeshTransform(const aiScene *scene)
         if (!anim) continue;
         foldVectors(anim->mVertices, anim->mNormals, anim->mTangents, anim->mBitangents,
                     anim->mNumVertices);
+    }
+
+    if (world.Determinant() < ai_real(0.0)) {
+        for (unsigned f = 0; f < mesh->mNumFaces; ++f) {
+            aiFace &face = mesh->mFaces[f];
+            for (unsigned i = 0; i < face.mNumIndices / 2; ++i)
+                std::swap(face.mIndices[i], face.mIndices[face.mNumIndices - 1 - i]);
+        }
+        const auto flipHandedness = [](aiVector3D *bitangents, unsigned count) {
+            if (!bitangents) return;
+            for (unsigned v = 0; v < count; ++v) bitangents[v] = -bitangents[v];
+        };
+        flipHandedness(mesh->mBitangents, mesh->mNumVertices);
+        for (unsigned a = 0; a < mesh->mNumAnimMeshes; ++a)
+            if (mesh->mAnimMeshes[a])
+                flipHandedness(mesh->mAnimMeshes[a]->mBitangents,
+                               mesh->mAnimMeshes[a]->mNumVertices);
     }
 
     for (aiNode *node : chain) node->mTransformation = aiMatrix4x4();

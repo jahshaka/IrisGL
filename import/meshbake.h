@@ -213,14 +213,20 @@ public:
     /// Build the bake from an ALREADY PARSED scene (the import side pays no
     /// second parse). `extractDir` is handed to MaterialHelper exactly as
     /// loadAsSceneFragment would.
+    /// `xf` is the asset's resolved import recipe (import/importsettings.h):
+    /// the GEOMETRY half was already applied when `source` was parsed, and the
+    /// TUNING half (skeleton / clips / materials) is applied HERE, to what is
+    /// built out of it.
     static Model buildFromScene(const SceneSource &source, const QString &filePath,
                                 const QString &fingerprint,
-                                const QString &extractDir = QString());
+                                const QString &extractDir = QString(),
+                                const ImportTransform &xf = ImportTransform());
 
     /// IrisGL-internal form (a complete aiScene needs assimp's headers).
     static Model buildFromScene(const aiScene *scene, const QString &filePath,
                                 const QString &fingerprint,
-                                const QString &extractDir = QString());
+                                const QString &extractDir = QString(),
+                                const ImportTransform &xf = ImportTransform());
 
     /// Parse `filePath` and bake it. Used by the lazy re-bake of an existing
     /// library, where no parse is in flight.

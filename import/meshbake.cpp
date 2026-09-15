@@ -893,13 +893,15 @@ void build(const MeshPtr &mesh)
 void MeshBake::buildLodChain(const MeshPtr &mesh) { lodchain::build(mesh); }
 
 MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QString &filePath,
-                                         const QString &fingerprint, const QString &extractDir)
+                                         const QString &fingerprint, const QString &extractDir,
+                                         const ImportTransform &xf)
 {
-    return buildFromScene(source.scene(), filePath, fingerprint, extractDir);
+    return buildFromScene(source.scene(), filePath, fingerprint, extractDir, xf);
 }
 
 MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &filePath,
-                                         const QString &fingerprint, const QString &extractDir)
+                                         const QString &fingerprint, const QString &extractDir,
+                                         const ImportTransform &xf)
 {
     Model model;
     if (!scene || scene->mNumMeshes == 0) return model;
@@ -913,8 +915,14 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
     const QString dir = QFileInfo(filePath).absoluteDir().absolutePath();
     for (unsigned i = 0; i < scene->mNumMeshes; ++i) {
         const aiMesh *m = scene->mMeshes[i];
-        auto mesh = MeshPtr(new Mesh(const_cast<aiMesh *>(m)));
-        if (m->HasBones()) mesh->setSkeleton(Mesh::extractSkeleton(m, scene));
+        // THE TUNING SWITCHES (import/importsettings.h §4.3). They act on what
+        // is BUILT, never on the parse: `skeleton:false` drops the skeleton AND
+        // the bone index/weight arrays, so a rigged file bakes as static
+        // geometry; the same two lines are what MeshNode::loadAsSceneFragment
+        // does, because the bake and the parse fallback have to agree node for
+        // node (tests/meshbake compares the two trees).
+        auto mesh = MeshPtr(new Mesh(const_cast<aiMesh *>(m), xf.skeleton));
+        if (m->HasBones() && xf.skeleton) mesh->setSkeleton(Mesh::extractSkeleton(m, scene));
         // ATOM stage 1: the LOD chain is a product of the bake, built here and
         // nowhere else. The fallback parse path (a library with no bake yet)
         // gets no chain — which is the same "no LOD" behaviour the tree has
@@ -929,7 +937,7 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
             continue;
         }
         MeshMaterialData data;
-        if (aiMatIndex < scene->mNumMaterials)
+        if (xf.materials && aiMatIndex < scene->mNumMaterials)
             MaterialHelper::extractMaterialData(scene, scene->mMaterials[aiMatIndex],
                                                 dir, data, extractDir, filePath);
         // TEXTURE REFERENCES ARE REDUCED TO BARE FILE NAMES, for two reasons.
@@ -973,6 +981,15 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
     }
 
     model.animations = Mesh::extractAnimations(scene, filePath);
+    // `clips:false` / `clips:[names]`: filtered AFTER extraction, on the names
+    // the rest of the app shows (extractAnimations uniquifies raw names, and a
+    // filter written against the raw ones would miss).
+    if (!xf.clips || !xf.clipNames.isEmpty()) {
+        QMap<QString, SkeletalAnimationPtr> kept;
+        for (auto it = model.animations.constBegin(); it != model.animations.constEnd(); ++it)
+            if (xf.wantsClip(it.key())) kept.insert(it.key(), it.value());
+        model.animations = kept;
+    }
 
     // Same shortcut condition as both loadAsSceneFragment overloads.
     model.singleMesh = scene->mNumMeshes == 1 && scene->mMeshes[0]->mNumBones == 0;
@@ -1012,7 +1029,7 @@ MeshBake::Model MeshBake::buildFromFile(const QString &filePath, const QString &
         irisLog("mesh bake: assimp could not read " + filePath);
         return Model();
     }
-    return buildFromScene(scene, filePath, fingerprint, extractDir);
+    return buildFromScene(scene, filePath, fingerprint, extractDir, xf);
 }
 
 // ---- serialize / deserialize ----------------------------------------------
