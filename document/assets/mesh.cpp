@@ -39,6 +39,9 @@ For more information see the LICENSE file
 #include "core/geometry/aabb.h"
 
 #include <functional>
+#include <QHash>
+#include <QMutex>
+#include <QWeakPointer>
 
 namespace iris
 {
@@ -245,8 +248,81 @@ bool Mesh::hasSkeletalAnimations()
     return skeletalAnimations.count() != 0;
 }
 
+namespace {
+
+// THE PARSE CACHE (ADD-1, 2026-09-15).
+//
+// THE MEASUREMENT: every `scene.addPrimitive` ran assimp over the primitive's
+// .obj again — 2 ms for a cube, 15 for a sphere, 16 for a teapot, per add, for
+// geometry that is a compiled-in resource and byte-identical every time. The
+// owner's 64-sphere script paid 15 ms of its per-add cost on nothing but
+// re-reading one file sixty-four times. And because the engine mirror keys its
+// engine meshes by the DOCUMENT Mesh pointer, sixty-four parses also meant
+// sixty-four v2 vertex buffers uploaded for one sphere.
+//
+// SHARING A MeshPtr BETWEEN NODES IS ALREADY THE MODEL, not a new idea: node
+// duplication has always handed the duplicate the same MeshPtr
+// (SceneNode::createDuplicate -> MeshNode::setMesh(getMesh())), and a Mesh is
+// immutable after construction — the importers fill one and nothing edits it
+// afterwards. The one piece of per-node state that lives on a mesh, the
+// SKELETON, is already CLONED per node by MeshNode::adoptSkeletonFromMesh
+// (GPU_SKINNING_SPEC §7), so two nodes of one rig cannot fight over a pose.
+// That is why this needs no copy-on-write: there is nothing to copy on, and the
+// one thing that would have needed it was solved before this cache existed.
+//
+// WEAK, NOT STRONG, references: the cache must not be what keeps a mesh alive.
+// A scene that drops its last sphere frees the geometry, and the next add
+// parses it again — correct, and no session-long growth from a user importing
+// a hundred models. A strong cache would be a leak with a nice name.
+QMutex &meshCacheMutex()
+{
+    static QMutex m;
+    return m;
+}
+
+QHash<QString, QWeakPointer<Mesh>> &meshCache()
+{
+    static QHash<QString, QWeakPointer<Mesh>> c;
+    return c;
+}
+
+MeshPtr cachedMesh(const QString &filePath)
+{
+    QMutexLocker lock(&meshCacheMutex());
+    const auto it = meshCache().constFind(filePath);
+    if (it == meshCache().constEnd()) return MeshPtr();
+    return it.value().lock();
+}
+
+/// Publishes a freshly parsed mesh, and answers with the one to USE: another
+/// thread may have parsed the same file meanwhile (imports run off the UI
+/// thread), and both copies are correct — the one already published wins so
+/// the sharing stays maximal.
+MeshPtr publishMesh(const QString &filePath, const MeshPtr &parsed)
+{
+    QMutexLocker lock(&meshCacheMutex());
+    auto &cache = meshCache();
+    const auto it = cache.constFind(filePath);
+    if (it != cache.constEnd()) {
+        if (MeshPtr hit = it.value().lock()) return hit;
+    }
+    // Expired entries hold nothing, but they are still keys; drop them here
+    // rather than growing a table of names for meshes nobody has any more.
+    for (auto e = cache.begin(); e != cache.end();) {
+        if (e.value().isNull()) e = cache.erase(e);
+        else ++e;
+    }
+    cache.insert(filePath, parsed.toWeakRef());
+    return parsed;
+}
+
+}   // namespace
+
 MeshPtr Mesh::loadMesh(QString filePath)
 {
+	// PARSED ONCE PER FILE, SHARED BY EVERY NODE THAT ASKS (see the cache above).
+	if (MeshPtr hit = cachedMesh(filePath)) return hit;
+
 	// legacy -- update TODO
 	Assimp::Importer importer;
 	const aiScene *scene;
@@ -286,7 +362,21 @@ MeshPtr Mesh::loadMesh(QString filePath)
 		meshObj->addSkeletalAnimation(animName, anims[animName]);
 	}
 
-	return MeshPtr(meshObj);
+	return publishMesh(filePath, MeshPtr(meshObj));
+}
+
+void Mesh::clearLoadCache()
+{
+    QMutexLocker lock(&meshCacheMutex());
+    meshCache().clear();
+}
+
+int Mesh::loadCacheSize()
+{
+    QMutexLocker lock(&meshCacheMutex());
+    int n = 0;
+    for (const auto &w : std::as_const(meshCache())) if (!w.isNull()) ++n;
+    return n;
 }
 
 SkeletonPtr Mesh::extractSkeleton(const aiMesh *mesh, const aiScene *scene)

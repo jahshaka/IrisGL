@@ -162,7 +162,20 @@ public:
     QMap<QString, SkeletalAnimationPtr> getSkeletalAnimations();
     bool hasSkeletalAnimations();
 
+    /// Loads (or ANSWERS FROM THE PARSE CACHE) the first mesh of a model file.
+    ///
+    /// Two nodes that name the same file get the SAME Mesh — the geometry is
+    /// immutable after construction and node duplication has always shared a
+    /// MeshPtr, so this is the model the document already had, applied to the
+    /// path that was re-parsing a primitive's .obj on every add (ADD-1). The
+    /// cache holds WEAK references: it never keeps a mesh alive, and a file
+    /// whose last node is gone is parsed again next time.
     static MeshPtr loadMesh(QString filePath);
+    /// Forgets every cached parse. For tests and for a tool that has just
+    /// rewritten a model file on disk; nothing in the editor needs it.
+    static void clearLoadCache();
+    /// How many parses the cache is currently able to answer from.
+    static int loadCacheSize();
     static SkeletonPtr extractSkeleton(const aiMesh* mesh, const aiScene* scene);
     static QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QString source = "");
 
