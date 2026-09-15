@@ -46,7 +46,7 @@
 // LAYOUT IS THE WHOLE GAME HERE. One pass buffer is shared by every material in
 // a pass; each shader declares its OWN view of it, and those views must agree
 // on every offset up to the last field a shader reads. FogHlmsListener writes
-// all 16 floats unconditionally, so the field ORDER below is fixed:
+// all 24 floats unconditionally, so the field ORDER below is fixed:
 // (While an irradiance field is bound the host SKIPS four floats before writing
 // any of this, because the renderer's own IrradianceField block under-reports
 // its size by exactly that much and its last float4 would otherwise be
@@ -59,6 +59,10 @@
 //                                          carry a generated piece)
 //   [12..15] the DDGI block                (declared only while an
 //                                          IrradianceField is bound)
+//   [16..19] the DDGI raster block         (   ditto   )
+//   [20..23] the sky's environment slot    (declared only by a pass that
+//                                          claimed the sky's extra texture
+//                                          slot -- ogre-patch 0048)
 // A material with a piece therefore has to declare PADDING for the fog fields
 // when the fog is off, or its clock would read the fog colour — and the same
 // rule one field further out: anything declaring jahIfd must first declare
@@ -75,7 +79,7 @@
 		float4 jahFogColour;	// rgb = fog colour (linear), w = height-layer density (0 = off)
 		float4 jahFogHeight;	// x = height falloff, y = reference world Y, z = camera world Y, w unused
 	@end
-	@property( jah_shader_clock || irradiance_field )
+	@property( jah_shader_clock || irradiance_field || jah_sky_env_probe )
 		@property( !hlms_fog )
 			float4 jahFogColourUnused;
 			float4 jahFogHeightUnused;
@@ -92,6 +96,40 @@
 								// vector (camera far x probes per unit, calibrated),
 								// w = 1 while the probes are raster-fed, 0 for voxel
 	@end
+	@property( jah_sky_env_probe )
+		@property( !irradiance_field )
+			float4 jahIfdUnused;
+			float4 jahIfd2Unused;
+		@end
+		float4 jahSky;			// ogre-patch 0048 (lane SKY-FALLBACK-1): x = the sky
+								// cube's gain (the Sky Light's), y = that cube's own
+								// mip count for the roughness-to-LOD map, zw reserved.
+								// The gain cannot ride ambientUpperHemi.w: that pass
+								// scale is pinned to 1.0 while a probe grid is bound,
+								// because it also scales the probe samples.
+	@end
+@end
+
+// THE SKY'S OWN ENVIRONMENT TEXTURE (ogre-patch 0048, lane SKY-FALLBACK-1).
+//
+// Declared here rather than in upstream's PixelShader_ps.glsl because upstream
+// offers the hook: custom_ps_uniformDeclaration sits immediately after the
+// pass/material struct declarations and before every texture of upstream's own.
+// The register number is whatever HlmsPbs reserved for the listener's one extra
+// pass texture, published as a property by
+// FogHlmsListener::propertiesMergedPreGenerationStep, and the sampler shares
+// the index (CbTexture binds both at one unit).
+//
+// It exists only in a pass that claimed the slot, which is only a colour pass
+// of a scene whose probe grid has taken the env-probe slot. Every other shader
+// in the tree is byte-identical to a build without this file's block.
+@property( jah_sky_env_probe )
+@piece( custom_ps_uniformDeclaration )
+	vulkan_layout( ogre_t@value(jahSkyEnvProbe) ) midf_tex uniform textureCube jahSkyEnvProbe;
+	@property( syntax == glslvk )
+		layout( ogre_s@value(jahSkyEnvProbe) ) uniform sampler jahSkyEnvSampler;
+	@end
+@end
 @end
 
 @property( hlms_fog )

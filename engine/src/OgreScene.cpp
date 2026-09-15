@@ -251,6 +251,22 @@ void OgreScene::setEnvironmentLightScale(float gain) {
 // reflecting its own walls. So the binding change re-pushes, through the one
 // funnel that already runs on every PCC transition.
 void OgreScene::refreshEnvmapScale() {
+    // THE SKY'S PASS-LEVEL SLOT RIDES THE SAME FUNNEL (lane SKY-FALLBACK-1).
+    // This function is the one place every edge that can move the sky's
+    // environment passes through: a sky rebuild and a PCC transition reach it
+    // via applyReflectionToAllImpl, and a Sky Light gain change between two
+    // non-zero values reaches it directly (setEnvironmentLightScale's else
+    // branch). The listener holds the cube for the passes where the env-probe
+    // slot is the probe array's — see FogHlmsListener::SkyEnvState.
+    {
+        FogHlmsListener::SkyEnvState sky;
+        if (mReflectionTex && mEnvLightScale > 0.0f) {
+            sky.cube = mReflectionTex;
+            sky.gain = mEnvLightScale;
+            sky.numMipmaps = float(mReflectionTex->getNumMipmaps());
+        }
+        FogHlmsListener::setSkyEnv(mSceneMgr, sky);
+    }
     // Re-push what we already hold rather than waiting for the next ambient
     // edit. setAmbientSh's own change guard compares the COEFFICIENTS, which
     // have not moved, so this costs no probe re-capture and no raster-field
