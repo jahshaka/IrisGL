@@ -869,6 +869,8 @@ void build(const MeshPtr &mesh)
 
 }   // namespace
 
+void MeshBake::buildLodChain(const MeshPtr &mesh) { lodchain::build(mesh); }
+
 MeshBake::Model MeshBake::buildFromScene(const SceneSource &source, const QString &filePath,
                                          const QString &fingerprint, const QString &extractDir)
 {
@@ -896,7 +898,7 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
         // nowhere else. The fallback parse path (a library with no bake yet)
         // gets no chain — which is the same "no LOD" behaviour the tree has
         // today, and one more reason a bake is worth having.
-        lodchain::build(mesh);
+        MeshBake::buildLodChain(mesh);
         model.meshes.append(mesh);
 
         const unsigned aiMatIndex = m->mMaterialIndex;

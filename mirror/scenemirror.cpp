@@ -6193,6 +6193,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         if (budget > 0 && engine->shadowMapBudget() != budget)
             engine->setShadowMapBudget(budget);
     }
+    // ATOM stage 1: the LOD dial. A plain push of the document value — the
+    // engine re-derives every mesh's switch distances in place when it changes,
+    // so this costs nothing on the frames it does not move.
+    if (mTarget && mTarget->lodBias() != mSource->lodBias)
+        mTarget->setLodBias(mSource->lodBias);
     // AMBIENT IS THE SKY LIGHT, AND NOTHING ELSE (SKY_LIGHT_SPEC.md §2, owner
     // decision D14). There is one path and one seam: the sky's own
     // cosine-convolved integral, scaled by the scene's Sky Light — its

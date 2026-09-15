@@ -144,10 +144,27 @@ namespace {
 ///
 /// Returns null when there is nothing to gain (the caller then aliases the main
 /// VAO, which is Ogre's "useSameVaos" fallback).
-Ogre::VertexArrayObject *buildShadowVao(Ogre::VaoManager *vaoMgr, const MeshData &data,
-                                        const std::vector<float> &blendW, bool skinned) {
+/// The optimized shadow VAOs: a position-only (plus blend indices/weights)
+/// vertex buffer with duplicate vertices merged, and ONE VAO PER LOD LEVEL over
+/// it — `levels` is the same accepted level list the normal VAOs were built
+/// from, level 0 first. An EMPTY return means "no optimized form", and the
+/// caller aliases the normal VAOs for every level instead.
+///
+/// Why one per level rather than just level 0:
+/// SubMesh::destroyShadowMappingVaos tests only
+/// `mVao[VpNormal][0] == mVao[VpShadow][0]` to decide whether the shadow list
+/// is an ALIAS of the normal one. A MIXED list — an independent VAO at 0 and
+/// aliases above it — reads as independent, so it destroys the aliased entries,
+/// and the SubMesh destructor then destroys the same VAOs and their shared
+/// vertex buffer a second time: "Vertex Buffer has already been destroyed or
+/// doesn't belong to this VaoManager", thrown on the first mesh destroy after
+/// an import (measured 2026-09-15, by the suite that came with this feature).
+/// The pin's shape is all-aliased or all-independent; we give it one of the two.
+std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
+    Ogre::VaoManager *vaoMgr, const MeshData &data, const std::vector<float> &blendW,
+    bool skinned, const std::vector<const std::vector<unsigned> *> &levels) {
     const size_t nv = data.vertexCount(), ni = data.indices.size();
-    if (nv == 0 || ni == 0) return nullptr;
+    if (nv == 0 || ni == 0 || levels.empty()) return {};
 
     // Element ORDER matches Ogre's: POSITION, BLEND_INDICES, BLEND_WEIGHTS.
     Ogre::VertexElement2Vec decl;
@@ -199,7 +216,7 @@ Ogre::VertexArrayObject *buildShadowVao(Ogre::VaoManager *vaoMgr, const MeshData
 
     // Nothing merged AND nothing narrower to stream: only true when the mesh is
     // already position-only, which our layout never is — keep the guard anyway.
-    if (uniqueCount == 0) return nullptr;
+    if (uniqueCount == 0) return {};
 
     unsigned char *vertexData = reinterpret_cast<unsigned char *>(
         OGRE_MALLOC_SIMD(stride * uniqueCount, Ogre::MEMCATEGORY_GEOMETRY));
@@ -214,27 +231,34 @@ Ogre::VertexArrayObject *buildShadowVao(Ogre::VaoManager *vaoMgr, const MeshData
         // On failure the buffer never took ownership — free it and fall back to
         // the aliased VAO rather than losing the mesh.
         OGRE_FREE_SIMD(vertexData, Ogre::MEMCATEGORY_GEOMETRY);
-        return nullptr;
+        return {};
     }
 
-    // The index type follows the SHADOW vertex count, which can only shrink.
-    if (uniqueCount <= 65535u) {
-        Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(
-            OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * ni, Ogre::MEMCATEGORY_GEOMETRY));
-        for (size_t i = 0; i < ni; ++i) idx[i] = Ogre::uint16(remap[data.indices[i]]);
-        ibuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_16BIT, Ogre::uint32(ni),
-                                         Ogre::BT_IMMUTABLE, idx, true);
-    } else {
-        Ogre::uint32 *idx = reinterpret_cast<Ogre::uint32 *>(
-            OGRE_MALLOC_SIMD(sizeof(Ogre::uint32) * ni, Ogre::MEMCATEGORY_GEOMETRY));
-        for (size_t i = 0; i < ni; ++i) idx[i] = remap[data.indices[i]];
-        ibuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_32BIT, Ogre::uint32(ni),
-                                         Ogre::BT_IMMUTABLE, idx, true);
+    // The index type follows the SHADOW vertex count, which can only shrink —
+    // and it is the SAME for every level, or the levels would not share a
+    // vaoName and each would cost its own draw command in the shadow pass.
+    std::vector<Ogre::VertexArrayObject *> out;
+    Ogre::VertexBufferPackedVec shadowVbufs;
+    shadowVbufs.push_back(vbuf);
+    for (const std::vector<unsigned> *level : levels) {
+        const size_t count = level->size();
+        Ogre::IndexBufferPacked *ibuf = nullptr;
+        if (uniqueCount <= 65535u) {
+            Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(
+                OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * count, Ogre::MEMCATEGORY_GEOMETRY));
+            for (size_t i = 0; i < count; ++i) idx[i] = Ogre::uint16(remap[(*level)[i]]);
+            ibuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_16BIT, Ogre::uint32(count),
+                                             Ogre::BT_IMMUTABLE, idx, true);
+        } else {
+            Ogre::uint32 *idx = reinterpret_cast<Ogre::uint32 *>(
+                OGRE_MALLOC_SIMD(sizeof(Ogre::uint32) * count, Ogre::MEMCATEGORY_GEOMETRY));
+            for (size_t i = 0; i < count; ++i) idx[i] = remap[(*level)[i]];
+            ibuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_32BIT, Ogre::uint32(count),
+                                             Ogre::BT_IMMUTABLE, idx, true);
+        }
+        out.push_back(vaoMgr->createVertexArrayObject(shadowVbufs, ibuf, Ogre::OT_TRIANGLE_LIST));
     }
-
-    Ogre::VertexBufferPackedVec vbufs;
-    vbufs.push_back(vbuf);
-    return vaoMgr->createVertexArrayObject(vbufs, ibuf, Ogre::OT_TRIANGLE_LIST);
+    return out;
 }
 
 }   // namespace
@@ -435,34 +459,43 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     //
     // A DYNAMIC (CPU-skinned) mesh never gets levels: updateMeshVertices
     // rewrites mVao[VpNormal][0]'s buffer alone, so a coarser level would keep
-    // drawing the bind pose. The bake does not build chains for skinned meshes
+    // drawing the bind pose. The bake builds no chain for a skinned mesh
     // either; this is the second lock on the same door.
-    const bool wantLods = !data.lodIndices.empty() && !data.dynamic &&
-                          data.lodErrors.size() == data.lodIndices.size();
-    if (wantLods) {
+    //
+    // `accepted` is the ONE list both VAO lists are built from — a malformed
+    // level ends the chain there, and the two lists must not disagree about
+    // where: the render queue indexes both with one mCurrentMeshLod.
+    std::vector<const std::vector<unsigned> *> accepted;
+    accepted.push_back(&data.indices);
+    if (!data.dynamic && data.lodErrors.size() == data.lodIndices.size()) {
         for (const std::vector<unsigned> &level : data.lodIndices) {
             if (level.size() < 3 || level.size() % 3 != 0) break;
             bool bad = false;
             for (unsigned i : level) if (i >= nv) { bad = true; break; }
             if (bad) break;
-            Ogre::IndexBufferPacked *lodIbuf = nullptr;
-            if (nv <= 65535u) {
-                Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(
-                    OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * level.size(), Ogre::MEMCATEGORY_GEOMETRY));
-                for (size_t i = 0; i < level.size(); ++i) idx[i] = Ogre::uint16(level[i]);
-                lodIbuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_16BIT,
-                                                    Ogre::uint32(level.size()), Ogre::BT_IMMUTABLE, idx, true);
-            } else {
-                Ogre::uint32 *idx = reinterpret_cast<Ogre::uint32 *>(
-                    OGRE_MALLOC_SIMD(sizeof(Ogre::uint32) * level.size(), Ogre::MEMCATEGORY_GEOMETRY));
-                for (size_t i = 0; i < level.size(); ++i) idx[i] = level[i];
-                lodIbuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_32BIT,
-                                                    Ogre::uint32(level.size()), Ogre::BT_IMMUTABLE, idx, true);
-            }
-            sub->mVao[Ogre::VpNormal].push_back(
-                vaoMgr->createVertexArrayObject(vbufs, lodIbuf, Ogre::OT_TRIANGLE_LIST));
+            accepted.push_back(&level);
         }
     }
+    for (size_t L = 1; L < accepted.size(); ++L) {
+        const std::vector<unsigned> &level = *accepted[L];
+        Ogre::IndexBufferPacked *lodIbuf = nullptr;
+        if (nv <= 65535u) {
+            Ogre::uint16 *idx = reinterpret_cast<Ogre::uint16 *>(
+                OGRE_MALLOC_SIMD(sizeof(Ogre::uint16) * level.size(), Ogre::MEMCATEGORY_GEOMETRY));
+            for (size_t i = 0; i < level.size(); ++i) idx[i] = Ogre::uint16(level[i]);
+            lodIbuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_16BIT,
+                                                Ogre::uint32(level.size()), Ogre::BT_IMMUTABLE, idx, true);
+        } else {
+            Ogre::uint32 *idx = reinterpret_cast<Ogre::uint32 *>(
+                OGRE_MALLOC_SIMD(sizeof(Ogre::uint32) * level.size(), Ogre::MEMCATEGORY_GEOMETRY));
+            for (size_t i = 0; i < level.size(); ++i) idx[i] = level[i];
+            lodIbuf = vaoMgr->createIndexBuffer(Ogre::IndexBufferPacked::IT_32BIT,
+                                                Ogre::uint32(level.size()), Ogre::BT_IMMUTABLE, idx, true);
+        }
+        sub->mVao[Ogre::VpNormal].push_back(
+            vaoMgr->createVertexArrayObject(vbufs, lodIbuf, Ogre::OT_TRIANGLE_LIST));
+    }
+
     // Shadow-caster VAO optimization (POST_CHAIN_SPEC.md §11). Aliasing the SAME
     // vao into both slots is what Ogre calls "useSameVaos": shadow passes then
     // stream the full 48-byte vertex (68 skinned) when they need 12 (+8). The
@@ -486,18 +519,17 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     // the mesh was built with — silent and visually confusing. GPU-skinned
     // meshes are fine: they deform in the vertex shader, which the optimized
     // buffer keeps the blend indices/weights for.
-    Ogre::VertexArrayObject *shadowVao = nullptr;
+    std::vector<Ogre::VertexArrayObject *> shadowVaos;
     if (Ogre::Mesh::msOptimizeForShadowMapping && !data.dynamic)
-        shadowVao = buildShadowVao(vaoMgr, data, blendW, skinned);
-    sub->mVao[Ogre::VpShadow].push_back(shadowVao ? shadowVao : vao);
-    // The shadow list must be exactly as long as the normal one: SubItem swaps
-    // the WHOLE vector between them when alpha testing turns on or off, and the
-    // render queue indexes it with the same mCurrentMeshLod. The coarse levels
-    // alias their own VAO — a simplified level is already cheap, and a
-    // position-only de-duplication per level is not worth the VRAM until it is
-    // measured to be (NANITE_SPEC §7.2 step 6).
-    for (size_t i = 1; i < sub->mVao[Ogre::VpNormal].size(); ++i)
-        sub->mVao[Ogre::VpShadow].push_back(sub->mVao[Ogre::VpNormal][i]);
+        shadowVaos = buildShadowVaos(vaoMgr, data, blendW, skinned, accepted);
+    if (shadowVaos.size() == accepted.size()) {
+        for (Ogre::VertexArrayObject *v : shadowVaos) sub->mVao[Ogre::VpShadow].push_back(v);
+    } else {
+        // ALL-ALIASED, the pin's other legal shape (buildShadowVaos says why a
+        // mixed list is a double free).
+        for (Ogre::VertexArrayObject *v : sub->mVao[Ogre::VpNormal])
+            sub->mVao[Ogre::VpShadow].push_back(v);
+    }
 
     // The LOD VALUE array: what LodStrategy::lodSet binary-searches every frame.
     // `distance_sphere` is the process-wide strategy (Mesh2::mLodStrategyName is
@@ -506,9 +538,9 @@ Ogre::MeshPtr OgreScene::buildMeshV2(const std::string &name, const MeshData &da
     // (distance(worldAabbCentre, eye) - worldRadius) * bias, so the values are
     // switch DISTANCES, ascending, with 0 first. Set before any Item exists:
     // Item::_initialise caches this array's address.
-    if (sub->mVao[Ogre::VpNormal].size() > 1) {
+    if (accepted.size() > 1) {
         std::vector<float> errors(data.lodErrors.begin(),
-                                  data.lodErrors.begin() + ptrdiff_t(sub->mVao[Ogre::VpNormal].size() - 1));
+                                  data.lodErrors.begin() + ptrdiff_t(accepted.size() - 1));
         applyLodValues(mesh, errors);
     }
     const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
