@@ -94,7 +94,28 @@ if(JAH_RAY_QUERY_OK)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_rays.comp"
         COMMENT "Compiling the ray-query compute shader at SPIR-V 1.4"
         VERBATIM)
-    add_custom_target(JahshakaRayQuerySpv DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h")
+    # R5's reflection trace, same rule (PHOTON_SPEC §7 R5).
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_reflectSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect.comp"
+        COMMENT "Compiling the ray-traced reflection compute shader at SPIR-V 1.4"
+        VERBATIM)
+    # ...and R5's spatial filter + composite (round C), same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --target-env spirv1.4 -S comp -x
+                --vn krq_reflectFilterSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_filter.comp"
+        COMMENT "Compiling the reflection filter/composite compute shader at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_target(JahshakaRayQuerySpv
+                      DEPENDS "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h")
     set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)
 endif()
 set(JAH_RAY_QUERY_OK "${JAH_RAY_QUERY_OK}" PARENT_SCOPE)

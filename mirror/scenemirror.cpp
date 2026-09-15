@@ -6166,6 +6166,9 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         fx.ssaoRadius     = mSource->ssaoRadius;
         fx.smaaPreset     = mSource->smaaPreset;
         fx.ssr            = mSource->ssrMode;
+        // Percent in the document, a fraction in the renderer — one conversion,
+        // here, so nothing downstream has to know which unit it is holding.
+        fx.rayReflectRoughness = float(mSource->rayReflectRoughness) * 0.01f;
         // Refraction "Auto" (the recommended default): the second scene pass and
         // its full-res copy only enter the graph while the scene actually holds a
         // refractive material, so the cost when unused is exactly zero. The flag

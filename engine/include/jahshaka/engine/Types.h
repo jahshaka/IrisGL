@@ -2382,6 +2382,21 @@ struct RayQueryStatus {
     unsigned long long tlasBuilds = 0;
     unsigned long long tlasRefits = 0;
     unsigned long long blasBuilds = 0;
+    /// RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5). True when this scene's
+    /// drawn views are tracing reflections — which needs `enabled`, a view
+    /// whose SSR row is on (High and Epic; the SSR contract, not a second
+    /// setting) and a chain that carries the SSR textures. With it false the
+    /// reflections are the screen-space march alone, which is the picture this
+    /// renderer drew before R5 existed.
+    bool reflect = false;
+    /// How many rays the last frame traced for reflections — one per pixel of
+    /// the trace's own resolution (full at Epic, one in four at High), before
+    /// the shader's own gates (the sky, the roughness band, a pixel the march
+    /// already answered) decline most of them.
+    int  reflectRays = 0;
+    /// GPU milliseconds of that dispatch, read back from a timestamp pair
+    /// several frames later and never with a wait. -1 until measured.
+    float reflectMs = -1.0f;
 };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at
@@ -2725,6 +2740,25 @@ struct PostFxDesc {
     /// A straight multiplier on the composite confidence. 1.0 is physical —
     /// the reflection replaces the probe answer where the march is confident.
     float ssrIntensity = 1.0f;
+    /// THE RAY-TRACED REFLECTION'S ROUGHNESS CUTOFF (PHOTON_SPEC §7 R5; owner,
+    /// ledger §426). A PER-PROJECT dial and not a renderer constant: above it a
+    /// reflection is a wide lobe, the probe's own prefiltered photograph is a
+    /// good enough integral of it, and a ray per pixel buys a blurrier answer
+    /// for the same cost — but where that point falls is a property of the
+    /// content, not of the renderer. It sits beside `ssrRoughnessCutoff` here
+    /// because it is the same kind of number about the same lobe, and a scene
+    /// stores both.
+    ///
+    /// THE TRANSITION IS FEATHERED, not a step: the ray's confidence runs from
+    /// full at `cutoff - kRayReflectFeather` to zero at `cutoff + feather`, so
+    /// a surface whose roughness varies across it — a scratched floor — hands
+    /// the pixel to the probe through the existing confidence composite with no
+    /// seam. The feather's half-width is a named constant in the engine
+    /// (0.1), deliberately not a second dial.
+    ///
+    /// It is a UNIFORM, not a graph change: moving it must not rebuild a
+    /// workspace (see ChainDesc::sameShape).
+    float rayReflectRoughness = 0.4f;
     /// Re-render refractive materials (alphaMode Refractive) in a second pass
     /// that samples the opaque result. Costs nothing when no material is.
     bool  refractions = false;
@@ -2834,6 +2868,7 @@ struct PostFxDesc {
                ssr == o.ssr && ssrMaxDistance == o.ssrMaxDistance &&
                ssrThickness == o.ssrThickness &&
                ssrRoughnessCutoff == o.ssrRoughnessCutoff &&
+               rayReflectRoughness == o.rayReflectRoughness &&
                ssrIntensity == o.ssrIntensity &&
                refractions == o.refractions &&
                distortion == o.distortion &&

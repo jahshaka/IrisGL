@@ -419,6 +419,7 @@ View *OgreEngine::createView(const std::string &name,
         mViews.emplace_back(new OgreView(mRoot, window, nullptr, name, width, height,
                                          background, mLastError));
         OgreView *view = mViews.back().get();
+        view->mEngine = this;
         view->mRequestedSamples = mDefaultSamples;
 #ifdef __APPLE__
         // No mCreateWindow on macOS (D2): VulkanMetalWindow implements
@@ -486,6 +487,7 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
         Ogre::TextureGpu *rtt = OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height);
         mViews.emplace_back(new OgreView(mRoot, nullptr, rtt, name, width, height,
                                          background, mLastError));
+        mViews.back()->mEngine = this;
         return mViews.back().get();
     } JAH_CATCH(mLastError, nullptr);
 }
@@ -682,6 +684,12 @@ void OgreEngine::renderOneFrame() {
             // change, the camera is recreated on setScene), so the listener is
             // re-synced rather than hooked up once.
             v->syncGlobalsListener();
+            // ...and the reflection trace's hook (PHOTON_SPEC §7 R5), for the
+            // third time and the third reason: the chain rebuilds when the SSR
+            // row or the machine's answer changes, the scene's voxel arm is
+            // rebuilt behind the trace's back, and the camera is recreated on
+            // setScene.
+            v->syncReflectListener();
             // The inset's rectangles are derived from the TARGET's aspect
             // (a normalised rect is not a pixel rect), so a resize that never
             // touched ViewPipDesc still moves the letterbox. Re-derived here,

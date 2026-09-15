@@ -213,6 +213,42 @@ class OgreEngine;
 /// knows what a VkAccelerationStructure is.
 class RayQueryTier;
 
+class OgreView;
+
+/// THE REFLECTION TRACE'S HOOK (PHOTON_SPEC §7 R5). A CompositorWorkspaceListener
+/// that records one compute dispatch into Ogre's own frame command buffer,
+/// immediately before the scene pass that SAMPLES `jahSsrReflection` — which is
+/// the only point in the frame where every input exists and the output is still
+/// writable: the SSR prepass has written the normals and the packed roughness
+/// the trace reads, and the SSR resolve has written the screen's own answer the
+/// trace defers to and must not overwrite.
+///
+/// (The brief said "before the SSR resolve". It cannot be: the resolve RENDERS
+/// the whole of `jahSsrReflection`, so anything written before it is thrown
+/// away. Recorded after it, this pass reads the resolve's confidence and fills
+/// only what the screen could not answer — which is what "screen first, rays for
+/// the rest" means. Stated here because it is a deviation from the brief's
+/// wording and not from its design.)
+///
+/// It holds NO state of its own: the per-view Vulkan resources (the descriptor
+/// ring, the parameter buffer, the temporal mean's ping-pong) live in the tier,
+/// keyed by this object's address, so that the one TU that may include Vulkan
+/// stays the one TU that includes Vulkan.
+class ReflectPassListener final : public Ogre::CompositorWorkspaceListener {
+public:
+    /// NOT `override`: Ogre's CompositorWorkspaceListener has no virtual
+    /// destructor. Nothing ever deletes one of these through a base pointer —
+    /// the View owns it by unique_ptr of the exact type — so the absence is a
+    /// fact to respect rather than a defect to work around.
+    ~ReflectPassListener();
+    void passPreExecute(Ogre::CompositorPass *pass) override;
+    /// The view whose chain this listener rides. Never null while registered.
+    OgreView   *mView = nullptr;
+    /// ...and its Root, so the destructor can flush without reaching into the
+    /// view's privates.
+    Ogre::Root *mRoot = nullptr;
+};
+
 /// Where the traced set is WRITTEN. `OgreScene::gatherRayInstances` walks the
 /// scene's item index once and hands each traceable Item to the sink, which
 /// (in the product path) writes the transform straight into a persistently
@@ -721,6 +757,24 @@ struct ChainDesc {
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
     float ssrRoughnessCutoff = 0.35f;
     float ssrIntensity = 1.0f;
+    /// The ray-traced reflection's per-project roughness cutoff (PostFxDesc's
+    /// note). A uniform, never a shape term.
+    float rayReflectRoughness = 0.4f;
+    /// RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5). SCREEN FIRST, RAYS FOR THE
+    /// REST: the march keeps every pixel it is confident about and a ray fills
+    /// only the rest — off screen, behind an occluder, past the edge fade, or
+    /// in the roughness band the march declines. It rides the SSR chain (the
+    /// prepass' normals and packed roughness are its inputs, `jahSsrReflection`
+    /// its output), so it can only be true when `ssr` is, and it is set by the
+    /// VIEW from the machine's answer (`Engine::rayQueryAvailable()` and the
+    /// `app.rayTracing` preference) rather than by the document: ray tracing is
+    /// a capability of the machine (PHOTON_SPEC §4 D4).
+    ///
+    /// IT CHANGES THE GRAPH, which is why it lives here and not in a per-frame
+    /// push: `jahSsrReflection` gains the Uav flag so a compute pass may write
+    /// it. Nothing else about the chain moves, and with it false every texture,
+    /// pass and pixel is exactly what it was.
+    bool  rayReflect = false;
     bool  refractions = false;
 
     // ---- The hierarchical depth pyramid (SPECS/NANITE_SPEC.md §4.3) ----
@@ -2446,6 +2500,19 @@ public:
     /// DROP THIS SCENE'S acceleration structures (OgreScene::destroy calls it).
     /// A no-op when the tier never held any. Defined in OgreRayQuery.cpp.
     void forgetRayQuery();
+    /// THE ONE PREDICATE that decides whether this scene's reflections are
+    /// traced (PHOTON_SPEC §7 R5 item 5). It answers the DOCUMENT's half —
+    /// "does this project want rays" — resolved against the MACHINE's
+    /// (`rayQueryAvailable()`); the view adds the third term, its SSR row,
+    /// because that is a property of the view's chain and not of the scene.
+    ///
+    /// TODAY it reads the application latch (`Engine::rayTracing()`, R1's
+    /// `app.rayTracing` / `--no-ray-query`). LANE RAYROW-1 replaces that ONE
+    /// line with the project's own World row — off / auto / on, with "on"
+    /// additionally raising a scene issue on a machine that cannot trace
+    /// (owner, ledger §425). Everything downstream reads this function, so that
+    /// lane changes an input and not a pass.
+    bool rayReflectionsWanted() const;
     bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) override;
     /// The tier reads this scene's PRIVATE caster epoch (shadowEpoch) to decide
     /// whether the acceleration structure can possibly be out of date — the same
@@ -4514,6 +4581,13 @@ public:
     /// on-screen views from EngineConfig::sampleCount; offscreen views start
     /// at 1 (pixel-asserted readbacks stay exact unless a test opts in).
     unsigned mRequestedSamples = 1;
+    /// The engine that made this view. Set right after construction by
+    /// OgreEngine::createView/createOffscreenView; never null for a view a host
+    /// can reach. chainDesc() reads the MACHINE's answers through it (ray
+    /// queries available, the app's ray-tracing preference) — a scene cannot be
+    /// asked, because a view has none until setScene and its graph is built in
+    /// the constructor.
+    OgreEngine *mEngine = nullptr;
 
     void setSampleCount(unsigned samples) override;
     unsigned sampleCount() const override;
@@ -4603,6 +4677,25 @@ public:
     /// view with no chain cost exactly nothing. Same idempotent once-a-frame
     /// contract as syncPlanarListener, and registered through the same seam.
     void syncGlobalsListener();
+    /// Arms or disarms this view's RAY-TRACED REFLECTION listener (PHOTON_SPEC
+    /// §7 R5). Armed while the view is enabled, has a scene and a camera, and
+    /// its chain carries `rayReflect` — which is the SSR row being on AND the
+    /// machine advertising ray queries AND the application preference allowing
+    /// them. Same idempotent once-a-frame contract and the same seam as the two
+    /// above, and for the same reason: every one of those can change between
+    /// frames. Defined in OgreRayQuery.cpp (both halves of it).
+    void syncReflectListener();
+    /// DROPS the reflection trace's per-view Vulkan state, flushing first.
+    /// Called from `detachWorkspace` — the one seam every workspace rebuild goes
+    /// through — because the trace's descriptor set holds IMAGE VIEWS OF THIS
+    /// CHAIN'S TEXTURES, and a rebuild destroys every one of them. An image
+    /// destroyed while a command buffer that has a set referencing it bound is
+    /// still recording INVALIDATES that command buffer: `vkEndCommandBuffer`
+    /// then fails and the frame dies with VK_ERROR_DEVICE_LOST (measured; the
+    /// validation layer names the image, the view and the set). Ogre's own sets
+    /// are safe because it recreates them with the textures; ours has to be
+    /// told. Defined in OgreRayQuery.cpp (both halves).
+    void dropReflectState();
     /// Releases workspace, camera, workspace definitions and the window/texture.
     /// Safe to call twice. Called by Engine::destroyView and by the Engine
     /// destructor BEFORE Root dies.
@@ -4664,7 +4757,20 @@ private:
     /// (CAMERA_LENS_SPEC §4). Null on a passthrough view — every thumbnail,
     /// preview and pixel suite, by construction.
     std::unique_ptr<chain::ViewGlobalsListener> mGlobalsListener;
+    /// Owned; registered the same way while this view's chain traces
+    /// reflections (PHOTON_SPEC §7 R5). Null everywhere else — on a machine
+    /// without ray queries, with the preference off, or on any view whose chain
+    /// has no SSR (every thumbnail, preview and pixel suite, by construction).
+    /// Defined in OgreRayQuery.cpp, which is why it is held through a pointer
+    /// the rest of the engine never dereferences.
+    std::unique_ptr<ReflectPassListener> mReflectListener;
     unsigned                   mWorkspaceGeneration = 0;
+    /// What `ChainDesc::rayReflect` was when the CURRENT workspace definition
+    /// was built. The scene arrives AFTER the chain is first built (the
+    /// constructor has no scene), and the project's ray row can change under a
+    /// live view, so the shape is re-checked once a frame in
+    /// syncReflectListener rather than only when a host pushes a PostFxDesc.
+    bool                       mChainRayReflect = false;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a
     /// workspace rebuild.

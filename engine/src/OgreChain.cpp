@@ -491,6 +491,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.letterbox == b.letterbox &&
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
+           a.rayReflect == b.rayReflect &&
            a.refractions == b.refractions && a.samples == b.samples &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
@@ -866,7 +867,19 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // would read the wrong texel rather than a blurrier one.
         // RGBA16_FLOAT because the rgb is scene RADIANCE and, with HDR on, may
         // legitimately exceed 1.
-        addTex(n, kSsrReflection, Ogre::PFG_RGBA16_FLOAT);
+        {
+            auto *td = addTex(n, kSsrReflection, Ogre::PFG_RGBA16_FLOAT);
+            // RAY-TRACED REFLECTIONS WRITE INTO IT (PHOTON_SPEC §7 R5): the
+            // trace is a compute pass of ours, recorded between the resolve and
+            // the scene pass that samples this texture, and a compute pass can
+            // only reach an image through a UAV. The flag is the ONLY thing R5
+            // changes about the graph — the format, the size, the passes and
+            // every pixel are what they were — and it is off unless the machine
+            // has ray queries and the preference allows them, so a build
+            // without rays declares the identical texture it always did.
+            if (desc.rayReflect)
+                td->textureFlags |= Ogre::TextureFlags::Uav;
+        }
         // The one-frame colour history. keep_content (RenderToTexture rather
         // than the default DiscardableContent) for exactly the reason the HDR
         // luminance history needs it: it is written at the END of a frame and
