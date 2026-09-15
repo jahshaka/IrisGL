@@ -129,7 +129,7 @@ ChainDesc OgreView::chainDesc() const {
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrIntensity   = mPostFx.ssrIntensity;
-    d.rayReflectRoughness = mPostFx.rayReflectRoughness;
+    d.reflectionRoughnessCutoff = mPostFx.reflectionRoughnessCutoff;
     // RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5), and the whole tier rule in one
     // line: AUTO means "traced wherever the machine can", which is this view's
     // SSR row being on (the SSR contract already keeps that to High and Epic —

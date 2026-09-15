@@ -545,16 +545,25 @@ public:
     /// number for them. The march used to carry a second cutoff of its own that
     /// no document could write.
     ///
+    /// THE NAME SAYS BOTH HALVES (lane SMALL-ITEMS D, ledger §453 finding 4).
+    /// It was `rayReflectRoughness` while a ray was the only thing it gated;
+    /// once the march took the same dial that name described half of what the
+    /// field does, and the World row had been spelled `reflectionRoughnessCutoff`
+    /// all along. There is ONE name now, the row's, everywhere — document, desc,
+    /// mirror, file key and verb. A document written before the rename carries
+    /// the old key and still opens: the reader accepts both spellings and writes
+    /// the new one (src/io/sceneformat.h, readReflectionRoughnessCutoff).
+    ///
     /// PERCENT AND NOT A FLOAT, deliberately: every World row in this document
     /// is an int (worldmodes::Row), the tier table's columns are ints, and a
     /// float field here would need a second row type, a second widget and a
     /// second pin spelling for one number. 5..100 in whole percent is finer than
     /// the 8-bit roughness maps the gate is compared against.
     ///
-    /// The engine reads it as a fraction (PostFxDesc::rayReflectRoughness) and
+    /// The engine reads it as a fraction (PostFxDesc::reflectionRoughnessCutoff) and
     /// feathers the transition either side of it by a fixed 0.1, so a surface
     /// whose roughness varies across it crossfades rather than steps.
-    int   rayReflectRoughness;
+    int   reflectionRoughnessCutoff;
     /// 0 off, 1 AUTO (the chain gains its refraction nodes only while the scene
     /// actually contains a refractive material — cost when unused is zero),
     /// 2 always on.

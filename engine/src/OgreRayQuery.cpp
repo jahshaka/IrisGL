@@ -2639,10 +2639,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.projParams[3] = kRayReflectFeather;
     pp.resolution[0] = float(traceW); pp.resolution[1] = float(traceH);
     pp.resolution[2] = float(fullW);  pp.resolution[3] = float(fullH);
-    // THE CUTOFF IS THE PROJECT'S (PostFxDesc::rayReflectRoughness) and the same
+    // THE CUTOFF IS THE PROJECT'S (PostFxDesc::reflectionRoughnessCutoff) and the same
     // one the screen-space march gates on since lane SSR-3; the engine only
     // clamps it into the range a reflection means anything in.
-    pp.knobs[0] = std::min(std::max(view->chainDesc().rayReflectRoughness, 0.0f), 1.0f);
+    pp.knobs[0] = std::min(std::max(view->chainDesc().reflectionRoughnessCutoff, 0.0f), 1.0f);
     // THE RAY'S LENGTH. Long enough to cross the lit volume it will be shaded
     // from — a ray that outruns the cache finds geometry nothing can colour —
     // and bounded by the camera's own far plane so an open scene's ray reaches
