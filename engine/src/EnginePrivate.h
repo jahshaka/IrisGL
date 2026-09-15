@@ -721,7 +721,7 @@ constexpr size_t kPbrTextureSlotCount = size_t(PbrTextureSlot::Count);
 /// HOW WIDE THE REFLECTION CUTOFF'S FEATHER IS, and it is ONE number for BOTH
 /// halves of a per-pixel reflection (owner, ledger §426; lane SSR-3 moved it
 /// here and gave the march its share). The cutoff itself is the project's
-/// (`ChainDesc::rayReflectRoughness`, the World panel's "Roughness Cutoff" row,
+/// (`ChainDesc::reflectionRoughnessCutoff`, the World panel's "Roughness Cutoff" row,
 /// in PERCEPTUAL roughness); this says only that the technique stops SMOOTHLY:
 ///
 ///   * the TRACED half runs from full confidence at `cutoff - kRayReflectFeather`
@@ -786,7 +786,7 @@ struct ChainDesc {
     /// THE reflection roughness cutoff, in PERCEPTUAL roughness: the project's
     /// one number for both the screen-space march and the traced ray
     /// (PostFxDesc's note). A uniform, never a shape term.
-    float rayReflectRoughness = 0.4f;
+    float reflectionRoughnessCutoff = 0.4f;
     /// RAY-TRACED REFLECTIONS (PHOTON_SPEC §7 R5). SCREEN FIRST, RAYS FOR THE
     /// REST: the march keeps every pixel it is confident about and a ray fills
     /// only the rest — off screen, behind an occluder, past the edge fade, or

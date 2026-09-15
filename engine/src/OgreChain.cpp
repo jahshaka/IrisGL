@@ -2477,7 +2477,7 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
     //
     // THE ROUGHNESS CUTOFF IS THE PROJECT'S, and it is the SAME number the
     // traced half gates on (lane SSR-3). The World panel's "Roughness Cutoff"
-    // row reaches here as `rayReflectRoughness`, in PERCEPTUAL roughness; the
+    // row reaches here as `reflectionRoughnessCutoff`, in PERCEPTUAL roughness; the
     // march decodes the G-buffer's GGX alpha and square-roots it to compare
     // (JahSsrRayMarch_ps.glsl). There used to be a second cutoff here
     // (`ssrRoughnessCutoff`, 0.35) that nothing in the document could write and
@@ -2486,7 +2486,7 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
     ps->setNamedConstant("rayParams",
                          Ogre::Vector4(desc.ssrMaxDistance, desc.ssrThickness,
                                        desc.ssr >= 2 ? 96.0f : 48.0f,
-                                       desc.rayReflectRoughness));
+                                       desc.reflectionRoughnessCutoff));
 
     // ...AND THE FEATHER TRAVELS WITH IT (lane SSR-3 round 2, lead's call). The
     // resolve's roughness ramp is `cutoff - feather -> cutoff`, the same 0.1 the
@@ -2498,7 +2498,7 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
     if (Ogre::Pass *resolve = materialPass("Jahshaka/SsrResolve"))
         resolve->getFragmentProgramParameters()->setNamedConstant(
             "resolveParams",
-            Ogre::Vector4(desc.rayReflectRoughness, desc.ssrIntensity,
+            Ogre::Vector4(desc.reflectionRoughnessCutoff, desc.ssrIntensity,
                           kRayReflectFeather, 0.0f));
 }
 

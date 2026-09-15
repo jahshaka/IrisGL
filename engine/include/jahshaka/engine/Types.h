@@ -2766,7 +2766,7 @@ struct PostFxDesc {
     ///
     /// It is a UNIFORM, not a graph change: moving it must not rebuild a
     /// workspace (see ChainDesc::sameShape).
-    float rayReflectRoughness = 0.4f;
+    float reflectionRoughnessCutoff = 0.4f;
     /// Re-render refractive materials (alphaMode Refractive) in a second pass
     /// that samples the opaque result. Costs nothing when no material is.
     bool  refractions = false;
@@ -2875,7 +2875,7 @@ struct PostFxDesc {
                ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrMaxDistance == o.ssrMaxDistance &&
                ssrThickness == o.ssrThickness &&
-               rayReflectRoughness == o.rayReflectRoughness &&
+               reflectionRoughnessCutoff == o.reflectionRoughnessCutoff &&
                ssrIntensity == o.ssrIntensity &&
                refractions == o.refractions &&
                distortion == o.distortion &&
