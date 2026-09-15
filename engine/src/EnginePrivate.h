@@ -100,6 +100,8 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <condition_variable>
+#include <thread>
 #include <map>
 #include <chrono>
 #include <deque>
@@ -1760,9 +1762,29 @@ public:
     /// The whole load, in upstream's mandated order. Call from ensureHlms()
     /// after registerHlms and before anything can compile a shader.
     void load(Ogre::Root *root);
-    /// Writes every dirty layer. False = the write failed and the previous
-    /// cache (if any) is untouched.
+    /// Serializes every dirty layer HERE and writes it OFF THIS THREAD.
+    ///
+    /// THE SPLIT, and why it exists (FSYNC-1). Serializing is Ogre's half —
+    /// HlmsDiskCache::copyFrom, saveMicrocodeCache, vkGetPipelineCacheData —
+    /// and it can only happen on the thread that owns those singletons. The
+    /// rest is a megabyte of bytes going to a file, and the `fsync` that makes
+    /// the write durable waits behind every other dirty page the filesystem's
+    /// journal is holding: 87 ms on an idle disk, 534-1 439 ms measured while a
+    /// build's own writeback was queued in front of it. That wait is what the
+    /// caller must not take, so the bytes are handed to one writer thread and
+    /// this returns.
+    ///
+    /// False = nothing was handed over (disabled, not dirty, or the
+    /// serialization failed). True = the bytes are serialized and the write is
+    /// either done or in flight; flushWrites() is how a caller waits for it.
+    /// ONE writer, ONE job: a save that meets a write still in flight waits for
+    /// it before serializing again, which is the whole of the coalescing —
+    /// nothing queues up behind a slow disk.
     bool save(Ogre::Root *root);
+    /// Waits for an in-flight off-thread write. True when the writer is idle,
+    /// false when `budgetMs` ran out first (the write continues; nothing is
+    /// abandoned). A no-op when no write is in flight.
+    bool flushWrites(unsigned budgetMs);
     /// True when something has been compiled since the last save — the
     /// burst-settle timer's condition, and what makes save() a cheap no-op.
     bool dirty(Ogre::Root *root) const;
@@ -1792,9 +1814,30 @@ public:
 
 private:
     struct Entry { std::string name; unsigned long long bytes; std::string hash; };
+    /// One dispatched save: the serialized layers, waiting for the writer
+    /// thread. `blobs` is parallel to `names`; `compileCount` is the counter
+    /// reading this write makes true once it lands.
+    struct PendingWrite {
+        std::vector<std::string>       names;
+        std::vector<std::vector<char>> blobs;
+        unsigned                       compileCount = 0;
+    };
+
+    /// THE WRITER THREAD's body: publish every blob atomically, carry the
+    /// manifest forward, write it, enforce the size cap. Touches no Ogre
+    /// object of any kind — that is what makes it safe here.
+    bool  runWrite(const PendingWrite &job);
+    void  writerLoop();
+    /// Hands `job` to the writer (starting it on first use). False when a
+    /// write is already in flight.
+    bool  dispatchWrite(std::unique_ptr<PendingWrite> job);
+    /// Stops and joins the writer. Safe to call twice.
+    void  stopWriter();
 
     bool  readManifest(std::vector<Entry> &filesOut) const;
-    bool  writeManifest(const std::vector<Entry> &files) const;
+    /// `shaders` is passed rather than read from mExpectedShaders: the writer
+    /// thread calls this, and the member belongs to the caller's thread.
+    bool  writeManifest(const std::vector<Entry> &files, unsigned shaders) const;
     /// Reads `name`, checks it against the manifest entry, and returns the bytes.
     /// Empty on any mismatch — the caller then wipes.
     bool  readVerified(const Entry &e, std::vector<char> &out) const;
@@ -1810,7 +1853,9 @@ private:
     unsigned    mExpectedShaders = 0; ///< from the manifest of the last saved run
     /// The compile count at the last drainCompileNames — the monitor's window.
     unsigned    mCompileNamesAt = 0;
-    long long   mLastSavedUnixMs = 0;
+    /// Written by the WRITER thread on success, read by stats()/dirty() on the
+    /// caller's — atomics, not a lock: two scalars nobody has to read together.
+    std::atomic<long long> mLastSavedUnixMs { 0 };
     bool        mPipelineLoaded = false, mMicrocodeLoaded = false;
     /// The driver's verdict on the pipeline blob, scraped from its own log
     /// (ShaderCacheStats::pipelineCacheReason documents the values).
@@ -1820,8 +1865,10 @@ private:
     /// would use if we had no log listener. Kept for the dirty() shortcut.
     size_t      mMicrocodeAtLoad = 0;
     /// compiled+cached at the last successful write — the "nothing new" test
-    /// that stops a clean quit writing the same bytes twice.
-    unsigned    mSavedAtCompileCount = 0;
+    /// that stops a clean quit writing the same bytes twice. Published by the
+    /// writer thread, so a write that FAILED leaves the cache dirty and the
+    /// next save tries again.
+    std::atomic<unsigned> mSavedAtCompileCount { 0 };
     /// Set by clear(): the next save writes even though nothing new compiled.
     bool        mForceSave = false;
     /// save() is running. Guards the re-entrant call a nested event loop can
@@ -1829,6 +1876,19 @@ private:
     bool        mSaving = false;
     class Counter;
     std::unique_ptr<Counter> mCounter;
+
+    // ---- the writer thread (FSYNC-1) --------------------------------------
+    // Created on the first dispatch and joined by the destructor. It is a raw
+    // std::thread and not a pool: the engine has exactly one of these, it
+    // sleeps on a condition variable between saves, and a pool would only add
+    // a scheduler between the bytes and the disk.
+    std::mutex              mWriteMutex;
+    std::condition_variable mWriteCv;       ///< wakes the writer
+    std::condition_variable mWriteDoneCv;   ///< wakes a flushWrites() caller
+    std::unique_ptr<PendingWrite> mWriteJob;    ///< handed over, not yet taken
+    bool                    mWriteBusy = false; ///< a job is being written NOW
+    bool                    mWriteStop = false;
+    std::thread             mWriteThread;
 };
 
 // ---------------------------------------------------------------------------
@@ -5095,6 +5155,7 @@ public:
     /// its nodes and passes, and which scene each renders).
     void collectCompositorGraph(std::vector<CompositorWorkspaceInfo> &out) const;
     bool saveShaderCache() override;
+    bool flushShaderCache(unsigned budgetMs) override;
     bool clearShaderCache() override;
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;

@@ -29,6 +29,7 @@
 #include <OgreHlmsManager.h>
 #include <OgreRenderSystem.h>
 #include <OgreRenderSystemCapabilities.h>
+#include <OgreDataStream.h>
 #include <OgreLog.h>
 #include <Hash/MurmurHash3.h>
 
@@ -73,6 +74,13 @@ constexpr unsigned long long kMaxCacheBytes = 256ull * 1024ull * 1024ull;
 
 constexpr const char *kManifest = "cache-manifest.txt";
 constexpr const char *kLockFile = "cache.lock";
+
+/// How long a save waits for a write that is still in flight (FSYNC-1). Thirty
+/// seconds is not a latency budget — no caller is expected to wait at all — it
+/// is the point at which "the filesystem is wedged" beats "the disk is busy",
+/// and a save that gives up costs nothing: the layers stay dirty and the next
+/// one writes them.
+constexpr unsigned kWriteWaitMs = 30000u;
 
 long long nowUnixMs() {
     using namespace std::chrono;
@@ -137,6 +145,65 @@ void logLine(const std::string &s) {
     if (Ogre::LogManager::getSingletonPtr())
         Ogre::LogManager::getSingleton().logMessage("Jahshaka shader cache: " + s);
 }
+
+/// A WRITE-ONLY DataStream THAT GROWS (FSYNC-1). Ogre ships two shapes and
+/// neither fits a serializer whose length is unknown until it finishes:
+/// MemoryDataStream is a fixed buffer, FileStreamDataStream is a file. Every
+/// caller here — HlmsDiskCache::saveTo, GpuProgramManager::saveMicrocodeCache,
+/// RenderSystem::savePipelineCache — writes sequentially and reads nothing
+/// back (verified against the pin), so this is the whole of what they need.
+/// `seek` past the end is still honoured (zero-filled) rather than refused: a
+/// stream that silently loses a write is the bug this class must not have.
+class GrowingMemoryStream final : public Ogre::DataStream {
+public:
+    explicit GrowingMemoryStream(const Ogre::String &name)
+        : Ogre::DataStream(name, WRITE) {}
+
+    size_t read(void *, size_t) override { return 0; }   // write-only, by design
+
+    size_t write(const void *buf, size_t count) override {
+        if (!count) return 0;
+        // HlmsDiskCache writes FOUR BYTES AT A TIME, a few hundred thousand
+        // times per save, so this function's own cost is the serialization's
+        // cost. Grow in large steps and copy: measured 26-28 ms for a 1.9 MB
+        // generation, against 37-39 for a vector::insert per call and 486 for
+        // the scratch FILE this replaced when the disk was busy.
+        const size_t need = mPos + count;
+        if (need > mBytes.size()) {
+            if (need > mBytes.capacity())
+                mBytes.reserve(need > 2u * mBytes.capacity() ? need + kGrowStep
+                                                             : 2u * mBytes.capacity());
+            mBytes.resize(need);
+        }
+        std::memcpy(mBytes.data() + mPos, buf, count);
+        mPos += count;
+        mSize = mBytes.size();
+        return count;
+    }
+
+    void skip(long count) override {
+        const long target = static_cast<long>(mPos) + count;
+        seek(target < 0 ? 0u : static_cast<size_t>(target));
+    }
+    void seek(size_t pos) override {
+        if (pos > mBytes.size()) mBytes.resize(pos, 0);
+        mPos = pos;
+        mSize = mBytes.size();
+    }
+    size_t tell() const override { return mPos; }
+    bool   eof() const override { return mPos >= mBytes.size(); }
+    void   close() override {}
+
+    /// The bytes, moved out. The stream is empty afterwards.
+    std::vector<char> take() { mPos = 0; mSize = 0; return std::move(mBytes); }
+
+private:
+    /// The first allocation and the floor for every growth: a generation is
+    /// 1-2 MB and the first writer through here is the biggest of the three.
+    static constexpr size_t kGrowStep = 1024u * 1024u;
+    std::vector<char> mBytes;
+    size_t            mPos = 0;
+};
 
 }  // namespace
 
@@ -272,7 +339,16 @@ public:
 // Out of line, both of them: Counter is an incomplete type at every other
 // translation unit that holds a ShaderCache by value (OgreEngine).
 ShaderCache::ShaderCache() = default;
-ShaderCache::~ShaderCache() { releaseLock(); }
+ShaderCache::~ShaderCache() {
+    // THE LAST BYTES OF THE SESSION. The engine's destructor saves before it
+    // tears anything down, and that save is now a hand-off — so the writer is
+    // joined here, which is the point that runs after every caller has had its
+    // turn and before the process can exit. A save in flight is waited for; a
+    // wedged filesystem costs the quit kWriteWaitMs and no more.
+    flushWrites(kWriteWaitMs);
+    stopWriter();
+    releaseLock();
+}
 
 // ---------------------------------------------------------------------------
 void ShaderCache::configure(const std::string &dir, const std::string &appBuildId,
@@ -443,12 +519,12 @@ bool ShaderCache::readManifest(std::vector<Entry> &filesOut) const {
     return true;
 }
 
-bool ShaderCache::writeManifest(const std::vector<Entry> &files) const {
+bool ShaderCache::writeManifest(const std::vector<Entry> &files, unsigned shaders) const {
     std::ostringstream o;
     o << "jahshaka-shader-cache " << kCacheFormat << "\n"
       << "fingerprint " << mFingerprint << "\n"
       << "saved " << nowUnixMs() << "\n"
-      << "shaders " << mExpectedShaders << "\n";
+      << "shaders " << shaders << "\n";
     for (const Entry &e : files) o << "file " << e.name << " " << e.bytes << " " << e.hash << "\n";
     const std::string s = o.str();
     return writeAtomic(mDir, kManifest, s.data(), s.size());
@@ -489,6 +565,9 @@ void ShaderCache::wipe() const {
 
 bool ShaderCache::clear() {
     if (!mEnabled) return true;
+    // A write in flight would otherwise land IN the directory we are about to
+    // empty, leaving a manifest naming files this wipe deleted.
+    flushWrites(kWriteWaitMs);
     wipe();
     mExpectedShaders = 0;
     mLastSavedUnixMs = 0;
@@ -693,15 +772,14 @@ bool ShaderCache::save(Ogre::Root *root) {
     // NOT RE-ENTRANT, AND IT IS CHEAP TO SAY SO — but read the second paragraph
     // before believing it fixed anything.
     //
-    // A save serializes about a megabyte through a scratch file whose name is
-    // derived from the layer, walks Ogre's Hlms caches through
-    // HlmsDiskCache::copyFrom, and calls vkGetPipelineCacheData. It is reachable
-    // from three places — the host's watchdog QTimer, the
+    // A save serializes about a megabyte in memory, walks Ogre's Hlms caches
+    // through HlmsDiskCache::copyFrom, and calls vkGetPipelineCacheData. It is
+    // reachable from three places — the host's watchdog QTimer, the
     // `app.saveShaderCache()` verb (scripts and MCP), and the clean-quit save —
-    // and two of them running at once would mean two writers on the same
-    // `*.building` path. One bool closes that. It is deliberately not a lock:
-    // every caller is the main thread, and a save arriving from anywhere else
-    // is a bug this would hide rather than fix.
+    // and two of them running at once would mean two of them handing the writer
+    // a job. One bool closes that. It is deliberately not a lock: every caller
+    // is the main thread, and a save arriving from anywhere else is a bug this
+    // would hide rather than fix.
     //
     // IT DID NOT CONTRIBUTE TO THE 2026-09-14 CRASHES, and the first version of
     // this comment implied it did (round-2 review item 4). The reasoning was
@@ -717,6 +795,23 @@ bool ShaderCache::save(Ogre::Root *root) {
         explicit Reentry(bool &f) : flag(f) { flag = true; }
         ~Reentry() { flag = false; }
     } reentry(mSaving);
+    // ONE WRITER, ONE JOB (FSYNC-1). Everything below this line serializes a
+    // fresh copy of the layers, so meeting a write that is still in flight
+    // means waiting for it — not queueing a second one behind it. In practice
+    // no caller meets it: the host's timer dispatches once per settled compile
+    // burst (seconds apart) and the other two callers are a script's explicit
+    // save and the clean quit. A script saving in a LOOP is the case this
+    // covers, and waiting is what it should do: its next save would otherwise
+    // serialize a megabyte the disk has not caught up with.
+    //
+    // The wait is bounded so that a wedged filesystem cannot turn a save into a
+    // hang; on the timeout the write below is skipped rather than started
+    // beside the old one (two writers on one `.tmp` name is the thing the
+    // single-job rule exists to prevent).
+    if (!flushWrites(kWriteWaitMs)) {
+        logLine("the previous write is still in flight — skipping this save");
+        return false;
+    }
     if (!mWriter && !acquireLock()) return false;   // read-only run: not an error
     Ogre::RenderSystem *rs = root->getRenderSystem();
     if (!rs || !Ogre::GpuProgramManager::getSingletonPtr()) return false;
@@ -729,43 +824,40 @@ bool ShaderCache::save(Ogre::Root *root) {
     // run 1's final save failed against a missing directory.
     if (!mkpath(mDir)) { logLine("cannot recreate " + mDir + " — nothing saved"); return false; }
 
+    const auto serializeStart = std::chrono::steady_clock::now();
     Ogre::HlmsManager *hm = root->getHlmsManager();
-    std::vector<Entry> files;
+    // THE JOB, filled here and written on the writer thread. Serializing is
+    // Ogre's half and belongs to this thread; from the moment a layer is a
+    // `std::vector<char>` nothing about it is Ogre's any more.
+    auto job = std::unique_ptr<PendingWrite>(new PendingWrite());
 
-    // Serialize each layer into memory first, then write atomically. Ogre's
-    // save APIs want a DataStreamPtr; a MemoryDataStream we own gives us the
-    // bytes to checksum before they ever reach the disk.
-    auto emit = [&](const std::string &name, const std::vector<char> &bytes) {
+    // Each layer becomes a blob in the job. The bytes are checksummed and
+    // written by the writer thread — this side never touches the disk.
+    auto emit = [&](const std::string &name, std::vector<char> &bytes) {
         if (bytes.empty()) return;
-        if (!writeAtomic(mDir, name, bytes.data(), bytes.size())) {
-            logLine("could not write " + name);
-            return;
-        }
-        files.push_back({name, bytes.size(), hex128(bytes.data(), bytes.size())});
+        job->names.push_back(name);
+        job->blobs.push_back(std::move(bytes));
     };
-    // Ogre writes into the stream and we need the written length, which
-    // MemoryDataStream cannot grow — so serialize through a temp file and read
-    // it back. It stays atomic: the temp file IS the *.tmp writeAtomic renames.
+    // INTO MEMORY, NOT THROUGH A SCRATCH FILE (FSYNC-1). Ogre's three writers
+    // want a DataStreamPtr and none of them can be asked how many bytes they
+    // are about to produce, which is why this used to write a `*.building` file
+    // and read it back: MemoryDataStream is fixed-size. A stream that GROWS
+    // removes the file — and with it 1.5 MB of buffered write plus the read on
+    // this thread, which the same dirty-page queue that owns the fsync also
+    // throttles (486 ms measured on the serialization alone, with a build's
+    // writeback in front of it, against 17 ms quiet). The bytes were always
+    // copied into a vector at the end of this lambda; now they start there.
     auto serialize = [&](const std::string &name,
                          const std::function<void(Ogre::DataStreamPtr &)> &writer,
                          std::vector<char> &out) -> bool {
-        const std::string scratch = mDir + "/" + name + ".building";
-        { std::ofstream probe(scratch, std::ios::binary | std::ios::trunc); if (!probe) return false; }
-        {
-            // freeOnClose=true is why this MUST be OGRE_NEW_T/MEMCATEGORY_GENERAL:
-            // FileStreamDataStream::close() frees it with OGRE_DELETE_T.
-            std::fstream *fs = OGRE_NEW_T(std::fstream, Ogre::MEMCATEGORY_GENERAL)(
-                scratch.c_str(), std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
-            // Named for the file the bytes are ACTUALLY in (F11). It used to be
-            // named "hlms.1.bin" while writing hlms.1.bin.building, so a log
-            // line naming the stream named a file that did not exist yet.
-            Ogre::DataStreamPtr s(OGRE_NEW Ogre::FileStreamDataStream(scratch, fs, 0, true));
-            writer(s);
-            s->close();
-        }
-        const bool ok = readWholeFile(scratch, out);
-        ::unlink(scratch.c_str());
-        return ok;
+        // Named for the file these bytes END UP IN (F11): a log line from
+        // inside Ogre's writer names something that exists.
+        GrowingMemoryStream *mem = OGRE_NEW GrowingMemoryStream(mDir + "/" + name);
+        Ogre::DataStreamPtr s(mem);
+        writer(s);
+        s->close();
+        out = mem->take();
+        return true;
     };
 
     try {
@@ -805,6 +897,60 @@ bool ShaderCache::save(Ogre::Root *root) {
         return false;
     }
 
+    // THE SPLASH DENOMINATOR, and it is LAST-RUN, not all-time (audit F6).
+    // shaderbuildgate.h:26-29 promises "the run that wrote the cache recorded
+    // how many shaders it needed", and std::max broke that promise in one
+    // direction only: one heavy world (or one run with the cache disabled, or
+    // one that opened five projects) pinned the number forever and every launch
+    // afterwards showed "61/76" and stopped. A session total that only ever
+    // grows is not a denominator, it is a high-water mark.
+    //
+    // The last save of a session is the clean-quit save (EngineHost::shutdown),
+    // so the value that survives IS the session total — which is what the next
+    // launch should expect to build or serve. It is read HERE, on the counting
+    // thread, and travels with the job: the manifest the writer produces must
+    // name the session this save measured, not one that moved under it.
+    if (mCounter) {
+        mExpectedShaders = mCounter->compiled.load() + mCounter->fromCache.load();
+        job->compileCount = mExpectedShaders;
+    }
+    logLine("serialized " + std::to_string(job->names.size()) + " file(s) in " +
+            std::to_string(int(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - serializeStart).count())) +
+            " ms — handing the write off");
+    if (!dispatchWrite(std::move(job))) {
+        // Only reachable if a write started between the flush above and here,
+        // which no caller can do: every one of them is this thread.
+        logLine("a write was already in flight — nothing dispatched");
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE WRITER THREAD (FSYNC-1).
+//
+// Everything below runs off the caller's thread and touches NO Ogre object:
+// blobs the caller serialized, the manifest, and the size cap. The reason it
+// exists is `fsync`, which is how this cache earns its atomic-rename contract
+// and which waits behind whatever else the filesystem's journal is holding —
+// 17 ms on an idle disk against 403 ms measured with a stream of dirty pages in
+// front of it, on the UI thread, in the middle of an archive the user was
+// watching. The contract does not move: bytes to a sibling `.tmp`, flushed,
+// renamed over the target, manifest last, so a crash at any instant leaves the
+// previous generation or the new one. Only the thread that waits moves.
+bool ShaderCache::runWrite(const PendingWrite &job) {
+    std::vector<Entry> files;
+    for (size_t i = 0; i < job.names.size(); ++i) {
+        const std::vector<char> &bytes = job.blobs[i];
+        if (bytes.empty()) continue;
+        if (!writeAtomic(mDir, job.names[i], bytes.data(), bytes.size())) {
+            logLine("could not write " + job.names[i]);
+            continue;
+        }
+        files.push_back({job.names[i], bytes.size(), hex128(bytes.data(), bytes.size())});
+    }
+
     // Files we did not rewrite this time are still valid: carry their manifest
     // entries forward, or the next run would reject a perfectly good file.
     std::vector<Entry> previous;
@@ -816,22 +962,17 @@ bool ShaderCache::save(Ogre::Root *root) {
         if (!rewritten && ::stat(path(p.name).c_str(), &st) == 0) files.push_back(p);
     }
 
-    // THE SPLASH DENOMINATOR, and it is LAST-RUN, not all-time (audit F6).
-    // shaderbuildgate.h:26-29 promises "the run that wrote the cache recorded
-    // how many shaders it needed", and std::max broke that promise in one
-    // direction only: one heavy world (or one run with the cache disabled, or
-    // one that opened five projects) pinned the number forever and every launch
-    // afterwards showed "61/76" and stopped. A session total that only ever
-    // grows is not a denominator, it is a high-water mark.
-    //
-    // The last save of a session is the clean-quit save (EngineHost::shutdown),
-    // so the value that survives IS the session total — which is what the next
-    // launch should expect to build or serve.
-    if (mCounter)
-        mExpectedShaders = mCounter->compiled.load() + mCounter->fromCache.load();
-    if (!writeManifest(files)) return false;
-    mLastSavedUnixMs = nowUnixMs();
-    if (mCounter) mSavedAtCompileCount = mCounter->compiled.load() + mCounter->fromCache.load();
+    // THE MANIFEST IS THE PUBLICATION. Every file above is already in place and
+    // already durable; until this line names them, a reader still sees the
+    // previous generation. Failing here therefore leaves the cache exactly as
+    // it was, which is why nothing below the write is allowed to run on a
+    // false.
+    if (!writeManifest(files, job.compileCount)) {
+        logLine("the manifest could not be written — the previous cache stands");
+        return false;
+    }
+    mLastSavedUnixMs.store(nowUnixMs());
+    mSavedAtCompileCount.store(job.compileCount);
 
     // Size cap: wipe the generation rather than evict (§4.3 rule 6).
     unsigned n = 0;
@@ -842,6 +983,60 @@ bool ShaderCache::save(Ogre::Root *root) {
     }
     logLine("saved " + std::to_string(files.size()) + " files");
     return true;
+}
+
+void ShaderCache::writerLoop() {
+    for (;;) {
+        std::unique_ptr<PendingWrite> job;
+        {
+            std::unique_lock<std::mutex> lock(mWriteMutex);
+            mWriteCv.wait(lock, [this]() { return mWriteStop || mWriteJob != nullptr; });
+            if (!mWriteJob) return;           // stopping, and nothing left to write
+            job = std::move(mWriteJob);
+            mWriteBusy = true;
+        }
+        const auto began = std::chrono::steady_clock::now();
+        const bool ok = runWrite(*job);
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - began).count();
+        logLine(std::string(ok ? "write finished in " : "write FAILED after ") +
+                std::to_string(ms) + " ms (off the calling thread)");
+        {
+            std::lock_guard<std::mutex> lock(mWriteMutex);
+            mWriteBusy = false;
+        }
+        mWriteDoneCv.notify_all();
+    }
+}
+
+bool ShaderCache::dispatchWrite(std::unique_ptr<PendingWrite> job) {
+    std::unique_lock<std::mutex> lock(mWriteMutex);
+    if (mWriteJob || mWriteBusy) return false;
+    mWriteJob = std::move(job);
+    if (!mWriteThread.joinable()) {
+        mWriteStop = false;
+        mWriteThread = std::thread([this]() { writerLoop(); });
+    }
+    lock.unlock();
+    mWriteCv.notify_one();
+    return true;
+}
+
+bool ShaderCache::flushWrites(unsigned budgetMs) {
+    std::unique_lock<std::mutex> lock(mWriteMutex);
+    if (!mWriteJob && !mWriteBusy) return true;
+    return mWriteDoneCv.wait_for(lock, std::chrono::milliseconds(budgetMs),
+                                 [this]() { return !mWriteJob && !mWriteBusy; });
+}
+
+void ShaderCache::stopWriter() {
+    {
+        std::lock_guard<std::mutex> lock(mWriteMutex);
+        if (!mWriteThread.joinable()) return;
+        mWriteStop = true;
+    }
+    mWriteCv.notify_all();
+    mWriteThread.join();
 }
 
 // ---------------------------------------------------------------------------

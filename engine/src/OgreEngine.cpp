@@ -1601,6 +1601,10 @@ bool OgreEngine::saveShaderCache() {
     JAH_TRY { return mShaderCache.save(mRoot); } JAH_CATCH(mLastError, false);
 }
 
+bool OgreEngine::flushShaderCache(unsigned budgetMs) {
+    JAH_TRY { return mShaderCache.flushWrites(budgetMs); } JAH_CATCH(mLastError, false);
+}
+
 bool OgreEngine::clearShaderCache() {
     // BOTH CACHES, because they are one directory and one lifetime (I-5). The
     // shader cache's wipe() unlinks every file in that directory anyway, so a

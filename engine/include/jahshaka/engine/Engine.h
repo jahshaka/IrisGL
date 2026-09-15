@@ -1900,11 +1900,29 @@ public:
     virtual bool readHzbLevel(View *view, unsigned level, std::vector<float> &out,
                               unsigned &width, unsigned &height) = 0;
 
-    /// Writes the cache now, if anything new has been compiled since the last
-    /// write. Called on clean shutdown and once a compile burst has settled;
-    /// safe (and a no-op) when the cache is disabled or nothing is dirty.
-    /// False means the write failed — the previous cache, if any, is untouched.
+    /// Serializes the cache now and writes it OFF THE CALLING THREAD. Called on
+    /// clean shutdown and once a compile burst has settled; safe (and a no-op)
+    /// when the cache is disabled or nothing is dirty.
+    ///
+    /// WHAT "NOW" MEANS (FSYNC-1). Serializing is the engine's half and happens
+    /// before this returns — it reads Ogre's caches, so it can happen nowhere
+    /// else. The FILE half (about a megabyte, an `fsync` and an atomic rename)
+    /// is handed to the engine's writer thread, because that fsync waits behind
+    /// every other dirty page the filesystem is holding: 17 ms on an idle disk,
+    /// 403 ms measured with a stream of writeback in front of it — on the UI
+    /// thread, in the middle of an archive the user was watching.
+    ///
+    /// True therefore means "serialized and handed over", not "on the disk".
+    /// flushShaderCache() is how a caller that needs the second thing waits for
+    /// it; the engine's own destructor waits too, so a clean quit never loses a
+    /// save. False means nothing was handed over (disabled, nothing dirty, or
+    /// the serialization failed) — the previous cache, if any, is untouched.
     virtual bool saveShaderCache() = 0;
+    /// Waits up to `budgetMs` for the write saveShaderCache() handed off. True
+    /// when the writer is idle (nothing in flight, or it finished); false on
+    /// timeout, with the write still running. A no-op when nothing is in
+    /// flight.
+    virtual bool flushShaderCache(unsigned budgetMs) = 0;
     /// Deletes every cached file. The next launch is cold. Always safe: the
     /// running process keeps its in-memory shaders.
     virtual bool clearShaderCache() = 0;
