@@ -147,6 +147,18 @@ bool OgreScene::setSky(const SkyDesc &desc) {
             if (mSkyDesc.mode != SkyMode::NoSky) requestSkyCapture();
         }
     }
+    // THE SUN'S AIR is a fourth independent piece (lane SKY-DENSITY-1), for the
+    // same reason as the disc above: `sunHaze` is the only input to
+    // atmosphereSunTint and it changes NO sky pixel and no reflection, so
+    // dragging it must not tear the sky down, re-render the six capture faces,
+    // re-convolve the IBL cube or stale the probe grid. It is not part of
+    // AtmosphereSky's equality (Types.h says why); it is applied here.
+    if (desc.mode == SkyMode::Atmosphere &&
+        desc.atmosphere.sunHaze != mSkyDesc.atmosphere.sunHaze) {
+        mSkyDesc.atmosphere.sunHaze = desc.atmosphere.sunHaze;
+        mAtmoSunHaze = std::max(1.0f, desc.atmosphere.sunHaze);
+        ++mAtmoPresetGeneration;   // the tint's memo is keyed on this
+    }
     if (!skyChanged && !reflChanged) return true;   // idempotent: nothing else to do
     // THE PROBE CACHE'S SKY INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
     // faces capture the sky (RQ 0 is inside their range) and the reflection
@@ -370,6 +382,12 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         // says whether the fog has a customer at all.
         if (!mAtmoFogOn) preset.fogDensity = 0.0f;
         mAtmosphere->setPreset(preset);
+        // THE SUN'S OWN AIR IS NOT A PRESET FIELD (lane SKY-DENSITY-1): the
+        // component draws the sky, the transmittance below the atmosphere is
+        // ours, and nothing about this number reaches the sky pass. Held at or
+        // above a purely molecular atmosphere — under 1 the aerosol term would
+        // turn negative and AMPLIFY the beam.
+        mAtmoSunHaze = std::max(1.0f, sky.sunHaze);
         ++mAtmoPresetGeneration;   // atmosphereSunTint's memo is keyed on this
 
         // THE SUN, PUSHED IN. setSunDir takes the direction the light TRAVELS
@@ -397,43 +415,78 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
 }
 
 // THE ATMOSPHERE'S TINT ON THE DIRECT SUNLIGHT (SUN_FOLLOWS_ATMOSPHERE, lane
-// ENGINE-7 item 6; Engine.h states the contract).
+// ENGINE-7 item 6; the model below is lane SKY-DENSITY-1's; Engine.h states the
+// contract).
 //
-// WHAT IT IS, AND WHERE IT COMES FROM. AtmosphereNpr's model carries its own
-// term for what the air takes out of SUNLIGHT on the way down — upstream calls
-// it `skyLightAbsorption`, it is the factor the model multiplies its own sun
-// disc by, and it is two lines (OgreAtmosphereNpr.cpp:154-161 and :163-193):
+// WHAT IT IS. The fraction of the sun's beam that survives the trip down, per
+// channel, relative to the trip it makes at the zenith. That is Beer-Lambert
+// along ONE ray:
+//
+//     T(elevation) = exp( -tau * m(elevation) )
+//     tint         = T(elevation) / T(90 degrees)
+//
+// with `m` the relative AIRMASS and `tau` the atmosphere's optical depth per
+// channel. Divided by its own value at the zenith so the answer is exactly
+// (1,1,1) at noon — the user's picked colour IS the noon colour — and falls,
+// blue first, as the sun goes down.
+//
+// WHY IT IS NOT THE SKY'S DIAL ANY MORE (the defect this lane closes). Until
+// 2026-09-15 this quantity was read out of AtmosphereNpr's own preset:
 //
 //     lightDensity = densityCoeff / max(sunHeight, 0.0035)^0.75
 //     absorption   = 2 * exp2(-lightDensity * skyColour)
 //
-// with `sunHeight = sin(normalizedTimeOfDay * PI)`. Both inputs are PRESET
-// fields, which the component hands out (getPreset), so this reads the model
-// rather than inventing one — the same numbers the sky on screen is drawn from.
+// — the NPR model's internal absorption term, which meant `densityCoeff` set
+// BOTH the sky dome's look and the colour of the sunlight. The two are
+// different physical quantities: the sky's radiance is an integral of
+// scattering over a whole view ray (and AtmosphereNpr is explicitly NOT a
+// physical model of it — its density is an artistic dial, fitted by SKY-TUNE-1
+// to a Preetham reference at turbidity 2.5), while the sun's colour is the
+// extinction along the single ray to the sun, which needs no art at all. One
+// dial for two jobs meant every sky tune moved the sunlight and every sunlight
+// tune moved the sky: SKY-TUNE-1 measured the residual at 0.046 stops when the
+// dial was where the SUN wanted it (0.47) and 0.189 stops where the SKY wanted
+// it (0.25), and had to ship a compromise inside the joint optimum.
 //
-// Divided by its own value with the sun at the zenith, so the answer is exactly
-// (1,1,1) at noon — the user's picked colour IS the noon colour — and falls,
-// blue first, as the sun goes down. On the shipped preset (density 0.25 since
-// SKY-TUNE-1) a sun 5 degrees above the horizon comes out at (0.74, 0.60, 0.40)
-// and one at 30 degrees at (0.96, 0.93, 0.89) — reddened AND dimmed, which is
-// what a low sun really does (test_engine's
-// atmosphere_sun_tint_reddens_a_low_sun prints all three).
+// THE MODEL, AND WHERE ITS NUMBERS COME FROM. The optical depths are the
+// standard clear-atmosphere terms of Preetham et al. 1999 (appendix A.2, the
+// direct solar attenuation) — the SAME model, at the same turbidity, the sky's
+// own defaults were fitted to, so the sky and the sunlight now describe one
+// atmosphere through two dials instead of disagreeing through one:
 //
-// HOW FAITHFUL IT IS, MEASURED (SKY-TUNE-1, spikes/sky-tune-1/): the physical
-// answer for this quantity is the direct beam's Rayleigh transmittance,
-// exp(-tau*airmass) / exp(-tau*airmass(90)), with tau(550 nm) = 0.0975 scaled
-// by lambda^-4.05 and Kasten-Young airmass — which is 0.53/0.40/0.13 at 5
-// degrees and 0.95/0.93/0.86 at 36. The model above tracks that shape because
-// its softer airmass (sunHeight^0.75 instead of 1/sin) is compensated by an
-// optical depth about 1.5x Rayleigh's, and how well it tracks depends ENTIRELY
-// on densityCoeff: the residual is 0.046 stops at density 0.47, 0.189 at 0.25
-// and 0.27 at 0.15. THAT IS A KNOWN COUPLING AND A RECORDED FINDING: one dial
-// sets both the SKY's look (where the fit wants 0.20-0.25) and the SUNLIGHT's
-// colour (where physics wants ~0.47), and 0.25 is inside the flat joint optimum
-// of the two rather than the best of either. The clean separation — deriving
-// this from Rayleigh optical depth directly, with the density dial only as a
-// multiplier — is deliberately NOT done here; it is the lead's call, not a sky
-// preset lane's.
+//     tau_rayleigh(l) = 0.008735 * l^-4.08                   (l in micrometres)
+//     tau_aerosol(l)  = beta * l^-1.3,  beta = 0.04608*T - 0.04586   (Angstrom)
+//     tau_ozone(l)    = k_o(l) * 0.35 cm                     (the Chappuis band)
+//
+// evaluated at 600 / 550 / 450 nm for linear sRGB R / G / B, and `T` is the
+// atmosphere's Linke TURBIDITY — the one dial, `AtmosphereSky::sunHaze`
+// (1 = purely molecular, 2.5 = the clear day the sky was fitted to, 4-6 hazy).
+// The mixed-gas and water-vapour terms of the same model are 760 nm and beyond:
+// zero across the visible, so they are not carried.
+//
+// Airmass is Kasten-Young (1989), which is the one part a low sun cannot do
+// without: 1/sin(h) is 28% wrong by 5 degrees and diverges at the horizon,
+// while this form is within 0.1% down to zero:
+//
+//     m(h) = 1 / ( sin(h) + 0.50572 * (h_deg + 6.07995)^-1.6364 )
+//
+// HOW FAITHFUL IT IS, MEASURED (spikes/skyd/, this lane). Against the same
+// model integrated SPECTRALLY at 5 nm from 380 to 750 nm through the CIE 1931
+// observer and into linear sRGB — i.e. against what three channels can only
+// approximate — the three-wavelength form above agrees to 0.04 stops at a
+// 30-degree sun, 0.08 at 20, 0.19 at 10 and 0.39 at 5 (R and G; by then B is
+// under 0.02 in both and the sRGB primaries no longer contain the beam). The
+// old preset-derived form was 0.7 to 3.3 stops BRIGHT over the same range —
+// it lost 0.7 stops by a 5-degree sun where the air really takes 3.7.
+//
+// WHAT MOVED, AT THE SHIPPED DEFAULTS (haze 2.5, and it is only the SUN that
+// moved — no sky pixel reads this function):
+//
+//     elevation   old (density 0.25)      new (haze 2.5)      reference
+//        30 deg   0.961 0.935 0.889      0.781 0.756 0.656   0.804 0.753 0.642
+//        10 deg   0.854 0.765 0.624      0.320 0.276 0.143   0.365 0.268 0.126
+//         5 deg   0.739 0.596 0.404      0.099 0.073 0.019   0.130 0.068 0.013
+//         2 deg   0.517 0.325 0.139      0.010 0.006 0.000   0.018 0.005 0.000
 //
 // WHY NOT THE COMPONENT'S OWN LIGHT LINK. `setLight` takes the light over
 // completely — type, direction, diffuse, specular and power — so it would
@@ -446,6 +499,25 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
 // direction — it gets BRIGHTER as the sun sets (measured: 0.09/0.24/0.55 at the
 // zenith against 6.92/3.38/0.69 at 5 degrees, which is the sunset glow) — so it
 // is the wrong quantity for "what reached the ground".
+namespace {
+// Optical depth per linear-sRGB channel at 600 / 550 / 450 nm (see above).
+constexpr float kTauRayleigh[3]   = { 0.07021f, 0.10013f, 0.22707f };
+constexpr float kTauOzone[3]      = { 0.04375f, 0.02975f, 0.00105f };
+// The Angstrom aerosol term at unit beta: lambda^-1.3 with lambda in microns.
+constexpr float kTauAerosolPerBeta[3] = { 1.94269f, 2.17535f, 2.82373f };
+
+/// Kasten-Young (1989) relative airmass. `elevDeg` is the sun's geometric
+/// elevation; below the horizon the formula's own guard (the +6.08 offset)
+/// keeps it finite, and the Earth's occlusion below takes the answer to zero
+/// long before it matters.
+inline float relativeAirmass(float elevDeg) {
+    const float h = elevDeg * float(M_PI) / 180.0f;
+    const float denom = std::sin(h)
+        + 0.50572f * std::pow(std::max(elevDeg + 6.07995f, 1e-3f), -1.6364f);
+    return denom > 1e-6f ? 1.0f / denom : 1.0f / 1e-6f;
+}
+}   // namespace
+
 Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
     const Colour white(1.0f, 1.0f, 1.0f, 1.0f);
     if (!mAtmosphere || !mAtmoSkyOn) return white;
@@ -457,46 +529,33 @@ Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
         return mAtmoTint;
     Colour tint = white;
     JAH_TRY {
-        const Ogre::AtmosphereNpr::Preset preset = mAtmosphere->getPreset();
-        // The model's own absorption, at an elevation. `normalizedTimeOfDay` is
-        // asin(elevation)/PI — what applySkyAtmosphere pushes — so sunHeight
-        // below is the same number the component computes for itself.
-        const auto absorption = [&preset](float elevation) {
-            const float tod = std::max(0.0f, std::min(1.0f - 1e-6f,
-                                                      std::asin(std::max(-1.0f, std::min(1.0f, elevation)))
-                                                          / float(M_PI)));
-            const float sunHeight = std::sin(tod * float(M_PI));
-            const float lightDensity =
-                std::max(0.0f, preset.densityCoeff) /
-                std::pow(std::max(sunHeight, 0.0035f), 0.75f);
-            return Ogre::Vector3(std::exp2(-lightDensity * preset.skyColour.x),
-                                 std::exp2(-lightDensity * preset.skyColour.y),
-                                 std::exp2(-lightDensity * preset.skyColour.z));
-            // (upstream's factor of 2 is common to both ends of the ratio)
-        };
-        const Ogre::Vector3 here = absorption(float(toSun.y));
-        const Ogre::Vector3 noon = absorption(1.0f);
-        const auto ratio = [](float a, float b) {
-            if (!(b > 1e-8f)) return 1.0f;              // a degenerate zenith: no opinion
-            return std::max(0.0f, std::min(1.0f, a / b));
-        };
-        tint = Colour(ratio(float(here.x), float(noon.x)), ratio(float(here.y), float(noon.y)),
-                      ratio(float(here.z), float(noon.z)), 1.0f);
+        // THE BEAM'S TRANSMITTANCE, RELATIVE TO THE ZENITH. Only the airmass
+        // DIFFERENCE survives the ratio, so the absolute column (which a
+        // renderer has no use for — the user's sun colour is the noon colour by
+        // contract) cancels and the whole model is three exponentials.
+        const float beta = std::max(0.0f, 0.04608f * mAtmoSunHaze - 0.04586f);
+        const float elevDeg = float(std::asin(std::max(-1.0, std::min(1.0, double(toSun.y))))
+                                    * 180.0 / M_PI);
+        const float dm = relativeAirmass(elevDeg) - relativeAirmass(90.0f);
+        float rgb[3];
+        for (int c = 0; c < 3; ++c) {
+            const float tau = kTauRayleigh[c] + kTauOzone[c] + beta * kTauAerosolPerBeta[c];
+            rgb[c] = std::max(0.0f, std::min(1.0f, std::exp(-tau * dm)));
+        }
+        tint = Colour(rgb[0], rgb[1], rgb[2], 1.0f);
         // ...AND THEN THE EARTH GETS IN THE WAY (lane SUN-DISC-1; the rig's
         // horizon-crossing capture, 2026-09-14).
         //
-        // THE MODEL HAS NO ANSWER BELOW THE HORIZON. `normalizedTimeOfDay` is
-        // clamped at 0 and `sunHeight` at 0.0035, so every elevation from +0.2
-        // degrees down to -90 returns the SAME absorption — the sun that has
-        // set goes on lighting the scene, drawing its disc and casting its
-        // shadow, at a constant value, for ever. On the shipped preset that
-        // value is 0.00058 of noon, which the night rule (SceneMirror's
-        // kSunNightTint) cuts off as a special case; dial the sky's density
-        // down to 0.1 and the same frozen plateau is 0.20 of noon — a fifth of
-        // the noon sun arriving from 30 degrees BELOW the ground, with a disc
-        // drawn under the horizon and shadows cast upwards (measured).
+        // NO TRANSMITTANCE MODEL HAS AN ANSWER BELOW THE HORIZON, and each is
+        // wrong in its own way: the preset-derived one this lane replaced FROZE
+        // there (its inputs clamped, so a sun 30 degrees under the ground went
+        // on lighting the scene at a constant fraction of noon, disc drawn and
+        // shadows cast upwards — measured, 2026-09-14), and an airmass formula
+        // is fitted to a ray that still reaches the ground, which a ray from
+        // below does not. Neither is a reason to guess: the term that ends
+        // sunlight is geometry, not chemistry, and it is exact.
         //
-        // The missing term is geometry, not chemistry: the Earth occludes the
+        // The Earth occludes the
         // sun. The sun's own disc is 0.53 degrees wide (0.265 of radius) and
         // refraction lifts the apparent disc by about 0.57 degrees at the
         // horizon, so direct sunlight starts to be cut at a GEOMETRIC centre
@@ -507,8 +566,6 @@ Colour OgreScene::atmosphereSunTint(const Vec3 &toSunIn) const {
         // same tint, so they fade together and the night rule now trips on a
         // value that is already zero instead of deciding when night begins.
         {
-            const float elevDeg = float(std::asin(std::max(-1.0, std::min(1.0, double(toSun.y))))
-                                        * 180.0 / M_PI);
             constexpr float kSunSetStartDeg = -0.305f;   // lower limb touches the horizon
             constexpr float kSunSetEndDeg   = -0.835f;   // upper limb goes under
             float occl = 1.0f;

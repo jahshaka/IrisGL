@@ -121,6 +121,23 @@ struct SkyRealistic
 	QColor skyColour;
 	/// Multiplies the whole sky (HDR).
 	float power;
+	/// THE AIR THE SUNLIGHT TRAVELS THROUGH — the atmosphere's turbidity, and
+	/// the ONLY thing that decides the sun's colour (lane SKY-DENSITY-1).
+	///
+	/// It is a SECOND dial because there are two quantities. The sky's radiance
+	/// is an integral of scattering along every view ray and `density` above is
+	/// the artistic dial of the non-physical model that draws it; the SUN's
+	/// colour is the extinction along the ONE ray from the sun to the ground,
+	/// which is Beer-Lambert and needs no art. Sharing one number made tuning
+	/// the sky move the sunlight and tuning the sunlight move the sky.
+	///
+	/// The value is Linke turbidity, the standard clear-sky measure: 1 is a
+	/// purely molecular atmosphere (Rayleigh plus ozone, a mountain-top sky),
+	/// 2-3 a clear day, 4-6 hazy, and the default 2.5 is exactly the turbidity
+	/// the SKY's own defaults were fitted to (SKY-TUNE-1), so the two describe
+	/// the same air. Below 1 the aerosol term would amplify rather than absorb;
+	/// it is held there. OgreSky.cpp::atmosphereSunTint carries the model.
+	float sunHaze;
 
 	// THE SKY HAS NO SUN OF ITS OWN (SKY_LIGHT_SPEC.md §3, owner decision D15).
 	// The analytic sky's sun DIRECTION comes from the scene's sun — the first

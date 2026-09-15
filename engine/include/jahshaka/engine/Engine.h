@@ -126,15 +126,25 @@ public:
     /// IS the analytic atmosphere — every other sky is a picture, and a picture
     /// knows nothing about what the air does to sunlight.
     ///
-    /// WHAT IT IS. The scattering model's own answer for the colour of the sky
-    /// looking straight at the sun, divided by its answer with the sun at the
-    /// zenith, per channel. So it is 1,1,1 at noon — the user's picked colour
-    /// IS the noon value — and falls, blue first, as the sun goes down: the
-    /// reddening AND the dimming a low sun really does to direct light. It is
-    /// the same evaluation the component's own light link uses
-    /// (AtmosphereNpr::syncToLight -> getAtmosphereAt), so the disc, the sky
-    /// and the direct light cannot disagree; the link itself is never armed
-    /// here (it would take the light's colour and power over entirely).
+    /// WHAT IT IS. The DIRECT BEAM's transmittance through the atmosphere at
+    /// the sun's elevation, divided by its value with the sun at the zenith,
+    /// per channel — Beer-Lambert, exp(-tau * airmass), with Rayleigh, aerosol
+    /// and ozone optical depths and Kasten-Young airmass (OgreSky.cpp carries
+    /// the constants and the reference). So it is 1,1,1 at noon — the user's
+    /// picked colour IS the noon value — and falls, blue first, as the sun goes
+    /// down: the reddening AND the dimming a low sun really does to direct
+    /// light.
+    ///
+    /// ITS ONE INPUT IS `AtmosphereSky::sunHaze`, the atmosphere's turbidity,
+    /// and NOT the sky's `density` (lane SKY-DENSITY-1). The sky's radiance and
+    /// the sun's extinction are two physical quantities: the first is an
+    /// integral of scattering over every view ray, drawn by a non-physical
+    /// model whose density dial is artistic, the second is the absorption along
+    /// one ray and is physics. They shared a dial until 2026-09-15, so tuning
+    /// the sky's look moved the sunlight's colour and back. Moving `density`
+    /// now leaves this value untouched, and moving `sunHaze` leaves every sky
+    /// pixel untouched. (The component's own light link is still never armed —
+    /// it would take the light's colour and power over entirely.)
     ///
     /// ...TIMES THE EARTH. The scattering model is frozen below the horizon
     /// (its own inputs clamp there), so on its own it would light the scene
@@ -144,7 +154,11 @@ public:
     /// setting through the horizon, lifted by 0.57 degrees of refraction. So
     /// this value REACHES ZERO, continuously, and a host does not need a
     /// threshold to decide when night starts — the light, the sun disc and the
-    /// sun's shadow all ride this one number and fade together.
+    /// sun's shadow all ride this one number and fade together. (With the
+    /// physical extinction the beam is already a thousandth of noon by an
+    /// elevation of 0.7 degrees, so a host's night threshold trips just before
+    /// the occlusion band rather than inside it — on a value that is three
+    /// hundred times below one 8-bit step either way.)
     ///
     /// `toSun` points AT the sun (the opposite of the direction the light
     /// travels), in world space; it does not have to be normalised. Cheap to
