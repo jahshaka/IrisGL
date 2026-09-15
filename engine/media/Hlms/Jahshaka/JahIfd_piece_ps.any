@@ -11,25 +11,25 @@
 // So the scalar is OURS, applied at the last line of upstream's own piece, and
 // it rides the pass buffer (a const-buffer write, never a shader rebuild) so
 // the author can turn the dial without a recompile.
+// WHY FIVE HOOK PIECES AND NOT A COPY OF UPSTREAM'S. This file used to
+// UNDEFINE upstream's `applyIrradianceField` and define it again with the whole
+// body copied verbatim, because the terms below are not a post-multiply: the
+// sample point moves before the cage is derived, the cage's probe indices have
+// to be clamped, two quantities are accumulated per probe, and the field's
+// answer is scaled and then complemented. There was no hook for any of it, and
+// a duplicated body is a liability exactly once -- at a pin bump, silently --
+// so it was guarded by a configure-time sha256 of upstream's file that FAILED
+// the build when upstream moved.
 //
-// WHY A WHOLE-PIECE COPY RATHER THAN A HOOK. There is no hook: the insert order
-// is `applyVoxelConeTracing` -> `applyIrradianceField` -> `forwardPlusDoCubemaps`
-// (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any:911-913), and the field's
-// contribution is accumulated into `pixelData.envColourD` inside the piece's
-// last statement. Anything that ran later would scale the probe/cubemap terms
-// too. The Hlms parser rejects a duplicate piece NAME, so the pattern is the one
-// JahFog_piece_vs_piece_ps.any already uses for `DoAtmosphereNprSky`: UNDEF the
-// piece, then define it again — from a library folder that is loaded LAST
-// (OgreEngine::ensureHlms appends Hlms/Jahshaka after upstream's Pbs paths, so
-// the original has been collected by the time this file is parsed).
-//
-// THE BODY IS UPSTREAM'S, VERBATIM, save the final multiply. It is duplicated
-// code and that is a maintenance cost we pay deliberately, guarded rather than
-// trusted: irisgl/engine/CMakeLists.txt hashes
-// Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any at configure time and
-// FAILS the configure when upstream's body changes, so a pin bump cannot leave
-// this copy silently stale (re-sync the body, re-apply the multiply, update the
-// hash). No Ogre patch is involved anywhere in this route.
+// Ogre-patch 0058 puts the five insertion points into upstream's own piece
+// (prologue / probe-origin / per-probe / resolve / post), which is what this
+// file uses now. The copy and the hash tripwire are gone with it: ours is a set
+// of PIECES again, upstream's body is upstream's, and a pin bump either applies
+// the patch or refuses it out loud. The patch also carries the two fixes the
+// copy had folded into the body -- the division guard on a probe that lands
+// exactly under the shaded pixel, and the comment-promised clamp becoming a
+// hook because the per-axis probe counts a clamp needs are not in upstream's
+// render params.
 //
 // CAUTION, the same one JahFog and JahVct carry, and this file cost the lane a
 // full test run by ignoring it: the Hlms parser does NOT respect // comments —
@@ -179,21 +179,11 @@
 
 @property( irradiance_field )
 
-@undefpiece( applyIrradianceField )
-@piece( applyIrradianceField )
-
-	// ifdGridPos in range [0; mNumProbes)
-	float3 ifdGridPos =
-		transformPos3( inPs.pos.xyz, //
-					   passBuf.irradianceField.viewToIrradianceFieldRow0,
-					   passBuf.irradianceField.viewToIrradianceFieldRow1,
-					   passBuf.irradianceField.viewToIrradianceFieldRow2 );
-
-	float3 ifdSpaceNormal = normalize( transformDir3( pixelData.normal, //
-									   passBuf.irradianceField.viewToIrradianceFieldRow0,
-									   passBuf.irradianceField.viewToIrradianceFieldRow1,
-									   passBuf.irradianceField.viewToIrradianceFieldRow2 ) );
-
+// ---- THE SAMPLE POINT, AND EVERYTHING THE CAGE LOOP BELOW NEEDS --------
+//
+// Inserted by upstream's piece with ifdGridPos and ifdSpaceNormal in scope and
+// before the cage is derived from them (ogre-patch 0058).
+@piece( custom_ps_ifdCagePrologue )
 	// THE FOURTH THING THAT IS NOT UPSTREAM'S: THE SURFACE BIAS (ENGINE-6 item
 	// 1; PHOTON-S2 FINDINGS §5 item 2 and §7 item 1, recorded in
 	// SPECS/OGRE_UPSTREAM_ISSUES.md as "IrradianceField: three visibility
@@ -259,14 +249,6 @@
 										   passBuf.irradianceField.viewToIrradianceFieldRow2 );
 	ifdGridPos += ifdSpaceNormal * ifdNormalBias + ifdViewDirGrid * ifdViewBias;
 
-	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
-
-	// ifdAlpha is how far from the floor( ifdGridPos ). on [0, 1] for each axis.
-	float3 ifdAlpha = saturate( fract( ifdGridPos ) );
-
-	float3 ifdIrradiance = float3( 0, 0, 0 );
-	float sumIfdWeight = 0;
-
 	// OURS, AND THE THIRD THING THAT IS NOT UPSTREAM'S: THE FIELD'S EDGE
 	// (ENGINE_CACHE_POLICY_SPEC P9). Two numbers the cage loop below needs and
 	// upstream never computes.
@@ -326,78 +308,41 @@
 	// set is 0.25, 0.15, 0.15, 0.15, 0.15, 0.15.
 	float ifdVisWeights[6] = OGRE_ARRAY_START( float ) 1.0, 0.15, 0.15, 0.15, 0.15, 0.15 OGRE_ARRAY_END;
 @end
+@end
 
-	// Iterate over adjacent probe cage
-	for( int i = 0; i < 8; ++i )
-	{
-		// Compute the offset grid coord and clamp to the probe grid boundary
-		// Offset = 0 or 1 along each axis
-		float3 probeOffset = float3( int3( i, i >> 1, i >> 2 ) & int3( 1, 1, 1 ) );
-		// THE CLAMP THE COMMENT ABOVE HAS ALWAYS PROMISED, and upstream has
-		// never performed (IrradianceField_piece_ps.any:130-140 at the pin, and
-		// the world->grid map has no clamp either,
-		// OgreIrradianceField.cpp:794-812). Without it a pixel outside the
+// ---- THE CAGE'S PROBE INDICES, CLAMPED TO THE GRID ---------------------
+@piece( custom_ps_ifdCageProbeOrigin )
+		// THE CLAMP UPSTREAM'S COMMENT PROMISES AND UPSTREAM CANNOT PERFORM: the
+		// per-axis probe counts it needs are not in the render params (only Nx and
+		// Nx*Ny are), which is why ogre-patch 0058 makes this a hook rather than a
+		// fix in place. The world->grid map has no clamp either
+		// (OgreIrradianceField.cpp:794-812). Without it a pixel outside the
 		// field indexes past the grid and getProbeIdx's flat index WRAPS into
 		// another row -- in the Grand Showroom 2 the roof's upper cage corner
 		// landed on the FLOOR layer with 77% of the trilinear weight, which is
 		// the "texture maps on the roof" the owner reported. A clamped cage
 		// EXTRAPOLATES the border probes instead, which is bounded and which
-		// the two fades below then take to zero.
-		float3 probeOrigin = clamp( ifdGridProbeOrigin + probeOffset,
-									float3( 0.0, 0.0, 0.0 ), ifdMaxProbe );
+		// the two fades in the resolve piece then take to zero.
+		probeOrigin = clamp( probeOrigin, float3( 0.0, 0.0, 0.0 ), ifdMaxProbe );
+@end
 
-		IrfProbeIndex probeIdx =
-			getProbeIdx( probeOrigin, passBuf.irradianceField.numProbesAggregated.xy );
-
-		float3 dir = probeOrigin - ifdGridPos;
-		// max(): a clamped cage can put a probe exactly under the pixel, and
-		// 1/0 would make dir NaN and poison the whole sum. (The hazard is
-		// upstream's too -- a pixel landing exactly on a grid integer hits it
-		// unclamped -- but clamping makes the coincidence reachable by a whole
-		// half-space rather than by a measure-zero plane.)
-		float r = max( length( dir ), 1e-6 );
-		dir *= 1.0 / r;
-
-		// Ignore probes that are behind us, but don't black them out completely
-		// as detailed surface may otherwise have very few probes ppointing at it
-		// Upstream's own front/back test, split into the weight it has always
-		// produced and a second reading of the same dot product for the
-		// front-side share (P9, after the loop). The +0.5 is what separates
+// ---- WHAT WE ACCUMULATE PER CAGE PROBE ---------------------------------
+@piece( custom_ps_ifdCageProbe )
+		// A SECOND READING OF UPSTREAM'S OWN FRONT/BACK TEST, for the front-side
+		// share of the cage's weight (P9; the fade that uses it is in the resolve
+		// piece). The +0.5 is what separates
 		// BEHIND from COPLANAR: a probe exactly in the shading surface -- which
 		// is the normal case for a flat field, e.g. the default scene's 64x2x64
 		// field puts a probe layer exactly in the ground plane -- has dot 0 and
 		// is not behind anything, so it reads 0.5 and keeps its say, while a
 		// probe genuinely under the surface reads 0 (the x200 makes even a
 		// 1 cm offset saturate).
-		float ifdNdotD = dot( dir, ifdSpaceNormal ) * 200.0;
-		float ifdFrontSide = saturate( ifdNdotD + 0.5 );
-		float weight = saturate( ifdNdotD ) + 0.2;
+		// Recomputed here rather than carried out of upstream's weight line, which
+		// is upstream's and stays upstream's: the same expression on the same
+		// normalised `dir` the weight was built from, so the same value.
+		float ifdFrontSide = saturate( dot( dir, ifdSpaceNormal ) * 200.0 + 0.5 );
+		ifdFrontWeight += weight * ifdFrontSide;
 
-		// Compute the trilinear weights based on the grid cell vertex to smoothly
-		// transition between probes. Avoid ever going entirely to zero because that
-		// will cause problems at the border probes.
-		// We're using 1-a when offset = 0 and a when offset = 1.
-		float3 trilinear;
-		trilinear.x = probeOffset.x < 1 ? ( 1.0 - ifdAlpha.x ) : ifdAlpha.x;
-		trilinear.y = probeOffset.y < 1 ? ( 1.0 - ifdAlpha.y ) : ifdAlpha.y;
-		trilinear.z = probeOffset.z < 1 ? ( 1.0 - ifdAlpha.z ) : ifdAlpha.z;
-
-		// Visibility (Chebyshev)
-		float2 ifdDepthUV = getIrradianceFieldXY(
-			-dir, probeIdx, passBuf.irradianceField.depthBorderedRes,
-			passBuf.irradianceField.depthFullWidth, passBuf.irradianceField.depthInvFullResolution );
-		float2 temp = OGRE_SampleLevel( ifdDepth, ifdSampler, ifdDepthUV, 0 ).xy;
-		float mean = temp.x;
-		float meanSq = temp.y;
-		if( r > mean )
-		{
-			float variance = abs( mean * mean - meanSq ) + 1e-6;
-			float dev = ( r - mean );
-			float chebyshevWeight = variance / ( variance + dev * dev );
-			chebyshevWeight = max( chebyshevWeight * chebyshevWeight * chebyshevWeight, 0.0 );
-
-			weight *= chebyshevWeight;
-		}
 		// WHY THERE IS NO VISIBILITY TERM OF OURS HERE, and it was measured
 		// rather than assumed (the lead's question, P9). The Chebyshev weight
 		// cannot carry the edge case on its own for two reasons. First,
@@ -411,25 +356,6 @@
 		// no threshold on it can separate them from an interior floor. The
 		// probes that answer such a pixel are inside geometry; recognising them
 		// is probe classification (RTXGI-style), which this lane does not do.
-
-		// Avoid zero weight
-		weight = max( 0.000001, weight );
-
-		const float crushThreshold = 0.2;
-		if (weight < crushThreshold) {
-			weight *= weight * weight * (1.0 / (crushThreshold*crushThreshold));
-		}
-
-		weight *= trilinear.x * trilinear.y * trilinear.z;
-
-		float2 ifdColourUV = getIrradianceFieldXY(
-			ifdSpaceNormal, probeIdx, passBuf.irradianceField.irradBorderedRes,
-			passBuf.irradianceField.irradFullWidth, passBuf.irradianceField.irradInvFullResolution );
-
-		float3 irrColour = OGRE_SampleLevel( ifdColour, ifdSampler, ifdColourUV, 0 ).xyz;
-		ifdIrradiance += irrColour * weight;
-		sumIfdWeight += weight;
-		ifdFrontWeight += weight * ifdFrontSide;
 
 @property( ambient_sh && !ambient_sh_monochrome && vct_num_probes )
 		// OURS: the sky-visibility taps for this cage probe. The branch is
@@ -475,8 +401,10 @@
 			ifdSkyVis += weight * ifdProbeVis;
 		}
 @end
-	}
+@end
 
+// ---- HOW MUCH THE FIELD IS TRUSTED, AND THE SCALE IT IS GIVEN ----------
+@piece( custom_ps_ifdCageResolve )
 	// OURS (P9): HOW MUCH THE FIELD IS TRUSTED AT THIS PIXEL, in [0, 1], and
 	// the two independent ways it can have nothing to say.
 	//
@@ -568,16 +496,23 @@
 	const float ifdWeightHi = 0.0050;
 	float ifdWeightFade = smoothstep( ifdWeightLo, ifdWeightHi, sumIfdWeight );
 
-	// THE FIRST LINE THAT IS NOT UPSTREAM'S. Upstream writes
-	//     pixelData.envColourD.xyz += ifdIrradiance * ( 1.0 / sumIfdWeight );
-	// and we scale that by jahIfd.x, the DDGI diffuse intensity the host writes
-	// into the pass buffer (JahshakaEngine's FogHlmsListener; the default is
-	// calibrated against the pre-DDGI VCT diffuse, GiParams::ddgiIntensity).
-	// 1.0 reproduces upstream exactly. The confidence is ours too (P9): inside
-	// the field it is exactly 1 and this line is bit-for-bit what it always was.
-	pixelData.envColourD.xyz +=
-		ifdIrradiance * ( passBuf.jahIfd.x * ifdConfidence * ifdWeightFade / sumIfdWeight );
+	// THE SCALE UPSTREAM'S COMPOSITE LINE APPLIES (ogre-patch 0058). Upstream
+	// writes
+	//     pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
+	// with the scale at one, and we set it to jahIfd.x -- the DDGI diffuse
+	// intensity the host writes into the pass buffer (JahshakaEngine's
+	// FogHlmsListener; the default is calibrated against the pre-DDGI VCT diffuse,
+	// GiParams::ddgiIntensity) -- times the confidence and the weight fade above.
+	// At intensity 1 inside the field every factor is exactly 1 and the line is
+	// bit-for-bit what it always was.
+	ifdIrradianceScale = float3( passBuf.jahIfd.x * ifdConfidence * ifdWeightFade );
+@end
 
+// ---- THE TERMS THAT COMPLEMENT THE FIELD -------------------------------
+//
+// Inserted AFTER upstream's composite add, in this order, so the accumulation
+// order of every term in this file is what it was when the body was a copy.
+@piece( custom_ps_ifdCagePost )
 @property( vct_num_probes )
 	// AND THE FALLBACK (P9). Binding a field sets VctDisableDiffuse
 	// (OgreHlmsPbs.cpp:1846-1850), which deletes the ENTIRE voxel-cone diffuse

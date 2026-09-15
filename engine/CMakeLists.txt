@@ -309,38 +309,6 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMENT "Staging Ogre-Next Hlms templates into bin/media/Hlms")
 add_custom_target(JahshakaEngineMedia DEPENDS "${_hlms_stamp}")
 
-# --- The DDGI piece copy, guarded rather than trusted ------------------------
-# media/Hlms/Jahshaka/JahIfd_piece_ps.any carries a VERBATIM copy of upstream's
-# `applyIrradianceField` body with one line changed (our diffuse-intensity
-# multiply — GI_UNIFIED_SPEC.md §4 P1 / addendum 2; there is no hook to do it
-# from, since the field's contribution is accumulated inside that piece's last
-# statement and anything later would scale the probe and cubemap terms too).
-#
-# A copy of upstream code is a liability exactly once: at a pin bump, silently.
-# So the configure hashes the original. When upstream's body changes, this FAILS
-# LOUD with the two-minute fix attached, instead of leaving DDGI rendering last
-# year's math. The escape hatch is for the person doing the re-sync, and it is
-# deliberately a cache variable so nobody sets it by accident.
-set(JAH_IFD_UPSTREAM_PIECE
-    "${OGRE_NEXT_HLMS_SOURCE_DIR}/Pbs/Any/IrradianceField_piece_ps.any")
-set(JAH_IFD_UPSTREAM_SHA256 "e6e1ddd1c833af2b3d2c3a811d3367334954bc705bfb7fe28045aa4308d993a1"
-    CACHE STRING "sha256 of the upstream IrradianceField piece our copy was taken from")
-option(JAH_IFD_PIECE_HASH_OK
-       "Acknowledge that media/Hlms/Jahshaka/JahIfd_piece_ps.any has been re-synced against a \
-changed upstream IrradianceField piece" OFF)
-if(EXISTS "${JAH_IFD_UPSTREAM_PIECE}")
-    file(SHA256 "${JAH_IFD_UPSTREAM_PIECE}" _jah_ifd_sha)
-    if(NOT _jah_ifd_sha STREQUAL JAH_IFD_UPSTREAM_SHA256 AND NOT JAH_IFD_PIECE_HASH_OK)
-        message(FATAL_ERROR
-            "Ogre-Next's IrradianceField_piece_ps.any has CHANGED upstream.\n"
-            "  expected ${JAH_IFD_UPSTREAM_SHA256}\n"
-            "  found    ${_jah_ifd_sha}\n"
-            "irisgl/engine/media/Hlms/Jahshaka/JahIfd_piece_ps.any holds a copy of that piece's "
-            "body with one line changed (the DDGI diffuse intensity). Re-sync the body, re-apply "
-            "the multiply on the final envColourD line, set JAH_IFD_UPSTREAM_SHA256 to the new "
-            "hash — or configure once with -DJAH_IFD_PIECE_HASH_OK=ON if you have already done so.")
-    endif()
-endif()
 add_dependencies(JahshakaEngine JahshakaEngineMedia)
 
 # Compile-time DEFAULTS for the host. The engine never reads these; the host puts
