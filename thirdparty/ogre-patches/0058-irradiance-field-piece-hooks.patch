@@ -1,0 +1,151 @@
+Jahshaka patch 0058 — five hook points in the irradiance-field piece (and a
+division guard), so a host stops copying the whole body.
+
+MEDIA patch (`Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any`). No
+Ogre recompile is needed for it, but Studio stages Hlms media from the SOURCE
+tree (`cmake/IncludeOgre.cmake`), so EVERY TREE MUST HAVE RUN THE PATCH LOOP —
+`irisgl/scripts/build-ogre.sh` — before its media is correct. No other patch in
+the stack touches this file.
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325; audit
+SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md finding F6).
+`irisgl/engine/media/Hlms/Jahshaka/JahIfd_piece_ps.any` used to
+`@undefpiece( applyIrradianceField )` and define it again with UPSTREAM'S WHOLE
+BODY COPIED INTO IT, because what Jahshaka adds to DDGI is not a post-multiply:
+
+  * the sample point MOVES before the probe cage is derived from it (the DDGI
+    paper's normal/view bias, in probe spacings — ogre-patch 0023's companion
+    work);
+  * the cage's probe indices must be CLAMPED to the grid, which upstream's own
+    comment promises ("clamp to the probe grid boundary") and upstream cannot
+    do: the render params carry only `numProbes.x` and `numProbes.x *
+    numProbes.y`, so the per-axis counts a clamp needs are not in the shader.
+    Unclamped, a pixel outside the field indexes past the grid and
+    `getProbeIdx`'s flat index WRAPS into another probe row — measured in
+    Jahshaka's Grand Showroom 2 as the roof taking 77 % of its cage weight from
+    the FLOOR layer;
+  * two quantities are accumulated PER PROBE (the front-facing share of the
+    cage's weight, and a sky-visibility estimate from the same depth atlas);
+  * the field's answer is SCALED (a diffuse intensity, and a confidence that
+    fades the field out where it has nothing to say) and then COMPLEMENTED by
+    the terms that cover the pixels it faded out of.
+
+A copied body is a liability exactly once, at a pin bump, silently — so the copy
+was guarded by a configure-time sha256 of THIS file that failed the build when
+upstream moved it. That guard is the tell: the honest fix is the hooks.
+
+WHAT THE PATCH ADDS. Five `@insertpiece` points, each empty and free when
+undefined (the pattern upstream already uses for `custom_ps_*` in its
+templates), plus one defect fix:
+
+  1. `custom_ps_ifdCagePrologue` — after `ifdGridPos` and `ifdSpaceNormal`, and
+     before anything is derived from them. `ifdGridProbeOrigin` moved one line
+     down for it; nothing between the two reads it.
+  2. `custom_ps_ifdCageProbeOrigin` — right after `probeOrigin` is formed, so a
+     host can clamp it (the comment's promise).
+  3. `float r = max( length( dir ), 1e-6 );` — A DEFECT FIX, not a hook: a probe
+     can sit exactly under the shaded pixel (a pixel landing on a grid integer
+     hits it unclamped, and a clamped cage makes the coincidence reachable by a
+     whole half-space), and `1/0` makes `dir` NaN and poisons the whole cage
+     sum.
+  4. `custom_ps_ifdCageProbe` — at the end of the cage loop's body, with the
+     probe's index, its normalised direction and its final weight in scope.
+  5. `custom_ps_ifdCageResolve` + `float3 ifdIrradianceScale` — the composite's
+     scale becomes a variable, one by default, so a host can modulate the
+     field's answer without replacing the piece;
+     `custom_ps_ifdCagePost` — after the composite add, so a host's own
+     diffuse-GI terms accumulate in the same order they did before.
+
+VERIFICATION. `git apply --check` against the pristine pin and `git apply
+--reverse --check` after applying. The conversion is PIXEL-EXACT and that is
+measured, not argued: `--engine-selftest` is byte-identical
+(`b55e2d5d03dce4059b71a65f8e61dc4773fb0b048e3de05428aca83cabae0ec7`) with the
+engine's five hook pieces replacing the copied body — and the default scene has
+an irradiance field bound, so that hash covers the SHIPPED permutation of this
+piece (one volume, no cascade chain, the sky-visibility dial at its default); the
+cascade and hemisphere permutations rest on the gi.* suites (50/50 at delivery). The
+composite is `ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight )` rather than
+a post-multiply for exactly that reason: it keeps the arithmetic and its order
+identical to the copy's. 50/50 on gi.*, scripting.e2e.gi_*, page_gi, lights.*
+and test_engine (including `gi.ddgi_raster`, the nightly-tier suite this lane's
+subject requires).
+
+--- a/Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any
+@@ -114,12 +114,20 @@
+ 					   passBuf.irradianceField.viewToIrradianceFieldRow1,
+ 					   passBuf.irradianceField.viewToIrradianceFieldRow2 );
+ 
+-	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
+ 	float3 ifdSpaceNormal = normalize( transformDir3( pixelData.normal, //
+ 									   passBuf.irradianceField.viewToIrradianceFieldRow0,
+ 									   passBuf.irradianceField.viewToIrradianceFieldRow1,
+ 									   passBuf.irradianceField.viewToIrradianceFieldRow2 ) );
+ 
++	// A HOST PIECE MAY RUN HERE, with ifdGridPos and ifdSpaceNormal in scope and
++	// before anything has been derived from them -- which is what a DDGI sample-point
++	// bias needs (the paper's normal/view offset, in probe spacings), and what any
++	// declaration the two hooks inside the cage loop need. The grid origin below moved
++	// one line down for it; nothing between the two reads it.
++	@insertpiece( custom_ps_ifdCagePrologue )
++
++	float3 ifdGridProbeOrigin = trunc( ifdGridPos );
++
+ 	// ifdAlpha is how far from the floor( ifdGridPos ). on [0, 1] for each axis.
+ 	float3 ifdAlpha = saturate( fract( ifdGridPos ) );
+ 
+@@ -134,12 +142,22 @@
+ 		// Offset = 0 or 1 along each axis
+ 		float3 probeOffset = float3( int3( i, i >> 1, i >> 2 ) & int3( 1, 1, 1 ) );
+ 		float3 probeOrigin = ifdGridProbeOrigin + probeOffset;
++		// ...and a host piece may adjust it. The comment above promises a clamp to the
++		// probe grid boundary that this piece cannot perform: the render params carry
++		// only numProbes.x and numProbes.x * numProbes.y, so the per-axis probe counts
++		// a clamp needs are not here. A pixel outside the field therefore indexes past
++		// the grid and getProbeIdx's flat index wraps into another row.
++		@insertpiece( custom_ps_ifdCageProbeOrigin )
+ 
+ 		IrfProbeIndex probeIdx =
+ 			getProbeIdx( probeOrigin, passBuf.irradianceField.numProbesAggregated.xy );
+ 
+ 		float3 dir = probeOrigin - ifdGridPos;
+-		float r = length( dir );
++		// max(): a probe can sit exactly under the shaded pixel -- a pixel landing on a
++		// grid integer hits it, and a host piece that clamps the cage to the grid makes
++		// the coincidence reachable by a whole half-space rather than by a measure-zero
++		// plane -- and 1/0 would make dir NaN and poison the whole cage sum.
++		float r = max( length( dir ), 1e-6 );
+ 		dir *= 1.0 / r;
+ 
+ 		// Ignore probes that are behind us, but don't black them out completely
+@@ -192,11 +210,29 @@
+ //		irrColour = sqrt(irrColour);
+ 		ifdIrradiance += irrColour * weight;
+ 		sumIfdWeight += weight;
++
++		// A host piece may accumulate its own per-probe quantities here, with this
++		// probe's index, its normalised direction and its final weight all in scope
++		// (a front-facing share of the cage's weight, a sky-visibility estimate from
++		// the same depth atlas, a debug counter).
++		@insertpiece( custom_ps_ifdCageProbe )
+ 	}
+ 
+ //	ifdIrradiance = ifdIrradiance * ifdIrradiance;
+ 
+-	pixelData.envColourD.xyz += ifdIrradiance * ( 1.0 / sumIfdWeight );
++	// THE SCALE IS A VARIABLE so that a host piece can modulate the field's answer
++	// without replacing this piece: a DDGI intensity, a confidence that fades the
++	// field out where it has nothing to say, a per-channel tint. Left at one it is
++	// exactly what this line always computed.
++	float3 ifdIrradianceScale = float3( 1.0, 1.0, 1.0 );
++	@insertpiece( custom_ps_ifdCageResolve )
++
++	pixelData.envColourD.xyz += ifdIrradiance * ( ifdIrradianceScale / sumIfdWeight );
++
++	// ...and a host piece may add its own diffuse-GI terms after it (a fallback for
++	// the pixels the field faded out of, an ambient term the voxel volume swallowed),
++	// in this order, so that the accumulation order of the existing term is unchanged.
++	@insertpiece( custom_ps_ifdCagePost )
+ @end
+ }
+ 

@@ -1,0 +1,54 @@
+Jahshaka patch 0051 — a manually reserved texture pool is Resident NEXT, too.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this. It touches `OgreMain/src/OgreTextureGpuManager.cpp`, which patch 0056 also
+touches (the overlap reset recipe applies to a tree that carries one of them).
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325; audit
+SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md finding F12).
+`TextureGpuManager::reservePoolId` creates the pool master with
+`TextureFlags::PoolOwner` only, then calls `_transitionTo( Resident )` +
+`notifyDataIsReady()`. `TextureGpu::_transitionTo` assigns
+`mNextResidencyStatus = mResidencyStatus` ONLY for a ManualTexture, so the
+master is left reading Resident with NEXT = OnStorage — a state that says "this
+texture is on its way out to storage". The next `scheduleTransitionTo( Resident )`
+on it, which happens as soon as anything binds the pool as a shader texture,
+therefore queues a FILE LOAD for a texture that has no file, and the streaming
+worker memcpy's from a null mip pointer inside
+`TextureGpuManager::processQueuedImage` — a crash, not a message, in a
+RelWithDebInfo Ogre where the asserts are compiled out.
+
+The engine carried the one line from outside, right after its own
+`reservePoolId` call for the decal atlas masters ("One line, no patch" —
+`irisgl/engine/src/OgreDecals.cpp`), which is exactly the shape the rule
+forbids: every caller of `reservePoolId` needs it, the next one will not know,
+and the state it repairs is not reachable through any public API of the
+manager. The nine engine lines are deleted with this patch.
+
+VERIFICATION. `git apply --check` against the pristine pin and `git apply
+--reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
+`--engine-selftest` byte-identical (`b55e2d5d…`). The behavioural gate is the
+decal suite (`decals.engine`) plus test_engine — a
+pool master that never loses residency renders exactly as before, which is the
+point: the defect only fires on a transition that should never have been
+queued.
+
+--- a/OgreMain/src/OgreTextureGpuManager.cpp
++++ b/OgreMain/src/OgreTextureGpuManager.cpp
+@@ -362,6 +362,16 @@
+ 
+         mTexturePool.push_back( newPool );
+ 
++        // The pool master is RESIDENT from here on and it has no file to load, so
++        // getNextResidencyStatus() must say so too. _transitionTo() only keeps the
++        // two in step for a ManualTexture (TextureGpu::_transitionTo's
++        // isManualTexture() tail), and a pool owner carries TextureFlags::PoolOwner
++        // alone — so without this the master read Resident with next = OnStorage, and
++        // the next scheduleTransitionTo( Resident ) on it (which happens as soon as
++        // something binds the pool as a shader texture) queued a FILE LOAD for a
++        // texture that has no file: the streaming worker then memcpy's from a null
++        // mip pointer in processQueuedImage.
++        newPool.masterTexture->_setNextResidencyStatus( GpuResidency::Resident );
+         newPool.masterTexture->_transitionTo( GpuResidency::Resident, 0 );
+         newPool.masterTexture->notifyDataIsReady();
+ 

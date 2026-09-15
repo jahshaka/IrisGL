@@ -1,0 +1,84 @@
+Jahshaka patch 0056 — a groupless texture load must not call a null listener.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this. It touches `OgreMain/src/OgreTextureGpuManager.cpp`, which patch
+0051 also touches (`reservePoolId`, ~500 lines earlier); the two apply in stack
+order.
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325; audit
+SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md finding F17). Both
+texture-load paths — the multiload worker
+(`_updateTextureMultiLoadWorkerThread`) and the streaming worker
+(`processLoadRequest`) — detect "no archive and no loading listener", log
+`"ERROR: Did you call createTexture with a valid resourceGroup?"` at
+LML_CRITICAL, and then, two lines later, call
+`loadRequest.loadingListener->grouplessResourceLoading( … )` on that null
+listener. So the diagnostic upstream wrote for this mistake is followed
+immediately by a null-pointer call on a worker thread: the process dies with a
+stack nobody can read, and the message that explains it is in the log above the
+crash.
+
+Jahshaka met this class of defect through a texture created with `flags 0`
+(SSAO's noise texture, 2026-09-08 — "any texture we create and upload ourselves
+MUST carry TextureFlags::ManualTexture" is in the workspace CLAUDE.md because of
+it). Our own triggers are fixed, and this is the HAZARD, not a workaround we
+carry: the next `createTexture` that forgets a resource group should get the
+error it already prints.
+
+THE FIX IS THE PATH UPSTREAM ALREADY HAS. Neither site returns early: the
+deref is guarded, `data` stays null, and each path then does what it already
+does for a file that fails to open or to parse — the multiload worker passes the
+request on to the streaming thread ("as if multiload was turned off", its own
+comment for the archive-throws case), and the streaming thread substitutes
+`mErrorFallbackTexData` (the 2x2 error image) and completes the load. A missing
+resource group becomes a logged error and a visible error texture instead of a
+process death.
+
+VERIFICATION. `git apply --check` against the pristine pin and `git apply
+--reverse --check` after applying; `build-ogre.sh` re-run in the lane worktree;
+`--engine-selftest` byte-identical (`b55e2d5d…`) — no load in the tree reaches
+the guarded branch (it is the state the log line calls an error). The
+behavioural gate is the importer and asset suites (every from-file texture load)
+plus test_engine.
+
+--- a/OgreMain/src/OgreTextureGpuManager.cpp
++++ b/OgreMain/src/OgreTextureGpuManager.cpp
+@@ -2752,7 +2752,20 @@
+ 
+                 DataStreamPtr data;
+                 if( !loadRequest.archive )
+-                    data = loadRequest.loadingListener->grouplessResourceLoading( loadRequest.name );
++                {
++                    // ...and NOT on a null listener: the error above was logged and then
++                    // the listener was called anyway, so a texture created with no
++                    // resource group took the process down from a worker thread instead
++                    // of failing the load. With no stream the request travels on to the
++                    // streaming thread exactly as it does when an archive open throws
++                    // ("as if multiload was turned off"), and that thread's own path
++                    // substitutes the error fallback image.
++                    if( loadRequest.loadingListener )
++                    {
++                        data =
++                            loadRequest.loadingListener->grouplessResourceLoading( loadRequest.name );
++                    }
++                }
+                 else
+                 {
+                     try
+@@ -2872,7 +2885,15 @@
+ 
+         DataStreamPtr data;
+         if( !loadRequest.archive && !loadRequest.image )
+-            data = loadRequest.loadingListener->grouplessResourceLoading( loadRequest.name );
++        {
++            // The error above was logged and then this line called
++            // grouplessResourceLoading() on the null listener regardless, killing the
++            // process from the streaming thread. Leaving `data` null instead takes the
++            // no-stream path below, which loads mErrorFallbackTexData -- the behaviour
++            // this function already has for a file that fails to open or to parse.
++            if( loadRequest.loadingListener )
++                data = loadRequest.loadingListener->grouplessResourceLoading( loadRequest.name );
++        }
+         else if( !loadRequest.image )
+         {
+             try

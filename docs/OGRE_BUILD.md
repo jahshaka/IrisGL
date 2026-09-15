@@ -1039,15 +1039,160 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     1.005 in our own code, i.e. copying a private constant out of the pin, which
     is the workaround this tree refuses.
 
-THE STACK IS 0001-0049 (this list; `build-ogre.sh` globs `*.patch`, so the file
+50. **0050-irradiance-field-host-api-and-vct-zero-multiplier** (SOURCE —
+    `OgreIrradianceField.{h,cpp}`, `OgreIrradianceFieldRaster.{h,cpp}`,
+    `OgreVctLighting.cpp`; OVERLAPS 0044 and 0037 on those files; **every tree
+    resets its ogre-next submodule and re-runs `build-ogre.sh`, and that rerun
+    COMPILES**) — five engine-side compensations turned into the pin fixes and
+    hooks they were compensating for (audit
+    `SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md` F2/F3/F4/F10 plus
+    the `unused0` nit). (1) `IrradianceField::getConstBufferSize()` returned 20
+    floats while `fillConstBufferData` writes 24 — the size of the struct the
+    generated shader declares — so HlmsPbs reserved 16 bytes too few and
+    advanced its write pointer 16 bytes short: upstream's samples overrun their
+    pass-buffer map, and with an HlmsListener next in line (ours) the listener's
+    first float4 landed on the field's irradiance-atlas parameters and every
+    DDGI UV collapsed onto texel 0. The engine's answer had been to reserve four
+    extra floats and deliberately SKIP them, which worked only because HlmsPbs
+    fills the field's block before calling the listener; ~60 lines of
+    `OgreFog.cpp`/`EnginePrivate.h` are deleted with it. (2) A public
+    `switchToRasterSource()` plus `getRasterSource()`, `getSettings()`,
+    `getFieldOrigin()`/`getFieldSize()` (the ENLARGED volume) and
+    `getNumProbesProcessed()` — the surface `JahIrradianceField`, a derived class
+    of ours held through a NON-VIRTUAL destructor, existed to reach; it is
+    deleted. (3) Patch 0023's C++ half, three months late:
+    `IrradianceFieldRaster` pushes `invFieldSize` beside `numProbes`, where
+    0023's own header said it belonged, so the host stops doing two string
+    lookups and a const-buffer dirty on the shared job before EVERY raster
+    sweep. (4) `IrradianceFieldGenParams::unused0` was uploaded uninitialised on
+    every voxel-sourced update. (5) `VctLighting::update`'s auto multiplier
+    inverted a zero maximum radiance into +inf, so a scene with no visible
+    light contributed NO GI at all (and, since a bound VctLighting kills the PBS
+    ambient inside its volume, went black); the zero case now falls back to
+    `mBakingMultiplier`, which is what the engine was choosing from outside — by
+    walking EVERY node before every injection (`OgreScene::hasVctLights`, three
+    call sites, deleted).
+
+51. **0051-reserved-texture-pool-is-resident-next-too** (SOURCE — overlaps 0056 in `OgreTextureGpuManager.cpp`;
+    `OgreTextureGpuManager.cpp`; **rerun COMPILES**) —
+    `TextureGpuManager::reservePoolId` transitions the pool master to Resident
+    but never sets its NEXT residency, because `_transitionTo` only syncs the two
+    for a ManualTexture. The master therefore read "Resident, on its way to
+    storage", and the next `scheduleTransitionTo( Resident )` on it queued a FILE
+    load for a texture with no file — the streaming worker memcpy's from a null
+    mip pointer. The engine carried the one line from outside after its own
+    `reservePoolId` call for the decal atlases; every caller needs it, so it
+    belongs here. Audit F12.
+
+52. **0052-planar-reflections-active-actor-slots** (SOURCE — a header:
+    `OgrePlanarReflections.h`; **rerun COMPILES, and every consumer of the header
+    recompiles**) — `getNumActiveActorSlots()` / `getActiveActorWorkspace( slot )`
+    over the `protected` `mActiveActorData`. Each active actor slot renders
+    through its own workspace, which instantiates its own shadow node and pass
+    list, and the lamp-map cache and the render-loop monitor both have to reach
+    those; the engine derived `JahPlanarReflections` purely to expose two lines,
+    and that class is deleted. Audit F13.
+
+53. **0053-setsky-records-the-method-it-was-given** (SOURCE —
+    `OgreSceneManager.cpp`, far from 0016's hunk in the same file; **rerun
+    COMPILES**) — `mSkyMethod` was assigned in the constructor and nowhere else,
+    so `getSkyMethod()` answered `SkyCubemap` for the life of the scene manager
+    whatever sky was up — including in the round trip
+    `setSky( false, getSkyMethod(), … )` the API invites. The engine's own
+    `mSkyIsEquirect` mirror (three writes, one read — the equirect sky needs a
+    WRAPPED u axis and a cube sky must not get it) is deleted. Audit F14.
+
+54. **0054-atmospherenpr-names-its-sky-quad** (SOURCE — a header:
+    `OgreAtmosphereNpr.h`; **rerun COMPILES**) — `getSky( sceneManager )` returns
+    the `Rectangle2D` the component created for that scene, from the `protected`
+    `mSkies` map. Jahshaka must move that quad to render queue 0 (upstream's 212
+    is after our on-top overlays, which write no depth) and give it the engine's
+    visibility bit (Instant Radiosity's rays must never hit the sky), and with no
+    accessor the engine found it by diffing the SceneManager's Rectangle2D set
+    across the `setSky` call — eighteen lines and two movable-object iterations,
+    deleted. Audit F15.
+
+55. **0055-rectangle2d-is-born-with-geometry** (SOURCE — `OgreRectangle2D2.cpp`;
+    **rerun COMPILES**) — the constructor left `mPosition`, `mSize` and
+    `mNormals` UNINITIALISED; `initialize()` fills the vertex buffer from them
+    and `setGeometry()` only raises a dirty flag, while the only `update()` call
+    in the whole engine is `SceneManager::_renderPhase02` on its OWN sky quad. So
+    every other Rectangle2D in a process drew from whatever the stack held,
+    silently, unless its author knew to call `update()` by hand (which is why
+    Jahshaka's sun disc does, after the symptom cost a lane an afternoon). Born
+    as the full-screen quad `SceneManager::setSky` sets, rays zeroed. A trap fix,
+    not a line saving: the engine keeps its explicit `update()`. Audit F16.
+
+56. **0056-groupless-load-must-not-call-a-null-listener** (SOURCE —
+    `OgreTextureGpuManager.cpp`, ~500 lines from 0051's hunk; **rerun COMPILES**)
+    — both load paths detect "no archive and no loading listener", log
+    `"ERROR: Did you call createTexture with a valid resourceGroup?"` at
+    LML_CRITICAL, and then call `grouplessResourceLoading()` on that null
+    listener two lines later: the diagnostic upstream wrote for the mistake is
+    followed by a null-pointer call on a worker thread. The deref is guarded and
+    `data` stays null, which takes each path's existing no-stream route — the
+    multiload worker passes the request on ("as if multiload was turned off", its
+    own comment for the archive-throws case) and the streaming worker substitutes
+    `mErrorFallbackTexData`. A missing resource group becomes a logged error and
+    a visible error texture instead of a process death. Audit F17.
+
+57. **0057-a-cascade-added-after-bounces-were-enabled** (SOURCE —
+    `OgreVctLighting.cpp`, overlapping 0037 and 0050 in that file; **rerun
+    COMPILES**) — `runBounce()` sets `hlms_num_vct_cascades` from the chain's
+    length on every injection and the generated compute shader declares one
+    light-voxel texture per cascade (four with anisotropy), but the job's texture
+    UNIT COUNT is only ever derived in
+    `setAllowMultipleBounces()`/`resetTexturesFromBuildRelative()`. Chaining the
+    cascades AFTER enabling bounces — an order the header does not forbid, and
+    the order this engine uses — therefore produced
+    `'ogre_t6' : unrecognized layout identifier`, the bounce program failed to
+    compile, and the WHOLE VCT arm stayed unbound: Photon's cascade chain with
+    multiple bounces rendered no GI at all, every time, with one log line to say
+    so (measured, `spikes/patches-1/gi-reenable-before-0057.log`). `addCascade()`
+    now re-derives the job when bounces are on, so either order works. The
+    shared-job residual (one `HlmsComputeJob` found by name for every
+    `VctLighting` in the process, the class of 0037's defect 2) is recorded in
+    the patch header; the gate is `gi.reenable`.
+
+58. **0058-irradiance-field-piece-hooks** (MEDIA —
+    `Samples/Media/Hlms/Pbs/Any/IrradianceField_piece_ps.any`; no Ogre recompile,
+    but Studio stages Hlms media from the SOURCE tree, so **the patch loop must
+    have run in that tree**) — five `@insertpiece` hook points in upstream's
+    `applyIrradianceField` (prologue / probe-origin / per-probe / resolve /
+    post) plus one defect fix, `float r = max( length( dir ), 1e-6 )` (a probe
+    sitting exactly under the shaded pixel made `dir` NaN and poisoned the whole
+    cage sum). It replaces a WHOLE-BODY COPY of that piece in
+    `irisgl/engine/media/Hlms/Jahshaka/JahIfd_piece_ps.any`, which existed
+    because what Jahshaka adds to DDGI is not a post-multiply: the sample point
+    moves before the cage is derived (the paper's normal/view bias), the cage's
+    probe indices must be clamped to the grid (upstream's own comment promises
+    it and upstream cannot do it — only Nx and Nx*Ny are in the render params,
+    so the per-axis counts a clamp needs are not in the shader; unclamped, the
+    Showroom 2 roof took 77 % of its cage weight from the FLOOR layer), two
+    quantities are accumulated per probe, and the field's answer is scaled and
+    then complemented. The copy was guarded by a configure-time sha256 of
+    upstream's file that FAILED the build when upstream moved — the guard was
+    the tell. Both are gone: ~200 copied lines out of our media file, 31 lines
+    of CMake (the hash check and its `JAH_IFD_PIECE_HASH_OK` escape hatch) out
+    of `irisgl/engine/CMakeLists.txt`. PIXEL-EXACT, measured rather than argued:
+    the `--engine-selftest` hash is byte-identical with the hooks replacing the
+    copy, and the default scene has a field bound, so that hash covers every
+    term in the piece; 50/50 on gi.*, scripting.e2e.gi_*, page_gi, lights.* and
+    test_engine, `gi.ddgi_raster` included. Audit F6 — whose premise (a "2-line
+    hook before the final multiply") the file refuted: three of the five
+    divergences MODIFY upstream statements rather than add to them, which is why
+    the composite's scale is a variable instead of a post-multiply (it keeps the
+    arithmetic and its order identical to the copy's).
+
+THE STACK IS 0001-0058 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047 and 0049 are SOURCE-only, and 0020 touches the
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049 and 0050-0057 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

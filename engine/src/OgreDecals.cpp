@@ -331,17 +331,6 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind)
         if (!atlas.master) {
             atlas.master = tm->reservePoolId(atlasPoolId(kind), kDecalAtlasSize, kDecalAtlasSize,
                                              kDecalAtlasSlices, mips, fmt);
-            if (atlas.master) {
-                // UPSTREAM GAP: reservePoolId calls _transitionTo(Resident) +
-                // notifyDataIsReady but never _setNextResidencyStatus, so the
-                // master reads Resident / next = OnStorage. Anything that then
-                // calls scheduleTransitionTo(Resident) on it (Ogre does, once
-                // the pool is bound as a shader texture) queues a FILE load for
-                // a texture that has no file — the streaming worker ends up
-                // memcpy'ing from a null mip pointer and the process dies in
-                // TextureGpuManager::processQueuedImage. One line, no patch.
-                atlas.master->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
-            }
             if (!atlas.master) {
                 delete dst;
                 mError = std::string("loadDecalTexture: could not reserve the ") +
