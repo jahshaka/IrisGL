@@ -106,7 +106,8 @@ namespace
 // is rejected and rebuilt exactly once more, under the new key.
 // v7 (2026-09-15, ATOM stage 1, SPECS/NANITE_SPEC.md §7): every mesh record
 // carries a TRAILING LOD BLOCK — the automatic simplification chain built at
-// import (levelCount, then per level its index list and its geometric error as
+// import (levelCount, then per level its index list and its simplifier error —
+// position + attribute quadrics combined, >= the geometric error — as
 // a length in mesh units). A v6 blob has no chain at all, so replaying one
 // would silently ship a library whose models never drop a triangle, with no way
 // for any fingerprint to notice; and the block is a layout change besides.
@@ -667,8 +668,9 @@ bool findMeshNodeTransform(const aiNode *node, unsigned meshIndex,
 //
 // SPECS/NANITE_SPEC.md §7. The artist authors nothing: the machine simplifies
 // each STATIC mesh a few times at import, records each level's index list and
-// its geometric ERROR, and the engine picks a level per object per frame from
-// that error (irisgl/engine/src/OgreMesh.cpp, lodValuesFromErrors).
+// its simplifier ERROR (>= the geometric error), and the engine picks a level
+// per object per frame from that error (irisgl/engine/src/OgreMesh.cpp,
+// OgreScene::applyLodValues + Types.h::lodSwitchDistance).
 //
 // THE THREE RULES THIS OBEYS, each with its reason:
 //

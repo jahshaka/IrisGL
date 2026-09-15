@@ -27,7 +27,7 @@ screen error (0..1, multiply by screen height for pixels) =
                  * (camera_proj * 0.5f)                 // camera_proj = projection[1][1] = cot(fovy/2)
 ```
 
-`irisgl/engine/src/OgreMesh.cpp` (`lodValuesFromErrors`) inverts that formula to turn a baked
+`irisgl/engine/src/OgreMesh.cpp` (`OgreScene::applyLodValues` + `Types.h::lodSwitchDistance`) inverts that formula to turn a baked
 per-level error into the distance at which the level becomes acceptable, and cites this file. The
 header itself is **NOT COMPILED** by stage 1 — no TU defines `CLUSTERLOD_IMPLEMENTATION` yet. It is
 here because stage 2 (the cluster DAG) calls `clodBuild`/`clodLocalIndices` and must call the

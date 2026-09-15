@@ -157,7 +157,8 @@ public:
     /// purpose: one vertex buffer, N index buffers is what keeps every level of
     /// a mesh inside ONE draw call downstream (finding B).
     ///
-    /// `lodErrors[i]` is that level's geometric error as a LENGTH in mesh
+    /// `lodErrors[i]` is that level's SIMPLIFIER error (position + attribute
+    /// quadrics combined, >= the geometric error) as a LENGTH in mesh
     /// units, monotonically non-decreasing. It is the currency the whole
     /// program is judged in: divided by the view distance it is a screen-space
     /// error, and compared against a world-space cell size it answers "is this

@@ -84,7 +84,12 @@ struct MeshData {
     // (the VAO is matched on {opType, indexBufferVbo, indexType, vertexBuffers},
     // so a per-level vertex remap would break the auto-instancing merge).
     //
-    // `lodErrors[i]` is level i+1's geometric error as a LENGTH IN MESH UNITS,
+    // `lodErrors[i]` is level i+1's SIMPLIFIER error as a LENGTH IN MESH UNITS —
+    // meshoptimizer's combined position + attribute (UV, normal) quadric error,
+    // which is >= the pure geometric error (the second read of ATOM-1): every
+    // consumer that compares it with a world-space size is CONSERVATIVE (a finer
+    // level than the geometry alone would need). A true geometric bound is a
+    // recorded follow-up;
     // monotonically non-decreasing. It is the currency of the whole program:
     //   * divided by the view distance it is a screen-space error (this is what
     //     the backend turns into per-mesh distance thresholds), and
@@ -107,7 +112,8 @@ struct MeshData {
         if (level == 0 || lodIndices.empty()) return indices;
         return lodIndices[std::min(level, lodIndices.size()) - 1];
     }
-    /// The COARSEST level whose geometric error is below `cellSize` (a length in
+    /// The COARSEST level whose simplifier error (>= the geometric error, see
+    /// `lodErrors`) is below `cellSize` (a length in
     /// the same units as the positions), or 0 when even level 1 is too coarse.
     /// A non-positive or non-finite cell size means "the finest", i.e. 0.
     size_t lodForCellSize(float cellSize) const {
@@ -156,7 +162,7 @@ struct LodReference {
     static constexpr float kScreenHeight      = 1080.0f;   ///< the rig's and the reference display's height
     static constexpr float kFovYDegrees       = 45.0f;     ///< the document camera's default vertical angle
     static constexpr float kProj11            = 2.4142136f;///< cot(45°/2) = projection[1][1] at that angle
-    static constexpr float kScreenErrorPixels = 1.0f;      ///< the budget: one pixel of geometric error
+    static constexpr float kScreenErrorPixels = 1.0f;      ///< the budget: one pixel of the simplifier's (combined, >= geometric) error
 };
 
 /// The LOD value (a distance from the object's bounding sphere, in world units)
