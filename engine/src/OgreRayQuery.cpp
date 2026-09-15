@@ -2370,7 +2370,13 @@ void RayQueryTier::readReflectTimestamps(ReflectView &rv) {
     const uint32_t now = frameNow(), inFlight = framesInFlight();
     for (unsigned i = 0; i < kFramesInFlight; ++i) {
         ReflectView::Pending &pd = rv.pending[i];
-        if (!pd.live || now - pd.frame <= inFlight) continue;
+        // `< inFlight`, not `<= inFlight`, and the difference is the whole
+        // reading: the pending ring is kFramesInFlight deep, so a slot is
+        // REUSED after that many frames — waiting one frame longer than the
+        // ring is deep threw every measurement away (measured: 0 readings over
+        // 90 frames). This is the same condition the structures' own
+        // readTimestamps uses, for the same reason.
+        if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
         uint64_t v[4] = {};
         const uint32_t base = rv.queryBase + i * 2u;
         if (vkGetQueryPoolResults(mVk, mReflectTimestamps, base, 2, sizeof(v), v,

@@ -478,6 +478,25 @@ public:
     float ssaoRadius;        ///< world-space reach, in metres
     int   smaaPreset;        ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssrMode;           ///< 0 off, 1 half-res rays, 2 HQ
+    /// THE REFLECTION ROUGHNESS CUTOFF, in PERCENT (5..100, default 40) —
+    /// PHOTON_SPEC §7 R5, owner ledger §426. Above this roughness a reflection
+    /// is a wide lobe, the probe's own prefiltered photograph is a good enough
+    /// integral of it, and a traced ray per pixel buys a blurrier answer for the
+    /// same cost. WHERE that point falls is a property of the CONTENT — a
+    /// polished gallery and a weathered street stop being worth tracing at
+    /// different roughnesses — which is why it is a per-project dial and not a
+    /// renderer constant.
+    ///
+    /// PERCENT AND NOT A FLOAT, deliberately: every World row in this document
+    /// is an int (worldmodes::Row), the tier table's columns are ints, and a
+    /// float field here would need a second row type, a second widget and a
+    /// second pin spelling for one number. 5..100 in whole percent is finer than
+    /// the 8-bit roughness maps the gate is compared against.
+    ///
+    /// The engine reads it as a fraction (PostFxDesc::rayReflectRoughness) and
+    /// feathers the transition either side of it by a fixed 0.1, so a surface
+    /// whose roughness varies across it crossfades rather than steps.
+    int   rayReflectRoughness;
     /// 0 off, 1 AUTO (the chain gains its refraction nodes only while the scene
     /// actually contains a refractive material — cost when unused is zero),
     /// 2 always on.
