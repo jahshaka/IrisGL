@@ -810,7 +810,7 @@ void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
         // me rebuilds?"). `mGiCachesDirty` already true means one is owed for
         // another reason and this change rides it.
         const bool wouldRebuild =
-            !mGiCachesDirty && (mPcc || mVctVoxelizer || mInstantRadiosity || mIfd);
+            !mGiCachesDirty && (mPcc || mVctVoxelizer || mIfd);
         invalidateGiCaches();
         if (wouldRebuild) ++mMobilityRebuilds;
     }
@@ -1054,11 +1054,14 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             const float r = std::max(d.range, 0.01f);
             L->setAttenuation(r, 0.5f, 0.0f, 0.5f / (r * r));
         } else {
-            // Ogre's default attenuation (const 0.5, quad 0.5) is never used to
-            // SHADE a directional light, but Instant Radiosity attenuates its
-            // rays with it — over the tens of units a ray travels from outside
-            // the scene that quadratic term crushed every bounce to black.
-            // The InstantRadiosity sample sets exactly this: no falloff.
+            // NO FALLOFF ON A DIRECTIONAL LIGHT. Ogre's default attenuation
+            // (const 0.5, quad 0.5) is never used to SHADE a directional light,
+            // so this is inert for the picture — it is set because anything that
+            // integrates a directional light along a RAY reads it, and a
+            // quadratic term over the tens of units such a ray travels crushes
+            // the result to black. (Instant Radiosity was the first such
+            // consumer and is gone; the voxel light injection's ray march and
+            // the ray-query tier are the live ones.)
             L->setAttenuation(std::numeric_limits<Ogre::Real>::max(), 1.0f, 0.0f, 0.0f);
         }
         if (d.type == LightType::Spot) {

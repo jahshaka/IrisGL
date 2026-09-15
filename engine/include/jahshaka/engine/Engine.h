@@ -723,9 +723,27 @@ public:
     /// reassertGiBinding — never by re-pushing. GiMode::Off tears everything
     /// down. Modes the
     /// backend has not implemented yet degrade to Off (true is still returned so a
-    /// document saved with a future mode keeps loading). Instant Radiosity is
-    /// per-scene: its virtual point lights live in this scene only.
+    /// document saved with a future mode keeps loading).
     virtual bool        setGlobalIllumination(const GiParams &) = 0;
+    /// THE TUNING PUSH — the GI values that take effect WITHOUT a rebuild
+    /// (PHOTON_SPEC §7 E2 (8), audit A F6). `ddgiIntensity`, `ddgiAmbient` and
+    /// `rayMarchStepScale` are read per frame (the first two by the irradiance
+    /// field's shader constants, the third by the next light injection), so
+    /// moving one is a constant write and not a re-solve — and they are
+    /// deliberately OUT of `GiParams::operator==` so that a host comparing by
+    /// value does not see a slider tick as a configuration change. Before this,
+    /// every tick of those three sliders tore the whole arm down and
+    /// re-voxelised the scene (under a cascade chain, N times).
+    ///
+    /// Every OTHER field in GiParams still belongs to setGlobalIllumination,
+    /// including the probe-placement tolerances the audit grouped with these
+    /// (`probeOverlap`, `probeSnap*`): those are consumed while the probe grid
+    /// is PLACED, so pushing one without a rebuild would change nothing at all
+    /// and a silently ignored slider is worse than an expensive one.
+    ///
+    /// No-op with GI off or nothing built. Returns false only on an engine
+    /// error.
+    virtual bool        setGiTuning(const GiParams &) = 0;
     /// Re-runs the active GI solution against the scene's current state (the
     /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
     /// in milliseconds at editor quality; callers may invoke this per edit.

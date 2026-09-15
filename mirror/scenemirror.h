@@ -279,12 +279,6 @@ public:
     /// The name of the last one, for the message a host shows.
     QString lastMobilityMiss() const { return mLastMobilityMiss; }
 
-    /// The document light node driving Instant Radiosity: the scene's giLightGuid
-    /// when it names a live light, else the first directional light (by creation
-    /// order), else any light. Null when the scene has no lights. Public so the
-    /// world panel can show which light "Automatic" resolves to.
-    iris::LightNode *resolveGiLight() const;
-
     /// Converts a document mesh to engine MeshData. Public so importers and tests
     /// can use the same conversion. Returns false if the mesh has no geometry.
     static bool toMeshData(iris::Mesh *mesh, jahshaka::engine::MeshData &out);

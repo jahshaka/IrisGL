@@ -1496,9 +1496,22 @@ using NodeId = unsigned int;
 // ---- written when the program was called Rayon) ----
 /// Which GI system lights the scene. Off is the default everywhere — GI must
 /// never cost anything unless the author turns it on.
+/// INSTANT RADIOSITY IS GONE (PHOTON_SPEC §7 E2 (4), 2026-09-15). It was the
+/// `Low` tier's technique: a CPU ray trace from ONE light, planting virtual
+/// point lights — so it saw one light, no emissive surface and no area light,
+/// re-traced on every light move, and could not feed the irradiance field
+/// because it produced no volume to feed it from. Photon's Low tier is two
+/// camera-centred voxel cascades at 64^3 with the field on instead, which is
+/// cheaper on the frame, sees every light, and is the SAME arm as the tiers
+/// above it rather than a second lighting model nobody could reason about.
+///
+/// The ORDINALS MOVED with it (Vct 2 -> 1, VctPccHybrid 3 -> 2). That is safe
+/// and deliberate: every serializer in the tree writes these as STABLE STRINGS
+/// and says so at the table (`scenewriter.cpp`, "the enum ints must stay free to
+/// be reordered"), and a document that still says `instant_radiosity` reads back
+/// as `Vct` — which is what its tier resolves to now.
 enum class GiMode {
     Off,
-    InstantRadiosity,   ///< bounced light as virtual point lights (VPLs)
     Vct,                ///< voxel cone tracing over the GI bounds (diffuse + specular GI)
     VctPccHybrid        ///< VCT plus parallax-corrected cubemap probes: probe reflections
                         ///< near geometry, cone-traced reflections far from it
@@ -1618,9 +1631,6 @@ struct GiParams {
     /// pin a volume — that, and world.fitGiBounds, is how a scene larger than
     /// the ceiling asks for more. Full rationale: OgreGi.cpp clampAutoGiBounds.
     float     autoBoundsMax = 64.0f;
-    /// Instant Radiosity: the node whose light drives the bounce. 0 means "auto"
-    /// (the backend picks the first directional light, else any light).
-    NodeId    irLight = 0;
     /// Total light bounces, 1..4 (1 = a single indirect bounce).
     int       numBounces = 1;
     /// Hybrid only: reflection-probe counts along each world axis of the GI
@@ -1847,6 +1857,34 @@ struct GiParams {
     /// The engine's default is the Ogre sample's set (5 m@128, 10 m@128,
     /// 15 m@64, 60 m@64), which PHOTON_SPEC §5 measured the cadence of.
     GiCascadeDesc cascadeSet[8];
+    /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1), audit B7).
+    ///
+    /// The raster voxeliser's price is the GEOMETRY INSIDE THE REGION and
+    /// nothing else — measured at ~13 us per enclosed instance (P0 §6.2), which
+    /// is 3-6 ms for a room and 60-110 ms for a dense world, on the frame
+    /// thread, for ONE cascade. A budget is the patch-free lever: each cascade
+    /// voxelises AT MOST this many objects, and it keeps the ones that matter
+    /// most to it — ranked by how much of one of ITS OWN voxels each object
+    /// fills (world size / cell), largest first, ties broken by distance to the
+    /// cascade's centre.
+    ///
+    /// Ranking by size-in-cells and not by size is what makes one number right
+    /// for a whole chain: the same 1 m crate is 13 cells across for the inner
+    /// cascade and half a cell for the outer one, so the outer cascade spends
+    /// its budget on the buildings and the inner one on the crates.
+    ///
+    /// 0 (the default) is NO BUDGET, and it is the shipped arm exactly: the
+    /// attach set is the whole size-filtered scene, attached once, and Ogre's
+    /// own region cull decides what each build voxelises (the attach-once rule
+    /// in OgreGi.cpp, which exists because re-selecting drops the voxeliser's
+    /// mesh bookkeeping and re-uploads every buffer). A budget necessarily
+    /// gives that up for the cascades it binds, because WHICH objects are
+    /// nearest changes as the cascade scrolls — so it re-selects only when the
+    /// chosen set actually differs from the one attached.
+    ///
+    /// `GiStatus::cascades[].items` reports what each cascade voxelised and
+    /// `[].attached` what it holds, so a budget that is biting is a reading.
+    int       cascadeInstanceCap = 0;
 
     /// "Is this the same GI configuration I last pushed?" Exact, like every
     /// other change guard here — and load-bearing rather than cosmetic: a GI
@@ -1857,8 +1895,17 @@ struct GiParams {
     /// EVERY FIELD setGlobalIllumination READS IS HERE — add one above and add
     /// it here. (The mirror hand-wrote this comparison over 24 fields; keeping
     /// it beside the struct is what makes "add a field" a one-place edit.)
+    ///
+    /// THE THREE TUNING FLOATS ARE DELIBERATELY ABSENT (PHOTON_SPEC §7 E2 (8),
+    /// audit A F6): `ddgiIntensity`, `ddgiAmbient` and `rayMarchStepScale` are
+    /// read per frame, so they take effect through `Scene::setGiTuning` without
+    /// a rebuild — and while they were IN this comparison every tick of those
+    /// three sliders was a from-scratch teardown and re-voxelisation (N of them
+    /// under a cascade chain). `giTuningEqual` is their comparison; a host
+    /// pushes on `!(a == b)` for the configuration and on `!a.giTuningEqual(b)`
+    /// for the tuning.
     bool operator==(const GiParams &o) const {
-        return mode == o.mode && quality == o.quality && irLight == o.irLight &&
+        return mode == o.mode && quality == o.quality &&
                numBounces == o.numBounces && autoBoundsMax == o.autoBoundsMax &&
                pccProbesX == o.pccProbesX && pccProbesY == o.pccProbesY &&
                pccProbesZ == o.pccProbesZ &&
@@ -1869,12 +1916,16 @@ struct GiParams {
                probeSnapSidesMin == o.probeSnapSidesMin &&
                probeSnapSidesMax == o.probeSnapSidesMax &&
                updateBudget == o.updateBudget &&
-               rayMarchStepScale == o.rayMarchStepScale &&
-               ddgi == o.ddgi && ddgiIntensity == o.ddgiIntensity &&
-               ddgiAmbient == o.ddgiAmbient && ddgiSource == o.ddgiSource &&
+               ddgi == o.ddgi && ddgiSource == o.ddgiSource &&
                boundsMin == o.boundsMin && boundsMax == o.boundsMax &&
                cascades == o.cascades && cascadeCount == o.cascadeCount &&
+               cascadeInstanceCap == o.cascadeInstanceCap &&
                cascadeSetEqual(o);
+    }
+    /// The three values `Scene::setGiTuning` pushes, compared on their own.
+    bool giTuningEqual(const GiParams &o) const {
+        return ddgiIntensity == o.ddgiIntensity && ddgiAmbient == o.ddgiAmbient &&
+               rayMarchStepScale == o.rayMarchStepScale;
     }
     /// The cascade table, compared only over the entries in USE — a table
     /// beyond `cascadeCount` is not part of the configuration.
@@ -2173,6 +2224,12 @@ struct GiStatus {
         /// cascade declines sub-voxel objects — it cannot represent them, and
         /// they are what a whole re-voxelisation spends its time on.
         int   items = 0;
+        /// How many GI items this cascade's voxeliser HOLDS — the attach set.
+        /// Without an instance budget (`GiParams::cascadeInstanceCap` 0) that is
+        /// the whole size-filtered scene and `items` is the part of it this
+        /// cascade's box reached; with a budget it is at most the budget, and
+        /// the two together say whether the budget is biting and on what.
+        int   attached = 0;
         /// CPU milliseconds of that same rebuild (the submission cost on the
         /// frame's own thread). The GPU half is NOT here and cannot be: a
         /// timestamp pair is read back two frames later, so it is reported

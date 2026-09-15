@@ -6399,7 +6399,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     {
         GiParams gi;
         switch (mSource->giMode) {
-        case iris::GiMode::INSTANT_RADIOSITY: gi.mode = GiMode::InstantRadiosity; break;
         case iris::GiMode::VCT:               gi.mode = GiMode::Vct; break;
         case iris::GiMode::VCT_PCC_HYBRID:    gi.mode = GiMode::VctPccHybrid; break;
         case iris::GiMode::OFF: default:      gi.mode = GiMode::Off; break;
@@ -6432,7 +6431,8 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // the table. A row with a non-positive half size or resolution is not a
         // request the renderer can honour halfway, so the whole table is dropped
         // and the tier's own decides — the same rule the engine states.
-        gi.cascades = mSource->giCascades;
+        gi.cascades = mSource->giCascades > 0;
+        gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
         gi.cascadeCount = 0;
         for (const iris::Vec3 &row : mSource->giCascadeSet) {
             if (gi.cascadeCount >= 8) break;
@@ -6460,12 +6460,11 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // The probe source (rayon2 S3): -1 auto, 0 voxel, 1 raster.
         gi.ddgiSource = mSource->giDdgiSource == 0 ? GiSource::Voxel
                       : (mSource->giDdgiSource == 1 ? GiSource::Raster : GiSource::Auto);
-        iris::LightNode *driver = gi.mode == GiMode::InstantRadiosity ? resolveGiLight() : nullptr;
-        gi.irLight = driver ? engineNode(driver) : 0;
-        // What a refresh should track depends on the mode: IR re-traces from
-        // ONE driving light, so only that light's transform matters; VCT
-        // injects EVERY light into the voxel volume, so any light moving (or
-        // appearing/dying) goes stale until a re-voxelize.
+        // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
+        // E2 (4) deleted Instant Radiosity, which traced from ONE driving light
+        // and therefore hashed only that one): the voxel injection reads every
+        // light in the scene, so any light moving — or appearing, or dying —
+        // goes stale until a re-injection.
         //
         // The signature is a HASH of local TRS up each light's parent chain,
         // not a product of world matrices (audit F8). The old form called
@@ -6497,14 +6496,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
             const auto *n = static_cast<const iris::SceneNode *>(l);
             return std::find(mMovableLights.begin(), mMovableLights.end(), n) != mMovableLights.end();
         };
-        if (driver) {
-            Hasher h;
-            h << worldTrsSignature(driver->graphNode()) << lightGiParamSignature(driver);
-            // Instant Radiosity traces from ONE light; if that one moves it is
-            // the same argument, and the re-trace rides the same cheap cadence.
-            if (movingLamp(driver)) movableLightSig = h.h;
-            else                    lightSig = h.h;
-        } else if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
+        if (gi.mode == GiMode::Vct || gi.mode == GiMode::VctPccHybrid) {
             mGiChainMemo.clear();          // capacity kept; contents are per call
             Hasher h, m;
             for (const auto &l : mSource->lights) {
@@ -6603,6 +6595,17 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         if (mGiReassertPending) {
             mGiReassertPending = false;
             if (mGiPushed) mTarget->reassertGiBinding();
+        }
+        // THE TUNING PUSH FIRST, and it is not an early-out (PHOTON_SPEC §7
+        // E2 (8)): the three per-frame floats are OUT of GiParams::operator==,
+        // so a slider tick on one of them leaves `gi == mLastGi` and would
+        // otherwise never reach the engine at all. A tick is now three constant
+        // writes instead of a teardown plus a re-voxelisation (times N under a
+        // cascade chain), and the rest of this block is unchanged: if anything
+        // in the CONFIGURATION also moved, the push below rebuilds anyway.
+        if (mGiPushed && !gi.giTuningEqual(mLastGi)) {
+            mTarget->setGiTuning(gi);
+            mLastGi = gi;                  // adopt them; operator== cannot see them
         }
         if (!mGiPushed || gi != mLastGi) {
             mTarget->setGlobalIllumination(gi);
@@ -6794,36 +6797,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     // Driven from sync() it was a frame behind — visibly so in gi.overlay,
     // where switching GI off left the box on screen for one more frame.
     syncGiVolume();
-}
-
-iris::LightNode *SceneMirror::resolveGiLight() const
-{
-    if (!mSource) return nullptr;
-    if (!mSource->giLightGuid.isEmpty()) {
-        auto it = mSource->lights.constFind(mSource->giLightGuid);
-        if (it != mSource->lights.constEnd() && !it.value().isNull()) return it.value().data();
-    }
-    // THE SUN, through the document's ONE resolver (SUN_AND_LIGHT_DEFAULTS Q1).
-    // This used to be a second, private rule — "the lowest-nodeId directional"
-    // — which agreed with the sky link's depth-first walk only by accident and
-    // could name a different light the moment anything was re-parented.
-    if (auto sun = mSource->sunLight()) return sun.data();
-    // No directional light at all is NORMAL (two of the eight shipped samples):
-    // Instant Radiosity still needs SOMETHING to bounce, so it falls through to
-    // the lowest-nodeId light of any type, exactly as before. QHash order is
-    // arbitrary, hence the explicit creation-order pick.
-    iris::LightNode *any = nullptr;
-    for (const auto &l : mSource->lights) {
-        if (l.isNull()) continue;
-        // ...but never a SKY LIGHT. It has no position and no direction to
-        // trace from — it IS the ambient (SKY_LIGHT_SPEC.md §2) — and Instant
-        // Radiosity given one would cast its virtual point lights from the
-        // world origin. It is also the first light in a scene built from the
-        // new template, so "the lowest nodeId of any type" would find it.
-        if (l->lightType == iris::LightType::Sky) continue;
-        if (!any || l->nodeId < any->nodeId) any = l.data();
-    }
-    return any;
 }
 
 namespace {

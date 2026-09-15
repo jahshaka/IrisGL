@@ -1386,7 +1386,7 @@ TextureId OgreScene::createTexture(unsigned w, unsigned h, const unsigned char *
         // for a ManualTexture _transitionTo(Resident) calls notifyDataIsReady
         // ITSELF (OgreTextureGpu.cpp:600). A second call underflows the uint8
         // mDataPreparationsPending to 255, isDataReady() then never turns true,
-        // and anything that waits on the texture — InstantRadiosity's
+        // and anything that waits on the texture — the voxeliser's
         // downloadTexture under GI, Image2::convertFromTexture — spins in
         // waitForData forever (found by the GI churn test hanging).
         tex->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
