@@ -5277,6 +5277,12 @@ private:
     unsigned long long mShadowFrame = 0;
     mutable unsigned long long mShadowPollFrame = 0;
     mutable bool    mShadowPolled = false;
+    /// Were the counters actually ARMED for the last frame that rendered? It is
+    /// not the same question as `mShadowPolled`: arming happens inside
+    /// applyShadowCacheDirties, so a read taken before any frame has rendered
+    /// under the listeners must report "not measured" rather than a zero that
+    /// looks like a measurement (ShadowStatus::countersMeasured).
+    bool            mShadowCountersArmed = false;
     unsigned        mDefaultSamples = 1;   // EngineConfig::sampleCount, sanitized; on-screen views only
     /// EngineConfig::vsync, then whatever setVsync() last said. Read at every
     /// window creation (createView + the MSAA-recreate hook), so the pacing

@@ -1063,10 +1063,18 @@ public:
     /// PARAMETER rather than a lookup so this stays a pure function of its
     /// inputs: the per-sync walk and the full-walk verifier must derive the
     /// same description from the same node.
+    /// `exposureGain` is what the VIEW'S CHAIN multiplies the frame by before
+    /// the tonemap (scenemirror.cpp's sunExposureGain). It decides only one
+    /// thing here — whether a sun has become too dim to darken a pixel and can
+    /// stop paying for its three PSSM passes — and it is a parameter for the
+    /// same reason `sunTint` is: this stays a pure function of its inputs, so
+    /// the per-sync walk and the full-walk verifier derive the same
+    /// description. Its default is the no-HDR gain of one.
     static jahshaka::engine::LightDesc toLightDesc(
         iris::LightNode *light, iris::LightNode *sun, bool sunKnown,
         const jahshaka::engine::Colour &sunTint =
-            jahshaka::engine::Colour(1.0f, 1.0f, 1.0f, 1.0f));
+            jahshaka::engine::Colour(1.0f, 1.0f, 1.0f, 1.0f),
+        float exposureGain = 1.0f);
     /// THE SUN'S TINT (SUN_FOLLOWS_ATMOSPHERE, lane ENGINE-7 item 6): what the
     /// air does to this light's colour at its own elevation, asked of the
     /// renderer's own sky model (Scene::atmosphereSunTint). White unless
@@ -1432,6 +1440,17 @@ private:
     /// MAIN view happened to ask for. Scene-level, so one value serves every
     /// view: the fields it carries (hdr, exposure) come from the document.
     jahshaka::engine::PostFxDesc mWorldPostFx;
+    /// WHAT THE VIEW'S CHAIN MULTIPLIES THE FRAME BY, as applyEnvironment last
+    /// resolved it — the world's post-fx with the driving camera layered over
+    /// it (scenemirror.cpp's sunExposureGain). Read by the two places that
+    /// decide a sun has gone out: the disc, and the sun's shadow passes.
+    ///
+    /// ONE VALUE FOR THE PROCESS, like the rest of the post-fx TUNING: Ogre's
+    /// HDR materials are MaterialManager singletons, so the engine already
+    /// lives with the primary view's exposure everywhere (Types.h, PostFxDesc).
+    /// The last view given an environment therefore speaks for the decision,
+    /// which is the convention the chain itself follows.
+    float mSunExposureGain = 1.0f;
     /// WHAT THE DOCUMENT'S SKY IS MADE OF, as one value — the question "does
     /// anything have to be BAKED again?" and nothing else. applySky DISPATCHES
     /// on the kind (and the realistic-bake debounce asks "was the previous sky

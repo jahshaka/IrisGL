@@ -714,6 +714,7 @@ ShadowStatus OgreEngine::shadowStatus() const {
         st.maps = st.pssmSplits + st.focusedMaps;
         st.lightSlots = 1u + st.focusedMaps;
         st.live = true;
+        st.countersMeasured = mShadowCountersArmed;
         st.shadowPassesLastFrame = mShadowPassesLastFrame;
         st.cachedMapRendersLastFrame = mCachedMapRendersLastFrame;
         st.shaderLightMismatches = FogHlmsListener::lightCountMismatches();
@@ -1107,6 +1108,7 @@ void OgreEngine::applyShadowCache() {
         const bool want = mShadowPolled && mShadowFrame - mShadowPollFrame <= kShadowPollWindowFrames;
         if (!want) {
             mShadowPolled = false;
+            mShadowCountersArmed = false;
             if (mShadowCounters[0] || mShadowCounters[1] || mShadowCounters[2]) detachShadowCounter();
         }
     } JAH_CATCH(mLastError, );
@@ -1294,6 +1296,10 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
         // Here and not at the top of the frame: applyPendingGi / applyPendingPlanar
         // may have rebuilt a probe or planar workspace since, and the counters
         // must ride the workspaces that are about to render.
+        // The frame about to render is MEASURED exactly when this arms it. A
+        // reader that asks before any such frame gets countersMeasured = false
+        // and reports "not measured" instead of a zero (SKY-SMALL).
+        mShadowCountersArmed = mShadowPolled;
         if (mShadowPolled) {
             for (unsigned k = 0; k < kShadowNodeKinds; ++k) {
                 if (!mShadowCounters[k])
