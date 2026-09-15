@@ -73,7 +73,7 @@ struct ModelSceneInfo
 
     /// The model's axis-aligned WORLD size in metres: mesh-local AABBs pushed
     /// through each instancing node's accumulated transform (the same shape
-    /// as Studio's document-side fitsize::measureNode, so the number recorded
+    /// as Studio's document-side extent::measureNode, so the number recorded
     /// at import and the number a placed node measures agree). `extentValid`
     /// is false for a scene with no geometry or a degenerate one.
     double extentX = 0.0;
@@ -84,7 +84,9 @@ struct ModelSceneInfo
     /// Metres per source unit AS THE FILE DECLARED IT (FBX's
     /// GlobalSettings::UnitScaleFactor, centimetres per unit — a Mixamo
     /// download says 1.0); 1.0 for every format that declares nothing.
-    /// Recorded for the user: the canonical parse has already applied it.
+    /// Recorded for the user — the import dialog shows it so a person can
+    /// disagree with the file — and for the choke point, which needs it to
+    /// resolve a UNIT OVERRIDE without a probe parse (import/scenesource.h).
     double declaredUnitScale = 1.0;
 
     /// Facts of a scene an import already parsed (no second parse).
