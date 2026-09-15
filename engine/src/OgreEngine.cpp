@@ -1686,6 +1686,11 @@ OgreEngine::~OgreEngine() {
     // ...and the same for the cross-scene file-texture references: every scene
     // above released its own, so this is empty on a clean teardown.
     detail::resetSharedTextures();
+    // THE WRITER THREAD LOGS THROUGH OGRE'S LOG after its fsync (FSYNC-1's
+    // second read): join it HERE, before Root — and the LogManager Root owns —
+    // dies. The save at the top of this destructor is a hand-off; this is where
+    // the old synchronous write used to cost the same wait, so nothing got slower.
+    mShaderCache.finishWrites();
     // Both log listeners are registered on Ogre's default log, which Root owns.
     mShaderCache.detachCounters();
     detachLogBridge();

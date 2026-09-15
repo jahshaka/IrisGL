@@ -1777,9 +1777,9 @@ public:
     /// False = nothing was handed over (disabled, not dirty, or the
     /// serialization failed). True = the bytes are serialized and the write is
     /// either done or in flight; flushWrites() is how a caller waits for it.
-    /// ONE writer, ONE job: a save that meets a write still in flight waits for
-    /// it before serializing again, which is the whole of the coalescing —
-    /// nothing queues up behind a slow disk.
+    /// ONE writer, ONE job: a save that meets a write still in flight SKIPS
+    /// (the layers stay dirty; the next save writes them) — nothing ever waits
+    /// on the calling thread, and nothing queues up behind a slow disk.
     bool save(Ogre::Root *root);
     /// Waits for an in-flight off-thread write. True when the writer is idle,
     /// false when `budgetMs` ran out first (the write continues; nothing is
@@ -1788,6 +1788,11 @@ public:
     /// True while the writer holds or is running a job (FSYNC-1): a save that
     /// meets one SKIPS — it never waits on the calling thread.
     bool writeInFlight() const;
+    /// Waits for an in-flight write (bounded) and then JOINS the writer thread
+    /// (unbounded — the bytes are never abandoned). The engine's destructor
+    /// calls it before Ogre's Root, whose LogManager the writer logs through,
+    /// is deleted; the ShaderCache destructor calls it again as a no-op.
+    void finishWrites();
     /// True when something has been compiled since the last save — the
     /// burst-settle timer's condition, and what makes save() a cheap no-op.
     bool dirty(Ogre::Root *root) const;
@@ -1837,7 +1842,11 @@ private:
     /// Stops and joins the writer. Safe to call twice.
     void  stopWriter();
 
-    bool  readManifest(std::vector<Entry> &filesOut) const;
+    /// `adopt` = publish the manifest's saved-at stamp and expected-shader
+    /// count into this object (the caller's thread, at load). The writer
+    /// thread reads the manifest only to carry entries forward and passes
+    /// false: `mExpectedShaders` belongs to the caller's thread.
+    bool  readManifest(std::vector<Entry> &filesOut, bool adopt = true) const;
     /// `shaders` is passed rather than read from mExpectedShaders: the writer
     /// thread calls this, and the member belongs to the caller's thread.
     bool  writeManifest(const std::vector<Entry> &files, unsigned shaders) const;

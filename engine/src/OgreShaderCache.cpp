@@ -343,10 +343,13 @@ ShaderCache::~ShaderCache() {
     // THE LAST BYTES OF THE SESSION. The engine's destructor saves before it
     // tears anything down, and that save is now a hand-off — so the writer is
     // joined here, which is the point that runs after every caller has had its
-    // turn and before the process can exit. A save in flight is waited for; a
-    // wedged filesystem costs the quit kWriteWaitMs and no more.
-    flushWrites(kWriteWaitMs);
-    stopWriter();
+    // turn and before the process can exit — normally a no-op, because the
+    // engine's destructor already called finishWrites() before deleting Root.
+    // A save in flight is waited for and the join is UNBOUNDED: a wedged
+    // filesystem holds the quit for as long as the write takes, because the
+    // bytes are never abandoned (kWriteWaitMs only decides when we stop
+    // waiting politely and join).
+    finishWrites();
     releaseLock();
 }
 
@@ -483,7 +486,7 @@ void ShaderCache::releaseLock() {
 //   saved <unix-ms>
 //   shaders <count>
 //   file <name> <bytes> <hash128>
-bool ShaderCache::readManifest(std::vector<Entry> &filesOut) const {
+bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
     std::ifstream f(path(kManifest));
     if (!f) return false;
     std::string line, storedFingerprint;
@@ -514,8 +517,10 @@ bool ShaderCache::readManifest(std::vector<Entry> &filesOut) const {
         logLine("fingerprint changed — discarding the cache");
         return false;
     }
-    const_cast<ShaderCache *>(this)->mLastSavedUnixMs = saved;
-    const_cast<ShaderCache *>(this)->mExpectedShaders = shaders;
+    if (adopt) {
+        const_cast<ShaderCache *>(this)->mLastSavedUnixMs = saved;
+        const_cast<ShaderCache *>(this)->mExpectedShaders = shaders;
+    }
     return true;
 }
 
@@ -951,7 +956,7 @@ bool ShaderCache::runWrite(const PendingWrite &job) {
     // Files we did not rewrite this time are still valid: carry their manifest
     // entries forward, or the next run would reject a perfectly good file.
     std::vector<Entry> previous;
-    readManifest(previous);
+    readManifest(previous, /*adopt*/ false);   // the writer thread: never publish
     for (const Entry &p : previous) {
         const bool rewritten = std::any_of(files.begin(), files.end(),
                                            [&](const Entry &e) { return e.name == p.name; });
@@ -1022,6 +1027,11 @@ bool ShaderCache::dispatchWrite(std::unique_ptr<PendingWrite> job) {
 bool ShaderCache::writeInFlight() const {
     std::lock_guard<std::mutex> lock(mWriteMutex);
     return mWriteJob || mWriteBusy;
+}
+
+void ShaderCache::finishWrites() {
+    flushWrites(kWriteWaitMs);
+    stopWriter();
 }
 
 bool ShaderCache::flushWrites(unsigned budgetMs) {
