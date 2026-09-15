@@ -1252,16 +1252,43 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // holds an array. Upstream cannot serve both and no patch of ours would change
 // that; the two are mutually exclusive by construction in this pin.
 //
-// So while auto PCC is bound WE do not bind the IBL cubemap. Nothing is lost
-// visually: the probe captures are full scene renders that include the sky, so
-// the probes ARE the environment — sharper than the single global cubemap was,
-// because they are parallax-corrected to the room. rebuildVct/teardownVct call
-// applyReflectionToAll() so the binding follows the hybrid up and down.
+// So while auto PCC is bound WE do not bind the IBL cubemap. That much is
+// unchanged and cannot change: the two are mutually exclusive in this pin.
 //
 // Before this, picking VCT+Probes on any scene with a sky produced a shader that
 // did not compile — i.e. objects that did not draw at all — and it was invisible
 // to every suite because no suite combined the two. `gi.pcc_mirror`'s sky case
 // is the fence; it goes black without this.
+//
+// WHAT CHANGED IS WHERE THE SKY WENT INSTEAD (lane SKY-FALLBACK-1,
+// ogre-patch 0048). The old note said "nothing is lost visually: the probe
+// captures include the sky, so the probes ARE the environment". That was true
+// while a probe grid was an all-or-nothing scene-wide decision — a grid meant a
+// room, and in a room the probes are the environment. It stopped being true the
+// day the grid became a PER PROBE decision (lane R5-ROOM): a PARTIAL grid is
+// the normal case now, one crate in a new project keeps a handful of its
+// candidates, and every pixel that no surviving probe's box contains had NO
+// environment left at all. Measured as a bar: e2e_default_ground's grazing
+// specular margin fell from 5/255 to 3/255 the day that landed.
+//
+// So the sky has its OWN slot now, at the pass level, through the extra
+// pass texture HlmsPbs offers its Hlms listener
+// (FogHlmsListener::SkyEnvState / getNumExtraPassTextures / hlmsTypeChanged,
+// OgreFog.cpp; the composite is ogre-patch 0048, inside upstream's per-pixel
+// probe loop). It is bound for every colour pass of a scene whose grid has
+// taken the env slot, and the probe loop hands it every pixel no probe's box
+// contains. This function therefore still returns null under a PCC — the slot
+// still has one occupant — and the sky is no longer lost by it.
+//
+// rebuildVct/teardownVct call applyReflectionToAll() so both bindings follow the
+// hybrid up and down (the pass-level one is pushed from refreshEnvmapScale,
+// which that call funnels through).
+//
+// THE RESIDUAL, recorded rather than fixed here: an AUTHORED reflection map on a
+// material is still unbound under a PCC, and the pass-level slot carries the
+// SKY, not that map. A material with its own environment therefore loses it
+// while a grid exists, exactly as before. Closing that needs a per-datablock
+// environment texture, which this pin does not have.
 Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
     return mPcc ? nullptr : mReflectionTex;
 }
