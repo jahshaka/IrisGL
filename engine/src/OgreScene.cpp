@@ -327,7 +327,10 @@ bool OgreScene::hasAuthoredReflectionMap() const {
 }
 
 float OgreScene::envmapScaleForPass() const {
-    if (mPcc) return 1.0f;
+    // Any grid anywhere, for the same reason reflectionTexFor asks that way: the
+    // scale multiplies whatever the env slot holds, and while a PCC is bound to
+    // the singleton that is a probe array in EVERY scene's pass.
+    if (anyProbeGridBound()) return 1.0f;
     if (hasAuthoredReflectionMap()) return 1.0f;
     return mEnvLightScale;
 }
@@ -1232,6 +1235,9 @@ NodeId OgreScene::nodeOfLight(const Ogre::Light *light) const {
 
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
+    // teardownVct is shared with "GI off", and the two want different timing for
+    // the process-wide reflection re-bind — see the note there.
+    mDestroying = true;
     JAH_TRY {
         // THE RAY TIER'S STRUCTURES FOR THIS SCENE, FIRST. They are keyed by
         // this object's ADDRESS and they hold MeshPtrs, so leaving them behind

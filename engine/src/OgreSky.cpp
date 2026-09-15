@@ -1289,8 +1289,31 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // SKY, not that map. A material with its own environment therefore loses it
 // while a grid exists, exactly as before. Closing that needs a per-datablock
 // environment texture, which this pin does not have.
+//
+// AND THE QUESTION IS PROCESS-WIDE, NOT PER SCENE (lane SKY-FALLBACK-1, second
+// read; this was a live defect on main). `HlmsPbs` is a singleton and it sets
+// `parallax_correct_cubemaps` — and therefore makes `texEnvProbeMap` a cube
+// ARRAY — for EVERY scene's pass while ANY grid is bound (OgreHlmsPbs.cpp:1820-
+// 1828). Testing this scene's own `mPcc` therefore answered the wrong question:
+// a SECOND scene (a preview, a thumbnail, the avatar module) whose materials
+// kept their manual sky cube generated `SampleEnvProbe` against a cube array,
+// which does not compile, and its objects did not draw at all. That is the
+// avatar preview's black character — measured, r3 g3 b4 with two shader-compile
+// exceptions in the log, and previously misread as the missing sky.
+//
+// So it asks HlmsPbs. The scene keeps its sky either way: with a grid bound
+// anywhere, the pass property fires in THAT scene's passes too, so its own sky
+// cube reaches its materials through the pass-level slot below (the state is
+// per SceneManager — FogHlmsListener::SkyEnvState). Every site that binds or
+// unbinds a grid calls OgreEngine::reapplyReflectionsAllScenes so the binding
+// follows the singleton for every scene, not just the one that changed.
+bool OgreScene::anyProbeGridBound() const {
+    auto *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+    return pbs && pbs->getParallaxCorrectedCubemap() != nullptr;
+}
+
 Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
-    return mPcc ? nullptr : mReflectionTex;
+    return anyProbeGridBound() ? nullptr : mReflectionTex;
 }
 
 void OgreScene::applyReflectionToAllImpl() {

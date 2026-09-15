@@ -2421,6 +2421,18 @@ public:
     /// cubemap on every PBR material's datablock. (Body in complete-class context,
     /// so it may call the private impl declared further down.)
     void applyReflectionToAll();
+    /// "Is ANY probe grid bound to HlmsPbs", which is the question the env-probe
+    /// slot's occupancy really turns on — not "does THIS scene have one". See
+    /// the long note above reflectionTexForDatablocks.
+    bool anyProbeGridBound() const;
+    /// Set by destroy() when THIS scene's teardown released the process-wide
+    /// probe binding; read by OgreEngine::destroyScene after the erase, which is
+    /// the only safe place to walk the remaining scenes.
+    bool mReleasedPccOnDestroy = false;
+    /// True for the duration of destroy(): teardownVct is shared between "GI
+    /// off" (walk the other scenes now) and "this scene is going away" (flag it,
+    /// the engine walks after the erase).
+    bool mDestroying = false;
     /// Runs the queued ibl_specular convolution (roughness mip chain) for the
     /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
     void applyPendingIbl();
@@ -5156,6 +5168,15 @@ public:
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
 
+    /// THE PROCESS-WIDE PROBE BINDING JUST CHANGED, so every scene has to
+    /// re-decide what its datablocks hold in the env-probe slot (lane
+    /// SKY-FALLBACK-1). HlmsPbs is a singleton and its
+    /// `parallax_correct_cubemaps` property is set for EVERY scene's pass while
+    /// any PCC is bound, so the question "may this material carry a manual
+    /// cubemap" is a process-wide one — see OgreScene::reflectionTexFor. Called
+    /// from the sites that bind or unbind a grid, which live in OgreScene.
+    void reapplyReflectionsAllScenes();
+
     ~OgreEngine() override;
 
 private:
@@ -5176,6 +5197,7 @@ private:
     /// structural reason the render thread never walks a staging manager the
     /// import worker is growing. Cheap enough to call once per frame.
     void scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const;
+
 
     /// First render target: the VaoManager now exists, so Hlms can be registered.
     void ensureHlms();
