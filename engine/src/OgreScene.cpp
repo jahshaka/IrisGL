@@ -1521,3 +1521,11 @@ bool OgreScene::rayTracingResolved() const {
 }
 
 }}}  // namespace jahshaka::engine::detail
+
+void OgreScene::setRayTracing(RayTracingMode mode) {
+    const bool wasOn = mRayTracing != RayTracingMode::Off;
+    mRayTracing = mode;
+    // OFF is a COST guarantee, not only a picture: the ray structures this
+    // scene holds are released now, and updateRayQuery skips it from here.
+    if (wasOn && mode == RayTracingMode::Off) forgetRayQuery();
+}

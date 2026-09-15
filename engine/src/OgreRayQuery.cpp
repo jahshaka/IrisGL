@@ -2984,7 +2984,14 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
             return;
         }
     }
-    for (OgreScene *s : drawn) mRayTier->updateScene(s);
+    // A scene whose project row says OFF must cost nothing, not just look the
+    // same (world.rayTracing's contract): no gather, no BLAS/TLAS for it. The
+    // structures it may already hold were released when the row flipped
+    // (OgreScene::setRayTracing → forgetRayQuery).
+    for (OgreScene *s : drawn) {
+        if (!s->rayTracingResolved()) continue;
+        mRayTier->updateScene(s);
+    }
 }
 
 void OgreEngine::shutdownRayQuery() {
@@ -2999,14 +3006,12 @@ void OgreScene::forgetRayQuery() {
 }
 
 bool OgreScene::rayReflectionsWanted() const {
-    if (!mEngine) return false;
-    // LANE RAYROW-1 REPLACES THIS ONE LINE with the project's own World row
-    // (off / auto / on; owner, ledger §425). Until then the application latch —
-    // `app.rayTracing`, `--no-ray-query`, `JAHSHAKA_NO_RAY_QUERY` — is the
-    // document's stand-in, which is what lets every ray-consuming suite run
-    // BOTH pictures on one GPU.
-    const bool documentWantsRays = mEngine->rayTracing();
-    return documentWantsRays && mEngine->rayQueryAvailable();
+    // The project's own World row (world.rayTracing: off / auto / on — owner,
+    // ledger §425) resolved against the machine: OgreScene::rayTracingResolved
+    // = the row is not Off × the diagnostic latch (--no-ray-query,
+    // JAHSHAKA_NO_RAY_QUERY — the one thing that still lets every
+    // ray-consuming suite run BOTH pictures on one GPU) × the device's answer.
+    return rayTracingResolved();
 }
 
 RayQueryStatus OgreScene::rayQueryStatus() const {
@@ -3018,7 +3023,7 @@ RayQueryStatus OgreScene::rayQueryStatus() const {
         // it is off. `enabled` must say WHICH (round 2, finding 18): reporting
         // false for both made "switched on, first frame not drawn" look exactly
         // like "this machine has ray tracing switched off", and a caller
-        // reading straight after app.rayTracing("auto") would be told no.
+        // reading straight after the row flipped to "auto" would be told no.
         st.enabled = st.available && mEngine->rayTracing();
         return st;
     }

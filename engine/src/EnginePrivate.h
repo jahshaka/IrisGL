@@ -2546,7 +2546,9 @@ public:
     int  activePlanarReflectors() const override;
 
     // ---- Hardware ray tracing, per scene (ledger §425; impl OgreScene.cpp) ----
-    void setRayTracing(RayTracingMode mode) override { mRayTracing = mode; }
+    /// Defined in OgreScene.cpp: a flip to Off also releases the scene's ray
+    /// structures (forgetRayQuery) so Off costs nothing, as the verb promises.
+    void setRayTracing(RayTracingMode mode) override;
     RayTracingMode rayTracingMode() const override { return mRayTracing; }
     bool rayTracingResolved() const override;
     /// The scene's live PlanarReflections, or null when the budget is 0. Views
