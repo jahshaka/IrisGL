@@ -6605,7 +6605,16 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // in the CONFIGURATION also moved, the push below rebuilds anyway.
         if (mGiPushed && !gi.giTuningEqual(mLastGi)) {
             mTarget->setGiTuning(gi);
-            mLastGi = gi;                  // adopt them; operator== cannot see them
+            // ONLY THE THREE, and the narrowness is load-bearing: `mLastGi = gi`
+            // here would adopt the WHOLE configuration, so a frame in which a
+            // tuning float AND a real setting both changed would leave
+            // `gi == mLastGi` below and swallow the setting outright — the push
+            // would never happen. (Measured the hard way:
+            // scripting.e2e.screenshot_grades lost a grade change that arrived
+            // in the same frame as a tuning value.)
+            mLastGi.ddgiIntensity     = gi.ddgiIntensity;
+            mLastGi.ddgiAmbient       = gi.ddgiAmbient;
+            mLastGi.rayMarchStepScale = gi.rayMarchStepScale;
         }
         if (!mGiPushed || gi != mLastGi) {
             mTarget->setGlobalIllumination(gi);
