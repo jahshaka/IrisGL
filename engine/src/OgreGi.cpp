@@ -535,6 +535,22 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
         // is converged inline instead. (The mirror only runs this path while
         // the budget is above 0, so this is the belt to that braces.)
         if (mIfd) {
+            // THE FIELD'S BINDING FIRST, AND UNCONDITIONALLY (E1 reader F2,
+            // PHOTON_SPEC §7 E2 (9)). `VctLighting::update` with extra bounces
+            // PING-PONGS its light voxel textures (`runBounce`), and the field
+            // bound whatever was current ONCE, by pointer, at `initialize()`
+            // (ogre-patch 0044). So after an odd number of bounce passes — which
+            // is exactly what Epic's column produces on a chain, where
+            // `cascadeBounces` yields 1/3/7 — a light move left the field
+            // integrating from the texture the injection had just stopped
+            // writing. Re-binding is five descriptor writes on a path that has
+            // just run a compute dispatch per bounce; deciding whether it is
+            // needed would mean comparing raw pointers that may have been
+            // recycled (the defect class patch 0041 exists for).
+            //
+            // The head, because the field rides cascade 0 and `mVctLighting`
+            // IS cascade 0's lighting under a chain.
+            if (mVctLighting) mIfd->setVctLighting(mVctLighting);
             mIfd->reset();
             mIfdProbesDone = 0u;
             mIfdRigEpochSeen = mRigPoseEpoch;
@@ -3048,17 +3064,31 @@ std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
     }
     // THE STEP TABLE, when a row did not pin one: the pin's own
     // `autoCalculateStepSizes(4)` shape (OgreVctCascadedVoxelizer.cpp:131-161)
-    // written out here so it is ours to tune (A7) — the outermost cascade steps
-    // every 4 cells and every finer cascade steps the same DISTANCE, ceiled to
-    // whole cells and floored at half its resolution (the pin's own guard
-    // against a step that outruns the volume). On the sample set this resolves
-    // to 64 / 48 / 16 / 4 cells = 5.0 / 7.5 / 7.5 / 7.5 m, exactly what the
-    // manager resolved in spikes/photon-s1 §4.
+    // written out here so it is ours to tune (A7) — every finer cascade steps
+    // the same DISTANCE as the outermost one, ceiled to whole cells and floored
+    // at half its resolution (the pin's own guard against a step that outruns
+    // the volume).
+    //
+    // THE OUTERMOST CASCADE STEPS TWICE AS FAR AS THE REST (PHOTON_SPEC §7
+    // E2 (1), "the outer stepCells raised"), and the reason is a measurement,
+    // not symmetry. The outermost cascade is the one that encloses the most
+    // geometry and resolves the least, so it is BY FAR the most expensive
+    // rebuild in the chain — on the 8,026-instance lattice it is 88.9 ms of GPU
+    // against cascade 0's 18.1, and even on the Showroom at Epic it is the row
+    // that peaks (spikes/photon-e2/BASELINE.md). Halving how often it runs
+    // halves that cost, and what it buys with the frames it skips is that its
+    // 60 m box sits up to 15 m off-centre instead of 7.5 — on a volume 120 m
+    // across, at 1.875 m per cell, which is a quarter of a cell of parallax on
+    // the far bounce. The INNER cascades are untouched, because they are what
+    // the eye is actually looking at and they are cheap.
+    static const float kOuterStepCells = 8.0f;   // the pin's own value is 4
+    static const float kInnerStepCells = 4.0f;
     const float cellLast = table.back().halfSize * 2.0f / float(table.back().resolution);
     for (size_t i = 0; i < table.size(); ++i) {
         if (table[i].stepCells > 0.0f) continue;
         const float cell = table[i].halfSize * 2.0f / float(table[i].resolution);
-        float steps = (i + 1u == table.size()) ? 4.0f : std::ceil(4.0f * cellLast / cell);
+        float steps = (i + 1u == table.size()) ? kOuterStepCells
+                                               : std::ceil(kInnerStepCells * cellLast / cell);
         steps = std::max(1.0f, std::min(steps, float(table[i].resolution) * 0.5f));
         table[i].stepCells = steps;
     }
