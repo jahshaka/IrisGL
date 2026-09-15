@@ -833,14 +833,59 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the guard this patch exists for — green 3/3 cold on both compile branches.
     Guarded by `threading.gi_resolve` / `.gi_resolve_serial` / `.gi_resolve_pixels`.
 
-THE STACK IS 0001-0041 (this list; `build-ogre.sh` globs `*.patch`, so the file
+42. **0042-hdr-luminance-meter-must-not-be-poisoned** (MEDIA, GLSL) — THE DRAG
+    SHIMMER. The HDR chain's exposure is a MEAN of `log( luminance )` over a
+    sparse grid of the scene target, so ONE unusable sample makes the whole
+    FRAME's measurement unusable — and two things produce one, both of which come
+    and go while a light turns: the RGBA16F target stores `+Inf` where a punctual
+    light's specular lobe (`1 / (pi * alpha^2)` at the roughness floor) blows out,
+    and the measurement's bilinear fetch weights that texel by zero on some frames
+    and not others (`0 * Inf` is a NaN); and a filtered fetch across a blown
+    neighbourhood comes back BELOW ZERO, whose `log()` is a NaN too. Patch 0034
+    then read an unusable measurement as `exposure.y`, the log-luminance FLOOR —
+    i.e. the chain's BRIGHTEST exposure — so every measurement failure yanked the
+    grade towards its limit. MEASURED on the live editor viewport (Ogre's
+    ShadowMapFromCode port, the sun stepped 0.35 deg/frame, the 1x1 adaptation
+    history and the 4x4 `rtIter2` read back every frame): 24 of 120 dragging
+    frames with SSR on and 9 with SSR off carried a NaN, the exposure lurched on
+    every one, and the adapted luminance's range over a 60-frame drag fell from
+    12.0 % to 2.3 % (SSR on) and 5.0 % to 1.0 % (SSR off) with the patch, 0.363 %
+    to 0.060 % at rest. AND: **patch 0034's `x == x` guards NEVER FIRED** — the
+    shader compiler folds `x == x` to true on this stack (NVIDIA 595.84,
+    Vulkan/SPIR-V), proved with an absurd value on its NaN branch that never
+    appeared; what produced 0034's constant was the DRIVER's `clamp( NaN, lo, hi )`
+    returning `lo`. Every guard here is on the BITS
+    (`(floatBitsToUint(x) & 0x7FFFFFFF) < 0x7F800000`), which no optimiser may
+    remove — **an `x == x` NaN test anywhere in this tree's shaders is a no-op.**
+    Bit-identical for every frame whose samples were all finite and non-negative;
+    `--engine-selftest` hash UNCHANGED (`b55e2d5d…`). Guarded by `hdr.drag_stable`.
+43. **0043-prepass-hands-back-the-roughness-it-wrote** (MEDIA) — in PrePassUse
+    mode the shading pass reads its normal and its shadow term out of the
+    G-buffer, but upstream lets it read the ROUGHNESS back only when the material
+    carries a roughness MAP. Jahshaka patch 0022 broke that premise: it makes the
+    GGX alpha a PER-PIXEL quantity on every normal-mapped surface (geometric
+    specular anti-aliasing), the prepass computes it and writes it, and the
+    shading pass threw it away — so a normal-mapped material with a CONSTANT
+    roughness lost its anti-aliasing for as long as SSR was switched on and got it
+    back when SSR was switched off (lane SSR-1 round 2 measured the gate alone at
+    1.48 % of the picture, peak 161 of 255). The gate is now `roughness_map ||
+    normal_map_tex`. AND the encoded RANGE moved with it: upstream packs alpha
+    over `[0.02, 1]` while `SampleRoughnessMap`'s own floor is `0.001`, so a
+    mirror-smooth material came back through the G-buffer WIDENED — measured at
+    8.60 % of the picture on the fixture in `tests/ssr`, worse than the defect
+    being fixed; over `[0.001, 1]` the round trip is faithful at the same 16 bits
+    (1.54 %, which is the prepass' R10G10B10A2 NORMALS on a near-delta lobe and
+    nothing else). `--engine-selftest` hash UNCHANGED — the default scene has no
+    SSR. Guarded by `ssr.engine` case 13.
+
+THE STACK IS 0001-0043 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040 and 0041 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
