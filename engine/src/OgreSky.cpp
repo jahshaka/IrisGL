@@ -1252,18 +1252,103 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // holds an array. Upstream cannot serve both and no patch of ours would change
 // that; the two are mutually exclusive by construction in this pin.
 //
-// So while auto PCC is bound WE do not bind the IBL cubemap. Nothing is lost
-// visually: the probe captures are full scene renders that include the sky, so
-// the probes ARE the environment — sharper than the single global cubemap was,
-// because they are parallax-corrected to the room. rebuildVct/teardownVct call
-// applyReflectionToAll() so the binding follows the hybrid up and down.
+// So while auto PCC is bound WE do not bind the IBL cubemap. That much is
+// unchanged and cannot change: the two are mutually exclusive in this pin.
 //
 // Before this, picking VCT+Probes on any scene with a sky produced a shader that
 // did not compile — i.e. objects that did not draw at all — and it was invisible
 // to every suite because no suite combined the two. `gi.pcc_mirror`'s sky case
 // is the fence; it goes black without this.
+//
+// WHAT CHANGED IS WHERE THE SKY WENT INSTEAD (lane SKY-FALLBACK-1,
+// ogre-patch 0048). The old note said "nothing is lost visually: the probe
+// captures include the sky, so the probes ARE the environment". That was true
+// while a probe grid was an all-or-nothing scene-wide decision — a grid meant a
+// room, and in a room the probes are the environment. It stopped being true the
+// day the grid became a PER PROBE decision (lane R5-ROOM): a PARTIAL grid is
+// the normal case now, one crate in a new project keeps a handful of its
+// candidates, and every pixel that no surviving probe's box contains had NO
+// environment left at all. Measured as a bar: e2e_default_ground's grazing
+// specular margin fell from 5/255 to 3/255 the day that landed.
+//
+// So the sky has its OWN slot now, at the pass level, through the extra
+// pass texture HlmsPbs offers its Hlms listener
+// (FogHlmsListener::SkyEnvState / getNumExtraPassTextures / hlmsTypeChanged,
+// OgreFog.cpp; the composite is ogre-patch 0048, inside upstream's per-pixel
+// probe loop). It is bound for every colour pass of a scene whose grid has
+// taken the env slot, and the probe loop hands it every pixel no probe's box
+// contains. This function therefore still returns null under a PCC — the slot
+// still has one occupant — and the sky is no longer lost by it.
+//
+// rebuildVct/teardownVct call applyReflectionToAll() so both bindings follow the
+// hybrid up and down (the pass-level one is pushed from refreshEnvmapScale,
+// which that call funnels through).
+//
+// THE RESIDUAL, recorded rather than fixed here: an AUTHORED reflection map on a
+// material is still unbound under a PCC, and the pass-level slot carries the
+// SKY, not that map. A material with its own environment therefore loses it
+// while a grid exists, exactly as before. Closing that needs a per-datablock
+// environment texture, which this pin does not have.
+//
+// AND THE QUESTION IS PROCESS-WIDE, NOT PER SCENE (lane SKY-FALLBACK-1, second
+// read; this was a live defect on main). `HlmsPbs` is a singleton and it sets
+// `parallax_correct_cubemaps` — and therefore makes `texEnvProbeMap` a cube
+// ARRAY — for EVERY scene's pass while ANY grid is bound (OgreHlmsPbs.cpp:1820-
+// 1828). Testing this scene's own `mPcc` therefore answered the wrong question:
+// a SECOND scene (a preview, a thumbnail, the avatar module) whose materials
+// kept their manual sky cube generated `SampleEnvProbe` against a cube array,
+// which does not compile, and its objects did not draw at all. That is the
+// avatar preview's black character — measured, r3 g3 b4 with two shader-compile
+// exceptions in the log, and previously misread as the missing sky.
+//
+// So it asks HlmsPbs. The scene keeps its sky either way: with a grid bound
+// anywhere, the pass property fires in THAT scene's passes too, so its own sky
+// cube reaches its materials through the pass-level slot below (the state is
+// per SceneManager — FogHlmsListener::SkyEnvState). Every site that binds or
+// unbinds a grid calls OgreEngine::reapplyReflectionsAllScenes so the binding
+// follows the singleton for every scene, not just the one that changed.
+// THE ROUGHNESS-TO-LOD MAP AFTER A PROBE TRANSITION (lane SKY-FALLBACK-1,
+// second read). `passBuf.envMapNumMipmaps` is ONE number for the whole pass and
+// `_notifyIblSpecMipmap` only ever GROWS it.
+// `ParallaxCorrectedCubemapAuto::setEnabled` pushes the PROBE ARRAY's count into
+// it (6 while the placement holds the scout's 32 px, 10 at a 512 px tier) and
+// the engine pushed the SKY cube's count only when the cube was BUILT, never
+// again — so once a grid had come and gone, every manual cube in every scene
+// mapped its roughness against a chain it does not have. The scene-wide walk
+// this lane added would spread one scene's transition to all of them.
+//
+// SO IT RUNS ON THE TRANSITION AND NOWHERE ELSE, which is the whole of the fix
+// and was measured the hard way. Putting it inside applyReflectionToAllImpl —
+// which every sky build, gain edge and material edit funnels through — changes
+// scenes that never had a grid at all: `scripting.e2e.ssr_mirror`'s "SSR is
+// still in this picture" bar fell 11 -> 7 against a bar of 8, reproducibly at
+// -j2 and in BOTH forms (the growth-only notify and the stricter
+// `resetIblSpecMipmap(0)` re-derivation), because a blurrier environment term is
+// a smaller difference between SSR on and off. That is a real picture question
+// about scenes with an authored cube and no probes, it is not this lane's, and
+// it is recorded for the lead rather than absorbed by widening somebody's bar.
+void OgreScene::renotifyReflectionMipmaps() {
+    JAH_TRY {
+        auto *hlmsPbs = static_cast<Ogre::HlmsPbs *>(
+            mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+        if (!hlmsPbs) return;
+        unsigned mips = 0;
+        for (const auto &kv : mMaterials) {
+            if (kv.second.unlit) continue;
+            if (Ogre::TextureGpu *bound = reflectionTexFor(kv.second))
+                mips = std::max(mips, unsigned(bound->getNumMipmaps()));
+        }
+        if (mips > 1u) hlmsPbs->_notifyIblSpecMipmap(Ogre::uint8(mips));
+    } JAH_CATCH(mError, );
+}
+
+bool OgreScene::anyProbeGridBound() const {
+    auto *pbs = static_cast<Ogre::HlmsPbs *>(mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
+    return pbs && pbs->getParallaxCorrectedCubemap() != nullptr;
+}
+
 Ogre::TextureGpu *OgreScene::reflectionTexForDatablocks() const {
-    return mPcc ? nullptr : mReflectionTex;
+    return anyProbeGridBound() ? nullptr : mReflectionTex;
 }
 
 void OgreScene::applyReflectionToAllImpl() {

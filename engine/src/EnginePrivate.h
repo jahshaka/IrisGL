@@ -1993,7 +1993,64 @@ public:
     /// mirror that could drift.
     static void setPbs(Ogre::HlmsPbs *pbs);
 
+    /// THE SKY'S OWN ENVIRONMENT SLOT (lane SKY-FALLBACK-1, PHOTON_SPEC §7).
+    ///
+    /// The PBS pixel shader has ONE env-probe texture (`texEnvProbeMap`), and
+    /// under automatic PCC it holds the probe cube ARRAY — so the sky cubemap
+    /// comes off every datablock the moment one probe exists
+    /// (`OgreScene::reflectionTexFor`, and the long note there says why it
+    /// cannot be otherwise: a manual cube in that slot generates a shader that
+    /// does not compile). With the probe grid decided PER PROBE (R5-ROOM) a
+    /// PARTIAL grid is the normal case — one crate in an open scene keeps 7 of
+    /// 18 candidates — and every pixel no probe's shape contains then had no
+    /// environment at all but the cones.
+    ///
+    /// So the sky gets a SECOND slot, at the pass level, through the listener
+    /// route HlmsPbs honours for exactly this (`getNumExtraPassTextures` /
+    /// `propertiesMergedPreGenerationStep` / `hlmsTypeChanged`; upstream's own
+    /// Terra sample is the reference implementation). The probe loop then
+    /// blends the sky in with the weight the probes did not claim — see
+    /// ogre-patch 0048. The state is per scene because the sky is.
+    struct SkyEnvState {
+        /// The scene's prefiltered sky cube (`mReflectionTex`), or null: null
+        /// is "this scene has no sky reflection", which is also what a Sky
+        /// Light at zero gain means (the sky goes out by not being BOUND).
+        Ogre::TextureGpu *cube = nullptr;
+        /// The Sky Light's gain. It rides here and NOT in
+        /// `passBuf.ambientUpperHemi.w` because that pass scale is 1.0 while a
+        /// PCC is bound, deliberately (envmapScaleForPass: a probe photographs
+        /// real radiance and must not be scaled by the skylight dial).
+        float gain = 1.0f;
+        /// The cube's own mip count, for the roughness->LOD map. NOT
+        /// `passBuf.envMapNumMipmaps`: that is a MAX over every bound
+        /// reflection texture and belongs to the probe array here.
+        float numMipmaps = 1.0f;
+    };
+    static void        setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState &state);
+    static SkyEnvState skyEnv(const Ogre::SceneManager *sm);
+
+    /// One extra PASS texture — the sky cube — for a colour pass that asked for
+    /// it in preparePassHash. Read from the PROPERTIES, never from the state,
+    /// because this may be called from any thread and must be a pure function
+    /// of the property set (the hook's own contract: a cached shader has to be
+    /// reproducible).
+    Ogre::uint16 getNumExtraPassTextures(const Ogre::HlmsPropertyVec &properties,
+                                         bool casterPass) const override;
+    /// ...and here it is bound, at the slot HlmsPbs reserved for it (the first
+    /// unit past its own pass textures = `set0_texture_slot_end` - 1, which is
+    /// where propertiesMergedPreGenerationStep declared it).
+    void hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *commandBuffer,
+                         const Ogre::HlmsDatablock *datablock, size_t texUnit) override;
+
 private:
+    /// The sky cube of the pass BEING BUILT, and the samplerblock to bind it
+    /// with — both decided in preparePassHash and read in hlmsTypeChanged, on
+    /// the render thread, within one pass. Set together or not at all: a slot
+    /// claimed by getNumExtraPassTextures and left unbound is an undefined
+    /// descriptor.
+    static Ogre::TextureGpu             *sPassSkyCube;                 // render thread only
+    static const Ogre::HlmsSamplerblock *sPassSkySampler;              // render thread only
+    static std::map<const Ogre::SceneManager *, SkyEnvState> sSkyEnv;  // render thread only
     /// 4 while a field is bound and this is not a shadow-caster pass (the two
     /// conditions HlmsPbs itself uses to emit the block), 0 otherwise.
     static Ogre::uint32 ifdAlignFloats(bool casterPass);
@@ -2364,6 +2421,22 @@ public:
     /// cubemap on every PBR material's datablock. (Body in complete-class context,
     /// so it may call the private impl declared further down.)
     void applyReflectionToAll();
+    /// "Is ANY probe grid bound to HlmsPbs", which is the question the env-probe
+    /// slot's occupancy really turns on — not "does THIS scene have one". See
+    /// the long note above reflectionTexForDatablocks.
+    bool anyProbeGridBound() const;
+    /// Re-pushes the mip count of whatever this scene's datablocks hold in the
+    /// env-probe slot. Called ONLY from the probe-transition walk — see the note
+    /// on the definition for why it must not run on every reflection re-apply.
+    void renotifyReflectionMipmaps();
+    /// Set by destroy() when THIS scene's teardown released the process-wide
+    /// probe binding; read by OgreEngine::destroyScene after the erase, which is
+    /// the only safe place to walk the remaining scenes.
+    bool mReleasedPccOnDestroy = false;
+    /// True for the duration of destroy(): teardownVct is shared between "GI
+    /// off" (walk the other scenes now) and "this scene is going away" (flag it,
+    /// the engine walks after the erase).
+    bool mDestroying = false;
     /// Runs the queued ibl_specular convolution (roughness mip chain) for the
     /// reflection cubemap. Called once per frame by the engine, like applyPendingGi.
     void applyPendingIbl();
@@ -5099,6 +5172,15 @@ public:
     void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
                              unsigned &expected) const override;
 
+    /// THE PROCESS-WIDE PROBE BINDING JUST CHANGED, so every scene has to
+    /// re-decide what its datablocks hold in the env-probe slot (lane
+    /// SKY-FALLBACK-1). HlmsPbs is a singleton and its
+    /// `parallax_correct_cubemaps` property is set for EVERY scene's pass while
+    /// any PCC is bound, so the question "may this material carry a manual
+    /// cubemap" is a process-wide one — see OgreScene::reflectionTexFor. Called
+    /// from the sites that bind or unbind a grid, which live in OgreScene.
+    void reapplyReflectionsAllScenes();
+
     ~OgreEngine() override;
 
 private:
@@ -5119,6 +5201,7 @@ private:
     /// structural reason the render thread never walks a staging manager the
     /// import worker is growing. Cheap enough to call once per frame.
     void scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const;
+
 
     /// First render target: the VaoManager now exists, so Hlms can be registered.
     void ensureHlms();

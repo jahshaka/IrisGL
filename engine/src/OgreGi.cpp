@@ -1717,13 +1717,18 @@ static bool giIsSlab(const Ogre::Aabb &a, size_t ax) {
 // Ogre's own bookkeeping is respected rather than poked around: the shape is
 // re-published through `CubemapProbe::set`, keeping the probe's camera
 // position, influence AREA, inner region and orientation exactly as the
-// placement left them. `set` re-applies its own 1.005 padding to whatever it is
-// handed, so both boxes are un-padded on the way in and the values that land in
-// the probe are exactly the intended ones. It also raises `mDirty`, so the
-// clamped probes re-capture on the next frame, which is what we want anyway.
+// placement left them. It also raises `mDirty`, so the clamped probes
+// re-capture on the next frame, which is what we want anyway.
+//
+// AND THE RE-PUBLISH SAYS SO (lane SKY-FALLBACK-1, second read). `set` used to
+// re-apply its own 1.005 padding to anything it was handed, so this function
+// divided both boxes by a copy of that constant on the way in — a private
+// number copied out of the pin, and a divide-then-multiply round trip that is
+// not even bit-exact. ogre-patch 0049 gave `set` a `bValuesAlreadyPadded`
+// argument for exactly this: these ARE the probe's own boxes, padding included,
+// so they are handed back as they are and the constant is gone.
 void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
     if (!mPcc) return;
-    static const float kSetPadding = 1.005f;    // CubemapProbe::set's own padding
     // The clamp target is the region grown slightly. Clamping to the region
     // EXACTLY puts a box face on the floor plane the region was pulled in to,
     // and a parallax ray that leaves a surface lying in its own box face
@@ -1769,9 +1774,8 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
         ++mProbesClampedToRegion;
         const Ogre::Aabb area = p->getArea();
         const Ogre::Aabb clamped = Ogre::Aabb::newFromExtents(cmn, cmx);
-        p->set(cam, Ogre::Aabb(area.mCenter, area.mHalfSize / kSetPadding),
-               p->getAreaInnerRegion(), p->getOrientation(),
-               Ogre::Aabb(clamped.mCenter, clamped.mHalfSize / kSetPadding));
+        p->set(cam, area, p->getAreaInnerRegion(), p->getOrientation(), clamped,
+               /*bValuesAlreadyPadded*/ true);   // ogre-patch 0049
         if (debug) {
             const auto toS = [](const Ogre::Vector3 &v) {
                 return Ogre::StringConverter::toString(v);
@@ -4074,7 +4078,11 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
         while ((pot << 1u) <= want) pot <<= 1u;
         probeRes = pot;
     }
-    mPccCaptureSize = int(probeRes);
+    // The REQUEST. What the grid ends up with is read off the bind texture
+    // after it is built (below) — the two are the same number and this line is
+    // the provisional one, so a failure to build reports 0 rather than a size
+    // nothing has.
+    mPccCaptureSize = 0;
     // HDR PROBES (P3a). The main chain renders PFG_RGBA16_FLOAT (OgreChain.cpp),
     // so an LDR probe target clamps every value above 1.0 at CAPTURE time — i.e.
     // before the IBL convolution spreads a highlight across the mip chain, which
@@ -4092,16 +4100,28 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     mProbeCamNear = std::max(0.02f, diag * 0.001f);
     mProbeCamFar  = std::max(1.0f, diag * 2.0f);
     const auto tPlace = std::chrono::steady_clock::now();
-    placement.buildStart(probeRes, mGiCamera, probeFormat, mProbeCamNear, mProbeCamFar);
-    // ...AND THE FIT'S CLOSING RE-CAPTURE IS SKIPPED (patch 0047's flag). It
-    // re-renders every probe through its corrected shape, which is half of what
-    // this call costs and was already dead work here: every probe is marked
-    // STALE a few lines below, because the placement's captures were taken
-    // before the grid was bound to HlmsPbs and before this build's irradiance
-    // field existed, so the budget re-captures each one anyway. A probe's cube
-    // holds the same colour either way — a capture renders the scene from the
-    // probe's camera, and the shape is a shading-time reprojection, not an
-    // input to it (verified: the probe suites' pixels are unchanged).
+    // THE PLACEMENT RUNS AT THE SCOUT'S RESOLUTION (lane SKY-FALLBACK-1; the
+    // debt R5-ROOM recorded). Everything buildStart/buildEnd consume is ONE
+    // 1x1 AVERAGED TEXEL per cube face — the fit's six reaches and patch 0047's
+    // six ratios are read from the smallest mip — so a placement capture at the
+    // real probe resolution renders 256 or 512 px faces to average them down to
+    // one texel each, for every CANDIDATE, including the ones about to be
+    // dropped. In an open scene that is every probe but a handful. The scout a
+    // few lines above has run at 32 px since R5-ROOM for exactly this reason
+    // and its box agrees with the full-resolution one; this is the same
+    // argument applied to the placement itself.
+    //
+    // AND THE GRID IS RE-CREATED BELOW AT THE REAL RESOLUTION, which is NOT
+    // optional: `buildStart` calls `setEnabled(true, resolution, resolution,
+    // maxNumProbes, format)` and that creates mRenderTarget, mIblTarget AND
+    // mBindTexture — the cube array the SHADER samples — at whatever resolution
+    // it was handed. Placing at 32 px and stopping there leaves every reflection
+    // in the scene at 32 px, at every tier, silently. The re-create is also what
+    // frees the array slices a dropped probe was holding: `destroyProbe` deletes
+    // the object, but the array was sized at `getMaxNumProbes()` here, so the
+    // dropped candidates' slices stayed allocated for the life of the grid.
+    placement.buildStart(kProbeScoutResolution, mGiCamera, probeFormat,
+                         mProbeCamNear, mProbeCamFar);
     // buildEnd's CLOSING RE-CAPTURE IS DEFERRED, not skipped (patch 0047's flag;
     // second read, 2026-09-15). Upstream ends the fit by re-rendering every
     // probe, and that render is NOT redundant: `processProbeDepth` re-publishes
@@ -4181,19 +4201,42 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
                 spanVol *= span[ax];
             }
             // THE PRODUCT OF THE THREE, i.e. the box against the world BY
-            // VOLUME, and the alternative was built and measured before this
-            // was written. Taking the SMALLEST of the three instead — "smaller
-            // on any one axis" — keeps every probe that stands near a FLOOR,
-            // because every scene has one, it fills the lower half of every
-            // probe's view and it shrinks exactly one axis: measured, a brand
-            // new project with a cube kept 7 of its 18 probes and the avatar
-            // preview kept 9 of 18, and a scene that gains a grid LOSES the sky
-            // cubemap on every datablock (`reflectionTexForDatablocks` — the
-            // shader's environment slot has one occupant), which rendered that
-            // preview's character black (r 3 g 3 b 4 of 255). A volume answers
-            // "is the space this probe measured smaller than the world the
-            // renderer lit?" in all three directions at once: a floor alone
-            // does not make it so.
+            // VOLUME, and the alternative was built and measured twice — once
+            // when this was written, once again by lane SKY-FALLBACK-1 with
+            // both forms switchable on one binary. Taking the SMALLEST of the
+            // three instead — "smaller on any one axis" — keeps every probe
+            // that stands near a FLOOR, because every scene has one, it fills
+            // the lower half of every probe's view and it shrinks exactly one
+            // axis. A volume answers "is the space this probe measured smaller
+            // than the world the renderer lit?" in all three directions at
+            // once: a floor alone does not make it so.
+            //
+            // WHAT SKY-FALLBACK-1 MEASURED, and it closes half of the original
+            // argument. That argument had two halves, and the SECOND is gone:
+            // a scene that gains a grid no longer loses the sky, because the
+            // sky has its own pass-level slot now (ogre-patch 0048) and answers
+            // wherever no probe's box does. What it does NOT close is the
+            // avatar preview reading r3 g3 b4 under the any-axis form: that was
+            // never the missing sky. Measured on this binary, it is upstream's
+            // one-occupant trap firing in a SECOND scene — the PCC binding is
+            // PROCESS-WIDE while the sky cube's binding is per scene and per
+            // material, so a preview scene's datablocks keep their manual cube
+            // while the editor scene's grid owns the env slot, and the pixel
+            // shader that generates does not compile (`SampleEnvProbe` against
+            // a textureCubeArray; OgreSky.cpp's note lists the three ways).
+            // The character is black because there is no shader, not because
+            // there is no sky. That defect is independent of which form of this
+            // rule ships and is recorded for its own lane.
+            //
+            // The counts, both forms, same binary, with 0048 in: gi.probe_open
+            // is IDENTICAL on every case but the 30 m yard (0 vs 3 of 18 at the
+            // shipped grid, 4 vs 8 of 32 at the denser one); LocalCubemaps is
+            // 3 of 3 kept either way with identical pixels; a new project with
+            // a cube and a mirror sphere keeps 2 of 18 by volume and 4 of 18 by
+            // axis, and the mirror's pixels are IDENTICAL between them (229 216
+            // 230) because the sky now answers either way. So the two forms
+            // differ only in how many probes a nearly-open scene PAYS for, and
+            // the volume form pays less for the same picture.
             const bool keep = spanVol < kProbeSeesGeometry;
             if (!keep) drop.push_back(built[i]);
             if (debugFit)
@@ -4224,14 +4267,26 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
                 "Jahshaka GI: no probe grid — all " + std::to_string(mProbesDropped) +
                 " probes photographed nothing inside the lit volume, so reflections come "
                 "from the sky and cone tracing");
+            if (std::getenv("JAHSHAKA_GI_DEBUG"))
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka GI: probe placement " +
+                    std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - tPlace).count()) +
+                    " ms — " + std::to_string(mProbesDropped) + " candidates at " +
+                    std::to_string(kProbeScoutResolution) + " px, 0 kept");
             // BY POINTER IDENTITY, like teardownVct's unbind: the process-wide
             // HlmsPbs binding may belong to ANOTHER scene, and clearing it from
             // here would blank that scene's reflections for a grid this one
             // never built. (This scene's own pointer is the one being deleted.)
             {
                 Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-                if (pbs->getParallaxCorrectedCubemap() == mPcc)
+                if (pbs->getParallaxCorrectedCubemap() == mPcc) {
                     pbs->setParallaxCorrectedCubemap(nullptr);
+                    // The env slot's occupancy is a PROCESS-WIDE question
+                    // (reflectionTexForDatablocks' note): every scene's
+                    // datablocks may take their own sky cube back now.
+                    if (mEngine) mEngine->reapplyReflectionsAllScenes();
+                }
             }
             delete mPcc; mPcc = nullptr;
             mProbeSlots.clear();
@@ -4246,28 +4301,80 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
                 std::to_string(mProbesDropped + int(mPcc->getProbes().size())) +
                 " probes saw nothing inside the lit volume and were dropped");
     }
+    // ...AND THE SURVIVORS' SHAPES ARE CLAMPED, and then the grid is RE-CREATED
+    // at the kept count and the REAL resolution (lane SKY-FALLBACK-1, second
+    // read). Both halves of that sentence are load-bearing:
+    //
+    //   * THE RESOLUTION. `PccPerPixelGridPlacement::buildStart` calls
+    //     `mPcc->setEnabled(true, resolution, resolution, maxNumProbes, format)`
+    //     and `ParallaxCorrectedCubemapAuto::setEnabled` creates mRenderTarget,
+    //     mIblTarget AND mBindTexture — the cube array the SHADER samples — at
+    //     that size. Placing at the scout's 32 px without re-creating therefore
+    //     leaves every probe reflection in the scene at 32 px, silently, at
+    //     every tier: a defect this lane shipped for one round and the second
+    //     read caught. The placement wants 32 px (it consumes one 1x1 averaged
+    //     texel per face); the PICTURE wants the tier's size; so the grid is
+    //     built twice, small then right.
+    //   * THE COUNT. `setEnabled` sizes the array at `getMaxNumProbes()`, the
+    //     CANDIDATE count, and `destroyProbe` frees only the object — so an
+    //     open scene keeping 2 of 18 held 18 slices for the life of the grid
+    //     (~300 MB at High/HDR 512). Re-creating at the kept count is what
+    //     releases them.
+    //
+    // setEnabled(false) keeps the CubemapProbe objects and their published
+    // geometry — it destroys their workspaces, releases their array slices and
+    // drops the three textures — so the survivors are re-armed in place:
+    // initWorkspace re-acquires a slice in the new, smaller array and set()
+    // re-publishes the same camera, area and shape into the internal probe the
+    // acquisition just re-created.
+    //
+    // AND THE RE-PUBLISH IS EXACT, which needed ogre-patch 0049 (SOURCE):
+    // `CubemapProbe::set` applied its 1.005 padding on EVERY call, so handing a
+    // probe back its own boxes grew them half a percent — measured here as the
+    // probe union leaving the region (gi.pcc_bounds' A2 invariant) and
+    // gi.budget's paused re-capture reading (g-r) +0.259 where it reads +0.380.
+    // The patch adds `bValuesAlreadyPadded`, which every existing caller
+    // defaults to false; this is the one caller that passes true, because these
+    // are the probe's OWN boxes coming back. The clamp therefore still runs
+    // BEFORE this block, exactly where it always did, and the geometry the
+    // shader sees is bit-for-bit what it was.
     clampProbeShapesToRegion(region);
-    // ...AND NOW THE CLOSING CAPTURE, over the survivors and with their final
-    // shapes (see the note at buildEnd above). Every one of them is dirty at
-    // this point — the fit re-published them and the clamp re-published the
-    // ones it corrected — so this is the single render that re-encodes their
-    // depth against the shape the shader will decode it against, and it leaves
-    // the Auto with nothing dirty to collect on the next frame.
+    {
+        const Ogre::CubemapProbeVec &kept = mPcc->getProbes();
+        const Ogre::uint32 keptCount = Ogre::uint32(kept.size());
+        mPcc->setEnabled(false, probeRes, probeRes, keptCount, probeFormat);
+        mPcc->setEnabled(true, probeRes, probeRes, keptCount, probeFormat);
+        for (Ogre::CubemapProbe *p : kept) {
+            const Ogre::Vector3 cam    = p->getProbeCameraPos();
+            const Ogre::Aabb    area   = p->getArea();
+            const Ogre::Vector3 inner  = p->getAreaInnerRegion();
+            const Ogre::Matrix3 orient = p->getOrientation();
+            const Ogre::Aabb    shape  = p->getProbeShape();
+            p->initWorkspace(mProbeCamNear, mProbeCamFar);
+            p->set(cam, area, inner, orient, shape, /*bValuesAlreadyPadded*/ true);
+        }
+    }
+    // THE CAPTURE SIZE IS READ FROM THE TEXTURE, never from the local that asked
+    // for it (second read): the local said 512 while the array was 32 for a
+    // round, and every probe assertion in the suites is a hue check that cannot
+    // see the difference. gi.probe_open asserts this against the tier's size.
+    mPccCaptureSize = mPcc->getBindTexture() ? int(mPcc->getBindTexture()->getWidth())
+                                             : int(probeRes);
     mPcc->updateAllDirtyProbes();
     // EVERY probe renders in the INLINE stage from now on (B2 point 2). Set once,
     // here, rather than flipped as probes come and go: in automatic mode this
     // selects a render stage, not an amount of work, and the budget already
     // decides how many probes render at all.
     for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->mNumIterations = 1u;
-    // TWICE for every probe that survived, synchronously: buildStart's
-    // updateAllDirtyProbes captured every CANDIDATE, and the closing one above
-    // captured the survivors again through their fitted shapes. Counted, so a
-    // rebuild frame reports what it cost (GiStatus::probeCapturesLastFrame).
-    // (The candidates that were dropped cost their first capture and nothing
-    // else — see the lane's debt note: paying full resolution for a probe that
-    // is about to be discarded is answered by placing at the scout's
-    // resolution and re-creating the grid at the kept count.)
-    mPlacementCapturesThisFrame += int(2u * mPcc->getProbes().size());
+    // ONE CAPTURE PER CANDIDATE AT THE SCOUT'S 32 px, PLUS ONE PER SURVIVOR AT
+    // THE REAL RESOLUTION (lane SKY-FALLBACK-1; it was two per CANDIDATE at the
+    // real resolution). Counted as captures either way so a rebuild frame
+    // reports what it cost (GiStatus::probeCapturesLastFrame) — but they are not
+    // the same size: a scout face is 1/64 of a 256 px one and 1/256 of a 512 px
+    // one by pixel count, so the placement's share of a rebuild is now
+    // negligible beside the survivors' one real capture each.
+    mPlacementCapturesThisFrame += int(mProbesDropped + int(mPcc->getProbes().size()) +
+                                       int(mPcc->getProbes().size()));
     // ...and every probe is STALE all the same: the placement captured before
     // the grid was bound to HlmsPbs and before this build's irradiance field
     // existed, so those captures show neither probe reflections nor the DDGI
@@ -4290,6 +4397,19 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // so a shape that lost the room reads downstream as "reflections are black"
     // with probeCount and pccBound both still healthy.
     if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+        // THE PLACEMENT'S WALL COST, which is the number lane SKY-FALLBACK-1
+        // moved: it covers the scout-resolution placement, the drop, the clamp,
+        // the re-create at the real resolution and the survivors' single
+        // capture. It was previously two full-resolution captures of every
+        // CANDIDATE.
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: probe placement " +
+            std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - tPlace).count()) +
+            " ms — " + std::to_string(mProbesDropped + int(mPcc->getProbes().size())) +
+            " candidates at " + std::to_string(kProbeScoutResolution) + " px, " +
+            std::to_string(mPcc->getProbes().size()) + " kept at " +
+            std::to_string(probeRes) + " px");
         Ogre::LogManager &lm = Ogre::LogManager::getSingleton();
         const auto toS = [](const Ogre::Vector3 &v) {
             return Ogre::StringConverter::toString(v);
@@ -4397,6 +4517,12 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     mPccBindMinDist = minDist;
     mPccBindMaxDist = minDist * 2.0f;
     hlmsPbs(mRoot)->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
+    // ...and EVERY scene's datablocks must drop their manual cubemap now, not
+    // just this one's: the property that makes texEnvProbeMap a cube array is
+    // set for every pass in the process (reflectionTexForDatablocks' note). A
+    // second scene that kept its sky cube here generated a shader that does not
+    // compile — the avatar preview's black character.
+    if (mEngine) mEngine->reapplyReflectionsAllScenes();
 }
 
 // THE PAGE-RETURN BINDING (ENGINE_CACHE_POLICY_SPEC P10). What a scene coming
@@ -4426,8 +4552,11 @@ bool OgreScene::reassertGiBinding() {
             return false;
         }
         pbs->setVctLighting(mVctLighting);
+        const bool pccBindingMoved = pbs->getParallaxCorrectedCubemap() != mPcc;
         if (mPcc) pbs->setParallaxCorrectedCubemap(mPcc, mPccBindMinDist, mPccBindMaxDist);
         else      pbs->setParallaxCorrectedCubemap(nullptr);
+        // Process-wide, so every scene re-decides (see rebuildVct's call).
+        if (pccBindingMoved && mEngine) mEngine->reapplyReflectionsAllScenes();
         pbs->setIrradianceField(mIfd);
         const bool owns = mVctLighting || mPcc || mIfd;
         sVctBindingOwner = owns ? this : nullptr;
@@ -5055,9 +5184,22 @@ void OgreScene::teardownVct() {
     // use-after-free on the next frame. Another scene's binding is untouched.
     {
         Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
-        if (mPcc && pbs->getParallaxCorrectedCubemap() == mPcc) pbs->setParallaxCorrectedCubemap(nullptr);
+        const bool releasedPcc = mPcc && pbs->getParallaxCorrectedCubemap() == mPcc;
+        if (releasedPcc) pbs->setParallaxCorrectedCubemap(nullptr);
         if (mVctLighting && pbs->getVctLighting() == mVctLighting) pbs->setVctLighting(nullptr);
         if (sVctBindingOwner == this) sVctBindingOwner = nullptr;
+        // PROCESS-WIDE: every other scene may take its own sky cube back now
+        // (reflectionTexForDatablocks' note). This runs on an ordinary GI-off
+        // or re-solve as well as on the scene's destruction, and the two need
+        // different timing: on a GI-off the walk happens here and now, because
+        // nothing else will do it and the other scenes' mirrors would stay
+        // unbound (measured: gi.pcc_second_scene's last case went black); on a
+        // DESTROY it must wait until the engine has erased this scene from the
+        // vector the walk iterates, so it is flagged instead.
+        if (releasedPcc) {
+            if (mDestroying) mReleasedPccOnDestroy = true;
+            else if (mEngine) mEngine->reapplyReflectionsAllScenes();
+        }
     }
     // Reverse dependency order, all while the SceneManager is still alive:
     // PCC (probe workspaces + cubemap textures) -> VctLighting (reads the

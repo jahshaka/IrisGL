@@ -959,15 +959,95 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     0035, so a tree carrying 0035 must reset its ogre-next submodule before
     `build-ogre.sh`.**
 
-THE STACK IS 0001-0046 (this list; `build-ogre.sh` globs `*.patch`, so the file
+47. **0047-pcc-placement-keeps-the-depth-it-measured** (SOURCE — lane R5-ROOM;
+    this entry was transcribed from the patch's own header by lane
+    SKY-FALLBACK-1, which found the list stopping at 46 while the stack held 47)
+    — `PccPerPixelGridPlacement::buildEnd` already takes one averaged 1x1 depth
+    value per cube face and throws it away after fitting the probe's shape. The
+    fit cannot be read backwards into it (1 % padding, `snapToFullRegion`,
+    `snapToSides`, and a saturation at twice the region distance), so a host
+    cannot tell "this probe sees a wall just inside the region" from "this probe
+    saw nothing and was snapped back to it" — which is exactly the distinction
+    the per-probe keep rule has to make. The patch KEEPS the six floats per
+    probe, in CubemapSide order, and adds the accessor; the fit itself is
+    byte-for-byte the code it was. Upstream-worthy as it stands.
+
+48. **0048-where-no-probe-is-the-sky-is** (MEDIA — `ForwardPlus_DecalsCubemaps_piece_ps.any`
+    and `Vct_piece_ps.any`; OVERLAPS 0017, 0029 and 0031 in the first and 0021,
+    0033 and 0045 in the second (0028 names that file in its prose but has no
+    hunk in it): a tree carrying them fails
+    `build-ogre.sh`'s reverse-check with "Upstream changed the patched file" —
+    the documented blind spot, cured by the submodule reset) — the PBS env-probe
+    slot has ONE occupant, and under automatic PCC it is the probe cube ARRAY, so
+    the engine takes the sky cubemap off every datablock the moment one probe
+    exists (a manual cube there does not compile — three ways, listed on
+    `OgreScene::reflectionTexFor`). Harmless while a grid meant a room; a
+    REGRESSION since patch 0047 made the grid a per-probe decision, because a
+    PARTIAL grid is now the normal case (one crate in a new project keeps 2 of
+    18) and every pixel no surviving probe's box contains was left with cone
+    tracing alone — measured as `scripting.e2e.default_ground`'s grazing margin
+    falling 5/255 → 3/255. The sky gets a SECOND slot at the pass level through
+    the extra-pass-texture route HlmsPbs honours for it
+    (`getNumExtraPassTextures` / `propertiesMergedPreGenerationStep` /
+    `hlmsTypeChanged`; upstream's Terra sample is the reference use, and the
+    route needs no engine change — the slot lands inside `set0_texture_slot_end`
+    and so inside the root layout HlmsPbs already builds). The host half is
+    `FogHlmsListener` and the declaration is in Jahshaka's own
+    `JahFog_piece_vs_piece_ps.any`; THIS patch is only the composite, which has
+    to live in upstream's probe loop because nothing else can see whether a probe
+    answered. The test is the loop's own and BINARY — did any probe's box contain
+    this point (`getProbeFade > 0`) — because both quantities that look like
+    coverage were built and measured NOT to be one: `cubemapAccumWeight` is an
+    inter-probe blend weight that is divided out again (0.006 at the centre of a
+    four-probe room), and the raw depth inside a probe's box is ~0.001 on every
+    wall and floor, the box being shrink-fitted to those very surfaces. So a
+    pixel any probe covers is bit-identical to before, and only the pixels with
+    no probe answer at all change — to the real sky, at the Sky Light's gain and
+    the sky cube's own mip LOD (both in Jahshaka's pass float4, because
+    `ambientUpperHemi.w` and `envMapNumMipmaps` belong to the probe array here).
+    Specular and clear coat only; `cubemaps_as_diffuse_gi` stays masked off. AND
+    IT IS A SWAP, NOT A REPLACEMENT: a pixel no probe covers may still be inside
+    the voxel volume, where the cone has a real answer, so `Vct_piece_ps.any`
+    exports what the cone's ESCAPE contributed (the flat ambient at
+    `specAlpha × blendWeight`, per cascade) and the composite is
+    `cone − ambient×escape + sky×escapeFraction` with the cone's hit untouched —
+    the colour removed carries upstream's 1/π because that is what was added, the
+    weight the sky enters at does not, because every other cubemap sample in this
+    shader is in radiance units. Inert for upstream (every line is inside
+    `@property( jah_sky_env_probe )`). KNOWN LIMIT, recorded: the test is binary,
+    so the sky arrives at once at the outermost box face — 10/255 measured on a
+    reflective ground in a new project with a crate; the fix is a margin on the
+    FIT, a later lane. `--engine-selftest` hash UNCHANGED (`b55e2d5d…`).
+
+49. **0049-cubemapprobe-set-is-idempotent** (SOURCE — `OgreCubemapProbe.{h,cpp}`;
+    **every tree resets its ogre-next submodule and re-runs `build-ogre.sh`, and
+    that rerun COMPILES**) — `CubemapProbe::set` applies its 1.005 padding on
+    EVERY call. The padding is right for the CALLER's boxes (adjacent probe areas
+    that tile a region exactly would leave a crack; a shape must contain its
+    area) and is kept. It is wrong for a caller that must re-publish a probe
+    WITHOUT re-authoring it, which Jahshaka now has: after the grid is placed at
+    the scout's 32 px and the candidates that saw nothing are dropped, the cube
+    array is re-created at the kept count and the tier's resolution, and that
+    drops each probe's internal probe — the GPU-side copy of these very values —
+    so every survivor is published again. Handing a probe back its own
+    `getArea()`/`getProbeShape()` grew both boxes half a percent per call:
+    measured, the probe union left the region (gi.pcc_bounds' A2 invariant) and
+    gi.budget's paused re-capture read (g−r) +0.259 where it reads +0.380. The
+    patch adds a trailing `bValuesAlreadyPadded`, defaulted to false — every
+    existing call site is byte-identical — and the one caller that passes true is
+    the re-create. Upstream-worthy as it stands. The alternative was dividing by
+    1.005 in our own code, i.e. copying a private constant out of the pin, which
+    is the workaround this tree refuses.
+
+THE STACK IS 0001-0049 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044 and 0046 are SOURCE-only, and 0020 touches the
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048) need no Ogre rebuild (0024 and 0028 are
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047 and 0049 are SOURCE-only, and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

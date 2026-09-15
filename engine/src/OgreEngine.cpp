@@ -318,7 +318,12 @@ void OgreEngine::destroyScene(Scene *scene) {
         for (auto &v : mViews)
             if (v->scene() == scene) v->detachScene();
         (*it)->destroy();
+        const bool releasedPcc = (*it)->mReleasedPccOnDestroy;
         mScenes.erase(it);
+        // A scene taking the process-wide probe binding down with it lets every
+        // REMAINING scene bind its own sky cube again (reflectionTexForDatablocks'
+        // note). After the erase: the walk must not see the corpse.
+        if (releasedPcc) reapplyReflectionsAllScenes();
         return;
     }
     mLastError = "destroyScene: unknown Scene";
@@ -508,6 +513,22 @@ void OgreEngine::destroyView(View *view) {
         return;
     }
     mLastError = "destroyView: unknown View";
+}
+
+void OgreEngine::reapplyReflectionsAllScenes() {
+    // EVERY scene, including the ones nothing is drawing right now: a preview or
+    // a thumbnail scene that is re-shown later must already hold the right
+    // answer, and the walk is a handful of datablock binds per scene on a
+    // transition that happens when a grid is built or torn down.
+    for (auto &s : mScenes) {
+        if (!s) continue;
+        s->applyReflectionToAll();
+        // ...and the roughness-to-LOD map with it: the grid that just came or
+        // went pushed ITS mip count into the one number the whole pass shares,
+        // and only a transition can leave that number describing a texture
+        // nobody is sampling any more (OgreScene::renotifyReflectionMipmaps).
+        s->renotifyReflectionMipmaps();
+    }
 }
 
 void OgreEngine::scenesFeedingEnabledViews(std::vector<OgreScene *> &out) const {

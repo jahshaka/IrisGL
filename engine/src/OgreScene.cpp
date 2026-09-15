@@ -251,6 +251,22 @@ void OgreScene::setEnvironmentLightScale(float gain) {
 // reflecting its own walls. So the binding change re-pushes, through the one
 // funnel that already runs on every PCC transition.
 void OgreScene::refreshEnvmapScale() {
+    // THE SKY'S PASS-LEVEL SLOT RIDES THE SAME FUNNEL (lane SKY-FALLBACK-1).
+    // This function is the one place every edge that can move the sky's
+    // environment passes through: a sky rebuild and a PCC transition reach it
+    // via applyReflectionToAllImpl, and a Sky Light gain change between two
+    // non-zero values reaches it directly (setEnvironmentLightScale's else
+    // branch). The listener holds the cube for the passes where the env-probe
+    // slot is the probe array's — see FogHlmsListener::SkyEnvState.
+    {
+        FogHlmsListener::SkyEnvState sky;
+        if (mReflectionTex && mEnvLightScale > 0.0f) {
+            sky.cube = mReflectionTex;
+            sky.gain = mEnvLightScale;
+            sky.numMipmaps = float(mReflectionTex->getNumMipmaps());
+        }
+        FogHlmsListener::setSkyEnv(mSceneMgr, sky);
+    }
     // Re-push what we already hold rather than waiting for the next ambient
     // edit. setAmbientSh's own change guard compares the COEFFICIENTS, which
     // have not moved, so this costs no probe re-capture and no raster-field
@@ -311,7 +327,10 @@ bool OgreScene::hasAuthoredReflectionMap() const {
 }
 
 float OgreScene::envmapScaleForPass() const {
-    if (mPcc) return 1.0f;
+    // Any grid anywhere, for the same reason reflectionTexFor asks that way: the
+    // scale multiplies whatever the env slot holds, and while a PCC is bound to
+    // the singleton that is a probe array in EVERY scene's pass.
+    if (anyProbeGridBound()) return 1.0f;
     if (hasAuthoredReflectionMap()) return 1.0f;
     return mEnvLightScale;
 }
@@ -1216,6 +1235,9 @@ NodeId OgreScene::nodeOfLight(const Ogre::Light *light) const {
 
 void OgreScene::destroy() {
     if (!mSceneMgr) return;
+    // teardownVct is shared with "GI off", and the two want different timing for
+    // the process-wide reflection re-bind — see the note there.
+    mDestroying = true;
     JAH_TRY {
         // THE RAY TIER'S STRUCTURES FOR THIS SCENE, FIRST. They are keyed by
         // this object's ADDRESS and they hold MeshPtrs, so leaving them behind
