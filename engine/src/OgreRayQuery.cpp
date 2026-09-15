@@ -953,6 +953,12 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
     // silently if the pin ever deepened: the gather would write the slot a
     // queued build is still reading. Refusing is the honest answer — the tier
     // is optional and the no-rays picture is supported.
+    if (framesInFlight() > kReflectRing) {
+        err = "rayquery: this device keeps " + std::to_string(framesInFlight()) +
+              " frames in flight; the reflection pass' descriptor ring holds " +
+              std::to_string(kReflectRing);
+        return false;
+    }
     if (framesInFlight() > kFramesInFlight) {
         err = "rayquery: the render system keeps " + std::to_string(framesInFlight()) +
               " frames in flight and this tier's rings hold " +
@@ -2514,6 +2520,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
     rv.scene = scene;
+    // A FRAME THAT DECLINES REPORTS ZERO (second reader, L4). Every early
+    // return below leaves the picture correct, but leaving `rays` at the last
+    // frame's value makes `giStatus().rayQuery.reflectRays` say a trace is
+    // running when none is — the one reading a caller would use to find out.
+    rv.rays = 0;
     /// EVERY EARLY RETURN BELOW IS A LEGITIMATE "not this frame" and leaves
     /// `jahSsrReflection` holding exactly what the resolve wrote — today's
     /// picture. `JAH_R5_WHY=1` names which one, because a silent decline is
@@ -2763,83 +2774,51 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     w[14].pImageInfo = &sky;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
+    // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
+    // The DOCUMENTED route, and it is the documented route again after a
+    // detour (second reader, M1). The first pass here emitted the barriers by
+    // hand and wrote `VulkanTextureGpu::mCurrLayout` from outside, on the
+    // reading that `resolveTransition` had produced nothing; that reading was
+    // taken while the command buffer was ALREADY invalid (a cached image view
+    // of a destroyed texture — the real defect, fixed elsewhere in this file),
+    // so it was a symptom and not a cause. Writing another module's layout
+    // bookkeeping from outside is exactly the class of workaround §325 is
+    // about, and it is gone.
+    //
+    // The array is a LOCAL, not `getNewResourceTransitionsArrayTmp()`: that
+    // accessor hands back the solver's one shared scratch and its own header
+    // says not to hold it in two places at once.
+    //
+    // IT RUNS BEFORE THE COMMAND BUFFER IS TAKEN, which is not style:
+    // `executeResourceTransition` closes every encoder
+    // (OgreVulkanRenderSystem.cpp:3483) and Ogre's queue may roll over to a new
+    // command buffer while doing it, so a handle fetched earlier can be an
+    // already-ended one.
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        solver.resolveTransition(trans, ssrTex, Ogre::ResourceLayout::Uav,
+                                 Ogre::ResourceAccess::ReadWrite, computeStage);
+        for (Ogre::TextureGpu *t : { normalTex, roughTex, depthTex })
+            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        for (unsigned c = 0; c < voxCount; ++c)
+            for (int axis = 0; axis < 4; ++axis)
+                if (vox[c][axis])
+                    solver.resolveTransition(trans, vox[c][axis], Ogre::ResourceLayout::Texture,
+                                             Ogre::ResourceAccess::Read, computeStage);
+        if (skyTex)
+            solver.resolveTransition(trans, skyTex, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+
     // ---- THE DISPATCH -------------------------------------------------------
-    // The command buffer is taken HERE, after everything above that could roll
-    // it over (a descriptor allocation cannot, but a transition can).
     VkCommandBuffer cmd = frameCmd();
     if (!cmd) { bail("frameCmd"); return; }   // device lost: record nothing
     clearDummyImages(cmd);
     clearReflectImages(rv, cmd);
-
-    // ---- THE LAYOUTS --------------------------------------------------------
-    // EXPLICIT BARRIERS ON THIS COMMAND BUFFER, FROM THE LAYOUT THE TEXTURE
-    // ACTUALLY HOLDS, and then the solver is TOLD. This is the second design
-    // here and the first one cost a device loss, so the reasoning is written
-    // down rather than remembered:
-    //
-    //   * `BarrierSolver::resolveTransition` + `RenderSystem::
-    //     executeResourceTransition` is the documented route and it emitted no
-    //     barrier at all for `jahSsrReflection`. The image stayed in
-    //     SHADER_READ_ONLY_OPTIMAL while the compute descriptor declared
-    //     GENERAL — VUID-vkCmdDraw-None-09600 named the image and both layouts,
-    //     and the frame died with VK_ERROR_DEVICE_LOST. The solver's own map
-    //     said `RenderTarget` at that moment, i.e. its bookkeeping and the
-    //     image had already parted company before this pass existed.
-    //   * `VulkanTextureGpu::mCurrLayout` is PUBLIC at this pin (
-    //     OgreVulkanTextureGpu.h:94, written from the pin's own render-pass
-    //     code) and it is the layout the image is in. Barriering from it cannot
-    //     be wrong, and `assumeTransition` is the API the pin provides for
-    //     exactly this — telling the solver about a transition someone else
-    //     performed (OgreResourceTransition.h:185-192).
-    //
-    // So: one barrier, on the same command buffer as the dispatch, in the right
-    // order by construction; the solver is then told, and the scene pass' own
-    // analyzeBarriers (which runs a few lines after this listener returns)
-    // emits the Uav -> Texture barrier that hands `jahSsrReflection` back.
-    {
-        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
-        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
-        std::vector<VkImageMemoryBarrier> barriers;
-        VkPipelineStageFlags srcStage = 0u;
-        const auto want = [&](Ogre::TextureGpu *t, VkImageLayout layout,
-                              Ogre::ResourceLayout::Layout ogreLayout,
-                              Ogre::ResourceAccess::ResourceAccess access, VkAccessFlags dstAccess) {
-            auto *vt = static_cast<Ogre::VulkanTextureGpu *>(t);
-            if (vt->mCurrLayout != layout) {
-                VkImageMemoryBarrier b = vt->getImageMemoryBarrier();
-                b.oldLayout = vt->mCurrLayout;
-                b.newLayout = layout;
-                b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-                b.dstAccessMask = dstAccess;
-                barriers.push_back(b);
-                srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-                vt->mCurrLayout = layout;
-                vt->mNextLayout = layout;
-            }
-            solver.assumeTransition(t, ogreLayout, access, computeStage);
-        };
-        want(ssrTex, VK_IMAGE_LAYOUT_GENERAL, Ogre::ResourceLayout::Uav,
-             Ogre::ResourceAccess::ReadWrite,
-             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        for (Ogre::TextureGpu *t : { normalTex, roughTex, depthTex })
-            want(t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, Ogre::ResourceLayout::Texture,
-                 Ogre::ResourceAccess::Read, VK_ACCESS_SHADER_READ_BIT);
-        for (unsigned c = 0; c < voxCount; ++c)
-            for (int axis = 0; axis < 4; ++axis)
-                if (vox[c][axis])
-                    want(vox[c][axis], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                         Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
-                         VK_ACCESS_SHADER_READ_BIT);
-        if (skyTex)
-            want(skyTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, Ogre::ResourceLayout::Texture,
-                 Ogre::ResourceAccess::Read, VK_ACCESS_SHADER_READ_BIT);
-        if (!barriers.empty())
-            vkCmdPipelineBarrier(cmd, srcStage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                                 0, nullptr, uint32_t(barriers.size()), barriers.data());
-    }
-
     if (mReflectTimestamps && rv.hasQueryBase) {
         const uint32_t base = rv.queryBase + (rv.frame % kFramesInFlight) * 2u;
         vkCmdResetQueryPool(cmd, mReflectTimestamps, base, 2);

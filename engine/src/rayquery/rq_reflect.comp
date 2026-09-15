@@ -186,10 +186,23 @@ vec2 sample2( ivec2 pix, uint frame )
 
 /// THE GGX VISIBLE-NORMAL SAMPLE (Heitz, "Sampling the GGX Distribution of
 /// Visible Normals", JCGT 2018). Returns a half vector in the surface's
-/// tangent frame given the view direction in that frame. Its estimator weight
-/// for the single-scatter GGX specular BRDF is 1, so nothing below divides by a
-/// pdf; and at alpha 0 it returns the surface normal exactly, which is why a
-/// mirror traces the mirror direction with no noise at all.
+/// tangent frame given the view direction in that frame.
+///
+/// WHAT IS DROPPED, stated because "the weight is 1" is the half-truth this
+/// file used to tell. Sampling the VNDF cancels D and the masking term, leaving
+/// the estimator weight `F * G2 / G1` — the Fresnel term and the height-
+/// correlated shadowing-to-masking ratio. NEITHER is applied here, and that is
+/// the design rather than an omission: what this pass writes is a RADIANCE plus
+/// a confidence, and HlmsPbs multiplies it by the surface's own BRDF when it
+/// composites `envColourS` — applying F here would apply it twice. G2/G1 is
+/// dropped outright: it is 1 at normal incidence and falls off at grazing
+/// angles, so a grazing reflection is slightly too bright, which is the same
+/// approximation the probe path this replaces makes. Correcting it needs the
+/// hit's own normal, which costs a per-instance geometry table (see
+/// voxelRadiance).
+///
+/// At alpha 0 it returns the surface normal exactly, which is why a mirror
+/// traces the mirror direction with no noise at all.
 vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 {
 	const vec3 Vh = normalize( vec3( alpha * Ve.x, alpha * Ve.y, Ve.z ) );
@@ -345,8 +358,20 @@ void main()
 	}
 	const float roughGate = p.knobs.x;
 	const float feather = p.projParams.w;
-	const float roughness =
-		texture( gBufShadowRoughness, uv ).y * 0.98 + 0.02;
+	// WHAT THE G-BUFFER'S .y ACTUALLY IS, and getting this wrong is a factor of
+	// ten in the lobe (second reader, C1). It is the GGX ALPHA — HlmsPbs runs
+	// with `mPerceptualRoughness` true, so `pixelData.roughness` in the piece
+	// that writes this channel is the perceptual value SQUARED (CLAUDE.md) —
+	// packed by ogre-patch 0043 over [0.001, 1] and NOT over upstream's old
+	// [0.02, 1]. Decoding it with the old range and then squaring it again ran
+	// the lobe at perceptual to the FOURTH power: a surface authored at 0.3 was
+	// traced as though it were 0.095, about ten times too sharp.
+	//
+	// The gate and the feather below are compared in PERCEPTUAL roughness,
+	// because that is the number the World row shows and the owner states the
+	// dial in. alpha 0.4 would be perceptual 0.63 — a different surface.
+	const float alpha = max( texture( gBufShadowRoughness, uv ).y * 0.999 + 0.001, 1e-6 );
+	const float roughness = sqrt( alpha );
 	// TRACED UP TO THE FEATHER'S FAR EDGE, not to the cutoff: the band above the
 	// cutoff is exactly where the two answers are being crossfaded, and a pixel
 	// in it with no ray would make the crossfade a step again.
@@ -381,10 +406,9 @@ void main()
 		return;
 	}
 
-	// The lobe. `roughness` here is PERCEPTUAL (the prepass packs the perceptual
-	// value); GGX's alpha is its square, which is the convention HlmsPbs itself
-	// runs on (mPerceptualRoughness, CLAUDE.md).
-	const float alpha = max( roughness * roughness, 1e-4 );
+	// The lobe is the alpha decoded above — NOT squared again; see the note
+	// there. Floored so a mirror's tangent frame arithmetic stays finite.
+	const float lobeAlpha = max( alpha, 1e-4 );
 	// A tangent frame around the surface normal (Duff et al., branchless).
 	const float sg = worldN.z >= 0.0 ? 1.0 : -1.0;
 	const float a0 = -1.0 / ( sg + worldN.z );
@@ -392,7 +416,7 @@ void main()
 	const vec3 T = vec3( 1.0 + sg * worldN.x * worldN.x * a0, sg * b0, -sg * worldN.x );
 	const vec3 B = vec3( b0, sg + worldN.y * worldN.y * a0, -worldN.y );
 	const vec3 Ve = vec3( dot( V, T ), dot( V, B ), dot( V, worldN ) );
-	const vec3 Ht = sampleGgxVndf( Ve, alpha, sample2( tc, uint( p.knobs.z ) ) );
+	const vec3 Ht = sampleGgxVndf( Ve, lobeAlpha, sample2( tc, uint( p.knobs.z ) ) );
 	const vec3 H = normalize( Ht.x * T + Ht.y * B + Ht.z * worldN );
 	vec3 L = reflect( -V, H );
 	if( dot( L, worldN ) <= 0.0 )
@@ -445,9 +469,33 @@ void main()
 	// frame anyway: every sample is the same ray.
 	const vec4 prev = historyAt( world, traceRes );
 	const float n = min( prev.w, 1.0 / max( p.knobs2.w, 1e-3 ) );
-	const float blend = prev.w > 0.0 ? max( 1.0 / ( n + 1.0 ), p.knobs2.w ) : 1.0;
+	float blend = prev.w > 0.0 ? max( 1.0 / ( n + 1.0 ), p.knobs2.w ) : 1.0;
+	// THE MEAN IS FOR VARIANCE, AND A MIRROR HAS NONE (second reader, H1). The
+	// floor on 1/n buys a still picture on a glossy surface by remembering
+	// about thirty frames — and on a MIRROR there is nothing to remember: every
+	// sample is the same ray, the estimator is exact on the first frame, and all
+	// thirty frames of memory can do is carry the reflection of where the camera
+	// USED to be. The reprojection moves the history to the right pixel; it
+	// cannot fix the fact that a mirror's reflected direction changes with the
+	// VIEW, so the old radiance is wrong at the new pose however well it is
+	// reprojected. That is a visible smear behind any camera motion.
+	//
+	// So the memory is bought with the lobe's width and not given away: at
+	// alpha 0 the blend is 1 (take this frame's answer whole), and it falls to
+	// the floor over kMirrorAlpha — the alpha at which one sample stops being
+	// the whole integral. 0.01 is perceptual 0.1, the roughness at which the
+	// reflected lobe's half-width (~2*alpha) first exceeds a pixel of a 1080p
+	// frame at a typical field of view.
+	const float kMirrorAlpha = 0.01;
+	/// HOW MANY FRAMES A GLOSSY LOBE TAKES TO BE WORTH SHOWING. Eight is where
+	/// the running mean's standard error has fallen by ~2.8x, which on the
+	/// fixture is the point at which the frame-to-frame movement drops below
+	/// the eye's threshold on a reflection.
+	const float kWarmupFrames = 8.0;
+	blend = max( blend, 1.0 - smoothstep( 0.0, kMirrorAlpha, lobeAlpha ) );
 	const vec3 mean = mix( prev.xyz, traced, blend );
-	imageStore( historyCur, tc, vec4( mean, min( prev.w + 1.0, 4096.0 ) ) );
+	const float count = min( prev.w + 1.0, 4096.0 );
+	imageStore( historyCur, tc, vec4( mean, count ) );
 	imageStore( historyDistCur, tc, vec4( dist, 0.0, 0.0, 0.0 ) );
 
 	// ---- THE WRITE, per full-resolution texel of this block ------------------
@@ -466,7 +514,10 @@ void main()
 			const float fd = texture( sceneDepth, fuv ).x;
 			if( fd <= 0.0 || fd >= 1.0 )
 				continue;
-			const float fr = texture( gBufShadowRoughness, fuv ).y * 0.98 + 0.02;
+			// PERCEPTUAL again, from the same 0043 packing (see the decode above):
+			// this texel's own gate, in the same units as the dial.
+			const float fr = sqrt( max( texture( gBufShadowRoughness, fuv ).y * 0.999 + 0.001,
+										1e-6 ) );
 			if( fr > roughGate + feather )
 				continue;
 			const vec4 screen = imageLoad( ssrReflection, fc );
@@ -478,8 +529,26 @@ void main()
 			// and what the ray gives up the probe takes through the SAME
 			// confidence composite, so a floor whose roughness varies across it
 			// crossfades instead of stepping.
-			const float gate =
+			float gate =
 				1.0 - smoothstep( roughGate - feather, roughGate + feather, fr );
+			// THE RAY FADES IN AS THE MEAN CONVERGES (second reader, M2). A
+			// GRADED SCREENSHOT's view lives about two frames, so a glossy
+			// traced reflection in a user's shot would be one or two samples of
+			// a lobe — visible noise in a picture that is supposed to be the
+			// editor's own. Weighting the trace's confidence by how much of the
+			// integral it actually holds hands those pixels back to the probe,
+			// which is today's picture: noise-free, deterministic, and the
+			// worst case is "the shot looks like the renderer without rays".
+			//
+			// It is the SAME physics as the blend above, so it is the same
+			// term: a MIRROR has no variance and needs no warm-up (one sample
+			// is the whole integral), and the warm-up's length grows with the
+			// lobe. A live viewport passes it within a few frames and is
+			// unaffected; a two-frame view never reaches it on a glossy
+			// surface, which is the point.
+			const float warm = max( 1.0 - smoothstep( 0.0, kMirrorAlpha, lobeAlpha ),
+									min( count * ( 1.0 / kWarmupFrames ), 1.0 ) );
+			gate *= warm;
 			if( gate <= 0.0 )
 				continue;
 			const vec3 rgb = mix( mean, screen.xyz, screenW );
