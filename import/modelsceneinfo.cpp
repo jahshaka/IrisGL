@@ -22,6 +22,7 @@ For more information see the LICENSE file
 #include "assimp/scene.h"
 #include "assimp/version.h"
 
+#include "import/clipnaming.h"
 #include "import/parsecensus.h"
 #include "import/scenesource.h"
 
@@ -33,9 +34,11 @@ namespace {
 /// Mesh-local AABBs through each instancing node's accumulated transform.
 /// Moved verbatim from Studio's assetmetadata.cpp (measureSceneExtent): the
 /// float arithmetic is the number every recorded fit was computed with.
-void measureExtent(const aiScene *scene, ModelSceneInfo &out)
+/// BOTH CORNERS: the metadata block wants the size, the import dialog's origin
+/// helpers want to know where the box sits (import/modelsceneinfo.h).
+bool measureBox(const aiScene *scene, double lo[3], double hi[3])
 {
-    if (!scene || scene->mNumMeshes == 0 || !scene->mRootNode) return;
+    if (!scene || scene->mNumMeshes == 0 || !scene->mRootNode) return false;
 
     // Per-mesh local AABB, computed once even when several nodes instance it.
     struct Box { aiVector3D mn, mx; bool any = false; };
@@ -53,10 +56,10 @@ void measureExtent(const aiScene *scene, ModelSceneInfo &out)
         }
     }
 
-    double lo[3] = { std::numeric_limits<double>::max(), std::numeric_limits<double>::max(),
-                     std::numeric_limits<double>::max() };
-    double hi[3] = { -std::numeric_limits<double>::max(), -std::numeric_limits<double>::max(),
-                     -std::numeric_limits<double>::max() };
+    for (int a = 0; a < 3; ++a) {
+        lo[a] = std::numeric_limits<double>::max();
+        hi[a] = -std::numeric_limits<double>::max();
+    }
     bool any = false;
 
     std::function<void(const aiNode *, const aiMatrix4x4 &)> walk =
@@ -84,7 +87,14 @@ void measureExtent(const aiScene *scene, ModelSceneInfo &out)
         };
     walk(scene->mRootNode, aiMatrix4x4());
 
-    if (!any) return;
+    return any;
+}
+
+/// The size half of the box, which is what the metadata block records.
+void measureExtent(const aiScene *scene, ModelSceneInfo &out)
+{
+    double lo[3], hi[3];
+    if (!measureBox(scene, lo, hi)) return;
     out.extentX = hi[0] - lo[0];
     out.extentY = hi[1] - lo[1];
     out.extentZ = hi[2] - lo[2];
@@ -202,6 +212,59 @@ double ModelSceneInfo::readDeclaredUnitScale(const QString &filePath)
     const aiScene *scene = readSceneFile(importer, filePath, 0u);
     if (!scene) return 1.0;
     return declaredUnitScaleOf(scene);
+}
+
+ModelPreRead ModelPreRead::read(const QString &filePath, const QString &formatHint)
+{
+    ModelPreRead out;
+
+    // THE LIGHT PARSE — no post-processing flags at all, so no triangulation,
+    // no tangents and NO aiProcess_GlobalScale: the vertices below are in the
+    // file's own units and `declaredUnitScale` is what the file says one of
+    // them is worth. The header says why the dialog wants them apart.
+    // Through the choke point with an identity transform, like every parse in
+    // this library (tests/hygiene/one_readfile.sh).
+    Assimp::Importer importer;
+    const aiScene *scene = readSceneFile(importer, filePath, 0u, ImportTransform(), formatHint);
+    if (!scene) {
+        out.error = QString::fromUtf8(importer.GetErrorString());
+        if (out.error.isEmpty()) out.error = QStringLiteral("the file could not be read");
+        return out;
+    }
+
+    out.parsed = true;
+    out.declaredUnitScale = declaredUnitScaleOf(scene);
+    out.meshes = int(scene->mNumMeshes);
+    out.materials = int(scene->mNumMaterials);
+
+    double lo[3], hi[3];
+    if (measureBox(scene, lo, hi)) {
+        for (int a = 0; a < 3; ++a) { out.aabbMin[a] = lo[a]; out.aabbMax[a] = hi[a]; }
+        out.aabbValid = hi[0] > lo[0] || hi[1] > lo[1] || hi[2] > lo[2];
+    }
+
+    QSet<QString> boneSeen;
+    for (unsigned i = 0; i < scene->mNumMeshes; ++i) {
+        const aiMesh *mesh = scene->mMeshes[i];
+        if (!mesh) continue;
+        for (unsigned b = 0; b < mesh->mNumBones; ++b) {
+            const QString name = QString::fromUtf8(mesh->mBones[b]->mName.C_Str());
+            if (name.isEmpty() || boneSeen.contains(name)) continue;
+            boneSeen.insert(name);
+        }
+    }
+    out.bones = boneSeen.size();
+
+    // THE NAMES THE IMPORT WOULD PRODUCE, by the one rule both sides share
+    // (import/clipnaming.h) — so the dialog's checklist and the `clips`
+    // filter can never disagree.
+    for (unsigned i = 0; i < scene->mNumAnimations; ++i) {
+        const aiAnimation *anim = scene->mAnimations[i];
+        if (!anim) continue;
+        out.clipNames.append(
+            clipNameFor(QString::fromUtf8(anim->mName.C_Str()), i, out.clipNames));
+    }
+    return out;
 }
 
 ModelSceneInfo ModelSceneInfo::read(const QString &filePath, const ImportTransform &xf)

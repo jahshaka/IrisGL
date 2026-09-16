@@ -178,7 +178,8 @@ void foldSingleMeshTransform(const aiScene *scene)
 }   // namespace
 
 const aiScene *readSceneFile(Assimp::Importer &importer, const QString &filePath,
-                             unsigned int flags, const ImportTransform &xf)
+                             unsigned int flags, const ImportTransform &xf,
+                             const QString &formatHint)
 {
     // THE SCALE reaches assimp as its own GLOBAL_SCALE_FACTOR property, which
     // ScaleProcess composes with the file's declared scale and applies to
@@ -210,16 +211,22 @@ const aiScene *readSceneFile(Assimp::Importer &importer, const QString &filePath
         QString resource;
         if (filePath.startsWith(QLatin1String("qrc:"))) resource = filePath.mid(3);   // "qrc:/x" -> ":/x"
         else if (filePath.startsWith(QLatin1Char(':'))) resource = filePath;
-        if (resource.isEmpty()) {
+        // A Qt resource, or a path whose NAME does not say what the bytes are
+        // (a store object is named by its hash), is read into memory and
+        // dispatched by an explicit format hint — see the header.
+        const QString inMemory = resource.isEmpty() && !formatHint.isEmpty() ? filePath : resource;
+        if (inMemory.isEmpty()) {
             scene = importer.ReadFile(filePath.toStdString().c_str(), flags);
         } else {
-            QFile file(resource);
+            QFile file(inMemory);
             if (!file.open(QIODevice::ReadOnly)) {
                 qWarning("readSceneFile: failed to open %s", qUtf8Printable(filePath));
                 return nullptr;
             }
             const QByteArray data = file.readAll();
-            const QByteArray hint = QFileInfo(resource).suffix().toLower().toLatin1();
+            const QByteArray hint = (formatHint.isEmpty() ? QFileInfo(inMemory).suffix()
+                                                          : formatHint)
+                                        .toLower().toLatin1();
             scene = importer.ReadFileFromMemory(data.constData(), size_t(data.size()), flags,
                                                 hint.isEmpty() ? "" : hint.constData());
         }
