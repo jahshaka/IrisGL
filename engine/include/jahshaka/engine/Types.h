@@ -49,6 +49,42 @@ using MaterialId = unsigned int;
 /// positions: xyz per vertex (required). normals: xyz per vertex (optional — smooth
 /// normals are generated when empty). uvs: uv per vertex (optional). indices: three
 /// per triangle (required).
+// ---- ATOM stage 1: THE LEVEL THAT STANDS IN FOR A MESH AT A GIVEN SIZE -----
+//
+// THE RULE, written ONCE and cited from both of its callers
+// (`MeshData::lodForCellSize` below, and `OgreScene::cascadeVoxelLod` in
+// irisgl/engine/src/OgreGi.cpp, which spends it on Photon's cascades):
+//
+//     take the COARSEST level whose error is strictly below `cellSize`.
+//
+// `errors[i]` is level i+1's simplifier error as a LENGTH in the same units as
+// `cellSize` (see MeshData::lodErrors), and the errors are non-decreasing, so
+// the first level that fails the test ends the walk. The answer is 0 — the
+// authored geometry — whenever even level 1 is too coarse, and whenever the
+// size is not a positive finite number.
+//
+// WHY "BELOW THE SIZE" IS THE WHOLE RULE: a consumer that samples the mesh at a
+// resolution of `cellSize` cannot represent a difference smaller than that, so
+// a level whose worst deviation from the original is under one of its samples
+// is, to that consumer, the same object — for a fraction of the geometry. It is
+// the same argument the voxeliser's sub-voxel size filter makes about whole
+// objects, made about the triangles inside one. The baked error is the COMBINED
+// position+attribute quadric error, which is >= the pure geometric one, so
+// every answer here is conservative (a finer level than geometry alone needs).
+//
+// `levelsAvailable` caps the answer at the levels the consumer actually has —
+// the document's index lists, or the VAOs the engine built from them.
+inline size_t lodLevelForCellSize(const std::vector<float> &errors, float cellSize,
+                                  size_t levelsAvailable) {
+    if (!(cellSize > 0.0f)) return 0;
+    size_t level = 0;
+    for (size_t i = 0; i < errors.size() && i < levelsAvailable; ++i) {
+        if (!(errors[i] < cellSize)) break;   // errors are non-decreasing
+        level = i + 1;
+    }
+    return level;
+}
+
 struct MeshData {
     std::vector<float>    positions;
     std::vector<float>    normals;
@@ -112,18 +148,13 @@ struct MeshData {
         if (level == 0 || lodIndices.empty()) return indices;
         return lodIndices[std::min(level, lodIndices.size()) - 1];
     }
-    /// The COARSEST level whose simplifier error (>= the geometric error, see
-    /// `lodErrors`) is below `cellSize` (a length in
-    /// the same units as the positions), or 0 when even level 1 is too coarse.
-    /// A non-positive or non-finite cell size means "the finest", i.e. 0.
+    /// The COARSEST level that still stands in for this mesh at `cellSize` —
+    /// THE RULE ITSELF IS `lodLevelForCellSize` ABOVE, stated once and shared
+    /// with the engine's voxeliser (OgreScene::cascadeVoxelLod). This overload
+    /// is the document-side convenience: it clamps to the levels this mesh
+    /// actually carries.
     size_t lodForCellSize(float cellSize) const {
-        if (!(cellSize > 0.0f)) return 0;
-        size_t level = 0;
-        for (size_t i = 0; i < lodErrors.size() && i < lodIndices.size(); ++i) {
-            if (!(lodErrors[i] < cellSize)) break;   // errors are non-decreasing
-            level = i + 1;
-        }
-        return level;
+        return lodLevelForCellSize(lodErrors, cellSize, lodIndices.size());
     }
     bool hasSkinData() const {
         return !blendIndices.empty() && blendIndices.size() == vertexCount() * 4 &&
@@ -1974,6 +2005,21 @@ struct GiParams {
     /// `GiStatus::cascades[].items` reports what each cascade voxelised and
     /// `[].attached` what it holds, so a budget that is biting is a reading.
     int       cascadeInstanceCap = 0;
+    /// THE FAR-FIELD PROXY: a cascade voxelises the BAKED LOD LEVEL that fits
+    /// its own cell (ATOM stage 1's hand-off, SPECS/NANITE_SPEC.md §7 — the
+    /// rule is `lodLevelForCellSize` and the site is
+    /// OgreScene::cascadeVoxelLod). True (the default) spends the chain; false
+    /// voxelises every cascade at the authored level, which is what the arm did
+    /// before ogre-patch 0064 existed.
+    ///
+    /// It is here — an engine parameter rather than a document row — because it
+    /// is the A/B: the same scene, the same chain, one term moved, so the cost
+    /// it saves and the voxels it moves can be measured against each other in
+    /// ONE process (gi.cascade_lod does exactly that). A mesh with no LOD chain
+    /// is unaffected either way, and that is most of what a scene holds today:
+    /// only IMPORTED static meshes are baked with one (document primitives are
+    /// not).
+    bool      cascadeVoxelLod = true;
 
     /// "Is this the same GI configuration I last pushed?" Exact, like every
     /// other change guard here — and load-bearing rather than cosmetic: a GI
@@ -2005,6 +2051,7 @@ struct GiParams {
                probeSnapSidesMin == o.probeSnapSidesMin &&
                probeSnapSidesMax == o.probeSnapSidesMax &&
                updateBudget == o.updateBudget &&
+               cascadeVoxelLod == o.cascadeVoxelLod &&
                ddgi == o.ddgi && ddgiSource == o.ddgiSource &&
                testBoundsMin == o.testBoundsMin && testBoundsMax == o.testBoundsMax &&
                cascades == o.cascades && cascadeCount == o.cascadeCount &&
@@ -2325,6 +2372,25 @@ struct GiStatus {
         /// where a two-frame-late number belongs — the monitor's `vct.cascadeN`
         /// cacheWork rows (ogre-patch 0027).
         float lastCpuMs = -1.0f;
+        /// WHICH MESH LOD LEVELS THIS CASCADE ATTACHED (ATOM stage 1's
+        /// hand-off): a histogram over the attach set, `lodLevels[L]` items at
+        /// level L, index 0 the authored geometry. Never empty once a cascade
+        /// has attached anything, and `{N}` — everything at level 0 — for a
+        /// scene of meshes with no baked chain, which is every scene built from
+        /// document primitives.
+        ///
+        /// The level a cascade takes is decided by ITS OWN CELL and by the
+        /// mesh's baked error, never by the camera: the LOD bias
+        /// (Scene::setLodBias) moves what is DRAWN and must not move this.
+        std::vector<int> lodLevels;
+        /// HOW MANY TRIANGLES THE ATTACH SET HANDS THIS CASCADE at those levels
+        /// — the currency of a voxelisation, since the raster dispatch is sized
+        /// by the index count and not by the object count. It is the attach set
+        /// (what the voxeliser holds) and not the enclosed set, so it is the
+        /// pair of `attached` rather than of `items`, and it is the number the
+        /// far-field proxy moves: the same cascade with the LOD chain off reads
+        /// the authored total.
+        long long voxelTriangles = 0;
     };
     /// The live cascade chain, innermost first. Empty unless
     /// GiParams::cascades built one.

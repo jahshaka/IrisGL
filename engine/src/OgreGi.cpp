@@ -711,6 +711,8 @@ GiStatus OgreScene::giStatus() const {
                                                               : int(cascadeAttachCount(c)))
                                 : 0;
             cs.lastCpuMs  = c.lastCpuMs;
+            cs.lodLevels  = c.lodLevels;    // what the attach set was voxelised at
+            cs.voxelTriangles = c.lodTriangles;
             st.cascades.push_back(cs);
         }
         st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;
@@ -3481,34 +3483,60 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
     return inside;
 }
 
-// THE VOXELISATION LOD HOOK (ATOM-1 hand-off, lead 2026-09-15; NANITE_SPEC
-// stage 1). ONE place, and it answers 0 today.
+// THE VOXELISATION LOD (ATOM stage 1's hand-off, NANITE_SPEC §7 stage 1;
+// delivered by lane ATOM-2 on ogre-patch 0064). ONE place decides WHICH level
+// of a mesh a cascade voxelises, and this is it.
 //
-// THE RULE, when the levels exist: an outer cascade must voxelise the COARSEST
-// level whose world-space error is below HALF ITS OWN CELL, because anything
-// finer than that is detail the grid provably cannot hold — the same argument
-// rule 2 (`kCascadeSubVoxelFactor`) makes about whole objects, made about the
-// triangles inside one. The 60 m cascade's cell is 1.875 m; a mesh simplified
-// to a 0.9 m error voxelises to the same grid as the full-resolution one and
-// costs a fraction of the raster pass.
+// THE RULE IS NOT RESTATED HERE. It is `lodLevelForCellSize` (Types.h, beside
+// MeshData::lodErrors, which is the other caller): the COARSEST baked level
+// whose error is below the size the consumer samples at. What this function
+// owns is the two terms that turn a cascade into that size:
 //
-// WHAT IT IS WAITING FOR (named so the last inch is a wiring job and not a
-// design one): ATOM-1's `MeshData::lodIndices` / `lodValues` — N index buffers
-// over ONE shared vertex buffer with a per-level world-space error — plus its
-// documented helper "the coarsest level whose error is below a given
-// world-space size". With those, this returns that helper's answer for
-// `c.cell() * kCascadeSubVoxelFactor`. Until then every cascade voxelises
-// level 0 and the picture is exactly today's.
+//   * THE SIZE IS HALF THIS CASCADE'S CELL (`kCascadeSubVoxelFactor`), the same
+//     number and the same argument rule 2 makes about whole objects: a grid
+//     cannot hold detail finer than half a sample, so a level whose worst
+//     deviation is under that voxelises to the same voxels as the authored
+//     mesh. The 60 m cascade's cell is 1.875 m at the High tier, so a mesh
+//     simplified to a 0.9 m error is free of charge there and costs a fraction
+//     of the raster dispatch.
+//   * AND IT IS MEASURED IN THE MESH'S OWN UNITS, because the baked errors are
+//     (MeshData::lodErrors). The item carries the scale that takes one to the
+//     other, so the cell is divided by it — a 10x-scaled mesh has 10x the
+//     world-space error for the same level, and dividing is what keeps the
+//     comparison honest for both. The LARGEST axis of the derived scale is
+//     used: it is the one that stretches an error the most.
 //
-// AND THE OTHER HALF, which is NOT ours: `VctVoxelizer::addItem` takes no LOD
-// (OgreVctVoxelizer.h) — it reads the item's LOD-0 vao. Spending the level this
-// returns needs either a `addItem(item, lod)` overload (an Ogre patch: a new
-// argument threaded into `VoxelizedMeshCache::addMeshToCache`'s key and its
-// buffer walk) or an item whose mesh IS the coarse level. Both are the lead's
-// wiring at the merge; this function is the one place that decides WHICH level.
+// WHAT IT NEVER READS: the camera, the item's own `mCurrentMeshLod` and the LOD
+// BIAS. Those belong to what is DRAWN — the bias is a debugging dial over the
+// picture (`Scene::setLodBias`), and a voxel volume that followed it would make
+// the bounce depend on a dial that exists to inspect the geometry. A cascade's
+// level is a function of its OWN cell and the mesh's baked error, and
+// `gi.cascade_lod` asserts exactly that.
+//
+// A MESH WITH NO CHAIN (every document primitive, every skinned mesh — stage 1
+// bakes static imported meshes only) is not in the index, so this answers 0 and
+// nothing moves.
 unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item) const {
-    (void)c; (void)item;
-    return 0u;
+    // THE DIAGNOSTIC LATCH, in the shape this engine already uses for one
+    // (`JAHSHAKA_NO_RAY_QUERY`, OgreEngine.cpp:55): it turns the proxy off for a
+    // whole RUN, which is what lets a measurement compare the two arms with ONE
+    // binary, ONE scene and one term moved — the rig rule that cross-run
+    // comparisons decide nothing (CLAUDE.md). Read once per process.
+    // `GiParams::cascadeVoxelLod` is the same switch per scene, for a suite.
+    static const bool sLatchedOff = std::getenv("JAHSHAKA_NO_CASCADE_LOD") != nullptr;
+    if (sLatchedOff || !mGi.cascadeVoxelLod || !item) return 0u;
+    if (mLodErrorsByMesh.empty()) return 0u;               // the common scene, in one branch
+    const Ogre::Mesh *mesh = item->getMesh().get();
+    const auto it = mLodErrorsByMesh.find(mesh);
+    if (it == mLodErrorsByMesh.end() || it->second.empty()) return 0u;
+    float scale = 1.0f;
+    if (const Ogre::Node *node = item->getParentNode()) {
+        const Ogre::Vector3 s = node->_getDerivedScale();
+        scale = std::max(std::max(std::fabs(s.x), std::fabs(s.y)), std::fabs(s.z));
+    }
+    if (!(scale > 0.0f) || !std::isfinite(scale)) return 0u;
+    const float sizeInMeshUnits = (c.cell() * kCascadeSubVoxelFactor) / scale;
+    return unsigned(lodLevelForCellSize(it->second, sizeInMeshUnits, it->second.size()));
 }
 
 void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
@@ -3531,6 +3559,8 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
         c.itemsAttached = false;
         c.itemsStale = false;
         c.attachedItems.clear();
+        c.lodLevels.clear();
+        c.lodTriangles = 0;
         return;
     }
     const bool edge = !c.itemsAttached || c.itemsStale;
@@ -3540,14 +3570,27 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     if (!edge && wanted == c.attachedItems) return;
     if (c.itemsAttached) c.voxelizer->removeAllItems();
     c.itemsStale = false;
+    c.lodLevels.clear();
+    c.lodTriangles = 0;
     for (Ogre::Item *item : wanted) {
-        // The ATOM-1 hook, called at the ONE site that hands geometry to the
-        // voxeliser. `lod` is 0 until the levels exist (see cascadeVoxelLod);
-        // the voxeliser has no LOD argument yet, so it is computed and not yet
-        // spent — deliberately, so that wiring it is one call site.
+        // The ATOM hook, called at the ONE site that hands geometry to the
+        // voxeliser, and SPENT here through ogre-patch 0064's fourth argument
+        // (the pin's `addItem` read the finest VAO and took no level).
         const unsigned lod = cascadeVoxelLod(c, item);
-        (void)lod;
-        c.voxelizer->addItem(item, false);
+        if (c.lodLevels.size() <= size_t(lod)) c.lodLevels.resize(size_t(lod) + 1u, 0);
+        ++c.lodLevels[lod];
+        c.voxelizer->addItem(item, false, 0u, lod);
+        // The geometry that level actually is — the same clamp ogre-patch 0064
+        // makes inside the voxeliser, so the reading cannot claim a level the
+        // mesh does not have.
+        if (const Ogre::MeshPtr &mesh = item->getMesh()) {
+            for (unsigned si = 0; si < mesh->getNumSubMeshes(); ++si) {
+                const auto &vaos = mesh->getSubMesh(si)->mVao[Ogre::VpNormal];
+                if (vaos.empty()) continue;
+                const size_t pick = std::min(size_t(lod), vaos.size() - 1u);
+                c.lodTriangles += (long long)(vaos[pick]->getPrimitiveCount() / 3u);
+            }
+        }
     }
     c.attachedItems.swap(wanted);
     c.itemsAttached = true;

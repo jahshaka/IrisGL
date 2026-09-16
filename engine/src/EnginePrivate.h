@@ -3777,6 +3777,14 @@ private:
         /// against the next pick is what keeps a scroll that changed nobody's
         /// rank from re-uploading every mesh buffer.
         std::vector<Ogre::Item *> attachedItems;
+        /// THE LEVELS THE ATTACH SET WAS VOXELISED AT (ATOM stage 1), as a
+        /// histogram: `lodLevels[L]` items at level L. Filled by
+        /// setCascadeItems at the one site that hands geometry to the
+        /// voxeliser, so it describes what the voxeliser HOLDS and not what a
+        /// walk would decide now. `{N}` for a scene with no baked LOD chains.
+        std::vector<int> lodLevels;
+        /// The triangles those levels add up to, counted in the same walk.
+        long long lodTriangles = 0;
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
         /// Cleared when the rebuild is serviced, and counted there, so the
@@ -4034,6 +4042,14 @@ private:
     /// than the node address, which Ogre recycles.
     std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
     std::map<MeshId, MeshRec> mMeshes;
+    /// ATOM stage 1: THE LOD ERRORS BY OGRE MESH — the one lookup that takes an
+    /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the baked
+    /// per-level errors `createMesh` was given. Only meshes that HAVE a chain
+    /// are in it, which is a small minority, so a miss is the common case and
+    /// means "no chain, level 0". Maintained beside `mMeshes` (createMesh
+    /// inserts, destroyMesh and destroy() erase) rather than walked, because the
+    /// cascade attach walks every item of the scene.
+    std::unordered_map<const Ogre::Mesh *, std::vector<float>> mLodErrorsByMesh;
     /// ATOM stage 1: the scene-wide LOD dial. 1 = the reference budget of one
     /// pixel of geometric error; 0 pins every object at level 0.
     float mLodBias = 1.0f;

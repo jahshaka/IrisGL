@@ -1303,7 +1303,38 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     Measured: `shadercache.app` run 3 compiled 3 of 110 before, 0 of 113 after.
     Suite: `shadercache.app` (its unchanged `compiledThisRun == 0` assertion).
 
-THE STACK IS 0001-0063 (this list; `build-ogre.sh` globs `*.patch`, so the file
+64. **0064-voxelizer-lod-level** (SOURCE —
+    `Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h`,
+    `Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp`; **every tree re-runs
+    `build-ogre.sh`**; the same two files as 0061 and 0062, applied after both,
+    no overlapping hunks) — `VctVoxelizer::addItem` can be told WHICH MESH LOD to
+    voxelize. The pin read `mVao[VpNormal].front()` — the finest level — in all
+    five places it walks geometry (`countBuffersSize`,
+    `prepareAabbCalculatorMeshData`, `convertMeshUncompressed`, `addItem`'s own
+    index check, `placeItemsInBuckets`) and took no argument that could say
+    otherwise; the only alternative, forcing the Item's live `mCurrentMeshLod`,
+    belongs to the CAMERA (`updateAllLods` rewrites it every frame for what is
+    drawn) and would not have been read by the voxelizer anyway. Why a voxelizer
+    wants one: a voxel grid cannot represent detail finer than its own cell, so
+    Photon's outermost cascade (1.875 m per voxel at High) voxelizes a mesh
+    simplified to a 0.9 m error to exactly the same voxels for a fraction of the
+    raster dispatch — that is ATOM stage 1's far-field proxy
+    (SPECS/NANITE_SPEC.md §7). The shape: a new `QueuedMesh::lodLevel` (the level
+    belongs to the MESH inside one voxelizer, because its buffers are downloaded
+    and converted once per mesh; when items disagree the FINEST wins, the same
+    precedence `bCompressed` uses), a trailing `lodLevel = 0u` argument on
+    `addItem`, and ONE static helper `getLodVao( subMesh, lodLevel )` replacing
+    the five `.front()` reads, clamped to the levels the mesh has. Every existing
+    caller passes nothing, gets 0 and produces the buffers it always did; a mesh
+    with no LOD chain is unaffected. The sibling `VctImageVoxelizer` is NOT
+    patched: it caches a voxelized mesh in `VoxelizedMeshCache` keyed by the mesh,
+    so a level would have to join that key, and Jahshaka's cascade chain drives
+    the rasterizing voxelizer only. Consumer: `OgreScene::cascadeVoxelLod`.
+    Measured (gi.cascade_lod's fixture): the outermost cascade voxelizes 652 of
+    16,396 triangles, 4.0 %. `--engine-selftest` UNCHANGED — the default scene's
+    meshes are document primitives, which carry no chain. Suite: `gi.cascade_lod`.
+
+THE STACK IS 0001-0064 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 NOTE ON 0059: it is ATOM-1's `Mesh2 set lod values`, which landed on main while
 this lane ran — this branch carries 0001-0058 + 0060-0062 and the merged tree
@@ -1315,7 +1346,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061 and 0063 are SOURCE-only (0062 is SOURCE + media), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063 and 0064 are SOURCE-only (0062 is SOURCE + media), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
