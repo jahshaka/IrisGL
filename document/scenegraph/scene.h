@@ -119,10 +119,14 @@ enum class SkyType : int
 
 // Global illumination (world panel). Values are serialized by ordinal-stable
 // string names in SceneWriter/SceneReader, not by these ints.
+/// INSTANT RADIOSITY IS GONE (PHOTON_SPEC §7 E2 (4), 2026-09-15) and the
+/// ordinals moved with it. Safe by construction: `scenewriter.cpp` writes this
+/// as a stable STRING and says at the table that "the enum ints must stay free
+/// to be reordered"; a document that still says `instant_radiosity` reads back
+/// as VCT, which is what its tier resolves to now.
 enum class GiMode : int
 {
 	OFF = 0,
-	INSTANT_RADIOSITY,
 	VCT,
 	VCT_PCC_HYBRID
 };
@@ -307,7 +311,6 @@ public:
     // CRUD law; an old scene that pinned a volume opens with the automatic one.
     GiMode giMode;
     GiQuality giQuality;
-    QString giLightGuid;       // driving light for Instant Radiosity; empty = auto
     int giNumBounces;          // 1..4
     /// PHOTON — CAMERA-CENTRED VOXEL CASCADES (SPECS/PHOTON_SPEC.md P0).
     ///
@@ -324,8 +327,28 @@ public:
     /// table. A zero or negative halfSize/resolution in any entry means the
     /// whole request is ignored — a half-specified cascade is not a request the
     /// renderer can honour halfway.
-    bool giCascades = false;
+    /// 1 = on, 0 = off, and THE DEFAULT IS ON because every Photon tier's
+    /// column is (PHOTON_SPEC §7 E2 (6)).
+    ///
+    /// It is NOT a tri-state, and that is a decision with a scar: it was `-1 =
+    /// the tier decides` for an afternoon, which put a value in the document
+    /// that only the STUDIO could resolve — and SceneMirror is IrisGL and cannot
+    /// see the tier table, so it read -1 as off while the reader resolved it to
+    /// on, and a scene rendered one way before a save and another way after
+    /// (scene.reopen_fidelity, 42,42,42 vs 47,47,47 on the ground). A field the
+    /// renderer reads must mean the same thing to everyone who reads it. The
+    /// "was this authored?" question the tri-state existed for is answered where
+    /// it belongs instead: by the KEY BEING ABSENT in the file, which only the
+    /// reader can see and which the reader resolves through the tier there and
+    /// then (SceneReader).
+    int giCascades = 1;
     QVector<iris::Vec3> giCascadeSet;
+    /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1)). How many
+    /// objects ONE cascade may voxelise: the renderer keeps the ones that fill
+    /// most of that cascade's own voxels, largest first, nearest first among
+    /// equals. 0 (the default) is no budget, which is the shipped arm exactly.
+    /// The engine's own documentation for it is GiParams::cascadeInstanceCap.
+    int giCascadeInstanceCap = 0;
     /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
     /// renderer may spend per frame, and the single "is GI live?" switch.
     ///

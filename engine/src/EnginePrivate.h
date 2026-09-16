@@ -54,6 +54,7 @@
 #include <OgreVertexFormatWarmUp.h>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/OgreCompositorNodeDef.h>
@@ -70,7 +71,6 @@
 #include <OgreParticleEmitter.h>
 #include <OgreForwardPlusBase.h>
 #include <OgreDecal.h>
-#include <InstantRadiosity/OgreInstantRadiosity.h>
 #include <Vct/OgreVctVoxelizer.h>
 #include <Vct/OgreVctLighting.h>
 #include <IrradianceField/OgreIrradianceField.h>
@@ -279,8 +279,7 @@ struct RayInstanceSink {
 // draw it. kGiGeometryBit marks items whose surfaces bounce light for GI: PBR
 // items only — never the sky, unlit overlays, line meshes or billboards, which
 // would otherwise occlude rays or raycast as garbage triangles (a non-indexed
-// line VAO reads as a vertex triangle list). kGiLightBit marks exactly the one
-// light Instant Radiosity traces from (InstantRadiosity::mLightMask).
+// line VAO reads as a vertex triangle list).
 //
 // AN EXCLUDE BIT IS IMPOSSIBLE; AN INCLUDE CHANNEL IS NOT. Ogre's visibility
 // test is ANY-BIT-SET (`objFlags & visibilityMask`,
@@ -312,7 +311,11 @@ struct RayInstanceSink {
 // a pass that forgets it silently drops every moving object).
 constexpr Ogre::uint32 kVisibleBit     = 1u;
 constexpr Ogre::uint32 kGiGeometryBit  = 1u << 1;
-constexpr Ogre::uint32 kGiLightBit     = 1u << 2;
+// BIT 2 IS A HOLE, ON PURPOSE. It was `kGiLightBit`, which marked the one light
+// Instant Radiosity traced from; IR is deleted (PHOTON_SPEC E2 (4)) and the bit
+// is left unused rather than reclaimed, because every bit below is a value
+// written into compositor scripts and mask literals and renumbering them would
+// move objects between passes for a bit nobody needs.
 constexpr Ogre::uint32 kHelperBit      = 1u << 3;
 // THE DISTORTION CHANNEL (POST_LOOKS_SPEC.md §5.3). A distortion item carries
 // this bit *INSTEAD OF* kVisibleBit — the same inversion trick kHelperBit uses,
@@ -2622,6 +2625,7 @@ public:
     // scenes' geometry outside the voxel volume samples nothing (cones exit the
     // volume and add no light), so previews/thumbnails stay sane in practice.
     bool setGlobalIllumination(const GiParams &p) override;
+    bool setGiTuning(const GiParams &p) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
@@ -3542,12 +3546,6 @@ private:
     void releaseNode(NodeId id, Node &n);
 
     // ---- GI internals ----
-    /// Resolves the driving light — the requested node's light, else the first
-    /// directional, else any light — and marks exactly that light with
-    /// kGiLightBit so InstantRadiosity's light mask selects it alone. Returns
-    /// null when the scene has no light at all. (IR's own LT_VPL lights are not
-    /// in mNodes and are skipped by IR itself.)
-    Ogre::Light *markGiLight(NodeId requested);
     /// The GI working volume: the document's explicit bounds, or (min == max)
     /// the world AABB of every GI-participating item plus a margin.
     bool computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const;
@@ -3559,22 +3557,14 @@ private:
     /// The mean of the CENTRES of the GI items that fit inside `maxEdge` —
     /// "everything that is not scenery". False when the scene is only scenery.
     bool giContentCentre(float maxEdge, Ogre::Vector3 &centre) const;
-    /// Re-traces Instant Radiosity against the scene as it is right now. Cheap
-    /// enough (a few ms at editor quality) to run on every light move.
-    /// Ogre::InstantRadiosity caches mesh data by raw VertexArrayObject* and
-    /// downloaded images by TextureGpu* (OgreInstantRadiosity.h:238-244). Destroying
-    /// a mesh/texture while IR is live leaves those caches stale — the owner's
-    /// scene-switch crash ("double free or corruption" tearing down a scene with IR
-    /// enabled while the next project's assets churned). Ogre::VctVoxelizer has the
-    /// same shape twice over: addItem keeps raw Item* until removeAllItems, and
-    /// VctMaterial caches conversions by raw datablock pointer across builds.
-    /// So every geometry/material/texture destroy path calls this BEFORE the
-    /// object actually dies — IR's caches are freed EAGERLY here, because
-    /// InstantRadiosity::freeMemory dereferences its VertexArrayObject* cache
-    /// keys and calling it after the mesh died is itself the heap corruption.
-    /// The rebuild still happens ONCE at frame time (bursty destroys = one
-    /// rebuild); for VCT the flush tears the whole arm down and re-voxelizes
-    /// from the LIVE scene, so a recycled pointer can never alias.
+    /// Ogre::VctVoxelizer caches raw pointers twice over: addItem keeps raw
+    /// Item* until removeAllItems, and VctMaterial caches conversions by raw
+    /// datablock pointer across builds. So every geometry/material/texture
+    /// destroy path calls this BEFORE the object actually dies. The rebuild
+    /// still happens ONCE at frame time (bursty destroys = one rebuild); the
+    /// flush tears the whole arm down and re-voxelizes from the LIVE scene — or,
+    /// under a cascade chain, marks only the cascades the change reaches (G1) —
+    /// so a recycled pointer can never alias.
     void invalidateGiCaches() { invalidateGiCaches(nullptr, true); }
     /// ...with the world box the edit touched, where the call site knows it:
     /// under a cascade chain that box is what decides which cascades owe a
@@ -3611,12 +3601,6 @@ public:
     /// per-cell budget, and the budget itself (F-F2). See RenderStats.
     void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const;
 private:
-    /// The Instant Radiosity arm's from-scratch re-trace. `why` NAMES THE CAUSE
-    /// for the render monitor: the default reads the grid's last recorded stale
-    /// reason, which is right for a refresh but wrong on the light-drag path,
-    /// where the IR arm records nothing of its own and the row came out
-    /// carrying whatever staled the grid last (ENGINE-5 review, ledger §208).
-    void rebuildGi(GiStaleReason why = GiStaleReason::None);
     /// Voxelizes the scene's PBR items over computeGiBounds at quality-mapped
     /// resolution, (re)builds VctLighting and binds it to HlmsPbs. The voxelizer
     /// and lighting are recreated from scratch every time (see invalidateGiCaches).
@@ -3786,6 +3770,13 @@ private:
         /// when the dirty path marked it (G1), so a capture can separate the
         /// cost of walking around a scene from the cost of changing it.
         GiStaleReason pendingReason = GiStaleReason::Camera;
+        /// WHAT THE VOXELISER HOLDS, in attach order (PHOTON_SPEC E2 (1)).
+        /// Empty without an instance budget — the set is then the whole
+        /// size-filtered scene and cannot change without an edge, so there is
+        /// nothing to remember. Under a budget it is the pick, and comparing it
+        /// against the next pick is what keeps a scroll that changed nobody's
+        /// rank from re-uploading every mesh buffer.
+        std::vector<Ogre::Item *> attachedItems;
         /// This cascade's queued rebuild came from the JUMP guard, not from an
         /// ordinary scroll — i.e. nothing of its old volume was reusable.
         /// Cleared when the rebuild is serviced, and counted there, so the
@@ -3866,6 +3857,15 @@ private:
     /// `count > 0`) the answer to "may this cascade be built with items
     /// attached at all", which Ogre cannot be asked.
     unsigned cascadeGeometryCount(const VctCascade &c) const;
+    /// How many items this cascade's voxeliser HOLDS with no instance budget
+    /// (GiStatus::cascades[].attached's other half).
+    unsigned cascadeAttachCount(const VctCascade &c) const;
+    /// The same walk, and (with `keep`) the set to ATTACH — the instance
+    /// budget's selection when `GiParams::cascadeInstanceCap` is set.
+    unsigned selectCascadeItems(const VctCascade &c, std::vector<Ogre::Item *> *keep) const;
+    /// WHICH mesh LOD a cascade voxelises an item at (ATOM-1). 0 until the
+    /// levels exist; the rule and what it is waiting for are at the definition.
+    unsigned cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item) const;
     /// Attaches or detaches the SIZE-FILTERED GI item set on one cascade's
     /// voxeliser (whole, never box-filtered: Ogre culls it to the region per
     /// build). A cascade with nothing in its box builds an EMPTY volume instead
@@ -3985,11 +3985,8 @@ private:
     /// PCC, VctLighting and VctVoxelizer, in that order. Safe to call twice;
     /// must run BEFORE the SceneManager dies.
     void teardownVct();
-    /// Deletes the radiosity solution and its VPL lights. Safe to call twice;
-    /// must run BEFORE the SceneManager dies (the dtor destroys its lights).
-    void teardownIr();
-    /// Deletes every GI object (IR + VCT arms). Safe to call twice; must run
-    /// BEFORE the SceneManager dies (VPL lights, probe workspaces, GI camera).
+    /// Deletes every GI object. Safe to call twice; must run BEFORE the
+    /// SceneManager dies (probe workspaces, GI camera).
     void teardownGi();
 
     // ---- Planar-reflection internals (OgrePlanar.cpp) ----
@@ -4103,7 +4100,6 @@ private:
     bool              mIblPending = false;   // convolve on the next frame
     /// One-shot ibl_specular workspace; kept null between runs.
     Ogre::Camera *mIblCamera = nullptr;
-    Ogre::InstantRadiosity *mInstantRadiosity = nullptr;   // owned; null unless IR mode
     // VCT arm (null unless a VCT mode is live). Teardown order within the arm:
     // unbind HlmsPbs -> PCC -> VctLighting -> VctVoxelizer, all before the
     // SceneManager (probe workspaces and the GI camera live in it).
@@ -4450,8 +4446,8 @@ private:
     /// Bumped whenever anything the GI arms hold RAW POINTERS INTO may have
     /// died — every invalidateGiCaches call site (B4). The reuse arm refuses to
     /// re-run an existing voxelizer across a bump, which is what keeps the
-    /// "always from scratch" rule's guarantee (InstantRadiosity::freeMemory's
-    /// cache keys, VctMaterial's datablock-pointer cache) exactly as strong.
+    /// "always from scratch" rule's guarantee (VctMaterial's datablock-pointer
+    /// cache) exactly as strong.
     unsigned long long mGiDestroyGeneration = 0;
     unsigned long long mGiBuiltGeneration   = ~0ull;   // no build yet
     /// THE MATERIAL GENERATION (ENGINE_CACHE_POLICY_SPEC P7). Bumped when a
@@ -4495,7 +4491,15 @@ private:
     bool    mFogDescKnown = false;
     /// The NodeIds handed to the live VctVoxelizer, so the reuse arm can add the
     /// items created since the build. Cleared with the arm.
-    std::vector<NodeId> mVctItemIds;
+    ///
+    /// A SET AND NOT A VECTOR (PHOTON_SPEC E2 (3)). Nothing here reads an ORDER
+    /// — the two questions ever asked of it are "is this node already in?" and
+    /// "how many?" — and the membership test ran as a linear `std::find` inside
+    /// the reuse arm's walk over every node, which is O(N x M) in the scene's
+    /// size: measured at **79 ms of CPU per refresh** on the 8,404-node lattice
+    /// (PHOTON_SPEC P0 §6.4), i.e. five frames' worth of budget spent deciding
+    /// that nothing had been added.
+    std::unordered_set<NodeId> mVctItemIds;
     /// Live decals in THIS scene. The SceneManager-level atlas binding is
     /// driven off the count (see refreshDecalBindings).
     unsigned            mDecalCount = 0;

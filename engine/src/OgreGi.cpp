@@ -1,7 +1,9 @@
-// Global illumination: Instant Radiosity, voxel cone tracing (VCT), the VCT +
+// Global illumination: voxel cone tracing (VCT), the VCT +
 // parallax-corrected-cubemap hybrid and Photon's camera-centred cascade chain —
-// the public verbs and the internals that drive Ogre's InstantRadiosity,
+// the public verbs and the internals that drive Ogre's
 // VctVoxelizer/VctLighting, IrradianceField and ParallaxCorrectedCubemapAuto.
+// (Instant Radiosity was the fourth arm and was deleted 2026-09-15,
+// PHOTON_SPEC §7 E2 (4).)
 //
 // THE LIVE PROGRAM DOC IS SPECS/PHOTON_SPEC.md. The realtime-GI program was
 // called RAYON until 2026-09-13 and GI_SPEC.md / GI_UNIFIED_SPEC.md are its
@@ -211,37 +213,8 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
             noteGiAutoVolume(Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO), false);
             return true;
 
-        case GiMode::InstantRadiosity: {
-            teardownVct();
-            if (!mInstantRadiosity) {
-                // VPLs ride the Forward+ clustered list every scene already has;
-                // this flag merely lets LT_VPL lights into it.
-                mSceneMgr->getForwardPlus()->setEnableVpls(true);
-                mInstantRadiosity = new Ogre::InstantRadiosity(mSceneMgr, mRoot->getHlmsManager());
-                mInstantRadiosity->mVisibilityMask = kGiGeometryBit;   // PBR items only
-                mInstantRadiosity->mLightMask = kGiLightBit;           // the one driving light
-                // NOT setUseIrradianceVolume: the volume binds process-wide to
-                // HlmsPbs (multi-scene caveat); plain VPLs already give the bounce.
-            }
-            // Quality -> ray/VPL budget. Rays are the cost knob (trace time and VPL
-            // count); the cell size clusters VPLs (smaller = more VPLs, softer look).
-            switch (p.quality) {
-            case GiQuality::Low:    mInstantRadiosity->mNumRays = 128;  mInstantRadiosity->mCellSize = 4.0f; break;
-            case GiQuality::Medium: mInstantRadiosity->mNumRays = 512;  mInstantRadiosity->mCellSize = 2.0f; break;
-            case GiQuality::High:   mInstantRadiosity->mNumRays = 2048; mInstantRadiosity->mCellSize = 1.0f; break;
-            }
-            // Document bounces are total (1 = one indirect bounce); IR counts extra
-            // ray bounces beyond the first hit.
-            mInstantRadiosity->mNumRayBounces =
-                size_t(std::min(std::max(p.numBounces, 1), 4) - 1);
-            mGi = p;
-            rebuildGi();
-            return true;
-        }
-
         case GiMode::Vct:
         case GiMode::VctPccHybrid:
-            teardownIr();
             mGi = p;
             rebuildVct();
             return true;
@@ -249,16 +222,40 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
     } JAH_CATCH(mError, false);
 }
 
+// THE TUNING PUSH (PHOTON_SPEC §7 E2 (8) / audit A F6). Three constants, no
+// rebuild: `ddgiIntensity` and `ddgiAmbient` are shader constants the field's
+// listener reads (pushIfdState), `rayMarchStepScale` is read by the NEXT light
+// injection (giRayMarchStepScale), and none of the three is geometry. So this
+// writes them and, when a field is bound, re-pushes its constants — nothing is
+// torn down, nothing re-voxelises, and no probe is staled (a probe capture does
+// not contain the field's diffuse).
+bool OgreScene::setGiTuning(const GiParams &p) {
+    JAH_TRY {
+        const bool marchMoved = p.rayMarchStepScale != mGi.rayMarchStepScale;
+        mGi.ddgiIntensity     = p.ddgiIntensity;
+        mGi.ddgiAmbient       = p.ddgiAmbient;
+        mGi.rayMarchStepScale = p.rayMarchStepScale;
+        if (mIfd) pushIfdState(mIfdProbeCounts);
+        // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
+        // moving it changes nothing at all until something else happens to
+        // re-inject, and this file's own header calls a silently ignored slider
+        // the worse outcome. So a change re-injects, on the spot, over the voxels
+        // that are already there: no teardown, no re-voxelisation, 0.1-0.3 ms per
+        // cascade (S1 §3). The other two ARE constants and are already live in
+        // the line above.
+        if (marchMoved && mVctLighting) refreshGiLighting(false);
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
 void OgreScene::refreshGlobalIllumination() {
     JAH_TRY {
-        // THE HOST ASKED, EXPLICITLY. Recorded before the arms run so whichever
-        // of them rebuilds carries `Refresh` as its reason rather than whatever
-        // staled the grid last (the Instant Radiosity arm sets nothing of its
-        // own). Read only by the render-loop monitor and by giStatus.
+        // THE HOST ASKED, EXPLICITLY. Recorded before the arm runs so that
+        // whatever it does carries `Refresh` as its reason rather than whatever
+        // staled the grid last. Read only by the render-loop monitor and by
+        // giStatus.
         mLastStaleReason = GiStaleReason::Refresh;
-        if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity)
-            rebuildGi();
-        else if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
+        if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
             // THE PER-CASCADE DIRTY PATH FIRST (G1), then THE REUSE ARM (FIX
             // WAVE B4). Both refuse in exactly the cases the from-scratch rule
             // exists for, and rebuildVct is what happens then — so these lines
@@ -280,8 +277,8 @@ void OgreScene::refreshGlobalIllumination() {
 // `rebuildVct` is deliberately from-scratch, and the reason is not caution: the
 // VctVoxelizer keeps raw `Item*` until removeAllItems and VctMaterial caches its
 // conversions by raw datablock POINTER across builds, so a recycled address
-// after a destroy would alias silently (the InstantRadiosity::freeMemory class
-// of bug this file's header records). But that argument is about DESTRUCTION,
+// after a destroy would alias silently (the dangling-cache-key class of bug
+// this file's header records). But that argument is about DESTRUCTION,
 // and a refresh triggered by an object MOVING destroys nothing at all.
 //
 // So the engine counts destructions instead of assuming them. Every site that
@@ -383,10 +380,9 @@ bool OgreScene::refreshVctFast() {
             for (auto &kv : mNodes) {
                 Ogre::Item *item = kv.second.item;
                 if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-                if (std::find(mVctItemIds.begin(), mVctItemIds.end(), kv.first) != mVctItemIds.end())
-                    continue;
+                if (mVctItemIds.count(kv.first)) continue;
                 mVctVoxelizer->addItem(item, false);
-                mVctItemIds.push_back(kv.first);
+                mVctItemIds.insert(kv.first);
             }
             // World transforms first: the voxelizer reads them, and the whole
             // reason this call exists is that something moved.
@@ -487,12 +483,6 @@ bool OgreScene::refreshVctFast() {
 // whole point of this call is that a light just moved.
 bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
-        if (mInstantRadiosity && mGi.mode == GiMode::InstantRadiosity) {
-            // IR has no cheaper path: the re-trace IS it — and the reason is the
-            // light that moved, which is why it is passed rather than read.
-            rebuildGi(GiStaleReason::Light);
-            return true;
-        }
         if (!mVctLighting || !mVctVoxelizer) return false;
         mSceneMgr->updateSceneGraph();
         // NO EXTRA BOUNCES WHILE THE THING IS STILL MOVING (CPU-vs-GPU audit
@@ -530,12 +520,30 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                 // Injection is the cheap half (0.1-0.3 ms per cascade, S1 §3);
                 // it is the VOXELISATION that is expensive, and nothing here
                 // re-voxelises.
-                for (size_t i = mVctCascades.size(); i--; ) {
-                    if (!mVctCascades[i].lighting) continue;
-                    applyCascadeAmbient(mVctCascades[i].lighting);
-                    mVctCascades[i].lighting->update(mSceneMgr, inMotion ? 0u : cascadeBounces(i),
-                                                     1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                                                     giRayMarchStepScale(inMotion));
+                //
+                // TWICE AT REST, and it is the mathematics rather than caution.
+                // A chain's radiance is a FIXED POINT over coupled volumes: each
+                // cascade's injection reads the ones outside it, so one pass is
+                // one Jacobi iteration from whatever the volumes happened to
+                // hold. A from-scratch solve starts from EMPTY volumes and a
+                // re-injection starts from the previous light's answer, so a
+                // single pass leaves the two in different places — measured at
+                // 3/255 on a lamp that travelled and came to rest against the
+                // same lamp fully re-solved (scripting.e2e.movable_lamp_rest),
+                // and 0/255 with the second pass. WHILE SOMETHING IS MOVING it
+                // stays at one pass: that answer is thrown away a few frames
+                // later by construction, and the at-rest tick is the one the
+                // user is left looking at (the same rule that gives the moving
+                // pass 0 bounces and the coarse ray march).
+                const int sweeps = inMotion ? 1 : 2;
+                for (int sweep = 0; sweep < sweeps; ++sweep) {
+                    for (size_t i = mVctCascades.size(); i--; ) {
+                        if (!mVctCascades[i].lighting) continue;
+                        applyCascadeAmbient(mVctCascades[i].lighting);
+                        mVctCascades[i].lighting->update(mSceneMgr, inMotion ? 0u : cascadeBounces(i),
+                                                         1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
+                                                         giRayMarchStepScale(inMotion));
+                    }
                 }
             } else {
                 mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
@@ -554,6 +562,22 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
         // is converged inline instead. (The mirror only runs this path while
         // the budget is above 0, so this is the belt to that braces.)
         if (mIfd) {
+            // THE FIELD'S BINDING FIRST, AND UNCONDITIONALLY (E1 reader F2,
+            // PHOTON_SPEC §7 E2 (9)). `VctLighting::update` with extra bounces
+            // PING-PONGS its light voxel textures (`runBounce`), and the field
+            // bound whatever was current ONCE, by pointer, at `initialize()`
+            // (ogre-patch 0044). So after an odd number of bounce passes — which
+            // a chain reaches whenever `cascadeBounces` lands on one (measured:
+            // 1/2/4/8 at three total bounces, 1/1/2/4 at two) — a light move left the field
+            // integrating from the texture the injection had just stopped
+            // writing. Re-binding is five descriptor writes on a path that has
+            // just run a compute dispatch per bounce; deciding whether it is
+            // needed would mean comparing raw pointers that may have been
+            // recycled (the defect class patch 0041 exists for).
+            //
+            // The head, because the field rides cascade 0 and `mVctLighting`
+            // IS cascade 0's lighting under a chain.
+            if (mVctLighting) mIfd->setVctLighting(mVctLighting);
             mIfd->reset();
             mIfdProbesDone = 0u;
             mIfdRigEpochSeen = mRigPoseEpoch;
@@ -677,6 +701,15 @@ GiStatus OgreScene::giStatus() const {
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
             cs.items      = int(c.items);
+            // WHAT THIS CASCADE HOLDS, and only that. Without a budget the set is
+            // not recorded (rule 1: it is the whole size-filtered scene and cannot
+            // change without an edge), so it is counted here — reporting
+            // `mVctItemIds.size()` instead was the GI item count of the SCENE, which
+            // is a different number the moment a cascade's cell declines anything.
+            cs.attached   = c.itemsAttached
+                                ? (mGi.cascadeInstanceCap > 0 ? int(c.attachedItems.size())
+                                                              : int(cascadeAttachCount(c)))
+                                : 0;
             cs.lastCpuMs  = c.lastCpuMs;
             st.cascades.push_back(cs);
         }
@@ -765,8 +798,6 @@ bool OgreScene::giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged,
     // once while a scene opens, and an O(nodes) walk per push there is the
     // O(nodes x binds) class that once cost 2.1 s of boot (setPbrTexture's
     // note). A live edit on a built arm walks once per push.
-    // Instant Radiosity counts as a cache too: its trace reads the same
-    // diffuse colours, and the generation is what makes the host re-trace it.
     // (UNDER A CASCADE CHAIN a pending flush is NOT a from-scratch rebuild any
     // more — `applyPendingGi` takes the dirty path, which keeps every voxeliser
     // and therefore every cached material conversion. Swallowing the generation
@@ -774,7 +805,7 @@ bool OgreScene::giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged,
     // early-out; the second clause, which is what keeps the node walk below off
     // the scene-load path, still applies to it.)
     if ((mGiCachesDirty && mVctCascades.empty()) ||
-        (!mPcc && !mVctVoxelizer && !mInstantRadiosity)) return false;
+        (!mPcc && !mVctVoxelizer)) return false;
     bool voxelized = false;
     if (!materialSeenByGi(id, voxelized)) return false;   // nothing GI can see wears it
     bumpVoxels = voxelized && voxelInputsChanged;
@@ -870,30 +901,6 @@ bool OgreScene::nodeGiBoundsExcluded(NodeId id) const {
 }
 
 // ---- GI internals ----
-Ogre::Light *OgreScene::markGiLight(NodeId requested) {
-    Ogre::Light *chosen = nullptr;
-    if (requested) {
-        auto it = mNodes.find(requested);
-        if (it != mNodes.end()) chosen = it->second.light;
-    }
-    if (!chosen)
-        for (auto &kv : mNodes)
-            if (kv.second.light && kv.second.light->getType() == Ogre::Light::LT_DIRECTIONAL) {
-                chosen = kv.second.light; break;
-            }
-    if (!chosen)
-        for (auto &kv : mNodes)
-            if (kv.second.light) { chosen = kv.second.light; break; }
-    for (auto &kv : mNodes) {
-        if (!kv.second.light) continue;
-        const Ogre::uint32 flags = kv.second.light->getVisibilityFlags();
-        const Ogre::uint32 want = (kv.second.light == chosen) ? (flags | kGiLightBit)
-                                                              : (flags & ~kGiLightBit);
-        if (want != flags) kv.second.light->setVisibilityFlags(want);
-    }
-    return chosen;
-}
-
 // The GI-participating items' world AABBs, AFTER the two document-driven
 // filters: the per-node "exclude from GI bounds" flag, and the extent-outlier
 // TRIMMING below. Everything that reasons about the shape of the lit world
@@ -1420,7 +1427,7 @@ void OgreScene::noteGiAutoVolume(const Ogre::Aabb &fitted, bool automatic) {
 }
 
 bool OgreScene::giBoundsExplicit() const {
-    const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
+    const Vec3 &a = mGi.testBoundsMin, &b = mGi.testBoundsMax;
     return a.x != b.x || a.y != b.y || a.z != b.z;
 }
 
@@ -1492,7 +1499,25 @@ bool OgreScene::giContentCentre(float maxEdge, Ogre::Vector3 &centre) const {
 }
 
 void OgreScene::clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
-    const float maxEdge = mGi.autoBoundsMax;
+    // THE 64 m CEILING IS THE ENGINE'S, NOT A PUSHED FIELD (PHOTON_SPEC §10's
+    // E2 row): nothing a user can reach has ever varied it — the document
+    // carries no bounds, `world.gi` refuses the key by name, and the mirror
+    // never writes it — so it is a constant here and `testAutoBoundsMax` is a
+    // suite's lever over it (negative = this value).
+    //
+    // WHY 64 METRES AND NOT METRES-PER-VOXEL, which is the quantity that really
+    // decides whether GI means anything (LIGHTING_PIPELINE_AUDIT L4.4) and would
+    // be tier-independent: a per-voxel ceiling SHRINKS the lit world as the
+    // quality dial goes down (0.5 m/voxel is 64 m at High but 16 m at Low), and
+    // that breaks standing contracts — measured, it took gi.cliff's "a scene
+    // that is only a ground plane" and gi.pcc_bounds' "a scene that IS one big
+    // mesh keeps the whole mesh" red at Low, the "scenes go dark when a dial
+    // moves" class the LIGHTING_FIX lane exists to prevent. A fixed 64 m holds
+    // at every tier and still kills the 8 m voxel a 1 km ground plane used to
+    // produce: High 0.5, Medium 1.0, Low 2.0 m per voxel.
+    static const float kAutoGiBoundsMax = 64.0f;
+    const float maxEdge = mGi.testAutoBoundsMax < 0.0f ? kAutoGiBoundsMax
+                                                       : mGi.testAutoBoundsMax;
     if (!(maxEdge > 0.0f)) return;
     const Ogre::Vector3 size = mx - mn;
     if (size.x <= maxEdge && size.y <= maxEdge && size.z <= maxEdge) return;
@@ -1513,7 +1538,7 @@ void OgreScene::clampAutoGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
 }
 
 bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
-    const Vec3 &a = mGi.boundsMin, &b = mGi.boundsMax;
+    const Vec3 &a = mGi.testBoundsMin, &b = mGi.testBoundsMax;
     if (giBoundsExplicit()) {
         mn = Ogre::Vector3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
         mx = Ogre::Vector3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
@@ -1718,17 +1743,6 @@ void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsC
     // The depth-relevant edits the scan cannot see (material parameters, new
     // vertex data) flag their items themselves (noteShadowShapeChanged,
     // updateMeshVertices).
-    if (mInstantRadiosity) {
-        // The cache FREE must happen NOW, while the dying mesh/texture is still
-        // alive: InstantRadiosity::freeMemory dereferences its cache KEYS
-        // (itor->first->getIndexBuffer()->getShadowCopy() on the raw
-        // VertexArrayObject*) — calling it after the mesh died is itself the
-        // heap corruption. Callers therefore invalidate BEFORE destroying.
-        // Repeat calls in a burst are no-ops (the maps are already empty);
-        // the re-trace still happens ONCE, at frame time.
-        JAH_TRY { mInstantRadiosity->freeMemory(); } JAH_CATCH(mError, );
-        mGiCachesDirty = true;
-    }
     if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid)
         mGiCachesDirty = true;   // VCT never dereferences stale keys: the flush
                                  // rebuilds the whole arm from scratch — or,
@@ -1910,9 +1924,7 @@ void OgreScene::applyPendingGi() {
     if (!mGiCachesDirty) return;
     mGiCachesDirty = false;
     JAH_TRY {
-        if (mInstantRadiosity)
-            rebuildGi();       // caches were freed at invalidate time; re-downloads live
-        else if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
+        if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
             // A STRUCTURAL CHANGE UNDER THE CHAIN IS NOT A CHAIN REBUILD (G1).
             // A spawn, a hide, a delete, a mobility flip and a preset apply all
             // arrive here through `invalidateGiCaches`, and all of them used to
@@ -2009,16 +2021,12 @@ void OgreScene::applyForwardClustered(float minDistance, float maxDistance) {
     if (!mSceneMgr) return;
     // WHAT MUST BE RE-ASSERTED AFTER THIS CALL: setForwardClustered destroys and
     // recreates the ForwardClustered object, so anything set ON that object goes
-    // with it. Instant Radiosity's VPLs ride the Forward+ list through
-    // `setEnableVpls`, which is exactly such a setting — re-armed here so a
-    // range update or a probe-budget growth cannot silently switch the bounce
-    // off. (Found while fixing the probe budget, 2026-09-07: the range update
-    // has been recreating this object every time the camera changed scale since
-    // fix 8, and IR's VPL flag has been going with it.)
+    // with it. (Instant Radiosity's `setEnableVpls` was the one such setting and
+    // was re-armed here until IR was deleted — PHOTON_SPEC E2 (4). Nothing rides
+    // the Forward+ object today; this note is the rule for the next thing that
+    // does.)
     mSceneMgr->setForwardClustered(true, 16, 8, 24, 96, kDecalsPerCell, mCubemapProbeSlots,
                                    minDistance, maxDistance);
-    if (mInstantRadiosity && mSceneMgr->getForwardPlus())
-        mSceneMgr->getForwardPlus()->setEnableVpls(true);
     mFwdPlusMin = minDistance; mFwdPlusMax = maxDistance;
 }
 
@@ -2417,6 +2425,29 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
                 // An ARRIVAL, after the first scan (which sees every item for
                 // the first time and is not news): the probes must capture it (P1).
                 if (!firstGi) mGiItemsAppeared = true;
+                // ...AND THE CHAIN HAS TO GROW INTO IT (PHOTON_SPEC E2 (2)).
+                //
+                // The single-volume arm answers an arrival inside the reuse arm
+                // (`refreshVctFast`'s "items born since the build" loop), and
+                // that path REFUSES under a chain by construction — so a NEW GI
+                // item that arrived after the chain was built cast no bounce at
+                // all under cascades, silently and for ever: nothing else ever
+                // re-selects a cascade's item set. (NEW is what this branch
+                // sees: `scan.giKnown` is set the first time the walk meets a
+                // node and is never cleared, so an item that leaves the channel
+                // and comes back is not a second arrival — that edge goes
+                // through `invalidateGiCaches` like every other channel change.)
+                //
+                // Both halves are needed and they are different statements:
+                // `itemsStale` makes each cascade RE-SELECT its attach set at
+                // whatever rebuild it next takes (it is not itself a reason to
+                // rebuild — round-2 F2), and the dirty box is what gives the
+                // cascades that can actually SEE the newcomer a rebuild to take.
+                // The scheduler still spends at most one cascade per frame.
+                if (!firstGi && !mVctCascades.empty()) {
+                    for (VctCascade &c : mVctCascades) c.itemsStale = true;
+                    noteGiCascadeDirty(&a);
+                }
             } else if (giAabbMoved(n.scan.giBox, a)) {
                 Ogre::Aabb moved = n.scan.giBox;
                 moved.merge(a);
@@ -2710,73 +2741,6 @@ float OgreScene::giRayMarchStepScale(bool inMotion) const {
     return inMotion ? std::max(rest, kMotionRayMarchStepScale) : rest;
 }
 
-void OgreScene::rebuildGi(GiStaleReason why) {
-    ++mGiRebuilds;
-    // WHAT THE MONITOR IS TOLD THIS COST WAS FOR (ENGINE-5 review, ledger §208).
-    // The IR arm records no stale reason of its own — nothing calls
-    // staleProbeGrid on this path, because Instant Radiosity has no probe grid —
-    // so reading `mLastStaleReason` here named whatever staled the grid last,
-    // which on a light drag was a `Moved` or a `Refresh` from minutes earlier.
-    // The caller knows; it passes it.
-    const GiStaleReason reason = why == GiStaleReason::None ? mLastStaleReason : why;
-    // The Instant Radiosity arm's rebuild — the same event, the same reason
-    // vocabulary; the detail says which arm paid for it.
-    monitor::EventScope giEvent(MonitorEventKind::GiRebuild, monitor::reasonOf(reason),
-                                "gi.rebuild", "ir");
-    // Every early return below leaves "nothing built" showing in giStatus.
-    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
-    Ogre::Light *driver = markGiLight(mGi.irLight);
-    Ogre::Vector3 mn, mx;
-    if (!driver || !computeGiBounds(mn, mx)) {
-        mInstantRadiosity->clear();   // nothing to bounce (yet); stay armed
-        return;
-    }
-    // One area of interest covering the GI bounds. Directional rays start
-    // outside the sphere so nearby geometry occludes correctly.
-    const Ogre::Aabb aabb = Ogre::Aabb::newFromExtents(mn, mx);
-    mGiLitVolume = aabb;
-    noteGiAutoVolume(aabb, !giBoundsExplicit());
-    mInstantRadiosity->mAoI.clear();
-    mInstantRadiosity->mAoI.push_back(
-        Ogre::InstantRadiosity::AreaOfInterest(aabb, aabb.getRadius() * 2.0f));
-    {
-        // THE GI CACHE'S OWN ROW (ENGINE-5 item 2). `CacheKind::Gi` existed in
-        // Types.h and nothing ever filed one, so a capture showed GI rebuilds
-        // as EVENTS and never as work in the frame that paid for it. The IR
-        // trace is pure CPU (a ray trace on the UI thread), hence no render
-        // system and no GPU pair.
-        monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0, "ir.rebuild");
-        mInstantRadiosity->build();
-    }
-    // Diagnostic: JAHSHAKA_GI_DEBUG=1 logs how many VPLs the trace planted.
-    if (std::getenv("JAHSHAKA_GI_DEBUG")) {
-        size_t vpls = 0;
-        Ogre::ObjectMemoryManager &mm = mSceneMgr->_getLightMemoryManager();
-        for (size_t rq = 0; rq < mm.getNumRenderQueues(); ++rq) {
-            Ogre::ObjectData objData;
-            const size_t total = mm.getFirstObjectData(objData, rq);
-            for (size_t i = 0; i < total; i += ARRAY_PACKED_REALS) {
-                for (size_t k = 0; k < ARRAY_PACKED_REALS && i + k < total; ++k) {
-                    const Ogre::Light *l = static_cast<Ogre::Light *>(objData.mOwner[k]);
-                    if (l && l->getType() == Ogre::Light::LT_VPL) {
-                        ++vpls;
-                        if (vpls <= 4) {
-                            const Ogre::ColourValue c = l->getDiffuseColour();
-                            const Ogre::Vector3 pos = l->getParentNode()->_getDerivedPosition();
-                            Ogre::LogManager::getSingleton().logMessage(
-                                "Jahshaka GI: vpl at " + Ogre::StringConverter::toString(pos) +
-                                " diffuse " + Ogre::StringConverter::toString(c) +
-                                " range " + std::to_string(l->getAttenuationRange()));
-                        }
-                    }
-                }
-                objData.advancePack();
-            }
-        }
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: instant radiosity planted " + std::to_string(vpls) + " VPLs");
-    }
-}
 
 void OgreScene::rebuildVct() {
     // THE PHOTON ARM (GiParams::cascades): camera-centred cascades instead of
@@ -2952,7 +2916,7 @@ size_t OgreScene::buildVoxelArm(const Ogre::Aabb &aabb) {
         // PBR items only — the same set IR traces (never sky/overlays/billboards).
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         mVctVoxelizer->addItem(item, false);
-        mVctItemIds.push_back(kv.first);     // what the reuse arm compares against (B4)
+        mVctItemIds.insert(kv.first);        // what the reuse arm compares against (B4)
         ++itemCount;
     }
     if (!itemCount) {
@@ -3120,8 +3084,19 @@ std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
         const int res = int(giVoxelResolution());
         switch (mGi.quality) {
         case GiQuality::Low:
-            table.push_back({  5.0f, res, 0.0f });
-            table.push_back({ 20.0f, res, 0.0f });
+            // LOW IS 64^3, NOT THE QUALITY DIAL'S 32 (PHOTON_SPEC §7 E2 (4):
+            // "Low = 2 cascades @ 64^3, 1 bounce, the field ON, no probes").
+            // Low is a GPU tier now — it replaced a CPU ray trace — and the
+            // number that decides whether its bounce means anything is the CELL,
+            // not the resolution: at 32 the inner cascade's cell is 0.31 m and
+            // the outer one's 1.25, which smears a room's own walls. At 64 they
+            // are 0.156 and 0.625 m for a voxel volume 1/8 the memory of the
+            // single 64 m box this tier used to be unable to afford at all.
+            // TWO cascades, because reach is what stops a corridor going black
+            // and the far one is the cheap one (its cell declines everything
+            // sub-voxel — rule 2).
+            table.push_back({  5.0f, 64, 0.0f });
+            table.push_back({ 20.0f, 64, 0.0f });
             break;
         case GiQuality::High:
             table.push_back({  5.0f, 128, 0.0f });
@@ -3139,17 +3114,31 @@ std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
     }
     // THE STEP TABLE, when a row did not pin one: the pin's own
     // `autoCalculateStepSizes(4)` shape (OgreVctCascadedVoxelizer.cpp:131-161)
-    // written out here so it is ours to tune (A7) — the outermost cascade steps
-    // every 4 cells and every finer cascade steps the same DISTANCE, ceiled to
-    // whole cells and floored at half its resolution (the pin's own guard
-    // against a step that outruns the volume). On the sample set this resolves
-    // to 64 / 48 / 16 / 4 cells = 5.0 / 7.5 / 7.5 / 7.5 m, exactly what the
-    // manager resolved in spikes/photon-s1 §4.
+    // written out here so it is ours to tune (A7) — every finer cascade steps
+    // the same DISTANCE as the outermost one, ceiled to whole cells and floored
+    // at half its resolution (the pin's own guard against a step that outruns
+    // the volume).
+    //
+    // THE OUTERMOST CASCADE STEPS TWICE AS FAR AS THE REST (PHOTON_SPEC §7
+    // E2 (1), "the outer stepCells raised"), and the reason is a measurement,
+    // not symmetry. The outermost cascade is the one that encloses the most
+    // geometry and resolves the least, so it is BY FAR the most expensive
+    // rebuild in the chain — on the 8,026-instance lattice it is 88.9 ms of GPU
+    // against cascade 0's 18.1, and even on the Showroom at Epic it is the row
+    // that peaks (spikes/photon-e2/BASELINE.md). Halving how often it runs
+    // halves that cost, and what it buys with the frames it skips is that its
+    // 60 m box sits up to 15 m off-centre instead of 7.5 — on a volume 120 m
+    // across, at 1.875 m per cell, which is a quarter of a cell of parallax on
+    // the far bounce. The INNER cascades are untouched, because they are what
+    // the eye is actually looking at and they are cheap.
+    static const float kOuterStepCells = 8.0f;   // the pin's own value is 4
+    static const float kInnerStepCells = 4.0f;
     const float cellLast = table.back().halfSize * 2.0f / float(table.back().resolution);
     for (size_t i = 0; i < table.size(); ++i) {
         if (table[i].stepCells > 0.0f) continue;
         const float cell = table[i].halfSize * 2.0f / float(table[i].resolution);
-        float steps = (i + 1u == table.size()) ? 4.0f : std::ceil(4.0f * cellLast / cell);
+        float steps = (i + 1u == table.size()) ? kOuterStepCells
+                                               : std::ceil(kInnerStepCells * cellLast / cell);
         steps = std::max(1.0f, std::min(steps, float(table[i].resolution) * 0.5f));
         table[i].stepCells = steps;
     }
@@ -3225,7 +3214,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
     for (const Node *np : mItemNodes) {          // the item index, not the map (B6)
         Ogre::Item *item = np->item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        mVctItemIds.push_back(np->selfId);
+        mVctItemIds.insert(np->selfId);
         ++itemCount;
     }
     if (!itemCount) {
@@ -3280,6 +3269,14 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
     // (binding, teardown, material generation, status) sees the arm it knows.
     } JAH_CATCH(mError, abandonCascadeChain());
     if (mVctCascades.empty() || !mVctCascades[0].lighting) return abandonCascadeChain();
+    if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+        std::string row;
+        for (size_t i = 0; i < mVctCascades.size(); ++i)
+            row += (i ? " / " : "") + std::to_string(cascadeBounces(i));
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: cascade bounce counts (the pin's per-cascade stabilisation at " +
+            std::to_string(std::min(std::max(mGi.numBounces, 1), 4)) + " total bounces): " + row);
+    }
     mVctVoxelizer = mVctCascades[0].voxelizer;
     mVctLighting  = mVctCascades[0].lighting;
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
@@ -3377,48 +3374,182 @@ static const float kCascadeSubVoxelFactor = 0.5f;
 // SELECTION, so a cascade that scrolled across a room kept reporting the
 // contents of the room it left.
 unsigned OgreScene::cascadeGeometryCount(const VctCascade &c) const {
-    const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+    return selectCascadeItems(c, nullptr);
+}
+
+// HOW MANY ITEMS THIS CASCADE'S VOXELISER HOLDS, without a budget — the whole GI
+// set minus what its own cell declines (rule 2). With a budget the cascade keeps
+// the list and `attachedItems.size()` is the answer; this is the other half of
+// `GiStatus::cascades[].attached`.
+unsigned OgreScene::cascadeAttachCount(const VctCascade &c) const {
     const float minExtent = c.cell() * kCascadeSubVoxelFactor;
-    unsigned inside = 0;
-    for (const Node *np : mItemNodes) {          // the item index, not the map (B6)
+    unsigned n = 0;
+    for (const Node *np : mItemNodes) {
+        Ogre::Item *item = np->item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        const Ogre::Vector3 h = item->getWorldAabb().mHalfSize;
+        if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;
+        ++n;
+    }
+    return n;
+}
+
+// THE ATTACH SET AND THE ENCLOSED COUNT, in ONE walk — and, when the document
+// asks for one, THE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1), audit B7).
+//
+// `keep` null asks only the question `GiStatus::cascades[].items` answers: how
+// many GI items this cascade would voxelise if it rebuilt right now. `keep`
+// non-null additionally fills in the set to ATTACH, which is a different set:
+// without a budget it is the whole size-filtered scene (rule 1 — Ogre culls it
+// to the region on every build, and re-selecting per rebuild drops the mesh
+// bookkeeping and re-uploads every buffer), and with one it is the budget's
+// pick, which is necessarily region-dependent and therefore re-selected as the
+// cascade scrolls.
+//
+// THE RANKING, and why it is size IN CELLS: `size / cell` is how many of THIS
+// cascade's voxels an object spans, which is exactly how much of this cascade's
+// picture it can possibly be. The same crate is 13 cells for the 5 m cascade
+// and half a cell for the 60 m one, so one budget number spends the inner
+// cascade on the crates and the outer one on the buildings without a second
+// dial. Distance to the cascade's own centre breaks ties — with equal-sized
+// objects (a lattice, a forest, a city block) that is the whole ordering, and
+// "the nearest N" is the right answer for a camera-centred volume.
+//
+// Objects OUTSIDE the box are ranked too, and kept when the budget has room:
+// the attach set is not the enclosed set, and a cascade about to scroll must
+// already hold what it is scrolling towards.
+unsigned OgreScene::selectCascadeItems(const VctCascade &c,
+                                       std::vector<Ogre::Item *> *keep) const {
+    const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+    const float cell = c.cell();
+    const float minExtent = cell * kCascadeSubVoxelFactor;
+    const int cap = std::max(0, mGi.cascadeInstanceCap);
+    if (keep) keep->clear();
+    if (!cap) {
+        unsigned inside = 0;
+        for (const Node *np : mItemNodes) {      // the item index, not the map (B6)
+            Ogre::Item *item = np->item;
+            if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+            const Ogre::Aabb wa = item->getWorldAabb();
+            const Ogre::Vector3 h = wa.mHalfSize;
+            if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;   // rule 2
+            if (keep) keep->push_back(item);
+            if (box.intersects(wa)) ++inside;
+        }
+        return inside;
+    }
+    // THE BUDGET IS ON. One pass to score, one partial sort, one pass to count.
+    //
+    // REACH BEFORE SIZE, and that order is the whole correctness of the budget
+    // (round-2 review F3). Size-in-cells alone is a statement about how much of
+    // THIS cascade's picture an object could be, and it says nothing about
+    // whether the object is anywhere near it: a 100 m building a kilometre away
+    // spans 1,280 cells of a 60 m cascade and would outrank every crate standing
+    // inside the box — the budget would spend itself on geometry the region cull
+    // then throws away, and the cascade would voxelise nothing at all. So the
+    // primary key is "can this cascade reach it": its box GROWN BY ONE STEP, so
+    // that what it is about to scroll into is kept too (the attach set must lead
+    // the scroll, not follow it). Size in cells and distance order the rest.
+    const float reach = c.halfSize + c.step();
+    const Ogre::Aabb reachBox(c.centre, Ogre::Vector3(reach));
+    struct Ranked { bool reachable; float cells; float dist2; Ogre::Item *item; bool inside; };
+    std::vector<Ranked> ranked;
+    ranked.reserve(mItemNodes.size());
+    for (const Node *np : mItemNodes) {
         Ogre::Item *item = np->item;
         if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
         const Ogre::Aabb wa = item->getWorldAabb();
         const Ogre::Vector3 h = wa.mHalfSize;
-        if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;
-        if (box.intersects(wa)) ++inside;
+        const float extent = std::max(std::max(h.x, h.y), h.z) * 2.0f;
+        if (extent < minExtent) continue;                                     // rule 2
+        const Ogre::Vector3 d = wa.mCenter - c.centre;
+        ranked.push_back({ reachBox.intersects(wa), extent / cell, d.dotProduct(d), item,
+                           box.intersects(wa) });
+    }
+    const size_t take = std::min(size_t(cap), ranked.size());
+    std::partial_sort(ranked.begin(), ranked.begin() + take, ranked.end(),
+                      [](const Ranked &a, const Ranked &b) {
+                          if (a.reachable != b.reachable) return a.reachable;
+                          if (a.cells != b.cells) return a.cells > b.cells;
+                          return a.dist2 < b.dist2;
+                      });
+    unsigned inside = 0;
+    for (size_t i = 0; i < take; ++i) {
+        if (keep) keep->push_back(ranked[i].item);
+        if (ranked[i].inside) ++inside;
     }
     return inside;
 }
 
+// THE VOXELISATION LOD HOOK (ATOM-1 hand-off, lead 2026-09-15; NANITE_SPEC
+// stage 1). ONE place, and it answers 0 today.
+//
+// THE RULE, when the levels exist: an outer cascade must voxelise the COARSEST
+// level whose world-space error is below HALF ITS OWN CELL, because anything
+// finer than that is detail the grid provably cannot hold — the same argument
+// rule 2 (`kCascadeSubVoxelFactor`) makes about whole objects, made about the
+// triangles inside one. The 60 m cascade's cell is 1.875 m; a mesh simplified
+// to a 0.9 m error voxelises to the same grid as the full-resolution one and
+// costs a fraction of the raster pass.
+//
+// WHAT IT IS WAITING FOR (named so the last inch is a wiring job and not a
+// design one): ATOM-1's `MeshData::lodIndices` / `lodValues` — N index buffers
+// over ONE shared vertex buffer with a per-level world-space error — plus its
+// documented helper "the coarsest level whose error is below a given
+// world-space size". With those, this returns that helper's answer for
+// `c.cell() * kCascadeSubVoxelFactor`. Until then every cascade voxelises
+// level 0 and the picture is exactly today's.
+//
+// AND THE OTHER HALF, which is NOT ours: `VctVoxelizer::addItem` takes no LOD
+// (OgreVctVoxelizer.h) — it reads the item's LOD-0 vao. Spending the level this
+// returns needs either a `addItem(item, lod)` overload (an Ogre patch: a new
+// argument threaded into `VoxelizedMeshCache::addMeshToCache`'s key and its
+// buffer walk) or an item whose mesh IS the coarse level. Both are the lead's
+// wiring at the merge; this function is the one place that decides WHICH level.
+unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item) const {
+    (void)c; (void)item;
+    return 0u;
+}
+
 void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     if (!c.voxelizer) return;
+    const bool budgeted = mGi.cascadeInstanceCap > 0;
     // RULE 1 — only on a change... or when the SET itself changed under us
     // (audit D2: an object left or joined the GI geometry channel). That is a
     // re-selection, so the old set has to go first — which costs the mesh
     // bookkeeping rule 1 exists to keep, and is why it is driven by an edge and
     // never by a scroll.
-    if (c.itemsAttached == attach && !c.itemsStale) return;
+    //
+    // A BUDGET MAKES THE SET REGION-DEPENDENT, so under one the question is not
+    // "has an edge fired" but "is the pick still the same pick": the chosen set
+    // is computed and compared, and a scroll that changed nobody's rank costs a
+    // vector compare. (Without a budget the set cannot change without an edge,
+    // and this reduces to exactly the test it always was.)
     if (!attach) {
+        if (!c.itemsAttached && !c.itemsStale) return;
         c.voxelizer->removeAllItems();
         c.itemsAttached = false;
         c.itemsStale = false;
+        c.attachedItems.clear();
         return;
     }
-    if (c.itemsStale && c.itemsAttached) c.voxelizer->removeAllItems();
+    const bool edge = !c.itemsAttached || c.itemsStale;
+    if (!edge && !budgeted) return;               // rule 1, exactly as it was
+    std::vector<Ogre::Item *> wanted;
+    selectCascadeItems(c, &wanted);
+    if (!edge && wanted == c.attachedItems) return;
+    if (c.itemsAttached) c.voxelizer->removeAllItems();
     c.itemsStale = false;
-    // THE ATTACH SET IS SIZE-FILTERED AND WHOLE — not box-filtered (rule 1:
-    // Ogre culls it to the region on every build, and re-selecting it per
-    // rebuild would drop the mesh bookkeeping and re-upload every buffer).
-    // What each rebuild actually voxelises is counted by cascadeGeometryCount.
-    const float minExtent = c.cell() * kCascadeSubVoxelFactor;
-    for (const Node *np : mItemNodes) {          // the item index, not the map (B6)
-        Ogre::Item *item = np->item;
-        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-        const Ogre::Vector3 h = item->getWorldAabb().mHalfSize;
-        if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;   // rule 2
+    for (Ogre::Item *item : wanted) {
+        // The ATOM-1 hook, called at the ONE site that hands geometry to the
+        // voxeliser. `lod` is 0 until the levels exist (see cascadeVoxelLod);
+        // the voxeliser has no LOD argument yet, so it is computed and not yet
+        // spent — deliberately, so that wiring it is one call site.
+        const unsigned lod = cascadeVoxelLod(c, item);
+        (void)lod;
         c.voxelizer->addItem(item, false);
     }
+    c.attachedItems.swap(wanted);
     c.itemsAttached = true;
 }
 
@@ -5128,17 +5259,8 @@ void OgreScene::teardownVct() {
     applyReflectionToAll();
 }
 
-void OgreScene::teardownIr() {
-    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
-    if (!mInstantRadiosity) return;
-    delete mInstantRadiosity;   // ~InstantRadiosity clears the VPLs
-    mInstantRadiosity = nullptr;
-    if (mSceneMgr && mSceneMgr->getForwardPlus())
-        mSceneMgr->getForwardPlus()->setEnableVpls(false);
-}
-
 void OgreScene::teardownGi() {
-    teardownIr();
+    mGiLitVolume = mGiProbeRegion = Ogre::Aabb(Ogre::Vector3::ZERO, Ogre::Vector3::ZERO);
     teardownVct();
     // ...and only here: the scene's GI history starts again (B9).
     mGiCascadeAwaitingCamera = false;   // no arm is wanted at all now (F5)
