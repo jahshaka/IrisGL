@@ -1272,7 +1272,38 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     apart before and 1/255 (the voxel's own 8-bit step) after.
     Suite: `gi.cascade_determinism` case 3.
 
-THE STACK IS 0001-0062 (this list; `build-ogre.sh` globs `*.patch`, so the file
+63. **0063-microcode-cache-for-reflected-array-bindings** (SOURCE —
+    `OgreMain/include/OgreRootLayout.h`,
+    `RenderSystems/Vulkan/include/OgreVulkanProgram.h`,
+    `RenderSystems/Vulkan/include/OgreVulkanRootLayout.h`,
+    `RenderSystems/Vulkan/src/OgreVulkanProgram.cpp`; **every tree re-runs
+    `build-ogre.sh`**; no overlap with any other patch) — the microcode cache
+    can now hold a shader whose root layout was DISCOVERED by reflecting its own
+    SPIR-V. Symptom: with Photon's VCT cascade chain on, every launch after the
+    first two recompiled exactly three shaders forever —
+    `20/33/44LightVctBounceInject_cs`, the 4-, 3- and 2-cascade permutations of
+    the bounce injection. Cause: `LightVctBounceInject_cs.glsl:13` sets
+    `uses_array_bindings` for any cascade count above one,
+    `HlmsCompute::compileShader` answers with
+    `setAutoReflectArrayBindingsInRootLayout(true)`, and upstream's microcode
+    read (`OgreVulkanProgram.cpp:325`) and write (`:751`, its own TODO) are both
+    gated on `!mReflectArrayRootLayouts`. Such a shader is compiled TWICE cold —
+    once to find its arrays, once against the layout they imply — and the second
+    compile's preamble (the microcode key is source + preamble) depends on what
+    the first found, so an entry stored under it could never be looked up. The
+    patch captures the key in `loadFromSource()` before anything compiles, and
+    frames the blob as `magic | array bindings | SPIR-V` so a hit can put the
+    reflected bindings back into the root layout instead of recompiling. The
+    frame is length-checked, which is also the only bounds check between that
+    file and `vkCreateShaderModule`. The blob format changes, so every existing
+    shader cache is one generation stale — Jahshaka's cache fingerprint carries
+    `JAHSHAKA_OGRE_PATCH_SERIES` and discards it automatically. Upstream's second
+    case (no custom root layout at all) is deliberately NOT taken: that layout
+    lives in the shader's own source, which is not parsed when the key is built.
+    Measured: `shadercache.app` run 3 compiled 3 of 110 before, 0 of 113 after.
+    Suite: `shadercache.app` (its unchanged `compiledThisRun == 0` assertion).
+
+THE STACK IS 0001-0063 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 NOTE ON 0059: it is ATOM-1's `Mesh2 set lod values`, which landed on main while
 this lane ran — this branch carries 0001-0058 + 0060-0062 and the merged tree
@@ -1284,7 +1315,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060 and 0061 are SOURCE-only (0062 is SOURCE + media), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061 and 0063 are SOURCE-only (0062 is SOURCE + media), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
