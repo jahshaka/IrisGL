@@ -95,9 +95,18 @@ private:
 /// skipped it would render a DIFFERENT SIZE from the bake — the exact class
 /// services/meshbakestore.cpp already documents for the unit factor — which is
 /// why tests/hygiene/one_readfile.sh refuses any other ReadFile call site.
+///
+/// `formatHint` is a FILE EXTENSION without the dot, for the one case where the
+/// path cannot tell assimp what the bytes are: the content-addressed store
+/// names its objects by their sha256 and nothing else (services/assetcas.h), so
+/// a read straight off the store has no extension to dispatch on and assimp
+/// falls back to sniffing. Given the hint the bytes are read into memory and
+/// dispatched by format, exactly as a Qt resource already is. Empty (the
+/// default) = read the path, which is what every import does.
 const aiScene *readSceneFile(Assimp::Importer &importer, const QString &filePath,
                              unsigned int flags,
-                             const ImportTransform &xf = ImportTransform());
+                             const ImportTransform &xf = ImportTransform(),
+                             const QString &formatHint = QString());
 
 } // namespace iris
 

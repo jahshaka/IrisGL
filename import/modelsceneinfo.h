@@ -22,6 +22,65 @@ namespace iris
 
 class SceneSource;
 
+/// WHAT A LIGHT PRE-READ OF A MODEL FILE TELLS THE IMPORT DIALOG
+/// (SPECS/IMPORT_DIALOG_SPEC.md §8).
+///
+/// The dialog has to show a person the size, the unit, the clip list and
+/// whether the file is rigged BEFORE anything is imported — and it has to do
+/// it fast enough to sit in front of a drop. So this is a parse with NO
+/// post-processing at all (the ~3x cheaper half, import/importflags.h): no
+/// triangulation, no tangents, and — the part that matters here — NO
+/// aiProcess_GlobalScale, so the vertices are still in the FILE'S OWN UNITS.
+///
+/// That is deliberate, not a limitation: the dialog's whole job is to let a
+/// person disagree with the file about what a unit is, and the preview it
+/// draws is
+///
+///     metres = source units x (the unit in force) x (the user's scale)
+///
+/// where "the unit in force" is `declaredUnitScale` under `units: "auto"` and
+/// the user's override otherwise (import/importsettings.h). A pre-read that
+/// had already applied the declaration could not show the difference.
+struct ModelPreRead
+{
+    bool parsed = false;        ///< false = `error` says why, everything else is empty
+    QString error;
+
+    /// Metres per source unit AS THE FILE DECLARES IT (FBX UnitScaleFactor/100;
+    /// 1 for every format at this pin that declares nothing).
+    double declaredUnitScale = 1.0;
+
+    /// The model's axis-aligned bounding box IN SOURCE UNITS — mesh-local
+    /// boxes pushed through each instancing node's transform, exactly as
+    /// ModelSceneInfo's extent is measured. Both corners, not just the size:
+    /// the dialog's origin helpers (Centre, Bottom-centre) need to know WHERE
+    /// the model sits, not only how big it is.
+    double aabbMin[3] = { 0.0, 0.0, 0.0 };
+    double aabbMax[3] = { 0.0, 0.0, 0.0 };
+    bool aabbValid = false;
+
+    int meshes = 0;
+    int materials = 0;
+    /// Distinct bone names across the meshes. `rigged` is the dialog's
+    /// "this is a character" test — the only thing the suggestion line needs.
+    int bones = 0;
+    bool rigged() const { return bones > 0; }
+
+    /// The clip names THIS FILE WOULD IMPORT AS, in file order, produced by
+    /// the one naming rule (import/clipnaming.h) — so the dialog's checklist
+    /// offers exactly the names the `clips` setting filters on.
+    QStringList clipNames;
+
+    /// Parse `filePath` with no post-processing and describe it. Goes through
+    /// the choke point (import/scenesource.h) with an identity transform, like
+    /// every other parse in this library.
+    ///
+    /// `formatHint` (an extension without the dot) is for a read straight off
+    /// the content-addressed store, whose objects are named by their hash and
+    /// carry no extension to dispatch on — the reimport dialog's case.
+    static ModelPreRead read(const QString &filePath, const QString &formatHint = QString());
+};
+
 /// The FACTS of a parsed model file, as plain data — what Studio's asset
 /// metadata block (services/assetmetadata.cpp, `kind: "model"`) is computed
 /// from, read off the parse once and handed over with no importer type in

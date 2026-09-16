@@ -247,6 +247,7 @@ set (HEADERS
     import/parsecensus.h
     import/meshbake.h
     import/importflags.h
+    import/clipnaming.h
     import/importsettings.h
     import/scenesource.h
     import/modelsceneinfo.h
