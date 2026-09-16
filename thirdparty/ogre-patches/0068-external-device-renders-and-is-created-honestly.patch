@@ -53,6 +53,21 @@ HUNK 2 — the device Ogre would have built, exported (OgreVulkanDevice.{h,cpp})
   every existing caller (upstream's Tutorial_VulkanExternal included) is
   unaffected.
 
+  And three things the second read asked for (fix round 1):
+  * `VulkanDeviceCreationRequest`'s copy constructor and assignment are `= delete`d.
+    Its pNext chain points INTO the object, so a copy hands vkCreateDevice a chain
+    that walks the original - the header's prose is now a compile error.
+  * The base `VkPhysicalDeviceFeatures` is taken from the request too, not only the
+    feature-chain bits: `setPhysicalDevice` had filled `mDeviceFeatures` from
+    `fillDeviceFeatures()`, i.e. from what the GPU SUPPORTS, and `mSupportedStages`
+    is derived from exactly two of those bits (geometry, tessellation). Today the
+    two agree by construction; a caller that trims the request would otherwise
+    leave Ogre believing in stages the device never enabled.
+  * The external path no longer re-logs "Found device extension" for every
+    extension on the device (the OpenXR caller has just enumerated and logged the
+    same list to build the request), and the "hardware ray query" verdict is logged
+    AFTER the override rather than only from the support query before it.
+
 Verified: the plain (non-external) path is unchanged in behaviour — the
 refactor moves code, it does not alter a single selection rule; Jahshaka's
 --engine-selftest hash is byte-identical across the patch (1fd91da9...).
@@ -63,7 +78,7 @@ may report an "already applied" false positive; judge by content and reset the
 submodule before build-ogre.sh.
 ---
 diff --git a/RenderSystems/Vulkan/include/OgreVulkanDevice.h b/RenderSystems/Vulkan/include/OgreVulkanDevice.h
-index 10efb0d..127ac6d 100644
+index 10efb0d..e348c26 100644
 --- a/RenderSystems/Vulkan/include/OgreVulkanDevice.h
 +++ b/RenderSystems/Vulkan/include/OgreVulkanDevice.h
 @@ -59,6 +59,8 @@ namespace Ogre
@@ -129,7 +144,7 @@ index 10efb0d..127ac6d 100644
          bool hasDeviceExtension( const IdString extension ) const;
  
          /// Jahshaka (ogre-patch 0038): true when VK_KHR_acceleration_structure +
-@@ -233,6 +275,57 @@ namespace Ogre
+@@ -233,6 +275,63 @@ namespace Ogre
          void stallIgnoringDeviceLost();
  
          bool isDeviceLost() const { return mDeviceLostReason != VK_SUCCESS; }
@@ -156,8 +171,8 @@ index 10efb0d..127ac6d 100644
 +    /// third party such as OpenXR), then hand the SAME request back to Ogre through
 +    /// VulkanExternalDevice::creationRequest.
 +    ///
-+    /// The pNext chain points into this object. Do not copy it; keep it alive for as
-+    /// long as Ogre holds the external device.
++    /// The pNext chain points into this object, so it is non-copyable by declaration
++    /// (below). Keep it alive for as long as Ogre holds the external device.
 +    struct _OgreVulkanExport VulkanDeviceCreationRequest
 +    {
 +        /// Static string literals, Ogre's order. Safe to hand to Vulkan directly.
@@ -182,13 +197,19 @@ index 10efb0d..127ac6d 100644
 +
 +        VulkanDeviceCreationRequest();
 +
++        /// NOT COPYABLE, and the compiler says so rather than this comment: the pNext
++        /// chain above points INTO this object, so a copy would hand vkCreateDevice a
++        /// chain that walks the original - or a dead one.
++        VulkanDeviceCreationRequest( const VulkanDeviceCreationRequest & ) = delete;
++        VulkanDeviceCreationRequest &operator=( const VulkanDeviceCreationRequest & ) = delete;
++
 +        /// VkDeviceCreateInfo::pNext (null when !hasFeatures2).
 +        const void *pNext() const { return hasFeatures2 ? &features2 : 0; }
      };
  
      // Mask away read flags from srcAccessMask
 diff --git a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
-index d5e3943..8d0dd14 100644
+index d5e3943..6da687f 100644
 --- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
 +++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
 @@ -604,15 +604,23 @@ namespace Ogre
@@ -474,7 +495,28 @@ index d5e3943..8d0dd14 100644
      void VulkanDevice::destroyQueues( FastArray<VulkanQueue> &queueArray )
      {
          FastArray<VulkanQueue>::iterator itor = queueArray.begin();
-@@ -914,6 +1022,37 @@ namespace Ogre
+@@ -879,14 +987,14 @@ namespace Ogre
+                                              externalDevice->graphicsQueue );
+ 
+             // Filter wrongly-provided extensions
++            //
++            // Jahshaka (ogre-patch 0068): the per-extension "Found device extension"
++            // line is NOT repeated here. On the OpenXR route the caller has already
++            // enumerated and logged the very same list to build the creation request,
++            // so this loop printed every name on this device a second time.
+             std::set<String> extensions;
+             for( auto &ext : availableExtensions )
+-            {
+-                const String extensionName = ext.extensionName;
+-                LogManager::getSingleton().logMessage( "Vulkan: Found device extension: " +
+-                                                       extensionName );
+-                extensions.insert( extensionName );
+-            }
++                extensions.insert( ext.extensionName );
+             auto extFilter = [&extensions]( const VkExtensionProperties &elem ) {
+                 if( extensions.find( elem.extensionName ) != extensions.end() )
+                     return false;
+@@ -914,6 +1022,61 @@ namespace Ogre
              VkPhysicalDevicePipelineCreationCacheControlFeaturesEXT deviceCacheControlFeatures;
              fillDeviceFeatures2( deviceFeatures2, device16BitStorageFeatures,
                                   deviceShaderFloat16Int8Features, deviceCacheControlFeatures );
@@ -489,8 +531,27 @@ index d5e3943..8d0dd14 100644
 +            // to get this right), the request IS the enabled set.
 +            if( externalDevice->creationRequest )
 +            {
-+                mDeviceExtraFeatures = externalDevice->creationRequest->extraFeatures;
-+                mRayQueryFeatures = externalDevice->creationRequest->rayQuery;
++                const VulkanDeviceCreationRequest &req = *externalDevice->creationRequest;
++                // The BASE VkPhysicalDeviceFeatures as well: setPhysicalDevice() filled
++                // mDeviceFeatures from fillDeviceFeatures(), i.e. from what the GPU
++                // supports, and on an external device that is again not what was
++                // enabled. Today the two agree (the request is built by the same
++                // function on the same physical device), but only by construction - a
++                // caller that trims the request would leave Ogre believing in geometry
++                // or tessellation shaders that were never enabled, and mSupportedStages
++                // is derived from exactly those two bits.
++                mDeviceFeatures = req.features;
++                mSupportedStages = 0xFFFFFFFF;
++                if( !mDeviceFeatures.geometryShader )
++                    mSupportedStages ^= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
++                if( !mDeviceFeatures.tessellationShader )
++                {
++                    mSupportedStages ^= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
++                                        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
++                }
++
++                mDeviceExtraFeatures = req.extraFeatures;
++                mRayQueryFeatures = req.rayQuery;
 +                // The copied chain pointed into the caller's request; nothing walks it
 +                // after vkCreateDevice, so do not keep the dangling links.
 +                mRayQueryFeatures.accelStruct.pNext = 0;
@@ -500,6 +561,11 @@ index d5e3943..8d0dd14 100644
 +                LogManager::getSingleton().logMessage(
 +                    "Vulkan: External device features taken from the caller's creation "
 +                    "request (what was enabled), not from what the GPU supports." );
++                LogManager::getSingleton().logMessage(
++                    String( "Vulkan: hardware ray query " ) +
++                    ( mRayQueryFeatures.enabled ? "AVAILABLE (as enabled on the external device)"
++                                                : "not available (not enabled on the external "
++                                                  "device)" ) );
 +            }
 +            else
 +            {
@@ -512,7 +578,7 @@ index d5e3943..8d0dd14 100644
          }
  
          vkGetPhysicalDeviceProperties( mPhysicalDevice, &mDeviceProperties );
-@@ -1047,40 +1186,45 @@ namespace Ogre
+@@ -1047,40 +1210,45 @@ namespace Ogre
          }
      }
      //-------------------------------------------------------------------------
@@ -570,7 +636,7 @@ index d5e3943..8d0dd14 100644
              // Jahshaka (ogre-patch 0038): the hardware ray-query set. Every one of
              // these is requested ONLY if the driver advertises it, exactly like the
              // names above; on a device without them nothing changes. Ogre itself uses
-@@ -1088,29 +1232,29 @@ namespace Ogre
+@@ -1088,29 +1256,29 @@ namespace Ogre
              // acceleration structures and run inline ray queries.
              // Each arm pushes the MACRO, which is a string literal with static
              // storage - never extensionName.c_str(), which dies with this loop
@@ -609,7 +675,7 @@ index d5e3943..8d0dd14 100644
  
          // Jahshaka patch 0013: fifo_latest_ready = vsync without the FIFO
          // queue backlog (NVIDIA xcb has no MAILBOX). A separate pass on
-@@ -1121,21 +1265,21 @@ namespace Ogre
+@@ -1121,21 +1289,21 @@ namespace Ogre
          {
              const String extensionName = ext.extensionName;
              if( extensionName == "VK_KHR_present_mode_fifo_latest_ready" )
@@ -635,7 +701,7 @@ index d5e3943..8d0dd14 100644
              const_cast<VkExtensionProperties *>( availableExtensions.begin() ),  // swappy API flaw
              &numSwappyRequiredExtensions, 0 );
  
-@@ -1152,14 +1296,14 @@ namespace Ogre
+@@ -1152,14 +1320,14 @@ namespace Ogre
              swappyRequiredExtensionNamesTmp.push_back( extName.name );
  
          SwappyVk_determineDeviceExtensions(
@@ -652,7 +718,7 @@ index d5e3943..8d0dd14 100644
              {
                  if( strncmp( alreadyAdded, swappyReqExtension, VK_MAX_EXTENSION_NAME_SIZE ) == 0 )
                  {
-@@ -1168,10 +1312,19 @@ namespace Ogre
+@@ -1168,10 +1336,19 @@ namespace Ogre
                  }
              }
              if( !bAlreadyAdded )

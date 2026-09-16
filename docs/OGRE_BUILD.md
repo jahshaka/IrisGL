@@ -1602,14 +1602,56 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     (17 extensions, `shaderFloat16` 1, `storageInputOutput16` 0, cache control 1,
     ray query 1, `RSC_VP_AND_RT_ARRAY_INDEX_FROM_ANY_SHADER` 1). Jahshaka's
     `--engine-selftest` is unchanged (`1fd91da9…`): both hunks are dead on the
-    non-external path.
+    non-external path. FIX ROUND 1 added three things a second read asked for:
+    `VulkanDeviceCreationRequest` is non-copyable by declaration (its pNext chain
+    points into itself, so a copy would hand `vkCreateDevice` a chain that walks the
+    original); the BASE `VkPhysicalDeviceFeatures` is taken from the request too, not
+    only the chain's bits, with `mSupportedStages` re-derived from it (`mDeviceFeatures`
+    was still read from what the GPU SUPPORTS, and geometry/tessellation are exactly the
+    two bits that stage mask is built from); and the external path no longer re-logs
+    "Found device extension" for every extension on the device, while the "hardware ray
+    query" verdict is logged after the override rather than only from the support query
+    before it.
 
-THE STACK IS 0001-0068 (this list; `build-ogre.sh` globs `*.patch`, so the file
+69. **0069-device-loss-must-not-abort-from-a-destructor** (SOURCE —
+    `RenderSystems/Vulkan/src/Vao/OgreVulkanStagingBuffer.cpp`, one file, touched by no
+    other patch in the stack; **every tree re-runs `build-ogre.sh`**) — EVERY DEVICE
+    LOSS THAT REACHES THE RECOVERY PATH ABORTS THE PROCESS. `~VulkanStagingBuffer`
+    waits on its last fence unconditionally (`:58-59`) and `wait()` ends in
+    `checkVkResult`, which THROWS on a bad `VkResult` (`:142-150`); a destructor is
+    implicitly `noexcept` since C++11, so a throw leaving it is `std::terminate`. And
+    `handleDeviceLost()` — the render system's ONLY recovery path — destroys every
+    staging buffer on its way through `destroyVkResources` →
+    `VaoManager::deleteStagingBuffers`. So a lost device does not produce a clean
+    exception and does not produce a recreate: it produces SIGABRT, by construction,
+    not by luck. Found by lane VR-1A's gate in a suite with nothing to do with VR:
+    `scripting.e2e.physics` died "Subprocess aborted" with a kernel-confirmed
+    `NVRM: Xid 109 CTX SWITCH TIMEOUT` naming that app's own pid, and the backtrace is
+    `_fireFrameStarted → validateDevice → handleDeviceLost → destroyVkResources →
+    deleteStagingBuffers → ~VulkanStagingBuffer → wait → __cxa_call_terminate → SIGABRT`
+    (evidence `~/Developer/spikes/openxr-vulkan/xid-physics-crash.log`). THE FIX is one
+    guard: skip the wait when the device is already lost. A fence on a lost device can
+    never be signalled, so the wait is not merely dangerous but meaningless;
+    `vkDestroyFence` and the pool return below it are both legal on a lost device, so
+    nothing else changes, and the skipped wait logs one `LML_CRITICAL` line so the loss
+    is never silent. The device is reached exactly as `wait()` reaches it (through the
+    VaoManager, whose pointer the destructor already computed further down and which is
+    simply hoisted). On a healthy device the condition is false and behaviour is
+    identical — `--engine-selftest` unchanged (`1fd91da9…`). The rest of that teardown
+    path already uses `stallIgnoringDeviceLost` for exactly this reason; this was the
+    only throwing wait left on it. HONEST RESIDUAL: whether a fresh `vkCreateDevice`
+    succeeds after an Xid 109 — i.e. whether `handleDeviceLost` can RECOVER rather than
+    merely fail cleanly — is a separate question this patch does not answer and could
+    not answer without provoking a device loss deliberately; what it establishes is the
+    floor, that a device loss ends in a clean throw or a working recreate and never in
+    an abort. The Xid 109 class itself is lane XID-2's. UPSTREAM-REPORTABLE.
+
+THE STACK IS 0001-0069 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067 and 0068 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068 and 0069 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
