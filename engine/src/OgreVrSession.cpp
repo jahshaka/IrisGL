@@ -1072,8 +1072,12 @@ void VrSession::setMirrorView(OgreView *v) {
 void VrSession::syncMirror() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root || !mView) return;
+    // A camera IS required even though every pass in the mirror node is a quad:
+    // CompositorWorkspace takes a default camera and dereferences it. A view
+    // whose scene has not been set yet has none.
     const bool wanted = mMirrorView && mMirrorView->isEnabled() &&
-                        mConfig.mirror != VrMirrorMode::None && mView->targetTexture();
+                        mConfig.mirror != VrMirrorMode::None && mView->targetTexture() &&
+                        mMirrorView->targetTexture() && mMirrorView->camera();
     if (!wanted) { teardownMirror(); return; }
     // A WORKSPACE REBUILD ON EITHER SIDE INVALIDATES THE ORDER (the inset's
     // rule, CAMERAS_SPEC §7.2): attachWorkspace always APPENDS, so a rebuilt

@@ -1174,11 +1174,16 @@ bool OgreEngine::beginVrSession(Scene *scene, const VrConfig &cfg) {
 
 void OgreEngine::endVrSession() {
     if (!mVrSession) return;
-    JAH_TRY {
-        vr::sessionEnd(mVrSession);
-        mVrSession = nullptr;
-    } JAH_CATCH(mLastError, );
+    // CLEARED FIRST, THEN DELETED. The session's destructor calls back into
+    // this engine (destroyView for its own View), and anything that re-entered
+    // through a live `mVrSession` pointer would be talking to a half-destroyed
+    // object. After this line there is no session, which is the truth every
+    // caller should see while one is being taken apart.
+    VrSession *session = mVrSession;
     mVrSession = nullptr;
+    JAH_TRY {
+        vr::sessionEnd(session);
+    } JAH_CATCH(mLastError, );
 }
 
 VrState OgreEngine::vrState() const {
@@ -1891,7 +1896,11 @@ OgreEngine::~OgreEngine() {
     // The BOOT — the VkInstance and VkDevice the runtime made — is destroyed at
     // the very bottom, AFTER Root: Ogre destroys neither (§2.1 row 8), and it
     // is using both until its own destructor has run.
-    if (mVrSession) { try { vr::sessionEnd(mVrSession); } catch (...) {} mVrSession = nullptr; }
+    if (mVrSession) {
+        VrSession *session = mVrSession;
+        mVrSession = nullptr;      // see endVrSession: cleared first, then deleted
+        try { vr::sessionEnd(session); } catch (...) {}
+    }
     // The shadow-pass counter is a listener on a live workspace: unhook it
     // before anything that owns a workspace starts dying.
     detachShadowCounter();
