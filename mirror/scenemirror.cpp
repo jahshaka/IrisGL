@@ -2083,10 +2083,22 @@ void SceneMirror::syncGroundHorizon()
             mTarget->setNodeVisible(mHorizonNode, false);
             mHorizonVisible = 0;
         }
-        // Let go of the floor's material as well: while the horizon holds one
-        // the cache sweep keeps it alive (reclaimUnused), and a floor that has
-        // been deleted must take its material with it.
-        if (mHorizonMaterial) {
+        // A HIDE IS NOT A DELETE (DRAG-1, RENDER_AUDIT I-2). What stood here
+        // detached the horizon's mesh and released its material on EITHER —
+        // and the visible consequence of doing that for a HIDE was the owner's
+        // "hiding the plane changed its size": un-hiding the floor rebuilt the
+        // 4 km plane from scratch (a mesh build, a UV fit over the floor's
+        // vertices, a material creation), and in the frames between, the ground
+        // the user could still see through the horizon was the floor's own
+        // 100 m square. Hiding a thing must not destroy it.
+        //
+        // The release itself is right and is KEPT for the case it was written
+        // for: there is no floor at all any more — it was deleted, or this is a
+        // thumbnail or preview scene that never had one. Then the horizon's
+        // material must go, because while the horizon holds one the cache sweep
+        // keeps it alive (reclaimUnused) and a deleted floor has to take its
+        // material with it.
+        if (!floor && mHorizonMaterial) {
             mTarget->detachMesh(mHorizonNode);
             mHorizonMaterial = 0;
             mReclaimPending = true;
@@ -3617,7 +3629,18 @@ MaterialId SceneMirror::materialFor(iris::Material *material)
         // the legacy DefaultMaterial only, so this is a guard rather than a
         // path anything shipped takes.
         if (!mDefaultMaterial) {
-            PbrParams d; d.albedo = Colour(0.8f, 0.8f, 0.8f); d.metalness = 0.0f; d.roughness = 0.6f;
+            // THE SAME SURFACE THE DOCUMENT INVENTS (DRAG-1, RENDER_AUDIT I-1),
+            // from the one definition in pbrmaterial.h. It used to be its own
+            // set of numbers (albedo 0.8, roughness 0.6), so a mesh node with
+            // no material rendered as a surface the properties panel could not
+            // show and a user could not edit — and at a roughness neither the
+            // panel nor this file agreed on.
+            PbrParams d;
+            d.albedo    = Colour(iris::defaultmaterial::kBaseColorLinear,
+                                 iris::defaultmaterial::kBaseColorLinear,
+                                 iris::defaultmaterial::kBaseColorLinear);
+            d.metalness = iris::defaultmaterial::kMetalness;
+            d.roughness = iris::defaultmaterial::kRoughness;
             mDefaultMaterial = mTarget->createPbrMaterial(d);
         }
         return mDefaultMaterial;
@@ -6835,6 +6858,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // Glossy floors need the mip chain (the shader samples at
         // roughness * numMips); without it every reflector is a perfect mirror.
         pr.mipmaps = true;
+        // AND THE MIRROR'S TARGET FOLLOWS THE CHAIN'S (DRAG-1, RENDER_AUDIT
+        // ON-3): the same scene, the same radiances, and no tonemapper inside
+        // the mirror's own workspace — so an 8-bit target clipped every value
+        // above 1.0 and quantised the dark end into visible steps. The document
+        // flag is the one the post chain already reads.
+        pr.hdr = mSource->hdrEnabled;
         pr.accurateLighting = true;
         // The reflection's clear colour is the view's, so a mirror showing
         // "nothing" shows the same nothing the viewport does.
