@@ -21,6 +21,7 @@ For more information see the LICENSE file
 
 #include "import/importflags.h"
 #include "import/parsecensus.h"
+#include "import/scenesource.h"
 
 namespace iris
 {
@@ -105,10 +106,10 @@ ClipFileInfo ClipFileInfo::read(const QString &filePath, const QVector<double> &
 {
     ClipFileInfo out;
     Assimp::Importer importer;
-    const aiScene *scene = [&]() {
-        ParseCensus::Record census(filePath);
-        return importer.ReadFile(filePath.toStdString().c_str(), ImportFlags::ClipNamesOnly);
-    }();
+    // Through the choke point with an IDENTITY transform, deliberately: this
+    // read is names, counts and key TIMES for the metadata block, never
+    // geometry that has to agree with a bake (import/scenesource.h).
+    const aiScene *scene = readSceneFile(importer, filePath, ImportFlags::ClipNamesOnly);
     if (!scene) {
         out.error = QString::fromUtf8(importer.GetErrorString());
         if (out.error.isEmpty()) out.error = QStringLiteral("the file could not be read");

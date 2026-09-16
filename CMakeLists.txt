@@ -173,6 +173,7 @@ set(SRCS
     import/parsecensus.cpp
     import/meshbake.cpp
     import/importflags.cpp
+    import/importsettings.cpp
     import/scenesource.cpp
     import/modelsceneinfo.cpp
     import/clipfileinfo.cpp
@@ -246,6 +247,7 @@ set (HEADERS
     import/parsecensus.h
     import/meshbake.h
     import/importflags.h
+    import/importsettings.h
     import/scenesource.h
     import/modelsceneinfo.h
     import/clipfileinfo.h

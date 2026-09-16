@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include "import/importsettings.h"
 
 namespace iris
 {
@@ -73,7 +74,7 @@ struct ModelSceneInfo
 
     /// The model's axis-aligned WORLD size in metres: mesh-local AABBs pushed
     /// through each instancing node's accumulated transform (the same shape
-    /// as Studio's document-side fitsize::measureNode, so the number recorded
+    /// as Studio's document-side extent::measureNode, so the number recorded
     /// at import and the number a placed node measures agree). `extentValid`
     /// is false for a scene with no geometry or a degenerate one.
     double extentX = 0.0;
@@ -84,7 +85,9 @@ struct ModelSceneInfo
     /// Metres per source unit AS THE FILE DECLARED IT (FBX's
     /// GlobalSettings::UnitScaleFactor, centimetres per unit — a Mixamo
     /// download says 1.0); 1.0 for every format that declares nothing.
-    /// Recorded for the user: the canonical parse has already applied it.
+    /// Recorded for the user — the import dialog shows it so a person can
+    /// disagree with the file — and for the choke point, which needs it to
+    /// resolve a UNIT OVERRIDE without a probe parse (import/scenesource.h).
     double declaredUnitScale = 1.0;
 
     /// Facts of a scene an import already parsed (no second parse).
@@ -92,7 +95,20 @@ struct ModelSceneInfo
 
     /// Parse `filePath` with the canonical preset and describe it. `parsed`
     /// is false when the importer refused the file.
-    static ModelSceneInfo read(const QString &filePath);
+    ///
+    /// `xf` is the ASSET's import recipe (import/importsettings.h). It matters:
+    /// the `extent` this records is what the asset MEASURES, and a describe
+    /// that parsed with identity would report the file's authored size for an
+    /// asset the import scaled (the second read's F7).
+    static ModelSceneInfo read(const QString &filePath,
+                               const ImportTransform &xf = ImportTransform());
+
+    /// The file's OWN unit declaration alone, from a LIGHT parse (no
+    /// post-processing): metres per source unit, 1.0 for a format that
+    /// declares nothing and for a file that cannot be read. The one caller is
+    /// readSceneFile resolving a unit OVERRIDE, which needs the declaration
+    /// before it can hand assimp a scale (import/scenesource.h).
+    static double readDeclaredUnitScale(const QString &filePath);
 
     /// The version of the import library these facts come from ("6.0.<rev>"
     /// at the pin), for the import determinism record (ASSET_PIPELINE_SPEC

@@ -103,12 +103,19 @@ public:
     /// `extractDir`: where embedded textures and derived maps are WRITTEN
     /// (import staging). Empty = beside the source file (legacy behavior —
     /// wrong for read-only sources; the import pipeline always passes one).
+    /// `xf`: the ASSET's resolved import recipe (import/importsettings.h) —
+    /// the scale, rotation and origin its settings baked in, AND the tuning
+    /// half (skeleton / clips / materials) that decides what is built from the
+    /// parse. Identity for a raw path with no library row behind it; a library
+    /// asset's parse that passes identity renders a DIFFERENT SIZE, or a
+    /// different set of products, from the asset's own bake.
     static SceneNodePtr loadAsSceneFragment(
         QString path,
         std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
         SceneSource *scene_ = Q_NULLPTR,
         IModelReadProgress* progressReader = Q_NULLPTR,
-        const QString &extractDir = QString()
+        const QString &extractDir = QString(),
+        const ImportTransform &xf = ImportTransform()
     );
 
     /// The fragment from a parse a caller already holds (the threaded open's
@@ -117,7 +124,8 @@ public:
         const QString &filePath,
         const SceneSource &source,
         std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-        const QString &extractDir = QString()
+        const QString &extractDir = QString(),
+        const ImportTransform &xf = ImportTransform()
     );
 
     /// IrisGL-internal form of the above (a complete aiScene needs assimp's
@@ -127,7 +135,8 @@ public:
 		const QString &filePath,
 		const aiScene* scene_,
 		std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-		const QString &extractDir = QString()
+		const QString &extractDir = QString(),
+		const ImportTransform &xf = ImportTransform()
 	);
 
     static SceneNodePtr loadAsAnimatedModel(QString path);

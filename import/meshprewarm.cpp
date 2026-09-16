@@ -66,7 +66,10 @@ void MeshPrewarm::parse(const PrewarmItem &item)
     // Importer instances, and the aiScene must outlive this call (the entry
     // owns the importer, so it does).
     auto source = std::make_shared<SceneSource>();
-    const bool parsed = source->read(path);
+    // The asset's import transform, resolved with the plan on the catalog
+    // thread (PrewarmItem::transform): a fallback parse that dropped it would
+    // hand the open geometry of a different size from the bake it replaced.
+    const bool parsed = source->read(path, item.transform);
 
     QMutexLocker locked(&mLock);
     mEntries.insert(path, parsed ? source : std::shared_ptr<SceneSource>());

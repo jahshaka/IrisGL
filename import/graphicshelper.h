@@ -35,11 +35,16 @@ public:
      * @param filePath
      * @return
      */
-    static QList<MeshPtr> loadAllMeshesFromFile(QString filePath);
+    static QList<MeshPtr> loadAllMeshesFromFile(QString filePath,
+                                                const ImportTransform &xf = ImportTransform());
 
+    /// `xf` is the ASSET's import transform (import/importsettings.h) — the
+    /// scale, rotation and origin its settings baked in. Identity for a raw
+    /// path with no library row behind it.
     static void loadAllMeshesAndAnimationsFromFile(QString filePath,
                                                    QList<MeshPtr> &meshes,
-                                                   QMap<QString, SkeletalAnimationPtr> &animations);
+                                                   QMap<QString, SkeletalAnimationPtr> &animations,
+                                                   const ImportTransform &xf = ImportTransform());
 
     /// The meshes and clips of a parse the caller already holds (the threaded
     /// open's prewarm): a copy out of the scene, never a file read.
@@ -60,9 +65,15 @@ public:
      * empty); a readable file with no animation returns an empty map and an
      * empty *error. Studio's clip readers go through here so that assimp stays
      * an irisgl-private import dependency.
+     *
+     * `xf` is the RIG's import transform, not the clip file's own: the keys
+     * have to land on a skeleton that was baked under the character asset's
+     * import settings.
      */
     static QMap<QString, SkeletalAnimationPtr> loadAnimationsFromClipFile(const QString &filePath,
-                                                                          QString *error = nullptr);
+                                                                          QString *error = nullptr,
+                                                                          const ImportTransform &xf
+                                                                              = ImportTransform());
 };
 
 }

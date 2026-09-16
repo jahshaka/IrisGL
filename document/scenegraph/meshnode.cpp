@@ -260,7 +260,11 @@ QJsonObject readJahShader(const QString &filePath)
 static bool _findMeshNodeTransform(const aiNode* node, unsigned meshIndex,
                                    const aiMatrix4x4& parent, aiMatrix4x4& out)
 {
-    const aiMatrix4x4 global = node->mTransformation * parent;
+    // parent * child: aiMatrix4x4 multiplies COLUMN vectors, so the ancestor
+    // goes on the left (IMPORT-1: it read child * parent, which only agreed
+    // with ModelSceneInfo's own walk while every ancestor was identity — and
+    // an import transform pre-multiplied onto the root is not).
+    const aiMatrix4x4 global = parent * node->mTransformation;
     for (unsigned i = 0; i < node->mNumMeshes; ++i) {
         if (node->mMeshes[i] == meshIndex) { out = global; return true; }
     }
@@ -288,12 +292,30 @@ static void _applyMeshNodeTransform(const aiScene* scene, MeshNodePtr node)
     node->setLocalRot(iris::Quat(rot.w, rot.x, rot.y, rot.z));
 }
 
+/// The file's clips, through the import settings' `clips` switch
+/// (import/importsettings.h §4.3). Filtered AFTER extraction, on the names the
+/// rest of the app shows — extractAnimations uniquifies raw names, and a filter
+/// written against the raw ones would miss. MeshBake::buildFromScene filters
+/// the identical way, because the bake and this path must agree.
+static QMap<QString, SkeletalAnimationPtr> filteredClips(const aiScene *scene,
+                                                         const QString &filePath,
+                                                         const ImportTransform &xf)
+{
+    auto anims = Mesh::extractAnimations(scene, filePath);
+    if (xf.clips && xf.clipNames.isEmpty()) return anims;
+    QMap<QString, SkeletalAnimationPtr> kept;
+    for (auto it = anims.constBegin(); it != anims.constEnd(); ++it)
+        if (xf.wantsClip(it.key())) kept.insert(it.key(), it.value());
+    return kept;
+}
+
 QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 											aiNode* node,
 											SceneNodePtr rootBone,
 											QString filePath,
 											std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-											const QString& extractDir = QString())
+											const QString& extractDir = QString(),
+											const ImportTransform &xf = ImportTransform())
 {
     QSharedPointer<iris::SceneNode> sceneNode;
 
@@ -305,9 +327,11 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
         // objects like Bezier curves have no vertex positions in the aiMesh
         // aside from that, iris currently only renders meshes
         if (mesh->HasPositions()) {
-            auto meshObj = MeshPtr(new Mesh(mesh));
-            auto skel = Mesh::extractSkeleton(mesh, scene);
-            meshObj->setSkeleton(skel);
+            // THE TUNING SWITCHES (import/importsettings.h §4.3), applied to
+            // what is BUILT. The bake does exactly this, in the same order —
+            // tests/meshbake compares the two trees node for node.
+            auto meshObj = MeshPtr(new Mesh(mesh, xf.skeleton));
+            if (xf.skeleton) meshObj->setSkeleton(Mesh::extractSkeleton(mesh, scene));
 
             meshNode->setMesh(meshObj);
             meshNode->name = QString(mesh->mName.C_Str());
@@ -319,7 +343,8 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+            if (xf.materials)
+                MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -334,9 +359,8 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 
         for (unsigned i = 0; i < node->mNumMeshes; i++) {
             auto mesh = scene->mMeshes[node->mMeshes[i]];
-            auto meshObj = MeshPtr(new Mesh(mesh));
-            auto skel = Mesh::extractSkeleton(mesh, scene);
-            meshObj->setSkeleton(skel);
+            auto meshObj = MeshPtr(new Mesh(mesh, xf.skeleton));
+            if (xf.skeleton) meshObj->setSkeleton(Mesh::extractSkeleton(mesh, scene));
 
             auto meshNode = iris::MeshNode::create();
             meshNode->name = QString(mesh->mName.C_Str());
@@ -351,7 +375,8 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
             auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
             MeshMaterialData meshMat;
-            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+            if (xf.materials)
+                MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
             auto mat = createMaterialFunc(meshObj, meshMat);
             if (!!mat) meshNode->setMaterial(mat);
         }
@@ -372,7 +397,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
     if (!rootBone) rootBone = sceneNode;
 
     for (unsigned i = 0 ;i < node->mNumChildren; i++) {
-        auto child = _buildScene(scene, node->mChildren[i], rootBone, filePath, createMaterialFunc, extractDir);
+        auto child = _buildScene(scene, node->mChildren[i], rootBone, filePath, createMaterialFunc, extractDir, xf);
         sceneNode->addChild(child, false);
     }
 
@@ -384,7 +409,7 @@ QSharedPointer<iris::SceneNode>
 MeshNode::loadAsSceneFragment(QString filePath,
                               std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
                               SceneSource *scene_, IModelReadProgress* progressReader,
-                              const QString &extractDir)
+                              const QString &extractDir, const ImportTransform &xf)
 {
     // scene_ defaults to null in the declaration but was dereferenced
     // unconditionally — every caller had to allocate a SceneSource just to
@@ -399,12 +424,10 @@ MeshNode::loadAsSceneFragment(QString filePath,
 
     scene_->importer().SetProgressHandler(new ModelProgressHandler(progressReader));
     // The session entry's parse (Studio's ProjectAssets::registerSessionAsset
-    // on a bake-and-prewarm miss), counted by thread — import/parsecensus.h.
-    const aiScene *scene = [&]() {
-        ParseCensus::Record census(filePath);
-        return scene_->importer().ReadFile(filePath.toStdString().c_str(),
-                                           iris::ImportFlags::Canonical);
-    }();
+    // on a bake-and-prewarm miss), counted by thread and carrying the ASSET's
+    // import transform — through the choke point, import/scenesource.h.
+    const aiScene *scene = readSceneFile(scene_->importer(), filePath,
+                                         iris::ImportFlags::Canonical, xf);
 
     // ReadFile returns null on failure (corrupt file, or an importer feature
     // that is not compiled in, e.g. KHR_draco_mesh_compression): dereferencing
@@ -439,10 +462,10 @@ MeshNode::loadAsSceneFragment(QString filePath,
         auto mesh = scene->mMeshes[0];
         auto node = iris::MeshNode::create();
 
-        auto meshObj = MeshPtr(new Mesh(mesh));
+        auto meshObj = MeshPtr(new Mesh(mesh, xf.skeleton));
 
         //todo: use relative path from scene root
-        auto anims = Mesh::extractAnimations(scene, filePath);
+        auto anims = filteredClips(scene, filePath, xf);
         for (auto animName : anims.keys()) {
             // meshObj->addSkeletalAnimation(animName, anims[animName]);
             auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
@@ -458,8 +481,7 @@ MeshNode::loadAsSceneFragment(QString filePath,
             if (node->getAnimations().size() == 1) node->setAnimation(anim);
         }
 
-        auto skel = Mesh::extractSkeleton(mesh, scene);
-        meshObj->setSkeleton(skel);
+        if (xf.skeleton) meshObj->setSkeleton(Mesh::extractSkeleton(mesh, scene));
 
         node->setMesh(meshObj);
         node->meshPath = filePath;
@@ -469,7 +491,8 @@ MeshNode::loadAsSceneFragment(QString filePath,
         auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
         MeshMaterialData meshMat;
-        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+        if (xf.materials)
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
         auto mat = createMaterialFunc(meshObj, meshMat);
         if (!!mat) node->setMaterial(mat);
 
@@ -478,12 +501,12 @@ MeshNode::loadAsSceneFragment(QString filePath,
         return node;
     }
 
-    auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc, extractDir);
+    auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc, extractDir, xf);
     node->setAttached(false); // root of object shouldnt be attached
 
     // extract animations and add them one by one
     // todo: use relative path from scene root (Nic)
-    auto anims = Mesh::extractAnimations(scene, filePath);
+    auto anims = filteredClips(scene, filePath, xf);
     for (auto animName : anims.keys()) {
         auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
         node->addAnimation(anim);
@@ -501,9 +524,9 @@ MeshNode::loadAsSceneFragment(
     const QString &filePath,
     const SceneSource &source,
     std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-    const QString &extractDir)
+    const QString &extractDir, const ImportTransform &xf)
 {
-    return loadAsSceneFragment(filePath, source.scene(), createMaterialFunc, extractDir);
+    return loadAsSceneFragment(filePath, source.scene(), createMaterialFunc, extractDir, xf);
 }
 
 QSharedPointer<iris::SceneNode>
@@ -511,7 +534,7 @@ MeshNode::loadAsSceneFragment(
 	const QString &filePath,
 	const aiScene* scene_,
 	std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-	const QString &extractDir)
+	const QString &extractDir, const ImportTransform &xf)
 {
 	const aiScene *scene = scene_;
 
@@ -539,10 +562,10 @@ MeshNode::loadAsSceneFragment(
 		auto mesh = scene->mMeshes[0];
 		auto node = iris::MeshNode::create();
 
-		auto meshObj = MeshPtr(new Mesh(mesh));
+		auto meshObj = MeshPtr(new Mesh(mesh, xf.skeleton));
 
 		//todo: use relative path from scene root
-		auto anims = Mesh::extractAnimations(scene, filePath);
+		auto anims = filteredClips(scene, filePath, xf);
 		for (auto animName : anims.keys()) {
 			// meshObj->addSkeletalAnimation(animName, anims[animName]);
 			auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
@@ -551,8 +574,7 @@ MeshNode::loadAsSceneFragment(
 			if (node->getAnimations().size() == 1) node->setAnimation(anim);
 		}
 
-		auto skel = Mesh::extractSkeleton(mesh, scene);
-		meshObj->setSkeleton(skel);
+		if (xf.skeleton) meshObj->setSkeleton(Mesh::extractSkeleton(mesh, scene));
 
 		node->setMesh(meshObj);
 		node->meshPath = filePath;
@@ -562,7 +584,8 @@ MeshNode::loadAsSceneFragment(
 		auto dir = QFileInfo(filePath).absoluteDir().absolutePath();
 
 		MeshMaterialData meshMat;
-        MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
+        if (xf.materials)
+            MaterialHelper::extractMaterialData(scene, m, dir, meshMat, extractDir, filePath);
 		auto mat = createMaterialFunc(meshObj, meshMat);
 		if (!!mat) node->setMaterial(mat);
 
@@ -571,12 +594,12 @@ MeshNode::loadAsSceneFragment(
 		return node;
 	}
 
-	auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc, extractDir);
+	auto node = _buildScene(scene, scene->mRootNode, SceneNodePtr(), filePath, createMaterialFunc, extractDir, xf);
 	node->setAttached(false); // root of object shouldnt be attached
 
 							  // extract animations and add them one by one
 							  // todo: use relative path from scene root (Nic)
-	auto anims = Mesh::extractAnimations(scene, filePath);
+	auto anims = filteredClips(scene, filePath, xf);
 	for (auto animName : anims.keys()) {
 		auto anim = Animation::createFromSkeletalAnimation(anims[animName]);
 		node->addAnimation(anim);

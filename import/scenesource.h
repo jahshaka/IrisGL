@@ -15,6 +15,8 @@ For more information see the LICENSE file
 #include <QString>
 #include <memory>
 
+#include "import/importsettings.h"
+
 namespace Assimp { class Importer; }
 struct aiScene;
 
@@ -51,7 +53,11 @@ public:
     /// a file on disk, or a Qt resource (":/..." or "qrc:/...") through
     /// readSceneFile below. False, with errorString() set, when the file could
     /// not be read; a second read releases the first scene.
-    bool read(const QString &filePath);
+    ///
+    /// `xf` is the ASSET'S IMPORT TRANSFORM (import/importsettings.h): the
+    /// scale, rotation and origin its import settings baked into it. Default =
+    /// identity, which is what a raw path with no library row behind it gets.
+    bool read(const QString &filePath, const ImportTransform &xf = ImportTransform());
 
     /// True while a successfully parsed scene is held.
     bool hasScene() const;
@@ -80,8 +86,18 @@ private:
 /// unloadable with nothing but "error parsing file" (smoke L10 item 4). With
 /// the hint the resource is dispatched by extension, exactly as a file on disk
 /// always was. Returns null (the importer holds the error) on failure.
+///
+/// THE CHOKE POINT for the import transform (SPECS/IMPORT_DIALOG_SPEC.md §4.1).
+/// Every canonical parse in this tree goes through here, and `xf` is how an
+/// asset's baked scale/rotation/origin reaches it: the scale as assimp's own
+/// GLOBAL_SCALE_FACTOR before the read, the rotation and the metre-valued
+/// translation as a pre-multiply of the scene ROOT after it. A parse that
+/// skipped it would render a DIFFERENT SIZE from the bake — the exact class
+/// services/meshbakestore.cpp already documents for the unit factor — which is
+/// why tests/hygiene/one_readfile.sh refuses any other ReadFile call site.
 const aiScene *readSceneFile(Assimp::Importer &importer, const QString &filePath,
-                             unsigned int flags);
+                             unsigned int flags,
+                             const ImportTransform &xf = ImportTransform());
 
 } // namespace iris
 

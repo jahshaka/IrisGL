@@ -227,7 +227,11 @@ public:
 
 	Mesh();
 
-    Mesh(aiMesh* mesh);
+    /// `withBones` false: the bone index/weight vertex arrays are NOT built,
+    /// so a rigged file becomes static geometry. The import-settings switch
+    /// `skeleton:false` (irisgl/import/importsettings.h §4.3) is the only
+    /// caller that passes false; every other build is unchanged.
+    Mesh(aiMesh* mesh, bool withBones = true);
 
     /**
      *

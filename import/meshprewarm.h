@@ -48,6 +48,7 @@ For more information see the LICENSE file
 #include <QStringList>
 #include <memory>
 
+#include "import/importsettings.h"
 #include "import/meshbake.h"
 #include "import/scenesource.h"
 
@@ -60,6 +61,11 @@ struct PrewarmItem
     QString path;
     QString bakePath;
     QString bakeFingerprint;
+    /// The asset's import transform (import/importsettings.h) for the FALLBACK
+    /// parse — resolved with the bake path, on the thread that may touch the
+    /// catalog, because the worker may not. Identity for a path with no
+    /// library row behind it.
+    ImportTransform transform;
 };
 
 using BakedModelPtr = std::shared_ptr<const MeshBake::Model>;

@@ -72,7 +72,7 @@ Mesh::Mesh()
 }
 
 // http://ogldev.atspace.co.uk/www/tutorial38/tutorial38.html
-Mesh::Mesh(aiMesh* mesh)
+Mesh::Mesh(aiMesh* mesh, bool withBones)
 {
     triMesh = new TriMesh();
 
@@ -101,7 +101,7 @@ Mesh::Mesh(aiMesh* mesh)
         this->addVertexArray(VertexAttribUsage::BiTangent, (void*)mesh->mBitangents, sizeof(aiVector3D) * mesh->mNumVertices, AttribTypeFloat,3);
     }
 
-    if (mesh->HasBones()) {
+    if (mesh->HasBones() && withBones) {
         // bone weights for skeletal animation
     #define MAX_BONE_INDICES 4
         QVector<float> boneIndices;
