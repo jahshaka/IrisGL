@@ -747,6 +747,14 @@ GiStatus OgreScene::giStatus() const {
             cs.lastCpuMs  = c.lastCpuMs;
             cs.lodLevels  = c.lodLevels;    // what the attach set was voxelised at
             cs.voxelTriangles = c.lodTriangles;
+            // WHAT THE REBUILD COST IN DISPATCHES (ogre-patch 0065): read live off
+            // the voxeliser, which keeps its bucket map after build(). A bucket is
+            // a dispatch and a dispatch is sized by the whole octant, so this is
+            // the material-count half of a cascade's bill.
+            cs.voxelDispatches = c.voxelizer
+                                     ? (long long)(c.voxelizer->getNumBuckets() *
+                                                   c.voxelizer->getNumOctants())
+                                     : 0;
             st.cascades.push_back(cs);
         }
         st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;
