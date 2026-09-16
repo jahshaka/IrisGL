@@ -1486,6 +1486,53 @@ public:
     /// exists (a headless engine, or between Root and initialise).
     virtual void advanceResources() = 0;
 
+    // ---- VR (SPECS/VR_SPEC.md v3 phase 2) ---------------------------------
+    /// Did the boot reach an OpenXR runtime? False on every engine booted with
+    /// `EngineConfig::vr == VrMode::Disabled` (the default), on a build with no
+    /// loader, and on a box whose runtime refused — vrInfo().reason says which.
+    /// Fixed for the life of the process.
+    virtual bool vrAvailable() const = 0;
+    /// The runtime's identity and what it wants. Always safe to read; every
+    /// field is empty or zero when unavailable.
+    virtual const VrInfo &vrInfo() const = 0;
+    /// Begins ONE session on `scene` (there is one per engine, like Root).
+    ///
+    /// What it creates: an XrSession on the Vulkan device the runtime made at
+    /// boot, a reference space (STAGE where the runtime offers one — a FLOOR
+    /// origin, VR_SPEC §0's phase-1b lesson — LOCAL otherwise), one swapchain
+    /// per eye, a both-eyes render target of 2w x h, and a View of `scene`
+    /// drawn with INSTANCED STEREO into it (one scene pass, two eyes). The
+    /// session's View becomes the scene's GI driver for as long as it runs, so
+    /// the cascades follow the HEAD and not some other camera.
+    ///
+    /// From the next frame on, `renderOneFrame()` is PACED BY THE RUNTIME: it
+    /// blocks in xrWaitFrame at the top, draws both eyes, copies each into the
+    /// runtime's swapchain image and submits one projection layer. A host's
+    /// timer should go to zero interval and its mirror window's vsync off
+    /// (Engine::setVsync) for the duration; nothing breaks if it does not,
+    /// the loop simply paces to the slower of the two.
+    ///
+    /// False = no runtime, a session already running, no such scene, or the
+    /// runtime refused; `lastError()` says which. Never throws, never hangs.
+    virtual bool beginVrSession(Scene *scene, const VrConfig &cfg) = 0;
+    /// Ends the session and puts everything back: the mirror, the View, the
+    /// target, the swapchains, the frame's pacing and the render profile the
+    /// session imposed. Safe when none is running.
+    virtual void endVrSession() = 0;
+    /// The runtime's lifecycle state (VrState::Unavailable when no session).
+    virtual VrState vrState() const = 0;
+    /// Everything a caller can ask about the live session without an Ogre or
+    /// OpenXR type crossing the boundary.
+    virtual VrStatus vrStatus() const = 0;
+    /// The View the session draws into — the both-eyes target. Null when no
+    /// session runs. Hosts use it for nothing but introspection; the session
+    /// owns its lifetime.
+    virtual View *vrView() const = 0;
+    /// Which on-screen (or offscreen) View shows the mirror. Null clears it.
+    /// Takes effect on the next frame; the View keeps its own picture
+    /// underneath and the mirror is copied over it (VR_SPEC §4.3).
+    virtual void setVrMirrorView(View *view) = 0;
+
     /// RESOLVES ONE SCENE'S GRAPH WITHOUT DRAWING ANYTHING — transforms,
     /// skeletal animations, tag points, bounds and the light list, exactly the
     /// pass `renderOneFrame` runs for the scenes it draws.

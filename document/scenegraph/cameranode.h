@@ -152,7 +152,6 @@ public:
 
     float nearClip;
     float farClip;
-    float vrViewScale;
 	float orthoSize;
 	bool isPerspective;
 
@@ -309,8 +308,6 @@ public:
 
 	void setProjection(CameraProjection view);
     CameraProjection getProjection();
-    float getVrViewScale();
-    void setVrViewScale(float viewScale);
     void setAspectRatio(float aspect);
     void setFieldOfViewRadians(float fov);
     void setFieldOfViewDegrees(float fov);
@@ -468,7 +465,6 @@ private:
 		// mirror rendered preview cameras ORTHOGRAPHIC when the garbage came up
 		// false. Keep it in lock-step with projMode.
 		isPerspective = true;
-		vrViewScale = 2.0f; // good default
         // THE VIEWER IS NOT THE VIEWED (nodegraph.h, the transform-write
         // epoch; lane ENGINE-7 item 1). Flying the camera cannot change
         // anything the renderer scans off that counter — the GI items' boxes,

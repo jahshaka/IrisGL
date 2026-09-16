@@ -2641,6 +2641,129 @@ struct RayQueryStatus {
     float reflectMs = -1.0f;
 };
 
+// ---------------------------------------------------------------------------
+// VR (SPECS/VR_SPEC.md v3 phase 2). The whole surface is Ogre-free AND
+// OpenXR-free: nothing below names a runtime type, so a host compiled against
+// this header needs no OpenXR headers and a build without the loader still
+// links (every call answers "unavailable").
+// ---------------------------------------------------------------------------
+
+/// Whether this process may talk to an OpenXR runtime at all (EngineConfig::vr).
+///
+/// `Disabled` is BIT-IDENTICAL to an engine that has never heard of VR: no
+/// loader is opened, no XrInstance is created, and — the part that matters —
+/// Ogre creates its own VkInstance and VkDevice exactly as it always did. That
+/// is the constraint of VR_SPEC §0: "without a headset the tool is today's
+/// tool, unchanged", and it is why the desktop selftest hash cannot move for
+/// VR work.
+///
+/// `IfAvailable` asks the loader once, at boot, BEFORE the render system is
+/// loaded — because on the `XR_KHR_vulkan_enable2` route the RUNTIME creates
+/// the Vulkan instance and device the engine then runs on, and Ogre reads
+/// `external_instance` in the render system's constructor. A failure at any
+/// step (no loader, no manifest, no runtime, no headset, a device the runtime
+/// refuses) is NOT an error: the reason is recorded in VrInfo::reason, the
+/// plain boot continues, and vrAvailable() answers false for the life of the
+/// process. VR CAPABILITY IS FIXED AT BOOT — plugging a headset in later needs
+/// a restart, because WiVRn only writes its runtime manifest on connect.
+enum class VrMode {
+    Disabled = 0,
+    IfAvailable
+};
+
+/// The OpenXR session's lifecycle, as the runtime reports it
+/// (XrSessionState, one for one, plus the two states that are ours).
+///
+/// `Unavailable` = no session exists and none can (vrAvailable() false).
+/// `Lost` = the runtime or the device went away mid-session; the session is
+/// ended cleanly and cannot be restarted in this process (VR_SPEC §7 item 9 —
+/// at this pin a lost EXTERNAL device is unrecoverable by construction).
+enum class VrState {
+    Unavailable = 0,
+    Idle,            ///< a session object exists, the runtime has not said Ready
+    Ready,           ///< xrBeginSession has been called
+    Synchronized,    ///< the runtime is consuming frames; nothing is displayed
+    Visible,         ///< displayed, not focused (the dashboard is up)
+    Focused,         ///< displayed and receiving input
+    Stopping,        ///< xrEndSession pending
+    Lost
+};
+
+/// What the desktop shows while a session runs (VrConfig::mirror).
+enum class VrMirrorMode {
+    None = 0,
+    Left,     ///< the left eye's half of the both-eyes target — the default
+    Right,
+    Both      ///< both halves, squeezed into the mirror's own aspect
+};
+
+/// What the runtime is and what it wants — filled once at boot (the identity
+/// half) and completed when a session begins (the size/refresh half, which
+/// needs no session on any runtime measured but is reported from one place).
+struct VrInfo {
+    bool        available = false;
+    /// Why not, when `available` is false: the loader's or the runtime's own
+    /// failure, in words, at the step it happened. Empty when available.
+    std::string reason;
+    std::string runtime;        ///< XrInstanceProperties::runtimeName ("Monado(XRT) ...")
+    std::string runtimeVersion; ///< "M.m.p" of XrInstanceProperties::runtimeVersion
+    std::string system;         ///< XrSystemProperties::systemName ("Meta Quest Pro on WiVRn")
+    /// The OpenXR version the instance was created at — negotiated, never
+    /// assumed: 1.1 is asked for and 1.0 is the retry (VR_SPEC §0, the Oculus
+    /// audit: Meta's PC runtime has no 1.1 conformance).
+    unsigned    apiMajor = 0, apiMinor = 0;
+    /// The runtime's RECOMMENDED per-eye size. Never ours to pin: Monado's
+    /// null compositor says 320x240 and its xcb one 896x1007; the Quest Pro
+    /// over WiVRn says 2160x2376.
+    unsigned    eyeWidth = 0, eyeHeight = 0;
+    /// From `predictedDisplayPeriod` of the first frame (60.0 on the simulated
+    /// HMD, 90.0 on the Quest Pro over WiVRn). 0 until a session has pumped.
+    float       refreshHz = 0.0f;
+    /// "stage" (a FLOOR origin — what a scene authored with the ground at
+    /// y = 0 needs) or "local" (the runtime offers no stage; the head sits
+    /// where the wearer was when the session began). Phase 1b measured why
+    /// this matters: in LOCAL the Quest Pro's eyes were at y = -0.70 m, under
+    /// the floor. Empty until a session has been created.
+    std::string space;
+    bool        visibilityMask = false;  ///< XR_KHR_visibility_mask is advertised
+    bool        depthLayer = false;      ///< XR_KHR_composition_layer_depth is advertised
+};
+
+/// A session's parameters. Everything here is the HOST's choice; nothing is
+/// persisted by the engine.
+struct VrConfig {
+    VrMirrorMode mirror = VrMirrorMode::Left;
+    /// Metres of world per metre of room. 1 = life size.
+    float worldScale = 1.0f;
+    /// FOR MEASUREMENT ONLY (VR_SPEC §5 phase 2's "at 2160x2376 per eye"): render
+    /// each eye at this size instead of the runtime's recommendation. The XR
+    /// swapchains still use the runtime's size, so the copy scales — which is
+    /// exactly what makes it a measurement of the RENDER and not of the runtime.
+    /// 0 = use the runtime's recommendation (the product path).
+    unsigned overrideEyeWidth = 0, overrideEyeHeight = 0;
+};
+
+/// What a live session is doing. Every number is a COUNT or a measured value,
+/// never a wall-clock derivation (VR_SPEC §6 flake class (b): count frames,
+/// never time, on a loaded box).
+struct VrStatus {
+    VrState            state = VrState::Unavailable;
+    bool               active = false;      ///< a session object exists
+    unsigned long long frames = 0;          ///< xrEndFrame calls that succeeded
+    unsigned long long rendered = 0;        ///< frames the runtime asked us to draw
+    /// The distance between the two located eye positions, metres. 0 before the
+    /// first xrLocateViews.
+    float              ipd = 0.0f;
+    unsigned           eyeWidth = 0, eyeHeight = 0;   ///< what the chain renders per eye
+    VrMirrorMode       mirror = VrMirrorMode::None;
+    float              worldScale = 1.0f;
+    /// Whether the per-eye PROJECTIONS differ, i.e. whether the runtime gave
+    /// the two eyes different fovs. Monado's simulated HMD does not (both eyes
+    /// get one symmetric fov and only the POSES separate them); the Quest Pro
+    /// does. A test that asserts "the eyes differ" has to know which it has.
+    bool               asymmetricFov = false;
+};
+
 /// Everything the engine needs to start. All paths are resolved by the HOST at
 /// runtime (next to the executable, an env override, or a compile-time default).
 /// Nothing in the engine is baked to a build-machine path.
@@ -2728,6 +2851,12 @@ struct EngineConfig {
     /// It is NOT a quality dial: with rays off the tier builds nothing at all,
     /// costs nothing at all, and `giStatus().rayQuery.enabled` reads false.
     bool rayTracing = true;
+    /// OPENXR (SPECS/VR_SPEC.md §4.1). Disabled by default and on purpose: the
+    /// `IfAvailable` route creates the Vulkan instance and device through the
+    /// RUNTIME, which is a different boot, so a host opts in per process (Studio:
+    /// `--vr` / JAHSHAKA_VR=1) rather than inheriting whatever manifest the last
+    /// headset connection happened to write. See VrMode.
+    VrMode vr = VrMode::Disabled;
     /// Vertical sync for ON-SCREEN views, as they are created (fps audit F1).
     /// True is what every window did unconditionally before this field existed.
     /// False asks for an immediate, tearing present mode — the "unlimited"

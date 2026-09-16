@@ -485,6 +485,9 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     if (a.looks.size() != b.looks.size()) return false;
     for (size_t i = 0; i < a.looks.size(); ++i)
         if (a.looks[i].kind != b.looks[i].kind) return false;
+    // STEREO is graph shape twice over: it writes four fields onto every scene
+    // pass definition, and a flip must therefore rebuild (VR_SPEC §4.3).
+    if (a.stereo != b.stereo || a.cullCameraName != b.cullCameraName) return false;
     return a.distortion == b.distortion && a.hzb == b.hzb && a.hzbLevels == b.hzbLevels &&
            a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
            a.tonemapFixed == b.tonemapFixed &&
@@ -612,6 +615,62 @@ void maskOutHelpers(Ogre::CompositorNodeDef *n) {
     }
 }
 
+/// INSTANCED STEREO, ON EVERY SCENE PASS THIS NODE CARRIES (ChainDesc::stereo).
+///
+/// The same sweep as maskOutHelpers and for the same reason: `build` below
+/// produces one of half a dozen shapes, each with its own set of PASS_SCENE
+/// sites (the opaque pass, the overlay pass, the SSR prepass, the depth/
+/// distortion/refraction passes, the shape's own extras — nine sites across the
+/// file as of this writing), and a stereo flag applied at some of them would
+/// draw some of the frame once, across both eyes, at the left eye's
+/// projection. Applying it HERE, to whatever the shape came out as, is what
+/// makes "all of them or none" structural rather than a checklist.
+///
+/// What each pass gets (the pin's own recipe — Tutorial_OpenVR.cpp:135-160 and
+/// Tutorial_OpenVRWorkspace.compositor:23-29; the first Vulkan use of it at
+/// this pin, VR_SPEC §2.5):
+///   * mInstancedStereo  — HlmsBaseProp::InstancedStereo on every shader the
+///     pass compiles (OgreHlms.cpp:3532), two instances per draw with the
+///     viewport index taken from the instance's low bit (OgreRenderQueue.cpp
+///     :697-699), and the per-eye viewProj pair + leftToRightView written into
+///     the pass buffer from the camera's VrData (OgreHlmsPbs.cpp:2149-2280).
+///   * two viewports — the left eye in [0, .5] of the target's width and the
+///     right in [.5, 1]. `mNumViewports` is what makes the viewport index
+///     mean anything.
+///   * the cull camera — ONE frustum for both eyes, so the two eyes cull and
+///     light identically (Forward+ builds its grid from the cull camera and
+///     the shader transforms into its clip space).
+///
+/// `mReuseCullData` is deliberately NOT set: it is an optimisation for a
+/// SECOND pass that culls the same set as a first one, and our shapes' scene
+/// passes have different render-queue ranges and different visibility masks.
+void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
+    const Ogre::IdString cull = cullCamera.empty() ? Ogre::IdString()
+                                                   : Ogre::IdString(cullCamera);
+    const size_t targets = n->getNumTargetPasses();
+    for (size_t t = 0; t < targets; ++t) {
+        Ogre::CompositorTargetDef *td = n->getTargetPass(t);
+        if (!td) continue;
+        for (Ogre::CompositorPassDef *p : td->getCompositorPasses()) {
+            if (!p || p->getType() != Ogre::PASS_SCENE) continue;
+            auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
+            sp->mInstancedStereo = true;
+            sp->mCullCameraName  = cull;
+            sp->mNumViewports    = 2u;
+            for (int eye = 0; eye < 2; ++eye) {
+                const float left = eye == 0 ? 0.0f : 0.5f;
+                sp->mVpRect[eye].mVpLeft   = left; sp->mVpRect[eye].mVpTop    = 0.0f;
+                sp->mVpRect[eye].mVpWidth  = 0.5f; sp->mVpRect[eye].mVpHeight = 1.0f;
+                // The SCISSOR follows the viewport: without it each eye's pass
+                // would scissor the whole target and a clear or a full-target
+                // quad inside the pass would reach into the other eye.
+                sp->mVpRect[eye].mVpScissorLeft   = left; sp->mVpRect[eye].mVpScissorTop    = 0.0f;
+                sp->mVpRect[eye].mVpScissorWidth  = 0.5f; sp->mVpRect[eye].mVpScissorHeight = 1.0f;
+            }
+        }
+    }
+}
+
 }   // namespace
 
 void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
@@ -701,6 +760,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             if (desc.letterbox) inset(handlesOut, p);
         }
         if (!desc.helpers) maskOutHelpers(n);
+        if (desc.stereo) applyStereo(n, desc.cullCameraName);
         Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
         workDef->connectExternal(0, n->getName(), 0);
         return;
@@ -1666,8 +1726,51 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     }
 
     if (!desc.helpers) maskOutHelpers(n);
+    if (desc.stereo) applyStereo(n, desc.cullCameraName);
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
     workDef->connectExternal(0, n->getName(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// THE VR MIRROR (VR_SPEC §4.3). See the declaration in EnginePrivate.h and the
+// material's own header for why this is a quad and not a blit.
+namespace {
+const char *kVrMirrorTargetChannel = "jahVrMirrorTarget";
+const char *kVrMirrorSourceChannel = "jahVrMirrorSource";
+}   // namespace
+
+void buildVrMirror(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+                   std::vector<std::string> &nodeDefsOut) {
+    const std::string nodeName = workspaceDef + "/Node";
+    Ogre::CompositorNodeDef *n = cm->addNodeDefinition(nodeName);
+    nodeDefsOut.push_back(nodeName);
+    n->addTextureSourceName(kVrMirrorTargetChannel, 0, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
+    n->addTextureSourceName(kVrMirrorSourceChannel, 1, Ogre::TextureDefinitionBase::TEXTURE_INPUT);
+    n->setNumTargetPass(1);
+    auto *q = addQuad(n, kVrMirrorTargetChannel, "Jahshaka/VrMirror", "Jahshaka VR mirror");
+    q->addQuadTextureSource(0, kVrMirrorSourceChannel);
+    // Store, never StoreOrResolve: this workspace is the LAST one on the target
+    // but the target may be a multisampled window, and kMultiWorkspaceStore is
+    // what the rest of this file uses for exactly that reason.
+    q->mStoreActionColour[0] = kMultiWorkspaceStore;
+    Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
+    workDef->connectExternal(0, nodeName, 0);
+    workDef->connectExternal(1, nodeName, 1);
+}
+
+void setVrMirrorUv(float scaleX, float scaleY, float offsetX, float offsetY) {
+    // The material is a MaterialManager singleton and there is exactly one
+    // mirror in a process (one session, one Engine), so this is a plain write
+    // rather than a per-view listener push like the looks'.
+    Ogre::MaterialPtr mat = std::static_pointer_cast<Ogre::Material>(
+        Ogre::MaterialManager::getSingleton().load(
+            "Jahshaka/VrMirror", Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME));
+    if (!mat || !mat->getTechnique(0)) return;
+    Ogre::Pass *pass = mat->getTechnique(0)->getPass(0);
+    if (!pass || !pass->hasFragmentProgram()) return;
+    Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+    ps->setIgnoreMissingParams(true);
+    ps->setNamedConstant("mirrorUv", Ogre::Vector4(scaleX, scaleY, offsetX, offsetY));
 }
 
 // ---------------------------------------------------------------------------

@@ -28,7 +28,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSockets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFrameMonitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreCompute.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreRayQuery.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreVrSession.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------
@@ -141,6 +142,61 @@ function(jahshaka_engine_ray_query target)
     add_dependencies(${target} JahshakaRayQuerySpv)
 endfunction()
 
+# --- OpenXR (SPECS/VR_SPEC.md §4.1, phase 2) ---------------------------------
+# OgreVrSession.cpp is the ONE TU that includes OpenXR and the second (after
+# OgreRayQuery.cpp) that includes Vulkan. Same rule as the ray tier, for the
+# same reason: a box without libopenxr-dev, or a platform without the Vulkan
+# render system's headers (macOS), compiles the whole file to five refusals and
+# builds green — `Engine::vrAvailable()` simply answers false.
+#
+# find_package(OpenXR) reads /usr/lib/<triplet>/cmake/openxr/OpenXRConfig.cmake
+# from libopenxr-dev and exports OpenXR::openxr_loader. The loader is linked,
+# never dlopen'd by us: the loader is itself the thing that dlopens a runtime,
+# and it costs ~1 ms and no file access when no manifest resolves (phase 1a §6).
+set(JAH_VR_OK OFF)
+if(UNIX AND NOT APPLE)
+    # BY PATH, NOT BY IMPORTED TARGET. `find_package(OpenXR)` creates
+    # OpenXR::openxr_loader in the DIRECTORY that called it, and the sanitised
+    # twin of these sources is configured from tests/engine — a sibling scope,
+    # where that target does not exist ("the target was not found", measured).
+    # A library path and a header probe cross scopes through PARENT_SCOPE like
+    # OGRE_NEXT_VULKAN_RS_LIB already does.
+    find_package(Vulkan QUIET)
+    find_library(JAH_OPENXR_LOADER NAMES openxr_loader)
+    find_path(JAH_OPENXR_INCLUDE_DIR openxr/openxr.h)
+    if(JAH_OPENXR_LOADER AND JAH_OPENXR_INCLUDE_DIR AND Vulkan_FOUND AND OGRE_NEXT_VULKAN_RS_LIB
+       AND EXISTS "${OGRE_NEXT_PREFIX}/include/OGRE-Next/RenderSystems/Vulkan/OgreVulkanDevice.h")
+        set(JAH_VR_OK ON)
+    endif()
+    if(JAH_VR_OK)
+        message(STATUS "Jahshaka: OpenXR (VR) COMPILED IN (${JAH_OPENXR_LOADER})")
+    else()
+        message(STATUS "Jahshaka: OpenXR (VR) COMPILED OUT — loader='${JAH_OPENXR_LOADER}' "
+                       "headers='${JAH_OPENXR_INCLUDE_DIR}' vulkan=${Vulkan_FOUND} "
+                       "rs='${OGRE_NEXT_VULKAN_RS_LIB}'")
+    endif()
+endif()
+set(JAH_VR_OK "${JAH_VR_OK}" PARENT_SCOPE)
+set(JAH_OPENXR_LOADER "${JAH_OPENXR_LOADER}" PARENT_SCOPE)
+set(JAH_OPENXR_INCLUDE_DIR "${JAH_OPENXR_INCLUDE_DIR}" PARENT_SCOPE)
+
+# Applied to BOTH the engine library and the tests' sanitised copy of the same
+# sources, exactly like jahshaka_engine_ray_query.
+function(jahshaka_engine_vr target)
+    if(NOT JAH_VR_OK)
+        target_compile_definitions(${target} PRIVATE JAH_VR=0)
+        return()
+    endif()
+    target_compile_definitions(${target} PRIVATE JAH_VR=1)
+    target_include_directories(${target} PRIVATE
+        "${OGRE_NEXT_PREFIX}/include/OGRE-Next/RenderSystems/Vulkan"
+        "${OGRE_NEXT_PREFIX}/include/OGRE-Next/RenderSystems/Vulkan/include"
+        "${JAH_OPENXR_INCLUDE_DIR}"
+        ${Vulkan_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE "${JAH_OPENXR_LOADER}"
+                          "${OGRE_NEXT_VULKAN_RS_LIB}" ${Vulkan_LIBRARIES})
+endfunction()
+
 # --- Shader-cache fingerprint terms (SHADER_CACHE_SPEC.md §4.2) --------------
 # Two things no hash inside Ogre can see, baked in at configure time:
 #
@@ -208,6 +264,7 @@ set(JAHSHAKA_OGRE_PATCH_SERIES "${_ogre_patch_series}" PARENT_SCOPE)
 add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
 jahshaka_engine_ray_query(JahshakaEngine)
+jahshaka_engine_vr(JahshakaEngine)
 target_compile_definitions(JahshakaEngine PRIVATE
     JAHSHAKA_OGRE_PATCH_SERIES="${_ogre_patch_series}")
 target_include_directories(JahshakaEngine

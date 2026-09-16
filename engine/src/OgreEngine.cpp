@@ -114,7 +114,43 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         const char *plugin = cfg.headless      ? "RenderSystem_NULL"
                              : (cfg.backend == Backend::Vulkan) ? "RenderSystem_Vulkan"
                                                                 : "RenderSystem_GL3Plus";
-        mRoot->loadPlugin(cfg.pluginDir + "/" + plugin, false, nullptr);
+        // ---- OPENXR, STEP 1 (SPECS/VR_SPEC.md §4.1) -----------------------
+        // BEFORE loadPlugin, because the Vulkan render system reads
+        // `external_instance` in its CONSTRUCTOR, which is what loadPlugin
+        // runs. On the vulkan_enable2 route the RUNTIME creates the VkInstance
+        // (from our own VkInstanceCreateInfo) and later the VkDevice (from the
+        // VkDeviceCreateInfo ogre-patch 0068 exports), and Ogre runs on both.
+        //
+        // NOTHING HERE IS FATAL. No loader, no manifest, no runtime, no headset
+        // on the cable: the reason is logged and recorded in vrInfo(), the
+        // plain boot continues unchanged, and vrAvailable() is false for the
+        // life of the process. A plain boot never enters this branch at all.
+        Ogre::NameValuePairList vrPluginOpts;
+        Ogre::NameValuePairList *pluginOpts = nullptr;
+        // THE REASON IS ALWAYS A SENTENCE, including the commonest one of all:
+        // "nobody asked". A host that reads vrInfo().reason on a plain boot
+        // must get an answer it can show a user, not an empty string.
+        mVrInfo.reason = cfg.vr == VrMode::Disabled
+                             ? "VR was not requested for this process (start it with --vr)"
+                         : cfg.headless
+                             ? "this engine is headless (the NULL render system renders nothing)"
+                         : cfg.backend != Backend::Vulkan
+                             ? "VR needs the Vulkan backend"
+                             : "";
+        if (cfg.vr == VrMode::IfAvailable && !cfg.headless &&
+            cfg.backend == Backend::Vulkan) {
+            std::string why;
+            mVrBoot = vr::bootBegin(mVrInfo, why);
+            if (!mVrBoot) {
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka VR: not available - " + why, Ogre::LML_NORMAL);
+            } else if (void *ext = vr::bootExternalInstance(mVrBoot)) {
+                vrPluginOpts["external_instance"] =
+                    Ogre::StringConverter::toString(uintptr_t(ext));
+                pluginOpts = &vrPluginOpts;
+            }
+        }
+        mRoot->loadPlugin(cfg.pluginDir + "/" + plugin, false, pluginOpts);
         // ParticleFX2: the SIMULATION half of the particle system. Its core
         // (definitions, instances, the manager, BillboardSet2) lives in
         // OgreNextMain and needs no plugin — but every emitter and affector
@@ -153,6 +189,25 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // no window, no device — so the first window a Vulkan session creates
         // is the host's real one whenever the host can wait that long.
         mNullWindow = mRoot->initialise(cfg.headless, "jahshaka-headless");
+        // ---- OPENXR, STEP 2 -----------------------------------------------
+        // AFTER initialise and BEFORE any window: ogre-patch 0068's exporter
+        // reads the instance-extension list the render system's constructor
+        // filled, so a request built earlier silently loses the feature chain
+        // (phase 1a's §8.5 — the one correction the spike made to the spec's
+        // order). The device it creates is consumed by the FIRST
+        // createRenderWindow, whichever of the three that turns out to be.
+        if (mVrBoot) {
+            std::string why;
+            if (!vr::bootDevice(mVrBoot, mRoot, mVrInfo, why)) {
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka VR: not available - " + why, Ogre::LML_CRITICAL);
+                // THE INSTANCE STAYS (it is already Ogre's), THE BOOT GOES: the
+                // engine runs on it exactly as it runs on its own, and
+                // vrAvailable() answers false. Deleting the boot here would
+                // destroy the VkInstance the render system is holding.
+                mVrDeviceFailed = true;
+            }
+        }
         // THE ENGINE HAS NO WALL CLOCK (Engine.h "Simulation clock"): its
         // frame-time source is put in frame-delay mode right here, before any
         // frame, and stays there. The host's SimulationClock pushes the real
@@ -186,6 +241,7 @@ void *OgreEngine::documentGraphScene() {
         // makes the surfaceless window happen — see Engine.h.
         if (!mHlmsRegistered && !mNullWindow) {
             Ogre::NameValuePairList wp; wp["windowType"] = "null";
+            applyVrExternalDevice(wp);
             mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"),
                                                     8, 8, false, &wp);
         }
@@ -431,6 +487,7 @@ View *OgreEngine::createView(const std::string &name,
         // MSAA: the FSAA misc param must be passed at EVERY window creation —
         // here AND in the resize lambda below, or a resize silently resets it.
         params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
+        applyVrExternalDevice(params);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
         window->setVSync(mVsync, 1u | kLowestLatencyVSync);
         ensureHlms();
@@ -498,6 +555,7 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
         // engine's lifetime (needs Ogre built with OGRE_VULKAN_WINDOW_NULL).
         if (!mHlmsRegistered && !mNullWindow) {
             Ogre::NameValuePairList wp; wp["windowType"] = "null";
+            applyVrExternalDevice(wp);
             mNullWindow = mRoot->createRenderWindow(processUniqueName("jahshaka-null"),
                                                     8, 8, false, &wp);
         }
@@ -512,6 +570,10 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
 
 void OgreEngine::destroyView(View *view) {
     if (!view) return;
+    // THE MIRROR'S VIEW CAN DIE WHILE A SESSION RUNS (a page closing, a window
+    // rebuilt): the session holds a raw OgreView* and a workspace on that
+    // view's target, so it is told before anything is freed.
+    if (view == mVrMirrorView) setVrMirrorView(nullptr);
     for (auto it = mViews.begin(); it != mViews.end(); ++it) {
         if (it->get() != view) continue;
         // THE SHADOW-PASS COUNTER RIDES A VIEW (SHADOW_TOOLING_SPEC.md §4.3),
@@ -583,6 +645,20 @@ void OgreEngine::renderOneFrame() {
     // and Root::renderOneFrame walks a workspace-less render system. Hosts do
     // not have to special-case their frame loop; it simply costs nothing.
     JAH_TRY {
+        // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
+        // While a session runs this call IS the frame's clock: it polls the
+        // runtime's lifecycle events, blocks in xrWaitFrame until the runtime
+        // wants the next picture, locates the eyes and writes the head pose and
+        // the two per-eye projections onto the session View's camera. The
+        // host's timer is at a zero interval for the duration, so nothing else
+        // paces this loop.
+        //
+        // FALSE means the runtime asked for NO picture this frame (it is not
+        // visible, or tracking is not valid yet) and has already been given its
+        // empty frame: there is nothing to draw and no frame to close.
+        // A NO-OP on every engine without a session, which is every engine
+        // outside a headset.
+        if (mVrSession && !vrSessionBeginFrame(mVrSession)) return;
         // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
         // Opened here and closed at the very bottom, so `totalMs` is exactly
         // what one renderOneFrame cost. `mNextFrameCause` is the caller's — the
@@ -695,9 +771,16 @@ void OgreEngine::renderOneFrame() {
             giDriver.emplace_back(s, nullptr);
             return &giDriver.back().second;
         };
-        for (int pass = 0; pass < 2; ++pass)          // 0: on-screen, 1: the fallback
+        // PASS -1 IS THE VR SESSION'S (VR_SPEC §3.4 / §7 item 6). The session's
+        // View is OFFSCREEN — its target is the both-eyes RTT — and it is
+        // created last, so under the creation-order rule below the editor's
+        // desktop view would place the cascades and the headset would look at a
+        // field centred on somebody else's camera. A view that declares itself
+        // the GI driver wins outright; nothing but a VR session ever does.
+        for (int pass = -1; pass < 2; ++pass)        // -1: the GI driver, 0: on-screen, 1: any
             for (auto &v : mViews) {
                 if (!v->isEnabled() || !v->ogreScene()) continue;
+                if (pass == -1 && !v->giPriority()) continue;
                 if (pass == 0 && v->isOffscreen()) continue;
                 OgreView **slot = driverSlot(v->ogreScene());
                 if (!*slot) *slot = v.get();
@@ -990,6 +1073,13 @@ void OgreEngine::renderOneFrame() {
     // the ring holds one record that never ends.
     if (monitor::live() && monitor::gMonitor->inFrame())
         monitor::gMonitor->endFrame(mUpdatedScenes);
+    // ---- ...AND THE VR FRAME CLOSES HERE ----------------------------------
+    // Outside the JAH_TRY, like the monitor's own close and for the same
+    // reason: a frame that threw still owes the runtime an xrEndFrame, or the
+    // next xrBeginFrame answers XR_ERROR_CALL_ORDER_INVALID and the session is
+    // wedged for good. The swapchain images acquired during the frame are
+    // released here too.
+    if (mVrSession) vrSessionEndFrame(mVrSession);
 }
 
 // THE RESOURCE HALF OF A FRAME, ON ITS OWN (lane OPEN-FRAMES-1, 2026-09-15).
@@ -1044,6 +1134,74 @@ void OgreEngine::renderOneFrame() {
 // between them (`_notifyNewCommandBuffer`, OgreVulkanVaoManager.cpp:2186-2195).
 // The advance needs neither: `_update` alone both recycles and, from the second
 // consecutive call on, submits.
+// ---------------------------------------------------------------------------
+// VR (SPECS/VR_SPEC.md §4). Five short methods: everything that knows what an
+// XrSession is lives in OgreVrSession.cpp.
+
+void OgreEngine::applyVrExternalDevice(Ogre::NameValuePairList &params) {
+    // ONLY THE FIRST WINDOW CAN CONSUME IT (VR_SPEC §2.1 row 5): the render
+    // system reads `external_device` while `!mInitialized`, and a second window
+    // carrying it would be read by nobody. Three call sites ask, in whichever
+    // order the host happens to create things; exactly one of them wins.
+    if (!mVrBoot || mVrDeviceFailed || mVrDeviceConsumed) return;
+    void *ext = vr::bootExternalDevice(mVrBoot);
+    if (!ext) return;
+    params["external_device"] = Ogre::StringConverter::toString(uintptr_t(ext));
+    mVrDeviceConsumed = true;
+}
+
+bool OgreEngine::beginVrSession(Scene *scene, const VrConfig &cfg) {
+    if (!vrAvailable()) {
+        mLastError = "beginVrSession: no OpenXR runtime (" +
+                     (mVrInfo.reason.empty() ? std::string("VR is disabled for this process")
+                                             : mVrInfo.reason) + ")";
+        return false;
+    }
+    if (mVrSession) { mLastError = "beginVrSession: a session is already running"; return false; }
+    OgreScene *s = nullptr;
+    for (auto &candidate : mScenes)
+        if (candidate.get() == scene) s = candidate.get();
+    if (!s) { mLastError = "beginVrSession: no such scene"; return false; }
+    JAH_TRY {
+        std::string why;
+        mVrSession = vr::sessionBegin(mVrBoot, this, s, cfg, why);
+        if (!mVrSession) { mLastError = "beginVrSession: " + why; return false; }
+        // The host's mirror wish, applied now that there is something to mirror.
+        vrSessionSetMirror(mVrSession, mVrMirrorView);
+        return true;
+    } JAH_CATCH(mLastError, false);
+}
+
+void OgreEngine::endVrSession() {
+    if (!mVrSession) return;
+    JAH_TRY {
+        vr::sessionEnd(mVrSession);
+        mVrSession = nullptr;
+    } JAH_CATCH(mLastError, );
+    mVrSession = nullptr;
+}
+
+VrState OgreEngine::vrState() const {
+    if (!mVrSession) return vrAvailable() ? VrState::Idle : VrState::Unavailable;
+    return vrSessionState(mVrSession);
+}
+
+VrStatus OgreEngine::vrStatus() const {
+    if (!mVrSession) {
+        VrStatus s;
+        s.state = vrState();
+        return s;
+    }
+    return vrSessionStatus(mVrSession);
+}
+
+View *OgreEngine::vrView() const { return mVrSession ? vrSessionView(mVrSession) : nullptr; }
+
+void OgreEngine::setVrMirrorView(View *view) {
+    mVrMirrorView = static_cast<OgreView *>(view);
+    if (mVrSession) vrSessionSetMirror(mVrSession, mVrMirrorView);
+}
+
 void OgreEngine::advanceResources() {
     if (!mRoot) return;
     JAH_TRY {
@@ -1725,6 +1883,15 @@ void OgreEngine::shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
 }
 
 OgreEngine::~OgreEngine() {
+    // THE VR SESSION GOES FIRST, and it has to: it owns a View (a workspace, a
+    // camera, an RTT), a second workspace on somebody else's target and a set
+    // of XR swapchains that name VkImages the runtime owns. Every one of those
+    // is invalid the moment the loops below start, and the XR session must be
+    // ended while its device is still alive (VR_SPEC §4.3's teardown order).
+    // The BOOT — the VkInstance and VkDevice the runtime made — is destroyed at
+    // the very bottom, AFTER Root: Ogre destroys neither (§2.1 row 8), and it
+    // is using both until its own destructor has run.
+    if (mVrSession) { try { vr::sessionEnd(mVrSession); } catch (...) {} mVrSession = nullptr; }
     // The shadow-pass counter is a listener on a live workspace: unhook it
     // before anything that owns a workspace starts dying.
     detachShadowCounter();
@@ -1798,6 +1965,11 @@ OgreEngine::~OgreEngine() {
     detachLogBridge();
     delete mRoot;
     mRoot = nullptr;
+    // ...and now, with Root gone, the instance and device the OpenXR runtime
+    // created for us. Ogre destroys NEITHER an external instance nor an
+    // external device, so this is the only place they die (and the only order
+    // in which they may).
+    if (mVrBoot) { try { vr::bootEnd(mVrBoot); } catch (...) {} mVrBoot = nullptr; }
     gLiveEngine = nullptr;
 }
 

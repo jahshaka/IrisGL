@@ -1,0 +1,68 @@
+// THE VR MIRROR (SPECS/VR_SPEC.md §4.3, phase 2).
+//
+// One full-screen quad that copies a HALF of the both-eyes VR target onto
+// whatever the desktop is showing — the Player widget's window, or an
+// offscreen texture in a suite. The source is 2w x h with the left eye in
+// [0, .5] and the right in [.5, 1]; `mirrorUv` picks the half:
+//
+//     mirrorUv.xy = uv SCALE   (0.5, 1) for one eye, (1, 1) for both
+//     mirrorUv.zw = uv OFFSET  (0, 0) left, (0.5, 0) right
+//
+// WHY A QUAD AND NOT A BLIT. The obvious alternative — vkCmdBlitImage into the
+// window's swapchain image, beside the eye copies, in the one Vulkan TU — is
+// ILLEGAL at this pin: Ogre creates its swapchain with
+// VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT (plus TRANSFER_SRC when the window can
+// be downloaded) and never TRANSFER_DST (OgreVulkanWindow.cpp:495-497), so a
+// window is not a valid transfer destination. Adding that usage bit would be
+// an ogre patch, and this needs none: a quad pass over an external input
+// channel is the engine-native way to put somebody else's texture on a target,
+// it works identically for a window and for an offscreen RTT (which is what
+// the suite reads back), and it costs one full-screen textured quad.
+//
+// The default is the LEFT eye, so a material loaded before anything pushes a
+// parameter already shows the right thing (the Jahshaka/Ssr* rule).
+fragment_program Jahshaka/VrMirror_ps_GLSL glsl
+{
+	source JahVrMirror_ps.glsl
+	default_params
+	{
+		param_named sourceTexture int 0
+	}
+}
+fragment_program Jahshaka/VrMirror_ps_VK glslvk
+{
+	source JahVrMirror_ps.glsl
+}
+fragment_program Jahshaka/VrMirror_ps unified
+{
+	delegate Jahshaka/VrMirror_ps_GLSL
+	delegate Jahshaka/VrMirror_ps_VK
+}
+
+material Jahshaka/VrMirror
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/VrMirror_ps
+			{
+				param_named mirrorUv float4 0.5 1.0 0.0 0.0
+			}
+
+			texture_unit sourceTexture
+			{
+				tex_address_mode	clamp
+				filtering			bilinear
+			}
+		}
+	}
+}

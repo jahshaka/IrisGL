@@ -221,12 +221,6 @@ QList<Property*> CameraNode::getProperties()
     prop->value = orthoSize;
     props.append(prop);
 
-    prop = new FloatProperty();
-    prop->displayName = "VR View Scale";
-    prop->name = "vrViewScale";
-    prop->value = vrViewScale;
-    props.append(prop);
-
     auto intProp = new IntProperty();
     intProp->displayName = "Projection Mode";
     intProp->name = "projMode";
@@ -430,7 +424,6 @@ QVariant CameraNode::getPropertyValue(QString valueName)
     if (valueName == "nearClip")    return nearClip;
     if (valueName == "farClip")     return farClip;
     if (valueName == "orthoSize")   return orthoSize;
-    if (valueName == "vrViewScale") return vrViewScale;
     if (valueName == "projMode")    return static_cast<int>(projMode);
 
     // CAMERAS_SPEC §2.
@@ -489,7 +482,6 @@ bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "nearClip")    { nearClip = value.toFloat();               return markedParams(); }
     if (valueName == "farClip")     { farClip = value.toFloat();                return markedParams(); }
     if (valueName == "orthoSize")   { setOrthagonalZoom(value.toFloat());       return markedParams(); }
-    if (valueName == "vrViewScale") { setVrViewScale(value.toFloat());          return markedParams(); }
     // setProjection, not a raw assignment: it keeps isPerspective in lock-step
     // with projMode (an out-of-sync pair renders previews orthographic).
     if (valueName == "projMode")    { setProjection(static_cast<CameraProjection>(value.toInt())); return markedParams(); }
@@ -598,18 +590,6 @@ CameraProjection CameraNode::getProjection()
     return projMode;
 }
 
-float CameraNode::getVrViewScale()
-{
-    return vrViewScale;
-}
-
-void CameraNode::setVrViewScale(float viewScale)
-{
-    if (vrViewScale == viewScale) return;
-    vrViewScale = viewScale;
-    notifyChanged(NodeChange::Params);
-}
-
 void CameraNode::setAspectRatio(float aspect)
 {
     // THE ASPECT IS PART OF THE LENS BINDING when the fit is horizontal
@@ -672,8 +652,6 @@ void CameraNode::updateCameraMatrices()
     else {
         projMatrix.ortho(-orthoSize * aspectRatio, orthoSize * aspectRatio, -orthoSize, orthoSize, -farClip, farClip);
     }
-
-    //vrViewScale = 5.0f;
 }
 
 void CameraNode::setFieldOfViewRadians(float fov)
@@ -908,11 +886,8 @@ SceneNodePtr CameraNode::createDuplicate()
 	camera->aspectRatio = this->aspectRatio;
 	camera->orthoSize = this->orthoSize;
 	// setProjection, not a raw assignment: isPerspective and projMode are a
-	// pair and a copy that splits them renders orthographic. vrViewScale was
-	// silently dropped by this method too — a duplicated VR camera came back
-	// with the default scale.
+	// pair and a copy that splits them renders orthographic.
 	camera->setProjection(this->projMode);
-	camera->vrViewScale = this->vrViewScale;
 
 	// CAMERAS_SPEC §2: every setting the table names, copied by VALUE. The
 	// order matters exactly once — the sensor is set before authorMode, and
