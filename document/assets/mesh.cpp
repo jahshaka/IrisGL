@@ -24,6 +24,7 @@ For more information see the LICENSE file
 
 #include "assimp/postprocess.h"
 #include "import/importflags.h"
+#include "import/clipnaming.h"
 #include "import/scenesource.h"
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
@@ -592,16 +593,10 @@ QMap<QString, iris::SkeletalAnimationPtr> iris::Mesh::extractAnimations(const ai
         const double ticksPerSecond =
             anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 25.0;
 
-        // Clip names are kept and made unique (SKELETAL_PLAYBACK_SPEC S1).
-        // The old code collapsed a clip named after its first channel to ""
-        // — multiple clips then overwrote one QMap key, and saved
-        // {source, name} references could never resolve on reload.
-        auto animName = QString(anim->mName.C_Str());
-        if (animName.isEmpty())
-            animName = QString("clip %1").arg(i);
-        const QString baseName = animName;
-        for (int suffix = 2; anims.contains(animName); ++suffix)
-            animName = baseName + QString(" %1").arg(suffix);
+        // Clip names are kept and made unique by THE one naming rule
+        // (import/clipnaming.h) — shared with the import dialog's pre-read,
+        // which lists the very names the `clips` import setting filters on.
+        const QString animName = clipNameFor(QString(anim->mName.C_Str()), i, anims);
 
         auto skelAnim = SkeletalAnimation::create();
         skelAnim->name = animName;
