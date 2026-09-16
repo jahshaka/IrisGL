@@ -411,7 +411,9 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
         // under one shows it again (as far as each node's own flag allows).
         bool giChanged = false;
         applyShownSubtree(n, inheritedShown(n), giChanged);
-        if (giChanged) invalidateGiCaches();
+        // A REPARENT IS A VISIBILITY EDGE HERE TOO (DRAG-1): the node moved
+        // under or out from under a hidden parent. Nothing died.
+        if (giChanged) invalidateGiCachesForVisibility(nullptr);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -935,12 +937,17 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
         // never true — every node in `mNodes` carries one — so no hide or show
         // ever carried a box at all.)
         if (giChanged) {
+            // ...THROUGH THE VISIBILITY DOOR (DRAG-1, RENDER_AUDIT I-2), which
+            // is the same invalidation minus the destruction generation:
+            // hiding a thing destroys nothing, and charging it as a death made
+            // a hide the most expensive single event in the pipeline — more
+            // than deleting the same object.
             const bool subtree = n.node && n.node->numChildren() > 0;
             if (!subtree && n.item) {
                 const Ogre::Aabb box = n.item->getWorldAabb();
-                invalidateGiCaches(&box);
+                invalidateGiCachesForVisibility(&box);
             } else {
-                invalidateGiCaches();
+                invalidateGiCachesForVisibility(nullptr);
             }
         }
     } JAH_CATCH(mError, );
@@ -1210,7 +1217,7 @@ bool OgreScene::removeLight(NodeId id) {
         // dirty path finds nothing marked, and it re-injects every cascade at
         // the full bounce count instead. Instant Radiosity's by-pointer caches
         // and the single arm's reuse rule are unaffected.
-        invalidateGiCaches(nullptr, false);
+        invalidateGiCaches(nullptr, false, true);
         // Its cached maps need nothing: the lamp leaves the cache's light list,
         // so the next frame releases its slot in every shadow-node instance.
         it->second.lightShadowKey = 0;

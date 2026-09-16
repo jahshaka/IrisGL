@@ -2291,6 +2291,13 @@ struct GiStatus {
     /// dirty — plus, on a from-scratch build, the placement pass's own captures
     /// of the whole grid. 0 in every mode but the hybrid.
     int  probeCapturesLastFrame = 0;
+    /// HOW MANY FRAMES THE MOTION DEFERRAL HELD THE BUDGET, for the life of the
+    /// scene (DRAG-1, REFLECT F3). A capture of a box that is still moving is
+    /// out of date before it is displayed and the next frame stales it again,
+    /// so the spend waits for the content to hold still; the staleness itself
+    /// is recorded either way, so the sweep guarantee keeps its shape. A scene
+    /// nothing moves in reads 0 for ever; a drag raises it by one per frame.
+    unsigned long long probeCapturesDeferred = 0;
     /// How many probes are still stale — owe a capture the budget has not
     /// spent yet. The grid has caught up when this reads 0; it drains at the
     /// resolved budget per frame (probeUpdatesPerFrame).
@@ -2521,6 +2528,18 @@ struct PlanarReflectionParams {
     /// Shadows inside the reflections. Costs a private shadow atlas per plane,
     /// at HALF the scene's shadow resolution, allocated up front.
     bool     shadows = false;
+    /// THE MIRROR'S TARGET IS THE CHAIN'S TARGET (DRAG-1, RENDER_AUDIT ON-3).
+    /// A planar reflection is a SCENE RENDER with no tonemapper of its own, so
+    /// its render target has to be able to hold what the scene emits: with the
+    /// main chain at RGBA16F (`PostFxDesc::hdr`) and the mirror at 8-bit sRGB,
+    /// every radiance above 1.0 inside a mirror was CLIPPED and every dark
+    /// reflection carried 8-bit steps the same surface does not show outside
+    /// the mirror — banding by construction, and the reason a bright window or
+    /// a lamp reflected flat white. It follows the chain rather than being its
+    /// own dial for the same reason the probe captures' HDR follows the quality
+    /// row: two switches for one picture is one switch too many. Costs 2x the
+    /// reflection RTT's memory (a 1024-square slot: 4 MB against 2).
+    bool     hdr = false;
     /// Full lighting update for each reflection camera. Off is faster and rarely
     /// visibly different (Ogre's own words); on is what "maximum realness" means.
     bool     accurateLighting = true;

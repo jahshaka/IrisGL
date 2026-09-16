@@ -3565,18 +3565,33 @@ private:
     /// flush tears the whole arm down and re-voxelizes from the LIVE scene — or,
     /// under a cascade chain, marks only the cascades the change reaches (G1) —
     /// so a recycled pointer can never alias.
-    void invalidateGiCaches() { invalidateGiCaches(nullptr, true); }
+    void invalidateGiCaches() { invalidateGiCaches(nullptr, true, true); }
     /// ...with the world box the edit touched, where the call site knows it:
     /// under a cascade chain that box is what decides which cascades owe a
     /// rebuild (G1). nullptr = "somewhere in the scene".
-    void invalidateGiCaches(const Ogre::Aabb *where) { invalidateGiCaches(where, true); }
+    void invalidateGiCaches(const Ogre::Aabb *where) { invalidateGiCaches(where, true, true); }
+    /// A HIDE OR A SHOW — GEOMETRY LEFT OR JOINED THE GI SET, AND NOTHING DIED
+    /// (DRAG-1, RENDER_AUDIT I-2). Every other caller of this family is a
+    /// DESTRUCTION (a node, a mesh, a material, a texture, a light) and bumps
+    /// the destruction generation, which is what makes the single-volume reuse
+    /// arm refuse and pay a from-scratch teardown-and-rebuild of every
+    /// voxeliser. A visibility edge destroys nothing at all: the Item, its
+    /// mesh, its datablock and every pointer the GI arms hold are alive and
+    /// unchanged — only the item SET the voxels should describe has changed,
+    /// and the reuse arm answers that by re-selecting (see refreshVctFast) and
+    /// the chain by `itemsStale` at each cascade's next rebuild. So a hide
+    /// became MORE expensive than a delete, which is upside down.
+    void invalidateGiCachesForVisibility(const Ogre::Aabb *where) {
+        invalidateGiCaches(where, true, false);
+    }
     /// `geometryVoxelsChanged == false` says NOTHING A VOXEL HOLDS MOVED — a
     /// LIGHT left the scene. The destruction generation still moves (Instant
     /// Radiosity's by-pointer caches, the single arm's reuse rule) and the
     /// cascades still re-select their item sets, but no cascade owes a
     /// RE-VOXELISATION: a light is answered by a re-injection, which is what the
     /// dirty path does when nothing geometric is marked (G1).
-    void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged);
+    void invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged,
+                            bool somethingDied);
 public:
     /// ADDS this scene's registry sizes into `out` (nodes/meshes/materials/
     /// textures). Additive because Engine::objectCounts sums every live scene
@@ -3797,6 +3812,14 @@ private:
         /// whole GI budget for ever and starve the ones that still can.
         unsigned     failures = 0;
         unsigned long long rebuilds = 0;
+        /// THIS CASCADE HAS BEEN INJECTED SINCE THE LAST IN-MOTION LIGHT TICK
+        /// (DRAG-1, REFLECT F2). `rebuildCascade` ends with a full-count
+        /// `VctLighting::update`, so a cascade the scheduler rebuilt this frame
+        /// already holds the answer the tick would compute — re-computing it is
+        /// duplicate work, and computing a DIFFERENT one (which is what the
+        /// zero-bounce moving tick did) is the pulse. Set by every rebuild,
+        /// cleared by the tick that skipped on it.
+        bool         injectedSinceTick = false;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
         /// is quantize(cam, cell*stepCells) != quantize(builtCam, cell*stepCells)
@@ -4449,6 +4472,10 @@ private:
     /// CEILING a frame may spend on stale probes. Reported by giStatus; what a
     /// frame actually spent is mProbeCapturesLastFrame.
     int mProbeUpdatesPerFrame = 0;
+    /// How many CASCADES the last in-motion light tick actually injected
+    /// (DRAG-1): the chain's size minus the cascades a rebuild had already
+    /// injected since the previous tick. 0 in the single-volume arm.
+    unsigned mGiChainInjections = 0;
     /// Whether the last full refresh took the reuse arm (B4). Reported by
     /// giStatus; cleared by every from-scratch build.
     bool mGiReusedLastRefresh = false;
@@ -4469,6 +4496,34 @@ private:
     /// reservation, the raster field's re-arm) nor giGeometrySignature (the
     /// voxel re-solve).
     bool mProbeOnlyChanged = false;
+    /// FRAMES SINCE THE LAST FRAME THAT SAW A MOVED BOX (DRAG-1, REFLECT F3).
+    /// A probe capture is a 512-square six-face HDR photograph of the room with
+    /// the probe shadow node recalculated on every face; a photograph of a box
+    /// that is still moving is wrong before it is displayed, and the next
+    /// frame's move stales it again — so during a drag the budget bought one
+    /// such photograph per frame and threw every one of them away. The capture
+    /// is DEFERRED to the settle instead: the staleness stays recorded (every
+    /// slot keeps `sweepPending`, and `framesSinceUpdate` keeps counting, so
+    /// the sweep guarantee is unchanged in shape — it is measured from the
+    /// frame the content stopped moving rather than from the frame it started).
+    /// Counts up from 0 on every frame that records a moved box.
+    unsigned mProbeMotionQuietFrames = 0;
+    /// HOW STILL IS STILL. Ten frames — the same 1/6 s the mirror's own
+    /// in-motion cadence (`kGiLightOnlyEveryN`) uses, and chosen from the
+    /// movement quantum rather than from taste: a box counts as moved when its
+    /// AABB steps a 64th of its own largest extent (giAabbQuantum), so a 1 m
+    /// object dragged as slowly as 20 cm/s still records a move about every
+    /// fifth frame at 60 Hz. A settle shorter than that would let a slow drag
+    /// spend captures between its own steps, which is the defect. It costs a
+    /// single deliberate move (a scripted setPosition) ten frames of latency
+    /// before its probes start catching up — against a sweep that already
+    /// takes `probes / budget` frames (18 on the Mirror Room's grid).
+    static constexpr unsigned kProbeMotionSettleFrames = 10u;
+    /// A NON-MOTION INPUT IS OUTSTANDING (a light, a material, the sky, the fog
+    /// or an explicit refresh staled the grid). Motion defers only the captures
+    /// MOTION asked for: a lamp switched on while something is being dragged
+    /// must still reach the probes. Cleared when no slot is pending any more.
+    bool mProbeStaleBeyondMotion = false;
     /// The movement scan has run at least once: before that, every item is
     /// seen for the first time and none of them is an arrival.
     bool mGiScannedOnce = false;
@@ -4510,6 +4565,10 @@ private:
     GiStaleReason      mLastStaleReason = GiStaleReason::None;
     unsigned long long mStaleSerial = 0;
     int                mProbeCapturesLastFrame = 0;
+    /// FRAMES THE MOTION DEFERRAL HELD THE BUDGET (DRAG-1). Monotonic for the
+    /// life of the scene; `GiStatus::probeCapturesDeferred` reports it, which
+    /// is what lets a suite assert "the drag spent nothing" from outside.
+    unsigned long long mProbeCapturesDeferred = 0;
     int                mPlacementCapturesThisFrame = 0;
     unsigned long long mGiRebuilds = 0;
     /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::

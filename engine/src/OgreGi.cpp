@@ -382,14 +382,23 @@ bool OgreScene::refreshVctFast() {
         if (freshVoxels) {
             if (!freshVoxelArm(aabb)) { voxelWork.cancel(); return false; }   // the caller rebuilds
         } else {
-            // Items born since the build. Nothing can have DIED (the generation
-            // says so), so the voxelizer's item list only ever grows on this path.
+            // THE ITEM SET, RE-SELECTED BOTH WAYS (DRAG-1). Nothing can have
+            // DIED on this path (the destruction generation says so), so every
+            // pointer here is safe to dereference — but an item can have LEFT
+            // the GI set without dying, which is exactly what hiding it does,
+            // and the list used only ever to GROW. That is why a hide had to
+            // bump the destruction generation to get the right picture, and so
+            // why a hide cost more than a delete. It is answered here instead:
+            // items that gained kGiGeometryBit are added, items that lost it
+            // are removed, and the voxeliser re-runs over what is left.
             for (auto &kv : mNodes) {
                 Ogre::Item *item = kv.second.item;
-                if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-                if (mVctItemIds.count(kv.first)) continue;
-                mVctVoxelizer->addItem(item, false);
-                mVctItemIds.insert(kv.first);
+                const bool inSet = item && (item->getVisibilityFlags() & kGiGeometryBit) != 0u;
+                const bool held  = mVctItemIds.count(kv.first) != 0u;
+                if (inSet == held) continue;
+                if (inSet) { mVctVoxelizer->addItem(item, false); mVctItemIds.insert(kv.first); }
+                else       { if (item) mVctVoxelizer->removeItem(item);
+                             mVctItemIds.erase(kv.first); }
             }
             // World transforms first: the voxelizer reads them, and the whole
             // reason this call exists is that something moved.
@@ -569,21 +578,86 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                     }
                 }
                 mGiChainSweeps = sweeps;
+                // HOW MANY CASCADE INJECTIONS THIS TICK ACTUALLY RAN, reported
+                // as the work row's `units` (DRAG-1). It is the only reading
+                // from which "the tick skipped the cascade the scheduler had
+                // already injected" can be asserted from outside — the row's
+                // presence cannot say it, because the tick still covers the
+                // cascades the rebuild did not. A chain of four with cascade 0
+                // rebuilt this frame reads 3.
+                unsigned injections = 0;
+                // ONE ANSWER PER CASCADE, WHOEVER COMPUTES IT (DRAG-1,
+                // REFLECT F2). What stood here injected EVERY cascade at ZERO
+                // bounces with the coarse (2x) ray march whenever `inMotion`,
+                // while the cascade scheduler was simultaneously rebuilding
+                // cascade 0 EVERY frame at its FULL bounce count with the
+                // scene's own ray march (rebuildCascade's closing
+                // `VctLighting::update`). Two different answers for one volume,
+                // ten frames apart: the reflected radiance of every lit surface
+                // in the room dropped to its zero-bounce value on frames 10,
+                // 20, 30 ... and came back on the next rebuild — the owner's
+                // "the reflected lights flicker when the sphere is moved", with
+                // a 10-frame period. The outer cascades, which the scheduler
+                // defers behind cascade 0 for the whole drag, had no rebuild to
+                // come back on and simply STAYED at the zero-bounce answer
+                // until the settle, so the drag also ended with a step.
+                //
+                // Both halves are the same mistake — a cascade's radiance must
+                // not depend on which path last injected it — and the cure is
+                // one rule: UNDER A CHAIN the moving tick computes exactly what
+                // a rebuild computes (the cascade's own bounce count, the
+                // scene's own ray march), and SKIPS any cascade a rebuild has
+                // already injected since the last tick, because that cascade
+                // already holds that answer.
+                //
+                // THE COST, measured in dispatches rather than guessed: during
+                // a drag the scheduler rebuilds cascade 0 every frame, so the
+                // tick skips it and pays the outer three. At Epic
+                // (cascadeBounces 2/1/3/7) that is 3 + 11 = 14 injection
+                // dispatches every ten frames against the 4 it used to pay —
+                // about one extra dispatch per frame, 0.1-0.3 ms each (S1 §3,
+                // injection being the cheap half; it is VOXELISATION that
+                // costs) — and it buys a far field that follows the drag
+                // instead of freezing at zero bounces until the settle.
+                //
+                // AT REST NOTHING IS SKIPPED and nothing is reduced: the
+                // at-rest tick is the fixed-point iteration over the coupled
+                // volumes (kAtRestSweeps above), and it is the frame the user
+                // is left looking at.
+                // The same measurement switch as the probe deferral's
+                // (JAHSHAKA_PROBE_NO_MOTION_DEFER): with it set, the moving
+                // tick goes back to zero bounces and the coarse march on every
+                // cascade, which is the behaviour this rule replaced.
+                const bool legacyTick = std::getenv("JAHSHAKA_GI_LEGACY_MOVING_TICK") != nullptr;
+                const bool chainMotion = inMotion && !legacyTick;
                 for (int sweep = 0; sweep < sweeps; ++sweep) {
                     for (size_t i = mVctCascades.size(); i--; ) {
                         if (!mVctCascades[i].lighting) continue;
+                        if (chainMotion && mVctCascades[i].injectedSinceTick) continue;
                         applyCascadeAmbient(mVctCascades[i].lighting);
-                        mVctCascades[i].lighting->update(mSceneMgr, inMotion ? 0u : cascadeBounces(i),
+                        const bool coarse = inMotion && legacyTick;
+                        mVctCascades[i].lighting->update(mSceneMgr,
+                                                         coarse ? 0u : cascadeBounces(i),
                                                          1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                                                         giRayMarchStepScale(inMotion));
+                                                         giRayMarchStepScale(coarse));
+                        ++injections;
                     }
                 }
+                // The skip is per TICK, not for ever: a cascade that was
+                // rebuilt before this tick has paid for this tick, and owes the
+                // next one unless it is rebuilt again.
+                for (VctCascade &c : mVctCascades) c.injectedSinceTick = false;
+                work.setUnits(injections);
+                mGiChainInjections = injections;
             } else {
                 mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
                                      true /*autoMultiplier*/, giRayMarchStepScale(inMotion));
                 mGiChainSweeps = 1;      // the single volume is not an iteration
             }
-            work.setUnits(extraBounces + 1u);
+            // (The chain branch has already reported its own count above: how
+            // many CASCADES it injected, which is the number DRAG-1's suite
+            // reads. This is the single volume's bounce count.)
+            if (mVctCascades.size() <= 1u) work.setUnits(extraBounces + 1u);
         }
         // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
         // object, same voxel textures, same field geometry — only the radiance
@@ -713,6 +787,7 @@ GiStatus OgreScene::giStatus() const {
         st.ifdFollows = mIfdFollows;
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
+        st.probeCapturesDeferred  = mProbeCapturesDeferred;
         int stale = 0;
         if (mPcc) for (const ProbeSlot &sl : mProbeSlots) if (sl.sweepPending) ++stale;
         st.staleProbes     = stale;
@@ -875,6 +950,10 @@ void OgreScene::staleProbeGrid(GiStaleReason why) {
     // even see E0's `Camera` reason it exists to report.
     mLastStaleReason = why;
     ++mStaleSerial;
+    // WHICH INPUT OWES THE CAPTURE (DRAG-1). The motion deferral below holds
+    // only the captures MOTION asked for; any other input still spends the
+    // budget in the frame it arrives, drag or no drag.
+    if (why != GiStaleReason::Moved) mProbeStaleBeyondMotion = true;
     if (!mPcc) return;
     const size_t n = mPcc->getProbes().size();
     if (mProbeSlots.size() != n) mProbeSlots.assign(n, ProbeSlot());
@@ -1778,7 +1857,8 @@ void OgreScene::clampProbeShapesToRegion(const Ogre::Aabb &region) {
     }
 }
 
-void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged) {
+void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsChanged,
+                                   bool somethingDied) {
     // EVERY STRUCTURAL CHANGE TO THE SCENE FUNNELS THROUGH HERE — a mesh
     // attached or detached, a node destroyed, a material or texture replaced,
     // a light removed. It deliberately does NOT touch the cached lamp maps any
@@ -1801,7 +1881,11 @@ void OgreScene::invalidateGiCaches(const Ogre::Aabb *where, bool geometryVoxelsC
     // full rebuild that could have been a reuse; being clever here costs heap
     // corruption. The counter is the ONLY thing standing between the reuse arm
     // and the rule this file's header spends a paragraph on.
-    ++mGiDestroyGeneration;
+    // ...UNLESS NOTHING DIED (DRAG-1). A visibility edge is the one caller of
+    // this family that destroys nothing — see invalidateGiCachesForVisibility
+    // — and bumping here made a HIDE cost a from-scratch rebuild of the whole
+    // single-volume arm, more than the DELETE of the same object.
+    if (somethingDied) ++mGiDestroyGeneration;
     // THE CASCADE CHAIN'S HALF OF THE SAME RULE (G1), and it is recorded HERE
     // rather than at the flush for a reason that is not tidiness: the scheduler
     // (`updateCascades`) runs EARLIER in the frame than the flush, and a scroll
@@ -2642,6 +2726,58 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     if (!mGiMovedBoxes.empty() || mGiItemsAppeared || mProbeOnlyChanged)
         staleProbeGrid(GiStaleReason::Moved);
     mGiItemsAppeared = mProbeOnlyChanged = false;
+
+    // ---- THE MOTION DEFERRAL (DRAG-1, REFLECT F3) -------------------------
+    // A PHOTOGRAPH OF A MOVING BOX IS OUT OF DATE BEFORE IT IS DISPLAYED, and
+    // this frame's move stales it again on the next frame: during a drag the
+    // budget bought one 512-square six-face HDR capture per frame — each with
+    // `shadows JahshakaProbeShadowNode recalculate` on every face, so both of
+    // the Mirror Room's point lamps re-rendered their probe-kind cubes six
+    // times over — and every one of those captures was invalidated by the
+    // frame after it. The work is not merely wasted: it is the bulk of the
+    // measured 5-6 fps while the teapot is dragged.
+    //
+    // So the SPEND waits for the content to hold still. What does NOT wait is
+    // the RECORD: `staleProbeGrid` above has already marked every slot, and
+    // `framesSinceUpdate` keeps counting below, so the sweep guarantee keeps
+    // its shape — every stale probe is re-captured within ceil(probes/budget)
+    // frames OF THE CONTENT COMING TO REST, instead of within that many frames
+    // of a move that has not finished happening. The picture the user is left
+    // looking at when the drag ends is the same picture; only the frames
+    // during the drag differ, and during the drag the probes were showing a
+    // photograph of somewhere the object no longer is either way.
+    //
+    // THIS IS THE SHIPPED POLICY, NOT A NEW ONE. The probes are the STATIC
+    // environment layer — the comment above says so for time-varying content
+    // (a posing rig, a particle system, a clock-driven material): SSR, the
+    // planar mirrors and the ray arm are what show a moving thing live. A box
+    // that is still moving is exactly that case.
+    //
+    // WHAT IS NOT DEFERRED: staleness from any other input
+    // (`mProbeStaleBeyondMotion` — a light, a material, the sky, an explicit
+    // refresh). A lamp switched on during a drag reaches the probes in the
+    // frame it is switched on.
+    if (mGiMovedBoxes.empty()) {
+        if (mProbeMotionQuietFrames < kProbeMotionSettleFrames) ++mProbeMotionQuietFrames;
+    } else {
+        mProbeMotionQuietFrames = 0;
+    }
+    // THE DIAGNOSTIC THE MEASUREMENT DRIVES, the same shape as
+    // JAHSHAKA_GI_SWEEPS above: this deferral is a claim about cost and about
+    // the picture at the drag's end, and both claims have to be checkable from
+    // outside against the behaviour it replaced, in ONE binary at one pose.
+    // Read per frame rather than cached because a test arms it between frames,
+    // and a getenv against a path that may issue a 512-square six-face capture
+    // is not a cost anyone can measure.
+    const bool deferMotion = std::getenv("JAHSHAKA_PROBE_NO_MOTION_DEFER") == nullptr;
+    if (deferMotion && mProbeMotionQuietFrames < kProbeMotionSettleFrames &&
+        !mProbeStaleBeyondMotion) {
+        // The queue still ages while it waits, so the order the settle spends
+        // in is the order the wait earned.
+        for (ProbeSlot &sl : mProbeSlots) ++sl.framesSinceUpdate;
+        ++mProbeCapturesDeferred;
+        return;
+    }
     // TIME-VARYING CONTENT IS FROZEN (REALTIME_REFLECTIONS_SPEC O4 = A, lead
     // decision 2026-09-12): a posing rig, a particle system, a clock-driven
     // material or a live texture stales nothing by itself. SSR and planar
@@ -2684,6 +2820,11 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     }
     const size_t take = std::min(size_t(budget), ranked.size());
     std::partial_sort(ranked.begin(), ranked.begin() + std::ptrdiff_t(take), ranked.end());
+    // The non-motion debt is paid once the sweep it armed has drained: this
+    // frame spends `take` of `ranked.size()` pending slots, so the last of them
+    // is the frame the flag goes down (and a new non-motion input raises it
+    // again through staleProbeGrid).
+    if (take >= ranked.size()) mProbeStaleBeyondMotion = false;
     for (size_t k = 0; k < take; ++k) {
         const size_t i = ranked[k].second;
         probes[i]->mDirty = true;
@@ -3770,6 +3911,11 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
             applyCascadeAmbient(c.lighting);
             c.lighting->update(mSceneMgr, cascadeBounces(idx), 1.0f /*thinWallCounter*/,
                                true /*autoMultiplier*/, giRayMarchStepScale(false));
+            // ...AND THAT IS THE MOVING TICK'S ANSWER TOO (DRAG-1): this cascade
+            // has just been injected at its full bounce count with the scene's
+            // own ray march, which is exactly what refreshGiLighting would
+            // compute for it, so the next in-motion tick skips it. See the tick.
+            c.injectedSinceTick = true;
             return true;
         } JAH_CATCH(mError, false);
     };
