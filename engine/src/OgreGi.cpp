@@ -528,21 +528,47 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                 // it is the VOXELISATION that is expensive, and nothing here
                 // re-voxelises.
                 //
-                // TWICE AT REST, and it is the mathematics rather than caution.
-                // A chain's radiance is a FIXED POINT over coupled volumes: each
-                // cascade's injection reads the ones outside it, so one pass is
+                // TO THE FIXED POINT AT REST, and it is the mathematics
+                // rather than caution. A chain's radiance is a FIXED POINT over
+                // coupled volumes: each cascade's injection reads the ones
+                // outside it AND the volume it is injecting into, so one pass is
                 // one Jacobi iteration from whatever the volumes happened to
                 // hold. A from-scratch solve starts from EMPTY volumes and a
                 // re-injection starts from the previous light's answer, so a
-                // single pass leaves the two in different places — measured at
-                // 3/255 on a lamp that travelled and came to rest against the
-                // same lamp fully re-solved (scripting.e2e.movable_lamp_rest),
-                // and 0/255 with the second pass. WHILE SOMETHING IS MOVING it
-                // stays at one pass: that answer is thrown away a few frames
-                // later by construction, and the at-rest tick is the one the
-                // user is left looking at (the same rule that gives the moving
-                // pass 0 bounces and the coarse ray march).
-                const int sweeps = inMotion ? 1 : 2;
+                // tick that stops short leaves the two in different places —
+                // and "short" is not two passes but THREE, measured
+                // (LAMPREST-2, spikes/lamprest-2): in the sealed room
+                // scripting.e2e.movable_lamp_rest uses, a lamp that travelled
+                // and came to rest reads 4/255 away from the same lamp jumped
+                // and re-solved at TWO passes, 0/255 at three, and the picture
+                // is then the SAME picture at three, four and six passes (a
+                // 25-probe mean of 77.16 at every one of them) — which is what
+                // a fixed point means and what says three is enough rather than
+                // lucky. WHY NOT MEASURE IT PER TICK: the only instrument is a
+                // read-back of the light voxels, and a read-back submits the
+                // command buffer and waits — measured at 5-10 ms of CPU per
+                // at-rest tick against the ~1 ms the passes themselves cost, so
+                // measuring costs more than the pass it would save. The count is
+                // measured ONCE, here, and `JAHSHAKA_GI_SWEEPS` re-measures it.
+                //
+                // WHILE SOMETHING IS MOVING it stays at one pass: that answer is
+                // thrown away a few frames later by construction, and the
+                // at-rest tick is the one the user is left looking at (the same
+                // rule that gives the moving pass 0 bounces and the coarse ray
+                // march).
+                int sweeps = inMotion ? 1 : kAtRestSweeps;
+                if (!inMotion) {
+                    // THE DIAGNOSTIC THE SUITE DRIVES (gi.chain_converge): the
+                    // number above is a measurement, so it has to be possible to
+                    // re-measure it — and to prove, from outside, that one pass
+                    // fewer really does leave the tick's answer depending on
+                    // where it started.
+                    if (const char *e = std::getenv("JAHSHAKA_GI_SWEEPS")) {
+                        const long v = std::strtol(e, nullptr, 10);
+                        if (v >= 1 && v <= 32) sweeps = int(v);
+                    }
+                }
+                mGiChainSweeps = sweeps;
                 for (int sweep = 0; sweep < sweeps; ++sweep) {
                     for (size_t i = mVctCascades.size(); i--; ) {
                         if (!mVctCascades[i].lighting) continue;
@@ -555,6 +581,7 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             } else {
                 mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
                                      true /*autoMultiplier*/, giRayMarchStepScale(inMotion));
+                mGiChainSweeps = 1;      // the single volume is not an iteration
             }
             work.setUnits(extraBounces + 1u);
         }
@@ -727,6 +754,7 @@ GiStatus OgreScene::giStatus() const {
         st.cascadeFullRebuilds = mCascadeFullRebuilds;
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
+        st.chainSweeps          = mGiChainSweeps;
     } JAH_CATCH(mError, st);
     return st;
 }

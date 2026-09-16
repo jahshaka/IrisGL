@@ -6745,6 +6745,28 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
                 // A full re-solve IS the rest frame, at the full bounce count:
                 // the movable path's owed one would only redo it (F1).
                 mGiMovableSettleOwed = false;
+                // ...AND THE MOVABLE LAMPS ARE NOT MOVING ANY MORE EITHER
+                // (LAMPREST-2, measured). `mGiMovableLightsMoving` is raised by
+                // a movable light's signature changing — which is exactly what
+                // happens on the frame a script (or the panel's Refresh button)
+                // moves a lamp and asks for a re-solve — and the re-solve above
+                // does not clear it. So the cadence fired ONE MORE TICK a few
+                // frames later, and that tick is the MOVING one: a single
+                // injection pass at ZERO bounces with the coarse ray march,
+                // which OVERWRITES the full-count picture the re-solve just
+                // produced with the cheap one. Measured on the movable-lamp
+                // room: after `world.refreshGi()` the picture was the moving
+                // answer for ten frames and the rest tick's for ever after,
+                // i.e. the verb's own answer was never what the user was left
+                // looking at, and which of the two a screenshot caught depended
+                // on the frame it landed on.
+                //
+                // The signature is ADOPTED rather than the flag simply cleared,
+                // for the reason the light signature above is: the lamp really
+                // did move, and forgetting that would make the NEXT frame raise
+                // the flag again from the same move.
+                mGiMovableLightSignature = movableLightSig;
+                mGiMovableLightsMoving = false;
             };
             if (explicitRefresh) {
                 mGiRefreshSerialSeen = mSource->giRefreshSerial;

@@ -2413,6 +2413,17 @@ struct GiStatus {
     /// Cascade rebuilds SKIPPED because the frame's budget (one per frame) was
     /// already spent. Cumulative; it is the queue pressure reading.
     unsigned long long cascadeDeferrals = 0;
+    /// HOW MANY INJECTION PASSES THE LAST LIGHT TICK SPENT over the cascade
+    /// chain (LAMPREST-2). Re-injecting a chain is one Jacobi iteration of its
+    /// coupled radiance — each cascade reads the ones outside it and the volume
+    /// it is injecting into — so an AT-REST tick iterates until the answer stops
+    /// depending on the state it started from (measured: two passes left 4/255
+    /// of that history in the movable-lamp room, three left none, and three,
+    /// four and six produce the same picture), while a MOVING tick spends
+    /// exactly one, because that answer is replaced a few frames later by
+    /// construction. 1 in the single-volume arm, which is not an iteration at
+    /// all, and 0 before any injection.
+    int chainSweeps = 0;
     /// Scrolls where MORE THAN HALF of the cascade's volume was new — the
     /// second DIRTY_ALL guard, counted rather than acted on in the whole-rebuild
     /// arm. It is the reading that says whether an incremental (slab-shifting)

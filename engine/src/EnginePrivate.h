@@ -3891,6 +3891,17 @@ private:
     /// (a coarser cell loses light, so it gets more bounces). 0 when the
     /// document asks for a single indirect bounce, which is the default.
     Ogre::uint32 cascadeBounces(size_t idx) const;
+    /// HOW MANY INJECTION PASSES AN AT-REST TICK SPENDS over a cascade chain
+    /// (LAMPREST-2). A re-injection is one Jacobi iteration of the chain's
+    /// coupled radiance, so the tick has to iterate until the answer stops
+    /// depending on the state it started from: measured, two passes leave
+    /// 4/255 of that history in the sealed room scripting.e2e.movable_lamp_rest
+    /// uses and three leave none, with three, four and six passes producing the
+    /// same picture. The moving tick stays at one pass. `JAHSHAKA_GI_SWEEPS`
+    /// overrides it for the suite that pins the measurement.
+    static constexpr int kAtRestSweeps = 3;
+    /// What the last light tick actually spent (GiStatus::chainSweeps).
+    int mGiChainSweeps = 0;
     /// Re-arms a RASTER-sourced irradiance field's integration (its probes
     /// RENDER the scene, so a changed ambient is baked into the faces they
     /// captured). Progressive over the converged atlas — nothing flashes — and
