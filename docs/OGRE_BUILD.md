@@ -1210,15 +1210,56 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     Suite: `gi.cascade_bounce_bindings` — the same light reached by two
     different histories must render the same picture.
 
-THE STACK IS 0001-0060 (this list; `build-ogre.sh` globs `*.patch`, so the file
+61. **0061-voxelizer-octants-follow-the-region** (SOURCE —
+    `Components/Hlms/Pbs/{include,src}/Vct/OgreVctVoxelizer.{h,cpp}`; **every tree
+    re-runs `build-ogre.sh`**) — `dividideOctants()` COPIES the region into every
+    octant, and `build()` uses that copy twice: it culls the items against it and
+    passes its minimum as the voxelisation shader's world origin.
+    `setRegionToVoxelize()` replaced the region and left the octants describing the
+    box it had just replaced, so a voxeliser that MOVES — which is every
+    camera-following cascade — voxelised the OLD box's geometry at the OLD origin
+    into a texture the shader maps onto the new one. It is the class's own
+    invariant broken in one of two siblings: `VctImageVoxelizer::setRegionToVoxelize`
+    ends with `mOctants.clear()` and its caller re-divides. Re-derives (rather than
+    clears) so that no existing caller is left with an empty octant list — an
+    assert in debug and a black volume in release. Measured: a document rendered
+    42,42,42 in the session that created it and 47,47,47 after a reopen.
+    Suites: `gi.cascade_determinism` case 1 (220/255 before, 0 after),
+    `scene.reopen_fidelity`.
+
+62. **0062-voxel-merge-and-dispatch-order** (SOURCE **and** MEDIA —
+    `.../Vct/OgreVctVoxelizer.{h,cpp}`, `.../Vct/OgreVctMaterial.{h,cpp}`,
+    `Samples/Media/VCT/Voxelizer_piece_cs.any`; **every tree re-runs
+    `build-ogre.sh`**; shares the two VctVoxelizer files with 0061, different
+    functions) — two halves of one defect. MEDIA: the per-voxel merge wrote
+    `voxelNormal.a = max( voxelNormal.a, voxelNormal.a )`, an upstream no-op typo
+    for `max( flag, origNormal.a )`, so the double-sided flag at a voxel is the
+    LAST dispatch's answer and a dispatch that adds nothing there clears it; the
+    flag is read per light (`abs(NdotL)` against `saturate(NdotL)`), so junction
+    voxels are systematically mis-lit. SOURCE: which dispatch is last was the
+    iteration order of a `std::map` keyed on buffer POINTERS — the same scene in
+    two processes is two orders. Ordered by what a bucket IS instead (the job's
+    variant, the material's pool and slot);
+    `VctMaterial::DatablockConversionResult` gains the pool index it already knew.
+    Upstream knows the class: `OGRE_FORCE_VCT_VOXELIZER_DETERMINISTIC` in the same
+    header orders MeshPtrs by name for the same reason and does not cover this map.
+    Measured: the same geometry attached in the opposite order rendered 6/255
+    apart before and 1/255 (the voxel's own 8-bit step) after.
+    Suite: `gi.cascade_determinism` case 3.
+
+THE STACK IS 0001-0062 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
+NOTE ON 0059: it is ATOM-1's `Mesh2 set lod values`, which landed on main while
+this lane ran — this branch carries 0001-0058 + 0060-0062 and the merged tree
+carries all of them. Every "verified on a tree carrying 0001-00NN" below means
+the numbers this branch could see.
 A lane's new patch takes the next free number and the LEAD renumbers at merge if
 a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059 and 0060 are SOURCE-only, and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060 and 0061 are SOURCE-only (0062 is SOURCE + media), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

@@ -744,9 +744,11 @@ public:
     /// No-op with GI off or nothing built. Returns false only on an engine
     /// error.
     virtual bool        setGiTuning(const GiParams &) = 0;
-    /// Re-runs the active GI solution against the scene's current state (the
-    /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
-    /// in milliseconds at editor quality; callers may invoke this per edit.
+    /// Re-runs the active GI solution against the scene's current state (a light
+    /// moved, geometry changed). No-op when GI is off. The engine picks the
+    /// cheapest correct arm for what actually changed — under a cascade chain an
+    /// edit costs the cascades that can see it, one per frame — so callers may
+    /// invoke this per edit.
     virtual void        refreshGlobalIllumination() = 0;
     /// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2): re-injects the
     /// scene's lights into the EXISTING voxel volume and leaves the geometry

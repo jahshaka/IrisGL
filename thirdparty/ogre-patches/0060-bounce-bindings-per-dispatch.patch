@@ -20,24 +20,28 @@ difference in cost — the only symptom is light that is a bounce behind where i
 should be, and only in the volumes outside the one being injected.
 
 An EVEN number of iterations happens to come back to where it started (a swap is
-an involution), which is why this survived: upstream's own `VctCascadedVoxelizer`
-gives every cascade the SAME bounce count. A per-cascade count is not exotic —
-the stabilisation upstream itself documents and implements (a coarser cascade
-gets more bounces, `OgreVctCascadedVoxelizer.cpp:465-491`) resolves to 1 / 3 / 7
-on a four-cascade chain at three total bounces, which is three odd counts out of
-three. Jahshaka reaches it through Photon's Epic tier (PHOTON_SPEC §7 E2);
-upstream reaches it the moment anyone varies the count per cascade.
+an involution), which is why the stale binding is not what a chain meets first:
+MEASURED on Photon's own four-cascade table at three total bounces, upstream's
+per-cascade stabilisation (a coarser cascade gets more bounces,
+`OgreVctCascadedVoxelizer.cpp:465-491`) resolves to **1 / 2 / 4 / 8** — only
+cascade 0 is odd, and cascade 0's own light voxel is the ONE slot `runBounce`
+already re-binds after its swap. So the parity half of this patch is a defect
+that is REACHABLE (any odd count on an outer cascade: two total bounces gives
+1/1/2/4, and a pinned per-cascade table gives whatever it likes) and is not what
+made the suite red. The SECOND defect below is.
 
-SECOND DEFECT, THE SAME HUNK CLOSES IT (patch 0057's recorded residual, and the
-shared-job class of patch 0037's defect 2). "VCT/LightVctBounceInject" is found
-BY NAME, so every `VctLighting` in the process shares ONE `HlmsComputeJob` while
-its bindings belong to whichever instance called `setupBounceTextures()` last.
-Two live cascade chains — two scenes with Photon cascades — would therefore
-inject one chain's voxels through the other's textures. Re-asserting the
-bindings in `runBounce()` makes them belong to the instance that is DISPATCHING,
-which is the only instance that can be right about them. (Jahshaka binds VCT
-process-wide to one scene through `sVctBindingOwner`, so this half was not
-reachable today; it is closed because it is the same three lines.)
+THE DEFECT THAT MADE THE SUITE RED — the same hunk closes it (patch 0057's
+recorded residual, and the shared-job class of patch 0037's defect 2).
+"VCT/LightVctBounceInject" is found BY NAME, so every `VctLighting` in the
+process shares ONE `HlmsComputeJob` while its bindings belong to whichever
+instance called `setupBounceTextures()` last. THAT IS EVERY CASCADE CHAIN, not
+just two scenes: `buildCascadeArm` builds outermost-first, so cascade 0 — the
+head, and the one the shader samples — configures the shared job LAST, and every
+outer cascade then dispatched its own bounces through CASCADE 0's voxels. At any
+count above one bounce that is a whole-picture corruption, and it is what the
+98.5 % history reading below is measuring. Re-asserting the bindings in
+`runBounce()` makes them belong to the instance that is DISPATCHING, which is the
+only instance that can be right about them.
 
 THE FIX, and why it is cheap enough to run per dispatch. `setupBounceTextures`
 gains a `bSetSamplerRefs` parameter (default true, so every existing caller is
@@ -45,12 +49,16 @@ unchanged) that skips the OpenGL-only samplerblock reference counting — the
 samplers do not move, only the textures do, and re-adding a reference per
 dispatch would leak one per bounce under GL. What is left is the slot writes
 themselves: the texture UNIT COUNT is change-guarded
-(`getNumTexUnits() != numNeededTexUnits`), the GLSL unit list is change-guarded
-inside `setupGlslTextureUnits()`, and the UAV is re-asserted to the same
-`mLightBounce` `runBounce` sets after its own swap. This is the fix upstream's
+(`getNumTexUnits() != numNeededTexUnits`) and the UAV is re-asserted to the same
+`mLightBounce` `runBounce` sets after its own swap. `setupGlslTextureUnits()` is
+NOT free — once a chain has extra cascades its own guard (`mParams.size() !=
+numNeededTexUnits || mParams[3].mp.dataSizeBytes != ...`) fires on every call and
+it rewrites the GLSL unit list — but it is a handful of small writes on the
+OpenGL path only and inert on Vulkan, which is the backend this engine ships. This is the fix upstream's
 own code comments point at, and patch 0057's header named it as the robust one.
 
-VERIFICATION. `git apply --check` on a tree carrying 0001-0059 and
+VERIFICATION. `git apply --check` on a tree carrying 0001-0058 (0059 is ATOM-1's,
+on main; the reader verified the full stack on a scratch copy) and
 `git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
 worktree; `--engine-selftest` unchanged by this patch alone (the default scene
 runs one bounce, where `cascadeBounces` is 0 for every cascade and no swap ever
@@ -126,7 +134,7 @@ it frame after frame. It reds on the pre-patch pin.
                      {
                          // Only OpenGL needs this sampler set
                          hlmsManager->addReference( mSamplerblockTrilinear );
-@@ -796,6 +801,37 @@
+@@ -796,6 +801,39 @@
          mBounceShaderParams->mParams.swap( mLocalBounceShaderParams );
          mBounceShaderParams->setDirty();
  
@@ -146,7 +154,8 @@ it frame after frame. It reds on the pre-patch pin.
 +        //     upstream's own cascade manager gives every cascade the same bounce count.
 +        //     A per-cascade count is not exotic — the stabilisation upstream documents
 +        //     (a coarser cascade gets more bounces, OgreVctCascadedVoxelizer.cpp:465-491)
-+        //     produces 1/3/7 on a four-cascade chain at three total bounces.
++        //     produces 1/2/4/8 on a four-cascade chain at three total bounces, and
++        //     odd counts on outer cascades at other totals (1/1/2/4 at two).
 +        //
 +        // (2) THE JOB IS SHARED BY NAME. "VCT/LightVctBounceInject" is found by name, so
 +        //     every VctLighting in the process uses ONE HlmsComputeJob while the
@@ -155,8 +164,9 @@ it frame after frame. It reds on the pre-patch pin.
 +        //     live chains would inject one chain's voxels through the other's textures.
 +        //     Re-asserting here makes the bindings belong to the instance DISPATCHING.
 +        //
-+        // The cost is the slot writes themselves: the unit count and the GLSL unit list
-+        // are both change-guarded, and `false` skips the OpenGL-only samplerblock
++        // The cost is the slot writes themselves: the unit count is change-guarded, the
++        // GLSL unit list is rewritten (cheap, and OpenGL-only), and `false` skips the
++        // OpenGL-only samplerblock
 +        // reference counting, which would otherwise leak a reference per dispatch (the
 +        // samplers do not move — only the textures do).
 +        setupBounceTextures( false );

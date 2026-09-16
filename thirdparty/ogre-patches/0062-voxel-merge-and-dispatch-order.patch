@@ -1,0 +1,168 @@
+Jahshaka patch 0062 — the voxelisation's per-voxel merge and its DISPATCH ORDER:
+the same scene must voxelise to the same voxels in every process.
+
+SOURCE **and** MEDIA. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh`
+after pulling this (the source half compiles; the media half is staged by Studio
+from the SOURCE tree, so the patch loop must have run in that tree either way).
+Files: `Components/Hlms/Pbs/{include,src}/Vct/OgreVctVoxelizer.{h,cpp}`,
+`Components/Hlms/Pbs/{include,src}/Vct/OgreVctMaterial.{h,cpp}`,
+`Samples/Media/VCT/Voxelizer_piece_cs.any`. It shares the two VctVoxelizer files
+with patch 0061 (different functions, applied in stack order).
+
+DEFECT 1, THE MERGE (media). `Voxelizer_piece_cs.any`, in the branch that merges
+a dispatch's triangles into a voxel another dispatch already wrote:
+
+    voxelNormal.a = doubleSided ? 1.0f : 0.0f;
+    voxelNormal.a = max( voxelNormal.a, voxelNormal.a );
+
+The second line is a no-op — `max(x, x)` — and it is plainly a typo for
+`max( flag, origNormal.a )`: every other quantity on the three lines above it is
+merged with what was already there (`mixAverage3/4`), and this one alone
+overwrites. So the double-sided flag at a voxel is whatever the LAST dispatch
+that touched it decided, and a dispatch that adds no triangle at a voxel an
+earlier one filled still enters this branch (the condition is
+`accumTris + origAccumTris > 0`) and CLEARS it. The flag is read per light in
+`LightInjection_piece_cs.any:103-106` — `normalVal.a > 0` lights the voxel from
+both sides (`abs(NdotL)`) instead of one (`saturate(NdotL)`) — so a lost flag is
+a systematically darker voxel wherever two dispatches meet: exactly the floor /
+wall / prop junctions. Fixed by merging it like everything else beside it.
+
+DEFECT 2, THE ORDER (source). Which dispatch is "last" is the iteration order of
+`mBuckets`, a `std::map` whose key compares POINTERS — the compute job, the
+material const buffer, the vertex and index buffers (OgreVctVoxelizer.h:64-75).
+Allocation order is not a property of the scene: the same document voxelised in
+the session that built it and in the session that reopened it walks its buckets
+in a different order, and with defect 1 that is a different set of voxels. It is
+not correctable by anything downstream — a re-injection re-lights the voxels it
+has, and a re-solve in the SAME process reproduces the same addresses — which is
+why it survives every comparison of boxes, item counts, attach sets and document
+fields. Upstream knows the class: `OGRE_FORCE_VCT_VOXELIZER_DETERMINISTIC` in the
+same header orders `MeshPtr`s by NAME for the same reason, and does not cover
+this map. Fixed by ordering the buckets by WHAT THEY ARE — the job's variant bits
+(which also decide the vertex/index buffers and the texture pool) and the
+material's POOL and SLOT — with the old pointer comparisons left underneath as a
+tie-break nothing reaches. `VctMaterial::DatablockConversionResult` gains the
+pool index it already knew; nothing else changes.
+
+WHAT EACH HALF IS WORTH, MEASURED (lane PHOTON-E2, round 2;
+spikes/photon-e2/FINDINGS-history.md). The lane's two red suites were NOT this:
+they were patch 0061's stale octants, and they go green on 0061 alone (the media
+half alone moves neither: 52 vs 59 before and after on the field-off probe, and
+the shipped configuration is already 0 with 0061). This patch is therefore a
+DEFECT FIXED ON ITS MERITS with a determinism suite behind it, not a bug fix with
+a red to its name — and the honest reason to take it is that a renderer whose
+output depends on `malloc` cannot be reasoned about at all.
+
+VERIFICATION. `git apply --check` on a tree carrying 0001-0061 and
+`git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
+worktree. Suite: `gi.cascade_determinism` (the same scene voxelised twice, in
+two orders, must be the same picture). `--engine-selftest`: the media half moves
+the flag at junction voxels, so the hash moves with it — the lane's report
+carries the A/B and the pixel count.
+
+--- a/Components/Hlms/Pbs/include/Vct/OgreVctMaterial.h
++++ b/Components/Hlms/Pbs/include/Vct/OgreVctMaterial.h
+@@ -46,11 +46,17 @@
+         struct DatablockConversionResult
+         {
+             uint32             slotIdx;
++            /// Which material POOL the slot is in, as an index into VctMaterial's own
++            /// bucket list. Together with slotIdx it names the material without naming
++            /// a pointer, which is what lets VctVoxelizer order its dispatches the same
++            /// way in every process (see VoxelizerBucket::operator<).
++            uint32             bucketIdx;
+             ConstBufferPacked *constBuffer;
+             uint16             diffuseTexIdx;
+             uint16             emissiveTexIdx;
+             DatablockConversionResult() :
+                 slotIdx( (uint32)-1 ),
++                bucketIdx( (uint32)-1 ),
+                 constBuffer( 0 ),
+                 diffuseTexIdx( std::numeric_limits<uint16>::max() ),
+                 emissiveTexIdx( std::numeric_limits<uint16>::max() )
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctMaterial.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctMaterial.cpp
+@@ -147,6 +147,7 @@
+ 
+         DatablockConversionResult conversionResult;
+         conversionResult.slotIdx = static_cast<uint32>( usedSlots );
++        conversionResult.bucketIdx = static_cast<uint32>( &bucket - &mBuckets.front() );
+         conversionResult.constBuffer = bucket.buffer;
+         if( diffuseTex )
+         {
+--- a/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
++++ b/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
+@@ -60,18 +60,45 @@
+         UavBufferPacked   *vertexBuffer;
+         UavBufferPacked   *indexBuffer;
+         bool               needsTexPool;
++        /// WHAT THIS BUCKET IS, said without a pointer: the compute job's VARIANT
++        /// (the VoxelizerJobSetting bits — it also decides the vertex and index
++        /// buffers) and the material's POOL and SLOT. See operator< below.
++        uint32             variant;
++        uint32             materialBucketIdx;
++        uint32             materialSlotIdx;
+ 
++        /// ORDERED BY WHAT A BUCKET IS, NEVER BY WHERE IT LIVES.
++        ///
++        /// This ordering is the ORDER THE DISPATCHES RUN IN (VctVoxelizer::build
++        /// iterates mBuckets), and the voxelisation shader's per-voxel merge is not
++        /// fully order-independent: the double-sided flag it writes is the last
++        /// dispatch's answer for every voxel it touches. Comparing POINTERS therefore
++        /// made the voxel contents depend on the order the allocator happened to hand
++        /// out buffers — the same scene, voxelised in two processes, is not the same
++        /// picture, and no re-solve can correct it because the VOXELS differ.
++        ///
++        /// The three integer keys name the bucket completely: `variant` carries the
++        /// job and, with it, which vertex/index buffers the bucket uses (compressed
++        /// vertex format, 32-bit indices) and whether a texture pool is needed; the
++        /// material's pool + slot name the material. The pointer comparisons remain
++        /// underneath as a total-order tie-break that nothing reaches.
+         bool operator<( const VoxelizerBucket &other ) const
+         {
++            if( this->variant != other.variant )
++                return this->variant < other.variant;
++            if( this->materialBucketIdx != other.materialBucketIdx )
++                return this->materialBucketIdx < other.materialBucketIdx;
++            if( this->materialSlotIdx != other.materialSlotIdx )
++                return this->materialSlotIdx < other.materialSlotIdx;
++            if( this->needsTexPool != other.needsTexPool )
++                return this->needsTexPool < other.needsTexPool;
+             if( this->job != other.job )
+                 return this->job < other.job;
+             if( this->materialBuffer != other.materialBuffer )
+                 return this->materialBuffer < other.materialBuffer;
+             if( this->vertexBuffer != other.vertexBuffer )
+                 return this->vertexBuffer < other.vertexBuffer;
+-            if( this->indexBuffer != other.indexBuffer )
+-                return this->indexBuffer < other.indexBuffer;
+-            return this->needsTexPool < other.needsTexPool;
++            return this->indexBuffer < other.indexBuffer;
+         }
+     };
+ 
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
+@@ -998,6 +998,10 @@
+                 bucket.job = mComputeJobs[variant];
+                 bucket.materialBuffer = convResult.constBuffer;
+                 bucket.needsTexPool = convResult.hasDiffuseTex() || convResult.hasEmissiveTex();
++                // The pointer-free identity the bucket is ORDERED by (see operator<).
++                bucket.variant = variant;
++                bucket.materialBucketIdx = convResult.bucketIdx;
++                bucket.materialSlotIdx = convResult.slotIdx;
+                 bucket.vertexBuffer =
+                     itMesh->second.bCompressed ? mVertexBufferCompressed : mVertexBufferUncompressed;
+                 bucket.indexBuffer =
+--- a/Samples/Media/VCT/Voxelizer_piece_cs.any
++++ b/Samples/Media/VCT/Voxelizer_piece_cs.any
+@@ -474,8 +474,7 @@
+ 		voxelNormal.xyz		= mixAverage3( voxelNormal.xyz, accumTris, origNormal.xyz, origAccumTris );
+ 		voxelEmissive.xyz	= mixAverage3( voxelEmissive.xyz, accumTris, origEmissive.xyz, origAccumTris );
+ 
+-		voxelNormal.a	= doubleSided ? 1.0f : 0.0f;
+-		voxelNormal.a	= max( voxelNormal.a, voxelNormal.a );
++		voxelNormal.a	= max( doubleSided ? 1.0f : 0.0f, origNormal.a );
+ 		voxelNormal.xyz	= voxelNormal.xyz * 0.5 + 0.5f;
+ 
+ 		@property( syntax != hlsl || typed_uav_load )

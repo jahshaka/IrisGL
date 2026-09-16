@@ -231,20 +231,29 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
 // not contain the field's diffuse).
 bool OgreScene::setGiTuning(const GiParams &p) {
     JAH_TRY {
+        const bool marchMoved = p.rayMarchStepScale != mGi.rayMarchStepScale;
         mGi.ddgiIntensity     = p.ddgiIntensity;
         mGi.ddgiAmbient       = p.ddgiAmbient;
         mGi.rayMarchStepScale = p.rayMarchStepScale;
         if (mIfd) pushIfdState(mIfdProbeCounts);
+        // THE RAY MARCH IS NOT A CONSTANT — it is read by the light INJECTION, so
+        // moving it changes nothing at all until something else happens to
+        // re-inject, and this file's own header calls a silently ignored slider
+        // the worse outcome. So a change re-injects, on the spot, over the voxels
+        // that are already there: no teardown, no re-voxelisation, 0.1-0.3 ms per
+        // cascade (S1 §3). The other two ARE constants and are already live in
+        // the line above.
+        if (marchMoved && mVctLighting) refreshGiLighting(false);
         return true;
     } JAH_CATCH(mError, false);
 }
 
 void OgreScene::refreshGlobalIllumination() {
     JAH_TRY {
-        // THE HOST ASKED, EXPLICITLY. Recorded before the arms run so whichever
-        // of them rebuilds carries `Refresh` as its reason rather than whatever
-        // staled the grid last (the Instant Radiosity arm sets nothing of its
-        // own). Read only by the render-loop monitor and by giStatus.
+        // THE HOST ASKED, EXPLICITLY. Recorded before the arm runs so that
+        // whatever it does carries `Refresh` as its reason rather than whatever
+        // staled the grid last. Read only by the render-loop monitor and by
+        // giStatus.
         mLastStaleReason = GiStaleReason::Refresh;
         if (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid) {
             // THE PER-CASCADE DIRTY PATH FIRST (G1), then THE REUSE ARM (FIX
@@ -511,12 +520,30 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                 // Injection is the cheap half (0.1-0.3 ms per cascade, S1 §3);
                 // it is the VOXELISATION that is expensive, and nothing here
                 // re-voxelises.
-                for (size_t i = mVctCascades.size(); i--; ) {
-                    if (!mVctCascades[i].lighting) continue;
-                    applyCascadeAmbient(mVctCascades[i].lighting);
-                    mVctCascades[i].lighting->update(mSceneMgr, inMotion ? 0u : cascadeBounces(i),
-                                                     1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                                                     giRayMarchStepScale(inMotion));
+                //
+                // TWICE AT REST, and it is the mathematics rather than caution.
+                // A chain's radiance is a FIXED POINT over coupled volumes: each
+                // cascade's injection reads the ones outside it, so one pass is
+                // one Jacobi iteration from whatever the volumes happened to
+                // hold. A from-scratch solve starts from EMPTY volumes and a
+                // re-injection starts from the previous light's answer, so a
+                // single pass leaves the two in different places — measured at
+                // 3/255 on a lamp that travelled and came to rest against the
+                // same lamp fully re-solved (scripting.e2e.movable_lamp_rest),
+                // and 0/255 with the second pass. WHILE SOMETHING IS MOVING it
+                // stays at one pass: that answer is thrown away a few frames
+                // later by construction, and the at-rest tick is the one the
+                // user is left looking at (the same rule that gives the moving
+                // pass 0 bounces and the coarse ray march).
+                const int sweeps = inMotion ? 1 : 2;
+                for (int sweep = 0; sweep < sweeps; ++sweep) {
+                    for (size_t i = mVctCascades.size(); i--; ) {
+                        if (!mVctCascades[i].lighting) continue;
+                        applyCascadeAmbient(mVctCascades[i].lighting);
+                        mVctCascades[i].lighting->update(mSceneMgr, inMotion ? 0u : cascadeBounces(i),
+                                                         1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
+                                                         giRayMarchStepScale(inMotion));
+                    }
                 }
             } else {
                 mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
@@ -540,8 +567,8 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             // PING-PONGS its light voxel textures (`runBounce`), and the field
             // bound whatever was current ONCE, by pointer, at `initialize()`
             // (ogre-patch 0044). So after an odd number of bounce passes — which
-            // is exactly what Epic's column produces on a chain, where
-            // `cascadeBounces` yields 1/3/7 — a light move left the field
+            // a chain reaches whenever `cascadeBounces` lands on one (measured:
+            // 1/2/4/8 at three total bounces, 1/1/2/4 at two) — a light move left the field
             // integrating from the texture the injection had just stopped
             // writing. Re-binding is five descriptor writes on a path that has
             // just run a compute dispatch per bounce; deciding whether it is
@@ -674,9 +701,14 @@ GiStatus OgreScene::giStatus() const {
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
             cs.items      = int(c.items);
+            // WHAT THIS CASCADE HOLDS, and only that. Without a budget the set is
+            // not recorded (rule 1: it is the whole size-filtered scene and cannot
+            // change without an edge), so it is counted here — reporting
+            // `mVctItemIds.size()` instead was the GI item count of the SCENE, which
+            // is a different number the moment a cascade's cell declines anything.
             cs.attached   = c.itemsAttached
                                 ? (mGi.cascadeInstanceCap > 0 ? int(c.attachedItems.size())
-                                                              : int(mVctItemIds.size()))
+                                                              : int(cascadeAttachCount(c)))
                                 : 0;
             cs.lastCpuMs  = c.lastCpuMs;
             st.cascades.push_back(cs);
@@ -766,8 +798,6 @@ bool OgreScene::giMaterialChangeEffect(MaterialId id, bool voxelInputsChanged,
     // once while a scene opens, and an O(nodes) walk per push there is the
     // O(nodes x binds) class that once cost 2.1 s of boot (setPbrTexture's
     // note). A live edit on a built arm walks once per push.
-    // Instant Radiosity counts as a cache too: its trace reads the same
-    // diffuse colours, and the generation is what makes the host re-trace it.
     // (UNDER A CASCADE CHAIN a pending flush is NOT a from-scratch rebuild any
     // more — `applyPendingGi` takes the dirty path, which keeps every voxeliser
     // and therefore every cached material conversion. Swallowing the generation
@@ -2399,12 +2429,14 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
                 //
                 // The single-volume arm answers an arrival inside the reuse arm
                 // (`refreshVctFast`'s "items born since the build" loop), and
-                // that path REFUSES under a chain by construction — so an object
-                // that joined the GI geometry channel WITHOUT a structural edit
-                // (a mesh shown again, a helper flag cleared, a mobility flip
-                // back to Still, an item the mirror re-channelled) cast no
-                // bounce at all under cascades, silently and for ever: nothing
-                // else ever re-selects a cascade's item set.
+                // that path REFUSES under a chain by construction — so a NEW GI
+                // item that arrived after the chain was built cast no bounce at
+                // all under cascades, silently and for ever: nothing else ever
+                // re-selects a cascade's item set. (NEW is what this branch
+                // sees: `scan.giKnown` is set the first time the walk meets a
+                // node and is never cleared, so an item that leaves the channel
+                // and comes back is not a second arrival — that edge goes
+                // through `invalidateGiCaches` like every other channel change.)
                 //
                 // Both halves are needed and they are different statements:
                 // `itemsStale` makes each cascade RE-SELECT its attach set at
@@ -3237,6 +3269,14 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
     // (binding, teardown, material generation, status) sees the arm it knows.
     } JAH_CATCH(mError, abandonCascadeChain());
     if (mVctCascades.empty() || !mVctCascades[0].lighting) return abandonCascadeChain();
+    if (std::getenv("JAHSHAKA_GI_DEBUG")) {
+        std::string row;
+        for (size_t i = 0; i < mVctCascades.size(); ++i)
+            row += (i ? " / " : "") + std::to_string(cascadeBounces(i));
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: cascade bounce counts (the pin's per-cascade stabilisation at " +
+            std::to_string(std::min(std::max(mGi.numBounces, 1), 4)) + " total bounces): " + row);
+    }
     mVctVoxelizer = mVctCascades[0].voxelizer;
     mVctLighting  = mVctCascades[0].lighting;
     mGiBuiltMaterialGeneration = mGiMaterialGeneration;
@@ -3337,6 +3377,23 @@ unsigned OgreScene::cascadeGeometryCount(const VctCascade &c) const {
     return selectCascadeItems(c, nullptr);
 }
 
+// HOW MANY ITEMS THIS CASCADE'S VOXELISER HOLDS, without a budget — the whole GI
+// set minus what its own cell declines (rule 2). With a budget the cascade keeps
+// the list and `attachedItems.size()` is the answer; this is the other half of
+// `GiStatus::cascades[].attached`.
+unsigned OgreScene::cascadeAttachCount(const VctCascade &c) const {
+    const float minExtent = c.cell() * kCascadeSubVoxelFactor;
+    unsigned n = 0;
+    for (const Node *np : mItemNodes) {
+        Ogre::Item *item = np->item;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        const Ogre::Vector3 h = item->getWorldAabb().mHalfSize;
+        if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;
+        ++n;
+    }
+    return n;
+}
+
 // THE ATTACH SET AND THE ENCLOSED COUNT, in ONE walk — and, when the document
 // asks for one, THE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1), audit B7).
 //
@@ -3382,7 +3439,20 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
         return inside;
     }
     // THE BUDGET IS ON. One pass to score, one partial sort, one pass to count.
-    struct Ranked { float cells; float dist2; Ogre::Item *item; bool inside; };
+    //
+    // REACH BEFORE SIZE, and that order is the whole correctness of the budget
+    // (round-2 review F3). Size-in-cells alone is a statement about how much of
+    // THIS cascade's picture an object could be, and it says nothing about
+    // whether the object is anywhere near it: a 100 m building a kilometre away
+    // spans 1,280 cells of a 60 m cascade and would outrank every crate standing
+    // inside the box — the budget would spend itself on geometry the region cull
+    // then throws away, and the cascade would voxelise nothing at all. So the
+    // primary key is "can this cascade reach it": its box GROWN BY ONE STEP, so
+    // that what it is about to scroll into is kept too (the attach set must lead
+    // the scroll, not follow it). Size in cells and distance order the rest.
+    const float reach = c.halfSize + c.step();
+    const Ogre::Aabb reachBox(c.centre, Ogre::Vector3(reach));
+    struct Ranked { bool reachable; float cells; float dist2; Ogre::Item *item; bool inside; };
     std::vector<Ranked> ranked;
     ranked.reserve(mItemNodes.size());
     for (const Node *np : mItemNodes) {
@@ -3393,11 +3463,13 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
         const float extent = std::max(std::max(h.x, h.y), h.z) * 2.0f;
         if (extent < minExtent) continue;                                     // rule 2
         const Ogre::Vector3 d = wa.mCenter - c.centre;
-        ranked.push_back({ extent / cell, d.dotProduct(d), item, box.intersects(wa) });
+        ranked.push_back({ reachBox.intersects(wa), extent / cell, d.dotProduct(d), item,
+                           box.intersects(wa) });
     }
     const size_t take = std::min(size_t(cap), ranked.size());
     std::partial_sort(ranked.begin(), ranked.begin() + take, ranked.end(),
                       [](const Ranked &a, const Ranked &b) {
+                          if (a.reachable != b.reachable) return a.reachable;
                           if (a.cells != b.cells) return a.cells > b.cells;
                           return a.dist2 < b.dist2;
                       });

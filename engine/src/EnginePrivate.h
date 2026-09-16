@@ -3843,6 +3843,9 @@ private:
     /// `count > 0`) the answer to "may this cascade be built with items
     /// attached at all", which Ogre cannot be asked.
     unsigned cascadeGeometryCount(const VctCascade &c) const;
+    /// How many items this cascade's voxeliser HOLDS with no instance budget
+    /// (GiStatus::cascades[].attached's other half).
+    unsigned cascadeAttachCount(const VctCascade &c) const;
     /// The same walk, and (with `keep`) the set to ATTACH — the instance
     /// budget's selection when `GiParams::cascadeInstanceCap` is set.
     unsigned selectCascadeItems(const VctCascade &c, std::vector<Ogre::Item *> *keep) const;
