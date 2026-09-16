@@ -204,10 +204,10 @@ double ModelSceneInfo::readDeclaredUnitScale(const QString &filePath)
     return declaredUnitScaleOf(scene);
 }
 
-ModelSceneInfo ModelSceneInfo::read(const QString &filePath)
+ModelSceneInfo ModelSceneInfo::read(const QString &filePath, const ImportTransform &xf)
 {
     SceneSource source;
-    if (!source.read(filePath)) {
+    if (!source.read(filePath, xf)) {
         ModelSceneInfo out;
         out.error = source.errorString();
         if (out.error.isEmpty()) out.error = QStringLiteral("the file could not be read");

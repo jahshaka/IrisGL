@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include "import/importsettings.h"
 
 namespace iris
 {
@@ -94,7 +95,13 @@ struct ModelSceneInfo
 
     /// Parse `filePath` with the canonical preset and describe it. `parsed`
     /// is false when the importer refused the file.
-    static ModelSceneInfo read(const QString &filePath);
+    ///
+    /// `xf` is the ASSET's import recipe (import/importsettings.h). It matters:
+    /// the `extent` this records is what the asset MEASURES, and a describe
+    /// that parsed with identity would report the file's authored size for an
+    /// asset the import scaled (the second read's F7).
+    static ModelSceneInfo read(const QString &filePath,
+                               const ImportTransform &xf = ImportTransform());
 
     /// The file's OWN unit declaration alone, from a LIGHT parse (no
     /// post-processing): metres per source unit, 1.0 for a format that
