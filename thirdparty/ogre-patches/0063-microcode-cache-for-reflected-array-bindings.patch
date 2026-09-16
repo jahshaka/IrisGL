@@ -1,0 +1,379 @@
+Jahshaka ogre-patch 0063 — the microcode cache holds a shader whose root
+layout was discovered by reflection
+
+WHY
+    With Photon's VCT cascade chain on (PHOTON-E2), every launch after the
+    first two compiled exactly three shaders and no others:
+
+        20LightVctBounceInject_cs
+        33LightVctBounceInject_cs
+        44LightVctBounceInject_cs
+
+    They are the 4-, 3- and 2-cascade permutations of the VCT bounce-injection
+    compute job. The 1-cascade one (13LightVctBounceInject_cs) came out of the
+    cache every time, and that difference is the whole diagnosis:
+
+        Samples/Media/VCT/LightVctBounceInject_cs.glsl:13
+            @psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
+
+    so every permutation above one cascade sets `uses_array_bindings`,
+    HlmsCompute::compileShader (OgreHlmsCompute.cpp:320-321) answers it with
+    setAutoReflectArrayBindingsInRootLayout( true ), and VulkanProgram then
+    skips the microcode cache on BOTH ends:
+
+        OgreVulkanProgram.cpp:325   read  if( mCustomRootLayout && !mReflectArrayRootLayouts )
+        OgreVulkanProgram.cpp:751   write // TODO: Support caching SPIR-Vs with
+                                         // mReflectArrayRootLayouts == true ...
+
+    The reason upstream left it as a TODO is real: such a shader is compiled
+    TWICE on a cold run — once to find out where its arrays are, and again
+    against the root layout those arrays imply — and the second compile's
+    preamble (and therefore the microcode key, which is source + preamble)
+    depends on what the first compile discovered. An entry stored under that
+    key could never be found by a launch that has not compiled anything yet.
+
+WHAT
+    * RootLayout gains a const accessor for its array bindings, re-exported
+      by VulkanRootLayout (which inherits RootLayout protected).
+    * VulkanProgram captures the microcode key in loadFromSource(), BEFORE any
+      compile — the key a later launch can compute — and stores under that one.
+    * The microcode blob is framed: a magic, the array bindings the reflection
+      found, then the SPIR-V. On a hit the bindings are put back into the root
+      layout (mRootLayout is re-derived through VulkanGpuProgramManager exactly
+      as gatherArrayedDescs would have derived it) and nothing is compiled.
+    * The frame is length-checked. A blob from an unpatched build, or a
+      truncated one, is rejected and the shader is compiled — this is also the
+      only bounds check between that file and vkCreateShaderModule.
+    * In OGRE_DEBUG_MODE >= MEDIUM the existing gatherArrayedDescs( true ) on
+      the cache-hit path now validates the restored layout against the cached
+      SPIR-V on every hit, so a wrong restore is loud rather than silent.
+
+    The second half of upstream's TODO (mCustomRootLayout == false, i.e. a root
+    layout written in the shader's own source) is deliberately NOT taken: that
+    layout is not known at the point the key has to be built.
+
+COST
+    SOURCE patch — every tree re-runs build-ogre.sh. The blob format changes,
+    so every existing shader cache is one generation stale; Jahshaka's cache
+    fingerprint carries JAHSHAKA_OGRE_PATCH_SERIES, so it is discarded and
+    rebuilt automatically on the first launch after the patch.
+
+    No overlap: no other patch in the stack touches these four files.
+
+Verified with `git apply --check` against the pristine pin and
+`git apply --reverse --check` after applying.
+diff --git a/OgreMain/include/OgreRootLayout.h b/OgreMain/include/OgreRootLayout.h
+index a9a4919b0..ae2623960 100644
+--- a/OgreMain/include/OgreRootLayout.h
++++ b/OgreMain/include/OgreRootLayout.h
+@@ -446,6 +446,26 @@ namespace Ogre
+         */
+         void addArrayBinding( DescBindingTypes::DescBindingTypes bindingType, ArrayDesc arrayDesc );
+ 
++        /** Jahshaka ogre-patch 0063: read access to the array bindings.
++
++            A shader whose root layout is DISCOVERED by reflecting its own SPIR-V
++            (see GpuProgram::setAutoReflectArrayBindingsInRootLayout) has to be
++            compiled twice on a cold run: once to find the arrays, once against
++            the layout they imply. The second compile is only avoidable on a
++            later launch if the shader cache can store what the reflection found
++            beside the microcode, and that needs a way to read it back out.
++        @param bindingType
++            Which of the binding types to read. ParamBuffer never has arrays.
++        @return
++            The ArrayDesc keys, in ascending binding order — the same order
++            addArrayBinding() requires them to be replayed in.
++        */
++        const FastArray<uint32> &getArrayRanges(
++            DescBindingTypes::DescBindingTypes bindingType ) const
++        {
++            return mArrayRanges[bindingType];
++        }
++
+         /** Copies all our parameters from 'other'
+             Does NOT call validate()
+         @param other
+diff --git a/RenderSystems/Vulkan/include/OgreVulkanProgram.h b/RenderSystems/Vulkan/include/OgreVulkanProgram.h
+index 3bb17f058..1457b990f 100644
+--- a/RenderSystems/Vulkan/include/OgreVulkanProgram.h
++++ b/RenderSystems/Vulkan/include/OgreVulkanProgram.h
+@@ -213,6 +213,21 @@ namespace Ogre
+         bool mReflectArrayRootLayouts;
+         bool mReplaceVersionMacro;
+ 
++        /// Jahshaka ogre-patch 0063. The microcode-cache key this program was
++        /// LOOKED UP under, captured in loadFromSource() before anything is
++        /// compiled.
++        ///
++        /// It has to be captured rather than recomputed at the end of compile(),
++        /// because a shader that reflects its own array bindings is compiled
++        /// against a root layout the first compile DISCOVERS: by the time the
++        /// microcode is stored, getPreamble() no longer produces the preamble a
++        /// later launch (which has not compiled anything yet) can compute. An
++        /// entry stored under the late key could never be found again.
++        ///
++        /// Empty means "not cacheable" — no custom root layout, or compile()
++        /// was reached without going through loadFromSource().
++        String mMicrocodeCacheKey;
++
+         /// Flag indicating if shader object successfully compiled
+         bool mCompiled;
+         /// Preprocessor options
+diff --git a/RenderSystems/Vulkan/include/OgreVulkanRootLayout.h b/RenderSystems/Vulkan/include/OgreVulkanRootLayout.h
+index 1ac202c12..d93120f95 100644
+--- a/RenderSystems/Vulkan/include/OgreVulkanRootLayout.h
++++ b/RenderSystems/Vulkan/include/OgreVulkanRootLayout.h
+@@ -139,6 +139,9 @@ namespace Ogre
+         using RootLayout::findParamsBuffer;
+         using RootLayout::getDescBindingRanges;
+         using RootLayout::validateArrayBindings;
++        /// Jahshaka ogre-patch 0063: the shader cache stores what SPIR-V
++        /// reflection discovered, so it has to be able to read it back out.
++        using RootLayout::getArrayRanges;
+ 
+         /// @copydoc RootLayout::copyFrom
+         void copyFrom( const RootLayout &rootLayout, bool bIncludeArrayBindings = true );
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanProgram.cpp b/RenderSystems/Vulkan/src/OgreVulkanProgram.cpp
+index c564bd97f..a3659043a 100644
+--- a/RenderSystems/Vulkan/src/OgreVulkanProgram.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanProgram.cpp
+@@ -314,6 +314,133 @@ namespace Ogre
+         resources.limits.generalConstantMatrixVectorIndexing = 1;
+     }
+     //-----------------------------------------------------------------------
++    // Jahshaka ogre-patch 0063 — the microcode blob's frame.
++    //
++    // Upstream stores the raw SPIR-V and nothing else, and therefore cannot
++    // cache a shader whose root layout is DISCOVERED by compiling it
++    // (setAutoReflectArrayBindingsInRootLayout — a compute job that binds an
++    // array of textures, which is every VCT bounce-injection permutation above
++    // one cascade). The array bindings the reflection pass found are not in the
++    // blob, and without them the binding numbers the final compile used cannot
++    // be reproduced, so a later launch could not use the SPIR-V even if it had
++    // it. That is the TODO this patch removes.
++    //
++    // The frame carries both, little-endian, uint32-aligned throughout:
++    //     uint32  magic ("JRL0")
++    //     uint32  numDescBindingTypes   (rejects a blob from a different build)
++    //     per type: uint32 count, then count * uint32 ArrayDesc keys
++    //     uint32  spirvSizeBytes
++    //     spirvSizeBytes of SPIR-V
++    //
++    // A blob that does not start with the magic, or whose lengths do not fit
++    // inside it, is REJECTED and the shader is compiled — which is also the
++    // only bounds check that exists anywhere on the way from that file to
++    // vkCreateShaderModule.
++    static const uint32 c_jahMicrocodeFrameMagic = 0x304C524Au;  // 'J' 'R' 'L' '0'
++
++    static void jahWriteMicrocodeFrame( const VulkanRootLayout *rootLayout,
++                                        const std::vector<uint32> &spirv, std::vector<uint8> &outBlob )
++    {
++        const uint32 numTypes = static_cast<uint32>( DescBindingTypes::NumDescBindingTypes );
++
++        size_t numKeys = 0u;
++        for( uint32 i = 0u; i < numTypes; ++i )
++        {
++            numKeys += rootLayout
++                           ? rootLayout
++                                 ->getArrayRanges( static_cast<DescBindingTypes::DescBindingTypes>( i ) )
++                                 .size()
++                           : 0u;
++        }
++
++        const size_t spirvSizeBytes = spirv.size() * sizeof( uint32 );
++        outBlob.resize( ( size_t( 3u ) + numTypes + numKeys ) * sizeof( uint32 ) + spirvSizeBytes );
++
++        // A local rather than memcpy at every site: the offsets are the format.
++        struct Writer
++        {
++            uint8 *dst;
++            void put( uint32 v )
++            {
++                memcpy( dst, &v, sizeof( uint32 ) );
++                dst += sizeof( uint32 );
++            }
++        } w = { outBlob.data() };
++
++        w.put( c_jahMicrocodeFrameMagic );
++        w.put( numTypes );
++        for( uint32 i = 0u; i < numTypes; ++i )
++        {
++            if( !rootLayout )
++            {
++                w.put( 0u );
++                continue;
++            }
++            const FastArray<uint32> &ranges =
++                rootLayout->getArrayRanges( static_cast<DescBindingTypes::DescBindingTypes>( i ) );
++            w.put( static_cast<uint32>( ranges.size() ) );
++            for( size_t k = 0u; k < ranges.size(); ++k )
++                w.put( ranges[k] );
++        }
++        w.put( static_cast<uint32>( spirvSizeBytes ) );
++        if( spirvSizeBytes )
++            memcpy( w.dst, spirv.data(), spirvSizeBytes );
++    }
++
++    static bool jahReadMicrocodeFrame( const uint8 *blob, const size_t blobSize,
++                                       FastArray<uint32> *outArrayRanges,
++                                       std::vector<uint32> &outSpirv )
++    {
++        size_t offset = 0u;
++        struct Reader
++        {
++            const uint8 *blob;
++            size_t       size;
++            size_t      &offset;
++            bool         get( uint32 &v )
++            {
++                if( offset + sizeof( uint32 ) > size )
++                    return false;
++                memcpy( &v, blob + offset, sizeof( uint32 ) );
++                offset += sizeof( uint32 );
++                return true;
++            }
++        } r = { blob, blobSize, offset };
++
++        uint32 magic = 0u;
++        uint32 numTypes = 0u;
++        if( !r.get( magic ) || magic != c_jahMicrocodeFrameMagic )
++            return false;
++        if( !r.get( numTypes ) || numTypes != DescBindingTypes::NumDescBindingTypes )
++            return false;
++
++        for( uint32 i = 0u; i < numTypes; ++i )
++        {
++            uint32 count = 0u;
++            if( !r.get( count ) )
++                return false;
++            outArrayRanges[i].clear();
++            for( uint32 k = 0u; k < count; ++k )
++            {
++                uint32 key = 0u;
++                if( !r.get( key ) )
++                    return false;
++                outArrayRanges[i].push_back( key );
++            }
++        }
++
++        uint32 spirvSizeBytes = 0u;
++        if( !r.get( spirvSizeBytes ) )
++            return false;
++        if( ( spirvSizeBytes % sizeof( uint32 ) ) != 0u || offset + spirvSizeBytes > blobSize )
++            return false;
++
++        outSpirv.resize( spirvSizeBytes / sizeof( uint32 ) );
++        if( spirvSizeBytes )
++            memcpy( outSpirv.data(), blob + offset, spirvSizeBytes );
++        return true;
++    }
++    //-----------------------------------------------------------------------
+     void VulkanProgram::loadFromSource()
+     {
+         OGRE_ASSERT_LOW( !mCompiled );
+@@ -322,24 +449,57 @@ namespace Ogre
+         if( mReplaceVersionMacro )
+             replaceVersionMacros();
+ 
+-        if( mCustomRootLayout && !mReflectArrayRootLayouts )
++        // Jahshaka ogre-patch 0063: mReflectArrayRootLayouts is no longer a
++        // reason to skip the cache — see jahWriteMicrocodeFrame above.
++        mMicrocodeCacheKey.clear();
++
++        if( mCustomRootLayout )
+         {
+             GpuProgramManager &gpuProgramManager = GpuProgramManager::getSingleton();
+             String preamble;
+             getPreamble( preamble );
++            // CAPTURED HERE, used at the other end of compile(). The root layout
++            // this preamble is built from is the one this program was CREATED
++            // with; by the end of a reflecting compile it has been replaced.
++            mMicrocodeCacheKey = getNameForMicrocodeCache( preamble );
+ 
+             GpuProgramManager::Microcode const *microcodePtr;
+-            if( gpuProgramManager.getMicrocodeFromCache( getNameForMicrocodeCache( preamble ),
+-                                                         &microcodePtr ) )
++            FastArray<uint32> arrayRanges[DescBindingTypes::NumDescBindingTypes];
++            // We can't use microcode->read() because it's not thread safe.
++            if( gpuProgramManager.getMicrocodeFromCache( mMicrocodeCacheKey, &microcodePtr ) &&
++                jahReadMicrocodeFrame( reinterpret_cast<const uint8 *>( ( *microcodePtr )->getPtr() ),
++                                       ( *microcodePtr )->size(), arrayRanges, mSpirv ) )
+             {
+-                const GpuProgramManager::Microcode &microcode = *microcodePtr;
+-
+-                // We can't use microcode->read() because it's not thread safe.
+-                const size_t spirvSizeBytes = microcode->size();
+-                mSpirv.resize( spirvSizeBytes / sizeof( uint32 ) );
+-                memcpy( mSpirv.data(), microcode->getPtr(), spirvSizeBytes );
+                 mCompiled = true;
+ 
++                // Jahshaka ogre-patch 0063: put back the root layout the run that
++                // WROTE this entry discovered by reflection. Without it the
++                // cached SPIR-V's binding numbers would not match the descriptor
++                // sets we are about to build from mRootLayout, and the shader
++                // would read the wrong resources — silently.
++                bool bHasArrays = false;
++                for( size_t i = 0u; i < DescBindingTypes::NumDescBindingTypes && !bHasArrays; ++i )
++                    bHasArrays = !arrayRanges[i].empty();
++
++                if( bHasArrays )
++                {
++                    RootLayout tmpRootLayout;
++                    mRootLayout->copyTo( tmpRootLayout, false );
++                    for( size_t i = 0u; i < DescBindingTypes::NumDescBindingTypes; ++i )
++                    {
++                        for( size_t k = 0u; k < arrayRanges[i].size(); ++k )
++                        {
++                            tmpRootLayout.addArrayBinding(
++                                static_cast<DescBindingTypes::DescBindingTypes>( i ),
++                                RootLayout::ArrayDesc::fromKey( arrayRanges[i][k] ) );
++                        }
++                    }
++                    VulkanGpuProgramManager *vulkanProgramManager =
++                        static_cast<VulkanGpuProgramManager *>(
++                            VulkanGpuProgramManager::getSingletonPtr() );
++                    mRootLayout = vulkanProgramManager->getRootLayout( tmpRootLayout );
++                }
++
+                 LogManager::getSingleton().logMessage( "Shader " + mName + " was in microcode cache." );
+ 
+                 {
+@@ -748,19 +908,28 @@ namespace Ogre
+         if( mCompiled && !mSpirv.empty() )
+         {
+             GpuProgramManager &gpuProgramManager = GpuProgramManager::getSingleton();
+-            // TODO: Support caching SPIR-Vs with mReflectArrayRootLayouts == true or with
+-            // mCustomRootLayout == false Is it even worth it? Most shaders won't need and it
+-            // just adds complexity.
+-            if( gpuProgramManager.getSaveMicrocodesToCache() && mCustomRootLayout &&
+-                !mReflectArrayRootLayouts )
++            // Jahshaka ogre-patch 0063, replacing upstream's TODO here ("Support
++            // caching SPIR-Vs with mReflectArrayRootLayouts == true or with
++            // mCustomRootLayout == false"). The first half IS worth it: with the
++            // VCT cascade chain on, three compute permutations of the bounce
++            // injection were recompiled on EVERY launch, forever, because they
++            // reflect their own array bindings. The blob now carries those
++            // bindings beside the SPIR-V and the key is the one loadFromSource()
++            // can compute before any of this has happened.
++            //
++            // The second half (no custom root layout at all) stays out: that
++            // shader's layout comes from its own source, which loadFromSource()
++            // has not parsed at the point it would have to build the key.
++            if( gpuProgramManager.getSaveMicrocodesToCache() && !mMicrocodeCacheKey.empty() )
+             {
+-                const uint32 spirvSizeBytes = static_cast<uint32>( mSpirv.size() * sizeof( uint32 ) );
++                std::vector<uint8> blob;
++                jahWriteMicrocodeFrame( mRootLayout, mSpirv, blob );
++
+                 GpuProgramManager::Microcode newMicrocode =
+-                    gpuProgramManager.createMicrocode( spirvSizeBytes );
++                    gpuProgramManager.createMicrocode( static_cast<uint32>( blob.size() ) );
+ 
+-                newMicrocode->write( mSpirv.data(), spirvSizeBytes );
+-                gpuProgramManager.addMicrocodeToCache( getNameForMicrocodeCache( preamble ),
+-                                                       newMicrocode );
++                newMicrocode->write( blob.data(), blob.size() );
++                gpuProgramManager.addMicrocodeToCache( mMicrocodeCacheKey, newMicrocode );
+             }
+ 
+             VkShaderModuleCreateInfo moduleCi;
