@@ -23,6 +23,54 @@ For more information see the LICENSE file
 namespace iris
 {
 
+/// THE UNAUTHORED SURFACE — ONE DEFINITION (DRAG-1, RENDER_AUDIT I-1).
+///
+/// What a material is before anybody has said anything about it. Every place
+/// that has to invent one reads THESE — the document's own constructor
+/// (PbrMaterial::PbrMaterial) and the renderer's fallback for a mesh node that
+/// carries no material at all (SceneMirror's mDefaultMaterial) — so the
+/// properties panel shows what the picture renders, which it did not: a
+/// primitive created from the menu rendered at the mirror's substituted
+/// roughness 0.6 while the panel displayed the document's 0.5, and neither of
+/// those numbers was a physical surface.
+///
+/// THE PHYSICS, because these are measurements and not taste:
+///
+///  * ALBEDO. No diffuse surface reflects all the light that lands on it.
+///    Fresh snow is 0.80-0.90, white paint about 0.80, a photographer's grey
+///    card 0.18; a neutral light grey — what a new object in a 3D editor should
+///    look like — is a little over half. sRGB 200 decodes to 0.5775 linear
+///    through the IEC EOTF (iris::linearOf), and it is stated as the sRGB
+///    triple rather than the linear number because that is what the colour
+///    swatch in the panel shows and what a user edits. The old default was
+///    sRGB 255 = 1.0 LINEAR: a surface that returns every photon, brighter
+///    than snow, which under the default scene's sun rendered at a radiance of
+///    about cos(15 deg) = 0.97 against a sky at 0.117 — an 8:1 step that the
+///    mean-of-logs exposure meter then answered by darkening everything else
+///    in the frame.
+///
+///  * ROUGHNESS. This is PERCEPTUAL roughness and the GGX lobe runs on its
+///    SQUARE, so 0.5 is alpha 0.25 — a distinct, tight glossy lobe that
+///    reflects a recognisable image of the sun and the sky. That is what made
+///    a "default" sphere show a sharp warped highlight with a dark smear
+///    beside it: not a defect in any reflection arm, but a mirror-ish material
+///    nobody asked for. Matte starts around 0.75 (alpha 0.56), which is where
+///    a painted or moulded surface sits, and it is what an unauthored object
+///    should be: a user who wants gloss asks for it.
+///
+///  * METALNESS 0. A metal is a decision, never a default: at metalness 1 the
+///    diffuse term vanishes and the surface is its environment.
+namespace defaultmaterial
+{
+/// The unauthored albedo, as the sRGB colour the panel shows (linear 0.5775).
+inline QColor baseColor() { return QColor(200, 200, 200); }
+/// ...and the same value as the LINEAR scalar the renderer's fallback needs,
+/// so the two can never drift: keep it equal to linearOf(baseColor()).
+constexpr float kBaseColorLinear = 0.5775f;
+constexpr float kRoughness = 0.75f;      ///< perceptual; GGX alpha 0.5625 — matte
+constexpr float kMetalness = 0.0f;
+}   // namespace defaultmaterial
+
 /**
  * Metallic-roughness PBR material.
  *
