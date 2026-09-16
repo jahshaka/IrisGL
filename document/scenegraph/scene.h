@@ -327,12 +327,21 @@ public:
     /// table. A zero or negative halfSize/resolution in any entry means the
     /// whole request is ignored — a half-specified cascade is not a request the
     /// renderer can honour halfway.
-    /// TRI-STATE, exactly like `giDdgi` beside it and for the same reason:
-    /// -1 is "the tier decides" and is what a document written before the
-    /// column existed carries, so the reader and `derivePhotonFromDocument` can
-    /// tell "never authored" from "authored off". Any tier application writes a
-    /// concrete 0/1 through. The renderer reads `> 0`.
-    int giCascades = -1;
+    /// 1 = on, 0 = off, and THE DEFAULT IS ON because every Photon tier's
+    /// column is (PHOTON_SPEC §7 E2 (6)).
+    ///
+    /// It is NOT a tri-state, and that is a decision with a scar: it was `-1 =
+    /// the tier decides` for an afternoon, which put a value in the document
+    /// that only the STUDIO could resolve — and SceneMirror is IrisGL and cannot
+    /// see the tier table, so it read -1 as off while the reader resolved it to
+    /// on, and a scene rendered one way before a save and another way after
+    /// (scene.reopen_fidelity, 42,42,42 vs 47,47,47 on the ground). A field the
+    /// renderer reads must mean the same thing to everyone who reads it. The
+    /// "was this authored?" question the tri-state existed for is answered where
+    /// it belongs instead: by the KEY BEING ABSENT in the file, which only the
+    /// reader can see and which the reader resolves through the tier there and
+    /// then (SceneReader).
+    int giCascades = 1;
     QVector<iris::Vec3> giCascadeSet;
     /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1)). How many
     /// objects ONE cascade may voxelise: the renderer keeps the ones that fill
