@@ -35,6 +35,10 @@ MeshId OgreScene::createMesh(const MeshData &data) {
                 rec.lodErrors.assign(data.lodErrors.begin(),
                                      data.lodErrors.begin() + ptrdiff_t(std::min(levels - 1, data.lodErrors.size())));
         }
+        // ...and the by-Ogre-mesh index, which is how a consumer holding only an
+        // `Ogre::Item *` — the cascade voxeliser — reaches them (ATOM stage 1).
+        if (!rec.lodErrors.empty() && rec.mesh)
+            mLodErrorsByMesh[rec.mesh.get()] = rec.lodErrors;
         mMeshes[++mNextMeshId] = std::move(rec);
         return mNextMeshId;
     } JAH_CATCH(mError, 0);
@@ -85,6 +89,7 @@ bool OgreScene::destroyMesh(MeshId id) {
     JAH_TRY {
         invalidateGiCaches();   // BEFORE the mesh dies: IR frees its by-VAO caches now
         for (auto &kv : mNodes) if (kv.second.meshRef == id) detachItem(kv.first, kv.second);
+        if (it->second.mesh) mLodErrorsByMesh.erase(it->second.mesh.get());
         it->second.mesh.reset();
         Ogre::MeshManager &mm = Ogre::MeshManager::getSingleton();
         if (mm.resourceExists(it->second.name)) mm.remove(it->second.name);

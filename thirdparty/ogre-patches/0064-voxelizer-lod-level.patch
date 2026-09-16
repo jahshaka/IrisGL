@@ -1,0 +1,227 @@
+Jahshaka patch 0064 — a voxelizer voxelizes the LOD LEVEL IT IS TOLD TO.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this. It touches `Components/Hlms/Pbs/{include,src}/Vct/OgreVctVoxelizer.{h,cpp}`,
+which patches 0061 (the octants follow the region) and 0062 (the voxel merge and
+the dispatch order) also touch — this one applies AFTER both and its hunks do not
+overlap theirs, but a tree that carries either and fails `build-ogre.sh` with
+"upstream changed the patched file" is seeing the known overlap false positive
+(CLAUDE.md): reset the ogre-next submodule and re-run the whole stack.
+
+THE MISSING HOOK. `VctVoxelizer::addItem` reads `mVao[VpNormal].front()` — the
+FINEST level of the mesh — in all five places it walks geometry (`countBuffersSize`,
+`prepareAabbCalculatorMeshData`, `convertMeshUncompressed`, `addItem`'s own index
+check and `placeItemsInBuckets`), and takes no argument that could say otherwise.
+There is no way to ask it for a coarser level, and the alternative — forcing the
+Item's own `mCurrentMeshLod` before the build — is wrong twice over: that value
+belongs to the CAMERA (`SceneManager::updateAllLods` rewrites it every frame for
+what is DRAWN), and the voxelizer reads `.front()` regardless of it, so it would
+change the picture and not the voxels.
+
+WHY A VOXELIZER WANTS ONE. A voxel grid cannot represent detail finer than its
+own cell: Photon's outermost cascade is 1.875 m per voxel at the High tier, and a
+mesh simplified to a 0.9 m error voxelizes to the SAME voxels as the
+full-resolution one while costing a fraction of the raster dispatch (the cost is
+per triangle: `QueuedInstance::numIndices` is what the dispatch is sized by).
+That is the whole of the far-field proxy Jahshaka's ATOM stage 1 bakes
+(SPECS/NANITE_SPEC.md §7) — one vertex buffer, N index buffers, a world-space
+error per level — and this argument is what lets a consumer spend it.
+
+THE SHAPE, and why the level lives on the MESH entry and not on the item. The
+class downloads, converts and indexes each mesh's buffers ONCE for every Item
+that shares it (`mMeshesV2`), so one entry can hold exactly one level. The new
+`QueuedMesh::lodLevel` is that level; `addItem`'s new trailing argument sets it,
+defaulting to 0, and when several items of one mesh disagree the FINEST wins —
+the same precedence rule `bCompressed` already used, and the conservative one.
+A single static helper, `getLodVao( subMesh, lodLevel )`, replaces the five
+`.front()` reads and CLAMPS to the levels the mesh has, so a mesh with no LOD
+chain (one VAO) is voxelized exactly as before, byte for byte.
+
+WHAT DOES NOT CHANGE. Every existing caller — including this class's own use
+through `VoxelizedMeshCache::addMeshToCache` and upstream's samples — passes no
+level, gets 0, and produces the buffers and the voxels it always did. The LOD
+levels share one vertex buffer by construction (ATOM stage 1's rule), so the
+vertex download, the vertex count and the instance buffer are unchanged; only
+the index walk and the dispatch's triangle count move.
+
+THE SIBLING IS NOT PATCHED. `VctVoxelizer`'s sibling `VctImageVoxelizer` caches
+a voxelized MESH in a texture cache keyed by the mesh (`VoxelizedMeshCache`), so
+a level there would have to join that cache's key — a bigger change, and one with
+no consumer: Jahshaka's cascade chain drives the rasterizing voxelizer only
+(irisgl/engine/src/OgreGi.cpp, EnginePrivate.h — the image voxelizer reproduces
+none of the chain's properties and is deliberately not on the path). Recorded
+rather than done.
+
+VERIFICATION. `git apply --check` on a tree carrying 0001-0063 and
+`git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
+worktree. `--engine-selftest` is UNCHANGED (the default scene's meshes are
+document primitives, which carry no LOD chain at all, so every level clamps to
+level 0). The suite is `gi.cascade_lod`, which asserts the level each cascade
+picked, that cascade 0 takes the finest, and that the outer cascade's voxel
+dispatch is cheaper than the same cascade with the levels forced off.
+
+--- a/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
++++ b/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
+@@ -182,6 +182,18 @@
+             bool               bCompressed;
+             uint32             numItems;
+             uint32             indexCountSplit;
++            /// WHICH MESH LOD OF THIS MESH IS VOXELIZED (Jahshaka patch 0064).
++            /// 0 = the finest level, which is what every caller that does not ask
++            /// gets and is exactly the behaviour this class always had. Clamped
++            /// per SubMesh to the levels that exist, so a mesh with no LOD chain
++            /// ignores it entirely.
++            ///
++            /// It is a property of the MESH inside THIS voxelizer and not of the
++            /// item, because the buffers are downloaded, converted and indexed
++            /// once per mesh: two items of one mesh in one voxelizer share the
++            /// level, and the FINEST request wins (the same precedence rule
++            /// `bCompressed` uses).
++            uint32             lodLevel;
+             QueuedSubMeshArray submeshes;
+         };
+ 
+@@ -333,8 +345,23 @@
+             This value is ignored if the mesh had already been added.
+ 
+             Use std::numeric_limits<uint32>::max to avoid partitioning at all.
++        @param lodLevel
++            Which LOD level of the item's mesh to voxelize. 0 (the default) is the
++            finest level and is what this class always did. Higher levels are
++            clamped to the levels the mesh actually has, so a mesh with no LOD
++            chain is voxelized exactly as before.
++
++            The level belongs to the MESH within this voxelizer: if several Items
++            share a mesh and ask for different levels, the FINEST (lowest) wins,
++            because the mesh's vertex/index data is downloaded and converted once.
++
++            A voxel grid cannot represent detail finer than its own cell, so a
++            coarse volume voxelizing a simplified level produces the same voxels
++            for a fraction of the raster cost. The caller decides which level that
++            is; this class only spends it.
+         */
+-        void addItem( Item *item, bool bCompressed, uint32 indexCountSplit = 0u );
++        void addItem( Item *item, bool bCompressed, uint32 indexCountSplit = 0u,
++                      uint32 lodLevel = 0u );
+ 
+         /** Removes an item added via VctVoxelizer::addItem
+         @remarks
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
+@@ -154,6 +154,22 @@
+         return adjustedIndexStart;
+     }
+     //-------------------------------------------------------------------------
++    /// THE VAO OF ONE LOD LEVEL (Jahshaka patch 0064), and the ONE place this
++    /// file decides which one a SubMesh is voxelized from.
++    ///
++    /// `mVao[VpNormal]` is the mesh's LOD chain, finest first, and it always has
++    /// at least one entry: a mesh with no chain has exactly one and every level
++    /// clamps back onto it, which is why this is a drop-in for the
++    /// `.front()` this class used everywhere.
++    static VertexArrayObject *getLodVao( const SubMesh *subMesh, uint32 lodLevel )
++    {
++        const VertexArrayObjectArray &vaos = subMesh->mVao[VpNormal];
++        if( vaos.empty() )
++            return 0;
++        const size_t idx = std::min<size_t>( lodLevel, vaos.size() - 1u );
++        return vaos[idx];
++    }
++    //-------------------------------------------------------------------------
+     void VctVoxelizer::createComputeJobs()
+     {
+         HlmsCompute *hlmsCompute = mHlmsManager->getComputeHlms();
+@@ -284,7 +300,7 @@
+         for( unsigned subMeshIdx = 0; subMeshIdx < numSubmeshes; ++subMeshIdx )
+         {
+             SubMesh *subMesh = mesh->getSubMesh( subMeshIdx );
+-            VertexArrayObject *vao = subMesh->mVao[VpNormal].front();
++            VertexArrayObject *vao = getLodVao( subMesh, queuedMesh.lodLevel );
+ 
+             // Count the total number of indices and vertices
+             size_t vertexStart = 0u;
+@@ -415,7 +431,8 @@
+             const size_t numSubMeshes = queuedMesh.submeshes.size();
+             for( size_t i = 0u; i < numSubMeshes; ++i )
+             {
+-                VertexArrayObject *vao = mesh->getSubMesh( (uint16)( i ) )->mVao[VpNormal].front();
++                VertexArrayObject *vao =
++                    getLodVao( mesh->getSubMesh( (uint16)( i ) ), queuedMesh.lodLevel );
+                 IndexBufferPacked *indexBuffer = vao->getIndexBuffer();
+                 const bool is16bit = indexBuffer->getIndexType() == IndexBufferPacked::IT_16BIT;
+ 
+@@ -494,7 +511,7 @@
+         for( unsigned subMeshIdx = 0; subMeshIdx < numSubmeshes; ++subMeshIdx )
+         {
+             SubMesh *subMesh = mesh->getSubMesh( subMeshIdx );
+-            VertexArrayObject *vao = subMesh->mVao[VpNormal].front();
++            VertexArrayObject *vao = getLodVao( subMesh, queuedMesh.lodLevel );
+ 
+             size_t numVertices = vao->getBaseVertexBuffer()->getNumElements();
+ 
+@@ -594,7 +611,8 @@
+         }
+     }
+     //-------------------------------------------------------------------------
+-    void VctVoxelizer::addItem( Item *item, bool bCompressed, uint32 indexCountSplit )
++    void VctVoxelizer::addItem( Item *item, bool bCompressed, uint32 indexCountSplit,
++                                uint32 lodLevel )
+     {
+         const MeshPtr &mesh = item->getMesh();
+ 
+@@ -609,13 +627,20 @@
+ 
+         const bool isNewEntry = itor == mMeshesV2.end();
+ 
++        // THE FINEST REQUEST WINS (patch 0064), for the same reason 'no
++        // compression' does below: the mesh's buffers are downloaded and
++        // converted ONCE for every item that shares it, so the entry can only
++        // hold one level and it must be one no caller asked to be finer than.
++        if( !isNewEntry )
++            lodLevel = std::min( lodLevel, itor->second.lodLevel );
++
+         if( isNewEntry )
+         {
+             const unsigned numSubMeshes = mesh->getNumSubMeshes();
+             for( unsigned i = 0u; i < numSubMeshes && bCanAdd; ++i )
+             {
+-                VertexArrayObject *vao = mesh->getSubMesh( i )->mVao[VpNormal].front();
+-                if( !vao->getIndexBuffer() )
++                VertexArrayObject *vao = getLodVao( mesh->getSubMesh( i ), lodLevel );
++                if( !vao || !vao->getIndexBuffer() )
+                 {
+                     bCanAdd = false;
+                     LogManager::getSingleton().logMessage(
+@@ -636,6 +661,7 @@
+                 QueuedMesh &queuedMesh = mMeshesV2[mesh];
+                 // const bool wasCompressed = queuedMesh.bCompressed;
+                 queuedMesh.bCompressed = false;
++                queuedMesh.lodLevel = lodLevel;
+ 
+                 if( isNewEntry )
+                 {
+@@ -655,12 +681,14 @@
+                     queuedMesh.numItems = 0u;
+                     queuedMesh.bCompressed = true;
+                     queuedMesh.indexCountSplit = indexCountSplit;
++                    queuedMesh.lodLevel = lodLevel;
+                     queuedMesh.submeshes.resize( mesh->getNumSubMeshes() );
+ 
+                     mMeshesV2[mesh] = queuedMesh;
+                 }
+                 else
+                 {
++                    itor->second.lodLevel = lodLevel;
+                     ++itor->second.numItems;
+                 }
+             }
+@@ -975,7 +1003,8 @@
+ 
+                 SubItem *subItem = item->getSubItem( i );
+ 
+-                VertexArrayObject *vao = subItem->getSubMesh()->mVao[VpNormal].front();
++                VertexArrayObject *vao =
++                    getLodVao( subItem->getSubMesh(), itMesh->second.lodLevel );
+                 if( vao->getIndexBuffer() )
+                 {
+                     if( vao->getIndexBuffer()->getIndexType() == IndexBufferPacked::IT_32BIT )

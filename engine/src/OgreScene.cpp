@@ -1287,6 +1287,7 @@ void OgreScene::destroy() {
             if (mm.resourceExists(kv.second.name)) mm.remove(kv.second.name);
         }
         mMeshes.clear();
+        mLodErrorsByMesh.clear();
         mRoot->destroySceneManager(mSceneMgr);
         // AFTER the SceneManager, deliberately. Particle definitions are freed
         // only by ~ParticleSystemManager2 (there is no destroyParticleSystemDef),
