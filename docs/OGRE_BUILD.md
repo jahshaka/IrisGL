@@ -1510,12 +1510,51 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     `result.alpha += newRes.alpha` opacity doubling that patch 0033 fixed on the
     pixel side.
 
-THE STACK IS 0001-0066 (this list; `build-ogre.sh` globs `*.patch`, so the file
+67. **0067-delayed-blocks-wait-for-their-frame** (SOURCE —
+    `RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp`; **every tree re-runs
+    `build-ogre.sh`**; it shares that file with 0039 but not its regions) — A
+    FREED GPU BLOCK IS REUSED ONE FRAME TOO EARLY. `deallocateVbo` delays a free
+    as `DirtyBlock( mFrameCount, ... )` and `flushGpuDelayedBlocks` returns it to
+    the pool once `( frameCount - frameIdx ) >= 1u` — "GPU -> GPU resources are
+    safe to reuse after 1 frame of synchronization" — behind a
+    `waitForTailFrameToFinish()`. But this render system keeps
+    `mDynamicBufferMultiplier` (3) frames in flight and that wait covers the TAIL
+    frame, not the frame the block was freed in: a block freed during frame N is
+    handed to a new resource at N+1 while frame N's command buffer may still be
+    executing, and the two then ALIAS the same device memory with no
+    synchronisation. On NVIDIA 595.84 the second resource's writes do not fault —
+    they HANG THE CHANNEL: `NVRM: Xid 109 CTX SWITCH TIMEOUT` followed by
+    `vkWaitForFences failed VK_ERROR_DEVICE_LOST` and a device-lost recreate that
+    never returns. Patch 0065's merge accumulator is what made it constant: a
+    transient 109 MB (at 128^3) R32_UINT 3D uav paged OnStorage at the end of
+    every `VctVoxelizer::build()` and back to Resident at the start of the next,
+    whose first traffic is `clearVoxels`' whole-volume clear — the biggest
+    immediate write into just-recycled memory this engine performs, once per
+    cascade, and Photon rebuilds a cascade per frame. Measured on `mcp.e2e`
+    (lane XID-1, cold home every run, the kernel log followed and every app pid
+    matched): tip 7 fails / 8 with an Xid each and none on a pass; `0065` removed
+    0/8; only its `clearUavUint` removed 0/8; that clear writing 1 instead of 0
+    5/8; the accumulator reshaped X-major at the same texel count 6/8; the
+    accumulator kept RESIDENT 0/8; `JAHSHAKA_GI_SWEEPS=2` 0/8 and patch 0066
+    removed 4/8 (both only change how much of frame N is still running when N+1
+    recycles). With this patch — accumulator still transient, clear still there —
+    **0 fails / 16, zero Xid**. Both tests become `>= mDynamicBufferMultiplier`,
+    which is exactly the window the caller's wait already establishes; it costs
+    two extra frames of retention on blocks that are already delayed, and nothing
+    on the `flushAllGpuDelayedBlocks` path (that one frees behind a full memory
+    barrier on purpose). `--engine-selftest` unchanged (`1fd91da9...`): the patch
+    moves no pixels, only when memory is recycled. UPSTREAM-REPORTABLE, and not
+    VCT-specific: any consumer that frees and re-requests a large device-local
+    block every frame or two can hit it, which is where Jahshaka's standing
+    Xid 109 sightings (VOXMERGE-1's two, the scoped gate's log.perf red) came
+    from.
+
+THE STACK IS 0001-0067 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063 and 0064 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064 and 0067 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
