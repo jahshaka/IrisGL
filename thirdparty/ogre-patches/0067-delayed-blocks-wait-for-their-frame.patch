@@ -1,0 +1,140 @@
+Jahshaka patch 0067 — A FREED GPU BLOCK IS REUSED ONE FRAME TOO EARLY.
+
+SOURCE patch (one file: `RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp`).
+EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after pulling it. It shares
+that file with patch 0039 (the ray-query buffer usage flags) but not its regions;
+a tree that carries 0039 and fails the script's per-patch reverse check is seeing
+the documented overlap false positive, and the cure is the recorded reset recipe.
+
+THE SYMPTOM (Jahshaka lane XID-1, 2026-09-16, measured on the PUSH-tier tip
+a2195ae10 / 6d67997, NVIDIA 595.84, RTX 4080 SUPER, a quiet box): `mcp.e2e` hung
+7 times in 8. The app log ends inside the "screenshot camera" block, the frame
+that follows takes 11.2 s, the render system throws
+`vkWaitForFences failed VK_ERROR_DEVICE_LOST in VulkanQueue::_isFrameFinished`,
+the device-lost recreate never returns and ctest kills it at 240 s. EVERY failure
+carries a kernel `NVRM: Xid (PCI:0000:01:00): 109, pid=<that app>, name=Jahshaka,
+channel 0x24, errorString CTX SWITCH TIMEOUT` and no passing run ever does —
+one to one, over 30 events. The same class of Xid 109 was seen by lane VOXMERGE-1
+on its RGBA32 accumulator ("it is the CLEAR", patch 0065's header) and by the
+scoped gate's log.perf red; this is that hazard, and it is not the clear.
+
+WHAT IS ACTUALLY WRONG. `VulkanVaoManager::deallocateVbo` does not free a block
+immediately: it records `DirtyBlock( mFrameCount, ... )` and lets
+`flushGpuDelayedBlocks` return it to the pool later — "unlike CPU -> GPU
+resources, GPU -> GPU resources are safe to reuse after 1 frame of
+synchronization", `( frameCount - itor->frameIdx ) >= 1u`, guarded by a
+`waitForTailFrameToFinish()` in the caller.
+
+ONE FRAME IS NOT ENOUGH, AND THE WAIT DOES NOT COVER IT. This render system runs
+`mDynamicBufferMultiplier` (3) frames in flight, and `waitForTailFrameToFinish`
+waits for the TAIL of those — the frame `mFrameCount - multiplier + 1` — not for
+the frame the block was freed in. A block freed during frame N is therefore
+handed to a new resource at frame N+1, while frame N's command buffer may still
+be executing on the GPU. The old resource and the new one then ALIAS the same
+device memory with no synchronisation at all. On this driver the second image's
+writes into memory the first one is still using do not fault — they hang the
+channel, which is exactly what Xid 109 CTX SWITCH TIMEOUT reports.
+
+WHY IT SURFACED NOW. Patch 0065's merge accumulator is a TRANSIENT
+`PFG_R32_UINT` 3D uav of `(w, h, d * 13)` — 109 MB at 128^3 — scheduled
+`OnStorage` at the end of every `VctVoxelizer::build()` and back to `Resident` at
+the start of the next one. So every cascade rebuild frees an exactly-sized
+109 MB block and asks for one again a frame or two later, and the first thing
+the new image receives is `clearVoxels`' whole-volume clear: the biggest, most
+immediate write into just-recycled memory this engine performs. Photon's chain
+rebuilds a cascade PER FRAME, so the pattern repeats four times per re-centre.
+
+THE MEASUREMENTS THAT LOCATE IT (mcp.e2e, cold home every run, the kernel log
+followed for the whole session and every app pid matched against it):
+
+    arm                                                   fails / runs   Xid 109
+    tip a2195ae10 (control)                                    7 / 8     7 (1:1)
+    + JAHSHAKA_GI_SWEEPS=2 (LAMPREST-2's at-rest count)         0 / 8     0
+    patch 0066 removed (the cone march)                        4 / 8     4
+    patch 0065 removed (the accumulator and its clear)         0 / 8     0
+    0065 in, only `clearUavUint( mMergeAccumTex )` removed     0 / 8     0
+    ... the same clear, to 1 instead of 0                      5 / 8     5
+    ... the accumulator reshaped X-major, same texel count     6 / 8     6
+    ... the accumulator kept RESIDENT (no per-build churn)     0 / 8     0
+    THIS PATCH (the accumulator transient, the clear in place) 0 / 16    0
+
+The clear's VALUE and the texture's SHAPE change nothing; removing either the
+clear (the write into recycled memory) or the residency churn (the recycling
+itself) removes the hang; and so does letting the block's own frame finish. The
+sweeps and the cone march move the RATE because they decide how much of frame N
+is still executing when frame N+1 recycles its memory.
+
+THE FIX. Both tests become `>= mDynamicBufferMultiplier`: a block freed during
+frame N is released once N has become the tail frame the caller already waits
+for. It costs two extra frames of retention on blocks that are already delayed
+(and nothing at all on the `flushAllGpuDelayedBlocks` path, which frees
+everything behind a full memory barrier on purpose).
+
+UPSTREAM-REPORTABLE, and the entry belongs in SPECS/OGRE_UPSTREAM_ISSUES.md: the
+one-frame reuse window is upstream's, it is not specific to VCT, and any consumer
+that frees and re-requests a large device-local block every frame or two can hit
+it. Jahshaka's own standing Xid 109 sightings (VOXMERGE-1's two, the log.perf
+red) are the same defect seen from different scenes.
+
+VERIFICATION. `git apply --check` on a tree carrying 0001-0066 and
+`git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
+worktree. mcp.e2e 16/16 cold with zero Xid in the followed kernel log;
+`--engine-selftest` unchanged at
+1fd91da92587ffac01d870142dec267db39ed56fdfe5d3d2dea53a34d837997d (this patch
+moves no pixels — it only delays when memory is recycled); the gi suites that
+own the accumulator (`gi.cascade_determinism`, `gi.leak_room`, `gi.field_follows`,
+`gi.cascade_lod`, `gi.chain_face`, `gi.cascades`) green.
+
+diff --git a/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp b/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp
+index 601a4e5c3..1e0aeba57 100644
+--- a/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp
++++ b/RenderSystems/Vulkan/src/Vao/OgreVulkanVaoManager.cpp
+@@ -558,18 +558,28 @@ namespace Ogre
+     void VulkanVaoManager::flushGpuDelayedBlocks()
+     {
+         const uint32 frameCount = mFrameCount;
+ 
+         size_t bytesFlushed = 0u;
+ 
+-        // Unlike CPU -> GPU (or GPU -> CPU) resources, GPU -> GPU resources
+-        // are safe to reuse after 1 frame of synchronization.
++        // A BLOCK IS SAFE TO REUSE ONCE THE FRAME THAT FREED IT HAS FINISHED ON THE
++        // GPU, AND THAT IS mDynamicBufferMultiplier FRAMES, NOT ONE (Jahshaka patch
++        // 0067). The caller below waits for the TAIL frame -- the oldest of the
++        // mDynamicBufferMultiplier frames in flight, i.e. mFrameCount - multiplier
++        // + 1 -- so a block freed during frame N is only known to be idle once
++        // N is the tail, which is mFrameCount == N + multiplier - 1 and one more
++        // frame of margin for the fence this manager has already flushed. Reusing
++        // it at N + 1 hands its memory to a NEW resource while frame N's command
++        // buffer may still be executing: the two alias, and on NVIDIA the second
++        // image's writes into memory the first is still using hang the channel
++        // (NVRM: Xid 109 CTX SWITCH TIMEOUT -> VK_ERROR_DEVICE_LOST). See the
++        // patch header for the measurement.
+         DirtyBlockArray::iterator itor = mDelayedBlocks.begin();
+         DirtyBlockArray::iterator endt = mDelayedBlocks.end();
+ 
+-        while( itor != endt && ( frameCount - itor->frameIdx ) >= 1u )
++        while( itor != endt && ( frameCount - itor->frameIdx ) >= mDynamicBufferMultiplier )
+         {
+             bytesFlushed += itor->size;
+             deallocateVbo( itor->vboIdx, itor->offset, itor->size, itor->vboFlag, true );
+             ++itor;
+         }
+ 
+@@ -2146,13 +2179,15 @@ namespace Ogre
+             }
+ 
+             mDelayedFuncs[mDynamicBufferCurrentFrame].erase(
+                 mDelayedFuncs[mDynamicBufferCurrentFrame].begin(), itor );
+         }
+ 
+-        if( !mDelayedBlocks.empty() && ( mFrameCount - mDelayedBlocks.front().frameIdx ) >= 1u )
++        // Jahshaka patch 0067: the same window as flushGpuDelayedBlocks' own test.
++        if( !mDelayedBlocks.empty() &&
++            ( mFrameCount - mDelayedBlocks.front().frameIdx ) >= mDynamicBufferMultiplier )
+         {
+             waitForTailFrameToFinish();
+             flushGpuDelayedBlocks();
+         }
+ 
+         deallocateEmptyVbos( false );
