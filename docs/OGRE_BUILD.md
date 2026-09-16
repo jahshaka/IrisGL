@@ -1549,12 +1549,122 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     Xid 109 sightings (VOXMERGE-1's two, the scoped gate's log.perf red) came
     from.
 
-THE STACK IS 0001-0067 (this list; `build-ogre.sh` globs `*.patch`, so the file
+68. **0068-external-device-renders-and-is-created-honestly** (SOURCE —
+    `RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp`,
+    `RenderSystems/Vulkan/src/OgreVulkanDevice.cpp`,
+    `RenderSystems/Vulkan/include/OgreVulkanDevice.h`; **every tree re-runs
+    `build-ogre.sh`**; it shares those files with 0002/0007/0013/0038/0040 in
+    different regions, so the per-patch reverse-check can report the overlap
+    false positive — judge by content and reset the submodule first) — THE
+    EXTERNAL-DEVICE ROUTE, WHICH VR NEEDS, RENDERED NOTHING AND WAS CREATED ON A
+    LIE. Under `XR_KHR_vulkan_enable2` the OpenXR runtime creates the VkInstance
+    and the VkDevice and Ogre is handed both (`VulkanExternalInstance` /
+    `VulkanExternalDevice`). Two defects at the pin, both inside code the render
+    system keeps to itself:
+    **(1) the frame veto.** `VulkanRenderSystem::validateDevice()` returned
+    `false` for ANY external device or instance, lost or not, and
+    `Root::_fireFrameStarted()` treats `false` as a veto — so an engine booted on
+    the runtime's device rendered NOTHING, every frame, silently. It now returns
+    `!mDevice->isDeviceLost()` for the external case. Recovery stays impossible
+    on purpose: `handleDeviceLost()` (reachable only through `validateDevice`)
+    recreates the instance, the device and every resource, which is meaningless
+    for a device the runtime owns and whose swapchain images it holds — a lost
+    external device ends the XR session and the process restarts. The plain path
+    is byte-for-byte unchanged.
+    **(2) the device Ogre would have built, exported, and the enabled set read
+    back honestly.** `createDevice()` is SKIPPED on the external path, so its ~17
+    device extensions and its five-struct `VkPhysicalDeviceFeatures2` chain (16-bit
+    storage, shaderFloat16/int8, pipeline cache control, 0038's ray-query set,
+    0013's fifo_latest_ready) were the caller's to reproduce — and a copy of that
+    list in our own TU would rot the day a patch changed it. The selection is now
+    exported and the plain path calls the same code:
+    `VulkanDevice::fillDeviceExtensionRequest()` (createDevice's extension loop),
+    `fillDeviceFeaturesFor()` (fillDeviceFeatures' opt-in set),
+    `buildFeatureChain()` (fillDeviceFeatures2's whole body) and
+    `buildDeviceCreationRequest()`, which fills a caller-owned
+    `VulkanDeviceCreationRequest` whose `extensions` / `pNext()` / `features` feed
+    a `VkDeviceCreateInfo` verbatim (that is what `xrCreateVulkanDeviceKHR` is
+    handed). And the matching half: on the external path `fillDeviceFeatures2()`
+    queried the PHYSICAL DEVICE and recorded what the hardware SUPPORTS as though
+    it had been ENABLED — `shaderFloat16` + `storageInputOutput16` decide
+    `RSC_SHADER_FLOAT16`, which moves both the Hlms variants and the shader-cache
+    fingerprint — so `VulkanExternalDevice` gains an OPTIONAL `creationRequest`
+    pointer: supply the request the device was created from and Ogre records the
+    enabled set from it; omit it and the old behaviour stands, with a
+    `LML_CRITICAL` line saying so. Default-initialised to null, so upstream's own
+    `Tutorial_VulkanExternal` is unaffected.
+    MEASURED (lane VR-1A, `spikes/openxr-vulkan`, Monado 25.0.0's simulated HMD
+    on this box): before the patch the external route draws the clear colour for
+    ever; after it, 551,969 of 902,272 pixels of a lit scene, 60 `xrEndFrame`s,
+    and — the parity that matters — the picture the runtime-created device renders
+    is **sha256-identical** to the picture Ogre's own device renders at the same
+    pose (`3b2a7e48…`), with `DeviceInfo` and the whole capability line equal
+    (17 extensions, `shaderFloat16` 1, `storageInputOutput16` 0, cache control 1,
+    ray query 1, `RSC_VP_AND_RT_ARRAY_INDEX_FROM_ANY_SHADER` 1). Jahshaka's
+    `--engine-selftest` is unchanged (`1fd91da9…`): both hunks are dead on the
+    non-external path. FIX ROUND 1 added three things a second read asked for:
+    `VulkanDeviceCreationRequest` is non-copyable by declaration (its pNext chain
+    points into itself, so a copy would hand `vkCreateDevice` a chain that walks the
+    original); the BASE `VkPhysicalDeviceFeatures` is taken from the request too, not
+    only the chain's bits, with `mSupportedStages` re-derived from it (`mDeviceFeatures`
+    was still read from what the GPU SUPPORTS, and geometry/tessellation are exactly the
+    two bits that stage mask is built from); and the external path no longer re-logs
+    "Found device extension" for every extension on the device, while the "hardware ray
+    query" verdict is logged after the override rather than only from the support query
+    before it.
+
+69. **0069-device-loss-must-not-abort-from-a-destructor** (SOURCE —
+    `RenderSystems/Vulkan/src/Vao/OgreVulkanStagingBuffer.cpp`, one file, touched by no
+    other patch in the stack; **every tree re-runs `build-ogre.sh`**) — EVERY DEVICE
+    LOSS THAT REACHES THE RECOVERY PATH ABORTS THE PROCESS. `~VulkanStagingBuffer`
+    waits on its last fence unconditionally (`:58-59`) and `wait()` ends in
+    `checkVkResult`, which THROWS on a bad `VkResult` (`:142-150`); a destructor is
+    implicitly `noexcept` since C++11, so a throw leaving it is `std::terminate`. And
+    `handleDeviceLost()` — the render system's ONLY recovery path — destroys every
+    staging buffer on its way through `destroyVkResources` →
+    `VaoManager::deleteStagingBuffers`. So a lost device does not produce a clean
+    exception and does not produce a recreate: it produces SIGABRT, by construction,
+    not by luck. Found by lane VR-1A's gate in a suite with nothing to do with VR:
+    `scripting.e2e.physics` died "Subprocess aborted" with a kernel-confirmed
+    `NVRM: Xid 109 CTX SWITCH TIMEOUT` naming that app's own pid, and the backtrace is
+    `_fireFrameStarted → validateDevice → handleDeviceLost → destroyVkResources →
+    deleteStagingBuffers → ~VulkanStagingBuffer → wait → __cxa_call_terminate → SIGABRT`
+    (evidence `~/Developer/spikes/openxr-vulkan/xid-physics-crash.log`). THE FIX is one
+    guard: skip the wait when the device is already lost. A fence on a lost device can
+    never be signalled, so the wait is not merely dangerous but meaningless;
+    `vkDestroyFence` and the pool return below it are both legal on a lost device, so
+    nothing else changes, and the skipped wait logs one `LML_CRITICAL` line so the loss
+    is never silent. The device is reached exactly as `wait()` reaches it (through the
+    VaoManager, whose pointer the destructor already computed further down and which is
+    simply hoisted). On a healthy device the condition is false and behaviour is
+    identical — `--engine-selftest` unchanged (`1fd91da9…`). The rest of that teardown
+    path already uses `stallIgnoringDeviceLost` for exactly this reason; this was the
+    only throwing wait left on it. HONEST RESIDUAL: whether a fresh `vkCreateDevice`
+    succeeds after an Xid 109 — i.e. whether `handleDeviceLost` can RECOVER rather than
+    merely fail cleanly — is a separate question this patch does not answer and could
+    not answer without provoking a device loss deliberately; what it establishes is the
+    floor, that a device loss ends in a clean throw or a working recreate and never in
+    an abort. The Xid 109 class itself is lane XID-2's. UPSTREAM-REPORTABLE.
+    **AND THAT RESIDUAL IS NOW OBSERVED, NOT SPECULATED** (one sample, VR-1A's fix-round
+    gate): with this patch in, `log.perf` met an Xid 109 (kernel line, its own pid) and
+    its log runs `vkWaitForFences … VK_ERROR_DEVICE_LOST` → the "Deleting mapped buffer"
+    warnings → **nothing**. No `VulkanStagingBuffer::wait failed`, no crash file, no
+    SIGABRT — and no return either: ctest reported a TIMEOUT. The same suite class
+    before this patch (`scripting.e2e.physics`, same gate, same box, pre-0069) aborted
+    at exactly the staging-buffer destructor. So the destructor defect is fixed at its
+    cause and the NEXT one on that path is exposed: `handleDeviceLost`'s recreate does
+    not return after an Xid 109. A hang is not better than an abort for a user — it is
+    only better for a diagnosis — so XID-2 owns bounding or abandoning that recreate.
+    Neither failure mode is provokable on demand, so neither claim is a rate; both are
+    single observations with their kernel lines beside them
+    (`~/Developer/spikes/openxr-vulkan/`).
+
+THE STACK IS 0001-0069 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064 and 0067 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068 and 0069 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
