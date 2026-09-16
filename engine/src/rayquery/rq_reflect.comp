@@ -143,6 +143,12 @@ layout( set = 0, binding = 14 ) uniform samplerCube skyCube;
 /// below the half-float format's own ceiling. A reflection clamped here is
 /// still white after any exposure the tonemapper arrives at.
 const float kMaxRadiance = 1024.0;
+/// HOW MANY SAMPLES THE FILTER'S CONFIDENCE RAMP WANTS before it composites a
+/// traced reflection at full weight. Declared in BOTH stages because the two
+/// are separate GLSL translation units sharing one descriptor set, and the
+/// seeding rule in main() has to state the same number the filter reads —
+/// rq_reflect_filter.comp's kWarmupFrames. Change one, change the other.
+const float kWarmupFrames = 8.0;
 
 /// IS THIS A NUMBER? `x == x` IS NOT A NaN TEST IN THIS TREE (CLAUDE.md, lane
 /// HDR-1, measured on NVIDIA 595.84): the compiler folds a self-equality to
@@ -247,16 +253,77 @@ vec3 sampleGgxVndf( vec3 Ve, float alpha, vec2 u )
 /// a surface thinner than a cell, or at a grazing angle to the grid, keeps a
 /// residual of its neighbours. The sample point is pushed HALF A CELL along the
 /// ray, into the cell the surface occupies rather than onto its face.
-vec3 voxelRadiance( vec3 hitPos, vec3 dir, out bool ok )
+///
+/// THREE THINGS THIS FUNCTION DOES THAT UPSTREAM'S FIRST CUT DID NOT (DRAG-1):
+///
+///  1. THE RADIANCE IS IN THE SCENE'S UNITS, NOT THE BAKE'S. `VctLighting`
+///     normalises everything it injects by the brightest light's radiance over
+///     pi (its `autoMultiplier`), and the PIXEL path multiplies that back out
+///     through `probeParams.multiplier` (Vct_piece_ps.any's `finalMultiplier`).
+///     This function read the voxel raw, so a traced reflection was in
+///     baking-normalised units and came out right ONLY when the brightest light
+///     in the scene happened to have radiance pi — which is exactly a sun at
+///     intensity 1 (powerScale = I*pi), i.e. every fixture the suites use, and
+///     nothing else. A brighter lamp darkened every traced reflection by its
+///     own factor. The engine now exports each cascade's `finalMultiplier` in
+///     `voxelOrigin[c].w` (a slot that held the cascade's largest extent, which
+///     nothing read).
+///
+///  2. THE CASCADE CHOICE IS BLENDED AT THE BOX FACE, not switched. Choosing the
+///     first cascade that CONTAINS the hit steps the texel size 2x at cascade
+///     0's face and 3x at cascade 1's, and a mirror looking across a hall shows
+///     that step as a ring — the boundary of a box, drawn on a reflection. The
+///     contribution now fades out over the last few texels of a cascade and the
+///     next one out takes up the remainder, so the texel size changes over a
+///     band instead of at a surface.
+///
+///  3. THE MIP IS CHOSEN FOR THE LOBE. `textureLod(..., 0.0)` made every ray
+///     read the finest directional mip, so a rough reflection paid for the
+///     anisotropic chain and never read it, and its variance was removed by the
+///     spatial filter instead. The lobe has a width; at distance t it covers a
+///     footprint, and a mip exists for exactly that. What is NOT taken is the
+///     WHOLE lobe footprint: the temporal mean already averages up to N samples
+///     of the lobe (N = 1/knobs2.w, the mean's memory floor), so pre-filtering
+///     the whole lobe on top of that would blur it twice. The honest footprint
+///     for ONE stochastic sample is the spacing BETWEEN the samples the mean
+///     holds, which for N samples spread over the lobe goes as 1/sqrt(N). A
+///     MIRROR takes LOD 0 and no blend widening at all — and LOD 0 is still two
+///     cells, so this does not sharpen a mirror; only hit lighting can.
+///
+/// `lobeAlpha` is the GGX alpha of the surface the ray left and `t` the distance
+/// it travelled.
+vec3 voxelRadiance( vec3 hitPos, vec3 dir, float lobeAlpha, float t, out bool ok )
 {
 	ok = false;
 	const int count = int( p.knobs.w );
+	// HOW WIDE THE HAND-OVER BAND IS, in cells of the cascade being left. Three
+	// DIRECTIONAL texels (a directional texel is two cells: the anisotropic
+	// textures are half resolution on two axes with both signs packed into the
+	// third), which is the narrowest band that can hide a 2x texel step and the
+	// widest that cannot reach a cascade's own centre.
+	const float kBlendCells = 6.0;
+	// The mean's sample count at its floor — see (3) above.
+	const float meanSamples = 1.0 / max( p.knobs2.w, 1e-3 );
+	const float kMirrorAlphaHere = 0.01;
+	vec3 acc = vec3( 0.0 );
+	float accW = 0.0;
 	for( int c = 0; c < count; ++c )
 	{
+		if( accW >= 0.999 )
+			break;
 		const vec3 pos = hitPos + dir * ( 0.5 * p.voxelInvSize[c].w );
 		const vec3 ls = ( pos - p.voxelOrigin[c].xyz ) * p.voxelInvSize[c].xyz;
 		if( any( lessThan( ls, vec3( 0.0 ) ) ) || any( greaterThan( ls, vec3( 1.0 ) ) ) )
 			continue;					// not this cascade's business; try the next one out
+		// The mip for this cascade's own texel size. `voxelInvSize[c].w` is the
+		// cell in world units; a directional texel is two of them.
+		const float texel = 2.0 * max( p.voxelInvSize[c].w, 1e-6 );
+		float lod = 0.0;
+		if( lobeAlpha > kMirrorAlphaHere )
+		{
+			const float footprint = 2.0 * t * lobeAlpha / sqrt( max( meanSamples, 1.0 ) );
+			lod = clamp( log2( max( footprint, texel ) / texel ), 0.0, 6.0 );
+		}
 		vec4 s;
 		if( p.knobs2.x > 0.5 )
 		{
@@ -266,9 +333,9 @@ vec3 voxelRadiance( vec3 hitPos, vec3 dir, out bool ok )
 			isNegative.z = dir.z < 0.0 ? 0.5 : 0.0;
 			vec3 uvw = ls;
 			uvw.x = clamp( uvw.x, 0.0, 1.0 ) * 0.5;
-			const vec4 xc = textureLod( voxelX[c], uvw + vec3( isNegative.x, 0.0, 0.0 ), 0.0 );
-			const vec4 yc = textureLod( voxelY[c], uvw + vec3( isNegative.y, 0.0, 0.0 ), 0.0 );
-			const vec4 zc = textureLod( voxelZ[c], uvw + vec3( isNegative.z, 0.0, 0.0 ), 0.0 );
+			const vec4 xc = textureLod( voxelX[c], uvw + vec3( isNegative.x, 0.0, 0.0 ), lod );
+			const vec4 yc = textureLod( voxelY[c], uvw + vec3( isNegative.y, 0.0, 0.0 ), lod );
+			const vec4 zc = textureLod( voxelZ[c], uvw + vec3( isNegative.z, 0.0, 0.0 ), lod );
 			const vec3 w = dir * dir;
 			s = w.x * xc + w.y * yc + w.z * zc;
 		}
@@ -277,14 +344,41 @@ vec3 voxelRadiance( vec3 hitPos, vec3 dir, out bool ok )
 			// Low tier: VctLighting was built without the anisotropic chains and
 			// slot 0 carries every mip. Directionally averaged, and the honest
 			// answer available.
-			s = textureLod( voxelIso[c], ls, 0.0 );
+			s = textureLod( voxelIso[c], ls, lod );
 		}
 		if( s.w <= 0.02 || !finite3( s.xyz ) || !finite1( s.w ) )
 			continue;					// this cascade holds nothing here
+		// HOW MUCH OF THE ANSWER THIS CASCADE OWNS. One inside its box, falling
+		// to zero over the last kBlendCells of it — and a MIRROR takes the
+		// containing cascade whole, because a crossfade of two texel sizes is
+		// still a blur and a mirror is the one surface that must not be blurred.
+		float w = 1.0;
+		if( lobeAlpha > kMirrorAlphaHere )
+		{
+			const vec3 e = min( ls, vec3( 1.0 ) - ls );
+			const float edge = min( min( e.x, e.y ), e.z );
+			// A cell expressed in this cascade's normalised space: cell (world)
+			// times 1/size (world) on the widest axis.
+			const vec3 invSz = p.voxelInvSize[c].xyz;
+			const float cellLS = p.voxelInvSize[c].w *
+								 max( max( invSz.x, invSz.y ), invSz.z );
+			w = clamp( edge / max( kBlendCells * cellLS, 1e-6 ), 0.0, 1.0 );
+		}
+		w = min( w, 1.0 - accW );
+		if( w <= 0.0 )
+			continue;
+		// (1) the cascade's own radiance multiplier, undoing the bake's
+		// normalisation exactly as the pixel path does.
+		acc += ( s.xyz / s.w ) * ( w * max( p.voxelOrigin[c].w, 0.0 ) );
+		accW += w;
 		ok = true;
-		return clamp( s.xyz / s.w, vec3( 0.0 ), vec3( kMaxRadiance ) );
 	}
-	return vec3( 0.0 );
+	if( !ok )
+		return vec3( 0.0 );
+	// Whatever weight the chain could actually answer for is the whole answer:
+	// a hit in the last cascade's outermost band has nothing further out to fade
+	// into, and normalising there is "this is all there is", not a hole.
+	return clamp( acc / max( accW, 1e-6 ), vec3( 0.0 ), vec3( kMaxRadiance ) );
 }
 
 vec3 skyRadiance( vec3 dir )
@@ -308,8 +402,15 @@ vec3 skyRadiance( vec3 dir )
 /// surface found there is the same one. Without that test a disocclusion drags the previous surface's
 /// reflection across the new one for as long as the mean remembers.
 /// Returns rgb = the mean, w = how many frames are in it (0 = nothing usable).
-vec4 historyAt( vec3 world, ivec2 traceRes )
+///
+/// `warmHeld` (DRAG-1, REFLECT F2 item 3) comes back 1.0 when a history texel
+/// WAS found at the reprojected pixel and had already passed the filter's
+/// warm-up (kWarmupFrames samples), but the distance test rejected it: the
+/// surface here MOVED. That is the one case where the renderer's confidence in
+/// showing a ray at all must not fall — see the count it seeds in main().
+vec4 historyAt( vec3 world, ivec2 traceRes, out float warmHeld )
 {
+	warmHeld = 0.0;
 	const vec3 d = world - p.prevCamPos.xyz;
 	const float z = dot( d, p.prevFwd.xyz );
 	if( z <= 0.0 )
@@ -327,7 +428,24 @@ vec4 historyAt( vec3 world, ivec2 traceRes )
 	// moved along, tight enough that a silhouette's far side is a different
 	// surface. A first frame stores 0 and is rejected here by construction.
 	if( wasDist <= 0.0 || abs( wasDist - dist ) > 0.05 * max( dist, 1.0 ) )
+	{
+		// THE RADIANCE IS REJECTED; THE CONFIDENCE IS NOT (DRAG-1). A rejection
+		// here means the surface at this pixel is not the one that was here
+		// last frame — a drag, a camera move, a disocclusion — and this frame's
+		// ray is the honest answer for the new one. What must NOT happen is the
+		// filter's warm-up gate falling back to an eighth and fading the ray
+		// out to the probe and in again over eight frames, once per rejection,
+		// for every frame of a drag: that is a visible pulse on the reflection,
+		// and it is the third of the flicker's three mechanisms. So a texel
+		// that HAD a warm history hands its warm-up on, and nothing else.
+		if( wasDist > 0.0 )
+		{
+			const vec4 hj = imageLoad( historyPrev, pc );
+			if( finite1( hj.w ) && hj.w >= kWarmupFrames )
+				warmHeld = 1.0;
+		}
 		return vec4( 0.0 );
+	}
 	const vec4 h = imageLoad( historyPrev, pc );
 	if( !finite3( h.xyz ) || !finite1( h.w ) || h.w <= 0.0 )
 		return vec4( 0.0 );
@@ -430,7 +548,8 @@ void main()
 	// to 1, discards thirty frames of integral, and — through the warm-up —
 	// throttles the ray to an eighth for eight frames afterwards. A glossy lobe
 	// grazing the voxel volume's edge would never converge at all.
-	const vec4 prev = historyAt( world, traceRes );
+	float warmHeld;
+	const vec4 prev = historyAt( world, traceRes, warmHeld );
 
 	// THE RAY. The origin is lifted off its own surface along the NORMAL rather
 	// than along the ray, so a grazing reflection cannot re-enter the surface it
@@ -448,7 +567,7 @@ void main()
 		gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
 		const float t = rayQueryGetIntersectionTEXT( rq, true );
-		traced = voxelRadiance( world + worldN * bias + L * t, L, ok );
+		traced = voxelRadiance( world + worldN * bias + L * t, L, lobeAlpha, t, ok );
 		// A HIT THE CACHE CANNOT SHADE IS NOT A MISS. The ray found geometry;
 		// the voxels simply do not reach it (outside every cascade, or a surface
 		// too thin for the grid). Returning the sky there would draw a hole in
@@ -518,7 +637,25 @@ void main()
 	// perceptual-0.08 surface 30 % of it on its first frame.
 	blend = max( blend, 1.0 - smoothstep( 0.001, kMirrorAlpha, lobeAlpha ) );
 	const vec3 mean = mix( prev.xyz, traced, blend );
-	const float count = min( prev.w + 1.0, 4096.0 );
+	// THE COUNT, AND THE ONE PLACE IT IS SEEDED (DRAG-1). Ordinarily it is
+	// exactly "how many samples are in this mean", which is what the blend
+	// above and the filter's warm-up both read. On a MOTION-CAUSED rejection
+	// (`warmHeld`) the mean restarts from this frame's sample — `blend` is 1,
+	// `prev` is zero — but the pixel is seeded at the warm-up's own threshold
+	// rather than at 1, so the filter composites the ray at full confidence
+	// from the first frame instead of fading it out and back.
+	//
+	// It costs a little adaptation speed at that pixel: the running mean
+	// resumes at 1/(kWarmupFrames+1) instead of 1/2, so it reaches the floor
+	// (1/30) after about twenty frames rather than thirty. It does NOT cost
+	// correctness: the sample it starts from is this frame's own ray.
+	//
+	// A pixel with NO history at all is untouched — `warmHeld` is 0 there by
+	// construction — so a freshly created view (a graded screenshot's, which
+	// lives about two frames) still fades in exactly as before, which is the
+	// guarantee the warm-up exists for.
+	const float seed = max( prev.w, warmHeld * kWarmupFrames );
+	const float count = min( seed + 1.0, 4096.0 );
 	imageStore( historyCur, tc, vec4( mean, count ) );
 	imageStore( historyDistCur, tc, vec4( dist, 0.0, 0.0, 0.0 ) );
 

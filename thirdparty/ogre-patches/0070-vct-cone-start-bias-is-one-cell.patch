@@ -1,0 +1,173 @@
+Jahshaka patch 0070 — the VCT cone's start bias is ONE CELL, whichever way the
+surface faces (MEDIA ONLY)
+
+WHAT IS WRONG UPSTREAM
+----------------------
+Every voxel-cone-tracing cone — the six diffuse ones and the specular one, in the
+pixel piece, and the diffuse set again in the bounce-injection compute twin —
+starts a short distance off the surface so that it does not immediately sample
+the voxel the surface itself occupies. Upstream expresses that distance as
+
+    posLS += (dirLS / maxVal) * vctInvResolution * lerp( 15.0f, 1.0f, maxVal )
+
+where `dirLS` is the geometric normal in probe space and `maxVal` is its largest
+component. For a normal pointing down an axis maxVal = 1 and the step is ONE
+voxel. For a body-diagonal normal maxVal = 1/sqrt(3) = 0.577, so lerp(15,1,0.577)
+= 6.92 and the division by maxVal makes it 6.92/0.577 = TWELVE voxels. The
+compute twin has the same shape without the lerp: one voxel to 1.73.
+
+The stated reason is staircase aliasing on axis-aligned steps, and on a BOX it is
+invisible: every face has maxVal = 1 and every cone starts one voxel out.
+
+On a CURVED surface it is a seam by construction. A sphere's normal sweeps every
+direction, so the start point travels from one voxel to twelve and back across the
+six arcs where two components of the normal are equal in magnitude — 8 cm against
+94 cm on a 7.8 cm cascade. A downward-diagonal normal on the lower half of a
+sphere starts its specular cone most of a metre INSIDE the floor and reads the
+floor's contact shadow; the upward-diagonal normal beside it starts above the
+sphere's own lit voxels and reads those. The result is a bright warped streak
+beside a dark smear, curved along the arc.
+
+That is the artefact the owner's smoke of push #41 reported on a plain sphere in
+an empty scene (spikes/smoke-41/screenshot7.png) — at the document's default
+roughness both the screen-space and the ray-traced reflection arms are gated off,
+so this cone IS the whole reflection of that surface.
+
+THE FIX
+-------
+A start bias is a geometric statement — "leave the surface's own voxel before
+sampling" — and a geometric statement cannot depend on how the surface happens to
+sit against the lattice. So the step becomes ONE CELL along the normal, measured
+along the normal, everywhere:
+
+    biasDirLS = normalise( dirLS )
+    posLS    += biasDirLS * dot( abs( biasDirLS ), vctInvResolution.xyz )
+
+An axis-aligned surface is unchanged (it always got exactly one cell). Everything
+else stops sweeping. The same expression replaces the same term at the two cascade
+HOPS in the pixel piece (the diffuse walk and the specular walk each re-enter the
+next cascade one bias along the normal, in that cascade's units), and in the
+bounce-injection compute shader.
+
+FILES
+-----
+  Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any        (3 sites)
+  Samples/Media/VCT/LightVctBounceInject_piece_cs.any (1 site)
+
+MEDIA ONLY. Studio stages media from the SOURCE tree (cmake/IncludeOgre.cmake), so
+no C++ is recompiled — but every tree still re-runs the patch loop, and a tree
+whose staged media predates this patch renders the old bias.
+
+OVERLAP. Vct_piece_ps.any is also touched by patches 0021, 0033, 0045, 0048 and
+0066; build-ogre.sh's per-patch reverse check cannot see an overlap, so a tree
+that already carries those will report this one as "upstream changed the patched
+file". Reset the submodule and apply the stack in order — the standing recipe.
+
+diff --git a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+index 6dfae8461..245c349bb 100644
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+@@ -403,13 +403,45 @@
+ 		float3 posLS = toVctProbeSpacePos( pos, probeParams );
+ 
+ 		// Bias away from current position in order to avoid self-occlusion (specular reflections
+-		// won't work otherwise). When the geometry is facing diagonally to the axes, we want that
+-		// bias to be stronger as aliasing can still cause oclussion (i.e. imagine the ray hitting
+-		// the steps of a staircase).
++		// won't work otherwise).
++		//
++		// JAHSHAKA PATCH 0070 - ONE CELL, WHICHEVER WAY THE SURFACE FACES.
++		//
++		// Upstream wrote `(dirLS / maxVal) * vctInvResolution * lerp( 15.0f, 1.0f, maxVal )`,
++		// where maxVal is the largest component of the normal in probe space: 1 for a
++		// normal down an axis and 1/sqrt(3) = 0.577 for a body-diagonal one. That makes
++		// the bias ONE voxel for an axis-aligned surface and lerp(15,1,0.577)/0.577 =
++		// TWELVE voxels for a diagonal one - 8 cm against 94 cm on a 7.8 cm cascade. The
++		// stated reason is staircase aliasing on axis-aligned steps, and on a box it is
++		// invisible because every face has maxVal 1.
++		//
++		// On a CURVED surface it is a seam by construction. A sphere's normal sweeps
++		// every direction, so the start point of every cone - the six diffuse ones and
++		// the specular one - travels from one voxel to twelve and back across the six
++		// arcs where two components of the normal are equal in magnitude. A downward
++		// diagonal normal on the lower half of a sphere starts its specular cone most of
++		// a metre INSIDE the floor and reads the floor's contact shadow; the upward one
++		// beside it starts above the sphere's own lit voxels and reads those. A bright
++		// warped streak beside a dark smear, curved along the arc - which is what the
++		// owner's smoke of push 41 reported on a plain sphere in an empty scene, at a
++		// roughness where the screen-space and ray-traced arms are both gated off and
++		// this cone IS the whole reflection.
++		//
++		// The bias is a geometric statement - "leave the surface's own voxel before
++		// sampling" - and a geometric statement cannot depend on how the surface happens
++		// to sit against the lattice. So: ONE CELL along the normal, measured along the
++		// normal, everywhere. An axis-aligned surface is unchanged (it always got one);
++		// everything else stops sweeping.
+ 		float3 dirLS = toVctProbeSpaceDir( pixelData.geomNormal.xyz, probeParams );
+ 		float maxVal = max3( abs( dirLS.x ), abs( dirLS.y ), abs( dirLS.z ) ) + 1e-6f;
+-		float vctInvResolution = dot( abs( dirLS ), probeParams.vctInvResolution_cascadeMaxLod[0].xyz );
+-		posLS += (dirLS / maxVal) * vctInvResolution * lerp( 15.0f, 1.0f, maxVal );
++		// The normal as a DIRECTION in probe space, so the step below is a length in
++		// cells rather than a length in "whatever component happened to be biggest".
++		float3 biasDirLS = dirLS * ( 1.0f / max( length( dirLS ), 1e-6f ) );
++		// ...and the cell size ALONG that direction, which is the same idiom the cascade
++		// hops below use for their own gap term.
++		float vctInvResolution =
++			dot( abs( biasDirLS ), probeParams.vctInvResolution_cascadeMaxLod[0].xyz );
++		posLS += biasDirLS * ( vctInvResolution * 1.0f );
+ 
+ 		@property( vct_num_probes > 1 )
+ 			/*float3 blendv = abs( posLS * 2.0f - 1.0f );
+@@ -463,9 +495,14 @@
+ 							dot( abs( dirLS ), probeParams.vctInvResolution_cascadeMaxLod[j].xyz );
+ 						float prevCascadeMaxLod = probeParams.vctInvResolution_cascadeMaxLod[j - 1].w;
+ 
++						// Jahshaka patch 0070: the same one cell, in the NEW cascade's
++						// units. See the start bias at the top of this function.
++						float normalBias =
++							dot( abs( biasDirLS ),
++								 probeParams.vctInvResolution_cascadeMaxLod[j].xyz );
+ 						float3 newPosLS =
+ 							fromVctProbeToNext( result.posLS, j, probeParams ) - dir * startBias +
+-							(dirLS / maxVal) * startBias * lerp( 15.0f, 1.0f, maxVal );
++							biasDirLS * ( normalBias * 1.0f );
+ 
+ 						VctResult newRes = voxelConeTraceDiff(
+ 							probeParams, newPosLS, dir, coneAngleTan,
+@@ -548,11 +585,13 @@
+ 					// hop. `startBias` measures the new cascade's voxel along the
+ 					// REFLECTION ray (upstream's gap term); the bias is along the
+ 					// normal, so it needs its own measure in the same units.
++					// Jahshaka patch 0070: one cell along the normal, measured along the
++					// normal, in the new cascade's units. See the start bias above.
+ 					float normalBias =
+-						dot( abs( dirLS ), probeParams.vctInvResolution_cascadeMaxLod[j].xyz );
++						dot( abs( biasDirLS ), probeParams.vctInvResolution_cascadeMaxLod[j].xyz );
+ 					float3 newPosLS =
+ 						fromVctProbeToNext( irrLight.posLS, j, probeParams ) - reflVecLS * startBias +
+-						(dirLS / maxVal) * normalBias * lerp( 15.0f, 1.0f, maxVal );
++						biasDirLS * ( normalBias * 1.0f );
+ 
+ 					VctResult newRes = voxelConeTraceSpec(
+ 						probeParams, newPosLS, reflVecLS, specConeAngleTan,
+diff --git a/Samples/Media/VCT/LightVctBounceInject_piece_cs.any b/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
+index 68ba29edd..2a212c56b 100644
+--- a/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
++++ b/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
+@@ -152,7 +152,15 @@
+ 		PARAMS_ARG_DECL
+ 	)
+ 	{
+-		geomNormal.xyz /= max3( abs( geomNormal.x ), abs( geomNormal.y ), abs( geomNormal.z ) );
++		// JAHSHAKA PATCH 0070 - ONE CELL, WHICHEVER WAY THE SURFACE FACES.
++		// The pixel piece's twin (Vct_piece_ps.any's computeVctProbe) carries the same
++		// change and the full rationale. Upstream divided the normal by its LARGEST
++		// component before stepping one inverse-resolution along it, so the step was one
++		// voxel down an axis and 1.73 voxels along a body diagonal: on a curved surface
++		// the cone's start point sweeps with the normal's direction instead of standing
++		// a fixed distance off the surface, which is a seam and not a bias. Normalising
++		// makes it exactly one cell everywhere; an axis-aligned surface is unchanged.
++		geomNormal.xyz *= 1.0f / max( length( geomNormal.xyz ), 1e-6f );
+ 		posLS = posLS + geomNormal.xyz * p_invVoxelResolution;
+ 
+ 		if( posLS.x < 0.0 || posLS.x > 1.0 ||
