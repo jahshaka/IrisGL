@@ -1645,6 +1645,19 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     not answer without provoking a device loss deliberately; what it establishes is the
     floor, that a device loss ends in a clean throw or a working recreate and never in
     an abort. The Xid 109 class itself is lane XID-2's. UPSTREAM-REPORTABLE.
+    **AND THAT RESIDUAL IS NOW OBSERVED, NOT SPECULATED** (one sample, VR-1A's fix-round
+    gate): with this patch in, `log.perf` met an Xid 109 (kernel line, its own pid) and
+    its log runs `vkWaitForFences … VK_ERROR_DEVICE_LOST` → the "Deleting mapped buffer"
+    warnings → **nothing**. No `VulkanStagingBuffer::wait failed`, no crash file, no
+    SIGABRT — and no return either: ctest reported a TIMEOUT. The same suite class
+    before this patch (`scripting.e2e.physics`, same gate, same box, pre-0069) aborted
+    at exactly the staging-buffer destructor. So the destructor defect is fixed at its
+    cause and the NEXT one on that path is exposed: `handleDeviceLost`'s recreate does
+    not return after an Xid 109. A hang is not better than an abort for a user — it is
+    only better for a diagnosis — so XID-2 owns bounding or abandoning that recreate.
+    Neither failure mode is provokable on demand, so neither claim is a rate; both are
+    single observations with their kernel lines beside them
+    (`~/Developer/spikes/openxr-vulkan/`).
 
 THE STACK IS 0001-0069 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
