@@ -1344,7 +1344,89 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     of one imported mesh; the real shape is a `(mesh, level)` cache key — days of
     work, and its own item.
 
-THE STACK IS 0001-0064 (this list; `build-ogre.sh` globs `*.patch`, so the file
+65. **0065-order-independent-voxel-merge** (SOURCE **and** MEDIA —
+    `.../Vct/OgreVctVoxelizer.{h,cpp}`, `Samples/Media/VCT/Voxelizer.material.json`,
+    `Samples/Media/VCT/Voxelizer_cs.{glsl,hlsl,metal}`,
+    `Samples/Media/VCT/Voxelizer_piece_cs.any`, and ONE NEW media file
+    `VoxelMerge_piece_cs.any`; **every tree re-runs `build-ogre.sh`**; shares the
+    two VctVoxelizer files with 0061, 0062 and 0064 and `Voxelizer_piece_cs.any`
+    with 0062, different regions, applied after all of them) — the voxelisation's
+    per-voxel merge is ORDER-INDEPENDENT, so a bucket can be a material POOL again.
+    THE COST IT REMOVES: `build()` issues one compute dispatch per bucket per
+    octant, each sized by the WHOLE OCTANT however few instances it holds. Patch
+    0062 put the material SLOT in the bucket key to buy determinism from an
+    order-dependent merge; that is one whole-volume dispatch PER MATERIAL, and the
+    editor gives every primitive its own material, so on the 8,026-instance
+    lattice the outermost cascade's rebuild went **86 -> 325 ms** (3.8x). Scenes
+    that share materials paid nothing.
+    THE MECHANISM IT FIXES: the merge was a RUNNING MEAN into the 8-bit voxel
+    textures (`mixAverage3/4`) — an 8-bit round trip per dispatch, so which
+    instances landed in which dispatch decided the picture; and the normal's
+    "these surfaces face opposite ways" test was made WHILE summing, against the
+    sum so far, so the first triangle a thread reached decided which way a voxel
+    faced. Both are order dependences no re-solve can correct, because the VOXELS
+    differ.
+    THE SHAPE: a dispatch adds its triangles to a new transient accumulator
+    (`mMergeAccumTex`, PFG_R32_UINT, sixteen texels per voxel interleaved in Z:
+    albedo sum, raw normal sum, emissive sum, FOLDED normal sum, four channels
+    each; upstream's `voxelAccumVal` stays the triangle counter) as exact
+    fixed-point integer SUMS (12 fractional bits, a contribution clamped to
+    [0, 16], so 65,535 of them cannot overflow a uint32 and the snap is 6 % of one
+    8-bit step), then writes the mean of the TOTAL the accumulator holds into the
+    three voxel textures — so whichever dispatch is last leaves the complete
+    answer and no separate resolve pass is needed. The double-sided decision is
+    made there and needs NO THRESHOLD: folded = U - F and raw = U + F (U the
+    normals the fold left alone, F the ones it turned round, in their original
+    directions), so U = (raw + folded)/2 and F = (raw - folded)/2; the voxel's
+    normal is the LARGER of the two — the majority group's mean, which is what
+    upstream stored — and it is double-sided when the other group is not empty,
+    both tested on the INTEGER sums. Taking the larger and not U is load-bearing:
+    a voxel whose normals ALL lie in the folded half-space (a wall facing -X) has
+    U = 0 and would be stored black — four `gi.leak_room` assertions caught it.
+    The one place it is not upstream's answer: upstream dropped at more than 120
+    degrees from the RUNNING sum while the fold separates at 90, so a voxel
+    spanning 90-120 degrees is two groups here and one there — measured on
+    gi.field_follows' sub-voxel walls at under 3 % of the far bounce (0.0216
+    against 0.0210), in the safe direction.
+    `VoxelizerBucket::materialSlotIdx` is RETIRED (0062's source half, and only
+    that half; its media half is superseded by the resolve computing the flag
+    rather than merging it), and the key keeps 0062's pointer-free ordering.
+    `getNumBuckets()/getNumOctants()` are exposed so the host can report the
+    dispatch count (`GiStatus::CascadeStatus::voxelDispatches`,
+    `world.giStatus().cascades[].voxelDispatches`).
+    **R32_UINT AND NOT RGBA32_UINT, AND THAT IS AN UPSTREAM FINDING:** the
+    accumulator is cleared every build through `ComputeTools::clearUavUint`, and
+    clearing a PFG_RGBA32_UINT 3D uav that way HANGS THE GPU on NVIDIA 595.84 —
+    `VK_ERROR_DEVICE_LOST` with `Xid 109 CTX SWITCH TIMEOUT`, 8/8 on
+    `samples.cleanstart.Showroom{,_2}` and 0/4 with that one call removed while
+    the same texture was still created, bound and written. It is the CLEAR and
+    not the size, the binding, the shader body or the bucket key: each of those
+    was reversed on its own and the device was still lost. R32_UINT clears without
+    complaint, 4/4. Recorded for OGRE_UPSTREAM_ISSUES.md; the cost is the
+    scattered addressing sixteen scalar texels imply.
+    WHAT IT COSTS: 64 bytes per voxel — 16.8 MB at 64^3, 134 MB at 128^3 —
+    TRANSIENT (OnStorage the moment `build()` returns, one volume at a time), plus
+    sixteen scalar texels read and written per touched voxel. The voxelisation job
+    gains ONE uav slot (7 instead of 6) and nothing else about its bindings moves.
+    Measured (lane VOXMERGE-1, GPU clocks locked, the lattice at Photon High, GPU
+    timestamps, mean/max ms per rebuild, two runs per arm): c0 13.7/20.4 and
+    14.3/22.7 -> 13.9/17.0 and 13.6/16.7; c1 34.3/90.1 and 29.8/73.4 -> 18.1/32.1
+    and 17.3/29.7; c2 73.9/175.5 and 68.5/164.0 -> 18.2/28.7 and 18.3/28.8;
+    **c3 324.8/333.6 and 329.1/331.1 -> 84.1/84.2 and 84.3/84.9**, 3.9x and below
+    the 86.8/88.9 E2 measured before 0062 landed. Showroom 2, whose materials are
+    shared, pays the accumulator's traffic on its near cascades and is repaid on
+    its far one: c0 4.21 -> 4.71, c1 4.31 -> 4.79, c2 3.77 -> 3.80,
+    c3 7.84 -> 4.58.
+    `gi.cascade_determinism` case 3 goes 6.00/255 -> **0.00/255** — exact, not
+    merely inside the 8-bit floor. `--engine-selftest` byte-identical
+    (`ead9a2ce...`), and so is the single-volume picture of the same scene.
+    Suites: `gi.cascade_determinism` (which gains case 4 — 200 objects with 200
+    materials in two attach orders), `gi.cascades` case 14 (the dispatch count is
+    a handful, not one per material), `gi.field_follows`, `gi.leak_room`,
+    `samples.cleanstart.Showroom{,_2}` and `scripting.e2e.movable_lamp_rest`
+    (both of which the RGBA32_UINT shape reddened and this one does not).
+
+THE STACK IS 0001-0065 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 NOTE ON 0059: it is ATOM-1's `Mesh2 set lod values`, which landed on main while
 this lane ran — this branch carries 0001-0058 + 0060-0062 and the merged tree
@@ -1356,7 +1438,7 @@ a sibling landed first.
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063 and 0064 are SOURCE-only (0062 is SOURCE + media), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063 and 0064 are SOURCE-only (0062 and 0065 are SOURCE + media), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

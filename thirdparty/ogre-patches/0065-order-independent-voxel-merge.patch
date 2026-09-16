@@ -1,0 +1,823 @@
+Jahshaka patch 0065 — AN ORDER-INDEPENDENT VOXEL MERGE, so a voxelisation
+bucket can be a material POOL again.
+
+SOURCE **and** MEDIA. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh`
+after pulling this (the source half compiles; the media half is staged by Studio
+from the SOURCE tree, so the patch loop must have run in that tree either way).
+Files: `Components/Hlms/Pbs/{include,src}/Vct/OgreVctVoxelizer.{h,cpp}`,
+`Samples/Media/VCT/Voxelizer.material.json`,
+`Samples/Media/VCT/Voxelizer_cs.{glsl,hlsl,metal}`,
+`Samples/Media/VCT/Voxelizer_piece_cs.any`, and ONE NEW media file
+`Samples/Media/VCT/VoxelMerge_piece_cs.any`. The voxelisation job gains ONE uav
+slot (7 instead of 6) and changes nothing else about its bindings. It shares the two VctVoxelizer
+files with patches 0061, 0062 and 0064 and `Voxelizer_piece_cs.any` with 0062 —
+different regions, applied after all of them.
+
+WHAT WENT WRONG, AND WHY 0062 IS HALF RETIRED BY THIS.
+
+`VctVoxelizer::build()` issues ONE COMPUTE DISPATCH PER BUCKET PER OCTANT, and
+each dispatch is sized by the whole octant however few instances the bucket
+holds. Upstream's bucket key therefore names only what a dispatch BINDS: the
+compute job's variant, the material POOL's const buffer, the vertex/index
+buffers, the texture-pool flag — the material SLOT rides per instance.
+
+The voxelisation merged each dispatch's triangles into the RGBA8/RGB10A2 voxel
+textures as a RUNNING MEAN (`mixAverage3/4`): load the mean written so far,
+weight it by the count, add this dispatch's, store the new mean back — an 8-bit
+round trip PER DISPATCH. An average of the same numbers taken in a different
+order is the same value only up to that quantisation, so WHICH INSTANCES LANDED
+IN WHICH DISPATCH decided the picture. And the normal's "these two surfaces face
+opposite ways" test was made WHILE summing, against the sum so far, so the FIRST
+triangle a thread happened to reach decided which way the voxel faced. Together
+they were 6/255 on `gi.cascade_determinism`'s room between two attach orders of
+one scene.
+
+Patch 0062 bought determinism by putting the material SLOT in the bucket key —
+one dispatch per MATERIAL makes the partition a property of the scene instead of
+of the attach order. It worked, and it cost: on a scene whose 8,001 primitives
+each own a material (which is what the editor gives every primitive) the
+outermost cascade's rebuild went **86 -> 325 ms**, 3.8x, because thousands of
+whole-volume dispatches at ~28 us each is a quarter of a second of nothing.
+Scenes that SHARE materials paid nothing.
+
+THE FIX — ACCUMULATE, THEN RESOLVE, IN ONE DISPATCH.
+
+1. A voxelisation dispatch adds its triangles to PER-VOXEL INTEGER SUMS in a new
+   accumulator (`mMergeAccumTex`, PFG_R32_UINT, sixteen texels per voxel
+   interleaved in Z: albedo sum, raw normal sum, emissive sum, FOLDED normal sum,
+   four channels each), on the fixed-point grid `VoxelMerge_piece_cs.any` defines
+   (12 fractional bits, one contribution clamped to [0, 16], so 65,535
+   contributions cannot overflow a uint32 and the snap is 6 % of one step of the
+   8-bit texture the mean finally lands in). Integer addition is exact and
+   associative: the partition stops mattering. Upstream's own `voxelAccumVal`
+   stays the triangle counter and the divisor, read and written where upstream
+   read and wrote it.
+
+2. It then writes the mean of the TOTAL the accumulator now holds into the three
+   voxel textures. Whichever dispatch is last at a voxel therefore leaves the
+   complete answer and an earlier one's partial answer is always overwritten by
+   it — the value depends on the sums, not on who wrote them — so no separate
+   resolve pass is needed. A dispatch also stops visiting voxels it contributed
+   nothing to (upstream's condition was `accumTris + origAccumTris > 0`, so a
+   dispatch re-rounded every voxel an earlier one had filled), which is most of
+   them.
+
+3. The "opposite ways" decision moves into that resolve, and needs no threshold,
+   because the two normal sums GIVE BACK THE TWO GROUPS. Each normal also goes
+   into a FOLDED sum, folded into one half-space by the sign of its largest
+   component, so ANTIPODAL NORMALS ALWAYS FOLD TOGETHER. Write the folded sum as
+   U - F and the raw one as U + F, where U is the sum of the normals the fold
+   left alone and F the sum, in their ORIGINAL directions, of the ones it turned
+   round: then U = (raw + folded)/2 and F = (raw - folded)/2, both exact. The
+   voxel's normal is the LARGER of the two — the majority group's mean, which is
+   what upstream stored after it dropped the opposing triangles and divided by
+   the whole count — and it is double-sided when the OTHER group is not empty,
+   which is what upstream's exclusion meant. Both emptiness tests are INTEGER
+   comparisons of the two sums, so a minority of one triangle in sixty thousand
+   still counts, and a voxel whose normals never crossed the fold's seam cannot
+   raise the flag.
+   Taking the LARGER and not U is load-bearing: a voxel whose normals all lie in
+   the half-space the fold turns round (a wall facing -X) has U = 0, and storing
+   that leaves it black — measured at four `gi.leak_room` assertions.
+   The one place this is not upstream's answer: it dropped a triangle at more
+   than 120 degrees from the RUNNING sum while the fold separates at 90, so a
+   voxel whose normals span 90 to 120 degrees is two groups here and one there.
+   Measured on gi.field_follows' sub-voxel walls that is worth under 3 % of the
+   far bounce (0.0216 against the pin's 0.0210), in the safe direction.
+
+4. `VoxelizerBucket::materialSlotIdx` is therefore RETIRED — patch 0062's source
+   half, and only that half. Its media half (the `max(x, x)` typo on the
+   double-sided flag) is superseded by the resolve computing the flag rather than
+   merging it. The bucket key keeps 0062's pointer-free ordering (variant,
+   material POOL, texture-pool flag) because a stable dispatch order is still the
+   right thing for a renderer to have and now costs nothing.
+
+R32_UINT AND NOT RGBA32_UINT, WHICH WOULD BE A QUARTER OF THE TEXELS AND A
+QUARTER OF THE ADDRESSING: `clearVoxels` clears the accumulator every build
+through `ComputeTools::clearUavUint`, and clearing a PFG_RGBA32_UINT 3D uav that
+way HANGS THE GPU on this driver — `VK_ERROR_DEVICE_LOST` with `NVRM: Xid 109
+CTX SWITCH TIMEOUT`, 8 runs out of 8 on `samples.cleanstart.Showroom` and
+`Showroom_2` (NVIDIA 595.84, RTX 4080 SUPER), and 0 out of 4 with that one call
+removed while the same texture was still created, still bound and still written
+by the same shader. It is the CLEAR and not the size, the binding, the shader
+body or the bucket key: each of those was reversed on its own and the device was
+still lost. R32_UINT clears without complaint, 4/4. Recorded as an upstream /
+driver finding; ComputeTools' clear job is generic and the fault is not visible
+in its shader, so it is dodged here rather than fixed.
+
+WHAT IT COSTS. The accumulator is 64 bytes per voxel — 16.8 MB at 64^3, 134 MB
+at 128^3 — and it is TRANSIENT: like `mAccumValVox` it is scheduled back
+OnStorage the moment `build()` returns, and one volume is voxelised at a time.
+Per touched voxel a dispatch now reads and writes sixteen scalar texels beside
+the three it always wrote.
+
+MEASURED (lane VOXMERGE-1, spikes/voxmerge-1/, RTX 4080 SUPER, GPU clocks
+locked, the 8,026-instance lattice at Photon High, GPU timestamps, two runs per
+arm, mean / max GPU ms per rebuild):
+
+    cascade      c0            c1            c2            c3 (outermost)
+    0001-0064    13.7 / 20.4   34.3 / 90.1   73.9 / 175.5  324.8 / 333.6
+                 14.3 / 22.7   29.8 / 73.4   68.5 / 164.0  329.1 / 331.1
+    0001-0065    13.9 / 17.0   18.1 / 32.1   18.2 / 28.7    84.1 /  84.2
+                 13.6 / 16.7   17.3 / 29.7   18.3 / 28.8    84.3 /  84.9
+
+The outermost cascade is BELOW the pre-0062 number (E2 measured 86.8 / 88.9
+before 0062 landed) — 3.9x. Showroom 2, whose materials are shared, pays the
+accumulator's traffic on its near cascades and is well repaid on its far one:
+c0 4.21 -> 4.71, c1 4.31 -> 4.79, c2 3.77 -> 3.80, c3 7.84 -> 4.58.
+
+`gi.cascade_determinism` case 3 goes **6.00/255 -> 0.00/255** — exact, not merely
+inside the 8-bit floor — and its new case 4 (200 objects, 200 materials, two
+attach orders) reads 0.00/255 too. `--engine-selftest` is **byte-identical**
+(`ead9a2ce6ddcc3badb7e1c6226db7ebd38a19b36a2359b99ea84e1d42c8b215d`), and so is
+the single-volume (chain OFF) picture of the same scene.
+
+UPSTREAM. Two findings for SPECS/OGRE_UPSTREAM_ISSUES.md: the order-dependent
+voxel merge itself (upstream already knows the class —
+`OGRE_FORCE_VCT_VOXELIZER_DETERMINISTIC` orders `MeshPtr`s by name for the same
+reason — and does not cover the voxel merge or the normal clustering), and the
+`ComputeTools` RGBA32_UINT 3D clear that loses the device.
+
+VERIFICATION. `git apply --check` on a tree carrying 0001-0064 and
+`git apply --reverse --check` after applying; `build-ogre.sh` re-run in the lane
+worktree. Suites: `gi.cascade_determinism` (which gains case 4 — 200 objects with
+200 materials in two attach orders), `gi.cascades` case 14 (the dispatch count is
+a handful, not one per material), every other `gi.*`, `scene.reopen_fidelity`,
+`samples.cleanstart.*`, `test_engine` and its ASan twin.
+
+diff --git a/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h b/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
+index 3cde38a..35bee6e 100644
+--- a/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
++++ b/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
+@@ -62,34 +62,38 @@ namespace Ogre
+         bool               needsTexPool;
+         /// WHAT THIS BUCKET IS, said without a pointer: the compute job's VARIANT
+         /// (the VoxelizerJobSetting bits — it also decides the vertex and index
+-        /// buffers) and the material's POOL and SLOT. See operator< below.
++        /// buffers) and the material POOL its const buffer is. See operator< below.
+         uint32             variant;
+         uint32             materialBucketIdx;
+-        uint32             materialSlotIdx;
+ 
+         /// ORDERED BY WHAT A BUCKET IS, NEVER BY WHERE IT LIVES.
+         ///
+         /// This ordering is the ORDER THE DISPATCHES RUN IN (VctVoxelizer::build
+-        /// iterates mBuckets), and the voxelisation shader's per-voxel merge is not
+-        /// fully order-independent: the double-sided flag it writes is the last
+-        /// dispatch's answer for every voxel it touches. Comparing POINTERS therefore
+-        /// made the voxel contents depend on the order the allocator happened to hand
+-        /// out buffers — the same scene, voxelised in two processes, is not the same
+-        /// picture, and no re-solve can correct it because the VOXELS differ.
++        /// iterates mBuckets). Comparing POINTERS made that order the allocator's,
++        /// and the voxelisation's per-voxel merge used to be order-dependent, so
++        /// the same scene voxelised in two processes was not the same picture and
++        /// no re-solve could correct it (the VOXELS differed). Patch 0065 made the
++        /// merge itself order-independent — the dispatches accumulate exact integer
++        /// sums and one resolve pass turns them into the voxel textures — so the
++        /// order no longer decides anything; this key stays because a stable order
++        /// is still the right thing for a renderer to have, and it costs nothing.
+         ///
+-        /// The three integer keys name the bucket completely: `variant` carries the
+-        /// job and, with it, which vertex/index buffers the bucket uses (compressed
+-        /// vertex format, 32-bit indices) and whether a texture pool is needed; the
+-        /// material's pool + slot name the material. The pointer comparisons remain
+-        /// underneath as a total-order tie-break that nothing reaches.
++        /// A BUCKET IS A DISPATCH, AND A DISPATCH IS SIZED BY THE WHOLE OCTANT
++        /// however few instances it holds, so the key must name only what a
++        /// dispatch BINDS: the job variant (which also decides the vertex and index
++        /// buffers and the texture pool) and the material POOL's const buffer. The
++        /// material SLOT rides per instance and must NOT be here — patch 0062 put
++        /// it here to buy determinism from the pin's order-dependent merge, and it
++        /// split one whole-volume dispatch into one PER MATERIAL: on a scene whose
++        /// 8,001 primitives each own a material the outermost cascade's rebuild
++        /// went 86 -> 321 ms. The pointer comparisons remain underneath as a
++        /// total-order tie-break that nothing reaches.
+         bool operator<( const VoxelizerBucket &other ) const
+         {
+             if( this->variant != other.variant )
+                 return this->variant < other.variant;
+             if( this->materialBucketIdx != other.materialBucketIdx )
+                 return this->materialBucketIdx < other.materialBucketIdx;
+-            if( this->materialSlotIdx != other.materialSlotIdx )
+-                return this->materialSlotIdx < other.materialSlotIdx;
+             if( this->needsTexPool != other.needsTexPool )
+                 return this->needsTexPool < other.needsTexPool;
+             if( this->job != other.job )
+@@ -219,6 +223,20 @@ namespace Ogre
+         HlmsComputeJob *mAabbCalculator[1u << 2u];
+         HlmsComputeJob *mAabbWorldSpaceJob;
+ 
++        /// Jahshaka patch 0065 — THE ORDER-INDEPENDENT MERGE'S ACCUMULATOR.
++        ///
++        /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 16): sixteen texels per voxel,
++        /// interleaved in Z (albedo sum, raw normal sum, emissive sum, folded
++        /// normal sum, four channels each), all in the fixed-point integers
++        /// Samples/Media/VCT/VoxelMerge_piece_cs.any defines — which also says
++        /// why it is not RGBA32_UINT at a quarter of the texels (ComputeTools'
++        /// clear of a 128-bit 3D uav loses the device on this driver).
++        /// 64 bytes per voxel, which is 16.8 MB at 64^3 and 134 MB at 128^3 —
++        /// and TRANSIENT: like mAccumValVox it is scheduled back OnStorage the
++        /// moment build() ends, so it is resident only while a volume is being
++        /// voxelised, and one volume is voxelised at a time.
++        TextureGpu *mMergeAccumTex;
++
+         uint32                mTotalNumInstances;
+         float                *mCpuInstanceBuffer;
+         UavBufferPacked      *mInstanceBuffer;
+@@ -312,6 +330,8 @@ namespace Ogre
+ 
+         void buildMeshBuffers();
+         void createVoxelTextures();
++        /// Jahshaka patch 0065: drops mMergeAccumTex too.
++        void destroyVoxelTextures() override;
+ 
+         void   placeItemsInBuckets();
+         size_t countSubMeshPartitionsIn( Item *item ) const;
+@@ -405,6 +425,17 @@ namespace Ogre
+         void setResolution( uint32 width, uint32 height, uint32 depth );
+ 
+         void build( SceneManager *sceneManager );
++
++        /// Jahshaka patch 0065 — HOW MANY DISPATCHES THE LAST build() ISSUED.
++        ///
++        /// A bucket IS a dispatch, and a dispatch is sized by the whole OCTANT
++        /// however few instances the bucket holds, so `getNumBuckets() *
++        /// getNumOctants()` is the number that says whether a scene is paying
++        /// for its material count rather than for its geometry. It is the
++        /// reading patch 0062's 3.6x had no name for; exposed so the host can
++        /// report it (Jahshaka: GiStatus::CascadeStatus::voxelDispatches).
++        size_t getNumBuckets() const { return mBuckets.size(); }
++        size_t getNumOctants() const { return mOctants.size(); }
+     };
+ }  // namespace Ogre
+ 
+diff --git a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
+index 6f430f9..13a92c7 100644
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
+@@ -90,6 +90,7 @@ namespace Ogre
+                                 bool correctAreaLightShadows ) :
+         VctVoxelizerSourceBase( id, renderSystem, hlmsManager ),
+         mAabbWorldSpaceJob( 0 ),
++        mMergeAccumTex( 0 ),
+         mTotalNumInstances( 0 ),
+         mCpuInstanceBuffer( 0 ),
+         mInstanceBuffer( 0 ),
+@@ -840,12 +841,25 @@ namespace Ogre
+         prepareAabbCalculatorMeshData();
+     }
+     //-------------------------------------------------------------------------
++    /// Jahshaka patch 0065: the merge accumulator dies with the voxel textures.
++    void VctVoxelizer::destroyVoxelTextures()
++    {
++        if( mMergeAccumTex )
++        {
++            mTextureGpuManager->destroyTexture( mMergeAccumTex );
++            mMergeAccumTex = 0;
++        }
++        VctVoxelizerSourceBase::destroyVoxelTextures();
++    }
++    //-------------------------------------------------------------------------
+     void VctVoxelizer::createVoxelTextures()
+     {
+         if( mAlbedoVox && mAlbedoVox->getWidth() == mWidth && mAlbedoVox->getHeight() == mHeight &&
+             mAlbedoVox->getDepth() == mDepth )
+         {
+             mAccumValVox->scheduleTransitionTo( GpuResidency::Resident );
++            // Jahshaka patch 0065: the merge accumulator is transient too.
++            mMergeAccumTex->scheduleTransitionTo( GpuResidency::Resident );
+             return;
+         }
+ 
+@@ -879,6 +893,12 @@ namespace Ogre
+             mAccumValVox = mTextureGpuManager->createTexture(
+                 "VctVoxelizer" + StringConverter::toString( getId() ) + "/AccumVal",
+                 GpuPageOutStrategy::Discard, TextureFlags::NotTexture | texFlags, TextureTypes::Type3D );
++
++            // Jahshaka patch 0065 — the order-independent merge's accumulator.
++            mMergeAccumTex = mTextureGpuManager->createTexture(
++                "VctVoxelizer" + StringConverter::toString( getId() ) + "/MergeAccum",
++                GpuPageOutStrategy::Discard,
++                TextureFlags::NotTexture | TextureFlags::Uav, TextureTypes::Type3D );
+         }
+ 
+         TextureGpu *textures[4] = { mAlbedoVox, mEmissiveVox, mNormalVox, mAccumValVox };
+@@ -893,6 +913,17 @@ namespace Ogre
+         else
+             mAccumValVox->setPixelFormat( PFG_R32_UINT );
+ 
++        // Jahshaka patch 0065: sixteen texels per voxel, interleaved in Z — the
++        // shader derives their coordinates from the voxel's own, so a dispatch
++        // that covers one OCTANT needs to know nothing about the volume's depth.
++        // R32_UINT rather than RGBA32_UINT because ComputeTools' clear of a
++        // 128-bit 3D uav loses the device on this driver (VoxelMerge_piece_cs).
++        mMergeAccumTex->scheduleTransitionTo( GpuResidency::OnStorage );
++        mMergeAccumTex->setPixelFormat( PFG_R32_UINT );
++        mMergeAccumTex->setResolution( mWidth, mHeight, mDepth * 16u );
++        mMergeAccumTex->setNumMipmaps( 1u );
++        mMergeAccumTex->scheduleTransitionTo( GpuResidency::Resident );
++
+         const uint8 numMipmaps = PixelFormatGpuUtils::getMaxMipmapCount( mWidth, mHeight, mDepth );
+ 
+         for( size_t i = 0; i < sizeof( textures ) / sizeof( textures[0] ); ++i )
+@@ -1030,7 +1061,6 @@ namespace Ogre
+                 // The pointer-free identity the bucket is ORDERED by (see operator<).
+                 bucket.variant = variant;
+                 bucket.materialBucketIdx = convResult.bucketIdx;
+-                bucket.materialSlotIdx = convResult.slotIdx;
+                 bucket.vertexBuffer =
+                     itMesh->second.bCompressed ? mVertexBufferCompressed : mVertexBufferUncompressed;
+                 bucket.indexBuffer =
+@@ -1362,12 +1392,15 @@ namespace Ogre
+         mComputeTools->prepareForUavClear( mResourceTransitions, mEmissiveVox );
+         mComputeTools->prepareForUavClear( mResourceTransitions, mNormalVox );
+         mComputeTools->prepareForUavClear( mResourceTransitions, mAccumValVox );
++        // Jahshaka patch 0065: the sums start at zero, every build.
++        mComputeTools->prepareForUavClear( mResourceTransitions, mMergeAccumTex );
+         mRenderSystem->executeResourceTransition( mResourceTransitions );
+ 
+         mComputeTools->clearUavFloat( mAlbedoVox, fClearValue );
+         mComputeTools->clearUavFloat( mEmissiveVox, fClearValue );
+         mComputeTools->clearUavFloat( mNormalVox, fClearNormals );
+         mComputeTools->clearUavUint( mAccumValVox, uClearValue );
++        mComputeTools->clearUavUint( mMergeAccumTex, uClearValue );
+         OgreProfileGpuEnd( "VCT Voxelization Clear" );
+     }
+     //-------------------------------------------------------------------------
+@@ -1449,11 +1482,27 @@ namespace Ogre
+             uavSlot.access = ResourceAccess::ReadWrite;
+             mComputeJobs[i]->_setUavTexture( 4, uavSlot );
+ 
++            // Jahshaka patch 0065: SLOT 5 WAS THE TRIANGLE COUNTER and is now the
++            // per-voxel INTEGER ACCUMULATOR the merge sums into (the count rides in
++            // it). Same slot, same uimage3D, so this job's binding shape — and the
++            // Vulkan root layout Ogre derives from it — is exactly the pin's. That
++            // is not cosmetic: a separate VCT/VoxelResolve compute job was tried
++            // first and corrupted the descriptor set of the job dispatched after it
++            // (VUID-VkWriteDescriptorSet-descriptorType-00319 on LightInjection's
++            // `lightVoxel`, then VK_ERROR_DEVICE_LOST on the Showroom samples).
+             uavSlot.texture = mAccumValVox;
+             uavSlot.pixelFormat = mAccumValVox->getPixelFormat();
+             uavSlot.access = ResourceAccess::ReadWrite;
+             mComputeJobs[i]->_setUavTexture( 5, uavSlot );
+ 
++            // Jahshaka patch 0065: the per-voxel INTEGER ACCUMULATOR the merge
++            // sums into (R32_UINT, sixteen texels per voxel — see
++            // VoxelMerge_piece_cs.any for why it is not RGBA32_UINT).
++            uavSlot.texture = mMergeAccumTex;
++            uavSlot.pixelFormat = mMergeAccumTex->getPixelFormat();
++            uavSlot.access = ResourceAccess::ReadWrite;
++            mComputeJobs[i]->_setUavTexture( 6, uavSlot );
++
+             DescriptorSetTexture2::BufferSlot texBufSlot(
+                 DescriptorSetTexture2::BufferSlot::makeEmpty() );
+             texBufSlot.buffer = mInstanceBufferAsTex;
+@@ -1551,8 +1600,10 @@ namespace Ogre
+ 
+         OgreProfileGpuEnd( "VCT Voxelization Jobs" );
+ 
+-        // This texture is no longer needed, it's not used for the injection phase. Save memory.
++        // These textures are no longer needed, they're not used for the injection
++        // phase. Save memory.
+         mAccumValVox->scheduleTransitionTo( GpuResidency::OnStorage );
++        mMergeAccumTex->scheduleTransitionTo( GpuResidency::OnStorage );
+ 
+         if( mNeedsAlbedoMipmaps || mNeedsAllMipmaps )
+             mAlbedoVox->_autogenerateMipmaps();
+diff --git a/Samples/Media/VCT/VoxelMerge_piece_cs.any b/Samples/Media/VCT/VoxelMerge_piece_cs.any
+new file mode 100644
+index 0000000..37c2904
+--- /dev/null
++++ b/Samples/Media/VCT/VoxelMerge_piece_cs.any
+@@ -0,0 +1,167 @@
++// Jahshaka patch 0065 — THE ORDER-INDEPENDENT VOXEL MERGE (Voxelizer_piece_cs).
++//
++// WHY IT EXISTS. `VctVoxelizer::build()` issues one compute dispatch per bucket
++// per octant, and upstream merged each dispatch's triangles into the RGBA8 voxel
++// textures as a RUNNING MEAN (`mixAverage3/4`): load the mean written so far,
++// weight it by the count, add this dispatch's, store the new mean back — 8-bit,
++// once per dispatch. An average of the same numbers taken in a different order
++// is the same value only up to that quantisation, so WHICH INSTANCES LANDED IN
++// WHICH DISPATCH decided the picture, by a few 8-bit steps per voxel and by
++// ~6/255 on screen after the bounce. That is why patch 0062 had to give every
++// MATERIAL its own bucket (one dispatch per material makes the partition a
++// property of the scene rather than of the attach order) — and why the outermost
++// cascade of a scene whose 8,001 primitives each own a material cost 321 ms
++// instead of 86: a dispatch is sized by the whole octant however few instances
++// it holds.
++//
++// THE FIX IS TO STOP MERGING MEANS. Every contribution is snapped to a fixed
++// point grid and added into a per-voxel INTEGER SUM; the mean is computed ONCE,
++// by the resolve pass, after every dispatch has run. Integer addition is exact
++// and associative, so the voxels do not depend on the partition at all, and a
++// bucket can go back to being a material POOL.
++//
++// THE GRID. 12 fractional bits (1/4096 = 2.4e-4) — 6 % of one step of the 8-bit
++// texture the mean is finally written to, so the snap is invisible — and one
++// contribution is clamped to [0, 16] first, which bounds a sum of 65,535
++// contributions (the widest the voxeliser's own triangle counter allows) at
++// 2.1e9: half a uint32, with the other half as headroom.
++
++@piece( DeclVoxelMerge )
++
++#define VOXEL_MERGE_SCALE 4096.0f
++#define VOXEL_MERGE_CLAMP 16.0f
++
++	/// ONE VOXEL'S SIXTEEN ACCUMULATOR TEXELS ARE ADJACENT IN Z, four per
++	/// quantity: albedo sum at z*16+0..3, RAW normal sum at +4..7 (two's
++	/// complement), emissive sum at +8..11, FOLDED normal sum at +12..15.
++	/// Interleaved rather than stacked planes so the shader needs no knowledge of
++	/// the volume's depth (a voxelisation dispatch covers one OCTANT and does not
++	/// know it), and so a voxel's sixteen texels share a cache line's worth of
++	/// the 3D swizzle.
++	///
++	/// R32_UINT AND NOT RGBA32_UINT, WHICH WOULD BE A QUARTER OF THE TEXELS:
++	/// `clearVoxels` clears this texture every build through
++	/// `ComputeTools::clearUavUint`, and clearing a PFG_RGBA32_UINT 3D uav that
++	/// way HANGS THIS DRIVER — VK_ERROR_DEVICE_LOST with `NVRM: Xid 109 CTX
++	/// SWITCH TIMEOUT`, 8 runs out of 8 on `samples.cleanstart.Showroom{,_2}`
++	/// (NVIDIA 595.84) and 0 out of 4 with that one call removed, everything else
++	/// identical. R32_UINT clears without complaint. Recorded as an upstream /
++	/// driver finding; the cost is the scattered access this layout implies.
++	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
++	{
++		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 16u + chan );
++	}
++
++	/// THE TWO NORMAL SUMS, AND WHY THERE ARE TWO.
++	///
++	/// Upstream decided "this voxel holds surfaces facing opposite ways" WHILE
++	/// summing: it compared each triangle's normal against the sum SO FAR, and if
++	/// the angle exceeded 120 degrees it set the double-sided flag and dropped
++	/// that triangle from the sum. That is first-one-wins — the answer depends on
++	/// which triangle the thread reached first, which is the instance order in
++	/// the dispatch, which is the attach order. It is the LAST order dependence
++	/// in the voxelisation once the merge itself is exact, and it is worth 6/255
++	/// on gi.cascade_determinism's room.
++	///
++	/// So the decision moves to the resolve pass, where it is made from two sums
++	/// that do not care about order: the RAW sum of every normal, and the sum of
++	/// every normal FOLDED into one half-space. `voxelMergeCanonical` folds by
++	/// the sign of the normal's largest component, which is arbitrary but has the
++	/// one property the test needs — ANTIPODAL NORMALS ALWAYS FOLD TOGETHER, since
++	/// sign(-n) = -sign(n). Two surfaces facing opposite ways therefore cancel in
++	/// the raw sum and reinforce in the folded one.
++	///
++	/// AND THE TWO SUMS GIVE BACK THE TWO GROUPS. Folded = U - F and raw = U + F,
++	/// where U is the sum of the normals the fold left alone and F the sum, in
++	/// their ORIGINAL directions, of the ones it turned round — so
++	/// U = (raw + folded)/2 and F = (raw - folded)/2, both exact. The voxel's
++	/// normal is the LARGER of the two, which is the majority group's mean, which
++	/// is what the pin stored (it dropped the opposing triangles from the sum and
++	/// divided by the whole count); the double-sided flag is "the other group is
++	/// not empty", which is what the pin's exclusion meant. No threshold, no
++	/// epsilon: both tests are integer comparisons of the two sums.
++	///
++	/// The one place this is NOT the pin's answer: upstream dropped a triangle at
++	/// more than 120 degrees from the RUNNING sum, while the fold separates at 90,
++	/// so a voxel whose normals span 90 to 120 degrees is two groups here and one
++	/// there. Measured on gi.field_follows' sub-voxel walls that is worth under
++	/// 3 % of the far bounce — the price of not asking the question one triangle
++	/// at a time, and of the answer no longer depending on which triangle a thread
++	/// reached first.
++	INLINE float3 voxelMergeCanonical( float3 n )
++	{
++		float3 a = abs( n );
++		float s = (a.x >= a.y && a.x >= a.z) ? n.x : ((a.y >= a.z) ? n.y : n.z);
++		return s < 0.0f ? -n : n;
++	}
++
++	/// A contribution in [0, VOXEL_MERGE_CLAMP], on the grid, rounded to nearest.
++	INLINE uint4 voxelMergeQuantize4( float4 v )
++	{
++		return uint4( clamp( v, 0.0f, VOXEL_MERGE_CLAMP ) * VOXEL_MERGE_SCALE + 0.5f );
++	}
++	INLINE uint3 voxelMergeQuantize3( float3 v )
++	{
++		return uint3( clamp( v, 0.0f, VOXEL_MERGE_CLAMP ) * VOXEL_MERGE_SCALE + 0.5f );
++	}
++	/// A unit vector's component, on the same grid, as two's complement. `floor`
++	/// and not a cast: a cast truncates towards zero and would round -0.5 the
++	/// wrong way.
++	INLINE int3 voxelMergeQuantizeSigned3( float3 v )
++	{
++		return int3( floor( clamp( v, -1.0f, 1.0f ) * VOXEL_MERGE_SCALE + 0.5f ) );
++	}
++
++
++	/// THE MEAN, FROM THE SUMS. Every dispatch that adds anything to a voxel
++	/// writes this afterwards, from the TOTAL the accumulator then holds — so
++	/// whichever dispatch happens to be last leaves the complete answer, and an
++	/// earlier one's partial answer is always overwritten by it. That is why the
++	/// resolve rides the voxelisation instead of being a pass of its own: the
++	/// value written does not depend on WHO writes it, only on the sums, and the
++	/// sums are exact.
++	INLINE float4 voxelMergeAlbedo( uint4 sumAlbedo, float invAccum )
++	{
++		return float4( sumAlbedo ) * invAccum;
++	}
++	INLINE float4 voxelMergeNormal( uint4 sumNormal, uint4 sumFolded, float invAccum )
++	{
++		// THE TWO GROUPS, RECOVERED. Write the folded sum as U - F and the raw one
++		// as U + F, where U is the sum of the normals the fold left alone and F
++		// the sum, IN THEIR ORIGINAL DIRECTIONS, of the ones it turned round: then
++		// U = (raw + folded)/2 and F = (raw - folded)/2, both exact. The voxel's
++		// normal is the LARGER of the two — the majority group's mean, which is
++		// what the pin stored after it dropped the opposing triangles and divided
++		// by the whole count — and it is double-sided when the OTHER group is not
++		// empty, which is what the pin's exclusion meant.
++		//
++		// Taking the larger and not U is load-bearing: a voxel whose normals ALL
++		// lie in the half-space the fold turns round (a wall facing -X, say) has
++		// U = 0, and storing that would leave it black. Measured: it costs
++		// gi.leak_room four assertions.
++		//
++		// Both emptiness tests are on the INTEGER sums, so they are exact and a
++		// minority of one triangle in sixty thousand still counts.
++		int3 iRaw	= int3( sumNormal.xyz );
++		int3 iFolded	= int3( sumFolded.xyz );
++		int3 iU		= iRaw + iFolded;
++		int3 iF		= iRaw - iFolded;
++		bool emptyU	= ( iU.x == 0 ) && ( iU.y == 0 ) && ( iU.z == 0 );
++		bool emptyF	= ( iF.x == 0 ) && ( iF.y == 0 ) && ( iF.z == 0 );
++		bool doubleSided = !emptyU && !emptyF;
++
++		float3 nU = float3( iU ) * ( 0.5f * invAccum );
++		float3 nF = float3( iF ) * ( 0.5f * invAccum );
++		float3 normalOut = dot( nU, nU ) >= dot( nF, nF ) ? nU : nF;
++
++		// Stored unnormalized and biased, exactly as before, so the injection's
++		// `xyz * 2 - 1` keeps meaning what it meant; .a is the double-sided flag
++		// it reads to pick abs(NdotL) over saturate(NdotL).
++		return float4( normalOut * 0.5f + 0.5f, doubleSided ? 1.0f : 0.0f );
++	}
++	INLINE float4 voxelMergeEmissive( uint4 sumEmissive, float invAccum )
++	{
++		return float4( float3( sumEmissive.xyz ) * invAccum, 0.0f );
++	}
++
++@end
+diff --git a/Samples/Media/VCT/Voxelizer.material.json b/Samples/Media/VCT/Voxelizer.material.json
+index b1f1b80..88f59f0 100644
+--- a/Samples/Media/VCT/Voxelizer.material.json
++++ b/Samples/Media/VCT/Voxelizer.material.json
+@@ -6,12 +6,12 @@
+             "threads_per_group" : [4, 4, 4],
+ 
+             "source" : "Voxelizer_cs",
+-            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "Matrix_piece_all", "Voxelizer_piece_cs.any"],
++            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "Matrix_piece_all", "VoxelMerge_piece_cs.any", "Voxelizer_piece_cs.any"],
+             "inform_shader_of_texture_data_change" : true,
+ 
+-            "uav_units" : 6,
++            "uav_units" : 7,
+ 
+-            "gl_tex_slot_start" : 6,
++            "gl_tex_slot_start" : 7,
+ 			
+ 			"params" :
+             [
+@@ -22,7 +22,8 @@
+                 ["voxelAlbedoTex",      	[2], "int"],
+                 ["voxelNormalTex",  		[3], "int"],
+                 ["voxelEmissiveTex",		[4], "int"],
+-                ["voxelAccumVal",			[5], "int"]
++                ["voxelAccumVal",			[5], "int"],
++                ["voxelMergeAccum",			[6], "int"]
+ 			],
+ 
+ 			"properties" :
+diff --git a/Samples/Media/VCT/Voxelizer_cs.glsl b/Samples/Media/VCT/Voxelizer_cs.glsl
+index bbdb03c..2b75a9e 100644
+--- a/Samples/Media/VCT/Voxelizer_cs.glsl
++++ b/Samples/Media/VCT/Voxelizer_cs.glsl
+@@ -76,6 +76,9 @@ layout( vulkan( ogre_u4 ) vk_comma @insertpiece(uav4_pf_type) )
+ uniform restrict image3D voxelEmissiveTex;
+ layout( vulkan( ogre_u5 ) vk_comma @insertpiece(uav5_pf_type) )
+ uniform restrict uimage3D voxelAccumVal;
++// Jahshaka patch 0065: the per-voxel INTEGER ACCUMULATOR the merge sums into.
++layout( vulkan( ogre_u6 ) vk_comma @insertpiece(uav6_pf_type) )
++uniform restrict uimage3D voxelMergeAccum;
+ 
+ layout( local_size_x = @value( threads_per_group_x ),
+ 		local_size_y = @value( threads_per_group_y ),
+@@ -90,7 +93,7 @@ layout( local_size_x = @value( threads_per_group_x ),
+ //		local_size_z = 4 ) in;
+ 
+ @property( syntax == glsl )
+-	ReadOnlyBufferF( 6, InstanceBuffer, instanceBuffer );
++	ReadOnlyBufferF( 7, InstanceBuffer, instanceBuffer );
+ @else
+ 	ReadOnlyBufferF( 0, InstanceBuffer, instanceBuffer );
+ @end
+@@ -101,6 +104,8 @@ layout( local_size_x = @value( threads_per_group_x ),
+ @end
+ 
+ 
++@insertpiece( DeclVoxelMerge )
++
+ @insertpiece( HeaderCS )
+ 
+ 
+diff --git a/Samples/Media/VCT/Voxelizer_cs.hlsl b/Samples/Media/VCT/Voxelizer_cs.hlsl
+index 2b08155..470068e 100644
+--- a/Samples/Media/VCT/Voxelizer_cs.hlsl
++++ b/Samples/Media/VCT/Voxelizer_cs.hlsl
+@@ -100,6 +100,8 @@ RWTexture3D<@insertpiece(uav2_pf_type)> voxelAlbedoTex		: register(u2);
+ RWTexture3D<@insertpiece(uav3_pf_type)> voxelNormalTex		: register(u3);
+ RWTexture3D<@insertpiece(uav4_pf_type)> voxelEmissiveTex	: register(u4);
+ RWTexture3D<@insertpiece(uav5_pf_type)> voxelAccumVal		: register(u5);
++// Jahshaka patch 0065: the per-voxel integer accumulator.
++RWTexture3D<@insertpiece(uav6_pf_type)> voxelMergeAccum		: register(u6);
+ 
+ StructuredBuffer<InstanceBuffer> instanceBuffer : register(t0);
+ 
+@@ -108,6 +110,8 @@ StructuredBuffer<InstanceBuffer> instanceBuffer : register(t0);
+ 	Texture2DArray		texturePool		: register(t1);
+ @end
+ 
++@insertpiece( DeclVoxelMerge )
++
+ @insertpiece( HeaderCS )
+ 
+ uniform uint2 instanceStart_instanceEnd;
+diff --git a/Samples/Media/VCT/Voxelizer_cs.metal b/Samples/Media/VCT/Voxelizer_cs.metal
+index 0bc5320..a18e8e9 100644
+--- a/Samples/Media/VCT/Voxelizer_cs.metal
++++ b/Samples/Media/VCT/Voxelizer_cs.metal
+@@ -80,6 +80,8 @@ inline uint packUnormRGB10A2( float4 v )
+ @pset( samplerRegister, 1 )
+ @pset( texRegister, 1 )
+ 
++@insertpiece( DeclVoxelMerge )
++
+ @insertpiece( HeaderCS )
+ 
+ #define p_instanceStart p.instanceStart_instanceEnd.x
+@@ -100,6 +102,8 @@ kernel void main_metal
+ 	texture3d<@insertpiece(uav3_pf_type), access::read_write> voxelNormalTex	[[texture(UAV_SLOT_START+3)]],
+ 	texture3d<@insertpiece(uav4_pf_type), access::read_write> voxelEmissiveTex	[[texture(UAV_SLOT_START+4)]],
+ 	texture3d<@insertpiece(uav5_pf_type), access::read_write> voxelAccumVal		[[texture(UAV_SLOT_START+5)]],
++	// Jahshaka patch 0065: the per-voxel integer accumulator.
++	texture3d<@insertpiece(uav6_pf_type), access::read_write> voxelMergeAccum	[[texture(UAV_SLOT_START+6)]],
+ 
+ @property( has_diffuse_tex || has_emissive_tex )
+ 	sampler					poolSampler	[[sampler(@counter(samplerRegister))]],
+diff --git a/Samples/Media/VCT/Voxelizer_piece_cs.any b/Samples/Media/VCT/Voxelizer_piece_cs.any
+index 2aff783..edea1a5 100644
+--- a/Samples/Media/VCT/Voxelizer_piece_cs.any
++++ b/Samples/Media/VCT/Voxelizer_piece_cs.any
+@@ -357,11 +357,16 @@
+ 							  4.0f * p_voxelCellSize * (float3( gl_WorkGroupID.xyz ) + 0.5f);
+ 	groupVoxelAabb.halfSize	= 4.0f * p_voxelCellSize * 0.5f;
+ 
+-	bool doubleSided = false;
+ 	float accumTris = 0;
+-	float4 voxelAlbedo		= float4( 0, 0, 0, 0 );
+-	float4 voxelNormal		= float4( 0, 0, 0, 0 );
+-	float4 voxelEmissive	= float4( 0, 0, 0, 0 );
++	// Jahshaka patch 0065: the SUMS this dispatch adds to the voxel's running
++	// integer total, on VoxelMerge's fixed-point grid. They are exact and they
++	// are ALL of the state, so neither the split of the instances between
++	// dispatches nor their order inside one decides anything
++	// (VoxelMerge_piece_cs.any has the whole argument).
++	uint4 accAlbedo			= uint4( 0u, 0u, 0u, 0u );
++	int3  accNormalRaw		= int3( 0, 0, 0 );
++	int3  accNormalFolded	= int3( 0, 0, 0 );
++	uint3 accEmissive		= uint3( 0u, 0u, 0u );
+ 
+ 	for( uint i=p_instanceStart; i<p_instanceEnd; ++i )
+ 	{
+@@ -420,26 +425,25 @@
+ 																	  material.emissiveTexIdx, 0 ).xyz;
+ 						@end
+ 
+-							voxelAlbedo			+= finalDiffuse;
+-							voxelEmissive.xyz	+= finalEmissive;
++							accAlbedo		+= voxelMergeQuantize4( finalDiffuse );
++							accEmissive		+= voxelMergeQuantize3( finalEmissive );
+ 
+ 							float3 triNormal = tri_barycentric_normal( voxelAabb.center, tri );
+ 							triNormal = normalize( triNormal );
+ 
+-							bool bIsZeroLength = dot( voxelNormal, voxelNormal ) <= 1e-6f;
+-
+-							//voxelNormal is not normalized for properly blend-averaging in multiple
+-							//passes. But we need it normalized for this check to work
+-							float cosAngle =
+-								bIsZeroLength ? 1.0f : dot( normalize( voxelNormal.xyz ), triNormal );
+-							float cos120 = -0.5f;
+-							/*Rewrote as ternary operator because it was glitching in iOS Metal
+-							if( cosAngle <= cos120 )
+-								doubleSided = true;
+-							else
+-								voxelNormal.xyz += triNormal;*/
+-							doubleSided		= cosAngle <= cos120 ? true : doubleSided;
+-							voxelNormal.xyz	+= cosAngle <= cos120 ? float3( 0, 0, 0 ) : triNormal;
++							// Jahshaka patch 0065: every normal goes into BOTH sums,
++							// raw and folded, and nothing is dropped. The "these two
++							// surfaces face opposite ways" decision upstream made
++							// here, against the sum SO FAR, is made once in
++							// VCT/VoxelResolve from the two sums — see
++							// VoxelMerge_piece_cs.any. (The old code is worth
++							// remembering: `cosAngle <= -0.5` dropped the triangle
++							// from the sum and set a double-sided flag, so the FIRST
++							// triangle a thread happened to see decided which way the
++							// voxel faced.)
++							accNormalRaw	+= voxelMergeQuantizeSigned3( triNormal );
++							accNormalFolded	+= voxelMergeQuantizeSigned3(
++													voxelMergeCanonical( triNormal ) );
+ 
+ 							++accumTris;
+ 						}
+@@ -449,40 +453,74 @@
+ 		}
+ 	}
+ 
++	// Jahshaka patch 0065 — ACCUMULATE, THEN RESOLVE, IN ONE DISPATCH.
++	//
++	// This dispatch adds ITS triangles to the voxel's exact integer sums and then
++	// writes the mean of the TOTAL the accumulator now holds. Whichever dispatch
++	// happens to be last at a voxel therefore leaves the complete answer, and an
++	// earlier one's partial answer is always overwritten by it — so the picture
++	// depends on the sums and not on who wrote them, which is the whole point.
++	// It also stops visiting voxels it contributed nothing to (the merge this
++	// replaces had `accumTris + origAccumTris > 0`, so a dispatch re-rounded
++	// every voxel an earlier one had filled), which is most of them.
++	//
++	// `voxelAccumVal` stays the pin's own triangle counter and the divisor, so
++	// the count is read and written exactly where upstream read and wrote it.
+ 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz + ushort3( p_voxelPixelOrigin ) );
+ 
+ 	@property( syntax != hlsl || typed_uav_load )
+-		float4 origAlbedo	= OGRE_imageLoad3D( voxelAlbedoTex, voxelCelUvw );
+-		float4 origNormal	= OGRE_imageLoad3D( voxelNormalTex, voxelCelUvw );
+-		float4 origEmissive = OGRE_imageLoad3D( voxelEmissiveTex, voxelCelUvw );
+ 		float origAccumTris = OGRE_imageLoad3D( voxelAccumVal, voxelCelUvw ).x;
+ 	@else
+-		float4 origAlbedo	= unpackUnorm4x8( OGRE_imageLoad3D( voxelAlbedoTex, voxelCelUvw ) );
+-		float4 origNormal	= unpackUnormRGB10A2( OGRE_imageLoad3D( voxelNormalTex, voxelCelUvw ) );
+-		float4 origEmissive = unpackUnorm4x8( OGRE_imageLoad3D( voxelEmissiveTex, voxelCelUvw ) );
+ 		uint origAccumTrisVal = OGRE_imageLoad3D( voxelAccumVal,
+ 												  wshort3( voxelCelUvw.x >> 1u, voxelCelUvw.yz ) ).x;
+ 		float origAccumTris = (gl_LocalInvocationIndex & 0x1u) ? (origAccumTrisVal >> 16u) :
+ 																 (origAccumTrisVal & 0xFFFFu);
+ 	@end
+ 
+-	origNormal.xyz = origNormal.xyz * 2.0f - 1.0f;
+-
+-	if( accumTris + origAccumTris > 0 )
++	if( accumTris > 0 )
+ 	{
+-		voxelAlbedo			= mixAverage4( voxelAlbedo, accumTris, origAlbedo, origAccumTris );
+-		voxelNormal.xyz		= mixAverage3( voxelNormal.xyz, accumTris, origNormal.xyz, origAccumTris );
+-		voxelEmissive.xyz	= mixAverage3( voxelEmissive.xyz, accumTris, origEmissive.xyz, origAccumTris );
++		uint3 voxelCel = uint3( gl_GlobalInvocationID.xyz ) + uint3( p_voxelPixelOrigin );
++
++		uint4 sumAlbedo		= uint4( 0u, 0u, 0u, 0u );
++		uint4 sumNormal		= uint4( 0u, 0u, 0u, 0u );
++		uint4 sumEmissive	= uint4( 0u, 0u, 0u, 0u );
++		uint4 sumFolded		= uint4( 0u, 0u, 0u, 0u );
++		@foreach( 4, c )
++			sumAlbedo[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ) ).x;
++			sumNormal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ) ).x;
++			sumEmissive[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 8u + @c ) ).x;
++			sumFolded[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 12u + @c ) ).x;
++		@end
++
++		sumAlbedo		+= accAlbedo;
++		// Two's complement: a signed sum kept in a uint wraps the same way in
++		// every order, which is the whole point of doing this in integers.
++		sumNormal.xyz	= uint3( int3( sumNormal.xyz ) + accNormalRaw );
++		sumEmissive.xyz	+= accEmissive;
++		sumFolded.xyz	= uint3( int3( sumFolded.xyz ) + accNormalFolded );
++
++		@foreach( 4, c )
++			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ),
++								uint4( sumAlbedo[@c], 0u, 0u, 0u ) );
++			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ),
++								uint4( sumNormal[@c], 0u, 0u, 0u ) );
++			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 8u + @c ),
++								uint4( sumEmissive[@c], 0u, 0u, 0u ) );
++			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 12u + @c ),
++								uint4( sumFolded[@c], 0u, 0u, 0u ) );
++		@end
+ 
+-		voxelNormal.a	= max( doubleSided ? 1.0f : 0.0f, origNormal.a );
+-		voxelNormal.xyz	= voxelNormal.xyz * 0.5 + 0.5f;
++		float totalTris = accumTris + origAccumTris;
++		float invAccum = 1.0f / ( VOXEL_MERGE_SCALE * totalTris );
++		float4 voxelAlbedo		= voxelMergeAlbedo( sumAlbedo, invAccum );
++		float4 voxelNormal		= voxelMergeNormal( sumNormal, sumFolded, invAccum );
++		float4 voxelEmissive	= voxelMergeEmissive( sumEmissive, invAccum );
+ 
+ 		@property( syntax != hlsl || typed_uav_load )
+ 			OGRE_imageWrite3D4( voxelAlbedoTex, voxelCelUvw, voxelAlbedo );
+ 			OGRE_imageWrite3D4( voxelNormalTex, voxelCelUvw, voxelNormal );
+ 			OGRE_imageWrite3D4( voxelEmissiveTex, voxelCelUvw, voxelEmissive );
+-			OGRE_imageWrite3D1( voxelAccumVal, voxelCelUvw,
+-								uint4( accumTris + origAccumTris, 0, 0, 0 ) );
++			OGRE_imageWrite3D1( voxelAccumVal, voxelCelUvw, uint4( totalTris, 0, 0, 0 ) );
+ 		@else
+ 			OGRE_imageWrite3D4( voxelAlbedoTex, voxelCelUvw, packUnorm4x8( voxelAlbedo ) );
+ 			OGRE_imageWrite3D4( voxelNormalTex, voxelCelUvw, packUnormRGB10A2( voxelNormal ) );

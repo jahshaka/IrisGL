@@ -2391,6 +2391,19 @@ struct GiStatus {
         /// far-field proxy moves: the same cascade with the LOD chain off reads
         /// the authored total.
         long long voxelTriangles = 0;
+        /// HOW MANY COMPUTE DISPATCHES THAT REBUILD COST (ogre-patch 0065).
+        ///
+        /// The voxeliser groups the instances it holds into BUCKETS by what a
+        /// dispatch binds — the vertex format, the index width, whether a
+        /// texture pool is needed, and WHICH MATERIAL POOL the material is in —
+        /// and issues one dispatch per bucket per octant, each sized by the
+        /// whole volume however few instances the bucket holds. So this is the
+        /// number that says whether a cascade is paying for its MATERIAL COUNT
+        /// rather than for its geometry: a scene that shares materials reads a
+        /// handful whatever its size, and one whose every object owns a material
+        /// reads one dispatch per pool of them. `voxelTriangles` is the geometry
+        /// half of the same rebuild's bill.
+        long long voxelDispatches = 0;
     };
     /// The live cascade chain, innermost first. Empty unless
     /// GiParams::cascades built one.
