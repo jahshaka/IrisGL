@@ -1,0 +1,383 @@
+Jahshaka patch 0066 — a cascaded cone march must CARRY THE CONE across the hop.
+
+MEDIA-only patch (one Hlms piece: `Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any`).
+THE PROCESS COST IS STATED RATHER THAN AVOIDED: Studio stages its media from the
+SOURCE tree (cmake/IncludeOgre.cmake), so every tree must still reset its
+ogre-next submodule and re-run `irisgl/scripts/build-ogre.sh` — no engine
+recompile beyond the staging. It OVERLAPS patches 0021, 0033, 0045 and 0048 in
+the same file, so a tree that already carries those hits `build-ogre.sh`'s
+"Upstream changed the patched file" on a re-run: that is the documented
+per-patch reverse-check blind spot and NOT an upstream change. The cure is the
+recorded one — `git -C irisgl/thirdparty/ogre-next checkout -- . && git -C
+irisgl/thirdparty/ogre-next clean -fd` and re-run the script.
+
+WHY (Jahshaka lane SEAM-1, 2026-09-16, measured; PHOTON-E3 named the symptom).
+On a 400 m slab lit by nothing but an ambient, with the camera-centred cascade
+chain bound, the ambient a surface receives falls by a STEP at every cascade
+face — one step per cascade, 1.15-1.24x each, travelling with the camera, and by
+a factor of 1.9 from the far world to the eye. The single fitted volume has no
+such face (1.007-1.029x). The step is the same RATIO under a flat ambient, a
+hemisphere pair and the engine's analytic sky at noon and at 5 degrees, which is
+what rules out a spherical-harmonic band mismatch: it is a pure multiplier on
+the cone's ambient weight. PHOTON_SPEC tracks the accumulated loss as "the
+cascade march residual (0.51x)"; patch 0033's own header table measured it as a
+chain-length sweep, 1.00 / 0.75 / 0.56 / 0.51 for one to four cascades.
+
+The continuation loop in `computeVctProbe` carries the exit POSITION, the colour
+opacity and the mip across a hop. It does not carry the other two things a cone
+IS, and each of them is one of the steps.
+
+  (a) THE ESCAPE OPACITY IS RE-SEEDED FROM THE COLOUR OPACITY AT EVERY HOP.
+      `voxelConeTraceDiff` opens with `float escapeAlpha = startingAlpha;`, and
+      `startingAlpha` is the caller's `result.alpha`, not its
+      `result.escapeAlpha`. Patch 0021 introduced `escapeAlpha` precisely
+      because under anisotropic tracing the two legitimately differ — the axis
+      textures are composited along their own axis, so a one-voxel-thick floor
+      reads alpha 1 along +/-Y at every mip while the cone's real chance of
+      escaping is a fraction of that — and 0021's header recorded this seeding
+      as "a small approximation only that path pays". It is not small. Since
+      `escapeAlpha <= alpha` always, every hop RAISES the escape opacity to the
+      colour opacity, so the ambient weight the cone carries (`light.w`) loses a
+      step per cascade, once per cascade, for exactly the pixels that are inside
+      the most cascades. That is the staircase, and it is why the single volume
+      — which never hops — does not have it.
+
+  (b) THE CONE'S AGE IS RESET AT EVERY HOP, so it is re-born narrow.
+      `dist` does two jobs at once: it POSITIONS the samples
+      (`nextPosLS = posLS + dist * dirLS`) and it SIZES the cone
+      (`diameter = 2 tan(theta) dist`, from which the mip follows). Positioning
+      from the new cascade's entry point is right; SIZING from it is not — a
+      cone's footprint is a function of how far it has come FROM THE SURFACE.
+      The hand-off is arranged to happen exactly when the footprint reaches the
+      next cascade's cell, so the reset looks harmless, but the restart's first
+      diameter is `2 * 0.577 * cell = 1.154 cell` and from there the cone grows
+      as though its apex sat at the entry point rather than at the surface: every
+      hop re-anchors the apex about 0.87 cells behind where it belongs and the
+      whole march through that cascade runs at a footprint that never matches
+      the cone's true solid angle. The escape estimate is accumulated per
+      sample, so a wrong footprint is a wrong escape.
+
+THE FIX is to carry both. `VctResult` gains `travelled` — the distance from the
+SURFACE, in the local-space units of the cascade the cone is currently in — and
+the trace takes `startingEscapeAlpha` and `startingTravelled`. `dist` keeps its
+positioning job unchanged; `diameter` is computed from `travelled`. At the hop
+the caller hands over its own `result.escapeAlpha` and its `result.travelled`
+converted into the next cascade's units by `dot( abs( dir ),
+fromPreviousProbeToNext[j-1][0].xyz )` — the same directional scale upstream
+already uses for `vctInvResolution`, and exactly the scale `fromVctProbeToNext`
+applies to a position, because a length in one cascade's normalised box is a
+length in the next one's box times the ratio of the box sizes.
+
+THE FIRST CASCADE IS ARITHMETICALLY UNTOUCHED. The first call passes
+`startingTravelled` 0 and the trace floors it at `vctInvResolution`, which is
+what `dist` is initialised to, so `travelled == dist` for every step of a
+single-volume march and every expression is the one it was. Measured, not
+asserted: the default scene rendered with the chain OFF is sha256-IDENTICAL
+between the two medias (7407fff2ded7f6462fb2ca3f23f11d292484b6395d56931922814132a25a5799),
+and `gi.chain_face`'s single-volume readings are unchanged to four decimals
+under all four ambients.
+
+MEASURED (Jahshaka `gi.chain_face`, the 400 m slab, High, the +/-20 m reading;
+the face ratio is the picture beyond the face over the picture inside it, and
+1.000x is no face):
+
+                         flat        hemisphere   sky-noon
+    cascade 0 face   0.591 -> 1.000  0.604 -> 1.003  0.679 -> 1.086
+    cascade 1 face   1.154 -> 0.821  1.157 -> 0.825  1.150 -> 0.833
+    cascade 2 face   1.138 -> 1.000  1.140 -> 1.000  1.125 -> 1.000
+
+As a profile across the slab (flat ambient), against the ambient a pixel outside
+the chain receives: the ring nearest the eye went from 0.567x to 0.959x of it —
+PHOTON_SPEC's 0.51x cascade march residual, measured at 0.96x. Four faces became
+one, and the one that is left sits at the 128^3 -> 64^3 cell-size jump in the
+tier's own cascade table (0.156 m to 0.469 m), not at a cascade hop: it is the
+coarse cell over-occluding a 0.1 m slab through patch 0021's deliberately
+conservative `min3` escape estimate, and it is a table question, not a march one.
+
+NOT DONE HERE, and each was measured before it was dropped: terminating the
+march on the escape opacity rather than the colour opacity is bit-identical in
+every arm (the march never reaches alpha 0.95 in these scenes), and dropping
+upstream's second `( 1.0 - result.alpha )` de-amplification of a cascade's
+colour moves an interior hall by 0.6 % — neither earns a line.
+
+THE SPECULAR WALK TAKES THE ESCAPE CARRY AND NOT THE AGE CARRY, and the
+asymmetry is measured rather than assumed. The two marches hand over at
+different places and weigh their escape with different estimates: the diffuse
+trace exits at `cascadeMaxLod` — its footprint has grown to exactly the next
+cascade's cell — and its ambient rides `escapeAlpha`, patch 0021's `min3` of the
+axis composites, a deliberately conservative estimate of what the cone hit; the
+specular trace runs to `maxLod = 11`, i.e. until it leaves the BOX, and its
+ambient rides the raw `alpha`, the direction-weighted axis composite, which
+over-states occlusion at a coarse mip (0021's whole finding). Carrying the true
+age into the specular walk hands a cone that has crossed a whole cascade a
+correspondingly wide footprint — right geometry fed to an opacity estimate that
+is already too high. Measured on `gi.cascades` case 7 (a smooth metal plate
+reflecting open space under a chain): the ambient in the reflection fell from
+1.00 / 0.85 / 0.85 to 1.00 / 0.43 / 0.34 at one, two and four cascades. Passing
+0 restores upstream's arithmetic exactly on that walk (the trace floors the age
+at `vctInvResolution`, which is what `dist` starts at, so `travelled == dist` for
+every step) and case 7 reads its pinned 1.00 / 0.85 / 0.85 again.
+THE HONEST CURE FOR THE SPECULAR SIDE IS ITS OWN LANE: giving `specAlpha` the
+same `min3` estimate the diffuse ambient already uses was built and measured here
+— 1.00 / 0.88 / 0.87 under a chain, and better than the pin at every roughness
+(0.35: 0.68 / 0.51 against 0.00 / 0.00; 0.55: 0.55 / 0.40 against 0.00 / 0.00) —
+but it moves the SINGLE-VOLUME reflection as well, so it needs its own pictures
+and its own gate, not a ride on this one.
+
+UPSTREAM-REPORTABLE: (a) is Jahshaka's own since 0021 and is fixed here; (b) is
+upstream's, and upstream's own `LightVctBounceInject_piece_cs.any` carries the
+same reset (and, separately, still carries the `result.alpha += newRes.alpha`
+opacity doubling that patch 0033 fixed on the pixel side).
+
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+@@ -51,12 +51,15 @@
+ 		// it out of the volume -- kept apart from `alpha` because under
+ 		// anisotropic tracing the two legitimately differ (see the loop).
+ 		// Identical to alpha on the isotropic path.
+ 		float escapeAlpha;
+ 		float lodLevel;
+ 		float3 posLS;
++		// SEAM-1: how far the cone has travelled FROM THE SURFACE, in this
++		// cascade's local-space units. See the march.
++		float travelled;
+ 	};
+ 
+ 	/// Generates a TBN matrix when no tangent information is present using
+ 	/// DDX information.
+ 	/// Should only we used as a fallback as the result isn't fully stable due to how DDX works
+ 	/// and due to floating point precision. It is possible for the TBN to change as you zoom-in
+@@ -76,13 +79,14 @@
+ 			INLINE VctResult voxelConeTraceDiff
+ 		@else
+ 			INLINE VctResult voxelConeTraceSpec
+ 		@end
+ 			( VctProbeParams probeParams, float3 posLS,
+ 			  float3 dirLS, float tanHalfAngle,
+-			  float startingLodLevel, float startingAlpha, int probeIdx,
++			  float startingLodLevel, float startingAlpha, float startingEscapeAlpha,
++			  float startingTravelled, int probeIdx,
+ 			  OGRE_Texture3D_float4 probes[@value( vct_num_probes )]
+ 			  OGRE_SAMPLER_ARG_DECL( probeSampler )
+ 			  OGRE_VCT_ANISO_PROBE_ARG_DECL )
+ 		{
+ 			float vctInvResolution =
+ 				dot( abs( dirLS ), probeParams.vctInvResolution_cascadeMaxLod[probeIdx].xyz );
+@@ -91,17 +95,24 @@
+ 				float maxLod = probeParams.vctInvResolution_cascadeMaxLod[probeIdx].w;
+ 			@else
+ 				float maxLod = 11.0f; // 2048x2048x2048 is max possible res
+ 			@end
+ 
+ 			float dist = vctInvResolution;
++			// SEAM-1: the cone's footprint is a function of how far it has come
++			// FROM THE SURFACE, which is not the same as how far it has come
++			// from THIS cascade's entry point. `dist` stays the offset from
++			// posLS (it positions the samples); `travelled` is the age of the
++			// cone, and it is what sizes it. They are identical on the first
++			// cascade (startingTravelled == vctInvResolution there).
++			float travelled = max( startingTravelled, vctInvResolution );
+ 			float alpha = startingAlpha;
+-			float escapeAlpha = startingAlpha;	// Jahshaka patch 0021
++			float escapeAlpha = startingEscapeAlpha;	// Jahshaka patch 0021
+ 			float3 color = float3( 0.0, 0.0, 0.0 );
+ 
+-			float diameter = max( vctInvResolution, 2.0 * tanHalfAngle * dist );
++			float diameter = max( vctInvResolution, 2.0 * tanHalfAngle * travelled );
+ 
+ 			@property( @n == 0 )
+ 				@property( vct_cone_dirs == 6 )
+ 					float lodLevel	= startingLodLevel;
+ 					float lodStep	= 0.71;
+ 				@else
+@@ -175,26 +186,28 @@
+ 									   min( -1.0 + finalOpac * probeParams.specularSdfFactor +
+ 											tanHalfAngle * 50.0f, 1.0f ) );
+ 					skipLod = clamp( skipLod + (1.0f - finalOpac) * 2.0f - 1.0f,
+ 									 1.0f, probeParams.specSdfMaxMip );
+ 
+ 					dist += diameter * 0.5f * skipFactor;	// Advance forward
++					travelled += diameter * 0.5f * skipFactor;
+ 				@else
+ 					dist += diameter * 0.5f;				// Advance forward
++					travelled += diameter * 0.5f;			// SEAM-1
+ 				@end
+ 
+ 				float a = ( 1.0f - alpha );  // Calc. the % left of light we are able to gather
+ 
+ 				color += sampleColour.xyz * a;     // Accumulate colour
+ 				alpha += a * sampleColour.w;       // Accumulate opacity
+ 				// Jahshaka patch 0021: same expression as alpha, so the isotropic
+ 				// path (which never enters the loop below) is unchanged.
+ 				escapeAlpha += ( 1.0f - escapeAlpha ) * sampleColour.w;
+ 				nextPosLS = posLS + dist * dirLS;  // Advance forward
+ 				// Calculate next LOD & next fwd step
+-				diameter = max( vctInvResolution, 2.0 * tanHalfAngle * dist );
++				diameter = max( vctInvResolution, 2.0 * tanHalfAngle * travelled );
+ 				@property( @n == 0 && vct_cone_dirs == 4 )
+ 					lodLevel += lodStep;			// Calculate next LOD
+ 				@else
+ 					lodLevel = log2( diameter * resolution ); // Calculate next LOD
+ 				@end
+ 			}
+@@ -291,15 +304,16 @@
+ 					float escapeZ = OGRE_SampleLevel( probeZ[probeIdx], probeSampler,
+ 													  sampleUVW + float3( isNegative.z, 0, 0 ),
+ 													  escapeLod ).w;
+ 					escapeAlpha += ( 1.0f - escapeAlpha ) * min( escapeX, min( escapeY, escapeZ ) );
+ 
+ 					dist += diameter * 0.5f;		   // Advance forward
++					travelled += diameter * 0.5f;	   // SEAM-1
+ 					nextPosLS = posLS + dist * dirLS;  // Advance forward
+ 					// Calculate next LOD & next fwd step
+-					diameter = max( vctInvResolution, 2.0 * tanHalfAngle * dist );
++					diameter = max( vctInvResolution, 2.0 * tanHalfAngle * travelled );
+ 					@property( @n == 0 && vct_cone_dirs == 4 )
+ 						lodLevel += lodStep; // Calculate next LOD
+ 					@else
+ 						lodLevel = log2( diameter * resolution ); // Calculate next LOD
+ 					@end
+ 				}
+@@ -308,12 +322,13 @@
+ 			VctResult result;
+ 			result.colour = color;
+ 			result.alpha = alpha;
+ 			result.escapeAlpha = escapeAlpha;	// Jahshaka patch 0021
+ 			result.lodLevel = lodLevel;
+ 			result.posLS = nextPosLS;
++			result.travelled = travelled;	// SEAM-1
+ 
+ 			return result;
+ 		}
+ 	@end
+ 
+ 	INLINE float3 toVctProbeSpacePos( float3 pos, VctProbeParams probeParams )
+@@ -435,13 +450,13 @@
+ 			float4 light = float4( 0.0f, 0.0f, 0.0f, 0.0f );
+ 			for( int i=0; i<@value( vct_cone_dirs ); ++i )
+ 			{
+ 				float3 dir = toVctProbeSpaceDir( mul( TBN, cone_dirs[i] ), probeParams );
+ 
+ 				VctResult result = voxelConeTraceDiff(
+-					probeParams, posLS, dir, coneAngleTan, 0.0f, 0.0f, 0,
++					probeParams, posLS, dir, coneAngleTan, 0.0f, 0.0f, 0.0f, 0.0f, 0,
+                     probes OGRE_SAMPLER_ARG( probeSampler ) OGRE_VCT_ANISO_PROBE_ARG );
+ 
+ 				@property( vct_num_probes > 1 )
+ 					for( int j = 1; j < @value( vct_num_probes ) && result.alpha < 0.95f; ++j )
+ 					{
+ 						float startBias =
+@@ -451,13 +466,18 @@
+ 						float3 newPosLS =
+ 							fromVctProbeToNext( result.posLS, j, probeParams ) - dir * startBias +
+ 							(dirLS / maxVal) * startBias * lerp( 15.0f, 1.0f, maxVal );
+ 
+ 						VctResult newRes = voxelConeTraceDiff(
+ 							probeParams, newPosLS, dir, coneAngleTan,
+-							max( result.lodLevel - prevCascadeMaxLod, 0.0f ), result.alpha, j,
++							max( result.lodLevel - prevCascadeMaxLod, 0.0f ), result.alpha,
++							result.escapeAlpha,
++							result.travelled *
++								dot( abs( dir ),
++									 probeParams.fromPreviousProbeToNext[j - 1][0].xyz ),
++							j,
+ 							probes OGRE_SAMPLER_ARG( probeSampler )
+ 								OGRE_VCT_ANISO_PROBE_ARG PARAMS_ARG );
+ 
+ 						// See VctCascadedVoxelizer::update comments on ( 1.0 - result.alpha )
+ 						result.colour += newRes.colour *
+ 										 probeParams.fromPreviousProbeToNext[j - 1][0].w *
+@@ -469,12 +489,13 @@
+ 						// so adding it doubles the opacity at every cascade hop. The
+ 						// colour composite above deliberately keeps reading the
+ 						// PREVIOUS value (upstream's de-amplification), so it is
+ 						// unaffected by the order of these two assignments.
+ 						result.alpha = newRes.alpha;
+ 						result.escapeAlpha = newRes.escapeAlpha;
++						result.travelled = newRes.travelled;
+ 						result.lodLevel = newRes.lodLevel;
+ 						result.posLS = newRes.posLS;
+ 					}
+ 				@end
+ 
+ 				light.xyz += coneWeights[i] * result.colour;
+@@ -502,13 +523,13 @@
+ 		@property( !vct_disable_specular )
+ 			float3 reflVecLS = toVctProbeSpaceDir( pixelData.reflDir, probeParams );
+ 			// 1 / (1 - 0.02) = 1.020408163
+ 			float vctRoughness = (pixelData.perceptualRoughness - 0.02f) * 1.020408163f;
+ 			float specConeAngleTan = max( 0.0f, tan( vctRoughness * 0.5f * M_PI * 0.99f ) );
+ 			VctResult irrLight = voxelConeTraceSpec( probeParams, posLS, reflVecLS,
+-													 specConeAngleTan, 0.0f, 0.0f, 0,
++													 specConeAngleTan, 0.0f, 0.0f, 0.0f, 0.0f, 0,
+ 													 probes OGRE_SAMPLER_ARG( probeSampler )
+ 													 OGRE_VCT_ANISO_PROBE_ARG );
+ 
+ 
+ 			@property( vct_num_probes > 1 )
+ 				for( int j = 1; j < @value( vct_num_probes ) && irrLight.alpha < 0.95f; ++j )
+@@ -532,13 +553,49 @@
+ 					float3 newPosLS =
+ 						fromVctProbeToNext( irrLight.posLS, j, probeParams ) - reflVecLS * startBias +
+ 						(dirLS / maxVal) * normalBias * lerp( 15.0f, 1.0f, maxVal );
+ 
+ 					VctResult newRes = voxelConeTraceSpec(
+ 						probeParams, newPosLS, reflVecLS, specConeAngleTan,
+-						max( irrLight.lodLevel - prevCascadeMaxLod, 0.0f ), irrLight.alpha, j,
++						max( irrLight.lodLevel - prevCascadeMaxLod, 0.0f ), irrLight.alpha,
++						irrLight.escapeAlpha,
++						// SEAM-1: THE AGE IS DELIBERATELY NOT CARRIED ON THE
++						// SPECULAR WALK, and 0 here restores upstream's restart
++						// exactly (the trace floors the age at
++						// `vctInvResolution`, which is what `dist` starts at, so
++						// travelled == dist for every step of this march and
++						// every expression is the one it was).
++						//
++						// WHY the diffuse walk carries it and this one must not.
++						// The two marches hand over at different places and
++						// weigh their escape with different estimates. The
++						// diffuse trace exits at `cascadeMaxLod` — the footprint
++						// has grown to exactly the next cascade's cell — and its
++						// ambient rides `escapeAlpha`, patch 0021's `min3` of
++						// the axis composites, which is a deliberately
++						// CONSERVATIVE estimate of what the cone hit. The
++						// specular trace runs to `maxLod = 11`, i.e. until it
++						// leaves the BOX, and its ambient rides the raw
++						// `alpha` — the direction-weighted axis composite, which
++						// over-states occlusion at a coarse mip (that is 0021's
++						// whole finding). Carrying the true age there hands a
++						// cone that has crossed a whole cascade a correspondingly
++						// wide footprint, which is right geometry fed to an
++						// opacity estimate that is already too high: measured on
++						// `gi.cascades` case 7 (a smooth metal plate reflecting
++						// open space under a chain), the ambient in the
++						// reflection fell from 1.00 / 0.85 / 0.85 to
++						// 1.00 / 0.43 / 0.34 at one, two and four cascades.
++						// The honest cure is to give the specular escape the same
++						// `min3` estimate the diffuse one has — measured at
++						// 1.00 / 0.88 / 0.87, better than the pin at every
++						// roughness — but it moves the SINGLE-VOLUME reflection
++						// too, so it is a lane of its own with its own pictures,
++						// not a rider on this one.
++						0.0f,
++						j,
+ 						probes OGRE_SAMPLER_ARG( probeSampler ) OGRE_VCT_ANISO_PROBE_ARG PARAMS_ARG );
+ 
+ 					float cascadeFinalMultiplier = probeParams.fromPreviousProbeToNext[j - 1][0].w;
+ 					float invNumLods3 = probeParams.fromPreviousProbeToNext[j - 1][1].w;
+ 
+ 					float strength =
+@@ -553,12 +610,13 @@
+ 					// cone; adding it doubles the opacity at every hop, the walk exits
+ 					// through `irrLight.alpha < 0.95f` after one, and specAlpha below
+ 					// goes to 0 -- the ambient (the sky in a reflection) disappears at
+ 					// 2+ cascades. The colour composite above deliberately reads the
+ 					// PREVIOUS alpha, and is evaluated first.
+ 					irrLight.alpha = newRes.alpha;
++					irrLight.escapeAlpha = newRes.escapeAlpha;
+ 					irrLight.lodLevel = newRes.lodLevel;
+ 					irrLight.posLS = newRes.posLS;
+ 				}
+ 			@end
+ 
+ 			float specAlpha = ( 1.0f - min( 1.0f, irrLight.alpha / 0.95f ) );

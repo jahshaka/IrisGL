@@ -1344,9 +1344,69 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     of one imported mesh; the real shape is a `(mesh, level)` cache key — days of
     work, and its own item.
 
-THE STACK IS 0001-0064 (this list; `build-ogre.sh` globs `*.patch`, so the file
+66. **0066-vct-cascade-march-carries-the-cone** (MEDIA —
+    `Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any`; **every tree resets the
+    ogre-next submodule and re-runs `build-ogre.sh`** for the staging, no engine
+    recompile of its own; it OVERLAPS 0021, 0033, 0045 and 0048 in the same file,
+    so the per-patch reverse-check reports it "unapplied" on a tree that already
+    carries those — the documented blind spot, judge by content) — a CASCADED
+    CONE MARCH MUST CARRY THE CONE ACROSS THE HOP. PHOTON-E3 measured a staircase
+    in the ambient a surface receives under a camera-centred chain: one step per
+    cascade face, 1.15-1.24x each, travelling with the camera, a factor 1.9 from
+    the far world to the eye, the same RATIO under a flat ambient and under the
+    analytic sky at noon and at 5 degrees (so not a spherical-harmonic band
+    mismatch), and absent from the single fitted volume. SEAM-1 found the two
+    terms in `computeVctProbe`'s continuation loop. (a) The ESCAPE opacity is
+    re-seeded from the COLOUR opacity at every hop (`float escapeAlpha =
+    startingAlpha;`, and `startingAlpha` is the caller's `result.alpha`) —
+    patch 0021's own "small approximation only that path pays", which is in fact
+    the staircase, because `escapeAlpha <= alpha` always and every hop raises the
+    escape to the colour opacity. (b) The cone's AGE is reset at every hop:
+    `dist` both positions the samples and sizes the cone, and restarting it at
+    the new cascade's entry re-anchors the cone's apex ~0.87 cells behind where
+    it belongs, so the whole march runs at a footprint that does not match the
+    cone's solid angle. The fix carries both — `VctResult::travelled`, and
+    `startingEscapeAlpha` / `startingTravelled` arguments, with the age converted
+    into the next cascade's units by `dot( abs( dir ),
+    fromPreviousProbeToNext[j-1][0].xyz )`, the same directional scale upstream
+    uses for `vctInvResolution`. The first cascade is arithmetically identical
+    (the trace floors the age at `vctInvResolution`, which is what `dist` starts
+    at), and that is measured, not asserted: the default scene with the chain OFF
+    is sha256-IDENTICAL between the two medias
+    (`7407fff2ded7f6462fb2ca3f23f11d292484b6395d56931922814132a25a5799`).
+    Measured (`gi.chain_face`, the 400 m slab at High, the +/-20 m reading):
+    the cascade-0 face 0.591 -> 1.000x (flat), 0.604 -> 1.003x (hemisphere);
+    the cascade-2 face 1.138 -> 1.000x; the ring nearest the eye went from 0.567x
+    to 0.959x of the ambient a pixel outside the chain receives — PHOTON_SPEC
+    §9's "cascade march residual (0.51x)", measured at 0.96x. Four faces became
+    one, and the one left (0.821-0.839x) sits at the tier table's 128^3 -> 64^3
+    cell-size jump, not at a cascade hop. `--engine-selftest` MOVES (chain ON):
+    `ead9a2ce...` -> `1fd91da9...`, max 4/255, mean 1.06, 36.9 % of pixels over
+    2/255, every changed channel DARKER. Suite: `gi.chain_face`, re-anchored to
+    0.75-1.35x. NOT DONE, each measured first: terminating the march on the
+    escape opacity instead of the colour opacity is bit-identical (the march
+    never reaches alpha 0.95 in these scenes), and dropping upstream's second
+    `( 1.0 - result.alpha )` de-amplification moves an interior hall by 0.6 %.
+    THE SPECULAR WALK TAKES THE ESCAPE CARRY AND NOT THE AGE CARRY, measured:
+    the specular trace runs to `maxLod = 11` (it leaves the BOX rather than
+    handing over at a matched footprint) and its ambient rides the RAW `alpha`,
+    not patch 0021's `min3` estimate, so a true age there is right geometry fed
+    to an opacity estimate that is already too high — `gi.cascades` case 7 fell
+    from 1.00 / 0.85 / 0.85 to 1.00 / 0.43 / 0.34. Passing 0 restores upstream's
+    arithmetic exactly on that walk. The honest cure for the specular side
+    (give `specAlpha` the same `min3` estimate: measured 1.00 / 0.88 / 0.87, and
+    better than the pin at every roughness) moves the SINGLE-VOLUME reflection
+    too, so it is its own lane.
+    UPSTREAM-REPORTABLE: (b) is upstream's, and its own
+    `LightVctBounceInject_piece_cs.any` carries the same reset plus the
+    `result.alpha += newRes.alpha` opacity doubling that patch 0033 fixed on the
+    pixel side.
+
+THE STACK IS 0001-0064 + 0066 ON THIS BRANCH (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
-NOTE ON 0059: it is ATOM-1's `Mesh2 set lod values`, which landed on main while
+NOTE ON 0065: the number is VOXMERGE-1's, a sibling engine lane running beside
+SEAM-1 in the voxelizer; this branch does not carry it and the merged tree carries
+both. NOTE ON 0059: it is ATOM-1's `Mesh2 set lod values`, which landed on main while
 this lane ran — this branch carries 0001-0058 + 0060-0062 and the merged tree
 carries all of them. Every "verified on a tree carrying 0001-00NN" below means
 the numbers this branch could see.
@@ -1355,7 +1415,7 @@ a sibling landed first.
 
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063 and 0064 are SOURCE-only (0062 is SOURCE + media), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
