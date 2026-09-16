@@ -4050,6 +4050,17 @@ private:
     /// inserts, destroyMesh and destroy() erase) rather than walked, because the
     /// cascade attach walks every item of the scene.
     std::unordered_map<const Ogre::Mesh *, std::vector<float>> mLodErrorsByMesh;
+    /// THE FAR-FIELD PROXY, AS APPLIED (ATOM stage 1): the scene's
+    /// `GiParams::cascadeVoxelLod` met with the run-wide diagnostic latch,
+    /// resolved once per `setGlobalIllumination` and reported as
+    /// `GiStatus::cascadeVoxelLod`. Kept apart from `mGi` on purpose — `mGi`
+    /// must keep comparing equal to what the document pushes.
+    bool mCascadeVoxelLod = true;
+    /// The latch itself, the shape `JAHSHAKA_NO_RAY_QUERY` uses
+    /// (OgreEngine.cpp:55): a measurement needs to move ONE term with one
+    /// binary and one scene, and a run-wide switch is how it does that. Read
+    /// ONCE, at construction, and never again.
+    const bool mCascadeLodAllowed = std::getenv("JAHSHAKA_NO_CASCADE_LOD") == nullptr;
     /// ATOM stage 1: the scene-wide LOD dial. 1 = the reference budget of one
     /// pixel of geometric error; 0 pins every object at level 0.
     float mLodBias = 1.0f;

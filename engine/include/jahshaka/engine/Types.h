@@ -2395,6 +2395,12 @@ struct GiStatus {
     /// The live cascade chain, innermost first. Empty unless
     /// GiParams::cascades built one.
     std::vector<CascadeStatus> cascades;
+    /// THE FAR-FIELD PROXY, AS APPLIED: whether the cascades are voxelising the
+    /// baked LOD levels (`GiParams::cascadeVoxelLod` met with the engine's
+    /// run-wide `JAHSHAKA_NO_CASCADE_LOD` diagnostic latch). It is here so the
+    /// arm a measurement is on has a NAME — a switch nothing can report is a
+    /// switch nobody can trust. True is the default and the shipped arm.
+    bool cascadeVoxelLod = true;
     /// The chain is WANTED but has not been built, because no view has tracked a
     /// camera yet — a camera-centred arm is built around the camera and there is
     /// no honest place to put it before one exists. Distinguishes "no view yet"

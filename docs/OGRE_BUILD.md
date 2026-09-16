@@ -1329,10 +1329,20 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     with no LOD chain is unaffected. The sibling `VctImageVoxelizer` is NOT
     patched: it caches a voxelized mesh in `VoxelizedMeshCache` keyed by the mesh,
     so a level would have to join that key, and Jahshaka's cascade chain drives
-    the rasterizing voxelizer only. Consumer: `OgreScene::cascadeVoxelLod`.
-    Measured (gi.cascade_lod's fixture): the outermost cascade voxelizes 652 of
-    16,396 triangles, 4.0 %. `--engine-selftest` UNCHANGED — the default scene's
-    meshes are document primitives, which carry no chain. Suite: `gi.cascade_lod`.
+    the rasterizing voxelizer only. Consumer: `OgreScene::cascadeVoxelLod`, whose
+    caller resolves the level per MESH (the MIN over the cascade's attach set)
+    before it adds anything, so the engine's reading describes what the voxelizer
+    HOLDS rather than what an item asked for.
+    Measured (gi.cascade_lod's fixture): the outermost cascade voxelizes 1,676 of
+    32,780 triangles, 5.1 %; on 1,000 imported 6,768-triangle spheres its rebuild
+    falls 3,017 -> 225 ms of GPU. `--engine-selftest` UNCHANGED — the default
+    scene's meshes are document primitives, which carry no chain. Suite:
+    `gi.cascade_lod`.
+    RESIDUAL, recorded (NANITE_SPEC §7 stage 1): one level per mesh per voxelizer
+    means a mesh instanced at SEVERAL SCALES in one cascade is voxelized at the
+    finest of their levels, so the proxy is worth less on mixed-scale instances
+    of one imported mesh; the real shape is a `(mesh, level)` cache key — days of
+    work, and its own item.
 
 THE STACK IS 0001-0064 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).

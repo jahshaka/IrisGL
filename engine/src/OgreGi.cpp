@@ -207,6 +207,7 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
         case GiMode::Off:
             teardownGi();
             mGi = p;
+            mCascadeVoxelLod = p.cascadeVoxelLod && mCascadeLodAllowed;
             // Switching GI off is the user's own "start over": the hysteresis
             // floor forgets what used to be lit, so switching back on fits the
             // scene as it is now rather than as it was.
@@ -216,6 +217,12 @@ bool OgreScene::setGlobalIllumination(const GiParams &p) {
         case GiMode::Vct:
         case GiMode::VctPccHybrid:
             mGi = p;
+            // THE APPLIED far-field-proxy answer (ATOM-2): the scene's request
+            // met with the run-wide latch, resolved once per push and reported
+            // by giStatus — never read per item, and deliberately NOT written
+            // back into `mGi`, which must keep comparing equal to what the
+            // document pushes or every push under the latch would rebuild.
+            mCascadeVoxelLod = p.cascadeVoxelLod && mCascadeLodAllowed;
             rebuildVct();
             return true;
         }
@@ -716,6 +723,7 @@ GiStatus OgreScene::giStatus() const {
             st.cascades.push_back(cs);
         }
         st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;
+        st.cascadeVoxelLod = mCascadeVoxelLod;
         st.cascadeFullRebuilds = mCascadeFullRebuilds;
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
@@ -3517,14 +3525,12 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
 // bakes static imported meshes only) is not in the index, so this answers 0 and
 // nothing moves.
 unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item) const {
-    // THE DIAGNOSTIC LATCH, in the shape this engine already uses for one
-    // (`JAHSHAKA_NO_RAY_QUERY`, OgreEngine.cpp:55): it turns the proxy off for a
-    // whole RUN, which is what lets a measurement compare the two arms with ONE
-    // binary, ONE scene and one term moved — the rig rule that cross-run
-    // comparisons decide nothing (CLAUDE.md). Read once per process.
-    // `GiParams::cascadeVoxelLod` is the same switch per scene, for a suite.
-    static const bool sLatchedOff = std::getenv("JAHSHAKA_NO_CASCADE_LOD") != nullptr;
-    if (sLatchedOff || !mGi.cascadeVoxelLod || !item) return 0u;
+    // ONE applied answer, resolved where the parameters are applied and REPORTED
+    // (`GiStatus::cascadeVoxelLod`): the document's request met with the
+    // run-wide diagnostic latch. Reading the environment here instead would be
+    // a switch nothing can name — the defect the NO_RAY_QUERY shape avoids by
+    // meeting the request once and reporting the answer.
+    if (!mCascadeVoxelLod || !item) return 0u;
     if (mLodErrorsByMesh.empty()) return 0u;               // the common scene, in one branch
     const Ogre::Mesh *mesh = item->getMesh().get();
     const auto it = mLodErrorsByMesh.find(mesh);
@@ -3572,18 +3578,48 @@ void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
     c.itemsStale = false;
     c.lodLevels.clear();
     c.lodTriangles = 0;
+    // THE LEVEL IS A PROPERTY OF THE MESH, NOT OF THE ITEM, and resolving that
+    // is the whole of this first pass (ATOM-2 round-1 F1). ogre-patch 0064
+    // keeps the level on the voxeliser's MESH entry, because the buffers are
+    // downloaded, converted and indexed ONCE for every item that shares the
+    // mesh, and when items disagree the FINEST request wins. So two instances
+    // of one mesh at different scales — which ask for different levels, since
+    // the baked error is in mesh units — are both voxelised at the finer one,
+    // and a per-item reading would claim a level nothing was spent at.
+    //
+    // Hence: MIN over the wanted set per mesh first, then one pass that spends
+    // that level AND books the histogram from it, so `lodLevels` /
+    // `lodTriangles` describe what the voxeliser HOLDS — which is what their
+    // comment in EnginePrivate.h promises and what `gi.cascade_lod` asserts.
+    std::unordered_map<const Ogre::Mesh *, unsigned> effective;
+    effective.reserve(wanted.size());
     for (Ogre::Item *item : wanted) {
-        // The ATOM hook, called at the ONE site that hands geometry to the
-        // voxeliser, and SPENT here through ogre-patch 0064's fourth argument
-        // (the pin's `addItem` read the finest VAO and took no level).
+        const Ogre::Mesh *mesh = item->getMesh().get();
+        if (!mesh) continue;
         const unsigned lod = cascadeVoxelLod(c, item);
+        const auto it = effective.find(mesh);
+        if (it == effective.end()) effective.emplace(mesh, lod);
+        else if (lod < it->second) it->second = lod;
+    }
+    for (Ogre::Item *item : wanted) {
+        // The ATOM hook's answer, resolved per mesh above and SPENT here through
+        // ogre-patch 0064's fourth argument (the pin's `addItem` read the finest
+        // VAO and took no level). The booking happens beside the call and not
+        // after it because `addItem` cannot report a refusal — it returns void,
+        // and the one case it refuses (a mesh with no index buffer, which it
+        // logs) cannot reach a cascade: the GI geometry channel only ever
+        // carries indexed lit meshes. If that ever changes, 0064 grows a return
+        // value and this books on it.
+        const Ogre::Mesh *mesh = item->getMesh().get();
+        const auto it = mesh ? effective.find(mesh) : effective.end();
+        const unsigned lod = it != effective.end() ? it->second : 0u;
         if (c.lodLevels.size() <= size_t(lod)) c.lodLevels.resize(size_t(lod) + 1u, 0);
         ++c.lodLevels[lod];
         c.voxelizer->addItem(item, false, 0u, lod);
         // The geometry that level actually is — the same clamp ogre-patch 0064
         // makes inside the voxeliser, so the reading cannot claim a level the
         // mesh does not have.
-        if (const Ogre::MeshPtr &mesh = item->getMesh()) {
+        if (mesh) {
             for (unsigned si = 0; si < mesh->getNumSubMeshes(); ++si) {
                 const auto &vaos = mesh->getSubMesh(si)->mVao[Ogre::VpNormal];
                 if (vaos.empty()) continue;
