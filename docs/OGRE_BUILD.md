@@ -1366,28 +1366,49 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     sum so far, so the first triangle a thread reached decided which way a voxel
     faced. Both are order dependences no re-solve can correct, because the VOXELS
     differ.
+    AMENDED IN PLACE (fix round 1, the lead's second read): the double-sided flag
+    was a MEMBERSHIP test and is now the 120-degree one (F1 below), the
+    accumulator lost the three channels that never carried anything, and the two
+    unsigned sums saturate. The patch was unpushed; a tree carrying the earlier
+    0065 resets its ogre-next submodule and re-runs `build-ogre.sh`, which is the
+    recipe a SOURCE patch asks for anyway.
     THE SHAPE: a dispatch adds its triangles to a new transient accumulator
-    (`mMergeAccumTex`, PFG_R32_UINT, sixteen texels per voxel interleaved in Z:
-    albedo sum, raw normal sum, emissive sum, FOLDED normal sum, four channels
-    each; upstream's `voxelAccumVal` stays the triangle counter) as exact
+    (`mMergeAccumTex`, PFG_R32_UINT, THIRTEEN texels per voxel interleaved in Z:
+    albedo sum rgba, raw normal sum xyz, emissive sum rgb, FOLDED normal sum xyz;
+    upstream's `voxelAccumVal` stays the triangle counter) as exact
     fixed-point integer SUMS (12 fractional bits, a contribution clamped to
-    [0, 16], so 65,535 of them cannot overflow a uint32 and the snap is 6 % of one
-    8-bit step), then writes the mean of the TOTAL the accumulator holds into the
+    [0, 16], so a contribution is at most 65,536 and 65,535 of them are the whole
+    uint32 bar one — the two unsigned sums therefore SATURATE rather than wrap,
+    and saturating addition is still commutative and associative; the snap is 6 %
+    of one 8-bit step), then writes the mean of the TOTAL the accumulator holds into the
     three voxel textures — so whichever dispatch is last leaves the complete
     answer and no separate resolve pass is needed. The double-sided decision is
-    made there and needs NO THRESHOLD: folded = U - F and raw = U + F (U the
+    made there from the two normal sums: folded = U - F and raw = U + F (U the
     normals the fold left alone, F the ones it turned round, in their original
-    directions), so U = (raw + folded)/2 and F = (raw - folded)/2; the voxel's
-    normal is the LARGER of the two — the majority group's mean, which is what
-    upstream stored — and it is double-sided when the other group is not empty,
-    both tested on the INTEGER sums. Taking the larger and not U is load-bearing:
-    a voxel whose normals ALL lie in the folded half-space (a wall facing -X) has
-    U = 0 and would be stored black — four `gi.leak_room` assertions caught it.
-    The one place it is not upstream's answer: upstream dropped at more than 120
-    degrees from the RUNNING sum while the fold separates at 90, so a voxel
-    spanning 90-120 degrees is two groups here and one there — measured on
-    gi.field_follows' sub-voxel walls at under 3 % of the far bounce (0.0216
-    against 0.0210), in the safe direction.
+    directions), so U = (raw + folded)/2 and F = (raw - folded)/2.
+    **F1, THE FOLD'S SEAM — the decision is GEOMETRY, not membership.** "Both
+    groups are non-empty" is the wrong question: the fold's seam runs along the
+    six arcs where a normal's largest component changes, and a smooth or faceted
+    surface crosses them everywhere — (0.72, 0, -0.69) and (0.69, 0, -0.72) are
+    six and a half degrees apart and land one in each group. Membership calls that
+    voxel double-sided, the injection takes abs(NdotL), and a single-sided surface
+    is LIT FROM BEHIND: the leak class, on every sphere, cylinder, character and
+    curved wall. So the test is upstream's own 120 degrees asked of the two group
+    MEANS — `dot(U, F) < -0.5 |U| |F|`, compared squared. The normal is then the
+    RAW mean when it is one surface (upstream's answer when its test excluded
+    nothing) and the LARGER group's mean when it is two (what upstream's exclusion
+    left behind). Taking the larger and not U is load-bearing: a voxel whose
+    normals ALL lie in the folded half-space (a wall facing -X) has U = 0 and
+    would be stored black — four `gi.leak_room` assertions caught it.
+    RESIDUALS: two normals ~170 degrees apart can both land in U and leave a
+    near-zero normal (the dark side, not the leaking one); and on a voxel holding
+    THREE clusters — nearly every voxel of a 0.2 m wall at an outer cascade's
+    1.9 m cell — upstream keeps whichever cluster its first triangle seeded and
+    this keeps the larger fold group, which on an edge voxel differ by a
+    reflection. Neither is more right; only one is the same answer twice.
+    Measured on gi.field_follows' far red bounce: 0.0210 for the pin, 0.0174 here,
+    against a GI-off control of 0.0000 — that suite's bar is re-anchored from 0.02
+    to 0.012 with the three numbers written into it.
     `VoxelizerBucket::materialSlotIdx` is RETIRED (0062's source half, and only
     that half; its media half is superseded by the resolve computing the flag
     rather than merging it), and the key keeps 0062's pointer-free ordering.
@@ -1404,22 +1425,26 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     was reversed on its own and the device was still lost. R32_UINT clears without
     complaint, 4/4. Recorded for OGRE_UPSTREAM_ISSUES.md; the cost is the
     scattered addressing sixteen scalar texels imply.
-    WHAT IT COSTS: 64 bytes per voxel — 16.8 MB at 64^3, 134 MB at 128^3 —
+    WHAT IT COSTS: 52 bytes per voxel — 13.6 MB at 64^3, 109 MB at 128^3 —
     TRANSIENT (OnStorage the moment `build()` returns, one volume at a time), plus
-    sixteen scalar texels read and written per touched voxel. The voxelisation job
+    thirteen scalar texels read and written per touched voxel. The voxelisation job
     gains ONE uav slot (7 instead of 6) and nothing else about its bindings moves.
     Measured (lane VOXMERGE-1, GPU clocks locked, the lattice at Photon High, GPU
     timestamps, mean/max ms per rebuild, two runs per arm): c0 13.7/20.4 and
-    14.3/22.7 -> 13.9/17.0 and 13.6/16.7; c1 34.3/90.1 and 29.8/73.4 -> 18.1/32.1
-    and 17.3/29.7; c2 73.9/175.5 and 68.5/164.0 -> 18.2/28.7 and 18.3/28.8;
-    **c3 324.8/333.6 and 329.1/331.1 -> 84.1/84.2 and 84.3/84.9**, 3.9x and below
-    the 86.8/88.9 E2 measured before 0062 landed. Showroom 2, whose materials are
+    14.3/22.7 -> 13.8/19.6 and 13.4/16.5; c1 34.3/90.1 and 29.8/73.4 -> 17.3/30.7
+    and 17.1/30.4; c2 73.9/175.5 and 68.5/164.0 -> 18.8/29.3 and 18.3/27.6;
+    **c3 324.8/333.6 and 329.1/331.1 -> 85.5/86.8 and 84.8/85.3**, 3.9x and at the
+    86.8/88.9 E2 measured before 0062 landed. Showroom 2, whose materials are
     shared, pays the accumulator's traffic on its near cascades and is repaid on
-    its far one: c0 4.21 -> 4.71, c1 4.31 -> 4.79, c2 3.77 -> 3.80,
-    c3 7.84 -> 4.58.
+    its far one: c0 4.21 -> 4.81, c1 4.31 -> 4.85, c2 3.77 -> 3.80,
+    c3 7.84 -> 5.06.
     `gi.cascade_determinism` case 3 goes 6.00/255 -> **0.00/255** — exact, not
-    merely inside the 8-bit floor. `--engine-selftest` byte-identical
-    (`ead9a2ce...`), and so is the single-volume picture of the same scene.
+    merely inside the 8-bit floor. `gi.leak_room`'s new seam case (two quads 2 mm
+    apart whose normals straddle the fold) reads **0.0000 of bounce on the side
+    away from the lamp against 1.0000 for a genuinely two-sided pair**, and
+    **1.0000** on the membership test this replaces. `--engine-selftest`
+    byte-identical (`ead9a2ce...`), and so is the single-volume picture of the
+    same scene.
     Suites: `gi.cascade_determinism` (which gains case 4 — 200 objects with 200
     materials in two attach orders), `gi.cascades` case 14 (the dispatch count is
     a handful, not one per material), `gi.field_follows`, `gi.leak_room`,

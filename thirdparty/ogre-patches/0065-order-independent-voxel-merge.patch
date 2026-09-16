@@ -43,12 +43,17 @@ Scenes that SHARE materials paid nothing.
 THE FIX — ACCUMULATE, THEN RESOLVE, IN ONE DISPATCH.
 
 1. A voxelisation dispatch adds its triangles to PER-VOXEL INTEGER SUMS in a new
-   accumulator (`mMergeAccumTex`, PFG_R32_UINT, sixteen texels per voxel
-   interleaved in Z: albedo sum, raw normal sum, emissive sum, FOLDED normal sum,
-   four channels each), on the fixed-point grid `VoxelMerge_piece_cs.any` defines
-   (12 fractional bits, one contribution clamped to [0, 16], so 65,535
-   contributions cannot overflow a uint32 and the snap is 6 % of one step of the
-   8-bit texture the mean finally lands in). Integer addition is exact and
+   accumulator (`mMergeAccumTex`, PFG_R32_UINT, THIRTEEN texels per voxel
+   interleaved in Z: albedo sum rgba, raw normal sum xyz, emissive sum rgb,
+   FOLDED normal sum xyz — thirteen and not sixteen because only thirteen carry
+   anything), on the fixed-point grid `VoxelMerge_piece_cs.any` defines: 12
+   fractional bits, one contribution clamped to [0, 16], so a contribution is at
+   most 65,536 and 65,535 of them are the WHOLE uint32 bar one contribution. The
+   two unsigned sums are therefore added with SATURATION rather than left to wrap
+   (the 16-bit triangle counter that would have capped them is the HLSL
+   `!typed_uav_load` branch alone; on Vulkan `voxelAccumVal` is an R32_UINT
+   counting freely), and saturating addition is still commutative and associative
+   — once the ceiling is reached it stays there. Integer addition is exact and
    associative: the partition stops mattering. Upstream's own `voxelAccumVal`
    stays the triangle counter and the divisor, read and written where upstream
    read and wrote it.
@@ -62,28 +67,47 @@ THE FIX — ACCUMULATE, THEN RESOLVE, IN ONE DISPATCH.
    dispatch re-rounded every voxel an earlier one had filled), which is most of
    them.
 
-3. The "opposite ways" decision moves into that resolve, and needs no threshold,
-   because the two normal sums GIVE BACK THE TWO GROUPS. Each normal also goes
+3. The "opposite ways" decision moves into that resolve. Each normal also goes
    into a FOLDED sum, folded into one half-space by the sign of its largest
    component, so ANTIPODAL NORMALS ALWAYS FOLD TOGETHER. Write the folded sum as
    U - F and the raw one as U + F, where U is the sum of the normals the fold
    left alone and F the sum, in their ORIGINAL directions, of the ones it turned
-   round: then U = (raw + folded)/2 and F = (raw - folded)/2, both exact. The
-   voxel's normal is the LARGER of the two — the majority group's mean, which is
-   what upstream stored after it dropped the opposing triangles and divided by
-   the whole count — and it is double-sided when the OTHER group is not empty,
-   which is what upstream's exclusion meant. Both emptiness tests are INTEGER
-   comparisons of the two sums, so a minority of one triangle in sixty thousand
-   still counts, and a voxel whose normals never crossed the fold's seam cannot
-   raise the flag.
-   Taking the LARGER and not U is load-bearing: a voxel whose normals all lie in
-   the half-space the fold turns round (a wall facing -X) has U = 0, and storing
-   that leaves it black — measured at four `gi.leak_room` assertions.
-   The one place this is not upstream's answer: it dropped a triangle at more
-   than 120 degrees from the RUNNING sum while the fold separates at 90, so a
-   voxel whose normals span 90 to 120 degrees is two groups here and one there.
-   Measured on gi.field_follows' sub-voxel walls that is worth under 3 % of the
-   far bounce (0.0216 against the pin's 0.0210), in the safe direction.
+   round: then U = (raw + folded)/2 and F = (raw - folded)/2, both exact.
+   THE DECISION IS GEOMETRY AND NOT MEMBERSHIP, which is the whole subtlety.
+   "Both groups are non-empty" is the wrong question: the fold's seam runs along
+   the six arcs where the largest component changes (x = -y, x = -z, y = -z), and
+   a smooth or faceted surface crosses those arcs everywhere — (0.72, 0, -0.69)
+   and (0.69, 0, -0.72) are SIX AND A HALF DEGREES apart and land one in each
+   group. Membership calls that voxel double-sided and the injection then takes
+   abs(NdotL) and lights it FROM BEHIND: the leak class, on every sphere,
+   cylinder, character and curved wall, and on flat walls built from several
+   instances whose matrices differ in the last bit. So ask upstream's own
+   question of the two group MEANS instead — are they more than 120 degrees
+   apart, `dot(U, F) < -0.5 |U| |F|`, compared squared. The seam pair reads
+   dot > 0 and is ONE surface; a plate thinner than a voxel reads
+   dot = -|U||F| and is two. Both sums are exact integers, so the answer is still
+   order-independent.
+   The voxel's normal is then the RAW mean, U + F, when it is one surface — which
+   is exactly what upstream stored when its 120-degree test excluded nothing —
+   and the LARGER group's mean when it is two, which is what upstream's exclusion
+   left behind. Taking the LARGER and not U is load-bearing: a voxel whose
+   normals all lie in the half-space the fold turns round (a wall facing -X) has
+   U = 0, and storing that leaves it black — measured at four `gi.leak_room`
+   assertions.
+   TWO RESIDUALS, both recorded rather than hidden. (a) Two normals about 170
+   degrees apart CAN both land in U — their largest components on different axes,
+   both positive — and then F is empty, the raw mean cancels and the voxel is
+   stored with a near-zero normal instead of upstream's majority cluster. It
+   needs the pair to straddle a tie within about a degree, and the answer it
+   gives is the dark side, not the leaking one. (b) On a voxel holding THREE
+   clusters — which is nearly every voxel of a 0.2 m wall at an outer cascade's
+   1.9 m cell, since it holds a front face, a back face and an edge — upstream
+   keeps whichever cluster its first triangle seeded and this keeps the larger of
+   the fold's two groups, and on an edge voxel those differ by a reflection.
+   Neither is more right; only one of them is the same answer twice. Measured on
+   gi.field_follows' far red bounce: 0.0210 for the pin, 0.0174 here, against a
+   GI-off control of 0.0000 — a tie-break, and that suite's bar is re-anchored
+   with the three numbers written into it.
 
 4. `VoxelizerBucket::materialSlotIdx` is therefore RETIRED — patch 0062's source
    half, and only that half. Its media half (the `max(x, x)` typo on the
@@ -91,6 +115,13 @@ THE FIX — ACCUMULATE, THEN RESOLVE, IN ONE DISPATCH.
    merging it. The bucket key keeps 0062's pointer-free ordering (variant,
    material POOL, texture-pool flag) because a stable dispatch order is still the
    right thing for a renderer to have and now costs nothing.
+
+AMENDED IN PLACE (fix round 1, the lead's second read F1/F3/F4): the flag was a
+membership test and is now the 120-degree one; the accumulator lost the three
+channels that never carried anything (sixteen texels to thirteen); the two
+unsigned sums saturate. The patch was unpushed, and a tree that already carries
+the earlier 0065 resets its ogre-next submodule and re-runs `build-ogre.sh`,
+which is the same recipe a SOURCE patch asks for anyway.
 
 R32_UINT AND NOT RGBA32_UINT, WHICH WOULD BE A QUARTER OF THE TEXELS AND A
 QUARTER OF THE ADDRESSING: `clearVoxels` clears the accumulator every build
@@ -105,10 +136,10 @@ still lost. R32_UINT clears without complaint, 4/4. Recorded as an upstream /
 driver finding; ComputeTools' clear job is generic and the fault is not visible
 in its shader, so it is dodged here rather than fixed.
 
-WHAT IT COSTS. The accumulator is 64 bytes per voxel — 16.8 MB at 64^3, 134 MB
+WHAT IT COSTS. The accumulator is 52 bytes per voxel — 13.6 MB at 64^3, 109 MB
 at 128^3 — and it is TRANSIENT: like `mAccumValVox` it is scheduled back
 OnStorage the moment `build()` returns, and one volume is voxelised at a time.
-Per touched voxel a dispatch now reads and writes sixteen scalar texels beside
+Per touched voxel a dispatch now reads and writes thirteen scalar texels beside
 the three it always wrote.
 
 MEASURED (lane VOXMERGE-1, spikes/voxmerge-1/, RTX 4080 SUPER, GPU clocks
@@ -118,17 +149,21 @@ arm, mean / max GPU ms per rebuild):
     cascade      c0            c1            c2            c3 (outermost)
     0001-0064    13.7 / 20.4   34.3 / 90.1   73.9 / 175.5  324.8 / 333.6
                  14.3 / 22.7   29.8 / 73.4   68.5 / 164.0  329.1 / 331.1
-    0001-0065    13.9 / 17.0   18.1 / 32.1   18.2 / 28.7    84.1 /  84.2
-                 13.6 / 16.7   17.3 / 29.7   18.3 / 28.8    84.3 /  84.9
+    0001-0065    13.8 / 19.6   17.3 / 30.7   18.8 / 29.3    85.5 /  86.8
+                 13.4 / 16.5   17.1 / 30.4   18.3 / 27.6    84.8 /  85.3
 
 The outermost cascade is BELOW the pre-0062 number (E2 measured 86.8 / 88.9
 before 0062 landed) — 3.9x. Showroom 2, whose materials are shared, pays the
 accumulator's traffic on its near cascades and is well repaid on its far one:
-c0 4.21 -> 4.71, c1 4.31 -> 4.79, c2 3.77 -> 3.80, c3 7.84 -> 4.58.
+c0 4.21 -> 4.81, c1 4.31 -> 4.85, c2 3.77 -> 3.80, c3 7.84 -> 5.06.
 
 `gi.cascade_determinism` case 3 goes **6.00/255 -> 0.00/255** — exact, not merely
 inside the 8-bit floor — and its new case 4 (200 objects, 200 materials, two
-attach orders) reads 0.00/255 too. `--engine-selftest` is **byte-identical**
+attach orders) reads 0.00/255 too. `gi.leak_room`'s new seam case, two quads 2 mm
+apart whose normals straddle the fold, reads **0.0000 of bounce on the side away
+from the lamp against 1.0000 for a genuinely two-sided pair** — and **1.0000**,
+a complete failure, on the membership test this fix replaces.
+`--engine-selftest` is **byte-identical**
 (`ead9a2ce6ddcc3badb7e1c6226db7ebd38a19b36a2359b99ea84e1d42c8b215d`), and so is
 the single-volume (chain OFF) picture of the same scene.
 
@@ -146,7 +181,7 @@ a handful, not one per material), every other `gi.*`, `scene.reopen_fidelity`,
 `samples.cleanstart.*`, `test_engine` and its ASan twin.
 
 diff --git a/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h b/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
-index 3cde38a..35bee6e 100644
+index 3cde38a..7b01762 100644
 --- a/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
 +++ b/Components/Hlms/Pbs/include/Vct/OgreVctVoxelizer.h
 @@ -62,34 +62,38 @@ namespace Ogre
@@ -209,13 +244,13 @@ index 3cde38a..35bee6e 100644
  
 +        /// Jahshaka patch 0065 — THE ORDER-INDEPENDENT MERGE'S ACCUMULATOR.
 +        ///
-+        /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 16): sixteen texels per voxel,
-+        /// interleaved in Z (albedo sum, raw normal sum, emissive sum, folded
-+        /// normal sum, four channels each), all in the fixed-point integers
++        /// PFG_R32_UINT, (mWidth, mHeight, mDepth * 13): thirteen texels per voxel,
++        /// interleaved in Z (albedo sum rgba, raw normal sum xyz, emissive sum
++        /// rgb, folded normal sum xyz), all in the fixed-point integers
 +        /// Samples/Media/VCT/VoxelMerge_piece_cs.any defines — which also says
 +        /// why it is not RGBA32_UINT at a quarter of the texels (ComputeTools'
 +        /// clear of a 128-bit 3D uav loses the device on this driver).
-+        /// 64 bytes per voxel, which is 16.8 MB at 64^3 and 134 MB at 128^3 —
++        /// 52 bytes per voxel, which is 13.6 MB at 64^3 and 109 MB at 128^3 —
 +        /// and TRANSIENT: like mAccumValVox it is scheduled back OnStorage the
 +        /// moment build() ends, so it is resident only while a volume is being
 +        /// voxelised, and one volume is voxelised at a time.
@@ -252,7 +287,7 @@ index 3cde38a..35bee6e 100644
  }  // namespace Ogre
  
 diff --git a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
-index 6f430f9..13a92c7 100644
+index 6f430f9..9bb321c 100644
 --- a/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
 +++ b/Components/Hlms/Pbs/src/Vct/OgreVctVoxelizer.cpp
 @@ -90,6 +90,7 @@ namespace Ogre
@@ -302,25 +337,26 @@ index 6f430f9..13a92c7 100644
          }
  
          TextureGpu *textures[4] = { mAlbedoVox, mEmissiveVox, mNormalVox, mAccumValVox };
-@@ -893,6 +913,17 @@ namespace Ogre
+@@ -893,6 +913,18 @@ namespace Ogre
          else
              mAccumValVox->setPixelFormat( PFG_R32_UINT );
  
-+        // Jahshaka patch 0065: sixteen texels per voxel, interleaved in Z — the
++        // Jahshaka patch 0065: thirteen texels per voxel, interleaved in Z — the
 +        // shader derives their coordinates from the voxel's own, so a dispatch
 +        // that covers one OCTANT needs to know nothing about the volume's depth.
 +        // R32_UINT rather than RGBA32_UINT because ComputeTools' clear of a
-+        // 128-bit 3D uav loses the device on this driver (VoxelMerge_piece_cs).
++        // 128-bit 3D uav loses the device on this driver (VoxelMerge_piece_cs),
++        // and thirteen rather than sixteen because only thirteen carry anything.
 +        mMergeAccumTex->scheduleTransitionTo( GpuResidency::OnStorage );
 +        mMergeAccumTex->setPixelFormat( PFG_R32_UINT );
-+        mMergeAccumTex->setResolution( mWidth, mHeight, mDepth * 16u );
++        mMergeAccumTex->setResolution( mWidth, mHeight, mDepth * 13u );
 +        mMergeAccumTex->setNumMipmaps( 1u );
 +        mMergeAccumTex->scheduleTransitionTo( GpuResidency::Resident );
 +
          const uint8 numMipmaps = PixelFormatGpuUtils::getMaxMipmapCount( mWidth, mHeight, mDepth );
  
          for( size_t i = 0; i < sizeof( textures ) / sizeof( textures[0] ); ++i )
-@@ -1030,7 +1061,6 @@ namespace Ogre
+@@ -1030,7 +1062,6 @@ namespace Ogre
                  // The pointer-free identity the bucket is ORDERED by (see operator<).
                  bucket.variant = variant;
                  bucket.materialBucketIdx = convResult.bucketIdx;
@@ -328,7 +364,7 @@ index 6f430f9..13a92c7 100644
                  bucket.vertexBuffer =
                      itMesh->second.bCompressed ? mVertexBufferCompressed : mVertexBufferUncompressed;
                  bucket.indexBuffer =
-@@ -1362,12 +1392,15 @@ namespace Ogre
+@@ -1362,12 +1393,15 @@ namespace Ogre
          mComputeTools->prepareForUavClear( mResourceTransitions, mEmissiveVox );
          mComputeTools->prepareForUavClear( mResourceTransitions, mNormalVox );
          mComputeTools->prepareForUavClear( mResourceTransitions, mAccumValVox );
@@ -344,7 +380,7 @@ index 6f430f9..13a92c7 100644
          OgreProfileGpuEnd( "VCT Voxelization Clear" );
      }
      //-------------------------------------------------------------------------
-@@ -1449,11 +1482,27 @@ namespace Ogre
+@@ -1449,11 +1483,27 @@ namespace Ogre
              uavSlot.access = ResourceAccess::ReadWrite;
              mComputeJobs[i]->_setUavTexture( 4, uavSlot );
  
@@ -362,7 +398,7 @@ index 6f430f9..13a92c7 100644
              mComputeJobs[i]->_setUavTexture( 5, uavSlot );
  
 +            // Jahshaka patch 0065: the per-voxel INTEGER ACCUMULATOR the merge
-+            // sums into (R32_UINT, sixteen texels per voxel — see
++            // sums into (R32_UINT, thirteen texels per voxel — see
 +            // VoxelMerge_piece_cs.any for why it is not RGBA32_UINT).
 +            uavSlot.texture = mMergeAccumTex;
 +            uavSlot.pixelFormat = mMergeAccumTex->getPixelFormat();
@@ -372,7 +408,7 @@ index 6f430f9..13a92c7 100644
              DescriptorSetTexture2::BufferSlot texBufSlot(
                  DescriptorSetTexture2::BufferSlot::makeEmpty() );
              texBufSlot.buffer = mInstanceBufferAsTex;
-@@ -1551,8 +1600,10 @@ namespace Ogre
+@@ -1551,8 +1601,10 @@ namespace Ogre
  
          OgreProfileGpuEnd( "VCT Voxelization Jobs" );
  
@@ -386,10 +422,10 @@ index 6f430f9..13a92c7 100644
              mAlbedoVox->_autogenerateMipmaps();
 diff --git a/Samples/Media/VCT/VoxelMerge_piece_cs.any b/Samples/Media/VCT/VoxelMerge_piece_cs.any
 new file mode 100644
-index 0000000..37c2904
+index 0000000..c1e97a5
 --- /dev/null
 +++ b/Samples/Media/VCT/VoxelMerge_piece_cs.any
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,217 @@
 +// Jahshaka patch 0065 — THE ORDER-INDEPENDENT VOXEL MERGE (Voxelizer_piece_cs).
 +//
 +// WHY IT EXISTS. `VctVoxelizer::build()` issues one compute dispatch per bucket
@@ -414,21 +450,31 @@ index 0000000..37c2904
 +//
 +// THE GRID. 12 fractional bits (1/4096 = 2.4e-4) — 6 % of one step of the 8-bit
 +// texture the mean is finally written to, so the snap is invisible — and one
-+// contribution is clamped to [0, 16] first, which bounds a sum of 65,535
-+// contributions (the widest the voxeliser's own triangle counter allows) at
-+// 2.1e9: half a uint32, with the other half as headroom.
++// contribution is clamped to [0, 16] first, so a contribution is at most
++// 16 * 4096 = 65,536 and 65,535 of them are 4,294,901,760: the WHOLE uint32 bar
++// one contribution, not half of it. The triangle counter is NOT a 16-bit cap
++// either — the packing that would give it one is the HLSL `!typed_uav_load`
++// branch alone, and on Vulkan `voxelAccumVal` is an R32_UINT counting freely —
++// so the albedo and emissive sums are added with SATURATION rather than left to
++// wrap: a voxel with more than 65,535 clamped contributions (a dense mesh inside
++// a far cascade's cell) stops at 0xFFFFFFFF and resolves to a white voxel
++// instead of wrapping to a dark one. Saturating addition is still commutative
++// and associative — once the ceiling is reached it stays there — so the merge is
++// exactly as order-independent as it was.
 +
 +@piece( DeclVoxelMerge )
 +
 +#define VOXEL_MERGE_SCALE 4096.0f
 +#define VOXEL_MERGE_CLAMP 16.0f
 +
-+	/// ONE VOXEL'S SIXTEEN ACCUMULATOR TEXELS ARE ADJACENT IN Z, four per
-+	/// quantity: albedo sum at z*16+0..3, RAW normal sum at +4..7 (two's
-+	/// complement), emissive sum at +8..11, FOLDED normal sum at +12..15.
++	/// ONE VOXEL'S THIRTEEN ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
++	/// z*13+0..3 (rgba), RAW normal sum at +4..6 (xyz, two's complement),
++	/// emissive sum at +7..9 (rgb), FOLDED normal sum at +10..12 (xyz). Thirteen
++	/// and not sixteen because only thirteen carry anything — a fourth channel on
++	/// the three vectors would be 25 MB read and written for nothing at 128^3.
 +	/// Interleaved rather than stacked planes so the shader needs no knowledge of
 +	/// the volume's depth (a voxelisation dispatch covers one OCTANT and does not
-+	/// know it), and so a voxel's sixteen texels share a cache line's worth of
++	/// know it), and so a voxel's thirteen texels share a cache line's worth of
 +	/// the 3D swizzle.
 +	///
 +	/// R32_UINT AND NOT RGBA32_UINT, WHICH WOULD BE A QUARTER OF THE TEXELS:
@@ -441,7 +487,7 @@ index 0000000..37c2904
 +	/// driver finding; the cost is the scattered access this layout implies.
 +	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 +	{
-+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 16u + chan );
++		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 13u + chan );
 +	}
 +
 +	/// THE TWO NORMAL SUMS, AND WHY THERE ARE TWO.
@@ -496,6 +542,15 @@ index 0000000..37c2904
 +	{
 +		return uint3( clamp( v, 0.0f, VOXEL_MERGE_CLAMP ) * VOXEL_MERGE_SCALE + 0.5f );
 +	}
++	/// ...added so it cannot wrap. See THE GRID above: the bound is one
++	/// contribution of headroom, and the triangle count is not capped at 65,535
++	/// on this backend. The signed NORMAL sums need no such guard — a unit
++	/// vector's component is at most 4,096, so they overflow at half a million
++	/// triangles in one voxel rather than at sixty-five thousand.
++	INLINE uint voxelMergeAddSat( uint sum, uint x )
++	{
++		return ( sum > ( 0xFFFFFFFFu - x ) ) ? 0xFFFFFFFFu : ( sum + x );
++	}
 +	/// A unit vector's component, on the same grid, as two's complement. `floor`
 +	/// and not a cast: a cast truncates towards zero and would round -0.5 the
 +	/// wrong way.
@@ -521,30 +576,61 @@ index 0000000..37c2904
 +		// THE TWO GROUPS, RECOVERED. Write the folded sum as U - F and the raw one
 +		// as U + F, where U is the sum of the normals the fold left alone and F
 +		// the sum, IN THEIR ORIGINAL DIRECTIONS, of the ones it turned round: then
-+		// U = (raw + folded)/2 and F = (raw - folded)/2, both exact. The voxel's
-+		// normal is the LARGER of the two — the majority group's mean, which is
-+		// what the pin stored after it dropped the opposing triangles and divided
-+		// by the whole count — and it is double-sided when the OTHER group is not
-+		// empty, which is what the pin's exclusion meant.
-+		//
-+		// Taking the larger and not U is load-bearing: a voxel whose normals ALL
-+		// lie in the half-space the fold turns round (a wall facing -X, say) has
-+		// U = 0, and storing that would leave it black. Measured: it costs
-+		// gi.leak_room four assertions.
-+		//
-+		// Both emptiness tests are on the INTEGER sums, so they are exact and a
-+		// minority of one triangle in sixty thousand still counts.
++		// U = (raw + folded)/2 and F = (raw - folded)/2, both exact.
 +		int3 iRaw	= int3( sumNormal.xyz );
 +		int3 iFolded	= int3( sumFolded.xyz );
 +		int3 iU		= iRaw + iFolded;
 +		int3 iF		= iRaw - iFolded;
 +		bool emptyU	= ( iU.x == 0 ) && ( iU.y == 0 ) && ( iU.z == 0 );
 +		bool emptyF	= ( iF.x == 0 ) && ( iF.y == 0 ) && ( iF.z == 0 );
-+		bool doubleSided = !emptyU && !emptyF;
 +
 +		float3 nU = float3( iU ) * ( 0.5f * invAccum );
 +		float3 nF = float3( iF ) * ( 0.5f * invAccum );
-+		float3 normalOut = dot( nU, nU ) >= dot( nF, nF ) ? nU : nF;
++
++		// AND THE DECISION IS GEOMETRY, NOT MEMBERSHIP. "Both groups are
++		// non-empty" is NOT the question: the fold's seam runs along the six arcs
++		// where the largest component changes (x = -y, x = -z, y = -z), and a
++		// smooth surface crosses those arcs all the time — (0.72, 0, -0.69) and
++		// (0.69, 0, -0.72) are 6.5 degrees apart and land one in each group. A
++		// membership test calls that voxel double-sided, and the injection then
++		// takes abs(NdotL) and lights it FROM BEHIND: the leak class, on every
++		// sphere, cylinder, character and curved wall (about 5 % of the surface
++		// voxels of a 32-voxel sphere), and on flat walls built from several
++		// instances whose matrices differ in the last bit.
++		//
++		// So ask the pin's own question of the two group MEANS instead: are they
++		// more than 120 degrees apart? `dot(U, F) < -0.5 |U| |F|`, compared
++		// squared to keep it to one multiply and no roots. The seam pair reads
++		// dot > 0 and is one surface; a plate thinner than a voxel reads
++		// dot = -|U||F| and is two. Both groups' sums are exact integers, so the
++		// answer is still order-independent.
++		float dUF	= dot( nU, nF );
++		float lenU2	= dot( nU, nU );
++		float lenF2	= dot( nF, nF );
++		bool doubleSided = !emptyU && !emptyF && dUF < 0.0f &&
++						   ( dUF * dUF ) > ( 0.25f * lenU2 * lenF2 );
++
++		// WHAT THE VOXEL'S NORMAL IS. One surface: the RAW mean, U + F, which is
++		// exactly what the pin stored when its 120-degree test excluded nothing.
++		// Two surfaces: the majority group's mean, which is what the pin's
++		// exclusion left behind (it dropped the opposing triangles and divided by
++		// the whole count).
++		//
++		// Taking the LARGER of the two and not U is load-bearing: a voxel whose
++		// normals ALL lie in the half-space the fold turns round (a wall facing
++		// -X, say) has U = 0, and storing that would leave it black. Measured: it
++		// costs gi.leak_room four assertions.
++		//
++		// RESIDUAL, and it is the mirror of the seam: two normals about 170
++		// degrees apart CAN both land in U (their largest components on different
++		// axes, both positive), and then F is empty, the raw mean cancels and the
++		// voxel is stored with a near-zero normal instead of the pin's majority
++		// cluster. It needs the pair to straddle the |x| = |y| tie within about a
++		// degree, and the answer it gives — a voxel that receives almost no light
++		// — is the dark side, not the leaking one.
++		float3 normalOut = nU + nF;
++		if( doubleSided )
++			normalOut = lenU2 >= lenF2 ? nU : nF;
 +
 +		// Stored unnormalized and biased, exactly as before, so the injection's
 +		// `xyz * 2 - 1` keeps meaning what it meant; .a is the double-sided flag
@@ -664,7 +750,7 @@ index 0bc5320..a18e8e9 100644
  @property( has_diffuse_tex || has_emissive_tex )
  	sampler					poolSampler	[[sampler(@counter(samplerRegister))]],
 diff --git a/Samples/Media/VCT/Voxelizer_piece_cs.any b/Samples/Media/VCT/Voxelizer_piece_cs.any
-index 2aff783..edea1a5 100644
+index 2aff783..09d049a 100644
 --- a/Samples/Media/VCT/Voxelizer_piece_cs.any
 +++ b/Samples/Media/VCT/Voxelizer_piece_cs.any
 @@ -357,11 +357,16 @@
@@ -717,20 +803,20 @@ index 2aff783..edea1a5 100644
 +							// Jahshaka patch 0065: every normal goes into BOTH sums,
 +							// raw and folded, and nothing is dropped. The "these two
 +							// surfaces face opposite ways" decision upstream made
-+							// here, against the sum SO FAR, is made once in
-+							// VCT/VoxelResolve from the two sums — see
-+							// VoxelMerge_piece_cs.any. (The old code is worth
-+							// remembering: `cosAngle <= -0.5` dropped the triangle
-+							// from the sum and set a double-sided flag, so the FIRST
-+							// triangle a thread happened to see decided which way the
-+							// voxel faced.)
++							// here, against the sum SO FAR, is made once at the end
++							// of this shader from the two sums — see
++							// `voxelMergeNormal` in VoxelMerge_piece_cs.any. (The old
++							// code is worth remembering: `cosAngle <= -0.5` dropped
++							// the triangle from the sum and set a double-sided flag,
++							// so the FIRST triangle a thread happened to see decided
++							// which way the voxel faced.)
 +							accNormalRaw	+= voxelMergeQuantizeSigned3( triNormal );
 +							accNormalFolded	+= voxelMergeQuantizeSigned3(
 +													voxelMergeCanonical( triNormal ) );
  
  							++accumTris;
  						}
-@@ -449,40 +453,74 @@
+@@ -449,40 +453,91 @@
  		}
  	}
  
@@ -774,32 +860,49 @@ index 2aff783..edea1a5 100644
 -		voxelEmissive.xyz	= mixAverage3( voxelEmissive.xyz, accumTris, origEmissive.xyz, origAccumTris );
 +		uint3 voxelCel = uint3( gl_GlobalInvocationID.xyz ) + uint3( p_voxelPixelOrigin );
 +
++		// Thirteen scalar texels per voxel: albedo rgba, the raw normal xyz, the
++		// emissive rgb, the folded normal xyz. Only what carries something.
 +		uint4 sumAlbedo		= uint4( 0u, 0u, 0u, 0u );
 +		uint4 sumNormal		= uint4( 0u, 0u, 0u, 0u );
 +		uint4 sumEmissive	= uint4( 0u, 0u, 0u, 0u );
 +		uint4 sumFolded		= uint4( 0u, 0u, 0u, 0u );
 +		@foreach( 4, c )
 +			sumAlbedo[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ) ).x;
++		@end
++		@foreach( 3, c )
 +			sumNormal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ) ).x;
-+			sumEmissive[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 8u + @c ) ).x;
-+			sumFolded[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 12u + @c ) ).x;
++			sumEmissive[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 7u + @c ) ).x;
++			sumFolded[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 10u + @c ) ).x;
 +		@end
 +
-+		sumAlbedo		+= accAlbedo;
++		// SATURATING on the two unsigned sums — a contribution is at most
++		// 16 * 4096, sixty-five thousand of them fill a uint32, and nothing caps
++		// the triangle count at sixty-five thousand on this backend. Saturating
++		// addition is commutative and associative, so the merge stays exactly as
++		// order-independent as it was (VoxelMerge_piece_cs.any, THE GRID).
++		@foreach( 4, c )
++			sumAlbedo[@c]	= voxelMergeAddSat( sumAlbedo[@c], accAlbedo[@c] );
++		@end
++		@foreach( 3, c )
++			sumEmissive[@c]	= voxelMergeAddSat( sumEmissive[@c], accEmissive[@c] );
++		@end
 +		// Two's complement: a signed sum kept in a uint wraps the same way in
-+		// every order, which is the whole point of doing this in integers.
++		// every order, which is the whole point of doing this in integers — and a
++		// unit vector's quantised component is 4,096, so half a million triangles
++		// in one voxel would be needed to reach the wrap at all.
 +		sumNormal.xyz	= uint3( int3( sumNormal.xyz ) + accNormalRaw );
-+		sumEmissive.xyz	+= accEmissive;
 +		sumFolded.xyz	= uint3( int3( sumFolded.xyz ) + accNormalFolded );
 +
 +		@foreach( 4, c )
 +			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ),
 +								uint4( sumAlbedo[@c], 0u, 0u, 0u ) );
++		@end
++		@foreach( 3, c )
 +			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ),
 +								uint4( sumNormal[@c], 0u, 0u, 0u ) );
-+			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 8u + @c ),
++			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 7u + @c ),
 +								uint4( sumEmissive[@c], 0u, 0u, 0u ) );
-+			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 12u + @c ),
++			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 10u + @c ),
 +								uint4( sumFolded[@c], 0u, 0u, 0u ) );
 +		@end
  
