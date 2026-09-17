@@ -63,29 +63,17 @@ QList<Property*> LightNode::getProperties()
     props.append(prop);
 
     prop = new FloatProperty();
-    prop->displayName = "Shadow Alpha";
-    prop->name = "shadowAlpha";
-    prop->value = shadowAlpha;
-    props.append(prop);
-
-    prop = new FloatProperty();
     prop->displayName = "Icon Size";
     prop->name = "iconSize";
     prop->value = iconSize;
     props.append(prop);
 
-    prop = new FloatProperty();
-    prop->displayName = "Shadow Bias";
-    prop->name = "shadowBias";
-    prop->value = shadowMap->bias;
-    props.append(prop);
-
-    auto shadowColorProp = new ColorProperty();
-    shadowColorProp->displayName = "Shadow Color";
-    shadowColorProp->name = "shadowColor";
-    shadowColorProp->value = shadowColor;
-    props.append(shadowColorProp);
-
+    // (THREE PROPERTIES ARE GONE — `shadowAlpha`, `shadowColor` and
+    // `shadowBias`, render audit I-6, CRUD law. All three were advertised,
+    // serialized, reflected and panel-bound, and NONE of them reached the
+    // renderer: the mirror never read a shadow alpha or colour — a shadow is
+    // the absence of light, not a tinted overlay — and the depth bias is the
+    // engine's own per-shadow-node constant.)
     auto intProp = new IntProperty();
     intProp->displayName = "Light Type";
     intProp->name = "lightType";
@@ -160,16 +148,10 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return rectHeight;
     if(valueName == "lightType")
         return static_cast<int>(lightType);
-    if(valueName == "shadowColor")
-        return shadowColor;
-    if(valueName == "shadowAlpha")
-        return shadowAlpha;
     if(valueName == "shadowMapType")
         return static_cast<int>(getShadowMapType());
     if(valueName == "shadowMapResolution")
         return getShadowMapResolution();
-    if(valueName == "shadowBias")
-        return shadowMap->bias;
     if(valueName == "doubleSided")
         return doubleSided;
     if(valueName == "accurate")
@@ -208,12 +190,9 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "rectWidth")         { rectWidth = value.toFloat();         return markedParams(); }
     if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return markedParams(); }
     if (valueName == "lightType")         { setLightType(static_cast<LightType>(value.toInt())); return markedParams(); }
-    if (valueName == "shadowColor")       { shadowColor = value.value<QColor>(); return markedParams(); }
-    if (valueName == "shadowAlpha")       { shadowAlpha = value.toFloat();       return markedParams(); }
     // The shadow-map fields live on the node's ShadowMap; reflect through it.
     if (valueName == "shadowMapType")     { setShadowMapType(static_cast<ShadowMapType>(value.toInt())); return markedParams(); }
     if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return markedParams(); }
-    if (valueName == "shadowBias")        { shadowMap->bias = value.toFloat();   return markedParams(); }
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return markedParams(); }
     if (valueName == "accurate")          { accurate = value.toBool();           return markedParams(); }
     if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return markedParams(); }
@@ -284,9 +263,6 @@ LightNode::LightNode()
 
     iesNormalisation = 1.0f;   // no profile bound: intensity passes through
 
-	shadowAlpha = 1.0f;
-	shadowColor = QColor(0,0,0);
-
     iconSize = 0.5f;
 
 	exportable = false;
@@ -298,7 +274,6 @@ SceneNodePtr LightNode::createDuplicate()
 {
 	auto light = iris::LightNode::create();
 
-	light->lightDir = this->lightDir;
 	light->lightType = this->lightType;
 	light->color = this->color;
 	light->intensity = this->intensity;
@@ -317,9 +292,6 @@ SceneNodePtr LightNode::createDuplicate()
 	light->iesNormalisation = this->iesNormalisation;
 	light->lightTextureGuid = this->lightTextureGuid;
 	light->lightTexturePath = this->lightTexturePath;
-	light->shadowAlpha = this->shadowAlpha;
-	light->shadowColor = this->shadowColor;
-	light->shadowMap->bias = this->shadowMap->bias;
 	light->shadowMap->shadowType = this->shadowMap->shadowType;
 	light->shadowMap->setResolution(this->shadowMap->resolution);
 	light->icon = this->icon;

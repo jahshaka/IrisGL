@@ -311,14 +311,17 @@ public:
     /// displacement field), the opacity (its own strength) and two-sidedness.
     static const QVector<QString> &rowsUnusedWhenDistortion();
 
+    // THE SIX `use*Map` FLAGS ARE GONE (render audit I-6, CRUD law): a
+    // material's maps are the `textures` map itself — the mirror binds from it,
+    // the bake reads it, the writer serializes it — and a second boolean per
+    // slot was a copy of "is there an entry under this sampler name" that only
+    // the setters maintained. `textures.contains("u_baseColorMap")` is the one
+    // answer, and it cannot go stale.
     QColor baseColor;
     float  baseColorFactor;
-    bool   useBaseColorMap;
 
     float  metallicFactor;
-    bool   useMetallicMap;
     float  roughnessFactor;
-    bool   useRoughnessMap;
     // Remap bounds for a sampled roughness map: roughness = mix(lower, upper, sampled).
     //
     // NOT OBVIOUS, AND EASY TO GET BACKWARDS: setting lower > upper INVERTS the
@@ -333,7 +336,6 @@ public:
     float  roughnessLowerBound;
     float  roughnessUpperBound;
 
-    bool   useNormalMap;
     float  normalFactor;
 
     /// A second specular lobe over the surface (car paint, lacquer, wet
@@ -491,8 +493,6 @@ public:
 
     QColor emissiveColor;
     float  emissiveIntensity;
-    bool   useEmissiveMap;
-    bool   useReflectionMap;
 
     float  alpha;
     float  alphaCutoff;

@@ -234,8 +234,6 @@ Scene::Scene()
     rootNode = SceneNode::create();
     rootNode->setName("World");
 
-    clearColor = QColor(0,0,0,0);
-    renderSky = true;
     // THE DEFAULT SKY: 96 grey (owner pick 1, SKY_LIGHT_SPEC.md §9.1 option ii).
     // It was 72 while the scene's light came from a separate 96-grey "Ambient
     // Color"; with ambient BEING the sky (D14) the sky has to carry that level
@@ -245,12 +243,12 @@ Scene::Scene()
     skyColor = QColor(96, 96, 96);
 
     fogColor = QColor(250, 250, 250);
-    fogStart = 100;
-    fogEnd = 180;
     fogEnabled = true;
-    // 2/(100+180) = 0.0071: the exponential density that keeps a 100..180 linear
-    // fog looking like itself (see fogDensityFromLinear).
-    fogDensity = fogDensityFromLinear(fogStart, fogEnd);
+    // 2/(100+180) = 0.0071: the exponential density that keeps the retired
+    // 100..180 LINEAR fog looking like itself (see fogDensityFromLinear — the
+    // two distances are gone from the document, but this is the density a
+    // scene has always come up with).
+    fogDensity = fogDensityFromLinear(100.0f, 180.0f);
     fogHeightDensity = 0.0f;      // height layer off until asked for
     fogAtmosphere = false;        // the authored colour, until a scene asks for the sky's
     fogHeightFalloff = 0.1f;

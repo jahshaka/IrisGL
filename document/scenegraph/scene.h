@@ -253,8 +253,9 @@ public:
     /// through getPlayMode(); the possession slot it arms is runtime only.
     ScenePlayMode playMode = ScenePlayMode::Explorer;
 
-    QColor clearColor;
-    bool renderSky;
+    // (`clearColor` and `renderSky` are GONE — render audit I-6, CRUD law.
+    // Two fields the renderer never read: the engine clears to the SKY, and
+    // whether there is a sky is `skyType`. Neither was ever serialized.)
     Texture2DPtr skyTexture;
     QColor skyColor;
 	QColor gradientTop;
@@ -264,13 +265,15 @@ public:
 
     // Fog properties. The model is EXPONENTIAL (jahshaka::engine::FogDesc):
     // transmittance = 2^(-distance * fogDensity), times a second, height-varying
-    // layer of the same colour. fogStart/fogEnd are the retired LINEAR pair, kept
-    // so old scenes keep loading and round-tripping: together they still derive
-    // the density when a scene predates fogDensity, and fogStart has no meaning
-    // of its own any more (the World panel greys it out).
+    // layer of the same colour.
+    //
+    // THE LINEAR PAIR IS GONE (`fogStart`/`fogEnd` — render audit I-6, CRUD
+    // law): exponential fog begins at the camera and never stops, so a start
+    // and an end distance described nothing the renderer could draw. Their last
+    // job — deriving a density for a scene written before `fogDensity` existed
+    // — belongs to the reader, which now reads those two keys into locals,
+    // calls fogDensityFromLinear and forgets them. Nothing writes them again.
     QColor fogColor;
-    float fogStart;
-    float fogEnd;
     bool fogEnabled;
     float fogDensity;          // per world unit, exp2
     float fogHeightDensity;    // 0 = no height layer

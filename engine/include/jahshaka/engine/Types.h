@@ -2057,6 +2057,89 @@ struct GiParams {
     bool operator!=(const GiParams &o) const { return !(*this == o); }
 };
 
+/// WHAT A QUALITY TIER PHYSICALLY IS, IN ONE PLACE (render audit A5, lane
+/// CRUD-RENDER-1).
+///
+/// Every number a Photon quality tier decides lives here and NOWHERE else: the
+/// engine reads it (`OgreScene::giVoxelResolution`, `resolveCascadeTable`'s
+/// fallback, `buildPcc`'s probe resolution and its HDR/shadow defaults) and so
+/// does the HOST, which is the point — the app's five tier tooltips used to
+/// describe a renderer that did not exist ("Medium voxelizes at twice the
+/// resolution" when both are 64; "32/64/128 voxels per axis" when the cascade
+/// chain, which is on at every tier, uses 64/64/128; "128^3 at High/Epic" when
+/// two of the four cascades are 64). They are GENERATED from this table now,
+/// through `world.tierTable()`, so a tier's description cannot drift from what
+/// the tier does.
+///
+/// It is a pure function of the quality dial: no scene, no device, no Ogre.
+struct GiQualityFacts {
+    /// The engine's cascade chain for this tier, innermost first, as
+    /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
+    /// left at 0 — the step is DERIVED from the chain (resolveCascadeTable does
+    /// it), not a property of the tier.
+    GiParams::GiCascadeDesc cascades[4];
+    /// How many entries of `cascades` are in use.
+    int   cascadeCount = 0;
+    /// The SINGLE scene-fitted volume's resolution per axis — the arm used when
+    /// the chain is off (`GiParams::cascades == false`).
+    unsigned voxelResolution = 64u;
+    /// One reflection-probe cube face, in pixels, when the scene pins no size.
+    unsigned probeFaceSize = 256u;
+    /// What `GiToggle::Auto` resolves to for the two expensive probe options.
+    bool  probeHdrDefault = false;
+    bool  probeShadowsDefault = false;
+};
+
+/// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
+/// with it.
+inline GiQualityFacts giQualityFacts(GiQuality quality)
+{
+    GiQualityFacts f;
+    switch (quality) {
+    case GiQuality::Low:
+        // LOW IS 64^3 IN THE CHAIN, NOT THE QUALITY DIAL'S 32 (PHOTON_SPEC §7
+        // E2 (4)): the number that decides whether its bounce means anything is
+        // the CELL, and at 32 the inner cascade's cell is 0.31 m, which smears
+        // a room's own walls. TWO cascades, because reach is what stops a
+        // corridor going black and the far one is the cheap one.
+        f.cascades[0] = {  5.0f, 64, 0.0f };
+        f.cascades[1] = { 20.0f, 64, 0.0f };
+        f.cascadeCount = 2;
+        f.voxelResolution = 32u;
+        f.probeFaceSize   = 128u;
+        break;
+    case GiQuality::High:
+        f.cascades[0] = {  5.0f, 128, 0.0f };
+        f.cascades[1] = { 10.0f, 128, 0.0f };
+        f.cascades[2] = { 15.0f,  64, 0.0f };
+        f.cascades[3] = { 60.0f,  64, 0.0f };
+        f.cascadeCount = 4;
+        f.voxelResolution = 128u;
+        f.probeFaceSize   = 512u;
+        // The two expensive probe options are ON at this tier and only here
+        // (REFLECTIONS_ADOPTION_SPEC P3a/P3b) — the pair `GiToggle::Auto` reads.
+        f.probeHdrDefault     = true;
+        f.probeShadowsDefault = true;
+        break;
+    default:   // Medium: the same reach as High, at its own resolution
+        f.cascades[0] = {  5.0f, 64, 0.0f };
+        f.cascades[1] = { 10.0f, 64, 0.0f };
+        f.cascades[2] = { 15.0f, 64, 0.0f };
+        f.cascades[3] = { 60.0f, 64, 0.0f };
+        f.cascadeCount = 4;
+        f.voxelResolution = 64u;
+        f.probeFaceSize   = 256u;
+        break;
+    }
+    return f;
+}
+
+/// One cascade's CELL in metres: the number that says what it can resolve.
+inline float giCascadeCell(const GiParams::GiCascadeDesc &c)
+{
+    return c.resolution > 0 ? c.halfSize * 2.0f / float(c.resolution) : 0.0f;
+}
+
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
 /// "the renderer beats the request" contract as View::sampleCount() and
 /// Scene::activePlanarReflectors().
@@ -2088,12 +2171,19 @@ struct GiStatus {
     /// for every scene that never pinned them.
     Vec3   boundsMin;
     Vec3   boundsMax;
-    /// METRES PER VOXEL of that volume — its largest axis divided by the tier's
-    /// voxel resolution (LIGHTING_PIPELINE_AUDIT L4.4). This, not the volume's
-    /// size, is the number that says whether the GI in this scene means
-    /// anything: the shipped default project used to report 8.1 (a 1040 m
-    /// volume at 128^3) and reports 0.5 with the automatic ceiling in force.
-    /// 0 when there is no volume.
+    /// METRES PER VOXEL of the volume `boundsMin/Max` describe — and UNDER A
+    /// CASCADE CHAIN THAT IS THE OUTERMOST, COARSEST CASCADE'S CELL, because
+    /// that is the volume those corners describe (render audit I-10).
+    ///
+    /// There is no single voxel size under a chain, so this scalar is the
+    /// COARSEST one; `cascades[i].cell` is every one of them, and the innermost
+    /// is what the eye is usually looking at. In the single-volume arm it is
+    /// the largest axis divided by the tier's resolution
+    /// (LIGHTING_PIPELINE_AUDIT L4.4), and then it is the whole answer: the
+    /// shipped default project used to report 8.1 (a 1040 m volume at 128^3)
+    /// and reports 0.5 with the automatic ceiling in force. 0 when there is no
+    /// volume. It is the number that says whether GI in a scene means anything
+    /// at all — a kilometre-wide volume at 128^3 is computing a constant.
     float  voxelMetres = 0.0f;
     /// The RESOLVED reflection-probe region — the free space the probe grid was
     /// placed in, which is deliberately NOT the lit volume (it carries no
@@ -3360,11 +3450,27 @@ constexpr float kSpotAreaFraction = 0.025f;
 /// implementation, not a choice.
 struct PostFxDesc {
     /// Render the scene into a floating-point target and tonemap it (filmic,
-    /// Hable/Uncharted2) with automatic exposure. The prerequisite for bloom.
+    /// Hable/Uncharted2). The prerequisite for bloom. The exposure may be
+    /// MANUAL (`tonemapFixed`, the editor's default since EXPOSURE-1) or
+    /// metered; this flag only says the chain exists.
     bool  hdr = false;
-    /// Auto-exposure midpoint and the window it may adapt within. NOT stops:
-    /// the value is used as e^(exposure - 2), so +0.69 is one doubling.
+    /// THE CHAIN'S OWN EXPOSURE AXIS — natural log, NOT stops: the multiplier
+    /// the frame is scaled by before the tonemap is `e^(exposure - 2)` times
+    /// the chain's 1024, so +0.69 is one doubling. The host converts: a
+    /// document exposure is in STOPS and `iris::lens::toChain` is the one door
+    /// between the two (SceneMirror::applyExposure).
     float exposure = 0.0f;
+    /// THE AUTO WINDOW, AND IT IS ON THE METER'S AXIS, NOT THIS ONE
+    /// (EXPOSURE-1, lead review): the chain clamps the measured mean-log
+    /// luminance to `[7.5 - exposureMax, 7.5 - exposureMin]`
+    /// (HDR/DownScale03_SumLumEnd_ps.glsl), so these two bound WHAT THE METER
+    /// IS ALLOWED TO READ, not what `exposure` above may become. They are inert
+    /// under manual exposure, which has no meter to bound.
+    ///
+    /// (There is no "set min == max for a fixed exposure" recipe any more — the
+    /// doc said so for months and it was never how the pin behaved. Manual
+    /// exposure is `tonemapFixed`, an explicit flag with its own code path: the
+    /// luminance ladder is replaced by a clear to one constant.)
     float exposureMin = -2.5f;
     float exposureMax = 2.5f;
     /// THE METERING PATTERN and THE PERCENTILE CLIPS — the automatic exposure's

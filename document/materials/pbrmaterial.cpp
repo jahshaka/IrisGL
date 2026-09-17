@@ -31,16 +31,12 @@ PbrMaterial::PbrMaterial()
     // a matte sphere".
     baseColor           = defaultmaterial::baseColor();
     baseColorFactor     = 1.0f;
-    useBaseColorMap     = false;
 
     metallicFactor      = defaultmaterial::kMetalness;
-    useMetallicMap      = false;
     roughnessFactor     = defaultmaterial::kRoughness;
-    useRoughnessMap     = false;
     roughnessLowerBound = 0.0f;
     roughnessUpperBound = 1.0f;
 
-    useNormalMap        = false;
     normalFactor        = 1.0f;
 
     // HLMS_ADOPTION P1. EVERY ONE OF THESE DEFAULTS IS THE RENDERER'S OWN
@@ -71,8 +67,6 @@ PbrMaterial::PbrMaterial()
 
     emissiveColor       = QColor(0, 0, 0);
     emissiveIntensity   = 0.0f;
-    useEmissiveMap      = false;
-    useReflectionMap    = false;
 
     alpha               = 1.0f;
     alphaCutoff         = 0.5f;
@@ -107,28 +101,28 @@ void PbrMaterial::setBaseColor(QColor color)        { baseColor = color; touch()
 void PbrMaterial::setBaseColorFactor(float factor)  { baseColorFactor = factor; touch(); }
 void PbrMaterial::setBaseColorMap(Texture2DPtr tex)
 {
-    if (!!tex) { useBaseColorMap = true;  addTexture("u_baseColorMap", tex); }
-    else       { useBaseColorMap = false; removeTexture("u_baseColorMap"); }
+    if (!!tex) addTexture("u_baseColorMap", tex);
+    else       removeTexture("u_baseColorMap");
 }
 
 void PbrMaterial::setMetallicFactor(float factor)   { metallicFactor = factor; touch(); }
 void PbrMaterial::setMetallicMap(Texture2DPtr tex)
 {
-    if (!!tex) { useMetallicMap = true;  addTexture("u_metallicMap", tex); }
-    else       { useMetallicMap = false; removeTexture("u_metallicMap"); }
+    if (!!tex) addTexture("u_metallicMap", tex);
+    else       removeTexture("u_metallicMap");
 }
 
 void PbrMaterial::setRoughnessFactor(float factor)  { roughnessFactor = factor; touch(); }
 void PbrMaterial::setRoughnessMap(Texture2DPtr tex)
 {
-    if (!!tex) { useRoughnessMap = true;  addTexture("u_roughnessMap", tex); }
-    else       { useRoughnessMap = false; removeTexture("u_roughnessMap"); }
+    if (!!tex) addTexture("u_roughnessMap", tex);
+    else       removeTexture("u_roughnessMap");
 }
 
 void PbrMaterial::setNormalMap(Texture2DPtr tex)
 {
-    if (!!tex) { useNormalMap = true;  addTexture("u_normalMap", tex); }
-    else       { useNormalMap = false; removeTexture("u_normalMap"); }
+    if (!!tex) addTexture("u_normalMap", tex);
+    else       removeTexture("u_normalMap");
 }
 
 void PbrMaterial::setNormalFactor(float factor)     { normalFactor = factor; touch(); }
@@ -380,8 +374,8 @@ void PbrMaterial::setEmissiveColor(QColor color)        { emissiveColor = color;
 void PbrMaterial::setEmissiveIntensity(float intensity) { emissiveIntensity = intensity; touch(); }
 void PbrMaterial::setEmissiveMap(Texture2DPtr tex)
 {
-    if (!!tex) { useEmissiveMap = true;  addTexture("u_emissiveMap", tex); }
-    else       { useEmissiveMap = false; removeTexture("u_emissiveMap"); }
+    if (!!tex) addTexture("u_emissiveMap", tex);
+    else       removeTexture("u_emissiveMap");
 }
 
 // ADDENDUM A-5. One more entry in `textures` under the sampler name the
@@ -390,8 +384,8 @@ void PbrMaterial::setEmissiveMap(Texture2DPtr tex)
 // the family switch every other map already has.
 void PbrMaterial::setReflectionMap(Texture2DPtr tex)
 {
-    if (!!tex) { useReflectionMap = true;  addTexture("u_reflectionMap", tex); }
-    else       { useReflectionMap = false; removeTexture("u_reflectionMap"); }
+    if (!!tex) addTexture("u_reflectionMap", tex);
+    else       removeTexture("u_reflectionMap");
 }
 
 void PbrMaterial::setAlpha(float a)          { alpha = a; touch(); }
