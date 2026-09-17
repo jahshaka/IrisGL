@@ -76,9 +76,25 @@ driver answers with a synchronous VK_ERROR_DEVICE_LOST and no Xid.
 SOURCE patch: every tree re-runs irisgl/scripts/build-ogre.sh.
 It shares RenderSystems/Vulkan/src/OgreVulkanWindow.cpp with patches 0008 and
 0013, so expect it on the reverse-check's overlap list.
+AMENDED AT MERGE (the lead, after the Fable second read, 2026-09-17): (a) the
+SUBOPTIMAL / mSuboptimal acquire path also rebuilds the swapchain, and there the
+acquire DID return an image (the semaphore will signal) while the status was
+still Released, so destroySwapchain took the bare-destroy branch -- the very
+defect this patch fixes, reachable on any real window-manager resize (Xvfb never
+reports SUBOPTIMAL, which is why the lane's twelve cycles did not see it). The
+rebuild path now marks the status Acquired when the acquire returned an image;
+OUT_OF_DATE acquired nothing and stays Released. (b) The retirement runs BEFORE
+notifySwapchainDestroyed releases the framebuffers. (c) The Acquired branch
+stalls after its submit, so the swapchain that owns the pending signal is not
+destroyed while the wait that consumes it is still queued.
+
 --- a/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
 +++ b/RenderSystems/Vulkan/src/OgreVulkanWindow.cpp
-@@ -611,7 +611,44 @@
+@@ -607,14 +607,68 @@
+     void VulkanWindowSwapChainBased::destroySwapchain( bool finalDestruction )
+     {
+         OGRE_ANDROID_SURFACE_LOCK;
+-        mDevice->mRenderSystem->notifySwapchainDestroyed( this );
  
          if( mSwapchainSemaphore )
          {
@@ -103,7 +119,22 @@ It shares RenderSystems/Vulkan/src/OgreVulkanWindow.cpp with patches 0008 and
 +            // the final teardown or a lost device, where no submit is possible —
 +            // those keep the old immediate destroy. The re-entrant call
 +            // (acquireNextSwapchain -> windowMovedOrResized -> destroySwapchain)
-+            // arrives in SwapchainReleased and therefore never submits from here.
++            // arrives in SwapchainAcquired when the acquire returned an image
++            // (SUBOPTIMAL, or SUCCESS with mSuboptimal set from the last present)
++            // and in SwapchainReleased when it did not (OUT_OF_DATE) -- see
++            // acquireNextSwapchain. A nested FlushOnly submit from inside the
++            // queue's own commit tail is legal there: the new command buffer is
++            // already open and the pending list cleared, and the xcb resize path
++            // already stalls from that very spot.
++            //
++            // This block runs BEFORE notifySwapchainDestroyed releases the
++            // framebuffers, so a submitted wait never references a released one;
++            // and the Acquired branch STALLS after its submit so the swapchain
++            // that owns the pending signal is not destroyed while the wait that
++            // consumes it is still queued (the WSI spec's grey area; a driver that
++            // rejects submissions over semaphore state is what this patch is for).
++            // The stall is a device idle on an operation that happens on a pacing
++            // change and at a VR session's start and end -- never per frame.
 +            const bool canSubmit = !finalDestruction && !mDevice->isDeviceLost();
 +            if( canSubmit && ( mSwapchainStatus == SwapchainAcquired ||
 +                               mSwapchainStatus == SwapchainUsedInRendering ) )
@@ -115,6 +146,7 @@ It shares RenderSystems/Vulkan/src/OgreVulkanWindow.cpp with patches 0008 and
 +                    mDevice->mGraphicsQueue.addWindowToWaitFor( mSwapchainSemaphore );
 +                }
 +                mDevice->mGraphicsQueue.commitAndNextCommandBuffer( SubmissionType::FlushOnly );
++                mDevice->stallIgnoringDeviceLost();
 +                mDevice->mVaoManager->notifyWaitSemaphoreSubmitted( mSwapchainSemaphore );
 +            }
 +            else
@@ -124,7 +156,26 @@ It shares RenderSystems/Vulkan/src/OgreVulkanWindow.cpp with patches 0008 and
              mSwapchainSemaphore = 0;
          }
  
-@@ -760,6 +797,13 @@
++        mDevice->mRenderSystem->notifySwapchainDestroyed( this );
++
+         if( mSwapchain )
+         {
+             vkDestroySwapchainKHR( mDevice->mDevice, mSwapchain, 0 );
+@@ -684,6 +738,13 @@
+                   ( result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ) ) &&
+                 !mRebuildingSwapchain )
+             {
++                // JAHSHAKA PATCH 0073: if the acquire RETURNED AN IMAGE (SUCCESS
++                // with mSuboptimal from the last present, or SUBOPTIMAL), the
++                // semaphore WILL be signalled, and the rebuild's destroySwapchain
++                // must retire it through a submitted wait, not destroy it. Say so
++                // in the status; OUT_OF_DATE acquired nothing and stays Released.
++                if( result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR )
++                    mSwapchainStatus = SwapchainAcquired;
+                 mRebuildingSwapchain = true;
+                 windowMovedOrResized();
+                 mRebuildingSwapchain = false;
+@@ -760,6 +821,13 @@
          // Don't do it right now because we need to recreate the surface as well.
          OGRE_ANDROID_SURFACE_PREVENT_USE;
  
@@ -138,7 +189,7 @@ It shares RenderSystems/Vulkan/src/OgreVulkanWindow.cpp with patches 0008 and
          destroySwapchain();
          createSwapchain();
      }
-@@ -775,6 +819,10 @@
+@@ -775,6 +843,10 @@
          // Don't do it right now because we need to recreate the surface as well.
          OGRE_ANDROID_SURFACE_PREVENT_USE;
  
