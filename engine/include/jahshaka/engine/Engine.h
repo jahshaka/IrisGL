@@ -915,21 +915,58 @@ public:
     /// "THIS HELPER IS DRAWN IN THE HEADSET TOO" (SPECS/VR_SPEC.md §5 phase 4).
     ///
     /// Editor furniture comes in two kinds once the editor's scene is being
-    /// worn. Most of it belongs to the DESK — the ground grid, the light and
-    /// camera icons, the mouse gizmo, the VR head and hand proxies — and a
-    /// wearer must not see any of it (a proxy drawn at their own face least of
-    /// all). One piece belongs to BOTH pictures: the SELECTION OUTLINE, because
-    /// "which object am I working on" is editor state a person editing in VR
-    /// needs. This flag is that distinction, and it is ADDITIVE — a node that
-    /// sets it is drawn by the desktop AND by the VR session's view.
+    /// worn, and the split is about WHOSE furniture it is rather than what kind
+    /// of object it is. Most of it belongs to the DESK — the ground grid, the
+    /// light and camera icons, the mouse gizmo, the SELECTION OUTLINE, the GI
+    /// volume boxes — and a VR eye draws all of that or none of it according to
+    /// the host's mode (the editor's preview opens the desk's channel because
+    /// watching the editor work is the mode's whole purpose; the Player opens
+    /// none of it, exactly as the desktop Player shows none).
+    ///
+    /// What THIS flag marks is the WEARER'S own furniture: the two CONTROLLER
+    /// PROXIES today, and phase 4b's controller ray and hit marker. Every VR
+    /// eye draws those, in BOTH modes — a player needs to see their own hands
+    /// as much as an author does — and so does the desktop editor viewport, so
+    /// the person at the desk can see where the wearer is reaching. It is
+    /// ADDITIVE, never instead-of: a node that sets it is drawn by the desktop
+    /// AND by the VR session's view.
     ///
     /// Only meaningful on a node that is already a helper; every capture
     /// (probes, shadow maps, GI, the planar mirrors) excludes it exactly as it
     /// excludes an ordinary helper, and a view that hides the furniture
     /// altogether — the Player, a thumbnail, a preview, a user's screenshot —
-    /// hides this too.
+    /// hides this too (View::setHelpersVisible(false) drops both bits).
     virtual void        setNodeVrHelper(NodeId, bool) = 0;
     virtual bool        nodeVrHelper(NodeId) const = 0;
+
+    /// THE WEARER'S CONTROLLER PROXIES, BY NODE (SPECS/VR_SPEC.md §5 phase 4).
+    ///
+    /// The host CREATES the two markers — they are its geometry, its materials
+    /// and its visibility, and nothing here changes any of that — and names
+    /// them once. A running VR session then PLACES them inside the frame,
+    /// immediately after it has located the wearer's hands, so a proxy is drawn
+    /// at the pose that same frame renders.
+    ///
+    /// WHY THE ENGINE AND NOT THE HOST. The poses do not exist until
+    /// xrWaitFrame has returned, which happens inside renderOneFrame — after
+    /// every host tick of that frame has run. A host pushing them itself can
+    /// therefore only push what it knew before the frame began: measured at two
+    /// frames of lag (~22 ms at 90 Hz), which on a hand is visible.
+    ///
+    /// 0 for either id unregisters it. Pass the LEFT hand's node first.
+    virtual void        setVrProxyNodes(NodeId left, NodeId right) = 0;
+    virtual void        vrProxyNodes(NodeId out[2]) const = 0;
+
+    /// WHERE A NODE IS RIGHT NOW, in WORLD space, as the graph holds it.
+    ///
+    /// The read half of setNodeTransform, for the things a host cannot compute
+    /// back: a node the ENGINE moved (the controller proxies above), or one
+    /// whose parent chain the host does not own. Forces the derived transform
+    /// up to date, so the answer is this frame's rather than the last frame the
+    /// scene manager happened to walk.
+    ///
+    /// False (and the outputs untouched) for an unknown id.
+    virtual bool        nodeWorldPose(NodeId, Vec3 &position, Quat &rotation) const = 0;
 
     /// "DOES THIS THING MOVE?" — the document's resolved MOBILITY for one node
     /// (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3). The host decides it

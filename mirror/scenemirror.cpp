@@ -2422,6 +2422,13 @@ void SceneMirror::syncVrProxies()
         for (int i = 0; i < 2; ++i)
             if (mVrProxyMesh[i])
                 mTarget->attachMesh(mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
+        // ...AND THE SESSION IS TOLD WHICH NODES THEY ARE (VR-4-FIX finding 4).
+        // A running session then places them INSIDE its own frame, right after
+        // it has located the hands — which is the only moment this frame's
+        // poses exist. The mirror keeps everything else about them: it made
+        // them, it owns their meshes and materials, and it decides whether they
+        // are shown.
+        mTarget->setVrProxyNodes(mVrProxyNode[0], mVrProxyNode[1]);
         mVrProxiesBuilt = true;
     }
 
@@ -2434,6 +2441,16 @@ void SceneMirror::syncVrProxies()
         if (want) {
             // A WORLD pose on a node with no parent — the proxies hang off the
             // scene root, exactly like the GI boxes, so "local" IS "world".
+            //
+            // THE POSE THE HOST LAST HEARD, which is a frame or two old
+            // (VR-4-FIX finding 4): the runtime locates the hands inside
+            // renderOneFrame, after every host tick of that frame has run. It
+            // is written anyway because it is the ONLY writer for a host with
+            // no live session — a suite driving setVrProxies with a hand-built
+            // status (mirror.vr_proxies), the first frame of a session, a
+            // status pushed while the session's own frame was skipped — and
+            // because a session overwrites it a few microseconds later with
+            // the pose that frame actually draws.
             mTarget->setNodeTransform(mVrProxyNode[i], p.position, p.rotation,
                                       Vec3(1.0f, 1.0f, 1.0f));
         }

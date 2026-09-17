@@ -106,6 +106,7 @@ void vrSessionEndFrame(VrSession *) {}
 VrState vrSessionState(const VrSession *) { return VrState::Unavailable; }
 VrStatus vrSessionStatus(const VrSession *) { return VrStatus(); }
 View *vrSessionView(const VrSession *) { return nullptr; }
+OgreScene *vrSessionScene(const VrSession *) { return nullptr; }
 void vrSessionSetMirror(VrSession *, OgreView *) {}
 void vrSessionSetOrigin(VrSession *, const Vec3 &, float) {}
 void vrSessionSyncMirror(VrSession *) {}
@@ -306,11 +307,12 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
     // proxies. Asked for only when advertised — an unknown extension in this
     // list fails the whole xrCreateInstance, which would take VR away from
     // every runtime that does not have it.
-    const char *want[3] = {
-        XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME,
-        "XR_KHR_visibility_mask",
-        XR_EXT_HAND_TRACKING_EXTENSION_NAME,
-    };
+    // THE LIST IS BUILT BELOW, NOT HERE: the first entry is the only one that
+    // is unconditional, and the two optional ones are appended by the counter.
+    // (It used to be spelled as a three-name initialiser that the appends then
+    // overwrote — the same names twice, and the second copy read as a claim
+    // that all three are always asked for.)
+    const char *want[3] = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr, nullptr };
     unsigned wantCount = 1u;
     if (mHasVisibilityMask) want[wantCount++] = "XR_KHR_visibility_mask";
     if (mHasHandTrackingExt) want[wantCount++] = XR_EXT_HAND_TRACKING_EXTENSION_NAME;
@@ -602,6 +604,9 @@ public:
     bool isOver() const { return mEnded || mState == VrState::Lost; }
     VrStatus status() const;
     OgreView *view() const { return mView; }
+    /// THE WORLD BEING WORN (VR-4-FIX finding 1). Raw, and held for the life of
+    /// the session — which is why `destroyScene` asks before it frees anything.
+    OgreScene *scene() const { return mScene; }
     void setMirrorView(OgreView *v);
     /// THE RIG'S PLACE IN THE WORLD (phase 3). Position and a heading about +Y;
     /// see Engine::setVrOrigin for why there is no pitch and no roll.
@@ -666,6 +671,13 @@ private:
     /// palm joints), compose through the rig. Called from the located branch of
     /// beginFrame with that frame's predicted display time.
     void locateHands(XrTime displayTime);
+    /// The two hand-tracking trackers, when the system has the extension —
+    /// created INDEPENDENTLY of the action set (finding 8), destroyed with it.
+    void createHandTrackers();
+    /// THIS FRAME'S HANDS, ON THE HOST'S MARKERS (Scene::setVrProxyNodes).
+    /// Called from beginFrame immediately after locateHands, which is the only
+    /// place the poses exist before the frame is drawn.
+    void placeProxies();
     void destroyActions();
 
     VrBoot     *mBoot;
@@ -970,6 +982,10 @@ bool VrSession::create(std::string &reason) {
     // before any frame is pumped — `xrAttachSessionActionSets` is once per
     // session and must precede the first `xrSyncActions`.
     createActions();
+    // ...AND THE JOINTS, BESIDE THEM RATHER THAN INSIDE THEM (finding 8): a
+    // runtime that refused the action set is precisely the one whose wearer has
+    // only hands.
+    createHandTrackers();
 
     vrLog("session created on the runtime's device");
     if (mTestNoRenderLeft)
@@ -1093,47 +1109,66 @@ void VrSession::createActions() {
         }
     }
     mHandActions = true;
+    vrLog("hand poses: the action set is attached");
+}
 
-    // ...AND THE JOINTS, where this system has them. A FALLBACK, not a
-    // replacement: a hand holding a controller is located by the controller,
-    // and only a hand the controller route left invalid asks the tracker.
-    if (mBoot->mSystemHandTracking && mBoot->CreateHandTracker) {
-        for (int h = 0; h < 2; ++h) {
-            XrHandTrackerCreateInfoEXT hci{ XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT };
-            hci.hand = h == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
-            hci.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
-            if (XR_FAILED(mBoot->CreateHandTracker(mSession, &hci, &mHandTracker[h])))
-                mHandTracker[h] = XR_NULL_HANDLE;
-        }
+// THE JOINTS, where this system has them — AND INDEPENDENTLY OF THE ACTIONS
+// (VR-4-FIX finding 8). A tracker is a child of the SESSION, not of the action
+// set, and the two are separate answers to "where is that hand": a runtime that
+// refuses the action set (or has no controllers bound to one) is exactly the
+// runtime whose wearer has nothing but hands, and creating the trackers inside
+// the action path meant that wearer got no proxies at all. Still a FALLBACK per
+// hand and per frame: a hand holding a controller is located by the controller,
+// and only a hand the controller route left invalid asks the tracker.
+void VrSession::createHandTrackers() {
+    if (!mBoot->mSystemHandTracking || !mBoot->CreateHandTracker) return;
+    if (mSession == XR_NULL_HANDLE) return;
+    for (int h = 0; h < 2; ++h) {
+        if (mHandTracker[h] != XR_NULL_HANDLE) continue;
+        XrHandTrackerCreateInfoEXT hci{ XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT };
+        hci.hand = h == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+        hci.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+        if (XR_FAILED(mBoot->CreateHandTracker(mSession, &hci, &mHandTracker[h])))
+            mHandTracker[h] = XR_NULL_HANDLE;
     }
-    vrLog("hand poses: the action set is attached (joints=%d)",
-          int(mHandTracker[0] != XR_NULL_HANDLE || mHandTracker[1] != XR_NULL_HANDLE));
+    vrLog("hand poses: hand tracking is available (joints=%d, actions=%d)",
+          int(mHandTracker[0] != XR_NULL_HANDLE || mHandTracker[1] != XR_NULL_HANDLE),
+          int(mHandActions));
 }
 
 void VrSession::locateHands(XrTime displayTime) {
     mHandValid[0] = mHandValid[1] = false;
-    if (!mHandActions || mSession == XR_NULL_HANDLE) return;
+    if (mSession == XR_NULL_HANDLE) return;
+    const bool haveTrackers =
+        mHandTracker[0] != XR_NULL_HANDLE || mHandTracker[1] != XR_NULL_HANDLE;
+    // TWO INDEPENDENT SOURCES (finding 8): a session with no action set may
+    // still have hand tracking, and that wearer's hands are the only hands
+    // there are. Only a session with neither has nothing to do here.
+    if (!mHandActions && !haveTrackers) return;
 
     // THE SYNC, AND WHAT IT ANSWERS WHEN NOBODY IS LOOKING. `xrSyncActions`
     // returns XR_SESSION_NOT_FOCUSED — a SUCCESS code, not a failure — while
     // the runtime's dashboard is up or the headset is off the head, and the
     // actions are simply inactive for that frame. Treating it as an error would
     // log once a frame for as long as a wearer talks to somebody.
-    XrActiveActionSet active{};
-    active.actionSet = mActionSet;
-    active.subactionPath = XR_NULL_PATH;
-    XrActionsSyncInfo sync{ XR_TYPE_ACTIONS_SYNC_INFO };
-    sync.countActiveActionSets = 1;
-    sync.activeActionSets = &active;
-    const XrResult sr = xrSyncActions(mSession, &sync);
-    if (XR_FAILED(sr)) {
-        if (!mSaidHands) {
-            vrLog("hand poses: xrSyncActions failed (%s) — hands are off for this session",
+    bool controllers = false;
+    if (mHandActions) {
+        XrActiveActionSet active{};
+        active.actionSet = mActionSet;
+        active.subactionPath = XR_NULL_PATH;
+        XrActionsSyncInfo sync{ XR_TYPE_ACTIONS_SYNC_INFO };
+        sync.countActiveActionSets = 1;
+        sync.activeActionSets = &active;
+        const XrResult sr = xrSyncActions(mSession, &sync);
+        controllers = XR_SUCCEEDED(sr);
+        if (!controllers && !mSaidHands) {
+            vrLog("hand poses: xrSyncActions failed (%s) — the controllers are off for this "
+                  "session (the joints, if any, still answer)",
                   xrResultName(mBoot->mInstance, sr).c_str());
             mSaidHands = true;
         }
-        return;
     }
+    if (!controllers && !haveTrackers) return;
 
     for (int h = 0; h < 2; ++h) {
         Ogre::Vector3 pos = Ogre::Vector3::ZERO;
@@ -1144,7 +1179,7 @@ void VrSession::locateHands(XrTime displayTime) {
         // INACTIVE action succeeds with no validity bits set, which is the
         // right answer for "that hand is not holding anything" — the flags are
         // what decides, never the result code.
-        if (mHandSpace[h] != XR_NULL_HANDLE) {
+        if (controllers && mHandSpace[h] != XR_NULL_HANDLE) {
             XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
             if (XR_SUCCEEDED(xrLocateSpace(mHandSpace[h], mSpace, displayTime, &loc)) &&
                 (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
@@ -1186,6 +1221,35 @@ void VrSession::locateHands(XrTime displayTime) {
         mHandPos[h] = mOriginPos + mOriginRot * (pos * mConfig.worldScale);
         mHandRot[h] = mOriginRot * rot;
         mHandValid[h] = true;
+    }
+}
+
+// THE WEARER'S MARKERS, PLACED INSIDE THE FRAME THAT DRAWS THEM (VR-4-FIX
+// finding 4; Scene::setVrProxyNodes).
+//
+// The host OWNS these two nodes — it made the wands, chose their colours and
+// decides whether they are shown at all — and it hands their ids to the scene.
+// All this does is write THIS frame's pose into them, between the locate and
+// the draw. A host-side push (the mirror's, which still runs for a frame the
+// session never saw and for a host with no session at all) cannot be closer
+// than the frame before last, because the poses do not exist until the pump
+// above has blocked in xrWaitFrame and located them.
+//
+// A hand the runtime did not locate is left ALONE rather than moved: whether an
+// unlocated hand is hidden or simply stale is the host's decision (the mirror
+// hides it), and writing a zero here would put a wand at the world origin.
+void VrSession::placeProxies() {
+    if (!mScene) return;
+    NodeId ids[2] = { 0, 0 };
+    mScene->vrProxyNodes(ids);
+    if (!ids[0] && !ids[1]) return;
+    for (int h = 0; h < 2; ++h) {
+        if (!ids[h] || !mHandValid[h]) continue;
+        mScene->setNodeTransform(ids[h],
+                                 Vec3(mHandPos[h].x, mHandPos[h].y, mHandPos[h].z),
+                                 Quat(mHandRot[h].x, mHandRot[h].y, mHandRot[h].z,
+                                      mHandRot[h].w),
+                                 Vec3(1.0f, 1.0f, 1.0f));
     }
 }
 
@@ -1562,6 +1626,13 @@ bool VrSession::beginFrame() {
     // the body it belongs to; locating them a millisecond apart is how a
     // controller ends up lagging its own arm.
     locateHands(mFrameState.predictedDisplayTime);
+    // ...AND THE MARKERS THE HOST HUNG FOR THEM, MOVED INSIDE THIS FRAME
+    // (VR-4-FIX finding 4). The poses above did not exist until xrWaitFrame
+    // returned, which is inside this call — so a host pushing the proxies from
+    // its own tick can only ever push the frame before last's (measured: two
+    // frames, ~22 ms at 90 Hz). Placed here, a proxy is drawn exactly where the
+    // hand it stands for is this frame.
+    placeProxies();
     // THE SECOND EYE'S FOUR CORNER RAYS (F2), in world space, from its own fov
     // and its own orientation — the same quantity SceneManager writes into the
     // sky quad's normals for a mono camera (OgreSceneManager.cpp:1487-1499),
@@ -2462,6 +2533,7 @@ VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Un
 bool vrSessionIsOver(const VrSession *s) { return s && s->isOver(); }
 VrStatus vrSessionStatus(const VrSession *s) { return s ? s->status() : VrStatus(); }
 View *vrSessionView(const VrSession *s) { return s ? s->view() : nullptr; }
+OgreScene *vrSessionScene(const VrSession *s) { return s ? s->scene() : nullptr; }
 void vrSessionSetMirror(VrSession *s, OgreView *v) { if (s) s->setMirrorView(v); }
 void vrSessionSyncMirror(VrSession *s) { if (s) s->syncMirror(); }
 void vrSessionSetOrigin(VrSession *s, const Vec3 &p, float yawDegrees) {
