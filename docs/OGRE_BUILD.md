@@ -1756,25 +1756,54 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     bounce recurrence re-gathers the TOTAL each pass ((1+rho*G)^n, never contracts).
     All three land together as PHOTON-M2 (0075 + a Jacobi bounce + the injection's
     1/pi), one SOURCE rebuild, one hash move, one re-anchoring.)
-  0075-lod-switch-hysteresis — A LOD SWITCH HAS A HYSTERESIS BAND (lane ATOM-3, the
-    render audit's A7, 2026-09-17), SOURCE, three files (OgreMain/include/
-    OgreLodStrategy.h, OgreMain/include/OgreLodStrategyPrivate.inl, OgreMain/src/
-    OgreLodStrategy.cpp — no other patch in the stack touches any of them, so there
-    is no overlap to reset for). `LodStrategy::lodSet` picks a level with one
-    `lower_bound` and writes `mCurrentMeshLod`: the comparison is a step in BOTH
-    directions, so an object whose LOD value sits on a threshold changes level every
-    frame the value dithers. Measured on the rig with one chained mesh and a camera
-    oscillating by 2 % of its switch distance: 71 level changes in 600 frames (one
-    per threshold crossing) with no band, 0 with a 10 % one; at a 20 % amplitude both
-    read 71, so the band removes the noise and keeps every real transition. The knob
-    is `LodStrategy::setHysteresis`, process-wide, DEFAULT 0 = upstream's behaviour to
-    the bit; the engine sets 0.10 in `installJahLodStrategy` (irisgl/engine/src/
-    OgreMesh.cpp) behind the `JAHSHAKA_NO_LOD_HYSTERESIS` run-wide latch. It cannot be
-    written outside the pin: `mCurrentMeshLod` and `mLodMesh` are protected and
-    MovableObject grants friendship to `LodStrategy::lodSet`/`lodUpdateImpl` BY NAME,
-    which does not extend to a derived strategy's override — which is also why the
-    rest of that lane's view rule (the `jah_world_error` strategy) needs NO patch at
-    all.
+  0075-lod-switch-hysteresis — A LOD SWITCH HAS A HYSTERESIS BAND, AND THE BAND
+    BELONGS TO THE PASS (lane ATOM-3, the render audit's A7, 2026-09-17; AMENDED IN
+    PLACE the same day by lane ATOM-3-FIX, ledger §664 finding 1), SOURCE.
+    `LodStrategy::lodSet` picks a level with one `lower_bound` and writes
+    `mCurrentMeshLod`: the comparison is a step in BOTH directions, so an object whose
+    LOD value sits on a threshold changes level every frame the value dithers.
+    Measured on the rig with one chained mesh and a camera oscillating by 2 % of its
+    switch distance: 71 level changes in 600 frames (one per threshold crossing) with
+    no band, 0 with a 10 % one; at a 20 % amplitude both read 71, so the band removes
+    the noise and keeps every real transition. It cannot be written outside the pin:
+    `mCurrentMeshLod` and `mLodMesh` are protected and MovableObject grants friendship
+    to `LodStrategy::lodSet`/`lodUpdateImpl` BY NAME, which does not extend to a
+    derived strategy's override — which is also why the rest of that lane's view rule
+    (the `jah_world_error` strategy) needs NO patch at all.
+      THE AMENDMENT, and why the first version was wrong: the band was process-wide
+    (`LodStrategy::setHysteresis`) and used `mCurrentMeshLod` as its direction state,
+    but ONE SCENE IS RENDERED BY MANY PASSES AND THEY DO NOT SHARE A CAMERA — a
+    planar reflector's mirrored camera, a PiP inset, a probe cube face and a thumbnail
+    are all `pass_scene` definitions on the same SceneManager with `mUpdateLodLists`
+    true and no LOD camera of their own, and every one of them wrote that slot. The
+    watched view's band was therefore measured against another camera's level:
+    measured at 1,760 moved pixels (the whole level-0/level-1 difference — the view
+    drew the INSET camera's level, and stayed on it after the inset was switched off),
+    0 with the amendment (`engine.lod_hysteresis`). So the band is now
+    `CompositorPassSceneDef::mLodHysteresis`, DEFAULT 0 = upstream to the bit, threaded
+    through `SceneManager::updateAllLods` (a defaulted 5th argument — no other caller
+    changes) and `UpdateLodRequest` into `lodUpdateImpl`/`lodSet` beside `lodBias`,
+    with its own per-object state slot `MovableObject::mHysteresisLod` (the last level
+    a BANDED pass chose; only a banded pass writes it; 0xFF = none yet, so a capture's
+    first frame is upstream's answer exactly; it costs no memory — the padding beside
+    `mCurrentMeshLod`). THIRTEEN FILES now: OgreLodStrategy.h,
+    OgreLodStrategyPrivate.inl, OgreMovableObject.h/.cpp, OgreRenderable.h (the two
+    `friend` declarations name those functions BY SIGNATURE), OgreDistanceLodStrategy.h
+    /.cpp and OgrePixelCountLodStrategy.h/.cpp (the three upstream strategies pass the
+    band through; a pin bump that adds a fourth fails to COMPILE rather than ignoring
+    the band), OgreSceneManager.h/.cpp, OgreCompositorPassSceneDef.h and
+    OgreCompositorPassScene.cpp. Of those only `OgreMain/src/OgreSceneManager.cpp` is
+    shared with another patch in this stack (0016 at ~1620 and 0053 at ~1081, far from
+    this patch's ~2126), so a tree carrying those two can see this patch reported as
+    "unapplied" by the per-patch reverse check — the documented overlap class; the cure
+    is the submodule reset recipe before `build-ogre.sh`. `chain::build` writes
+    `ChainDesc::lodHysteresis` onto every `PASS_SCENE` of the view's own node (all of
+    them or none — they share the view's camera) and `OgreView::chainDesc()` sets 0.10
+    for a view a person watches over time (on-screen, and the VR session's stereo view)
+    and 0 for every capture, so thumbnails, previews, screenshots and pixel suites keep
+    taking the exact level their own value asks for. `JAHSHAKA_NO_LOD_HYSTERESIS` still
+    zeroes the band run-wide; `JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN` grants it to
+    offscreen views for the one suite that can read pixels.
 
   0076-vct-bounce-is-a-jacobi-iteration — THE VOXEL BOUNCE IS A JACOBI ITERATION, AND
     ITS DAMPENING IS 1 (lane PHOTON-M2, the physics read of ledger §659 findings F-B

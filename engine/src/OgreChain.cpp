@@ -488,6 +488,9 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
     // STEREO is graph shape twice over: it writes four fields onto every scene
     // pass definition, and a flip must therefore rebuild (VR_SPEC §4.3).
     if (a.stereo != b.stereo || a.cullCameraName != b.cullCameraName) return false;
+    // ...and so is the LOD BAND, for the same reason (ogre-patch 0075): it is
+    // written onto the pass definitions.
+    if (a.lodHysteresis != b.lodHysteresis) return false;
     return a.distortion == b.distortion && a.hzb == b.hzb && a.hzbLevels == b.hzbLevels &&
            a.shadows == b.shadows && a.hdr == b.hdr && a.bloom == b.bloom &&
            a.tonemapFixed == b.tonemapFixed &&
@@ -674,6 +677,33 @@ void maskOutHelpers(Ogre::CompositorNodeDef *n, Ogre::uint32 drop) {
 /// here selects nothing and costs every low-level draw in the pass a scheme
 /// miss and an arbitration call. The screen quads are made stereo by swapping
 /// their MATERIAL instead (OgreVrSession.cpp, syncStereoQuads).
+/// THE LOD SWITCH BAND, ON EVERY SCENE PASS THIS NODE CARRIES
+/// (ChainDesc::lodHysteresis, ogre-patch 0075).
+///
+/// The same sweep as maskOutHelpers and applyStereo, and ALL OF THEM OR NONE
+/// for a sharper reason than either: every scene pass in this node renders with
+/// the VIEW'S OWN CAMERA, so they all compute the same LOD value — but the band
+/// is what decides whether that value moves the level, and a band on the opaque
+/// pass with none on the refraction, distortion or overlay pass would let those
+/// passes re-pick the exact level and draw a DIFFERENT one in the same frame.
+///
+/// Every other node definition in this engine — a planar reflector's, a probe
+/// face's, a shadow node's, the PiP inset's (buildPip) — is built by another
+/// function and never sees this sweep, so it keeps the pin's 0 and takes the
+/// exact level its own camera asks for. That is the whole point of the band
+/// being per pass: @see CompositorPassSceneDef::mLodHysteresis.
+void applyLodHysteresis(Ogre::CompositorNodeDef *n, float band) {
+    const size_t targets = n->getNumTargetPasses();
+    for (size_t t = 0; t < targets; ++t) {
+        Ogre::CompositorTargetDef *td = n->getTargetPass(t);
+        if (!td) continue;
+        for (Ogre::CompositorPassDef *p : td->getCompositorPasses()) {
+            if (!p || p->getType() != Ogre::PASS_SCENE) continue;
+            static_cast<Ogre::CompositorPassSceneDef *>(p)->mLodHysteresis = Ogre::Real(band);
+        }
+    }
+}
+
 void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
     const Ogre::IdString cull = cullCamera.empty() ? Ogre::IdString()
                                                    : Ogre::IdString(cullCamera);
@@ -791,6 +821,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         if (const Ogre::uint32 drop = helperBitsToDrop(desc)) maskOutHelpers(n, drop);
         if (desc.stereo) applyStereo(n, desc.cullCameraName);
+        if (desc.lodHysteresis > 0.0f) applyLodHysteresis(n, desc.lodHysteresis);
         Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
         workDef->connectExternal(0, n->getName(), 0);
         return;
@@ -1757,6 +1788,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     if (const Ogre::uint32 drop = helperBitsToDrop(desc)) maskOutHelpers(n, drop);
     if (desc.stereo) applyStereo(n, desc.cullCameraName);
+    if (desc.lodHysteresis > 0.0f) applyLodHysteresis(n, desc.lodHysteresis);
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
     workDef->connectExternal(0, n->getName(), 0);
 }

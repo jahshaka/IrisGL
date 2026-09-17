@@ -72,6 +72,17 @@ ChainDesc OgreView::chainDesc() const {
     // through PostFxDesc::allowOffscreen like every other deliberate case.
     d.stereo         = mStereo;
     d.cullCameraName = mStereo ? mCullCameraName : std::string();
+    // THE LOD SWITCH BAND (ogre-patch 0075, ChainDesc::lodHysteresis), and the
+    // whole rule in one line: a band belongs to a picture somebody WATCHES OVER
+    // TIME and is exactly wrong for a CAPTURE. So it is on for an on-screen view
+    // — the editor viewport, the Player's window — and for the VR session's
+    // view, which is offscreen only because both eyes share one texture and is
+    // the most motion-sensitive picture this engine draws; and off for every
+    // thumbnail, preview, screenshot and pixel suite, which must take the level
+    // their own value asks for so one pose is always one set of pixels.
+    // `jahLodHysteresisOffscreen()` is the suite's latch (see its note).
+    d.lodHysteresis  = (!isOffscreen() || d.stereo || detail::jahLodHysteresisOffscreen())
+                           ? detail::jahLodHysteresis() : 0.0f;
     // Set BEFORE the offscreen early-out below: the overlay's entitlement is
     // its own opt-in (ViewOverlayDesc::allowOffscreen), not the post chain's,
     // so an offscreen view may legitimately keep the passthrough shape AND be

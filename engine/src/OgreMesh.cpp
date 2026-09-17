@@ -68,7 +68,8 @@ public:
     }
 
     void lodUpdateImpl(const size_t numNodes, Ogre::ObjectData objData,
-                       const Ogre::Camera *camera, Ogre::Real bias) const override
+                       const Ogre::Camera *camera, Ogre::Real bias,
+                       Ogre::Real hysteresis) const override
     {
         OGRE_ALIGNED_DECL(Ogre::Real, lodValues[ARRAY_PACKED_REALS], OGRE_SIMD_ALIGNMENT);
         const Ogre::Real perPixel = worldPerPixel(camera) * camera->_getLodBiasInverse() * bias;
@@ -81,7 +82,7 @@ public:
             const Ogre::ArrayReal flat(Ogre::Mathlib::SetAll(perPixel));
             for (size_t i = 0; i < numNodes; i += ARRAY_PACKED_REALS) {
                 CastArrayToReal(lodValues, flat);
-                lodSet(objData, lodValues);
+                lodSet(objData, lodValues, hysteresis);
                 objData.advanceLodPack();
             }
             return;
@@ -101,7 +102,9 @@ public:
             Ogre::ArrayReal v = objData.mWorldAabb->mCenter.distance(cameraPos) - (*worldRadius);
             v = Ogre::Mathlib::Max(v, zero) * scale;
             CastArrayToReal(lodValues, v);
-            lodSet(objData, lodValues);
+            // The band is THIS PASS'S (ogre-patch 0075): the value is the same
+            // arithmetic for every pass, the band is not.
+            lodSet(objData, lodValues, hysteresis);
             objData.advanceLodPack();
         }
     }
@@ -139,15 +142,46 @@ private:
 // both directions, so an object parked on one changes level every frame the
 // camera dithers — 71 pops in 600 frames on a camera oscillating by 2 % of the
 // switch distance; 0 with this band, and every real transition kept at 20 %
-// (spikes/atom-3/FINDINGS.md §4). KNOWN LIMIT (the Fable read at merge): the
-// band's direction state is the object's ONE current level, shared by every
-// pass on the SceneManager — a PiP, planar or probe camera inside the band
-// can hand the view the other camera's level; the fix is a per-pass band
-// (ATOM-3-FIX, patch 0075 amended), not a wider or narrower constant.
-// 0.10 holds the level across a 10 % window of the switch distance, which is
-// ~0.6 m of dolly travel at the measured pose and is bounded by construction:
-// a value genuinely past the band switches on the frame it gets there.
+// (spikes/atom-3/FINDINGS.md §4). 0.10 holds the level across a 10 % window of
+// the switch distance, which is ~0.6 m of dolly travel at the measured pose and
+// is bounded by construction: a value genuinely past the band switches on the
+// frame it gets there.
+//
+// IT IS A PER-PASS NUMBER (ATOM-3-FIX; patch 0075 amended): it reaches
+// `lodSet` from the PASS DEFINITION that asked for the LOD update, so the
+// watched view carries it and a planar reflector's mirrored camera, a PiP
+// inset, a probe cube face and a thumbnail do not (they take the exact level
+// their own value asks for, which is what keeps a capture assertable). The
+// route is `ChainDesc::lodHysteresis` -> `chain::build`'s sweep over the
+// view's own scene passes -> `CompositorPassSceneDef::mLodHysteresis`. The
+// first version of the band was process-wide state on the strategy, which made
+// the direction state one slot per OBJECT shared by every camera in the frame
+// — see the patch header.
 static const float kLodHysteresis = 0.10f;
+
+// What a WATCHED view's scene passes get, read once (the run-wide diagnostic
+// latch every measurable engine rule in this tree carries — JAHSHAKA_NO_RAY_QUERY,
+// JAHSHAKA_NO_CASCADE_LOD — so the band's A/B is a run of the shipped binary and
+// not a build). Zero everywhere else, by construction.
+float jahLodHysteresis()
+{
+    static const float band =
+        std::getenv("JAHSHAKA_NO_LOD_HYSTERESIS") == nullptr ? kLodHysteresis : 0.0f;
+    return band;
+}
+
+// THE SUITE'S ONLY WAY IN (`engine.lod_hysteresis`). A band is only ever given
+// to a view a person watches over time, and `View::readPixels` refuses an
+// on-screen view (its target is a swapchain), so a test that wants to SEE what
+// the band does has no reachable subject at all. This latch grants the band to
+// OFFSCREEN views as well; nothing but the suite sets it, and with it unset
+// every capture in this engine — thumbnail, preview, screenshot, pixel suite —
+// takes the exact level, frame after frame.
+bool jahLodHysteresisOffscreen()
+{
+    static const bool on = std::getenv("JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN") != nullptr;
+    return on;
+}
 
 // Registered once per process, before any mesh's LOD values are written
 // (`applyLodValues` reads the default strategy's base value) and before any
@@ -159,11 +193,6 @@ void installJahLodStrategy()
     if (mgr.getStrategy("jah_world_error") == nullptr)
         mgr.addStrategy(OGRE_NEW JahWorldErrorLodStrategy());
     mgr.setDefaultStrategy("jah_world_error");
-    // The run-wide diagnostic latch every measurable engine rule in this tree
-    // carries (JAHSHAKA_NO_RAY_QUERY, JAHSHAKA_NO_CASCADE_LOD): one getenv at
-    // boot, so the band's A/B is a run of the shipped binary and not a build.
-    const bool allowed = std::getenv("JAHSHAKA_NO_LOD_HYSTERESIS") == nullptr;
-    Ogre::LodStrategy::setHysteresis(allowed ? kLodHysteresis : 0.0f);
 }
 
 // ---- Meshes ----

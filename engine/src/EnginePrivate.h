@@ -133,10 +133,16 @@ namespace detail {
 inline Ogre::Vector3     toOgre(const Vec3 &v)   { return Ogre::Vector3(v.x, v.y, v.z); }
 inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r, c.g, c.b, c.a); }
 
+/// The LOD switch band a WATCHED view's scene passes carry, and the suite's
+/// offscreen latch (OgreMesh.cpp; ogre-patch 0075). @see ChainDesc::lodHysteresis.
+float jahLodHysteresis();
+bool  jahLodHysteresisOffscreen();
+
 /// ATOM stage 1's VIEW rule (OgreMesh.cpp): registers `jah_world_error` — the
 /// LOD strategy whose per-object value is the world-space error the pass's own
-/// camera and render target can hide — and makes it the process default, plus
-/// the switch hysteresis ogre-patch 0075 adds to `LodStrategy::lodSet`. Called
+/// camera and render target can hide — and makes it the process default. The
+/// switch BAND ogre-patch 0075 adds to `LodStrategy::lodSet` is per PASS and
+/// comes from the chain (`ChainDesc::lodHysteresis`), not from here. Called
 /// once, after Root::initialise and before any mesh or Item exists.
 void installJahLodStrategy();
 
@@ -951,6 +957,23 @@ struct ChainDesc {
     /// sameShape() and a flip rebuilds the workspace — which happens exactly
     /// twice, when a session begins and when it ends.
     bool  stereo = false;
+
+    // ---- The LOD switch band, per pass (ogre-patch 0075, ATOM-3-FIX) -------
+    /// The hysteresis band `chain::build` writes onto EVERY scene pass of this
+    /// view's node (`CompositorPassSceneDef::mLodHysteresis`), as a fraction of
+    /// the LOD threshold being crossed. 0 = upstream's behaviour to the bit.
+    ///
+    /// It is a property of the VIEW, like `overlays` and `helpers`: a band is
+    /// what a picture somebody WATCHES OVER TIME wants (the level stops
+    /// flickering when the camera breathes at a switch distance), and it is
+    /// exactly wrong for a capture, which must take the level its own value
+    /// asks for so the same pose gives the same pixels. `OgreView::chainDesc()`
+    /// is the one place that answers the question; a planar, probe, shadow or
+    /// PiP node is built by another function and never gets the sweep.
+    ///
+    /// GRAPH SHAPE (sameShape): it lives on the pass definitions, so a change
+    /// rewrites them — it never changes for a live view.
+    float lodHysteresis = 0.0f;
     /// The camera whose frustum CULLS when `stereo` is set: one camera between
     /// the eyes, wide enough to hold both, so the two eyes cull and light
     /// (Forward+) identically and an object near the edge cannot appear in one
