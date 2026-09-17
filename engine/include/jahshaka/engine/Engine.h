@@ -977,10 +977,21 @@ public:
     /// The host makes both nodes (the mirror does: a unit line down -Z and a
     /// small cross, on kHelperBit | kVrHelperBit) and names them once. A
     /// running session then places them INSIDE its frame from the state the
-    /// host pushed with `Engine::setVrRay` — scaling the line to the hit
-    /// distance, standing the marker at the hit point and hiding both when
-    /// there is no ray — because a ray drawn from a pose the host knew before
-    /// the frame began leaves the wearer's own hand.
+    /// host pushed with `Engine::setVrRay` — because a ray drawn from a pose
+    /// the host knew before the frame began leaves the wearer's own hand.
+    ///
+    /// WHAT "PLACES" MEANS, EXACTLY (VR-INPUT-1E-FIX finding 2): the marker
+    /// stands at `VrRayState::hitPoint` — the place in the world the pick
+    /// found, which has not moved — and the LINE runs from THIS frame's aim
+    /// pose to that point, so both of its ends are true. With nothing hit the
+    /// line runs this frame's aim direction for `length` (0 = ten metres), and
+    /// with no ray at all both nodes are hidden.
+    ///
+    /// AND THE RAY IS NOT A HAND MARKER. It is the pointing tool, so it is
+    /// INDEPENDENT of the host's own controller-proxy switch
+    /// (`SceneMirror::setVrProxies` / the `vr.proxies` verb): a wearer who
+    /// turns the wands off still has to see what they are about to select.
+    /// Its nodes are built and taken down with the SESSION.
     ///
     /// 0 for either id unregisters it. Pass the LINE first.
     virtual void        setVrRayNodes(NodeId line, NodeId marker) = 0;
@@ -1529,6 +1540,13 @@ public:
     virtual bool  isHeadless() const = 0;
     /// Destroys the Scene and every node, mesh and material it owns. Views bound to
     /// it are detached first (they stay alive, showing nothing).
+    ///
+    /// CALLED FROM INSIDE A FRAME IT IS DEFERRED to that frame's tail
+    /// (VR-INPUT-1E-FIX finding 5) — a VR session bound to the scene cannot be
+    /// ended between its own xrBeginFrame and xrEndFrame, and the render system
+    /// is holding the scene's buffers for the frame in flight. Nothing in this
+    /// tree does it; a host that does may treat the Scene as gone the moment it
+    /// has asked, which is why the call is honoured late rather than refused.
     virtual void   destroyScene(Scene *) = 0;
 
     /// THE HOST'S TRANSFORM-WRITE EPOCH — how the renderer learns that nothing
@@ -1640,6 +1658,17 @@ public:
     virtual VrState vrState() const = 0;
     /// Everything a caller can ask about the live session without an Ogre or
     /// OpenXR type crossing the boundary.
+    ///
+    /// AN INJECTED HAND READS BACK IMMEDIATELY, WITH OR WITHOUT A SESSION
+    /// (VR-INPUT-1E-FIX, the lead's item): `input[]` and `hands[]` carry the
+    /// injection store's sample as soon as `vrInjectInput` has taken it, not
+    /// from the next rendered frame. With a session the frame is still where
+    /// the runtime's own answer is REPLACED (readInput, so the proxies and the
+    /// ray follow) — but a host that injects a gesture and reads the state back
+    /// between frames must see what it just wrote, or every headless gesture
+    /// test has to render a frame it does not otherwise need. A hand whose
+    /// runtime has bound a real profile is NOT overlaid: the refusal rule is
+    /// the same here as everywhere (see vrInjectInput).
     virtual VrStatus vrStatus() const = 0;
     /// The View the session draws into — the both-eyes target. Null when no
     /// session runs. Hosts use it for nothing but introspection; the session
@@ -1718,8 +1747,41 @@ public:
     /// headset can therefore never be fooled by a stale injection left behind
     /// by a script — the wearer's own hardware always wins.
     ///
+    /// AND THE RULE IS A GUARANTEE, NOT A CHECK ON ONE CODE PATH
+    /// (VR-INPUT-1E-FIX finding 1). Three things hold it up:
+    ///
+    ///   * a WITHDRAWAL (a default state) is NEVER refused — taking a fake
+    ///     hand away cannot fool anybody, and refusing it meant the safe
+    ///     direction was the one that needed permission;
+    ///   * a sample written while nothing was bound (with no session at all,
+    ///     or in a session's first frames before the runtime answers) is
+    ///     IGNORED AND FORGOTTEN the moment a real profile arrives for that
+    ///     hand — with one line in the log — rather than standing in for the
+    ///     wearer's hand for the life of the session;
+    ///   * the store is EMPTIED at both ends of a session: none inherits a
+    ///     script's leftovers and none leaves its own behind.
+    ///
+    /// With no session and no profile an injection is always accepted and
+    /// reported through `vrStatus().input[]` with `fromInjection` true. That is
+    /// the headless backbone and it is load-bearing for the Studio side.
+    ///
     /// `hand` is VrHandLeft or VrHandRight; anything else is false.
     virtual bool vrInjectInput(int hand, const VrHandState &state) = 0;
+    /// TEST-FACING: THE INPUT FOCUS AN INJECTED SESSION HAS
+    /// (`VrStatus::inputFocused`; VR-INPUT-1E-FIX).
+    ///
+    /// Focus is the SESSION's, not a hand's — a runtime takes it away for the
+    /// whole application — so this is one bit for the process and not a field
+    /// on a sample. It is what `inputFocused` reports while ANY hand is
+    /// injected, with a session or without one, and it is how the focus-loss
+    /// rule (a gesture in flight is cancelled, never committed) is driven with
+    /// no dashboard to raise.
+    ///
+    /// True by default, and reset to true whenever the store is emptied (both
+    /// ends of a session): a test that says nothing about focus means "the
+    /// wearer was there", and a `false` cannot outlive the session it was
+    /// written for.
+    virtual void vrInjectFocus(bool focused) = 0;
     /// THE ONE OUTPUT: buzz a controller (product, not a test hook).
     ///
     /// `amplitude01` is clamped to 0..1 and `seconds` to a sane pulse; the

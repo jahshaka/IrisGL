@@ -696,13 +696,20 @@ private:
     void createActions();
     /// One frame's hands: sync the actions, locate the two spaces (or the two
     /// palm joints), compose through the rig. Called from the located branch of
-    /// beginFrame with that frame's predicted display time.
-    void locateHands(XrTime displayTime);
+    /// beginFrame with that frame's predicted display time. RETURNS whether
+    /// this frame's actions synced — i.e. whether the controllers answer at
+    /// all — which is what `readInput` needs and the only thing it cannot see
+    /// for itself. (It used to CALL readInput at its tail, which meant its own
+    /// two early returns took the whole input read down with them:
+    /// VR-INPUT-1E-FIX finding 3.)
+    bool locateHands(XrTime displayTime);
     /// ONE FRAME'S CONTROLS (phase 4b stage 1): the aim pose located beside the
     /// grip, then the trigger, the squeeze, the menu button and the stick read
     /// off the same synced action set — and, for a hand a test has injected, the
-    /// injected sample instead of all of it. Called from locateHands, which is
-    /// the only place that has already synced the actions for this frame.
+    /// injected sample instead of all of it. Called from beginFrame, right
+    /// after locateHands and off the same sync, UNCONDITIONALLY — `controllers`
+    /// false says the runtime's own controls answer nothing this frame, which
+    /// is not the same as "there is nothing to report" (finding 3).
     void readInput(XrTime displayTime, bool controllers);
     /// WHAT THE RUNTIME HAS ACTUALLY BOUND, per hand
     /// (`xrGetCurrentInteractionProfile`), logged once per change. It is the
@@ -1107,6 +1114,20 @@ bool VrSession::create(std::string &reason) {
 // attach leaves `mHandActions` false and the session runs exactly as phase 3's
 // did: a headset with no controllers is a supported headset.
 void VrSession::createActions() {
+    // A SESSION WITH NO ACTION SET, ON PURPOSE (VR-INPUT-1E-FIX finding 3's
+    // test hook, beside JAHSHAKA_VR_TEST_NO_RENDER_FRAMES and
+    // JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES). A real runtime can refuse the set
+    // outright — and then this session has no controllers, no aim poses and no
+    // sync, which used to take the whole per-frame input read down with it. No
+    // simulated runtime will refuse on request, so the refusal is reproduced
+    // here: read ONCE, at session creation, and named in the log.
+    if (const char *no = std::getenv("JAHSHAKA_VR_TEST_NO_ACTIONS")) {
+        if (*no && std::strcmp(no, "0") != 0) {
+            vrLog("hand input: JAHSHAKA_VR_TEST_NO_ACTIONS is set - this session has NO action "
+                  "set at all (an injected hand is then its only input)");
+            return;
+        }
+    }
     XrActionSetCreateInfo asci{ XR_TYPE_ACTION_SET_CREATE_INFO };
     std::strncpy(asci.actionSetName, "jahshaka", XR_MAX_ACTION_SET_NAME_SIZE - 1);
     std::strncpy(asci.localizedActionSetName, "Jahshaka",
@@ -1345,15 +1366,15 @@ void VrSession::createHandTrackers() {
           int(mHandActions));
 }
 
-void VrSession::locateHands(XrTime displayTime) {
+bool VrSession::locateHands(XrTime displayTime) {
     mHandValid[0] = mHandValid[1] = false;
-    if (mSession == XR_NULL_HANDLE) return;
+    if (mSession == XR_NULL_HANDLE) return false;
     const bool haveTrackers =
         mHandTracker[0] != XR_NULL_HANDLE || mHandTracker[1] != XR_NULL_HANDLE;
     // TWO INDEPENDENT SOURCES (finding 8): a session with no action set may
     // still have hand tracking, and that wearer's hands are the only hands
     // there are. Only a session with neither has nothing to do here.
-    if (!mHandActions && !haveTrackers) return;
+    if (!mHandActions && !haveTrackers) return false;
 
     // THE SYNC, AND WHAT IT ANSWERS WHEN NOBODY IS LOOKING. `xrSyncActions`
     // returns XR_SESSION_NOT_FOCUSED — a SUCCESS code, not a failure — while
@@ -1377,7 +1398,7 @@ void VrSession::locateHands(XrTime displayTime) {
             mSaidHands = true;
         }
     }
-    if (!controllers && !haveTrackers) return;
+    if (!controllers && !haveTrackers) return controllers;
 
     for (int h = 0; h < 2; ++h) {
         Ogre::Vector3 pos = Ogre::Vector3::ZERO;
@@ -1432,10 +1453,13 @@ void VrSession::locateHands(XrTime displayTime) {
         mHandValid[h] = true;
     }
 
-    // ...AND WHAT THE HANDS ARE DOING (phase 4b stage 1). Same frame, same
-    // sync: the actions were synced above, so every control below is this
-    // frame's answer and not the previous one's.
-    readInput(displayTime, controllers);
+    // ...AND WHAT THE HANDS ARE DOING is read by the CALLER, in the same frame
+    // and off the same sync (beginFrame). It used to be called from here, which
+    // tied the whole input read to this function's own early returns — a
+    // session whose runtime refused the action set then reported `focused` from
+    // a struct default for ever and could not be driven by an injection at all
+    // (VR-INPUT-1E-FIX finding 3).
+    return controllers;
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,14 +1534,63 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
         return latch;
     };
 
-    // WHOSE FRAME IS IT? Focus is a property of the SESSION, not of a hand,
-    // but it is reported per sample because that is where a host reads it: a
-    // gesture is cancelled by the sample that lost focus, and by then the
-    // session's state may have moved on again.
-    const bool focused = mState == VrState::Focused;
+    // (WHOSE FRAME IS IT is no longer asked here: focus is a property of the
+    // SESSION and is reported ONCE, on `VrStatus::inputFocused`, from the
+    // session's own state — VR-INPUT-1E-FIX. It used to be copied onto every
+    // hand, which made two copies of one truth and let a consumer fold them
+    // back together wrongly.)
     for (int h = 0; h < 2; ++h) {
         VrHandState &in = mInput[h];
-        in.focused = focused;
+
+        // ---- IS THIS HAND A TEST'S? (Engine::vrInjectInput, §2.4 I1) -----
+        //
+        // ASKED FIRST, and that is the fix for two separate things
+        // (VR-INPUT-1E-FIX findings 1 and 8). The injected sample REPLACES the
+        // whole hand — poses, controls, focus — so everything the runtime would
+        // have been asked for below is work whose answer is thrown away: an aim
+        // locate and five `xrGetActionState*` calls per hand per frame, each an
+        // IPC on a runtime like Monado's.
+        //
+        // AND THE WEARER'S HARDWARE WINS EVEN HERE. The write-side refusal
+        // (OgreEngine::vrInjectInput) cannot be the whole rule: a sample
+        // written while nothing was bound — before the session, or in its first
+        // frames, which is exactly when a runtime has not answered
+        // xrGetCurrentInteractionProfile yet — was perfectly legal at the time
+        // and would then have stood in for a real hand for the life of the
+        // session. So a bound profile IGNORES it AND CLEARS IT, once, with a
+        // line in the log naming what happened.
+        VrHandState injected;
+        if (mEngine && mEngine->vrInjectedInput(h, injected)) {
+            if (hasBoundProfile(h) && !vrTestInjectAllowed()) {
+                vrLog("hand input: the %s hand has a real interaction profile ('%s') - the "
+                      "injected sample is IGNORED and forgotten (the wearer's hardware wins; "
+                      "JAHSHAKA_VR_TEST_INJECT=1 overrides)",
+                      h == 0 ? "left" : "right", mProfilePath[h].c_str());
+                mEngine->vrClearInjectedInput(h);
+            } else {
+                // WORLD SPACE ALREADY: the injected poses are in the frame
+                // `vrStatus()` reports, so the rig is NOT applied to them a
+                // second time. `hands[]` and the controller proxy follow, so a
+                // script can put a wand where it likes and see what the wearer
+                // would.
+                in = injected;
+                in.fromInjection = true;
+                mHandValid[h] = in.grip.valid;
+                if (in.grip.valid) {
+                    mHandPos[h] = Ogre::Vector3(in.grip.position.x, in.grip.position.y,
+                                                in.grip.position.z);
+                    mHandRot[h] = Ogre::Quaternion(in.grip.rotation.w, in.grip.rotation.x,
+                                                   in.grip.rotation.y, in.grip.rotation.z);
+                }
+                // THE PRESS LATCHES ARE NOT ADVANCED while a hand is injected:
+                // the sample carries its own `*Pressed` (the struct is the whole
+                // truth, and the JS verb derives an unsaid press at 0.5), and a
+                // hysteresis fed from frames nobody read would answer for the
+                // runtime about a controller it never saw.
+                continue;
+            }
+        }
+
         if (controllers) {
             if (mAimSpace[h] != XR_NULL_HANDLE) {
                 XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
@@ -1546,24 +1619,6 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
         // located but whose grip did not is still a hand in the room, and a
         // hand-tracked palm with no aim is too.
         in.valid = in.grip.valid || in.aim.valid;
-
-        // ...UNLESS A TEST WROTE IT (Engine::vrInjectInput, VR_INPUT_SPEC
-        // §2.4 I1). The injected sample REPLACES the whole hand, poses
-        // included, and already stands in world space — the rig is not applied
-        // to it a second time. `hands[]` and the controller proxy follow, so a
-        // script can put a wand where it likes and see what the wearer would.
-        VrHandState injected;
-        if (mEngine && mEngine->vrInjectedInput(h, injected)) {
-            in = injected;
-            in.fromInjection = true;
-            mHandValid[h] = in.grip.valid;
-            if (in.grip.valid) {
-                mHandPos[h] = Ogre::Vector3(in.grip.position.x, in.grip.position.y,
-                                            in.grip.position.z);
-                mHandRot[h] = Ogre::Quaternion(in.grip.rotation.w, in.grip.rotation.x,
-                                               in.grip.rotation.y, in.grip.rotation.z);
-            }
-        }
     }
 }
 
@@ -1685,12 +1740,23 @@ void VrSession::placeProxies() {
 // mesh is a unit segment down -Z, so it is rotated onto the direction and
 // scaled to the distance, and the marker stands at the far end.
 //
-// AND IT RE-ANCHORS. A host's ray starts at the pose it last HEARD, which is a
-// frame or two old — the very lag that moved the proxies in here. When the
-// state names a hand and that hand's aim located THIS frame, the line is
-// re-anchored to this frame's aim pose and the host's own LENGTH is kept: the
-// ray then leaves the wearer's hand exactly where the model is, and only its
-// far end is as old as the pick behind it.
+// AND IT RE-ANCHORS — AT ONE END ONLY (VR-INPUT-1E-FIX finding 2). A host's
+// ray starts at the pose it last HEARD, which is a frame or two old: the very
+// lag that moved the proxies in here. So when the state names a hand whose aim
+// located THIS frame, the line's ORIGIN is moved to this frame's aim pose and
+// the ray then leaves the wearer's hand exactly where the model is.
+//
+// THE HIT IS A PLACE IN THE WORLD, NOT A DISTANCE ALONG AN AIM. The first cut
+// kept the host's LENGTH and re-anchored the DIRECTION too, which put the
+// marker at `freshOrigin + freshDir * L` — a point on this frame's aim ray at
+// the old ray's distance, which is the hit point only if the wearer has not
+// moved: a two-degree swing lifts it centimetres off the surface it is marking,
+// and on an oblique wall it hangs in the air (the lane's own test codified a
+// marker two metres from the hit). The surface that was picked has not moved,
+// so the marker stands at `hitPoint` and the LINE runs from the fresh origin TO
+// it — the direction and the length both follow from those two points. Only
+// with nothing hit is the fresh direction the whole answer, because then there
+// is nothing in the world to aim at.
 void VrSession::placeRay() {
     if (!mScene || !mEngine) return;
     NodeId ids[2] = { 0, 0 };
@@ -1700,16 +1766,26 @@ void VrSession::placeRay() {
     const VrRayState &ray = mEngine->vrRay();
     Ogre::Vector3 origin(ray.origin.x, ray.origin.y, ray.origin.z);
     Ogre::Vector3 dir(ray.dir.x, ray.dir.y, ray.dir.z);
-    // The host's own length: to the hit if there is one, else its asked-for
-    // reach (ten metres by default — far enough to read as "nothing there").
     const Ogre::Vector3 hit(ray.hitPoint.x, ray.hitPoint.y, ray.hitPoint.z);
-    float length = ray.hit ? (hit - origin).length()
-                           : (ray.length > 0.0f ? ray.length : 10.0f);
+    // THE ORIGIN IS THIS FRAME'S, when the state names a hand that located.
     if (ray.hand >= 0 && ray.hand < 2 && mInput[ray.hand].aim.valid) {
         const VrPose &aim = mInput[ray.hand].aim;
         origin = Ogre::Vector3(aim.position.x, aim.position.y, aim.position.z);
-        dir = Ogre::Quaternion(aim.rotation.w, aim.rotation.x, aim.rotation.y, aim.rotation.z) *
-              Ogre::Vector3::NEGATIVE_UNIT_Z;
+        // ...AND THE DIRECTION WITH IT, but only while nothing was hit: with a
+        // hit, the line's far end is the hit point and the direction is
+        // whatever reaches it (below).
+        if (!ray.hit)
+            dir = Ogre::Quaternion(aim.rotation.w, aim.rotation.x, aim.rotation.y,
+                                   aim.rotation.z) * Ogre::Vector3::NEGATIVE_UNIT_Z;
+    }
+    // FROM THE HAND TO THE HIT. Both ends are then true: the line leaves the
+    // wearer's own hand this frame and arrives at the place the pick found.
+    // With nothing hit it runs the host's asked-for reach (ten metres by
+    // default — far enough to read as "nothing there").
+    float length = ray.length > 0.0f ? ray.length : 10.0f;
+    if (ray.hit) {
+        dir = hit - origin;
+        length = dir.length();
     }
     const float len2 = dir.squaredLength();
     const bool show = ray.visible && len2 > 1e-12f && length > 1e-4f &&
@@ -1732,8 +1808,10 @@ void VrSession::placeRay() {
     if (ids[1]) {
         const bool marker = show && ray.hit;
         if (marker) {
-            const Ogre::Vector3 point = origin + dir * length;
-            mScene->setNodeTransform(ids[1], Vec3(point.x, point.y, point.z),
+            // AT THE HIT POINT ITSELF (finding 2) — not at a distance along
+            // this frame's aim, which is the same point only while the wearer
+            // holds perfectly still.
+            mScene->setNodeTransform(ids[1], ray.hitPoint,
                                      Quat(0.0f, 0.0f, 0.0f, 1.0f), Vec3(1.0f, 1.0f, 1.0f));
         }
         mScene->setNodeVisible(ids[1], marker);
@@ -1921,7 +1999,15 @@ bool VrSession::beginFrame() {
     // Cleared at the top so every early return below — lost, not running, no
     // picture, no pose — leaves them invalid rather than leaving yesterday's
     // hands hanging in the air.
+    //
+    // THE CONTROLS GO WITH THE POSES (VR-INPUT-1E-FIX finding 3). `mInput` was
+    // only ever cleared inside readInput, which a skipped frame does not
+    // reach — so a session that stopped running, or one whose runtime refused
+    // the action set, went on reporting `focused` true and the last controls it
+    // saw. A sample is this frame's answer or it is nothing, exactly like a
+    // pose.
     mHandValid[0] = mHandValid[1] = false;
+    mInput[0] = mInput[1] = VrHandState();
     if (mState == VrState::Lost) { teardownMirror(); setSessionViewEnabled(false); return true; }
     pollEvents();
     if (!mRunning) {
@@ -2147,7 +2233,14 @@ bool VrSession::beginFrame() {
     // 4). One time for every pose in a frame is what keeps a hand attached to
     // the body it belongs to; locating them a millisecond apart is how a
     // controller ends up lagging its own arm.
-    locateHands(mFrameState.predictedDisplayTime);
+    const bool synced = locateHands(mFrameState.predictedDisplayTime);
+    // ...AND WHAT THE HANDS ARE DOING, UNCONDITIONALLY (finding 3). Same frame
+    // and the same sync the locate used: `synced` false means the controllers
+    // answer nothing this frame (no action set, or a sync the runtime refused),
+    // which is not the same as "there is nothing to report" — an INJECTED hand
+    // is reported through this call, and `focused` is read from the session's
+    // own state rather than left at a struct default.
+    readInput(mFrameState.predictedDisplayTime, synced);
     // ...AND THE MARKERS THE HOST HUNG FOR THEM, MOVED INSIDE THIS FRAME
     // (VR-4-FIX finding 4). The poses above did not exist until xrWaitFrame
     // returned, which is inside this call — so a host pushing the proxies from
@@ -2576,12 +2669,18 @@ VrStatus VrSession::status() const {
     // same pose as `hands[h]` by construction (readInput writes it from the
     // located pose), so a host may read either and never both.
     for (int h = 0; h < 2; ++h) s.input[h] = mInput[h];
+    // FOCUS, ONCE, FOR THE SESSION (VR-INPUT-1E-FIX): FOCUSED is the only state
+    // in which a runtime reports input at all — `xrSyncActions` answers
+    // XR_SESSION_NOT_FOCUSED otherwise and every control reads its zero — so a
+    // host cancels a gesture in flight on this going false rather than
+    // believing a release nobody made.
+    s.inputFocused = mState == VrState::Focused;
     // ONE PROFILE STRING FOR THE SESSION: the right hand's when it has one
     // (the manipulating hand by default), else the left's. No runtime measured
     // binds two different profiles at once, and the log names both when they
     // differ (readProfiles).
-    s.profile = !mProfilePath[VrHandRight].empty() ? mProfilePath[VrHandRight]
-                                                   : mProfilePath[VrHandLeft];
+    s.profile.assign((!mProfilePath[VrHandRight].empty() ? mProfilePath[VrHandRight]
+                                                         : mProfilePath[VrHandLeft]).c_str());
     s.bindingProfiles = mBindingProfiles;
     s.bindingProfilesAccepted = mBindingProfilesAccepted;
     s.handActions = mHandActions;
@@ -2963,13 +3062,18 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
         // actually converged to, reads 0.000. That is the difference between a
         // control that can prove something and one that cannot.
         //
-        // WHAT IT COSTS, stated because it is real: the control's ~90 frames
-        // move the session's own auto-exposure a little (its picture drifts
-        // ~1.2/255 over the sky rows across one call), so a SECOND control in
-        // the same session is compared across that drift. The suite says so
-        // rather than hiding it, and the order experiment behind
-        // JAH_VR_RIGHT_FIRST is what proved the residual is the drift and not
-        // the second eye's ray route.
+        // WHAT IT COSTS, stated because it is real: this call renders ~90
+        // frames of its own, and they are WALL TIME — the session's own
+        // auto-exposure moves a little through them and, on a runtime whose
+        // head moves by the clock (every simulated one), so does the wearer.
+        // The camera below is pinned to the eye poses of the LAST COMPLETED
+        // FRAME, so a caller comparing this control with a stereo picture must
+        // read that picture immediately BEFORE calling — `readPixels` renders
+        // nothing, so the pair is then exactly one frame's pose and one frame's
+        // exposure, whatever the box is doing. A second control in the same
+        // session compared against an OLDER stereo read measures the head's
+        // walk instead of the eye's projection (VR-INPUT-1E-FIX, the lead's
+        // item: it reddened twice under load and never solo).
         PostFxDesc fx = mView->postFx();
         const float exposure = mView->measuredExposureScale();
         if (fx.hdr && exposure > 0.0f) {

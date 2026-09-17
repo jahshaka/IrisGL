@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <string>
@@ -2810,24 +2811,13 @@ struct VrHandState {
     /// wearer's — a smoke in a headset that ever sees this true is looking at a
     /// stale injection, which is exactly what the refusal rule prevents.
     bool   fromInjection = false;
-    /// DID THE APPLICATION HAVE INPUT FOCUS when this sample was taken?
-    ///
-    /// The runtime takes focus away whenever its own dashboard comes up, the
-    /// headset comes off the head or another application is talking to the
-    /// wearer, and it does not tell the hand: `xrSyncActions` returns
-    /// XR_SESSION_NOT_FOCUSED (a SUCCESS code), every action goes inactive and
-    /// every control reads its zero. A host that read that as "the trigger was
-    /// released" would COMMIT a gesture the wearer never finished — so the
-    /// distinction is reported, and a gesture in flight is CANCELLED rather
-    /// than committed when this goes false (VR_INPUT_SPEC §5.5).
-    ///
-    /// True when the session is FOCUSED, and true by default on an injected
-    /// sample (a test that says nothing about focus means "the wearer was
-    /// there"); a test drives the cancel by injecting it false. LAST in the
-    /// struct on purpose: it was added after the contract the two phase-4b
-    /// lanes built to, so nothing that initialises the struct positionally
-    /// moves.
-    bool   focused = true;
+    // (THERE IS NO PER-HAND `focused` HERE — VR-INPUT-1E-FIX, the second read
+    // of the Studio half. Focus is a property of the SESSION: the runtime takes
+    // it away for the whole application, never for one hand, so the same bit
+    // was written to both hands and every consumer had to fold two copies of
+    // one truth back together — and a host that OR-ed them could miss a cancel
+    // (an unfocus on one hand while a stale sample on the other still said
+    // focused). It lives on `VrStatus::inputFocused` now, once.)
 };
 
 /// The engine's own `VrHandState` exists — what the Studio side's guarded
@@ -2891,6 +2881,49 @@ struct VrConfig {
     /// Unreal's. Off by default here, so a host that says nothing gets the
     /// conservative answer.
     bool helpers = false;
+};
+
+/// AN INTERACTION PROFILE'S PATH, WITHOUT A HEAP (VR-INPUT-1E-FIX finding 8).
+///
+/// `VrStatus` is COPIED several times per frame — every host reads it by value
+/// (`const VrStatus st = engine->vrStatus()`), the mirror keeps its own copy,
+/// and at ninety frames a second that was three or four small allocations a
+/// frame for one string nobody edits. A fixed array makes the whole status
+/// trivially copyable, which is what a per-frame value type should be.
+///
+/// SIXTY-FOUR BYTES IS THE WHOLE OPENXR NAMESPACE with room to spare: the
+/// longest profile path any runtime can bind here is
+/// `/interaction_profiles/microsoft/motion_controller` (49) and the registry's
+/// longest is 57. A longer one is TRUNCATED rather than dropped — the string is
+/// diagnostic and a prefix still names the vendor — and always terminated.
+///
+/// It converts to `std::string` implicitly so the one place that hands the path
+/// out of the engine (the `vr.state()` verb) is unchanged: the allocation
+/// happens THERE, once per call, instead of on every frame's copy.
+struct VrProfileName {
+    char text[64] = { 0 };
+    bool empty() const { return text[0] == '\0'; }
+    const char *c_str() const { return text; }
+    /// Is `needle` somewhere in the path? (Which model to draw is decided this
+    /// way: a Touch controller is any path with `touch_controller` in it.)
+    bool contains(const char *needle) const {
+        return needle && *needle && std::strstr(text, needle) != nullptr;
+    }
+    /// Does the path START with `prefix`? (`/interaction_profiles/` — "the
+    /// runtime bound something real".)
+    bool startsWith(const char *prefix) const {
+        if (!prefix) return false;
+        const size_t n = std::strlen(prefix);
+        return std::strncmp(text, prefix, n) == 0;
+    }
+    void assign(const char *s) {
+        if (!s) { text[0] = '\0'; return; }
+        std::strncpy(text, s, sizeof(text) - 1);
+        text[sizeof(text) - 1] = '\0';
+    }
+    void clear() { text[0] = '\0'; }
+    VrProfileName &operator=(const char *s) { assign(s); return *this; }
+    operator std::string() const { return std::string(text); }
 };
 
 /// What a live session is doing. Every number is a COUNT or a measured value,
@@ -2966,6 +2999,24 @@ struct VrStatus {
     /// pose, reported twice because `hands` is what phase 4's hosts read and
     /// the pair is what a gesture needs.
     VrHandState        input[VrHandCount];
+    /// DOES THE APPLICATION HAVE INPUT FOCUS? (VR_INPUT_SPEC §5.5; the shape is
+    /// VR-INPUT-1E-FIX's — it used to be a bit on every hand.)
+    ///
+    /// The runtime takes focus away whenever its own dashboard comes up, the
+    /// headset comes off the head or another application is talking to the
+    /// wearer, and it takes it away for the WHOLE APPLICATION: `xrSyncActions`
+    /// answers XR_SESSION_NOT_FOCUSED (a SUCCESS code), every action goes
+    /// inactive and every control reads its zero. A host that read that as "the
+    /// trigger was released" would COMMIT a gesture the wearer never finished,
+    /// so the distinction is reported and a gesture in flight is CANCELLED
+    /// rather than committed when this goes false.
+    ///
+    /// True exactly while the session is FOCUSED. With NO session it is false
+    /// (nobody is holding anything) — unless a hand is INJECTED, and then it is
+    /// what `Engine::vrInjectFocus` was last given, true by default: a test
+    /// that says nothing about focus means "the wearer was there", and one that
+    /// injects it false is driving the cancel with no dashboard to raise.
+    bool               inputFocused = false;
     /// THE INTERACTION PROFILE THE RUNTIME HAS BOUND, as its own path
     /// (`/interaction_profiles/oculus/touch_controller`), or empty when it has
     /// bound none — which is what a wearer with no controllers, and every
@@ -2975,7 +3026,10 @@ struct VrStatus {
     /// what a host needs to know to draw the right model: the two hands are
     /// reported as one string because no runtime measured ever bound two
     /// different profiles at once, and the log names both when they differ.
-    std::string        profile;
+    ///
+    /// A FIXED ARRAY, not a `std::string` (VrProfileName's note): this struct
+    /// is copied several times per frame and a status copy allocates nothing.
+    VrProfileName      profile;
     /// HOW MANY SUGGESTED-BINDING BLOCKS WERE OFFERED, and how many the runtime
     /// ACCEPTED (`xrSuggestInteractionProfileBindings`). A runtime refuses a
     /// profile it does not know (a path it cannot resolve, an extension it does

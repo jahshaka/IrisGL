@@ -5344,6 +5344,17 @@ bool    vrSessionEyeScreenshot(VrSession *, unsigned eye, Image &out, std::strin
 /// HAS THE RUNTIME BOUND A REAL PROFILE for this hand? (The injection refusal
 /// rule, VR_INPUT_SPEC §2.4 I1: the wearer's own hardware always wins.)
 bool    vrSessionHasBoundProfile(const VrSession *, int hand);
+/// THE ONE READING OF `JAHSHAKA_VR_TEST_INJECT` (VR_INPUT_SPEC §2.4 I1), for
+/// the two places that enforce the refusal rule: the WRITE (Engine::
+/// vrInjectInput refuses one) and the per-frame READ (the session ignores and
+/// clears a sample a bound profile has overtaken). Read LIVE rather than
+/// latched at boot, which is what lets one process prove both halves of the
+/// rule — and it is deliberately not a member of anything: an escape hatch
+/// with two spellings is an escape hatch with a hole in it.
+inline bool vrTestInjectAllowed() {
+    const char *allow = std::getenv("JAHSHAKA_VR_TEST_INJECT");
+    return allow && *allow && std::strcmp(allow, "0") != 0;
+}
 /// ONE BUZZ (Engine::vrHaptic). False only when the call itself failed.
 bool    vrSessionHaptic(VrSession *, int hand, float amplitude01, float seconds,
                         std::string &error);
@@ -5357,6 +5368,11 @@ public:
     bool  isHeadless() const override { return mHeadless; }
 
     void destroyScene(Scene *scene) override;
+    /// Destroys whatever a frame asked for while it was running
+    /// (mPendingSceneDestroy). Called ONLY from renderOneFrame's frame guard,
+    /// after the in-frame flag has been cleared, and never throws — a
+    /// destructor runs it.
+    void drainPendingSceneDestroys() noexcept;
 
     View *createView(const std::string &name,
                      NativeWindowHandle handle, unsigned width, unsigned height,
@@ -5385,6 +5401,7 @@ public:
     void setVrOrigin(const Vec3 &position, float yawDegrees) override;
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     bool vrInjectInput(int hand, const VrHandState &state) override;
+    void vrInjectFocus(bool focused) override { mVrInjectFocus = focused; }
     bool vrHaptic(int hand, float amplitude01, float seconds) override;
     void setVrRay(const VrRayState &ray) override { mVrRay = ray; }
     const VrRayState &vrRay() const override { return mVrRay; }
@@ -5397,6 +5414,31 @@ public:
         out = mVrInject[hand];
         return true;
     }
+    /// FORGETS AN INJECTED SAMPLE (VR-INPUT-1E-FIX finding 1). Three callers,
+    /// and between them they are the whole guarantee the refusal rule makes:
+    /// `beginVrSession` and `endVrSession` clear BOTH hands (a session never
+    /// inherits a script's leftovers and never leaves its own behind), and the
+    /// session's per-frame read clears ONE hand the moment the runtime binds a
+    /// real interaction profile for it — because a write that was legal before
+    /// the profile arrived must not go on standing in for the wearer's hand.
+    void vrClearInjectedInput(int hand) {
+        if (hand < 0 || hand >= int(VrHandCount)) return;
+        mVrInjected[hand] = false;
+        mVrInject[hand] = VrHandState();
+    }
+    void vrClearInjectedInput() {
+        for (unsigned h = 0; h < VrHandCount; ++h) vrClearInjectedInput(int(h));
+        // ...AND THE INJECTED FOCUS WITH THEM: a `focused:false` written for
+        // one session's cancel test must not be what the next one starts from.
+        mVrInjectFocus = true;
+    }
+    /// IS EITHER HAND A TEST'S? (What makes `VrStatus::inputFocused` read the
+    /// injected bit rather than the session's own state.)
+    bool vrAnyInjectedInput() const {
+        for (unsigned h = 0; h < VrHandCount; ++h) if (mVrInjected[h]) return true;
+        return false;
+    }
+    bool vrInjectedFocus() const { return mVrInjectFocus; }
     /// The live session, for the TU that owns it and for the frame. Null when
     /// none runs.
     VrSession *vrSession() const { return mVrSession; }
@@ -5471,13 +5513,24 @@ public:
     /// that starts later picks them up on its first frame.
     VrHandState mVrInject[VrHandCount];
     bool        mVrInjected[VrHandCount] = { false, false };
+    /// THE INJECTED SESSION FOCUS (Engine::vrInjectFocus) — one bit for the
+    /// process, because focus is the session's and not a hand's. True by
+    /// default and reset with the store.
+    bool        mVrInjectFocus = true;
     VrRayState  mVrRay;
     /// ARE WE INSIDE renderOneFrame? (VR-4-FIX's second read, finding 3.)
     /// Nothing in this tree destroys a scene from inside a frame — and if
-    /// anything ever does, the VR belt in `destroyScene` would end a session
-    /// between its own xrBeginFrame and xrEndFrame, which is unsound in a way
-    /// no log would explain. So the flag exists and the belt is LOUD.
+    /// anything ever does, tearing it down there would end a VR session between
+    /// its own xrBeginFrame and xrEndFrame and free a scene the render system
+    /// is holding. So the flag exists and `destroyScene` DEFERS to the list
+    /// below instead (VR-INPUT-1E-FIX finding 5: the old shape refused, which
+    /// left the host holding a pointer to a scene it believed gone).
     bool        mInRenderFrame = false;
+    /// THE SCENES A FRAME ASKED TO DESTROY, drained at that frame's tail — in
+    /// the order they were asked for, and once: a scene named twice is
+    /// destroyed on its first turn and reports "unknown Scene" on the second,
+    /// which is what a double destroy is.
+    std::vector<Scene *> mPendingSceneDestroy;
     const std::string &lastError() const override;
     std::string takeLastError() override;
 

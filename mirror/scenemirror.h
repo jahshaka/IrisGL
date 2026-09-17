@@ -551,6 +551,12 @@ public:
     /// what the engine reports and what a host already holds, so there is no
     /// second pose type to keep in step — and a suite can drive this with a
     /// hand-built status and no runtime at all.
+    /// `visible` IS THE HAND MARKERS' SWITCH AND NOTHING ELSE
+    /// (VR-INPUT-1E-FIX finding 6): the RAY and its hit marker are the
+    /// pointing tool, not a marker of a hand, so they are built and taken down
+    /// with the SESSION and placed by it (Engine::setVrRayNodes) whatever this
+    /// says. A wearer who turns the wands off still has to see what they are
+    /// about to select.
     void setVrProxies(bool visible, const jahshaka::engine::VrStatus &status);
     bool vrProxies() const { return mVrProxiesVisible; }
     /// The two proxy nodes — left hand, right hand — or 0 where none has been
