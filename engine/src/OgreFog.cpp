@@ -337,7 +337,6 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // written always, because this hook cannot know which materials the pass
     // will draw, and sixteen unconditional bytes are cheaper than a size that
     // varies per pass.
-    // Plus the second DDGI float4 (jahIfd2: the raster escape vector).
     // Plus jahSky (lane SKY-FALLBACK-1): the sky cube's gain and mip count,
     // declared only by a pass that claimed the sky's extra texture slot.
     //
@@ -349,7 +348,7 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // collide with our first float4. That correction depended on HlmsPbs
     // filling the field's block BEFORE calling this listener; the size is
     // simply right now.
-    return 24u * sizeof(float);
+    return 20u * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool, bool,
@@ -388,13 +387,6 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = ifd.ambient;
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
-    // jahIfd2 (rayon2 S3): xyz = the raster source's escape vector, w = 1 while
-    // the probes are raster-fed. The shader branches UNIFORMLY on w, so a
-    // voxel-fed field computes the same expression it always did.
-    *passBufferPtr++ = ifd.escapeX;
-    *passBufferPtr++ = ifd.escapeY;
-    *passBufferPtr++ = ifd.escapeZ;
-    *passBufferPtr++ = ifd.rasterSource;
     // jahSky (SKY-FALLBACK-1): x = the Sky Light's gain for the sky cube, y =
     // that cube's own mip count for the roughness->LOD map, zw reserved. Both
     // are written unconditionally like every field above — the shader declares

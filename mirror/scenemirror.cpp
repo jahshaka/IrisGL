@@ -6525,9 +6525,6 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         gi.ddgi = toggle(mSource->giDdgi);
         gi.ddgiIntensity = qBound(0.0f, mSource->giDdgiIntensity, 64.0f);
         gi.ddgiAmbient = qBound(0.0f, mSource->giDdgiAmbient, 8.0f);
-        // The probe source (rayon2 S3): -1 auto, 0 voxel, 1 raster.
-        gi.ddgiSource = mSource->giDdgiSource == 0 ? GiSource::Voxel
-                      : (mSource->giDdgiSource == 1 ? GiSource::Raster : GiSource::Auto);
         // EVERY LIGHT IS A VOXEL LIGHT. There is one GI arm now (PHOTON_SPEC
         // E2 (4) deleted Instant Radiosity, which traced from ONE driving light
         // and therefore hashed only that one): the voxel injection reads every

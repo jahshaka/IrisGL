@@ -1,0 +1,128 @@
+Jahshaka patch 0050 — the irradiance field's const-buffer size (which the pin
+under-reported by one float4) and the zero auto-multiplier in VctLighting.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this (reset the ogre-next submodule first if it already carries an
+earlier revision of any patch: `git -C irisgl/thirdparty/ogre-next checkout -- .
+&& git -C irisgl/thirdparty/ogre-next clean -fd`). It OVERLAPS patch 0044
+(OgreIrradianceField.cpp) and patch 0037 (OgreVctLighting.cpp): it applies on
+top of them, in stack order, and a per-patch reverse-check on a tree that
+carries 0037/0044 reports this one "unapplied" for those files — judge by
+content (CLAUDE.md, the overlap blind spot).
+
+AMENDED 2026-09-17 (lane FIELD-RASTER-CRUD). Two of the four original items
+existed only for the irradiance field's RASTERISED probe source, which was
+deleted that day together with patch 0023 (its media half): the public
+`switchToRasterSource()` plus the four read-only accessors it came with
+(audit F3), and patch 0023's C++ half, the `invFieldSize` push in
+`IrradianceFieldRaster::renderProbes` (audit F4). Both hunk sets are gone from
+this file; nothing in Jahshaka calls `IrradianceFieldRaster` any more, so the
+pin's own copy of that class is left exactly as upstream ships it. What remains
+is what the VOXEL-fed field and VctLighting need:
+
+  1. `IrradianceField::getConstBufferSize()` UNDER-REPORTS BY ONE float4 (F2).
+     It returned `sizeof(float) * (4*3 + 4 + 4)` = 80 bytes, while
+     `fillConstBufferData` writes an `IrradianceFieldRenderParams` of 96 — a
+     float4x3, then numProbesAggregated + 2 pads, then the depth pair, then the
+     IRRADIANCE pair — and the struct the generated shader declares
+     (`Hlms/Pbs/Any/IrradianceField_piece_ps.any`) is those same 24 floats. So
+     HlmsPbs reserved 16 bytes too few for the pass buffer and advanced its
+     write pointer by 20 floats after a 24-float write. Upstream's own samples
+     simply overrun their pass-buffer map by 16 bytes; with an HlmsListener next
+     in line (ours), the listener's first float4 lands on top of
+     irradBorderedRes / irradFullWidth / irradInvFullResolution and every
+     irradiance UV collapses onto texel 0 — DDGI contributes an almost-black
+     constant, with no error anywhere. Engine-side, this was a
+     reserve-four-floats-and-skip-them in `FogHlmsListener` that only worked
+     because HlmsPbs happens to fill the field's block BEFORE calling the
+     listener; it was deleted with this patch.
+
+  2. `IrradianceFieldGenParams::unused0` WAS UPLOADED UNINITIALISED on every
+     voxel-sourced update (the raster branch memsets the struct; the voxel
+     branch writes every member except this one). Zeroed where the rest of the
+     struct is written.
+
+  3. `VctLighting::update`'s AUTO MULTIPLIER TURNS "NO LIGHTS" INTO "NO GI"
+     (F10). The maximum radiance over the scene's visible lights is 0 in a scene
+     with none; the code inverted it unconditionally (+inf), so
+     `mInvBakingMultiplier` came out 0 and the shader's
+     `blendWeight = blendFade * blend * multiplier` was 0 for every voxel. A
+     bound VctLighting also switches the PBS ambient pieces off inside its
+     volume, so an ambient-lit scene whose only lamp is switched off went BLACK
+     the moment VCT was enabled. The zero case is folded into the branch that
+     already exists for "no measurement wanted" (`autoMultiplier == false` →
+     `mBakingMultiplier`), which is the same answer the engine was choosing from
+     outside — by walking EVERY node in the scene before every injection
+     (`OgreScene::hasVctLights`, three call sites) to decide whether to pass
+     `autoMultiplier = false`. That walk is deleted with this patch; the three
+     call sites pass `true`.
+
+VERIFICATION. `git apply --check` against the pristine pin with the stack up to
+0049 applied, and `git apply --reverse --check` after applying; `build-ogre.sh`
+re-run in the lane worktree; `--engine-selftest` byte-identical — all three
+items are no-change-by-construction on the shipped default scene (1: the
+listener skipped the same four floats it now no longer has to reserve; 3: the
+engine already passed the value this branch now computes), which the lanes
+measured rather than assumed. The GI suites (gi.ddgi_*, gi.modes, gi.tiers,
+gi.budget, gi.coalesce) are the behavioural gate.
+
+--- a/Components/Hlms/Pbs/src/IrradianceField/OgreIrradianceField.cpp
++++ b/Components/Hlms/Pbs/src/IrradianceField/OgreIrradianceField.cpp
+@@ -447,6 +447,10 @@
+ 
+         mIfGenParams.invNumRaysPerPixel = 1.0f / float( numRaysPerPixel );
+         mIfGenParams.invNumRaysPerIrradiancePixel = 1.0f / float( numRaysPerIrradiancePixel );
++        // Uploaded with the rest of the struct on every update, so it must hold
++        // something: the voxel branch never wrote it (only the raster branch's
++        // memset did), so the generation job read an uninitialised float here.
++        mIfGenParams.unused0 = 0.0f;
+ 
+         const TextureGpu *vctLightingTex = mVctLighting->getLightVoxelTextures()[0];
+         const float smallestRes = static_cast<float>(
+@@ -824,7 +828,18 @@
+     //-------------------------------------------------------------------------
+     size_t IrradianceField::getConstBufferSize() const
+     {
+-        return sizeof( float ) * ( 4u * 3u + 4u + 4u );
++        // THE LAST float4 USED TO BE MISSING. fillConstBufferData() writes an
++        // IrradianceFieldRenderParams: a float4x3 (12 floats), then numProbesAggregated
++        // plus two paddings (4), then the depth pair (4), then the IRRADIANCE pair (4) —
++        // 24 floats, 96 bytes — and the struct the generated shader declares
++        // (Hlms/Pbs/Any/IrradianceField_piece_ps.any) is the same 24. This function
++        // returned 20, so HlmsPbs reserved 16 bytes too few for the pass buffer and
++        // advanced its write pointer by 20 floats after a 24-float write: the next
++        // occupant of the pass buffer (any HlmsListener, or nothing at all in the
++        // samples, which simply overrun their map) lands on top of the irradiance
++        // atlas parameters and every irradiance UV collapses onto texel 0 — DDGI goes
++        // to an almost-black constant, with no error anywhere.
++        return sizeof( float ) * ( 4u * 3u + 4u + 4u + 4u );
+     }
+     //-------------------------------------------------------------------------
+     void IrradianceField::fillConstBufferData( const Matrix4 &viewMatrix,
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
+@@ -991,9 +991,22 @@
+         mLightsConstBuffer->unmap( UO_KEEP_PERSISTENT );
+ 
+         autoMultiplierValue /= Math::PI;
+-        autoMultiplierValue = 1.0f / autoMultiplierValue;
+-        if( !autoMultiplier )
++        // A SCENE WITH NO VISIBLE LIGHTS HAS NOTHING TO NORMALISE AGAINST, and the
++        // arithmetic below turned that into "the VCT arm contributes nothing": the
++        // maximum radiance collected above is exactly 0, its inverse is +inf, so
++        // mInvBakingMultiplier comes out 0 and the shader's
++        // blendWeight = blendFade * blend * multiplier is 0 for every voxel. That used
++        // to be invisible (no lights, nothing to inject) but it is not any more: a
++        // bound VctLighting switches the PBS ambient pieces off inside its volume, so an
++        // AMBIENT-LIT scene whose only lamp is switched off goes black the moment VCT is
++        // enabled. The fallback for "no measurement available" is the same one
++        // autoMultiplier == false asks for -- mBakingMultiplier -- so the zero case is
++        // folded into that branch. Note the collection loop above gathers only
++        // LAYER_VISIBILITY lights, so a hidden lamp is this case too.
++        if( !autoMultiplier || autoMultiplierValue <= 0.0f )
+             autoMultiplierValue = mBakingMultiplier;
++        else
++            autoMultiplierValue = 1.0f / autoMultiplierValue;
+         mInvBakingMultiplier = 1.0f / autoMultiplierValue;
+ 
+         const Vector3 voxelRes( Real( mLightVoxel[0]->getWidth() ), Real( mLightVoxel[0]->getHeight() ),
