@@ -4275,6 +4275,29 @@ struct Image {
 //     never draws, because drawing would cost frame time and passes and
 //     contaminate what it measures.
 
+/// A FAULT INJECTED INTO ONE FRAME — TEST-FACING, NEVER A SHIPPING PATH
+/// (`Engine::setFrameFault`, lane FRAME-CATCH-1, 2026-09-18).
+///
+/// The subject is the engine's own frame CLOSE: a frame that throws still owes
+/// the OpenXR runtime an `xrEndFrame` (with the eye swapchain images it
+/// acquired), owes the monitor a closed record, and must still reach the
+/// device-lost latch. None of that can be asserted without a frame that
+/// throws, and nothing a test can legally ask the engine to do throws out of a
+/// frame on demand — so the engine can be asked for one.
+///
+///   * `Throw` — the next `frames` frames raise an Ogre exception from inside
+///     the frame, AFTER the render has been recorded (and, in a session, after
+///     the eye copies have acquired their swapchain images) and before
+///     anything closes: the exact position a `VK_ERROR_DEVICE_LOST` from the
+///     frame's commit occupies.
+///   * `ThrowDeviceLost` — the same, and the frame ALSO reports the device as
+///     lost to the engine's own latch. It is the only way `deviceLost()` can
+///     become true without a real loss, and it fakes nothing else: the render
+///     system, the driver and any live VR session are untouched (a real loss
+///     cannot be induced on demand, and inducing one would take the box's GPU
+///     down with it).
+enum class FrameFault { None, Throw, ThrowDeviceLost };
+
 /// What the monitor is doing. `Review` is the one recording level — the spec's
 /// old Recorder/Compact/Full ladder collapsed to it when the HUD was cut.
 enum class MonitorLevel {

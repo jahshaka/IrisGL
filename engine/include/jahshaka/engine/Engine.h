@@ -1573,7 +1573,29 @@ public:
     virtual void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) = 0;
 
     /// Draws every enabled View once. The host owns the loop and calls this.
+    ///
+    /// EVERY EXIT FROM IT CLOSES THE FRAME (lane FRAME-CATCH-1): a frame that
+    /// throws still ends the OpenXR frame it opened (releasing the eye
+    /// swapchain images it acquired), still closes the monitor's record, still
+    /// ends a session the runtime has taken away, still latches a lost device
+    /// and still honours a `destroyScene` asked for from inside it. A host
+    /// therefore never has to guess whether a frame that answered
+    /// `lastError()` left something open.
     virtual void renderOneFrame() = 0;
+
+    /// TEST-FACING: MAKE THE NEXT `frames` FRAMES FAULT (`FrameFault`, lane
+    /// FRAME-CATCH-1, 2026-09-18).
+    ///
+    /// The one thing in the engine no legal call can produce and no suite can
+    /// assert without: a frame that THROWS. The fault is raised inside
+    /// `renderOneFrame`, after the frame has rendered and before anything
+    /// closes, which is where a device loss surfaces; `lastError()` afterwards
+    /// carries the fault's own message, so a suite can prove the fault really
+    /// fired rather than passing vacuously.
+    ///
+    /// `FrameFault::None` (or `frames` 0) disarms. Nothing in Studio calls
+    /// this — it exists for `engine.frame_catch` and `vr.session`.
+    virtual void setFrameFault(FrameFault fault, unsigned frames) = 0;
 
     /// THE GPU IS GONE AND THIS PROCESS CANNOT COME BACK FROM IT (lane XID-2,
     /// 2026-09-17). True once the render system has reported a lost device — on

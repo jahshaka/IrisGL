@@ -465,9 +465,29 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
 //   * VOXELISED geometry (kGiGeometryBit) — the GI scan and both signatures;
 //   * PROBE-ONLY geometry (P7: unlit, visible, below the probe-face queue) —
 //     the probe grid's half of the GI scan;
-//   * a SHADOW CASTER (casts, and below the overlay queue, which writes no
-//     depth) — the caster walk. The channel test is deliberately left out: a
-//     caster that no lamp can see still counts, which is the safe direction.
+//   * a SHADOW CASTER (casts, in a caster CHANNEL, and below the overlay
+//     queue, which writes no depth) — the caster walk.
+//
+// THE CASTER CHANNEL IS PART OF THE TEST, AND LEAVING IT OUT WAS A 90 Hz BILL
+// (lane VR-SCAN-1, 2026-09-18; the Fable read of VR-INPUT-1E-FIX found it).
+// `Item::getCastShadows()` is `mVisibilityFlags & LAYER_SHADOW_CASTER`, and
+// Ogre sets that bit on EVERY MovableObject at birth — so "it casts shadows"
+// is true of everything nobody has switched off, editor furniture included,
+// and this test's last line used to pass for every helper in the scene. The
+// caster WALK does not work that way (walkItems: `flags & channelsAll` first),
+// so a write on a node in no caster channel could not change a single answer
+// it gives — the filter asked the other way round has to ask the same
+// question. The comment that used to sit here said the channel was "left out
+// deliberately: a caster no lamp can see still counts" — which conflated a
+// lamp's light mask (not read here, and rightly so) with the RENDER channel
+// that decides whether a shadow pass draws the item at all.
+//
+// WHAT IT COST: since VR-4-FIX moved the controller proxies and the pointing
+// ray into the session's own frame, those helpers' poses are written EVERY
+// frame a hand is located — so every VR frame with a hand or a ray in it bumped
+// the movement epoch and re-ran the full item scan (392 / 1,961 / 4,328 us at
+// 1k / 5k / 10k nodes, lane R2's numbers), at 90 Hz, for furniture no GI
+// consumer and no shadow map can see.
 // ...plus three structural yeses that are not items at all: a node with
 // CHILDREN moves them, a DECAL is a probe input (mDecalNodes), and a LIGHT is
 // an input to everything (its position is not read here, but nothing is gained
@@ -481,10 +501,12 @@ bool OgreScene::writeIsSceneMovement(const Node &n) const {
     if (n.node && n.node->numChildren()) return true;
     const Ogre::Item *item = n.item;
     if (!item) return false;              // an empty node with nothing under it
-    if (item->getVisibilityFlags() & kGiGeometryBit) return true;
+    const Ogre::uint32 flags = item->getVisibilityFlags();
+    if (flags & kGiGeometryBit) return true;
     const Ogre::uint8 rq = item->getRenderQueueGroup();
     if (probeSeesItem(n)) return true;
-    return item->getCastShadows() && n.shown && rq < kOverlayRenderQueue;
+    return (flags & allShadowCasterChannels()) && item->getCastShadows() && n.shown &&
+           rq < kOverlayRenderQueue;
 }
 
 // THE bit-scheme application point (REFLECTIONS_ADOPTION_SPEC.md P1b).
@@ -979,6 +1001,27 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
         auto it = mNodes.find(id);
         if (it == mNodes.end()) return;
         Node &n = it->second;
+        // A WRITE THAT CHANGES NOTHING DIRTIES NOTHING (lane VR-SCAN-1,
+        // 2026-09-18). Visibility is PUSHED, not diffed, by more than one
+        // writer — the mirror's per-frame sync, and inside a VR frame
+        // `VrSession::placeProxies`, which hides an unlocated hand on EVERY
+        // frame it is not located (its own note says the show side is
+        // deliberately unconditional). Each of those pushes ran the whole
+        // subtree walk below, re-derived the item's channel bits and asked the
+        // probe-visibility question again, for a state that was already
+        // exactly that. So: the node's own flag AND the state it resolves to
+        // both unchanged means the subtree below is already the function of
+        // those two inputs it would be recomputed into — nothing to do.
+        //
+        // WHY THIS IS EXACT rather than a hopeful memo: the effective state of
+        // every registered descendant is a pure function of its own flag and
+        // the chain above it (applyShownSubtree computes precisely that), and
+        // the chain above THIS node is what `parentShown` / `inheritedShown`
+        // reports. With this node's flag and its effective state both equal to
+        // what they already are, no descendant's inputs have moved either.
+        // (One parent-chain walk, at worst, against a whole subtree.)
+        const bool parentEff = parentShown ? *parentShown : inheritedShown(n.node);
+        if (n.visible == visible && n.shown == (visible && parentEff)) return;
         n.visible = visible;
         // THE WHOLE SUBTREE, EFFECTIVELY (RENDER_PIPELINE_AUDIT 1.1/1.2). This
         // was Ogre's setVisible(visible, cascade = true) plus the GI bit of
@@ -991,8 +1034,7 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
         // carries the GI bit, the billboard and the PFX2 halves with it.
         bool giChanged = false;
         if (n.node) {
-            applyShownSubtree(n.node, &n, parentShown ? *parentShown : inheritedShown(n.node),
-                              giChanged);
+            applyShownSubtree(n.node, &n, parentEff, giChanged);
         } else {
             const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
             const bool probeBefore = probeSeesItem(n);
