@@ -20,7 +20,6 @@ For more information see the LICENSE file
 #include "document/physics/physicsproperties.h"
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/nodedirtyset.h"
-#include "document/scenegraph/scalelock.h"
 
 namespace iris
 {
@@ -754,7 +753,9 @@ public:
     /// `iris::scalelock::apply` (document/scenegraph/scalelock.h) rather than
     /// in a method here, because two of its three callers do NOT start from the
     /// node's current scale: a panel scrub and a gizmo drag both measure their
-    /// ratio from the scale the GESTURE started at.
+    /// ratio from the scale the GESTURE started at. Its callers include that
+    /// header themselves — this one does not use it, and does not drag it into
+    /// every TU that sees a scene node.
 
     /// Sets the node's lighting channels (see `lightMask` above). No bit is
     /// special and 0 is legal — a light on no channels lights nothing, and an
