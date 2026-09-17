@@ -39,6 +39,7 @@
 #include <Compositor/OgreCompositorManager2.h>
 #include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/OgreCompositorWorkspaceDef.h>
+#include <Vao/OgreVaoManager.h>
 
 #if JAH_VR
 
@@ -1667,6 +1668,31 @@ void VrSession::destroyXr() {
             if (XR_FAILED(xrEndFrame(mSession, &fei))) break;
         }
         if (mRunning) { xrEndSession(mSession); mRunning = false; }
+    }
+    // THE GPU FINISHES WITH THE RUNTIME'S IMAGES BEFORE THEY ARE DESTROYED
+    // (the owner's first successful headset run, 2026-09-17: VR worked, and the
+    // toggle OUT died with an NVRM Xid 31 — an MMU fault, a graphics-engine READ
+    // of an unmapped address, from this process — followed by DEVICE_LOST in the
+    // Player's vsync restore). The last frame's per-eye copy into the runtime's
+    // swapchain images, and the mirror quad's read of the eye target, are in
+    // command buffers that may still be executing here; on WiVRn those images
+    // are IMPORTED memory, so xrDestroySwapchain unmaps them under a running
+    // copy and the GPU faults. Monado's null compositor never showed it (its
+    // images are ordinary device memory). So: a FULL device stall through the
+    // public VaoManager contract (the View uses the same route before it
+    // rebuilds its own targets), once, at a session's end — never per frame —
+    // and skipped on a lost device, where no wait can return.
+    if (mSession != XR_NULL_HANDLE) {
+        Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+        if (rs && !rs->isDeviceLost()) {
+            try {
+                Ogre::VaoManager *vao = rs->getVaoManager();
+                if (vao) vao->waitForSpecificFrameToFinish(vao->getFrameCount());
+            } catch (Ogre::Exception &e) {
+                vrLog("the device could not be drained before the swapchains go (%s)",
+                      e.getDescription().c_str());
+            }
+        }
     }
     for (int eye = 0; eye < 2; ++eye) {
         if (mSwapchain[eye] != XR_NULL_HANDLE) xrDestroySwapchain(mSwapchain[eye]);
