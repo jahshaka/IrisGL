@@ -108,7 +108,104 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight;
 	vec4 prevRayDown;
 	vec4 prevFwd;
+	/// ---- THE SECOND EYE (lane REFLECT-VR-1) -----------------------------
+	/// x = 1 when this target carries TWO EYES SIDE BY SIDE — the left eye in
+	/// the left half of every texture here, the right in the right half
+	/// (chain::applyStereo's viewport split). Then the five basis vectors above
+	/// are the LEFT eye's and the five below are the right eye's, each mapped
+	/// over its OWN half as a 0..1 image; with x = 0 the block below is unread
+	/// and the basis above is the one camera's, exactly as before.
+	///
+	/// WHY A HALF TEST AND NOT TWO DISPATCHES: the depth, the normals and the
+	/// roughness of BOTH eyes live in one texture at one scale, and the pixel's
+	/// own coordinate already selects the right eye's texels. Only the RAY
+	/// needs to know which eye it belongs to — one branch on the x coordinate,
+	/// no second descriptor set, no second history ring, and the seam falls on
+	/// a block boundary by construction (the C++ side sizes the trace so).
+	vec4 stereo;
+	vec4 camPos2;
+	vec4 rayTL2;
+	vec4 rayRight2;
+	vec4 rayDown2;
+	vec4 fwd2;
+	vec4 prevCamPos2;
+	vec4 prevRayTL2;
+	vec4 prevRayRight2;
+	vec4 prevRayDown2;
+	vec4 prevFwd2;
 } p;
+
+/// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
+/// and the world-space ray (or image-plane offset) of its own 0..1 image.
+/// @see p.stereo — with one eye there is one of these and nothing branches.
+struct EyeImage
+{
+	vec3  camPos;
+	float perspective;		// 1 = a ray per pixel, 0 = an offset (orthographic)
+	vec3  rayTL;
+	vec3  rayRight;
+	vec3  rayDown;
+	vec3  fwd;
+};
+
+EyeImage eyeNow( int eye )
+{
+	EyeImage e;
+	if( eye == 1 )
+	{
+		e.camPos = p.camPos2.xyz; e.perspective = p.camPos2.w;
+		e.rayTL = p.rayTL2.xyz; e.rayRight = p.rayRight2.xyz;
+		e.rayDown = p.rayDown2.xyz; e.fwd = p.fwd2.xyz;
+	}
+	else
+	{
+		e.camPos = p.camPos.xyz; e.perspective = p.camPos.w;
+		e.rayTL = p.rayTL.xyz; e.rayRight = p.rayRight.xyz;
+		e.rayDown = p.rayDown.xyz; e.fwd = p.fwd.xyz;
+	}
+	return e;
+}
+
+EyeImage eyeBefore( int eye )
+{
+	EyeImage e;
+	if( eye == 1 )
+	{
+		e.camPos = p.prevCamPos2.xyz; e.perspective = p.prevCamPos2.w;
+		e.rayTL = p.prevRayTL2.xyz; e.rayRight = p.prevRayRight2.xyz;
+		e.rayDown = p.prevRayDown2.xyz; e.fwd = p.prevFwd2.xyz;
+	}
+	else
+	{
+		e.camPos = p.prevCamPos.xyz; e.perspective = p.prevCamPos.w;
+		e.rayTL = p.prevRayTL.xyz; e.rayRight = p.prevRayRight.xyz;
+		e.rayDown = p.prevRayDown.xyz; e.fwd = p.prevFwd.xyz;
+	}
+	return e;
+}
+
+/// WHICH EYE OWNS A COLUMN, and the whole of the stereo layout in one place:
+/// the left eye is the left half of the image, the right eye the right half.
+int eyeOfColumn( int x, int width )
+{
+	return ( p.stereo.x > 0.5 && x >= width / 2 ) ? 1 : 0;
+}
+/// That eye's own 0..1 image coordinate from a coordinate over the whole
+/// target. Horizontally it is the half's own fraction; vertically nothing is
+/// split, so it passes straight through.
+vec2 eyeLocalUv( vec2 uv, int eye )
+{
+	if( p.stereo.x <= 0.5 )
+		return uv;
+	return vec2( clamp( uv.x * 2.0 - float( eye ), 0.0, 1.0 ), uv.y );
+}
+/// ...and back: a coordinate in the eye's own image, as one over the target.
+vec2 eyeGlobalUv( vec2 local, int eye )
+{
+	if( p.stereo.x <= 0.5 )
+		return local;
+	return vec2( ( local.x + float( eye ) ) * 0.5, local.y );
+}
 
 layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
 layout( set = 0, binding = 3 ) uniform sampler2D gBufShadowRoughness;
@@ -196,6 +293,16 @@ void main()
 	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
 	const ivec2 blockOrigin = tc * scale;
 	const vec2 uv = traceUv( tc, scale, fullRes );
+	// THE KERNEL MAY NOT CROSS THE SEAM BETWEEN THE EYES (lane REFLECT-VR-1).
+	// Under stereo the two eyes are two images in one texture, and the columns
+	// either side of the middle are the far edges of two different pictures: a
+	// tap across them averages this eye's reflection with the other eye's, and
+	// the depth and normal tests cannot reject it (the two eyes see the same
+	// surfaces at nearly the same distance and orientation — that is what
+	// stereo IS). So the tap range is the EYE'S half, not the texture's width.
+	const int eye = eyeOfColumn( tc.x, traceRes.x );
+	const int eyeX0 = p.stereo.x > 0.5 ? eye * ( traceRes.x / 2 ) : 0;
+	const int eyeX1 = p.stereo.x > 0.5 ? eyeX0 + traceRes.x / 2 : traceRes.x;
 
 	const float rawDepth = texture( sceneDepth, uv ).x;
 	if( rawDepth <= 0.0 || rawDepth >= 1.0 )
@@ -250,11 +357,14 @@ void main()
 		// one-sided difference, which is what `clamp` below gives for free.
 		vec2 grad = vec2( 0.0 );
 		{
-			const ivec2 lim = traceRes - ivec2( 1 );
-			const ivec2 xr = clamp( tc + ivec2( 1, 0 ), ivec2( 0 ), lim );
-			const ivec2 xl = clamp( tc - ivec2( 1, 0 ), ivec2( 0 ), lim );
-			const ivec2 yu = clamp( tc + ivec2( 0, 1 ), ivec2( 0 ), lim );
-			const ivec2 yd = clamp( tc - ivec2( 0, 1 ), ivec2( 0 ), lim );
+			// Clamped into THIS EYE's half (see eyeX0/eyeX1): a one-sided
+			// difference at the seam, never a step into the other picture.
+			const ivec2 lo = ivec2( eyeX0, 0 );
+			const ivec2 lim = ivec2( eyeX1 - 1, traceRes.y - 1 );
+			const ivec2 xr = clamp( tc + ivec2( 1, 0 ), lo, lim );
+			const ivec2 xl = clamp( tc - ivec2( 1, 0 ), lo, lim );
+			const ivec2 yu = clamp( tc + ivec2( 0, 1 ), lo, lim );
+			const ivec2 yd = clamp( tc - ivec2( 0, 1 ), lo, lim );
 			const float dxr = texture( sceneDepth, traceUv( xr, scale, fullRes ) ).x;
 			const float dxl = texture( sceneDepth, traceUv( xl, scale, fullRes ) ).x;
 			const float dyu = texture( sceneDepth, traceUv( yu, scale, fullRes ) ).x;
@@ -277,8 +387,8 @@ void main()
 				if( dx == 0 && dy == 0 )
 					continue;
 				const ivec2 t = tc + ivec2( dx, dy );
-				if( any( lessThan( t, ivec2( 0 ) ) ) || any( greaterThanEqual( t, traceRes ) ) )
-					continue;
+				if( t.x < eyeX0 || t.x >= eyeX1 || t.y < 0 || t.y >= traceRes.y )
+					continue;			// outside this EYE's own picture
 				// The SAME flag for a tap, and for a sharper reason: without it
 				// a neighbour that was traced before a dial drag took it above
 				// the cutoff is averaged into this pixel FOR EVER, because

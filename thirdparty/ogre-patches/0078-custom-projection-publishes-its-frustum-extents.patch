@@ -1,0 +1,97 @@
+A camera with a custom projection matrix must report its own frustum extents.
+
+Found by lane REFLECT-VR-1 (2026-09-17) while making the ray-traced reflection
+answer per eye, and it is not a VR defect at all: it is every camera in this pin
+that carries `setCustomProjectionMatrix`.
+
+THE MECHANISM, exactly. `Frustum::calcProjectionParameters` has three branches
+(OgreFrustum.cpp:328). The auto-perspective and auto-orthographic ones compute
+the extents into the out-parameters AND publish them to the members
+`mLeft/mRight/mTop/mBottom` (:380 and :396). The `mCustomProjMatrix` branch
+(:330) computes them — it unprojects the two clip-space corners through the
+inverse of the custom matrix, which is correct — and publishes NOTHING. Those
+four members are what `Frustum::getFrustumExtents()` returns, and they are the
+only route any caller has to a frustum's shape.
+
+And they are not initialised by the constructor (:60-80 initialises every other
+member of the class and not these four, OgreFrustum.h:137). So a camera given a
+custom projection matrix BEFORE its first `updateFrustum` — which is the normal
+way to use one, and what Ogre's own VR recipe does — answers
+`getFrustumExtents()` with INDETERMINATE VALUES, silently. Measured on this box
+(an OpenXR eye's projection, near 0.05, true tangents 0.847 x 0.985):
+
+    getFrustumExtents(FET_TAN_HALF_ANGLES) = (-1106.711, 1102.311,
+                                              825.453, -1147.873)
+
+i.e. wrong by a factor of about 1,300, and stable across frames, which is what
+makes it look like a real number rather than uninitialised memory. A camera that
+HAD an auto frustum first answers with the auto one's extents instead — wrong by
+whatever the two projections differ by, and never flagged.
+
+WHO READS IT. Anything that has to know a frustum's shape without a matrix: a
+ray-per-pixel generator (Jahshaka's ray-traced reflections trace `rayTL +
+rayRight*u + rayDown*v` from these extents — that is how this was found), the
+compositor's own `VIEW_SPACE_CORNERS_NORMALIZED_*` auto-parameters via
+`Frustum::getWorldSpaceCorners`, upstream's PSSM/focused shadow setups, and any
+application code. The consequence is not subtle: a screen-space effect or a trace
+on such a camera works in a frustum 1,300 times too wide.
+
+THE FIX is four assignments in the branch that was missing them, plus the four
+missing constructor initialisers. The values are already computed, in the same
+units and the same convention the other two branches publish (a position on the
+near plane, `FET_PROJ_PLANE_POS`, which `getFrustumExtents` converts to tangents
+by dividing by the near distance). Nothing else changes: a camera without a
+custom matrix takes neither hunk's path, so every existing picture is
+bit-identical (verified: the directional-lit pixel suites and the
+`--engine-selftest` hash are unchanged by this patch).
+
+NOT FIXED HERE, and stated so nobody reads it as fixed: under
+`OGRE_NO_VIEWPORT_ORIENTATIONMODE == 0` and a portrait orientation mode,
+`updateFrustumImpl` calls this function with its arguments SWAPPED (:411), so the
+members are published under swapped names — by the existing branches too, since
+they publish from the same locals. That is upstream's own behaviour for every
+camera; this patch neither introduces nor repairs it (the mode is compiled out in
+Jahshaka's build).
+
+Upstream: worth filing — OgreFrustum.cpp:330-344 and the constructor.
+
+diff --git a/OgreMain/src/OgreFrustum.cpp b/OgreMain/src/OgreFrustum.cpp
+index 77072927b..b258ec082 100644
+--- a/OgreMain/src/OgreFrustum.cpp
++++ b/OgreMain/src/OgreFrustum.cpp
+@@ -68,6 +68,13 @@ namespace Ogre
+         mCustomProjMatrix( false ),
+         mFrustumExtentsManuallySet( false ),
+         mFrustrumExtentsType( FET_PROJ_PLANE_POS ),
++        // Jahshaka patch 0078: the four extents were the only members of this
++        // class left indeterminate by the constructor, and they are readable
++        // from outside (getFrustumExtents) before anything writes them.
++        mLeft( 0 ),
++        mRight( 0 ),
++        mTop( 0 ),
++        mBottom( 0 ),
+         mOrientationMode( OR_DEGREE_0 ),
+         mVertexData( NULL ),
+         mReflect( false ),
+@@ -341,6 +348,21 @@ namespace Ogre
+             top = topLeft.y / topLeft.w;
+             right = bottomRight.x / bottomRight.w;
+             bottom = bottomRight.y / bottomRight.w;
++
++            // ...AND PUBLISH THEM, exactly as the two branches below do
++            // (Jahshaka patch 0078). Without this, mLeft/mRight/mTop/mBottom —
++            // which is what getFrustumExtents() returns and the only route any
++            // caller has to this frustum's shape — keep whatever they held
++            // before the custom matrix was set: the values of the AUTO frustum
++            // if one was ever computed, and INDETERMINATE otherwise (they are
++            // not initialised by the constructor either; see it). A camera that
++            // is given a custom projection before its first updateFrustum —
++            // which is the normal way to use one — therefore reported garbage
++            // extents, with no warning of any kind.
++            mLeft = left;
++            mRight = right;
++            mTop = top;
++            mBottom = bottom;
+         }
+         else
+         {

@@ -799,6 +799,36 @@ constexpr size_t kPbrTextureSlotCount = size_t(PbrTextureSlot::Count);
 // view has always had; the effect switches (HDR + tonemap, bloom, SSAO, SMAA,
 // SSR, refraction) become extra fields here and extra nodes in OgreChain.cpp,
 // and nothing outside those two places has to learn about them.
+/// WHERE THE TWO EYES OF A STEREO VIEW ARE, in the world (lane REFLECT-VR-1).
+///
+/// WHY THE VIEW HAS TO CARRY IT. Under instanced stereo the RENDERING camera is
+/// the HEAD: one camera, one position, one projection (the left eye's, so the
+/// low-level screen quads' auto-params are an eye's — OgreVrSession.cpp F2),
+/// and the per-eye pair rides `Ogre::VrData` where only the Hlms reads it. Any
+/// pass of OURS that has to answer PER EYE — the ray-traced reflection is the
+/// first — cannot get an eye out of the camera it is handed, and must not guess
+/// one: an eye is the runtime's own pose, carried by the rig, and the session
+/// is the only thing that knows all three.
+///
+/// So the session pushes both eyes onto its View each frame, in the frame the
+/// eyes were located for, and a pass reads them from there. A view with none
+/// (every desktop view, and a session's before its first located frame) says so
+/// — `OgreView::stereoEyes()` returns null and the pass declines rather than
+/// inventing a mono answer for two eyes.
+struct StereoEyeBasis {
+    /// The eye in WORLD space, after the world scale and the rig's origin.
+    Ogre::Vector3    position = Ogre::Vector3::ZERO;
+    /// Which way it looks. The two eyes' orientations are the same on every
+    /// runtime measured (OgreVrSession.cpp says so where it builds the head),
+    /// but nothing here assumes it.
+    Ogre::Quaternion orientation = Ogre::Quaternion::IDENTITY;
+    /// Its frustum as TANGENTS of the half-angles, in the same sense as
+    /// `Ogre::Frustum::getFrustumExtents(FET_TAN_HALF_ANGLES)`: left and bottom
+    /// negative, right and top positive, and asymmetric per eye on real
+    /// hardware (which is exactly why one mono frustum cannot serve both).
+    float tanLeft = 0.0f, tanRight = 0.0f, tanTop = 0.0f, tanBottom = 0.0f;
+};
+
 struct ChainDesc {
     Colour   background;
     bool     shadows = false;   ///< instantiate the process-wide shadow node
@@ -829,6 +859,13 @@ struct ChainDesc {
     float ssaoRadius = 2.0f;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
+    /// Does the screen-space MARCH contribute (PostFxDesc::ssrScreenMarch)?
+    /// False leaves the `ssr` row meaning the reflection's RESOLUTION alone and
+    /// the rays its only source — the shape a STEREO chain is forced into, and
+    /// the shape a mono control of one eye must be asked for to be comparable.
+    /// A GRAPH change: the march's two textures and three quad passes are not
+    /// built at all, and `jahSsrReflection` is CLEARED instead of resolved into.
+    bool  ssrScreenMarch = true;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
     float ssrIntensity = 1.0f;
@@ -4885,6 +4922,15 @@ public:
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }
+    /// THE TWO EYES THIS VIEW IS RENDERING, this frame (@see StereoEyeBasis).
+    /// Pushed by the VR session every frame it locates them, dropped when the
+    /// session ends; read by the ray-traced reflection so each eye's pixels get
+    /// rays from that eye. Null until a session pushes a located pair.
+    void setStereoEyes(const StereoEyeBasis &left, const StereoEyeBasis &right) {
+        mStereoEyes[0] = left; mStereoEyes[1] = right; mHaveStereoEyes = true;
+    }
+    void clearStereoEyes() { mHaveStereoEyes = false; }
+    const StereoEyeBasis *stereoEyes() const { return mHaveStereoEyes ? mStereoEyes : nullptr; }
     /// THE GI DRIVER (VR_SPEC §3.4 / §7 item 6). The Photon cascade chain
     /// follows ONE camera per scene, and the engine elects it by creation order
     /// among enabled ON-SCREEN views — which would leave a VR session (whose
@@ -5153,6 +5199,10 @@ private:
     bool                       mStereo = false;
     bool                       mGiPriority = false;
     std::string                mCullCameraName;
+    /// The located eyes of THIS frame (@see StereoEyeBasis). Not part of the
+    /// chain's identity — they change every frame and change no pass.
+    StereoEyeBasis             mStereoEyes[2];
+    bool                       mHaveStereoEyes = false;
 
     Ogre::Root                *mRoot;
     Ogre::Window              *mWindow;

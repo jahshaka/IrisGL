@@ -461,6 +461,18 @@ public:
     void reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
 
 private:
+    /// ONE EYE'S IMAGE as the shader's five vec4s (rq_reflect.comp's EyeImage):
+    /// where the camera is (w = 1 perspective, 0 orthographic) and the world
+    /// basis of its 0..1 image. A MONO view has one; a stereo view has two, each
+    /// spanning its own HALF of the target.
+    struct EyeBasisF {
+        float camPos[4] = { 0, 0, 0, 1 };
+        float rayTL[4] = { 0, 0, 0, 0 };
+        float rayRight[4] = { 0, 0, 0, 0 };
+        float rayDown[4] = { 0, 0, 0, 0 };
+        float fwd[4] = { 0, 0, 0, 0 };
+    };
+
     struct ReflectView {
         /// The descriptor ring. A set that is bound by a command buffer still in
         /// flight may not be rewritten, and every input of this pass can be
@@ -480,14 +492,16 @@ private:
         /// buffer, which is taken later than the creation).
         bool     needsClear = false;
         /// The PREVIOUS frame's camera basis, in the five numbers the shader
-        /// reconstructs with. `havePrev` false means "no history is valid", which
-        /// is what a first frame, a resize and a scene change all are.
-        float prevCamPos[4] = { 0, 0, 0, 1 };
-        float prevRayTL[4] = { 0, 0, 0, 0 };
-        float prevRayRight[4] = { 0, 0, 0, 0 };
-        float prevRayDown[4] = { 0, 0, 0, 0 };
-        float prevFwd[4] = { 0, 0, 0, 0 };
+        /// reconstructs with — ONE PER EYE since lane REFLECT-VR-1 (index 0 is
+        /// the only one a mono view uses, and is that view's camera).
+        /// `havePrev` false means "no history is valid", which is what a first
+        /// frame, a resize and a scene change all are.
+        EyeBasisF prev[2];
         bool  havePrev = false;
+        /// Was the LAST recorded frame a stereo one? A view that changes shape
+        /// (a session beginning or ending on it) has a history whose halves mean
+        /// something else, so the mean starts again — the same rule as a resize.
+        bool  prevStereo = false;
         /// What the last recorded dispatch covered, for the status readings.
         OgreScene *scene = nullptr;
         unsigned   rays = 0;
@@ -2199,6 +2213,23 @@ struct ReflectParams {
     float prevRayRight[4];
     float prevRayDown[4];
     float prevFwd[4];
+    /// THE SECOND EYE (lane REFLECT-VR-1). `stereo.x` is 1 when the target
+    /// carries two eyes side by side, and then everything above is the LEFT
+    /// eye's over the left half and everything here is the RIGHT eye's over the
+    /// right half. Appended rather than folded into an array of two: the block
+    /// above is what a mono view writes and what every reader of this file
+    /// already knows, and std140 lays the tail out identically either way.
+    float stereo[4];
+    float camPos2[4];
+    float rayTL2[4];
+    float rayRight2[4];
+    float rayDown2[4];
+    float fwd2[4];
+    float prevCamPos2[4];
+    float prevRayTL2[4];
+    float prevRayRight2[4];
+    float prevRayDown2[4];
+    float prevFwd2[4];
 };
 
 void put3(float *dst, const Ogre::Vector3 &v, float w) {
@@ -2509,8 +2540,33 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     const unsigned fullW = ssrTex->getWidth(), fullH = ssrTex->getHeight();
     if (!fullW || !fullH) return;
     const int ssrRow = view->chainDesc().ssr;
-    const unsigned traceW = ssrRow >= 2 ? fullW : std::max(1u, fullW / 2u);
-    const unsigned traceH = ssrRow >= 2 ? fullH : std::max(1u, fullH / 2u);
+    // ---- ONE TRACE, TWO EYES (lane REFLECT-VR-1) ----------------------------
+    // A STEREO target is two eyes side by side in one texture, so the trace
+    // covers both in one dispatch and each pixel's own column says which eye it
+    // belongs to. Only two things have to be true for that to be exact, and
+    // both are arranged here rather than hoped for:
+    //
+    //   * THE SEAM FALLS ON A BLOCK BOUNDARY. At the half-resolution row one
+    //     trace texel covers a 2x2 block of the target, and a block straddling
+    //     the middle would fetch one eye's depth to trace the other eye's ray.
+    //     So the trace width is built from the EYE's width, and an eye whose
+    //     half-resolution width would not divide traces at full resolution
+    //     instead (a 1-pixel-odd eye size costs the row, not the picture).
+    //   * THE EYES ARE KNOWN. They are the runtime's, pushed onto the View by
+    //     the session each located frame; a stereo view without them declines
+    //     rather than tracing one mono answer across two eyes, which is the
+    //     defect this lane exists to remove.
+    const bool stereo = view->stereo();
+    const StereoEyeBasis *eyes = view->stereoEyes();
+    unsigned traceW = ssrRow >= 2 ? fullW : std::max(1u, fullW / 2u);
+    unsigned traceH = ssrRow >= 2 ? fullH : std::max(1u, fullH / 2u);
+    if (stereo) {
+        const unsigned eyeW = fullW / 2u;
+        if (!eyeW || fullW != eyeW * 2u) return;      // not a two-eye target after all
+        const unsigned eyeTraceW = ssrRow >= 2 ? eyeW : eyeW / 2u;
+        traceW = eyeTraceW * 2u;
+        if (!eyeTraceW || fullW % traceW != 0u) { traceW = fullW; traceH = fullH; }
+    }
 
     // ---- THE VOXEL CACHE THE HITS ARE SHADED FROM (route A) -----------------
     // Under a Photon cascade chain each cascade is its OWN VctLighting (they are
@@ -2641,11 +2697,78 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
     cam->getFrustumExtents(fl, fr, ft, fb,
                            ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
-    put3(pp.camPos, camPos, ortho ? 0.0f : 1.0f);
-    put3(pp.rayTL, right * fl + up * ft + (ortho ? Ogre::Vector3::ZERO : fwd), 0.0f);
-    put3(pp.rayRight, right * (fr - fl), 0.0f);
-    put3(pp.rayDown, up * (fb - ft), 0.0f);
-    put3(pp.fwd, fwd, 0.0f);
+    // ONE IMAGE'S BASIS, from a pose and a frustum (lane REFLECT-VR-1). The
+    // arithmetic is exactly what the single-camera path did; it is a function
+    // now because a stereo target needs it twice, from two poses and two
+    // frustums, and having two copies of it is how they would drift apart.
+    const auto makeEye = [ortho](const Ogre::Vector3 &pos, const Ogre::Quaternion &rot,
+                                 float el, float er, float et, float eb) {
+        EyeBasisF e;
+        const Ogre::Vector3 f = rot * Ogre::Vector3::NEGATIVE_UNIT_Z;
+        const Ogre::Vector3 r = rot * Ogre::Vector3::UNIT_X;
+        const Ogre::Vector3 u = rot * Ogre::Vector3::UNIT_Y;
+        put3(e.camPos, pos, ortho ? 0.0f : 1.0f);
+        put3(e.rayTL, r * el + u * et + (ortho ? Ogre::Vector3::ZERO : f), 0.0f);
+        put3(e.rayRight, r * (er - el), 0.0f);
+        put3(e.rayDown, u * (eb - et), 0.0f);
+        put3(e.fwd, f, 0.0f);
+        return e;
+    };
+    // THE EYES, OR THE ONE CAMERA. A stereo view whose eyes have not been
+    // pushed yet declines: tracing the head's frustum across a two-eye target
+    // maps each eye's half onto HALF of one mono frustum, which is not a small
+    // error but a different picture (the reflection of anything off the head's
+    // axis lands in the wrong eye or in neither — the owner's "no reflections
+    // in the headset", measured).
+    EyeBasisF eyeB[2];
+    // THE ARM THAT RE-MEASURES THE CLAIM (the shape of JAH_RQ_NO_MULT beside
+    // it): `JAH_R5_MONO_EYES=1` traces a stereo target through the RENDERING
+    // camera for both halves — the behaviour before lane REFLECT-VR-1 — so the
+    // cost of getting this wrong can be measured rather than argued. On the
+    // `vr.session` mirror fixture it moves an eye from a mean of 0.33/255
+    // against its own mono control (0.65 % of bytes over 8) to 2.84 at 6.1 % in
+    // the LEFT eye and 10.42 at 21.6 % in the RIGHT one — the asymmetry being
+    // that the rendering camera carries the left eye's projection, so one
+    // camera is nearly right for one half and wrong for the other.
+    const bool monoEyes = stereo && getenv("JAH_R5_MONO_EYES") != nullptr;
+    if (stereo && !monoEyes) {
+        if (!eyes) { bail("a stereo view with no located eyes"); return; }
+        for (int i = 0; i < 2; ++i)
+            eyeB[i] = makeEye(eyes[i].position, eyes[i].orientation, eyes[i].tanLeft,
+                              eyes[i].tanRight, eyes[i].tanTop, eyes[i].tanBottom);
+    } else {
+        eyeB[0] = makeEye(camPos, q, float(fl), float(fr), float(ft), float(fb));
+        // Written, never read in the mono case (`stereo.x` is 0): a uniform
+        // buffer with a half-initialised tail is a thing to read in a debugger
+        // one day. Under the measurement arm above it IS read, and reading the
+        // same basis for both halves is exactly what the arm reproduces.
+        eyeB[1] = eyeB[0];
+    }
+    memcpy(pp.camPos, eyeB[0].camPos, sizeof(pp.camPos));
+    memcpy(pp.rayTL, eyeB[0].rayTL, sizeof(pp.rayTL));
+    memcpy(pp.rayRight, eyeB[0].rayRight, sizeof(pp.rayRight));
+    memcpy(pp.rayDown, eyeB[0].rayDown, sizeof(pp.rayDown));
+    memcpy(pp.fwd, eyeB[0].fwd, sizeof(pp.fwd));
+    memcpy(pp.camPos2, eyeB[1].camPos, sizeof(pp.camPos2));
+    memcpy(pp.rayTL2, eyeB[1].rayTL, sizeof(pp.rayTL2));
+    memcpy(pp.rayRight2, eyeB[1].rayRight, sizeof(pp.rayRight2));
+    memcpy(pp.rayDown2, eyeB[1].rayDown, sizeof(pp.rayDown2));
+    memcpy(pp.fwd2, eyeB[1].fwd, sizeof(pp.fwd2));
+    // ...and the flag the shader splits on. Under the measurement arm it is 0
+    // on a stereo target, which is precisely the pre-lane shape: ONE image, the
+    // rendering camera's, stretched across two eyes' worth of pixels. (What the
+    // arm cannot reproduce is that before ogre-patch 0078 that camera's
+    // extents were INDETERMINATE as well, because it carries a custom
+    // projection matrix — so the shipped defect was the sum of the two.)
+    pp.stereo[0] = (stereo && !monoEyes) ? 1.0f : 0.0f;
+    // THE VIEW AXES ARE THE RENDERING CAMERA'S, FOR BOTH EYES, AND THAT IS
+    // EXACT rather than an approximation (the pin, checked): the G-buffer
+    // normal is written in the pass camera's view space — HlmsPbs uploads ONE
+    // `mat4 view` per pass and instanced stereo does not make it two
+    // (OgreHlmsPbs.cpp:2327) — so under stereo both halves' normals are in the
+    // HEAD's view space and this one rotation is what turns either of them back
+    // into the world. (It is also why the eyes' own orientations do not enter
+    // here: a per-eye rotation applied to a head-space normal would TILT it.)
     put3(pp.viewAxisX, right, 0.0f);
     put3(pp.viewAxisY, up, 0.0f);
     put3(pp.viewAxisZ, -fwd, 0.0f);          // Ogre's view space looks down -Z
@@ -2707,26 +2830,32 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         pp.voxelInvSize[c][2] = sz.z > 0.0f ? 1.0f / sz.z : 0.0f;
         pp.voxelInvSize[c][3] = std::max(std::max(cl.x, cl.y), cl.z);
     }
-    if (rv.havePrev) {
-        memcpy(pp.prevCamPos, rv.prevCamPos, sizeof(pp.prevCamPos));
-        memcpy(pp.prevRayTL, rv.prevRayTL, sizeof(pp.prevRayTL));
-        memcpy(pp.prevRayRight, rv.prevRayRight, sizeof(pp.prevRayRight));
-        memcpy(pp.prevRayDown, rv.prevRayDown, sizeof(pp.prevRayDown));
-        memcpy(pp.prevFwd, rv.prevFwd, sizeof(pp.prevFwd));
+    // NO PREVIOUS FRAME — OR A DIFFERENT SHAPE OF ONE. A zero forward makes
+    // every reprojection's `z` zero, which the shader rejects, so the first
+    // frame after a resize, a scene bind or a workspace rebuild starts its mean
+    // from scratch instead of reading a buffer that means something else. A
+    // view that has just BECOME stereo (or stopped being) is the same case: its
+    // history's two halves were one picture, or its one picture is now two.
+    if (rv.havePrev && rv.prevStereo == stereo) {
+        memcpy(pp.prevCamPos, rv.prev[0].camPos, sizeof(pp.prevCamPos));
+        memcpy(pp.prevRayTL, rv.prev[0].rayTL, sizeof(pp.prevRayTL));
+        memcpy(pp.prevRayRight, rv.prev[0].rayRight, sizeof(pp.prevRayRight));
+        memcpy(pp.prevRayDown, rv.prev[0].rayDown, sizeof(pp.prevRayDown));
+        memcpy(pp.prevFwd, rv.prev[0].fwd, sizeof(pp.prevFwd));
+        memcpy(pp.prevCamPos2, rv.prev[1].camPos, sizeof(pp.prevCamPos2));
+        memcpy(pp.prevRayTL2, rv.prev[1].rayTL, sizeof(pp.prevRayTL2));
+        memcpy(pp.prevRayRight2, rv.prev[1].rayRight, sizeof(pp.prevRayRight2));
+        memcpy(pp.prevRayDown2, rv.prev[1].rayDown, sizeof(pp.prevRayDown2));
+        memcpy(pp.prevFwd2, rv.prev[1].fwd, sizeof(pp.prevFwd2));
     } else {
-        // NO PREVIOUS FRAME. A zero forward makes every reprojection's `z` zero,
-        // which the shader rejects — so the first frame after a resize, a scene
-        // bind or a workspace rebuild starts its mean from scratch instead of
-        // reading a buffer that means something else.
         memset(pp.prevFwd, 0, sizeof(pp.prevFwd));
+        memset(pp.prevFwd2, 0, sizeof(pp.prevFwd2));
     }
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
-    memcpy(rv.prevCamPos, pp.camPos, sizeof(pp.camPos));
-    memcpy(rv.prevRayTL, pp.rayTL, sizeof(pp.rayTL));
-    memcpy(rv.prevRayRight, pp.rayRight, sizeof(pp.rayRight));
-    memcpy(rv.prevRayDown, pp.rayDown, sizeof(pp.rayDown));
-    memcpy(rv.prevFwd, pp.fwd, sizeof(pp.fwd));
+    rv.prev[0] = eyeB[0];
+    rv.prev[1] = eyeB[1];
     rv.havePrev = true;
+    rv.prevStereo = stereo;
 
     // ---- THE DESCRIPTOR SET, rewritten every frame --------------------------
     // IMAGE VIEWS, UNCACHED AND RETIRED — and the cache is not an optimisation

@@ -2881,6 +2881,21 @@ struct VrConfig {
     /// Unreal's. Off by default here, so a host that says nothing gets the
     /// conservative answer.
     bool helpers = false;
+    /// THE REFLECTION ROW THE HEADSET RENDERS WITH (lane REFLECT-VR-1), the
+    /// same 0/1/2 as `PostFxDesc::ssr` — 0 off, 1 half-resolution, 2 full.
+    ///
+    /// IT IS THE HOST'S TO PASS, because the row is the PROJECT'S (the World
+    /// panel's SSR row, `iris::Scene::ssrMode`, which the mirror pushes into
+    /// the desktop view every frame) and this struct is the only channel a
+    /// session has to it: the session creates its own View inside the engine
+    /// and no mirror ever reaches it. Both Studio hosts pass the project's row,
+    /// so the wearer sees the reflections the author sees.
+    ///
+    /// The SOURCE is not a choice here: a stereo chain never marches in screen
+    /// space (see `PostFxDesc::ssrScreenMarch`), so this row buys RAY-TRACED
+    /// reflections on a ray-capable machine and, on one without, the prepass
+    /// and nothing else — which is why a host that wants neither passes 0.
+    int ssr = 0;
 };
 
 /// AN INTERACTION PROFILE'S PATH, WITHOUT A HEAP (VR-INPUT-1E-FIX finding 8).
@@ -3377,6 +3392,27 @@ struct PostFxDesc {
     /// lean on translucent panes should leave SSR off until the prepass learns
     /// a visibility split.
     int   ssr = 0;
+    /// DOES THE SCREEN-SPACE MARCH CONTRIBUTE (lane REFLECT-VR-1)?
+    ///
+    /// The `ssr` row above selects TWO things that used to be one: the
+    /// reflection's RESOLUTION (half or full) and its SOURCES (the screen-space
+    /// march, plus the rays where the machine can trace them). This flag turns
+    /// the first source off and leaves the row meaning the resolution alone —
+    /// the reflection is then whatever the rays answer, and every pixel they
+    /// decline keeps the probe/sky answer it has today.
+    ///
+    /// WHO SETS IT FALSE, AND WHY IT IS NOT A QUALITY DIAL: a STEREO target
+    /// carries two eyes side by side in one texture, and a screen-space march
+    /// is a walk through THAT texture — it reads the other eye's pixels across
+    /// the seam, reconstructs its positions through one camera for two eyes,
+    /// and reprojects its colour history the same way. None of those is
+    /// repairable by a threshold. The rays have no such term: a ray is traced
+    /// in the world from the eye that owns its pixel. So the VR session asks
+    /// for this, and `chain::build` ENFORCES it for any stereo chain whatever a
+    /// host asked (OgreChain.cpp) — the flag exists so that a MONO view of the
+    /// same picture (the per-eye control `vrEyeScreenshot` renders) can be
+    /// asked for the same answer, which is what makes the two comparable.
+    bool  ssrScreenMarch = true;
     /// How far a reflection ray may travel, in world units. Beyond this the
     /// march gives up and the pixel falls back to the probe/sky reflection.
     /// Scene-scale dependent: the default suits a room, not a landscape.
@@ -3527,7 +3563,8 @@ struct PostFxDesc {
                ssao == o.ssao &&
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
                ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
-               ssr == o.ssr && ssrMaxDistance == o.ssrMaxDistance &&
+               ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
+               ssrMaxDistance == o.ssrMaxDistance &&
                ssrThickness == o.ssrThickness &&
                reflectionRoughnessCutoff == o.reflectionRoughnessCutoff &&
                ssrIntensity == o.ssrIntensity &&
