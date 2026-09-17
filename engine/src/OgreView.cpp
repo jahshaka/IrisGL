@@ -605,8 +605,9 @@ void OgreView::seedExposureHistory(float scale) {
 /// THE EXPOSURE THIS VIEW ACTUALLY GRADED WITH, read back off the GPU (SS1).
 ///
 /// WHY IT HAS TO BE A READBACK. The automatic exposure is computed entirely on
-/// the GPU — four downscale quads reduce the frame's log-luminance into a 1x1
-/// texture which the tonemapper then samples as `fInvLumAvg` — so the CPU never
+/// the GPU — the meter's three compute jobs bin the frame's log-luminance into
+/// a histogram and resolve it into a 1x1 texture which the tonemapper then
+/// samples as `fInvLumAvg` (EXPOSURE-2; four downscale quads before) — so the CPU never
 /// sees the number at all. Nothing else in this engine knows it, and no formula
 /// reproduces it (it is a temporal filter over the scene's own content).
 ///
@@ -615,12 +616,14 @@ void OgreView::seedExposureHistory(float scale) {
 /// undefined memory by definition) while the history is explicitly
 /// keep_content, and the chain's last HDR pass copies one into the other — so
 /// the history holds exactly the multiplier the last presented frame graded
-/// with. One 1x1 R16_FLOAT texel, downloaded with accurate tracking; the cost
+/// with. One 1x1 R32_FLOAT texel, downloaded with accurate tracking; the cost
 /// is one fence on a path that already stalls (a screenshot).
 ///
 /// 0 means "there is nothing to read": no workspace, no HDR, the FIXED form
-/// (whose exposure is a constant the caller already has), or a workspace that
-/// has not presented a frame YET.
+/// (whose exposure is a constant the caller already has), a chain with NO
+/// METER (a shader profile without the compute jobs defines no history
+/// texture, so the search below finds none), or a workspace that has not
+/// presented a frame YET.
 ///
 /// "YET" IS PER WORKSPACE, NOT PER VIEW, and that distinction is a defect that
 /// was caught in review rather than in the field. `jahOldLum` is destroyed and

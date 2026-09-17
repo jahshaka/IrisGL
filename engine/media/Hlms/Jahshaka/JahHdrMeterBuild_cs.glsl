@@ -28,7 +28,8 @@
 //     fact that Manual exposure is the editor default (EXPOSURE-1).
 //
 // THE SAMPLING. One texelFetch per thread on a grid of one sample per 4x4
-// pixels of the HDR target - 130,560 samples at 1920x1080, twice the ladder's
+// pixels of the HDR target - 129,600 binned samples at 1920x1080 (a 480x272
+// invocation grid; the two rows past 1080 return at the bounds test), twice the ladder's
 // 65,536 (64x64 output texels x 16 taps). Unfiltered, deliberately: the
 // ladder's samples were BILINEAR, and a bilinear fetch that weights a +Inf
 // texel by zero is where HDR-1's `0 * Inf` NaNs came from. A texelFetch cannot
@@ -49,10 +50,11 @@
 //                   the centre" (K = ln 2 / 0.25 = 2.7726) and P = 0.05 is a
 //                   PEDESTAL so the corners still count for something: a meter
 //                   that ignores the edges of the frame outright cannot see a
-//                   window opening behind the subject. Integrated over a 16:9
-//                   frame that puts 40 % of the sensitivity in the central
-//                   11 % of the picture and 81 % inside the inscribed
-//                   full-height circle (44 % of the picture).
+//                   window opening behind the subject. Integrated over the
+//                   16:9 rectangle that puts 41 % of the sensitivity in the
+//                   central 11 % of the picture and 83 % inside the inscribed
+//                   full-height circle (44 % of the picture); the infinite
+//                   plane's Gaussian would say 40/81, but a picture has corners.
 //   spot            a disc whose HALF-WEIGHT AREA IS EXACTLY the authored
 //                   fraction of the frame (2.5 %), with a +/-15 % feather in
 //                   radius so the boundary is not a step. The radius is derived
@@ -107,7 +109,10 @@ const float c_histMinLog  = -2.7725887;     // ln( 1024 ) - 14 * ln 2
 const float c_histSpanLog = 20.7944154;     // 30 * ln 2
 // THE FLOOR, applied BEFORE the log (CLAUDE.md, HDR-1): the meter is a mean of
 // logs and log(0) is -Inf, so a black texel needs a floor or it is not a
-// measurement. 1e-4 is the epsilon the pin's own ladder added.
+// measurement. 1e-4 is the pin's ladder's constant, but applied as a FLOOR
+// (max) where the ladder ADDED it before the log: the HDR-1 rule. The two
+// differ by 1e-4/Y nats - 0.005 at Y = 0.02, 0.095 (0.14 stops) at Y = 0.001 -
+// so an Auto scene regrades by that much against the ladder, more in the dark.
 const float c_minLuminance = 0.0001;
 // Luminance coefficients for LINEAR RGB - the same vector the pin's ladder used
 // (from the DX SDK docs), kept so the two meters measure the same quantity.

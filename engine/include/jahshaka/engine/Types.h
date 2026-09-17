@@ -3419,9 +3419,11 @@ enum class ExposureMeterPattern : int {
 namespace meter {
 /// CENTRE-WEIGHTED: the radius, in units of HALF THE FRAME HEIGHT, at which the
 /// weight has fallen to half. 0.5 = half weight halfway to the top edge, which
-/// integrates (over a 16:9 frame, with the pedestal) to 40 % of the meter's
-/// sensitivity inside the central 11 % of the picture and 81 % inside the
-/// inscribed full-height circle.
+/// integrates (over the 16:9 rectangle, with the pedestal) to 41 % of the
+/// meter's sensitivity inside the central 11 % of the picture and 83 % inside
+/// the inscribed full-height circle (the infinite-plane Gaussian gives 40/81;
+/// the picture has corners). "Half weight" is the Gaussian term's half — with
+/// the pedestal the total weight there is 0.525 of the peak.
 constexpr float kCentreWeightedHalfRadius = 0.5f;
 /// CENTRE-WEIGHTED: the weight a pixel infinitely far from the centre still
 /// carries, as a fraction of the peak. NOT zero on purpose: a meter that
@@ -3461,9 +3463,10 @@ struct PostFxDesc {
     /// between the two (SceneMirror::applyExposure).
     float exposure = 0.0f;
     /// THE AUTO WINDOW, AND IT IS ON THE METER'S AXIS, NOT THIS ONE
-    /// (EXPOSURE-1, lead review): the chain clamps the measured mean-log
-    /// luminance to `[7.5 - exposureMax, 7.5 - exposureMin]`
-    /// (HDR/DownScale03_SumLumEnd_ps.glsl), so these two bound WHAT THE METER
+    /// (EXPOSURE-1, lead review): the meter's resolve clamps the measured log
+    /// luminance — the percentile-clipped mean of its histogram since
+    /// EXPOSURE-2 — to `[7.5 - exposureMax, 7.5 - exposureMin]`
+    /// (JahHdrMeterResolve_cs.glsl), so these two bound WHAT THE METER
     /// IS ALLOWED TO READ, not what `exposure` above may become. They are inert
     /// under manual exposure, which has no meter to bound.
     ///

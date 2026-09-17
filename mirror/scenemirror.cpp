@@ -163,7 +163,8 @@ constexpr float kSunShadowSpecularHeadroom = 65504.0f;
 
 /// HOW MUCH THE VIEW'S CHAIN MULTIPLIES THE FRAME BY BEFORE THE TONEMAP.
 ///
-/// `HDR/DownScale03_SumLumEnd_ps.glsl` computes
+/// The meter's resolve (`JahHdrMeterResolve_cs.glsl`; the pin's
+/// `HDR/DownScale03_SumLumEnd_ps.glsl` before EXPOSURE-2, the same arithmetic) computes
 /// `exposure.x / exp(clamp(meanLogLum, 7.5 - exposureMax, 7.5 - exposureMin))`
 /// with `exposure.x = 1024 * e^(exposure - 2)`. The CLAMP is what makes this
 /// knowable: the multiplier is bounded, and its upper bound is reached by every

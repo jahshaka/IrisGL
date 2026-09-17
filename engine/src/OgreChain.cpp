@@ -932,7 +932,15 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // luminance reduction: no history to adapt from, no 64/16/4 downscale
         // ladder. Only the 1x1 texture the tonemapper samples survives, and it
         // is CLEARED to a constant every frame instead of being computed.
-        if (!desc.tonemapFixed) {
+        //
+        // AND ONLY WHERE THE METER CAN RUN (lead review at merge, EXPOSURE-2):
+        // the history and the histogram exist for the meter's resolve and for
+        // nothing else. On the no-meter fallback below they used to be created
+        // and SEEDED anyway, so OgreView::measuredExposureScale() found a
+        // texture holding the 1.0 seed and reported a "measurement" on a chain
+        // that measured nothing. With neither texture defined the readback
+        // finds nothing and says so (0 = "nothing to read").
+        if (!desc.tonemapFixed && meterJobsPresent()) {
             // keep_content: the 1x1 luminance history is read next frame, so it
             // must NOT be DiscardableContent.
             //
@@ -961,10 +969,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // RGBA32_UINT UAV loses the device on this driver (VOXMERGE-1,
             // 2026-09-16), R32 clears cleanly, and this one is cleared by our
             // own job in any case.
-            // Only where the meter can actually run (meterJobsPresent): on a
-            // backend without it the fallback grades at the authored exposure
-            // and there is no histogram to allocate.
-            if (meterJobsPresent()) {
+            {
                 auto *h = n->addTextureDefinition(kLumHist);
                 h->width = kHistBins; h->height = 2u;
                 h->widthFactor = 0.0f; h->heightFactor = 0.0f;
@@ -1238,7 +1243,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     // Auto-exposure history must start at something finite or the first frame
     // reads NaN out of an undefined 1x1 target.
-    if (desc.hdr && !desc.tonemapFixed) {
+    if (desc.hdr && !desc.tonemapFixed && meterJobsPresent()) {
         Ogre::CompositorTargetDef *t = n->addTargetPass(kOldLum);
         t->setNumPasses(1);
         auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -1721,6 +1726,21 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         //
         // Recorded for the macOS session rather than papered over: porting the
         // three sources to MSL is the fix, and it cannot be verified from here.
+        //
+        // SAID ONCE IN THE LOG (lead review at merge): on Linux this branch is
+        // reached only when one of the three jobs failed to PARSE (stale staged
+        // media, a glslang error), and a silent fallback would read as "auto
+        // exposure does nothing" with no line to find. The readback reports
+        // nothing on this chain (no history texture is defined above), so
+        // `exposureMeasured` is null here rather than a fabricated 0.
+        static bool sSaidSo = false;
+        if (!sSaidSo) {
+            sSaidSo = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: HDR meter unavailable on this shader profile (the "
+                "compute jobs are missing) - automatic exposure grades at the "
+                "authored exposure; exposureMeasured reads nothing.");
+        }
         handlesOut.fixedExposure =
             addFixedExposureClear(n, kLum, desc.exposureScale, desc.exposure);
       }
