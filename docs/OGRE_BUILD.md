@@ -1776,12 +1776,60 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     rest of that lane's view rule (the `jah_world_error` strategy) needs NO patch at
     all.
 
-THE STACK IS 0001-0075 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0076-vct-bounce-is-a-jacobi-iteration — THE VOXEL BOUNCE IS A JACOBI ITERATION, AND
+    ITS DAMPENING IS 1 (lane PHOTON-M2, the physics read of ledger §659 findings F-B
+    and F-C, 2026-09-17), SOURCE + MEDIA, six files (OgreVctLighting.{h,cpp}, the two
+    VCT compute shells and their two pieces; it OVERLAPS 0060/0070/0074 in the
+    bounce-injection piece, so the reverse check false-positives on a re-run — reset
+    the submodule, that is the documented blind spot). The bounce job read the RUNNING
+    TOTAL as its base and added the gather to it, so the series was
+    L_n = (1 + rho*G)^n * D — binomial, never contracting, the first bounce counted
+    once per pass; upstream's 1/pi dampening, its commented-out per-pass one and the
+    "more bounces for coarser cascades" stabilisation PHOTON-M1 deleted were three
+    fudges against that one defect. The fix is the fixed point the volume's radiance
+    satisfies, L = D + rho*G(L): the DIRECT injection is kept in its own volume
+    (`mLightDirect`, one mip, +8 MB at 128^3 / +1 MB at 64^3 per cascade, created and
+    destroyed with `mLightBounce`), written by a SECOND UAV of the same injection
+    dispatch under a new `vct_keep_direct` property (one image store per voxel — no
+    copy, no second dispatch, nothing on the CPU), read by the bounce job as
+    `directVoxel` at the unit after every probe array, and `iterationDampening`
+    becomes 1.0 because the six-cone gather is already an estimate of E/pi. Measured
+    on a closed 5 m cube of albedo 0.791 (spikes/photon-m2/m2-bounceC.js): the
+    per-pass increments run 0.88/0.52/0.60 at the base (ratios 0.59, 1.15 — not
+    contracting), 2.00/1.88/1.96 with the dampening alone (0.94, 1.04 — plainly
+    divergent) and 3.64/1.60/0.40 with this patch (0.44, 0.25 — contracting at
+    rho*f). Selftest `277ba3c2…` -> `ebe346e1…` with 0077.
+  0077-injection-stores-radiance — THE LIGHT INJECTION STORES RADIANCE, and the
+    specular cone's eye-tuned 1/pi retires with the error it cancelled (lane
+    PHOTON-M2, finding F-A / render-audit F2, 2026-09-17), MEDIA-only, two files
+    (LightInjection_piece_cs.any, Vct_piece_ps.any; OVERLAPS
+    0021/0033/0045/0048/0066/0070/0074 in the pixel piece and 0076 in the injection
+    piece). The injection stored `NdotL * D * rho * shadow` = pi times the surface's
+    outgoing radiance (D = colour*powerScale = pi*I in this tree), while the cone
+    gather is consumed as `envColourD` with no division (200.BRDFs: Rd =
+    envColourD*albedo) — so cone-lit diffuse was pi times brighter than the emissive
+    and the ambient in the same voxel slot, and the RGBA8 store (scaled by
+    pi/D_max) SATURATED wherever rho*NdotL*D/D_max > 1/pi, desaturating the bleed of
+    every lit surface. The file's own `c_invPI` was VALUED pi and unused: it is given
+    its name's value and applied, which also makes the store exactly 1 at the
+    brightest fully-lit surface. Upstream's hard-coded `0.31831f` on the specular
+    composite ("I'm not sure why is it even needed") was this pi found by eye and is
+    deleted, together with its copy in patch 0048's exported escape colour so the sky
+    swap stays exact. Measured against the analytic wall/floor form factor
+    (spikes/photon-m2/m2-bounceA.js, which predicts rho_w/2 = 0.5 with no units in the
+    answer): 0.800/0.726/0.637 at the base, 0.521/0.475/0.412 with this patch. It also
+    un-darkens the SPECULAR ambient by pi (the scene's one ambient convention now
+    reaches both slots the same), which re-anchored gi.volume_edge (+2/255 on a 24/255
+    band, attributed by zeroing the term in staged media), gi.chain_face (1.029 ->
+    1.057) and gi.rt_reflect (the no-ray control 0.0099 -> 0.0315, the ray's own
+    answer unchanged). Selftest alone: `277ba3c2…` -> `8254977e…`.
+
+THE STACK IS 0001-0077 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073 and 0075 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077) need no Ogre rebuild (0024 and 0028 are
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073 and 0075 are SOURCE-only (0062, 0065 and 0076 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

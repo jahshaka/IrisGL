@@ -1,0 +1,399 @@
+Jahshaka patch 0076 — the voxel bounce is a JACOBI iteration, and its dampening is 1.
+
+SOURCE + MEDIA patch (`Components/Hlms/Pbs/{include,src}/Vct/OgreVctLighting.{h,cpp}`,
+`Samples/Media/VCT/LightInjection_cs.glsl`,
+`Samples/Media/VCT/LightInjection_piece_cs.any`,
+`Samples/Media/VCT/LightVctBounceInject_cs.glsl`,
+`Samples/Media/VCT/LightVctBounceInject_piece_cs.any`). THE PROCESS COST IS STATED
+RATHER THAN AVOIDED: every tree must reset its ogre-next submodule and re-run
+`irisgl/scripts/build-ogre.sh` — this one COMPILES (HlmsPbs changes), and Studio
+also stages its media from the SOURCE tree (cmake/IncludeOgre.cmake). It OVERLAPS
+patches 0060, 0070 and 0074 in the bounce-injection piece, so a tree that already
+carries those hits `build-ogre.sh`'s "Upstream changed the patched file" on a
+re-run: that is the documented per-patch reverse-check blind spot and NOT an
+upstream change. The cure is the recorded one —
+`git -C irisgl/thirdparty/ogre-next checkout -- . &&
+git -C irisgl/thirdparty/ogre-next clean -fd` and re-run the script.
+
+WHY (Jahshaka lane PHOTON-M2, 2026-09-17, measured; the physics read of ledger
+§659, findings F-B and F-C of the 2026-09-17 render audit's PHOTON section).
+
+THE DEFECT. `VctLighting::runBounce` propagates light by re-dispatching the
+injection job over the voxel volume. The job read the RUNNING TOTAL as its base
+term (`OGRE_Load3D( vctProbes[0], ... )`) and added the gather to it, so each pass
+computed
+
+    L_n = L_{n-1} + rho * G( L_{n-1} ),   i.e.   L_n = (1 + rho*G)^n * D
+
+— a binomial series in (1 + rho*G). It never contracts: every pass re-amplifies
+the first bounce's energy instead of adding a dimmer one, and the first bounce is
+counted n times at n passes. Upstream held it down with a 1/pi dampening on every
+pass (and a commented-out 1/(pi*(n/2+1)) beside it), and with the "more bounces
+for coarser cascades" stabilisation PHOTON-M1 deleted — three fudges against one
+defect.
+
+THE FIX is the fixed point the radiance in a volume actually satisfies:
+
+    L = D + rho * G( L ),   iterated as   L_n = D + rho * G( L_{n-1} )
+
+which is a Jacobi iteration and contracts by rho*f per pass (f being the gather's
+form factor, < 1). It needs D — the light INJECTED from the scene's lamps, before
+any bounce — at every pass, and D cannot be recovered from the two ping-ponging
+textures the total uses: by the second pass the direct term is the one being
+overwritten. So this patch keeps D in its own volume:
+
+  * `VctLighting::mLightDirect`, one RGBA8_UNORM_SRGB 3D texture per cascade at
+    mip 0 only (the bounce reads it with a Load3D at the voxel it is writing,
+    never filtered), created and destroyed with `mLightBounce` in
+    `setAllowMultipleBounces` — a volume that cannot bounce has no use for it.
+    +8 MB at 128^3, +1 MB at 64^3, per cascade, in DEVICE memory.
+  * the light-injection job writes it as a SECOND UAV in the same dispatch that
+    writes the total, under a new `vct_keep_direct` property (one extra image
+    store per voxel; no copy, no second dispatch, no encoder switch, and nothing
+    on the CPU). The property and both slots are re-asserted per injection for
+    the same reason `correct_area_light_shadows` is: "VCT/LightInjection" is ONE
+    HlmsComputeJob shared by name by every VctLighting in the process.
+  * the bounce job takes `directVoxel` at the texture unit after every probe
+    array (so no existing slot index moves) and uses it as the base term.
+  * `iterationDampening` becomes 1.0, which is the physics: the six-cone gather
+    is a weighted mean over a cosine-ish set — an estimate of E/pi — and the
+    bounced radiance of a Lambertian surface is rho*E/pi = rho*G. No further
+    factor exists to apply. (HlmsPbs consumes the same gather as `envColourD`
+    with no division of its own: `200.BRDFs_piece_ps.any:305`, Rd =
+    envColourD * albedo.) The pass index `runBounce` took for upstream's
+    per-iteration dampening goes with it: every pass of a Jacobi iteration is the
+    same operator.
+
+MEASURED (spikes/photon-m2, `m2-bounceC.js` — a closed 5 m cube of albedo 0.791,
+one lamp, the irradiance field off so the picture is the cone term alone; the
+per-pass INCREMENT of a 25-probe mean and the RATIO of consecutive increments,
+which must be about rho for a contracting series):
+
+    arm                                   increments        ratios
+    base (1/pi + accumulating)         0.88  0.52  0.60    0.59  1.15
+    dampening 1 alone (0075 as held)   2.00  1.88  1.96    0.94  1.04
+    this patch (Jacobi + 1)            3.64  1.60  0.40    0.44  0.25
+
+The base and the 0075-alone arms do not contract (the third increment is as large
+as the second, or larger — the binomial signature); this patch's contracts
+monotonically, at 0.44 and 0.25 against rho*f. The same rig at a quarter of the
+lamp's intensity reads 0.50 and 0.455.
+
+THE SELFTEST: this patch plus 0077 moves `--engine-selftest` from
+`277ba3c2…` to `ebe346e1…` (54,228 of 65,536 pixels by at most 6/255, every
+changed channel DARKER — the default scene's cone-lit diffuse is no longer pi
+times too bright). 0077 alone reads `8254977e…`; this patch is the difference
+between them.
+diff -u -r -N a/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h b/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h
+--- a/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h	2026-09-17 20:46:28.301644439 +0200
++++ b/Components/Hlms/Pbs/include/Vct/OgreVctLighting.h	2026-09-17 20:46:28.303026622 +0200
+@@ -94,6 +94,26 @@
+         HlmsComputeJob *mLightVctBounceInject;
+         TextureGpu     *mLightBounce;
+ 
++        /// JAHSHAKA PATCH 0076: THE DIRECT TERM, KEPT.
++        ///
++        /// The bounce is a fixed-point iteration over the radiance in the volume,
++        /// L = D + rho * G( L ), and it needs D -- the light INJECTED from the
++        /// scene's lamps, before any bounce -- at every pass. Upstream's bounce job
++        /// re-read the running TOTAL and added to it (L_n = L_n-1 + rho * G( L_n-1 )),
++        /// which is a binomial series in (1 + rho*G) and never contracts: the first
++        /// bounce's energy is counted again at every later pass. The two textures
++        /// mLightVoxel[0]/mLightBounce ping-pong, so by the second pass the direct
++        /// term is the one being overwritten and cannot be recovered from them.
++        ///
++        /// This is that third volume: mip 0 only (the bounce reads it with a
++        /// Load3D at its own voxel, never filtered), same resolution and format as
++        /// mLightVoxel[0], written by the light-injection job's second UAV in the
++        /// same dispatch that writes the total -- so keeping it costs one image
++        /// store per voxel and no copy, no readback and no CPU path. It lives
++        /// exactly as long as mLightBounce does (see setAllowMultipleBounces): a
++        /// volume that cannot bounce has no use for it.
++        TextureGpu *mLightDirect;
++
+         float mBakingMultiplier;
+         float mInvBakingMultiplier;
+ 
+@@ -189,7 +209,11 @@
+ 
+         void generateAnisotropicMips();
+ 
+-        void runBounce( uint32 bounceIteration );
++        /// JAHSHAKA PATCH 0076: the pass index is gone with the per-iteration
++        /// dampening it fed (upstream's commented-out 1 / ( pi * ( n/2 + 1 ) )).
++        /// Every pass of a Jacobi iteration is the same operator; nothing about it
++        /// depends on which pass it is.
++        void runBounce();
+ 
+     public:
+         VctLighting( IdType id, VctVoxelizerSourceBase *voxelizer, bool bAnisotropic );
+diff -u -r -N a/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp b/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp
+--- a/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp	2026-09-17 20:46:28.312915232 +0200
++++ b/Components/Hlms/Pbs/src/Vct/OgreVctLighting.cpp	2026-09-17 20:46:28.313883223 +0200
+@@ -82,6 +82,7 @@
+         mAnisoGeneratorStep0( 0 ),
+         mLightVctBounceInject( 0 ),
+         mLightBounce( 0 ),
++        mLightDirect( 0 ),  // JAHSHAKA PATCH 0076
+         mBakingMultiplier( 1.0f ),
+         mInvBakingMultiplier( 1.0f ),
+         mDefaultLightDistThreshold( 0.5f ),
+@@ -543,11 +544,15 @@
+     {
+         const size_t numExtraCascades = mExtraCascades.size();
+ 
++        // JAHSHAKA PATCH 0076: +1 for `directVoxel`, the fixed point's D term. It is
++        // bound LAST so that every existing slot index -- albedo, normal, this
++        // cascade's probes, the extra cascades', the three anisotropic sets -- keeps
++        // the number it had, in the C++ and in the shader's ogre_tN layout alike.
+         uint8 numNeededTexUnits;
+         if( mAnisotropic )
+-            numNeededTexUnits = 6u + 4u * static_cast<uint8>( numExtraCascades );
++            numNeededTexUnits = 6u + 4u * static_cast<uint8>( numExtraCascades ) + 1u;
+         else
+-            numNeededTexUnits = 3u + static_cast<uint8>( numExtraCascades );
++            numNeededTexUnits = 3u + static_cast<uint8>( numExtraCascades ) + 1u;
+ 
+         HlmsManager *hlmsManager = mVoxelizer->getHlmsManager();
+         const RenderSystemCapabilities *caps = hlmsManager->getRenderSystem()->getCapabilities();
+@@ -617,6 +622,12 @@
+             }
+         }
+ 
++        // JAHSHAKA PATCH 0076: THE DIRECT TERM, at the last unit. Read with a plain
++        // Load3D at the voxel being written, so it needs no sampler of its own (the
++        // OpenGL path's samplerblock loop above deliberately skips it).
++        texSlot.texture = mLightDirect;
++        mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
++
+         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+         uavSlot.access = ResourceAccess::Write;
+         uavSlot.texture = mLightBounce;
+@@ -627,11 +638,11 @@
+     void VctLighting::setupGlslTextureUnits()
+     {
+         const size_t numExtraCascades = mExtraCascades.size();
+-        size_t numNeededTexUnits;
++        size_t numNeededTexUnits;  // +1: `directVoxel` (JAHSHAKA PATCH 0076)
+         if( mAnisotropic )
+-            numNeededTexUnits = 6u + 4u * numExtraCascades;
++            numNeededTexUnits = 6u + 4u * numExtraCascades + 1u;
+         else
+-            numNeededTexUnits = 3u + numExtraCascades;
++            numNeededTexUnits = 3u + numExtraCascades + 1u;
+ 
+         // This code assumes there's 2 textures at the beginning that always stays the same
+         // the rest of them are dynamically generated.
+@@ -661,6 +672,12 @@
+                 glslShaderParams.mParams.push_back( param );
+             }
+ 
++            // JAHSHAKA PATCH 0076: the direct volume's own unit, after every probe
++            // array -- the same order setupBounceTextures() binds them in.
++            param.name = "directVoxel";
++            param.setManualValue( texSlotIdx );
++            glslShaderParams.mParams.push_back( param );
++
+             glslShaderParams.setDirty();
+         }
+     }
+@@ -689,16 +706,33 @@
+         renderSystem->debugAnnotationPop();
+     }
+     //-------------------------------------------------------------------------
+-    void VctLighting::runBounce( uint32 bounceIteration )
++    void VctLighting::runBounce()
+     {
+         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
+         renderSystem->debugAnnotationPush( "VctLighting Bounce" );
+ 
+         mBounceVoxelCellSize->setManualValue( mVoxelizer->getVoxelCellSize() );
+         mBounceInvVoxelResolution->setManualValue( 1.0f / mVoxelizer->getVoxelResolution() );
+-        // mBounceIterationDampening->setManualValue( 1.0f /
+-        //                                           ( Math::PI * ( bounceIteration * 0.5f + 1.0f ) ) );
+-        mBounceIterationDampening->setManualValue( 1.0f / (float)Math::PI );
++        // JAHSHAKA PATCH 0076: ONE, AND IT IS THE PHYSICS.
++        //
++        // The bounce adds `albedo * G` where G is the six-cone weighted mean of the
++        // voxel radiance -- weights that sum to 1 over a cosine-ish set, i.e. an
++        // ESTIMATE OF E / PI already (that is exactly why HlmsPbs consumes the same
++        // gather as `envColourD` with no division of its own,
++        // 200.BRDFs_piece_ps.any: Rd = envColourD * albedo). The bounced outgoing
++        // radiance of a Lambertian surface is rho * E / pi = rho * G: no further
++        // factor exists to apply.
++        //
++        // Upstream divided by pi here (and its commented-out line divided by an extra
++        // 1 + n/2 per pass). Both were fudges against the runaway this patch fixes at
++        // the cause: the job re-gathered the TOTAL and added to it, so the series was
++        // binomial in (1 + rho*G) and every extra pass amplified the first bounce
++        // instead of adding a dimmer one. With the Jacobi form -- new = direct +
++        // rho * G( total ) -- the series contracts by rho * f per pass on its own,
++        // and a dampening of 1/pi would simply make every bounce pi times too dark
++        // (which is what upstream's "more bounces for coarser cascades" stabilisation,
++        // deleted by PHOTON-M1, was compensating for).
++        mBounceIterationDampening->setManualValue( 1.0f );
+ 
+         const size_t numCascades = mExtraCascades.size() + 1u;
+ 
+@@ -924,12 +958,35 @@
+             texture->setPixelFormat( PFG_RGBA8_UNORM_SRGB );
+             texture->scheduleTransitionTo( GpuResidency::Resident );
+             mLightBounce = texture;
++
++            // JAHSHAKA PATCH 0076: the direct term's own volume, born and buried with
++            // the bounce texture -- it is the bounce iteration that needs it, and
++            // nothing else reads it. ONE mip: the bounce job reads it with a Load3D at
++            // the voxel it is writing (the fixed point's D term at this cell), never
++            // filtered and never at a coarser level, so the mip chain the total needs
++            // for the cone gather would be dead weight (+14 % of the volume).
++            texName.clear();
++            texName.a( "VctLightingDirect/Id", getId() );
++            TextureGpu *directTex = textureManager->createTexture(
++                texName.c_str(), GpuPageOutStrategy::Discard,
++                TextureFlags::Uav | TextureFlags::Reinterpretable, TextureTypes::Type3D );
++            directTex->setResolution( mLightVoxel[0]->getWidth(), mLightVoxel[0]->getHeight(),
++                                      mLightVoxel[0]->getDepth() );
++            directTex->setNumMipmaps( 1u );
++            directTex->setPixelFormat( PFG_RGBA8_UNORM_SRGB );
++            directTex->scheduleTransitionTo( GpuResidency::Resident );
++            mLightDirect = directTex;
+         }
+         else
+         {
+             restoreSwappedTextures();
+             textureManager->destroyTexture( mLightBounce );
+             mLightBounce = 0;
++            if( mLightDirect )
++            {
++                textureManager->destroyTexture( mLightDirect );  // JAHSHAKA PATCH 0076
++                mLightDirect = 0;
++            }
+         }
+ 
+         if( mLightVctBounceInject )
+@@ -996,6 +1053,31 @@
+         uavSlot.pixelFormat = PFG_RGBA8_UNORM;
+         mLightInjectionJob->_setUavTexture( 0, uavSlot );
+ 
++        // JAHSHAKA PATCH 0076: THE SAME DISPATCH WRITES THE DIRECT TERM TWICE -- once
++        // into the running total the bounce gathers from, once into the volume the
++        // bounce's fixed point needs as its D term. It is one extra image store per
++        // voxel inside a job that already walks every light's shadow ray per voxel;
++        // no copy, no second dispatch, no encoder switch.
++        //
++        // RE-ASSERTED PER INJECTION, both the property and the slot, for the same
++        // reason `correct_area_light_shadows` is above: "VCT/LightInjection" is ONE
++        // HlmsComputeJob shared by name by every VctLighting in the process, and the
++        // state in force belongs to whoever touched it last. A cascade with bounces
++        // and a volume without them would otherwise take each other's UAV count --
++        // and an unbound u1 on a shader that declares it is a dead descriptor.
++        // The count is change-guarded because setNumUavUnits() invalidates the PSO
++        // cache hash unconditionally.
++        const uint8 numUavsNeeded = mLightDirect ? 2u : 1u;
++        if( mLightInjectionJob->getNumUavUnits() != numUavsNeeded )
++            mLightInjectionJob->setNumUavUnits( numUavsNeeded );
++        mLightInjectionJob->setProperty( "vct_keep_direct", mLightDirect ? 1 : 0 );
++        if( mLightDirect )
++        {
++            uavSlot.texture = mLightDirect;
++            uavSlot.pixelFormat = PFG_RGBA8_UNORM;
++            mLightInjectionJob->_setUavTexture( 1, uavSlot );
++        }
++
+         float autoMultiplierValue = 0.0f;
+ 
+         const Vector3 voxelOrigin = mVoxelizer->getVoxelOrigin();
+@@ -1111,7 +1193,7 @@
+                              "VctLighting::update" );
+             }
+             for( uint32 i = 0u; i < numBounces; ++i )
+-                runBounce( i );
++                runBounce();
+         }
+ 
+         if( mDebugVoxelVisualizer )
+diff -u -r -N a/Samples/Media/VCT/LightInjection_cs.glsl b/Samples/Media/VCT/LightInjection_cs.glsl
+--- a/Samples/Media/VCT/LightInjection_cs.glsl	2026-09-17 20:46:28.320939451 +0200
++++ b/Samples/Media/VCT/LightInjection_cs.glsl	2026-09-17 20:46:28.321807514 +0200
+@@ -16,6 +16,17 @@
+ layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
+ uniform restrict writeonly image3D lightVoxel;
+ 
++// JAHSHAKA PATCH 0076: the DIRECT term's own volume, written by the same dispatch.
++// The bounce's fixed point is L = D + rho * G( L ) and needs D at every pass; the
++// total's two textures ping-pong, so D cannot be recovered from them after the first
++// pass. Declared only when the host has a volume to write it to (a VctLighting with
++// no bounce texture has no use for it): VctLighting::update() sets the property and
++// binds the slot per injection, because this job is shared by name process-wide.
++@property( vct_keep_direct )
++	layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
++	uniform restrict writeonly image3D directVoxel;
++@end
++
+ layout( local_size_x = @value( threads_per_group_x ),
+ 		local_size_y = @value( threads_per_group_y ),
+ 		local_size_z = @value( threads_per_group_z ) ) in;
+diff -u -r -N a/Samples/Media/VCT/LightInjection_piece_cs.any b/Samples/Media/VCT/LightInjection_piece_cs.any
+--- a/Samples/Media/VCT/LightInjection_piece_cs.any	2026-09-17 20:46:28.344063868 +0200
++++ b/Samples/Media/VCT/LightInjection_piece_cs.any	2026-09-17 20:46:28.344909762 +0200
+@@ -166,5 +166,11 @@
+ 	blockColour *= p_bakingMultiplier;
+ 
+ 	wshort3 voxelCelUvw = wshort3( gl_GlobalInvocationID.xyz );
+-	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, toSRGB( float4( blockColour, albedoVal.w ) ) );
++	float4 injectedVoxel = toSRGB( float4( blockColour, albedoVal.w ) );
++	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, injectedVoxel );
++	// JAHSHAKA PATCH 0076: the same value, kept apart as the bounce iteration's
++	// D term. One extra image store; no copy and no second dispatch.
++	@property( vct_keep_direct )
++		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, injectedVoxel );
++	@end
+ @end
+diff -u -r -N a/Samples/Media/VCT/LightVctBounceInject_cs.glsl b/Samples/Media/VCT/LightVctBounceInject_cs.glsl
+--- a/Samples/Media/VCT/LightVctBounceInject_cs.glsl	2026-09-17 20:46:28.328346605 +0200
++++ b/Samples/Media/VCT/LightVctBounceInject_cs.glsl	2026-09-17 20:46:28.329107234 +0200
+@@ -28,6 +28,13 @@
+ 	@add( vctTexUnit, hlms_num_vct_cascades )
+ @end
+ 
++// JAHSHAKA PATCH 0076: THE DIRECT TERM, at the unit after every probe array (the
++// same order VctLighting::setupBounceTextures binds them in). It is read with a
++// plain Load3D at the voxel this invocation writes -- the D of the fixed point
++// L = D + rho * G( L ) -- so it needs no sampler and no mip chain.
++vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directVoxel;
++@add( vctTexUnit, 1 )
++
+ vulkan( layout( ogre_s2 ) uniform sampler vctProbeSampler );
+ 
+ layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
+diff -u -r -N a/Samples/Media/VCT/LightVctBounceInject_piece_cs.any b/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
+--- a/Samples/Media/VCT/LightVctBounceInject_piece_cs.any	2026-09-17 20:46:28.335802030 +0200
++++ b/Samples/Media/VCT/LightVctBounceInject_piece_cs.any	2026-09-17 20:46:28.336087575 +0200
+@@ -265,7 +265,26 @@
+ 
+ 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, gl_GlobalInvocationID.xyz, 0 );
+ 	float4 normalVal = OGRE_Load3D( voxelNormalTex, gl_GlobalInvocationID.xyz, 0 );
+-	float4 currentLight = OGRE_Load3D( vctProbes[0], gl_GlobalInvocationID.xyz, 0 );
++	// JAHSHAKA PATCH 0076: JACOBI, NOT ACCUMULATION.
++	//
++	// What this pass writes is  new = direct + rho * G( total )  -- the fixed point
++	// of the radiance in the volume, iterated once. The base term is therefore the
++	// DIRECT injection, read from its own volume; the GATHER below still reads the
++	// running total (`vctProbes`), which is what makes the second pass see the first
++	// bounce and the chain see the cascades outside it.
++	//
++	// What stood here was `OGRE_Load3D( vctProbes[0], ... )`: the running TOTAL as
++	// the base, so the pass computed  new = total + rho * G( total )  and the series
++	// was S_n = (1 + rho*G)^n * D -- binomial. It never contracts; every pass
++	// re-amplifies the first bounce's energy, which is why upstream needed a 1/pi
++	// dampening (and a commented-out per-pass one, and "more bounces for coarser
++	// cascades") to keep the picture from running away. With this line the series
++	// contracts by rho * f per pass on its own, and the dampening is 1.
++	//
++	// The alpha channel is the voxel's COVERAGE, identical in both volumes (the
++	// injection writes albedoVal.w to each), so reading it here keeps it exactly as
++	// the accumulating form did.
++	float4 currentLight = OGRE_Load3D( directVoxel, gl_GlobalInvocationID.xyz, 0 );
+ 
+ 	if( anyInvocationARB( albedoVal.a > 0 ) )
+ 	{
