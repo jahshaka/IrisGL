@@ -656,6 +656,27 @@ void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
             auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
             sp->mInstancedStereo = true;
             sp->mCullCameraName  = cull;
+            // THE "VR" MATERIAL SCHEME (F2). Instanced stereo doubles every
+            // draw, including the low-level materials of the three SCREEN
+            // QUADS this engine draws — Ogre's sky, Ogre's atmosphere and our
+            // sun disc — but only a vertex shader that writes
+            // `gl_ViewportIndex` sends the second copy to the second eye, and
+            // only one that knows the eye's own projection points its rays
+            // where that eye looks. Their vertex programs do neither.
+            //
+            // A SCHEME is the pin's own per-pass answer: the pass pushes it
+            // onto the viewport (CompositorPassScene::execute), the scene
+            // manager pushes it into MaterialManager (SceneManager::
+            // _setViewport), and `Material::getBestTechnique` then picks the
+            // technique that declares it. So the VR pass gets a stereo-aware
+            // technique and EVERY OTHER PASS IN THE PROCESS — the desktop
+            // viewport drawing the same scene in the same frame, a thumbnail,
+            // a probe capture — keeps the technique it has always had, with
+            // not one byte of its picture moved. The session builds those
+            // techniques on the materials it finds (OgreVrSession.cpp,
+            // syncStereoQuads); a material without one simply falls back to
+            // its default, which is what a scene with no sky does.
+            sp->mMaterialScheme = kVrMaterialScheme;
             sp->mNumViewports    = 2u;
             for (int eye = 0; eye < 2; ++eye) {
                 const float left = eye == 0 ? 0.0f : 0.5f;

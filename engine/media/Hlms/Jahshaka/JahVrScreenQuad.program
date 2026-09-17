@@ -1,0 +1,30 @@
+// The stereo screen quad's vertex program (see JahVrScreenQuad_vs.glsl for the
+// defect it exists for). ONE program for all three of this engine's screen
+// quads — Ogre's sky, Ogre's atmosphere and our sun disc — which is why it
+// lives here as a program rather than inside any one material: the VR session
+// builds a "VR" technique on whichever of them the scene actually draws and
+// points it at this.
+//
+// NO GLSL (non-Vulkan) DELEGATE, on purpose: `gl_InstanceIndex` is Vulkan's
+// spelling of the instance and instanced stereo is a Vulkan path in this
+// engine. A material that asks for this program on GL3Plus would fail loudly,
+// which is the right answer — there is no stereo there to be right about.
+vertex_program Jahshaka/VrScreenQuad_vs glslvk
+{
+	source JahVrScreenQuad_vs.glsl
+
+	default_params
+	{
+		param_named_auto	rsDepthRange	rs_depth_range
+		// THE FIRST EYE, and every mono pass, ride these two.
+		param_named_auto	autoInvViewProj	inverse_viewproj_matrix
+		param_named_auto	autoCameraPos	camera_position
+		// The SECOND eye's four corner rays, written per frame by the session
+		// and by nobody else. The defaults point forward, so a frame drawn
+		// before the first write is a flat sky rather than a NaN.
+		param_named	jahEyeCorner[0]	float4	0 0 -1 0
+		param_named	jahEyeCorner[1]	float4	0 0 -1 0
+		param_named	jahEyeCorner[2]	float4	0 0 -1 0
+		param_named	jahEyeCorner[3]	float4	0 0 -1 0
+	}
+}

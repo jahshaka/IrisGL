@@ -50,6 +50,10 @@
 #include <string>
 #include <vector>
 
+#include "OgreRectangle2D2.h"
+#include "OgreTechnique.h"
+#include "OgreMaterialManager.h"
+
 #include "OgreVulkanRenderSystem.h"
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanQueue.h"
@@ -523,6 +527,13 @@ private:
     /// Has the Vulkan device gone? (F3 — the frame's commit is where a loss
     /// surfaces, and the engine's catch swallows it.)
     bool deviceLost() const;
+    /// THE THREE SCREEN QUADS, TAUGHT TO BE STEREO (F2). Builds — and keeps in
+    /// step with — a "VR" technique on every screen-quad material this scene
+    /// draws, and writes the per-eye rays into it.
+    void syncStereoQuads();
+    /// Takes those techniques off again, so a material a session touched is
+    /// exactly the material it was.
+    void dropStereoQuads();
     /// The one Vulkan routine: the two eye copies, recorded on the frame's own
     /// command buffer while the BarrierSolver still knows the target's state.
     void copyEyes();
@@ -558,10 +569,26 @@ private:
     /// pair because nothing on the Hlms path converts; this is what a caller
     /// that converts for itself (Camera::setCustomProjectionMatrix) needs.
     Ogre::Matrix4 mEyeProjection[2];
+    /// ...and the same pair AFTER the render system's conversion, which is the
+    /// convention every auto-param consumer works in (the screen quads
+    /// unproject a point at `rs_depth_range`'s far value).
+    Ogre::Matrix4 mEyeProjectionRS[2];
     Ogre::Vector3 mEyeWorldPos[2];
+    /// The second eye's four corner rays in world space (see the shader).
+    Ogre::Vector3 mEyeCornerRay[4];
     Ogre::Quaternion mEyeWorldRot[2];
     bool        mHavePose = false;
     bool        mViewEnabled = true;
+    /// THE SCREEN QUADS THIS SESSION SWAPPED, so every one of them can be put
+    /// back exactly as it was. The base material is held by STRONG reference:
+    /// an owner that drops its material while a session runs must not free it
+    /// under the quad that is about to have it back.
+    struct StereoQuad {
+        Ogre::Rectangle2D *quad = nullptr;
+        Ogre::MaterialPtr  baseMaterial;
+        Ogre::MaterialPtr  vrMaterial;
+    };
+    std::vector<StereoQuad> mStereoQuads;
     OgreView   *mView = nullptr;
     Ogre::Camera *mCullCamera = nullptr;
 
@@ -933,6 +960,8 @@ bool VrSession::beginFrame() {
     // which converts for itself, and would double-convert one of these).
     mEyeProjection[0] = proj[0];
     mEyeProjection[1] = proj[1];
+    mEyeProjectionRS[0] = projRS[0];
+    mEyeProjectionRS[1] = projRS[1];
     mAsymmetricFov =
         std::fabs(mViews[0].fov.angleLeft - mViews[1].fov.angleLeft) > 1e-6f ||
         std::fabs(mViews[0].fov.angleRight - mViews[1].fov.angleRight) > 1e-6f ||
@@ -943,19 +972,61 @@ bool VrSession::beginFrame() {
         cam->setPosition(worldHead);
         cam->setOrientation(headRot);
         cam->setVrData(&mVrData);
+        // THE RENDERING CAMERA CARRIES THE LEFT EYE'S PROJECTION, and it is not
+        // cosmetic (F2). Everything drawn by the Hlms takes its matrices from
+        // VrData and never looks at the camera's own projection — but the three
+        // SCREEN QUADS are low-level materials whose shaders read Ogre's
+        // AUTO-PARAMS, and an auto-param is the RENDERING camera's. Left at the
+        // View's CameraDesc angle, the sky in the headset would be drawn
+        // through a 45-degree frustum while the eyes render at eighty-odd.
+        //
+        // With the left eye's projection here, ONE stereo shader is correct
+        // everywhere: the first instance (the left eye) takes the auto-params
+        // it is already given, the second takes the right eye's pair written
+        // below, and the SAME material drawn by any OTHER pass in the process —
+        // the desktop mirror view, a probe capture, a thumbnail — takes that
+        // pass's own camera's auto-params and is therefore right too.
+        cam->setCustomProjectionMatrix(true, mEyeProjection[0]);
     }
     // THE EYES' WORLD POSES, kept for the mono control (vrEyeScreenshot): the
     // same composition the shader performs, `headToEye^-1` applied to the head,
     // so a control render cannot drift from what the eye actually drew.
     for (int eye = 0; eye < 2; ++eye) {
-        Ogre::Matrix4 world(headRot);
-        world.setTrans(worldHead);
-        world = world * eyeToHead[eye];
-        Ogre::Vector3 scale; Ogre::Quaternion rot;
-        world.decomposition(mEyeWorldPos[eye], scale, rot);
-        mEyeWorldRot[eye] = rot;
+        // DIRECTLY, not through a matrix decomposition: with the rig's origin
+        // at identity (phase 2) the eye's world pose IS the pose the runtime
+        // reported, scaled — origin(head) * (head^-1 * eye) reduces to the eye
+        // — and a QDU decomposition of the product is the same answer with
+        // seven digits instead of all of them. That difference is invisible
+        // everywhere except at a high-contrast edge, where it moves one pixel,
+        // which is exactly where a bit-exact assertion looks.
+        mEyeWorldPos[eye] = eyePos[eye] * mConfig.worldScale;
+        mEyeWorldRot[eye] = eyeRot[eye];
     }
     mHavePose = true;
+    // THE SECOND EYE'S FOUR CORNER RAYS (F2), in world space, from its own fov
+    // and its own orientation — the same quantity SceneManager writes into the
+    // sky quad's normals for a mono camera (OgreSceneManager.cpp:1487-1499),
+    // computed here for an eye no camera exists for. Order: bottom-left,
+    // bottom-right, top-left, top-right in the quad's own NDC, which is what
+    // the shader's bilinear pick expects; the suite pins that order by
+    // rendering the FIRST eye through the same path and comparing it with a
+    // mono render (JahVrScreenQuad_vs.glsl's note).
+    {
+        const XrFovf &f = mViews[1].fov;
+        const float l = std::tan(f.angleLeft), r = std::tan(f.angleRight);
+        const float u = std::tan(f.angleUp), d = std::tan(f.angleDown);
+        // THE QUAD'S v = 1 EDGE IS THE TOP OF THE PICTURE, and that is
+        // CALIBRATED, not assumed: the same convention question has two
+        // plausible answers on a Vulkan backend (the API's clip space is
+        // Y-down, the quad's own vertex data is not), and the suite settles it
+        // — with the up-tangent at v = 1 the second eye reads mean 0.66/255
+        // against a mono render of that eye, with the down-tangent 1.86 and
+        // three times as many pixels past the tolerance.
+        const float xs[4] = { l, r, l, r };
+        const float ys[4] = { d, d, u, u };
+        for (int c = 0; c < 4; ++c)
+            mEyeCornerRay[c] = mEyeWorldRot[1] * Ogre::Vector3(xs[c], ys[c], -1.0f);
+    }
     if (mCullCamera) {
         // THE CULL FRUSTUM MUST CONTAIN BOTH EYES, AND A UNION OF ANGLES AT THE
         // HEAD DOES NOT (F6). Two frusta that share an apex are contained by
@@ -995,6 +1066,8 @@ bool VrSession::beginFrame() {
         mCullCamera->setPosition(worldHead + headRot * Ogre::Vector3(0.0f, 0.0f, offset));
         mCullCamera->setOrientation(headRot);
     }
+    // THE SCREEN QUADS, with the poses this frame located (F2).
+    syncStereoQuads();
     ++mRendered;
     return true;
 }
@@ -1324,6 +1397,7 @@ VrSession::~VrSession() {
     // frame (the PiP lane's T6).
     destroyXr();
     teardownMirror();
+    dropStereoQuads();
     if (mView) {
         mView->removeWorkspaceListener(this);
         if (mView->camera()) mView->camera()->setVrData(nullptr);
@@ -1334,6 +1408,146 @@ VrSession::~VrSession() {
         mScene->sceneManager()->destroyCamera(mCullCamera);
         mCullCamera = nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE THREE SCREEN QUADS (F2): the sky, the atmosphere and the sun disc.
+//
+// WHAT THEY HAVE IN COMMON, and why one routine answers for all three: each is
+// a full-screen `Rectangle2D` drawn with a LOW-LEVEL material whose vertex
+// program turns the quad's corners into a camera ray. Instanced stereo doubles
+// their draw like every other (OgreRenderQueue.cpp:697-699), but their vertex
+// programs were written for ONE viewport — so both copies land in the first
+// eye and THE RIGHT EYE HAS NO SKY. (Measured on this lane's fixture before the
+// fix: the two halves of a worldScale-0 frame, which must be identical, differ
+// by 30,306 bytes with a worst of 255/255.)
+//
+// THE FIX IS A MATERIAL, AND IT HAS TO BE. The pin's per-pass MATERIAL SCHEME
+// (`CompositorPassSceneDef::mMaterialScheme`) looks like the answer and is not:
+// for a low-level material the technique is resolved into the renderable's
+// cached Hlms hash when its MATERIAL is set (`HlmsLowLevel::calculateHashFor`
+// via Renderable::setMaterial), not per pass, so a scheme switched on by the VR
+// pass changes nothing at all. Measured, not reasoned: the technique existed,
+// the shader compiled, and every eye still drew the default one.
+//
+// So the session gives each quad a CLONE of its material whose vertex program
+// is the stereo one, and puts the original back when it ends. `setMaterial` is
+// what re-resolves the hash, which is exactly the mechanism that was missing.
+//
+// AND THE CLONE IS CORRECT IN EVERY OTHER PASS TOO, which is what makes the
+// swap safe: the stereo shader takes the FIRST eye's ray from Ogre's ordinary
+// auto-params — the rendering camera's own inverse view-projection, which for
+// the VR view is the left eye's (see the camera's setCustomProjectionMatrix
+// above) and for the desktop mirror view, a probe capture or a thumbnail is
+// that camera's. Only the SECOND instance reads the pair written here, and only
+// a stereo pass ever draws a second instance.
+void VrSession::syncStereoQuads() {
+    if (!mScene || !mScene->sceneManager()) return;
+    Ogre::SceneManager *sm = mScene->sceneManager();
+
+    // The quads THIS scene actually draws, found by WHAT THEY ARE rather than
+    // by name: a screen quad is a Rectangle2D, and the ones that need an eye
+    // are the ones whose vertex program derives a camera ray.
+    Ogre::SceneManager::MovableObjectIterator it =
+        sm->getMovableObjectIterator(Ogre::Rectangle2DFactory::FACTORY_TYPE_NAME);
+    while (it.hasMoreElements()) {
+        Ogre::MovableObject *obj = it.getNext();
+        if (!obj) continue;
+        Ogre::Rectangle2D *quad = static_cast<Ogre::Rectangle2D *>(obj);
+        Ogre::MaterialPtr mat = quad->getMaterial();
+        if (!mat) continue;
+
+        StereoQuad *known = nullptr;
+        for (StereoQuad &q : mStereoQuads)
+            if (q.quad == quad) { known = &q; break; }
+
+        if (!known || known->vrMaterial != mat) {
+            // Either a quad we have not seen, or one whose owner has changed
+            // its material since (the sky method changed, the atmosphere was
+            // switched on). Either way the base material is what it is holding
+            // right now.
+            Ogre::Technique *base = mat->getTechnique(0u);
+            Ogre::Pass *basePass = base && base->getNumPasses() ? base->getPass(0u) : nullptr;
+            if (!basePass || !basePass->hasVertexProgram()) continue;
+            const Ogre::String &vs = basePass->getVertexProgramName();
+            // THE TWO PROGRAMS THAT READ A CAMERA RAY. Upstream's is shared by
+            // the sky and the atmosphere; the second is our sun disc's.
+            // Anything else drawn as a Rectangle2D is left alone, which is the
+            // right answer for a quad with no ray.
+            if (vs != "Ogre/Compositor/QuadCameraDirNoUV_vs" && vs != "Jahshaka/SunDisc_vs")
+                continue;
+
+            StereoQuad entry;
+            entry.quad = quad;
+            entry.baseMaterial = mat;
+            Ogre::MaterialPtr clone = mat->clone(mat->getName() + "/JahVrStereo");
+            if (!clone) continue;
+            Ogre::Technique *ct = clone->getTechnique(0u);
+            if (!ct || ct->getNumPasses() == 0u) continue;
+            ct->getPass(0u)->setVertexProgram("Jahshaka/VrScreenQuad_vs");
+            clone->compile(false);
+            clone->load();
+            entry.vrMaterial = clone;
+            quad->setMaterial(clone);       // ...which re-resolves the hash
+            if (known) *known = entry;
+            else       mStereoQuads.push_back(entry);
+            known = known ? known : &mStereoQuads.back();
+            vrLog("stereo screen quad: '%s' (was %s)", mat->getName().c_str(), vs.c_str());
+        }
+
+        // ---- what the owner keeps writing into the ORIGINAL, mirrored -----
+        // `SceneManager::setSky` binds the sky texture there, `AtmosphereNpr::
+        // _update` pushes its whole preset there every frame, our sun disc
+        // pushes its direction and colour there. The clone is a copy, so it has
+        // to be kept a copy.
+        Ogre::Technique *baseT = known->baseMaterial ? known->baseMaterial->getTechnique(0u) : nullptr;
+        Ogre::Technique *vrT = known->vrMaterial ? known->vrMaterial->getTechnique(0u) : nullptr;
+        Ogre::Pass *basePass = baseT && baseT->getNumPasses() ? baseT->getPass(0u) : nullptr;
+        Ogre::Pass *vrPass = vrT && vrT->getNumPasses() ? vrT->getPass(0u) : nullptr;
+        if (!basePass || !vrPass) continue;
+        if (basePass->hasFragmentProgram() && vrPass->hasFragmentProgram()) {
+            vrPass->getFragmentProgramParameters()->copyMatchingNamedConstantsFrom(
+                *basePass->getFragmentProgramParameters());
+        }
+        const unsigned short units =
+            std::min(basePass->getNumTextureUnitStates(), vrPass->getNumTextureUnitStates());
+        for (unsigned short u = 0; u < units; ++u) {
+            Ogre::TextureUnitState *src = basePass->getTextureUnitState(u);
+            Ogre::TextureUnitState *dst = vrPass->getTextureUnitState(u);
+            // `_getTexturePtr` is the only read side this class has (there is
+            // no getTexture); the underscore is upstream's spelling for "the
+            // resolved pointer", not a private.
+            if (src && dst && src->_getTexturePtr() != dst->_getTexturePtr())
+                dst->setTexture(src->_getTexturePtr());
+        }
+
+        // ---- and the RIGHT eye's four corner rays -------------------------
+        // (the left one rides Ogre's auto-params; see the shader's header for
+        // why this is four directions and not a matrix)
+        if (!vrPass->hasVertexProgram()) continue;
+        Ogre::GpuProgramParametersSharedPtr vp = vrPass->getVertexProgramParameters();
+        vp->setIgnoreMissingParams(true);
+        for (int corner = 0; corner < 4; ++corner) {
+            const Ogre::Vector3 &d = mEyeCornerRay[corner];
+            vp->setNamedConstant("jahEyeCorner[" + std::to_string(corner) + "]",
+                                 Ogre::Vector4(d.x, d.y, d.z, 0.0f));
+        }
+    }
+}
+
+void VrSession::dropStereoQuads() {
+    Ogre::MaterialManager *mm = Ogre::MaterialManager::getSingletonPtr();
+    for (StereoQuad &q : mStereoQuads) {
+        // The quad may be gone already (the sky switched off, the scene torn
+        // down): the entry holds the material by value, never the object.
+        if (q.quad && q.baseMaterial) q.quad->setMaterial(q.baseMaterial);
+        if (q.vrMaterial && mm) {
+            const Ogre::String name = q.vrMaterial->getName();
+            q.vrMaterial.reset();
+            mm->remove(name);
+        }
+    }
+    mStereoQuads.clear();
 }
 
 // ---------------------------------------------------------------------------
