@@ -2759,6 +2759,9 @@ public:
     void setNodeBackdrop(NodeId id, bool backdrop) override;
     void setNodeVrHelper(NodeId id, bool vrHelper) override;
     bool nodeVrHelper(NodeId id) const override;
+    void setVrProxyNodes(NodeId left, NodeId right) override;
+    void vrProxyNodes(NodeId out[2]) const override;
+    bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeBackdrop(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
     unsigned nodeLightMask(NodeId id) const override;
@@ -3146,9 +3149,10 @@ private:
         /// ALSO IN THE VR HELPER CHANNEL (kVrHelperBit's two-bit rule): a
         /// helper the HEADSET draws as well as the desk. Adds kVrHelperBit
         /// BESIDE kHelperBit rather than instead of it, which is the one case
-        /// the inversion scheme needs two bits for — the selection outline is
-        /// furniture in both pictures. Meaningless (and ignored) on a node that
-        /// is not a helper at all.
+        /// the inversion scheme needs two bits for — the controller proxies
+        /// (and phase 4b's ray and hit marker) are the wearer's furniture and
+        /// belong in every eye, in both modes. Meaningless (and ignored) on a
+        /// node that is not a helper at all.
         bool                      vrHelper = false;
         /// MOBILITY, as the document RESOLVED it (REALTIME_REFLECTIONS_SPEC
         /// §3.3). True = this node moves, and the renderer keeps it OUT of the
@@ -4156,6 +4160,11 @@ private:
     /// ours, and what was it told?"). Keyed by Ogre's never-reused id rather
     /// than the node address, which Ogre recycles.
     std::unordered_map<Ogre::IdType, NodeId> mNodeByOgreId;
+    /// THE HOST'S CONTROLLER PROXY NODES, left then right (Scene::setVrProxyNodes,
+    /// VR_SPEC §5 phase 4). The scene owns nothing about them but these two ids:
+    /// a running VrSession reads them once a frame, right after it has located
+    /// the wearer's hands, and writes this frame's pose into them.
+    NodeId              mVrProxyNode[2] = { 0, 0 };
     std::map<MeshId, MeshRec> mMeshes;
     /// ATOM stage 1: THE LOD ERRORS BY OGRE MESH — the one lookup that takes an
     /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the baked
@@ -5276,6 +5285,12 @@ VrState vrSessionState(const VrSession *);
 bool    vrSessionIsOver(const VrSession *);
 VrStatus vrSessionStatus(const VrSession *);
 View   *vrSessionView(const VrSession *);
+/// WHICH SCENE IS BEING WORN (VR-4-FIX finding 1). A session holds a raw
+/// `OgreScene *` and dereferences it every frame (the stereo quads) and at
+/// teardown (its cull camera), so `destroyScene` has to be able to ask — a host
+/// that closes a project while a preview runs would otherwise free the world
+/// out from under a live session.
+OgreScene *vrSessionScene(const VrSession *);
 void    vrSessionSetMirror(VrSession *, OgreView *);
 /// Places the reference space in the world (Engine::setVrOrigin). Position and
 /// a heading in degrees about +Y; never a pitch or a roll.

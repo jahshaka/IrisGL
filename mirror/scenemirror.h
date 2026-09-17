@@ -1619,9 +1619,12 @@ private:
     /// them — which is every scene, until somebody opens the GI overlay.
     int mGiVolLitVisible = -1;
     int mGiVolProbeVisible = -1;
-    // The VR proxies (phase 4): head, left hand, right hand. Same shape as the
-    // GI boxes above — created on first use, latched visibility, and nothing at
-    // all until a session asks for them.
+    // The VR proxies (phase 4): the wearer's LEFT and RIGHT hands, and no head
+    // marker (setVrProxies' note). Same shape as the GI boxes above — created
+    // on first use, latched visibility, and nothing at all until a session asks
+    // for them. A running session places them itself, inside its frame
+    // (Scene::setVrProxyNodes); the write below is the host's own best answer
+    // for a frame no session drew.
     bool mVrProxiesVisible = false;
     jahshaka::engine::VrStatus mVrStatus;
     jahshaka::engine::NodeId mVrProxyNode[2] = { 0, 0 };

@@ -371,6 +371,30 @@ void OgreEngine::destroyScene(Scene *scene) {
     if (!scene) return;
     for (auto it = mScenes.begin(); it != mScenes.end(); ++it) {
         if (it->get() != scene) continue;
+        // A SESSION MUST NOT OUTLIVE THE WORLD IT RENDERS (VR-4-FIX finding 1).
+        //
+        // The session holds a raw `OgreScene *`: it dereferences it every frame
+        // (syncStereoQuads' mark-and-sweep over the scene's Rectangle2Ds) and
+        // again in its destructor (the cull camera it created in that scene's
+        // manager). A host that closes a project while the editor's VR preview
+        // runs used to free this scene with all of that still live — a
+        // use-after-free one frame later, every time.
+        //
+        // The HOST ends it first and properly (EditorVrPreview::end, which also
+        // gives the viewport its fly keys back); this is the belt, so no host
+        // can repeat it. Ending here rather than at the top of the function is
+        // deliberate: only a session bound to THIS scene is anybody's business,
+        // and the two advanceResources() calls below are the drain its Views,
+        // RTTs and swapchains need — which is exactly the drain endVrSession
+        // relies on its caller for.
+        if (mVrSession && vrSessionScene(mVrSession) == it->get()) {
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka VR: a session was still rendering the scene '" + (*it)->name() +
+                    "' when it was destroyed - the engine ends it first",
+                Ogre::LML_CRITICAL);
+            endVrSession();
+            mVrMirrorView = nullptr;
+        }
         for (auto &v : mViews)
             if (v->scene() == scene) v->detachScene();
         // THE BELT ON THE TEARDOWN (lane OPEN-FRAMES-1). Destroying a scene

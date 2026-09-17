@@ -503,10 +503,11 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // exclusion from every capture, a channel a view can NOT mask out as
     // furniture.
     // ...AND A HELPER MAY BE IN BOTH HELPER CHANNELS (kVrHelperBit's two-bit
-    // rule): the selection outline is furniture the desk AND the headset draw,
-    // so its bit is added BESIDE the desktop one rather than replacing it. A
-    // backdrop is never in the VR channel — it is part of the picture and every
-    // view already draws it.
+    // rule): the controller proxies (and phase 4b's ray and hit marker) are the
+    // WEARER's furniture, drawn in every eye and at the desk, so their bit is
+    // added BESIDE the desktop one rather than replacing it. A backdrop is
+    // never in the VR channel — it is part of the picture and every view
+    // already draws it.
     if (n.helper)
         return n.backdrop ? kBackdropBit
                           : (kHelperBit | (n.vrHelper ? kVrHelperBit : 0u));
@@ -569,8 +570,14 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
     if (giBefore != giAfter)
         for (VctCascade &c : mVctCascades) c.itemsStale = true;
-    const Ogre::uint32 on = n.helper ? (n.backdrop ? kBackdropBit : kHelperBit)
-                                     : (n.movable ? kMovableBit : kVisibleBit);
+    // THE TWO-BIT RULE REACHES BILLBOARDS TOO (VR-4-FIX finding 9): a helper
+    // billboard set — an icon, and a phase-4b hit marker if it is built as one
+    // — carries kVrHelperBit beside kHelperBit exactly as an Item does, or the
+    // wearer's own furniture would be desk-only whenever it is not a mesh.
+    const Ogre::uint32 on = n.helper
+                                ? (n.backdrop ? kBackdropBit
+                                              : (kHelperBit | (n.vrHelper ? kVrHelperBit : 0u)))
+                                : (n.movable ? kMovableBit : kVisibleBit);
     if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? on : 0u);
     if (n.particleDef) n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
 }
@@ -718,7 +725,10 @@ Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {
     // resolves every emitter movable (spec §3.6, owner decision O4): the probes
     // freeze whatever they last captured of it and SSR and the mirrors show it
     // live. The channel is what implements that here.
-    return n.helper ? (n.backdrop ? kBackdropBit : kHelperBit)
+    // Helper emitters follow the two-bit rule like every other helper
+    // (VR-4-FIX finding 9): the wearer's channel is ADDITIVE here too.
+    return n.helper ? (n.backdrop ? kBackdropBit
+                                  : (kHelperBit | (n.vrHelper ? kVrHelperBit : 0u)))
                     : (n.movable ? kMovableBit : kVisibleBit);
 }
 
@@ -757,6 +767,35 @@ void OgreScene::setNodeVrHelper(NodeId id, bool vrHelper) {
 bool OgreScene::nodeVrHelper(NodeId id) const {
     auto it = mNodes.find(id);
     return it != mNodes.end() && it->second.vrHelper;
+}
+
+// THE WEARER'S HANDS ARE PLACED INSIDE THE FRAME (Scene::setVrProxyNodes,
+// VR-4-FIX finding 4). Two ids and nothing else: the nodes, their line meshes,
+// their materials and their visibility stay the host's — a scene that never
+// wears a headset carries two zeroes.
+void OgreScene::setVrProxyNodes(NodeId left, NodeId right) {
+    mVrProxyNode[0] = left;
+    mVrProxyNode[1] = right;
+}
+
+void OgreScene::vrProxyNodes(NodeId out[2]) const {
+    out[0] = mVrProxyNode[0];
+    out[1] = mVrProxyNode[1];
+}
+
+// WHERE A NODE ACTUALLY IS. `_getDerived*Updated` walks up to whatever parent
+// chain the node hangs from and brings the derived transform up to date first,
+// which is the whole reason this is not `node->getPosition()`: the caller is
+// asking about the picture, and the scene manager's own walk happens later in
+// the frame.
+bool OgreScene::nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const {
+    Ogre::SceneNode *n = node(id);
+    if (!n) return false;
+    const Ogre::Vector3 p = n->_getDerivedPositionUpdated();
+    const Ogre::Quaternion q = n->_getDerivedOrientationUpdated();
+    position = Vec3(p.x, p.y, p.z);
+    rotation = Quat(q.x, q.y, q.z, q.w);
+    return true;
 }
 
 // A BACKDROP IS A HELPER (kBackdropBit's note), so this goes through the same

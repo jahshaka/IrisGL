@@ -604,16 +604,17 @@ namespace {
 /// as `RESERVED & ~kHelperBit` and nothing else moves.
 ///
 /// TWO CHANNELS SINCE VR PHASE 4 (kVrHelperBit's two-bit rule), and `drop` says
-/// which of them this view refuses: the desktop editor drops the VR channel,
-/// the VR session's view drops the desktop one, the Player and every capture
-/// shape drop both. The selection outline carries BOTH bits and is therefore
-/// still drawn by a view that keeps either — which is what lets a wearer see
-/// what is selected while seeing none of the desk's furniture.
+/// which of them this view refuses: the VR session's view drops the desktop one
+/// unless its host asked for the editor's furniture, the Player's desktop
+/// window and every capture shape drop both, and the editor viewport keeps
+/// both. The CONTROLLER PROXIES carry both bits and are therefore drawn by a
+/// view that keeps either — which is what puts the wearer's own hands in a
+/// Player's eyes (no desk furniture at all) and at the desk alike.
 /// Which helper channels THIS view refuses (the two-bit rule). Zero = keep
 /// everything, which is what the default desktop chain used to be — except that
 /// a view which never asked for the VR channel now says so, and since nothing
-/// but the selection outline carries that bit (and the outline carries the
-/// desktop one as well) no pixel moves for it.
+/// but the controller proxies carries that bit (and they carry the desktop one
+/// as well) no pixel moves for it in a scene that has never worn a headset.
 Ogre::uint32 helperBitsToDrop(const ChainDesc &desc) {
     Ogre::uint32 drop = 0u;
     if (!desc.helpers) drop |= kHelperBit;
