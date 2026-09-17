@@ -820,6 +820,13 @@ struct ChainDesc {
     /// `exposure` it is a CLEAR COLOUR, not a graph edit, so it is deliberately
     /// NOT part of sameShape() — OgreView::applyFixedExposure rewrites it live.
     float exposureScale = 0.0f;
+    /// THE METER (EXPOSURE-2): its pattern and its percentile clips. UNIFORMS on
+    /// the meter's compute jobs, exactly like `exposure` is a uniform on the
+    /// resolve — so they are deliberately NOT part of sameShape(): changing the
+    /// metering pattern must not rebuild a compositor graph.
+    ExposureMeterPattern meterPattern = ExposureMeterPattern::CentreWeighted;
+    float meterLowPercent = 10.0f;
+    float meterHighPercent = 90.0f;
     bool  bloom = false;            ///< rides the HDR node at ~zero marginal cost
     float bloomThreshold = 5.0f;    ///< bright-pass start, in the sample's units
     float bloomKnee = 2.0f;         ///< ramp WIDTH above it (A-6); 2.0 = the old hard-coded value
@@ -1165,6 +1172,9 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 // whose chain has effects, and every other view lives with that.
 void initHdrMsaa(unsigned samples);
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
+/// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
+/// meter's compute jobs; only meaningful for the form that measures.
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent);
 void setBloomThreshold(float minThreshold, float fullColourThreshold);
 void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);

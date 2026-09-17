@@ -27,6 +27,49 @@
 			"uav_units" : 1
 		},
 
+		"Jahshaka/HdrMeterClear" :
+		{
+			"threads_per_group" : [64, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahHdrMeterClear_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"inform_shader_of_texture_data_change" : true,
+			"uav_units" : 1
+		},
+
+		"Jahshaka/HdrMeterBuild" :
+		{
+			"threads_per_group" : [8, 8, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahHdrMeterBuild_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"inform_shader_of_texture_data_change" : true,
+			"textures" : [ {} ],
+			"thread_groups_based_on_texture" : { "slot" : 0, "divisor" : [4, 4, 1] },
+			"uav_units" : 1,
+			"params" :
+			[
+				["meterParams", [1.0, 2.7725887, 0.025, 0.05], "float"]
+			]
+		},
+
+		"Jahshaka/HdrMeterResolve" :
+		{
+			"threads_per_group" : [1, 1, 1],
+			"thread_groups" : [1, 1, 1],
+			"source" : "JahHdrMeterResolve_cs",
+			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
+			"inform_shader_of_texture_data_change" : true,
+			"textures" : [ {} ],
+			"uav_units" : 2,
+			"params" :
+			[
+				["exposure", [138.5833, 5.0, 10.0, 0.0], "float"],
+				["meterClip", [0.1, 0.9, 0.0, 0.0], "float"],
+				["timeSinceLast", "frame_time", 1]
+			]
+		},
+
 		"Jahshaka/HzbSeed" :
 		{
 			"threads_per_group" : [8, 8, 1],

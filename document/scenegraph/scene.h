@@ -562,6 +562,21 @@ public:
     /// them apart.
     float exposureMin;
     float exposureMax;
+    /// THE METER (EXPOSURE-2), read only in Auto. WHERE the meter looks — a
+    /// camera's metering pattern — and WHICH SLICE of what it sees it believes.
+    ///
+    /// They are two different bounds and both are needed. The percentile clips
+    /// throw away OUTLIERS (a sun disc, a blown window, a specular firefly are
+    /// a few percent of the metered weight and are cut, where the mean of logs
+    /// this engine used to take had no resistance at all). The PATTERN is what
+    /// bounds the other case, the one clipping cannot touch: a white surface
+    /// filling 60-90 % of the frame is inside any sane percentile band, so only
+    /// WHERE the meter looks can keep it from normalising the whole picture.
+    iris::ExposureMetering exposureMetering;
+    /// The percentiles of the metered weight, darkest first, averaged between.
+    /// 10 and 90. Kept ordered; a degenerate pair means "the whole frame".
+    float exposureMeterLowPercent;
+    float exposureMeterHighPercent;
     /// TRANSIENT, NEVER SERIALISED (EXPOSURE-1). True when the file this scene
     /// was read from carried the RETIRED chain-unit `exposure` keys and nothing
     /// else, so the reader ignored them and the scene opened at the

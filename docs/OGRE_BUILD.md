@@ -861,6 +861,19 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     remove — **an `x == x` NaN test anywhere in this tree's shaders is a no-op.**
     Bit-identical for every frame whose samples were all finite and non-negative;
     `--engine-selftest` hash UNCHANGED (`b55e2d5d…`). Guarded by `hdr.drag_stable`.
+    **INERT ON JAHSHAKA'S FRAME PATH SINCE EXPOSURE-2 (2026-09-17), AND KEPT
+    DELIBERATELY.** 0034 and 0042 patch the two GLSL files of the pin's
+    64/16/4/1 luminance LADDER, and Jahshaka's chain does not run that ladder any
+    more: the automatic exposure is a compute HISTOGRAM of our own
+    (`engine/media/Hlms/Jahshaka/JahHdrMeter*_cs.glsl`), where an unusable sample
+    is not BOUNDED but simply NOT BINNED — a mean had to clamp one because it
+    could not drop it, and a histogram can. Both patches stay applied because
+    they are correct fixes to upstream media that upstream's own HDR sample and
+    compositor still use, and because the measurement in this entry is the
+    record that produced the bit-level NaN rule the new meter also follows.
+    Neither is a candidate for deletion on cost grounds (they are MEDIA-only:
+    no Ogre rebuild). If the stack is ever squashed (PATCHES-2), they belong
+    together.
 43. **0043-prepass-hands-back-the-roughness-it-wrote** (MEDIA) — in PrePassUse
     mode the shading pass reads its normal and its shadow term out of the
     G-buffer, but upstream lets it read the ROUGHNESS back only when the material

@@ -138,6 +138,9 @@ ChainDesc OgreView::chainDesc() const {
     d.exposureMin    = mPostFx.exposureMin;
     d.exposureMax    = mPostFx.exposureMax;
     d.exposureScale  = mPostFx.exposureScale;
+    d.meterPattern   = mPostFx.meterPattern;
+    d.meterLowPercent  = mPostFx.meterLowPercent;
+    d.meterHighPercent = mPostFx.meterHighPercent;
     // Bloom rides the HDR node; without HDR there is nothing to bright-pass.
     d.bloom          = mPostFx.bloom && mPostFx.hdr;
     d.bloomThreshold = mPostFx.bloomThreshold;

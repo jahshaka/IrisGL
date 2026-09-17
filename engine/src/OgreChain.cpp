@@ -152,9 +152,40 @@ inline float resolveFixedInverseLuminance(float exposureScale, float exposure) {
 
 constexpr const char *kOldLum  = "jahOldLum";
 constexpr const char *kLum     = "jahLum";
-constexpr const char *kLumIter0 = "jahLumIter0";
-constexpr const char *kLumIter1 = "jahLumIter1";
-constexpr const char *kLumIter2 = "jahLumIter2";
+/// THE METER'S HISTOGRAM (EXPOSURE-2). One R32_UINT texture, `kHistBins` wide
+/// and TWO rows tall: row 0 the metered weight per log-luminance bin, row 1 the
+/// weighted log-luminance OFFSET inside that bin. The pin's five-quad
+/// 64/16/4/1 reduction ladder (`jahLumIter0..2`, a MEAN OF LOGS over a sparse
+/// grid) is GONE with it — a mean has no resistance, and the three defects that
+/// followed from that are written out in JahHdrMeterBuild_cs's header.
+///
+/// 128 bins over thirty stops is 0.234 stops a bin, and the bin width bounds
+/// NOTHING: row 1 lets the resolve reconstruct each bin's true weighted mean
+/// (only the two bins the percentile window cuts through are approximated).
+constexpr const char *kLumHist = "jahLumHist";
+constexpr unsigned kHistBins = 128u;
+/// THE METER'S THREE COMPUTE JOBS. Declared in
+/// engine/media/Hlms/Jahshaka/JahshakaCompute.material.json.
+constexpr const char *kMeterClearJob   = "Jahshaka/HdrMeterClear";
+constexpr const char *kMeterBuildJob   = "Jahshaka/HdrMeterBuild";
+constexpr const char *kMeterResolveJob = "Jahshaka/HdrMeterResolve";
+
+/// CAN THIS BACKEND RUN THE METER? The three jobs' sources are GLSL, like every
+/// other Jahshaka compute job (the HZB, the indirect dispatch pair), so the
+/// answer is "the compute Hlms compiles a GLSL profile and the jobs parsed".
+/// Asked at graph-build time rather than assumed, because the alternative is a
+/// throw from inside the first dispatch of a frame.
+bool meterJobsPresent() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    if (!hc) return false;
+    const Ogre::String &profile = hc->getShaderProfile();
+    if (profile != "glsl" && profile != "glslvk") return false;
+    return hc->findComputeJobNoThrow(kMeterClearJob) &&
+           hc->findComputeJobNoThrow(kMeterBuildJob) &&
+           hc->findComputeJobNoThrow(kMeterResolveJob);
+}
 /// Bloom ping-pong, at a FIXED 256x256 — the sample's own layout, and the
 /// reason bloom is resolution-independent and nearly free.
 constexpr const char *kBlur0 = "jahBlur0";
@@ -904,13 +935,59 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         if (!desc.tonemapFixed) {
             // keep_content: the 1x1 luminance history is read next frame, so it
             // must NOT be DiscardableContent.
-            auto *td = addTex(n, kOldLum, Ogre::PFG_R16_FLOAT, 1u, 1u);
+            //
+            // R32_FLOAT SINCE EXPOSURE-2, AND THAT IS A FIX, MEASURED. The
+            // adaptation is a first-order filter that moves 2.284 % of the gap
+            // per frame, so as it closes on the measurement its per-frame step
+            // shrinks — and in a HALF float near 6.7 the step size is 0.0039, so
+            // the recurrence FROZE while it was still up to 0.17 (2.5 %, 0.036
+            // stops) short of the number the meter had measured. Read off a
+            // uniform frame of known radiance: the meter reported 3.0176 (right,
+            // to the half float it is quantised into) and the grade settled at
+            // 3.0442. A single-channel 1x1 texture costs four bytes instead of
+            // two; the dead zone is gone and the suite can assert the arithmetic
+            // outright. The FIXED form keeps its half float: its 1x1 is a clear
+            // colour, there is no recurrence to stall, and changing its
+            // precision would move every pixel of every manual-exposure picture.
+            auto *td = addTex(n, kOldLum, Ogre::PFG_R32_FLOAT, 1u, 1u);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
-            addTex(n, kLumIter0, Ogre::PFG_R16_FLOAT, 64u, 64u);
-            addTex(n, kLumIter1, Ogre::PFG_R16_FLOAT, 16u, 16u);
-            addTex(n, kLumIter2, Ogre::PFG_R16_FLOAT, 4u, 4u);
+            // THE HISTOGRAM. No RenderTargetView — nothing ever renders into it;
+            // the clear job writes it, the build job adds into it atomically and
+            // the resolve reads it. RenderToTexture is claimed anyway because
+            // TextureDefinitionBase::createTextures calls _setDepthBufferDefaults
+            // unconditionally and throws on anything else (the HZB's note says
+            // the same, for the same reason). R32_UINT and not a wider integer
+            // format deliberately: a ComputeTools::clearUavUint on an
+            // RGBA32_UINT UAV loses the device on this driver (VOXMERGE-1,
+            // 2026-09-16), R32 clears cleanly, and this one is cleared by our
+            // own job in any case.
+            // Only where the meter can actually run (meterJobsPresent): on a
+            // backend without it the fallback grades at the authored exposure
+            // and there is no histogram to allocate.
+            if (meterJobsPresent()) {
+                auto *h = n->addTextureDefinition(kLumHist);
+                h->width = kHistBins; h->height = 2u;
+                h->widthFactor = 0.0f; h->heightFactor = 0.0f;
+                h->format = Ogre::PFG_R32_UINT;
+                h->depthBufferId = 0;
+                h->fsaa = "1";
+                h->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
+            }
         }
-        addTex(n, kLum,      Ogre::PFG_R16_FLOAT, 1u, 1u);
+        {
+            // R32_FLOAT for the form that MEASURES (see kOldLum's note: the
+            // adaptation recurrence stalls in a half float), R16_FLOAT for the
+            // form that clears it to a constant.
+            auto *td = addTex(n, kLum,
+                              desc.tonemapFixed ? Ogre::PFG_R16_FLOAT : Ogre::PFG_R32_FLOAT,
+                              1u, 1u);
+            // The AUTO form's 1x1 is written by a COMPUTE pass (the meter's
+            // resolve) and then SAMPLED by the tonemapper and the bright pass —
+            // a hand-off the compositor's barrier solver inserts for us, exactly
+            // as upstream's own TutorialCompute01 documents. The FIXED form
+            // still CLEARS it, so the Uav flag is added only where it is used.
+            if (!desc.tonemapFixed) td->textureFlags |= Ogre::TextureFlags::Uav;
+        }
         // R10G10B10A2 rather than FP16: the pin's own note says FP16 bloom
         // buffers cost 0.748 ms on an HD 7770 at 1080p for no visible gain.
         {
@@ -1585,28 +1662,67 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // it — this chain and the picture-in-picture inset).
         handlesOut.fixedExposure =
             addFixedExposureClear(n, kLum, desc.exposureScale, desc.exposure);
-      } else {
+      } else if (meterJobsPresent()) {
+        // ---- THE HISTOGRAM METER (EXPOSURE-2) ---------------------------
+        // Three compute dispatches where the pin had four quads: clear the
+        // bins, bin every sampled pixel with the metering pattern's weight,
+        // and resolve the percentile-clipped mean into the 1x1 the tonemapper
+        // samples. The WHY is in JahHdrMeterBuild_cs's header; the short form
+        // is that a mean of logs has no resistance and a histogram does.
         {
-            auto *q = addQuad(n, kLumIter0, "HDR/DownScale01_SumLumStart", "Jahshaka HDR luminance start");
-            q->addQuadTextureSource(0, sceneResult);
+            Ogre::CompositorTargetDef *t = n->addTargetPass("");
+            t->setNumPasses(1);
+            auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
+                t->addPass(Ogre::PASS_COMPUTE));
+            c->mJobName = kMeterClearJob;
+            c->mProfilingId = "Jahshaka HDR meter clear";
+            c->addUavSource(0, kLumHist, Ogre::ResourceAccess::Write, 0, 0,
+                            Ogre::PFG_UNKNOWN, false);
         }
         {
-            auto *q = addQuad(n, kLumIter1, "HDR/DownScale02_SumLumIterative", "Jahshaka HDR luminance");
-            q->addQuadTextureSource(0, kLumIter0);
+            Ogre::CompositorTargetDef *t = n->addTargetPass("");
+            t->setNumPasses(1);
+            auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
+                t->addPass(Ogre::PASS_COMPUTE));
+            c->mJobName = kMeterBuildJob;
+            c->mProfilingId = "Jahshaka HDR meter histogram";
+            c->addTextureSource(0, sceneResult);
+            // ReadWrite, not Write: every sample is an imageAtomicAdd, and the
+            // barrier solver has to know this pass reads the bins the pass
+            // before it cleared.
+            c->addUavSource(0, kLumHist, Ogre::ResourceAccess::ReadWrite, 0, 0,
+                            Ogre::PFG_UNKNOWN, false);
         }
         {
-            auto *q = addQuad(n, kLumIter2, "HDR/DownScale02_SumLumIterative", "Jahshaka HDR luminance");
-            q->addQuadTextureSource(0, kLumIter1);
-        }
-        {
-            auto *q = addQuad(n, kLum, "HDR/DownScale03_SumLumEnd", "Jahshaka HDR luminance end");
-            q->addQuadTextureSource(0, kLumIter2);
-            q->addQuadTextureSource(1, kOldLum);
+            Ogre::CompositorTargetDef *t = n->addTargetPass("");
+            t->setNumPasses(1);
+            auto *c = static_cast<Ogre::CompositorPassComputeDef *>(
+                t->addPass(Ogre::PASS_COMPUTE));
+            c->mJobName = kMeterResolveJob;
+            c->mProfilingId = "Jahshaka HDR meter resolve";
+            c->addTextureSource(0, kOldLum);
+            c->addUavSource(0, kLum, Ogre::ResourceAccess::Write, 0, 0,
+                            Ogre::PFG_UNKNOWN, false);
+            c->addUavSource(1, kLumHist, Ogre::ResourceAccess::Read, 0, 0,
+                            Ogre::PFG_UNKNOWN, false);
         }
         {
             auto *q = addQuad(n, kOldLum, "Ogre/Copy/1xFP32", "Jahshaka HDR luminance history");
             q->addQuadTextureSource(0, kLum);
         }
+      } else {
+        // NO COMPUTE METER ON THIS SYNTAX. The meter's three jobs are GLSL
+        // sources (like every Jahshaka compute job — the HZB and the indirect
+        // dispatch pair are the precedent), so on a backend whose Hlms compiles
+        // Metal or HLSL there is nothing to dispatch. Grading at the authored
+        // exposure is the one honest answer: it is the picture Manual renders,
+        // it is exact from the first frame, and it is what a thumbnail of the
+        // same world already gets. A silently black 1x1 is not.
+        //
+        // Recorded for the macOS session rather than papered over: porting the
+        // three sources to MSL is the fix, and it cannot be verified from here.
+        handlesOut.fixedExposure =
+            addFixedExposureClear(n, kLum, desc.exposureScale, desc.exposure);
       }
         // BLOOM RUNS FOR BOTH EXPOSURE FORMS, and so does its stand-in clear:
         // HDR/FinalToneMapping samples the bloom buffer unconditionally, so
@@ -2338,14 +2454,61 @@ void initHdrMsaa(unsigned samples) {
     recompile("HDR/Resolve_4xFP32_HDR_Box", defines);
 }
 
+namespace {
+/// A named uniform on one of the meter's compute jobs. Compute jobs are
+/// process-wide singletons exactly as the HDR materials were, so the per-frame
+/// push has the same shape and the same caveat it always had (the primary
+/// on-screen view's numbers win when two views disagree; see PostFxDesc).
+void setMeterParam(const char *jobName, const char *param, const Ogre::Vector4 &v) {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(jobName) : nullptr;
+    if (!job) return;
+    Ogre::ShaderParams &sp = job->getShaderParams("default");
+    Ogre::ShaderParams::Param *p = sp.findParameter(param);
+    if (!p) return;
+    p->setManualValue(v);
+    sp.setDirty();
+}
+}   // namespace
+
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure) {
-    Ogre::Pass *pass = materialPass("HDR/DownScale03_SumLumEnd");
-    if (!pass) return;
     // Verbatim from HdrUtils::setExposure — the shader wants
     // (1024 * e^(exposure-2), 7.5 - max, 7.5 - min), not the stops themselves.
-    const Ogre::Vector3 params(1024.0f * std::exp(exposure - 2.0f),
-                               7.5f - maxAutoExposure, 7.5f - minAutoExposure);
-    pass->getFragmentProgramParameters()->setNamedConstant("exposure", params);
+    // The two window terms are on the MEASUREMENT's axis, which is why the
+    // document converts them through iris::lens::meterGreyCardChain and not
+    // through the exposure's anchor (EXPOSURE-1's one-line lesson).
+    //
+    // It lands on the METER'S RESOLVE JOB since EXPOSURE-2 — the pass that used
+    // to read it (HDR/DownScale03_SumLumEnd) is not in the graph any more.
+    setMeterParam(kMeterResolveJob, "exposure",
+                  Ogre::Vector4(1024.0f * std::exp(exposure - 2.0f),
+                                7.5f - maxAutoExposure, 7.5f - minAutoExposure, 0.0f));
+}
+
+/// THE METERING PATTERN AND THE PERCENTILE CLIPS (EXPOSURE-2). Uniforms, so a
+/// pattern change is a number and never a graph rebuild.
+///
+/// The pattern's geometry is derived here from the two constants that DEFINE it
+/// (jahshaka::engine::meter) rather than typed twice: K is the Gaussian
+/// coefficient that puts half weight at `kCentreWeightedHalfRadius` half-frame-
+/// heights from the centre, and the spot's radius is derived in the shader from
+/// its AREA fraction so that the same 2.5 % holds on any window shape.
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent) {
+    const float k = float(std::log(2.0)) /
+                    (meter::kCentreWeightedHalfRadius * meter::kCentreWeightedHalfRadius);
+    setMeterParam(kMeterBuildJob, "meterParams",
+                  Ogre::Vector4(float(int(pattern)), k, meter::kSpotAreaFraction,
+                                meter::kCentreWeightedPedestal));
+    // Percentiles in, FRACTIONS out, ordered and inside [0, 1]: the shader walks
+    // a cumulative weight and a reversed or out-of-range pair would silently
+    // select nothing.
+    float lo = std::min(lowPercent, highPercent) * 0.01f;
+    float hi = std::max(lowPercent, highPercent) * 0.01f;
+    lo = std::min(std::max(lo, 0.0f), 1.0f);
+    hi = std::min(std::max(hi, 0.0f), 1.0f);
+    setMeterParam(kMeterResolveJob, "meterClip", Ogre::Vector4(lo, hi, 0.0f, 0.0f));
 }
 
 void setBloomThreshold(float minThreshold, float fullColourThreshold) {
@@ -2730,6 +2893,12 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
                       unsigned viewWidth, unsigned viewHeight) {
     if (desc.hdr) {
         setExposure(desc.exposure, desc.exposureMin, desc.exposureMax);
+        // The meter's own two settings. Pushed only for the form that measures:
+        // the fixed grade has no meter, and writing a process-wide job's
+        // uniforms for a view that never dispatches it would hand the next
+        // auto-exposed view somebody else's pattern.
+        if (!desc.tonemapFixed)
+            setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent);
         if (desc.bloom)
             setBloomThreshold(desc.bloomThreshold,
                               desc.bloomThreshold + std::max(0.01f, desc.bloomKnee));
