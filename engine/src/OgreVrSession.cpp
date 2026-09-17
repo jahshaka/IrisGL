@@ -27,8 +27,16 @@
 // does not render into the runtime's images (VR_SPEC §2.4 B — a ~250-400 line
 // SOURCE patch, phase 5 of the program). It submits ONE projection layer and
 // no depth layer (WiVRn does not advertise the extension; the submit function
-// takes the layer so Windows can turn it on without a refactor). It reads no
-// input and locates no hands: phase 4's.
+// takes the layer so Windows can turn it on without a refactor).
+//
+// PHASE 4 ADDED THE HANDS (the action set, the grip poses, the joints) and
+// PHASE 4b STAGE 1 ADDED THE INPUT (SPECS/VR_INPUT_SPEC.md §2): the aim pose,
+// the trigger, the squeeze, the menu button and the thumbstick, on four
+// suggested interaction profiles, plus one haptic output and the injection hook
+// every gesture test in the tree drives. What this file still does NOT do is
+// decide anything: no gesture, no selection, no locomotion rule lives here —
+// it reports what the wearer's hardware says, in world space, and draws the
+// ray the host computed.
 //
 // THE CONSTRAINT THAT OUTRANKS EVERYTHING HERE (VR_SPEC §0): without a headset
 // the tool is today's tool, unchanged. `EngineConfig::vr` defaults to Disabled,
@@ -109,6 +117,11 @@ View *vrSessionView(const VrSession *) { return nullptr; }
 OgreScene *vrSessionScene(const VrSession *) { return nullptr; }
 void vrSessionSetMirror(VrSession *, OgreView *) {}
 void vrSessionSetOrigin(VrSession *, const Vec3 &, float) {}
+bool vrSessionHasBoundProfile(const VrSession *, int) { return false; }
+bool vrSessionHaptic(VrSession *, int, float, float, std::string &error) {
+    error = "this build has no OpenXR support";
+    return false;
+}
 void vrSessionSyncMirror(VrSession *) {}
 bool vrSessionEyeScreenshot(VrSession *, unsigned, Image &, std::string &error) {
     error = "this build has no OpenXR support";
@@ -244,6 +257,10 @@ public:
     /// at all).
     bool         mHasHandTrackingExt = false;
     bool         mSystemHandTracking = false;
+    /// XR_EXT_hand_interaction is advertised AND enabled on the instance — the
+    /// one condition under which the `ext/hand_interaction_ext` profile's
+    /// bindings may be suggested at all.
+    bool         mHasHandInteractionExt = false;
     PFN_xrCreateHandTrackerEXT  CreateHandTracker = nullptr;
     PFN_xrDestroyHandTrackerEXT DestroyHandTracker = nullptr;
     PFN_xrLocateHandJointsEXT   LocateHandJoints = nullptr;
@@ -291,6 +308,15 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
         if (!std::strcmp(e.extensionName, "XR_KHR_composition_layer_depth")) mHasDepthLayer = true;
         if (!std::strcmp(e.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME))
             mHasHandTrackingExt = true;
+        // XR_EXT_hand_interaction (phase 4b stage 1, the owner's answer 9): the
+        // profile that lets BARE HANDS press the same actions a controller
+        // presses — pinch for select, grasp for grab. Bound in stage 1 because
+        // a suggested-bindings block is forty lines and a runtime refusal is
+        // worth finding now; ACTED ON in stage 3, where the hand ergonomics
+        // live. Suggesting bindings for it needs the extension ENABLED, so the
+        // instance asks for it when the runtime advertises it.
+        if (!std::strcmp(e.extensionName, "XR_EXT_hand_interaction"))
+            mHasHandInteractionExt = true;
     }
     if (!hasEnable2) {
         reason = "the runtime does not advertise XR_KHR_vulkan_enable2";
@@ -312,10 +338,11 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
     // (It used to be spelled as a three-name initialiser that the appends then
     // overwrote — the same names twice, and the second copy read as a claim
     // that all three are always asked for.)
-    const char *want[3] = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr, nullptr };
+    const char *want[4] = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr, nullptr, nullptr };
     unsigned wantCount = 1u;
     if (mHasVisibilityMask) want[wantCount++] = "XR_KHR_visibility_mask";
     if (mHasHandTrackingExt) want[wantCount++] = XR_EXT_HAND_TRACKING_EXTENSION_NAME;
+    if (mHasHandInteractionExt) want[wantCount++] = "XR_EXT_hand_interaction";
     XrInstanceCreateInfo ici{ XR_TYPE_INSTANCE_CREATE_INFO };
     std::strncpy(ici.applicationInfo.applicationName, "Jahshaka",
                  XR_MAX_APPLICATION_NAME_SIZE - 1);
@@ -671,6 +698,17 @@ private:
     /// palm joints), compose through the rig. Called from the located branch of
     /// beginFrame with that frame's predicted display time.
     void locateHands(XrTime displayTime);
+    /// ONE FRAME'S CONTROLS (phase 4b stage 1): the aim pose located beside the
+    /// grip, then the trigger, the squeeze, the menu button and the stick read
+    /// off the same synced action set — and, for a hand a test has injected, the
+    /// injected sample instead of all of it. Called from locateHands, which is
+    /// the only place that has already synced the actions for this frame.
+    void readInput(XrTime displayTime, bool controllers);
+    /// WHAT THE RUNTIME HAS ACTUALLY BOUND, per hand
+    /// (`xrGetCurrentInteractionProfile`), logged once per change. It is the
+    /// answer a host needs to draw the right controller model, and the answer
+    /// the injection refusal rule asks for.
+    void readProfiles();
     /// The two hand-tracking trackers, when the system has the extension —
     /// created INDEPENDENTLY of the action set (finding 8), destroyed with it.
     void createHandTrackers();
@@ -678,7 +716,23 @@ private:
     /// Called from beginFrame immediately after locateHands, which is the only
     /// place the poses exist before the frame is drawn.
     void placeProxies();
+    /// THE RAY AND ITS HIT MARKER, PLACED IN THE FRAME THAT DRAWS THEM
+    /// (Scene::setVrRayNodes; VR_INPUT_SPEC §3). The host computes the ray and
+    /// the pick — the document owns the picker — and this scales the line,
+    /// stands the marker up and hides both when there is nothing to point at.
+    /// Re-anchors the line to THIS frame's aim pose when the state names a
+    /// hand, which is the same lag argument the proxies were moved here for.
+    void placeRay();
     void destroyActions();
+public:
+    /// One buzz on one hand (Engine::vrHaptic).
+    bool haptic(int hand, float amplitude01, float seconds, std::string &error);
+    /// Has the runtime bound a real interaction profile for this hand? (The
+    /// injection refusal rule — the wearer's hardware always wins.)
+    bool hasBoundProfile(int hand) const {
+        return hand >= 0 && hand < 2 && !mProfilePath[hand].empty();
+    }
+private:
 
     VrBoot     *mBoot;
     OgreEngine *mEngine;
@@ -775,6 +829,37 @@ private:
     XrActionSet mActionSet = XR_NULL_HANDLE;
     XrAction    mHandPoseAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     XrSpace     mHandSpace[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    // ---- THE CONTROLS (phase 4b stage 1, VR_INPUT_SPEC §2.2) --------------
+    /// THE AIM POSE, which is a different question from the grip: where the
+    /// hand POINTS, as the wearer's own hardware defines it. A pointer built
+    /// out of the grip pose disagrees with the controller it is held in.
+    XrAction    mAimPoseAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrSpace     mAimSpace[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    /// ONE FLOAT ACTION PER ANALOGUE CONTROL, never a float and a bool for the
+    /// same input: OpenXR converts a boolean input to 0.0/1.0 for a float
+    /// action (the simple profile's `select/click` and WMR's `squeeze/click`
+    /// arrive that way), so the press is OUR threshold over one number and
+    /// there is no second source of truth to disagree with it.
+    XrAction    mSelectAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrAction    mGrabAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrAction    mMenuAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrAction    mStickAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrAction    mStickClickAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrAction    mHapticAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    /// THIS FRAME'S INPUT, world space, as `VrStatus::input` reports it.
+    VrHandState mInput[2];
+    /// THE PRESS LATCH FOR THE HYSTERESIS (0.5 up, 0.4 down) — the only state
+    /// in the input path, and it is there so a trigger resting on the
+    /// threshold does not chatter a gesture on and off at the frame rate.
+    bool        mSelectLatch[2] = { false, false };
+    bool        mGrabLatch[2] = { false, false };
+    /// The interaction profile the runtime reports per hand, as its own path
+    /// string (empty = none bound: no controller, or an unfocused session).
+    std::string mProfilePath[2];
+    std::string mProfileSaid[2];   ///< what was last LOGGED, so a change is once
+    /// How many suggested-binding blocks were offered, and how many the runtime
+    /// took (VrStatus's note). Counted once, in createActions.
+    unsigned    mBindingProfiles = 0u, mBindingProfilesAccepted = 0u;
     XrHandTrackerEXT mHandTracker[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     bool        mHandActions = false;   ///< the set was attached
     bool        mHandJoints = false;    ///< a joint answered this session
@@ -1030,53 +1115,165 @@ void VrSession::createActions() {
         return;
     }
 
-    // TWO ACTIONS RATHER THAN ONE WITH SUBACTION PATHS. Both spellings are
-    // conformant; two is the one with no hidden state — each action has exactly
-    // one binding, one space and one answer, so "the left hand did not locate"
-    // cannot be a subaction path that was never in the action's list.
-    static const char *const kActionName[2] = { "left_hand_pose", "right_hand_pose" };
-    static const char *const kLocalized[2] = { "Left hand pose", "Right hand pose" };
-    static const char *const kBinding[2] = { "/user/hand/left/input/grip/pose",
-                                             "/user/hand/right/input/grip/pose" };
-    XrActionSuggestedBinding bindings[2] = {};
-    for (int h = 0; h < 2; ++h) {
-        XrActionCreateInfo aci{ XR_TYPE_ACTION_CREATE_INFO };
-        aci.actionType = XR_ACTION_TYPE_POSE_INPUT;
-        std::strncpy(aci.actionName, kActionName[h], XR_MAX_ACTION_NAME_SIZE - 1);
-        std::strncpy(aci.localizedActionName, kLocalized[h],
-                     XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
-        r = xrCreateAction(mActionSet, &aci, &mHandPoseAction[h]);
-        if (XR_FAILED(r)) {
-            vrLog("no hand poses: xrCreateAction(%s) failed (%s)", kActionName[h],
-                  xrResultName(mBoot->mInstance, r).c_str());
-            destroyActions();
-            return;
+    // TWO ACTIONS PER HAND PER INPUT, NEVER ONE WITH SUBACTION PATHS. Both
+    // spellings are conformant; this is the one with no hidden state — each
+    // action has exactly one binding, one space and one answer, so "the left
+    // hand did not locate" cannot be a subaction path that was never in the
+    // action's list.
+    static const char *const kSide[2] = { "left", "right" };
+    bool ok = true;
+    auto makeAction = [&](XrAction out[2], XrActionType type, const char *stem,
+                          const char *localizedStem) {
+        for (int h = 0; h < 2 && ok; ++h) {
+            char name[XR_MAX_ACTION_NAME_SIZE];
+            char loc[XR_MAX_LOCALIZED_ACTION_NAME_SIZE];
+            std::snprintf(name, sizeof(name), "%s_%s", kSide[h], stem);
+            std::snprintf(loc, sizeof(loc), "%s %s", h == 0 ? "Left" : "Right", localizedStem);
+            XrActionCreateInfo aci{ XR_TYPE_ACTION_CREATE_INFO };
+            aci.actionType = type;
+            std::strncpy(aci.actionName, name, XR_MAX_ACTION_NAME_SIZE - 1);
+            std::strncpy(aci.localizedActionName, loc, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+            const XrResult ar = xrCreateAction(mActionSet, &aci, &out[h]);
+            if (XR_FAILED(ar)) {
+                vrLog("no hand input: xrCreateAction(%s) failed (%s)", name,
+                      xrResultName(mBoot->mInstance, ar).c_str());
+                ok = false;
+            }
         }
-        XrPath path = XR_NULL_PATH;
-        if (XR_FAILED(xrStringToPath(mBoot->mInstance, kBinding[h], &path))) {
-            vrLog("no hand poses: xrStringToPath(%s) failed", kBinding[h]);
-            destroyActions();
-            return;
-        }
-        bindings[h].action = mHandPoseAction[h];
-        bindings[h].binding = path;
-    }
+    };
+    // THE POSES, then the CONTROLS, then the one OUTPUT. `hand_pose` keeps its
+    // phase-4 spelling so a runtime's own action-set logs stay comparable.
+    makeAction(mHandPoseAction, XR_ACTION_TYPE_POSE_INPUT, "hand_pose", "hand pose");
+    makeAction(mAimPoseAction, XR_ACTION_TYPE_POSE_INPUT, "aim_pose", "aim pose");
+    makeAction(mSelectAction, XR_ACTION_TYPE_FLOAT_INPUT, "select", "select");
+    makeAction(mGrabAction, XR_ACTION_TYPE_FLOAT_INPUT, "grab", "grab");
+    makeAction(mMenuAction, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "menu");
+    makeAction(mStickAction, XR_ACTION_TYPE_VECTOR2F_INPUT, "stick", "thumbstick");
+    makeAction(mStickClickAction, XR_ACTION_TYPE_BOOLEAN_INPUT, "stick_click",
+               "thumbstick press");
+    makeAction(mHapticAction, XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "haptic");
+    if (!ok) { destroyActions(); return; }
 
-    XrPath profile = XR_NULL_PATH;
-    if (XR_FAILED(xrStringToPath(mBoot->mInstance,
-                                 "/interaction_profiles/khr/simple_controller", &profile))) {
-        vrLog("no hand poses: the simple controller profile path did not resolve");
-        destroyActions();
-        return;
+    // =======================================================================
+    // THE SUGGESTED BINDINGS — FOUR PROFILES (VR_INPUT_SPEC §2.2, §17).
+    //
+    // A SUGGESTION IS NOT A REQUIREMENT. The runtime picks ONE profile for a
+    // wearer out of what it knows and what they are holding; every block below
+    // is an offer, and a runtime that does not know a profile refuses that
+    // block alone (XR_ERROR_PATH_UNSUPPORTED) with no effect on the others. So
+    // each is suggested on its own and COUNTED, and only a session where every
+    // block failed has no input at all.
+    //
+    //   khr/simple_controller      every conformant runtime, from whatever the
+    //                              wearer holds. No squeeze and no stick exist
+    //                              on it: those stay unbound rather than
+    //                              standing in a chord for them.
+    //   oculus/touch_controller    the owner's Quest Pro over WiVRn (a runtime
+    //                              that prefers facebook/touch_controller_pro
+    //                              still maps this one — the Pro is a superset).
+    //   microsoft/motion_controller  WMR — AND the gate's own input route:
+    //                              Monado's qwerty driver presses a WMR
+    //                              controller, so this block is what lets a
+    //                              keyboard press a real trigger through
+    //                              xrSyncActions on the rig (§17).
+    //   ext/hand_interaction_ext   BARE HANDS pressing the same actions: pinch
+    //                              for select, grasp for grab, aim-activate
+    //                              for menu. Bound now (the owner's answer 9),
+    //                              acted on in stage 3.
+    //
+    // THE RIGHT HAND'S MENU IS `b/click` ON TOUCH, not `menu/click`: the touch
+    // profile has a menu button on the LEFT controller only and reserves the
+    // right one's `system/click` to the runtime. Binding a path a profile does
+    // not have fails the WHOLE block, which is why every asymmetry here is
+    // spelled out rather than assumed.
+    // =======================================================================
+    struct ProfileDesc {
+        const char *profile;
+        const char *select;       ///< nullptr = unbound on this profile
+        const char *grab;
+        const char *menu[2];      ///< per hand; nullptr = unbound
+        const char *stick;
+        const char *stickClick;
+        const char *haptic;
+        bool        needsHandInteraction;
+    };
+    static const ProfileDesc kProfiles[] = {
+        { "/interaction_profiles/khr/simple_controller",
+          "/input/select/click", nullptr,
+          { "/input/menu/click", "/input/menu/click" },
+          nullptr, nullptr, "/output/haptic", false },
+        { "/interaction_profiles/oculus/touch_controller",
+          "/input/trigger/value", "/input/squeeze/value",
+          { "/input/menu/click", "/input/b/click" },
+          "/input/thumbstick", "/input/thumbstick/click", "/output/haptic", false },
+        { "/interaction_profiles/microsoft/motion_controller",
+          "/input/trigger/value", "/input/squeeze/click",
+          { "/input/menu/click", "/input/menu/click" },
+          "/input/thumbstick", "/input/thumbstick/click", "/output/haptic", false },
+        { "/interaction_profiles/ext/hand_interaction_ext",
+          "/input/pinch_ext/value", "/input/grasp_ext/value",
+          { "/input/aim_activate_ext/value", "/input/aim_activate_ext/value" },
+          nullptr, nullptr, nullptr, true },
+    };
+
+    auto pathOf = [&](const std::string &s, XrPath &out) {
+        return XR_SUCCEEDED(xrStringToPath(mBoot->mInstance, s.c_str(), &out));
+    };
+    for (const ProfileDesc &pd : kProfiles) {
+        if (pd.needsHandInteraction && !mBoot->mHasHandInteractionExt) continue;
+        std::vector<XrActionSuggestedBinding> binds;
+        bool built = true;
+        auto add = [&](XrAction action, const char *suffix, int h) {
+            if (!suffix || !built) return;
+            XrPath path = XR_NULL_PATH;
+            const std::string full = std::string("/user/hand/") + kSide[h] + suffix;
+            if (!pathOf(full, path)) {
+                vrLog("hand input: %s did not resolve — %s is not offered", full.c_str(),
+                      pd.profile);
+                built = false;
+                return;
+            }
+            XrActionSuggestedBinding b{};
+            b.action = action;
+            b.binding = path;
+            binds.push_back(b);
+        };
+        for (int h = 0; h < 2; ++h) {
+            add(mHandPoseAction[h], "/input/grip/pose", h);
+            add(mAimPoseAction[h], "/input/aim/pose", h);
+            add(mSelectAction[h], pd.select, h);
+            add(mGrabAction[h], pd.grab, h);
+            add(mMenuAction[h], pd.menu[h], h);
+            add(mStickAction[h], pd.stick, h);
+            add(mStickClickAction[h], pd.stickClick, h);
+            add(mHapticAction[h], pd.haptic, h);
+        }
+        if (!built || binds.empty()) continue;
+        XrPath profile = XR_NULL_PATH;
+        if (!pathOf(pd.profile, profile)) {
+            vrLog("hand input: the profile path %s did not resolve", pd.profile);
+            continue;
+        }
+        ++mBindingProfiles;
+        XrInteractionProfileSuggestedBinding sug{
+            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+        sug.interactionProfile = profile;
+        sug.countSuggestedBindings = uint32_t(binds.size());
+        sug.suggestedBindings = binds.data();
+        const XrResult sr = xrSuggestInteractionProfileBindings(mBoot->mInstance, &sug);
+        if (XR_FAILED(sr)) {
+            // NOT FATAL, and worth one line: a runtime that does not know a
+            // profile has simply not got that hardware.
+            vrLog("hand input: %s REFUSED %zu bindings (%s)", pd.profile, binds.size(),
+                  xrResultName(mBoot->mInstance, sr).c_str());
+            continue;
+        }
+        ++mBindingProfilesAccepted;
+        vrLog("hand input: %s took %zu bindings", pd.profile, binds.size());
     }
-    XrInteractionProfileSuggestedBinding sug{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
-    sug.interactionProfile = profile;
-    sug.countSuggestedBindings = 2;
-    sug.suggestedBindings = bindings;
-    r = xrSuggestInteractionProfileBindings(mBoot->mInstance, &sug);
-    if (XR_FAILED(r)) {
-        vrLog("no hand poses: xrSuggestInteractionProfileBindings failed (%s)",
-              xrResultName(mBoot->mInstance, r).c_str());
+    if (mBindingProfilesAccepted == 0u) {
+        vrLog("no hand input: the runtime accepted none of the %u suggested profiles",
+              mBindingProfiles);
         destroyActions();
         return;
     }
@@ -1092,24 +1289,30 @@ void VrSession::createActions() {
         return;
     }
 
-    // THE ACTION SPACES, one per hand. Created AFTER the attach (an action
+    // THE ACTION SPACES, two per hand. Created AFTER the attach (an action
     // space of an unattached action is not defined) and identity-posed: the
-    // grip pose is already where the hand is, and an offset here would be this
-    // engine's opinion about somebody else's controller.
+    // grip pose is already where the hand is, the aim pose is already where it
+    // points, and an offset here would be this engine's opinion about somebody
+    // else's controller.
     for (int h = 0; h < 2; ++h) {
-        XrActionSpaceCreateInfo asi{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
-        asi.action = mHandPoseAction[h];
-        asi.poseInActionSpace.orientation.w = 1.0f;
-        r = xrCreateActionSpace(mSession, &asi, &mHandSpace[h]);
-        if (XR_FAILED(r)) {
-            vrLog("no hand poses: xrCreateActionSpace(%d) failed (%s)", h,
-                  xrResultName(mBoot->mInstance, r).c_str());
-            destroyActions();
-            return;
+        XrAction actions[2] = { mHandPoseAction[h], mAimPoseAction[h] };
+        XrSpace *spaces[2] = { &mHandSpace[h], &mAimSpace[h] };
+        for (int k = 0; k < 2; ++k) {
+            XrActionSpaceCreateInfo asi{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
+            asi.action = actions[k];
+            asi.poseInActionSpace.orientation.w = 1.0f;
+            r = xrCreateActionSpace(mSession, &asi, spaces[k]);
+            if (XR_FAILED(r)) {
+                vrLog("no hand poses: xrCreateActionSpace(%d/%d) failed (%s)", h, k,
+                      xrResultName(mBoot->mInstance, r).c_str());
+                destroyActions();
+                return;
+            }
         }
     }
     mHandActions = true;
-    vrLog("hand poses: the action set is attached");
+    vrLog("hand input: the action set is attached (%u of %u profiles bound)",
+          mBindingProfilesAccepted, mBindingProfiles);
 }
 
 // THE JOINTS, where this system has them — AND INDEPENDENTLY OF THE ACTIONS
@@ -1222,6 +1425,188 @@ void VrSession::locateHands(XrTime displayTime) {
         mHandRot[h] = mOriginRot * rot;
         mHandValid[h] = true;
     }
+
+    // ...AND WHAT THE HANDS ARE DOING (phase 4b stage 1). Same frame, same
+    // sync: the actions were synced above, so every control below is this
+    // frame's answer and not the previous one's.
+    readInput(displayTime, controllers);
+}
+
+// ---------------------------------------------------------------------------
+// ONE FRAME'S CONTROLS (VR_INPUT_SPEC §2.3).
+//
+// WHAT IS OURS HERE AND WHAT IS NOT. The values are the runtime's; the FRAME
+// they arrive in is ours (world space, through the rig, exactly like the head
+// and the grip pose); the PRESS is ours (one threshold with hysteresis over the
+// analogue value, so a build has ONE answer to "is the trigger down" and a
+// controller resting on the line cannot chatter a gesture on and off at ninety
+// frames a second). Nothing here decides anything: no gesture, no selection, no
+// locomotion — that is the host's, above the boundary, where it can be tested
+// with no runtime at all.
+//
+// AN INACTIVE ACTION IS NOT AN ERROR. `xrGetActionState*` succeeds with
+// `isActive` false for a hand that holds nothing, for a profile that never
+// bound that input (the simple controller has no squeeze and no stick), and for
+// every frame of an unfocused session. The state then stays at its zero, which
+// is the honest answer, and the value is never LATCHED from an earlier frame.
+void VrSession::readInput(XrTime displayTime, bool controllers) {
+    for (int h = 0; h < 2; ++h) mInput[h] = VrHandState();
+    if (mSession == XR_NULL_HANDLE) return;
+    if (mHandActions) readProfiles();
+
+    auto toWorld = [&](const XrPosef &pose, VrPose &out) {
+        const Ogre::Vector3 p = mOriginPos +
+            mOriginRot * (toOgreVec(pose.position) * mConfig.worldScale);
+        const Ogre::Quaternion q = mOriginRot * toOgreQuat(pose.orientation);
+        out.position = Vec3(p.x, p.y, p.z);
+        out.rotation = Quat(q.x, q.y, q.z, q.w);
+        out.valid = true;
+    };
+    auto readFloat = [&](XrAction a, float &out) {
+        if (a == XR_NULL_HANDLE) return;
+        XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
+        gi.action = a;
+        XrActionStateFloat st{ XR_TYPE_ACTION_STATE_FLOAT };
+        if (XR_SUCCEEDED(xrGetActionStateFloat(mSession, &gi, &st)) && st.isActive == XR_TRUE)
+            out = st.currentState;
+    };
+    auto readBool = [&](XrAction a, bool &out) {
+        if (a == XR_NULL_HANDLE) return;
+        XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
+        gi.action = a;
+        XrActionStateBoolean st{ XR_TYPE_ACTION_STATE_BOOLEAN };
+        if (XR_SUCCEEDED(xrGetActionStateBoolean(mSession, &gi, &st)) && st.isActive == XR_TRUE)
+            out = st.currentState == XR_TRUE;
+    };
+    auto readStick = [&](XrAction a, float &x, float &y) {
+        if (a == XR_NULL_HANDLE) return;
+        XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
+        gi.action = a;
+        XrActionStateVector2f st{ XR_TYPE_ACTION_STATE_VECTOR2F };
+        if (XR_SUCCEEDED(xrGetActionStateVector2f(mSession, &gi, &st)) && st.isActive == XR_TRUE) {
+            x = st.currentState.x;
+            y = st.currentState.y;
+        }
+    };
+    // ONE THRESHOLD, TWO EDGES: 0.5 to press, 0.4 to release.
+    auto press = [](float v, bool &latch) {
+        latch = latch ? (v > 0.4f) : (v >= 0.5f);
+        return latch;
+    };
+
+    for (int h = 0; h < 2; ++h) {
+        VrHandState &in = mInput[h];
+        if (controllers) {
+            if (mAimSpace[h] != XR_NULL_HANDLE) {
+                XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
+                if (XR_SUCCEEDED(xrLocateSpace(mAimSpace[h], mSpace, displayTime, &loc)) &&
+                    (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                    (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+                    toWorld(loc.pose, in.aim);
+            }
+            readFloat(mSelectAction[h], in.select);
+            readFloat(mGrabAction[h], in.grab);
+            readBool(mMenuAction[h], in.menuPressed);
+            readStick(mStickAction[h], in.stickX, in.stickY);
+            readBool(mStickClickAction[h], in.stickPressed);
+        }
+        in.selectPressed = press(in.select, mSelectLatch[h]);
+        in.grabPressed = press(in.grab, mGrabLatch[h]);
+        // THE GRIP IS THE SAME POSE `hands[]` REPORTS — located above, by the
+        // controller or by the palm joint. Reported twice because `hands` is
+        // what phase 4's hosts read and the pair is what a gesture needs.
+        in.grip.valid = mHandValid[h];
+        if (mHandValid[h]) {
+            in.grip.position = Vec3(mHandPos[h].x, mHandPos[h].y, mHandPos[h].z);
+            in.grip.rotation = Quat(mHandRot[h].x, mHandRot[h].y, mHandRot[h].z, mHandRot[h].w);
+        }
+        // A HAND IS "REPORTED" WHEN EITHER POSE IS: a controller whose aim
+        // located but whose grip did not is still a hand in the room, and a
+        // hand-tracked palm with no aim is too.
+        in.valid = in.grip.valid || in.aim.valid;
+
+        // ...UNLESS A TEST WROTE IT (Engine::vrInjectInput, VR_INPUT_SPEC
+        // §2.4 I1). The injected sample REPLACES the whole hand, poses
+        // included, and already stands in world space — the rig is not applied
+        // to it a second time. `hands[]` and the controller proxy follow, so a
+        // script can put a wand where it likes and see what the wearer would.
+        VrHandState injected;
+        if (mEngine && mEngine->vrInjectedInput(h, injected)) {
+            in = injected;
+            in.fromInjection = true;
+            mHandValid[h] = in.grip.valid;
+            if (in.grip.valid) {
+                mHandPos[h] = Ogre::Vector3(in.grip.position.x, in.grip.position.y,
+                                            in.grip.position.z);
+                mHandRot[h] = Ogre::Quaternion(in.grip.rotation.w, in.grip.rotation.x,
+                                               in.grip.rotation.y, in.grip.rotation.z);
+            }
+        }
+    }
+}
+
+// WHAT THE RUNTIME HAS BOUND (`xrGetCurrentInteractionProfile`), per hand.
+//
+// It is the runtime's CHOICE out of the four blocks we suggested, it can change
+// mid-session (a wearer picks a controller up, puts it down, switches to bare
+// hands) and it is the answer a host needs in order to draw the right model —
+// so it is read every frame and LOGGED once per change. It is also what the
+// injection refusal rule asks: a hand with a real profile bound is a hand a
+// script may not fake.
+void VrSession::readProfiles() {
+    static const char *const kUser[2] = { "/user/hand/left", "/user/hand/right" };
+    for (int h = 0; h < 2; ++h) {
+        XrPath user = XR_NULL_PATH;
+        if (XR_FAILED(xrStringToPath(mBoot->mInstance, kUser[h], &user))) continue;
+        XrInteractionProfileState st{ XR_TYPE_INTERACTION_PROFILE_STATE };
+        std::string name;
+        if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(mSession, user, &st)) &&
+            st.interactionProfile != XR_NULL_PATH) {
+            char buf[XR_MAX_PATH_LENGTH] = { 0 };
+            uint32_t written = 0u;
+            if (XR_SUCCEEDED(xrPathToString(mBoot->mInstance, st.interactionProfile,
+                                            uint32_t(sizeof(buf)), &written, buf)))
+                name = buf;
+        }
+        mProfilePath[h] = name;
+        if (mProfileSaid[h] != name) {
+            mProfileSaid[h] = name;
+            vrLog("hand input: the %s hand's interaction profile is now '%s'", kUser[h] + 11,
+                  name.empty() ? "(none)" : name.c_str());
+        }
+    }
+}
+
+// ONE BUZZ (Engine::vrHaptic). The runtime decides what it feels like; a
+// profile with no haptic output at all (bare hands, Monado's simulated
+// controllers) takes the call and does nothing, which is a supported controller
+// and not an error — so "nothing buzzed" is NOT a false answer here. Only the
+// call failing is.
+bool VrSession::haptic(int hand, float amplitude01, float seconds, std::string &error) {
+    if (hand < 0 || hand >= 2 || mHapticAction[hand] == XR_NULL_HANDLE || !mHandActions) {
+        error = "vrHaptic: this session has no haptic action for that hand";
+        return false;
+    }
+    const float amp = amplitude01 < 0.0f ? 0.0f : (amplitude01 > 1.0f ? 1.0f : amplitude01);
+    // A PULSE, CLAMPED: 1 ms to 2 s. A duration of zero would ask the runtime
+    // for its own minimum (legal, but then the caller cannot tell what it got)
+    // and an unbounded one leaves a controller buzzing after the gesture that
+    // asked for it has ended.
+    const float secs = seconds < 0.001f ? 0.001f : (seconds > 2.0f ? 2.0f : seconds);
+    XrHapticVibration vib{ XR_TYPE_HAPTIC_VIBRATION };
+    vib.amplitude = amp;
+    vib.duration = XrDuration(double(secs) * 1e9);
+    vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+    XrHapticActionInfo hi{ XR_TYPE_HAPTIC_ACTION_INFO };
+    hi.action = mHapticAction[hand];
+    const XrResult r = xrApplyHapticFeedback(mSession, &hi,
+                                             reinterpret_cast<const XrHapticBaseHeader *>(&vib));
+    if (XR_FAILED(r)) {
+        error = "vrHaptic: xrApplyHapticFeedback failed (" +
+                xrResultName(mBoot->mInstance, r) + ")";
+        return false;
+    }
+    return true;
 }
 
 // THE WEARER'S MARKERS, PLACED INSIDE THE FRAME THAT DRAWS THEM (VR-4-FIX
@@ -1235,21 +1620,101 @@ void VrSession::locateHands(XrTime displayTime) {
 // than the frame before last, because the poses do not exist until the pump
 // above has blocked in xrWaitFrame and located them.
 //
-// A hand the runtime did not locate is left ALONE rather than moved: whether an
-// unlocated hand is hidden or simply stale is the host's decision (the mirror
-// hides it), and writing a zero here would put a wand at the world origin.
+// A HAND THE RUNTIME DID NOT LOCATE IS HIDDEN HERE, NOT LEFT ALONE (VR-4-FIX's
+// second read, finding 2). The mirror's own write runs a host tick EARLIER and
+// holds the PREVIOUS frame's status — so on the frame a controller is switched
+// off or put down, the mirror has already written the old pose and left the
+// wand visible, and a session that only skipped the hand would draw a stale
+// wand at a stale pose for one frame.
+//
+// THE SESSION MAY TAKE A PROXY AWAY; IT MAY NEVER PUT ONE BACK. That asymmetry
+// is the whole rule, and getting it wrong once cost a real suite: whether the
+// markers are drawn AT ALL is the host's decision (`vr.proxies(false)` is a
+// user's off switch and the mirror is where it lives), while whether THIS
+// hand exists THIS frame is the runtime's, and only the runtime's answer can
+// be a frame late. So an unlocated hand is hidden here, and a located one has
+// its pose written and its visibility left exactly as the host set it.
+// (The mirror's write stays for the other reason too: it is the only writer
+// for a host with no live session at all — a suite driving `setVrProxies`
+// with a hand-built status, or the first frame of a session.)
 void VrSession::placeProxies() {
     if (!mScene) return;
     NodeId ids[2] = { 0, 0 };
     mScene->vrProxyNodes(ids);
     if (!ids[0] && !ids[1]) return;
     for (int h = 0; h < 2; ++h) {
-        if (!ids[h] || !mHandValid[h]) continue;
+        if (!ids[h]) continue;
+        if (!mHandValid[h]) { mScene->setNodeVisible(ids[h], false); continue; }
         mScene->setNodeTransform(ids[h],
                                  Vec3(mHandPos[h].x, mHandPos[h].y, mHandPos[h].z),
                                  Quat(mHandRot[h].x, mHandRot[h].y, mHandRot[h].z,
                                       mHandRot[h].w),
                                  Vec3(1.0f, 1.0f, 1.0f));
+    }
+    placeRay();
+}
+
+// THE RAY AND ITS HIT MARKER (VR_INPUT_SPEC §3), in the same frame and for the
+// same reason.
+//
+// THE DIVISION OF LABOUR. The host computes the ray and the PICK — the document
+// owns the one picker in this tree and the selection rules are the editor's —
+// and pushes both as numbers (`Engine::setVrRay`). This draws them: the line
+// mesh is a unit segment down -Z, so it is rotated onto the direction and
+// scaled to the distance, and the marker stands at the far end.
+//
+// AND IT RE-ANCHORS. A host's ray starts at the pose it last HEARD, which is a
+// frame or two old — the very lag that moved the proxies in here. When the
+// state names a hand and that hand's aim located THIS frame, the line is
+// re-anchored to this frame's aim pose and the host's own LENGTH is kept: the
+// ray then leaves the wearer's hand exactly where the model is, and only its
+// far end is as old as the pick behind it.
+void VrSession::placeRay() {
+    if (!mScene || !mEngine) return;
+    NodeId ids[2] = { 0, 0 };
+    mScene->vrRayNodes(ids);
+    if (!ids[0] && !ids[1]) return;
+
+    const VrRayState &ray = mEngine->vrRay();
+    Ogre::Vector3 origin(ray.origin.x, ray.origin.y, ray.origin.z);
+    Ogre::Vector3 dir(ray.dir.x, ray.dir.y, ray.dir.z);
+    // The host's own length: to the hit if there is one, else its asked-for
+    // reach (ten metres by default — far enough to read as "nothing there").
+    const Ogre::Vector3 hit(ray.hitPoint.x, ray.hitPoint.y, ray.hitPoint.z);
+    float length = ray.hit ? (hit - origin).length()
+                           : (ray.length > 0.0f ? ray.length : 10.0f);
+    if (ray.hand >= 0 && ray.hand < 2 && mInput[ray.hand].aim.valid) {
+        const VrPose &aim = mInput[ray.hand].aim;
+        origin = Ogre::Vector3(aim.position.x, aim.position.y, aim.position.z);
+        dir = Ogre::Quaternion(aim.rotation.w, aim.rotation.x, aim.rotation.y, aim.rotation.z) *
+              Ogre::Vector3::NEGATIVE_UNIT_Z;
+    }
+    const float len2 = dir.squaredLength();
+    const bool show = ray.visible && len2 > 1e-12f && length > 1e-4f &&
+                      std::isfinite(length) && std::isfinite(len2);
+    if (show) dir /= std::sqrt(len2);
+
+    if (ids[0]) {
+        if (show) {
+            const Ogre::Quaternion rot =
+                Ogre::Vector3::NEGATIVE_UNIT_Z.getRotationTo(dir);
+            // THE LINE IS SCALED ALONG ITS OWN Z, which is the rotated axis:
+            // one unit segment becomes a ray of any length with no mesh
+            // rebuild, and a line has no thickness to distort.
+            mScene->setNodeTransform(ids[0], Vec3(origin.x, origin.y, origin.z),
+                                     Quat(rot.x, rot.y, rot.z, rot.w),
+                                     Vec3(1.0f, 1.0f, length));
+        }
+        mScene->setNodeVisible(ids[0], show);
+    }
+    if (ids[1]) {
+        const bool marker = show && ray.hit;
+        if (marker) {
+            const Ogre::Vector3 point = origin + dir * length;
+            mScene->setNodeTransform(ids[1], Vec3(point.x, point.y, point.z),
+                                     Quat(0.0f, 0.0f, 0.0f, 1.0f), Vec3(1.0f, 1.0f, 1.0f));
+        }
+        mScene->setNodeVisible(ids[1], marker);
     }
 }
 
@@ -1260,11 +1725,25 @@ void VrSession::destroyActions() {
         mHandTracker[h] = XR_NULL_HANDLE;
         if (mHandSpace[h] != XR_NULL_HANDLE) xrDestroySpace(mHandSpace[h]);
         mHandSpace[h] = XR_NULL_HANDLE;
+        if (mAimSpace[h] != XR_NULL_HANDLE) xrDestroySpace(mAimSpace[h]);
+        mAimSpace[h] = XR_NULL_HANDLE;
         // The ACTIONS are destroyed by their set (the spec says so); naming
         // them here as well would be a double destroy.
         mHandPoseAction[h] = XR_NULL_HANDLE;
+        mAimPoseAction[h] = XR_NULL_HANDLE;
+        mSelectAction[h] = XR_NULL_HANDLE;
+        mGrabAction[h] = XR_NULL_HANDLE;
+        mMenuAction[h] = XR_NULL_HANDLE;
+        mStickAction[h] = XR_NULL_HANDLE;
+        mStickClickAction[h] = XR_NULL_HANDLE;
+        mHapticAction[h] = XR_NULL_HANDLE;
         mHandValid[h] = false;
+        mInput[h] = VrHandState();
+        mSelectLatch[h] = mGrabLatch[h] = false;
+        mProfilePath[h].clear();
+        mProfileSaid[h].clear();
     }
+    mBindingProfiles = mBindingProfilesAccepted = 0u;
     if (mActionSet != XR_NULL_HANDLE) xrDestroyActionSet(mActionSet);
     mActionSet = XR_NULL_HANDLE;
     mHandActions = false;
@@ -2050,6 +2529,18 @@ VrStatus VrSession::status() const {
         s.hands[h].rotation =
             Quat(mHandRot[h].x, mHandRot[h].y, mHandRot[h].z, mHandRot[h].w);
     }
+    // EVERYTHING EACH HAND IS DOING (phase 4b stage 1). `input[h].grip` is the
+    // same pose as `hands[h]` by construction (readInput writes it from the
+    // located pose), so a host may read either and never both.
+    for (int h = 0; h < 2; ++h) s.input[h] = mInput[h];
+    // ONE PROFILE STRING FOR THE SESSION: the right hand's when it has one
+    // (the manipulating hand by default), else the left's. No runtime measured
+    // binds two different profiles at once, and the log names both when they
+    // differ (readProfiles).
+    s.profile = !mProfilePath[VrHandRight].empty() ? mProfilePath[VrHandRight]
+                                                   : mProfilePath[VrHandLeft];
+    s.bindingProfiles = mBindingProfiles;
+    s.bindingProfilesAccepted = mBindingProfilesAccepted;
     s.handActions = mHandActions;
     s.handJoints = mHandJoints;
     return s;
@@ -2542,6 +3033,14 @@ void vrSessionSetOrigin(VrSession *s, const Vec3 &p, float yawDegrees) {
 bool vrSessionEyeScreenshot(VrSession *s, unsigned eye, Image &out, std::string &error) {
     if (!s) { error = "vrEyeScreenshot: no session is running"; return false; }
     return s->eyeScreenshot(eye, out, error);
+}
+bool vrSessionHasBoundProfile(const VrSession *s, int hand) {
+    return s && s->hasBoundProfile(hand);
+}
+bool vrSessionHaptic(VrSession *s, int hand, float amplitude01, float seconds,
+                     std::string &error) {
+    if (!s) { error = "vrHaptic: no session is running"; return false; }
+    return s->haptic(hand, amplitude01, seconds, error);
 }
 
 #endif  // JAH_VR

@@ -38,6 +38,7 @@
 #include "irisgl/document/assets/livetextures.h"
 #include "irisgl/document/assets/texture2d.h"
 #include "irisgl/document/scenegraph/shadowmap.h"
+#include "irisgl/import/graphicshelper.h"   // the VR controller models (phase 4b stage 1)
 #include <QFileInfo>
 #include <functional>
 #include <chrono>
@@ -2363,6 +2364,86 @@ void SceneMirror::vrProxyNodes(jahshaka::engine::NodeId out[2]) const
     for (int i = 0; i < 2; ++i) out[i] = mVrProxyNode[i];
 }
 
+void SceneMirror::vrRayNodes(jahshaka::engine::NodeId out[2]) const
+{
+    for (int i = 0; i < 2; ++i) out[i] = mVrRayNode[i];
+}
+
+void SceneMirror::setVrProxyModels(const QString &leftPath, const QString &rightPath)
+{
+    const QString wanted[2] = { leftPath, rightPath };
+    for (int i = 0; i < 2; ++i) {
+        if (mVrProxyModelPath[i] == wanted[i]) continue;
+        mVrProxyModelPath[i] = wanted[i];
+        // A NEW PATH IS A NEW LOAD, and the old mesh must not survive to
+        // short-circuit it (it did, in the first cut: the cached id was
+        // returned before the path was ever looked at, so a host's own model
+        // was accepted and silently ignored). Anything the old mesh is
+        // attached to goes back to the WAND first — nothing may reference a
+        // mesh that is about to be destroyed — and the next sync loads the
+        // new one.
+        mVrProxyModelTried[i] = false;
+        if (!mVrProxyModelMesh[i] || !mTarget) continue;
+        if (mVrProxyMesh[i] == mVrProxyModelMesh[i]) {
+            mTarget->detachMesh(mVrProxyNode[i]);
+            mVrProxyMesh[i] = mVrProxyWandMesh[i];
+            if (mVrProxyMesh[i])
+                mTarget->attachMesh(mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
+        }
+        mTarget->destroyMesh(mVrProxyModelMesh[i]);
+        mVrProxyModelMesh[i] = 0;
+    }
+}
+
+// THE VENDORED CONTROLLER MODEL, LOADED ONCE (phase 4b stage 1).
+//
+// ONE MESH, BAKED AT VENDORING. The upstream glTF places its six parts (body,
+// trigger, squeeze, thumbstick, two buttons) by NODE TRANSFORM, and this tree's
+// one assimp read site hands back `aiScene::mMeshes` with no node tree at all —
+// six parts loaded that way land on top of each other. So the transforms are
+// baked into ONE mesh at vendoring (app/content/vr/make-controller-obj.py) and
+// this is an ordinary model read, through the same choke point every other
+// model in the tree goes through.
+//
+// NO TEXTURES, DELIBERATELY: unlit grey. A helper's material is the mirror's,
+// not the asset's, and a controller that lit the room or sampled an albedo map
+// would be the one helper in the tree that pretends to be content.
+jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
+{
+    if (hand < 0 || hand > 1 || !mTarget) return 0;
+    if (mVrProxyModelMesh[hand]) return mVrProxyModelMesh[hand];
+    if (mVrProxyModelTried[hand]) return 0;
+    mVrProxyModelTried[hand] = true;
+    const QString path = mVrProxyModelPath[hand];
+    if (path.isEmpty()) return 0;
+
+    const QList<iris::MeshPtr> parts = iris::GraphicsHelper::loadAllMeshesFromFile(path);
+    MeshData merged;
+    for (const iris::MeshPtr &part : parts) {
+        MeshData one;
+        if (!part || !toMeshData(part.data(), one) || one.positions.empty()) continue;
+        const unsigned base = unsigned(merged.positions.size() / 3);
+        merged.positions.insert(merged.positions.end(), one.positions.begin(),
+                                one.positions.end());
+        // NORMALS ARE PADDED RATHER THAN DROPPED when a part has none: the
+        // vertex declaration is decided by the FIRST part, so a mesh that is
+        // half normalled would upload a buffer of the wrong length.
+        const size_t verts = one.positions.size() / 3;
+        if (one.normals.size() == verts * 3)
+            merged.normals.insert(merged.normals.end(), one.normals.begin(), one.normals.end());
+        else
+            merged.normals.insert(merged.normals.end(), verts * 3, 0.0f);
+        for (unsigned idx : one.indices) merged.indices.push_back(base + idx);
+    }
+    if (merged.positions.empty() || merged.indices.empty()) {
+        qWarning("SceneMirror: the VR controller model '%s' has no geometry - the wand stands in",
+                 qUtf8Printable(path));
+        return 0;
+    }
+    mVrProxyModelMesh[hand] = mTarget->createMesh(merged);
+    return mVrProxyModelMesh[hand];
+}
+
 void SceneMirror::syncVrProxies()
 {
     if (!mTarget) return;
@@ -2371,12 +2452,17 @@ void SceneMirror::syncVrProxies()
     // scene, nearly always — pays one branch a frame.
     const bool wanted = mVrProxiesVisible && mVrStatus.active;
     if (!wanted) {
-        if (mVrProxiesBuilt)
+        if (mVrProxiesBuilt) {
             for (int i = 0; i < 2; ++i)
                 if (mVrProxyNode[i] && mVrProxyVisible[i] != 0) {
                     mTarget->setNodeVisible(mVrProxyNode[i], false);
                     mVrProxyVisible[i] = 0;
                 }
+            // ...AND THE RAY WITH THEM: the session is its only writer, so
+            // nothing else would take it down when a session ends.
+            for (int i = 0; i < 2; ++i)
+                if (mVrRayNode[i]) mTarget->setNodeVisible(mVrRayNode[i], false);
+        }
         return;
     }
 
@@ -2401,6 +2487,23 @@ void SceneMirror::syncVrProxies()
             wand.push_back(Vec3(-x, 0, t)); wand.push_back(Vec3(x, 0, t));
             wand.push_back(Vec3(0, -x, t)); wand.push_back(Vec3(0, x, t));
         }
+        // THE RAY'S LINE, A UNIT SEGMENT DOWN -Z (VR_INPUT_SPEC §3). The
+        // session rotates it onto the direction and scales it to the distance,
+        // so a ray that moves every frame rebuilds no geometry at all — and a
+        // line has no thickness to distort under a non-uniform scale.
+        const std::vector<Vec3> rayLine = { Vec3(0, 0, 0), Vec3(0, 0, -1) };
+        // ...AND THE HIT MARKER: a 2 cm cross, drawn ON TOP. On-top rather
+        // than depth-tested because the marker sits exactly ON the surface it
+        // marks, and Vulkan applies no depth bias to LINE primitives at all
+        // (GIZMO-2) — the only cures are a lift or a queue, and a 2 cm marker
+        // must not be lifted off the thing it is pointing at.
+        std::vector<Vec3> marker;
+        {
+            const float m = 0.02f;
+            marker.push_back(Vec3(-m, 0, 0)); marker.push_back(Vec3(m, 0, 0));
+            marker.push_back(Vec3(0, -m, 0)); marker.push_back(Vec3(0, m, 0));
+            marker.push_back(Vec3(0, 0, -m)); marker.push_back(Vec3(0, 0, m));
+        }
         for (int i = 0; i < 2; ++i) {
             mVrProxyNode[i] = mTarget->createNode();
             if (!mVrProxyNode[i]) return;
@@ -2417,11 +2520,42 @@ void SceneMirror::syncVrProxies()
         // second question anybody asks of a pair of markers.
         mVrProxyMaterial[0] = mTarget->createUnlitMaterial(Colour(0.35f, 0.80f, 1.0f, 0.90f), true);
         mVrProxyMaterial[1] = mTarget->createUnlitMaterial(Colour(1.0f, 0.72f, 0.30f, 0.90f), true);
-        mVrProxyMesh[0] = mTarget->createLineMesh(wand, false);
-        mVrProxyMesh[1] = mTarget->createLineMesh(wand, false);
-        for (int i = 0; i < 2; ++i)
+        // UNLIT GREY for the vendored models: a helper's material is the
+        // mirror's, and a solid model reads by its shape rather than its
+        // colour (the wands keep their two colours — a pair of identical
+        // line markers needs them).
+        mVrProxyModelMaterial = mTarget->createUnlitMaterial(Colour(0.62f, 0.64f, 0.67f, 1.0f),
+                                                             true);
+        mVrProxyWandMesh[0] = mTarget->createLineMesh(wand, false);
+        mVrProxyWandMesh[1] = mTarget->createLineMesh(wand, false);
+        for (int i = 0; i < 2; ++i) {
+            mVrProxyMesh[i] = mVrProxyWandMesh[i];
             if (mVrProxyMesh[i])
                 mTarget->attachMesh(mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
+        }
+        // THE RAY'S TWO NODES, on the same two channels as the wands: in every
+        // VR eye and in the desktop editor's picture, in no capture and in no
+        // user's screenshot.
+        for (int i = 0; i < 2; ++i) {
+            mVrRayNode[i] = mTarget->createNode();
+            if (!mVrRayNode[i]) return;
+            mTarget->setNodeHelper(mVrRayNode[i], true);
+            mTarget->setNodeVrHelper(mVrRayNode[i], true);
+        }
+        mVrRayMaterial[0] = mTarget->createUnlitMaterial(Colour(0.55f, 0.90f, 1.0f, 0.85f), true);
+        mVrRayMaterial[1] = mTarget->createUnlitMaterial(Colour(1.0f, 0.95f, 0.45f, 0.95f), false);
+        mVrRayMesh[0] = mTarget->createLineMesh(rayLine, false);
+        mVrRayMesh[1] = mTarget->createLineMesh(marker, false);
+        for (int i = 0; i < 2; ++i) {
+            if (mVrRayMesh[i])
+                mTarget->attachMesh(mVrRayNode[i], mVrRayMesh[i], mVrRayMaterial[i]);
+            // HIDDEN UNTIL A SESSION PLACES THEM. The ray belongs to a live
+            // gesture and the session is its only writer (`placeRay`), so a
+            // host with no session never shows one — and a node born visible
+            // would draw a metre of line at the world origin for one frame.
+            mTarget->setNodeVisible(mVrRayNode[i], false);
+        }
+        mTarget->setVrRayNodes(mVrRayNode[0], mVrRayNode[1]);
         // ...AND THE SESSION IS TOLD WHICH NODES THEY ARE (VR-4-FIX finding 4).
         // A running session then places them INSIDE its own frame, right after
         // it has located the hands — which is the only moment this frame's
@@ -2430,6 +2564,34 @@ void SceneMirror::syncVrProxies()
         // are shown.
         mTarget->setVrProxyNodes(mVrProxyNode[0], mVrProxyNode[1]);
         mVrProxiesBuilt = true;
+    }
+
+    // WHICH MODEL IS ON EACH HAND (the owner's slot, answer 6). The runtime's
+    // own answer decides: a wearer holding a Touch controller gets the
+    // vendored Touch model, and every other profile — the simple controller,
+    // WMR, bare hands, nothing bound at all — gets the WAND, because a wand is
+    // the honest drawing for a controller whose shape we do not know. The
+    // model is loaded the first frame it is asked for and never otherwise.
+    const std::string &profile = mVrStatus.profile;
+    const bool touch = profile.find("touch_controller") != std::string::npos;
+    for (int i = 0; i < 2; ++i) {
+        if (!mVrProxyNode[i]) continue;
+        MeshId want = mVrProxyWandMesh[i];
+        MaterialId material = mVrProxyMaterial[i];
+        if (touch) {
+            if (const MeshId model = vrProxyModelMesh(i)) {
+                want = model;
+                material = mVrProxyModelMaterial;
+            }
+        }
+        if (want && want != mVrProxyMesh[i]) {
+            // DETACH IS NOT DESTROY: both meshes stay alive for the life of
+            // the scene, so a wearer who puts a controller down and picks a
+            // different one up swaps the mesh back with no reload.
+            mTarget->detachMesh(mVrProxyNode[i]);
+            mTarget->attachMesh(mVrProxyNode[i], want, material);
+            mVrProxyMesh[i] = want;
+        }
     }
 
     // THE POSES. Each hand's validity is its OWN frame's answer: a controller
