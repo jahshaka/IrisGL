@@ -1100,7 +1100,10 @@ void OgreEngine::renderOneFrame() {
     // pacing (a zero interval with vsync off) spinning against a pump that no
     // longer blocks. Ending it here makes `vrStatus().active` false, which is
     // the one signal every host already has to watch.
-    if (mVrSession && vrSessionState(mVrSession) == VrState::Lost) endVrSession();
+    if (mVrSession && vrSessionState(mVrSession) == VrState::Lost) {
+        Ogre::LogManager::getSingleton().logMessage("Jahshaka VR: the session is LOST - the engine ends it", Ogre::LML_CRITICAL);
+        endVrSession();
+    }
 
     // THE GPU IS GONE (lane XID-2, 2026-09-17). Said ONCE, loudly, the moment
     // the render system reports it: from here on the render system vetoes every
@@ -1301,6 +1304,15 @@ bool OgreEngine::updateScene(Scene *scene) {
 }
 
 bool OgreEngine::hasEnabledViews() const {
+    // A VR SESSION IS SOMETHING TO DRAW even when every View is off (the owner's
+    // WiVRn smoke, 2026-09-17): the runtime answers "no picture" on its first
+    // frames, the pump switches the session's View off for those frames, the
+    // Player's View is off by design and the editor's is hidden — and a host
+    // that skips renderOneFrame on "no enabled views" then never runs the pump
+    // again, so xrWaitFrame is never called, the runtime never synchronises
+    // and keeps answering "no picture" for ever: black in the headset, a spin
+    // on the desktop. The frame loop IS the session's heartbeat.
+    if (mVrSession) return true;
     // Offscreen views count: they are enabled by construction and something is
     // waiting on their pixels (a thumbnail, a preview dock, a scripted
     // screenshot). The only state this reports is View::setEnabled, which the

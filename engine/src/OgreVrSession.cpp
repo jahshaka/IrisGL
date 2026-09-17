@@ -582,6 +582,8 @@ private:
 
     VrState     mState = VrState::Idle;
     bool        mRunning = false;     ///< between xrBeginSession and xrEndSession
+    bool        mSaidNoRender = false; ///< the no-picture stretch logged once
+    bool        mSaidNoPose = false;   ///< the invalid-pose stretch logged once
     bool        mInFrame = false;     ///< between xrBeginFrame and xrEndFrame
     bool        mDrewThisFrame = false;
     XrFrameState mFrameState{ XR_TYPE_FRAME_STATE };
@@ -811,7 +813,7 @@ bool VrSession::create(std::string &reason) {
 // ---------------------------------------------------------------------------
 void VrSession::applyState(XrSessionState s) {
     switch (s) {
-        case XR_SESSION_STATE_IDLE:         mState = VrState::Idle; break;
+        case XR_SESSION_STATE_IDLE:         mState = VrState::Idle; vrLog("session state: IDLE"); break;
         case XR_SESSION_STATE_READY: {
             XrSessionBeginInfo bi{ XR_TYPE_SESSION_BEGIN_INFO };
             bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -823,12 +825,14 @@ void VrSession::applyState(XrSessionState s) {
             }
             mRunning = true;
             mState = VrState::Ready;
+            vrLog("session state: READY - session begun");
             break;
         }
-        case XR_SESSION_STATE_SYNCHRONIZED: mState = VrState::Synchronized; break;
-        case XR_SESSION_STATE_VISIBLE:      mState = VrState::Visible; break;
-        case XR_SESSION_STATE_FOCUSED:      mState = VrState::Focused; break;
+        case XR_SESSION_STATE_SYNCHRONIZED: mState = VrState::Synchronized; vrLog("session state: SYNCHRONIZED"); break;
+        case XR_SESSION_STATE_VISIBLE:      mState = VrState::Visible; vrLog("session state: VISIBLE"); break;
+        case XR_SESSION_STATE_FOCUSED:      mState = VrState::Focused; vrLog("session state: FOCUSED"); break;
         case XR_SESSION_STATE_STOPPING:
+            vrLog("session state: STOPPING (the RUNTIME asked; ending the XR session)");
             mState = VrState::Stopping;
             // THE RUNTIME ASKED US TO STOP. Never between xrBeginFrame and
             // xrEndFrame — the pump closes its frame before it polls again.
@@ -960,6 +964,7 @@ bool VrSession::beginFrame() {
     mDrewThisFrame = false;
 
     if (!mFrameState.shouldRender) {
+        if (!mSaidNoRender) { vrLog("the runtime asks for NO picture (shouldRender=0) in state %d", int(mState)); mSaidNoRender = true; }
         // A FRAME IS STILL OWED, with no layers (the spec's contract, and what
         // Monado's first frames ask for) — and THE DESKTOP MUST KEEP DRAWING.
         //
@@ -975,6 +980,7 @@ bool VrSession::beginFrame() {
         setSessionViewEnabled(false);
         return true;
     }
+    mSaidNoRender = false;
 
     XrViewState vs{ XR_TYPE_VIEW_STATE };
     XrViewLocateInfo vli{ XR_TYPE_VIEW_LOCATE_INFO };
@@ -988,6 +994,7 @@ bool VrSession::beginFrame() {
                             (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
                             (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
     if (!posesValid) {
+        if (!mSaidNoPose) { vrLog("poses not valid (xrLocateViews %s, got %u, flags 0x%llx)", xrResultName(mBoot->mInstance, r).c_str(), got, (unsigned long long)vs.viewStateFlags); mSaidNoPose = true; }
         // No tracking this frame (the headset is off the head, the runtime is
         // still coming up). Draw no EYE rather than draw a lie — and, as above,
         // never stop the desktop's frame over it.
@@ -995,6 +1002,7 @@ bool VrSession::beginFrame() {
         setSessionViewEnabled(false);
         return true;
     }
+    mSaidNoPose = false;
     setSessionViewEnabled(true);
 
     // ---- the pose, in three parts -----------------------------------------
@@ -1532,6 +1540,7 @@ void VrSession::destroyXr() {
         // runtime that never answers must not hang the editor, so the drain is
         // bounded and the session is destroyed regardless (destroying a running
         // session is legal; leaving the process wedged is not).
+        vrLog("we asked the runtime to exit the session (xrRequestExitSession)");
         xrRequestExitSession(mSession);
         for (int i = 0; i < 100 && mRunning; ++i) {
             pollEvents();
