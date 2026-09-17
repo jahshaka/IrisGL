@@ -137,8 +137,13 @@ private:
 // THE SWITCH HYSTERESIS (ATOM-3 A7, ogre-patch 0075), as a fraction of the
 // threshold being crossed. Upstream's `lodSet` flips at the exact threshold in
 // both directions, so an object parked on one changes level every frame the
-// camera dithers — 232 level changes in 600 frames on a camera oscillating by
-// 2 % of the switch distance; 2 with this band (spikes/atom-3/FINDINGS.md §4).
+// camera dithers — 71 pops in 600 frames on a camera oscillating by 2 % of the
+// switch distance; 0 with this band, and every real transition kept at 20 %
+// (spikes/atom-3/FINDINGS.md §4). KNOWN LIMIT (the Fable read at merge): the
+// band's direction state is the object's ONE current level, shared by every
+// pass on the SceneManager — a PiP, planar or probe camera inside the band
+// can hand the view the other camera's level; the fix is a per-pass band
+// (ATOM-3-FIX, patch 0075 amended), not a wider or narrower constant.
 // 0.10 holds the level across a 10 % window of the switch distance, which is
 // ~0.6 m of dolly travel at the measured pose and is bounded by construction:
 // a value genuinely past the band switches on the frame it gets there.

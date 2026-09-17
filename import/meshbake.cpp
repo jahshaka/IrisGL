@@ -699,7 +699,7 @@ bool findMeshNodeTransform(const aiNode *node, unsigned meshIndex,
 // each STATIC mesh a few times at import, records each level's index list and
 // its simplifier ERROR (>= the geometric error), and the engine picks a level
 // per object per frame from that error (irisgl/engine/src/OgreMesh.cpp,
-// OgreScene::applyLodValues + Types.h::lodSwitchDistance).
+// the `jah_world_error` LodStrategy + Types.h::lodLevelForWorldError).
 //
 // THE THREE RULES THIS OBEYS, each with its reason:
 //

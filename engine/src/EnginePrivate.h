@@ -136,7 +136,7 @@ inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r,
 /// ATOM stage 1's VIEW rule (OgreMesh.cpp): registers `jah_world_error` — the
 /// LOD strategy whose per-object value is the world-space error the pass's own
 /// camera and render target can hide — and makes it the process default, plus
-/// the switch hysteresis ogre-patch 0074 adds to `LodStrategy::lodSet`. Called
+/// the switch hysteresis ogre-patch 0075 adds to `LodStrategy::lodSet`. Called
 /// once, after Root::initialise and before any mesh or Item exists.
 void installJahLodStrategy();
 
