@@ -2549,7 +2549,7 @@ void SceneMirror::syncVrProxies()
         // pointing.
         //
         // A PLAIN PHYSICAL SURFACE, nothing clever: mid-grey albedo (sRGB 110,
-        // which is 0.177 linear through the one colour rule every picked colour
+        // which is 0.156 linear through the one colour rule every picked colour
         // goes through — iris::linearOf), roughness 0.6, no metal and no
         // emissive. No normal map, so no tangents are needed. The HELPER BITS
         // are unchanged: it is still out of every probe capture, every shadow

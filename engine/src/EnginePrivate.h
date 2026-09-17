@@ -5509,8 +5509,9 @@ public:
     OgreView  *mVrMirrorView = nullptr;
     /// THE INJECTED HAND SAMPLES (Engine::vrInjectInput) and the ray the host
     /// last pushed (Engine::setVrRay). Both are plain state on the engine: they
-    /// must answer with no session (the headless test backbone) and a session
-    /// that starts later picks them up on its first frame.
+    /// must answer with no session (the headless test backbone); a session's
+    /// BEGIN and END empty the injected samples (a stale injection never
+    /// reaches a wearer) — the ray persists.
     VrHandState mVrInject[VrHandCount];
     bool        mVrInjected[VrHandCount] = { false, false };
     /// THE INJECTED SESSION FOCUS (Engine::vrInjectFocus) — one bit for the

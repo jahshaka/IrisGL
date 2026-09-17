@@ -991,7 +991,7 @@ public:
     /// INDEPENDENT of the host's own controller-proxy switch
     /// (`SceneMirror::setVrProxies` / the `vr.proxies` verb): a wearer who
     /// turns the wands off still has to see what they are about to select.
-    /// Its nodes are built and taken down with the SESSION.
+    /// Its nodes are built once and HIDDEN at the session's end (they live for the scene).
     ///
     /// 0 for either id unregisters it. Pass the LINE first.
     virtual void        setVrRayNodes(NodeId line, NodeId marker) = 0;

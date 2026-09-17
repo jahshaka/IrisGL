@@ -553,8 +553,8 @@ public:
     /// hand-built status and no runtime at all.
     /// `visible` IS THE HAND MARKERS' SWITCH AND NOTHING ELSE
     /// (VR-INPUT-1E-FIX finding 6): the RAY and its hit marker are the
-    /// pointing tool, not a marker of a hand, so they are built and taken down
-    /// with the SESSION and placed by it (Engine::setVrRayNodes) whatever this
+    /// pointing tool, not a marker of a hand, so they are built once, HIDDEN
+    /// when the session ends, and placed by it (Engine::setVrRayNodes) whatever this
     /// says. A wearer who turns the wands off still has to see what they are
     /// about to select.
     void setVrProxies(bool visible, const jahshaka::engine::VrStatus &status);
