@@ -123,7 +123,17 @@ namespace
 // gains a SETTINGS term at the same time (fingerprintFor/fileNameFor below), so
 // two imports of one source with different settings stop colliding; the bump is
 // what rejects every bake produced under the old meaning.
-constexpr int kFormatVersion = 8;
+//
+// v9 (2026-09-17, ATOM-3, the render audit's A6): the LOD CHAIN GOES ALL THE WAY
+// DOWN. `kMaxLevels = 4` ended every chain at 1/16 of the authored triangles, so
+// no asset had a far-field proxy; the chain now halves until the triangle floor
+// (`kMinTriangles`, 128 — Nanite's root cluster), the accept ratio or the 5 %
+// error cap stops it. Every mesh above 256 triangles gets MORE levels than its
+// old bake, with the same errors for the levels it already had, so the bytes of
+// the trailing LOD block change for most library assets. (`meshbake.cpp` is in
+// the producer hash and would re-bake every library on its own; the bump is what
+// makes the reason readable, and it is the version an old .jmb is rejected by.)
+constexpr int kFormatVersion = 9;
 constexpr quint32 kMagic = 0x4A4D424Bu;   // 'JMBK'
 
 /// QDataStream settings are PINNED: the same Model must serialize to the same
@@ -758,9 +768,20 @@ namespace lodchain {
 /// The knobs, in one place, with the reason each exists. These are BAKE INPUTS:
 /// meshbake.cpp is hashed into the producer id, so editing any of them
 /// re-bakes every library by itself.
-constexpr int   kMaxLevels     = 4;      ///< levels ABOVE 0. mCurrentMeshLod is a uint8; four is what §7.2 asks for.
+/// THE CHAIN ENDS AT A TRIANGLE FLOOR, NOT AT A LEVEL COUNT (ATOM-3 A6, the
+/// render audit's A6). `kMaxLevels = 4` ended every chain at 1/16 of the
+/// authored triangles whatever the asset was, so a 1 M-triangle model's
+/// coarsest level was 62 k triangles — not a far-field proxy, just a slightly
+/// smaller model (Nanite's root cluster is ~128 triangles, which is exactly
+/// `kMinTriangles` below). The loop now halves until one of the three rules
+/// that MEAN something stops it: the triangle floor, a level that could not
+/// shed 15 % (topology), or an error past 5 % of the mesh extent. This ceiling
+/// is the uint8 in `MovableObject::mCurrentMeshLod` and nothing else — at
+/// `kRatio` 0.5 a 254-level chain would need 2^254 triangles, so it can never
+/// be the rule that fires.
+constexpr int   kMaxLevels     = 254;
 constexpr float kRatio         = 0.5f;   ///< each level targets half the previous triangle count (the paper's step).
-constexpr int   kMinTriangles  = 128;    ///< below this a level saves nothing worth a buffer — and is clusterlod's own leaf size.
+constexpr int   kMinTriangles  = 128;    ///< THE FLOOR: below this a level saves nothing worth a buffer — and is clusterlod's own leaf size, and Nanite's root.
 constexpr float kAcceptRatio   = 0.85f;  ///< a level that could not shed 15% is topology-locked: stop, do not store it.
 constexpr float kMaxRelError   = 0.05f;  ///< and stop once the error passes 5% of the mesh extent — beyond that it is a blob, not the object.
 constexpr float kNormalWeight  = 0.5f;   ///< meshoptimizer's own reference weight for unit normals.
