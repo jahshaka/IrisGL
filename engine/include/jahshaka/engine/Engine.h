@@ -1541,6 +1541,24 @@ public:
     /// session runs. Hosts use it for nothing but introspection; the session
     /// owns its lifetime.
     virtual View *vrView() const = 0;
+    /// WHERE THE WEARER IS STANDING, IN THE WORLD (phase 3, the Player's VR
+    /// mode). The reference space the session took is a ROOM — a floor origin
+    /// (STAGE) with the wearer somewhere on it — and until this is called that
+    /// room sits at the world origin, facing down -Z. This places it: `position`
+    /// is the world point the room's origin occupies and `yawDegrees` is the
+    /// room's heading about +Y, so a wearer who walks a metre north in the room
+    /// walks a metre along the rotated north of the world.
+    ///
+    /// POSITION AND YAW ONLY, and that is physics rather than economy: a room
+    /// has a floor and gravity, so pitching or rolling the rig would tilt the
+    /// horizon under a standing person, which is the one thing a VR renderer
+    /// must never do. Locomotion belongs to the HOST (the Player's fly moves
+    /// this); the engine only composes what it is given with the runtime's
+    /// pose, and `vrStatus()` reports both halves back.
+    ///
+    /// Takes effect on the next located frame. Ignored — harmlessly — when no
+    /// session is running; a host sets it after beginVrSession().
+    virtual void setVrOrigin(const Vec3 &position, float yawDegrees) = 0;
     /// Which on-screen (or offscreen) View shows the mirror. Null clears it.
     /// Takes effect on the next frame; the View keeps its own picture
     /// underneath and the mirror is copied over it (VR_SPEC §4.3).

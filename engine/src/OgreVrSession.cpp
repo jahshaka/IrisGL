@@ -105,6 +105,8 @@ VrState vrSessionState(const VrSession *) { return VrState::Unavailable; }
 VrStatus vrSessionStatus(const VrSession *) { return VrStatus(); }
 View *vrSessionView(const VrSession *) { return nullptr; }
 void vrSessionSetMirror(VrSession *, OgreView *) {}
+void vrSessionSetOrigin(VrSession *, const Vec3 &, float) {}
+void vrSessionSyncMirror(VrSession *) {}
 bool vrSessionEyeScreenshot(VrSession *, unsigned, Image &, std::string &error) {
     error = "this build has no OpenXR support";
     return false;
@@ -512,6 +514,13 @@ public:
     VrStatus status() const;
     OgreView *view() const { return mView; }
     void setMirrorView(OgreView *v);
+    /// THE RIG'S PLACE IN THE WORLD (phase 3). Position and a heading about +Y;
+    /// see Engine::setVrOrigin for why there is no pitch and no roll.
+    void setOrigin(const Ogre::Vector3 &position, float yawDegrees) {
+        mOriginPos = position;
+        mOriginYawDeg = yawDegrees;
+        mOriginRot = Ogre::Quaternion(Ogre::Degree(yawDegrees), Ogre::Vector3::UNIT_Y);
+    }
     /// ONE EYE, RENDERED MONO — the reverse-Z detector and the VR screenshot
     /// (see the engine-side declaration on Engine::vrEyeScreenshot).
     bool eyeScreenshot(unsigned eye, Image &out, std::string &error);
@@ -520,7 +529,9 @@ private:
     void pollEvents();
     void applyState(XrSessionState s);
     void teardownMirror();
+public:
     void syncMirror();
+private:
     /// The session's own View, on for a frame the runtime wants a picture for
     /// and off for one it does not (F4).
     void setSessionViewEnabled(bool on);
@@ -598,11 +609,30 @@ private:
     OgreView   *mView = nullptr;
     Ogre::Camera *mCullCamera = nullptr;
 
+    /// THE RIG, as the host placed it (setOrigin). Identity = the room's origin
+    /// at the world origin facing -Z, which is what a session that nobody
+    /// places renders — phase 2's behaviour, unchanged.
+    /// The last LOCATED head pose, in world space (VrStatus). Stale but valid
+    /// while tracking is lost, which `mHavePose` distinguishes.
+    Ogre::Vector3    mWorldHeadPos = Ogre::Vector3::ZERO;
+    Ogre::Quaternion mWorldHeadRot = Ogre::Quaternion::IDENTITY;
+    Ogre::Vector3    mOriginPos = Ogre::Vector3::ZERO;
+    Ogre::Quaternion mOriginRot = Ogre::Quaternion::IDENTITY;
+    float            mOriginYawDeg = 0.0f;
     OgreView   *mMirrorView = nullptr;
     Ogre::CompositorWorkspace *mMirrorWorkspace = nullptr;
     std::vector<std::string> mMirrorNodeDefs;
     std::string mMirrorWorkspaceDef;
     unsigned    mMirrorGeneration = 0u;
+    /// THE TARGET THE MIRROR WAS BUILT AGAINST, and its shape. A window's
+    /// swapchain is destroyed and rebuilt in place by a resize — the View's own
+    /// workspace generation does NOT move for that (nothing was detached), so
+    /// without these the mirror would keep executing against a target whose
+    /// render pass no longer matches: an "attachment is not a depth format"
+    /// exception, and a segfault inside CompositorWorkspace::_update when the
+    /// timing is right (measured, phase 3, 1 run in 4 of the Player suite).
+    Ogre::TextureGpu *mMirrorTarget = nullptr;
+    unsigned    mMirrorW = 0u, mMirrorH = 0u;
 
     unsigned long long mFrames = 0ull, mRendered = 0ull;
     float       mIpd = 0.0f;
@@ -921,7 +951,17 @@ bool VrSession::beginFrame() {
     // WORLD SCALE is applied to the OFFSET from the space's origin, never to
     // the orientation: at scale 2 a step of one metre moves you two metres
     // through the world and the horizon does not tilt.
-    const Ogre::Vector3 worldHead = headPos * mConfig.worldScale;
+    //
+    // ...AND THEN THE RIG'S ORIGIN (phase 3, the Player's VR mode). The runtime
+    // reports a pose in its own reference space — a room with a floor — and
+    // `setOrigin` says where that room stands in the world and which way it
+    // faces. World = origin translation * origin YAW * (runtime pose * scale),
+    // in that order, so walking a metre inside the room walks a metre along the
+    // room's own rotated north. The origin's rotation has no pitch and no roll
+    // by construction, which is why the horizon cannot tilt under a standing
+    // wearer however the host moves them.
+    const Ogre::Vector3 worldHead = mOriginPos + mOriginRot * (headPos * mConfig.worldScale);
+    const Ogre::Quaternion worldHeadRot = mOriginRot * headRot;
 
     // THE CLIP PLANES ARE THE VIEW'S, NOT A PAIR OF CONSTANTS (F10). A host
     // that moves the session View's camera desc moves the headset's frustum
@@ -976,7 +1016,7 @@ bool VrSession::beginFrame() {
 
     if (cam) {
         cam->setPosition(worldHead);
-        cam->setOrientation(headRot);
+        cam->setOrientation(worldHeadRot);
         cam->setVrData(&mVrData);
         // THE RENDERING CAMERA CARRIES THE LEFT EYE'S PROJECTION, and it is not
         // cosmetic (F2). Everything drawn by the Hlms takes its matrices from
@@ -998,17 +1038,24 @@ bool VrSession::beginFrame() {
     // same composition the shader performs, `headToEye^-1` applied to the head,
     // so a control render cannot drift from what the eye actually drew.
     for (int eye = 0; eye < 2; ++eye) {
-        // DIRECTLY, not through a matrix decomposition: with the rig's origin
-        // at identity (phase 2) the eye's world pose IS the pose the runtime
-        // reported, scaled — origin(head) * (head^-1 * eye) reduces to the eye
-        // — and a QDU decomposition of the product is the same answer with
-        // seven digits instead of all of them. That difference is invisible
-        // everywhere except at a high-contrast edge, where it moves one pixel,
-        // which is exactly where a bit-exact assertion looks.
-        mEyeWorldPos[eye] = eyePos[eye] * mConfig.worldScale;
-        mEyeWorldRot[eye] = eyeRot[eye];
+        // DIRECTLY, not through a matrix decomposition: the eye's world pose is
+        // the runtime's own pose, scaled and then carried by the RIG — the same
+        // composition the head gets two dozen lines up, applied to the eye
+        // instead of to the midpoint, because origin(head) * (head^-1 * eye)
+        // reduces to origin(eye). A QDU decomposition of the product is the
+        // same answer with seven digits instead of all of them, and that
+        // difference is invisible everywhere except at a high-contrast edge,
+        // where it moves one pixel — which is exactly where a bit-exact
+        // assertion looks.
+        mEyeWorldPos[eye] = mOriginPos + mOriginRot * (eyePos[eye] * mConfig.worldScale);
+        mEyeWorldRot[eye] = mOriginRot * eyeRot[eye];
     }
     mHavePose = true;
+    // WHERE THE WEARER'S HEAD ENDED UP, for the host that has to move them
+    // (VrStatus::headPosition/headRotation). Reported in WORLD space, after the
+    // rig, because that is the only frame a locomotion rule can reason in.
+    mWorldHeadPos = worldHead;
+    mWorldHeadRot = worldHeadRot;
     // THE SECOND EYE'S FOUR CORNER RAYS (F2), in world space, from its own fov
     // and its own orientation — the same quantity SceneManager writes into the
     // sky quad's normals for a mono camera (OgreSceneManager.cpp:1487-1499),
@@ -1078,8 +1125,8 @@ bool VrSession::beginFrame() {
         mCullCamera->setNearClipDistance(std::max(zNear + offset, 0.001f));
         mCullCamera->setFarClipDistance(zFar + offset);
         // +Z in camera space is BEHIND the eye (Ogre cameras look down -Z).
-        mCullCamera->setPosition(worldHead + headRot * Ogre::Vector3(0.0f, 0.0f, offset));
-        mCullCamera->setOrientation(headRot);
+        mCullCamera->setPosition(worldHead + worldHeadRot * Ogre::Vector3(0.0f, 0.0f, offset));
+        mCullCamera->setOrientation(worldHeadRot);
     }
     // THE SCREEN QUADS, with the poses this frame located (F2).
     syncStereoQuads();
@@ -1290,6 +1337,8 @@ void VrSession::workspacePosUpdate(Ogre::CompositorWorkspace *workspace) {
 // picture it just drew. See JahVrMirror.material for why it is a quad and not
 // a blit.
 void VrSession::teardownMirror() {
+    mMirrorTarget = nullptr;
+    mMirrorW = mMirrorH = 0u;
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root) return;
     Ogre::CompositorManager2 *cm = root->getCompositorManager2();
@@ -1322,7 +1371,21 @@ void VrSession::syncMirror() {
     // A camera IS required even though every pass in the mirror node is a quad:
     // CompositorWorkspace takes a default camera and dereferences it. A view
     // whose scene has not been set yet has none.
-    const bool wanted = mMirrorView && mMirrorView->isEnabled() &&
+    //
+    // A DISABLED VIEW IS STILL A MIRROR (phase 3, VR-2's F7). The mirror is its
+    // OWN workspace over the view's target, not a pass inside the view's chain,
+    // so `View::setEnabled(false)` — which disables the view's workspace and
+    // nothing else — stops the view drawing its own picture and leaves the
+    // mirror painting the eye over it. That is exactly what the Player's VR
+    // mode wants: the desktop shows the headset's left eye and pays for a copy
+    // instead of a second render of the world at window size. It presents, too:
+    // `CompositorManager2::_swapAllFinalTargets` swaps the final target of
+    // every ENABLED workspace, and the mirror's is the window.
+    //
+    // (What the old `isEnabled()` term was protecting against — mirroring onto
+    // a view nobody is looking at — is the HOST's call: a host that hides the
+    // mirror's page clears the mirror, or ends the session, as the Player does.)
+    const bool wanted = mMirrorView &&
                         mConfig.mirror != VrMirrorMode::None && mView->targetTexture() &&
                         mMirrorView->targetTexture() && mMirrorView->camera();
     if (!wanted) { teardownMirror(); return; }
@@ -1332,7 +1395,10 @@ void VrSession::syncMirror() {
     // There is no reorder API; the mirror is rebuilt instead, which happens
     // only when something else already rebuilt.
     const unsigned gen = mMirrorView->workspaceGeneration() + mView->workspaceGeneration();
-    if (mMirrorWorkspace && gen == mMirrorGeneration) return;
+    Ogre::TextureGpu *const target = mMirrorView->targetTexture();
+    if (mMirrorWorkspace && gen == mMirrorGeneration && target == mMirrorTarget &&
+        target->getWidth() == mMirrorW && target->getHeight() == mMirrorH)
+        return;
     teardownMirror();
     if (!mMirrorView->workspace()) return;   // nothing to paint over yet
 
@@ -1350,6 +1416,9 @@ void VrSession::syncMirror() {
     mMirrorWorkspace = cm->addWorkspace(mScene->sceneManager(), targets, mMirrorView->camera(),
                                         mMirrorWorkspaceDef, true);
     mMirrorGeneration = gen;
+    mMirrorTarget = target;
+    mMirrorW = target->getWidth();
+    mMirrorH = target->getHeight();
     if (!mMirrorWorkspace) vrLog("the mirror workspace could not be created");
 }
 
@@ -1366,6 +1435,11 @@ VrStatus VrSession::status() const {
     s.mirror = mMirrorView ? mConfig.mirror : VrMirrorMode::None;
     s.worldScale = mConfig.worldScale;
     s.asymmetricFov = mAsymmetricFov;
+    s.headPosition = Vec3(mWorldHeadPos.x, mWorldHeadPos.y, mWorldHeadPos.z);
+    s.headRotation = Quat(mWorldHeadRot.x, mWorldHeadRot.y, mWorldHeadRot.z, mWorldHeadRot.w);
+    s.posesValid = mHavePose;
+    s.origin = Vec3(mOriginPos.x, mOriginPos.y, mOriginPos.z);
+    s.originYaw = mOriginYawDeg;
     return s;
 }
 
@@ -1817,6 +1891,10 @@ VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Un
 VrStatus vrSessionStatus(const VrSession *s) { return s ? s->status() : VrStatus(); }
 View *vrSessionView(const VrSession *s) { return s ? s->view() : nullptr; }
 void vrSessionSetMirror(VrSession *s, OgreView *v) { if (s) s->setMirrorView(v); }
+void vrSessionSyncMirror(VrSession *s) { if (s) s->syncMirror(); }
+void vrSessionSetOrigin(VrSession *s, const Vec3 &p, float yawDegrees) {
+    if (s) s->setOrigin(Ogre::Vector3(p.x, p.y, p.z), yawDegrees);
+}
 bool vrSessionEyeScreenshot(VrSession *s, unsigned eye, Image &out, std::string &error) {
     if (!s) { error = "vrEyeScreenshot: no session is running"; return false; }
     return s->eyeScreenshot(eye, out, error);

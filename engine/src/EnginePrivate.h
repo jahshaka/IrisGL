@@ -5258,6 +5258,18 @@ VrState vrSessionState(const VrSession *);
 VrStatus vrSessionStatus(const VrSession *);
 View   *vrSessionView(const VrSession *);
 void    vrSessionSetMirror(VrSession *, OgreView *);
+/// Places the reference space in the world (Engine::setVrOrigin). Position and
+/// a heading in degrees about +Y; never a pitch or a roll.
+void    vrSessionSetOrigin(VrSession *, const Vec3 &position, float yawDegrees);
+/// RE-CHECKS THE MIRROR against the view it is painting onto, mid-frame.
+///
+/// The frame applies pending window RESIZES (OgreView::applyPendingResize)
+/// AFTER the session's pump has already decided what the mirror looks like, and
+/// a resize destroys and rebuilds the window's swapchain under a mirror
+/// workspace that is about to execute against it. Calling this after the resize
+/// loop is what stops that workspace running on a target that has changed
+/// shape; it costs a handful of integer compares when nothing moved.
+void    vrSessionSyncMirror(VrSession *);
 bool    vrSessionEyeScreenshot(VrSession *, unsigned eye, Image &out, std::string &error);
 
 class OgreEngine final : public Engine {
@@ -5293,6 +5305,7 @@ public:
     VrStatus vrStatus() const override;
     View *vrView() const override;
     void setVrMirrorView(View *view) override;
+    void setVrOrigin(const Vec3 &position, float yawDegrees) override;
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     /// The live session, for the TU that owns it and for the frame. Null when
     /// none runs.
