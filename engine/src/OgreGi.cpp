@@ -1661,12 +1661,12 @@ bool OgreScene::computeGiBounds(Ogre::Vector3 &mn, Ogre::Vector3 &mx) const {
 
 // Voxel volume resolution per axis, by quality. Shared so the bounds margin can
 // be expressed in voxels rather than in a made-up percentage.
+//
+// THE NUMBER COMES FROM THE ONE TIER TABLE (`giQualityFacts`, Types.h): the
+// app's tier descriptions are generated from the same function, so what a tier
+// SAYS and what it DOES cannot drift (render audit A5).
 unsigned OgreScene::giVoxelResolution() const {
-    switch (mGi.quality) {
-    case GiQuality::Low:  return 32u;
-    case GiQuality::High: return 128u;
-    default:              return 64u;
-    }
+    return giQualityFacts(mGi.quality).voxelResolution;
 }
 
 // THE ONE SHAPE READING LEFT IN THIS FILE (ENGINE-4 item 5's ground clip).
@@ -3270,36 +3270,13 @@ std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
         // the same reach at their own resolution: the far cascade is what stops
         // a corridor going black, and losing it would cost more picture than
         // the cells it saves.
-        const int res = int(giVoxelResolution());
-        switch (mGi.quality) {
-        case GiQuality::Low:
-            // LOW IS 64^3, NOT THE QUALITY DIAL'S 32 (PHOTON_SPEC §7 E2 (4):
-            // "Low = 2 cascades @ 64^3, 1 bounce, the field ON, no probes").
-            // Low is a GPU tier now — it replaced a CPU ray trace — and the
-            // number that decides whether its bounce means anything is the CELL,
-            // not the resolution: at 32 the inner cascade's cell is 0.31 m and
-            // the outer one's 1.25, which smears a room's own walls. At 64 they
-            // are 0.156 and 0.625 m for a voxel volume 1/8 the memory of the
-            // single 64 m box this tier used to be unable to afford at all.
-            // TWO cascades, because reach is what stops a corridor going black
-            // and the far one is the cheap one (its cell declines everything
-            // sub-voxel — rule 2).
-            table.push_back({  5.0f, 64, 0.0f });
-            table.push_back({ 20.0f, 64, 0.0f });
-            break;
-        case GiQuality::High:
-            table.push_back({  5.0f, 128, 0.0f });
-            table.push_back({ 10.0f, 128, 0.0f });
-            table.push_back({ 15.0f,  64, 0.0f });
-            table.push_back({ 60.0f,  64, 0.0f });
-            break;
-        default:
-            table.push_back({  5.0f, res, 0.0f });
-            table.push_back({ 10.0f, res, 0.0f });
-            table.push_back({ 15.0f, res, 0.0f });
-            table.push_back({ 60.0f, res, 0.0f });
-            break;
-        }
+        // THE TIER TABLE IS `giQualityFacts` (Types.h) — the same function the
+        // app generates its tier descriptions from, so a chain the renderer
+        // builds and a chain a tooltip promises are one table (render audit A5).
+        // Low is 2 cascades at 64^3 and NOT the quality dial's 32 (PHOTON_SPEC
+        // §7 E2 (4)); the reasoning for each row is at the table.
+        const GiQualityFacts facts = giQualityFacts(mGi.quality);
+        for (int i = 0; i < facts.cascadeCount; ++i) table.push_back(facts.cascades[i]);
     }
     // THE STEP TABLE, when a row did not pin one: the pin's own
     // `autoCalculateStepSizes(4)` shape (OgreVctCascadedVoxelizer.cpp:131-161)
@@ -4288,7 +4265,8 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // instantiates a shadow node per workspace and this workspace is
     // instantiated once per probe, which at the full atlas cost 80 MB per
     // probe (the numbers are at the constant's declaration).
-    const bool wantShadows = resolveToggle(mGi.probeShadows, mGi.quality == GiQuality::High);
+    const bool wantShadows =
+        resolveToggle(mGi.probeShadows, giQualityFacts(mGi.quality).probeShadowsDefault);
     const char *probeWorkspace = "JahshakaPccProbeWorkspace";
     if (wantShadows) {
         if (cm->hasWorkspaceDefinition("JahshakaPccProbeWorkspaceShadows") &&
@@ -4473,12 +4451,9 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     //
     // 0 = follow the dial; anything else is the author's, clamped to a sane
     // power of two because Ogre sizes the IBL mip chain from it.
-    Ogre::uint32 probeRes = 512u;
-    switch (mGi.quality) {
-    case GiQuality::Low:    probeRes = 128u; break;
-    case GiQuality::Medium: probeRes = 256u; break;
-    case GiQuality::High:   probeRes = 512u; break;
-    }
+    // From the ONE tier table (`giQualityFacts`), like the cascade chain and
+    // the voxel resolution: 128 at Low, 256 at Medium, 512 at High and Epic.
+    Ogre::uint32 probeRes = giQualityFacts(mGi.quality).probeFaceSize;
     if (mGi.probeCaptureSize > 0) {
         unsigned want = unsigned(std::min(std::max(mGi.probeCaptureSize, 64), 1024));
         unsigned pot = 64u;
@@ -4498,7 +4473,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
     // into alpha (never sRGB-encoded either way, and more precise as float), and
     // buildEnd reads it back through TextureBox::getColourAt with the bind
     // texture's own format. The cost is 2x the probe VRAM, hence the High gate.
-    mPccHdr = resolveToggle(mGi.probeHdr, mGi.quality == GiQuality::High);
+    mPccHdr = resolveToggle(mGi.probeHdr, giQualityFacts(mGi.quality).probeHdrDefault);
     const Ogre::PixelFormatGpu probeFormat =
         mPccHdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM_SRGB;
     const float diag = region.getSize().length();

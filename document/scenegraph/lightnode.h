@@ -49,8 +49,10 @@ class LightNode:public SceneNode
 {
 
 public:
-    iris::Vec3 lightDir;
-
+    // (`lightDir` is GONE — render audit I-6, CRUD law. It was a stored
+    // direction nothing ever wrote and nothing ever read: the direction a
+    // light shines is DERIVED from its rotation, by getLightDir() below, and
+    // that is the only answer that can be right after a node moves.)
     LightType lightType;
 
     ShadowMap* shadowMap;
@@ -95,11 +97,9 @@ public:
     /// records).
     bool followsAtmosphere = true;
 
-	/*
-	Shadow's color and trasnsparency
-	*/
-	QColor shadowColor;
-	float shadowAlpha;
+	// (`shadowColor` and `shadowAlpha` are GONE — render audit I-6, CRUD law:
+	// two serialized, reflected, panel-bound fields the renderer never read.
+	// A shadow is the absence of light, not a tinted overlay.)
 
     /**
      * Spotlight cutoff HALF angle in degrees: the angle between the light's
