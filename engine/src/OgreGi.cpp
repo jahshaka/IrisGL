@@ -3582,12 +3582,31 @@ static const float kCascadeSubVoxelFactor = 0.5f;
 // looking at (at the 25 m pose cascades 0 and 1 stand in empty space and
 // cascade 2 owns the near field). So a per-cascade factor by INDEX, which is
 // what the audit expected, is not what the measurement supports: the index is
-// not the variable. Second, the only fraction that holds every arm inside
-// 4/255 is below 1/151 (the ratio at which cascade 2 takes level 1), so:
+// not the variable. Second, on that fixture the only fraction that holds every
+// arm inside 4/255 is below 1/151 (the ratio at which cascade 2 takes level 1),
+// so:
 //
-//   kCascadeLodCellFraction = 1/256 — at most ~0.4 % of an object's surface
-//   voxels may change occupancy, and the picture stays inside 4/255 on every
-//   arm measured.
+//   kCascadeLodCellFraction = 1/256
+//
+// AND WHAT THAT NUMBER IS NOT, measured on two further fixtures (ATOM-3-FIX,
+// spikes/atom-3/FINDINGS.md §6): it is NOT a picture bound. Take the same
+// protocol to an AVENUE — 353 imported instances at three scales and mixed
+// distances over 90 m of depth, as a thin knot tube and again as ATOM-3's
+// convex sphere — and the outermost cascade becomes the only cover of what the
+// camera sees at the mid and far poses. There, cascade 3 at LEVEL 1 (an error
+// of 0.00094 of its cell, four times STRICTER than this constant) already costs
+// 62-80/255 on sparse pixels and 400-2,300 pixels above 4/255, and the fourth
+// level does not make the worst pixel any worse — it is the same pixel at the
+// same magnitude, because a BINARY occupancy flip is not proportional to the
+// error that caused it. No non-zero fraction is inside 4/255 for a cascade in
+// that role.
+//
+// So this constant is honestly described as: the fraction at which a cascade
+// that is NOT the finest cover of the camera's surfaces stays inside 4/255,
+// and which keeps the outermost cascade's 4-5x saving (measured 4.8x and 3.9x
+// on those two fixtures, 4.0x on the lattice). A real picture bound is a
+// question about a cascade's ROLE, which the scheduler knows and a constant
+// cannot — the measured follow-up, not a number to tune (FINDINGS.md §6).
 //
 // WHAT IT STILL BUYS, which is the reason it is not simply 0: the win was never
 // spread over the chain, it is concentrated in the OUTERMOST cascade (225 ms of
