@@ -308,20 +308,22 @@ Scene::Scene()
     // Post chain: everything off. A scene only gets effects when the user picks
     // a World Mode (or turns a row on); nothing changes under anyone's feet.
     hdrEnabled = false;
-    // +0.6, not 0. The shader's exposure term is 1024*e^(exposure-2) divided by
-    // the scene's average log-luminance (DownScale03_SumLumEnd_ps.glsl), and
-    // Ogre's sample tuned its 0 against content whose radiance runs to ~20.
-    // Every texture we can import is 8-bit, so ours runs to ~1: at 0 the filmic
-    // curve plus its grade tail lands mid-grey at about 0.31, and a default
-    // scene visibly darkens the moment HDR comes on. +0.6 is ln(1.8), the
-    // amount that puts mid-grey back where it was; it is a starting point the
-    // auto-exposure then works from, not a fixed offset.
-    exposure = 0.6f;
-    // The adaptation window, verbatim from what the engine hard-coded before
-    // the document could say anything about it (PostFxDesc's own defaults), so
-    // a scene written before this field existed grades identically.
-    exposureMin = -2.5f;
-    exposureMax = 2.5f;
+    // EXPOSURE (EXPOSURE-1): MANUAL, at the exposure the default template's
+    // lights DERIVE (iris::lens::defaultExposureChain — a sun and a Sky Light
+    // at intensity 1 over a 96-grey sky put PI*(1+0.117) = 3.5091 on a surface
+    // facing them, and an 18 % grey card under that develops at chain
+    // E = 0.5960 once the film curve's own transfer is inverted). Zero stops IS
+    // that grade, so a new scene reads 0.00 in the World panel.
+    //
+    // The old +0.6 was a number fitted by eye against 8-bit content and it was
+    // the AUTO midpoint, which is a different thing again: the meter then moved
+    // the picture by whatever the frame happened to contain (RENDER AUDIT A1).
+    exposureMode = iris::ExposureMode::Manual;
+    exposure = 0.0f;
+    // The window Auto adapts within, in STOPS, and the same pair a camera is
+    // born with (CameraNode) — one default for one quantity.
+    exposureMin = -3.5f;
+    exposureMax = 3.5f;
     bloomEnabled = false;
     bloomThreshold = 5.0f;
     bloomKnee = 2.0f;   // the width the engine used to hard-code (A-6)

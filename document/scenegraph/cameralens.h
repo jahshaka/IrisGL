@@ -218,58 +218,229 @@ float ogreFrustumOffset(float shiftFraction, float halfExtent, float nearDist,
 float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float nearDist,
                                  float stereoFocalLength);
 
-// ---- EXPOSURE (CAMERA_LENS_SPEC §4) ---------------------------------------
+// ---- EXPOSURE (CAMERA_LENS_SPEC §4; EXPOSURE-1, 2026-09-17) ---------------
 //
-// THE DOCUMENT STORES STOPS. The post chain does not: Ogre's HDR auto-exposure
-// material takes `(1024 * e^(E-2), 7.5 - max, 7.5 - min)` and its shader
-// computes
+// THIS IS THE ONE EXPOSURE MODEL IN THE PROGRAM. The document stores STOPS,
+// everywhere — the world's grade and a camera's override are the same unit on
+// the same axis — and exactly one conversion (`toChain`, below) turns a
+// resolved exposure into what the post chain takes. Before this lane there were
+// five spellings of the quantity spread over four files and two units (RENDER
+// AUDIT A3); two of them are deleted and the rest are stated here.
+//
+// THE CHAIN'S AXIS. Ogre's HDR material takes `(1024 * e^(E-2), 7.5 - max,
+// 7.5 - min)` and its shader computes
 //
 //     multiplier = 1024 * e^(E-2) / e^( clamp( meanLogLuma, 7.5-max, 7.5-min ) )
 //     history    = mix( multiplier, history, 0.25 ^ dt )        // ~75%/s
 //
 // (DownScale03_SumLumEnd_ps.glsl, verified in the pin). So `E` lives on a
-// NATURAL-LOG axis — one photographic stop is ln 2 of it — and the window
-// bounds live on the same axis but describe MEASURED LUMINANCE, not exposure.
-// Both conversions are here, as pure functions, because they are the one place
-// the two unit systems meet and every number they produce is asserted against a
-// hand computation in tests/cameras.
+// NATURAL-LOG axis — one photographic stop is ln 2 of it. That axis is an
+// ENGINE unit: nothing in the document holds it any more.
 //
-// THE ANCHOR. `stops = 0` has to mean something, and the honest choice is "the
-// grade a default world already has": iris::Scene's own default exposure is
-// +0.6 in chain units (the value the World panel documents as "what puts
-// mid-grey back where it was when HDR comes on"). So zero stops on a camera IS
-// the default world exposure, and +1 stop is one doubling from there.
-constexpr float kExposureAnchorChain = 0.6f;
+// AUTO vs MANUAL, and what each one IS in the renderer.
+//   * AUTO is that shader: a meter (a mean of log luminance over the frame)
+//     drives the multiplier, bounded by the window.
+//   * MANUAL replaces the whole measurement with a constant — the chain's
+//     FIXED-EXPOSURE form (PostFxDesc::tonemapFixed), which clears the 1x1
+//     exposure texture to `e^(E-2) / 0.18` and draws the identical tonemap
+//     node. It is exact from the first frame, it is five quads and four
+//     textures cheaper, and it is BY CONSTRUCTION the same grade a thumbnail
+//     or a screenshot of the same world gets, because those already use that
+//     form. The old recipe — pin the shader's clamp by setting min == max —
+//     is DELETED as a way of SPELLING manual exposure: it reached the same
+//     number through a temporal filter that took about a second to arrive. Its
+//     constant survives under its real name, `meterGreyCardChain()`, because
+//     the WINDOW still lives on the meter's axis and has to be converted
+//     through it.
+//
+// THE ANCHOR. `stops = 0` means "the default world grade", and that grade is
+// DERIVED FROM PHYSICS rather than tuned by hand (it was +0.6 in chain units,
+// a number fitted by eye in 2026-09). See `defaultExposureChain()`.
+/// THE GREY CARD, twice over, because the two 0.18s in this file are different
+/// quantities that happen to share a number:
+///   * `kGreyCardReflectance` is the 18 % REFLECTANCE a photographic meter is
+///     calibrated against — a property of a piece of card;
+///   * `kGreyCardDisplay` is the 18 % of maximum a correctly exposed grey card
+///     should make the DISPLAY emit — a property of the picture.
+/// (The chain's own `e^(E-2)/0.18` carries a third one, the reflectance again.)
+constexpr float kGreyCardReflectance = 0.18f;
+constexpr float kGreyCardDisplay     = 0.18f;
+
+/// THE FILM CURVE, as the pin's media actually ships it
+/// (`Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl` —
+/// UNPATCHED by us; 0034 and 0042 touch the METER, not the curve):
+///
+///     out = ( Hable(x) / Hable(W) - 0.5 ) * 1.25 + 0.5 + 0.11
+///     Hable(x) = (x(Ax + CB) + DE) / (x(Ax + B) + DF) - E/F
+///
+/// with Ogre's SECOND constant set (the commented-out first one is Hable's
+/// original). The `*1.25 + 0.11` tail is a hand grade with real contrast and
+/// lift in it, so the curve does NOT map 0.18 in to 0.18 out — which is exactly
+/// why an exposure derived as "put the grey card at the tonemapper's 0.18
+/// input" comes out 0.6 stops dark. The derivation below inverts the WHOLE
+/// curve instead. CHANGE THE MEDIA AND THIS NUMBER MOVES: the suite recomputes
+/// it by hand from these constants, so a curve edit fails loudly here.
+constexpr float kFilmA = 0.22f, kFilmB = 0.30f, kFilmC = 0.10f;
+constexpr float kFilmD = 0.20f, kFilmE = 0.01f, kFilmF = 0.30f;
+constexpr float kFilmW = 11.2f;
+constexpr float kFilmContrast = 1.25f, kFilmPivot = 0.5f, kFilmLift = 0.61f;
+
+/// THE TONEMAPPER INPUT THAT DISPLAYS AS AN 18 % GREY CARD — the curve above,
+/// inverted. `Hable` is a ratio of two quadratics, so the inverse is a
+/// quadratic root and not an iteration. ~0.2744 for the shipped constants.
+///
+/// (The window's target is `PFG_RGBA8_UNORM_SRGB` and the render window is
+/// created with `gamma=true`, so the shader's LINEAR output is sRGB-encoded by
+/// the hardware: "the display emits 18 %" is the shader value 0.18. An
+/// OFFSCREEN plain readback is NOT encoded, which is why a screenshot PNG of
+/// this looks darker than the viewport — a separate, recorded item.)
+float greyCardFilmInput();
+
+/// THE KEY IRRADIANCE of a scene's lights, in the renderer's own units.
+///
+/// HlmsPbs shades a Lambertian surface as `L = lightDiffuse * NdotL * albedo/PI`
+/// (kD is albedo/PI — 200.BRDFs_piece_ps.any: "already included in kD"), and
+/// this engine writes `lightDiffuse = colour * intensity * PI`
+/// (OgreScene.cpp setPowerScale). So `lightDiffuse` IS the irradiance a surface
+/// facing the light receives, and a light of intensity `i` delivers `i * PI`.
+///
+/// The SKY LIGHT is an integral rather than a beam: a uniform sky of radiance
+/// `L_sky` puts `PI * L_sky` on an unshadowed upward-facing surface, scaled by
+/// the Sky Light's own intensity.
+///
+///     E_key = PI * ( sunIntensity + skyLightIntensity * skyRadiance )
+///
+/// `skyRadiance` is the sky's own linear radiance (a colour sky is its colour
+/// decoded sRGB->linear; the analytic sky is its integral). NdotL is taken as 1
+/// — the key is what a surface FACING the key light gets, which is the
+/// photographic definition and not an average over the frame.
+float keyIrradiance(float sunIntensity, float skyLightIntensity, float skyRadiance);
+
+/// THE EXPOSURE THAT DEVELOPS THAT ILLUMINATION CORRECTLY, on the chain's axis.
+///
+/// An 18 % grey card under `E_key` has radiance `L = 0.18 * E_key / PI`. Manual
+/// exposure multiplies by `m = e^(E-2) / 0.18` (the chain's own constant), and
+/// a correctly exposed grey card lands on `greyCardFilmInput()`:
+///
+///     L * m = x*
+///     e^(E-2) = 0.18 * x* / L = x* * PI / E_key          (the two 0.18s cancel)
+///     E       = 2 + ln( x* * PI / E_key )
+///
+/// A doubling of the light is exactly one stop down, which is the property that
+/// makes this a meter and not a fudge factor.
+float exposureForKeyIrradiance(float keyIrradianceValue);
+
+/// THE DEFAULT WORLD GRADE, derived: the formula above for the lights a NEW
+/// SCENE is born with (MainWindow::createDefaultScene) —
+///
+///     sun (Directional Light)  intensity 1.0, white
+///     Sky Light                intensity 1.0, white
+///     sky                      96-grey, sRGB 96/255 = 0.37647 -> linear 0.11697
+///
+///     E_key = PI * (1 + 0.11697)               = 3.50907
+///     x*    = 0.274352                         (the film curve, inverted)
+///     E     = 2 + ln(0.274352 * PI / 3.50907)  = 0.59604
+///
+/// MEASURED AGAINST THE METER IT REPLACES (EXPOSURE-1, 2026-09-17): the
+/// automatic exposure converges on the default scene at multiplier 1.41406 and
+/// this exposure is 1.36456 — 0.051 STOPS apart, so the default picture does
+/// not move when the default becomes a number instead of a measurement. The
+/// hand-tuned +0.6 that stood here for a fortnight was 0.006 stops from the
+/// physics; it was right, and it was underived, which is what made it
+/// impossible to move the default lights without re-tuning by eye.
+float defaultExposureChain();
+/// The chain exposure zero stops corresponds to — `defaultExposureChain()`.
+float exposureAnchorChain();
 
 /// stops -> the chain's `E`, and back. Exact inverses.
 float exposureStopsToChain(float stops);
 float exposureChainToStops(float chain);
 
-/// THE MANUAL PIN, and why it is a CONSTANT rather than the exposure value.
-///
-/// Setting min == max pins the shader's clamp, which is what makes manual
-/// exposure possible at all. But pinning it TO THE EXPOSURE would make the
-/// exposure appear twice in the same expression (`e^(E-2) / e^(7.5-E)`), so one
-/// authored stop would move the picture by two — a silently wrong dial. Pinning
-/// the clamp to a fixed reference instead leaves `multiplier ∝ e^E`, i.e.
-/// exactly one stop per stop.
-///
-/// WHICH reference: the one that makes manual exposure agree with the
-/// deterministic tonemap the secondary surfaces already use
-/// (PostFxDesc::tonemapFixed, whose constant is `e^(E-2) / 0.18` — a grey card
-/// standing in for the measurement). Solving
-/// `1024 / e^(7.5 - pin) = 1 / 0.18` gives `pin = 7.5 - ln(1024 * 0.18)`, so a
-/// manually exposed viewport and a thumbnail of the same world at the same
-/// exposure grade IDENTICALLY. Nothing about that is a coincidence to preserve
-/// by luck — it is why this number is derived here and not typed in.
-float manualExposureClamp();
-
-/// The multiplier the tonemapper ends up applying for a chain exposure `E`
-/// under the manual pin (and the value the auto path converges to on a
-/// grey-card scene): `e^(E-2) / 0.18`. Used to re-seed the adaptation history
-/// on a camera cut, and asserted against the chain's own fixed-exposure
-/// constant.
+/// The multiplier the tonemapper applies for a chain exposure `E` in the FIXED
+/// (manual) form: `e^(E-2) / 0.18`. This is the one number manual exposure is:
+/// the chain's clear colour, the thumbnail grade's constant, and the value the
+/// auto path converges to on a scene whose measured geometric-mean luminance is
+/// the 0.18 grey card. Also used to re-seed the adaptation history on a cut.
 float exposureMultiplier(float chainExposure);
+
+/// THE WINDOW IS NOT AN EXPOSURE, and this is the number that says so.
+///
+/// `chain::setExposure(E, min, max)` pushes `(1024*e^(E-2), 7.5-max, 7.5-min)`
+/// and DownScale03 clamps the MEASURED log-luminance `ln(1024 * Y)` into that
+/// pair. So the window lives on the MEASUREMENT's axis, not the exposure's, and
+/// the two axes have different zeros. A grey-card scene measures
+/// `ln(1024 * 0.18)`, and the window value that corresponds to it is
+///
+///     kMeterGreyCardChain = 7.5 - ln(1024 * 0.18) = 2.283327
+///
+/// At that value the clamp is exactly where an 18 % grey card would put the
+/// meter, so the automatic multiplier equals the MANUAL grade at the same `E`:
+/// `1024*e^(E-2) / e^(7.5-w)` with `w = kMeterGreyCardChain` is `e^(E-2)/0.18`.
+/// Away from it the auto grade differs from Manual by `e^(w - kMeterGreyCardChain)`,
+/// i.e. by exactly `(w - kMeterGreyCardChain) / ln 2` stops.
+///
+/// SO THE DOCUMENT'S WINDOW IS IN STOPS *FROM THE MANUAL GRADE*: a window of
+/// [-3.5, +3.5] means "the meter may land up to three and a half stops either
+/// side of the exposure you typed", and [0, 0] means "exactly the exposure you
+/// typed", which is the same picture Manual renders. That is the only reading
+/// of the pair a user can act on, and it is what makes the three numbers ONE
+/// dial rather than a number and two engine internals.
+///
+/// (This constant is the one EXPOSURE-1 deleted as `manualExposureClamp()`. It
+/// was deleted as the product's way of SPELLING manual exposure — Manual is the
+/// chain's fixed form now — and it comes back named for what it always was: the
+/// place on the meter's axis where the meter agrees with the grey card. The
+/// first cut of this lane converted the window with the EXPOSURE's anchor and
+/// was 2.43 stops out; the suites pinned only the window's WIDTH, so nothing
+/// caught it — they pin the OFFSET now.)
+float meterGreyCardChain();
+
+}   // namespace lens
+
+// ---- THE RESOLVED EXPOSURE (EXPOSURE-1) -----------------------------------
+
+/// Manual (a number) or Auto (a measurement). The WORLD's mode; a camera adds
+/// `Inherit` on top of these two (iris::CameraExposureMode).
+enum class ExposureMode {
+	Manual,
+	Auto
+};
+
+const char *exposureModeName(ExposureMode m);              ///< "manual" | "auto"
+ExposureMode exposureModeFromName(const char *name, bool *ok = nullptr);
+
+/// ONE EXPOSURE STATEMENT, in the document's unit, after the world and the
+/// driving camera have been combined. This is what crosses the mirror.
+struct ExposureDesc {
+	ExposureMode mode = ExposureMode::Manual;
+	/// The exposure in STOPS. In Manual it IS the exposure; in Auto it is the
+	/// midpoint the adaptation works around.
+	float stops = 0.0f;
+	/// The window Auto may adapt within, in stops. Ignored in Manual (which
+	/// measures nothing at all). Kept ordered: min <= max.
+	float minStops = -3.5f;
+	float maxStops = 3.5f;
+};
+
+namespace lens
+{
+
+/// THE ONE CONVERSION into the post chain's units.
+///
+/// TWO AXES, and they are not the same one: the EXPOSURE converts through
+/// `exposureStopsToChain` (anchored at the derived default grade) and the
+/// WINDOW through `meterGreyCardChain` (anchored where the meter agrees with a
+/// grey card), because the chain clamps a MEASUREMENT with the window and
+/// multiplies by the exposure. Both are STOPS in the document and both are
+/// stops the user can act on — the window's are stops away from the exposure
+/// they typed — which is why the pair is one dial and not two internals.
+///
+/// `fixed` out is the chain's FIXED-EXPOSURE form (PostFxDesc::tonemapFixed):
+/// true for Manual. In that form `chainMin`/`chainMax` are not read by anything
+/// — the clear colour is the whole grade — and they are returned at the
+/// resolved exposure so a description is never carrying a stale window.
+void toChain(const ExposureDesc &d, float &chainExposure, float &chainMin, float &chainMax,
+             bool &fixed);
 
 /// Exponential smoothing toward a target, framerate-independent:
 ///     out = target + (current - target) * exp(-speed * dt)

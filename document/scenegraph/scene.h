@@ -20,6 +20,7 @@ For more information see the LICENSE file
 #include "irisglfwd.h"
 #include "document/assets/texture2d.h"
 #include "document/input/possession.h"
+#include "document/scenegraph/cameralens.h"
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/nodedirtyset.h"
 #include "document/scenegraph/shadowmap.h"
@@ -529,27 +530,54 @@ public:
     // Per scene, pushed to the ENGINE VIEWPORT by SceneMirror. Offscreen views
     // (thumbnails, previews, every pixel suite) ignore all of it by
     // construction, which is what keeps their colours exact.
-    bool  hdrEnabled;        ///< float scene target + filmic tonemap + auto exposure
-    float exposure;          ///< auto-exposure midpoint; used as e^(exposure-2),
-                             ///< so +0.69 is one doubling (NOT stops)
-    /// The WINDOW auto-exposure may adapt within, around `exposure`. Both
-    /// engine fields (PostFxDesc::exposureMin/Max) existed and were pushed at
-    /// their hard-coded defaults; the document could not say otherwise, so the
-    /// World > Post Process section could not offer them (fix wave 2026-09-07,
-    /// item 8).
+    bool  hdrEnabled;        ///< float scene target + filmic tonemap + the exposure below
+
+    // ---- EXPOSURE (EXPOSURE-1, 2026-09-17; RENDER AUDIT A1 + A3) ----------
+    //
+    // THE EDITOR'S DEFAULT IS MANUAL, at an exposure DERIVED FROM THE DEFAULT
+    // TEMPLATE'S LIGHTS (iris::lens::defaultExposureChain). Auto is a meter,
+    // and a meter does what meters do: a white plane filling the frame is
+    // normalised to the grey card and everything else in the scene sinks about
+    // two and a half stops — measured, SMOKE-41 symptom 5 (a default plane took
+    // the objects down 56-62 %, while the same scene at a frozen exposure got
+    // 7-38 % BRIGHTER, because a plane bounces light). That is correct
+    // photometry and the wrong default for an authoring tool: a user who just
+    // placed a white plane expects it to read white.
+    //
+    // ONE UNIT: STOPS, the same unit a camera's block uses (CameraNode's
+    // exposure block), converted to what the post chain takes exactly once, at
+    // the mirror, by iris::lens::toChain. Zero stops is the derived default
+    // grade; +1 is one doubling. (The WINDOW below is stops too, but of a
+    // different quantity — see it.)
+    iris::ExposureMode exposureMode;
+    /// In Manual it IS the exposure; in Auto it is the midpoint the adaptation
+    /// works around. STOPS.
+    float exposure;
+    /// The window Auto may adapt within, in stops AROUND THE EXPOSURE ABOVE:
+    /// [0, 0] is the exposure you typed (the picture Manual renders) and
+    /// [-3.5, +3.5] lets the meter land three and a half stops either side of
+    /// it. Read only in Auto — Manual measures nothing at all, so there is
+    /// nothing to bound (the old "set them equal to pin the grade" recipe is
+    /// DELETED: Manual is the chain's fixed-exposure form now, exact from the
+    /// first frame and five passes cheaper). Kept ordered: min <= max.
     ///
-    /// WHAT min == max REALLY DOES (corrected by measurement, SS1 2026-09-13 —
-    /// the old note here claimed it was "the deterministic setting the
-    /// secondary-surface tonemap uses", and it is not): it clamps what the
-    /// automatic exposure adapts TOWARDS to a single value, so the grade stops
-    /// following the scene's content. It is still the AUTOMATIC chain — a
-    /// temporal filter that takes about a second to arrive — and it lands
-    /// nowhere near the constant the secondary surfaces grade with, which
-    /// substitutes a 0.18 grey card for the measurement (measured on one floor
-    /// region: 12.9 against 86.6). For a picture that is deterministic by
-    /// construction, ask a screenshot for the "tonemap" or "scene" grade.
+    /// IT IS NOT ON THE SAME AXIS AS `exposure` INSIDE THE RENDERER, and the
+    /// conversion is the one thing about this pair worth knowing: the chain
+    /// clamps a MEASUREMENT with the window and MULTIPLIES by the exposure, so
+    /// the two have different zeros (iris::lens::meterGreyCardChain). Both are
+    /// stops here because both are stops a user can act on; the mirror keeps
+    /// them apart.
     float exposureMin;
     float exposureMax;
+    /// TRANSIENT, NEVER SERIALISED (EXPOSURE-1). True when the file this scene
+    /// was read from carried the RETIRED chain-unit `exposure` keys and nothing
+    /// else, so the reader ignored them and the scene opened at the
+    /// constructor's grade. There is no migration and there will not be one —
+    /// the same number means a different picture in the two units — but the
+    /// user is entitled to be told once, which is what `services/sceneissues`
+    /// does with it. Cleared by the writer: once the file carries the new keys
+    /// the statement is no longer true.
+    bool  legacyExposureKeyIgnored = false;
     bool  bloomEnabled;      ///< highlight bloom; rides the HDR node, needs hdrEnabled
     float bloomThreshold;    ///< where the bright pass starts, in tonemapper units
     /// How WIDE the ramp above that threshold is (ADDENDUM A-6). A width, not a
