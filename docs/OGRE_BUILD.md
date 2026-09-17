@@ -1219,9 +1219,10 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     the end of every bounce iteration it runs; after an ODD number of them the
     job would read the texture that cascade has just stopped writing (a swap is
     an involution, so even counts come back to where they started). On the
-    shipped four-cascade table at three total bounces the counts resolve to
+    shipped four-cascade table at three total bounces the counts used to resolve to
     1/2/4/8 (measured under JAHSHAKA_GI_DEBUG — an earlier "1/3/7" was
-    arithmetic on the wrong precedence), so only cascade 0 is odd and nobody's
+    arithmetic on the wrong precedence; since PHOTON-M1 every cascade runs the
+    document's own count, so three bounces is 2/2/2/2 and two is 1/1/1/1), so only cascade 0 was odd and nobody's
     bounce reads cascade 0 (the irradiance FIELD does, which is why the engine
     re-binds it after every bouncing update). THE DEFECT THAT ACTUALLY RED THE
     SUITE is the other one this hunk closes — patch 0057's recorded residual and
@@ -1722,11 +1723,41 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     (the rejection is synchronous, the GPU never hung) — not proof: that crash has not
     been reproduced on the simulated runtime.
 
-THE STACK IS 0001-0073 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0074-cascade-continuation-composites-once — THE CASCADE CONTINUATION COMPOSITES THE
+    TRANSMITTANCE ONCE, AND THE BOUNCE-INJECTION WALK CARRIES ITS CONE (lane PHOTON-M1,
+    2026-09-17; the 2026-09-17 render audit's PHOTON F8 + F9), MEDIA-only, two files
+    (Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any — overlaps 0021/0033/0045/0048/0066/0070
+    — and Samples/Media/VCT/LightVctBounceInject_piece_cs.any). A continuation trace
+    STARTS its opacity accumulator at the caller's `result.alpha` and weights every
+    sample it composites by `1 - alpha` from there, so what it returns already carries
+    the transmittance; the composite multiplied by `( 1.0 - result.alpha )` a second
+    time and every outer cascade contributed (1-A0)^2 of its radiance. Upstream calls
+    that "de-amplification" (OgreVctCascadedVoxelizer.cpp:470-486) and pairs it with
+    "more bounces for coarser cascades": both are one brightness stabilisation invented
+    when the opacity was DOUBLING per hop, which patch 0033 fixed at the cause. The
+    compute twin of the walk still had that doubling (`result.alpha += newRes.alpha`),
+    so a bounce never travelled past cascade 1, and restarted the cone's age at every
+    hop (0066's defect); both are fixed here. MEASURED: the default scene's selftest
+    picture moves 10,686 px (max 1/255, all brighter) for the composite and a further
+    4,590 for the walk; Showroom 2 at High reads 74.4583 -> 75.0694 mean probe against
+    an unchanged single-volume 91.3056; the chain-OFF picture is byte-identical
+    (7407fff2ded7f6462fb2ca3f23f11d292484b6395d56931922814132a25a5799 both sides) and
+    the lightless slab suite gi.chain_face is bit-identical.
+
+  (0075 — A BOUNCE IS NOT DIVIDED BY PI — was delivered by PHOTON-M1 and HELD at merge
+    (the lead, 2026-09-17, after the Fable second read): correct in the voxel's own
+    units, but one of three coupled defects in the same bounce job — the injection
+    stores k*rho*E (pi times the outgoing radiance, and the RGBA8 voxel saturates on
+    most lit surfaces) while the pixel consumes the gather as radiance, and the
+    bounce recurrence re-gathers the TOTAL each pass ((1+rho*G)^n, never contracts).
+    All three land together as PHOTON-M2 (0075 + a Jacobi bounce + the injection's
+    1/pi), one SOURCE rebuild, one hash move, one re-anchoring.)
+
+THE STACK IS 0001-0074 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
-patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
+patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074) need no Ogre rebuild (0024 and 0028 are
 SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072 and 0073 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,

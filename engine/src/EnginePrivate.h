@@ -4002,9 +4002,11 @@ private:
     void recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos);
     /// The ambient pair into ONE cascade's lighting (applyVctAmbient, aimed).
     void applyCascadeAmbient(Ogre::VctLighting *lighting);
-    /// Extra bounces for cascade `idx` — the pin's own brightness stabilisation
-    /// (a coarser cell loses light, so it gets more bounces). 0 when the
-    /// document asks for a single indirect bounce, which is the default.
+    /// Extra bounce passes for cascade `idx` — the DOCUMENT's own count, on
+    /// every cascade alike (PHOTON-M1 retired the pin's "a coarser cell gets
+    /// more bounces" stabilisation: a bounce adds energy, it does not recover
+    /// occlusion). 0 when the document asks for a single indirect bounce,
+    /// which is the default.
     Ogre::uint32 cascadeBounces(size_t idx) const;
     /// HOW MANY INJECTION PASSES AN AT-REST TICK SPENDS over a cascade chain
     /// (LAMPREST-2). A re-injection is one Jacobi iteration of the chain's

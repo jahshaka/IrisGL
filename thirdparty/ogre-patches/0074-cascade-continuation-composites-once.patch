@@ -1,0 +1,248 @@
+Jahshaka patch 0074 — the cascade continuation composites the transmittance ONCE,
+and the bounce-injection walk carries its cone across a hop.
+
+MEDIA-only patch (two Hlms/compute pieces:
+`Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any` and
+`Samples/Media/VCT/LightVctBounceInject_piece_cs.any`). THE PROCESS COST IS
+STATED RATHER THAN AVOIDED: Studio stages its media from the SOURCE tree
+(cmake/IncludeOgre.cmake), so every tree must still reset its ogre-next submodule
+and re-run `irisgl/scripts/build-ogre.sh` — no engine recompile beyond the
+staging. It OVERLAPS patches 0021, 0033, 0045, 0048, 0066 and 0070 in the pixel
+piece and 0060/0070 in the compute piece, so a tree that already carries those
+hits `build-ogre.sh`'s "Upstream changed the patched file" on a re-run: that is
+the documented per-patch reverse-check blind spot and NOT an upstream change. The
+cure is the recorded one — `git -C irisgl/thirdparty/ogre-next checkout -- . &&
+git -C irisgl/thirdparty/ogre-next clean -fd` and re-run the script.
+
+WHY (Jahshaka lane PHOTON-M1, 2026-09-17, measured; the 2026-09-17 render audit's
+PHOTON F8 and F9 named both).
+
+(1) THE DOUBLE TRANSMITTANCE (F9), in both continuations of the pixel piece and
+    in the compute twin. `voxelConeTraceDiff`/`voxelConeTraceSpec` start their
+    opacity accumulator at `startingAlpha` — the caller's own `result.alpha` —
+    and weight every sample they composite by `a = 1 - alpha` from that start.
+    What a continuation RETURNS is therefore already reduced by the light the
+    cone used up in the cascades before it. The composite then multiplied by
+    `( 1.0 - result.alpha )` a SECOND time, so every outer cascade contributed
+    (1-A0)^2 of its radiance. Upstream calls that second factor
+    "de-amplification" (`OgreVctCascadedVoxelizer.cpp:470-486`) and pairs it with
+    "more bounces for coarser cascades": both halves are a brightness
+    stabilisation invented when the opacity was DOUBLING at every hop — which
+    Jahshaka patch 0033 fixed at the cause. With 0033 in, the factor is a pure
+    darkening of every cascade past the first.
+
+(2) THE COMPUTE WALK STOPPED AFTER ONE HOP (F8). The bounce-injection twin of
+    `computeVctProbe` still had the two defects the pixel piece had before 0033
+    and 0066: `result.alpha += newRes.alpha` DOUBLED the opacity at every hop (the
+    accumulator already started at `result.alpha`), so the loop's `< 0.95f` guard
+    ended the walk after one cascade and a bounce never travelled further than
+    cascade 1; and the cone's AGE restarted at every hop, so the continuation
+    marched the next cascade at a footprint that never matched the cone's solid
+    angle. `VctResult` gains `travelled` and the trace a `startingTravelled`, in
+    the new cascade's units by the same directional scale 0066 uses.
+
+WHAT IT DOES NOT TOUCH. A single fitted volume never hops: the chain-OFF picture
+of the default scene is byte-identical across this patch
+(sha256 7407fff2ded7f6462fb2ca3f23f11d292484b6395d56931922814132a25a5799,
+measured both sides). The lightless-slab suite `gi.chain_face` is bit-identical
+too — the composite multiplies a radiance the slab does not have, and the
+ambient/escape term the slab measures is not on this path.
+
+MEASURED (PHOTON-M1, Xvfb 1920x1080, fixed 1/60 s clock, probes read "plain"
+= linear radiance, frames never wall clock):
+
+  * the default scene's selftest picture, F9 alone: 10,686 of 65,536 pixels move,
+    max 1/255, every changed channel BRIGHTER (32,053 channels up, 0 down);
+    the compute walk on top of it moves a further 4,590, max 1/255, all brighter.
+  * Showroom 2 at High (one bounce, so F9 alone): the chain's cones read
+    74.4583 -> 75.0694 mean probe (+0.82 %) against a single fitted volume's
+    91.3056, which is unchanged to the digit — the chain-vs-single darkening
+    SEAM-1 measured as 12.5 % (18.45 % on this tree) falls to 17.78 %.
+  * a closed cube room of albedo 0.79 at Epic (three bounces): the light each
+    extra bounce pass adds, as a fraction of the one-bounce picture, rises from
+    6.09 / 1.23 / 1.97 % to 9.26 / 1.77 / 3.35 % — the bounce reaches past
+    cascade 1 for the first time.
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+@@ -521,18 +521,31 @@
+ 							probes OGRE_SAMPLER_ARG( probeSampler )
+ 								OGRE_VCT_ANISO_PROBE_ARG PARAMS_ARG );
+ 
+-						// See VctCascadedVoxelizer::update comments on ( 1.0 - result.alpha )
++						// JAHSHAKA PATCH 0074: THE TRANSMITTANCE IS ALREADY INSIDE
++						// `newRes.colour`, AND WAS BEING APPLIED TWICE.
++						// voxelConeTraceDiff starts its opacity accumulator at
++						// `startingAlpha` -- this very `result.alpha` -- and every
++						// sample it composites is weighted by `a = 1 - alpha` from
++						// that start, so what it returns is the continuation's
++						// contribution ALREADY reduced by the light this cone has
++						// used up in the cascades before it. Multiplying by
++						// ( 1 - result.alpha ) a second time squares the
++						// transmittance and darkens every outer cascade.
++						// Upstream calls that second factor "de-amplification"
++						// (VctCascadedVoxelizer::update) and pairs it with "more
++						// bounces for coarser cascades" -- a brightness
++						// stabilisation invented when the opacity was doubling per
++						// hop, which patch 0033 fixed at the cause. With 0033 in it
++						// is a pure darkening, so it goes.
+ 						result.colour += newRes.colour *
+-										 probeParams.fromPreviousProbeToNext[j - 1][0].w *
+-										 ( 1.0 - result.alpha );
++										 probeParams.fromPreviousProbeToNext[j - 1][0].w;
+ 						// Jahshaka patch 0033 (both lines were `+=`): what the
+ 						// continuation RETURNS is already the running total for the
+ 						// whole cone -- voxelConeTraceDiff starts both accumulators
+ 						// at `startingAlpha`, which is this very `result.alpha` --
+ 						// so adding it doubles the opacity at every cascade hop. The
+-						// colour composite above deliberately keeps reading the
+-						// PREVIOUS value (upstream's de-amplification), so it is
+-						// unaffected by the order of these two assignments.
++						// colour composite above no longer reads it at all
++						// (patch 0074), so the order of these assignments is free.
+ 						result.alpha = newRes.alpha;
+ 						result.escapeAlpha = newRes.escapeAlpha;
+ 						result.travelled = newRes.travelled;
+@@ -644,8 +657,12 @@
+ 					float strength =
+ 						lerp( 0.5f, cascadeFinalMultiplier, saturate( newRes.lodLevel * invNumLods3 ) );
+ 
+-					// See VctCascadedVoxelizer::update comments on ( 1.0 - irrLight.alpha )
+-					irrLight.colour += newRes.colour * strength * ( 1.0 - irrLight.alpha );
++					// JAHSHAKA PATCH 0074: the same double transmittance as the
++					// diffuse composite above, on the specular walk. voxelConeTraceSpec
++					// starts its accumulator at `irrLight.alpha`, so `newRes.colour`
++					// already carries ( 1 - irrLight.alpha ); the second factor was
++					// upstream's de-amplification of the doubled opacity 0033 fixed.
++					irrLight.colour += newRes.colour * strength;
+ 					// Jahshaka patch 0033 (amended; this line was `+=`): the same
+ 					// doubling the diffuse loop had. voxelConeTraceSpec starts its
+ 					// accumulator at `startingAlpha` -- this very `irrLight.alpha` --
+@@ -653,8 +670,8 @@
+ 					// cone; adding it doubles the opacity at every hop, the walk exits
+ 					// through `irrLight.alpha < 0.95f` after one, and specAlpha below
+ 					// goes to 0 -- the ambient (the sky in a reflection) disappears at
+-					// 2+ cascades. The colour composite above deliberately reads the
+-					// PREVIOUS alpha, and is evaluated first.
++					// 2+ cascades. The colour composite above no longer reads the
++					// alpha at all (patch 0074).
+ 					irrLight.alpha = newRes.alpha;
+ 					irrLight.escapeAlpha = newRes.escapeAlpha;
+ 					irrLight.lodLevel = newRes.lodLevel;
+--- a/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
++++ b/Samples/Media/VCT/LightVctBounceInject_piece_cs.any
+@@ -18,6 +18,11 @@
+ 		float alpha;
+ 		float lodLevel;
+ 		float3 posLS;
++		// JAHSHAKA PATCH 0074: the cone's AGE -- how far it has travelled from
++		// the surface it started on, which is what sizes it. The pixel piece's
++		// twin (Vct_piece_ps.any) has carried it since patch 0066; this is the
++		// same carry on the bounce-injection walk.
++		float travelled;
+ 	};
+ 
+ 	INLINE VctResult voxelConeTraceDiff
+@@ -25,7 +30,7 @@
+ 		float3 posLS,
+ 		float3 dirLS, float tanHalfAngle,
+ 		float4 localStartBias_invStartBias_cascadeMaxLod, float startingLodLevel,
+-		float startingAlpha, int probeIdx,
++		float startingAlpha, float startingTravelled, int probeIdx,
+ 		OGRE_ArrayTex( OGRE_Texture3D_float4, probes, @value( hlms_num_vct_cascades ) )
+ 		OGRE_SAMPLER_ARG_DECL( probeSampler )
+ 		OGRE_VCT_ANISO_PROBE_ARG_DECL
+@@ -36,10 +41,15 @@
+ 		float maxLod = localStartBias_invStartBias_cascadeMaxLod.z;
+ 
+ 		float dist = vctStartBias;
++		// JAHSHAKA PATCH 0074 (the compute twin of patch 0066): `dist` positions
++		// the samples from THIS cascade's entry point; `travelled` is the cone's
++		// age since the SURFACE, and it is what sizes the footprint. They are
++		// identical on the first cascade.
++		float travelled = max( startingTravelled, vctStartBias );
+ 		float alpha = startingAlpha;
+ 		float3 color = float3( 0.0, 0.0, 0.0 );
+ 
+-		float diameter = max( vctStartBias, 2.0 * tanHalfAngle * dist );
++		float diameter = max( vctStartBias, 2.0 * tanHalfAngle * travelled );
+ 		float3 nextPosLS = posLS + dist * dirLS;
+ 
+ 		float lodLevel = startingLodLevel;
+@@ -67,8 +77,9 @@
+ 			color += sampleColour.xyz * a;                  // Accumulate colour
+ 			alpha += a * sampleColour.w;                    // Accumulate opacity
+ 			dist += diameter * 0.5f;                        // Advance forward
++			travelled += diameter * 0.5f;                   // ...and age by the same step (0074)
+ 			nextPosLS = posLS + dist * dirLS;               // Advance forward
+-			diameter = 2.0 * tanHalfAngle * dist;           // Calculate next LOD & next fwd step
++			diameter = max( vctStartBias, 2.0 * tanHalfAngle * travelled );
+ 			lodLevel = log2( diameter * vctInvStartBias );  // Calculate next LOD
+ 		}
+ 
+@@ -110,8 +121,9 @@
+ 				color += sampleColour.xyz * a;                  // Accumulate colour
+ 				alpha += a * sampleColour.w;                    // Accumulate opacity
+ 				dist += diameter * 0.5f;                        // Advance forward
++				travelled += diameter * 0.5f;                   // ...and age by the same step (0074)
+ 				nextPosLS = posLS + dist * dirLS;               // Advance forward
+-				diameter = 2.0 * tanHalfAngle * dist;           // Calculate next LOD & next fwd step
++				diameter = max( vctStartBias, 2.0 * tanHalfAngle * travelled );
+ 				lodLevel = log2( diameter * vctInvStartBias );  // Calculate next LOD
+ 			}
+ 		@end
+@@ -121,6 +133,7 @@
+ 		result.alpha = alpha;
+ 		result.lodLevel = lodLevel;
+ 		result.posLS = nextPosLS;
++		result.travelled = travelled;
+ 
+ 		return result;
+ 	}
+@@ -191,8 +204,8 @@
+ 			dir = normalize( dir );
+ 
+ 			VctResult result = voxelConeTraceDiff(
+-				posLS, dir, coneAngleTan, p_vctStartBias_invStartBias_cascadeMaxLod[0], 0.0f, 0.0f, 0,
+-				probes OGRE_SAMPLER_ARG( probeSampler ) OGRE_VCT_ANISO_PROBE_ARG );
++				posLS, dir, coneAngleTan, p_vctStartBias_invStartBias_cascadeMaxLod[0], 0.0f, 0.0f,
++				0.0f, 0, probes OGRE_SAMPLER_ARG( probeSampler ) OGRE_VCT_ANISO_PROBE_ARG );
+ 
+ 			@property( hlms_num_vct_cascades > 1 )
+ 				for( int j = 1; j < @value( hlms_num_vct_cascades ) && result.alpha < 0.95f; ++j )
+@@ -204,13 +217,29 @@
+ 
+ 					VctResult newRes = voxelConeTraceDiff(
+ 						newPosLS, dir, coneAngleTan, p_vctStartBias_invStartBias_cascadeMaxLod[j],
+-						max( result.lodLevel - prevCascadeMaxLod, 0.0f ), result.alpha, j,
+-						probes OGRE_SAMPLER_ARG( probeSampler ) OGRE_VCT_ANISO_PROBE_ARG );
+-
+-					// See VctCascadedVoxelizer::update comments on ( 1.0 - result.alpha )
+-					result.colour += newRes.colour * p_vctFromPreviousProbeToNext[j - 1][0].w *
+-									 ( 1.0 - result.alpha );
+-					result.alpha += newRes.alpha;
++						max( result.lodLevel - prevCascadeMaxLod, 0.0f ), result.alpha,
++						// JAHSHAKA PATCH 0074: the age, in the NEW cascade's units --
++						// the same directional scale the pixel piece uses (0066).
++						result.travelled *
++							dot( abs( dir ), p_vctFromPreviousProbeToNext[j - 1][0].xyz ),
++						j, probes OGRE_SAMPLER_ARG( probeSampler ) OGRE_VCT_ANISO_PROBE_ARG );
++
++					// JAHSHAKA PATCH 0074, the three defects of this walk, the same
++					// three the pixel piece had:
++					//  - the transmittance is already inside `newRes.colour` (the
++					//    trace starts its accumulator at `result.alpha`), so the
++					//    ( 1 - result.alpha ) factor applied it twice (F9);
++					//  - `result.alpha += newRes.alpha` DOUBLED the opacity at every
++					//    hop -- the accumulator started at `result.alpha` -- so the
++					//    loop's `< 0.95f` guard ended the walk after one cascade and
++					//    a bounce never travelled further than cascade 1 (patch 0033
++					//    fixed the same line in the pixel piece);
++					//  - the cone's age restarted at every hop, so the continuation
++					//    marched a cascade at a footprint that never matched the
++					//    cone's solid angle (patch 0066, above).
++					result.colour += newRes.colour * p_vctFromPreviousProbeToNext[j - 1][0].w;
++					result.alpha = newRes.alpha;
++					result.travelled = newRes.travelled;
+ 					result.lodLevel = newRes.lodLevel;
+ 					result.posLS = newRes.posLS;
+ 				}

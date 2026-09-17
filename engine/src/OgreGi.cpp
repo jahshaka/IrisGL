@@ -555,8 +555,9 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                 //
                 // THE COST, measured in dispatches rather than guessed: during
                 // a drag the scheduler rebuilds cascade 0 every frame, so the
-                // tick skips it and pays the outer three. At Epic
-                // (cascadeBounces 2/1/3/7) that is 3 + 11 = 14 injection
+                // tick skips it and pays the outer three. At Epic (two extra
+                // bounce passes per cascade since PHOTON-M1 retired the pin's
+                // 1/2/4/8 stabilisation) that is 3 + 6 = 9 injection
                 // dispatches every ten frames against the 4 it used to pay —
                 // about one extra dispatch per frame, 0.1-0.3 ms each (S1 §3,
                 // injection being the cheap half; it is VOXELISATION that
@@ -626,8 +627,8 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             // PING-PONGS its light voxel textures (`runBounce`), and the field
             // bound whatever was current ONCE, by pointer, at `initialize()`
             // (ogre-patch 0044). So after an odd number of bounce passes — which
-            // a chain reaches whenever `cascadeBounces` lands on one (measured:
-            // 1/2/4/8 at three total bounces, 1/1/2/4 at two) — a light move left the field
+            // a chain reaches whenever the document asks for an even total (two
+            // total bounces = one pass per cascade) — a light move left the field
             // integrating from the texture the injection had just stopped
             // writing. Re-binding is five descriptor writes on a path that has
             // just run a compute dispatch per bounce; deciding whether it is
@@ -3178,8 +3179,10 @@ bool OgreScene::freshVoxelArm(const Ogre::Aabb &aabb) {
 //
 // What we DO use is everything underneath it: `VctVoxelizer` (the rasteriser),
 // `VctLighting`, and `VctLighting::addCascade` — the chaining that makes
-// HlmsPbs sample N volumes with the pin's own cone-continuation and its own
-// per-cascade brightness stabilisation. The cascade transforms reach the shader
+// HlmsPbs sample N volumes with the pin's own cone-continuation (its
+// per-cascade brightness stabilisation is NOT used: see cascadeBounces, and
+// ogre-patches 0074/0075 for the two defects it was compensating for). The
+// cascade transforms reach the shader
 // from the LIVE voxelisers every frame (`VctLighting::fillConstBufferData`
 // builds `invXform` from `getVoxelOrigin()/getVoxelSize()`), so moving a
 // cascade's region is picked up by the next frame with no extra push.
@@ -3329,20 +3332,30 @@ static inline long long jahQuantAxis(float pos, float size) {
     return (long long)std::floor(double(pos) / double(size));
 }
 
-// Per-cascade bounce count, the pin's own stabilisation
-// (OgreVctCascadedVoxelizer.cpp:465-491): a coarser cascade gets MORE bounces
-// because a bigger cell loses light. `base` is the document's extra-bounce
-// count, so 0 (the default, one indirect bounce) leaves every cascade at 0 and
-// this whole term disappears.
+// EVERY CASCADE RUNS THE DOCUMENT'S BOUNCE COUNT (PHOTON-M1, 2026-09-17).
+//
+// The pin gives a coarser cascade MORE bounces — `round(sqrt((b+1) * cellRatio
+// - 1))`, which is 1/2/4/8 at Epic's three bounces — and calls it a brightness
+// stabilisation: "as cell volume increases, we get darker results ... more
+// bounces means brighter cascade" (OgreVctCascadedVoxelizer.cpp:470-486). It is
+// not physics. A bounce is a TRANSPORT step: it adds light everywhere, in
+// proportion to what is already there, and cannot recover the occlusion a
+// bigger cell loses (a coarse cell over-occludes a thin wall — that is a
+// resolution term, SEAM-1 §3). The pin reached for it because the OTHER half of
+// the same stabilisation, the shader's `( 1 - alpha )` de-amplification, and the
+// bounce's own extra 1/pi were both making the outer cascades too dark —
+// ogre-patches 0074 and 0075 fix those at the cause, so the compensation goes
+// with them.
+//
+// It also priced: eight injection passes on Epic's outermost 64^3 volume per
+// rebuild, 1 + 2 + 4 + 8 = 15 passes per chain, against 2 + 2 + 2 + 2 = 8 for
+// the document's own count.
+//
+// `base` is the document's EXTRA-bounce count (one total bounce = zero extra
+// passes), so the default leaves every cascade at 0 exactly as before.
 Ogre::uint32 OgreScene::cascadeBounces(size_t idx) const {
-    const Ogre::uint32 base = Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
-    if (!base || idx >= mVctCascades.size() || mVctCascades.empty()) return base;
-    const float cell0 = mVctCascades[0].cell();
-    const float celli = mVctCascades[idx].cell();
-    if (cell0 <= 0.0f) return base;
-    const float factor = celli / cell0;                      // (volume ratio)^(1/3)
-    const float n = std::sqrt(float(base + 1u) * factor - 1.0f);
-    return Ogre::uint32(std::max(0.0f, std::round(n)));
+    (void)idx;
+    return Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
 }
 
 // The ambient pair into ONE cascade's lighting (rule 4 above). applyVctAmbient
@@ -3451,7 +3464,7 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
         for (size_t i = 0; i < mVctCascades.size(); ++i)
             row += (i ? " / " : "") + std::to_string(cascadeBounces(i));
         Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: cascade bounce counts (the pin's per-cascade stabilisation at " +
+            "Jahshaka GI: cascade bounce counts (the document's own count on every cascade, at " +
             std::to_string(std::min(std::max(mGi.numBounces, 1), 4)) + " total bounces): " + row);
     }
     mVctVoxelizer = mVctCascades[0].voxelizer;
