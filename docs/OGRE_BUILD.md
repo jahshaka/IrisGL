@@ -1340,7 +1340,11 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     32,780 triangles, 5.1 %; on 1,000 imported 6,768-triangle spheres its rebuild
     falls 3,017 -> 225 ms of GPU. `--engine-selftest` UNCHANGED — the default
     scene's meshes are document primitives, which carry no chain. Suite:
-    `gi.cascade_lod`.
+    `gi.cascade_lod`. THE FRACTION OF THE CELL IT ASKS FOR CHANGED IN ATOM-3
+    (the render audit's A2): half a cell moved that lattice's picture by up to
+    112/255 because a voxel's occupancy is a binary triangle-box test, so it is
+    a measured 1/256 now and the outer cascade takes level 2 (4x) instead of
+    level 4 (16x). The patch itself is untouched — it is the hook, not the rule.
     RESIDUAL, recorded (NANITE_SPEC §7 stage 1): one level per mesh per voxelizer
     means a mesh instanced at SEVERAL SCALES in one cascade is voxelized at the
     finest of their levels, so the proxy is worth less on mixed-scale instances
@@ -1752,13 +1756,32 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     bounce recurrence re-gathers the TOTAL each pass ((1+rho*G)^n, never contracts).
     All three land together as PHOTON-M2 (0075 + a Jacobi bounce + the injection's
     1/pi), one SOURCE rebuild, one hash move, one re-anchoring.)
+  0075-lod-switch-hysteresis — A LOD SWITCH HAS A HYSTERESIS BAND (lane ATOM-3, the
+    render audit's A7, 2026-09-17), SOURCE, three files (OgreMain/include/
+    OgreLodStrategy.h, OgreMain/include/OgreLodStrategyPrivate.inl, OgreMain/src/
+    OgreLodStrategy.cpp — no other patch in the stack touches any of them, so there
+    is no overlap to reset for). `LodStrategy::lodSet` picks a level with one
+    `lower_bound` and writes `mCurrentMeshLod`: the comparison is a step in BOTH
+    directions, so an object whose LOD value sits on a threshold changes level every
+    frame the value dithers. Measured on the rig with one chained mesh and a camera
+    oscillating by 2 % of its switch distance: 71 level changes in 600 frames (one
+    per threshold crossing) with no band, 0 with a 10 % one; at a 20 % amplitude both
+    read 71, so the band removes the noise and keeps every real transition. The knob
+    is `LodStrategy::setHysteresis`, process-wide, DEFAULT 0 = upstream's behaviour to
+    the bit; the engine sets 0.10 in `installJahLodStrategy` (irisgl/engine/src/
+    OgreMesh.cpp) behind the `JAHSHAKA_NO_LOD_HYSTERESIS` run-wide latch. It cannot be
+    written outside the pin: `mCurrentMeshLod` and `mLodMesh` are protected and
+    MovableObject grants friendship to `LodStrategy::lodSet`/`lodUpdateImpl` BY NAME,
+    which does not extend to a derived strategy's override — which is also why the
+    rest of that lane's view rule (the `jah_world_error` strategy) needs NO patch at
+    all.
 
-THE STACK IS 0001-0074 (this list; `build-ogre.sh` globs `*.patch`, so the file
+THE STACK IS 0001-0075 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072 and 0073 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073 and 0075 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

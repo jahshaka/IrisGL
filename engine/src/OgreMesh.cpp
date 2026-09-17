@@ -1,11 +1,165 @@
 // Mesh creation, update and destruction, plus the v2 geometry builder.
 #include "EnginePrivate.h"
 
+#include <OgreLodStrategy.h>
 #include <OgreLodStrategyManager.h>
+#include <OgreViewport.h>
+#include <OgreLodStrategyPrivate.inl>
 
 #include <unordered_map>
 
 namespace jahshaka { namespace engine { namespace detail {
+
+// ---- ATOM stage 1: THE VIEW'S LOD RULE, EVALUATED PER PASS ------------------
+//
+// THE STRATEGY IS OURS BECAUSE THE QUANTITY IS OURS. Ogre ships four: two
+// distance strategies, whose per-object value carries no projection term at
+// all, and two pixel-count ones, whose value is a projected AREA. Ours is the
+// only one that speaks the currency the bake produces — a world-space DEVIATION
+// — so the mesh's thresholds can be the BAKED ERRORS THEMSELVES and the level
+// the renderer picks is `lodLevelForWorldError` (Types.h) evaluated by Ogre's
+// own four-wide SoA loop:
+//
+//     value = (distance(centre, eye) - radius) * 2 * budget / (proj[1][1] * H)
+//
+// i.e. the world-space error that covers `budget` pixels at THIS pass's camera
+// and THIS pass's render target. Every pass evaluates its own: the view, a
+// planar reflector's virtual camera, a probe cube face, a 256-pixel thumbnail,
+// and each eye of a headset. A 2160x2376 VR eye gets the same PIXEL error as
+// the desktop window, which is the whole point (the reference-projection
+// version got twice it).
+//
+// WHAT WE DO NOT DO, and why it is not a workaround: nothing here reaches into
+// the pin. `LodStrategy` is the engine's documented extension point,
+// `LodStrategy::lodSet` is public and is the ONE function MovableObject grants
+// friendship to, and `LodStrategyManager::addStrategy` takes ownership exactly
+// as it does for upstream's four. The only pin change this lane makes is
+// ogre-patch 0075, which adds the hysteresis band `lodSet` has no way to
+// express (the switch is a step in both directions otherwise).
+//
+// AT 1080 LINES AND 45 DEGREES THIS IS ARITHMETICALLY THE OLD RULE: the stage-1
+// thresholds were `error * proj11 * 0.5 * 1080 / budget` and the strategy's
+// value was `distance - radius`, so the comparison is the same one multiplied
+// through by the same constant. Every rig picture at 1920x1080 is therefore
+// byte-identical; an OFFSCREEN shot at 640x360 is NOT, and correctly so — a
+// third of the lines is a third of the pixels an error covers.
+namespace {
+
+class JahWorldErrorLodStrategy final : public Ogre::LodStrategy
+{
+public:
+    JahWorldErrorLodStrategy() : Ogre::LodStrategy("jah_world_error") {}
+
+    /// The finest level's threshold: no view can afford a negative deviation.
+    Ogre::Real getBaseValue() const override { return Ogre::Real(0); }
+
+    /// The value is multiplied by the bias, so a factor passes through: larger
+    /// affords more error, i.e. swaps to a coarser level sooner.
+    Ogre::Real transformBias(Ogre::Real factor) const override { return factor; }
+
+    Ogre::Real getValueImpl(const Ogre::MovableObject *object,
+                            const Ogre::Camera *camera) const override
+    {
+        const Ogre::Real perPixel = worldPerPixel(camera) * camera->_getLodBiasInverse();
+        if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) return perPixel;
+        const Ogre::Real d = object->getWorldAabb().mCenter.distance(camera->getDerivedPosition()) -
+                             object->getWorldRadius();
+        return std::max(d, Ogre::Real(0)) * perPixel;
+    }
+
+    void lodUpdateImpl(const size_t numNodes, Ogre::ObjectData objData,
+                       const Ogre::Camera *camera, Ogre::Real bias) const override
+    {
+        OGRE_ALIGNED_DECL(Ogre::Real, lodValues[ARRAY_PACKED_REALS], OGRE_SIMD_ALIGNMENT);
+        const Ogre::Real perPixel = worldPerPixel(camera) * camera->_getLodBiasInverse() * bias;
+
+        // ORTHOGRAPHIC: one pixel is the same world length everywhere in the
+        // frustum, so the allowed error does not depend on the object at all
+        // and the distance term must NOT enter — an orthographic view that
+        // simplified what is far from the camera would be a plain defect.
+        if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) {
+            const Ogre::ArrayReal flat(Ogre::Mathlib::SetAll(perPixel));
+            for (size_t i = 0; i < numNodes; i += ARRAY_PACKED_REALS) {
+                CastArrayToReal(lodValues, flat);
+                lodSet(objData, lodValues);
+                objData.advanceLodPack();
+            }
+            return;
+        }
+
+        Ogre::ArrayVector3 cameraPos;
+        cameraPos.setAll(camera->_getCachedDerivedPosition());
+        const Ogre::ArrayReal scale(Ogre::Mathlib::SetAll(perPixel));
+        const Ogre::ArrayReal zero(Ogre::Mathlib::SetAll(Ogre::Real(0)));
+
+        for (size_t i = 0; i < numNodes; i += ARRAY_PACKED_REALS) {
+            Ogre::ArrayReal *RESTRICT_ALIAS worldRadius =
+                reinterpret_cast<Ogre::ArrayReal * RESTRICT_ALIAS>(objData.mWorldRadius);
+            // The SAME quantity the distance strategy computes — the distance
+            // from the bounding SPHERE — turned into a world error by one
+            // scalar the whole pass shares.
+            Ogre::ArrayReal v = objData.mWorldAabb->mCenter.distance(cameraPos) - (*worldRadius);
+            v = Ogre::Mathlib::Max(v, zero) * scale;
+            CastArrayToReal(lodValues, v);
+            lodSet(objData, lodValues);
+            objData.advanceLodPack();
+        }
+    }
+
+private:
+    /// The world-space error one metre of view distance can hide at this
+    /// camera's projection and its render target's height (a length per metre
+    /// of distance); for an orthographic camera, the world length of one pixel
+    /// outright. Constant across a pass, so it is computed once per
+    /// `lodUpdateImpl` rather than per object.
+    static Ogre::Real worldPerPixel(const Ogre::Camera *camera)
+    {
+        // A pass whose camera has never been given a viewport cannot be
+        // measured; the pin's own pixel strategies dereference it blind. The
+        // reference height keeps such a pass on the stage-1 numbers instead of
+        // crashing, and there is no such pass in this engine today.
+        const Ogre::Viewport *vp = camera->getLastViewport();
+        const Ogre::Real height = vp ? Ogre::Real(vp->getActualHeight()) : Ogre::Real(1080);
+        if (!(height > 0.0f)) return Ogre::Real(0);
+        if (camera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC) {
+            const Ogre::Real orthoH = camera->getOrthoWindowHeight();
+            return orthoH > 0.0f ? (orthoH * kLodBudgetPixels / height) : Ogre::Real(0);
+        }
+        const Ogre::Matrix4 &proj = camera->getProjectionMatrix();
+        const Ogre::Real p11 = proj[1][1];
+        if (!(p11 > 0.0f)) return Ogre::Real(0);
+        return Ogre::Real(2) * kLodBudgetPixels / (p11 * height);
+    }
+};
+
+}   // namespace
+
+// THE SWITCH HYSTERESIS (ATOM-3 A7, ogre-patch 0075), as a fraction of the
+// threshold being crossed. Upstream's `lodSet` flips at the exact threshold in
+// both directions, so an object parked on one changes level every frame the
+// camera dithers — 232 level changes in 600 frames on a camera oscillating by
+// 2 % of the switch distance; 2 with this band (spikes/atom-3/FINDINGS.md §4).
+// 0.10 holds the level across a 10 % window of the switch distance, which is
+// ~0.6 m of dolly travel at the measured pose and is bounded by construction:
+// a value genuinely past the band switches on the frame it gets there.
+static const float kLodHysteresis = 0.10f;
+
+// Registered once per process, before any mesh's LOD values are written
+// (`applyLodValues` reads the default strategy's base value) and before any
+// Item exists (`Item::_initialise` caches the value array's address). The
+// manager OWNS what it is given, exactly as it owns upstream's four.
+void installJahLodStrategy()
+{
+    Ogre::LodStrategyManager &mgr = Ogre::LodStrategyManager::getSingleton();
+    if (mgr.getStrategy("jah_world_error") == nullptr)
+        mgr.addStrategy(OGRE_NEW JahWorldErrorLodStrategy());
+    mgr.setDefaultStrategy("jah_world_error");
+    // The run-wide diagnostic latch every measurable engine rule in this tree
+    // carries (JAHSHAKA_NO_RAY_QUERY, JAHSHAKA_NO_CASCADE_LOD): one getenv at
+    // boot, so the band's A/B is a run of the shipped binary and not a build.
+    const bool allowed = std::getenv("JAHSHAKA_NO_LOD_HYSTERESIS") == nullptr;
+    Ogre::LodStrategy::setHysteresis(allowed ? kLodHysteresis : 0.0f);
+}
 
 // ---- Meshes ----
 MeshId OgreScene::createMesh(const MeshData &data) {
@@ -269,10 +423,21 @@ std::vector<Ogre::VertexArrayObject *> buildShadowVaos(
 }   // namespace
 
 void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<float> &errors) const {
-    // Ascending distances with the strategy's base value first — what
-    // LodStrategy::lodSet binary-searches (lower_bound - 1). Patch 0059 is what
-    // makes this expressible at all: Mesh::mLodValues is protected and
-    // _setLodInfo's body is commented out upstream.
+    // THE THRESHOLDS ARE THE BAKED ERRORS THEMSELVES (ATOM-3 A1). The strategy's
+    // per-object value is the world-space error that view can afford
+    // (JahWorldErrorLodStrategy, above), so `lodSet`'s `lower_bound - 1` over
+    // this array IS `lodLevelForWorldError` — one rule, no second copy of it,
+    // and no reference projection baked into a distance.
+    //
+    // THE BIAS DIVIDES THEM, which is the same dial it always was seen from the
+    // other side: a bias above 1 shrinks every threshold, so a given view
+    // affords a coarser level sooner. 0 means NEVER swap, and the only way to
+    // say that in an ascending array is a threshold nothing can reach.
+    //
+    // Ascending with the strategy's base value first — what LodStrategy::lodSet
+    // binary-searches. Patch 0059 is what makes this expressible at all:
+    // Mesh::mLodValues is protected and _setLodInfo's body is commented out
+    // upstream.
     Ogre::Mesh::LodValueArray values;
     values.push_back(Ogre::LodStrategyManager::getSingleton().getDefaultStrategy()->getBaseValue());
     float previous = values[0];
@@ -280,7 +445,9 @@ void OgreScene::applyLodValues(const Ogre::MeshPtr &mesh, const std::vector<floa
         // Monotonic by construction (the bake accumulates), but a blob that is
         // not strictly increasing would make a level unreachable rather than
         // wrong — nudge instead of trusting.
-        float v = lodSwitchDistance(error, mLodBias);
+        float v = (mLodBias > 0.0f && error > 0.0f && std::isfinite(error))
+                      ? error / mLodBias
+                      : std::numeric_limits<float>::max();
         if (!(v > previous)) v = std::nextafter(previous, std::numeric_limits<float>::max());
         values.push_back(v);
         previous = v;

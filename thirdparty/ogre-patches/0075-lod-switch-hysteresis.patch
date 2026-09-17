@@ -1,0 +1,152 @@
+Jahshaka patch 0075 (claimed 0074 in the lane; renumbered at merge — 0074 is PHOTON-M1's composite) — a LOD switch has a hysteresis band.
+
+SOURCE patch. EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after
+pulling this. It touches `OgreMain/include/OgreLodStrategy.h`,
+`OgreMain/include/OgreLodStrategyPrivate.inl` and
+`OgreMain/src/OgreLodStrategy.cpp`, which NO other patch in this stack touches,
+so there is no overlap to reset for.
+
+WHY A PATCH AND NOT A WORKAROUND (owner rule, 2026-09-15, ledger §325).
+`LodStrategy::lodSet` picks a level with ONE `std::lower_bound` against the
+mesh's value array and writes `MovableObject::mCurrentMeshLod`
+(OgreLodStrategyPrivate.inl:31-40). The comparison is a step in both
+directions, so an object whose LOD value sits ON a threshold changes level
+EVERY FRAME the value dithers — a camera breathing at a switch distance, a
+dolly crawling across one, a hand-held pose in a headset. Stage 1 of ATOM ships
+with no defence against it and no suite measured it (the render audit's A7).
+
+The band cannot be written outside the pin:
+
+  * `mCurrentMeshLod` and `mLodMesh` are PROTECTED on `MovableObject`
+    (OgreMovableObject.h:122-123) and the friendship it grants is to
+    `LodStrategy::lodSet` and `LodStrategy::lodUpdateImpl` BY NAME
+    (OgreMovableObject.h:354-356) — friendship to a base class's virtual
+    member does not extend to a derived class's override, so a strategy of our
+    own (which is how the rest of ATOM-3's view rule is written, with no patch
+    at all) can compute a VALUE but can never see or hold the level;
+  * a hysteresis expressed in the value alone needs the direction of travel,
+    i.e. per-object state, and `ObjectData` has no slot for it;
+  * `getCurrentMeshLod()` is public, but without the mesh's thresholds — which
+    are the protected `mLodMesh` — knowing the current level says nothing about
+    how far the value is from the switch.
+
+So the band belongs where the comparison is, and it is eleven lines there.
+
+WHAT IT DOES. `LodStrategy::setHysteresis( fraction )` is process-wide and
+defaults to 0, which is upstream's behaviour to the bit: with no band the
+function is the same `lower_bound` it always was. With a band `h`, a switch to
+a COARSER level requires the value to pass the crossed threshold by
+`h * |threshold|` and a switch back to a FINER one requires it to fall below by
+the same, so the level only moves when the picture would genuinely change and a
+value that is genuinely past the band moves on the frame it gets there. The
+band is RELATIVE, so it means the same thing in every strategy's units
+(distances, pixel counts, or Jahshaka's world-space errors), and it can only
+ever hold the CURRENT level — a multi-level jump still jumps all the way, and
+nothing can be held for more than the band's width of travel.
+
+MEASURED (ATOM-3, spikes/atom-3/FINDINGS.md §4), in FRAMES and not in seconds:
+one chained mesh alone in the scene, the camera oscillating sinusoidally about
+its level-1 switch distance (3.836 m), 600 frames, a level change counted every
+frame the drawn triangle count moves. The oscillation crosses the threshold 71
+times in those 600 frames.
+
+  amplitude   band 0 (upstream)   band 0.10 (ours)
+  +-2 %       71 pops, 2 levels   0 pops, 1 level
+  +-20 %      71 pops, 2 levels   71 pops, 2 levels
+
+So the band removes exactly the pops that are noise — every crossing of a
+motion too small to change the picture — and keeps every crossing of a motion
+that is real. Jahshaka sets 0.10 once, in `installJahLodStrategy`
+(irisgl/engine/src/OgreMesh.cpp), behind the run-wide `JAHSHAKA_NO_LOD_HYSTERESIS`
+latch that took the "band 0" column above. One consequence to know: with a band
+the switch distance depends on the direction of approach, by the width of the
+band — the same bisection reads 3.836 m with it off and 4.047 m with it on.
+
+Verified: `git apply --check` against the pristine pin, and
+`git apply --reverse --check` after applying.
+diff --git a/OgreMain/include/OgreLodStrategy.h b/OgreMain/include/OgreLodStrategy.h
+index 4230220bf..650975c49 100644
+--- a/OgreMain/include/OgreLodStrategy.h
++++ b/OgreMain/include/OgreLodStrategy.h
+@@ -108,6 +108,28 @@ namespace Ogre
+ 
+         /** Get the name of this strategy. */
+         const String &getName() const { return mName; }
++
++        /** JAHSHAKA (ogre-patch 0075): the LOD SWITCH HYSTERESIS BAND, as a
++            fraction of the threshold being crossed. 0 (the default) is this
++            engine's historical behaviour exactly: `lodSet` flips at the exact
++            threshold in both directions, so an object sitting on one pops
++            between two levels every frame the camera jitters.
++
++            With a band `h`, a switch to a COARSER level needs the value to pass
++            the threshold by `h * |threshold|`, and a switch back to a FINER one
++            needs it to fall below by the same amount. The band is relative, so
++            it is meaningful whatever a strategy's units are, and it is bounded:
++            a value genuinely past the band switches on the frame it gets there,
++            and a jump of several levels is still one step.
++
++            Process-wide and written once at startup; read by the worker threads
++            that run `lodUpdateImpl`. */
++        static void setHysteresis( Real fraction ) { msHysteresis = fraction > 0 ? fraction : 0; }
++        static Real getHysteresis() { return msHysteresis; }
++
++    protected:
++        /// @see setHysteresis. Defined in OgreLodStrategy.cpp.
++        static Real msHysteresis;
+     };
+     /** @} */
+     /** @} */
+diff --git a/OgreMain/include/OgreLodStrategyPrivate.inl b/OgreMain/include/OgreLodStrategyPrivate.inl
+index ea7243f81..87de02758 100644
+--- a/OgreMain/include/OgreLodStrategyPrivate.inl
++++ b/OgreMain/include/OgreLodStrategyPrivate.inl
+@@ -39,8 +39,31 @@ namespace Ogre
+             {
+                 FastArray<Real>::const_iterator it =
+                     std::lower_bound( owner->mLodMesh->begin(), owner->mLodMesh->end(), lodValues[j] );
+-                owner->mCurrentMeshLod =
+-                    static_cast<uint8>( std::max<ptrdiff_t>( it - owner->mLodMesh->begin() - 1, 0 ) );
++                ptrdiff_t newLod = std::max<ptrdiff_t>( it - owner->mLodMesh->begin() - 1, 0 );
++
++                // JAHSHAKA (ogre-patch 0075): THE HYSTERESIS BAND. Without it
++                // this comparison is a step in both directions, so an object
++                // parked on a threshold — a camera breathing at a switch
++                // distance, a dolly crawling past one — changes level every
++                // frame. The band is measured on the threshold actually being
++                // crossed, which is the only one that matters here, and it can
++                // only ever hold the CURRENT level: a value past the band moves,
++                // and a several-level jump moves all the way.
++                const ptrdiff_t curLod = static_cast<ptrdiff_t>( owner->mCurrentMeshLod );
++                if( msHysteresis > 0 && newLod != curLod &&
++                    curLod < static_cast<ptrdiff_t>( owner->mLodMesh->size() ) )
++                {
++                    const Real threshold = newLod > curLod ? ( *owner->mLodMesh )[size_t( curLod + 1 )]
++                                                           : ( *owner->mLodMesh )[size_t( curLod )];
++                    const Real band = Math::Abs( threshold ) * msHysteresis;
++                    if( newLod > curLod ? ( lodValues[j] < threshold + band )
++                                        : ( lodValues[j] > threshold - band ) )
++                    {
++                        newLod = curLod;
++                    }
++                }
++
++                owner->mCurrentMeshLod = static_cast<uint8>( newLod );
+             }
+ 
+             RenderableArray::iterator itor = owner->mRenderables.begin();
+diff --git a/OgreMain/src/OgreLodStrategy.cpp b/OgreMain/src/OgreLodStrategy.cpp
+index 58495e7a1..b8cd6a731 100644
+--- a/OgreMain/src/OgreLodStrategy.cpp
++++ b/OgreMain/src/OgreLodStrategy.cpp
+@@ -35,6 +35,10 @@ THE SOFTWARE.
+ 
+ namespace Ogre
+ {
++    //-----------------------------------------------------------------------
++    // JAHSHAKA (ogre-patch 0075): no band unless somebody asks for one, so a
++    // build that never calls setHysteresis behaves exactly as it always did.
++    Real LodStrategy::msHysteresis = 0;
+     //-----------------------------------------------------------------------
+     LodStrategy::LodStrategy( const String &name ) : mName( name ) {}
+     //-----------------------------------------------------------------------
