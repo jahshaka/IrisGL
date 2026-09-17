@@ -2539,12 +2539,35 @@ void SceneMirror::syncVrProxies()
         // second question anybody asks of a pair of markers.
         mVrProxyMaterial[0] = mTarget->createUnlitMaterial(Colour(0.35f, 0.80f, 1.0f, 0.90f), true);
         mVrProxyMaterial[1] = mTarget->createUnlitMaterial(Colour(1.0f, 0.72f, 0.30f, 0.90f), true);
-        // UNLIT GREY for the vendored models: a helper's material is the
-        // mirror's, and a solid model reads by its shape rather than its
-        // colour (the wands keep their two colours — a pair of identical
-        // line markers needs them).
-        mVrProxyModelMaterial = mTarget->createUnlitMaterial(Colour(0.62f, 0.64f, 0.67f, 1.0f),
-                                                             true);
+        // THE VENDORED MODELS ARE LIT, AND THAT IS THE OWNER'S HEADSET SMOKE
+        // TALKING (2026-09-17, WiVRn + Quest Pro): with an UNLIT flat grey they
+        // read as PURE WHITE SILHOUETTES in the eyes — the shape moved in 3D
+        // correctly and had no geometry in it at all, because one constant
+        // colour through the eye's exposure and tonemap is one output value
+        // over the whole outline. A controller is a solid object in the room;
+        // it has to shade like one, or the wearer cannot see which way it is
+        // pointing.
+        //
+        // A PLAIN PHYSICAL SURFACE, nothing clever: mid-grey albedo (sRGB 110,
+        // which is 0.177 linear through the one colour rule every picked colour
+        // goes through — iris::linearOf), roughness 0.6, no metal and no
+        // emissive. No normal map, so no tangents are needed. The HELPER BITS
+        // are unchanged: it is still out of every probe capture, every shadow
+        // map and every user screenshot, and still in both of the wearer's
+        // channels.
+        //
+        // THE WANDS STAY UNLIT, and that is physics rather than taste: they are
+        // LINE meshes with no surface and no normals, so there is nothing for a
+        // lit datablock to shade — a line's colour IS its whole appearance, and
+        // the pair needs two of them to tell left from right.
+        {
+            PbrParams wandModel;
+            const iris::LinearColor grey = iris::linearOf(QColor(110, 110, 110));
+            wandModel.albedo = Colour(grey.r, grey.g, grey.b, 1.0f);
+            wandModel.roughness = 0.6f;
+            wandModel.metalness = 0.0f;
+            mVrProxyModelMaterial = mTarget->createPbrMaterial(wandModel);
+        }
         mVrProxyWandMesh[0] = mTarget->createLineMesh(wand, false);
         mVrProxyWandMesh[1] = mTarget->createLineMesh(wand, false);
         for (int i = 0; i < 2; ++i) {
