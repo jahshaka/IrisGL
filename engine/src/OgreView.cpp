@@ -82,6 +82,11 @@ ChainDesc OgreView::chainDesc() const {
     // an offscreen shot of a view that hides the furniture must hide it too
     // (that is what makes player.screenshot a picture of the PLAYER).
     d.helpers    = mHelpersVisible;
+    // ...AND THE VR CHANNEL (kVrHelperBit's two-bit rule): furniture the
+    // HEADSET draws. Only the VR session's view asks for it, so every other
+    // picture in this process — the desktop, a thumbnail, a preview, a
+    // screenshot — is built with that channel masked out.
+    d.vrHelpers  = mVrHelpersVisible;
     // LETTERBOX (CAMERAS_SPEC §7.4) is a property of the CAMERA the host
     // pushed, not of the view — a camera that constrains its aspect does so in
     // every view that shows it. Unlike the effects below it is NOT cleared for
@@ -1029,6 +1034,12 @@ void OgreView::setShadows(bool on) {
 void OgreView::setHelpersVisible(bool on) {
     if (on == mHelpersVisible) return;
     mHelpersVisible = on;
+    rebuildWorkspaceDef();
+}
+
+void OgreView::setVrHelpersVisible(bool on) {
+    if (on == mVrHelpersVisible) return;
+    mVrHelpersVisible = on;
     rebuildWorkspaceDef();
 }
 

@@ -497,6 +497,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.rayReflect == b.rayReflect &&
            a.refractions == b.refractions && a.samples == b.samples &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
+           a.vrHelpers == b.vrHelpers &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
            a.background.b == b.background.b && a.background.a == b.background.a;
 }
@@ -601,9 +602,27 @@ namespace {
 /// cullFrustum's second term excludes nothing at all, silently. Every pass
 /// definition is born holding exactly RESERVED, so the default case comes out
 /// as `RESERVED & ~kHelperBit` and nothing else moves.
-void maskOutHelpers(Ogre::CompositorNodeDef *n) {
-    const Ogre::uint32 keep =
-        Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS & ~kHelperBit;
+///
+/// TWO CHANNELS SINCE VR PHASE 4 (kVrHelperBit's two-bit rule), and `drop` says
+/// which of them this view refuses: the desktop editor drops the VR channel,
+/// the VR session's view drops the desktop one, the Player and every capture
+/// shape drop both. The selection outline carries BOTH bits and is therefore
+/// still drawn by a view that keeps either — which is what lets a wearer see
+/// what is selected while seeing none of the desk's furniture.
+/// Which helper channels THIS view refuses (the two-bit rule). Zero = keep
+/// everything, which is what the default desktop chain used to be — except that
+/// a view which never asked for the VR channel now says so, and since nothing
+/// but the selection outline carries that bit (and the outline carries the
+/// desktop one as well) no pixel moves for it.
+Ogre::uint32 helperBitsToDrop(const ChainDesc &desc) {
+    Ogre::uint32 drop = 0u;
+    if (!desc.helpers) drop |= kHelperBit;
+    if (!desc.vrHelpers) drop |= kVrHelperBit;
+    return drop;
+}
+
+void maskOutHelpers(Ogre::CompositorNodeDef *n, Ogre::uint32 drop) {
+    const Ogre::uint32 keep = Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS & ~drop;
     const size_t targets = n->getNumTargetPasses();
     for (size_t t = 0; t < targets; ++t) {
         Ogre::CompositorTargetDef *td = n->getTargetPass(t);
@@ -769,7 +788,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // Gizmos and wires belong to the SHOT, not to the bars.
             if (desc.letterbox) inset(handlesOut, p);
         }
-        if (!desc.helpers) maskOutHelpers(n);
+        if (const Ogre::uint32 drop = helperBitsToDrop(desc)) maskOutHelpers(n, drop);
         if (desc.stereo) applyStereo(n, desc.cullCameraName);
         Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
         workDef->connectExternal(0, n->getName(), 0);
@@ -1735,7 +1754,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         if (desc.letterbox) inset(handlesOut, p);
     }
 
-    if (!desc.helpers) maskOutHelpers(n);
+    if (const Ogre::uint32 drop = helperBitsToDrop(desc)) maskOutHelpers(n, drop);
     if (desc.stereo) applyStereo(n, desc.cullCameraName);
     Ogre::CompositorWorkspaceDef *workDef = cm->addWorkspaceDefinition(workspaceDef);
     workDef->connectExternal(0, n->getName(), 0);

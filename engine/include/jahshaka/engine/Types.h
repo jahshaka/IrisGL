@@ -2750,6 +2750,24 @@ struct VrInfo {
     bool        depthLayer = false;      ///< XR_KHR_composition_layer_depth is advertised
 };
 
+/// ONE LOCATED THING, IN WORLD SPACE — the rig already applied (phase 4).
+///
+/// `valid` is the runtime's own answer for THIS frame: a controller that is
+/// switched off, out of the tracking volume or simply not held reports nothing,
+/// and a host that drew a marker at the origin for it would be inventing a
+/// hand. Unlike VrStatus::posesValid (which latches the last HEAD pose because
+/// a locomotion rule must not stutter on one skipped frame) this goes false the
+/// moment the runtime stops answering: a proxy that is not there must not be
+/// drawn, and there is nothing to keep walking.
+struct VrPose {
+    bool valid = false;
+    Vec3 position;
+    Quat rotation;
+};
+
+/// WHICH HAND, and what indexes VrStatus::hands.
+enum VrHand : unsigned { VrHandLeft = 0, VrHandRight = 1, VrHandCount = 2 };
+
 /// A session's parameters. Everything here is the HOST's choice; nothing is
 /// persisted by the engine.
 struct VrConfig {
@@ -2762,6 +2780,21 @@ struct VrConfig {
     /// exactly what makes it a measurement of the RENDER and not of the runtime.
     /// 0 = use the runtime's recommendation (the product path).
     unsigned overrideEyeWidth = 0, overrideEyeHeight = 0;
+    /// DOES THE WEARER SEE THE EDITOR'S FURNITURE — the ground grid, the light
+    /// and camera icons, the selection outline, the gizmo (owner, 2026-09-17)?
+    ///
+    /// IT FOLLOWS THE HOST MODE, and the host is the only one who knows which
+    /// it is. The EDITOR's VR preview passes true: the whole point of that mode
+    /// is to stand inside the scene and watch the editor work, and a wearer who
+    /// cannot see what is selected or where the grid is cannot author. The
+    /// PLAYER passes nothing and gets this default: a play session shows no
+    /// furniture, exactly as the desktop Player shows none.
+    ///
+    /// The VR CONTROLLER proxies are NOT governed by it — they carry their own
+    /// channel (kVrHelperBit) and are drawn in every VR eye, both modes, like
+    /// Unreal's. Off by default here, so a host that says nothing gets the
+    /// conservative answer.
+    bool helpers = false;
 };
 
 /// What a live session is doing. Every number is a COUNT or a measured value,
@@ -2818,6 +2851,29 @@ struct VrStatus {
     /// host that sees it climbing while nobody touched the headset is looking
     /// at a runtime problem, not at its own locomotion.
     unsigned long long spaceChanges = 0;
+
+    // ---- THE HANDS (phase 4) ---------------------------------------------
+    /// WHERE THE WEARER'S HANDS ARE, in world space, through the rig exactly
+    /// like the head. Indexed by VrHand. POSES ONLY: no buttons, no triggers,
+    /// no input actions — those are their own spec, and nothing here reads a
+    /// value a user pressed.
+    ///
+    /// The source is the OpenXR ACTION system (a grip pose on the simple
+    /// controller profile, which every runtime maps from whatever the wearer is
+    /// actually holding), or the hand-tracking extension's palm joint where the
+    /// runtime offers it and no controller answers. A runtime with neither
+    /// leaves both invalid for the life of the session, which is not an error:
+    /// a headset with no controllers is a supported headset.
+    VrPose             hands[VrHandCount];
+    /// The action set was created, bound and ATTACHED to this session — i.e.
+    /// the controller route is live and `hands` can become valid. False means
+    /// the runtime refused the actions (or the build has none), which is worth
+    /// telling apart from "the controllers are switched off".
+    bool               handActions = false;
+    /// XR_EXT_hand_tracking is advertised, supported by the system and in use.
+    /// It is a FALLBACK, never a replacement: a hand holding a controller is
+    /// located by the controller.
+    bool               handJoints = false;
 };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at
