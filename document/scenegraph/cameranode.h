@@ -57,8 +57,9 @@ enum class CameraFocusMode {
 /// per-camera exposure existed. `Auto` and `Manual` both SUBSTITUTE this
 /// camera's block for the world's while this camera is the one driving a view
 /// (piloted, played through, or the subject of an opted-in screenshot);
-/// `Manual` additionally pins the adaptation clamp so the grade is a number and
-/// not a measurement (iris::lens::manualExposureClamp explains the pin).
+/// `Manual` additionally makes the grade a NUMBER and not a measurement: the
+/// chain's fixed-exposure form, which replaces the luminance meter with a clear
+/// to a constant (iris::lens::toChain).
 ///
 /// NEVER on a thumbnail, a preview or a pixel suite: those render through
 /// OFFSCREEN views, which discard the whole post description unless a caller
@@ -249,12 +250,12 @@ public:
 
     // ---- CAMERA_LENS_SPEC §4: the exposure block -------------------------
     //
-    // STOPS, all three of them, and the conversion into the post chain's own
-    // natural-log axis happens ONCE, at the mirror, through
-    // iris::lens::exposureStopsToChain. Nothing in the document ever holds a
-    // chain-unit exposure: the world's `Scene::exposure` does (it is the value
-    // the chain has always taken), the camera's does not, and mixing them up is
-    // the one mistake this pair of units invites.
+    // STOPS, all three of them, and the conversion into what the post chain
+    // takes happens ONCE, at the mirror, through iris::lens::toChain. NOTHING
+    // in the document holds a renderer-unit exposure any more — the world's
+    // `Scene::exposure` is stops too since EXPOSURE-1 — so this block and the
+    // World panel's rows are one dial said twice, and a camera at 0 stops is
+    // the world's own grade.
 
     /// Inherit (default) / Auto / Manual. Inherit is bit-for-bit "as if this
     /// block did not exist".
@@ -263,10 +264,12 @@ public:
     /// doubling. In Manual mode it IS the exposure; in Auto it is the midpoint
     /// the adaptation works around.
     float exposure;
-    /// The window automatic exposure may adapt within, in stops, on the same
-    /// axis. Ignored in Manual mode (which pins the clamp to a fixed reference
-    /// instead — see iris::lens::manualExposureClamp for why that is not the
-    /// exposure value). Kept ordered by the writers: min <= max.
+    /// The window automatic exposure may adapt within, in stops AROUND
+    /// `exposure`: [0, 0] is the exposure above and nothing else. Ignored in
+    /// Manual mode, which measures nothing. NOT the same axis as `exposure`
+    /// inside the renderer — the chain clamps a MEASUREMENT with this pair and
+    /// MULTIPLIES by the exposure, so they have different zeros and
+    /// iris::lens::toChain keeps them apart. Kept ordered: min <= max.
     float exposureMin;
     float exposureMax;
 

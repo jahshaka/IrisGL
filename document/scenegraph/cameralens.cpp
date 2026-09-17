@@ -14,6 +14,7 @@ For more information see the LICENSE file
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace iris
 {
@@ -217,31 +218,150 @@ float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float ne
     return shiftFromNearOffset(frustumOffset * scale, halfExtent);
 }
 
-// ---- exposure (CAMERA_LENS_SPEC §4) ---------------------------------------
+// ---- exposure (CAMERA_LENS_SPEC §4; EXPOSURE-1) ----------------------------
+//
+// THE DERIVATION, in three lines of arithmetic. The header carries the physics;
+// these are the numbers.
+
+float greyCardFilmInput()
+{
+    // Invert `out = (H(x)/H(W) - kFilmPivot) * kFilmContrast + kFilmLift` for
+    // out = kGreyCardDisplay, then invert Hable itself. Hable is
+    // (Ax^2 + CBx + DE) / (Ax^2 + Bx + DF) - E/F, so `H(x) = h` is
+    //     A(1-k) x^2 + B(C-k) x + D(E - kF) = 0,    k = h + E/F
+    // — one quadratic, the positive root. No iteration, and no tolerance to
+    // tune.
+    const double A = kFilmA, B = kFilmB, C = kFilmC, D = kFilmD, E = kFilmE, F = kFilmF;
+    const auto hable = [&](double x) {
+        return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+    };
+    const double hw = hable(double(kFilmW));
+    const double h = ((double(kGreyCardDisplay) - double(kFilmLift)) / double(kFilmContrast) +
+                      double(kFilmPivot)) * hw;
+    const double k = h + E / F;
+    const double a = A * (1.0 - k);
+    const double b = B * (C - k);
+    const double c = D * (E - k * F);
+    const double disc = b * b - 4.0 * a * c;
+    if (!(disc >= 0.0) || a == 0.0) return float(kGreyCardReflectance);   // a curve we cannot invert
+    return float((-b + std::sqrt(disc)) / (2.0 * a));
+}
+
+float keyIrradiance(float sunIntensity, float skyLightIntensity, float skyRadiance)
+{
+    const double sun = std::max(0.0, double(sunIntensity));
+    const double sky = std::max(0.0, double(skyLightIntensity)) * std::max(0.0, double(skyRadiance));
+    return float(kPi * (sun + sky));
+}
+
+/// The key irradiance of the DEFAULT TEMPLATE (MainWindow::createDefaultScene):
+/// a sun and a Sky Light, both at intensity 1.0, over a 96-grey sky. 96/255 =
+/// 0.37647 in sRGB; its linear decode is 0.11697 (the number SKY_LIGHT_SPEC
+/// §9.1 quotes for this sky's hemispherical integral), and the decode is
+/// spelled out rather than the 0.117 so the two cannot drift.
+static float defaultKeyIrradiance()
+{
+    constexpr double kDefaultSkySrgb = 96.0 / 255.0;
+    const double skyLinear = kDefaultSkySrgb <= 0.04045
+                                 ? kDefaultSkySrgb / 12.92
+                                 : std::pow((kDefaultSkySrgb + 0.055) / 1.055, 2.4);
+    return keyIrradiance(1.0f /*sun*/, 1.0f /*sky light*/, float(skyLinear));
+}
+
+float exposureForKeyIrradiance(float keyIrradianceValue)
+{
+    // A scene with no light at all has no correct exposure. The DEFAULT
+    // TEMPLATE's illumination stands in — and it is the INPUT that is
+    // substituted, not the result, so this stays the one place the formula
+    // lives and there is no way for the two to disagree (or to recurse).
+    const double e = keyIrradianceValue > 0.0f ? double(keyIrradianceValue)
+                                               : double(defaultKeyIrradiance());
+    return float(2.0 + std::log(double(greyCardFilmInput()) * kPi / e));
+}
+
+float defaultExposureChain()
+{
+    // ONE SPELLING: the default template's own lights, through the same rule
+    // every other scene goes through. "The default" is an evaluation of the
+    // general formula, never a second copy of it.
+    //
+    // CACHED, because this is the ANCHOR: exposureStopsToChain calls it on
+    // every conversion and it is a pow and three logs deep. The inputs are
+    // compile-time constants, so once is right.
+    static const float cached = exposureForKeyIrradiance(defaultKeyIrradiance());
+    return cached;
+}
+
+float exposureAnchorChain() { return defaultExposureChain(); }
 
 float exposureStopsToChain(float stops)
 {
     // One stop is a doubling, and the chain's axis is natural-log, so a stop is
     // ln 2 of it. Anchored so that zero stops is the default world grade.
-    return kExposureAnchorChain + stops * float(kLn2);
+    return exposureAnchorChain() + stops * float(kLn2);
 }
 
 float exposureChainToStops(float chain)
 {
-    return (chain - kExposureAnchorChain) / float(kLn2);
-}
-
-float manualExposureClamp()
-{
-    // 7.5 - ln(1024 * 0.18). Derived, not typed: see the header for why this
-    // exact number is what makes manual exposure agree with the deterministic
-    // tonemap constant e^(E-2)/0.18.
-    return 7.5f - float(std::log(1024.0 * 0.18));
+    return (chain - exposureAnchorChain()) / float(kLn2);
 }
 
 float exposureMultiplier(float chainExposure)
 {
-    return float(std::exp(double(chainExposure) - 2.0) / 0.18);
+    return float(std::exp(double(chainExposure) - 2.0) / double(kGreyCardReflectance));
+}
+
+float meterGreyCardChain()
+{
+    // 7.5 - ln(1024 * 0.18). DERIVED, not typed: 1024 is the chain's own scale
+    // (DownScale01 measures ln(1024 * Y)), 0.18 is the grey card's reflectance
+    // and 7.5 is the offset setExposure applies. The header says what it means.
+    return 7.5f - float(std::log(1024.0 * double(kGreyCardReflectance)));
+}
+
+}   // namespace lens
+
+const char *exposureModeName(ExposureMode m)
+{
+    return m == ExposureMode::Auto ? "auto" : "manual";
+}
+
+ExposureMode exposureModeFromName(const char *name, bool *ok)
+{
+    const std::string n = name ? name : "";
+    if (ok) *ok = true;
+    if (n == "auto") return ExposureMode::Auto;
+    if (n == "manual") return ExposureMode::Manual;
+    if (ok) *ok = false;
+    return ExposureMode::Manual;
+}
+
+namespace lens
+{
+
+void toChain(const ExposureDesc &d, float &chainExposure, float &chainMin, float &chainMax,
+             bool &fixed)
+{
+    chainExposure = exposureStopsToChain(d.stops);
+    fixed = d.mode == ExposureMode::Manual;
+    if (fixed) {
+        // Nothing reads the window in the fixed form (the exposure IS a clear
+        // colour). Returning the exposure itself keeps a description from
+        // carrying a window that means nothing, so two descriptions that grade
+        // identically compare equal and the chain is not rebuilt for nothing.
+        chainMin = chainMax = chainExposure;
+        return;
+    }
+    // THE WINDOW IS ON THE METER'S AXIS, NOT THE EXPOSURE'S (the header's
+    // meterGreyCardChain says why, with the arithmetic). Zero stops here means
+    // "where the meter agrees with a grey card", which is the picture Manual
+    // renders at the same exposure — so a window of [0, 0] IS the manual grade
+    // and [-3.5, +3.5] is symmetric about it. Converting these through
+    // exposureStopsToChain instead put the shipped window at [-5.93, +1.07]
+    // around Manual and a pinned [0, 0] 2.43 stops dark.
+    const float base = meterGreyCardChain();
+    chainMin = base + std::min(d.minStops, d.maxStops) * float(kLn2);
+    chainMax = base + std::max(d.minStops, d.maxStops) * float(kLn2);
 }
 
 float smoothTowards(float current, float target, float speed, float dt)

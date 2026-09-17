@@ -186,7 +186,30 @@ constexpr float kSunShadowSpecularHeadroom = 65504.0f;
 inline float sunExposureGain(const jahshaka::engine::PostFxDesc &fx)
 {
     if (!fx.hdr) return 1.0f;
+    // MANUAL exposure (the chain's fixed form) has no meter and no clamp: the
+    // multiplier IS the constant the 1x1 exposure texture is cleared to, so the
+    // gain is known exactly rather than bounded (EXPOSURE-1).
+    if (fx.tonemapFixed) return iris::lens::exposureMultiplier(fx.exposure);
     return 1024.0f * std::exp(fx.exposure - 2.0f - (7.5f - fx.exposureMax));
+}
+
+/// THE ONE PLACE A DOCUMENT EXPOSURE BECOMES A RENDERER EXPOSURE (EXPOSURE-1).
+///
+/// Both halves of the model go through here — the world's statement and, over
+/// it, a driving camera's override — so "stops in the document, the chain's
+/// natural-log axis in the engine" is enforced by there being no other route.
+/// MANUAL is the chain's FIXED-EXPOSURE form (`tonemapFixed`): the luminance
+/// ladder is replaced by a clear to `e^(E-2)/0.18`, which is exact on the first
+/// frame, five quads and four textures cheaper, and the identical constant a
+/// thumbnail or a screenshot of the same world already grades with.
+inline void applyExposure(const iris::ExposureDesc &d, jahshaka::engine::PostFxDesc &fx)
+{
+    bool fixed = false;
+    iris::lens::toChain(d, fx.exposure, fx.exposureMin, fx.exposureMax, fixed);
+    fx.tonemapFixed = fixed;
+    // A MEASURED scale belongs to the automatic path. Carrying one into the
+    // fixed form would grade a manual exposure with somebody else's meter.
+    if (fixed) fx.exposureScale = 0.0f;
 }
 
 inline float brightestChannel(const jahshaka::engine::Colour &c)
@@ -6316,9 +6339,12 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
     {
         PostFxDesc fx;
         fx.hdr            = mSource->hdrEnabled;
-        fx.exposure       = mSource->exposure;
-        fx.exposureMin    = mSource->exposureMin;
-        fx.exposureMax    = mSource->exposureMax;
+        // EXPOSURE: the world's statement, in the document's unit. The DRIVING
+        // CAMERA's block is layered over it below (applyCameraPostFx) and the
+        // whole thing is converted ONCE, there, by iris::lens::toChain — this
+        // is why nothing here touches fx.exposure*.
+        applyExposure(iris::ExposureDesc{ mSource->exposureMode, mSource->exposure,
+                                          mSource->exposureMin, mSource->exposureMax }, fx);
         fx.bloom          = mSource->bloomEnabled;
         fx.bloomThreshold = mSource->bloomThreshold;
         fx.bloomKnee      = mSource->bloomKnee;
@@ -7465,22 +7491,16 @@ static bool cameraOverridesAnything(const iris::CameraNodePtr &camera)
 /// Applies the camera's exposure block and override map over `fx`.
 static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
 {
-    // ---- §4, exposure. STOPS in the document, the chain's natural-log axis
-    // here, converted in ONE place (iris::lens::exposureStopsToChain).
-    if (camera->exposureMode != iris::CameraExposureMode::Inherit) {
-        fx.exposure = iris::lens::exposureStopsToChain(camera->exposure);
-        if (camera->exposureMode == iris::CameraExposureMode::Manual) {
-            // min == max pins the shader's clamp, which is what makes the grade
-            // a NUMBER instead of a measurement. The pin is a constant and not
-            // the exposure — see iris::lens::manualExposureClamp for why using
-            // the exposure would make one authored stop move the picture by two.
-            fx.exposureMin = fx.exposureMax = iris::lens::manualExposureClamp();
-        } else {
-            fx.exposureMin = iris::lens::exposureStopsToChain(camera->exposureMin);
-            fx.exposureMax = iris::lens::exposureStopsToChain(camera->exposureMax);
-            if (fx.exposureMax < fx.exposureMin) std::swap(fx.exposureMin, fx.exposureMax);
-        }
-    }
+    // ---- §4, exposure. STOPS in the document; the chain's natural-log axis is
+    // reached in ONE place for the world and for a camera alike (applyExposure
+    // -> iris::lens::toChain). `Inherit` leaves whatever the world put there.
+    if (camera->exposureMode != iris::CameraExposureMode::Inherit)
+        applyExposure(iris::ExposureDesc{ camera->exposureMode == iris::CameraExposureMode::Auto
+                                              ? iris::ExposureMode::Auto
+                                              : iris::ExposureMode::Manual,
+                                          camera->exposure, camera->exposureMin,
+                                          camera->exposureMax },
+                      fx);
 
     // ---- §5, the tri-state overrides. Absent = inherit, so every branch below
     // is guarded by hasPostOverride and the world's value survives otherwise.
