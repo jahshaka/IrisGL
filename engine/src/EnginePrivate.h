@@ -5203,6 +5203,12 @@ void sessionEnd(VrSession *);
 bool    vrSessionBeginFrame(VrSession *);
 void    vrSessionEndFrame(VrSession *);
 VrState vrSessionState(const VrSession *);
+/// IS THE SESSION OVER? (lane VR-3b.) True once nothing can come of it any
+/// more: the runtime stopped it, the runtime went away, or the device was lost.
+/// The frame tail ends such a session — the state alone cannot say it (a
+/// stopped session reads `Idle`, which is also what a session that has not
+/// started yet reads).
+bool    vrSessionIsOver(const VrSession *);
 VrStatus vrSessionStatus(const VrSession *);
 View   *vrSessionView(const VrSession *);
 void    vrSessionSetMirror(VrSession *, OgreView *);
