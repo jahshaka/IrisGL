@@ -527,6 +527,36 @@ public:
     void setGiVolumeOverlay(bool visible);
     bool giVolumeOverlay() const { return mGiVolumeVisible; }
 
+    /// THE VR CONTROLLER PROXIES (SPECS/VR_SPEC.md §5 phase 4; the shape is the
+    /// owner's, 2026-09-17): where the wearer's two hands are, drawn as small
+    /// wands — in the headset's own eyes in BOTH modes (the editor's preview
+    /// and the Player's, like Unreal's), and in the desktop editor viewport so
+    /// the person at the desk can see where the wearer is reaching.
+    ///
+    /// THERE IS NO HEAD PROXY, deliberately: a marker at the wearer's own face
+    /// is a box in their eyes, and on the desktop "where is the wearer" is
+    /// already answered by the camera.
+    ///
+    /// THE TWO CHANNELS THEY CARRY (EnginePrivate.h's kVrHelperBit): kHelperBit
+    /// keeps them out of every reflection-probe capture, every shadow map, the
+    /// GI and a user's screenshot, and puts them in the desktop editor's
+    /// picture; kVrHelperBit puts them in every VR eye, including a Player's,
+    /// which draws no other furniture at all.
+    ///
+    /// NO DOCUMENT NODES ARE CREATED. Nothing is added to the outliner, nothing
+    /// is saved, nothing changes scene.bounds: two mirror-owned line meshes,
+    /// positioned from the poses the caller hands in.
+    ///
+    /// The STATUS is the data, deliberately: `jahshaka::engine::VrStatus` is
+    /// what the engine reports and what a host already holds, so there is no
+    /// second pose type to keep in step — and a suite can drive this with a
+    /// hand-built status and no runtime at all.
+    void setVrProxies(bool visible, const jahshaka::engine::VrStatus &status);
+    bool vrProxies() const { return mVrProxiesVisible; }
+    /// The two proxy nodes — left hand, right hand — or 0 where none has been
+    /// created. For the suite that asserts which channels they are in.
+    void vrProxyNodes(jahshaka::engine::NodeId out[2]) const;
+
 private:
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
     /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
@@ -897,6 +927,9 @@ private:
     /// importer did to them. False when the mesh has no usable linear map.
     bool fitGroundUvMap(iris::Mesh *mesh, float &ux, float &uc, float &vz, float &vc);
     void syncGiVolume();
+    /// The two controller markers, positioned from the status last pushed
+    /// (setVrProxies). Draws nothing at all while no session is running.
+    void syncVrProxies();
     jahshaka::engine::MeshId wireMeshFor(int kind);
     /// The per-sync document walk. Takes a RAW node and iterates children
     /// through iris::graph rather than through SceneNode::children(), which
@@ -1586,6 +1619,16 @@ private:
     /// them — which is every scene, until somebody opens the GI overlay.
     int mGiVolLitVisible = -1;
     int mGiVolProbeVisible = -1;
+    // The VR proxies (phase 4): head, left hand, right hand. Same shape as the
+    // GI boxes above — created on first use, latched visibility, and nothing at
+    // all until a session asks for them.
+    bool mVrProxiesVisible = false;
+    jahshaka::engine::VrStatus mVrStatus;
+    jahshaka::engine::NodeId mVrProxyNode[2] = { 0, 0 };
+    jahshaka::engine::MeshId mVrProxyMesh[2] = { 0, 0 };
+    jahshaka::engine::MaterialId mVrProxyMaterial[2] = { 0, 0 };   ///< left, right
+    int mVrProxyVisible[2] = { -1, -1 };
+    bool mVrProxiesBuilt = false;
     /// The highlighted SET, primary first. Empty = nothing selected.
     QList<iris::SceneNodePtr> mHighlighted;
     /// The same set, for the membership test (isHighlighted). The list keeps

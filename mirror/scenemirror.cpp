@@ -888,6 +888,7 @@ int SceneMirror::sync()
     syncHighlight();
     syncGrid();
     syncGroundHorizon();
+    syncVrProxies();
     }
     // AFTER removeMissing: a rider deleted from the document is a dangling key
     // in the reconciler's map until its entry is released (see the function).
@@ -1525,6 +1526,14 @@ void SceneMirror::syncHighlight()
             // visibility mask, so the user still sees the outline; the shadow
             // node masks to kVisibleBit, so the shell stops casting — which is
             // what an outline should do.
+            //
+            // AND IT IS THE DESK'S FURNITURE, not the wearer's (VR_SPEC §5
+            // phase 4, kVrHelperBit's note): the outline is drawn in the
+            // EDITOR's VR preview because that session opens the ordinary
+            // helper channel (VrConfig::helpers), and it is absent from the
+            // PLAYER's eyes for the same reason the grid is — a player is not
+            // editing. It does NOT carry the VR channel, which is the wearer's
+            // own hands and pointer.
             if (s.node) mTarget->setNodeHelper(s.node, true);
         }
         if (!s.node) continue;
@@ -2333,6 +2342,106 @@ void SceneMirror::syncGiVolume()
             st.boundsMin, st.boundsMax, mGiVolLitMin, mGiVolLitMax, haveLit, mGiVolLitVisible);
     rebuild(mGiVolProbeNode, mGiVolProbeMesh, mGiVolProbeMaterial,
             st.probeRegionMin, st.probeRegionMax, mGiVolProbeMin, mGiVolProbeMax, haveProbe, mGiVolProbeVisible);
+}
+
+// ---------------------------------------------------------------------------
+// THE VR CONTROLLER PROXIES (VR_SPEC §5 phase 4; the shape is the owner's,
+// 2026-09-17). See the header for what they are and where they are drawn.
+//
+// TWO MARKERS, NOT THREE: THERE IS NO HEAD PROXY. It was the obvious third one
+// and it is wrong twice over — in the headset a marker at the wearer's own face
+// is a box in their eyes, and on the desktop "where is the wearer" is already
+// answered by the camera. The hands are the thing neither picture has.
+void SceneMirror::setVrProxies(bool visible, const jahshaka::engine::VrStatus &status)
+{
+    mVrProxiesVisible = visible;
+    mVrStatus = status;
+}
+
+void SceneMirror::vrProxyNodes(jahshaka::engine::NodeId out[2]) const
+{
+    for (int i = 0; i < 2; ++i) out[i] = mVrProxyNode[i];
+}
+
+void SceneMirror::syncVrProxies()
+{
+    if (!mTarget) return;
+    // NOTHING AT ALL UNTIL SOMEBODY ASKS, and then nothing again afterwards:
+    // the latch below means a scene that has never worn VR — which is every
+    // scene, nearly always — pays one branch a frame.
+    const bool wanted = mVrProxiesVisible && mVrStatus.active;
+    if (!wanted) {
+        if (mVrProxiesBuilt)
+            for (int i = 0; i < 2; ++i)
+                if (mVrProxyNode[i] && mVrProxyVisible[i] != 0) {
+                    mTarget->setNodeVisible(mVrProxyNode[i], false);
+                    mVrProxyVisible[i] = 0;
+                }
+        return;
+    }
+
+    if (!mVrProxiesBuilt) {
+        // THE MARKER. A small wand: a box the size of a held controller with a
+        // pointer down its own -Z (the direction a grip pose points), so
+        // position AND orientation read at a glance. Lines, unlit, depth-tested
+        // and blended — the same class as the grid and the GI boxes, so a hand
+        // behind a wall reads as behind it.
+        const float hw = 0.028f, hh = 0.030f, hd = 0.060f;   // half-extents, metres
+        std::vector<Vec3> wand;
+        {
+            const Vec3 c[8] = { Vec3(-hw,-hh,-hd), Vec3(hw,-hh,-hd), Vec3(hw,-hh,hd), Vec3(-hw,-hh,hd),
+                                Vec3(-hw, hh,-hd), Vec3(hw, hh,-hd), Vec3(hw, hh,hd), Vec3(-hw, hh,hd) };
+            const int e[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
+                                   {0,4},{1,5},{2,6},{3,7} };
+            for (int i = 0; i < 12; ++i) { wand.push_back(c[e[i][0]]); wand.push_back(c[e[i][1]]); }
+            // The pointer, and a short cross at its tip so the tip is legible
+            // against geometry of any colour.
+            wand.push_back(Vec3(0, 0, -hd)); wand.push_back(Vec3(0, 0, -hd - 0.10f));
+            const float t = -hd - 0.10f, x = 0.018f;
+            wand.push_back(Vec3(-x, 0, t)); wand.push_back(Vec3(x, 0, t));
+            wand.push_back(Vec3(0, -x, t)); wand.push_back(Vec3(0, x, t));
+        }
+        for (int i = 0; i < 2; ++i) {
+            mVrProxyNode[i] = mTarget->createNode();
+            if (!mVrProxyNode[i]) return;
+            // BOTH HELPER CHANNELS (kVrHelperBit's note). kHelperBit is what
+            // keeps a controller out of every reflection-probe capture, every
+            // shadow map, the GI and a user's screenshot, and what puts it in
+            // the desktop editor's picture; kVrHelperBit is what puts it in
+            // EVERY VR eye — including a Player's, which draws no other
+            // furniture at all. A wearer must see their own hands in both modes.
+            mTarget->setNodeHelper(mVrProxyNode[i], true);
+            mTarget->setNodeVrHelper(mVrProxyNode[i], true);
+        }
+        // Left and right in two colours, because "which hand is that" is the
+        // second question anybody asks of a pair of markers.
+        mVrProxyMaterial[0] = mTarget->createUnlitMaterial(Colour(0.35f, 0.80f, 1.0f, 0.90f), true);
+        mVrProxyMaterial[1] = mTarget->createUnlitMaterial(Colour(1.0f, 0.72f, 0.30f, 0.90f), true);
+        mVrProxyMesh[0] = mTarget->createLineMesh(wand, false);
+        mVrProxyMesh[1] = mTarget->createLineMesh(wand, false);
+        for (int i = 0; i < 2; ++i)
+            if (mVrProxyMesh[i])
+                mTarget->attachMesh(mVrProxyNode[i], mVrProxyMesh[i], mVrProxyMaterial[i]);
+        mVrProxiesBuilt = true;
+    }
+
+    // THE POSES. Each hand's validity is its OWN frame's answer: a controller
+    // that is switched off or put down leaves no marker hanging in the air.
+    for (int i = 0; i < 2; ++i) {
+        if (!mVrProxyNode[i]) continue;
+        const jahshaka::engine::VrPose &p = mVrStatus.hands[i];
+        const int want = (p.valid && mVrProxyMesh[i]) ? 1 : 0;
+        if (want) {
+            // A WORLD pose on a node with no parent — the proxies hang off the
+            // scene root, exactly like the GI boxes, so "local" IS "world".
+            mTarget->setNodeTransform(mVrProxyNode[i], p.position, p.rotation,
+                                      Vec3(1.0f, 1.0f, 1.0f));
+        }
+        if (mVrProxyVisible[i] != want) {
+            mTarget->setNodeVisible(mVrProxyNode[i], want != 0);
+            mVrProxyVisible[i] = want;
+        }
+    }
 }
 
 MeshId SceneMirror::wireMeshFor(int kind)

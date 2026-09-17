@@ -237,6 +237,15 @@ public:
     XrViewConfigurationView mViewCfg[2] = {};
     bool         mHasVisibilityMask = false;
     bool         mHasDepthLayer = false;
+    /// XR_EXT_hand_tracking: advertised by the runtime, and then supported by
+    /// the SYSTEM (two different answers — WiVRn advertises it for a Quest that
+    /// may still have it switched off, and Monado's simulated HMD has no hands
+    /// at all).
+    bool         mHasHandTrackingExt = false;
+    bool         mSystemHandTracking = false;
+    PFN_xrCreateHandTrackerEXT  CreateHandTracker = nullptr;
+    PFN_xrDestroyHandTrackerEXT DestroyHandTracker = nullptr;
+    PFN_xrLocateHandJointsEXT   LocateHandJoints = nullptr;
 
     VkInstance       mVkInstance = VK_NULL_HANDLE;
     VkPhysicalDevice mPhysicalDevice = VK_NULL_HANDLE;
@@ -279,6 +288,8 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
         if (!std::strcmp(e.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME)) hasEnable2 = true;
         if (!std::strcmp(e.extensionName, "XR_KHR_visibility_mask")) mHasVisibilityMask = true;
         if (!std::strcmp(e.extensionName, "XR_KHR_composition_layer_depth")) mHasDepthLayer = true;
+        if (!std::strcmp(e.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME))
+            mHasHandTrackingExt = true;
     }
     if (!hasEnable2) {
         reason = "the runtime does not advertise XR_KHR_vulkan_enable2";
@@ -289,16 +300,26 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
     // §580): everything used here is OpenXR 1.0 core plus vulkan_enable2, and
     // Meta's PC runtime has no 1.1 conformance — so 1.1 is asked for and 1.0 is
     // the retry, on exactly XR_ERROR_API_VERSION_UNSUPPORTED.
-    const char *want[] = {
+    //
+    // XR_EXT_hand_tracking rides the same list when the runtime advertises it
+    // (phase 4): it is how a wearer with NO controllers still gets two hand
+    // proxies. Asked for only when advertised — an unknown extension in this
+    // list fails the whole xrCreateInstance, which would take VR away from
+    // every runtime that does not have it.
+    const char *want[3] = {
         XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME,
         "XR_KHR_visibility_mask",
+        XR_EXT_HAND_TRACKING_EXTENSION_NAME,
     };
+    unsigned wantCount = 1u;
+    if (mHasVisibilityMask) want[wantCount++] = "XR_KHR_visibility_mask";
+    if (mHasHandTrackingExt) want[wantCount++] = XR_EXT_HAND_TRACKING_EXTENSION_NAME;
     XrInstanceCreateInfo ici{ XR_TYPE_INSTANCE_CREATE_INFO };
     std::strncpy(ici.applicationInfo.applicationName, "Jahshaka",
                  XR_MAX_APPLICATION_NAME_SIZE - 1);
     ici.applicationInfo.applicationVersion = 1;
     std::strncpy(ici.applicationInfo.engineName, "Jahshaka Engine", XR_MAX_ENGINE_NAME_SIZE - 1);
-    ici.enabledExtensionCount = mHasVisibilityMask ? 2u : 1u;
+    ici.enabledExtensionCount = wantCount;
     ici.enabledExtensionNames = want;
 
     const XrVersion ladder[2] = { XR_MAKE_VERSION(1, 1, 0), XR_MAKE_VERSION(1, 0, 0) };
@@ -347,8 +368,29 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
         return false;
     }
     XrSystemProperties sp{ XR_TYPE_SYSTEM_PROPERTIES };
-    if (XR_SUCCEEDED(xrGetSystemProperties(mInstance, mSystemId, &sp)))
+    // THE SYSTEM'S ANSWER ABOUT HANDS, WHICH IS NOT THE RUNTIME'S (phase 4).
+    // The extension being advertised says the runtime KNOWS about hand
+    // tracking; this says the headset in front of it can do it. WiVRn advertises
+    // it for a Quest whose hand tracking the wearer may have switched off, and
+    // Monado's simulated HMD advertises nothing of the sort.
+    XrSystemHandTrackingPropertiesEXT handProps{ XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT };
+    if (mHasHandTrackingExt) sp.next = &handProps;
+    if (XR_SUCCEEDED(xrGetSystemProperties(mInstance, mSystemId, &sp))) {
         info.system = sp.systemName;
+        mSystemHandTracking = mHasHandTrackingExt && handProps.supportsHandTracking == XR_TRUE;
+    }
+    if (mHasHandTrackingExt) {
+        xrGetInstanceProcAddr(mInstance, "xrCreateHandTrackerEXT",
+                              reinterpret_cast<PFN_xrVoidFunction *>(&CreateHandTracker));
+        xrGetInstanceProcAddr(mInstance, "xrDestroyHandTrackerEXT",
+                              reinterpret_cast<PFN_xrVoidFunction *>(&DestroyHandTracker));
+        xrGetInstanceProcAddr(mInstance, "xrLocateHandJointsEXT",
+                              reinterpret_cast<PFN_xrVoidFunction *>(&LocateHandJoints));
+        if (!CreateHandTracker || !DestroyHandTracker || !LocateHandJoints)
+            mSystemHandTracking = false;
+    }
+    vrLog("hand tracking: extension=%d system=%d", int(mHasHandTrackingExt),
+          int(mSystemHandTracking));
 
     uint32_t viewCount = 0;
     if (XR_FAILED(xrEnumerateViewConfigurationViews(
@@ -613,6 +655,18 @@ private:
     /// Everything that must be released before Ogre's objects go: the XR
     /// swapchains, the space and the session. Safe twice.
     void destroyXr();
+    /// THE ACTION SET AND THE TWO HAND POSES (phase 4, VR_SPEC §5 phase 4).
+    /// One action set, two pose actions on the SIMPLE CONTROLLER profile, and
+    /// one action space per hand — attached ONCE, here, because
+    /// `xrAttachSessionActionSets` may be called only once per session and must
+    /// precede the first `xrSyncActions`. Never fatal: a runtime that refuses
+    /// leaves `mHandActions` false and the session runs without hands.
+    void createActions();
+    /// One frame's hands: sync the actions, locate the two spaces (or the two
+    /// palm joints), compose through the rig. Called from the located branch of
+    /// beginFrame with that frame's predicted display time.
+    void locateHands(XrTime displayTime);
+    void destroyActions();
 
     VrBoot     *mBoot;
     OgreEngine *mEngine;
@@ -701,6 +755,23 @@ private:
     /// timing is right (measured, phase 3, 1 run in 4 of the Player suite).
     Ogre::TextureGpu *mMirrorTarget = nullptr;
     unsigned    mMirrorW = 0u, mMirrorH = 0u;
+
+    // ---- THE HANDS (phase 4) ----------------------------------------------
+    /// The one action set, its two POSE actions and their two action spaces.
+    /// Poses only — this session creates no boolean, float or vector action and
+    /// reads no button (VR_SPEC §5 phase 4: input ACTIONS are a later spec).
+    XrActionSet mActionSet = XR_NULL_HANDLE;
+    XrAction    mHandPoseAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrSpace     mHandSpace[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrHandTrackerEXT mHandTracker[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    bool        mHandActions = false;   ///< the set was attached
+    bool        mHandJoints = false;    ///< a joint answered this session
+    /// The last located hand poses, in WORLD space (the rig applied), and the
+    /// runtime's own validity for THIS frame — never latched (VrPose's note).
+    Ogre::Vector3    mHandPos[2] = { Ogre::Vector3::ZERO, Ogre::Vector3::ZERO };
+    Ogre::Quaternion mHandRot[2] = { Ogre::Quaternion::IDENTITY, Ogre::Quaternion::IDENTITY };
+    bool        mHandValid[2] = { false, false };
+    bool        mSaidHands = false;
 
     unsigned long long mFrames = 0ull, mRendered = 0ull;
     float       mIpd = 0.0f;
@@ -847,6 +918,38 @@ bool VrSession::create(std::string &reason) {
     mView->setPostFx(fx);
     mView->setSampleCount(1u);
     mView->setStereo(true, "JahshakaVrCullCamera");
+    // THE TWO HELPER CHANNELS (kVrHelperBit's two-bit rule, phase 4; owner
+    // 2026-09-17). Until this lane the session's view simply INHERITED
+    // `mHelpersVisible = true` and never said so, which is a different thing
+    // from choosing it: whatever the default happened to be is what the wearer
+    // got. Both are chosen here, explicitly.
+    //
+    //   * THE DESKTOP FURNITURE FOLLOWS THE HOST MODE (VrConfig::helpers): the
+    //     EDITOR's preview shows the grid, the icons, the outline and the
+    //     gizmo — "see the editor working", which is the mode's whole purpose —
+    //     and the PLAYER shows none of it, exactly as the desktop Player does.
+    //   * THE VR CHANNEL IS ALWAYS ON in an eye, in both modes: the controller
+    //     proxies (and, later, phase 4b's controller ray, hit marker and in-VR
+    //     gizmo) are the wearer's own hands and pointer, and a player needs
+    //     them as much as an author does.
+    mView->setHelpersVisible(mConfig.helpers);
+    mView->setVrHelpersVisible(true);
+    // SHADOWS, WHICH THE HEADSET DID NOT HAVE (lane VR-4, found by the §3.4
+    // measurement rather than by looking): `OgreView::mShadows` is FALSE by
+    // default and every other host opts in explicitly — the editor viewport at
+    // creation, the Player's view at creation — but the session's view never
+    // did. So phases 2 and 3 rendered both eyes with NO shadow node at all: no
+    // directional PSSM, no point or spot shadows, in either mode, silently. The
+    // capture is the evidence: the `jahshaka-vr` workspace carried zero
+    // `shadow.view` passes while the desktop's carried four a frame.
+    //
+    // IT IS ALSO THE COST §3.4 PREDICTED, and now really paid: the view atlas
+    // is rendered once per workspace, so a session beside a live desktop view
+    // renders it twice a frame. Measured on this rig with the clocks locked —
+    // the numbers are in the lane's report — and it is the right trade: a
+    // headset with no shadows is not a preview of the scene, it is a different
+    // scene.
+    mView->setShadows(true);
     // THE GI DRIVER. Without this the cascades would follow whichever on-screen
     // view was created first — the editor's — and the headset would look at a
     // field centred somewhere else entirely (VR_SPEC §3.4).
@@ -863,6 +966,11 @@ bool VrSession::create(std::string &reason) {
     mView->addWorkspaceListener(this);
     mView->setEnabled(true);
 
+    // THE HANDS (phase 4). After the session and the reference space exist and
+    // before any frame is pumped — `xrAttachSessionActionSets` is once per
+    // session and must precede the first `xrSyncActions`.
+    createActions();
+
     vrLog("session created on the runtime's device");
     if (mTestNoRenderLeft)
         vrLog("TEST HOOK: the first %u frames will be answered 'no picture' "
@@ -871,6 +979,231 @@ bool VrSession::create(std::string &reason) {
         vrLog("TEST HOOK: the runtime will be asked to exit after %u frames "
               "(JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES)", mTestStopAfter);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE HANDS (VR_SPEC §5 phase 4). POSES ONLY.
+//
+// ONE ACTION SET, TWO POSE ACTIONS, AND THE SIMPLE CONTROLLER PROFILE. The
+// profile is `/interaction_profiles/khr/simple_controller` and nothing else, on
+// purpose: it is the one profile every conformant runtime must map, from
+// whatever the wearer is actually holding (Touch, Index, WMR, a Vive wand), so
+// two grip poses bound there are two grip poses everywhere. A vendor profile
+// buys nothing until there are BUTTONS to bind, and buttons are their own spec.
+//
+// GRIP, NOT AIM. The grip pose is where the hand IS — the runtime's estimate of
+// the middle of the fist around the controller — which is what a proxy standing
+// in for a hand must be drawn at. The aim pose is where the hand POINTS, and it
+// belongs to a pointer, not to a hand.
+//
+// NOTHING HERE IS FATAL. A runtime that refuses the set, the bindings or the
+// attach leaves `mHandActions` false and the session runs exactly as phase 3's
+// did: a headset with no controllers is a supported headset.
+void VrSession::createActions() {
+    XrActionSetCreateInfo asci{ XR_TYPE_ACTION_SET_CREATE_INFO };
+    std::strncpy(asci.actionSetName, "jahshaka", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+    std::strncpy(asci.localizedActionSetName, "Jahshaka",
+                 XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+    asci.priority = 0;
+    XrResult r = xrCreateActionSet(mBoot->mInstance, &asci, &mActionSet);
+    if (XR_FAILED(r)) {
+        vrLog("no hand poses: xrCreateActionSet failed (%s)",
+              xrResultName(mBoot->mInstance, r).c_str());
+        mActionSet = XR_NULL_HANDLE;
+        return;
+    }
+
+    // TWO ACTIONS RATHER THAN ONE WITH SUBACTION PATHS. Both spellings are
+    // conformant; two is the one with no hidden state — each action has exactly
+    // one binding, one space and one answer, so "the left hand did not locate"
+    // cannot be a subaction path that was never in the action's list.
+    static const char *const kActionName[2] = { "left_hand_pose", "right_hand_pose" };
+    static const char *const kLocalized[2] = { "Left hand pose", "Right hand pose" };
+    static const char *const kBinding[2] = { "/user/hand/left/input/grip/pose",
+                                             "/user/hand/right/input/grip/pose" };
+    XrActionSuggestedBinding bindings[2] = {};
+    for (int h = 0; h < 2; ++h) {
+        XrActionCreateInfo aci{ XR_TYPE_ACTION_CREATE_INFO };
+        aci.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        std::strncpy(aci.actionName, kActionName[h], XR_MAX_ACTION_NAME_SIZE - 1);
+        std::strncpy(aci.localizedActionName, kLocalized[h],
+                     XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+        r = xrCreateAction(mActionSet, &aci, &mHandPoseAction[h]);
+        if (XR_FAILED(r)) {
+            vrLog("no hand poses: xrCreateAction(%s) failed (%s)", kActionName[h],
+                  xrResultName(mBoot->mInstance, r).c_str());
+            destroyActions();
+            return;
+        }
+        XrPath path = XR_NULL_PATH;
+        if (XR_FAILED(xrStringToPath(mBoot->mInstance, kBinding[h], &path))) {
+            vrLog("no hand poses: xrStringToPath(%s) failed", kBinding[h]);
+            destroyActions();
+            return;
+        }
+        bindings[h].action = mHandPoseAction[h];
+        bindings[h].binding = path;
+    }
+
+    XrPath profile = XR_NULL_PATH;
+    if (XR_FAILED(xrStringToPath(mBoot->mInstance,
+                                 "/interaction_profiles/khr/simple_controller", &profile))) {
+        vrLog("no hand poses: the simple controller profile path did not resolve");
+        destroyActions();
+        return;
+    }
+    XrInteractionProfileSuggestedBinding sug{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+    sug.interactionProfile = profile;
+    sug.countSuggestedBindings = 2;
+    sug.suggestedBindings = bindings;
+    r = xrSuggestInteractionProfileBindings(mBoot->mInstance, &sug);
+    if (XR_FAILED(r)) {
+        vrLog("no hand poses: xrSuggestInteractionProfileBindings failed (%s)",
+              xrResultName(mBoot->mInstance, r).c_str());
+        destroyActions();
+        return;
+    }
+
+    XrSessionActionSetsAttachInfo attach{ XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
+    attach.countActionSets = 1;
+    attach.actionSets = &mActionSet;
+    r = xrAttachSessionActionSets(mSession, &attach);
+    if (XR_FAILED(r)) {
+        vrLog("no hand poses: xrAttachSessionActionSets failed (%s)",
+              xrResultName(mBoot->mInstance, r).c_str());
+        destroyActions();
+        return;
+    }
+
+    // THE ACTION SPACES, one per hand. Created AFTER the attach (an action
+    // space of an unattached action is not defined) and identity-posed: the
+    // grip pose is already where the hand is, and an offset here would be this
+    // engine's opinion about somebody else's controller.
+    for (int h = 0; h < 2; ++h) {
+        XrActionSpaceCreateInfo asi{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
+        asi.action = mHandPoseAction[h];
+        asi.poseInActionSpace.orientation.w = 1.0f;
+        r = xrCreateActionSpace(mSession, &asi, &mHandSpace[h]);
+        if (XR_FAILED(r)) {
+            vrLog("no hand poses: xrCreateActionSpace(%d) failed (%s)", h,
+                  xrResultName(mBoot->mInstance, r).c_str());
+            destroyActions();
+            return;
+        }
+    }
+    mHandActions = true;
+
+    // ...AND THE JOINTS, where this system has them. A FALLBACK, not a
+    // replacement: a hand holding a controller is located by the controller,
+    // and only a hand the controller route left invalid asks the tracker.
+    if (mBoot->mSystemHandTracking && mBoot->CreateHandTracker) {
+        for (int h = 0; h < 2; ++h) {
+            XrHandTrackerCreateInfoEXT hci{ XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT };
+            hci.hand = h == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+            hci.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+            if (XR_FAILED(mBoot->CreateHandTracker(mSession, &hci, &mHandTracker[h])))
+                mHandTracker[h] = XR_NULL_HANDLE;
+        }
+    }
+    vrLog("hand poses: the action set is attached (joints=%d)",
+          int(mHandTracker[0] != XR_NULL_HANDLE || mHandTracker[1] != XR_NULL_HANDLE));
+}
+
+void VrSession::locateHands(XrTime displayTime) {
+    mHandValid[0] = mHandValid[1] = false;
+    if (!mHandActions || mSession == XR_NULL_HANDLE) return;
+
+    // THE SYNC, AND WHAT IT ANSWERS WHEN NOBODY IS LOOKING. `xrSyncActions`
+    // returns XR_SESSION_NOT_FOCUSED — a SUCCESS code, not a failure — while
+    // the runtime's dashboard is up or the headset is off the head, and the
+    // actions are simply inactive for that frame. Treating it as an error would
+    // log once a frame for as long as a wearer talks to somebody.
+    XrActiveActionSet active{};
+    active.actionSet = mActionSet;
+    active.subactionPath = XR_NULL_PATH;
+    XrActionsSyncInfo sync{ XR_TYPE_ACTIONS_SYNC_INFO };
+    sync.countActiveActionSets = 1;
+    sync.activeActionSets = &active;
+    const XrResult sr = xrSyncActions(mSession, &sync);
+    if (XR_FAILED(sr)) {
+        if (!mSaidHands) {
+            vrLog("hand poses: xrSyncActions failed (%s) — hands are off for this session",
+                  xrResultName(mBoot->mInstance, sr).c_str());
+            mSaidHands = true;
+        }
+        return;
+    }
+
+    for (int h = 0; h < 2; ++h) {
+        Ogre::Vector3 pos = Ogre::Vector3::ZERO;
+        Ogre::Quaternion rot = Ogre::Quaternion::IDENTITY;
+        bool got = false;
+
+        // THE CONTROLLER FIRST. `xrLocateSpace` on an action space of an
+        // INACTIVE action succeeds with no validity bits set, which is the
+        // right answer for "that hand is not holding anything" — the flags are
+        // what decides, never the result code.
+        if (mHandSpace[h] != XR_NULL_HANDLE) {
+            XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
+            if (XR_SUCCEEDED(xrLocateSpace(mHandSpace[h], mSpace, displayTime, &loc)) &&
+                (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                pos = toOgreVec(loc.pose.position);
+                rot = toOgreQuat(loc.pose.orientation);
+                got = true;
+            }
+        }
+        // ...THEN THE JOINTS. The PALM joint is the hand-tracking answer to the
+        // same question the grip pose answers — the middle of the hand — so the
+        // two sources put a proxy in the same place and a wearer who puts a
+        // controller down does not see their hand jump.
+        if (!got && mHandTracker[h] != XR_NULL_HANDLE && mBoot->LocateHandJoints) {
+            XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT] = {};
+            XrHandJointLocationsEXT locs{ XR_TYPE_HAND_JOINT_LOCATIONS_EXT };
+            locs.jointCount = XR_HAND_JOINT_COUNT_EXT;
+            locs.jointLocations = joints;
+            XrHandJointsLocateInfoEXT li{ XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT };
+            li.baseSpace = mSpace;
+            li.time = displayTime;
+            if (XR_SUCCEEDED(mBoot->LocateHandJoints(mHandTracker[h], &li, &locs)) &&
+                locs.isActive == XR_TRUE) {
+                const XrHandJointLocationEXT &palm = joints[XR_HAND_JOINT_PALM_EXT];
+                if ((palm.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                    (palm.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                    pos = toOgreVec(palm.pose.position);
+                    rot = toOgreQuat(palm.pose.orientation);
+                    got = true;
+                    mHandJoints = true;
+                }
+            }
+        }
+        if (!got) continue;
+        // THROUGH THE RIG, EXACTLY LIKE THE HEAD (beginFrame's note): the world
+        // scale multiplies the OFFSET inside the room, the rig's yaw turns it,
+        // and the rig's position carries it. A hand composed any other way
+        // drifts away from the head it belongs to as the wearer walks.
+        mHandPos[h] = mOriginPos + mOriginRot * (pos * mConfig.worldScale);
+        mHandRot[h] = mOriginRot * rot;
+        mHandValid[h] = true;
+    }
+}
+
+void VrSession::destroyActions() {
+    for (int h = 0; h < 2; ++h) {
+        if (mHandTracker[h] != XR_NULL_HANDLE && mBoot->DestroyHandTracker)
+            mBoot->DestroyHandTracker(mHandTracker[h]);
+        mHandTracker[h] = XR_NULL_HANDLE;
+        if (mHandSpace[h] != XR_NULL_HANDLE) xrDestroySpace(mHandSpace[h]);
+        mHandSpace[h] = XR_NULL_HANDLE;
+        // The ACTIONS are destroyed by their set (the spec says so); naming
+        // them here as well would be a double destroy.
+        mHandPoseAction[h] = XR_NULL_HANDLE;
+        mHandValid[h] = false;
+    }
+    if (mActionSet != XR_NULL_HANDLE) xrDestroyActionSet(mActionSet);
+    mActionSet = XR_NULL_HANDLE;
+    mHandActions = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -998,6 +1331,11 @@ void VrSession::pollEvents() {
 
 // ---------------------------------------------------------------------------
 bool VrSession::beginFrame() {
+    // THE HANDS ARE THIS FRAME'S OR THEY ARE NOTHING (VrPose's note, phase 4).
+    // Cleared at the top so every early return below — lost, not running, no
+    // picture, no pose — leaves them invalid rather than leaving yesterday's
+    // hands hanging in the air.
+    mHandValid[0] = mHandValid[1] = false;
     if (mState == VrState::Lost) { teardownMirror(); setSessionViewEnabled(false); return true; }
     pollEvents();
     if (!mRunning) {
@@ -1219,6 +1557,11 @@ bool VrSession::beginFrame() {
     // rig, because that is the only frame a locomotion rule can reason in.
     mWorldHeadPos = worldHead;
     mWorldHeadRot = worldHeadRot;
+    // ...AND THE HANDS, at the SAME predicted display time as the views (phase
+    // 4). One time for every pose in a frame is what keeps a hand attached to
+    // the body it belongs to; locating them a millisecond apart is how a
+    // controller ends up lagging its own arm.
+    locateHands(mFrameState.predictedDisplayTime);
     // THE SECOND EYE'S FOUR CORNER RAYS (F2), in world space, from its own fov
     // and its own orientation — the same quantity SceneManager writes into the
     // sky quad's normals for a mono camera (OgreSceneManager.cpp:1487-1499),
@@ -1630,6 +1973,14 @@ VrStatus VrSession::status() const {
     s.origin = Vec3(mOriginPos.x, mOriginPos.y, mOriginPos.z);
     s.originYaw = mOriginYawDeg;
     s.spaceChanges = mSpaceChanges;
+    for (int h = 0; h < 2; ++h) {
+        s.hands[h].valid = mHandValid[h];
+        s.hands[h].position = Vec3(mHandPos[h].x, mHandPos[h].y, mHandPos[h].z);
+        s.hands[h].rotation =
+            Quat(mHandRot[h].x, mHandRot[h].y, mHandRot[h].z, mHandRot[h].w);
+    }
+    s.handActions = mHandActions;
+    s.handJoints = mHandJoints;
     return s;
 }
 
@@ -1699,6 +2050,10 @@ void VrSession::destroyXr() {
         mSwapchain[eye] = XR_NULL_HANDLE;
         mImages[eye].clear();
     }
+    // THE ACTIONS BEFORE THE SESSION (phase 4): action spaces and hand trackers
+    // are children of the session, and a session destroyed under them would
+    // leave two handles this object still holds.
+    destroyActions();
     if (mSpace != XR_NULL_HANDLE) { xrDestroySpace(mSpace); mSpace = XR_NULL_HANDLE; }
     if (mSession != XR_NULL_HANDLE) { xrDestroySession(mSession); mSession = XR_NULL_HANDLE; }
 }

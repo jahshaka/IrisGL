@@ -912,6 +912,25 @@ public:
     virtual void        setNodeBackdrop(NodeId, bool) = 0;
     virtual bool        nodeBackdrop(NodeId) const = 0;
 
+    /// "THIS HELPER IS DRAWN IN THE HEADSET TOO" (SPECS/VR_SPEC.md §5 phase 4).
+    ///
+    /// Editor furniture comes in two kinds once the editor's scene is being
+    /// worn. Most of it belongs to the DESK — the ground grid, the light and
+    /// camera icons, the mouse gizmo, the VR head and hand proxies — and a
+    /// wearer must not see any of it (a proxy drawn at their own face least of
+    /// all). One piece belongs to BOTH pictures: the SELECTION OUTLINE, because
+    /// "which object am I working on" is editor state a person editing in VR
+    /// needs. This flag is that distinction, and it is ADDITIVE — a node that
+    /// sets it is drawn by the desktop AND by the VR session's view.
+    ///
+    /// Only meaningful on a node that is already a helper; every capture
+    /// (probes, shadow maps, GI, the planar mirrors) excludes it exactly as it
+    /// excludes an ordinary helper, and a view that hides the furniture
+    /// altogether — the Player, a thumbnail, a preview, a user's screenshot —
+    /// hides this too.
+    virtual void        setNodeVrHelper(NodeId, bool) = 0;
+    virtual bool        nodeVrHelper(NodeId) const = 0;
+
     /// "DOES THIS THING MOVE?" — the document's resolved MOBILITY for one node
     /// (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3). The host decides it
     /// PREDICTIVELY (a physics body, an avatar, a socket rider, a playing clip,
@@ -1200,6 +1219,25 @@ public:
     /// the sun disc, and every piece of real scene content.
     virtual void setHelpersVisible(bool) = 0;
     virtual bool helpersVisible() const = 0;
+
+    /// ...AND DOES IT DRAW THE VR CHANNEL? (SPECS/VR_SPEC.md §5 phase 4; owner
+    /// 2026-09-17.)
+    ///
+    /// A SECOND, INDEPENDENT helper channel (Scene::setNodeVrHelper) for the
+    /// furniture that belongs to the WEARER rather than to the desk: the
+    /// controller proxies today, and phase 4b's controller ray, hit marker and
+    /// in-VR gizmo. Every VR eye draws it in BOTH modes — a player needs to see
+    /// their own hands as much as an author does — and so does the desktop
+    /// EDITOR viewport, so a person at the desk can see where the wearer is
+    /// reaching.
+    ///
+    /// Off by default, which is what keeps it out of everything else: a
+    /// thumbnail, a preview, the Player's desktop window and the offscreen view
+    /// a user's screenshot renders through never open it. Same mechanics as
+    /// setHelpersVisible — a per-pass mask, graph shape, set it once at view
+    /// creation.
+    virtual void setVrHelpersVisible(bool) = 0;
+    virtual bool vrHelpersVisible() const = 0;
 
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
     /// tonemapper's own multiplier (SS1, 2026-09-13) — the number the shader

@@ -413,6 +413,46 @@ constexpr Ogre::uint32 kSunDiscBit     = 1u << 6;
 //     the pixels a mirror shows do not move with this split.
 constexpr Ogre::uint32 kBackdropBit    = 1u << 7;
 
+// THE VR HELPER CHANNEL (SPECS/VR_SPEC.md §5 phase 4, lane VR-4; the rule is
+// the owner's, 2026-09-17). The sixth use of the inversion above, and the one
+// that makes "the wearer's own hands" expressible.
+//
+// TWO QUESTIONS, TWO ANSWERS. Once the editor's scene can be WORN, "is this
+// object furniture?" splits in two, and the split is not about the object's
+// kind — it is about WHOSE furniture it is:
+//
+//   * kHelperBit        = THE DESK'S. The ground grid, the light/camera wires
+//                         and icons, the mouse gizmo, the selection outline,
+//                         the GI volume boxes. A VR eye draws them or not
+//                         ACCORDING TO THE HOST MODE (VrConfig::helpers): the
+//                         editor's preview does, because standing inside the
+//                         scene and watching the editor work is the mode's
+//                         whole purpose, and the Player does not, exactly as
+//                         the desktop Player does not.
+//   * kVrHelperBit      = THE WEARER'S. The two CONTROLLER proxies today, and
+//                         phase 4b's controller ray, hit marker and in-VR
+//                         gizmo. EVERY VR eye draws them, in BOTH modes — a
+//                         player needs to see their own hands as much as an
+//                         author does — and so does the desktop EDITOR
+//                         viewport, so the person at the desk can see where the
+//                         wearer is reaching.
+//
+// A node may be in both (Scene::setNodeVrHelper is ADDITIVE, never instead-of):
+// the controller proxies are, which is what puts them in the desk's picture
+// through the ordinary helper channel and in a HELPER-LESS player's eye through
+// this one.
+//
+// WHAT NEITHER CHANNEL EVER REACHES, and it needs no new rule: a capture. The
+// probe faces' `visibility_mask 0x1`, the shadow nodes' shadowCasterChannels,
+// the planar pass and kGiGeometryBit all ask for kVisibleBit, which an item in
+// either helper channel does not carry. A user's screenshot is the same
+// statement in the other direction: its offscreen view opens NEITHER channel.
+//
+// THE RULE THAT COMES WITH IT is kHelperBit's, widened: a view that hides the
+// furniture must take BOTH bits out of its mask unless it deliberately wants
+// one of them (chain::helperBitsToDrop does).
+constexpr Ogre::uint32 kVrHelperBit    = 1u << 8;
+
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
 // ---------------------------------------------------------------------------
@@ -869,6 +909,15 @@ struct ChainDesc {
     /// flip re-writes those definitions and the workspace is rebuilt — which
     /// happens once, when the Player page's view is created.
     bool  helpers = true;
+    /// Does THIS view draw the VR helper channel — the WEARER's furniture
+    /// (kVrHelperBit): the controller proxies, and later the controller ray and
+    /// the in-VR gizmo?
+    ///
+    /// Every VR eye sets it, in both host modes, and so does the desktop EDITOR
+    /// viewport. Off everywhere else — a thumbnail, a preview, the Player's
+    /// desktop window, the offscreen view a user's screenshot renders through —
+    /// so nothing meant for a wearer reaches a picture that is not theirs.
+    bool  vrHelpers = false;
 
     // ---- INSTANCED STEREO (SPECS/VR_SPEC.md §4.3, phase 2) ----------------
     /// Render BOTH EYES in one pass into a target that is two eyes wide
@@ -2708,6 +2757,8 @@ public:
     MobilityStatus mobilityStatus() const override;
     bool nodeHelper(NodeId id) const override;
     void setNodeBackdrop(NodeId id, bool backdrop) override;
+    void setNodeVrHelper(NodeId id, bool vrHelper) override;
+    bool nodeVrHelper(NodeId id) const override;
     bool nodeBackdrop(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
     unsigned nodeLightMask(NodeId id) const override;
@@ -3092,6 +3143,13 @@ private:
         /// capture — but carries kBackdropBit instead of kHelperBit, so a view
         /// that masks the editor's furniture out still draws it.
         bool                      backdrop = false;
+        /// ALSO IN THE VR HELPER CHANNEL (kVrHelperBit's two-bit rule): a
+        /// helper the HEADSET draws as well as the desk. Adds kVrHelperBit
+        /// BESIDE kHelperBit rather than instead of it, which is the one case
+        /// the inversion scheme needs two bits for — the selection outline is
+        /// furniture in both pictures. Meaningless (and ignored) on a node that
+        /// is not a helper at all.
+        bool                      vrHelper = false;
         /// MOBILITY, as the document RESOLVED it (REALTIME_REFLECTIONS_SPEC
         /// §3.3). True = this node moves, and the renderer keeps it OUT of the
         /// still-world layer: its item carries kMovableBit instead of
@@ -4814,6 +4872,8 @@ public:
     void seedExposureHistory(float scale) override;
     void setHelpersVisible(bool on) override;
     bool helpersVisible() const override { return mHelpersVisible; }
+    void setVrHelpersVisible(bool on) override;
+    bool vrHelpersVisible() const override { return mVrHelpersVisible; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -5138,6 +5198,9 @@ private:
     /// Does this view draw the editor's furniture (View::setHelpersVisible)?
     /// Graph shape — it is a per-pass visibility mask, ChainDesc::helpers.
     bool                       mHelpersVisible = true;
+    /// ...and the VR channel (kVrHelperBit). Off everywhere but the session's
+    /// own view, so nothing meant for a headset reaches a desktop picture.
+    bool                       mVrHelpersVisible = false;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
     /// on the chain it builds, once; 0 = nothing owed.

@@ -502,7 +502,14 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // A BACKDROP IS A HELPER THE PICTURE KEEPS (kBackdropBit's note): the same
     // exclusion from every capture, a channel a view can NOT mask out as
     // furniture.
-    if (n.helper) return n.backdrop ? kBackdropBit : kHelperBit;
+    // ...AND A HELPER MAY BE IN BOTH HELPER CHANNELS (kVrHelperBit's two-bit
+    // rule): the selection outline is furniture the desk AND the headset draw,
+    // so its bit is added BESIDE the desktop one rather than replacing it. A
+    // backdrop is never in the VR channel — it is part of the picture and every
+    // view already draws it.
+    if (n.helper)
+        return n.backdrop ? kBackdropBit
+                          : (kHelperBit | (n.vrHelper ? kVrHelperBit : 0u));
     // MOVING THINGS ARE THEIR OWN CHANNEL (REALTIME_REFLECTIONS_SPEC §3.3.4,
     // kMovableBit's note): a movable item carries kMovableBit INSTEAD OF
     // kVisibleBit, which takes it out of every capture pass that asks for
@@ -731,6 +738,25 @@ void OgreScene::setNodeHelper(NodeId id, bool helper) {
 bool OgreScene::nodeHelper(NodeId id) const {
     auto it = mNodes.find(id);
     return it != mNodes.end() && it->second.helper;
+}
+
+// THE SECOND HELPER CHANNEL (kVrHelperBit's two-bit rule). ADDITIVE, so it
+// changes nothing about what a capture sees — the node keeps carrying
+// kHelperBit instead of kVisibleBit, which is what every probe, shadow node and
+// GI gather keys on — and therefore needs no probe-visibility edge and no
+// staleness of any kind. All it does is put the item in a second INCLUDE
+// channel that exactly one view in the process asks for.
+void OgreScene::setNodeVrHelper(NodeId id, bool vrHelper) {
+    auto it = mNodes.find(id);
+    if (it == mNodes.end()) return;
+    if (it->second.vrHelper == vrHelper) return;
+    it->second.vrHelper = vrHelper;
+    applyNodeVisibilityFlags(it->second);
+}
+
+bool OgreScene::nodeVrHelper(NodeId id) const {
+    auto it = mNodes.find(id);
+    return it != mNodes.end() && it->second.vrHelper;
 }
 
 // A BACKDROP IS A HELPER (kBackdropBit's note), so this goes through the same
