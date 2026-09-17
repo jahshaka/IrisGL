@@ -65,9 +65,10 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// corner is which is a test, not a comment: the suite renders the FIRST eye
 	// through this same path and compares it with a mono render of that eye.)
 	//
-	// Order: 0 = bottom-left, 1 = bottom-right, 2 = top-left, 3 = top-right,
-	// in the quad's own normalised device coordinates.
-	uniform vec4 jahEyeCorner[4];
+	// Order: eye * 4 + corner, with the corners 0 = bottom-left,
+	// 1 = bottom-right, 2 = top-left, 3 = top-right in the quad's own
+	// normalised device coordinates.
+	uniform vec4 jahEyeCorner[8];
 vulkan( }; )
 
 out gl_PerVertex
@@ -104,7 +105,7 @@ void main()
 		// normalised device coordinates (the quad spans -1..1 in both).
 		const float u = vertex.x * 0.5 + 0.5;
 		const float v = vertex.y * 0.5 + 0.5;
-		outVs.cameraDir = mix( mix( jahEyeCorner[0].xyz, jahEyeCorner[1].xyz, u ),
-							   mix( jahEyeCorner[2].xyz, jahEyeCorner[3].xyz, u ), v );
+		outVs.cameraDir = mix( mix( jahEyeCorner[4].xyz, jahEyeCorner[5].xyz, u ),
+							   mix( jahEyeCorner[6].xyz, jahEyeCorner[7].xyz, u ), v );
 	}
 }

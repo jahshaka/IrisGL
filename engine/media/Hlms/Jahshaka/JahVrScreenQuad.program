@@ -26,5 +26,9 @@ vertex_program Jahshaka/VrScreenQuad_vs glslvk
 		param_named	jahEyeCorner[1]	float4	0 0 -1 0
 		param_named	jahEyeCorner[2]	float4	0 0 -1 0
 		param_named	jahEyeCorner[3]	float4	0 0 -1 0
+		param_named	jahEyeCorner[4]	float4	0 0 -1 0
+		param_named	jahEyeCorner[5]	float4	0 0 -1 0
+		param_named	jahEyeCorner[6]	float4	0 0 -1 0
+		param_named	jahEyeCorner[7]	float4	0 0 -1 0
 	}
 }

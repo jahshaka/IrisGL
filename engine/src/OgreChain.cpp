@@ -644,6 +644,16 @@ void maskOutHelpers(Ogre::CompositorNodeDef *n) {
 /// `mReuseCullData` is deliberately NOT set: it is an optimisation for a
 /// SECOND pass that culls the same set as a first one, and our shapes' scene
 /// passes have different render-queue ranges and different visibility masks.
+///
+/// AND NO MATERIAL SCHEME IS SET HERE, which is worth a line because it is the
+/// obvious thing to try (V2F-4): `CompositorPassSceneDef::mMaterialScheme`
+/// exists, the pass pushes it onto the viewport and the scene manager pushes it
+/// into MaterialManager — but a LOW-LEVEL material's technique is resolved into
+/// the renderable's cached Hlms hash when its MATERIAL is set
+/// (`HlmsLowLevel::calculateHashFor`), not per pass, so a scheme switched on
+/// here selects nothing and costs every low-level draw in the pass a scheme
+/// miss and an arbitration call. The screen quads are made stereo by swapping
+/// their MATERIAL instead (OgreVrSession.cpp, syncStereoQuads).
 void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
     const Ogre::IdString cull = cullCamera.empty() ? Ogre::IdString()
                                                    : Ogre::IdString(cullCamera);
@@ -656,27 +666,6 @@ void applyStereo(Ogre::CompositorNodeDef *n, const std::string &cullCamera) {
             auto *sp = static_cast<Ogre::CompositorPassSceneDef *>(p);
             sp->mInstancedStereo = true;
             sp->mCullCameraName  = cull;
-            // THE "VR" MATERIAL SCHEME (F2). Instanced stereo doubles every
-            // draw, including the low-level materials of the three SCREEN
-            // QUADS this engine draws — Ogre's sky, Ogre's atmosphere and our
-            // sun disc — but only a vertex shader that writes
-            // `gl_ViewportIndex` sends the second copy to the second eye, and
-            // only one that knows the eye's own projection points its rays
-            // where that eye looks. Their vertex programs do neither.
-            //
-            // A SCHEME is the pin's own per-pass answer: the pass pushes it
-            // onto the viewport (CompositorPassScene::execute), the scene
-            // manager pushes it into MaterialManager (SceneManager::
-            // _setViewport), and `Material::getBestTechnique` then picks the
-            // technique that declares it. So the VR pass gets a stereo-aware
-            // technique and EVERY OTHER PASS IN THE PROCESS — the desktop
-            // viewport drawing the same scene in the same frame, a thumbnail,
-            // a probe capture — keeps the technique it has always had, with
-            // not one byte of its picture moved. The session builds those
-            // techniques on the materials it finds (OgreVrSession.cpp,
-            // syncStereoQuads); a material without one simply falls back to
-            // its default, which is what a scene with no sky does.
-            sp->mMaterialScheme = kVrMaterialScheme;
             sp->mNumViewports    = 2u;
             for (int eye = 0; eye < 2; ++eye) {
                 const float left = eye == 0 ? 0.0f : 0.5f;

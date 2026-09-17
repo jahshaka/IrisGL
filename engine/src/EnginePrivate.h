@@ -5102,12 +5102,6 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-/// THE MATERIAL SCHEME THE VR PASSES RUN UNDER (VR_SPEC §4.3, lane VR-2's F2).
-/// Named once, here, because two files have to agree on it: chain::applyStereo
-/// writes it onto every stereo scene pass, and the session builds the
-/// techniques that answer to it.
-constexpr const char *kVrMaterialScheme = "VR";
-
 /// THE OPENXR SESSION (SPECS/VR_SPEC.md §4.3) — everything about it lives in
 /// OgreVrSession.cpp, the second TU allowed to include Vulkan (after
 /// OgreRayQuery.cpp) and the ONLY one that includes OpenXR. Declared here so

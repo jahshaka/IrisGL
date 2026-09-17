@@ -527,13 +527,28 @@ private:
     /// Has the Vulkan device gone? (F3 — the frame's commit is where a loss
     /// surfaces, and the engine's catch swallows it.)
     bool deviceLost() const;
-    /// THE THREE SCREEN QUADS, TAUGHT TO BE STEREO (F2). Builds — and keeps in
-    /// step with — a "VR" technique on every screen-quad material this scene
-    /// draws, and writes the per-eye rays into it.
+    /// THE SCREEN QUADS THIS SESSION SWAPPED, so every one of them can be put
+    /// back exactly as it was. The base material is held by STRONG reference:
+    /// an owner that drops its material while a session runs must not free it
+    /// under the quad that is about to have it back.
+    struct StereoQuad {
+        Ogre::Rectangle2D *quad = nullptr;
+        Ogre::MaterialPtr  baseMaterial;
+        Ogre::MaterialPtr  vrMaterial;
+        /// Was this quad among the scene's live Rectangle2Ds this frame? The
+        /// answer is how a destroyed quad is noticed at all (V2F-2).
+        bool               seen = false;
+    };
+
+    /// THE THREE SCREEN QUADS, TAUGHT TO BE STEREO (F2). Gives each one a clone
+    /// of its material pointed at the stereo vertex program, keeps that clone in
+    /// step with what its owner writes, and pushes the eyes' rays into it.
     void syncStereoQuads();
-    /// Takes those techniques off again, so a material a session touched is
-    /// exactly the material it was.
+    /// Puts every screen quad back the way it was found, so a material a
+    /// session touched is exactly the material it was.
     void dropStereoQuads();
+    /// Unregisters one quad's clone (not a restore — see its definition).
+    void dropClone(StereoQuad &q);
     /// The one Vulkan routine: the two eye copies, recorded on the frame's own
     /// command buffer while the BarrierSolver still knows the target's state.
     void copyEyes();
@@ -574,20 +589,11 @@ private:
     /// unproject a point at `rs_depth_range`'s far value).
     Ogre::Matrix4 mEyeProjectionRS[2];
     Ogre::Vector3 mEyeWorldPos[2];
-    /// The second eye's four corner rays in world space (see the shader).
-    Ogre::Vector3 mEyeCornerRay[4];
+    /// BOTH eyes' four corner rays in world space (see the shader).
+    Ogre::Vector3 mEyeCornerRay[2][4];
     Ogre::Quaternion mEyeWorldRot[2];
     bool        mHavePose = false;
     bool        mViewEnabled = true;
-    /// THE SCREEN QUADS THIS SESSION SWAPPED, so every one of them can be put
-    /// back exactly as it was. The base material is held by STRONG reference:
-    /// an owner that drops its material while a session runs must not free it
-    /// under the quad that is about to have it back.
-    struct StereoQuad {
-        Ogre::Rectangle2D *quad = nullptr;
-        Ogre::MaterialPtr  baseMaterial;
-        Ogre::MaterialPtr  vrMaterial;
-    };
     std::vector<StereoQuad> mStereoQuads;
     OgreView   *mView = nullptr;
     Ogre::Camera *mCullCamera = nullptr;
@@ -1011,8 +1017,8 @@ bool VrSession::beginFrame() {
     // the shader's bilinear pick expects; the suite pins that order by
     // rendering the FIRST eye through the same path and comparing it with a
     // mono render (JahVrScreenQuad_vs.glsl's note).
-    {
-        const XrFovf &f = mViews[1].fov;
+    for (int eye = 0; eye < 2; ++eye) {
+        const XrFovf &f = mViews[eye].fov;
         const float l = std::tan(f.angleLeft), r = std::tan(f.angleRight);
         const float u = std::tan(f.angleUp), d = std::tan(f.angleDown);
         // THE QUAD'S v = 1 EDGE IS THE TOP OF THE PICTURE, and that is
@@ -1025,7 +1031,7 @@ bool VrSession::beginFrame() {
         const float xs[4] = { l, r, l, r };
         const float ys[4] = { d, d, u, u };
         for (int c = 0; c < 4; ++c)
-            mEyeCornerRay[c] = mEyeWorldRot[1] * Ogre::Vector3(xs[c], ys[c], -1.0f);
+            mEyeCornerRay[eye][c] = mEyeWorldRot[eye] * Ogre::Vector3(xs[c], ys[c], -1.0f);
     }
     if (mCullCamera) {
         // THE CULL FRUSTUM MUST CONTAIN BOTH EYES, AND A UNION OF ANGLES AT THE
@@ -1059,7 +1065,16 @@ bool VrSession::beginFrame() {
         mCullCamera->setFrustumExtents(tanL, tanR, tanU, tanD,
                                        Ogre::FrustrumExtentsType::FET_TAN_HALF_ANGLES);
         const float halfIpd = 0.5f * mIpd * mConfig.worldScale;
-        const float offset = std::fabs(tanL) > 1e-6f ? halfIpd / std::fabs(tanL) : 0.0f;
+        // THE NARROWER SIDE DECIDES, which is where this parts company with the
+        // tutorial (V2F-5). The pin's sample divides by |tan(left)| alone
+        // (OpenVRCompositorListener.cpp:167) — fine for a symmetric pair, wrong
+        // for a headset whose eyes are asymmetric: if the RIGHT extent is the
+        // narrower one, an apex pulled back by the LEFT one does not swallow
+        // the right eye's outer sliver and that sliver is culled out of the
+        // frame it belongs in. The offset a cone needs is set by its tightest
+        // side, so the smaller tangent is the divisor.
+        const float narrow = std::min(std::fabs(tanL), std::fabs(tanR));
+        const float offset = narrow > 1e-6f ? halfIpd / narrow : 0.0f;
         mCullCamera->setNearClipDistance(std::max(zNear + offset, 0.001f));
         mCullCamera->setFarClipDistance(zFar + offset);
         // +Z in camera space is BEHIND the eye (Ogre cameras look down -Z).
@@ -1291,6 +1306,16 @@ void VrSession::setMirrorView(OgreView *v) {
     syncMirror();
 }
 
+/// THE MIRROR SHOWS THE LAST EYE PICTURE, AND WHILE THE SESSION VIEW IS OFF
+/// THAT PICTURE IS STALE (V2F-8, by design). The mirror is a quad over the eye
+/// TARGET, and that target is only rewritten by a frame the runtime asked for:
+/// when it asks for none — the headset is off the head, the dashboard is up,
+/// the runtime is paused — the session's own View is switched off for those
+/// frames (F4) and the mirror keeps painting the last eye that was drawn. That
+/// is the right answer for a mirror (a frozen last frame beats a black hole,
+/// and the desktop's own picture is still being drawn underneath it), and it is
+/// stated here so that "the mirror froze" is read as the runtime pausing rather
+/// than as the loop stopping — `vr.state()` says which.
 void VrSession::syncMirror() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root || !mView) return;
@@ -1346,15 +1371,14 @@ VrStatus VrSession::status() const {
 
 void VrSession::destroyXr() {
     if (mInFrame) endFrame();
-    // THE EXIT DRAIN NEEDS A LIVE DEVICE (F3): it feeds the runtime empty
-    // frames until it answers STOPPING, and on a lost device every one of those
-    // is a call into a runtime whose compositor is waiting on a queue that will
-    // never finish. A lost session skips straight to xrEndSession.
-    if (mRunning && mSession != XR_NULL_HANDLE && deviceLost()) {
-        vrLog("the device is lost - ending the session without the exit drain");
-        xrEndSession(mSession);
-        mRunning = false;
-    }
+    // A LOST SESSION NEVER REACHES THE DRAIN BELOW, and that is by
+    // construction rather than by a test here (V2F-7): `endFrame` clears
+    // `mRunning` the moment it sees a lost device, so a session that died that
+    // way arrives with nothing running and is simply DESTROYED — which is
+    // legal for a session in any state, and is the only thing that can work
+    // when the runtime's compositor is waiting on a queue that will never
+    // finish. The drain below is for the ordinary end: a live device, a
+    // runtime that still answers, and a lifecycle to walk down.
     if (mRunning && mSession != XR_NULL_HANDLE) {
         // ASK, THEN DRAIN. xrRequestExitSession makes the runtime walk the
         // session down to STOPPING, which is where xrEndSession is legal; a
@@ -1444,6 +1468,18 @@ VrSession::~VrSession() {
 void VrSession::syncStereoQuads() {
     if (!mScene || !mScene->sceneManager()) return;
     Ogre::SceneManager *sm = mScene->sceneManager();
+    Ogre::MaterialManager *mm = Ogre::MaterialManager::getSingletonPtr();
+    if (!mm) return;
+
+    // MARK AND SWEEP, and the sweep is the point (V2F-2). The entries below
+    // hold a RAW `Rectangle2D *`, and those quads are DESTROYED under us: a
+    // sky pushed to None destroys `SceneManager::mSky`
+    // (OgreSceneManager.cpp:1157-1161) and our own sun disc goes with its
+    // scene. Nothing signals it. So the list is rebuilt against the live
+    // objects every frame — an entry nobody saw this frame names a quad that no
+    // longer exists, and the one thing that must NOT happen to it is a
+    // `setMaterial` on freed memory.
+    for (StereoQuad &q : mStereoQuads) q.seen = false;
 
     // The quads THIS scene actually draws, found by WHAT THEY ARE rather than
     // by name: a screen quad is a Rectangle2D, and the ones that need an eye
@@ -1460,12 +1496,37 @@ void VrSession::syncStereoQuads() {
         StereoQuad *known = nullptr;
         for (StereoQuad &q : mStereoQuads)
             if (q.quad == quad) { known = &q; break; }
+        if (known) known->seen = true;
 
-        if (!known || known->vrMaterial != mat) {
-            // Either a quad we have not seen, or one whose owner has changed
-            // its material since (the sky method changed, the atmosphere was
-            // switched on). Either way the base material is what it is holding
-            // right now.
+        // ---- IS THIS QUAD ALREADY OURS? ----------------------------------
+        // THE OWNERS RE-APPLY THEIR MATERIAL CONSTANTLY (V2F-1):
+        // `SceneManager::setSky` calls `mSky->setMaterial(mSkyMaterial)` on
+        // EVERY call (OgreSceneManager.cpp:1153), and this engine re-calls
+        // setSky for any equirect/cubemap/tint change (OgreSky.cpp:249, :305).
+        // So a quad that was ours a frame ago can be holding its base again,
+        // and the answer to that is to PUT OUR CLONE BACK — not to clone a
+        // second time under a name the material manager already has, which
+        // throws ERR_DUPLICATE_ITEM inside beginFrame and takes the whole
+        // frame down with it (no eye, no desktop, every frame until the
+        // session ends).
+        if (known && known->vrMaterial) {
+            if (mat == known->vrMaterial) {
+                // nothing moved
+            } else if (mat == known->baseMaterial) {
+                quad->setMaterial(known->vrMaterial);   // re-resolves the hash
+            } else {
+                // The base material really changed (a sky method swap, the
+                // atmosphere replacing the cubemap sky). The old clone is dead
+                // and its NAME has to go with it, or the rebuild below cannot
+                // have it.
+                dropClone(*known);
+                known->seen = true;                     // the entry is reused
+                known->quad = quad;
+                known->baseMaterial.reset();
+            }
+        }
+
+        if (!known || !known->vrMaterial) {
             Ogre::Technique *base = mat->getTechnique(0u);
             Ogre::Pass *basePass = base && base->getNumPasses() ? base->getPass(0u) : nullptr;
             if (!basePass || !basePass->hasVertexProgram()) continue;
@@ -1477,38 +1538,70 @@ void VrSession::syncStereoQuads() {
             if (vs != "Ogre/Compositor/QuadCameraDirNoUV_vs" && vs != "Jahshaka/SunDisc_vs")
                 continue;
 
-            StereoQuad entry;
-            entry.quad = quad;
-            entry.baseMaterial = mat;
-            Ogre::MaterialPtr clone = mat->clone(mat->getName() + "/JahVrStereo");
+            const Ogre::String cloneName = mat->getName() + "/JahVrStereo";
+            // A LEFTOVER FROM A PREVIOUS SESSION, OR FROM A MODE CHANGE THAT
+            // DID NOT COME BACK THROUGH US: the name is the material manager's,
+            // not ours, and `clone` on a registered name THROWS.
+            if (Ogre::MaterialPtr stale = mm->getByName(cloneName)) {
+                stale.reset();
+                mm->remove(cloneName);
+            }
+            Ogre::MaterialPtr clone;
+            try {
+                clone = mat->clone(cloneName);
+            } catch (const Ogre::Exception &e) {
+                vrLog("the screen quad's material could not be cloned: %s",
+                      e.getDescription().c_str());
+                continue;
+            }
             if (!clone) continue;
             Ogre::Technique *ct = clone->getTechnique(0u);
             if (!ct || ct->getNumPasses() == 0u) continue;
             ct->getPass(0u)->setVertexProgram("Jahshaka/VrScreenQuad_vs");
+            // THE CLONE SHARES THE BASE'S FRAGMENT PARAMETERS — the same
+            // object, not a copy (V2F-3's real cause). The owners of these
+            // materials write into their pass PER CAMERA, inside the frame:
+            // `AtmosphereNpr::_update` pushes its whole preset — including a
+            // camera-dependent displacement — once for every camera that
+            // renders (OgreSceneManager.cpp:1484). A copy taken once a frame is
+            // therefore whatever the LAST camera of the previous frame left,
+            // which in a session is the desktop mirror's, and the headset's sky
+            // would be graded for a camera the wearer is not looking through.
+            // Measured as a 1.2/255 mean over the sky rows of whichever picture
+            // was rendered second. Sharing the object removes the question:
+            // both passes use the same fragment program, so the layout is the
+            // same, and whatever the owner writes is what the clone draws with.
+            if (basePass->hasFragmentProgram() && ct->getPass(0u)->hasFragmentProgram())
+                ct->getPass(0u)->setFragmentProgramParameters(
+                    basePass->getFragmentProgramParameters());
+            // COMPILE, THEN LOAD, AND compile() IS THE ONE THAT MATTERS: a
+            // material's per-scheme technique lists are built by compile(), and
+            // load() on an already-loaded resource returns without doing it.
             clone->compile(false);
             clone->load();
-            entry.vrMaterial = clone;
             quad->setMaterial(clone);       // ...which re-resolves the hash
-            if (known) *known = entry;
-            else       mStereoQuads.push_back(entry);
-            known = known ? known : &mStereoQuads.back();
+            if (!known) {
+                mStereoQuads.push_back(StereoQuad());
+                known = &mStereoQuads.back();
+            }
+            known->quad = quad;
+            known->baseMaterial = mat;
+            known->vrMaterial = clone;
+            known->seen = true;
             vrLog("stereo screen quad: '%s' (was %s)", mat->getName().c_str(), vs.c_str());
         }
 
-        // ---- what the owner keeps writing into the ORIGINAL, mirrored -----
-        // `SceneManager::setSky` binds the sky texture there, `AtmosphereNpr::
-        // _update` pushes its whole preset there every frame, our sun disc
-        // pushes its direction and colour there. The clone is a copy, so it has
-        // to be kept a copy.
+        // ---- the TEXTURES the owner binds, mirrored -----------------------
+        // The fragment PARAMETERS are shared with the base (see the clone
+        // above), so nothing has to be copied for them. Texture bindings are
+        // not parameters: `SceneManager::setSky` binds the sky's cubemap or
+        // equirect map into its own pass's texture unit, and that has to be
+        // followed.
         Ogre::Technique *baseT = known->baseMaterial ? known->baseMaterial->getTechnique(0u) : nullptr;
         Ogre::Technique *vrT = known->vrMaterial ? known->vrMaterial->getTechnique(0u) : nullptr;
         Ogre::Pass *basePass = baseT && baseT->getNumPasses() ? baseT->getPass(0u) : nullptr;
         Ogre::Pass *vrPass = vrT && vrT->getNumPasses() ? vrT->getPass(0u) : nullptr;
         if (!basePass || !vrPass) continue;
-        if (basePass->hasFragmentProgram() && vrPass->hasFragmentProgram()) {
-            vrPass->getFragmentProgramParameters()->copyMatchingNamedConstantsFrom(
-                *basePass->getFragmentProgramParameters());
-        }
         const unsigned short units =
             std::min(basePass->getNumTextureUnitStates(), vrPass->getNumTextureUnitStates());
         for (unsigned short u = 0; u < units; ++u) {
@@ -1521,31 +1614,61 @@ void VrSession::syncStereoQuads() {
                 dst->setTexture(src->_getTexturePtr());
         }
 
-        // ---- and the RIGHT eye's four corner rays -------------------------
-        // (the left one rides Ogre's auto-params; see the shader's header for
-        // why this is four directions and not a matrix)
+        // ---- and the eyes' corner rays ------------------------------------
         if (!vrPass->hasVertexProgram()) continue;
         Ogre::GpuProgramParametersSharedPtr vp = vrPass->getVertexProgramParameters();
         vp->setIgnoreMissingParams(true);
-        for (int corner = 0; corner < 4; ++corner) {
-            const Ogre::Vector3 &d = mEyeCornerRay[corner];
-            vp->setNamedConstant("jahEyeCorner[" + std::to_string(corner) + "]",
-                                 Ogre::Vector4(d.x, d.y, d.z, 0.0f));
+        for (int eye = 0; eye < 2; ++eye) {
+            for (int corner = 0; corner < 4; ++corner) {
+                const Ogre::Vector3 &d = mEyeCornerRay[eye][corner];
+                vp->setNamedConstant("jahEyeCorner[" + std::to_string(eye * 4 + corner) + "]",
+                                     Ogre::Vector4(d.x, d.y, d.z, 0.0f));
+            }
         }
+    }
+
+    // ---- the sweep ---------------------------------------------------------
+    for (size_t i = mStereoQuads.size(); i-- > 0;) {
+        if (mStereoQuads[i].seen) continue;
+        // The quad is GONE. Its clone is ours to unregister; the pointer is not
+        // ours to touch.
+        dropClone(mStereoQuads[i]);
+        mStereoQuads.erase(mStereoQuads.begin() + long(i));
     }
 }
 
-void VrSession::dropStereoQuads() {
+/// Unregisters one quad's clone. NOT a restore — the caller decides whether
+/// there is still a quad to give the base material back to.
+void VrSession::dropClone(StereoQuad &q) {
     Ogre::MaterialManager *mm = Ogre::MaterialManager::getSingletonPtr();
-    for (StereoQuad &q : mStereoQuads) {
-        // The quad may be gone already (the sky switched off, the scene torn
-        // down): the entry holds the material by value, never the object.
-        if (q.quad && q.baseMaterial) q.quad->setMaterial(q.baseMaterial);
-        if (q.vrMaterial && mm) {
-            const Ogre::String name = q.vrMaterial->getName();
-            q.vrMaterial.reset();
-            mm->remove(name);
+    if (q.vrMaterial && mm) {
+        const Ogre::String name = q.vrMaterial->getName();
+        q.vrMaterial.reset();
+        mm->remove(name);
+    }
+    q.vrMaterial.reset();
+}
+
+void VrSession::dropStereoQuads() {
+    // ONLY QUADS THAT ARE STILL ALIVE GET THEIR MATERIAL BACK (V2F-2). The
+    // entries hold raw pointers and a session can outlive the objects they
+    // name — a sky switched off mid-session destroys its quad — so the live
+    // set is re-derived here rather than trusted.
+    std::vector<Ogre::Rectangle2D *> live;
+    if (mScene && mScene->sceneManager()) {
+        Ogre::SceneManager::MovableObjectIterator it =
+            mScene->sceneManager()->getMovableObjectIterator(
+                Ogre::Rectangle2DFactory::FACTORY_TYPE_NAME);
+        while (it.hasMoreElements()) {
+            if (Ogre::MovableObject *obj = it.getNext())
+                live.push_back(static_cast<Ogre::Rectangle2D *>(obj));
         }
+    }
+    for (StereoQuad &q : mStereoQuads) {
+        const bool alive = std::find(live.begin(), live.end(), q.quad) != live.end();
+        if (alive && q.baseMaterial && q.quad->getMaterial() == q.vrMaterial)
+            q.quad->setMaterial(q.baseMaterial);
+        dropClone(q);
     }
     mStereoQuads.clear();
 }
@@ -1580,14 +1703,23 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
     OgreView *control = static_cast<OgreView *>(v);
     bool ok = false;
     JAH_TRY {
-        // THE CONTROL'S EXPOSURE IS THE SESSION'S, AS A CONSTANT. Both chains
+        // THE CONTROL'S EXPOSURE IS THE SESSION'S, AS A CONSTANT, and the
+        // alternative was measured rather than argued (V2F-3). Both chains
         // carry the same filmic composite (POST_CHAIN_SPEC §14: one material,
-        // two forms), but the AUTO form's exposure is a per-chain feedback
-        // history — a fresh chain converges to its own value from its own seed,
-        // and two pictures a few tenths of a stop apart are not comparable byte
-        // for byte. The FIXED form takes the number the session's chain
-        // actually converged to and multiplies by it, so the only thing left
-        // between the two pictures is what this call exists to test.
+        // two forms), but the AUTO form's exposure is a per-chain FEEDBACK
+        // HISTORY: a control that keeps the auto form converges on its own and
+        // read 8-9/255 away from the session's picture — when it settled at all
+        // — while the fixed form, handed the number the session's chain
+        // actually converged to, reads 0.000. That is the difference between a
+        // control that can prove something and one that cannot.
+        //
+        // WHAT IT COSTS, stated because it is real: the control's ~90 frames
+        // move the session's own auto-exposure a little (its picture drifts
+        // ~1.2/255 over the sky rows across one call), so a SECOND control in
+        // the same session is compared across that drift. The suite says so
+        // rather than hiding it, and the order experiment behind
+        // JAH_VR_RIGHT_FIRST is what proved the residual is the drift and not
+        // the second eye's ray route.
         PostFxDesc fx = mView->postFx();
         const float exposure = mView->measuredExposureScale();
         if (fx.hdr && exposure > 0.0f) {
