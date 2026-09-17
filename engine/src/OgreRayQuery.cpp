@@ -2522,6 +2522,18 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::TextureGpu *vox[kMaxReflectCascades][4] = {};
     Ogre::Vector3 voxOrigin[kMaxReflectCascades], voxSize[kMaxReflectCascades],
                   voxCell[kMaxReflectCascades];
+    /// THE CASCADE'S RADIANCE MULTIPLIER (DRAG-1, RENDER_AUDIT PHOTON F2).
+    /// `VctLighting::update` with autoMultiplier normalises everything it
+    /// injects by the brightest light's radiance over pi, and the PIXEL path
+    /// multiplies it back out (`finalMultiplier = mInvBakingMultiplier *
+    /// mMultiplier`, OgreVctLighting.cpp; read in Vct_piece_ps.any as
+    /// `probeParams.multiplier`). The ray arm read the voxel raw, so a traced
+    /// reflection was in baking units — right only when the brightest light has
+    /// radiance pi, which is a sun at intensity 1 and every fixture the suites
+    /// use. No patch is needed for it: `mMultiplier` is a public member and
+    /// `getCurrentBakingMultiplier()` is a public accessor for the inverse of
+    /// the other half, so the product is available from outside.
+    float voxMultiplier[kMaxReflectCascades];
     unsigned voxCount = 0;
     bool anisotropic = false;
     const auto takeVolume = [&](Ogre::VctLighting *lighting,
@@ -2536,6 +2548,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         voxOrigin[voxCount] = voxelizer->getVoxelOrigin();
         voxSize[voxCount]   = voxelizer->getVoxelSize();
         voxCell[voxCount]   = voxelizer->getVoxelCellSize();
+        {
+            const float baking = lighting->getCurrentBakingMultiplier();
+            voxMultiplier[voxCount] =
+                baking > 1e-6f ? lighting->mMultiplier / baking : lighting->mMultiplier;
+        }
         ++voxCount;
     };
     if (!scene->mVctCascades.empty()) {
@@ -2671,7 +2688,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const Ogre::Vector3 og = voxCount ? voxOrigin[src] : Ogre::Vector3::ZERO;
         const Ogre::Vector3 cl = voxCount ? voxCell[src] : Ogre::Vector3(1.0f);
         pp.voxelOrigin[c][0] = og.x; pp.voxelOrigin[c][1] = og.y; pp.voxelOrigin[c][2] = og.z;
-        pp.voxelOrigin[c][3] = std::max(std::max(sz.x, sz.y), sz.z);
+        // ...AND THE RADIANCE MULTIPLIER in `.w` (DRAG-1). The slot held this
+        // cascade's largest extent, which no shader ever read; see voxMultiplier.
+        pp.voxelOrigin[c][3] = voxCount ? voxMultiplier[src] : 1.0f;
+        // THE ARMS THAT RE-MEASURE THE CLAIM (DRAG-1), the same shape as
+        // JAHSHAKA_GI_SWEEPS: `JAH_RQ_NO_MULT` restores the un-multiplied
+        // reading this replaced, and `JAH_RQ_SHOW_MULT` prints the factor. On
+        // tests/rtreflect's fixture (brightest light radiance 2.0, so the
+        // factor is 2/pi = 0.6366) the mirror's red excess reads 0.0737 without
+        // it and 0.0434 with it: the ray used to show that fixture 57 % too
+        // bright, which is what a voxel read in baking units means.
+        if (std::getenv("JAH_RQ_NO_MULT")) pp.voxelOrigin[c][3] = 1.0f;
+        if (std::getenv("JAH_RQ_SHOW_MULT") && c == 0)
+            std::fprintf(stderr, "JAH_RQ multiplier c0 = %.6f (cascades %u)\n",
+                         double(pp.voxelOrigin[c][3]), voxCount);
         pp.voxelInvSize[c][0] = sz.x > 0.0f ? 1.0f / sz.x : 0.0f;
         pp.voxelInvSize[c][1] = sz.y > 0.0f ? 1.0f / sz.y : 0.0f;
         pp.voxelInvSize[c][2] = sz.z > 0.0f ? 1.0f / sz.z : 0.0f;

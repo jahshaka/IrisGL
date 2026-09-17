@@ -411,7 +411,9 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
         // under one shows it again (as far as each node's own flag allows).
         bool giChanged = false;
         applyShownSubtree(n, inheritedShown(n), giChanged);
-        if (giChanged) invalidateGiCaches();
+        // A REPARENT IS A VISIBILITY EDGE HERE TOO (DRAG-1): the node moved
+        // under or out from under a hidden parent. Nothing died.
+        if (giChanged) invalidateGiCachesForVisibility(nullptr);
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -445,6 +447,12 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
             // stopped counting (nodegraph.h's epoch).
             if (it == mNodes.end() || writeIsSceneMovement(it->second))
                 noteSceneTransformWrite();
+            // A MOVABLE LAMP MOVES NOTHING A SCAN CAN SEE (DRAG-1 round 2, F5).
+            // It is not GI geometry, so `mGiMovedBoxes` never mentions it and
+            // the probe grid is never staled for it — but a light injection
+            // reads its pose, so the in-motion tick must not skip a cascade
+            // that was injected before it moved.
+            if (it != mNodes.end() && it->second.light) ++mGiLightWriteSerial;
         }
     } JAH_CATCH(mError, );
 }
@@ -618,7 +626,8 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited
         // decal rides the projector-box child, one unregistered level down,
         // and is reached by this same loop there.
         if (obj->getVisible() != shown) {
-            if (dynamic_cast<Ogre::Light *>(obj))      staleProbeGrid(GiStaleReason::Light);
+            if (dynamic_cast<Ogre::Light *>(obj))      { ++mGiLightWriteSerial;
+                                                          staleProbeGrid(GiStaleReason::Light); }
             else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
         }
         obj->setVisible(shown);
@@ -935,12 +944,17 @@ void OgreScene::setNodeVisibleImpl(NodeId id, bool visible, const bool *parentSh
         // never true — every node in `mNodes` carries one — so no hide or show
         // ever carried a box at all.)
         if (giChanged) {
+            // ...THROUGH THE VISIBILITY DOOR (DRAG-1, RENDER_AUDIT I-2), which
+            // is the same invalidation minus the destruction generation:
+            // hiding a thing destroys nothing, and charging it as a death made
+            // a hide the most expensive single event in the pipeline — more
+            // than deleting the same object.
             const bool subtree = n.node && n.node->numChildren() > 0;
             if (!subtree && n.item) {
                 const Ogre::Aabb box = n.item->getWorldAabb();
-                invalidateGiCaches(&box);
+                invalidateGiCachesForVisibility(&box);
             } else {
-                invalidateGiCaches();
+                invalidateGiCachesForVisibility(nullptr);
             }
         }
     } JAH_CATCH(mError, );
@@ -951,6 +965,15 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setLight: unknown node"; return false; }
     JAH_TRY {
+        // A LIGHT INJECTION WOULD READ THIS (DRAG-1 round 2, F5). The serial is
+        // what tells the in-motion light tick that a cascade the scheduler
+        // rebuilt no longer holds the scene's lights — see
+        // VctCascade::injectedAtLightSerial. Bumped for the whole push rather
+        // than for a measured change: this entry point is idempotent and the
+        // mirror pushes it per frame, but only for lights the mirror believes
+        // changed, and a spurious bump costs one extra cascade injection on the
+        // next tick, while a missed one costs a stale bounce for a whole drag.
+        ++mGiLightWriteSerial;
         Node &n = it->second;
         if (!n.light) {
             // The document's convention (IrisGL LightNode::getLightDir): lights shine
@@ -1210,7 +1233,7 @@ bool OgreScene::removeLight(NodeId id) {
         // dirty path finds nothing marked, and it re-injects every cascade at
         // the full bounce count instead. Instant Radiosity's by-pointer caches
         // and the single arm's reuse rule are unaffected.
-        invalidateGiCaches(nullptr, false);
+        invalidateGiCaches(nullptr, false, true);
         // Its cached maps need nothing: the lamp leaves the cache's light list,
         // so the next frame releases its slot in every shadow-node instance.
         it->second.lightShadowKey = 0;

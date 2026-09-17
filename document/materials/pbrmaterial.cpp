@@ -20,13 +20,22 @@ namespace iris
 
 PbrMaterial::PbrMaterial()
 {
-    baseColor           = QColor(255, 255, 255);
+    // THE UNAUTHORED SURFACE, from the one definition (DRAG-1,
+    // RENDER_AUDIT I-1): a neutral light grey at 0.5775 linear, MATTE, not a
+    // metal. The physics and the history are in the header beside the
+    // constants; the short version is that the old defaults (albedo 1.0 LINEAR
+    // and perceptual roughness 0.5 = GGX alpha 0.25) were a surface that
+    // reflects every photon and carries a tight glossy lobe — brighter than
+    // snow and shinier than paint — which is what the owner's smoke reported
+    // as "a plane that darkens the whole scene" and "a sharp warped streak on
+    // a matte sphere".
+    baseColor           = defaultmaterial::baseColor();
     baseColorFactor     = 1.0f;
     useBaseColorMap     = false;
 
-    metallicFactor      = 0.0f;
+    metallicFactor      = defaultmaterial::kMetalness;
     useMetallicMap      = false;
-    roughnessFactor     = 0.5f;
+    roughnessFactor     = defaultmaterial::kRoughness;
     useRoughnessMap     = false;
     roughnessLowerBound = 0.0f;
     roughnessUpperBound = 1.0f;

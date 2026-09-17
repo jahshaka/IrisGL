@@ -337,7 +337,7 @@ bool OgreScene::setPlanarReflections(const PlanarReflectionParams &p) {
     const PlanarReflectionParams &c = mPlanarParams;
     const bool same = c.budget == q.budget && c.resolution == q.resolution &&
                       c.mipmaps == q.mipmaps && c.shadows == q.shadows &&
-                      c.accurateLighting == q.accurateLighting &&
+                      c.accurateLighting == q.accurateLighting && c.hdr == q.hdr &&
                       std::abs(c.maxDistance - q.maxDistance) < 1e-4f &&
                       std::abs(c.background.r - q.background.r) < 1e-4f &&
                       std::abs(c.background.g - q.background.g) < 1e-4f &&
@@ -376,7 +376,14 @@ void OgreScene::rebuildPlanar() {
     mPlanar->setMaxActiveActors(
         static_cast<Ogre::uint8>(mPlanarParams.budget), Ogre::IdString(mPlanarWorkspaceDef),
         mPlanarParams.accurateLighting, mPlanarParams.resolution, mPlanarParams.resolution,
-        mPlanarParams.mipmaps, Ogre::PFG_RGBA8_UNORM_SRGB, /*mipmapMethodCompute*/ false);
+        mPlanarParams.mipmaps,
+        // THE MIRROR'S TARGET FOLLOWS THE CHAIN (DRAG-1, RENDER_AUDIT ON-3) —
+        // see PlanarReflectionParams::hdr. The workspace this feeds is a plain
+        // PASS_SCENE with no tonemapper, so at 8 bits everything above 1.0 was
+        // clipped inside every mirror and the dark end was quantised to 8-bit
+        // steps the main image does not have.
+        mPlanarParams.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM_SRGB,
+        /*mipmapMethodCompute*/ false);
 
     // The receiving half is process-wide, like VCT's.
     if (Ogre::HlmsPbs *pbs = planar::pbsOf(mRoot)) {
