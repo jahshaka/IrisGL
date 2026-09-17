@@ -444,27 +444,35 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
         if (!mVctLighting || !mVctVoxelizer) return false;
         mSceneMgr->updateSceneGraph();
-        // NO EXTRA BOUNCES WHILE THE THING IS STILL MOVING (CPU-vs-GPU audit
-        // F4), and every one of them AT REST. Each extra bounce is a second
-        // full light-injection dispatch over the voxel volume plus its
-        // anisotropic mip chain (VctLighting::runBounce) — measured on an
-        // RTX 4080 at 128^3 in a closed room, a tick plus its read-back frame
-        // costs 5.37 ms at three bounces against 4.83 at one, i.e. 0.5-0.6 ms
-        // of GPU per tick — spent on a picture the next tick replaces a few
-        // frames later. The first bounce is what makes the light follow the
-        // lamp; two and three are a refinement of a frame nobody holds still
-        // enough to see.
+        // ONE ANSWER PER VOLUME, WHOEVER COMPUTES IT — the single volume under
+        // the same rule DRAG-1 gave the chain (PHOTON-M2, F-D).
         //
-        // AT REST IT IS THE OPPOSITE (round-2 review F1): the frame the user is
-        // left looking at must be the one a full solve would have produced. For
-        // a DRAG that is the settle's own re-solve, but a MOVABLE lamp never
-        // arms a settle (REALTIME_REFLECTIONS_SPEC §3.3, O2: it re-injects on a
-        // cadence and nothing re-solves), so its room would have stayed at one
-        // bounce indefinitely. `inMotion` is the host's answer to "is it still
-        // moving", and the same flag chooses the ray march: coarse while
-        // moving, the scene's own at rest.
+        // What stood here dropped the moving tick to ZERO extra bounces and the
+        // coarse (2x) ray march, on the argument that a frame thrown away a few
+        // frames later does not need the refinement. The chain was written that
+        // way too, and DRAG-1 measured what it costs: the rebuild path injects
+        // the SAME volume at the document's full bounce count with the scene's
+        // own march (rebuildVct's closing `VctLighting::update`, and
+        // buildVct's), so the two paths hand the one volume two different
+        // answers and the picture STEPS between them as the drag alternates
+        // rebuild frames and tick frames — the owner's "the reflected lights
+        // flicker when the sphere is moved". A volume's radiance must not depend
+        // on which path last injected it.
+        //
+        // THE COST, in the only unit that matters: one extra bounce dispatch per
+        // TICK per bounce past the first (the ticks run on the drag's cadence,
+        // not per frame), each 0.1-0.3 ms at 128^3 (S1 §3 — injection is the
+        // cheap half; it is VOXELISATION that costs). The earlier reading quoted
+        // here, 5.37 ms against 4.83 for a tick PLUS ITS READ-BACK FRAME at
+        // three bounces, is the same 0.5 ms and it buys a moving picture that
+        // matches the one the settle leaves.
+        //
+        // `JAHSHAKA_GI_LEGACY_MOVING_TICK` restores the old behaviour for
+        // measurement, exactly as it does for the chain below.
+        const bool legacyTick = std::getenv("JAHSHAKA_GI_LEGACY_MOVING_TICK") != nullptr;
+        const bool coarseTick = inMotion && legacyTick;
         const Ogre::uint32 extraBounces =
-            inMotion ? 0u : Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
+            coarseTick ? 0u : Ogre::uint32(std::min(std::max(mGi.numBounces, 1), 4) - 1);
         {
             // THE LIGHT-ONLY TICK (ENGINE-5 item 2). The cheap path a drag runs
             // every few frames: one injection dispatch per bounce over the
@@ -571,8 +579,9 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                 // The same measurement switch as the probe deferral's
                 // (JAHSHAKA_PROBE_NO_MOTION_DEFER): with it set, the moving
                 // tick goes back to zero bounces and the coarse march on every
-                // cascade, which is the behaviour this rule replaced.
-                const bool legacyTick = std::getenv("JAHSHAKA_GI_LEGACY_MOVING_TICK") != nullptr;
+                // cascade, which is the behaviour this rule replaced. (Read
+                // once, above: the single volume answers to it too since
+                // PHOTON-M2's F-D.)
                 const bool chainMotion = inMotion && !legacyTick;
                 for (int sweep = 0; sweep < sweeps; ++sweep) {
                     for (size_t i = mVctCascades.size(); i--; ) {
@@ -603,7 +612,7 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                 mGiChainInjections = injections;
             } else {
                 mVctLighting->update(mSceneMgr, extraBounces, 1.0f /*thinWallCounter*/,
-                                     true /*autoMultiplier*/, giRayMarchStepScale(inMotion));
+                                     true /*autoMultiplier*/, giRayMarchStepScale(coarseTick));
                 mGiChainSweeps = 1;      // the single volume is not an iteration
             }
             // (The chain branch has already reported its own count above: how

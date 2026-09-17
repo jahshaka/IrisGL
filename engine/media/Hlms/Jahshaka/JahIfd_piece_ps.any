@@ -540,7 +540,41 @@
 	// GiParams::ddgiIntensity) -- times the confidence and the weight fade above.
 	// At intensity 1 inside the field every factor is exactly 1 and the line is
 	// bit-for-bit what it always was.
-	ifdIrradianceScale = float3( passBuf.jahIfd.x * ifdConfidence * ifdWeightFade );
+	//
+	// ...TIMES THE VOXEL VOLUME'S OWN DECODE MULTIPLIER (PHOTON-M2, F-C), which
+	// is the unit that was missing from this line.
+	//
+	// The field's atlas holds the mean of RAW LIGHT-VOXEL SAMPLES: the Gen job
+	// cone-traces the voxel volume and stores the average with no scale of its
+	// own (IrradianceFieldGenFromVct_piece_cs.any's BodyCS: `diffuse.xyz *=
+	// invNumRaysPerIrradiancePixel`, straight into a R10G10B10A2_UNORM atlas).
+	// Those samples are NORMALISED: the light injection scales everything by
+	// `bakingMultiplier = PI / D_max`, D_max being the brightest light in the
+	// scene (VctLighting::update's autoMultiplier), precisely so an 8-bit volume
+	// can hold them. The cone-traced diffuse undoes that on the way out --
+	// `light.xyz * blendWeight` with blendWeight carrying
+	// `vctProbeParams.multiplier` = D_max / PI (Vct_piece_ps.any) -- and so does
+	// the fallback ambient in this very file. THE FIELD'S PATH DID NOT.
+	//
+	// So the field's diffuse was the right picture times 1 / (D_max / PI): a
+	// scene whose brightest lamp was dim got a field PI/D_max times TOO BRIGHT
+	// (and clipped, the atlas being UNORM), and a scene with a bright lamp got
+	// one too dark. MEASURED on a closed room with one lamp, field-lit mean
+	// against cone-lit mean at the same pose (spikes/photon-m2, m2-field.js):
+	// lamp intensity 0.03 -> 13.4x, 0.12 -> 4.1x, 0.5 -> 1.6x -- i.e. the ratio
+	// tracked 1/D_max, capped by the atlas ceiling, exactly as the algebra says.
+	// This is also the whole of finding F-C (ledger §659): under 0075 the CONES
+	// answered one more bounce pass with +0.15 and the FIELD with +0.03, because
+	// at that scene's brightness the field's probes were pinned at the UNORM
+	// ceiling (measured: 253-255 of 255) and could not answer anything. The
+	// suites never saw it because their lamps are intensity ~1, where the factor
+	// is ~1.
+	//
+	// It belongs HERE and not in the Gen job: the atlas is UNORM, so the
+	// normalised form is the only one it can hold without clipping, and this is
+	// the same place and the same constant the cone path applies.
+	ifdIrradianceScale = float3( passBuf.jahIfd.x * ifdConfidence * ifdWeightFade *
+								 passBuf.vctProbeParams.multiplier );
 @end
 
 // ---- THE TERMS THAT COMPLEMENT THE FIELD -------------------------------

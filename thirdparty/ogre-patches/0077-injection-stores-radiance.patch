@@ -1,0 +1,214 @@
+Jahshaka patch 0077 — the light injection stores RADIANCE, and the specular cone's
+eye-tuned 1/pi retires with the error it was cancelling.
+
+MEDIA-only patch (`Samples/Media/VCT/LightInjection_piece_cs.any` and
+`Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any`). THE PROCESS COST IS STATED RATHER
+THAN AVOIDED: Studio stages its media from the SOURCE tree
+(cmake/IncludeOgre.cmake), so every tree must reset its ogre-next submodule and
+re-run `irisgl/scripts/build-ogre.sh` — no engine recompile beyond the staging,
+but the loop must run. It OVERLAPS patches 0021, 0033, 0045, 0048, 0066, 0070 and
+0074 in the pixel piece and 0076 in the injection piece, so a tree that already
+carries those hits `build-ogre.sh`'s "Upstream changed the patched file" on a
+re-run: that is the documented per-patch reverse-check blind spot and NOT an
+upstream change. The cure is the recorded one —
+`git -C irisgl/thirdparty/ogre-next checkout -- . &&
+git -C irisgl/thirdparty/ogre-next clean -fd` and re-run the script.
+
+WHY (Jahshaka lane PHOTON-M2, 2026-09-17, measured; finding F-A of the physics
+read at ledger §659, and F2 of the 2026-09-17 render audit's PHOTON section).
+
+THE UNIT CHAIN, from the lamp to the pixel.
+
+  * `light.diffuse` in the injection's const buffer is `colour * powerScale` = D,
+    and in this tree D = pi * I for the document's intensity I (IrisGL does not
+    divide by pi; HlmsPbs does — kD = albedo/pi,
+    `OgreHlmsPbsDatablock.cpp:82-84`).
+  * The Lambertian OUTGOING RADIANCE of a voxel's surface is therefore
+    L_out = rho * E / pi = rho * NdotL * D / pi, which is exactly what HlmsPbs
+    computes for the DIRECT lighting of the same surface.
+  * What the injection stored was `NdotL * D * rho * shadow` = pi * L_out
+    (`LightInjection_piece_cs.any:162`). The intended constant for the missing
+    factor is in the file, named `c_invPI` — and it was VALUED pi and never used.
+  * The cone gather downstream is a weighted mean of those voxels over a
+    cosine-ish set of six cones (weights summing to 1) — an estimate of E/pi —
+    and HlmsPbs consumes it as `envColourD` with no division of its own
+    (`200.BRDFs_piece_ps.any:305`: Rd = envColourD * albedo). So the cone-lit
+    DIFFUSE was pi times brighter than the EMISSIVE and the AMBIENT sharing the
+    same voxel slot, both of which are radiance already (the emissive is written
+    straight through, and `VctLighting::fillConstBufferData` scales the ambient
+    pair by `invFinalMultiplier` so the decode returns it unchanged).
+  * The SPECULAR path carried a hard-coded `0.31831f` — 1/pi — under upstream's
+    own comment "but I'm not sure why is it even needed. It's clearly
+    overbrightened when it's not there". That is this pi, found by eye: it made
+    the specular cone right and left the diffuse one wrong.
+
+AND IT IS WHAT THE 8-BIT VOLUME CAN HOLD. The store is scaled by
+`bakingMultiplier = pi / D_max` (`VctLighting::update`'s autoMultiplier), so with
+the pi the stored value was `pi * rho * NdotL * D / D_max` — above 1, i.e.
+CLIPPED, for every surface with `rho * NdotL * D / D_max > 1/pi`, which is most
+lit surfaces. Clipping an RGB triple channel by channel desaturates it: a red wall
+at (1.0, 0.31, 0.31) bleeds pink. Without the pi the stored value is
+`rho * NdotL * D / D_max`, at most exactly 1 — the whole 8-bit range, used and
+never exceeded.
+
+THE FIX: `c_invPI` is given its name's value (0.318309886) and applied to the
+direct term, and the specular path's `0.31831f` is deleted from both the composite
+and patch 0048's exported escape colour (which must remove exactly what was
+added, so the sky swap stays exact).
+
+MEASURED (spikes/photon-m2):
+
+  * THE ANALYTIC FORM FACTOR, `m2-bounceA.js` — a large floor of albedo rho_f
+    under a vertical sun with the ambient off, and a wall standing on it. A point
+    on the wall sees the floor over half its hemisphere, so
+    L_wall / L_floor = rho_w / 2 = 0.5 exactly, with no units, no exposure and no
+    light intensity in the answer. Three probes up the wall, floor probes in
+    front of it:
+        base        0.800  0.726  0.637   (predicted 0.500)
+        this patch  0.521  0.475  0.412
+    The lowest probe — the one where the half-space approximation holds — lands
+    within 4 % of the analytic answer; the fall-off up the wall is the form
+    factor doing what it should. (The base's 1.6x rather than pi is the 8-bit
+    clip compressing the ratio: the floor's own voxels were saturated.)
+  * THE SPECULAR AMBIENT, which this patch also un-darkens by pi: the scene's one
+    ambient (`OgreScene::setAmbient`'s single convention) now reaches the
+    specular slot as it reaches the diffuse one. Three suites measure it and were
+    re-anchored with the numbers: gi.volume_edge (+2/255 on a 24/255 band at the
+    volume's face, attributed by zeroing the term in staged media — the band
+    returns to the GI-off value exactly), gi.chain_face (face step 1.029 ->
+    1.057) and gi.rt_reflect (the no-ray control's red excess 0.0099 -> 0.0315,
+    the ray arm's answer unchanged).
+
+THE SELFTEST: this patch alone moves `--engine-selftest` from `277ba3c2…` to
+`8254977e…` — 54,228 of 65,536 pixels by at most 6/255, every changed channel
+DARKER. With 0076 it reads `ebe346e1…`.
+diff -u -r -N a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any
+--- a/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any	2026-09-17 20:47:12.604845830 +0200
++++ b/Samples/Media/Hlms/Pbs/Any/Vct_piece_ps.any	2026-09-17 20:47:12.605483708 +0200
+@@ -689,9 +689,19 @@
+ 			@end
+ 			irrLight.colour.xyz += jahAmbientTerm * specAlpha;
+ 
+-			// 0.31831 = 1 / PI, but I'm not sure why is it even needed. It's clearly
+-			// overbrightened when it's not there
+-			outSpecular += float4( irrLight.colour.xyz * blendWeight * 0.31831f, blend );
++			// JAHSHAKA PATCH 0077: THE FUDGE IS GONE, AT ITS CAUSE.
++			// Upstream's comment here read "0.31831 = 1 / PI, but I'm not sure why
++			// is it even needed. It's clearly overbrightened when it's not there".
++			// It was needed because the light injection stored PI times the
++			// surface's outgoing radiance (LightInjection_piece_cs.any: the direct
++			// term had no 1/PI), so every cone result -- diffuse and specular
++			// alike -- came back PI times too bright. The diffuse composite above
++			// never carried the correction and was therefore PI times too bright
++			// for as long as this line hid the same error on the specular one.
++			// With the injection fixed the voxel holds radiance, a specular cone
++			// returns radiance, and the pre-integrated BRDF downstream wants
++			// exactly that: no factor.
++			outSpecular += float4( irrLight.colour.xyz * blendWeight, blend );
+ 
+ 			@property( jah_sky_env_probe )
+ 				// JAHSHAKA PATCH 0048: WHAT THE CONE COULD NOT ANSWER FOR.
+@@ -704,24 +714,28 @@
+ 				// cubemap in the direction the surface reflects, for pixels no
+ 				// probe box covers. To replace it, it must know precisely what
+ 				// was added and at what weight, per cascade and with the same
+-				// blendWeight and 1/pi that scaled it -- so both are exported
++				// blendWeight that scaled it -- so both are exported
+ 				// rather than reconstructed, and the cone's own HIT colour is
+ 				// never touched.
+-				// THE COLOUR REMOVED CARRIES THE 1/PI; THE WEIGHT ADDED DOES NOT,
+-				// and that asymmetry is the whole of the units question. What
+-				// was ADDED here is the flat ambient scaled by the cone's own
+-				// composite, 1/pi included, so removing it exactly means
+-				// removing exactly that. What is ADDED BACK downstream is a
+-				// cubemap sample, and every other cubemap sample in this shader
+-				// (CubemapGlobal, the probe loop) is taken in radiance units
+-				// with no 1/pi at all -- the two conventions differ by pi in
+-				// this pin, which upstream's own comment three lines above
+-				// records as unexplained. So the sky's weight is the ESCAPE
+-				// FRACTION itself: at a full escape the pixel sees exactly the
+-				// sky it would see with no voxel volume at all, which is the
+-				// calibrated answer (scripting.e2e.default_ground's 5/255
+-				// grazing margin, measured back to 5 with this).
+-				jahEscapeColour += jahAmbientTerm * specAlpha * blendWeight * 0.31831f;
++				// (JAHSHAKA PATCH 0077: the 1/pi this comment argued about is
++				// gone from both sides -- see below.)
++				// THE REMOVAL IS EXACTLY WHAT WAS ADDED, WHICHEVER UNITS THAT IS
++				// IN -- that is the whole of the units question, and it is why
++				// this term is EXPORTED rather than reconstructed here. What was
++				// added above is the flat ambient scaled by the cone's own
++				// escape composite and by blendWeight, so this is that same
++				// product, and the swap downstream is exact.
++				// JAHSHAKA PATCH 0077 removed the 1/pi that used to appear in
++				// BOTH lines (upstream's eye-tuned cancellation of the
++				// injection's missing 1/pi, fixed at the cause in
++				// LightInjection_piece_cs.any). The two conventions the older
++				// comment here described as "differing by pi in this pin" now
++				// agree: the voxel volume, the cubemaps and the flat ambient are
++				// all radiance. The sky's WEIGHT is still the escape fraction
++				// itself -- at a full escape the pixel sees exactly the sky it
++				// would see with no voxel volume at all, which is the calibrated
++				// answer (scripting.e2e.default_ground's grazing margin).
++				jahEscapeColour += jahAmbientTerm * specAlpha * blendWeight;
+ 				jahEscapeWeight += specAlpha * blendWeight;
+ 				jahConeWeight   += blendWeight;
+ 			@end
+diff -u -r -N a/Samples/Media/VCT/LightInjection_piece_cs.any b/Samples/Media/VCT/LightInjection_piece_cs.any
+--- a/Samples/Media/VCT/LightInjection_piece_cs.any	2026-09-17 20:47:12.598976446 +0200
++++ b/Samples/Media/VCT/LightInjection_piece_cs.any	2026-09-17 20:47:12.599348477 +0200
+@@ -36,7 +36,10 @@
+ 	#define lightType uvwPos.w
+ 	#define spotDirection points[0].xyz
+ 	#define spotParams points[1]
+-	#define c_invPI 3.14159265359f
++	// JAHSHAKA PATCH 0077: 1 / PI, WHICH IS WHAT THE NAME SAYS.
++	// Upstream defined `c_invPI` as PI and never used it. The direct term below
++	// needs exactly this factor -- see the unit chain there.
++	#define c_invPI 0.318309886f
+ 
+ 	@insertpiece( DeclAreaLtcLightFuncs )
+ 	@insertpiece( DeclSRgbFuncs )
+@@ -159,7 +162,42 @@
+ 				}
+ 			}
+ 
+-			blockColour += NdotL * light.diffuse.xyz * alpha * albedoVal.xyz;
++			// JAHSHAKA PATCH 0077: THE VOXEL STORES RADIANCE. THE UNIT CHAIN,
++			// from the lamp to the pixel, is:
++			//
++			//   light.diffuse = colour * powerScale = D, and in this tree
++			//       D = PI * I  (IrisGL's intensity I; HlmsPbs divides the
++			//       diffuse by PI, IrisGL does not -- kD = albedo / PI,
++			//       OgreHlmsPbsDatablock.cpp:82-84).
++			//   The Lambertian OUTGOING RADIANCE of this voxel's surface is
++			//       L_out = rho * E / PI = rho * NdotL * D / PI,
++			//       which is exactly what HlmsPbs computes for the direct
++			//       lighting of the same surface (NdotL * D * kD).
++			//   What stood here was  NdotL * D * rho * shadow  = PI * L_out.
++			//
++			// The cone gather downstream is a weighted mean of these voxels over
++			// a cosine-ish set of directions -- an estimate of E / PI -- and
++			// HlmsPbs consumes it as `envColourD` with NO division of its own
++			// (200.BRDFs_piece_ps.any: Rd = envColourD * albedo). So a voxel
++			// holding PI * L_out made every cone-lit diffuse surface PI times
++			// brighter than the EMISSIVE and the AMBIENT sharing the same slot
++			// (both of which are radiance already, here and in
++			// VctLighting::fillConstBufferData's invFinalMultiplier), and the
++			// specular path carried an eye-tuned 0.31831 -- "I'm not sure why is
++			// it even needed" -- to cancel this very factor. Patch 0077 removes
++			// that fudge with this one line.
++			//
++			// AND IT IS WHAT THE 8-BIT VOLUME CAN HOLD. The store below is
++			// scaled by p_bakingMultiplier = PI / D_max
++			// (OgreVctLighting.cpp: autoMultiplierValue), so with the PI the
++			// stored value was PI * rho * NdotL * D / D_max -- above 1, i.e.
++			// CLIPPED, for every surface with rho * NdotL * D / D_max > 1/PI,
++			// which is most lit surfaces. Clipping an RGB triple channel by
++			// channel does not just darken it, it desaturates it: a red wall at
++			// (1.0, 0.31, 0.31) bleeds pink. With the PI gone the stored value
++			// is rho * NdotL * D / D_max, at most exactly 1 -- the whole 8-bit
++			// range, used and never exceeded, and the bleed keeps its hue.
++			blockColour += c_invPI * NdotL * light.diffuse.xyz * alpha * albedoVal.xyz;
+ 		}
+ 	}
+ 
