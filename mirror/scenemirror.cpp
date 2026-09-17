@@ -7629,12 +7629,14 @@ void SceneMirror::applyCamera(iris::CameraNodePtr camera, View *view, float fram
     // has said which one it wants by possessing; letting the active camera win
     // there would render the shot from a tripod while the user drove a
     // character they could not see.
-    if (mSource && mSource->isPlaying()) {
-        const iris::AvatarPossession *possession = mSource->getPossession();
-        const bool possessing = possession && possession->isPossessing();
-        if (!possessing)
-            if (auto active = mSource->getActiveCamera()) camera = active;
-    }
+    //
+    // THE RULE ITSELF MOVED TO THE DOCUMENT (Scene::renderCamera, VR phase 3's
+    // lead review F1) and this is now its first caller rather than its only
+    // one: the Player's VR mode has to answer the same question outside the
+    // mirror — where the wearer stands, and which camera the head writes back
+    // to — and a second copy of a three-term rule is how a wearer ends up
+    // standing somewhere the Player's picture never was.
+    if (mSource) camera = mSource->renderCamera(camera);
 
     // A CAMERA NEVER DRAWS ITSELF (CAMERAS_SPEC phase 2b). Whatever camera is
     // driving the view is, by definition, the one whose body would sit on the

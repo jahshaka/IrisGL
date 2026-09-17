@@ -2806,6 +2806,41 @@ struct VrStatus {
     /// get one symmetric fov and only the POSES separate them); the Quest Pro
     /// does. A test that asserts "the eyes differ" has to know which it has.
     bool               asymmetricFov = false;
+
+    // ---- THE RIG IN THE WORLD (phase 3, the Player's VR mode) -------------
+    /// WHERE THE HEAD IS, IN WORLD SPACE — the rig's origin composed with the
+    /// pose the runtime reported, which is the only pose a host can reason
+    /// about. A host that moves the wearer (locomotion) needs both halves:
+    /// where it put the rig, and where the wearer's head ended up inside it.
+    ///
+    /// `headRotation` is the FULL head orientation (pitch and roll included);
+    /// a locomotion rule that wants a level heading takes the forward vector
+    /// and flattens it rather than decomposing Euler angles, which is what the
+    /// Player's head-relative fly does.
+    Vec3               headPosition;
+    Quat               headRotation;
+    /// Has the runtime EVER located the views in this session? False until the
+    /// first located frame, when the two fields above hold nothing but their
+    /// defaults. It deliberately does NOT go false again on a frame the runtime
+    /// skips or a moment of lost tracking: the fields then hold the last pose
+    /// that WAS located, which is the right thing for a host moving a wearer
+    /// who is mid-stride — a locomotion rule that stopped dead on one skipped
+    /// frame would stutter, and one that reset to the origin would teleport.
+    bool               posesValid = false;
+    /// THE RIG'S ORIGIN, AS THE HOST LAST SET IT (Engine::setVrOrigin): the
+    /// world position of the reference space's origin (the floor spot the
+    /// wearer stands on, in STAGE) and its heading in DEGREES about +Y.
+    /// Reported back so a caller can see that the engine took what it was
+    /// given rather than trusting its own copy.
+    Vec3               origin;
+    float              originYaw = 0.0f;
+    /// HOW MANY TIMES THE RUNTIME RECENTRED THE ROOM under this session (the
+    /// Quest's long-press, a guardian re-setup). Each one moves every pose the
+    /// runtime reports discontinuously; the session ABSORBS it into the rig so
+    /// the wearer stays where they were standing, and this counts them — a
+    /// host that sees it climbing while nobody touched the headset is looking
+    /// at a runtime problem, not at its own locomotion.
+    unsigned long long spaceChanges = 0;
 };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at

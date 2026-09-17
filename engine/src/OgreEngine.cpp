@@ -814,6 +814,19 @@ void OgreEngine::renderOneFrame() {
             // no inset.
             v->applyLetterboxAndPip();
         }
+        // THE MIRROR, AFTER THE RESIZES (phase 3, a measured crash). The loop
+        // above may have rebuilt a window's swapchain in place — which moves no
+        // workspace generation, because nothing was detached — and the VR
+        // session's mirror is a workspace of its own over that very target,
+        // decided at the top of this frame and about to execute. Re-checking it
+        // here is what stops it running against a target that has changed
+        // shape: an "attachment is not a depth format" exception at best, a
+        // segfault inside CompositorWorkspace::_update at worst (1 run in 4 of
+        // the Player's VR suite, where the page is shown a moment before the
+        // session begins and the resize lands in its first frames). A handful
+        // of integer compares when nothing moved, and nothing at all with no
+        // session.
+        if (mVrSession) vrSessionSyncMirror(mVrSession);
         // THE SCENES THIS FRAME BELONGS TO (THREADING_ADOPTION_SPEC.md P3).
         // Computed ONCE, here, and read four times below: by the deferred GI /
         // IBL / planar work on the next line, by the refraction interlock, by
@@ -1239,6 +1252,14 @@ bool OgreEngine::vrEyeScreenshot(unsigned eye, Image &out) {
 void OgreEngine::setVrMirrorView(View *view) {
     mVrMirrorView = static_cast<OgreView *>(view);
     if (mVrSession) vrSessionSetMirror(mVrSession, mVrMirrorView);
+}
+
+void OgreEngine::setVrOrigin(const Vec3 &position, float yawDegrees) {
+    // NOT REMEMBERED ACROSS SESSIONS, deliberately: where the wearer stands is
+    // a property of the RUN the host started, and a session that inherited the
+    // previous one's origin would put the next wearer wherever the last one
+    // walked to. A host sets it right after beginVrSession().
+    if (mVrSession) vrSessionSetOrigin(mVrSession, position, yawDegrees);
 }
 
 void OgreEngine::advanceResources() {
