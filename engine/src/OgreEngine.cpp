@@ -1236,8 +1236,8 @@ void OgreEngine::renderOneFrame() {
 // would have fixed the throwing path and left the OTHER non-local exit — the VR
 // pump's `return` when the runtime wants no picture — still skipping the close,
 // so the fix would have had to be written twice and re-written for every future
-// early return. One guard covers every exit, needs no new macro, and leaves all
-// ~900 other JAH_CATCH sites in the engine exactly as they were. The cost is
+// early return. One guard covers every exit, needs no new macro, and leaves the
+// other 170 JAH_CATCH sites in the engine exactly as they were. The cost is
 // that the close cannot answer anything to the caller, which it never did.
 //
 // THE ORDER, and each step's reason:
