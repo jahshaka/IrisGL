@@ -213,6 +213,22 @@ inline void applyExposure(const iris::ExposureDesc &d, jahshaka::engine::PostFxD
     if (fixed) fx.exposureScale = 0.0f;
 }
 
+/// THE METER, separately from the exposure (EXPOSURE-2) — and it is separate on
+/// purpose. `exposureMetering` and the two percentiles are the WORLD's: a
+/// CameraNode has an exposure block but no metering block (owner, ledger §610:
+/// per camera comes later), so a camera that overrides the MODE must not
+/// silently reset the pattern the world chose. One caller, the world's.
+inline void applyMeter(const iris::ExposureDesc &d, jahshaka::engine::PostFxDesc &fx)
+{
+    fx.meterPattern = d.metering == iris::ExposureMetering::Average
+                          ? jahshaka::engine::ExposureMeterPattern::Average
+                      : d.metering == iris::ExposureMetering::Spot
+                          ? jahshaka::engine::ExposureMeterPattern::Spot
+                          : jahshaka::engine::ExposureMeterPattern::CentreWeighted;
+    fx.meterLowPercent = d.lowPercent;
+    fx.meterHighPercent = d.highPercent;
+}
+
 inline float brightestChannel(const jahshaka::engine::Colour &c)
 {
     return std::max(std::max(c.r, c.g), c.b);
@@ -6631,8 +6647,15 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // CAMERA's block is layered over it below (applyCameraPostFx) and the
         // whole thing is converted ONCE, there, by iris::lens::toChain — this
         // is why nothing here touches fx.exposure*.
-        applyExposure(iris::ExposureDesc{ mSource->exposureMode, mSource->exposure,
-                                          mSource->exposureMin, mSource->exposureMax }, fx);
+        {
+            iris::ExposureDesc e{ mSource->exposureMode, mSource->exposure,
+                                  mSource->exposureMin, mSource->exposureMax };
+            e.metering = mSource->exposureMetering;
+            e.lowPercent = mSource->exposureMeterLowPercent;
+            e.highPercent = mSource->exposureMeterHighPercent;
+            applyExposure(e, fx);
+            applyMeter(e, fx);
+        }
         fx.bloom          = mSource->bloomEnabled;
         fx.bloomThreshold = mSource->bloomThreshold;
         fx.bloomKnee      = mSource->bloomKnee;

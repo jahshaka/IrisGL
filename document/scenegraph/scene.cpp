@@ -319,6 +319,12 @@ Scene::Scene()
     // the AUTO midpoint, which is a different thing again: the meter then moved
     // the picture by whatever the frame happened to contain (RENDER AUDIT A1).
     exposureMode = iris::ExposureMode::Manual;
+    // THE METER'S DEFAULTS (EXPOSURE-2). Centre-weighted is the classic camera
+    // default and the right one here for the same reason: the subject is what
+    // the picture is about. Read only in Auto — the editor default is Manual.
+    exposureMetering = iris::ExposureMetering::CentreWeighted;
+    exposureMeterLowPercent = 10.0f;
+    exposureMeterHighPercent = 90.0f;
     exposure = 0.0f;
     // The window Auto adapts within, in STOPS, and the same pair a camera is
     // born with (CameraNode) — one default for one quantity.

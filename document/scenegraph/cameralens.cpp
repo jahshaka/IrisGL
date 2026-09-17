@@ -336,6 +336,24 @@ ExposureMode exposureModeFromName(const char *name, bool *ok)
     return ExposureMode::Manual;
 }
 
+const char *exposureMeteringName(ExposureMetering m)
+{
+    return m == ExposureMetering::Average        ? "average"
+         : m == ExposureMetering::Spot           ? "spot"
+                                                 : "centreWeighted";
+}
+
+ExposureMetering exposureMeteringFromName(const char *name, bool *ok)
+{
+    const std::string n = name ? name : "";
+    if (ok) *ok = true;
+    if (n == "average") return ExposureMetering::Average;
+    if (n == "centreWeighted") return ExposureMetering::CentreWeighted;
+    if (n == "spot") return ExposureMetering::Spot;
+    if (ok) *ok = false;
+    return ExposureMetering::CentreWeighted;
+}
+
 namespace lens
 {
 

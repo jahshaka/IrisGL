@@ -3252,6 +3252,44 @@ struct LookDesc {
     bool operator!=(const LookDesc &o) const { return !(*this == o); }
 };
 
+/// HOW THE AUTOMATIC EXPOSURE'S METER LOOKS AT THE FRAME (EXPOSURE-2) — the
+/// per-pixel WEIGHT the log-luminance histogram is built with. A camera's
+/// metering pattern, by its own names; ignored under `tonemapFixed`, which
+/// measures nothing at all.
+///
+/// The geometry is a circle IN PIXELS on any window shape, and the numbers
+/// below are the whole definition of each pattern — they live here, beside the
+/// enum, because they are physics rather than policy, and the shader derives
+/// everything else from them (JahHdrMeterBuild_cs).
+enum class ExposureMeterPattern : int {
+    /// The whole frame, equally. The reference the other two are judged
+    /// against, and what the pin's ladder always did.
+    Average = 0,
+    /// The classic camera default: a Gaussian on the distance from the frame
+    /// centre, with a pedestal so the corners still count for something.
+    CentreWeighted = 1,
+    /// A centre disc of `kSpotAreaFraction` of the frame.
+    Spot = 2
+};
+
+namespace meter {
+/// CENTRE-WEIGHTED: the radius, in units of HALF THE FRAME HEIGHT, at which the
+/// weight has fallen to half. 0.5 = half weight halfway to the top edge, which
+/// integrates (over a 16:9 frame, with the pedestal) to 40 % of the meter's
+/// sensitivity inside the central 11 % of the picture and 81 % inside the
+/// inscribed full-height circle.
+constexpr float kCentreWeightedHalfRadius = 0.5f;
+/// CENTRE-WEIGHTED: the weight a pixel infinitely far from the centre still
+/// carries, as a fraction of the peak. NOT zero on purpose: a meter that
+/// ignores the edges of the frame outright cannot see a window opening behind
+/// the subject.
+constexpr float kCentreWeightedPedestal = 0.05f;
+/// SPOT: the fraction of the FRAME AREA inside the disc's half-weight radius.
+/// 2.5 % is a 35 mm spot meter (1-5 % is the range real bodies offer); on 16:9
+/// it is a disc 23.8 % of the frame height across.
+constexpr float kSpotAreaFraction = 0.025f;
+}   // namespace meter
+
 /// The post-processing chain for a View (POST_CHAIN_SPEC.md).
 ///
 /// Everything here is OFF by default, and every field is IGNORED on an offscreen
@@ -3275,6 +3313,21 @@ struct PostFxDesc {
     float exposure = 0.0f;
     float exposureMin = -2.5f;
     float exposureMax = 2.5f;
+    /// THE METERING PATTERN and THE PERCENTILE CLIPS — the automatic exposure's
+    /// meter, and nothing else (EXPOSURE-2). Read only when `hdr` and not
+    /// `tonemapFixed`; they are UNIFORMS on the meter's compute jobs, so
+    /// changing one never rebuilds the chain.
+    ///
+    /// The clips are PERCENTILES of the metered weight, darkest first: the
+    /// meter averages the log-luminance of the slice between them and throws
+    /// the rest away. 10 and 90 by default. What that buys is a meter a sun
+    /// disc, a blown window or a specular firefly cannot pull — they are a few
+    /// percent of the weight and they are cut — where a MEAN of logs (the pin's
+    /// ladder) had no resistance at all. Kept ordered; a degenerate pair falls
+    /// back to the whole frame rather than to no measurement.
+    ExposureMeterPattern meterPattern = ExposureMeterPattern::CentreWeighted;
+    float meterLowPercent = 10.0f;
+    float meterHighPercent = 90.0f;
     /// Highlight bloom. Rides the HDR node's fixed 256x256 blur chain, so it is
     /// resolution-independent and nearly free — but it needs `hdr`.
     bool  bloom = false;
@@ -3468,7 +3521,10 @@ struct PostFxDesc {
 
     bool operator==(const PostFxDesc &o) const {
         return hdr == o.hdr && exposure == o.exposure && exposureMin == o.exposureMin &&
-               exposureMax == o.exposureMax && bloom == o.bloom &&
+               exposureMax == o.exposureMax &&
+               meterPattern == o.meterPattern &&
+               meterLowPercent == o.meterLowPercent &&
+               meterHighPercent == o.meterHighPercent && bloom == o.bloom &&
                bloomThreshold == o.bloomThreshold && bloomKnee == o.bloomKnee &&
                ssao == o.ssao &&
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&

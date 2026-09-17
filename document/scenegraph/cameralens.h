@@ -409,6 +409,31 @@ enum class ExposureMode {
 const char *exposureModeName(ExposureMode m);              ///< "manual" | "auto"
 ExposureMode exposureModeFromName(const char *name, bool *ok = nullptr);
 
+/// HOW THE AUTOMATIC EXPOSURE'S METER LOOKS AT THE FRAME (EXPOSURE-2) — a
+/// camera's METERING PATTERN, by its own names. Read only in Auto: Manual
+/// measures nothing at all.
+///
+/// It is a CHOICE, not a number, and it is the answer to the one thing a
+/// percentile clip cannot fix: a white surface filling most of the frame is
+/// inside any sane percentile band, so the clips do not bound it — WHERE the
+/// meter looks does. The geometry of each pattern (the falloff, the spot's
+/// area) is physics and lives with the renderer that applies it
+/// (jahshaka::engine::meter); the document holds only the choice.
+enum class ExposureMetering {
+	/// The whole frame, equally. What the engine's meter always did.
+	Average,
+	/// The classic camera default, and ours: a Gaussian on the distance from
+	/// the frame centre with a small pedestal, so most of the sensitivity is on
+	/// the subject and the edges of the frame still count for something.
+	CentreWeighted,
+	/// A small centre disc — a couple of percent of the frame. Expose for the
+	/// thing you are pointing at and let the rest fall where it falls.
+	Spot
+};
+
+const char *exposureMeteringName(ExposureMetering m);     ///< "average" | "centreWeighted" | "spot"
+ExposureMetering exposureMeteringFromName(const char *name, bool *ok = nullptr);
+
 /// ONE EXPOSURE STATEMENT, in the document's unit, after the world and the
 /// driving camera have been combined. This is what crosses the mirror.
 struct ExposureDesc {
@@ -420,6 +445,15 @@ struct ExposureDesc {
 	/// measures nothing at all). Kept ordered: min <= max.
 	float minStops = -3.5f;
 	float maxStops = 3.5f;
+	/// THE METER ITSELF (EXPOSURE-2), and only the meter: how it looks at the
+	/// frame, and which slice of what it sees it believes. Ignored in Manual.
+	ExposureMetering metering = ExposureMetering::CentreWeighted;
+	/// The PERCENTILES of the metered weight, darkest first, the meter averages
+	/// between — 10 and 90 by default, so the darkest and brightest tenth of
+	/// what the pattern sees are thrown away. Unreal's MinPercent/MaxPercent.
+	/// Kept ordered; a degenerate pair means "the whole frame".
+	float lowPercent = 10.0f;
+	float highPercent = 90.0f;
 };
 
 namespace lens
