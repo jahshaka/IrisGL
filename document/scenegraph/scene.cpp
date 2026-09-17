@@ -945,6 +945,18 @@ bool Scene::setActiveCamera(const QString &guid)
     return true;
 }
 
+bool Scene::armCameraIfNoneActive(const CameraNodePtr &camera)
+{
+    // The three refusals, each one a decision (see the header):
+    // nothing to arm, something already armed, or a camera that is not ours.
+    if (!camera) return false;
+    if (!activeCameraGuid.isEmpty()) return false;
+    const QString guid = camera->getGUID();
+    if (!cameras.contains(guid)) return false;
+    activeCameraGuid = guid;
+    return true;
+}
+
 CameraNodePtr Scene::getActiveCamera() const
 {
     if (activeCameraGuid.isEmpty()) return CameraNodePtr();

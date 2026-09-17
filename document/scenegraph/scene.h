@@ -1082,6 +1082,30 @@ public:
     /// leaves the previous choice alone, because silently rendering through the
     /// wrong camera is exactly the failure a caller cannot see.
     bool setActiveCamera(const QString &guid);
+
+    /// THE FIRST CAMERA ADDED TAKES THE SHOT — and only the first
+    /// (PLAYER-SPAWN-1 rule 2, owner 2026-09-17).
+    ///
+    /// A scene with no cameras plays through the free viewer, which is where
+    /// the editor happens to be standing; the moment somebody puts a camera in
+    /// the scene, that camera is what they mean by "play this". So an ADD arms
+    /// it — when, and only when, nothing is armed yet. A SECOND camera never
+    /// steals the shot: past the first one the choice is a real decision with
+    /// two answers, and a silent switch is the failure the old
+    /// "adding is never a side effect" rule was written to avoid.
+    ///
+    /// WHAT THIS IS NOT:
+    ///   * It is not a promotion rule. Deleting the active camera clears the
+    ///     choice (removeNode) and leaves the OTHER cameras alone — none of
+    ///     them is promoted, because none of them was chosen. The next camera
+    ///     ADDED arms itself by the rule above.
+    ///   * It is not a LOAD rule. The reader never calls this: a saved file
+    ///     with cameras and no active-camera key means the free viewer, and a
+    ///     file's silence about the choice is itself the choice.
+    ///
+    /// Returns true when this call armed the camera. False when something was
+    /// already armed, when `camera` is null, or when it is not in this scene.
+    bool armCameraIfNoneActive(const CameraNodePtr &camera);
     /// The active camera node, or null when there is none / the guid no longer
     /// resolves (the camera was deleted with the guid still recorded).
     CameraNodePtr getActiveCamera() const;
