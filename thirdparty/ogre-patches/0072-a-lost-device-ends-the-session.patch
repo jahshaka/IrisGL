@@ -1,0 +1,146 @@
+Jahshaka patch 0072 — A LOST DEVICE MUST END THE SESSION, NOT HANG IT.
+
+SOURCE patch (four files, all in the Vulkan render system:
+`OgreVulkanRenderSystem.{h,cpp}`, `OgreVulkanDevice.cpp`, `OgreVulkanQueue.cpp`).
+EVERY TREE MUST RE-RUN `irisgl/scripts/build-ogre.sh` after pulling it. It shares
+no region with any earlier patch.
+
+THE SYMPTOM. Patch 0069 stopped a device loss from ABORTING the process out of
+`~VulkanStagingBuffer`. What it uncovered is that the recreate then never
+returns: the application freezes with the UI thread inside
+`Root::_fireFrameStarted`, for ever. Lane XID-2 caught it with gdb on its own
+reproduction (the owner's sequence: hide a plane in an Epic scene), ten minutes
+into the hang, the thread at 99.4 % of a core:
+
+    #11 vkDestroyDevice                      libvulkan.so.1
+    #12 Ogre::VulkanDevice::destroy          OgreVulkanDevice.cpp:599
+    #14 Ogre::VulkanDevice::setPhysicalDevice OgreVulkanDevice.cpp:914
+    #15 Ogre::VulkanRenderSystem::handleDeviceLost   OgreVulkanRenderSystem.cpp:1505
+    #16 Ogre::VulkanRenderSystem::validateDevice     OgreVulkanRenderSystem.cpp:1462
+    #17 Ogre::Root::_fireFrameStarted                OgreRoot.cpp:928
+    (below #11: a busy loop on clock_gettime inside libnvidia-glcore.so.595.84)
+
+So the block is `vkDestroyDevice` ITSELF, not a wait we could bound: on this
+driver, destroying a VkDevice whose channel is in `CTX SWITCH TIMEOUT` spins
+until the channel is reclaimed, which after an Xid 109 does not happen.
+
+AND THE RECREATE COULD NOT RECOVER ANYWAY. `handleDeviceLost` rebuilds the pin's
+own resources, but a host that holds Vulkan objects on that VkDevice outside the
+render system (Jahshaka's ray-query tier: pipelines, descriptor pools, BLAS/TLAS
+memory) is never told, and the first command it records afterwards names a dead
+device. A working recreate is a program, not a patch.
+
+THE FIX, in three parts:
+
+ 1. `validateDevice` no longer calls `handleDeviceLost()` for a LOST device. It
+    logs one critical line naming the kernel log, and returns false. A device
+    ELECTION on a live device (`forceDeviceElection` picking a different GPU)
+    still recreates, because that path destroys a healthy device and does not
+    block. Root treats the false as a veto on the frame, so the application does
+    not render again -- it is expected to notice (`RenderSystem::isDeviceLost()`
+    is public) and end with a message. Jahshaka's engine does exactly that.
+ 2. `VulkanDevice::destroy` skips `vkDeviceWaitIdle` when the device is lost. The
+    spec says that call returns VK_ERROR_DEVICE_LOST; this driver may block, and
+    everything submitted is finished by definition once the device is gone.
+ 3. `VulkanQueue::destroy` skips the same call for the same reason.
+
+WHAT THIS PATCH DOES NOT DO: it does not make `vkDestroyDevice` safe. A host that
+wants to survive the report must end the process without an orderly Vulkan
+teardown (Jahshaka's does: it logs and `_exit`s). That is the honest shape until
+somebody owns a real recreate.
+
+VERIFICATION. `git apply --check` on a tree carrying 0001-0071 and
+`git apply --reverse --check` after applying. On the XID-2 reproducer with patch
+0071 REMOVED (so the device is still lost on purpose): the app no longer hangs --
+it logs "THE DEVICE WAS LOST AND IS NOT RECREATED", the engine's own fatal line
+follows, and the process ends; measured against the same reproducer's hangs
+before it. `--engine-selftest` unchanged (no pixel path is touched); the engine
+suites green.
+
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
+--- a/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanRenderSystem.cpp
+@@ -1456,8 +1456,36 @@
+             }
+         }
+ 
+-        // recreate logical device with all resources
+-        if( anotherIsElected || mDevice->isDeviceLost() )
++        // A LOST DEVICE IS NOT RECREATED (Jahshaka patch 0072). handleDeviceLost()
++        // ends in VulkanDevice::setPhysicalDevice -> destroy() -> vkDestroyDevice,
++        // and on NVIDIA 595.84 after an Xid 109 CTX SWITCH TIMEOUT that call does
++        // not return: it spins at 100 % of a core inside libnvidia-glcore for
++        // ever (lane XID-2 caught it with gdb on the owner's own reproduction --
++        // the frame below is Root::_fireFrameStarted, so the UI thread never comes
++        // back and the application is frozen, not crashed). A hang is worse than
++        // an end for a user.
++        //
++        // It would not be a recovery either: the host keeps Vulkan objects of its
++        // own on this VkDevice (Jahshaka's ray-query tier is one), and nothing
++        // tells them a new device exists. So this render system answers the only
++        // question it can answer honestly -- the device is gone -- and leaves the
++        // ending to the host, which is expected to say so and quit.
++        if( mDevice->isDeviceLost() )
++        {
++            if( !mReportedDeviceLost )
++            {
++                mReportedDeviceLost = true;
++                LogManager::getSingleton().logMessage(
++                    "Vulkan: THE DEVICE WAS LOST AND IS NOT RECREATED. Check the system log for "
++                    "an NVRM Xid / GPU reset around this time. The application must end.",
++                    LML_CRITICAL );
++            }
++            return false;
++        }
++
++        // recreate logical device with all resources (a device ELECTION on a live
++        // device, not a loss)
++        if( anotherIsElected )
+         {
+             handleDeviceLost();
+ 
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+--- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+@@ -580,7 +580,13 @@
+     {
+         if( mDevice )
+         {
+-            vkDeviceWaitIdle( mDevice );  // intentionally ignore result in destroy()
++            // NOT ON A LOST DEVICE (Jahshaka patch 0072). The spec says this
++            // returns VK_ERROR_DEVICE_LOST; this driver may instead block until a
++            // hung channel is reclaimed, which after an Xid 109 is not bounded.
++            // Everything submitted is finished by definition once the device is
++            // lost, so there is nothing to wait for.
++            if( !isDeviceLost() )
++                vkDeviceWaitIdle( mDevice );  // intentionally ignore result in destroy()
+ 
+             mGraphicsQueue.destroy();
+             destroyQueues( mComputeQueues );
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanQueue.cpp b/RenderSystems/Vulkan/src/OgreVulkanQueue.cpp
+--- a/RenderSystems/Vulkan/src/OgreVulkanQueue.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanQueue.cpp
+@@ -74,7 +74,9 @@
+     {
+         if( mDevice )
+         {
+-            vkDeviceWaitIdle( mDevice );  // intentionally ignore result in destroy()
++            // NOT ON A LOST DEVICE (Jahshaka patch 0072) -- see VulkanDevice::destroy.
++            if( !mOwnerDevice || !mOwnerDevice->isDeviceLost() )
++                vkDeviceWaitIdle( mDevice );  // intentionally ignore result in destroy()
+ 
+             mWindowsPendingSwap.clear();
+ 
+diff --git a/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h b/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
+--- a/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
++++ b/RenderSystems/Vulkan/include/OgreVulkanRenderSystem.h
+@@ -106,6 +106,9 @@
+ 
+         VulkanDevice *mDevice;
+ 
++        /// Jahshaka patch 0072: the "device lost, not recreated" line is said once.
++        bool mReportedDeviceLost = false;
++
+         VulkanCache *mCache;
+ 
+         HlmsPso const *mPso;

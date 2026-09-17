@@ -1659,12 +1659,51 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     single observations with their kernel lines beside them
     (`~/Developer/spikes/openxr-vulkan/`).
 
-THE STACK IS 0001-0069 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0071-the-merge-accumulator-stays-resident — THE SECOND Xid 109 SITE (lane XID-2,
+    2026-09-17), SOURCE, one file, amends 0065's own lines. Patch 0065 gave the
+    order-independent merge accumulator upstream's transient treatment: OnStorage at
+    the end of every `VctVoxelizer::build()`, Resident at the start of the next. That
+    volume is thirteen texels per voxel (13.6 MB at 64^3, 109 MB at 128^3) and under a
+    Photon cascade chain a build happens every frame or two, so a LARGE 3D storage
+    image was created and destroyed continuously while the dispatches that wrote the
+    previous one may still have been executing. On NVIDIA 595.84 that hangs the
+    channel: NVRM Xid 109 CTX SWITCH TIMEOUT -> VK_ERROR_DEVICE_LOST. Measured on the
+    owner's own sequence scripted (hide and show a plane in an Epic scene): 4/4 and
+    6/6 runs lost the device with the round trip, 0/6, 0/6 and 0/16 without it, every
+    failure pid-matched to a kernel Xid line and no passing run ever carrying one. It
+    is NOT patch 0067's delayed-block window (16 frames still hangs 4/6), NOT the
+    512 MB force-flush (disabled: 6/6), NOT the cached image views (purged on
+    residency loss: 6/6) and NOT the ray-query tier (rays off: 6/6). The cost is one
+    accumulator per voxeliser held for its lifetime — memory the next build asked for
+    again a frame later anyway. Sharing one scratch volume across a chain's cascades
+    is a Photon optimisation, not a correctness matter.
+
+  0072-a-lost-device-ends-the-session — THE OTHER HALF OF 0069 (lane XID-2,
+    2026-09-17), SOURCE, four files in the Vulkan render system. 0069 stopped a device
+    loss from ABORTING out of a destructor and uncovered that the recreate never
+    returns. XID-2 caught it with gdb on a live hang: the block is `vkDestroyDevice`
+    ITSELF (`VulkanDevice::destroy` <- `setPhysicalDevice` <- `handleDeviceLost` <-
+    `validateDevice` <- `Root::_fireFrameStarted`), spinning at 99.4 % of a core inside
+    libnvidia-glcore, still spinning ten minutes later — so no bounded WAIT could have
+    fixed it. And the recreate could not recover anyway: the engine holds Vulkan
+    objects on that VkDevice outside the render system (the ray-query tier) and is
+    never told. So `validateDevice` no longer recreates a LOST device: it logs one
+    critical line and returns false (a device ELECTION on a live device still
+    recreates), and `VulkanDevice::destroy` / `VulkanQueue::destroy` skip
+    `vkDeviceWaitIdle` when the device is lost, as 0069 did for the staging fence. The
+    HOST then has to end the process without an orderly teardown — `Engine::deviceLost()`
+    plus `src/viewport/devicelossend.h` do that in Studio. Measured on the reproducer
+    with 0071 deliberately removed: before, 4/4 and 6/6 FROZEN; after, 4/4 ended in
+    27-55 s with one `VK_ERROR_DEVICE_LOST` line instead of 4,348, the fatal sentence
+    in the session log and on stderr, exit code 3, no crash file. What it does NOT do
+    is make `vkDestroyDevice` safe; a real recreate is a program.
+
+THE STACK IS 0001-0072 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068 and 0069 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071 and 0072 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes

@@ -5144,6 +5144,7 @@ public:
 
     void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) override;
     void renderOneFrame() override;
+    bool deviceLost() const override;
     void advanceResources() override;
     bool updateScene(Scene *scene) override;
     bool hasEnabledViews() const override;
@@ -5663,6 +5664,9 @@ private:
     std::unique_ptr<monitor::FrameMonitor> mMonitor;
     /// Set by the host for the NEXT frame only (Engine::setNextFrameCause).
     FrameCause mNextFrameCause = FrameCause::Driver;
+
+    /// XID-2: latched the first frame the render system reports a lost device.
+    bool mDeviceLost = false;
     /// WHAT STOPPING A CAPTURE LEAVES BEHIND. Switching the monitor off flushes
     /// the frames still waiting for their GPU samples (which arrive two frames
     /// late) into here, so the host's usual "stop, then drain" order does not

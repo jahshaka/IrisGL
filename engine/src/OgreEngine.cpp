@@ -990,7 +990,28 @@ void OgreEngine::renderOneFrame() {
     // the ring holds one record that never ends.
     if (monitor::live() && monitor::gMonitor->inFrame())
         monitor::gMonitor->endFrame(mUpdatedScenes);
+
+    // THE GPU IS GONE (lane XID-2, 2026-09-17). Said ONCE, loudly, the moment
+    // the render system reports it: from here on the render system vetoes every
+    // frame (ogre-patch 0072 -- it no longer tries to recreate the device, which
+    // on this driver hangs inside vkDestroyDevice for ever), so a host that does
+    // not ask would see a silent, frozen picture and nothing in the log.
+    if (!mDeviceLost && mRoot) {
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        if (rs && rs->isDeviceLost()) {
+            mDeviceLost = true;
+            mLastError = "the GPU device was lost";
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: THE GPU DEVICE WAS LOST. The session cannot continue; the renderer "
+                "does not recreate a lost device. Look for an 'NVRM: Xid' line in the system "
+                "log at this time (journalctl -k | grep -i xid).",
+                Ogre::LML_CRITICAL);
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+bool OgreEngine::deviceLost() const { return mDeviceLost; }
 
 // THE RESOURCE HALF OF A FRAME, ON ITS OWN (lane OPEN-FRAMES-1, 2026-09-15).
 //
