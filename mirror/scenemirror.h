@@ -556,6 +556,25 @@ public:
     /// The two proxy nodes — left hand, right hand — or 0 where none has been
     /// created. For the suite that asserts which channels they are in.
     void vrProxyNodes(jahshaka::engine::NodeId out[2]) const;
+    /// The ray's two nodes — the line, then the hit marker — or 0 before they
+    /// exist. Placed by the running session (Scene::setVrRayNodes).
+    void vrRayNodes(jahshaka::engine::NodeId out[2]) const;
+
+    /// WHICH CONTROLLER MODEL IS DRAWN, PER HAND — the slot the owner asked for
+    /// (2026-09-17 answer 6: "the controller/hand models are a slot games can
+    /// fill later").
+    ///
+    /// Defaults to the vendored Meta Quest Touch Pro pair in the app's
+    /// resources (`:/content/vr/meta-quest-touch-pro/{left,right}.obj`,
+    /// MIT — app/content/vr/PROVENANCE.md), loaded LAZILY the first frame the
+    /// runtime says the wearer is holding a Touch controller and never loaded
+    /// at all otherwise. Every other profile — the simple controller, WMR,
+    /// bare hands, nothing bound — gets the hand-made WAND, which is the
+    /// honest drawing when we do not know what is in the wearer's hand.
+    ///
+    /// A path this can open may be a qrc path or a file; an empty pair turns
+    /// the models off and leaves the wands. Set it before a session starts.
+    void setVrProxyModels(const QString &leftPath, const QString &rightPath);
 
 private:
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
@@ -930,6 +949,11 @@ private:
     /// The two controller markers, positioned from the status last pushed
     /// (setVrProxies). Draws nothing at all while no session is running.
     void syncVrProxies();
+    /// The vendored model for one hand, loaded ONCE and only when a profile
+    /// asks for it (the six parts of the glTF baked to one mesh at vendoring —
+    /// app/content/vr/make-controller-obj.py). 0 when there is none, which is
+    /// how a wand stays the answer.
+    jahshaka::engine::MeshId vrProxyModelMesh(int hand);
     jahshaka::engine::MeshId wireMeshFor(int kind);
     /// The per-sync document walk. Takes a RAW node and iterates children
     /// through iris::graph rather than through SceneNode::children(), which
@@ -1632,6 +1656,24 @@ private:
     jahshaka::engine::MaterialId mVrProxyMaterial[2] = { 0, 0 };   ///< left, right
     int mVrProxyVisible[2] = { -1, -1 };
     bool mVrProxiesBuilt = false;
+    // ---- THE CONTROLLER MODELS (phase 4b stage 1) ------------------------
+    /// The hand-made wand (always built — it is the fallback for every profile
+    /// we do not have a model for) and the vendored model (loaded lazily, once
+    /// a profile asks for it). `mVrProxyAttached` is which of the two is on
+    /// the node, so a profile change re-attaches once rather than every frame.
+    jahshaka::engine::MeshId mVrProxyWandMesh[2] = { 0, 0 };
+    jahshaka::engine::MeshId mVrProxyModelMesh[2] = { 0, 0 };
+    jahshaka::engine::MaterialId mVrProxyModelMaterial = 0;
+    bool mVrProxyModelTried[2] = { false, false };
+    QString mVrProxyModelPath[2] = {
+        QStringLiteral(":/content/vr/meta-quest-touch-pro/left.obj"),
+        QStringLiteral(":/content/vr/meta-quest-touch-pro/right.obj") };
+    /// THE RAY AND ITS HIT MARKER (VR_INPUT_SPEC §3): the line is a UNIT
+    /// segment down -Z that the session rotates onto the direction and scales
+    /// to the distance, so no mesh is ever rebuilt for a moving ray.
+    jahshaka::engine::NodeId mVrRayNode[2] = { 0, 0 };
+    jahshaka::engine::MeshId mVrRayMesh[2] = { 0, 0 };
+    jahshaka::engine::MaterialId mVrRayMaterial[2] = { 0, 0 };
     /// The highlighted SET, primary first. Empty = nothing selected.
     QList<iris::SceneNodePtr> mHighlighted;
     /// The same set, for the membership test (isHighlighted). The list keeps

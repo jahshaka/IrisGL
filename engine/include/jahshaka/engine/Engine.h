@@ -937,9 +937,18 @@ public:
     ///
     /// Only meaningful on a node that is already a helper; every capture
     /// (probes, shadow maps, GI, the planar mirrors) excludes it exactly as it
-    /// excludes an ordinary helper, and a view that hides the furniture
-    /// altogether — the Player, a thumbnail, a preview, a user's screenshot —
-    /// hides this too (View::setHelpersVisible(false) drops both bits).
+    /// excludes an ordinary helper, and a view that opens NEITHER channel — the
+    /// Player, a thumbnail, a preview, the offscreen view a user's screenshot
+    /// renders through — draws none of it.
+    ///
+    /// THE TWO CHANNELS ARE INDEPENDENT (corrected 2026-09-17, VR-4-FIX's
+    /// second read): `View::setHelpersVisible(false)` drops kHelperBit ALONE
+    /// and `View::setVrHelpersVisible(false)` drops this bit alone
+    /// (`helperBitsToDrop`, OgreChain.cpp). A node carrying both — which the
+    /// controller proxies and the ray do — is therefore drawn by a view that
+    /// keeps EITHER, and kept out of a picture only by a view that opens
+    /// neither. The VR channel is off by default on every view, which is what
+    /// keeps a screenshot clean; it is not a consequence of the desk switch.
     virtual void        setNodeVrHelper(NodeId, bool) = 0;
     virtual bool        nodeVrHelper(NodeId) const = 0;
 
@@ -960,6 +969,22 @@ public:
     /// 0 for either id unregisters it. Pass the LEFT hand's node first.
     virtual void        setVrProxyNodes(NodeId left, NodeId right) = 0;
     virtual void        vrProxyNodes(NodeId out[2]) const = 0;
+
+    /// THE CONTROLLER'S RAY AND ITS HIT MARKER, BY NODE (VR_INPUT_SPEC §3,
+    /// phase 4b stage 1) — the same arrangement as the proxies above, for the
+    /// same reason.
+    ///
+    /// The host makes both nodes (the mirror does: a unit line down -Z and a
+    /// small cross, on kHelperBit | kVrHelperBit) and names them once. A
+    /// running session then places them INSIDE its frame from the state the
+    /// host pushed with `Engine::setVrRay` — scaling the line to the hit
+    /// distance, standing the marker at the hit point and hiding both when
+    /// there is no ray — because a ray drawn from a pose the host knew before
+    /// the frame began leaves the wearer's own hand.
+    ///
+    /// 0 for either id unregisters it. Pass the LINE first.
+    virtual void        setVrRayNodes(NodeId line, NodeId marker) = 0;
+    virtual void        vrRayNodes(NodeId out[2]) const = 0;
 
     /// WHERE A NODE IS RIGHT NOW, in WORLD space, as the graph holds it.
     ///
@@ -1635,8 +1660,12 @@ public:
     /// this); the engine only composes what it is given with the runtime's
     /// pose, and `vrStatus()` reports both halves back.
     ///
-    /// Takes effect on the next located frame. Ignored — harmlessly — when no
-    /// session is running; a host sets it after beginVrSession().
+    /// Takes effect on the next located frame. A NO-OP WITH NO SESSION, and
+    /// not remembered either: where the wearer stands is a property of the RUN
+    /// a host started, so a call made BEFORE `beginVrSession` is dropped
+    /// rather than inherited by whatever session comes next (a host sets it
+    /// right after beginVrSession, and reads it back from `vrStatus().origin`
+    /// — the engine's rig is the one truth).
     virtual void setVrOrigin(const Vec3 &position, float yawDegrees) = 0;
     /// Which on-screen (or offscreen) View shows the mirror. Null clears it.
     /// Takes effect on the next frame; the View keeps its own picture
@@ -1663,6 +1692,53 @@ public:
     /// when no session is running or the eyes have not been located yet;
     /// `lastError()` says which.
     virtual bool vrEyeScreenshot(unsigned eye, Image &out) = 0;
+
+    // ---- VR INPUT (SPECS/VR_INPUT_SPEC.md §2.4, phase 4b stage 1) ---------
+    /// TEST-FACING: WRITE ONE HAND'S SAMPLE AS IF THE RUNTIME HAD REPORTED IT.
+    ///
+    /// This is the backbone of every gesture test in the tree, and it exists
+    /// because the interaction logic is arithmetic on two poses and four
+    /// booleans: given this hook it runs — and is asserted — with no headset,
+    /// no controller and no runtime at all, which is the only way a VR editor
+    /// gets tested on a box in a rack.
+    ///
+    /// WHAT IT REPLACES. The whole `VrHandState` for that hand, poses
+    /// included, from the moment it is called until the next call or until
+    /// `vrInjectInput(hand, VrHandState())` clears it (a default state — `valid`
+    /// false — is the "stop injecting" spelling). The injected poses are
+    /// already in WORLD space, i.e. in the frame `vrStatus()` reports: the rig
+    /// is NOT applied to them a second time. A hand under injection is also
+    /// the hand `VrStatus::hands[i]` and the controller proxy follow, so a
+    /// script can put a wand anywhere and watch what the wearer would see.
+    ///
+    /// THE REFUSAL RULE, and it is not optional: while a session is running
+    /// AND the runtime has bound a real interaction profile for that hand
+    /// (`VrStatus::profile`), this REFUSES (false, lastError says so) unless
+    /// the process was started with `JAHSHAKA_VR_TEST_INJECT=1`. A smoke in a
+    /// headset can therefore never be fooled by a stale injection left behind
+    /// by a script — the wearer's own hardware always wins.
+    ///
+    /// `hand` is VrHandLeft or VrHandRight; anything else is false.
+    virtual bool vrInjectInput(int hand, const VrHandState &state) = 0;
+    /// THE ONE OUTPUT: buzz a controller (product, not a test hook).
+    ///
+    /// `amplitude01` is clamped to 0..1 and `seconds` to a sane pulse; the
+    /// runtime decides what that feels like. False when no session is running,
+    /// when the hand is not a hand, or when the runtime refused the call —
+    /// NOT when nothing buzzed: a profile with no haptic output (hand
+    /// tracking, Monado's simulated controllers) takes the call and does
+    /// nothing, which is a supported controller rather than an error.
+    virtual bool vrHaptic(int hand, float amplitude01, float seconds) = 0;
+    /// THE CONTROLLER'S RAY, AS THE HOST COMPUTED IT (VrRayState) — pushed
+    /// every frame while a gesture is live and pushed once with `visible` false
+    /// when it is not. The engine only DRAWS it, into the two nodes
+    /// `Scene::setVrRayNodes` named, inside the frame; the pick behind
+    /// `hitPoint` is the document's and stays the host's business.
+    ///
+    /// Safe with no session and with no nodes registered (it is then a store).
+    virtual void setVrRay(const VrRayState &ray) = 0;
+    /// What the engine last stored (introspection, and what the suite asserts).
+    virtual const VrRayState &vrRay() const = 0;
 
     /// RESOLVES ONE SCENE'S GRAPH WITHOUT DRAWING ANYTHING — transforms,
     /// skeletal animations, tag points, bounds and the light list, exactly the

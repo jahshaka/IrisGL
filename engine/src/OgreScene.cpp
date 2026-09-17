@@ -783,6 +783,20 @@ void OgreScene::vrProxyNodes(NodeId out[2]) const {
     out[1] = mVrProxyNode[1];
 }
 
+// ...AND THE RAY THE WEARER POINTS WITH (Scene::setVrRayNodes,
+// VR_INPUT_SPEC §3). Two more ids and nothing else: the line and the hit
+// marker are the mirror's geometry, and the session scales and stands them up
+// inside the frame from the state the host pushed.
+void OgreScene::setVrRayNodes(NodeId line, NodeId marker) {
+    mVrRayNode[0] = line;
+    mVrRayNode[1] = marker;
+}
+
+void OgreScene::vrRayNodes(NodeId out[2]) const {
+    out[0] = mVrRayNode[0];
+    out[1] = mVrRayNode[1];
+}
+
 // WHERE A NODE ACTUALLY IS. `_getDerived*Updated` walks up to whatever parent
 // chain the node hangs from and brings the derived transform up to date first,
 // which is the whole reason this is not `node->getPosition()`: the caller is

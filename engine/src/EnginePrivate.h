@@ -2768,6 +2768,8 @@ public:
     bool nodeVrHelper(NodeId id) const override;
     void setVrProxyNodes(NodeId left, NodeId right) override;
     void vrProxyNodes(NodeId out[2]) const override;
+    void setVrRayNodes(NodeId line, NodeId marker) override;
+    void vrRayNodes(NodeId out[2]) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeBackdrop(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
@@ -4172,6 +4174,10 @@ private:
     /// a running VrSession reads them once a frame, right after it has located
     /// the wearer's hands, and writes this frame's pose into them.
     NodeId              mVrProxyNode[2] = { 0, 0 };
+    /// THE HOST'S RAY NODES, line then marker (Scene::setVrRayNodes,
+    /// VR_INPUT_SPEC §3): the same arrangement as the proxies above, placed by
+    /// the running session from `Engine::setVrRay`'s state.
+    NodeId              mVrRayNode[2] = { 0, 0 };
     std::map<MeshId, MeshRec> mMeshes;
     /// ATOM stage 1: THE LOD ERRORS BY OGRE MESH — the one lookup that takes an
     /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the baked
@@ -5312,6 +5318,12 @@ void    vrSessionSetOrigin(VrSession *, const Vec3 &position, float yawDegrees);
 /// shape; it costs a handful of integer compares when nothing moved.
 void    vrSessionSyncMirror(VrSession *);
 bool    vrSessionEyeScreenshot(VrSession *, unsigned eye, Image &out, std::string &error);
+/// HAS THE RUNTIME BOUND A REAL PROFILE for this hand? (The injection refusal
+/// rule, VR_INPUT_SPEC §2.4 I1: the wearer's own hardware always wins.)
+bool    vrSessionHasBoundProfile(const VrSession *, int hand);
+/// ONE BUZZ (Engine::vrHaptic). False only when the call itself failed.
+bool    vrSessionHaptic(VrSession *, int hand, float amplitude01, float seconds,
+                        std::string &error);
 
 class OgreEngine final : public Engine {
 public:
@@ -5349,6 +5361,19 @@ public:
     View *vrMirrorView() const override { return mVrMirrorView; }
     void setVrOrigin(const Vec3 &position, float yawDegrees) override;
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
+    bool vrInjectInput(int hand, const VrHandState &state) override;
+    bool vrHaptic(int hand, float amplitude01, float seconds) override;
+    void setVrRay(const VrRayState &ray) override { mVrRay = ray; }
+    const VrRayState &vrRay() const override { return mVrRay; }
+    /// THE INJECTED SAMPLE FOR ONE HAND, or false when none is live
+    /// (OgreVrSession.cpp's readInput asks once per hand per frame). The store
+    /// lives HERE rather than in the session because the hook has to work with
+    /// no session at all — that is the whole point of it (VR_INPUT_SPEC §2.4).
+    bool vrInjectedInput(int hand, VrHandState &out) const {
+        if (hand < 0 || hand >= int(VrHandCount) || !mVrInjected[hand]) return false;
+        out = mVrInject[hand];
+        return true;
+    }
     /// The live session, for the TU that owns it and for the frame. Null when
     /// none runs.
     VrSession *vrSession() const { return mVrSession; }
@@ -5417,6 +5442,19 @@ public:
     /// The host's mirror wish, remembered across sessions (Engine::
     /// setVrMirrorView may be called before one exists).
     OgreView  *mVrMirrorView = nullptr;
+    /// THE INJECTED HAND SAMPLES (Engine::vrInjectInput) and the ray the host
+    /// last pushed (Engine::setVrRay). Both are plain state on the engine: they
+    /// must answer with no session (the headless test backbone) and a session
+    /// that starts later picks them up on its first frame.
+    VrHandState mVrInject[VrHandCount];
+    bool        mVrInjected[VrHandCount] = { false, false };
+    VrRayState  mVrRay;
+    /// ARE WE INSIDE renderOneFrame? (VR-4-FIX's second read, finding 3.)
+    /// Nothing in this tree destroys a scene from inside a frame — and if
+    /// anything ever does, the VR belt in `destroyScene` would end a session
+    /// between its own xrBeginFrame and xrEndFrame, which is unsound in a way
+    /// no log would explain. So the flag exists and the belt is LOUD.
+    bool        mInRenderFrame = false;
     const std::string &lastError() const override;
     std::string takeLastError() override;
 

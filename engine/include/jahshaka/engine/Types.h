@@ -2768,6 +2768,102 @@ struct VrPose {
 /// WHICH HAND, and what indexes VrStatus::hands.
 enum VrHand : unsigned { VrHandLeft = 0, VrHandRight = 1, VrHandCount = 2 };
 
+/// ONE HAND'S WHOLE INPUT, FOR ONE FRAME (SPECS/VR_INPUT_SPEC.md §2, phase 4b
+/// stage 1). Two poses and the controls, in the frame a caller can reason in.
+///
+/// THE TWO POSES ARE DIFFERENT QUESTIONS, and both are the runtime's answers
+/// rather than ours. `grip` is where the hand IS — the middle of the fist round
+/// the controller, which is where a model or a marker is drawn — and `aim` is
+/// where the hand POINTS: a runtime-authored ray whose origin sits forward of
+/// the fist and whose direction is the controller's own pointing axis, which on
+/// every headset measured is NOT the grip's -Z. A pointer built out of the grip
+/// pose is a pointer that disagrees with the wearer's own hardware.
+///
+/// THE RAY IS -Z OF `aim.rotation`, by the OpenXR convention this whole engine
+/// keeps: origin = aim.position, direction = aim.rotation * (0, 0, -1).
+///
+/// EVERY CONTROL IS A VALUE PLUS ITS EDGE-FREE PRESS, never a wall-clock or a
+/// latch: `select`/`grab` are the analogue 0..1 (a bool input reads 0 or 1),
+/// and the `*Pressed` booleans are those values through ONE threshold with
+/// hysteresis (0.5 on the way up, 0.4 on the way down) so a trigger resting on
+/// the line does not chatter. A host that wants an EDGE compares two frames —
+/// which it must do anyway, because a frame the runtime skipped has no press in
+/// it at all.
+///
+/// `valid` is this frame's answer for the whole hand: a controller switched off,
+/// put down or out of the tracking volume reports nothing, and everything below
+/// is then at its zero. Like VrPose::valid and unlike VrStatus::posesValid it
+/// never latches.
+struct VrHandState {
+    bool   valid = false;        ///< the runtime reports this hand this frame
+    VrPose aim;                  ///< world space through the rig: the pointing ray
+    VrPose grip;                 ///< world space through the rig: where the model is drawn
+    float  select = 0.0f;        ///< trigger 0..1
+    bool   selectPressed = false;
+    float  grab = 0.0f;          ///< squeeze 0..1
+    bool   grabPressed = false;
+    bool   menuPressed = false;
+    float  stickX = 0.0f, stickY = 0.0f;   ///< -1..1
+    bool   stickPressed = false;
+    /// A TEST HOOK WROTE THIS SAMPLE (Engine::vrInjectInput), not the runtime.
+    /// Reported so nothing downstream can mistake an injected gesture for a
+    /// wearer's — a smoke in a headset that ever sees this true is looking at a
+    /// stale injection, which is exactly what the refusal rule prevents.
+    bool   fromInjection = false;
+    /// DID THE APPLICATION HAVE INPUT FOCUS when this sample was taken?
+    ///
+    /// The runtime takes focus away whenever its own dashboard comes up, the
+    /// headset comes off the head or another application is talking to the
+    /// wearer, and it does not tell the hand: `xrSyncActions` returns
+    /// XR_SESSION_NOT_FOCUSED (a SUCCESS code), every action goes inactive and
+    /// every control reads its zero. A host that read that as "the trigger was
+    /// released" would COMMIT a gesture the wearer never finished — so the
+    /// distinction is reported, and a gesture in flight is CANCELLED rather
+    /// than committed when this goes false (VR_INPUT_SPEC §5.5).
+    ///
+    /// True when the session is FOCUSED, and true by default on an injected
+    /// sample (a test that says nothing about focus means "the wearer was
+    /// there"); a test drives the cancel by injecting it false. LAST in the
+    /// struct on purpose: it was added after the contract the two phase-4b
+    /// lanes built to, so nothing that initialises the struct positionally
+    /// moves.
+    bool   focused = true;
+};
+
+/// The engine's own `VrHandState` exists — what the Studio side's guarded
+/// mirror of this struct (src/modules/vr/vrinteraction.h) compiles out
+/// against, so the two halves of phase 4b stage 1 never define it twice.
+#define JAH_ENGINE_HAS_VRHANDSTATE 1
+
+/// THE CONTROLLER'S RAY AND ITS HIT, AS THE HOST COMPUTED THEM
+/// (Engine::setVrRay; VR_INPUT_SPEC §3). The engine DRAWS this and nothing
+/// else: the picking is the document's (one picker, `iris::picking`), the
+/// selection rules are the host's, and the two helper nodes the mirror owns are
+/// placed from these numbers inside the frame that draws them.
+///
+/// `origin` and `dir` are WORLD space; `dir` need not be normalised. With
+/// `hit` the line stops at `hitPoint` and a small marker is drawn there;
+/// without it the line runs to `length` (or ten metres).
+struct VrRayState {
+    bool visible = false;
+    Vec3 origin;
+    Vec3 dir;
+    bool hit = false;
+    Vec3 hitPoint;
+    /// How far the line runs when nothing was hit, metres. 0 = ten metres.
+    float length = 0.0f;
+    /// WHICH HAND IT BELONGS TO (VrHandLeft/VrHandRight), or -1 for "take the
+    /// origin and direction exactly as given".
+    ///
+    /// WHY IT IS WORTH A FIELD. A host computes this ray from the pose it last
+    /// HEARD, which is a frame or two old — the same lag that made the engine
+    /// place the controller proxies itself (Scene::setVrProxyNodes). Naming the
+    /// hand lets the session re-anchor the line to THIS frame's aim pose while
+    /// keeping the host's own length, so the ray leaves the wearer's hand
+    /// exactly where the model is and only its far end is as old as the pick.
+    int hand = -1;
+};
+
 /// A session's parameters. Everything here is the HOST's choice; nothing is
 /// persisted by the engine.
 struct VrConfig {
@@ -2865,6 +2961,27 @@ struct VrStatus {
     /// leaves both invalid for the life of the session, which is not an error:
     /// a headset with no controllers is a supported headset.
     VrPose             hands[VrHandCount];
+    /// EVERYTHING EACH HAND IS DOING (phase 4b stage 1, VR_INPUT_SPEC §2): the
+    /// two poses and the controls. `input[i].grip` IS `hands[i]` — the same
+    /// pose, reported twice because `hands` is what phase 4's hosts read and
+    /// the pair is what a gesture needs.
+    VrHandState        input[VrHandCount];
+    /// THE INTERACTION PROFILE THE RUNTIME HAS BOUND, as its own path
+    /// (`/interaction_profiles/oculus/touch_controller`), or empty when it has
+    /// bound none — which is what a wearer with no controllers, and every
+    /// unfocused session, reports.
+    ///
+    /// It is the runtime's CHOICE out of the profiles we suggested, and it is
+    /// what a host needs to know to draw the right model: the two hands are
+    /// reported as one string because no runtime measured ever bound two
+    /// different profiles at once, and the log names both when they differ.
+    std::string        profile;
+    /// HOW MANY SUGGESTED-BINDING BLOCKS WERE OFFERED, and how many the runtime
+    /// ACCEPTED (`xrSuggestInteractionProfileBindings`). A runtime refuses a
+    /// profile it does not know (a path it cannot resolve, an extension it does
+    /// not have) and that is not an error — but a build whose four blocks all
+    /// failed would silently have no input at all, so the counts are reported.
+    unsigned           bindingProfiles = 0, bindingProfilesAccepted = 0;
     /// The action set was created, bound and ATTACHED to this session — i.e.
     /// the controller route is live and `hands` can become valid. False means
     /// the runtime refused the actions (or the build has none), which is worth
