@@ -1453,6 +1453,19 @@ public:
     /// Draws every enabled View once. The host owns the loop and calls this.
     virtual void renderOneFrame() = 0;
 
+    /// THE GPU IS GONE AND THIS PROCESS CANNOT COME BACK FROM IT (lane XID-2,
+    /// 2026-09-17). True once the render system has reported a lost device — on
+    /// this driver that is an `NVRM: Xid` in the kernel log and a
+    /// `VK_ERROR_DEVICE_LOST` from a fence wait. Nothing renders again after it:
+    /// the render system vetoes every frame from then on.
+    ///
+    /// A HOST THAT SEES THIS MUST SAY SO AND END THE PROCESS WITHOUT AN ORDERLY
+    /// TEARDOWN. `vkDestroyDevice` on a device whose channel the driver has not
+    /// reclaimed does not return (measured: it spins at 100 % of a core for
+    /// ever), so running destructors is how an application FREEZES instead of
+    /// ending — which is what the owner saw. Log, tell the user, `_exit`.
+    virtual bool deviceLost() const = 0;
+
     /// ADVANCES THE RENDERER'S RESOURCE BOOKKEEPING WITHOUT DRAWING ANYTHING
     /// (lane OPEN-FRAMES-1, 2026-09-15).
     ///
