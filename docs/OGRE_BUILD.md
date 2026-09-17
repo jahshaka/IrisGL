@@ -1339,7 +1339,11 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     32,780 triangles, 5.1 %; on 1,000 imported 6,768-triangle spheres its rebuild
     falls 3,017 -> 225 ms of GPU. `--engine-selftest` UNCHANGED — the default
     scene's meshes are document primitives, which carry no chain. Suite:
-    `gi.cascade_lod`.
+    `gi.cascade_lod`. THE FRACTION OF THE CELL IT ASKS FOR CHANGED IN ATOM-3
+    (the render audit's A2): half a cell moved that lattice's picture by up to
+    112/255 because a voxel's occupancy is a binary triangle-box test, so it is
+    a measured 1/256 now and the outer cascade takes level 2 (4x) instead of
+    level 4 (16x). The patch itself is untouched — it is the hook, not the rule.
     RESIDUAL, recorded (NANITE_SPEC §7 stage 1): one level per mesh per voxelizer
     means a mesh instanced at SEVERAL SCALES in one cascade is voxelized at the
     finest of their levels, so the proxy is worth less on mixed-scale instances
