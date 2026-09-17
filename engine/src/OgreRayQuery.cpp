@@ -2923,12 +2923,44 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
 }
 
 // ---------------------------------------------------------------------------
+/// A DESTRUCTOR MAY NOT THROW — it is implicitly `noexcept`, so an exception
+/// leaving it is `std::terminate`, and this one submits to the GPU (lane VR-3b,
+/// 2026-09-17; the owner's WiVRn smoke died exactly here). The chain was:
+///
+///     renderOneFrame -> OgreView::syncReflectListener
+///       -> ~ReflectPassListener -> RenderSystem::flushCommands
+///       -> VulkanQueue::commitAndNextCommandBuffer -> vkQueueSubmit
+///       -> VK_ERROR_DEVICE_LOST -> checkVkResult THROWS -> SIGABRT
+///
+/// ogre-patch 0069 made the same statement about the pin's own staging buffer;
+/// this is OUR destructor and it is ours to make safe. Two rules, in order:
+/// a lost device is not flushed at all (a submit on it can only fail, and the
+/// engine's own frame tail already reports the loss), and anything that still
+/// escapes is caught and logged — the process keeps its stack and its log
+/// instead of aborting with neither.
 ReflectPassListener::~ReflectPassListener() {
     if (!mView || !mView->mEngine || !mView->mEngine->mRayTier) return;
-    // Same rule as dropReflectState: nothing may be freed while a command buffer
-    // that has it bound is still recording.
-    if (mRoot && mRoot->getRenderSystem()) mRoot->getRenderSystem()->flushCommands();
-    mView->mEngine->mRayTier->forgetReflect(this);
+    try {
+        // Same rule as dropReflectState: nothing may be freed while a command
+        // buffer that has it bound is still recording.
+        Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+        if (rs && !rs->isDeviceLost()) rs->flushCommands();
+        mView->mEngine->mRayTier->forgetReflect(this);
+    } catch (Ogre::Exception &e) {
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: the ray-reflection listener could not be flushed away cleanly (" +
+            e.getDescription() + ") - the reflection resources are released without it",
+            Ogre::LML_CRITICAL);
+        // THE BOOKKEEPING STILL HAS TO HAPPEN, or the tier keeps a record keyed
+        // by an address that is about to be freed and the next view allocated at
+        // it inherits a stranger's images.
+        try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
+    } catch (...) {
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: the ray-reflection listener's teardown threw a non-Ogre exception",
+            Ogre::LML_CRITICAL);
+        try { mView->mEngine->mRayTier->forgetReflect(this); } catch (...) {}
+    }
 }
 
 void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
@@ -2965,6 +2997,22 @@ void OgreView::syncReflectListener() {
     // The same arming rule as the planar and globals listeners, and the same
     // reason it is re-evaluated every frame: the shape above can change, and a
     // view can gain or lose its scene.
+    //
+    // AND `mEnabled` IS PART OF IT, WHICH IS NOT FREE AND IS NOT A CHOICE
+    // (lane VR-3b, 2026-09-17, measured). Tearing the listener down when a view
+    // merely blinks off costs a device-wide `flushCommands` — a queue submit,
+    // from a destructor, in a frame that may be drawing nothing at all (a VR
+    // session's first frames: the runtime answers "no picture", the session's
+    // View goes off, the Player's is off by design and the editor's is hidden)
+    // — plus the free and re-allocation of the reflection's rings. Keeping it
+    // instead looks free and IS NOT: `dropReflect` also drops the trace's
+    // TEMPORAL HISTORY, so retaining it across a disable changes the picture.
+    // Measured, interleaved on one box: `scripting.e2e.movable_lamp_rest` went
+    // from 12/12 passing to 2/14 with the listener retained (the floor probe
+    // moves 7/255), and back to base with the teardown restored. So the
+    // teardown stays, the destructor is made safe instead (below), and "a view
+    // that blinks off keeps its reflection history" is a change that has to be
+    // designed and measured, not slipped in.
     const bool wanted = mEnabled && mScene && mCamera && mEngine && mEngine->mRayTier != nullptr &&
                         chainDesc().rayReflect;
     if (!wanted) {

@@ -46,6 +46,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -165,6 +166,47 @@ Ogre::Quaternion toOgreQuat(const XrQuaternionf &q) {
     return Ogre::Quaternion(q.w, q.x, q.y, q.z);
 }
 Ogre::Vector3 toOgreVec(const XrVector3f &v) { return Ogre::Vector3(v.x, v.y, v.z); }
+
+/// THE WiVRn SHAPE, ON A RUNTIME THAT DOES NOT PRODUCE IT (lane VR-3b,
+/// 2026-09-17) — `JAHSHAKA_VR_TEST_NO_RENDER_FRAMES=N`.
+///
+/// WHY A HOOK AT ALL. The owner's headset failed on a state no suite could
+/// reach: WiVRn answers `shouldRender=0` on its first frames, so the session's
+/// own View is switched off (F4) while the Player's is off by design and the
+/// editor's is hidden — a frame with NO enabled view at all, running the whole
+/// engine. Monado's simulated HMD asks for a picture on its first or second
+/// frame and there is no knob anywhere in XRT to stop it (the null compositor
+/// has no "not visible" mode, and the session state machine is the runtime's),
+/// so the only way to make the owner's state a SUITE is to make the pump
+/// answer what the runtime would have answered.
+///
+/// It overrides nothing else: the frame is still waited for, begun and ended
+/// through the real runtime, the session still walks its real lifecycle, and
+/// after N frames the pump reads the runtime again. Unset (every ordinary run,
+/// every gate that does not ask for it) this is one getenv per session and a
+/// compare per frame — and it is read FRESH for each session, never cached,
+/// because `vr.session` arms it around ONE of its sessions and the ones before
+/// and after it have to be ordinary.
+unsigned vrEnvFrames(const char *name) {
+    const char *s = std::getenv(name);
+    if (!s || !*s) return 0u;
+    const long v = std::strtol(s, nullptr, 10);
+    return v > 0 ? unsigned(v) : 0u;
+}
+unsigned vrTestNoRenderFrames() { return vrEnvFrames("JAHSHAKA_VR_TEST_NO_RENDER_FRAMES"); }
+
+/// THE OTHER HALF OF THE OWNER'S SMOKE, as a suite — the session the RUNTIME
+/// takes away (`JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES=N`). Run 2 of the WiVRn smoke
+/// went READY -> SYNCHRONIZED -> stopped inside a second, and nothing downstream
+/// noticed: the Player's View stayed switched off behind a mirror with nothing
+/// to mirror and the driver kept the session's pacing.
+///
+/// This is NOT a fake: after N accepted frames the session asks the runtime to
+/// exit (`xrRequestExitSession`), the RUNTIME then sends the real
+/// XR_SESSION_STATE_STOPPING, and everything from there — xrEndSession, the
+/// session being over, the engine ending it, the host taking its view and its
+/// pacing back — is the product path, byte for byte. Only who asked differs.
+unsigned vrTestStopAfterFrames() { return vrEnvFrames("JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES"); }
 
 }   // namespace
 
@@ -511,6 +553,10 @@ public:
     void workspacePosUpdate(Ogre::CompositorWorkspace *workspace) override;
 
     VrState state() const { return mState; }
+    /// Nothing can come of this session any more: the runtime stopped it, the
+    /// runtime went away, or the device was lost (VR-3b). The engine's frame
+    /// tail ends it; `status().active` is false from the same moment.
+    bool isOver() const { return mEnded || mState == VrState::Lost; }
     VrStatus status() const;
     OgreView *view() const { return mView; }
     void setMirrorView(OgreView *v);
@@ -582,7 +628,17 @@ private:
 
     VrState     mState = VrState::Idle;
     bool        mRunning = false;     ///< between xrBeginSession and xrEndSession
+    /// The session is OVER: the runtime stopped it, the runtime went away, or
+    /// the device was lost. What `status().active` reports (VR-3b).
+    bool        mEnded = false;
     bool        mSaidNoRender = false; ///< the no-picture stretch logged once
+    /// TEST ONLY (vrTestNoRenderFrames): how many more located frames must be
+    /// answered "no picture" regardless of what the runtime said.
+    unsigned    mTestNoRenderLeft = vrTestNoRenderFrames();
+    /// TEST ONLY (vrTestStopAfterFrames): ask the runtime to exit after this
+    /// many accepted frames, once. Zero = never.
+    unsigned    mTestStopAfter = vrTestStopAfterFrames();
+    bool        mTestStopAsked = false;
     bool        mSaidNoPose = false;   ///< the invalid-pose stretch logged once
     bool        mInFrame = false;     ///< between xrBeginFrame and xrEndFrame
     bool        mDrewThisFrame = false;
@@ -807,6 +863,12 @@ bool VrSession::create(std::string &reason) {
     mView->setEnabled(true);
 
     vrLog("session created on the runtime's device");
+    if (mTestNoRenderLeft)
+        vrLog("TEST HOOK: the first %u frames will be answered 'no picture' "
+              "(JAHSHAKA_VR_TEST_NO_RENDER_FRAMES)", mTestNoRenderLeft);
+    if (mTestStopAfter)
+        vrLog("TEST HOOK: the runtime will be asked to exit after %u frames "
+              "(JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES)", mTestStopAfter);
     return true;
 }
 
@@ -838,7 +900,20 @@ void VrSession::applyState(XrSessionState s) {
             // xrEndFrame — the pump closes its frame before it polls again.
             xrEndSession(mSession);
             mRunning = false;
-            mState = VrState::Idle;
+            // ...AND A SESSION THE RUNTIME STOPPED IS OVER (lane VR-3b,
+            // 2026-09-17). It used to go back to `Idle` — which reads exactly
+            // like a session that has not started yet — while `status().active`
+            // answered a flat `true`, so nothing downstream could tell the
+            // difference: the Player kept its own View switched off behind a
+            // mirror that no longer had anything to mirror, and the render
+            // driver kept the session's pacing (a zero interval with vsync off)
+            // against a pump that would never block again. The owner's second
+            // WiVRn run is that state: READY -> SYNCHRONIZED -> stopped inside
+            // a second, then 131,505 skipped ticks against an unpainted window.
+            // `mEnded` is what `active` reports, and the engine's frame tail
+            // ends such a session exactly as it ends a Lost one.
+            mEnded = true;
+            vrLog("the session is OVER (the runtime stopped it) - the engine will end it");
             break;
         case XR_SESSION_STATE_LOSS_PENDING:
         case XR_SESSION_STATE_EXITING:
@@ -864,6 +939,7 @@ void VrSession::pollEvents() {
             vrLog("the OpenXR instance is going away - ending the session");
             mState = VrState::Lost;
             mRunning = false;
+            mEnded = true;
         } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             // THE RUNTIME RECENTRED THE ROOM UNDER THE WEARER (the Quest's
             // long-press, a guardian re-setup, a runtime that re-origins a
@@ -963,6 +1039,22 @@ bool VrSession::beginFrame() {
     mInFrame = true;
     mDrewThisFrame = false;
 
+    // THE SECOND TEST HOOK (vrTestStopAfterFrames): the runtime is asked to
+    // take the session away, and answers with the real STOPPING event.
+    if (mTestStopAfter && !mTestStopAsked && mFrames >= mTestStopAfter) {
+        mTestStopAsked = true;
+        vrLog("TEST HOOK: asking the runtime to exit the session after %llu frames "
+              "(JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES)", (unsigned long long)mFrames);
+        xrRequestExitSession(mSession);
+    }
+    // THE TEST HOOK, HERE AND NOWHERE ELSE (vrTestNoRenderFrames): the frame
+    // was really waited for and really begun; only the runtime's answer to
+    // "do you want a picture" is replaced, for the first N frames of the
+    // session, which is exactly what WiVRn answers on a real headset.
+    if (mTestNoRenderLeft) {
+        --mTestNoRenderLeft;
+        mFrameState.shouldRender = XR_FALSE;
+    }
     if (!mFrameState.shouldRender) {
         if (!mSaidNoRender) { vrLog("the runtime asks for NO picture (shouldRender=0) in state %d", int(mState)); mSaidNoRender = true; }
         // A FRAME IS STILL OWED, with no layers (the spec's contract, and what
@@ -1465,7 +1557,17 @@ void VrSession::syncMirror() {
     //
     // A cleared mirror tears the workspace down on the next pump and a re-set
     // builds it again; both are asserted in vr.session.
-    const bool wanted = mMirrorView &&
+    // AND NOT BEFORE THE FIRST EYE FRAME (lane VR-3b, 2026-09-17 — the owner's
+    // WiVRn smoke). The eye target is an offscreen RTT: until a frame the
+    // runtime ASKED FOR has rendered into it, no pass has ever written it and
+    // its contents are whatever that VRAM held before — black in an empty
+    // scene, line blocks and a white band in a loaded one, which is exactly
+    // what the owner photographed. A mirror is a window onto the headset's
+    // picture; with no picture yet there is nothing to be a window onto, so the
+    // desktop keeps its OWN (the host leaves its view drawing until the same
+    // moment — PlayerVr::step). From the first accepted frame on, the note
+    // above applies: a frozen last eye beats a black hole.
+    const bool wanted = mMirrorView && mRendered > 0ull &&
                         mConfig.mirror != VrMirrorMode::None && mView->targetTexture() &&
                         mMirrorView->targetTexture() && mMirrorView->camera();
     if (!wanted) { teardownMirror(); return; }
@@ -1506,7 +1608,13 @@ void VrSession::syncMirror() {
 VrStatus VrSession::status() const {
     VrStatus s;
     s.state = mState;
-    s.active = true;
+    // NOT A FLAT `true` (lane VR-3b): "a session object exists" and "a session
+    // is running" are different facts, and every host acts on this one — the
+    // Player restores its View on it, the render driver takes its pacing back
+    // on it, the API answers `vr.state().active` with it. It goes false the
+    // moment the session is over, whoever ended it: the runtime (STOPPING), a
+    // lost device, or a lost runtime instance.
+    s.active = !mEnded && mState != VrState::Lost;
     s.frames = mFrames;
     s.rendered = mRendered;
     s.ipd = mIpd;
@@ -1970,6 +2078,7 @@ void sessionEnd(VrSession *s) { delete s; }
 bool vrSessionBeginFrame(VrSession *s) { return s ? s->beginFrame() : true; }
 void vrSessionEndFrame(VrSession *s) { if (s) s->endFrame(); }
 VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Unavailable; }
+bool vrSessionIsOver(const VrSession *s) { return s && s->isOver(); }
 VrStatus vrSessionStatus(const VrSession *s) { return s ? s->status() : VrStatus(); }
 View *vrSessionView(const VrSession *s) { return s ? s->view() : nullptr; }
 void vrSessionSetMirror(VrSession *s, OgreView *v) { if (s) s->setMirrorView(v); }

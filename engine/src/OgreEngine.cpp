@@ -1100,8 +1100,20 @@ void OgreEngine::renderOneFrame() {
     // pacing (a zero interval with vsync off) spinning against a pump that no
     // longer blocks. Ending it here makes `vrStatus().active` false, which is
     // the one signal every host already has to watch.
-    if (mVrSession && vrSessionState(mVrSession) == VrState::Lost) {
-        Ogre::LogManager::getSingleton().logMessage("Jahshaka VR: the session is LOST - the engine ends it", Ogre::LML_CRITICAL);
+    //
+    // A SESSION THE RUNTIME STOPPED IS THE SAME CASE (lane VR-3b, 2026-09-17).
+    // `XR_SESSION_STATE_STOPPING` is not a pause: the runtime has taken the
+    // session away (the wearer took the headset off for good, the dashboard
+    // closed the app, WiVRn's link went) and the only legal thing left is to
+    // end it. It cannot be read off the state — a stopped session sits in
+    // `Idle`, which is also where a session that has not begun sits — so the
+    // session says it itself.
+    if (mVrSession && vrSessionIsOver(mVrSession)) {
+        Ogre::LogManager::getSingleton().logMessage(
+            vrSessionState(mVrSession) == VrState::Lost
+                ? "Jahshaka VR: the session is LOST - the engine ends it"
+                : "Jahshaka VR: the session is OVER (the runtime stopped it) - the engine ends it",
+            Ogre::LML_CRITICAL);
         endVrSession();
     }
 

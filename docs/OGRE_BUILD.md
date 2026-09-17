@@ -1700,12 +1700,34 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     in the session log and on stderr, exit code 3, no crash file. What it does NOT do
     is make `vkDestroyDevice` safe; a real recreate is a program.
 
-THE STACK IS 0001-0072 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0073-swapchain-rebuild-retires-its-semaphore — A SWAPCHAIN REBUILD MUST NOT DESTROY
+    A SEMAPHORE THAT STILL HAS A PENDING SIGNAL (lane VR-3b, 2026-09-17), SOURCE, one
+    file (RenderSystems/Vulkan/src/OgreVulkanWindow.cpp — shared with 0008 and 0013,
+    so expect it on the reverse-check's overlap list). `acquireNextSwapchain` hands a
+    pooled semaphore to `vkAcquireNextImageKHR`, which leaves a SIGNAL pending that
+    only a queue submit waiting on it can consume — `vkDeviceWaitIdle` cannot. But
+    `destroySwapchain` called `notifySemaphoreUnused`, a bare `vkDestroySemaphore`, so
+    every rebuild that happened between an acquire and the next frame's render freed a
+    semaphore mid-operation; the driver hands the same handle back and the recreated
+    swapchain's acquire gets it. Measured on the rig under VK_LAYER_KHRONOS_validation,
+    twelve VR entry/exit cycles (a VR session start turns vsync off, which rebuilds the
+    swapchain twice): 20 reports of VUID-vkAcquireNextImageKHR-semaphore-01779 —
+    "Semaphore must not have any pending operations", the layer's duplicate limit, two
+    per cycle — before, ZERO after. The patch retires the semaphore through the
+    deferred `notifyWaitSemaphoreSubmitted` route `swapBuffers()` already uses, after
+    submitting the wait that consumes the acquire's signal; and `setVSync` /
+    `setWantsToDownload` now stall before rebuilding, which the sibling rebuild site
+    (VulkanXcbWindow::windowMovedOrResized) already did. It is the standing candidate
+    for the owner's WiVRn `VK_ERROR_DEVICE_LOST` with no Xid at a session's first frame
+    (the rejection is synchronous, the GPU never hung) — not proof: that crash has not
+    been reproduced on the simulated runtime.
+
+THE STACK IS 0001-0073 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071 and 0072 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072 and 0073 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
