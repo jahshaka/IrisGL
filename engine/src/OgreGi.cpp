@@ -2757,9 +2757,27 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // (`mProbeStaleBeyondMotion` — a light, a material, the sky, an explicit
     // refresh). A lamp switched on during a drag reaches the probes in the
     // frame it is switched on.
+    // A SINGLE MOVE IS NOT A GESTURE. A scripted setPosition, a nudge or a
+    // paste has to reach the probes in the frame it happens: nothing can know
+    // at the first move whether a second is coming, and one capture is the
+    // honest price of finding out. So the deferral arms on the SECOND move,
+    // and lifts after kProbeMotionSettleFrames frames with none — a drag costs
+    // exactly that one wasted photograph instead of one a frame.
+    //
+    // "SECOND" IS WITHIN THE SETTLE WINDOW AND NOT ON THE NEXT FRAME, and that
+    // is measured rather than cautious: the editor renders about TWO frames per
+    // document edit during a drag (SMOKE-41: 170 monitor frames for 90 scripted
+    // steps), so the moved boxes arrive on alternate frames and a rule that
+    // wanted two CONSECUTIVE moving frames never fired at all — 59 captures
+    // over a 60-frame drag, i.e. exactly the behaviour it was replacing.
     if (mGiMovedBoxes.empty()) {
-        if (mProbeMotionQuietFrames < kProbeMotionSettleFrames) ++mProbeMotionQuietFrames;
+        if (++mProbeMotionQuietFrames >= kProbeMotionSettleFrames) {
+            mProbeDragActive = false;
+            mProbeMotionRun = 0;
+        }
     } else {
+        if (mProbeMotionRun) mProbeDragActive = true;   // a second move, still inside the window
+        mProbeMotionRun = 1;
         mProbeMotionQuietFrames = 0;
     }
     // THE DIAGNOSTIC THE MEASUREMENT DRIVES, the same shape as
@@ -2770,8 +2788,7 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // and a getenv against a path that may issue a 512-square six-face capture
     // is not a cost anyone can measure.
     const bool deferMotion = std::getenv("JAHSHAKA_PROBE_NO_MOTION_DEFER") == nullptr;
-    if (deferMotion && mProbeMotionQuietFrames < kProbeMotionSettleFrames &&
-        !mProbeStaleBeyondMotion) {
+    if (deferMotion && mProbeDragActive && !mProbeStaleBeyondMotion) {
         // The queue still ages while it waits, so the order the settle spends
         // in is the order the wait earned.
         for (ProbeSlot &sl : mProbeSlots) ++sl.framesSinceUpdate;

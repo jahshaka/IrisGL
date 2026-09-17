@@ -4508,6 +4508,16 @@ private:
     /// frame the content stopped moving rather than from the frame it started).
     /// Counts up from 0 on every frame that records a moved box.
     unsigned mProbeMotionQuietFrames = 0;
+    /// CONSECUTIVE frames that recorded a moved box, and whether those add up
+    /// to a GESTURE yet. A single deliberate move — a scripted setPosition, a
+    /// nudge, a paste — is NOT "still moving" and must reach the probes in the
+    /// frame it happens: at the moment of the first move nothing can know
+    /// whether a second is coming, and spending one capture to find out is a
+    /// capture, not a drag. The deferral therefore starts on the SECOND
+    /// consecutive moving frame, which costs a gesture exactly one wasted
+    /// photograph instead of one per frame.
+    unsigned mProbeMotionRun = 0;
+    bool     mProbeDragActive = false;
     /// HOW STILL IS STILL. Ten frames — the same 1/6 s the mirror's own
     /// in-motion cadence (`kGiLightOnlyEveryN`) uses, and chosen from the
     /// movement quantum rather than from taste: a box counts as moved when its
