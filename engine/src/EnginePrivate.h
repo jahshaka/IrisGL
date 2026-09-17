@@ -871,6 +871,38 @@ struct ChainDesc {
     /// happens once, when the Player page's view is created.
     bool  helpers = true;
 
+    // ---- INSTANCED STEREO (SPECS/VR_SPEC.md §4.3, phase 2) ----------------
+    /// Render BOTH EYES in one pass into a target that is two eyes wide
+    /// (2w x h), the left eye in [0, .5] and the right in [.5, 1].
+    ///
+    /// It is one flag here and a sweep over the built node (chain::build's
+    /// applyStereo): EVERY PASS_SCENE the chosen shape carries — the opaque
+    /// pass, the overlay pass, the SSR prepass, the distortion pass, the
+    /// refraction pass, the shape's own extra scene passes — gets
+    /// `mInstancedStereo`, two viewports and the cull camera. All of them or
+    /// none: a shape that stereo-ised its opaque pass and not its overlay pass
+    /// would draw the gizmos once, across both eyes, at the left eye's
+    /// projection.
+    ///
+    /// The QUAD passes are deliberately untouched. A post quad reads and writes
+    /// the whole 2w x h image, which is right for anything per-pixel (tonemap,
+    /// looks, the exposure reduction) and WRONG for anything that samples a
+    /// neighbourhood across the middle of the image (SSAO, SMAA, the SSR
+    /// march) — those see the seam between the eyes. The VR profile turns them
+    /// off rather than teaching each one where the seam is (VR_SPEC §9 item 6);
+    /// the flag here does not enforce that, the session's profile does.
+    ///
+    /// GRAPH SHAPE: it lives on the pass definitions, so it is part of
+    /// sameShape() and a flip rebuilds the workspace — which happens exactly
+    /// twice, when a session begins and when it ends.
+    bool  stereo = false;
+    /// The camera whose frustum CULLS when `stereo` is set: one camera between
+    /// the eyes, wide enough to hold both, so the two eyes cull and light
+    /// (Forward+) identically and an object near the edge cannot appear in one
+    /// eye and vanish from the other. Empty = cull with the rendering camera,
+    /// which is what every non-stereo pass does.
+    std::string cullCameraName;
+
     /// Does this description need anything beyond the passthrough graph?
     bool anyEffect() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
@@ -945,6 +977,21 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 /// The name of the scene node definition for a workspace — the anchor later
 /// phases (and the planar-reflection lane) need to find the main scene pass.
 std::string sceneNodeDefName(const std::string &workspaceDef);
+
+// ---- The VR mirror (SPECS/VR_SPEC.md §4.3) ---------------------------------
+/// One node, one quad: channel 1 (the both-eyes VR target) copied onto channel
+/// 0 (the desktop View's own target — a window or an offscreen RTT), through
+/// `Jahshaka/VrMirror`. Which HALF is a material parameter, not a graph term
+/// (setVrMirrorUv below), so changing eyes rebuilds nothing.
+///
+/// It is a SECOND workspace on that target, appended after the View's own, so
+/// the mirror is painted over the picture the desktop just drew — the same
+/// shape the picture-in-picture inset uses, for the same reason (there is no
+/// reorder API; the later workspace wins).
+void buildVrMirror(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
+                   std::vector<std::string> &nodeDefsOut);
+/// The mirror quad's uv rectangle: scale in xy, offset in zw.
+void setVrMirrorUv(float scaleX, float scaleY, float offsetX, float offsetY);
 
 // ---- The picture-in-picture inset (CAMERAS_SPEC §7.7) ----------------------
 /// What buildPip hands back so the view can move the inset without rebuilding
@@ -4776,6 +4823,22 @@ public:
     bool attachWorkspace();
     /// This view's current chain shape — what the builder is asked for.
     ChainDesc chainDesc() const;
+
+    // ---- VR (SPECS/VR_SPEC.md §4.3) ---------------------------------------
+    /// Makes this view's chain a STEREO one: every scene pass renders both eyes
+    /// into a target two eyes wide (ChainDesc::stereo). `cullCamera` is the
+    /// name of a camera sitting between the eyes. Rebuilds the workspace
+    /// definition, because the flag lives on the pass definitions.
+    /// Called only by the VR session, on the View it owns.
+    void setStereo(bool on, const std::string &cullCamera);
+    bool stereo() const { return mStereo; }
+    /// THE GI DRIVER (VR_SPEC §3.4 / §7 item 6). The Photon cascade chain
+    /// follows ONE camera per scene, and the engine elects it by creation order
+    /// among enabled ON-SCREEN views — which would leave a VR session (whose
+    /// View is offscreen, and created last) looking at cascades centred on the
+    /// desktop camera. A view that says so here wins the election outright.
+    void setGiPriority(bool on) { mGiPriority = on; }
+    bool giPriority() const { return mGiPriority; }
     /// Drops the live workspace (detaching its listeners first). Safe when
     /// there is none; returns whether one was actually dropped.
     bool detachWorkspace();
@@ -4845,6 +4908,11 @@ public:
     /// workspace census and its compositor-graph snapshot; nothing mutates a
     /// view's workspace from outside the seam.
     Ogre::CompositorWorkspace *workspace() const { return mWorkspace; }
+    /// The texture this view draws into: the window's swapchain texture on an
+    /// on-screen view, the RTT on an offscreen one. The VR session needs it for
+    /// both of its jobs — the eye copy reads the session View's target, and the
+    /// mirror writes the mirror View's.
+    Ogre::TextureGpu *targetTexture() const;
     bool isEnabled() const override;
     unsigned width()  const override;
     unsigned height() const override;
@@ -5024,6 +5092,13 @@ private:
     void pipTexFactors(float &widthFactor, float &heightFactor) const;
 
 
+    /// VR_SPEC §4.3: this view draws both eyes (chain::build's applyStereo),
+    /// and this view places the GI cascades for its scene whatever else is on
+    /// screen. Both are false on every view but the session's.
+    bool                       mStereo = false;
+    bool                       mGiPriority = false;
+    std::string                mCullCameraName;
+
     Ogre::Root                *mRoot;
     Ogre::Window              *mWindow;
     Ogre::TextureGpu          *mTexture;
@@ -5123,6 +5198,68 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+/// THE OPENXR SESSION (SPECS/VR_SPEC.md §4.3) — everything about it lives in
+/// OgreVrSession.cpp, the second TU allowed to include Vulkan (after
+/// OgreRayQuery.cpp) and the ONLY one that includes OpenXR. Declared here so
+/// the engine can hold one and the frame can call it; nothing else in this
+/// header knows what an XrSession is.
+///
+/// TWO OBJECTS, TWO LIFETIMES, and the split is forced by the pin (§2.1):
+///   * `VrBoot` is the INSTANCE and the DEVICE. It is created inside
+///     OgreEngine::init, interleaved with the Root/plugin/initialise order,
+///     because the render system reads `external_instance` in its CONSTRUCTOR
+///     and the first createRenderWindow reads `external_device`. It lives for
+///     the engine's life and outlives any number of sessions.
+///   * `VrSession` is the XrSession, the swapchains, the both-eyes target, the
+///     stereo View and the pump. It lives for as long as the user is in the
+///     headset.
+class VrBoot;
+class VrSession;
+
+/// The four calls OgreEngine.cpp makes into that TU. Free functions rather
+/// than methods so the engine never has to see either class's definition.
+namespace vr {
+/// Step 1 of the init order: the XrInstance, the system, and the VkInstance
+/// the RUNTIME creates from our own VkInstanceCreateInfo. Returns null and
+/// fills `reason` when anything refuses — which is not an error anywhere:
+/// the caller boots plainly and answers vrAvailable() false.
+/// MUST be called BEFORE Root::loadPlugin (the external instance is consumed
+/// in the render system's constructor).
+VrBoot *bootBegin(VrInfo &infoOut, std::string &reason);
+/// The `VulkanExternalInstance *` for loadPlugin's `external_instance`, as an
+/// opaque pointer (the type belongs to the render system).
+void *bootExternalInstance(VrBoot *);
+/// Step 2: the physical device the runtime wants, the device-creation request
+/// ogre-patch 0068 exports, and xrCreateVulkanDeviceKHR. MUST be called AFTER
+/// Root::initialise (the exporter reads the instance-extension list the render
+/// system's constructor filled — phase 1a's finding §8.5) and BEFORE the first
+/// createRenderWindow. False = the boot is abandoned; `reason` says why.
+bool bootDevice(VrBoot *, Ogre::Root *root, VrInfo &infoOut, std::string &reason);
+/// The `VulkanExternalDevice *` for the first window's `external_device`.
+void *bootExternalDevice(VrBoot *);
+/// Destroys the XrInstance and the VkDevice/VkInstance WE own. Call after
+/// Root is deleted (Ogre destroys neither — §2.1 row 8).
+void bootEnd(VrBoot *);
+/// Creates the session. Null + `reason` on refusal.
+VrSession *sessionBegin(VrBoot *, OgreEngine *, OgreScene *, const VrConfig &,
+                        std::string &reason);
+void sessionEnd(VrSession *);
+}  // namespace vr
+
+/// THE PUMP, from the frame's point of view. `vrSessionBeginFrame` polls the
+/// runtime's events, blocks in xrWaitFrame (the session's clock), locates the
+/// eyes and writes the head pose and the per-eye projections onto the View's
+/// camera; FALSE means the runtime asked for no picture this frame and has
+/// already been given its empty frame. `vrSessionEndFrame` releases the
+/// swapchain images and submits the projection layer.
+bool    vrSessionBeginFrame(VrSession *);
+void    vrSessionEndFrame(VrSession *);
+VrState vrSessionState(const VrSession *);
+VrStatus vrSessionStatus(const VrSession *);
+View   *vrSessionView(const VrSession *);
+void    vrSessionSetMirror(VrSession *, OgreView *);
+bool    vrSessionEyeScreenshot(VrSession *, unsigned eye, Image &out, std::string &error);
+
 class OgreEngine final : public Engine {
 public:
     bool init(const EngineConfig &cfg, std::string &error);
@@ -5146,6 +5283,25 @@ public:
     void renderOneFrame() override;
     bool deviceLost() const override;
     void advanceResources() override;
+
+    // ---- VR (SPECS/VR_SPEC.md §4) -----------------------------------------
+    bool vrAvailable() const override { return mVrBoot && !mVrDeviceFailed; }
+    const VrInfo &vrInfo() const override { return mVrInfo; }
+    bool beginVrSession(Scene *scene, const VrConfig &cfg) override;
+    void endVrSession() override;
+    VrState vrState() const override;
+    VrStatus vrStatus() const override;
+    View *vrView() const override;
+    void setVrMirrorView(View *view) override;
+    bool vrEyeScreenshot(unsigned eye, Image &out) override;
+    /// The live session, for the TU that owns it and for the frame. Null when
+    /// none runs.
+    VrSession *vrSession() const { return mVrSession; }
+    /// Puts `external_device` on a window's misc params the FIRST time a window
+    /// is created on a VR boot, and never again (the render system reads it
+    /// only while `!mInitialized` — §2.1 row 5). A no-op on a plain boot.
+    void applyVrExternalDevice(Ogre::NameValuePairList &params);
+
     bool updateScene(Scene *scene) override;
     bool hasEnabledViews() const override;
     void listViews(std::vector<View *> &out) const override;
@@ -5190,6 +5346,22 @@ public:
     RayQueryTier *mRayTier = nullptr;
     /// The no-rays switch (EngineConfig::rayTracing, Engine::setRayTracing).
     bool mRayTracingWanted = true;
+
+    // ---- VR state (all four RAW: the types are incomplete everywhere but
+    //      OgreVrSession.cpp, and a unique_ptr would need them complete
+    //      wherever ~OgreEngine is compiled — the mRayTier rule) ------------
+    VrBoot    *mVrBoot = nullptr;      ///< the instance + device; engine lifetime
+    VrSession *mVrSession = nullptr;   ///< the session; user lifetime
+    VrInfo     mVrInfo;
+    /// Has a window consumed `external_device` yet? Only the first one can.
+    bool       mVrDeviceConsumed = false;
+    /// The RUNTIME made the instance but refused (or could not make) the
+    /// device. The boot object must stay alive — Ogre is running on its
+    /// VkInstance — but no session can ever be created on it.
+    bool       mVrDeviceFailed = false;
+    /// The host's mirror wish, remembered across sessions (Engine::
+    /// setVrMirrorView may be called before one exists).
+    OgreView  *mVrMirrorView = nullptr;
     const std::string &lastError() const override;
     std::string takeLastError() override;
 

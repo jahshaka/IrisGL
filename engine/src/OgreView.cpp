@@ -66,6 +66,12 @@ ChainDesc OgreView::chainDesc() const {
     d.background = mBackground;
     d.shadows    = mShadows;
     d.samples    = sampleCount();
+    // STEREO (VR_SPEC §4.3), before the offscreen early-out: the VR session's
+    // view IS offscreen (its target is the both-eyes RTT), and it is the one
+    // offscreen view in the engine that must keep the post chain — it opts in
+    // through PostFxDesc::allowOffscreen like every other deliberate case.
+    d.stereo         = mStereo;
+    d.cullCameraName = mStereo ? mCullCameraName : std::string();
     // Set BEFORE the offscreen early-out below: the overlay's entitlement is
     // its own opt-in (ViewOverlayDesc::allowOffscreen), not the post chain's,
     // so an offscreen view may legitimately keep the passthrough shape AND be
@@ -758,6 +764,16 @@ bool OgreView::attachWorkspace() {
     } JAH_CATCH(mError, false);
 }
 
+void OgreView::setStereo(bool on, const std::string &cullCamera) {
+    if (mStereo == on && mCullCameraName == cullCamera) return;
+    mStereo = on;
+    mCullCameraName = cullCamera;
+    // The flag lives on the pass DEFINITIONS, so this is a definition rebuild
+    // and not a live write — the same operation a shadow-node or an effect
+    // change performs. It happens exactly twice per session (begin and end).
+    rebuildWorkspaceDef();
+}
+
 bool OgreView::detachWorkspace() {
     if (!mWorkspace) return false;
     // THE REFLECTION TRACE HOLDS THIS CHAIN'S TEXTURES (PHOTON_SPEC §7 R5).
@@ -1342,5 +1358,7 @@ Ogre::TextureGpu *OgreView::createRtt(Ogre::Root *root, const std::string &name,
 }
 
 Ogre::TextureGpu *OgreView::target() const { return mWindow ? mWindow->getTexture() : mTexture; }
+
+Ogre::TextureGpu *OgreView::targetTexture() const { return target(); }
 
 }}}  // namespace jahshaka::engine::detail
