@@ -2725,12 +2725,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // it): `JAH_R5_MONO_EYES=1` traces a stereo target through the RENDERING
     // camera for both halves — the behaviour before lane REFLECT-VR-1 — so the
     // cost of getting this wrong can be measured rather than argued. On the
-    // `vr.session` mirror fixture it moves an eye from a mean of 0.33/255
-    // against its own mono control (0.65 % of bytes over 8) to 2.84 at 6.1 % in
-    // the LEFT eye and 10.42 at 21.6 % in the RIGHT one — the asymmetry being
+    // `vr.session` mirror fixture it moves an eye from a mean of 0.34/255
+    // against its own mono control (0.39 % of bytes over 8) to 2.70 at 5.6 % in
+    // the LEFT eye and 6.26 at 12.8 % in the RIGHT one — the asymmetry being
     // that the rendering camera carries the left eye's projection, so one
     // camera is nearly right for one half and wrong for the other.
-    const bool monoEyes = stereo && getenv("JAH_R5_MONO_EYES") != nullptr;
+    // Read ONCE per process, like `JAH_RQ_REFIT` beside it: an environment
+    // variable cannot change under a running process, and this sits in a
+    // per-frame path.
+    static const bool sMonoEyesArm = getenv("JAH_R5_MONO_EYES") != nullptr;
+    const bool monoEyes = stereo && sMonoEyesArm;
     if (stereo && !monoEyes) {
         if (!eyes) { bail("a stereo view with no located eyes"); return; }
         for (int i = 0; i < 2; ++i)

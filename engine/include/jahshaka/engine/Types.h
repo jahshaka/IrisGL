@@ -2893,8 +2893,10 @@ struct VrConfig {
     ///
     /// The SOURCE is not a choice here: a stereo chain never marches in screen
     /// space (see `PostFxDesc::ssrScreenMarch`), so this row buys RAY-TRACED
-    /// reflections on a ray-capable machine and, on one without, the prepass
-    /// and nothing else — which is why a host that wants neither passes 0.
+    /// reflections on a ray-capable machine and NOTHING AT ALL on one without —
+    /// `chain::build` declines to build the reflection stage when neither source
+    /// can write it, so a machine with no ray queries does not even pay the
+    /// prepass and renders exactly what it renders today.
     int ssr = 0;
 };
 

@@ -148,6 +148,16 @@ ChainDesc OgreView::chainDesc() const {
     d.ssaoRadius     = mPostFx.ssaoRadius;
     d.smaaPreset     = mPostFx.smaaPreset;
     d.ssr            = mPostFx.ssr;
+    // AND THE SOURCE THE ROW SELECTS, which this line was missing for one round
+    // (the lead's read, 2026-09-18). Without it `ChainDesc::ssrScreenMarch` held
+    // its own default — true — whatever a host pushed, so a STEREO chain was
+    // saved only by `chain::build`'s `!desc.stereo` while the MONO view of one
+    // eye (`vrEyeScreenshot`'s control: offscreen, `allowOffscreen`, copying the
+    // session's PostFxDesc) went on MARCHING. The two pictures were then not
+    // comparable in the way the control exists to be comparable — it is below
+    // the offscreen early-out for exactly that reason, because the control is
+    // an offscreen view. @see PostFxDesc::ssrScreenMarch.
+    d.ssrScreenMarch = mPostFx.ssrScreenMarch;
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrIntensity   = mPostFx.ssrIntensity;

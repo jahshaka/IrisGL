@@ -1868,7 +1868,17 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     matrix reads it: our ray-per-pixel reflection basis (which is how it was
     found — `vrEyeScreenshot`'s per-eye control traced a frustum 1,300 times too
     wide), the compositor's `VIEW_SPACE_CORNERS_*` auto-parameters through
-    `getWorldSpaceCorners`, upstream's own shadow setups. The fix is the four
+    `getWorldSpaceCorners`, upstream's own shadow setups — AND FORWARD+, which
+    makes this a behavioural change and not only a corrected reading:
+    `ForwardClustered::collectLights` pushes the current camera's tangents onto
+    the camera it slices the light grid with (OgreForwardClustered.cpp:341-343),
+    so such a camera culled its lights against a garbage frustum before the
+    patch and against its own after. Nothing that ships today moves (the only
+    custom-projection cameras here are the VR session's, whose grid is the CULL
+    camera's, and `vrEyeScreenshot`'s mono control). The tangent form divides the
+    published positions by the Frustum's OWN `mNearDist`, so it is right only
+    while `setNearClipDistance` matches the matrix's near — asserted where the
+    session builds the projection. The fix is the four
     missing assignments plus the four missing constructor initialisers, in the
     same units and convention (`FET_PROJ_PLANE_POS`) the other branches publish.
     A camera without a custom projection takes neither hunk: the selftest hash and

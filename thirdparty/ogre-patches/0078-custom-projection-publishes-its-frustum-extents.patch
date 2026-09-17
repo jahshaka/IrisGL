@@ -36,6 +36,33 @@ compositor's own `VIEW_SPACE_CORNERS_NORMALIZED_*` auto-parameters via
 application code. The consequence is not subtle: a screen-space effect or a trace
 on such a camera works in a frustum 1,300 times too wide.
 
+AND FORWARD+ READS IT, WHICH IS A SECOND BEHAVIOURAL CHANGE OF THIS PATCH:
+`ForwardClustered::collectLights` takes the CURRENT camera's extents in tangents
+and pushes them onto the light-grid camera it slices with
+(OgreForwardClustered.cpp:341-343, `getFrustumExtents(FET_TAN_HALF_ANGLES)` ->
+`setFrustumExtents(...)`). So every frame rendered by a camera with a custom
+projection built its light grid from those indeterminate numbers — the lights a
+cell can see were culled against a frustum that has nothing to do with the
+picture. With the patch that grid is the camera's own, which is a CHANGE for such
+a camera and not merely a fix to a reading: the only cameras in Jahshaka that
+carry a custom projection are the VR session's (whose eyes go through VrData and
+whose grid is the CULL camera's, not this one's) and `vrEyeScreenshot`'s mono
+control, so nothing that ships today moves — but a project that hands Ogre its
+own projection matrix will see its Forward+ lighting change, for the better.
+
+THE ONE INVARIANT THE TANGENT FORM CARRIES: `getFrustumExtents(
+FET_TAN_HALF_ANGLES)` converts the published near-plane positions to tangents by
+dividing by the Frustum's OWN `mNearDist` (OgreFrustum.cpp:1361), while the
+positions themselves come out of the MATRIX. The two agree only when
+`setNearClipDistance` holds the same near the custom matrix was built with —
+true by construction wherever a caller derives the matrix from the camera (the
+VR session asserts it where it builds the projection from the runtime's fov,
+OgreVrSession.cpp), and a silent scale by the ratio of the two wherever a caller
+does not. Upstream's documentation already says "even when using a custom
+projection matrix, you should still call the methods that update the near / far
+distances and field of view" (OgreFrustum.h:425-428); this is what goes wrong
+when that advice is not followed.
+
 THE FIX is four assignments in the branch that was missing them, plus the four
 missing constructor initialisers. The values are already computed, in the same
 units and the same convention the other two branches publish (a position on the

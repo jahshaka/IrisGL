@@ -52,6 +52,7 @@
 #if JAH_VR
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -2176,6 +2177,16 @@ bool VrSession::beginFrame() {
         // distance in the ROOM, so at world scale s the eyes are s times
         // further apart in the world.
         eyeToHead[eye].setTrans(eyeToHead[eye].getTrans() * mConfig.worldScale);
+        // THE INVARIANT ogre-patch 0078 DEPENDS ON, stated where it is
+        // established rather than where it is consumed: the matrix below is
+        // built from THIS camera's own near and far, and `getFrustumExtents(
+        // FET_TAN_HALF_ANGLES)` divides the extents it unprojects from the
+        // matrix by the Frustum's `mNearDist` (OgreFrustum.cpp:1361). The two
+        // are the same number here BY CONSTRUCTION — `zNear` IS
+        // `cam->getNearClipDistance()` a few lines up — and anything that ever
+        // builds a custom projection with a near plane the camera does not
+        // carry would get tangents scaled by the ratio of the two.
+        assert(!cam || std::fabs(float(cam->getNearClipDistance()) - zNear) < 1e-6f);
         proj[eye] = projectionFromFov(mViews[eye].fov, zNear, zFar);
         // ...AND THE RENDER SYSTEM'S CONVENTION, WHICH VrData DOES NOT APPLY
         // (F1, the critical one). `VrData::set` STORES the matrix raw
@@ -3164,9 +3175,18 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
             // control accepted this way cannot hide the defect it exists to
             // catch (which reads a mean of 11.5). Before this, a chain with
             // reflections in it simply never settled and the call failed.
+            // AND IT ENDS WHEN THE PICTURE IS STILL, NOT AT THE BUDGET (the
+            // lead's read): a bit-exact pair ends it immediately, and otherwise
+            // `kSettleRuns` CONSECUTIVE quiet pairs do — one quiet pair on a
+            // stochastic chain can be luck (a frame whose few flickering pixels
+            // happened to land the same way), three in a row is the picture
+            // holding still. Before this the loop always ran its whole
+            // ninety-frame budget on such a chain and then judged the LAST pair.
             const double kSettleMean = 0.25;
+            const int kSettleRuns = 3;
             Image prev;
             double lastMean = -1.0;
+            int quiet = 0;
             for (int i = 0; i < 90 && !ok; ++i) {
                 mEngine->renderOneFrame();
                 if (!control->readPixels(out)) break;
@@ -3175,14 +3195,20 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
                     for (size_t b = 0; b < out.rgba.size(); ++b)
                         sum += std::abs(int(out.rgba[b]) - int(prev.rgba[b]));
                     lastMean = sum / double(out.rgba.size());
-                    if (lastMean <= 0.0) ok = true;
+                    if (lastMean <= 0.0) {
+                        ok = true;                      // bit-exact: nothing to argue about
+                    } else if (lastMean <= kSettleMean) {
+                        if (++quiet >= kSettleRuns) {
+                            ok = true;
+                            vrLog("eye screenshot: the picture settled to a mean of %.3f/255 "
+                                  "over %d consecutive frames rather than exactly (a "
+                                  "stochastic pass is in this chain)", lastMean, kSettleRuns);
+                        }
+                    } else {
+                        quiet = 0;                      // it moved again: start the run over
+                    }
                 }
                 if (!ok) prev = out;
-            }
-            if (!ok && lastMean >= 0.0 && lastMean <= kSettleMean) {
-                ok = true;
-                vrLog("eye screenshot: the picture settled to a mean of %.3f/255 rather than "
-                      "exactly (a stochastic pass is in this chain)", lastMean);
             }
             if (!ok)
                 error = "vrEyeScreenshot: the control picture never settled (the last pair's "
