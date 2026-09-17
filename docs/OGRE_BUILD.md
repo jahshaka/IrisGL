@@ -283,18 +283,20 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
 
 
 
-23. **0023-ifd-raster-depth-grid-units** — the raster-fed IrradianceField
-    (`IrradianceFieldRaster`, the path Jahshaka's `ddgiSource: raster` uses)
-    writes its depth atlas in world units times the probe COUNT, while the pixel
-    shader's Chebyshev visibility test compares against probe-GRID distances and
-    the voxel path stores grid units. For any field larger than one unit per axis
-    the stored depth dwarfs every cage distance, `r > mean` never fires and every
-    probe reads unoccluded — the leak fix DDGI exists for is absent on the raster
-    path. The patch adds an `invFieldSize` param to the CubemapToIfd job
-    (default 1 = upstream's behaviour byte for byte) that the host sets to
-    1 / the field's enlarged size per axis. Media-only. (22 is the lead's
-    geometric-specular-antialiasing patch, landed on a later base than this
-    lane's; numbered around it.)
+23. **DELETED 2026-09-17** (lane FIELD-RASTER-CRUD). Was
+    `0023-ifd-raster-depth-grid-units`, a MEDIA-only patch that put the
+    raster-fed IrradianceField's depth atlas into probe-GRID units
+    (an `invFieldSize` param on the CubemapToIfd job) so the Chebyshev
+    visibility test it feeds could fire at all. Its only consumer was the
+    irradiance field's RASTERISED probe source (`ddgiSource: raster`), which was
+    deleted the same day — no shipped tier ever selected it, the path cost
+    ~3.4 ms per probe, and its first compute dispatch lost the device on the
+    RTX 4080 / driver 595.84 about 20 % of the time (NVRM Xid 109 CTX SWITCH
+    TIMEOUT). Nothing in Jahshaka calls `IrradianceFieldRaster` any more, so the
+    pin's own copy of that class and of the `IrradianceFields` media is left
+    exactly as upstream ships it. The number is NOT reused. (22 is the lead's
+    geometric-specular-antialiasing patch, landed on a later base than the
+    original 0023's lane; numbered around it.)
 
 24. **0024-pbs-ortho-view-dir** — SOURCE + MEDIA (`OgreHlmsPbs.h/.cpp` +
     `800.PixelShader_piece_ps.any`; every tree reruns `build-ogre.sh`). HlmsPbs
@@ -1039,12 +1041,17 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     1.005 in our own code, i.e. copying a private constant out of the pin, which
     is the workaround this tree refuses.
 
-50. **0050-irradiance-field-host-api-and-vct-zero-multiplier** (SOURCE —
-    `OgreIrradianceField.{h,cpp}`, `OgreIrradianceFieldRaster.{h,cpp}`,
-    `OgreVctLighting.cpp`; OVERLAPS 0044 and 0037 on those files; **every tree
-    resets its ogre-next submodule and re-runs `build-ogre.sh`, and that rerun
-    COMPILES**) — five engine-side compensations turned into the pin fixes and
-    hooks they were compensating for (audit
+50. **0050-irradiance-field-const-buffer-size-and-vct-zero-multiplier**
+    (SOURCE — `OgreIrradianceField.cpp`, `OgreVctLighting.cpp`; OVERLAPS 0044
+    and 0037 on those files; **every tree resets its ogre-next submodule and
+    re-runs `build-ogre.sh`, and that rerun COMPILES**). **AMENDED AND RENAMED
+    2026-09-17** (lane FIELD-RASTER-CRUD): items (2) and (3) below existed only
+    for the rasterised probe source deleted that day, so their hunks — the
+    public `switchToRasterSource()` with its four accessors, and patch 0023's
+    C++ half in `IrradianceFieldRaster` — are gone from the patch, which no
+    longer touches `OgreIrradianceField.h` or
+    `OgreIrradianceFieldRaster.{h,cpp}` at all. Three engine-side compensations
+    remain, turned into the pin fixes they were compensating for (audit
     `SPECS/audits/ENGINE_WORKAROUNDS_TO_PATCHES_2026-09-15.md` F2/F3/F4/F10 plus
     the `unused0` nit). (1) `IrradianceField::getConstBufferSize()` returned 20
     floats while `fillConstBufferData` writes 24 — the size of the struct the
@@ -1055,16 +1062,11 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     DDGI UV collapsed onto texel 0. The engine's answer had been to reserve four
     extra floats and deliberately SKIP them, which worked only because HlmsPbs
     fills the field's block before calling the listener; ~60 lines of
-    `OgreFog.cpp`/`EnginePrivate.h` are deleted with it. (2) A public
-    `switchToRasterSource()` plus `getRasterSource()`, `getSettings()`,
-    `getFieldOrigin()`/`getFieldSize()` (the ENLARGED volume) and
-    `getNumProbesProcessed()` — the surface `JahIrradianceField`, a derived class
-    of ours held through a NON-VIRTUAL destructor, existed to reach; it is
-    deleted. (3) Patch 0023's C++ half, three months late:
-    `IrradianceFieldRaster` pushes `invFieldSize` beside `numProbes`, where
-    0023's own header said it belonged, so the host stops doing two string
-    lookups and a const-buffer dirty on the shared job before EVERY raster
-    sweep. (4) `IrradianceFieldGenParams::unused0` was uploaded uninitialised on
+    `OgreFog.cpp`/`EnginePrivate.h` are deleted with it. (2) [WITHDRAWN
+    2026-09-17 with the raster source — was the public `switchToRasterSource()`
+    plus four accessors.] (3) [WITHDRAWN 2026-09-17 — was patch 0023's C++ half,
+    the `invFieldSize` push in `IrradianceFieldRaster`.]
+    (4) `IrradianceFieldGenParams::unused0` was uploaded uninitialised on
     every voxel-sourced update. (5) `VctLighting::update`'s auto multiplier
     inverted a zero maximum radiance into +inf, so a scene with no visible
     light contributed NO GI at all (and, since a bound VctLighting kills the PBS

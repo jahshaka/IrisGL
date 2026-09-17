@@ -17,11 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <IrradianceField/OgreIrradianceFieldRaster.h>
-#include <OgreHlmsCompute.h>
-#include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
-#include <OgreShaderParams.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -33,59 +29,6 @@ static OgreScene *sVctBindingOwner = nullptr;
 
 static Ogre::HlmsPbs *hlmsPbs(Ogre::Root *root) {
     return static_cast<Ogre::HlmsPbs *>(root->getHlmsManager()->getHlms(Ogre::HLMS_PBS));
-}
-
-// ---- Raster-source constants (the spikes/rayon2 S3 measurements) ----------
-
-// HOW MANY RASTER PROBES ONE UNIT OF THE UPDATE BUDGET BUYS PER FRAME: ONE.
-// The dial's unit is reflection-probe equivalents (one PCC probe = six 512^2
-// faces with HDR and shadows at High, ~2.1 ms in Debug); a raster IFD probe is
-// six 32^2 faces plus a depth copy per face and one CubemapToIfd dispatch —
-// 256x fewer pixels per face, but the same twelve compositor passes, camera
-// moves and barriers per probe, and that overhead is what it costs, not the
-// fill. MEASURED (spikes/rayon2 S3 gate, app.renderStats on a fresh Epic project,
-// Debug, RTX 4080S, a sibling gate live): 64 probes/frame re-converging =
-// 244 ms/frame against 27-30 ms converged, i.e. ~3.4 ms per raster probe —
-// about 1.6 PCC-probe equivalents. One per budget unit is the nearest whole
-// number, and it means a raster field of 8192 probes follows motion over
-// 8192 / budget frames: a rig that must be tracked within seconds wants a
-// budget of 8-16, which is the dial's job (the recorded follow-up is a
-// cheaper capture: the depth copy pass folded into the face render, and
-// fewer passes per probe).
-static const Ogre::uint32 kIfdRasterProbesPerBudget = 1u;
-
-// THE RASTER ESCAPE CALIBRATION, the raster twin of the S1 piece's
-// ifdVisEscapeScale (0.9 for the voxel source, measured). A raster miss is a
-// sky pixel at the capture camera's far plane EXACTLY (no cone overshoot, no
-// early exit), so 1.0 was the expected value; MEASURED (gi.ddgi_raster case 7,
-// gi.ddgi_ambient's open scene, ambient only, no sky): at 1.0 the raster
-// field's proxy lands at 106.9% of the voxel field's (whose own scale was
-// pinned to the cone reference in S1), so 1.05 brings the two sources to the
-// same ambient — the raster depth is a 32^2 cubemap estimate, not a cone
-// march, and the 7% is the difference between the two estimators of the same
-// hemisphere. Re-measured at 1.05 in the build record.
-static const float kIfdRasterEscapeScale = 1.05f;
-
-// The capture camera's far plane, as a multiple of the enlarged field's
-// diagonal. Any hit INSIDE the field is nearer than one diagonal, so a miss —
-// nothing at all along the ray, out to twice the field — reads as exactly far,
-// which is what the escape threshold compares against.
-static const float kIfdRasterFarDiagonals = 2.0f;
-
-/// PATCH 0023's PARAMETER, CHECKED not pushed. The conversion of the raster
-/// probe depths into field units is the raster source's own business since
-/// ogre-patch 0050 (IrradianceFieldRaster pushes `invFieldSize` beside
-/// `numProbes`, on the shared "IrradianceField/CubemapToIfd" job, per sweep).
-/// What is left here is the REFUSAL: a media tree that predates patch 0023 has
-/// no such parameter at all, and a raster field running with world-unit depths
-/// leaks light through everything, so the source is declined at build time
-/// rather than run wrong.
-static bool ifdRasterMediaHasInvFieldSize(Ogre::Root *root) {
-    Ogre::HlmsCompute *hc = root->getHlmsManager()->getComputeHlms();
-    if (!hc) return false;
-    Ogre::HlmsComputeJob *job = hc->findComputeJobNoThrow("IrradianceField/CubemapToIfd");
-    if (!job) return false;
-    return job->getShaderParams("default").findParameter("invFieldSize") != nullptr;
 }
 
 /// GiToggle::Auto defers to the quality dial; Off/On pin it either way. Exists
@@ -696,11 +639,8 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             if (mVctLighting) mIfd->setVctLighting(mVctLighting);
             mIfd->reset();
             mIfdProbesDone = 0u;
-            mIfdRigEpochSeen = mRigPoseEpoch;
-            // Paused budget: the voxel field converges inline (5 ms of GPU);
-            // a raster one would be 8192 x 6 scene renders in one frame, so it
-            // keeps its previous answer until the budget is raised.
-            if (!mIfdProbesPerFrame && mIfdSource != GiSource::Raster) {
+            // Paused budget: the field converges inline (5 ms of GPU).
+            if (!mIfdProbesPerFrame) {
                 monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
                                          mRoot->getRenderSystem());
                 mIfd->update(mIfdTotalProbes);
@@ -747,7 +687,7 @@ GiStatus OgreScene::giStatus() const {
         // from "no grid because the mode does not build one".
         st.probesDropped      = mProbesDropped;
         st.probeHdr     = mPcc && mPccHdr;
-        st.probeShadows = (mPcc && mPccShadowed) || (mIfd && mIfdShadowed);   // either shadowed capture arm
+        st.probeShadows = mPcc && mPccShadowed;
         // RESOLVED, like the two above: the request is clamped to the probes
         // that exist, and it is only ACTED ON once a view has pushed a tracked
         // camera position (updateGiTracking), so this reads 0 for the frame
@@ -787,7 +727,6 @@ GiStatus OgreScene::giStatus() const {
         st.ifdProbes         = int(mIfdTotalProbes);
         st.ifdConverged      = mIfd && mIfdProbesDone >= mIfdTotalProbes;
         st.ifdProbesPerFrame = mIfd ? int(mIfdProbesPerFrame) : 0;
-        st.ifdSource         = (mIfd && st.ifdBound) ? mIfdSource : GiSource::Voxel;
         if (mIfd) {
             st.ifdMin = toV(mIfdVolumeOrigin);
             st.ifdMax = toV(mIfdVolumeOrigin + mIfdVolumeSize);
@@ -1461,8 +1400,8 @@ unsigned long long OgreScene::giEscapeSignature() const {
 //
 // (The MOVEMENT SCAN — ensureGiWalk/walkItems — is deliberately NOT folded in
 // with them, and the reason is a contract rather than an oversight: its
-// `mGiMovedBoxes` are per FRAME and are consumed by the probe budget and the
-// raster field inside `renderOneFrame`, while these two are read by the mirror
+// `mGiMovedBoxes` are per FRAME and are consumed by the probe budget inside
+// `renderOneFrame`, while these two are read by the mirror
 // BEFORE it, after the mirror has written this frame's transforms. One walk
 // serving both would have to answer at two different epochs in the same frame,
 // and the loser would be the probe budget's movers. Folding them needs the
@@ -2249,8 +2188,8 @@ void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
     // rebuilds the chain at this very camera, so a scroll rebuild spent here
     // would be torn down within the frame that paid for it.
             // THE MOVEMENT SCAN, UNDER A CHAIN (G1). Without it `mGiMovedBoxes` is only
-    // ever filled for a scene with a live probe budget or a converged raster
-    // field, so a plain-VCT cascade scene would have no idea WHERE anything
+    // ever filled for a scene with a live probe budget, so a plain-VCT cascade
+    // scene would have no idea WHERE anything
     // moved and every edit would mark the whole chain. It is epoch-gated like
     // every other consumer — a still scene runs no walk at all — and D4 makes
     // it the one walk the frame pays for. The walk itself records the boxes
@@ -2316,8 +2255,8 @@ void OgreScene::runItemWalk(bool shadow) {
     // measured 2.1 ms -> 0.4 ms at 5k items in Debug+ASan).
     //
     // THE GI HALF IS NOT HERE, and that is a correctness rule, not a taste:
-    // its consumers (the probe budget, the raster field's re-arm) run EARLIER
-    // in the frame, before any scene graph update, so they must see THIS
+    // its consumer (the probe budget) runs EARLIER in the frame, before any
+    // scene graph update, so it must see THIS
     // frame's transforms through getWorldAabbUpdated — ensureGiWalk, below.
     // Running it here instead made every mover stale the probes a frame late
     // and took gi.dynamic_probes, gi.budget and gi.probe_inputs with it.
@@ -2472,9 +2411,9 @@ void OgreScene::unindexItemNode(Node &n) {
 // hash lookup per item: measured 1.4 + 2.3 ms at 5k nodes in Debug+ASan.)
 //
 // GI half: records which GI items MOVED since the last scan, as the union of
-// each mover's old and new world AABB. Two consumers, both cheap paths: the
-// probe round-robin (a probe whose parallax shape contains a moved box goes to
-// the front of the sweep) and the raster field's re-arm. QUANTIZED to a 64th of
+// each mover's old and new world AABB. One consumer, a cheap path: the probe
+// round-robin (a probe whose parallax shape contains a moved box goes to the
+// front of the sweep). QUANTIZED to a 64th of
 // the lit volume (giAabbMoved): sub-voxel jitter must not read as movement for
 // ever. An item seen for the FIRST time is recorded, not reported — appearing
 // is not moving, and the arrival is already in the signature.
@@ -4897,9 +4836,7 @@ void OgreScene::buildPcc(const Ogre::Aabb &litVolume) {
 // Each of the three is set to THIS scene's arm, including null for an arm the
 // scene does not have: a scene without probes must not be shaded through the
 // probes of the scene that last built some (the old re-push could not fix that
-// case at all — its teardown only unbinds when it is the owner). The shared
-// raster CubemapToIfd parameter needs nothing here: updateIrradianceField
-// re-pushes it before every raster dispatch, for exactly this reason.
+// case at all — its teardown only unbinds when it is the owner).
 bool OgreScene::reassertGiBinding() {
     JAH_TRY {
         Ogre::HlmsPbs *pbs = hlmsPbs(mRoot);
@@ -5128,8 +5065,6 @@ void OgreScene::buildIrradianceField() {
         mIfdVolumeSize   = size;
         for (size_t i = 0; i < 3u; ++i) mIfdProbeCounts[i] = settings.mNumProbes[i];
         mIfdFollows = 0;
-        mIfdSource = GiSource::Voxel;
-        mIfdRasterFar = 0.0f;
         mIfdTotalProbes    = total;
         mIfdProbesDone     = 0u;
         mIfdProbesPerFrame = ifdProbesPerFrame(settings, mGi.updateBudget, total);
@@ -5158,16 +5093,6 @@ void OgreScene::buildIrradianceField() {
         // over the PREVIOUS converged atlas and so has nothing ugly to show.
         mIfd->update(mIfdTotalProbes);
         mIfdProbesDone = mIfdTotalProbes;
-        mIfdRigEpochSeen = mRigPoseEpoch;
-
-        // THE RASTER SOURCE (GI_UNIFIED_SPEC.md P3 "A2", spikes/rayon2 S3), switched
-        // in AFTER the voxel converge above so the atlases start from the voxel
-        // answer (IrradianceField::switchToRasterSource, ogre-patch 0050).
-        // Refused — logged, the field stays
-        // voxel-fed and giStatus says so — when the raster workspace is not
-        // staged or the media predates patch 0023 (world-unit depths would
-        // defeat the cage visibility test the field exists for).
-        if (resolveSource() == GiSource::Raster) applyRasterSource(settings, origin, size);
 
         // Our two scalars, and the two probe counts the shader's sky-visibility
         // threshold needs but upstream's own IrradianceField block does not
@@ -5197,22 +5122,7 @@ void OgreScene::buildIrradianceField() {
                 Ogre::StringConverter::toString(size) + ", intensity " +
                 std::to_string(mGi.ddgiIntensity) + ", ambient " +
                 std::to_string(mGi.ddgiAmbient) + ", re-converge " +
-                std::to_string(mIfdProbesPerFrame) + " probes/frame, source " +
-                (mIfdSource == GiSource::Raster ? "raster" : "voxel"));
-    } JAH_CATCH(mError, );
-}
-
-GiSource OgreScene::resolveSource() const {
-    // Auto is the tier's choice, and the tier's choice is voxel at EVERY tier
-    // (Epic included, by decree): raster is an Advanced opt-in, never a default.
-    return mGi.ddgiSource == GiSource::Raster ? GiSource::Raster : GiSource::Voxel;
-}
-
-void OgreScene::resetRasterFieldIntegration() {
-    if (!mIfd || mIfdSource != GiSource::Raster) return;
-    JAH_TRY {
-        mIfd->reset();
-        mIfdProbesDone = 0u;
+                std::to_string(mIfdProbesPerFrame) + " probes/frame");
     } JAH_CATCH(mError, );
 }
 
@@ -5222,93 +5132,7 @@ void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
     st.ambient    = std::max(0.0f, std::min(mGi.ddgiAmbient, 8.0f));
     st.numProbesY = float(numProbes[1]);
     st.numProbesZ = float(numProbes[2]);
-    if (mIfd && mIfdSource == GiSource::Raster) {
-        // THE RASTER ESCAPE VECTOR: a miss is stored at far x dot( |dir|,
-        // probesPerUnit ) (CubemapToIfd with patch 0023), so the shader's
-        // integrated threshold is dot( A(d), far x scale x probesPerUnit ).
-        const Ogre::Vector3 fieldSize = mIfd->getFieldSize();
-        const Ogre::Vector3 probesPerUnit(
-            float(numProbes[0]) / std::max(fieldSize.x, 1e-4f),
-            float(numProbes[1]) / std::max(fieldSize.y, 1e-4f),
-            float(numProbes[2]) / std::max(fieldSize.z, 1e-4f));
-        const Ogre::Vector3 esc = probesPerUnit * (mIfdRasterFar * kIfdRasterEscapeScale);
-        st.escapeX = esc.x; st.escapeY = esc.y; st.escapeZ = esc.z;
-        st.rasterSource = 1.0f;
-        // A raster probe SEES the sky (RQ 0 is inside the capture range), so
-        // with a sky bound the field already carries the sky's light and the
-        // ambient proxy would count it twice: off. With no sky the captures
-        // clear to black and the proxy is the only ambient there is: on.
-        if (mSceneMgr->getSky()) st.ambient = 0.0f;
-    }
     FogHlmsListener::setIfdState(mSceneMgr, st);
-}
-
-void OgreScene::applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
-                                  const Ogre::Vector3 &origin, const Ogre::Vector3 &size) {
-    (void)origin;
-    Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
-    const char *workspace = "JahshakaIfdRasterWorkspace";
-    if (!cm->hasWorkspaceDefinition(workspace)) {
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: raster probe source requested but JahshakaIfdRasterWorkspace is not "
-            "staged; the field stays voxel-fed");
-        return;
-    }
-    // Patch 0023's parameter must exist or the raster depths are in world units
-    // and the field leaks through everything (the refusal is deliberate).
-    if (!ifdRasterMediaHasInvFieldSize(mRoot)) {
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka GI: raster probe source requested but the staged IrradianceField media "
-            "predates ogre-patch 0023 (no invFieldSize on CubemapToIfd); the field stays "
-            "voxel-fed");
-        return;
-    }
-    // Shadowed captures follow the same P3b rule as the reflection probes:
-    // only when the PROBE shadow node exists (Ogre THROWS at workspace
-    // creation otherwise), and only when the quality dial asks for them. The
-    // raster field owns ONE workspace (IrradianceFieldRaster::createWorkspace,
-    // the camera moves per probe), not one per probe — it names the
-    // quarter-resolution probe node because its faces are 32 px
-    // (ClosestPow2(kIfdDepthRes*2)): the view's 2048 atlas would be 80 MB of
-    // resolution no face can observe.
-    const bool wantShadows = resolveToggle(mGi.probeShadows, mGi.quality == GiQuality::High);
-    mIfdShadowed = false;
-    if (wantShadows && cm->hasWorkspaceDefinition("JahshakaIfdRasterWorkspaceShadows") &&
-        cm->hasShadowNodeDefinition(OgreView::kProbeShadowNodeName)) {
-        workspace = "JahshakaIfdRasterWorkspaceShadows";
-        mIfdShadowed = true;
-    }
-
-    Ogre::RasterParams rp;
-    rp.mWorkspaceName = workspace;
-    rp.mPixelFormat   = Ogre::PFG_RGBA8_UNORM_SRGB;    // upstream's default; the atlas is LDR anyway
-    // Near: a sliver of the smallest probe cell (the probe sits in free space
-    // by construction, but a wall a hair away must still register). Far: twice
-    // the ENLARGED field's diagonal, so a miss reads as exactly far.
-    const Ogre::Vector3 cell(size.x / float(settings.mNumProbes[0]),
-                             size.y / float(settings.mNumProbes[1]),
-                             size.z / float(settings.mNumProbes[2]));
-    const float minCell = std::max(std::min(std::min(cell.x, cell.y), cell.z), 1e-3f);
-    rp.mCameraNear = std::max(0.005f * minCell, 1e-3f);
-    const Ogre::Vector3 enlarged = size + cell * 2.0f;
-    rp.mCameraFar  = std::max(enlarged.length() * kIfdRasterFarDiagonals, rp.mCameraNear * 10.0f);
-
-    mIfd->switchToRasterSource(rp);
-    mIfdSource    = GiSource::Raster;
-    mIfdRasterFar = rp.mCameraFar;
-    // The raster re-converge: the same dial, in raster probes. No thread-group
-    // floor here (the raster path renders whole probes), so the only clamp is
-    // the field itself. NOT converged inline: that is 8192 x 6 scene renders.
-    mIfdProbesDone     = 0u;
-    mIfdMinProbes      = 1u;
-    mIfdProbesPerFrame = ifdRasterProbesPerFrame(mGi.updateBudget, mIfdTotalProbes);
-    mIfdRigEpochSeen   = mRigPoseEpoch;
-}
-
-Ogre::uint32 OgreScene::ifdRasterProbesPerFrame(int updateBudget, Ogre::uint32 totalProbes) {
-    if (updateBudget <= 0 || totalProbes == 0u) return 0u;
-    const Ogre::uint64 want = Ogre::uint64(updateBudget) * kIfdRasterProbesPerBudget;
-    return Ogre::uint32(std::min<Ogre::uint64>(want, totalProbes));
 }
 
 void OgreScene::teardownIrradianceField() {
@@ -5316,9 +5140,6 @@ void OgreScene::teardownIrradianceField() {
     mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
     mIfdFollows = 0;
-    mIfdSource = GiSource::Voxel;
-    mIfdRasterFar = 0.0f;
-    mIfdShadowed = false;
     if (!mIfd) return;
     JAH_TRY {
         // Pointer identity, not sVctBindingOwner: the owner flag says who bound
@@ -5337,24 +5158,7 @@ void OgreScene::updateIrradianceField() {
     // all — which is also what keeps the zero-work-group abort unreachable on
     // this path.
     if (!mIfdProbesPerFrame) return;
-    const bool raster = mIfdSource == GiSource::Raster;
-    if (raster && mIfdProbesDone >= mIfdTotalProbes) {
-        // A CONVERGED RASTER FIELD RE-ARMS ON MOVEMENT — the whole point of
-        // the source: two signals, either one restarts the sweep. The movement
-        // scan (an item's AABB moved past sub-voxel jitter) is the same one the
-        // reflection probes read, run once per frame by whichever consumer
-        // comes first; the rig epoch is for what that scan cannot see — a
-        // skinned character posing in place keeps its bind-pose bounds. A
-        // sweep in flight is never restarted (that would starve the far
-        // probes); the epoch is re-read when the next one starts.
-        JAH_TRY { ensureGiWalk(); } JAH_CATCH(mError, );
-        const bool moved = !mGiMovedBoxes.empty() || mRigPoseEpoch != mIfdRigEpochSeen;
-        if (!moved) return;
-        mIfdRigEpochSeen = mRigPoseEpoch;
-        JAH_TRY { mIfd->reset(); } JAH_CATCH(mError, );
-        mIfdProbesDone = 0u;
-    }
-    if (mIfdProbesDone >= mIfdTotalProbes) return;              // converged (voxel)
+    if (mIfdProbesDone >= mIfdTotalProbes) return;              // converged
     JAH_TRY {
         const Ogre::uint32 remaining = mIfdTotalProbes - mIfdProbesDone;
         const Ogre::uint32 batch = std::min(mIfdProbesPerFrame, remaining);
@@ -5379,8 +5183,7 @@ void OgreScene::updateIrradianceField() {
             // THE FIELD'S PROGRESSIVE RE-INTEGRATION (ENGINE-5 item 2) — the
             // budget's turn, one batch of probes a frame, so `Sweep` is its
             // reason: nothing changed, this is the cache catching up.
-            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0,
-                                     raster ? "ifd.converge.raster" : "ifd.converge",
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "ifd.converge",
                                      mRoot->getRenderSystem());
             mIfd->update(batch);
             work.setUnits(batch);
@@ -5393,8 +5196,8 @@ void OgreScene::updateIrradianceField() {
 //
 // WHAT MOVES. The probes are a grid in the field's own volume, and every
 // consumer reads that volume LIVE — the pixel transform is rebuilt from it per
-// pass, the generation job's probe-to-voxel transform is re-derived from it and
-// from the voxel volume, a raster probe's camera is derived from it per capture.
+// pass, and the generation job's probe-to-voxel transform is re-derived from it
+// and from the voxel volume.
 // So "the field follows cascade 0" is two numbers (origin, size) plus a
 // re-integration; ogre-patch 0044 adds the setter that moves them without
 // destroying the atlases, which is what made the refusal in `rebuildVct`
@@ -5433,10 +5236,6 @@ void OgreScene::updateIrradianceField() {
 // radiance it gathers changed, so re-converging over the previous atlas shows
 // slightly stale bounce and never a wrong place — exactly what `refreshGiLighting`
 // does for a light drag.
-//
-// A RASTER-SOURCED field is progressive either way: converging it whole is
-// 8,192 probes x 6 scene renders in one frame. It re-sweeps from the new place
-// at its own budget, which is the source's own bargain (kIfdRasterProbesPerBudget).
 void OgreScene::followCascade0Field(GiStaleReason reason) {
     // A field whose initialize() threw is a non-null mIfd with no atlases;
     // mIfdTotalProbes is written only after a successful build, so it is the
@@ -5465,23 +5264,11 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
                            std::fabs(origin.x - mIfdVolumeOrigin.x) > tol ||
                            std::fabs(origin.y - mIfdVolumeOrigin.y) > tol ||
                            std::fabs(origin.z - mIfdVolumeOrigin.z) > tol;
-        const bool raster = mIfdSource == GiSource::Raster;
-        // A RASTER-FED field with a PAUSED budget cannot re-sweep, so moving it
-        // would show the old place's irradiance at the new placement for as
-        // long as the budget stays at 0 — the wrong-place picture this
-        // function refuses for the voxel source. It keeps its old placement
-        // (still correct where it is) and follows on the frame the budget
-        // returns, because `moved` is re-derived every call.
-        if (moved && raster && !mIfdProbesPerFrame) return;
         if (moved) {
             mIfd->setFieldVolume(origin, size);
             mIfdVolumeOrigin = origin;
             mIfdVolumeSize   = size;
             ++mIfdFollows;
-            // The raster escape threshold is probes-per-unit x the capture far
-            // plane, so it is a function of the field's SIZE — re-pushed only
-            // when that changes (a scroll never does; a table change does).
-            if (resized) pushIfdState(mIfdProbeCounts);
         }
 
         // RE-INTEGRATE. `reset()` rewinds the counter and keeps the atlases,
@@ -5489,11 +5276,10 @@ void OgreScene::followCascade0Field(GiStaleReason reason) {
         // correct (the whole case overwrites every probe in this dispatch).
         mIfd->reset();
         mIfdProbesDone   = 0u;
-        mIfdRigEpochSeen = mRigPoseEpoch;
         // ...and a PAUSED budget (updateBudget 0) converges inline for the same
         // reason the light path does: nothing would ever spend the counter down,
         // so a reset there would freeze the field half-updated for ever.
-        if (!raster && (moved || !mIfdProbesPerFrame)) {
+        if (moved || !mIfdProbesPerFrame) {
             monitor::CacheScope work(CacheKind::Gi, monitor::reasonOf(reason), 0,
                                      "ifd.follow", mRoot->getRenderSystem());
             mIfd->update(mIfdTotalProbes);
@@ -5587,9 +5373,9 @@ void OgreScene::teardownGi() {
 // The shadow-atlas rebuild's GI half (SHADOW_TOOLING_SPEC.md risk R3)
 // ---------------------------------------------------------------------------
 // A shadow-node DEFINITION cannot be deleted while anything instantiates it,
-// and the shadowed probe captures do: each PCC probe workspace and the raster
-// field's one workspace name JahshakaProbeShadowNode, so the probe arm holds live
-// CompositorShadowNodes exactly like a view's workspace does. Before this
+// and the shadowed probe captures do: each PCC probe workspace names
+// JahshakaProbeShadowNode, so the probe arm holds live CompositorShadowNodes
+// exactly like a view's workspace does. Before this
 // existed, changing the shadow resolution with hybrid GI at high quality left
 // those instances pointing at freed definition memory and the next frame died
 // inside Hlms::preparePassHashBase — reproduced as a SEGV by tests/shadow's r3
@@ -5604,30 +5390,19 @@ void OgreScene::teardownGi() {
 // it was the entire chain as well, N voxelisers from scratch in one frame, for
 // a change that says nothing whatever about where the geometry is.
 //
-// What actually holds the dying shadow-node DEFINITION is the WORKSPACES: one
-// per PCC probe and one for the raster field. Those are what must go, and they
-// are all that goes. The voxels, the cascade chain, the probe shapes, the
-// placement's depth fit and the field's converged atlases all survive; the
+// What actually holds the dying shadow-node DEFINITION is the WORKSPACES, one
+// per PCC probe. Those are what must go, and they are all that goes. The
+// voxels, the cascade chain, the probe shapes, the placement's depth fit and
+// the field's converged atlases all survive; the
 // probes' CONTENTS are staled instead, so the ordinary per-frame budget
 // re-captures them a few at a time rather than the placement capturing the
 // whole grid inline.
 bool OgreScene::dropGiForShadowRebuild() {
-    // BOTH shadowed arms hold live CompositorShadowNodes on the probe
-    // definition: the PCC probes (one workspace each) AND the raster
-    // IrradianceField (ONE workspace per field, kept for the field's whole
-    // life in IrradianceFieldRaster::mRenderWorkspace). VCT + DDGI-raster at
-    // High with no PCC reached here with mPcc null, returned false, and the
-    // atlas rebuild deleted the definition under the field's workspace: a
-    // use-after-free at the next raster sweep or at teardown
-    // (~CompositorNode reads mDefinition). Code review 2026-09-10.
-    const bool pccShadowed = mPcc && mPccShadowed;
-    const bool ifdShadowed = mIfd && mIfdShadowed;
-    if (!pccShadowed && !ifdShadowed) return false;
+    // The shadowed PCC probes hold live CompositorShadowNodes on the probe
+    // definition, one workspace each.
+    if (!mPcc || !mPccShadowed) return false;
     JAH_TRY {
-        if (pccShadowed)
-            for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->destroyWorkspace();
-        if (ifdShadowed)
-            if (Ogre::IrradianceFieldRaster *r = mIfd->getRasterSource()) r->destroyWorkspace();
+        for (Ogre::CubemapProbe *p : mPcc->getProbes()) p->destroyWorkspace();
     } JAH_CATCH(mError, false);
     return true;
 }
@@ -5658,12 +5433,6 @@ void OgreScene::recreateGiAfterShadowRebuild() {
                 mPcc->updateAllDirtyProbes();
                 mPlacementCapturesThisFrame += int(mPcc->getProbes().size());
             }
-        }
-        if (mIfd && mIfdShadowed) {
-            if (Ogre::IrradianceFieldRaster *r = mIfd->getRasterSource()) r->createWorkspace();
-            // The field's atlases survived; its sweep restarts so the new
-            // workspace re-renders the probes it is responsible for.
-            resetRasterFieldIntegration();
         }
     } JAH_CATCH(mError, );
 }

@@ -459,9 +459,8 @@ std::vector<std::string> OgreScene::boneNames(NodeId id) const {
 }
 
 bool OgreScene::setBonePoses(NodeId id, const BonePose *poses, size_t count) {
-    // The lamp-map cache, per node (its caster scan), always — and the raster
-    // irradiance field's scene-wide epoch only for a STILL rig (noteRigPosed).
-    noteRigPosed(id);
+    // The lamp-map cache, per node (its caster scan).
+    noteNodePosed(id);
 
     // A FOLLOWER's `skeletonOf` IS the master's instance, so a pose written here
     // would silently move the whole character (AVATAR_RIG_PERF_SPEC §3.3).

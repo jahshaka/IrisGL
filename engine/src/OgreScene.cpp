@@ -147,18 +147,12 @@ void OgreScene::setAmbientSh(const float sh[27]) {
         std::memcpy(mLastAmbientSh, sh, sizeof mLastAmbientSh);
         mAmbientShKnown = true;
         staleProbeGrid(GiStaleReason::Ambient);          // a no-op before a grid exists
-        // ...AND A RASTER-SOURCED IRRADIANCE FIELD OWES A RE-INTEGRATION
-        // (round-2 review F6). A raster probe RENDERS the scene, so the ambient
-        // is baked into the six faces it captured: the field keeps yesterday's
-        // sky until something re-integrates it. It used to ride the full GI
-        // re-solve a Sky Light edit fired through the mirror's light signature
-        // — and that re-solve is exactly what audit A F3 removed, so the reset
-        // has to be here, where the ambient actually changes. Progressive, over
-        // the converged atlas: reset() only re-arms the counter, so nothing
-        // flashes, and a paused budget keeps its previous answer (the same deal
-        // the light path makes for a raster field, which cannot converge
-        // inline: 8192 x 6 scene renders in one frame).
-        resetRasterFieldIntegration();
+        // (The irradiance field owes nothing here: a VOXEL-fed probe cone-traces
+        // the volume live, so the new ambient reaches it on its next integration
+        // without a re-arm. The re-arm that used to stand here existed for the
+        // RASTERISED probe source, whose probes RENDER the scene and therefore
+        // baked the old ambient into their captured faces; that source was
+        // deleted 2026-09-17, lane FIELD-RASTER-CRUD.)
     }
     JAH_TRY {
         // HlmsPbs does NOT evaluate the SH basis on the world normal. It uses

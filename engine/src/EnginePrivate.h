@@ -347,8 +347,7 @@ constexpr Ogre::uint32 kDistortionBit  = 1u << 4;
 // bit cannot (the any-bit test above), so a mover simply stops carrying the bit
 // every capture pass asks for:
 //   * OUT, with no mask change anywhere: the reflection-probe faces
-//     (`visibility_mask 0x1` in JahshakaPcc.compositor and
-//     JahshakaIfdRaster.compositor), the PROBE-kind shadow node
+//     (`visibility_mask 0x1` in JahshakaPcc.compositor), the PROBE-kind shadow node
 //     (shadowCasterChannels), and — through the flags, not through a mask —
 //     Instant Radiosity's trace and every GI gather that keys on
 //     kGiGeometryBit, which a movable item never carries either (it is LIT by
@@ -378,8 +377,8 @@ constexpr Ogre::uint32 kMovableBit     = 1u << 5;
 //     thumbnail/preview shapes. A user's picture has the sun in it.
 //   * IN, explicitly: the planar reflection pass asks for this bit beside
 //     kVisibleBit|kMovableBit (OgrePlanar.cpp) — a mirror shows the sun.
-//   * OUT, with no mask change anywhere: the reflection-probe faces and the
-//     raster irradiance-field faces (`visibility_mask 0x1`), and every shadow
+//   * OUT, with no mask change anywhere: the reflection-probe faces
+//     (`visibility_mask 0x1`) and every shadow
 //     node (shadowCasterChannels). A probe that captured the disc would paint
 //     a SECOND sun highlight on every probe-lit glossy surface, on top of the
 //     directional light's own specular.
@@ -403,8 +402,8 @@ constexpr Ogre::uint32 kSunDiscBit     = 1u << 6;
 // wires and icons, the gizmo, the selection shell, the GI volume boxes — and a
 // view may mask it out per pass (ChainDesc::helpers). kBackdropBit is the other
 // half of the old meaning, unchanged in every capture pass:
-//   * OUT, with no mask change anywhere: the reflection-probe faces, the raster
-//     irradiance-field faces (`visibility_mask 0x1`), every shadow node
+//   * OUT, with no mask change anywhere: the reflection-probe faces
+//     (`visibility_mask 0x1`), every shadow node
 //     (shadowCasterChannels), and kGiGeometryBit (itemVisibilityFlags never
 //     grants it to a helper of either kind).
 //   * IN, by the all-ones default: the main chain and the thumbnail/preview
@@ -440,7 +439,7 @@ constexpr unsigned     kMaxShadowMaps     = 16u;
 /// kProbeShadowNodeName — the numbers behind them are at its declaration).
 /// Resolution: a quarter of the main atlas, floored at 256 (the engine's own
 /// floor) and capped at 512 = the largest reflection-probe face (OgreScene::
-/// buildPcc's quality table; a raster irradiance-field face is 32 px). A probe
+/// buildPcc's quality table). A probe
 /// face is consumed through the IBL roughness mip chain, so a shadow edge
 /// sharper than the face itself is unobservable by construction — measured on
 /// the Showroom sample's reflections: 2048 and 1024 PSSM-only captures are
@@ -2063,13 +2062,6 @@ public:
     /// Defaults to GiParams' defaults so a scene that never pushes state still
     /// reads sane values.
     struct IfdState {
-        /// THE ESCAPE VECTOR FOR THE RASTER SOURCE (spikes/rayon2 S3), jahIfd2.xyz, and
-        /// jahIfd2.w = 1 while it applies. The voxel path's threshold stays the
-        /// shader's own expression (byte-identical); a raster field stores
-        /// misses at camera-far x dot(|dir|, probesPerUnit), so the host sends
-        /// far x scale x probesPerUnit and the shader takes dot(A(d), this).
-        float escapeX = 0.0f, escapeY = 0.0f, escapeZ = 0.0f;
-        float rasterSource = 0.0f;
         /// GiParams::ddgiIntensity, clamped.
         float intensity = 1.0f;
         /// GiParams::ddgiAmbient, clamped. 0 removes the ambient term through a
@@ -2752,15 +2744,14 @@ public:
     bool dropPlanarForShadowRebuild();
     /// The SAME contract for the hybrid's reflection-probe arm, and the fix for
     /// SHADOW_TOOLING_SPEC.md risk R3: when the probe captures are SHADOWED,
-    /// every probe workspace (and the raster field's one) instantiates
-    /// JahshakaProbeShadowNode too, so deleting
+    /// every probe workspace instantiates JahshakaProbeShadowNode too, so deleting
     /// the definition under them leaves live CompositorShadowNodes pointing at
     /// freed memory. Reproduced as a SEGV in Hlms::preparePassHashBase
     /// (tests/shadow, mode r3) before this existed. Returns true when the arm
     /// was dropped and the caller must call the recreate below.
     /// THE SHADOW-ATLAS REBUILD'S GI HALF (PHOTON_SPEC G2). Drops exactly the
-    /// WORKSPACES that instantiate the probe shadow node — each PCC probe's and
-    /// the raster field's — and nothing else. The voxels, the cascade chain and
+    /// WORKSPACES that instantiate the probe shadow node — each PCC probe's —
+    /// and nothing else. The voxels, the cascade chain and
     /// the probes' own shapes survive: a shadow atlas growing on the 3rd, 5th or
     /// 9th casting lamp is shadow bookkeeping, not a statement about the scene's
     /// geometry. Returns false when this scene holds no such workspace.
@@ -2774,10 +2765,7 @@ public:
     /// the shadow node of `kind` — each planar budget slot (Reflect) and each
     /// reflection probe whose captures are shadowed (Probe). A view's own node
     /// belongs to the view (OgreView::shadowNodeInstance), so View appends
-    /// nothing here. Empty when the arm is off or unshadowed. The raster
-    /// irradiance field's one workspace is NOT reachable (IrradianceFieldRaster
-    /// keeps it private, no accessor at the pin), so its lamp maps stay on
-    /// Ogre's dynamic path — correct, uncached.
+    /// nothing here. Empty when the arm is off or unshadowed.
     void shadowWorkspaces(ShadowNodeKind kind,
                           std::vector<Ogre::CompositorWorkspace *> &out) const;
     /// EVERY live workspace this scene privately owns — each planar mirror
@@ -2876,8 +2864,8 @@ public:
     /// immediately (one empty() test) when nothing is parked, which is every
     /// frame after a scene has finished loading.
     void settleTextureResidency();
-    /// THE GI MOVEMENT SCAN, once per frame, run by its first consumer (the
-    /// probe budget / the raster re-arm) — which is EARLIER in the frame than
+    /// THE GI MOVEMENT SCAN, once per frame, run by its consumer (the
+    /// probe budget) — which is EARLIER in the frame than
     /// any scene graph update, so it reads updated bounds. Same pass, same
     /// per-node records as the caster walk (walkItems).
     void ensureGiWalk();
@@ -2894,12 +2882,9 @@ public:
     void noteShadowShapeChanged(MaterialId mat);
     /// A skinned node's pose moved (a clip time, a pushed bone pose) — the one
     /// shape change an AABB scan cannot see (Items keep bind-pose bounds).
-    /// PER NODE, not the scene's mRigPoseEpoch: one animating character must
-    /// not re-dirty the lamps near every other rig.
+    /// PER NODE: one animating character must not re-dirty the lamps near every
+    /// other rig.
     void noteNodePosed(NodeId id);
-    /// Both halves of "a rig was posed": the per-node lamp-map epoch always, the
-    /// scene-wide mRigPoseEpoch only for a STILL rig (see the definition).
-    void noteRigPosed(NodeId id);
     /// What the per-frame walks cost on the last frame, in microseconds
     /// (steady clock): the lamp-map cache's own half (collectShadowCacheFrame:
     /// the lamps and the change-to-lamp test), the caster walk (runItemWalk)
@@ -3974,19 +3959,7 @@ private:
     static constexpr int kAtRestSweeps = 3;
     /// What the last light tick actually spent (GiStatus::chainSweeps).
     int mGiChainSweeps = 0;
-    /// Re-arms a RASTER-sourced irradiance field's integration (its probes
-    /// RENDER the scene, so a changed ambient is baked into the faces they
-    /// captured). Progressive over the converged atlas — nothing flashes — and
-    /// a no-op for a voxel-fed field, which reads the volume live.
-    void resetRasterFieldIntegration();
-    /// spikes/rayon2 S3 — the raster probe source. resolveSource: GiParams::ddgiSource
-    /// with Auto = Voxel at every tier. applyRasterSource: re-sources a just
-    /// converged voxel field to the raster workspace in place (refused, logged,
-    /// when the workspace or patch 0023's media is missing). pushIfdState: the
-    /// pass-buffer block (JahIfd_piece_ps.any) for the current source.
-    GiSource      resolveSource() const;
-    void          applyRasterSource(const Ogre::IrradianceFieldSettings &settings,
-                                    const Ogre::Vector3 &origin, const Ogre::Vector3 &size);
+    /// The irradiance field's pass-buffer block (JahIfd_piece_ps.any).
     void          pushIfdState(const Ogre::uint32 numProbes[3]);
     /// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1). Called by the
     /// cascade scheduler whenever cascade 0 has been re-placed or re-voxelised:
@@ -3997,7 +3970,6 @@ private:
     /// progressively over the converged atlas when only the voxels changed.
     /// A no-op in the single-volume arm, with no field, or with the toggle off.
     void          followCascade0Field(GiStaleReason reason);
-    static Ogre::uint32 ifdRasterProbesPerFrame(int updateBudget, Ogre::uint32 totalProbes);
     /// The movement quantum for one item's world AABB (a 64th of its own
     /// largest extent), and "did this AABB move by at least that much?". Shared
     /// by giGeometrySignature and walkItems so the mirror's debounce and
@@ -4261,15 +4233,6 @@ private:
     /// which also retires the slicing hazard of holding a derived type through
     /// a non-virtual ~IrradianceField.
     Ogre::IrradianceField            *mIfd          = nullptr;
-    /// What is feeding the probes (GiStatus::ifdSource): Raster only once the
-    /// field has been re-sourced to the raster workspace, Voxel otherwise.
-    GiSource                          mIfdSource    = GiSource::Voxel;
-    /// The raster camera's far plane in world units (misses store exactly it,
-    /// scaled per axis by probes-per-unit); 0 while the source is voxel.
-    float                             mIfdRasterFar = 0.0f;
-    /// The rig-activity epoch the raster field last converged against
-    /// (mRigPoseEpoch below moves whenever a pose or clip time is pushed).
-    unsigned long long                mIfdRigEpochSeen = 0;
     /// Convergence bookkeeping. `IrradianceField` counts processed probes
     /// internally and exposes nothing, so the engine keeps its own count —
     /// which it needs anyway to know when a re-converge has finished and to
@@ -4290,8 +4253,7 @@ private:
     /// not — and so giStatus can report where the field actually is.
     Ogre::Vector3                     mIfdVolumeOrigin = Ogre::Vector3::ZERO;
     Ogre::Vector3                     mIfdVolumeSize   = Ogre::Vector3::ZERO;
-    /// The field's probe counts, kept because the raster escape scale in
-    /// pushIfdState is derived from them and the volume can move without a
+    /// The field's probe counts, kept because the volume can move without a
     /// rebuild (E1).
     Ogre::uint32                      mIfdProbeCounts[3] = { 0u, 0u, 0u };
     /// How many times the field has been re-placed onto cascade 0 since the
@@ -4490,9 +4452,6 @@ private:
     /// Non-zero with no grid at all means every probe saw nothing, which is a
     /// built state; zero with no grid in the hybrid means the build failed.
     int  mProbesDropped = 0;
-    /// The raster IrradianceField's one workspace names the probe shadow node
-    /// (dropGiForShadowRebuild must tear the field down before an atlas rebuild).
-    bool mIfdShadowed = false;
     /// THE PROBE CACHE'S STALE SET (FIX WAVE B2; ENGINE_CACHE_POLICY_SPEC P1).
     /// One entry per probe, rebuilt with the grid. `sweepPending` is true while
     /// the probe is STALE — owes a capture because an input changed
@@ -4547,8 +4506,7 @@ private:
     /// (probeSeesItem) but that is not GI geometry — tracked by the same scan
     /// in their own record (Node::scan.probeBox), so they stale the probes when
     /// they move or arrive and never enter mGiMovedBoxes (the dynamic
-    /// reservation, the raster field's re-arm) nor giGeometrySignature (the
-    /// voxel re-solve).
+    /// reservation) nor giGeometrySignature (the voxel re-solve).
     bool mProbeOnlyChanged = false;
     /// FRAMES SINCE THE LAST FRAME THAT SAW A MOVED BOX (DRAG-1, REFLECT F3).
     /// A probe capture is a 512-square six-face HDR photograph of the room with
@@ -4611,15 +4569,6 @@ private:
     /// The movement scan has run at least once: before that, every item is
     /// seen for the first time and none of them is an arrival.
     bool mGiScannedOnce = false;
-    /// THE STILL RIGS' POSE EPOCH. Bumped by setBonePoses and by setClipStates
-    /// when a clip's time or enable changed — for a node that is NOT movable
-    /// (noteRigPosed): a rig posed in place moves no AABB (Items keep their
-    /// bind-pose bounds), so the movement scan cannot see it, and this is what
-    /// the raster irradiance field re-arms on instead. A MOVABLE rig is not in
-    /// a probe face (kMovableBit), so re-converging the field for it would be
-    /// 8192 probes of work for a picture that cannot contain it; its pose still
-    /// dirties the lamp maps around it through the per-node epoch.
-    unsigned long long mRigPoseEpoch = 0;
     /// Bumped whenever anything the GI arms hold RAW POINTERS INTO may have
     /// died — every invalidateGiCaches call site (B4). The reuse arm refuses to
     /// re-run an existing voxelizer across a bump, which is what keeps the
@@ -4778,8 +4727,7 @@ public:
     static constexpr const char *kReflectShadowNodeName = "JahshakaReflectShadowNode";
     /// The THIRD shadow node: REFLECTION-PROBE CAPTURES ONLY — the PCC probe
     /// workspace (media/Hlms/Jahshaka/JahshakaPcc.compositor, the `Shadows`
-    /// twin) and the irradiance-field raster workspace (JahshakaIfdRaster
-    /// .compositor). The same PSSM + focused layout as the main atlas at a
+    /// twin). The same PSSM + focused layout as the main atlas at a
     /// QUARTER of its resolution (probeShadowResolution(): 512 at the High
     /// tier's 2048), the derived focused-map count capped at four, and a
     /// scratch cube of R/2 instead of a fixed 1024 (kProbeShadowMaxResolution /

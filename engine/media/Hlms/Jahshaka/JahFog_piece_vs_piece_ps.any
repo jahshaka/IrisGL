@@ -59,8 +59,7 @@
 //                                          carry a generated piece)
 //   [12..15] the DDGI block                (declared only while an
 //                                          IrradianceField is bound)
-//   [16..19] the DDGI raster block         (   ditto   )
-//   [20..23] the sky's environment slot    (declared only by a pass that
+//   [16..19] the sky's environment slot    (declared only by a pass that
 //                                          claimed the sky's extra texture
 //                                          slot -- ogre-patch 0048)
 // A material with a piece therefore has to declare PADDING for the fog fields
@@ -92,14 +91,10 @@
 								// Y and Z probe counts (upstream's own block carries
 								// only Nx and Nx*Ny, and the visibility threshold
 								// needs all three axes)
-		float4 jahIfd2;			// JahIfd_piece_ps.any: xyz = the RASTER source's escape
-								// vector (camera far x probes per unit, calibrated),
-								// w = 1 while the probes are raster-fed, 0 for voxel
 	@end
 	@property( jah_sky_env_probe )
 		@property( !irradiance_field )
 			float4 jahIfdUnused;
-			float4 jahIfd2Unused;
 		@end
 		float4 jahSky;			// ogre-patch 0048 (lane SKY-FALLBACK-1): x = the sky
 								// cube's gain (the Sky Light's), y = that cube's own
