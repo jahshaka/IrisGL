@@ -857,6 +857,11 @@ private:
     /// string (empty = none bound: no controller, or an unfocused session).
     std::string mProfilePath[2];
     std::string mProfileSaid[2];   ///< what was last LOGGED, so a change is once
+    /// Does the profile need re-reading? Set at the attach and by the runtime's
+    /// own XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED event, never per
+    /// frame: the read is a call into the runtime, and the answer changes when
+    /// a wearer picks a controller up.
+    bool        mProfilesDirty = true;
     /// How many suggested-binding blocks were offered, and how many the runtime
     /// took (VrStatus's note). Counted once, in createActions.
     unsigned    mBindingProfiles = 0u, mBindingProfilesAccepted = 0u;
@@ -1311,6 +1316,7 @@ void VrSession::createActions() {
         }
     }
     mHandActions = true;
+    mProfilesDirty = true;
     vrLog("hand input: the action set is attached (%u of %u profiles bound)",
           mBindingProfilesAccepted, mBindingProfiles);
 }
@@ -1452,7 +1458,17 @@ void VrSession::locateHands(XrTime displayTime) {
 void VrSession::readInput(XrTime displayTime, bool controllers) {
     for (int h = 0; h < 2; ++h) mInput[h] = VrHandState();
     if (mSession == XR_NULL_HANDLE) return;
-    if (mHandActions) readProfiles();
+    // ...AND WITH A BOUNDED RETRY WHILE NOTHING IS BOUND AT ALL. The event is
+    // the cheap path and the FOCUSED transition the belt; this is the last one,
+    // for a runtime that sends neither and simply starts answering: once a
+    // second, only while both hands are unbound, and never once one is.
+    if (mHandActions) {
+        const bool nothingBound = mProfilePath[0].empty() && mProfilePath[1].empty();
+        if (mProfilesDirty || (nothingBound && (mFrames % 90ull) == 0ull)) {
+            mProfilesDirty = false;
+            readProfiles();
+        }
+    }
 
     auto toWorld = [&](const XrPosef &pose, VrPose &out) {
         const Ogre::Vector3 p = mOriginPos +
@@ -1743,6 +1759,7 @@ void VrSession::destroyActions() {
         mProfilePath[h].clear();
         mProfileSaid[h].clear();
     }
+    mProfilesDirty = true;
     mBindingProfiles = mBindingProfilesAccepted = 0u;
     if (mActionSet != XR_NULL_HANDLE) xrDestroyActionSet(mActionSet);
     mActionSet = XR_NULL_HANDLE;
@@ -1769,7 +1786,17 @@ void VrSession::applyState(XrSessionState s) {
         }
         case XR_SESSION_STATE_SYNCHRONIZED: mState = VrState::Synchronized; vrLog("session state: SYNCHRONIZED"); break;
         case XR_SESSION_STATE_VISIBLE:      mState = VrState::Visible; vrLog("session state: VISIBLE"); break;
-        case XR_SESSION_STATE_FOCUSED:      mState = VrState::Focused; vrLog("session state: FOCUSED"); break;
+        case XR_SESSION_STATE_FOCUSED:
+            mState = VrState::Focused;
+            // A FOCUSED SESSION IS WHERE INPUT LIVES, so the profile is worth
+            // asking for again here as well as on the runtime's own event: a
+            // runtime that binds without ever sending
+            // XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED would otherwise
+            // leave us believing nothing is bound (and the injection refusal
+            // rule, which reads that answer, is a SAFETY rule).
+            mProfilesDirty = true;
+            vrLog("session state: FOCUSED");
+            break;
         case XR_SESSION_STATE_STOPPING:
             vrLog("session state: STOPPING (the RUNTIME asked; ending the XR session)");
             mState = VrState::Stopping;
@@ -1817,6 +1844,16 @@ void VrSession::pollEvents() {
             mState = VrState::Lost;
             mRunning = false;
             mEnded = true;
+        } else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+            // THE WEARER PICKED SOMETHING UP, OR PUT IT DOWN (phase 4b stage
+            // 1). The runtime has rebound one or both hands, and the profile
+            // is what decides which model a host draws — so it is read HERE,
+            // on the event, and not once a frame: `xrGetCurrentInteractionProfile`
+            // is a call into the runtime (an IPC round trip on Monado), and two
+            // of those per frame at ninety frames a second would be paid
+            // forever for an answer that changes when somebody moves their
+            // hands. Read once at the attach, then on this event.
+            mProfilesDirty = true;
         } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             // THE RUNTIME RECENTRED THE ROOM UNDER THE WEARER (the Quest's
             // long-press, a guardian re-setup, a runtime that re-origins a
