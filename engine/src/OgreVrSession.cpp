@@ -1510,8 +1510,14 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
         return latch;
     };
 
+    // WHOSE FRAME IS IT? Focus is a property of the SESSION, not of a hand,
+    // but it is reported per sample because that is where a host reads it: a
+    // gesture is cancelled by the sample that lost focus, and by then the
+    // session's state may have moved on again.
+    const bool focused = mState == VrState::Focused;
     for (int h = 0; h < 2; ++h) {
         VrHandState &in = mInput[h];
+        in.focused = focused;
         if (controllers) {
             if (mAimSpace[h] != XR_NULL_HANDLE) {
                 XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };

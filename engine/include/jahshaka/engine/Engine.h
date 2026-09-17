@@ -1656,8 +1656,12 @@ public:
     /// this); the engine only composes what it is given with the runtime's
     /// pose, and `vrStatus()` reports both halves back.
     ///
-    /// Takes effect on the next located frame. Ignored — harmlessly — when no
-    /// session is running; a host sets it after beginVrSession().
+    /// Takes effect on the next located frame. A NO-OP WITH NO SESSION, and
+    /// not remembered either: where the wearer stands is a property of the RUN
+    /// a host started, so a call made BEFORE `beginVrSession` is dropped
+    /// rather than inherited by whatever session comes next (a host sets it
+    /// right after beginVrSession, and reads it back from `vrStatus().origin`
+    /// — the engine's rig is the one truth).
     virtual void setVrOrigin(const Vec3 &position, float yawDegrees) = 0;
     /// Which on-screen (or offscreen) View shows the mirror. Null clears it.
     /// Takes effect on the next frame; the View keeps its own picture

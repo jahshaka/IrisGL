@@ -1314,7 +1314,14 @@ VrStatus OgreEngine::vrStatus() const {
         // is what lets the gesture logic above this boundary be written once
         // and tested with no runtime (VR_INPUT_SPEC §2.4, §10).
         for (unsigned h = 0; h < VrHandCount; ++h) {
-            if (!mVrInjected[h]) continue;
+            if (!mVrInjected[h]) {
+                // NOTHING IS FOCUSED WHEN THERE IS NO SESSION — the field's
+                // `true` default belongs to an injected sample (a test that
+                // says nothing about focus means the wearer was there), not to
+                // a hand nobody is reporting.
+                s.input[h].focused = false;
+                continue;
+            }
             s.input[h] = mVrInject[h];
             s.hands[h] = mVrInject[h].grip;   // `input[i].grip` IS `hands[i]`
         }

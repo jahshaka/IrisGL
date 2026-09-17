@@ -2810,7 +2810,30 @@ struct VrHandState {
     /// wearer's — a smoke in a headset that ever sees this true is looking at a
     /// stale injection, which is exactly what the refusal rule prevents.
     bool   fromInjection = false;
+    /// DID THE APPLICATION HAVE INPUT FOCUS when this sample was taken?
+    ///
+    /// The runtime takes focus away whenever its own dashboard comes up, the
+    /// headset comes off the head or another application is talking to the
+    /// wearer, and it does not tell the hand: `xrSyncActions` returns
+    /// XR_SESSION_NOT_FOCUSED (a SUCCESS code), every action goes inactive and
+    /// every control reads its zero. A host that read that as "the trigger was
+    /// released" would COMMIT a gesture the wearer never finished — so the
+    /// distinction is reported, and a gesture in flight is CANCELLED rather
+    /// than committed when this goes false (VR_INPUT_SPEC §5.5).
+    ///
+    /// True when the session is FOCUSED, and true by default on an injected
+    /// sample (a test that says nothing about focus means "the wearer was
+    /// there"); a test drives the cancel by injecting it false. LAST in the
+    /// struct on purpose: it was added after the contract the two phase-4b
+    /// lanes built to, so nothing that initialises the struct positionally
+    /// moves.
+    bool   focused = true;
 };
+
+/// The engine's own `VrHandState` exists — what the Studio side's guarded
+/// mirror of this struct (src/modules/vr/vrinteraction.h) compiles out
+/// against, so the two halves of phase 4b stage 1 never define it twice.
+#define JAH_ENGINE_HAS_VRHANDSTATE 1
 
 /// THE CONTROLLER'S RAY AND ITS HIT, AS THE HOST COMPUTED THEM
 /// (Engine::setVrRay; VR_INPUT_SPEC §3). The engine DRAWS this and nothing
