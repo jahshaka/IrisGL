@@ -3598,7 +3598,10 @@ static const float kCascadeSubVoxelFactor = 0.5f;
 //   kCascadeLodCellFraction = 1/256
 //
 // AND WHAT THAT NUMBER IS NOT, measured on two further fixtures (ATOM-3-FIX,
-// spikes/atom-3/FINDINGS.md §6): it is NOT a picture bound. Take the same
+// spikes/atom-3/FINDINGS.md §6): it is NOT a picture bound (measured by capping
+// a WHOLE cascade at a level; fractions between the fixture's item scales were
+// not run — an extrapolation that changes nothing, since such a fraction would
+// forfeit most of the saving). Take the same
 // protocol to an AVENUE — 353 imported instances at three scales and mixed
 // distances over 90 m of depth, as a thin knot tube and again as ATOM-3's
 // convex sphere — and the outermost cascade becomes the only cover of what the

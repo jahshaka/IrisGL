@@ -692,6 +692,12 @@ void maskOutHelpers(Ogre::CompositorNodeDef *n, Ogre::uint32 drop) {
 /// function and never sees this sweep, so it keeps the pin's 0 and takes the
 /// exact level its own camera asks for. That is the whole point of the band
 /// being per pass: @see CompositorPassSceneDef::mLodHysteresis.
+// A SILENT INVARIANT (the Fable read at merge): the all-or-none sweep is right
+// only while every PASS_SCENE in the view's node renders into a FULL-SIZE
+// target — the LOD value reads the pass's viewport height, so a half-res
+// scene pass in this node would compute a different value under the same band
+// and re-create the cross-pass defect INSIDE the node. All seven pass sites
+// are full-size today (the half-res textures are compute/quad targets only).
 void applyLodHysteresis(Ogre::CompositorNodeDef *n, float band) {
     const size_t targets = n->getNumTargetPasses();
     for (size_t t = 0; t < targets; ++t) {
