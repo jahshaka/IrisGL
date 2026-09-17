@@ -416,16 +416,59 @@
 	//
 	// OUTSIDE IT THE FIELD SAYS NOTHING. Not "says something weaker": the
 	// volume is what was voxelised and what the probes integrate, and a surface
-	// beyond it has no probe on its own side at all -- the cage is clamped, so
-	// it is being handed the border probes' irradiance, which is the leak this
-	// fix exists for. The roll-off is half a probe spacing wide and lives
-	// INSIDE the authored box, so the field reaches zero AT the boundary and
-	// everything past it gets the fallback below. Half a spacing keeps the
-	// roll-off inside the shell where the cage is already half made of padding
-	// probes; measured, it moves no interior pixel of the gate scenes.
+	// far beyond it has no probe on its own side at all -- the cage is clamped,
+	// so it is being handed the border probes' irradiance, which is the leak
+	// this fix exists for.
+	//
+	// WHERE THE ROLL-OFF SITS, AND WHY IT MOVED OUTWARD (SQUARE-1, 2026-09-17,
+	// measured; the owner's report was "a square lighting effect around the
+	// scene in an empty scene, not centred on the scene").
+	//
+	// The roll-off used to be half a probe spacing wide and to live INSIDE the
+	// authored box, so the field reached zero AT the face. That is the wrong
+	// side, and the reason is what the field hands over TO. Under a cascade
+	// chain the field rides cascade 0, so the face is also the chain's own hop,
+	// and the cone term is NOT continuous across it: measured on the default
+	// scene (flat floor, straight down from 4 m, Epic, plain grade) the cones
+	// alone read 110/255 outside cascade 0 and 98-100 inside it, an 11/255 step
+	// at the face that has nothing to do with the field. With the ramp inside
+	// the box, every pixel in that last half spacing was handed the INSIDE
+	// cone value while the field was still fading up -- so the profile fell
+	// off the outside value (110) to the inside cone value (101), then climbed
+	// back to the field's 107 over half a spacing. A DARK LINE along the face,
+	// one probe spacing wide, 7-9/255 deep on the coarse axes: the sharpest
+	// feature of the square and the one an eye finds.
+	//
+	// So the ramp now sits OUTSIDE the authored face, over the padding shell
+	// `initialize()` adds: it enlarges the volume by one probe block per side
+	// before building the world->grid transform, so on the LOW faces the
+	// lattice reaches ~0.89-0.97 grid units beyond the authored corner and a
+	// cage taken half a unit outside it is made of real, traced probes with no
+	// clamp active at all. Upstream's padding is ASYMMETRIC (the same asymmetry
+	// the front-weight fade below records): probe N-1 sits ~0.11 units INSIDE
+	// the high authored face, so on that side the outward ramp rides the
+	// clamped border probes -- an extrapolation, but a bounded one that the
+	// ramp is already fading out, and measured below to be monotone.
+	//
+	// The field is therefore at FULL confidence at the face and fades to
+	// nothing half a probe spacing outside it, and the hand-off to the cone
+	// term is a RAMP in one direction instead of a notch: measured
+	// 107 -> 110 monotonically over that half spacing on both the low and the
+	// high face, with the dark line gone.
+	//
+	// IT HIDES THE EDGE; IT DOES NOT EQUALISE THE INTEGRALS. The field
+	// integrates cascade 0 and throws the escape away, the cones integrate the
+	// whole chain and take the sky as their escape, and the two answers differ
+	// by a few 8-bit levels on an open floor (4-6/255 here) whatever the ramp
+	// does. The fix for THAT is one voxel reader -- the field integrating the
+	// same chain the cones walk (ENGINE_V2_SPEC part 2 / the render audit's
+	// synthesis phase 2.1) -- and it is not this file.
 	float3 ifdQ = ifdProbeCounts / ( ifdProbeCounts + float3( 2.0, 2.0, 2.0 ) );
 	float3 ifdInside = min( ifdGridPos - ifdQ, ( ifdProbeCounts - ifdQ ) - ifdGridPos );
-	float3 ifdAxisFade = saturate( ifdInside * 2.0 );
+	// `ifdInside` is the signed distance to the nearest authored face in PROBE
+	// SPACINGS, positive inside. 1 at the face, 0 one ramp width outside it.
+	const float ifdEdgeRamp = 0.5;			// probe spacings, outside the face
+	float3 ifdAxisFade = saturate( ifdInside * ( 1.0 / ifdEdgeRamp ) + 1.0 );
 	float ifdEdgeFade = ifdAxisFade.x * ifdAxisFade.y * ifdAxisFade.z;
 	ifdEdgeFade = ifdEdgeFade * ifdEdgeFade * ( 3.0 - 2.0 * ifdEdgeFade );
 	// (b) NO PROBE IN FRONT OF ME. The fade above is about the field's BOX; this
