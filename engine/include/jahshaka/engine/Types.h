@@ -2512,6 +2512,31 @@ struct FogDesc {
 /// private shadow atlas render when `shadows` is on. A scene may hold any number of
 /// reflectors; only `budget` of them (the ones on screen, nearest first) render.
 /// budget == 0 disables the feature completely and costs nothing at all.
+/// THE REFLECTION CUTOFF'S FEATHER, and the only copy of it (DRAG-1 round 2,
+/// F13; moved here from EnginePrivate.h).
+///
+/// A scene carries a reflection ROUGHNESS CUTOFF — where a traced or marched
+/// reflection stops being worth its cost — and both arms ramp their confidence
+/// to zero across a band of this half-width around it: the traced half from full
+/// at `cutoff - kRayReflectFeather` to zero at `cutoff + kRayReflectFeather`,
+/// the marched half from full at `cutoff - kRayReflectFeather` to zero AT the
+/// cutoff. What one gives up the other's fallback takes through the same
+/// composite, so a floor whose roughness varies across it crossfades instead of
+/// stepping.
+///
+/// A CONSTANT and deliberately not a second dial: the cutoff says WHERE the
+/// technique stops being worth it (content), the feather only says that it stops
+/// smoothly (renderer). 0.1 is about two and a half times the +-0.04 that a
+/// roughness map's 8-bit quantisation can move a neighbouring pixel by, so the
+/// ramp is always wider than the noise it hides.
+///
+/// IT IS IN THE PUBLIC HEADER so that anything reasoning about the band reads
+/// the shipped number instead of copying it. It was private while only the
+/// renderer used it, and document.material_defaults — which asserts that the
+/// unauthored material's roughness CLEARS the band — had to carry a second 0.1
+/// that nothing would have updated.
+constexpr float kRayReflectFeather = 0.1f;
+
 struct PlanarReflectionParams {
     /// Active reflection planes, 0..8 (0 = off). CHANGING THIS RECOMPILES SHADERS:
     /// the count is baked into the PBS shader as a property, not passed as a
@@ -3015,7 +3040,7 @@ struct PostFxDesc {
     /// deleted; the march reads this field (OgreChain::updateSsr).
     ///
     /// THE TRANSITION IS FEATHERED, not a step, and BOTH SOURCES FADE OVER THE
-    /// SAME 0.1 (`kRayReflectFeather`, one constant in EnginePrivate.h since
+    /// SAME 0.1 (`kRayReflectFeather`, one constant in this header since
     /// lane SSR-3 so the two cannot drift). The ray's confidence runs from full
     /// at `cutoff - feather` to zero at `cutoff + feather`; the march's
     /// roughness ramp runs from full at `cutoff - feather` to zero AT `cutoff`,

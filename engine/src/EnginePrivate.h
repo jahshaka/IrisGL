@@ -738,17 +738,9 @@ constexpr size_t kPbrTextureSlotCount = size_t(PbrTextureSlot::Count);
 ///     JahSsrResolve_ps.glsl reads it), because the march is SKIPPED above the
 ///     cutoff — there is nothing there to crossfade.
 ///
-/// IT LIVES IN THIS HEADER SO THE TWO CANNOT DRIFT. It was a file-scope constant
-/// in OgreRayQuery.cpp while only the ray tier had a feather; the moment the
-/// screen-space march took the same dial (SSR-3) a second copy of 0.1 would have
-/// been two numbers one edit apart.
-///
-/// A CONSTANT and deliberately not a second dial: the cutoff says WHERE the
-/// technique stops being worth it (content), the feather only says that it stops
-/// smoothly (renderer). 0.1 is about two and a half times the ±0.04 that a
-/// roughness map's 8-bit quantisation can move a neighbouring pixel by, so the
-/// ramp is always wider than the noise it hides.
-constexpr float kRayReflectFeather = 0.1f;
+/// THE CONSTANT ITSELF LIVES IN THE PUBLIC HEADER (Types.h) since DRAG-1's
+/// second round: a suite that reasons about the band has to read the shipped
+/// number rather than copy it. This block is the renderer-side reading of it.
 
 // ---------------------------------------------------------------------------
 // What shape of compositor chain a view wants. Phase 1 carries only what every
@@ -3820,6 +3812,16 @@ private:
         /// zero-bounce moving tick did) is the pulse. Set by every rebuild,
         /// cleared by the tick that skipped on it.
         bool         injectedSinceTick = false;
+        /// ...AND THE LIGHT STATE IT WAS INJECTED AT (DRAG-1 round 2, F5). The
+        /// latch above says "a rebuild already computed what the tick would
+        /// compute", and that is only true while nothing the INJECTION reads has
+        /// changed since. A lamp that moved or was re-parameterised between the
+        /// rebuild and the tick makes the rebuild's answer stale, and skipping
+        /// on the latch alone would leave that cascade holding the old light
+        /// until its next rebuild — which, for an outer cascade deferred behind
+        /// cascade 0, is the whole drag. The tick skips only when this still
+        /// equals the scene's current light-write serial.
+        unsigned long long injectedAtLightSerial = 0;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
         /// is quantize(cam, cell*stepCells) != quantize(builtCam, cell*stepCells)
@@ -4476,6 +4478,11 @@ private:
     /// (DRAG-1): the chain's size minus the cascades a rebuild had already
     /// injected since the previous tick. 0 in the single-volume arm.
     unsigned mGiChainInjections = 0;
+    /// EVERY WRITE A LIGHT INJECTION WOULD READ (DRAG-1 round 2, F5): a light's
+    /// parameters (setLight), its POSE (setNodeTransform on a node that owns
+    /// one — a movable lamp never stales the probe grid, so nothing else sees
+    /// it), and a light leaving the scene. Monotonic; only ever compared.
+    unsigned long long mGiLightWriteSerial = 0;
     /// Whether the last full refresh took the reuse arm (B4). Reported by
     /// giStatus; cleared by every from-scratch build.
     bool mGiReusedLastRefresh = false;
@@ -4529,6 +4536,26 @@ private:
     /// before its probes start catching up — against a sweep that already
     /// takes `probes / budget` frames (18 on the Mirror Room's grid).
     static constexpr unsigned kProbeMotionSettleFrames = 10u;
+    /// THE CEILING ON A DEFERRAL (DRAG-1 round 2, F4). A drag ends; a KEYFRAMED
+    /// object in play, a physics body settling, or a script that moves something
+    /// every frame does NOT — and without a ceiling that is one endless gesture,
+    /// so the probes would hold the pre-motion room for as long as it lasts and
+    /// then pay a whole sweep at the end. One capture every N frames while the
+    /// deferral holds keeps a long motion LIVE at a bounded price.
+    ///
+    /// N = 30 is derived from what a capture costs and from the sweep it feeds,
+    /// not chosen: one capture is six faces at the tier's size with the probe
+    /// shadow node recalculated on each, measured at about 4.3 ms (SMOKE-41), so
+    /// one every 30 frames is 0.14 ms amortised — under 1 % of a 16.7 ms frame,
+    /// against the 26 % the un-deferred rate was costing. And it is COMFORTABLY
+    /// ABOVE the sweep length (18 frames on the Mirror Room's grid at the
+    /// shipped budget of 1), which is the other half of the requirement: a
+    /// ceiling below the sweep would spend a whole grid's worth of captures
+    /// inside one gesture and be back where it started.
+    static constexpr unsigned kProbeDeferredCaptureEvery = 30u;
+    /// Frames since the deferral last let a capture through. Reset when the
+    /// gesture ends, so a NEW gesture never inherits a nearly-expired counter.
+    unsigned mProbeDeferredRun = 0;
     /// A NON-MOTION INPUT IS OUTSTANDING (a light, a material, the sky, the fog
     /// or an explicit refresh staled the grid). Motion defers only the captures
     /// MOTION asked for: a lamp switched on while something is being dragged

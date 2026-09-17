@@ -447,6 +447,12 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
             // stopped counting (nodegraph.h's epoch).
             if (it == mNodes.end() || writeIsSceneMovement(it->second))
                 noteSceneTransformWrite();
+            // A MOVABLE LAMP MOVES NOTHING A SCAN CAN SEE (DRAG-1 round 2, F5).
+            // It is not GI geometry, so `mGiMovedBoxes` never mentions it and
+            // the probe grid is never staled for it — but a light injection
+            // reads its pose, so the in-motion tick must not skip a cascade
+            // that was injected before it moved.
+            if (it != mNodes.end() && it->second.light) ++mGiLightWriteSerial;
         }
     } JAH_CATCH(mError, );
 }
@@ -620,7 +626,8 @@ void OgreScene::applyShownSubtree(Ogre::SceneNode *sn, Node *rec, bool inherited
         // decal rides the projector-box child, one unregistered level down,
         // and is reached by this same loop there.
         if (obj->getVisible() != shown) {
-            if (dynamic_cast<Ogre::Light *>(obj))      staleProbeGrid(GiStaleReason::Light);
+            if (dynamic_cast<Ogre::Light *>(obj))      { ++mGiLightWriteSerial;
+                                                          staleProbeGrid(GiStaleReason::Light); }
             else if (dynamic_cast<Ogre::Decal *>(obj)) staleProbeGrid(GiStaleReason::Moved);
         }
         obj->setVisible(shown);
@@ -958,6 +965,15 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setLight: unknown node"; return false; }
     JAH_TRY {
+        // A LIGHT INJECTION WOULD READ THIS (DRAG-1 round 2, F5). The serial is
+        // what tells the in-motion light tick that a cascade the scheduler
+        // rebuilt no longer holds the scene's lights — see
+        // VctCascade::injectedAtLightSerial. Bumped for the whole push rather
+        // than for a measured change: this entry point is idempotent and the
+        // mirror pushes it per frame, but only for lights the mirror believes
+        // changed, and a spurious bump costs one extra cascade injection on the
+        // next tick, while a missed one costs a stale bounce for a whole drag.
+        ++mGiLightWriteSerial;
         Node &n = it->second;
         if (!n.light) {
             // The document's convention (IrisGL LightNode::getLightDir): lights shine

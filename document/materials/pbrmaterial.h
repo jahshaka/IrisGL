@@ -25,14 +25,23 @@ namespace iris
 
 /// THE UNAUTHORED SURFACE — ONE DEFINITION (DRAG-1, RENDER_AUDIT I-1).
 ///
-/// What a material is before anybody has said anything about it. Every place
-/// that has to invent one reads THESE — the document's own constructor
+/// What a material is before anybody has said anything about it. The two places
+/// that INVENT one read these — the document's own constructor
 /// (PbrMaterial::PbrMaterial) and the renderer's fallback for a mesh node that
 /// carries no material at all (SceneMirror's mDefaultMaterial) — so the
 /// properties panel shows what the picture renders, which it did not: a
 /// primitive created from the menu rendered at the mirror's substituted
 /// roughness 0.6 while the panel displayed the document's 0.5, and neither of
 /// those numbers was a physical surface.
+///
+/// TWO PLACES DELIBERATELY DO NOT, and they are not exceptions to the rule but
+/// a different question. `builtinmaterials.cpp`'s import fallback and its legacy
+/// conversion fill a colour a SOURCE FILE failed to state, and the honest value
+/// there is the identity — white, an untinted multiplier over whatever map the
+/// file did carry — not an opinion about what an unauthored surface looks like.
+/// The same reasoning keeps `defaultfloor` and `imagematerial` on an explicit
+/// white: both multiply a texture, so their base colour is a statement about the
+/// TEXTURE, not about the material.
 ///
 /// THE PHYSICS, because these are measurements and not taste:
 ///

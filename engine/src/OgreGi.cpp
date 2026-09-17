@@ -633,7 +633,15 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                 for (int sweep = 0; sweep < sweeps; ++sweep) {
                     for (size_t i = mVctCascades.size(); i--; ) {
                         if (!mVctCascades[i].lighting) continue;
-                        if (chainMotion && mVctCascades[i].injectedSinceTick) continue;
+                        // ...AND ONLY WHILE THE LIGHTS IT WAS INJECTED WITH
+                        // ARE STILL THE SCENE'S (F5): a lamp that moved since
+                        // the rebuild makes the rebuild's answer stale, and this
+                        // tick is the only thing that would fix it before that
+                        // cascade's next rebuild — which for an outer cascade
+                        // deferred behind cascade 0 is the whole drag.
+                        if (chainMotion && mVctCascades[i].injectedSinceTick &&
+                            mVctCascades[i].injectedAtLightSerial == mGiLightWriteSerial)
+                            continue;
                         applyCascadeAmbient(mVctCascades[i].lighting);
                         const bool coarse = inMotion && legacyTick;
                         mVctCascades[i].lighting->update(mSceneMgr,
@@ -2723,8 +2731,20 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // Geometry the probes capture that moved or arrived since the last scan —
     // GI geometry and unlit geometry alike — is out of date in every probe
     // that can see it, which in v1 is all of them.
-    if (!mGiMovedBoxes.empty() || mGiItemsAppeared || mProbeOnlyChanged)
+    // WHAT MOVED THIS FRAME, CAPTURED BEFORE THE FLAGS ARE CLEARED (DRAG-1
+    // round 2, F3). `mGiMovedBoxes` holds GI geometry only; a PROBE-ONLY item —
+    // unlit geometry the probe faces capture but the voxels do not, an image
+    // plane, a backdrop card — reports through `mProbeOnlyChanged` instead, and
+    // it stales the grid exactly the same way. Reading the boxes alone made a
+    // dragged image plane look like a STILL scene to the gesture rule below, so
+    // it spent a capture on every frame of the drag, which is the whole defect.
+    const bool movedThisFrame = !mGiMovedBoxes.empty() || mProbeOnlyChanged;
+    if (movedThisFrame || mGiItemsAppeared)
         staleProbeGrid(GiStaleReason::Moved);
+    // (An ARRIVAL is not motion and does not arm the gesture: a thing that
+    // appears once is an event the probes should answer. It is still deferred
+    // while a gesture is running — it arrived into one — and the ceiling below
+    // bounds how long that can last.)
     mGiItemsAppeared = mProbeOnlyChanged = false;
 
     // ---- THE MOTION DEFERRAL (DRAG-1, REFLECT F3) -------------------------
@@ -2770,10 +2790,11 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // steps), so the moved boxes arrive on alternate frames and a rule that
     // wanted two CONSECUTIVE moving frames never fired at all — 59 captures
     // over a 60-frame drag, i.e. exactly the behaviour it was replacing.
-    if (mGiMovedBoxes.empty()) {
+    if (!movedThisFrame) {
         if (++mProbeMotionQuietFrames >= kProbeMotionSettleFrames) {
             mProbeDragActive = false;
             mProbeMotionRun = 0;
+            mProbeDeferredRun = 0;      // a new gesture starts its ceiling fresh
         }
     } else {
         if (mProbeMotionRun) mProbeDragActive = true;   // a second move, still inside the window
@@ -2788,7 +2809,20 @@ void OgreScene::updateProbeBudget(const Ogre::Vector3 &camPos) {
     // and a getenv against a path that may issue a 512-square six-face capture
     // is not a cost anyone can measure.
     const bool deferMotion = std::getenv("JAHSHAKA_PROBE_NO_MOTION_DEFER") == nullptr;
-    if (deferMotion && mProbeDragActive && !mProbeStaleBeyondMotion) {
+    bool deferring = deferMotion && mProbeDragActive && !mProbeStaleBeyondMotion;
+    if (deferring) {
+        // ...WITH A CEILING (DRAG-1 round 2, F4). A drag ends and a keyframed
+        // object in play does not: without this, a motion that never stops is
+        // one endless gesture and the probes would show the pre-motion room for
+        // as long as it lasts. One capture every kProbeDeferredCaptureEvery
+        // frames keeps a long motion live at a bounded price — see the constant
+        // for the arithmetic.
+        if (++mProbeDeferredRun >= kProbeDeferredCaptureEvery) {
+            mProbeDeferredRun = 0;
+            deferring = false;
+        }
+    }
+    if (deferring) {
         // The queue still ages while it waits, so the order the settle spends
         // in is the order the wait earned.
         for (ProbeSlot &sl : mProbeSlots) ++sl.framesSinceUpdate;
@@ -3933,6 +3967,7 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
             // own ray march, which is exactly what refreshGiLighting would
             // compute for it, so the next in-motion tick skips it. See the tick.
             c.injectedSinceTick = true;
+            c.injectedAtLightSerial = mGiLightWriteSerial;
             return true;
         } JAH_CATCH(mError, false);
     };
