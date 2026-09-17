@@ -133,6 +133,13 @@ namespace detail {
 inline Ogre::Vector3     toOgre(const Vec3 &v)   { return Ogre::Vector3(v.x, v.y, v.z); }
 inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r, c.g, c.b, c.a); }
 
+/// ATOM stage 1's VIEW rule (OgreMesh.cpp): registers `jah_world_error` — the
+/// LOD strategy whose per-object value is the world-space error the pass's own
+/// camera and render target can hide — and makes it the process default, plus
+/// the switch hysteresis ogre-patch 0074 adds to `LodStrategy::lodSet`. Called
+/// once, after Root::initialise and before any mesh or Item exists.
+void installJahLodStrategy();
+
 /// THE HOST'S TRANSFORM-WRITE COUNTER (Engine::setTransformWriteCounter), or
 /// null when no host handed one over — in which case every frame's GI movement
 /// scan runs, the way it always did. Read once a frame per scene, relaxed: it

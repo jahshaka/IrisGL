@@ -215,6 +215,10 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // After initialise(), not after the Root constructor: Root creates its
         // ControllerManager in initialise() (OgreRoot.cpp:751).
         Ogre::ControllerManager::getSingleton().setFrameDelay(kDefaultFrameDelta);
+        // ATOM stage 1's view rule, before anything can create a mesh: the LOD
+        // value arrays are written against the DEFAULT strategy's base value and
+        // an Item caches the array's address at _initialise (OgreMesh.cpp).
+        detail::installJahLodStrategy();
         // NOTE: Hlms registration is deferred to the first view. The VaoManager
         // does not exist until a render target is created, and HlmsUnlit/HlmsPbs
         // registration walks it via ConstBufferPool::_changeRenderSystem —

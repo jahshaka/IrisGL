@@ -303,12 +303,16 @@ public:
     virtual float       shaderTime() const = 0;
     /// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the scene-wide LOD dial. 1 is the
     /// reference — every mesh switches level where its baked geometric error
-    /// reaches one pixel at the reference projection (Types.h, LodReference).
-    /// Larger swaps earlier (coarser); 0 PINS every object at level 0, which is
-    /// how a pixel test asserts one level at a time and how a user turns the
-    /// whole thing off. Applies immediately to meshes that already exist: the
-    /// values are re-derived in place and every Item reads them through a
-    /// pointer. Meshes with no baked chain are unaffected by any value.
+    /// covers ONE PIXEL of the pass that is drawing it, at that pass's live lens
+    /// and its render target's height (Types.h, `kLodBudgetPixels`), so the same
+    /// object switches at the same SIZE ON SCREEN in the viewport, in a
+    /// thumbnail and in a headset eye rather than at one distance for all three.
+    /// The dial is a multiplier on that pixel budget: larger swaps earlier
+    /// (coarser); 0 PINS every object at level 0, which is how a pixel test
+    /// asserts one level at a time and how a user turns the whole thing off.
+    /// Applies immediately to meshes that already exist: the thresholds are
+    /// re-derived in place and every Item reads them through a pointer. Meshes
+    /// with no baked chain are unaffected by any value.
     virtual void        setLodBias(float bias) = 0;
     virtual float       lodBias() const = 0;
     /// DIAGNOSTIC: what the backend datablock actually ends up holding, as

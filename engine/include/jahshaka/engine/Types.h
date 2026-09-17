@@ -51,11 +51,23 @@ using MaterialId = unsigned int;
 /// per triangle (required).
 // ---- ATOM stage 1: THE LEVEL THAT STANDS IN FOR A MESH AT A GIVEN SIZE -----
 //
-// THE RULE, written ONCE and cited from both of its callers
-// (`MeshData::lodForCellSize` below, and `OgreScene::cascadeVoxelLod` in
-// irisgl/engine/src/OgreGi.cpp, which spends it on Photon's cascades):
+// THE RULE, written ONCE and cited from all of its callers
+// (`MeshData::lodForWorldError` below; `OgreScene::cascadeVoxelLod` in
+// irisgl/engine/src/OgreGi.cpp, which spends it on Photon's cascades; and the
+// engine's view LOD strategy in OgreMesh.cpp, which is the same `lower_bound`
+// over the same errors done four-wide in Ogre's own SoA loop):
 //
-//     take the COARSEST level whose error is strictly below `cellSize`.
+//     take the COARSEST level whose error is strictly below `allowed` — the
+//     WORLD-SPACE error THIS consumer has said it can afford.
+//
+// ONE RULE, AND EVERY CONSUMER COMPUTES ITS OWN `allowed` FROM WHAT IT SAMPLES
+// (ATOM-3, the render audit's A8). The view: a pixel budget at the LIVE camera
+// and the LIVE viewport height, `pixels * (d - r) * 2 / (proj[1][1] * height)`.
+// A cascade: a MEASURED fraction of its own cell — not half of it, because a
+// voxel's occupancy is a binary triangle-box test and the boundary moves with
+// the deviation (the fraction, its measurement and its picture evidence are at
+// `kCascadeLodCellFraction` in OgreGi.cpp). A far-field proxy: a fraction of
+// the distance. The CONSTANTS are the things to measure; the rule is arithmetic.
 //
 // `errors[i]` is level i+1's simplifier error as a LENGTH in the same units as
 // `cellSize` (see MeshData::lodErrors), and the errors are non-decreasing, so
@@ -63,23 +75,25 @@ using MaterialId = unsigned int;
 // authored geometry — whenever even level 1 is too coarse, and whenever the
 // size is not a positive finite number.
 //
-// WHY "BELOW THE SIZE" IS THE WHOLE RULE: a consumer that samples the mesh at a
-// resolution of `cellSize` cannot represent a difference smaller than that, so
-// a level whose worst deviation from the original is under one of its samples
-// is, to that consumer, the same object — for a fraction of the geometry. It is
-// the same argument the voxeliser's sub-voxel size filter makes about whole
-// objects, made about the triangles inside one. The baked error is the COMBINED
-// position+attribute quadric error, which is >= the pure geometric one, so
-// every answer here is conservative (a finer level than geometry alone needs).
+// WHY "BELOW THE ALLOWED ERROR" IS THE WHOLE RULE: the baked error is the worst
+// distance a level's surface may sit from the authored one, so a consumer that
+// cannot see a difference of `allowed` cannot see that level either. What
+// `allowed` IS belongs to the consumer and to nobody else — and the two shipped
+// consumers have measured it, which is the only way this number was ever going
+// to be right (the old text claimed "a sample of its own resolution" for the
+// voxeliser and was wrong by two orders of magnitude; see OgreGi.cpp). The
+// baked error is the COMBINED position+attribute quadric error, which is >= the
+// pure geometric one, so every answer here is conservative (a finer level than
+// geometry alone needs).
 //
 // `levelsAvailable` caps the answer at the levels the consumer actually has —
 // the document's index lists, or the VAOs the engine built from them.
-inline size_t lodLevelForCellSize(const std::vector<float> &errors, float cellSize,
-                                  size_t levelsAvailable) {
-    if (!(cellSize > 0.0f)) return 0;
+inline size_t lodLevelForWorldError(const std::vector<float> &errors, float allowed,
+                                   size_t levelsAvailable) {
+    if (!(allowed > 0.0f)) return 0;
     size_t level = 0;
     for (size_t i = 0; i < errors.size() && i < levelsAvailable; ++i) {
-        if (!(errors[i] < cellSize)) break;   // errors are non-decreasing
+        if (!(errors[i] < allowed)) break;    // errors are non-decreasing
         level = i + 1;
     }
     return level;
@@ -126,15 +140,16 @@ struct MeshData {
     // consumer that compares it with a world-space size is CONSERVATIVE (a finer
     // level than the geometry alone would need). A true geometric bound is a
     // recorded follow-up;
-    // monotonically non-decreasing. It is the currency of the whole program:
-    //   * divided by the view distance it is a screen-space error (this is what
-    //     the backend turns into per-mesh distance thresholds), and
-    //   * compared against a world-space cell size it answers "is this level
-    //     fine enough to stand in for the mesh at that resolution" —
-    //     `lodForCellSize`, which is how a VOXELIZER or a far-field proxy picks
-    //     a level (PHOTON's outer cascades and its ray-tier proxy: the coarsest
-    //     level whose error is below the cell size is the cheapest geometry
-    //     that cannot be wrong by more than one cell).
+    // monotonically non-decreasing. It is the currency of the whole program,
+    // and every consumer spends it the same way — by stating the world-space
+    // deviation IT can afford and taking the coarsest level below it:
+    //   * the VIEW turns a PIXEL budget into that deviation at its own live
+    //     lens and viewport height (`kLodBudgetPixels`, and the strategy in
+    //     OgreMesh.cpp), and
+    //   * a VOXELISER turns its own CELL into it through a measured fraction
+    //     (`kCascadeLodCellFraction` in OgreGi.cpp — a binary occupancy test
+    //     moves its boundary with the deviation, so the fraction is small and
+    //     it was measured on the picture, not argued).
     std::vector<std::vector<unsigned>> lodIndices;
     std::vector<float>                 lodErrors;
 
@@ -148,13 +163,14 @@ struct MeshData {
         if (level == 0 || lodIndices.empty()) return indices;
         return lodIndices[std::min(level, lodIndices.size()) - 1];
     }
-    /// The COARSEST level that still stands in for this mesh at `cellSize` —
-    /// THE RULE ITSELF IS `lodLevelForCellSize` ABOVE, stated once and shared
+    /// The COARSEST level that still stands in for this mesh when the consumer
+    /// can afford a world-space deviation of `allowed` —
+    /// THE RULE ITSELF IS `lodLevelForWorldError` ABOVE, stated once and shared
     /// with the engine's voxeliser (OgreScene::cascadeVoxelLod). This overload
     /// is the document-side convenience: it clamps to the levels this mesh
     /// actually carries.
-    size_t lodForCellSize(float cellSize) const {
-        return lodLevelForCellSize(lodErrors, cellSize, lodIndices.size());
+    size_t lodForWorldError(float allowed) const {
+        return lodLevelForWorldError(lodErrors, allowed, lodIndices.size());
     }
     bool hasSkinData() const {
         return !blendIndices.empty() && blendIndices.size() == vertexCount() * 4 &&
@@ -162,50 +178,34 @@ struct MeshData {
     }
 };
 
-// ---- ATOM stage 1: turning a baked error into a switch distance -------------
+// ---- ATOM stage 1: the VIEW's allowed error -------------------------------
 //
-// The projection formula is clusterlod.h's, verbatim (its own comment, lines
-// 94-97; the file is vendored at irisgl/thirdparty/meshoptimizer-clusterlod/):
+// THE VIEW'S BUDGET IS A REAL SCREEN-SPACE PIXEL ERROR, at the live lens and
+// the live viewport (ATOM-3, the render audit's A1). The projection is
+// clusterlod.h's, verbatim (its own comment, lines 94-97; vendored at
+// irisgl/thirdparty/meshoptimizer-clusterlod/):
 //
-//     screen error (0..1) = error / max(distance(centre, eye) - radius, znear)
-//                                 * (proj[1][1] * 0.5)
+//     screen error (pixels) = error / (distance(centre, eye) - radius)
+//                             * proj[1][1] * 0.5 * viewport height
 //
-// multiply by the screen height for pixels. INVERTED, it answers the question
-// the LOD strategy asks: at what distance does a level's error fall under the
-// pixel budget?
+// INVERTED, it is the world-space error a view can afford at an object:
 //
-//     distance - radius = error * proj[1][1] * 0.5 * height / budgetPixels
+//     allowed = (distance - radius) * 2 * budgetPixels / (proj[1][1] * height)
 //
-// and `distance - radius` is EXACTLY the value Ogre's distance_sphere strategy
-// computes per object per frame, so the number below can be handed to the mesh
-// as its LOD value with nothing in between.
+// and `distance - radius` is EXACTLY what Ogre's SoA LOD loop already computes
+// per object, so the engine's own LOD strategy (`OgreMesh.cpp`,
+// `JahWorldErrorLodStrategy`) evaluates this per PASS with that pass's camera
+// and render target and compares it against the mesh's baked errors directly.
 //
-// WHY A REFERENCE RESOLUTION AND FOV RATHER THAN THE LIVE CAMERA'S: the LOD
-// strategy is process-wide and distance-based, and its value carries no
-// projection term at all — Ogre's `pixel_count` strategies do, and switching to
-// one is a global change that moves every mesh in the application at once. So
-// stage 1 derives its thresholds at a stated reference (1080 lines at a 45°
-// vertical field of view) and records `pixel_count` as the follow-on with its
-// own pixel gate (NANITE_SPEC §7.2, finding C). The consequence, stated plainly:
-// on a taller window or a narrower lens the switch happens at the same distance,
-// not at the same pixel error.
-struct LodReference {
-    static constexpr float kScreenHeight      = 1080.0f;   ///< the rig's and the reference display's height
-    static constexpr float kFovYDegrees       = 45.0f;     ///< the document camera's default vertical angle
-    static constexpr float kProj11            = 2.4142136f;///< cot(45°/2) = projection[1][1] at that angle
-    static constexpr float kScreenErrorPixels = 1.0f;      ///< the budget: one pixel of the simplifier's (combined, >= geometric) error
-};
-
-/// The LOD value (a distance from the object's bounding sphere, in world units)
-/// at which a level carrying `error` reaches the pixel budget. `bias` scales the
-/// budget: 1 is the reference, larger swaps earlier (coarser), and 0 or less
-/// means "never swap", which pins the object at level 0.
-inline float lodSwitchDistance(float error, float bias = 1.0f) {
-    if (!(error > 0.0f) || !std::isfinite(error)) return 0.0f;
-    const float budget = LodReference::kScreenErrorPixels * (bias > 0.0f ? bias : 0.0f);
-    if (!(budget > 0.0f)) return std::numeric_limits<float>::max();
-    return error * LodReference::kProj11 * 0.5f * LodReference::kScreenHeight / budget;
-}
+// WHAT THIS REPLACES, and why it was wrong: stage 1 shipped a REFERENCE
+// projection — 1080 lines at a 45 degree vertical field of view — baked into
+// per-mesh switch DISTANCES, so "one pixel of error" was one pixel only on a
+// 1080-line window at 45 degrees. A 30 degree lens on a 1440-line window
+// switched at 2.05 px, a 90 degree lens at 720 lines at 0.28, and a VR eye at
+// 2376 lines got twice the error the desktop did — on the same asset, in the
+// same frame. The reference constants (`LodReference`) and `lodSwitchDistance`
+// are DELETED with this note; nothing derives a distance any more.
+constexpr float kLodBudgetPixels = 1.0f;   ///< the budget: one pixel of the simplifier's (combined, >= geometric) error
 
 // ---- Rigs (GPU_SKINNING_SPEC) ----------------------------------------------
 /// One bone of a rig, in its BIND pose. The transform is LOCAL to the parent
@@ -1990,7 +1990,7 @@ struct GiParams {
     int       cascadeInstanceCap = 0;
     /// THE FAR-FIELD PROXY: a cascade voxelises the BAKED LOD LEVEL that fits
     /// its own cell (ATOM stage 1's hand-off, SPECS/NANITE_SPEC.md §7 — the
-    /// rule is `lodLevelForCellSize` and the site is
+    /// rule is `lodLevelForWorldError` and the site is
     /// OgreScene::cascadeVoxelLod). True (the default) spends the chain; false
     /// voxelises every cascade at the authored level, which is what the arm did
     /// before ogre-patch 0064 existed.

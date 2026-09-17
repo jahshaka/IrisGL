@@ -3531,6 +3531,65 @@ void OgreScene::recentreCascade(VctCascade &c, const Ogre::Vector3 &camPos) {
 // its cost, not its benefit.
 static const float kCascadeSubVoxelFactor = 0.5f;
 
+// AND THE LOD FRACTION IS A DIFFERENT NUMBER, MEASURED (ATOM-3 A2, the render
+// audit's A2). Until this lane the ONE constant above answered two unrelated
+// questions — "is this whole object too small for the grid" (rule 2) and "how
+// coarse a baked level may stand in for this mesh" — and the second answer was
+// wrong by two orders of magnitude.
+//
+// WHY HALF A CELL IS NOT THE ANSWER FOR A LEVEL. A voxel is written by a
+// TRIANGLE-BOX OVERLAP TEST (Voxelizer_piece_cs.any:411) and the occupancy it
+// records is BINARY: one intersecting triangle fills it, none leaves it empty.
+// So a level whose worst deviation is `e` moves the surface across a cell
+// BOUNDARY wherever the surface sat within `e` of one — about `e / cell` of the
+// object's surface voxels — and the cone march's transmittance through a
+// flipped voxel changes by a whole factor. At `e = cell / 2` that is HALF the
+// shell. The old argument ("a consumer that samples at `cell` cannot represent
+// a difference below one sample") is the argument for a POINT-SAMPLED signal;
+// this consumer integrates a volume, and it is the boundary, not the sample,
+// that moves.
+//
+// THE NUMBER IS A MEASUREMENT, not an argument (spikes/atom-3/FINDINGS.md §1):
+// 1,000 instances of an imported 6,768-triangle sphere (baked errors 3.1 / 5.2 /
+// 10.7 / 21.4 mm), the High tier's four cascades (cells 78 / 156 / 469 /
+// 1875 mm), three poses, one cascade's level moved per arm against an
+// all-level-0 reference that reproduces bit-for-bit:
+//
+//   cascade / e per cell |  0.004  0.007  0.011  0.027  0.067  0.137  0.274
+//   c2 (469 mm cell)     |    -     70/255  70    112     -      -      -
+//   c3 (1875 mm)         |   3/255   4      7      -      -      -      -
+//   c0 (78 mm)           |    -      -      -      -    2/255   2      3
+//
+// (worst channel delta over the three poses; the c2 row's 70/255 is 3,026
+// pixels of 230,400 above 1/255, spread over the whole frame and stable across
+// a repeat.) TWO THINGS FALL OUT. First, the same RATIO costs wildly different
+// pictures in different cascades — 0.274 of a cell costs 3/255 in cascade 0 and
+// 0.007 of a cell costs 70/255 in cascade 2 — because what decides the damage
+// is whether that cascade is the FINEST one holding the surface the camera is
+// looking at (at the 25 m pose cascades 0 and 1 stand in empty space and
+// cascade 2 owns the near field). So a per-cascade factor by INDEX, which is
+// what the audit expected, is not what the measurement supports: the index is
+// not the variable. Second, the only fraction that holds every arm inside
+// 4/255 is below 1/151 (the ratio at which cascade 2 takes level 1), so:
+//
+//   kCascadeLodCellFraction = 1/256 — at most ~0.4 % of an object's surface
+//   voxels may change occupancy, and the picture stays inside 4/255 on every
+//   arm measured.
+//
+// WHAT IT STILL BUYS, which is the reason it is not simply 0: the win was never
+// spread over the chain, it is concentrated in the OUTERMOST cascade (225 ms of
+// a ~300 ms chain on that lattice, spikes/atom-2) — and the outermost cascade
+// has the largest cell, so it is exactly the one a small fraction still lets
+// take a coarse level. On that lattice the outer cascade keeps level 2 (4x less
+// geometry) where it used to take level 4 (16x) and its worst pixel goes from
+// 112/255 to 4.
+//
+// AND THE REFERENCE IS NOT THE TRUTH: every number above is a DIFFERENCE from
+// voxelising the authored mesh, which at a 1.875 m cell is itself a crude
+// integral. The fraction bounds how far the proxy may move the picture we
+// already ship; it is not an error bound against light transport.
+static const float kCascadeLodCellFraction = 1.0f / 256.0f;
+
 // HOW MANY GI items this cascade would voxelise reach into its box — and the
 // question `build()` cannot be asked: with items attached and NONE of them in
 // the region, its instance-to-world job is sized to zero thread groups and Ogre
@@ -3662,18 +3721,20 @@ unsigned OgreScene::selectCascadeItems(const VctCascade &c,
 // delivered by lane ATOM-2 on ogre-patch 0064). ONE place decides WHICH level
 // of a mesh a cascade voxelises, and this is it.
 //
-// THE RULE IS NOT RESTATED HERE. It is `lodLevelForCellSize` (Types.h, beside
+// THE RULE IS NOT RESTATED HERE. It is `lodLevelForWorldError` (Types.h, beside
 // MeshData::lodErrors, which is the other caller): the COARSEST baked level
 // whose error is below the size the consumer samples at. What this function
 // owns is the two terms that turn a cascade into that size:
 //
-//   * THE SIZE IS HALF THIS CASCADE'S CELL (`kCascadeSubVoxelFactor`), the same
-//     number and the same argument rule 2 makes about whole objects: a grid
-//     cannot hold detail finer than half a sample, so a level whose worst
-//     deviation is under that voxelises to the same voxels as the authored
-//     mesh. The 60 m cascade's cell is 1.875 m at the High tier, so a mesh
-//     simplified to a 0.9 m error is free of charge there and costs a fraction
-//     of the raster dispatch.
+//   * THE SIZE IS A MEASURED FRACTION OF THIS CASCADE'S CELL
+//     (`kCascadeLodCellFraction`, 1/256 — the argument and the numbers are
+//     beside the constant). It is NOT rule 2's half-cell and never was: rule 2
+//     asks whether a whole object can register in the grid at all, this asks how
+//     far a stand-in may move a surface that the grid records with a BINARY
+//     occupancy test, and the answer measured on the picture is two orders of
+//     magnitude stricter. The 60 m cascade's cell is 1.875 m at the High tier,
+//     so a mesh simplified to a 7 mm error is free of charge there and costs a
+//     quarter of the raster dispatch.
 //   * AND IT IS MEASURED IN THE MESH'S OWN UNITS, because the baked errors are
 //     (MeshData::lodErrors). The item carries the scale that takes one to the
 //     other, so the cell is divided by it — a 10x-scaled mesh has 10x the
@@ -3708,8 +3769,8 @@ unsigned OgreScene::cascadeVoxelLod(const VctCascade &c, const Ogre::Item *item)
         scale = std::max(std::max(std::fabs(s.x), std::fabs(s.y)), std::fabs(s.z));
     }
     if (!(scale > 0.0f) || !std::isfinite(scale)) return 0u;
-    const float sizeInMeshUnits = (c.cell() * kCascadeSubVoxelFactor) / scale;
-    return unsigned(lodLevelForCellSize(it->second, sizeInMeshUnits, it->second.size()));
+    const float sizeInMeshUnits = (c.cell() * kCascadeLodCellFraction) / scale;
+    return unsigned(lodLevelForWorldError(it->second, sizeInMeshUnits, it->second.size()));
 }
 
 void OgreScene::setCascadeItems(VctCascade &c, bool attach) {
