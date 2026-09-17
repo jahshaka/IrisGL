@@ -1722,12 +1722,32 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     (the rejection is synchronous, the GPU never hung) — not proof: that crash has not
     been reproduced on the simulated runtime.
 
-THE STACK IS 0001-0073 (this list; `build-ogre.sh` globs `*.patch`, so the file
+  0074-lod-switch-hysteresis — A LOD SWITCH HAS A HYSTERESIS BAND (lane ATOM-3, the
+    render audit's A7, 2026-09-17), SOURCE, three files (OgreMain/include/
+    OgreLodStrategy.h, OgreMain/include/OgreLodStrategyPrivate.inl, OgreMain/src/
+    OgreLodStrategy.cpp — no other patch in the stack touches any of them, so there
+    is no overlap to reset for). `LodStrategy::lodSet` picks a level with one
+    `lower_bound` and writes `mCurrentMeshLod`: the comparison is a step in BOTH
+    directions, so an object whose LOD value sits on a threshold changes level every
+    frame the value dithers. Measured on the rig with one chained mesh and a camera
+    oscillating by 2 % of its switch distance: 71 level changes in 600 frames (one
+    per threshold crossing) with no band, 0 with a 10 % one; at a 20 % amplitude both
+    read 71, so the band removes the noise and keeps every real transition. The knob
+    is `LodStrategy::setHysteresis`, process-wide, DEFAULT 0 = upstream's behaviour to
+    the bit; the engine sets 0.10 in `installJahLodStrategy` (irisgl/engine/src/
+    OgreMesh.cpp) behind the `JAHSHAKA_NO_LOD_HYSTERESIS` run-wide latch. It cannot be
+    written outside the pin: `mCurrentMeshLod` and `mLodMesh` are protected and
+    MovableObject grants friendship to `LodStrategy::lodSet`/`lodUpdateImpl` BY NAME,
+    which does not extend to a derived strategy's override — which is also why the
+    rest of that lane's view rule (the `jah_world_error` strategy) needs NO patch at
+    all.
+
+THE STACK IS 0001-0074 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072 and 0073 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073 and 0074 are SOURCE-only (0062 and 0065 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
