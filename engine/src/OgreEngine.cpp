@@ -707,6 +707,23 @@ namespace {
 size_t countPendingTextures(Ogre::TextureGpuManager *tm, std::string *namesOut);
 }   // namespace
 
+namespace {
+/// ONE STEP OF A FRAME'S CLOSE (closeRenderFrame, lane FRAME-CATCH-1). The
+/// close runs from a destructor, so nothing in it may throw out; and the steps
+/// are independent, so a step that fails must not cost the ones after it.
+/// Whatever it caught lands in the engine's `lastError`, which is where a host
+/// looks anyway. `catch (...)` as well as the two JAH_CATCH kinds: this is the
+/// one place in the engine where letting something through is undefined
+/// behaviour rather than a bad error message.
+template <class Step>
+void frameCloseStep(std::string &sink, Step &&step) {
+    try { step(); }
+    catch (Ogre::Exception &e) { sink = e.getFullDescription(); }
+    catch (std::exception &e)  { sink = std::string("engine: ") + e.what(); }
+    catch (...)                { sink = "engine: an unknown exception closing the frame"; }
+}
+}   // namespace
+
 const std::atomic<unsigned long long> *gTransformWriteCounter = nullptr;
 
 void OgreEngine::setTransformWriteCounter(const std::atomic<unsigned long long> *counter) {
@@ -727,19 +744,20 @@ void OgreEngine::renderOneFrame() {
     // destroyScene's VR belt asks before it ends a session. RAII rather than a
     // pair of assignments because this function throws (JAH_CATCH below) and a
     // flag left set would refuse every later teardown.
-    // AND IT DRAINS WHAT THE FRAME DEFERRED (VR-INPUT-1E-FIX finding 5): a
-    // destroyScene asked for from inside the frame is honoured HERE, with the
-    // flag already cleared (or it would defer itself for ever) and on the
-    // throwing path too — a frame that threw still owes the host the teardown
-    // it asked for.
-    struct InFrame {
+    //
+    // ...AND IT IS THE WHOLE CLOSE OF THE FRAME NOW, NOT ONLY THE FLAG (lane
+    // FRAME-CATCH-1, 2026-09-18). `JAH_CATCH` RETURNS — that is what makes it
+    // usable on a hundred bool-returning boundary calls — so everything this
+    // function used to do AFTER the catch was unreachable on a frame that
+    // threw, comments and all: the runtime's xrEndFrame, the monitor's close,
+    // the lost/stopped session's end and the device-lost latch. `closeRenderFrame`
+    // holds all of it and the destructor is what runs it, so it runs on every
+    // exit — the normal one, the VR pump's early return, and a throw.
+    struct FrameScope {
         OgreEngine *self;
-        explicit InFrame(OgreEngine *s) : self(s) { self->mInRenderFrame = true; }
-        ~InFrame() {
-            self->mInRenderFrame = false;
-            self->drainPendingSceneDestroys();
-        }
-    } inFrame(this);
+        explicit FrameScope(OgreEngine *s) : self(s) { self->mInRenderFrame = true; }
+        ~FrameScope() { self->closeRenderFrame(); }
+    } frameScope(this);
     JAH_TRY {
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
         // While a session runs this call IS the frame's clock: it polls the
@@ -754,6 +772,12 @@ void OgreEngine::renderOneFrame() {
         // empty frame: there is nothing to draw and no frame to close.
         // A NO-OP on every engine without a session, which is every engine
         // outside a headset.
+        //
+        // NO PATH IN THE PUMP ANSWERS FALSE TODAY (F4 turned every one of them
+        // into "the XR frame is closed here and the desktop draws anyway"), so
+        // this is a contract kept rather than a branch taken — and it is SAFE
+        // to take: the scope guard above closes the frame on this return like
+        // on any other. Before FRAME-CATCH-1 it was not.
         if (mVrSession && !vrSessionBeginFrame(mVrSession)) return;
         // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
         // Opened here and closed at the very bottom, so `totalMs` is exactly
@@ -1149,6 +1173,15 @@ void OgreEngine::renderOneFrame() {
             mUpdatedScenes = unsigned(updated.size());
             // ...and its readings (P8): what the pass counters saw this frame.
             latchShadowCounters();
+            // THE INJECTED FAULT (Engine::setFrameFault, lane FRAME-CATCH-1) —
+            // TEST-FACING, armed by no shipping path, and HERE rather than
+            // anywhere else: the frame has been recorded and submitted, so in a
+            // session the eye copies have already ACQUIRED their two swapchain
+            // images and still hold them, and nothing has closed yet. That is
+            // exactly the position a `VK_ERROR_DEVICE_LOST` from the frame's
+            // commit occupies, and a fault raised any earlier would prove
+            // nothing about the acquires the close has to release.
+            if (mFrameFaultLeft) raiseFrameFault();
         }
         // POSE FOLLOWERS (Scene::followSkeleton — the selection silhouette over
         // an animating character). AFTER the frame, deliberately: the source's
@@ -1178,32 +1211,87 @@ void OgreEngine::renderOneFrame() {
             monitor::gMonitor->endFrame(mUpdatedScenes);
         }
     } JAH_CATCH(mLastError, );
-    // A frame that THREW still has to close, or the next one appends to it and
-    // the ring holds one record that never ends.
-    if (monitor::live() && monitor::gMonitor->inFrame())
-        monitor::gMonitor->endFrame(mUpdatedScenes);
-    // ---- ...AND THE VR FRAME CLOSES HERE ----------------------------------
-    // Outside the JAH_TRY, like the monitor's own close and for the same
-    // reason: a frame that threw still owes the runtime an xrEndFrame, or the
-    // next xrBeginFrame answers XR_ERROR_CALL_ORDER_INVALID and the session is
-    // wedged for good. The swapchain images acquired during the frame are
-    // released here too.
-    if (mVrSession) vrSessionEndFrame(mVrSession);
-    // ...AND A LOST SESSION ENDS ITSELF (F5). `VrState::Lost` is terminal at
-    // this pin — an external device has no recovery path (VR_SPEC §2.1 row 10)
-    // — so a session that reaches it can only be torn down, and leaving that to
-    // a host that may never ask would leave the render loop in the session's
-    // pacing (a zero interval with vsync off) spinning against a pump that no
-    // longer blocks. Ending it here makes `vrStatus().active` false, which is
-    // the one signal every host already has to watch.
-    //
-    // A SESSION THE RUNTIME STOPPED IS THE SAME CASE (lane VR-3b, 2026-09-17).
-    // `XR_SESSION_STATE_STOPPING` is not a pause: the runtime has taken the
-    // session away (the wearer took the headset off for good, the dashboard
-    // closed the app, WiVRn's link went) and the only legal thing left is to
-    // end it. It cannot be read off the state — a stopped session sits in
-    // `Idle`, which is also where a session that has not begun sits — so the
-    // session says it itself.
+    // NOTHING BELONGS HERE. Every line that used to follow the catch ran on the
+    // normal path only (JAH_CATCH returns); the frame's close is
+    // `closeRenderFrame`, called by the scope guard above.
+}
+
+// ---------------------------------------------------------------------------
+// EVERY FRAME CLOSES, THROWN OR NOT (lane FRAME-CATCH-1, 2026-09-18).
+//
+// WHAT WAS WRONG, and it had been written as if it were right: `JAH_CATCH`
+// expands to `catch (...) { sink = ...; return ret; }` (EnginePrivate.h:219), so
+// on a frame that threw, the four things below were dead code — and their own
+// comments claimed the opposite ("outside the JAH_TRY, like the monitor's own
+// close"). The measured consequences: the eye copies' two swapchain images stay
+// ACQUIRED (the runtime has nothing to hand the next acquire, so the headset
+// goes black while `VrStatus::frames` keeps climbing, and the session is wedged
+// on XR_ERROR_CALL_ORDER_INVALID), the monitor's record for that frame is
+// thrown away by the next `beginFrame`, a session the runtime took away is
+// never ended, and a device loss inside a frame never latches — on the very
+// path XID-2's "a loss ENDS the session" was written for, because that loss
+// surfaces as a VK_ERROR_DEVICE_LOST thrown out of the frame's commit.
+//
+// WHY A SCOPE GUARD AND NOT A NO-RETURN `JAH_CATCH` VARIANT. A second macro
+// would have fixed the throwing path and left the OTHER non-local exit — the VR
+// pump's `return` when the runtime wants no picture — still skipping the close,
+// so the fix would have had to be written twice and re-written for every future
+// early return. One guard covers every exit, needs no new macro, and leaves all
+// ~900 other JAH_CATCH sites in the engine exactly as they were. The cost is
+// that the close cannot answer anything to the caller, which it never did.
+//
+// THE ORDER, and each step's reason:
+//   1. THE RUNTIME'S FRAME, first: it is the only step with a counterparty and
+//      a deadline (a compositor inside xrWaitFrame) and the only one that frees
+//      something the next frame needs — the acquired eye images. Idempotent:
+//      `VrSession::endFrame` returns at once when no XR frame is open, which is
+//      what the pump's own early ends leave behind.
+//   2. THE MONITOR'S RECORD, so the ring holds one record per frame. On a
+//      thrown frame its `totalMs` now includes the xrEndFrame the frame really
+//      owed, which is the honest number.
+//   3. A LOST OR STOPPED SESSION ENDS ITSELF.
+//   4. THE DEVICE-LOST LATCH.
+//   5. THE DEFERRED TEARDOWNS, last and with the in-frame flag cleared (or a
+//      destroy asked for inside the frame would defer itself for ever).
+//
+// AND NOTHING MAY THROW OUT OF IT: a destructor runs it. Each step is wrapped
+// on its own — a step that fails costs its own work and not the ones after it —
+// and the message lands in `lastError()`, which is where a host looks anyway.
+void OgreEngine::closeRenderFrame() noexcept {
+    // ---- 1. the runtime's frame ------------------------------------------
+    frameCloseStep(mLastError, [this] {
+        if (mVrSession) vrSessionEndFrame(mVrSession);
+    });
+    // ---- 2. the monitor's record -----------------------------------------
+    frameCloseStep(mLastError, [this] {
+        if (monitor::live() && monitor::gMonitor->inFrame())
+            monitor::gMonitor->endFrame(mUpdatedScenes);
+    });
+    // ---- 3. a lost or stopped session ------------------------------------
+    frameCloseStep(mLastError, [this] { endLostOrStoppedVrSession(); });
+    // ---- 4. the device-lost latch ----------------------------------------
+    frameCloseStep(mLastError, [this] { latchDeviceLost(); });
+    // ---- 5. the deferred teardowns ---------------------------------------
+    mInRenderFrame = false;
+    drainPendingSceneDestroys();          // noexcept itself
+}
+
+// A LOST SESSION ENDS ITSELF (F5). `VrState::Lost` is terminal at
+// this pin — an external device has no recovery path (VR_SPEC §2.1 row 10)
+// — so a session that reaches it can only be torn down, and leaving that to
+// a host that may never ask would leave the render loop in the session's
+// pacing (a zero interval with vsync off) spinning against a pump that no
+// longer blocks. Ending it here makes `vrStatus().active` false, which is
+// the one signal every host already has to watch.
+//
+// A SESSION THE RUNTIME STOPPED IS THE SAME CASE (lane VR-3b, 2026-09-17).
+// `XR_SESSION_STATE_STOPPING` is not a pause: the runtime has taken the
+// session away (the wearer took the headset off for good, the dashboard
+// closed the app, WiVRn's link went) and the only legal thing left is to
+// end it. It cannot be read off the state — a stopped session sits in
+// `Idle`, which is also where a session that has not begun sits — so the
+// session says it itself.
+void OgreEngine::endLostOrStoppedVrSession() {
     if (mVrSession && vrSessionIsOver(mVrSession)) {
         Ogre::LogManager::getSingleton().logMessage(
             vrSessionState(mVrSession) == VrState::Lost
@@ -1217,24 +1305,59 @@ void OgreEngine::renderOneFrame() {
         // nobody's wish, and the next session would inherit it.
         mVrMirrorView = nullptr;
     }
+}
 
-    // THE GPU IS GONE (lane XID-2, 2026-09-17). Said ONCE, loudly, the moment
-    // the render system reports it: from here on the render system vetoes every
-    // frame (ogre-patch 0072 -- it no longer tries to recreate the device, which
-    // on this driver hangs inside vkDestroyDevice for ever), so a host that does
-    // not ask would see a silent, frozen picture and nothing in the log.
-    if (!mDeviceLost && mRoot) {
-        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
-        if (rs && rs->isDeviceLost()) {
-            mDeviceLost = true;
-            mLastError = "the GPU device was lost";
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka: THE GPU DEVICE WAS LOST. The session cannot continue; the renderer "
-                "does not recreate a lost device. Look for an 'NVRM: Xid' line in the system "
-                "log at this time (journalctl -k | grep -i xid).",
-                Ogre::LML_CRITICAL);
-        }
-    }
+// THE GPU IS GONE (lane XID-2, 2026-09-17). Said ONCE, loudly, the moment
+// the render system reports it: from here on the render system vetoes every
+// frame (ogre-patch 0072 -- it no longer tries to recreate the device, which
+// on this driver hangs inside vkDestroyDevice for ever), so a host that does
+// not ask would see a silent, frozen picture and nothing in the log.
+//
+// REACHED ON A THROWN FRAME NOW (FRAME-CATCH-1), which is the only kind of
+// frame a real loss produces: the wait that notices it throws
+// VK_ERROR_DEVICE_LOST out of the commit, and until this lane that throw
+// returned out of renderOneFrame past this test.
+void OgreEngine::latchDeviceLost() {
+    if (mDeviceLost) return;
+    Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+    // `mFrameFaultDeviceLost` is the injected fault's second half and the only
+    // way this is true without a real loss (FrameFault::ThrowDeviceLost).
+    if (!(mFrameFaultDeviceLost || (rs && rs->isDeviceLost()))) return;
+    mDeviceLost = true;
+    mLastError = "the GPU device was lost";
+    Ogre::LogManager::getSingleton().logMessage(
+        "Jahshaka: THE GPU DEVICE WAS LOST. The session cannot continue; the renderer "
+        "does not recreate a lost device. Look for an 'NVRM: Xid' line in the system "
+        "log at this time (journalctl -k | grep -i xid).",
+        Ogre::LML_CRITICAL);
+}
+
+// ---------------------------------------------------------------------------
+// THE INJECTED FRAME FAULT (Engine::setFrameFault; FrameFault's note in
+// Types.h). Test-facing: the engine's frame close cannot be asserted without a
+// frame that throws, and nothing a suite may legally ask of the engine throws
+// out of a frame.
+void OgreEngine::setFrameFault(FrameFault fault, unsigned frames) {
+    mFrameFault = (fault == FrameFault::None || frames == 0u) ? FrameFault::None : fault;
+    mFrameFaultLeft = mFrameFault == FrameFault::None ? 0u : frames;
+    // The device-lost REPORT is armed with the fault and disarmed with it, so a
+    // disarm cannot leave the latch's input stuck true for the rest of the
+    // process. (The latch itself is one-way, by design: a lost device never
+    // comes back.)
+    if (mFrameFault != FrameFault::ThrowDeviceLost) mFrameFaultDeviceLost = false;
+}
+
+void OgreEngine::raiseFrameFault() {
+    if (!mFrameFaultLeft) return;
+    // The kind is read BEFORE the run is spent: the LAST faulting frame of a
+    // ThrowDeviceLost run is the one that matters most, and reading it after
+    // the disarm below would report that one as a plain throw.
+    const FrameFault fault = mFrameFault;
+    if (--mFrameFaultLeft == 0u) mFrameFault = FrameFault::None;
+    if (fault == FrameFault::ThrowDeviceLost) mFrameFaultDeviceLost = true;
+    OGRE_EXCEPT(Ogre::Exception::ERR_INTERNAL_ERROR,
+                "Jahshaka: an injected frame fault (Engine::setFrameFault) - TEST ONLY",
+                "OgreEngine::renderOneFrame");
 }
 
 // ---------------------------------------------------------------------------

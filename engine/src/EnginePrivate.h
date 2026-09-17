@@ -5395,6 +5395,20 @@ public:
 
     void setTransformWriteCounter(const std::atomic<unsigned long long> *counter) override;
     void renderOneFrame() override;
+    /// THE FRAME'S CLOSE, RUN FROM renderOneFrame's SCOPE GUARD AND NOWHERE
+    /// ELSE (lane FRAME-CATCH-1): the runtime's xrEndFrame, the monitor's
+    /// record, a lost/stopped session's end, the device-lost latch and the
+    /// deferred scene teardowns — on every exit from a frame, thrown or not.
+    /// Never throws: a destructor runs it.
+    void closeRenderFrame() noexcept;
+    /// Steps 3 and 4 of that close, each on its own so the close reads as the
+    /// list it is. Called from closeRenderFrame ONLY.
+    void endLostOrStoppedVrSession();
+    void latchDeviceLost();
+    void setFrameFault(FrameFault fault, unsigned frames) override;
+    /// Raises the armed fault (mFrameFault) and spends one of its frames.
+    /// Called from ONE site inside renderOneFrame; always throws.
+    void raiseFrameFault();
     bool deviceLost() const override;
     void advanceResources() override;
 
@@ -6019,6 +6033,14 @@ private:
 
     /// XID-2: latched the first frame the render system reports a lost device.
     bool mDeviceLost = false;
+    /// THE INJECTED FRAME FAULT (Engine::setFrameFault) — test-facing, off in
+    /// every shipping path, and the only thing in the engine that can make a
+    /// frame throw on purpose. `mFrameFaultDeviceLost` is the second half of
+    /// `FrameFault::ThrowDeviceLost`: the one way the latch below can fire
+    /// without a real device loss, cleared with the fault.
+    FrameFault mFrameFault = FrameFault::None;
+    unsigned   mFrameFaultLeft = 0u;
+    bool       mFrameFaultDeviceLost = false;
     /// WHAT STOPPING A CAPTURE LEAVES BEHIND. Switching the monitor off flushes
     /// the frames still waiting for their GPU samples (which arrive two frames
     /// late) into here, so the host's usual "stop, then drain" order does not
