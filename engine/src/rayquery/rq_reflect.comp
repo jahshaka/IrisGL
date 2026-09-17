@@ -112,7 +112,104 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 prevRayRight;
 	vec4 prevRayDown;
 	vec4 prevFwd;
+	/// ---- THE SECOND EYE (lane REFLECT-VR-1) -----------------------------
+	/// x = 1 when this target carries TWO EYES SIDE BY SIDE — the left eye in
+	/// the left half of every texture here, the right in the right half
+	/// (chain::applyStereo's viewport split). Then the five basis vectors above
+	/// are the LEFT eye's and the five below are the right eye's, each mapped
+	/// over its OWN half as a 0..1 image; with x = 0 the block below is unread
+	/// and the basis above is the one camera's, exactly as before.
+	///
+	/// WHY A HALF TEST AND NOT TWO DISPATCHES: the depth, the normals and the
+	/// roughness of BOTH eyes live in one texture at one scale, and the pixel's
+	/// own coordinate already selects the right eye's texels. Only the RAY
+	/// needs to know which eye it belongs to — one branch on the x coordinate,
+	/// no second descriptor set, no second history ring, and the seam falls on
+	/// a block boundary by construction (the C++ side sizes the trace so).
+	vec4 stereo;
+	vec4 camPos2;
+	vec4 rayTL2;
+	vec4 rayRight2;
+	vec4 rayDown2;
+	vec4 fwd2;
+	vec4 prevCamPos2;
+	vec4 prevRayTL2;
+	vec4 prevRayRight2;
+	vec4 prevRayDown2;
+	vec4 prevFwd2;
 } p;
+
+/// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
+/// and the world-space ray (or image-plane offset) of its own 0..1 image.
+/// @see p.stereo — with one eye there is one of these and nothing branches.
+struct EyeImage
+{
+	vec3  camPos;
+	float perspective;		// 1 = a ray per pixel, 0 = an offset (orthographic)
+	vec3  rayTL;
+	vec3  rayRight;
+	vec3  rayDown;
+	vec3  fwd;
+};
+
+EyeImage eyeNow( int eye )
+{
+	EyeImage e;
+	if( eye == 1 )
+	{
+		e.camPos = p.camPos2.xyz; e.perspective = p.camPos2.w;
+		e.rayTL = p.rayTL2.xyz; e.rayRight = p.rayRight2.xyz;
+		e.rayDown = p.rayDown2.xyz; e.fwd = p.fwd2.xyz;
+	}
+	else
+	{
+		e.camPos = p.camPos.xyz; e.perspective = p.camPos.w;
+		e.rayTL = p.rayTL.xyz; e.rayRight = p.rayRight.xyz;
+		e.rayDown = p.rayDown.xyz; e.fwd = p.fwd.xyz;
+	}
+	return e;
+}
+
+EyeImage eyeBefore( int eye )
+{
+	EyeImage e;
+	if( eye == 1 )
+	{
+		e.camPos = p.prevCamPos2.xyz; e.perspective = p.prevCamPos2.w;
+		e.rayTL = p.prevRayTL2.xyz; e.rayRight = p.prevRayRight2.xyz;
+		e.rayDown = p.prevRayDown2.xyz; e.fwd = p.prevFwd2.xyz;
+	}
+	else
+	{
+		e.camPos = p.prevCamPos.xyz; e.perspective = p.prevCamPos.w;
+		e.rayTL = p.prevRayTL.xyz; e.rayRight = p.prevRayRight.xyz;
+		e.rayDown = p.prevRayDown.xyz; e.fwd = p.prevFwd.xyz;
+	}
+	return e;
+}
+
+/// WHICH EYE OWNS A COLUMN, and the whole of the stereo layout in one place:
+/// the left eye is the left half of the image, the right eye the right half.
+int eyeOfColumn( int x, int width )
+{
+	return ( p.stereo.x > 0.5 && x >= width / 2 ) ? 1 : 0;
+}
+/// That eye's own 0..1 image coordinate from a coordinate over the whole
+/// target. Horizontally it is the half's own fraction; vertically nothing is
+/// split, so it passes straight through.
+vec2 eyeLocalUv( vec2 uv, int eye )
+{
+	if( p.stereo.x <= 0.5 )
+		return uv;
+	return vec2( clamp( uv.x * 2.0 - float( eye ), 0.0, 1.0 ), uv.y );
+}
+/// ...and back: a coordinate in the eye's own image, as one over the target.
+vec2 eyeGlobalUv( vec2 local, int eye )
+{
+	if( p.stereo.x <= 0.5 )
+		return local;
+	return vec2( ( local.x + float( eye ) ) * 0.5, local.y );
+}
 
 layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
 layout( set = 0, binding = 3 ) uniform sampler2D gBufShadowRoughness;
@@ -166,12 +263,15 @@ float viewDistance( float rawDepth )
 }
 
 /// The surface this pixel shows, in world space.
-vec3 worldAt( vec2 uv, float dist )
+/// THE SURFACE THIS PIXEL DREW, from its depth. `uv` is the coordinate in the
+/// EYE'S OWN image (eyeLocalUv), so under stereo each half reconstructs through
+/// the eye that rendered it and nothing here knows there are two.
+vec3 worldAt( EyeImage e, vec2 uv, float dist )
 {
-	const vec3 plane = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
-	if( p.camPos.w < 0.5 )
-		return p.camPos.xyz + plane + p.fwd.xyz * dist;		// an offset, not a ray
-	return p.camPos.xyz + plane * dist;
+	const vec3 plane = e.rayTL + e.rayRight * uv.x + e.rayDown * uv.y;
+	if( e.perspective < 0.5 )
+		return e.camPos + plane + e.fwd * dist;		// an offset, not a ray
+	return e.camPos + plane * dist;
 }
 
 /// A cheap, well-distributed per-pixel-per-frame pair. PCG's mixing step; the
@@ -408,20 +508,27 @@ vec3 skyRadiance( vec3 dir )
 /// warm-up (kWarmupFrames samples), but the distance test rejected it: the
 /// surface here MOVED. That is the one case where the renderer's confidence in
 /// showing a ray at all must not fall — see the count it seeds in main().
-vec4 historyAt( vec3 world, ivec2 traceRes, out float warmHeld )
+/// WHERE THIS SURFACE WAS IN THE LAST FRAME'S PICTURE — of THIS EYE (lane
+/// REFLECT-VR-1). The reprojection runs entirely in the eye's own image and the
+/// result is mapped back onto the eye's own HALF of the history: an eye's
+/// temporal mean may never be read from the other eye's texels, whose radiance
+/// belongs to a different camera and whose distances belong to different
+/// silhouettes.
+vec4 historyAt( EyeImage before, int eye, vec3 world, ivec2 traceRes, out float warmHeld )
 {
 	warmHeld = 0.0;
-	const vec3 d = world - p.prevCamPos.xyz;
-	const float z = dot( d, p.prevFwd.xyz );
+	const vec3 d = world - before.camPos;
+	const float z = dot( d, before.fwd );
 	if( z <= 0.0 )
 		return vec4( 0.0 );				// behind the camera it was
-	const vec3 plane = p.prevCamPos.w < 0.5 ? d - p.prevFwd.xyz * z : d / z;
-	const vec3 q = plane - p.prevRayTL.xyz;
-	const vec2 uv = vec2( dot( q, p.prevRayRight.xyz ) / dot( p.prevRayRight.xyz, p.prevRayRight.xyz ),
-						  dot( q, p.prevRayDown.xyz ) / dot( p.prevRayDown.xyz, p.prevRayDown.xyz ) );
+	const vec3 plane = before.perspective < 0.5 ? d - before.fwd * z : d / z;
+	const vec3 q = plane - before.rayTL;
+	const vec2 uv = vec2( dot( q, before.rayRight ) / dot( before.rayRight, before.rayRight ),
+						  dot( q, before.rayDown ) / dot( before.rayDown, before.rayDown ) );
 	if( any( lessThan( uv, vec2( 0.0 ) ) ) || any( greaterThanEqual( uv, vec2( 1.0 ) ) ) )
 		return vec4( 0.0 );
-	const ivec2 pc = clamp( ivec2( uv * vec2( traceRes ) ), ivec2( 0 ), traceRes - 1 );
+	const ivec2 pc = clamp( ivec2( eyeGlobalUv( uv, eye ) * vec2( traceRes ) ),
+							ivec2( 0 ), traceRes - 1 );
 	const float wasDist = imageLoad( historyDistPrev, pc ).x;
 	const float dist = z;   // what THIS surface's distance was last frame
 	// 5 % of the distance: far enough not to reject a surface the camera merely
@@ -465,6 +572,15 @@ void main()
 	const ivec2 scale = max( fullRes / max( traceRes, ivec2( 1 ) ), ivec2( 1 ) );
 	const ivec2 blockOrigin = tc * scale;
 	const vec2 uv = ( vec2( blockOrigin ) + 0.5 * vec2( scale ) ) / vec2( fullRes );
+	// WHICH EYE THIS PIXEL BELONGS TO, and its coordinate in that eye's own
+	// image (lane REFLECT-VR-1). Every TEXTURE fetch below uses `uv` — the
+	// coordinate over the whole target, which already lands in the right eye's
+	// half of the depth, normal and roughness buffers — and every RAY below is
+	// built from `localUv` through that eye's basis. With one eye the two are
+	// the same coordinate and nothing branches.
+	const int eye = eyeOfColumn( tc.x, traceRes.x );
+	const vec2 localUv = eyeLocalUv( uv, eye );
+	const EyeImage thisEye = eyeNow( eye );
 
 	const float rawDepth = texture( sceneDepth, uv ).x;
 	// Cleared depth at EITHER extreme is "nothing was drawn here" — correct with
@@ -507,7 +623,7 @@ void main()
 	normalVS = normalize( normalVS );
 
 	const float dist = viewDistance( rawDepth );
-	const vec3 world = worldAt( uv, dist );
+	const vec3 world = worldAt( thisEye, localUv, dist );
 	// The G-buffer normal is in Ogre's RIGHT-HANDED view space (HlmsPbs writes
 	// `pixelData.normal` straight out — JahSsrRayMarch_ps.glsl's own note, which
 	// is why the march negates z to march in a left-handed one). viewAxis* are
@@ -517,7 +633,8 @@ void main()
 								   p.viewAxisY.xyz * normalVS.y +
 								   p.viewAxisZ.xyz * normalVS.z );
 
-	const vec3 V = p.camPos.w < 0.5 ? -p.fwd.xyz : normalize( p.camPos.xyz - world );
+	const vec3 V = thisEye.perspective < 0.5 ? -thisEye.fwd
+												: normalize( thisEye.camPos - world );
 	if( dot( worldN, V ) <= 0.0 )
 	{
 		imageStore( historyDistCur, tc, vec4( 0.0 ) );
@@ -549,7 +666,7 @@ void main()
 	// throttles the ray to an eighth for eight frames afterwards. A glossy lobe
 	// grazing the voxel volume's edge would never converge at all.
 	float warmHeld;
-	const vec4 prev = historyAt( world, traceRes, warmHeld );
+	const vec4 prev = historyAt( eyeBefore( eye ), eye, world, traceRes, warmHeld );
 
 	// THE RAY. The origin is lifted off its own surface along the NORMAL rather
 	// than along the ray, so a grazing reflection cannot re-enter the surface it

@@ -52,6 +52,7 @@
 #if JAH_VR
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -1023,7 +1024,26 @@ bool VrSession::create(std::string &reason) {
     fx.bloom = false;
     fx.ssao = false;
     fx.smaaPreset = -1;
-    fx.ssr = 0;
+    // REFLECTIONS IN THE HEADSET (lane REFLECT-VR-1). The row is the PROJECT'S —
+    // the World panel's SSR row, which the host passes in `VrConfig::ssr`
+    // because no mirror reaches a view the session made — and it selects the
+    // reflection's RESOLUTION and its prepass, exactly as on the desktop.
+    //
+    // WHAT IT DOES NOT SELECT IS THE SCREEN-SPACE MARCH, which is off here and
+    // structurally impossible in a stereo chain (PostFxDesc::ssrScreenMarch,
+    // and chain::build enforces it): the march walks the TARGET, and this
+    // target is two eyes side by side. Phase 2 read that correctly and
+    // concluded "so no reflections in VR", which is the line the owner saw the
+    // consequence of — a chrome sphere showing the room on the desktop and
+    // nothing in the headset. The rays have no such term: a ray is traced in
+    // the world from the eye that owns its pixel, so they answer per eye, and
+    // with the march off they answer ALL of it.
+    //
+    // SSAO and SMAA stay off for the reason phase 2 gave and it still holds:
+    // both are neighbourhood filters over the target, both would read across
+    // the seam, and neither has a per-eye form here yet.
+    fx.ssr = mConfig.ssr;
+    fx.ssrScreenMarch = false;
     mView->setPostFx(fx);
     mView->setSampleCount(1u);
     mView->setStereo(true, "JahshakaVrCullCamera");
@@ -2157,6 +2177,16 @@ bool VrSession::beginFrame() {
         // distance in the ROOM, so at world scale s the eyes are s times
         // further apart in the world.
         eyeToHead[eye].setTrans(eyeToHead[eye].getTrans() * mConfig.worldScale);
+        // THE INVARIANT ogre-patch 0078 DEPENDS ON, stated where it is
+        // established rather than where it is consumed: the matrix below is
+        // built from THIS camera's own near and far, and `getFrustumExtents(
+        // FET_TAN_HALF_ANGLES)` divides the extents it unprojects from the
+        // matrix by the Frustum's `mNearDist` (OgreFrustum.cpp:1361). The two
+        // are the same number here BY CONSTRUCTION — `zNear` IS
+        // `cam->getNearClipDistance()` a few lines up — and anything that ever
+        // builds a custom projection with a near plane the camera does not
+        // carry would get tangents scaled by the ratio of the two.
+        assert(!cam || std::fabs(float(cam->getNearClipDistance()) - zNear) < 1e-6f);
         proj[eye] = projectionFromFov(mViews[eye].fov, zNear, zFar);
         // ...AND THE RENDER SYSTEM'S CONVENTION, WHICH VrData DOES NOT APPLY
         // (F1, the critical one). `VrData::set` STORES the matrix raw
@@ -2222,6 +2252,28 @@ bool VrSession::beginFrame() {
         // assertion looks.
         mEyeWorldPos[eye] = mOriginPos + mOriginRot * (eyePos[eye] * mConfig.worldScale);
         mEyeWorldRot[eye] = mOriginRot * eyeRot[eye];
+    }
+    // ...AND ONTO THE VIEW, for the passes that must answer PER EYE (lane
+    // REFLECT-VR-1; @see StereoEyeBasis). The ray-traced reflection is the
+    // first: it traces one ray per pixel from the camera it is given, and the
+    // camera it is given is the HEAD. The eyes are pushed here, in the frame
+    // they were located for and from the same numbers the picture was rendered
+    // with, rather than recomposed later from the camera and VrData.
+    if (mView) {
+        StereoEyeBasis eyes[2];
+        for (int eye = 0; eye < 2; ++eye) {
+            eyes[eye].position = mEyeWorldPos[eye];
+            eyes[eye].orientation = mEyeWorldRot[eye];
+            // The runtime's own frustum, as tangents — the same sense
+            // `Frustum::getFrustumExtents(FET_TAN_HALF_ANGLES)` returns and the
+            // same numbers `projectionFromFov` above built the matrix from, so
+            // a ray and a rasterised pixel cannot disagree about the frustum.
+            eyes[eye].tanLeft   = std::tan(mViews[eye].fov.angleLeft);
+            eyes[eye].tanRight  = std::tan(mViews[eye].fov.angleRight);
+            eyes[eye].tanTop    = std::tan(mViews[eye].fov.angleUp);
+            eyes[eye].tanBottom = std::tan(mViews[eye].fov.angleDown);
+        }
+        mView->setStereoEyes(eyes[0], eyes[1]);
     }
     mHavePose = true;
     // WHERE THE WEARER'S HEAD ENDED UP, for the host that has to move them
@@ -2774,6 +2826,9 @@ VrSession::~VrSession() {
     if (mView) {
         mView->removeWorkspaceListener(this);
         if (mView->camera()) mView->camera()->setVrData(nullptr);
+        // AND THE EYES GO WITH IT: a view with no session has no eyes, and a
+        // pass that read stale ones would trace last session's poses.
+        mView->clearStereoEyes();
         mEngine->destroyView(mView);
         mView = nullptr;
     }
@@ -3099,14 +3154,65 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
             }
             // READ UNTIL IT HOLDS STILL. The chain's history textures are new,
             // so the first frames of any chain are its own warm-up.
+            //
+            // "STILL" IS NOT "IDENTICAL" ONCE A STOCHASTIC PASS IS IN THE CHAIN
+            // (lane REFLECT-VR-1, measured). The ray-traced reflection fires one
+            // ray per pixel per frame from a sequence that changes every frame,
+            // so at a silhouette — where a ray either finds the near surface or
+            // passes it — a handful of pixels flip for ever, whatever the mean
+            // does. Measured on this lane's mirror fixture, frames 80 to 84 of
+            // a static control: the MEAN absolute difference between
+            // consecutive reads is 0.045-0.065 of 255, while 0.06-0.09 % of
+            // bytes differ by more than 8 and the worst single byte swings 156.
+            // A bit-exact pair never happens, and the picture is nevertheless
+            // as still as a picture with a stochastic estimator in it gets.
+            //
+            // So: a bit-exact pair FIRST, because that is what a chain without a
+            // trace gives and what the reverse-Z detector's one-in-255
+            // comparison was built on, and a MEAN below `kSettleMean`
+            // afterwards, logged so a caller can see which kind of settle it
+            // got. The bar is four times below that comparison's own, so a
+            // control accepted this way cannot hide the defect it exists to
+            // catch (which reads a mean of 11.5). Before this, a chain with
+            // reflections in it simply never settled and the call failed.
+            // AND IT ENDS WHEN THE PICTURE IS STILL, NOT AT THE BUDGET (the
+            // lead's read): a bit-exact pair ends it immediately, and otherwise
+            // `kSettleRuns` CONSECUTIVE quiet pairs do — one quiet pair on a
+            // stochastic chain can be luck (a frame whose few flickering pixels
+            // happened to land the same way), three in a row is the picture
+            // holding still. Before this the loop always ran its whole
+            // ninety-frame budget on such a chain and then judged the LAST pair.
+            const double kSettleMean = 0.25;
+            const int kSettleRuns = 3;
             Image prev;
+            double lastMean = -1.0;
+            int quiet = 0;
             for (int i = 0; i < 90 && !ok; ++i) {
                 mEngine->renderOneFrame();
                 if (!control->readPixels(out)) break;
-                if (i > 0 && !out.rgba.empty() && out.rgba == prev.rgba) ok = true;
-                else prev = out;
+                if (i > 0 && !out.rgba.empty() && out.rgba.size() == prev.rgba.size()) {
+                    double sum = 0.0;
+                    for (size_t b = 0; b < out.rgba.size(); ++b)
+                        sum += std::abs(int(out.rgba[b]) - int(prev.rgba[b]));
+                    lastMean = sum / double(out.rgba.size());
+                    if (lastMean <= 0.0) {
+                        ok = true;                      // bit-exact: nothing to argue about
+                    } else if (lastMean <= kSettleMean) {
+                        if (++quiet >= kSettleRuns) {
+                            ok = true;
+                            vrLog("eye screenshot: the picture settled to a mean of %.3f/255 "
+                                  "over %d consecutive frames rather than exactly (a "
+                                  "stochastic pass is in this chain)", lastMean, kSettleRuns);
+                        }
+                    } else {
+                        quiet = 0;                      // it moved again: start the run over
+                    }
+                }
+                if (!ok) prev = out;
             }
-            if (!ok) error = "vrEyeScreenshot: the control picture never settled";
+            if (!ok)
+                error = "vrEyeScreenshot: the control picture never settled (the last pair's "
+                        "mean difference was " + std::to_string(lastMean) + "/255)";
         } else {
             error = "vrEyeScreenshot: the control view refused the scene";
         }

@@ -1865,13 +1865,47 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     band, attributed by zeroing the term in staged media), gi.chain_face (1.029 ->
     1.057) and gi.rt_reflect (the no-ray control 0.0099 -> 0.0315, the ray's own
     answer unchanged). Selftest alone: `277ba3c2…` -> `8254977e…`.
+  0078-custom-projection-publishes-its-frustum-extents — A CAMERA WITH A CUSTOM
+    PROJECTION MATRIX MUST REPORT ITS OWN FRUSTUM EXTENTS (lane REFLECT-VR-1,
+    2026-09-18), SOURCE-only, one file (OgreMain/src/OgreFrustum.cpp, no overlap
+    with any other patch). `Frustum::calcProjectionParameters`' three branches all
+    compute the extents; the two AUTO ones publish them to `mLeft/mRight/mTop/
+    mBottom` (:380, :396) and the `mCustomProjMatrix` one (:330) publishes nothing
+    — and the constructor initialises every other member of the class but not
+    those four (OgreFrustum.h:137). So `getFrustumExtents()` on a camera given a
+    custom projection matrix before its first `updateFrustum` — the normal way to
+    use one, and what Ogre's own VR recipe does — returns INDETERMINATE values:
+    measured on an OpenXR eye (near 0.05, true tangents 0.847 x 0.985) it answered
+    (-1106.711, 1102.311, 825.453, -1147.873), wrong by a factor of ~1,300 and
+    stable across frames. Anything that needs a frustum's SHAPE rather than its
+    matrix reads it: our ray-per-pixel reflection basis (which is how it was
+    found — `vrEyeScreenshot`'s per-eye control traced a frustum 1,300 times too
+    wide), the compositor's `VIEW_SPACE_CORNERS_*` auto-parameters through
+    `getWorldSpaceCorners`, upstream's own shadow setups — AND FORWARD+, which
+    makes this a behavioural change and not only a corrected reading:
+    `ForwardClustered::collectLights` pushes the current camera's tangents onto
+    the camera it slices the light grid with (OgreForwardClustered.cpp:341-343),
+    so such a camera culled its lights against a garbage frustum before the
+    patch and against its own after. Nothing that ships today moves (the only
+    custom-projection cameras here are the VR session's, whose grid is the CULL
+    camera's, and `vrEyeScreenshot`'s mono control). The tangent form divides the
+    published positions by the Frustum's OWN `mNearDist`, so it is right only
+    while `setNearClipDistance` matches the matrix's near — asserted where the
+    session builds the projection. The fix is the four
+    missing assignments plus the four missing constructor initialisers, in the
+    same units and convention (`FET_PROJ_PLANE_POS`) the other branches publish.
+    A camera without a custom projection takes neither hunk: the selftest hash and
+    the directional-lit pixel suites are unchanged (`ebe346e1…` either way,
+    verified). NOT fixed: under a portrait `OrientationMode` (compiled out here)
+    `updateFrustumImpl` calls the function with swapped arguments, so every branch
+    publishes under swapped names — upstream's behaviour, untouched.
 
-THE STACK IS 0001-0077 (this list; `build-ogre.sh` globs `*.patch`, so the file
+THE STACK IS 0001-0078 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).
 Updating Ogre: bump the submodule pin, re-run scripts/build-ogre.sh. A patch that
 no longer applies is the signal to review upstream's change and adapt. Media-only
 patches (0003/0009/0011/0019/0021/0022/0023/0029/0030/0031/0033/0034/0036/0042/0043/0045/0048/0058/0066/0074/0077) need no Ogre rebuild (0024 and 0028 are
-SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073 and 0075 are SOURCE-only (0062, 0065 and 0076 are SOURCE + media; 0066 is media-only), and 0020 touches the
+SOURCE + media; 0025, 0026, 0027, 0032, 0038, 0039, 0040, 0041, 0044, 0046, 0047, 0049, 0050-0057, 0059, 0060, 0061, 0063, 0064, 0067, 0068, 0069, 0071, 0072, 0073, 0075 and 0078 are SOURCE-only (0062, 0065 and 0076 are SOURCE + media; 0066 is media-only), and 0020 touches the
 sample framework only) — the Studio build stages the
 media straight from the submodule — but the patch loop must have run in that tree,
 and a tree whose media predates 0019 will THROW when chain::updateSsao pushes
