@@ -2444,14 +2444,31 @@ jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
     return mVrProxyModelMesh[hand];
 }
 
+// THE SESSION BUILDS THEM; THE USER'S SWITCH DECIDES ONLY THE HAND MARKERS
+// (VR-INPUT-1E-FIX finding 6).
+//
+// `vr.proxies(false)` is an off switch for the WANDS — "do not draw a marker
+// where my hand is". The RAY is not a marker of a hand, it is the pointing
+// TOOL: it is what tells a wearer what they are about to select, and a hidden
+// pointer is an editor that answers questions nobody asked. It is therefore
+// INDEPENDENT of the switch, and the session (its only writer, `placeRay`) is
+// what shows and hides it — while the switch and the session together decide
+// the wands.
+//
+// The first cut built both sets behind the switch and took the ray down with
+// the wands, so the behaviour depended on the ORDER the two were toggled in:
+// proxies off BEFORE a session meant the ray nodes were never created at all,
+// and proxies off DURING one meant the session went on putting back a ray the
+// host had just hidden — the very asymmetry rule VrSession::placeProxies
+// spells out ("the session may take a proxy away; it may never put one back").
 void SceneMirror::syncVrProxies()
 {
     if (!mTarget) return;
-    // NOTHING AT ALL UNTIL SOMEBODY ASKS, and then nothing again afterwards:
-    // the latch below means a scene that has never worn VR — which is every
-    // scene, nearly always — pays one branch a frame.
-    const bool wanted = mVrProxiesVisible && mVrStatus.active;
-    if (!wanted) {
+    // NOTHING AT ALL UNTIL SOMEBODY WEARS ONE, and then nothing again
+    // afterwards: the latch below means a scene that has never worn VR — which
+    // is every scene, nearly always — pays one branch a frame.
+    const bool session = mVrStatus.active;
+    if (!session) {
         if (mVrProxiesBuilt) {
             for (int i = 0; i < 2; ++i)
                 if (mVrProxyNode[i] && mVrProxyVisible[i] != 0) {
@@ -2459,7 +2476,9 @@ void SceneMirror::syncVrProxies()
                     mVrProxyVisible[i] = 0;
                 }
             // ...AND THE RAY WITH THEM: the session is its only writer, so
-            // nothing else would take it down when a session ends.
+            // nothing else would take it down when a session ENDS. (A session
+            // that is merely running with the wands switched off keeps it —
+            // that is the switch, not the end.)
             for (int i = 0; i < 2; ++i)
                 if (mVrRayNode[i]) mTarget->setNodeVisible(mVrRayNode[i], false);
         }
@@ -2520,12 +2539,35 @@ void SceneMirror::syncVrProxies()
         // second question anybody asks of a pair of markers.
         mVrProxyMaterial[0] = mTarget->createUnlitMaterial(Colour(0.35f, 0.80f, 1.0f, 0.90f), true);
         mVrProxyMaterial[1] = mTarget->createUnlitMaterial(Colour(1.0f, 0.72f, 0.30f, 0.90f), true);
-        // UNLIT GREY for the vendored models: a helper's material is the
-        // mirror's, and a solid model reads by its shape rather than its
-        // colour (the wands keep their two colours — a pair of identical
-        // line markers needs them).
-        mVrProxyModelMaterial = mTarget->createUnlitMaterial(Colour(0.62f, 0.64f, 0.67f, 1.0f),
-                                                             true);
+        // THE VENDORED MODELS ARE LIT, AND THAT IS THE OWNER'S HEADSET SMOKE
+        // TALKING (2026-09-17, WiVRn + Quest Pro): with an UNLIT flat grey they
+        // read as PURE WHITE SILHOUETTES in the eyes — the shape moved in 3D
+        // correctly and had no geometry in it at all, because one constant
+        // colour through the eye's exposure and tonemap is one output value
+        // over the whole outline. A controller is a solid object in the room;
+        // it has to shade like one, or the wearer cannot see which way it is
+        // pointing.
+        //
+        // A PLAIN PHYSICAL SURFACE, nothing clever: mid-grey albedo (sRGB 110,
+        // which is 0.177 linear through the one colour rule every picked colour
+        // goes through — iris::linearOf), roughness 0.6, no metal and no
+        // emissive. No normal map, so no tangents are needed. The HELPER BITS
+        // are unchanged: it is still out of every probe capture, every shadow
+        // map and every user screenshot, and still in both of the wearer's
+        // channels.
+        //
+        // THE WANDS STAY UNLIT, and that is physics rather than taste: they are
+        // LINE meshes with no surface and no normals, so there is nothing for a
+        // lit datablock to shade — a line's colour IS its whole appearance, and
+        // the pair needs two of them to tell left from right.
+        {
+            PbrParams wandModel;
+            const iris::LinearColor grey = iris::linearOf(QColor(110, 110, 110));
+            wandModel.albedo = Colour(grey.r, grey.g, grey.b, 1.0f);
+            wandModel.roughness = 0.6f;
+            wandModel.metalness = 0.0f;
+            mVrProxyModelMaterial = mTarget->createPbrMaterial(wandModel);
+        }
         mVrProxyWandMesh[0] = mTarget->createLineMesh(wand, false);
         mVrProxyWandMesh[1] = mTarget->createLineMesh(wand, false);
         for (int i = 0; i < 2; ++i) {
@@ -2566,14 +2608,26 @@ void SceneMirror::syncVrProxies()
         mVrProxiesBuilt = true;
     }
 
+    // ...AND ONLY NOW THE USER'S SWITCH. Everything below is the HAND MARKERS:
+    // which model each hand wears and where the two wands stand. With the
+    // switch off they are hidden and the ray, built and placed above, is left
+    // exactly as the session set it (finding 6).
+    if (!mVrProxiesVisible) {
+        for (int i = 0; i < 2; ++i)
+            if (mVrProxyNode[i] && mVrProxyVisible[i] != 0) {
+                mTarget->setNodeVisible(mVrProxyNode[i], false);
+                mVrProxyVisible[i] = 0;
+            }
+        return;
+    }
+
     // WHICH MODEL IS ON EACH HAND (the owner's slot, answer 6). The runtime's
     // own answer decides: a wearer holding a Touch controller gets the
     // vendored Touch model, and every other profile — the simple controller,
     // WMR, bare hands, nothing bound at all — gets the WAND, because a wand is
     // the honest drawing for a controller whose shape we do not know. The
     // model is loaded the first frame it is asked for and never otherwise.
-    const std::string &profile = mVrStatus.profile;
-    const bool touch = profile.find("touch_controller") != std::string::npos;
+    const bool touch = mVrStatus.profile.contains("touch_controller");
     for (int i = 0; i < 2; ++i) {
         if (!mVrProxyNode[i]) continue;
         MeshId want = mVrProxyWandMesh[i];
@@ -2616,9 +2670,26 @@ void SceneMirror::syncVrProxies()
             mTarget->setNodeTransform(mVrProxyNode[i], p.position, p.rotation,
                                       Vec3(1.0f, 1.0f, 1.0f));
         }
-        if (mVrProxyVisible[i] != want) {
-            mTarget->setNodeVisible(mVrProxyNode[i], want != 0);
-            mVrProxyVisible[i] = want;
+        // THE MEMO IS NOT THE ONLY WRITER (VR-INPUT-1E-FIX finding 4). The
+        // running session hides an unlocated hand itself, inside its own frame
+        // (VrSession::placeProxies) — so a memo that says "already shown"
+        // could be describing a node somebody else took away, and the proxy
+        // stayed hidden until the next invalid→valid transition the mirror
+        // happened to see. It can be a LONG wait: every frame loop that calls
+        // renderOneFrame without a host tick in front of it (the scripted
+        // editor loops, the stable offscreen render, the Player's own loop)
+        // runs the session's hide with no mirror sync behind it.
+        //
+        // So the SHOW side is unconditional — one flag write per frame per
+        // hand, which is a branch and a store — and the memo stays on the HIDE
+        // side, where this is the only writer that ever asks for a hide with
+        // the hand still valid.
+        if (want) {
+            mTarget->setNodeVisible(mVrProxyNode[i], true);
+            mVrProxyVisible[i] = 1;
+        } else if (mVrProxyVisible[i] != 0) {
+            mTarget->setNodeVisible(mVrProxyNode[i], false);
+            mVrProxyVisible[i] = 0;
         }
     }
 }

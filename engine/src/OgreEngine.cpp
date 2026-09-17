@@ -371,8 +371,33 @@ Scene *OgreEngine::createScene(const std::string &name, unsigned workerThreads) 
     } JAH_CATCH(mLastError, nullptr);
 }
 
+// A DESTROY ASKED FOR FROM INSIDE A FRAME IS DEFERRED, NOT REFUSED
+// (VR-INPUT-1E-FIX finding 5).
+//
+// Nothing in this tree destroys a scene from inside renderOneFrame, and doing
+// it there cannot be honoured on the spot: a VR session bound to the scene
+// would be ended between its own xrBeginFrame and xrEndFrame (the runtime's
+// frame contract, broken with no log to explain it), and the render system is
+// holding the scene's own buffers for the frame in flight. The first cut
+// REFUSED — and a refusal on a `void` call is a ghost: `lastError()` was not
+// even set, and every host in the tree nulls its Scene pointer the moment it
+// has asked, so the scene would have leaked with nobody able to name it.
+//
+// So the request is remembered and drained at the frame's TAIL, where the same
+// call is sound. The host's contract is unchanged ("the Scene is gone when you
+// asked for it to be"); what moves is by how many microseconds.
 void OgreEngine::destroyScene(Scene *scene) {
     if (!scene) return;
+    if (mInRenderFrame) {
+        for (Scene *pending : mPendingSceneDestroy)
+            if (pending == scene) return;          // asked for twice in one frame
+        mPendingSceneDestroy.push_back(scene);
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: destroyScene() was called from INSIDE a frame - deferred to this "
+            "frame's tail (a session rendering it is ended there, in order)",
+            Ogre::LML_NORMAL);
+        return;
+    }
     for (auto it = mScenes.begin(); it != mScenes.end(); ++it) {
         if (it->get() != scene) continue;
         // A SESSION MUST NOT OUTLIVE THE WORLD IT RENDERS (VR-4-FIX finding 1).
@@ -392,20 +417,11 @@ void OgreEngine::destroyScene(Scene *scene) {
         // RTTs and swapchains need — which is exactly the drain endVrSession
         // relies on its caller for.
         if (mVrSession && vrSessionScene(mVrSession) == it->get()) {
-            // IN A FRAME, THIS WOULD BE WORSE THAN THE DEFECT IT GUARDS
-            // (VR-4-FIX's second read, finding 3). Nothing in this tree
-            // destroys a scene from inside renderOneFrame; if anything ever
-            // does, ending a session between its own xrBeginFrame and
-            // xrEndFrame breaks the runtime's frame contract with no log to
-            // explain it. So it is REFUSED, loudly, and the scene stays.
-            if (mInRenderFrame) {
-                Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka VR: destroyScene('" + (*it)->name() +
-                        "') was called from INSIDE a frame while a session renders it - "
-                        "REFUSED (end the session, leave the frame, then destroy)",
-                    Ogre::LML_CRITICAL);
-                return;
-            }
+            // IN A FRAME THIS IS NOT REACHED AT ALL (VR-INPUT-1E-FIX finding
+            // 5): the top of this function defers such a call to the frame's
+            // tail, so by the time the session is ended here the frame is
+            // closed and xrEndFrame has been paired with its xrBeginFrame.
+            //
             // The HOST ends it first and properly; this is the belt, and since
             // the hosts are ordered (the Player and the editor preview both end
             // their session before the scene goes) it is a plain line rather
@@ -442,6 +458,22 @@ void OgreEngine::destroyScene(Scene *scene) {
         return;
     }
     mLastError = "destroyScene: unknown Scene";
+}
+
+void OgreEngine::drainPendingSceneDestroys() noexcept {
+    if (mPendingSceneDestroy.empty()) return;
+    // SWAPPED OUT FIRST: destroyScene tears down Views, workspaces and a VR
+    // session, and a host callback reached from any of that may ask for another
+    // scene — which then belongs to the NEXT frame's tail, not to this loop.
+    std::vector<Scene *> pending;
+    pending.swap(mPendingSceneDestroy);
+    for (Scene *scene : pending) {
+        // NOTHING MAY ESCAPE: the frame guard's destructor calls this.
+        try { destroyScene(scene); }
+        catch (Ogre::Exception &e) { mLastError = e.getFullDescription(); }
+        catch (std::exception &e)  { mLastError = std::string("engine: ") + e.what(); }
+        catch (...)                { mLastError = "destroyScene: unknown exception"; }
+    }
 }
 
 View *OgreEngine::createView(const std::string &name,
@@ -695,11 +727,19 @@ void OgreEngine::renderOneFrame() {
     // destroyScene's VR belt asks before it ends a session. RAII rather than a
     // pair of assignments because this function throws (JAH_CATCH below) and a
     // flag left set would refuse every later teardown.
+    // AND IT DRAINS WHAT THE FRAME DEFERRED (VR-INPUT-1E-FIX finding 5): a
+    // destroyScene asked for from inside the frame is honoured HERE, with the
+    // flag already cleared (or it would defer itself for ever) and on the
+    // throwing path too — a frame that threw still owes the host the teardown
+    // it asked for.
     struct InFrame {
-        bool &flag;
-        explicit InFrame(bool &f) : flag(f) { flag = true; }
-        ~InFrame() { flag = false; }
-    } inFrame(mInRenderFrame);
+        OgreEngine *self;
+        explicit InFrame(OgreEngine *s) : self(s) { self->mInRenderFrame = true; }
+        ~InFrame() {
+            self->mInRenderFrame = false;
+            self->drainPendingSceneDestroys();
+        }
+    } inFrame(this);
     JAH_TRY {
         // ---- THE VR FRAME OPENS HERE (SPECS/VR_SPEC.md §4.3) --------------
         // While a session runs this call IS the frame's clock: it polls the
@@ -1284,6 +1324,13 @@ bool OgreEngine::beginVrSession(Scene *scene, const VrConfig &cfg) {
         std::string why;
         mVrSession = vr::sessionBegin(mVrBoot, this, s, cfg, why);
         if (!mVrSession) { mLastError = "beginVrSession: " + why; return false; }
+        // NO SESSION INHERITS A SCRIPT'S LEFTOVERS (VR-INPUT-1E-FIX finding 1).
+        // The injection store answers with no session at all — that is the
+        // headless test backbone — and a sample written there is addressed to
+        // THAT situation, not to the wearer who puts a headset on afterwards.
+        // Carried in, it replaced a real hand for the life of the session and
+        // the refusal rule never saw it (nothing was being written any more).
+        vrClearInjectedInput();
         // The host's mirror wish, applied now that there is something to mirror.
         vrSessionSetMirror(mVrSession, mVrMirrorView);
         return true;
@@ -1299,6 +1346,10 @@ void OgreEngine::endVrSession() {
     // caller should see while one is being taken apart.
     VrSession *session = mVrSession;
     mVrSession = nullptr;
+    // ...AND NO SESSION LEAVES ITS OWN BEHIND (finding 1). A suite that
+    // injected through a live session (with the override on) would otherwise
+    // hand the next one, or the headless verbs after it, a hand nobody wrote.
+    vrClearInjectedInput();
     JAH_TRY {
         vr::sessionEnd(session);
     } JAH_CATCH(mLastError, );
@@ -1318,20 +1369,46 @@ VrStatus OgreEngine::vrStatus() const {
         // is what lets the gesture logic above this boundary be written once
         // and tested with no runtime (VR_INPUT_SPEC §2.4, §10).
         for (unsigned h = 0; h < VrHandCount; ++h) {
-            if (!mVrInjected[h]) {
-                // NOTHING IS FOCUSED WHEN THERE IS NO SESSION — the field's
-                // `true` default belongs to an injected sample (a test that
-                // says nothing about focus means the wearer was there), not to
-                // a hand nobody is reporting.
-                s.input[h].focused = false;
-                continue;
-            }
+            if (!mVrInjected[h]) continue;
             s.input[h] = mVrInject[h];
             s.hands[h] = mVrInject[h].grip;   // `input[i].grip` IS `hands[i]`
         }
+        // NOTHING IS FOCUSED WHEN THERE IS NO SESSION — unless a hand is
+        // INJECTED, and then focus is whatever the test said (true by default:
+        // a test that says nothing about focus means the wearer was there).
+        // One bit for the session, never one per hand (VR-INPUT-1E-FIX).
+        s.inputFocused = vrAnyInjectedInput() && mVrInjectFocus;
         return s;
     }
-    return vrSessionStatus(mVrSession);
+    VrStatus s = vrSessionStatus(mVrSession);
+    // ...AND WITH A SESSION THE STORE IS STILL THE TRUTH BETWEEN FRAMES
+    // (VR-INPUT-1E-FIX, the lead's item 2026-09-17). The session's `input[]` is
+    // a per-FRAME copy — the injection is applied inside readInput, which is
+    // inside the frame — so an injection written between two frames was
+    // invisible here until the next one, while the no-session branch above
+    // reported it at once. One boundary cannot answer the same question two
+    // ways: a host that injects a gesture and reads the state back had to
+    // render a frame it did not otherwise need (the Studio suite did, and said
+    // so in a comment).
+    //
+    // THE FRAME IS STILL WHERE IT COUNTS — that is what moves the proxies, the
+    // ray and `hands[]` as drawn — and the refusal rule is unchanged: a hand
+    // whose runtime has bound a real profile is not overlaid, exactly as
+    // readInput would not apply it.
+    bool overlaid = false;
+    for (unsigned h = 0; h < VrHandCount; ++h) {
+        if (!mVrInjected[h]) continue;
+        if (vrSessionHasBoundProfile(mVrSession, int(h)) && !vrTestInjectAllowed()) continue;
+        s.input[h] = mVrInject[h];
+        s.input[h].fromInjection = true;
+        s.hands[h] = mVrInject[h].grip;   // `input[i].grip` IS `hands[i]`
+        overlaid = true;
+    }
+    // ...AND THE SESSION'S FOCUS IS THE TEST'S while it is driving the hands,
+    // which is how a focus-loss cancel is asserted against a live runtime whose
+    // dashboard nothing can raise.
+    if (overlaid) s.inputFocused = mVrInjectFocus;
+    return s;
 }
 
 View *OgreEngine::vrView() const { return mVrSession ? vrSessionView(mVrSession) : nullptr; }
@@ -1361,26 +1438,36 @@ bool OgreEngine::vrInjectInput(int hand, const VrHandState &state) {
         mLastError = "vrInjectInput: hand must be 0 (left) or 1 (right)";
         return false;
     }
+    // A WITHDRAWAL IS NEVER REFUSED (VR-INPUT-1E-FIX finding 1). A default
+    // state means "stop injecting", and refusing THAT was the rule eating its
+    // own purpose: a script that had put a hand somewhere (legally, before the
+    // runtime bound a profile, or with the override on) could not take it back
+    // again without the override — so the safe direction was the one that
+    // needed permission. Taking a fake hand away can never fool a smoke.
+    if (!state.valid) {
+        vrClearInjectedInput(hand);
+        return true;
+    }
     // THE WEARER'S HARDWARE ALWAYS WINS. A live session whose runtime has
     // bound a real interaction profile for this hand refuses the write, so a
     // smoke in a headset can never be fooled by an injection a script left
     // behind. The escape is an EXPLICIT process-level one, read live rather
     // than latched at boot so a suite can prove BOTH halves in one process.
-    if (mVrSession && vrSessionHasBoundProfile(mVrSession, hand)) {
-        const char *allow = std::getenv("JAHSHAKA_VR_TEST_INJECT");
-        if (!(allow && *allow && std::strcmp(allow, "0") != 0)) {
-            mLastError = "vrInjectInput: refused - the runtime has a real interaction profile "
-                         "bound for that hand (set JAHSHAKA_VR_TEST_INJECT=1 to override)";
-            return false;
-        }
+    //
+    // AND THE REFUSAL IS ONLY THE FRONT DOOR: the session's own per-frame read
+    // IGNORES AND CLEARS a sample whose hand has since been bound (the write
+    // may have been perfectly legal at the time — the profile arrives a few
+    // frames into a session), and the store is emptied at both ends of a
+    // session. The three together are what makes the rule a guarantee rather
+    // than a check on one code path.
+    if (mVrSession && vrSessionHasBoundProfile(mVrSession, hand) && !vrTestInjectAllowed()) {
+        mLastError = "vrInjectInput: refused - the runtime has a real interaction profile "
+                     "bound for that hand (set JAHSHAKA_VR_TEST_INJECT=1 to override)";
+        return false;
     }
     mVrInject[hand] = state;
     mVrInject[hand].fromInjection = true;
-    // A DEFAULT STATE IS THE "STOP" SPELLING (the header says so): `valid`
-    // false means the hand is not being reported, so the injection itself is
-    // withdrawn and the runtime's own answer comes back.
-    mVrInjected[hand] = state.valid;
-    if (!state.valid) mVrInject[hand] = VrHandState();
+    mVrInjected[hand] = true;
     return true;
 }
 
