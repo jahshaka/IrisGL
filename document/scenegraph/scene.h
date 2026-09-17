@@ -1064,6 +1064,30 @@ public:
     /// The active camera node, or null when there is none / the guid no longer
     /// resolves (the camera was deleted with the guid still recorded).
     CameraNodePtr getActiveCamera() const;
+
+    /// THE CAMERA A RENDER OF THIS SCENE ACTUALLY LOOKS THROUGH, given the
+    /// camera its host owns (the editor's free explorer, the player's).
+    ///
+    /// ONE RULE, ONE PLACE (VR phase 3, lead review F1). It was written inside
+    /// SceneMirror::applyCamera — which is "the ONLY way a View's camera
+    /// moves", so nothing else needed it — until the Player's VR mode had to
+    /// answer the same question OUTSIDE the mirror: where the wearer stands and
+    /// which camera the head writes back to. Two copies of a three-term rule is
+    /// how a wearer ends up standing somewhere the Player's picture never was,
+    /// so the rule lives here, on the document that owns all three terms, and
+    /// the mirror calls it.
+    ///
+    ///   * EDITING always looks through the host's own camera. Routing the main
+    ///     viewport through an authored camera is pilot mode, not editing.
+    ///   * PLAYING with an armed ACTIVE camera looks through that camera
+    ///     (CAMERAS_SPEC D6).
+    ///   * ...unless an avatar is POSSESSED, where the spring arm drives the
+    ///     host's camera and possession is the scene saying which it wants
+    ///     (AVATAR_LOCOMOTION_SPEC §8.5).
+    ///
+    /// Never null when `hostCamera` is not: a scene whose active camera has been
+    /// deleted falls back to the host's rather than to nothing.
+    CameraNodePtr renderCamera(const CameraNodePtr &hostCamera) const;
     QString getActiveCameraGuid() const { return activeCameraGuid; }
 
     // ---- sockets (CAMERAS_SPEC §5, D9; see scenegraph/socket.h) ----------

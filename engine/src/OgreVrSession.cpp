@@ -624,6 +624,15 @@ private:
     std::vector<std::string> mMirrorNodeDefs;
     std::string mMirrorWorkspaceDef;
     unsigned    mMirrorGeneration = 0u;
+    /// How many times the RUNTIME has recentred the reference space under this
+    /// session (VrStatus::spaceChanges). A counter rather than a flag: on a
+    /// headset it is a thing the wearer DID, and a host that sees it climbing
+    /// while nobody pressed anything is looking at a runtime problem.
+    unsigned long long mSpaceChanges = 0ull;
+    /// The reference space this session actually took (STAGE where offered),
+    /// kept so a change event for some OTHER space is ignored rather than
+    /// absorbed.
+    XrReferenceSpaceType mSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
     /// THE TARGET THE MIRROR WAS BUILT AGAINST, and its shape. A window's
     /// swapchain is destroyed and rebuilt in place by a resize — the View's own
     /// workspace generation does NOT move for that (nothing was detached), so
@@ -684,6 +693,9 @@ bool VrSession::create(std::string &reason) {
         reason = "xrCreateReferenceSpace failed: " + xrResultName(mBoot->mInstance, r);
         return false;
     }
+    // REMEMBERED, because a REFERENCE_SPACE_CHANGE_PENDING event names the
+    // space it is about and only the one we are standing in may move the rig.
+    mSpaceType = spaceType;
     mEngine->mVrInfo.space = spaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "stage" : "local";
     vrLog("reference space: %s", mEngine->mVrInfo.space.c_str());
 
@@ -848,6 +860,56 @@ void VrSession::pollEvents() {
             vrLog("the OpenXR instance is going away - ending the session");
             mState = VrState::Lost;
             mRunning = false;
+        } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+            // THE RUNTIME RECENTRED THE ROOM UNDER THE WEARER (the Quest's
+            // long-press, a guardian re-setup, a runtime that re-origins a
+            // STAGE space). Every pose it reports from `changeTime` on is in a
+            // NEW space, so a wearer standing still would JUMP across the world
+            // by whatever the runtime moved — the most violent thing a VR
+            // renderer can do to somebody, and done by a gesture they may have
+            // made for an entirely different reason.
+            //
+            // THE RIG ABSORBS IT, so the wearer stays exactly where they are.
+            // The event carries `poseInPreviousSpace` = the NEW space's origin
+            // expressed in the OLD space, call it T. A pose that read P in the
+            // old space reads T^-1 * P in the new one, and the wearer's world
+            // pose is Origin * P, so keeping that constant needs
+            //
+            //     Origin' = Origin * T
+            //
+            // ...PROJECTED ONTO WHAT A RIG MAY BE, which is a position and a
+            // HEADING (see Engine::setVrOrigin): a recentre that carried a
+            // pitch or a roll into the rig would tilt the horizon under a
+            // standing person, so T's yaw is taken and its tilt is dropped. The
+            // same arithmetic, and the invariant it exists for, are asserted
+            // host-side in `player.vr` (vrorigin::rigAfterSpaceChange) — the
+            // engine cannot include the document's maths, so this is the second
+            // expression of a four-line rule and says so.
+            auto *rs = reinterpret_cast<XrEventDataReferenceSpaceChangePending *>(&ev);
+            ++mSpaceChanges;
+            if (rs->poseValid && rs->referenceSpaceType == mSpaceType) {
+                const Ogre::Vector3 t = toOgreVec(rs->poseInPreviousSpace.position);
+                const Ogre::Quaternion q = toOgreQuat(rs->poseInPreviousSpace.orientation);
+                // The yaw of T about +Y, taken from where it sends -Z (the same
+                // "level heading" the host's locomotion uses) rather than from
+                // an Euler decomposition, which is undefined at the poles.
+                const Ogre::Vector3 fwd = q * Ogre::Vector3::NEGATIVE_UNIT_Z;
+                const Ogre::Radian yaw = (fwd.x * fwd.x + fwd.z * fwd.z) > 1e-8f
+                    ? Ogre::Radian(std::atan2(-fwd.x, -fwd.z))
+                    : Ogre::Radian(0.0f);
+                const Ogre::Vector3 pos = mOriginPos + mOriginRot * (t * mConfig.worldScale);
+                const float deg = mOriginYawDeg + yaw.valueDegrees();
+                setOrigin(pos, deg);
+                vrLog("the runtime recentred the reference space - the rig absorbed it "
+                      "(origin now %.3f, %.3f, %.3f yaw %.2f)",
+                      double(pos.x), double(pos.y), double(pos.z), double(deg));
+            } else {
+                // No pose, or a space we are not standing in: nothing can be
+                // absorbed, and pretending otherwise would move the wearer for
+                // a reason we did not measure.
+                vrLog("the runtime recentred the reference space but gave no usable pose - "
+                      "the wearer will move with it");
+            }
         }
         ev = { XR_TYPE_EVENT_DATA_BUFFER };
     }
@@ -1382,9 +1444,19 @@ void VrSession::syncMirror() {
     // `CompositorManager2::_swapAllFinalTargets` swaps the final target of
     // every ENABLED workspace, and the mirror's is the window.
     //
-    // (What the old `isEnabled()` term was protecting against — mirroring onto
-    // a view nobody is looking at — is the HOST's call: a host that hides the
-    // mirror's page clears the mirror, or ends the session, as the Player does.)
+    // WHICH MAKES "IS ANYBODY LOOKING AT IT" THE HOST'S QUESTION, and it has to
+    // ASK it (lead review F9). A mirror is a workspace over a target, not a
+    // pass inside a view, so it goes on painting and presenting into a window
+    // that has been hidden — the enabled flag used to hide that fact by
+    // accident. The contract is therefore explicit: a host that stops showing
+    // the mirror's page CLEARS the mirror (`setVrMirrorView(nullptr)`) or ends
+    // the session. Studio does both — the Player ends the session with the
+    // page, the editor viewport clears and re-takes the mirror around a space
+    // switch — and `vrMirrorView()` exists so a host can tell whether the
+    // mirror is on the page it is about to hide.
+    //
+    // A cleared mirror tears the workspace down on the next pump and a re-set
+    // builds it again; both are asserted in vr.session.
     const bool wanted = mMirrorView &&
                         mConfig.mirror != VrMirrorMode::None && mView->targetTexture() &&
                         mMirrorView->targetTexture() && mMirrorView->camera();
@@ -1440,6 +1512,7 @@ VrStatus VrSession::status() const {
     s.posesValid = mHavePose;
     s.origin = Vec3(mOriginPos.x, mOriginPos.y, mOriginPos.z);
     s.originYaw = mOriginYawDeg;
+    s.spaceChanges = mSpaceChanges;
     return s;
 }
 

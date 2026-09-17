@@ -5305,6 +5305,7 @@ public:
     VrStatus vrStatus() const override;
     View *vrView() const override;
     void setVrMirrorView(View *view) override;
+    View *vrMirrorView() const override { return mVrMirrorView; }
     void setVrOrigin(const Vec3 &position, float yawDegrees) override;
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     /// The live session, for the TU that owns it and for the frame. Null when

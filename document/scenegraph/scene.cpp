@@ -949,6 +949,18 @@ CameraNodePtr Scene::getActiveCamera() const
     return cameras.value(activeCameraGuid);
 }
 
+CameraNodePtr Scene::renderCamera(const CameraNodePtr &hostCamera) const
+{
+    // The three terms, in the order the header states them. Written out rather
+    // than folded into one expression because each one is a decision somebody
+    // made, and the comments on them live in the header.
+    if (!isPlaying()) return hostCamera;
+    const iris::AvatarPossession *possessed = getPossession();
+    if (possessed && possessed->isPossessing()) return hostCamera;
+    if (CameraNodePtr active = getActiveCamera()) return active;
+    return hostCamera;
+}
+
 // ---- play state + possession (AVATAR_LOCOMOTION_SPEC §8.4/§8.5) -----------
 //
 // setPlaying is EDGE-DETECTING. Everything possession does at a play boundary

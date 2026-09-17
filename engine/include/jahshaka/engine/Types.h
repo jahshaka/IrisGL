@@ -2834,6 +2834,13 @@ struct VrStatus {
     /// given rather than trusting its own copy.
     Vec3               origin;
     float              originYaw = 0.0f;
+    /// HOW MANY TIMES THE RUNTIME RECENTRED THE ROOM under this session (the
+    /// Quest's long-press, a guardian re-setup). Each one moves every pose the
+    /// runtime reports discontinuously; the session ABSORBS it into the rig so
+    /// the wearer stays where they were standing, and this counts them — a
+    /// host that sees it climbing while nobody touched the headset is looking
+    /// at a runtime problem, not at its own locomotion.
+    unsigned long long spaceChanges = 0;
 };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at

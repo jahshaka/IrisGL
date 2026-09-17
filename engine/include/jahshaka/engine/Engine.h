@@ -1563,6 +1563,11 @@ public:
     /// Takes effect on the next frame; the View keeps its own picture
     /// underneath and the mirror is copied over it (VR_SPEC §4.3).
     virtual void setVrMirrorView(View *view) = 0;
+    /// Which View the mirror is currently pointed at (null = none). A host with
+    /// several pages needs to know whether the mirror is on the one it is about
+    /// to hide — a mirror is a workspace of its OWN over that view's target and
+    /// does not stop when the view does.
+    virtual View *vrMirrorView() const = 0;
     /// ONE EYE OF THE RUNNING SESSION, RENDERED MONO AND READ BACK — the
     /// picture that eye is seeing, at the eye's own size, through the eye's own
     /// pose and projection.
