@@ -1532,6 +1532,22 @@ public:
     /// Takes effect on the next frame; the View keeps its own picture
     /// underneath and the mirror is copied over it (VR_SPEC §4.3).
     virtual void setVrMirrorView(View *view) = 0;
+    /// ONE EYE OF THE RUNNING SESSION, RENDERED MONO AND READ BACK — the
+    /// picture that eye is seeing, at the eye's own size, through the eye's own
+    /// pose and projection.
+    ///
+    /// Two uses, and the second is why it is worth its weight. It is the VR
+    /// SCREENSHOT (what did I see in there), and it is the one place where the
+    /// stereo path's arithmetic is checked against the engine's ordinary one:
+    /// the eyes are drawn from a `VrData` pair the session converts by hand,
+    /// this is drawn through `Camera`'s own projection path, and a session that
+    /// ever stops converting produces two pictures that disagree about DEPTH.
+    ///
+    /// It RENDERS FRAMES (a fresh chain has to settle before it can be read),
+    /// so it is a tool and a test call, not something to put in a loop. False
+    /// when no session is running or the eyes have not been located yet;
+    /// `lastError()` says which.
+    virtual bool vrEyeScreenshot(unsigned eye, Image &out) = 0;
 
     /// RESOLVES ONE SCENE'S GRAPH WITHOUT DRAWING ANYTHING — transforms,
     /// skeletal animations, tag points, bounds and the light list, exactly the

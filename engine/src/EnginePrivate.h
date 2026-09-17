@@ -5162,6 +5162,7 @@ VrState vrSessionState(const VrSession *);
 VrStatus vrSessionStatus(const VrSession *);
 View   *vrSessionView(const VrSession *);
 void    vrSessionSetMirror(VrSession *, OgreView *);
+bool    vrSessionEyeScreenshot(VrSession *, unsigned eye, Image &out, std::string &error);
 
 class OgreEngine final : public Engine {
 public:
@@ -5195,6 +5196,7 @@ public:
     VrStatus vrStatus() const override;
     View *vrView() const override;
     void setVrMirrorView(View *view) override;
+    bool vrEyeScreenshot(unsigned eye, Image &out) override;
     /// The live session, for the TU that owns it and for the frame. Null when
     /// none runs.
     VrSession *vrSession() const { return mVrSession; }

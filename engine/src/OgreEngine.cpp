@@ -1080,6 +1080,14 @@ void OgreEngine::renderOneFrame() {
     // wedged for good. The swapchain images acquired during the frame are
     // released here too.
     if (mVrSession) vrSessionEndFrame(mVrSession);
+    // ...AND A LOST SESSION ENDS ITSELF (F5). `VrState::Lost` is terminal at
+    // this pin — an external device has no recovery path (VR_SPEC §2.1 row 10)
+    // — so a session that reaches it can only be torn down, and leaving that to
+    // a host that may never ask would leave the render loop in the session's
+    // pacing (a zero interval with vsync off) spinning against a pump that no
+    // longer blocks. Ending it here makes `vrStatus().active` false, which is
+    // the one signal every host already has to watch.
+    if (mVrSession && vrSessionState(mVrSession) == VrState::Lost) endVrSession();
 }
 
 // THE RESOURCE HALF OF A FRAME, ON ITS OWN (lane OPEN-FRAMES-1, 2026-09-15).
@@ -1201,6 +1209,11 @@ VrStatus OgreEngine::vrStatus() const {
 }
 
 View *OgreEngine::vrView() const { return mVrSession ? vrSessionView(mVrSession) : nullptr; }
+
+bool OgreEngine::vrEyeScreenshot(unsigned eye, Image &out) {
+    if (!mVrSession) { mLastError = "vrEyeScreenshot: no session is running"; return false; }
+    return vrSessionEyeScreenshot(mVrSession, eye, out, mLastError);
+}
 
 void OgreEngine::setVrMirrorView(View *view) {
     mVrMirrorView = static_cast<OgreView *>(view);

@@ -101,10 +101,23 @@ VrState vrSessionState(const VrSession *) { return VrState::Unavailable; }
 VrStatus vrSessionStatus(const VrSession *) { return VrStatus(); }
 View *vrSessionView(const VrSession *) { return nullptr; }
 void vrSessionSetMirror(VrSession *, OgreView *) {}
+bool vrSessionEyeScreenshot(VrSession *, unsigned, Image &, std::string &error) {
+    error = "this build has no OpenXR support";
+    return false;
+}
 
 #else   // JAH_VR
 
 namespace {
+
+/// THE SESSION'S DEFAULT CLIP PLANES (F10). A VR near plane is CLOSER than a
+/// desktop one — a hand, a controller or a wall comes inside 10 cm and a
+/// desktop default would clip it away — and the far plane matches the engine's
+/// own CameraDesc default so the headset sees the distance the desktop sees.
+/// They are only DEFAULTS: the pump reads the View's camera every frame, so a
+/// host that pushes its own CameraDesc moves the headset's frustum with it.
+constexpr float kVrDefaultNear = 0.05f;
+constexpr float kVrDefaultFar = 1000.0f;
 
 void vrLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vrLog(const char *fmt, ...) {
@@ -495,12 +508,21 @@ public:
     VrStatus status() const;
     OgreView *view() const { return mView; }
     void setMirrorView(OgreView *v);
+    /// ONE EYE, RENDERED MONO — the reverse-Z detector and the VR screenshot
+    /// (see the engine-side declaration on Engine::vrEyeScreenshot).
+    bool eyeScreenshot(unsigned eye, Image &out, std::string &error);
 
 private:
     void pollEvents();
     void applyState(XrSessionState s);
     void teardownMirror();
     void syncMirror();
+    /// The session's own View, on for a frame the runtime wants a picture for
+    /// and off for one it does not (F4).
+    void setSessionViewEnabled(bool on);
+    /// Has the Vulkan device gone? (F3 — the frame's commit is where a loss
+    /// surfaces, and the engine's catch swallows it.)
+    bool deviceLost() const;
     /// The one Vulkan routine: the two eye copies, recorded on the frame's own
     /// command buffer while the BarrierSolver still knows the target's state.
     void copyEyes();
@@ -531,6 +553,15 @@ private:
 
     unsigned    mEyeWidth = 0, mEyeHeight = 0;
     Ogre::VrData mVrData;
+    /// The per-eye projections in OGRE's [-1,1] depth convention, BEFORE the
+    /// render system's reverse-Z conversion (F1). VrData holds the converted
+    /// pair because nothing on the Hlms path converts; this is what a caller
+    /// that converts for itself (Camera::setCustomProjectionMatrix) needs.
+    Ogre::Matrix4 mEyeProjection[2];
+    Ogre::Vector3 mEyeWorldPos[2];
+    Ogre::Quaternion mEyeWorldRot[2];
+    bool        mHavePose = false;
+    bool        mViewEnabled = true;
     OgreView   *mView = nullptr;
     Ogre::Camera *mCullCamera = nullptr;
 
@@ -656,8 +687,8 @@ bool VrSession::create(std::string &reason) {
     // the union of the located fovs; it lives in the scene and dies with the
     // session.
     mCullCamera = mScene->sceneManager()->createCamera("JahshakaVrCullCamera");
-    mCullCamera->setNearClipDistance(0.05f);
-    mCullCamera->setFarClipDistance(5000.0f);
+    mCullCamera->setNearClipDistance(kVrDefaultNear);
+    mCullCamera->setFarClipDistance(kVrDefaultFar);
 
     // THE VIEW. Offscreen, two eyes wide, and the ONE offscreen view in this
     // engine that keeps the post chain (PostFxDesc::allowOffscreen) — because
@@ -691,8 +722,8 @@ bool VrSession::create(std::string &reason) {
         return false;
     }
     CameraDesc cam;
-    cam.nearClip = 0.05f;
-    cam.farClip = 5000.0f;
+    cam.nearClip = kVrDefaultNear;
+    cam.farClip = kVrDefaultFar;
     mView->setCamera(cam);
     if (mView->camera()) mView->camera()->setVrData(&mVrData);
     mView->addWorkspaceListener(this);
@@ -761,13 +792,14 @@ void VrSession::pollEvents() {
 
 // ---------------------------------------------------------------------------
 bool VrSession::beginFrame() {
-    if (mState == VrState::Lost) { teardownMirror(); return true; }
+    if (mState == VrState::Lost) { teardownMirror(); setSessionViewEnabled(false); return true; }
     pollEvents();
     if (!mRunning) {
         // NOTHING HAS BEEN DRAWN INTO THE EYE TARGET YET, so a mirror would
         // paint black over the desktop's own picture. It appears when the
         // session starts producing frames and goes again when it stops.
         teardownMirror();
+        setSessionViewEnabled(false);
         return true;
     }
     syncMirror();
@@ -782,6 +814,7 @@ bool VrSession::beginFrame() {
     if (XR_FAILED(r)) {
         vrLog("xrWaitFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
+        setSessionViewEnabled(false);
         return true;
     }
     if (mRefreshHz <= 0.0f && mFrameState.predictedDisplayPeriod > 0) {
@@ -795,6 +828,7 @@ bool VrSession::beginFrame() {
     if (XR_FAILED(r) && r != XR_FRAME_DISCARDED) {
         vrLog("xrBeginFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
+        setSessionViewEnabled(false);
         return true;
     }
     mInFrame = true;
@@ -802,10 +836,19 @@ bool VrSession::beginFrame() {
 
     if (!mFrameState.shouldRender) {
         // A FRAME IS STILL OWED, with no layers (the spec's contract, and what
-        // Monado's first frames ask for). Skipping the render is the whole
-        // point of the flag.
+        // Monado's first frames ask for) — and THE DESKTOP MUST KEEP DRAWING.
+        //
+        // THE FIX (F4): this used to `return false`, which made
+        // OgreEngine::renderOneFrame return before the monitor's frame, the
+        // texture wait and EVERY view's render — so a doffed headset, an open
+        // dashboard or a paused WiVRn froze the editor's viewport, its
+        // thumbnails and every frame-counting host, for as long as the session
+        // was up. The XR frame is closed here (it is owed and it is paid), the
+        // session's own View is switched off so nothing renders two eyes for a
+        // picture nobody will see, and the frame goes ahead for everybody else.
         endFrame();
-        return false;
+        setSessionViewEnabled(false);
+        return true;
     }
 
     XrViewState vs{ XR_TYPE_VIEW_STATE };
@@ -821,10 +864,13 @@ bool VrSession::beginFrame() {
                             (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
     if (!posesValid) {
         // No tracking this frame (the headset is off the head, the runtime is
-        // still coming up). Draw nothing rather than draw a lie.
+        // still coming up). Draw no EYE rather than draw a lie — and, as above,
+        // never stop the desktop's frame over it.
         endFrame();
-        return false;
+        setSessionViewEnabled(false);
+        return true;
     }
+    setSessionViewEnabled(true);
 
     // ---- the pose, in three parts -----------------------------------------
     // THE HEAD is the midpoint of the two eyes, oriented like the left eye (the
@@ -844,10 +890,19 @@ bool VrSession::beginFrame() {
     // through the world and the horizon does not tilt.
     const Ogre::Vector3 worldHead = headPos * mConfig.worldScale;
 
-    Ogre::Matrix4 eyeToHead[2], proj[2];
+    // THE CLIP PLANES ARE THE VIEW'S, NOT A PAIR OF CONSTANTS (F10). A host
+    // that moves the session View's camera desc moves the headset's frustum
+    // with it; the session only supplies the VR-appropriate defaults at
+    // create() (a 5 cm near plane — hands come closer than the desktop's 10 cm).
+    Ogre::Camera *cam = mView ? mView->camera() : nullptr;
+    const float zNear = cam ? float(cam->getNearClipDistance()) : kVrDefaultNear;
+    const float zFar  = cam ? float(cam->getFarClipDistance()) : kVrDefaultFar;
+
+    Ogre::Matrix4 eyeToHead[2], proj[2], projRS[2];
     Ogre::Matrix4 head(headRot);
     head.setTrans(headPos);
     const Ogre::Matrix4 headInv = head.inverseAffine();
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     for (int eye = 0; eye < 2; ++eye) {
         Ogre::Matrix4 eyeWorld(eyeRot[eye]);
         eyeWorld.setTrans(eyePos[eye]);
@@ -856,43 +911,127 @@ bool VrSession::beginFrame() {
         // distance in the ROOM, so at world scale s the eyes are s times
         // further apart in the world.
         eyeToHead[eye].setTrans(eyeToHead[eye].getTrans() * mConfig.worldScale);
-        proj[eye] = projectionFromFov(mViews[eye].fov, 0.05f, 5000.0f);
+        proj[eye] = projectionFromFov(mViews[eye].fov, zNear, zFar);
+        // ...AND THE RENDER SYSTEM'S CONVENTION, WHICH VrData DOES NOT APPLY
+        // (F1, the critical one). `VrData::set` STORES the matrix raw
+        // (OgreCamera.h:51-56) and HlmsPbs multiplies it raw into the pass
+        // buffer with only the texture-flip on Y (OgreHlmsPbs.cpp:2240-2252) —
+        // nothing on that path converts a [-1,1] GL-depth projection into this
+        // render system's REVERSE-Z [1,0] range (OgreRenderSystem.cpp:112 sets
+        // mReverseDepth). Only `Camera::setCustomProjectionMatrix` converts,
+        // which is the path phase 1a proved and the path this pump does NOT
+        // use for the eyes. The pin's own VR sample converts before the set
+        // (Tutorial_OpenVR/OpenVRCompositorListener.cpp:136-151), and so do we.
+        // Left raw, every depth test in the headset runs inverted: the picture
+        // is not subtly wrong, it is sorted backwards.
+        if (rs) rs->_convertProjectionMatrix(proj[eye], projRS[eye]);
+        else    projRS[eye] = proj[eye];
     }
-    mVrData.set(eyeToHead, proj);
+    mVrData.set(eyeToHead, projRS);
+    // The UNCONVERTED pair is kept for anything that needs a plain projection
+    // (the suite's mono control renders through setCustomProjectionMatrix,
+    // which converts for itself, and would double-convert one of these).
+    mEyeProjection[0] = proj[0];
+    mEyeProjection[1] = proj[1];
     mAsymmetricFov =
         std::fabs(mViews[0].fov.angleLeft - mViews[1].fov.angleLeft) > 1e-6f ||
         std::fabs(mViews[0].fov.angleRight - mViews[1].fov.angleRight) > 1e-6f ||
         std::fabs(mViews[0].fov.angleUp - mViews[1].fov.angleUp) > 1e-6f ||
         std::fabs(mViews[0].fov.angleDown - mViews[1].fov.angleDown) > 1e-6f;
 
-    if (Ogre::Camera *cam = mView ? mView->camera() : nullptr) {
+    if (cam) {
         cam->setPosition(worldHead);
         cam->setOrientation(headRot);
         cam->setVrData(&mVrData);
     }
+    // THE EYES' WORLD POSES, kept for the mono control (vrEyeScreenshot): the
+    // same composition the shader performs, `headToEye^-1` applied to the head,
+    // so a control render cannot drift from what the eye actually drew.
+    for (int eye = 0; eye < 2; ++eye) {
+        Ogre::Matrix4 world(headRot);
+        world.setTrans(worldHead);
+        world = world * eyeToHead[eye];
+        Ogre::Vector3 scale; Ogre::Quaternion rot;
+        world.decomposition(mEyeWorldPos[eye], scale, rot);
+        mEyeWorldRot[eye] = rot;
+    }
+    mHavePose = true;
     if (mCullCamera) {
-        // THE UNION FRUSTUM: the widest of the two eyes on each side, so
-        // nothing either eye can see is culled. Built as a custom projection
-        // rather than a symmetric fov because a headset's eyes are asymmetric
-        // (the Quest Pro's left eye reaches -0.94 rad on one side and 0.70 on
-        // the other) and a symmetric frustum wide enough to contain both would
-        // cull nothing at all on the narrow side while wasting the Forward+
-        // grid on the wide one.
-        XrFovf u = mViews[0].fov;
-        u.angleLeft  = std::min(mViews[0].fov.angleLeft,  mViews[1].fov.angleLeft);
-        u.angleRight = std::max(mViews[0].fov.angleRight, mViews[1].fov.angleRight);
-        u.angleDown  = std::min(mViews[0].fov.angleDown,  mViews[1].fov.angleDown);
-        u.angleUp    = std::max(mViews[0].fov.angleUp,    mViews[1].fov.angleUp);
-        mCullCamera->setPosition(worldHead);
+        // THE CULL FRUSTUM MUST CONTAIN BOTH EYES, AND A UNION OF ANGLES AT THE
+        // HEAD DOES NOT (F6). Two frusta that share an apex are contained by
+        // the widest angles; two frusta whose apexes are an IPD apart are not —
+        // each eye sees a sliver past the other's edge, and an object in that
+        // sliver is culled out of the frame it belongs in (and missing from the
+        // Forward+ light grid at the wider eye's edge, which is the same defect
+        // one shading term later).
+        //
+        // The pin's own recipe closes it (Tutorial_OpenVR's
+        // OpenVRCompositorListener.cpp:161-171): take the union of the TANGENT
+        // extents, then PULL THE APEX BACK along the head's -Z by
+        // (ipd/2) / |tan(leftmost)| — the distance at which the widened frustum
+        // from the single apex swallows both eyes' — and give the near and far
+        // planes that same offset so nothing near or far is lost to the move.
+        //
+        // TANGENT extents, not a custom projection matrix: Ogre then builds the
+        // projection itself (so the render system's reverse-Z conversion
+        // happens where it always happens) and may re-derive the near plane for
+        // the PSSM and Forward+ passes, which is exactly what this camera is for.
+        const float tanL = std::min(std::tan(mViews[0].fov.angleLeft),
+                                    std::tan(mViews[1].fov.angleLeft));
+        const float tanR = std::max(std::tan(mViews[0].fov.angleRight),
+                                    std::tan(mViews[1].fov.angleRight));
+        const float tanU = std::max(std::tan(mViews[0].fov.angleUp),
+                                    std::tan(mViews[1].fov.angleUp));
+        const float tanD = std::min(std::tan(mViews[0].fov.angleDown),
+                                    std::tan(mViews[1].fov.angleDown));
+        mCullCamera->setCustomProjectionMatrix(false);
+        mCullCamera->setFrustumExtents(tanL, tanR, tanU, tanD,
+                                       Ogre::FrustrumExtentsType::FET_TAN_HALF_ANGLES);
+        const float halfIpd = 0.5f * mIpd * mConfig.worldScale;
+        const float offset = std::fabs(tanL) > 1e-6f ? halfIpd / std::fabs(tanL) : 0.0f;
+        mCullCamera->setNearClipDistance(std::max(zNear + offset, 0.001f));
+        mCullCamera->setFarClipDistance(zFar + offset);
+        // +Z in camera space is BEHIND the eye (Ogre cameras look down -Z).
+        mCullCamera->setPosition(worldHead + headRot * Ogre::Vector3(0.0f, 0.0f, offset));
         mCullCamera->setOrientation(headRot);
-        mCullCamera->setCustomProjectionMatrix(true, projectionFromFov(u, 0.05f, 5000.0f));
     }
     ++mRendered;
     return true;
 }
 
+/// HAS THE DEVICE GONE? (F3.) The frame that just ran may have thrown
+/// `VK_ERROR_DEVICE_LOST` out of its commit and been swallowed by the engine's
+/// JAH_CATCH — from here that is indistinguishable from a frame that worked,
+/// except that the render system knows. Asking costs a pointer chase.
+bool VrSession::deviceLost() const {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    if (!root) return false;
+    auto *vkRs = dynamic_cast<Ogre::VulkanRenderSystem *>(root->getRenderSystem());
+    if (!vkRs) return false;
+    Ogre::VulkanDevice *dev = vkRs->getVulkanDevice();
+    return dev && dev->isDeviceLost();
+}
+
 void VrSession::endFrame() {
     if (!mInFrame) return;
+    // A LOST DEVICE ENDS THE SESSION — IT DOES NOT KEEP SUBMITTING (F3).
+    //
+    // `copyEyes` marks the frame drawn when it has RECORDED the two copies; the
+    // commit that executes them happens later and is where a device loss
+    // actually surfaces, through an exception the engine's frame catches and
+    // turns into `lastError`. Left alone, this function would then hand the
+    // runtime a projection layer over swapchain images nothing ever wrote,
+    // every frame, for ever — at a zero-interval pace, because the pump no
+    // longer blocks on a dead device. So: no layer, no frames counted, and the
+    // state goes to Lost, which is what makes the engine end the session and
+    // the host put its pacing back (VrState::Lost is terminal at this pin —
+    // an external device has no recovery path, VR_SPEC §2.1 row 10).
+    const bool lost = deviceLost();
+    if (lost) {
+        mDrewThisFrame = false;
+        if (mState != VrState::Lost)
+            vrLog("the Vulkan device was lost inside a session - ending it");
+    }
     for (int eye = 0; eye < 2; ++eye) {
         if (!mHasAcquired[eye]) continue;
         XrSwapchainImageReleaseInfo ri{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
@@ -915,11 +1054,21 @@ void VrSession::endFrame() {
     fei.layers = mDrewThisFrame ? layers : nullptr;
     const XrResult r = xrEndFrame(mSession, &fei);
     mInFrame = false;
+    if (lost) { mState = VrState::Lost; mRunning = false; return; }
     if (XR_FAILED(r)) {
         vrLog("xrEndFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         return;
     }
     ++mFrames;
+}
+
+/// The session's own View, switched off for a frame the runtime does not want
+/// (F4). `View::setEnabled` is a workspace flag, not a rebuild: flipping it per
+/// frame costs nothing and is what the Player already does with its own view.
+void VrSession::setSessionViewEnabled(bool on) {
+    if (!mView || mViewEnabled == on) return;
+    mViewEnabled = on;
+    mView->setEnabled(on);
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,6 +1273,15 @@ VrStatus VrSession::status() const {
 
 void VrSession::destroyXr() {
     if (mInFrame) endFrame();
+    // THE EXIT DRAIN NEEDS A LIVE DEVICE (F3): it feeds the runtime empty
+    // frames until it answers STOPPING, and on a lost device every one of those
+    // is a call into a runtime whose compositor is waiting on a queue that will
+    // never finish. A lost session skips straight to xrEndSession.
+    if (mRunning && mSession != XR_NULL_HANDLE && deviceLost()) {
+        vrLog("the device is lost - ending the session without the exit drain");
+        xrEndSession(mSession);
+        mRunning = false;
+    }
     if (mRunning && mSession != XR_NULL_HANDLE) {
         // ASK, THEN DRAIN. xrRequestExitSession makes the runtime walk the
         // session down to STOPPING, which is where xrEndSession is legal; a
@@ -1176,6 +1334,85 @@ VrSession::~VrSession() {
         mScene->sceneManager()->destroyCamera(mCullCamera);
         mCullCamera = nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// ONE EYE, RENDERED MONO (Engine::vrEyeScreenshot).
+//
+// WHAT IT IS FOR, and it is two things at once. It is the picture a user wants
+// when they ask "what did I see in there" — a screenshot of an eye, at the eye's
+// own size, through the eye's own pose and projection. And it is THE REVERSE-Z
+// DETECTOR (VR_SPEC §6): the stereo path hands its projections to `VrData`,
+// which stores them RAW, while this path hands the same matrix to
+// `Camera::setCustomProjectionMatrix`, which runs it through the render
+// system's own conversion. If the session ever stops converting for VrData —
+// the defect this round fixed — the two pictures disagree about depth, and the
+// disagreement is total, not subtle: the far surface wins every test.
+//
+// THE CONTROL IS A REAL VIEW rendered by REAL FRAMES. It is created with the
+// session View's own chain shape and helper policy, seeded with the session
+// View's measured exposure so the tonemapper starts where the session's is, and
+// read once the picture STOPS MOVING (never after a fixed frame count — the
+// rule cameras.exposure taught this tree).
+bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
+    if (eye > 1u) { error = "vrEyeScreenshot: eye must be 0 (left) or 1 (right)"; return false; }
+    if (!mHavePose || !mView) {
+        error = "vrEyeScreenshot: the session has not located its eyes yet";
+        return false;
+    }
+    View *v = mEngine->createOffscreenView("jahshaka-vr-eye", mEyeWidth, mEyeHeight,
+                                           Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
+    if (!v) { error = "vrEyeScreenshot: " + mEngine->lastError(); return false; }
+    OgreView *control = static_cast<OgreView *>(v);
+    bool ok = false;
+    JAH_TRY {
+        // THE CONTROL'S EXPOSURE IS THE SESSION'S, AS A CONSTANT. Both chains
+        // carry the same filmic composite (POST_CHAIN_SPEC §14: one material,
+        // two forms), but the AUTO form's exposure is a per-chain feedback
+        // history — a fresh chain converges to its own value from its own seed,
+        // and two pictures a few tenths of a stop apart are not comparable byte
+        // for byte. The FIXED form takes the number the session's chain
+        // actually converged to and multiplies by it, so the only thing left
+        // between the two pictures is what this call exists to test.
+        PostFxDesc fx = mView->postFx();
+        const float exposure = mView->measuredExposureScale();
+        if (fx.hdr && exposure > 0.0f) {
+            fx.tonemapFixed = true;
+            fx.exposureScale = exposure;
+        }
+        control->setPostFx(fx);
+        control->setHelpersVisible(mView->helpersVisible());
+        control->setShadows(mView->shadows());
+        if (control->setScene(mScene)) {
+            CameraDesc desc;
+            desc.nearClip = float(mView->camera() ? mView->camera()->getNearClipDistance()
+                                                  : kVrDefaultNear);
+            desc.farClip = float(mView->camera() ? mView->camera()->getFarClipDistance()
+                                                 : kVrDefaultFar);
+            control->setCamera(desc);
+            if (Ogre::Camera *c = control->camera()) {
+                c->setPosition(mEyeWorldPos[eye]);
+                c->setOrientation(mEyeWorldRot[eye]);
+                // THE EYE'S EXACT PROJECTION, through the one call that
+                // converts it for this render system.
+                c->setCustomProjectionMatrix(true, mEyeProjection[eye]);
+            }
+            // READ UNTIL IT HOLDS STILL. The chain's history textures are new,
+            // so the first frames of any chain are its own warm-up.
+            Image prev;
+            for (int i = 0; i < 90 && !ok; ++i) {
+                mEngine->renderOneFrame();
+                if (!control->readPixels(out)) break;
+                if (i > 0 && !out.rgba.empty() && out.rgba == prev.rgba) ok = true;
+                else prev = out;
+            }
+            if (!ok) error = "vrEyeScreenshot: the control picture never settled";
+        } else {
+            error = "vrEyeScreenshot: the control view refused the scene";
+        }
+    } JAH_CATCH(error, (mEngine->destroyView(v), false));
+    mEngine->destroyView(v);
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,6 +1471,10 @@ VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Un
 VrStatus vrSessionStatus(const VrSession *s) { return s ? s->status() : VrStatus(); }
 View *vrSessionView(const VrSession *s) { return s ? s->view() : nullptr; }
 void vrSessionSetMirror(VrSession *s, OgreView *v) { if (s) s->setMirrorView(v); }
+bool vrSessionEyeScreenshot(VrSession *s, unsigned eye, Image &out, std::string &error) {
+    if (!s) { error = "vrEyeScreenshot: no session is running"; return false; }
+    return s->eyeScreenshot(eye, out, error);
+}
 
 #endif  // JAH_VR
 
