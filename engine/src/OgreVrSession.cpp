@@ -110,7 +110,7 @@ void sessionEnd(VrSession *) {}
 }  // namespace vr
 
 // The engine's four session entry points, for the same reason.
-bool vrSessionBeginFrame(VrSession *) { return true; }
+void vrSessionBeginFrame(VrSession *) {}
 void vrSessionEndFrame(VrSession *) {}
 VrState vrSessionState(const VrSession *) { return VrState::Unavailable; }
 VrStatus vrSessionStatus(const VrSession *) { return VrStatus(); }
@@ -618,9 +618,11 @@ public:
     bool create(std::string &reason);
 
     // ---- the pump, called by OgreEngine::renderOneFrame -------------------
-    /// True = draw this frame. False = the runtime asked for no picture (or
-    /// the session is ending); the XR frame has already been closed.
-    bool beginFrame();
+    /// Polls the runtime, waits its frame, locates the eyes, writes the head
+    /// and the projections. When the runtime wants no picture the XR frame is
+    /// closed here and the desktop still draws (F4); the old bool answer never
+    /// said false and is gone (VR-ENGINE-2 merge).
+    void beginFrame();
     void endFrame();
 
     void workspacePosUpdate(Ogre::CompositorWorkspace *workspace) override;
@@ -2014,7 +2016,7 @@ void VrSession::pollEvents() {
 }
 
 // ---------------------------------------------------------------------------
-bool VrSession::beginFrame() {
+void VrSession::beginFrame() {
     // THE HANDS ARE THIS FRAME'S OR THEY ARE NOTHING (VrPose's note, phase 4).
     // Cleared at the top so every early return below — lost, not running, no
     // picture, no pose — leaves them invalid rather than leaving yesterday's
@@ -2028,7 +2030,7 @@ bool VrSession::beginFrame() {
     // pose.
     mHandValid[0] = mHandValid[1] = false;
     mInput[0] = mInput[1] = VrHandState();
-    if (mState == VrState::Lost) { teardownMirror(); setSessionViewEnabled(false); return true; }
+    if (mState == VrState::Lost) { teardownMirror(); setSessionViewEnabled(false); return; }
     pollEvents();
     if (!mRunning) {
         // NOTHING HAS BEEN DRAWN INTO THE EYE TARGET YET, so a mirror would
@@ -2036,7 +2038,7 @@ bool VrSession::beginFrame() {
         // session starts producing frames and goes again when it stops.
         teardownMirror();
         setSessionViewEnabled(false);
-        return true;
+        return;
     }
     syncMirror();
 
@@ -2051,7 +2053,7 @@ bool VrSession::beginFrame() {
         vrLog("xrWaitFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
         setSessionViewEnabled(false);
-        return true;
+        return;
     }
     if (mRefreshHz <= 0.0f && mFrameState.predictedDisplayPeriod > 0) {
         mRefreshHz = float(1.0e9 / double(mFrameState.predictedDisplayPeriod));
@@ -2065,7 +2067,7 @@ bool VrSession::beginFrame() {
         vrLog("xrBeginFrame failed: %s", xrResultName(mBoot->mInstance, r).c_str());
         mState = VrState::Lost; mRunning = false;
         setSessionViewEnabled(false);
-        return true;
+        return;
     }
     mInFrame = true;
     mDrewThisFrame = false;
@@ -2101,7 +2103,7 @@ bool VrSession::beginFrame() {
         // picture nobody will see, and the frame goes ahead for everybody else.
         endFrame();
         setSessionViewEnabled(false);
-        return true;
+        return;
     }
     mSaidNoRender = false;
 
@@ -2123,7 +2125,7 @@ bool VrSession::beginFrame() {
         // never stop the desktop's frame over it.
         endFrame();
         setSessionViewEnabled(false);
-        return true;
+        return;
     }
     mSaidNoPose = false;
     setSessionViewEnabled(true);
@@ -2375,7 +2377,7 @@ bool VrSession::beginFrame() {
     // THE SCREEN QUADS, with the poses this frame located (F2).
     syncStereoQuads();
     ++mRendered;
-    return true;
+    return;
 }
 
 /// HAS THE DEVICE GONE? (F3.) The frame that just ran may have thrown
@@ -3271,7 +3273,7 @@ void sessionEnd(VrSession *s) { delete s; }
 
 }  // namespace vr
 
-bool vrSessionBeginFrame(VrSession *s) { return s ? s->beginFrame() : true; }
+void vrSessionBeginFrame(VrSession *s) { if (s) s->beginFrame(); }
 void vrSessionEndFrame(VrSession *s) { if (s) s->endFrame(); }
 VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Unavailable; }
 bool vrSessionIsOver(const VrSession *s) { return s && s->isOver(); }

@@ -715,12 +715,25 @@ namespace {
 /// looks anyway. `catch (...)` as well as the two JAH_CATCH kinds: this is the
 /// one place in the engine where letting something through is undefined
 /// behaviour rather than a bad error message.
+///
+/// APPENDED, NEVER REPLACED (lead review at merge): the frame's own cause — a
+/// real VK_ERROR_DEVICE_LOST text — was written by the catch before this ran,
+/// and a close step that also throws (xrEndFrame on a dying session) must not
+/// overwrite it. And the message is built inside its own catch-all: this runs
+/// from a noexcept destructor, where a bad_alloc raised while composing the
+/// string would be std::terminate.
 template <class Step>
 void frameCloseStep(std::string &sink, Step &&step) {
+    auto note = [&sink](const std::string &what) {
+        try {
+            if (!sink.empty()) sink += "; ";
+            sink += what;
+        } catch (...) {}
+    };
     try { step(); }
-    catch (Ogre::Exception &e) { sink = e.getFullDescription(); }
-    catch (std::exception &e)  { sink = std::string("engine: ") + e.what(); }
-    catch (...)                { sink = "engine: an unknown exception closing the frame"; }
+    catch (Ogre::Exception &e) { try { note(e.getFullDescription()); } catch (...) {} }
+    catch (std::exception &e)  { try { note(std::string("engine: ") + e.what()); } catch (...) {} }
+    catch (...)                { note("engine: an unknown exception closing the frame"); }
 }
 }   // namespace
 
@@ -767,18 +780,14 @@ void OgreEngine::renderOneFrame() {
         // host's timer is at a zero interval for the duration, so nothing else
         // paces this loop.
         //
-        // FALSE means the runtime asked for NO picture this frame (it is not
-        // visible, or tracking is not valid yet) and has already been given its
-        // empty frame: there is nothing to draw and no frame to close.
-        // A NO-OP on every engine without a session, which is every engine
-        // outside a headset.
-        //
-        // NO PATH IN THE PUMP ANSWERS FALSE TODAY (F4 turned every one of them
-        // into "the XR frame is closed here and the desktop draws anyway"), so
-        // this is a contract kept rather than a branch taken — and it is SAFE
-        // to take: the scope guard above closes the frame on this return like
-        // on any other. Before FRAME-CATCH-1 it was not.
-        if (mVrSession && !vrSessionBeginFrame(mVrSession)) return;
+        // When the runtime asks for NO picture this frame (it is not visible,
+        // or tracking is not valid yet) the pump has already given it its
+        // empty frame and the desktop draws anyway (F4) — there is no early
+        // return here any more, and there was no path taking one: the bool
+        // the pump used to answer was dead (seven `return true`s), deleted at
+        // the VR-ENGINE-2 merge. A NO-OP on every engine without a session,
+        // which is every engine outside a headset.
+        if (mVrSession) vrSessionBeginFrame(mVrSession);
         // THE RENDER-LOOP MONITOR'S FRAME (RENDER_LOOP_MONITOR_SPEC §4.2).
         // Opened here and closed at the very bottom, so `totalMs` is exactly
         // what one renderOneFrame cost. `mNextFrameCause` is the caller's — the
@@ -1237,7 +1246,7 @@ void OgreEngine::renderOneFrame() {
 // pump's `return` when the runtime wants no picture — still skipping the close,
 // so the fix would have had to be written twice and re-written for every future
 // early return. One guard covers every exit, needs no new macro, and leaves the
-// other 170 JAH_CATCH sites in the engine exactly as they were. The cost is
+// other 158 JAH_CATCH sites in the engine exactly as they were. The cost is
 // that the close cannot answer anything to the caller, which it never did.
 //
 // THE ORDER, and each step's reason:

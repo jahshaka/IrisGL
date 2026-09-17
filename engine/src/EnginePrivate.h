@@ -5367,10 +5367,11 @@ void sessionEnd(VrSession *);
 /// THE PUMP, from the frame's point of view. `vrSessionBeginFrame` polls the
 /// runtime's events, blocks in xrWaitFrame (the session's clock), locates the
 /// eyes and writes the head pose and the per-eye projections onto the View's
-/// camera; FALSE means the runtime asked for no picture this frame and has
-/// already been given its empty frame. `vrSessionEndFrame` releases the
+/// camera; when the runtime asks for no picture this frame the pump has
+/// already given it its empty frame and the desktop draws anyway (F4 — the
+/// old bool answer was dead and is gone). `vrSessionEndFrame` releases the
 /// swapchain images and submits the projection layer.
-bool    vrSessionBeginFrame(VrSession *);
+void    vrSessionBeginFrame(VrSession *);
 void    vrSessionEndFrame(VrSession *);
 VrState vrSessionState(const VrSession *);
 /// IS THE SESSION OVER? (lane VR-3b.) True once nothing can come of it any
