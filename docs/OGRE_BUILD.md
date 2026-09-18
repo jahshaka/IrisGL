@@ -1946,21 +1946,37 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     itself is OUR media (irisgl/engine/media/Hlms/Jahshaka/JahDither.glsl,
     reached through Ogre's own `#include` + `enable_include_header`, which
     resolves through the resource GROUP): a deterministic interleaved-gradient
-    offset of at most 0.498 of a code, keyed on the pixel coordinate alone — no
-    time term, so a still frame stays byte-identical — added to the shader's own
-    output value, which in this engine IS the display code. 0.498 and not 0.500
-    so that a value already sitting exactly on a code rounds back to it, which is
-    what makes a dithered write over an already-quantised picture the identity.
+    offset of at most 0.498 of a code, keyed on the INTEGER pixel coordinate
+    alone — no time term, so a still frame stays byte-identical — added to the
+    shader's own output value, which in this engine IS the display code. 0.498
+    and not 0.500 so that a value already sitting exactly on a code rounds back
+    to it, which is what makes a dithered write over an already-quantised
+    picture the identity.
+    IT IS ALL INTEGER ARITHMETIC AND THE SHADER QUANTISES ITSELF, because
+    neither the compiler nor the driver may decide the picture: a float
+    `fract(52.98 * fract(dot(p,k)))` turns a 1-ULP difference into a completely
+    different offset under fused-multiply-add contraction, and a float handed
+    to a UNORM attachment lets the hardware break the rounding tie. So the
+    noise is 32-bit unsigned (the same IGN, its constants as Q32 fixed point)
+    and the shader writes `floor(v*255 + 0.5 + n)/255`. MEASURED: NVIDIA's and
+    lavapipe's dropped-pixel sets on an unshaded frame are NESTED (12,339 a
+    subset of 14,425, zero violations) — the same noise field thresholded at
+    two slightly different fractions, which is what an identical integer noise
+    looks like through two float pipelines that disagree by 1e-4.
     Measured (default scene, plain ground, 25 m overhead, 'scene' grade): the
-    longest run of one code on a cut 475 -> 24 px, the radial profile's max
-    annulus-to-annulus step 0.5756 -> 0.0237 of a code. `jahDitherOff` is the
-    diagnostic override (JAHSHAKA_NO_DITHER), named so that its SAFE value is
-    zero — an unwritten constant buffer renders the CORRECT picture. Guarded by
-    `hdr.dither`, which renders both arms in one process. The selftest hashes
-    move by design: pose 1 `2bc1ab3a…` -> `c429b38c…`, pose 2 `a42ec3d6…` ->
-    `f23ced25…`, 24.79 % / 21.14 % of pixels by exactly 1/255 and nothing more,
-    and the same binary under JAHSHAKA_NO_DITHER reproduces the old pair byte for
-    byte.
+    longest run of one code on a cut 475 -> 76 px, the radial profile's max
+    annulus-to-annulus step 0.5756 -> 0.0243 of a code. `jahDitherOff` is the
+    diagnostic switch (`PostFxDesc::ditherOff` per view, or JAHSHAKA_NO_DITHER
+    read once for the process), named so that its SAFE value is zero — an
+    unwritten constant buffer renders the CORRECT picture. Guarded by
+    `hdr.dither` (ten arms, both pictures in one process) and, for the eyes, by
+    `vr.session` + `vr.session_undithered`. The selftest hashes move by design:
+    pose 1 `2bc1ab3a…` -> `3d2e88e7…`, pose 2 `a42ec3d6…` -> `90d06e1f…`. The
+    same binary with the dither off gives `e4f35c84…`/`89335f30…` and NOT the
+    pre-lane pair: taking the rounding of ties away from the driver moves 2.02 %
+    / 1.72 % of the poses' pixels by exactly 1/255 on its own (flat regions
+    sharing one float value that lands on a tie), and the dither then moves
+    25.08 %.
 
 THE STACK IS 0001-0079 (this list; `build-ogre.sh` globs `*.patch`, so the file
 count under thirdparty/ogre-patches/ is the truth and this document tracks it).

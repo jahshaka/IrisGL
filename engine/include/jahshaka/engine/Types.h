@@ -4114,6 +4114,24 @@ struct PostFxDesc {
     /// Contrast of the occlusion term, and how far in world units it looks.
     float ssaoPower = 1.5f;
     float ssaoRadius = 2.0f;
+    /// THE DITHER'S OFF SWITCH — A DIAGNOSTIC, NOT A DIAL (lane DITHER-1).
+    ///
+    /// The final grade quantises a floating-point picture to 8-bit display
+    /// codes, and that write is DITHERED: a deterministic, screen-space,
+    /// zero-mean offset of at most half a code, so a smooth gradient reads as
+    /// noise whose local mean follows it instead of as a staircase of contours
+    /// (the owner's "rippling in the ground plane while flying"). It is
+    /// correctness, so there is no project row for it and there will not be
+    /// one.
+    ///
+    /// THIS EXISTS SO A TEST CAN RENDER BOTH PICTURES IN ONE PROCESS. Every
+    /// arm of hdr.dither is measured against the same binary with this set,
+    /// and so is the --engine-selftest hash A/B. `JAHSHAKA_NO_DITHER` in the
+    /// environment forces it on process-wide (read once) for the arms that
+    /// cannot reach into a description — a rig shot, a selftest run.
+    ///
+    /// A uniform, not a graph term: setting it rebuilds no workspace.
+    bool  ditherOff = false;
     /// SMAA: -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra. Runs AFTER tonemapping.
     int   smaaPreset = -1;
     /// Screen-space reflections: 0 off, 1 half-resolution rays, 2 full.
@@ -4312,7 +4330,8 @@ struct PostFxDesc {
                bloomThreshold == o.bloomThreshold && bloomKnee == o.bloomKnee &&
                ssao == o.ssao &&
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
-               ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
+               ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&
+               smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
                ssrMaxDistance == o.ssrMaxDistance &&
                ssrThickness == o.ssrThickness &&
