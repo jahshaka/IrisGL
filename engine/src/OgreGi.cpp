@@ -875,6 +875,13 @@ GiStatus OgreScene::giStatus() const {
             cs.resolution = int(c.resolution);
             cs.cell       = c.cell();
             cs.step       = c.step();
+            // THE NEAR-FIELD GUARANTEE THIS CASCADE IS ACHIEVING (Types.h's
+            // giCascadeGuaranteedRadius, in metres): halfSize - step - cell.
+            // The step is how far the camera may travel from the camera the
+            // cascade was built for, and the cell is how far below the camera
+            // the re-centre quantised the centre — so this is the radius around
+            // the head inside which the bounce is ALWAYS this cascade's.
+            cs.guaranteedRadius = c.halfSize - c.step() - c.cell();
             cs.centre     = toV(c.centre);
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
@@ -3495,36 +3502,28 @@ std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
                                                         : GiViewProfile::Desktop);
         for (int i = 0; i < facts.cascadeCount; ++i) table.push_back(facts.cascades[i]);
     }
-    // THE STEP TABLE, when a row did not pin one: the pin's own
-    // `autoCalculateStepSizes(4)` shape (OgreVctCascadedVoxelizer.cpp:131-161)
-    // written out here so it is ours to tune (A7) — every finer cascade steps
-    // the same DISTANCE as the outermost one, ceiled to whole cells and floored
-    // at half its resolution (the pin's own guard against a step that outruns
-    // the volume).
+    // THE STEP TABLE, when a row did not pin one: `giResolveCascadeSteps`
+    // (Types.h) — the pin's `autoCalculateStepSizes(4)` shape met with THE
+    // NEAR-FIELD GUARANTEE (kGiNearFieldRadiusFraction, CASCADE-STEP-1), which
+    // is a ceiling on it. It lives in the header rather than here because
+    // `world.tierTable()` reports the resolved steps and the guaranteed radius
+    // a tier's chain would have, and a chain the renderer builds and a chain a
+    // tooltip promises must be one table (render audit A5) — the derivation is
+    // pure arithmetic on the row and needs no scene, no device and no Ogre.
     //
-    // THE OUTERMOST CASCADE STEPS TWICE AS FAR AS THE REST (PHOTON_SPEC §7
-    // E2 (1), "the outer stepCells raised"), and the reason is a measurement,
-    // not symmetry. The outermost cascade is the one that encloses the most
-    // geometry and resolves the least, so it is BY FAR the most expensive
-    // rebuild in the chain — on the 8,026-instance lattice it is 88.9 ms of GPU
-    // against cascade 0's 18.1, and even on the Showroom at Epic it is the row
-    // that peaks (spikes/photon-e2/BASELINE.md). Halving how often it runs
-    // halves that cost, and what it buys with the frames it skips is that its
-    // 60 m box sits up to 15 m off-centre instead of 7.5 — on a volume 120 m
-    // across, at 1.875 m per cell, which is a quarter of a cell of parallax on
-    // the far bounce. The INNER cascades are untouched, because they are what
-    // the eye is actually looking at and they are cheap.
-    static const float kOuterStepCells = 8.0f;   // the pin's own value is 4
-    static const float kInnerStepCells = 4.0f;
-    const float cellLast = table.back().halfSize * 2.0f / float(table.back().resolution);
-    for (size_t i = 0; i < table.size(); ++i) {
-        if (table[i].stepCells > 0.0f) continue;
-        const float cell = table[i].halfSize * 2.0f / float(table[i].resolution);
-        float steps = (i + 1u == table.size()) ? kOuterStepCells
-                                               : std::ceil(kInnerStepCells * cellLast / cell);
-        steps = std::max(1.0f, std::min(steps, float(table[i].resolution) * 0.5f));
-        table[i].stepCells = steps;
-    }
+    // WHAT THE RULE MOVED, exactly — every row not named here is arithmetically
+    // unchanged, in both columns:
+    //   Medium  c0  32 -> 16 cells   5.000 -> 2.500 m   r -0.156 -> 2.344
+    //           c1  24 -> 16 cells   7.500 -> 5.000 m   r  2.188 -> 4.688
+    //   High    c0  64 -> 34 cells   5.000 -> 2.656 m   r -0.078 -> 2.266
+    //           c1  48 -> 34 cells   7.500 -> 5.313 m   r  2.344 -> 4.531
+    // (Epic is High's table.) LOW WAS ALREADY COMPLIANT at every row and in
+    // both columns — its outermost cascade is only 20 m, so the "every cascade
+    // steps the outermost one's distance" rule already gave cascade 0 a 2.5 m
+    // step — and so is the outermost cascade of every tier, including the VR
+    // column's pinned 16 cells (60 m box, 30 m step, 28.125 m guaranteed
+    // against the 27.0 the rule asks of it).
+    giResolveCascadeSteps(table.data(), int(table.size()));
     return table;
 }
 

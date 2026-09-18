@@ -2202,6 +2202,125 @@ inline float giCascadeCell(const GiParams::GiCascadeDesc &c)
     return c.resolution > 0 ? c.halfSize * 2.0f / float(c.resolution) : 0.0f;
 }
 
+// ---- THE NEAR-FIELD GUARANTEE (CASCADE-STEP-1, owner 2026-09-18) -----------
+//
+// THE RULE, stated before the arithmetic: THE INNERMOST CASCADE GUARANTEES A
+// NEAR-FIELD RADIUS. Within `kGiNearFieldRadiusFraction` of its own half-size
+// around the head, the diffuse bounce is ALWAYS read from that cascade — never,
+// at any moment of any walk, from the coarser one behind it. Outside that
+// radius the hand-over still exists (a boundary has to be somewhere); the rule
+// says how far away it is, which is the only thing a walker can notice.
+//
+// WHY IT NEEDS A RULE AT ALL. A cascade re-centres when the camera has
+// travelled `step` metres from the camera it was built for, and it re-centres
+// onto its own CELL lattice, so at the moment of a rebuild the centre is up to
+// one cell below the camera on each axis. The worst distance from the head to
+// the centre before the next rebuild is therefore
+//
+//     off = step + cell                                       (per axis)
+//
+// and the head is guaranteed to have that cascade's own lighting out to
+//
+//     r = halfSize - step - cell                              (the inscribed radius)
+//
+// The hysteresis costs nothing here: `kStepHysteresis` shrinks the test lattice
+// by the band and adds the band back on both sides (OgreGi.cpp), so the worst
+// travel from the built camera is exactly `step`, not `(1 + h) * step`
+// (measured by gi.cascades case 16b, which reads the centres out of giStatus
+// every frame of a walk rather than trusting this comment).
+//
+// WHAT IT WAS BEFORE. The derived step was the pin's "every cascade steps the
+// same distance", floored at half the resolution — and that floor BOUND on the
+// innermost cascade at every tier but Low: 32 cells of a 64^3 5 m cascade is a
+// 5 m step, i.e. step == halfSize, i.e. r = -cell. NOTHING was guaranteed: a
+// wearer walking a straight line reached cascade 0's own face before it
+// re-centred, and the metre in front of their eyes was read from cascade 1 —
+// 3x coarser in the VR column (0.156 m -> 0.469 m). That is the artifact
+// CASCADE-STEP-1 removes; the owner's acceptance is "we should never notice a
+// change when walking around a scene".
+//
+// THE FRACTION. 0.45 of the half-size: 2.25 m of the 5 m inner cascade every
+// tier ships, which is about one and a half paces ahead of the wearer and more
+// than the 2 m a room's near wall usually stands at. It costs rebuild
+// frequency, linearly: the step falls from halfSize to roughly halfSize/2, so
+// cascade 0 re-voxelises twice as often per metre walked. The measurement of
+// both halves is in spikes/cascade-step-1/.
+inline constexpr float kGiNearFieldRadiusFraction = 0.45f;
+
+/// The near-field radius this cascade is REQUIRED to guarantee, in metres.
+inline float giNearFieldRadius(const GiParams::GiCascadeDesc &c)
+{
+    return kGiNearFieldRadiusFraction * c.halfSize;
+}
+
+/// The near-field radius this cascade DOES guarantee at the step it carries:
+/// `halfSize - step - cell`, in metres. Negative means it guarantees nothing —
+/// the head can be outside the box before the cascade re-centres. Meaningless
+/// on a row whose step is still 0 (not yet resolved).
+inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
+{
+    const float cell = giCascadeCell(c);
+    return c.halfSize - c.stepCells * cell - cell;
+}
+
+/// The most cells a cascade may step and still honour the rule, floored at one
+/// cell (a step below one cell re-centres the volume for a fraction of a voxel)
+/// and ceiled by the pin's own guard at half the resolution.
+inline float giNearFieldMaxStepCells(const GiParams::GiCascadeDesc &c)
+{
+    const float cell = giCascadeCell(c);
+    if (cell <= 0.0f) return 1.0f;
+    const float metres = c.halfSize - giNearFieldRadius(c) - cell;
+    return std::max(1.0f, std::min(std::floor(metres / cell), float(c.resolution) * 0.5f));
+}
+
+/// RESOLVE THE DERIVED STEPS OF A WHOLE CHAIN, innermost first — the one place
+/// the step of a cascade nobody pinned is decided, so the renderer's chain and
+/// the chain a tooltip (world.tierTable) promises cannot drift.
+///
+/// A row that already carries a step (`stepCells > 0`) is PINNED and is left
+/// exactly as it is: a pinned step is the author's own statement and is held
+/// only by the pin's 1..resolution/2 guard, which the caller applies. Our own
+/// tier tables pin only the outermost cascade (the VR column's 16 cells) and
+/// they are checked against the rule by gi.cascade_steps, not clamped here.
+///
+/// Every other row gets the pin's `autoCalculateStepSizes(4)` shape
+/// (OgreVctCascadedVoxelizer.cpp:131-161) written out here so it is ours to
+/// tune (A7) — every finer cascade steps the same DISTANCE as the outermost
+/// one, ceiled to whole cells and floored at half its resolution (the pin's own
+/// guard against a step that outruns the volume) — MET WITH the near-field rule
+/// above, which is a ceiling on it.
+///
+/// THE OUTERMOST CASCADE STEPS TWICE AS FAR AS THE REST (PHOTON_SPEC §7 E2 (1),
+/// "the outer stepCells raised"), and the reason is a measurement, not symmetry.
+/// The outermost cascade is the one that encloses the most geometry and resolves
+/// the least, so it is BY FAR the most expensive rebuild in the chain — on the
+/// 8,026-instance lattice it is 88.9 ms of GPU against cascade 0's 18.1, and
+/// even on the Showroom at Epic it is the row that peaks
+/// (spikes/photon-e2/BASELINE.md). Halving how often it runs halves that cost,
+/// and what it buys with the frames it skips is that its 60 m box sits up to
+/// 15 m off-centre instead of 7.5 — on a volume 120 m across, at 1.875 m per
+/// cell, which is a quarter of a cell of parallax on the far bounce. It still
+/// clears the near-field rule by a wide margin (43.1 m guaranteed against the
+/// 27.0 asked of it), which is why the ceiling never bites there.
+inline void giResolveCascadeSteps(GiParams::GiCascadeDesc *rows, int count)
+{
+    if (!rows || count <= 0) return;
+    static const float kOuterStepCells = 8.0f;   // the pin's own value is 4
+    static const float kInnerStepCells = 4.0f;
+    const float cellLast = giCascadeCell(rows[count - 1]);
+    for (int i = 0; i < count; ++i) {
+        if (rows[i].stepCells > 0.0f) continue;          // pinned: not ours to decide
+        const float cell = giCascadeCell(rows[i]);
+        if (cell <= 0.0f) continue;
+        float steps = (i + 1 == count) ? kOuterStepCells
+                                       : std::ceil(kInnerStepCells * cellLast / cell);
+        steps = std::max(1.0f, std::min(steps, float(rows[i].resolution) * 0.5f));
+        // THE NEAR-FIELD RULE IS A CEILING ON ALL OF IT.
+        rows[i].stepCells = std::min(steps, giNearFieldMaxStepCells(rows[i]));
+    }
+}
+
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
 /// "the renderer beats the request" contract as View::sampleCount() and
 /// Scene::activePlanarReflectors().
@@ -2478,6 +2597,16 @@ struct GiStatus {
         float cell = 0.0f;
         /// Metres of camera travel between re-centres (stepCells * cell).
         float step = 0.0f;
+        /// THE NEAR-FIELD RADIUS THIS CASCADE GUARANTEES, in metres:
+        /// `halfSize - step - cell` (Types.h's giCascadeGuaranteedRadius and
+        /// the rule above it). Inside it the bounce is ALWAYS read from this
+        /// cascade, at every moment of any walk; outside it the hand-over to
+        /// the coarser cascade behind can happen. Negative means the cascade
+        /// guarantees NOTHING — the camera can be outside the box before it
+        /// re-centres, which is what every tier but Low did before
+        /// CASCADE-STEP-1. The assertable form of the rule (gi.cascades cases
+        /// 16a and 16b, and scripting.e2e.world_modes over both columns).
+        float guaranteedRadius = 0.0f;
         /// The world-space centre it is currently built at (quantised to its
         /// own lattice, so it is NOT the camera position).
         Vec3  centre;
