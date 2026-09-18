@@ -626,6 +626,10 @@ void OgreScene::syncAtmosphere() {
 void OgreScene::tuneAtmosphereRenderable() {
     if (!mAtmoQuad) return;
     mAtmoQuad->setRenderQueueGroup(0u);
+    // Subgroup 1, for the reason tuneSkyRenderable's own note gives: the
+    // hidden-area mesh occupies subgroup 0 of this queue inside a VR eye and
+    // this quad has to be behind it to be masked by it.
+    mAtmoQuad->setRenderQueueSubGroup(1u);
     mAtmoQuad->setVisibilityFlags(kVisibleBit);
     mAtmoQuad->setCastShadows(false);
 }
@@ -1070,6 +1074,23 @@ void OgreScene::tuneSkyRenderable() {
     // our own sky quads used to sit: the sky writes no depth either, so drawing
     // first costs one screen of overdraw and preserves every existing ordering.
     sky->setRenderQueueGroup(0);
+    // ...AND AT SUBGROUP 1 WITHIN IT (lane HAM-1). Queue 0 has exactly one
+    // other tenant, and only inside a VR eye: the runtime's hidden-area mesh, a
+    // depth-only draw at the NEAR plane whose whole purpose is that nothing
+    // behind it is ever shaded. The sky's material is `depth_check on,
+    // depth_write off` and draws at the FAR plane, so it is masked out by that
+    // depth — but only if it is drawn AFTER it, and the subgroup is the top
+    // field of the render queue's sort key (OgreRenderQueue::addRenderable), so
+    // it is the one ordering guarantee available inside a queue. At equal
+    // subgroups the order falls to a material/mesh hash, i.e. to luck.
+    //
+    // NOTHING ELSE MOVES: items are at queue 10, particles at 15, the sun disc
+    // at 5, decals in their own, and the sky quad is the only renderable in
+    // queue 0 in every picture this engine draws that has no headset in it — so
+    // this line reorders nothing on the desktop (the selftest hash holds) and
+    // buys the mask the sky's own fill, which is the largest single thing it
+    // saves (an open scene's masked corners are all sky).
+    sky->setRenderQueueSubGroup(1u);
     // Instant Radiosity casts rays with mVisibilityMask = kGiGeometryBit; the sky
     // must never be hit by them (nor counted as GI geometry anywhere else).
     sky->setVisibilityFlags(kVisibleBit);

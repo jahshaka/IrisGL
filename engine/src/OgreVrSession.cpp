@@ -301,6 +301,12 @@ public:
     Ogre::VulkanExternalDevice        mExternalDevice;
     Ogre::VulkanDeviceCreationRequest mRequest;
 
+    /// THE EYE'S OWN MASK (lane HAM-1). Resolved only when the runtime
+    /// advertises `XR_KHR_visibility_mask` — the instance asks for the
+    /// extension above, and asking for one it does not advertise fails
+    /// xrCreateInstance outright.
+    PFN_xrGetVisibilityMaskKHR GetVisibilityMask = nullptr;
+
     PFN_xrGetVulkanGraphicsRequirements2KHR GetVulkanGraphicsRequirements2 = nullptr;
     PFN_xrCreateVulkanInstanceKHR           CreateVulkanInstance = nullptr;
     PFN_xrGetVulkanGraphicsDevice2KHR       GetVulkanGraphicsDevice2 = nullptr;
@@ -472,6 +478,16 @@ bool VrBoot::begin(VrInfo &info, std::string &reason) {
                           reinterpret_cast<PFN_xrVoidFunction *>(&GetVulkanGraphicsDevice2));
     xrGetInstanceProcAddr(mInstance, "xrCreateVulkanDeviceKHR",
                           reinterpret_cast<PFN_xrVoidFunction *>(&CreateVulkanDevice));
+    // The hidden-area mesh's one entry point (HAM-1). NOT fatal if it fails to
+    // resolve: a session without it renders the whole eye, which is what every
+    // session before this lane did.
+    if (mHasVisibilityMask) {
+        xrGetInstanceProcAddr(mInstance, "xrGetVisibilityMaskKHR",
+                              reinterpret_cast<PFN_xrVoidFunction *>(&GetVisibilityMask));
+        if (!GetVisibilityMask)
+            vrLog("the runtime advertises XR_KHR_visibility_mask but xrGetVisibilityMaskKHR "
+                  "did not resolve - no hidden-area mesh");
+    }
     if (!GetVulkanGraphicsRequirements2 || !CreateVulkanInstance || !GetVulkanGraphicsDevice2 ||
         !CreateVulkanDevice) {
         reason = "the XR_KHR_vulkan_enable2 entry points did not resolve";
@@ -709,6 +725,16 @@ private:
     void dropStereoQuads();
     /// Unregisters one quad's clone (not a restore — see its definition).
     void dropClone(StereoQuad &q);
+    // ---- THE HIDDEN-AREA MESH (lane HAM-1; VR_SPEC §9) --------------------
+    /// ASKS THE RUNTIME FOR THE MASK, once per session (and again on the
+    /// runtime's own change event). Kept RAW, in the tangent space the
+    /// extension defines, because the mapping into clip space needs the eye's
+    /// fov — which does not exist until a frame has been located.
+    void fetchHiddenAreaData();
+    /// Builds (or rebuilds) the masking mesh for THIS frame's fovs. A no-op on
+    /// every frame after the first — one fov compare per eye per frame.
+    void ensureHiddenAreaMesh();
+    void destroyHiddenAreaMesh();
     /// The one Vulkan routine: the two eye copies, recorded on the frame's own
     /// command buffer while the BarrierSolver still knows the target's state.
     void copyEyes();
@@ -855,6 +881,29 @@ private:
     bool        mHavePose = false;
     bool        mViewEnabled = true;
     std::vector<StereoQuad> mStereoQuads;
+
+    // ---- THE HIDDEN-AREA MESH (lane HAM-1) --------------------------------
+    /// The runtime's own geometry, per eye, EXACTLY as it handed it over:
+    /// vertices in the view's tangent space (the plane z = -1, +Y up) and a
+    /// triangle index list. Empty = this eye has no mask.
+    struct HamData {
+        std::vector<float>    x, y;      ///< the tangent-space vertices, split
+        std::vector<uint32_t> idx;       ///< triangle list into them
+    };
+    HamData     mHamData[2];
+    /// The fovs the CURRENT mesh was built for. A runtime is free to change
+    /// them (and a canted or varifocal headset does), and the mapping from
+    /// tangent space into the eye's clip rectangle is exactly those four
+    /// tangents — so the mesh is rebuilt when they move.
+    XrFovf      mHamFov[2] = {};
+    bool        mHamBuilt = false;
+    Ogre::MeshPtr mHamMesh;
+    Ogre::Item *mHamItem = nullptr;
+    std::string mHamMeshName;
+    float       mHamFraction[2] = { 0.0f, 0.0f };
+    unsigned    mHamTriangles[2] = { 0u, 0u };
+    std::string mHamSource;              ///< "runtime", "off" or "none"
+
     OgreView   *mView = nullptr;
     Ogre::Camera *mCullCamera = nullptr;
 
@@ -1147,6 +1196,21 @@ bool VrSession::create(std::string &reason) {
     //     them as much as an author does.
     mView->setHelpersVisible(mConfig.helpers);
     mView->setVrHelpersVisible(true);
+    // ...AND THE MASK'S CHANNEL (kVrMaskBit, lane HAM-1), opened HERE — before
+    // the scene, with the two helper channels — and never touched again.
+    //
+    // WHY NOT WHEN THE MASK IS BUILT, which is the obvious place: the channel is
+    // a per-pass VISIBILITY MASK on this view's node, so flipping it REBUILDS
+    // the workspace (ChainDesc::sameShape) — and the mask can only be built on
+    // the first frame the runtime locates its eyes, i.e. INSIDE a frame. A
+    // rebuild there is survivable (`attachWorkspace` re-adds every workspace
+    // listener, the eye copy's included) but it is a seam nothing in this suite
+    // can see the far side of: a lost copy listener leaves the picture in the
+    // eye target perfect and the HEADSET black. Opening the channel at creation
+    // costs one bit in this view's own passes that nothing carries until the
+    // mask exists — no pixel, no pass, no rebuild — and the mask then appears
+    // and disappears as an ordinary scene object.
+    mView->setHiddenAreaMask(mConfig.hiddenAreaMask);
     // SHADOWS, WHICH THE HEADSET DID NOT HAVE (lane VR-4, found by the §3.4
     // measurement rather than by looking): `OgreView::mShadows` is FALSE by
     // default and every other host opts in explicitly — the editor viewport at
@@ -1187,6 +1251,11 @@ bool VrSession::create(std::string &reason) {
     // runtime that refused the action set is precisely the one whose wearer has
     // only hands.
     createHandTrackers();
+    // THE EYE'S OWN MASK (lane HAM-1). Asked for HERE, where the session
+    // exists, and built later — on the first frame the runtime locates, because
+    // the geometry it hands over is in the view's tangent space and the mapping
+    // into clip space is that eye's fov.
+    fetchHiddenAreaData();
 
     vrLog("session created on the runtime's device");
     if (mTestNoRenderLeft)
@@ -2269,6 +2338,21 @@ void VrSession::pollEvents() {
             // forever for an answer that changes when somebody moves their
             // hands. Read once at the attach, then on this event.
             mProfilesDirty = true;
+        } else if (ev.type == XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR) {
+            // THE LENSES MOVED, OR THE RUNTIME CHANGED ITS MIND (HAM-1). A
+            // Quest re-runs its own lens calibration, a runtime may switch
+            // between eye reliefs, and the extension exists precisely so the
+            // application does not cache the shape for ever. Re-asked here and
+            // rebuilt on the next located frame; the event names ONE eye and
+            // one view configuration, and both are re-read because the fetch
+            // asks for both eyes anyway.
+            auto *vm = reinterpret_cast<XrEventDataVisibilityMaskChangedKHR *>(&ev);
+            if (vm->viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) {
+                vrLog("the runtime changed its visibility mask (eye %u) - re-asking",
+                      vm->viewIndex);
+                fetchHiddenAreaData();
+                destroyHiddenAreaMesh();   // ensureHiddenAreaMesh rebuilds it next frame
+            }
         } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             // THE RUNTIME RECENTRED THE ROOM UNDER THE WEARER (the Quest's
             // long-press, a guardian re-setup, a runtime that re-origins a
@@ -2528,6 +2612,9 @@ void VrSession::beginFrame() {
     mEyeProjection[1] = proj[1];
     mEyeProjectionRS[0] = projRS[0];
     mEyeProjectionRS[1] = projRS[1];
+    // THE HIDDEN-AREA MESH (HAM-1), the first frame the eyes are located and
+    // again whenever the runtime moves a fov. One compare per eye otherwise.
+    ensureHiddenAreaMesh();
     mAsymmetricFov =
         std::fabs(mViews[0].fov.angleLeft - mViews[1].fov.angleLeft) > 1e-6f ||
         std::fabs(mViews[0].fov.angleRight - mViews[1].fov.angleRight) > 1e-6f ||
@@ -3028,6 +3115,15 @@ VrStatus VrSession::status() const {
     s.origin = Vec3(mOriginPos.x, mOriginPos.y, mOriginPos.z);
     s.originYaw = mOriginYawDeg;
     s.spaceChanges = mSpaceChanges;
+    // THE HIDDEN-AREA MESH (HAM-1). `source` says where the shape came from and
+    // the fractions are the RUNTIME'S OWN answer, measured on the geometry it
+    // handed over — the number a saving is computed from, and the one that
+    // differs between a simulated HMD and a real headset.
+    s.hiddenAreaSource = mHamSource.empty() ? std::string("none") : mHamSource;
+    for (int e = 0; e < 2; ++e) {
+        s.hiddenAreaFraction[e] = mHamFraction[e];
+        s.hiddenAreaTriangles[e] = mHamTriangles[e];
+    }
     for (int h = 0; h < 2; ++h) {
         s.hands[h].valid = mHandValid[h];
         s.hands[h].position = Vec3(mHandPos[h].x, mHandPos[h].y, mHandPos[h].z);
@@ -3151,6 +3247,9 @@ VrSession::~VrSession() {
     destroyXr();
     teardownMirror();
     dropStereoQuads();
+    // The mask's Item and its mesh, before the View and long before Root: a
+    // MeshPtr that outlives Root throws in the VaoManager.
+    destroyHiddenAreaMesh();
     if (mView) {
         mView->removeWorkspaceListener(this);
         if (mView->camera()) mView->camera()->setVrData(nullptr);
@@ -3164,6 +3263,337 @@ VrSession::~VrSession() {
         mScene->sceneManager()->destroyCamera(mCullCamera);
         mCullCamera = nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE HIDDEN-AREA MESH (lane HAM-1; SPECS/VR_SPEC.md §9, V1-RIG's COST.txt §3)
+//
+// WHAT IT IS. A headset's lenses do not show the corners of the rectangle we
+// render: the eye is round, the barrel cuts it, and the nose takes a bite out
+// of the inner edge. Those pixels are shaded and then thrown away by the
+// runtime's own distortion. The fix is as old as VR: draw the shape they occupy
+// FIRST, depth-only, at the NEAR plane, so every later draw fails the depth
+// test there and nothing is ever shaded behind it.
+//
+// WHERE THE SHAPE COMES FROM, and this is the whole reason this is engine code
+// and not a config file: THE RUNTIME KNOWS IT. `XR_KHR_visibility_mask` hands
+// over a triangle mesh per eye for the headset that is actually plugged in —
+// WiVRn answers it for the owner's Quest Pro and Monado's simulated HMD answers
+// it on the rig (12 vertices, 4 triangles, an eighth of the eye). The pin also
+// ships `HiddenAreaMeshVrGenerator` + `HiddenAreaMeshVr.cfg`, which BUILDS a
+// shape from two circles and a nose radius per device name — but the only
+// enabled entry in that file is the Vive, so it answers for no headset we own
+// or test with. The runtime's own geometry is the source; there is no fallback
+// (see the report's "what was deliberately not built").
+//
+// THE SPACE THE VERTICES ARE IN is the view's TANGENT space: the plane z = -1
+// of that eye's frustum, +Y up, so a vertex (x, y) is a direction (x, y, -1).
+// Mapping it into that eye's clip rectangle is therefore exactly the eye's own
+// four tangents, which is the same quantity `projectionFromFov` builds the
+// projection from:
+//
+//     ndc.x = (2x - (tanR + tanL)) / (tanR - tanL)
+//     ndc.y = (2y - (tanU + tanD)) / (tanU - tanD)
+//
+// MEASURED, not assumed (the lane's probe against Monado): the mask's x extent
+// is 0.916331, which is tan(42.5 degrees) to six digits, and the simulated
+// HMD's horizontal fov is 85 degrees — i.e. the mask reaches EXACTLY the edge
+// of the view rectangle in tangent space, as the interpretation requires. The
+// engine logs both numbers every session so the reading can be re-checked on
+// any runtime.
+//
+// WHY ONE MESH FOR BOTH EYES. The vertex carries its eye INDEX in z and the
+// pin's own vertex program (`Ogre/VR/HiddenAreaMeshVr`, already in the staged
+// media — Samples/Media/2.0/scripts/materials/Common) writes it to
+// `gl_ViewportIndex`, so one draw covers both eyes' viewports. That needs
+// `VK_EXT_shader_viewport_index_layer`, which this driver has and which Ogre
+// enables whenever the device offers it (OgreVulkanDevice.cpp:1239); the
+// alternative is a draw per eye, and the fallback is that the mask is simply
+// not built. Geometry that spills past an eye's edge is cut by the pass's own
+// SCISSOR, which `chain::applyStereo` sets to the same half as the viewport.
+//
+// WHY IT DRAWS AT RENDER QUEUE 0 AND NOT IN A PASS OF ITS OWN. A pass of its
+// own is a second full scene CULL (CompositorPassScene::execute calls
+// `_updateCullPhase01` unconditionally) for four triangles — on a heavy scene
+// that CPU cost is the same order as the GPU saving the mask buys. So the mask
+// is an object in the FIRST scene pass instead, at queue 0 SUBGROUP 0, and the
+// sky (the only other tenant of queue 0) moved to subgroup 1 to be behind it
+// (OgreSky.cpp's tuneSkyRenderable says the same thing from the sky's side).
+// With SSR on, the pass that draws it first is the depth prepass, which is
+// where the depth belongs anyway.
+//
+// WHAT KEEPS IT OUT OF EVERY OTHER PICTURE is kVrMaskBit — carried INSTEAD OF
+// kVisibleBit, so no capture path can see it — plus `helperBitsToDrop`, which
+// takes the bit out of every view's node but a session's eye pair. See the
+// bit's own note in EnginePrivate.h.
+void VrSession::fetchHiddenAreaData() {
+    mHamData[0] = HamData();
+    mHamData[1] = HamData();
+    if (!mConfig.hiddenAreaMask) { mHamSource = "off"; return; }
+    mHamSource = "none";
+    if (!mBoot || !mBoot->GetVisibilityMask || mSession == XR_NULL_HANDLE) return;
+    for (uint32_t eye = 0; eye < 2u; ++eye) {
+        // The two-call pattern: counts first, then the fill. A runtime is
+        // entitled to answer zero (no mask for this eye), and that is not an
+        // error — it is a headset whose lenses show the whole rectangle.
+        XrVisibilityMaskKHR m{ XR_TYPE_VISIBILITY_MASK_KHR };
+        XrResult r = mBoot->GetVisibilityMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                             eye, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR,
+                                             &m);
+        if (XR_FAILED(r) || m.vertexCountOutput == 0u || m.indexCountOutput < 3u) {
+            vrLog("hidden-area mesh: eye %u has none (%s, %u vertices, %u indices)", eye,
+                  xrResultName(mBoot->mInstance, r).c_str(), m.vertexCountOutput,
+                  m.indexCountOutput);
+            continue;
+        }
+        std::vector<XrVector2f> verts(m.vertexCountOutput);
+        std::vector<uint32_t> idx(m.indexCountOutput);
+        m.vertexCapacityInput = uint32_t(verts.size());
+        m.indexCapacityInput = uint32_t(idx.size());
+        m.vertices = verts.data();
+        m.indices = idx.data();
+        r = mBoot->GetVisibilityMask(mSession, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, eye,
+                                     XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &m);
+        if (XR_FAILED(r)) {
+            vrLog("hidden-area mesh: eye %u refused the fill (%s)", eye,
+                  xrResultName(mBoot->mInstance, r).c_str());
+            continue;
+        }
+        // A triangle list, and nothing is trusted about it: an index past the
+        // vertex array takes the eye's mask away rather than reading memory.
+        const uint32_t tris = m.indexCountOutput / 3u;
+        bool sane = true;
+        for (uint32_t i = 0; i < tris * 3u; ++i)
+            if (idx[i] >= verts.size()) { sane = false; break; }
+        if (!sane) {
+            vrLog("hidden-area mesh: eye %u handed over an out-of-range index - ignored", eye);
+            continue;
+        }
+        mHamData[eye].x.resize(verts.size());
+        mHamData[eye].y.resize(verts.size());
+        float minx = verts[0].x, maxx = verts[0].x, miny = verts[0].y, maxy = verts[0].y;
+        for (size_t v = 0; v < verts.size(); ++v) {
+            mHamData[eye].x[v] = verts[v].x;
+            mHamData[eye].y[v] = verts[v].y;
+            minx = std::min(minx, verts[v].x); maxx = std::max(maxx, verts[v].x);
+            miny = std::min(miny, verts[v].y); maxy = std::max(maxy, verts[v].y);
+        }
+        mHamData[eye].idx.assign(idx.begin(), idx.begin() + tris * 3u);
+        mHamSource = "runtime";
+        vrLog("hidden-area mesh: eye %u %zu vertices, %u triangles, tangent bbox "
+              "x[%.6f %.6f] y[%.6f %.6f]", eye, verts.size(), tris,
+              double(minx), double(maxx), double(miny), double(maxy));
+    }
+}
+
+namespace {
+
+/// The area of ONE triangle clipped to the eye's clip rectangle [-1,1]^2,
+/// Sutherland-Hodgman against four half-planes then the shoelace formula.
+///
+/// WHY CLIP AT ALL. The number this feeds is `VrStatus::hiddenAreaFraction`,
+/// which is what a saving is computed from and what the suite compares against
+/// a PIXEL count — so geometry that spills past the eye's edge (the scissor
+/// throws those pixels away, see the note above) must not be counted as
+/// masked. A runtime whose mask stops exactly at the edge, like Monado's, is
+/// unaffected by this.
+double clippedTriangleArea(float ax, float ay, float bx, float by, float cx, float cy) {
+    float px[8] = { ax, bx, cx }, py[8] = { ay, by, cy };
+    int n = 3;
+    // Four edges: x >= -1, x <= 1, y >= -1, y <= 1.
+    for (int edge = 0; edge < 4; ++edge) {
+        float qx[8], qy[8];
+        int m = 0;
+        for (int i = 0; i < n && m < 7; ++i) {
+            const int j = (i + 1) % n;
+            const float vi = edge == 0 ? px[i] + 1.0f : edge == 1 ? 1.0f - px[i]
+                           : edge == 2 ? py[i] + 1.0f : 1.0f - py[i];
+            const float vj = edge == 0 ? px[j] + 1.0f : edge == 1 ? 1.0f - px[j]
+                           : edge == 2 ? py[j] + 1.0f : 1.0f - py[j];
+            if (vi >= 0.0f) { qx[m] = px[i]; qy[m] = py[i]; ++m; }
+            if ((vi >= 0.0f) != (vj >= 0.0f) && m < 7) {
+                const float t = vi / (vi - vj);
+                qx[m] = px[i] + t * (px[j] - px[i]);
+                qy[m] = py[i] + t * (py[j] - py[i]);
+                ++m;
+            }
+        }
+        n = m;
+        for (int i = 0; i < n; ++i) { px[i] = qx[i]; py[i] = qy[i]; }
+        if (n < 3) return 0.0;
+    }
+    double twice = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        twice += double(px[i]) * double(py[j]) - double(px[j]) * double(py[i]);
+    }
+    return std::fabs(twice) * 0.5;
+}
+
+bool sameFov(const XrFovf &a, const XrFovf &b) {
+    return std::fabs(a.angleLeft - b.angleLeft) < 1e-5f &&
+           std::fabs(a.angleRight - b.angleRight) < 1e-5f &&
+           std::fabs(a.angleUp - b.angleUp) < 1e-5f &&
+           std::fabs(a.angleDown - b.angleDown) < 1e-5f;
+}
+
+}   // namespace
+
+void VrSession::ensureHiddenAreaMesh() {
+    if (!mConfig.hiddenAreaMask) return;
+    if (mHamData[0].idx.empty() && mHamData[1].idx.empty()) return;   // nothing to build
+    if (mHamBuilt && sameFov(mHamFov[0], mViews[0].fov) && sameFov(mHamFov[1], mViews[1].fov))
+        return;                                                       // the common path
+    if (!mScene || !mScene->sceneManager()) return;
+    if (mHamBuilt)
+        vrLog("hidden-area mesh: the runtime's fov moved - rebuilding");
+    destroyHiddenAreaMesh();
+
+    // ONE triangle list, both eyes, xy in that eye's NDC and z = the eye index.
+    std::vector<float> vb;
+    size_t total = 0;
+    for (int eye = 0; eye < 2; ++eye) total += mHamData[eye].idx.size();
+    vb.reserve(total * 4u);
+    for (int eye = 0; eye < 2; ++eye) {
+        const HamData &d = mHamData[eye];
+        if (d.idx.empty()) continue;
+        const XrFovf &f = mViews[eye].fov;
+        const float l = std::tan(f.angleLeft), r = std::tan(f.angleRight);
+        const float dn = std::tan(f.angleDown), u = std::tan(f.angleUp);
+        const float w = r - l, h = u - dn;
+        if (!(w > 1e-6f) || !(h > 1e-6f)) {
+            // A frustum this degenerate cannot be mapped into; the eye keeps
+            // its whole rectangle rather than getting a mask of nonsense.
+            vrLog("hidden-area mesh: eye %d has a degenerate fov - skipped", eye);
+            continue;
+        }
+        double area = 0.0;
+        unsigned tris = 0;
+        for (size_t i = 0; i + 2 < d.idx.size(); i += 3) {
+            float nx[3], ny[3];
+            for (int c = 0; c < 3; ++c) {
+                const uint32_t v = d.idx[i + size_t(c)];
+                nx[c] = (2.0f * d.x[v] - (r + l)) / w;
+                ny[c] = (2.0f * d.y[v] - (u + dn)) / h;
+            }
+            area += clippedTriangleArea(nx[0], ny[0], nx[1], ny[1], nx[2], ny[2]);
+            ++tris;
+            for (int c = 0; c < 3; ++c) {
+                vb.push_back(nx[c]);
+                vb.push_back(ny[c]);
+                vb.push_back(float(eye));   // -> gl_ViewportIndex
+                vb.push_back(1.0f);
+            }
+        }
+        // The rectangle's own area is 4, so the fraction is area/4.
+        mHamFraction[eye] = float(area * 0.25);
+        mHamTriangles[eye] = tris;
+    }
+    if (vb.empty()) return;
+
+    try {
+        Ogre::Root *root = Ogre::Root::getSingletonPtr();
+        Ogre::VaoManager *vao =
+            root && root->getRenderSystem() ? root->getRenderSystem()->getVaoManager() : nullptr;
+        if (!vao) return;
+        // A UNIQUE NAME PER BUILD. A session may rebuild this (a runtime that
+        // changed its mask or its fov), and a MeshManager name is a name — a
+        // recycled one throws "already exists" (and the shader cache's own
+        // lesson from SHADERCACHE-2 is that a recycled name is worse than a
+        // new one).
+        static unsigned long long sHamSerial = 0ull;
+        mHamMeshName = "JahshakaVrHiddenArea/" + std::to_string(++sHamSerial);
+        mHamMesh = Ogre::MeshManager::getSingleton().createManual(
+            mHamMeshName, Ogre::ResourceGroupManager::INTERNAL_RESOURCE_GROUP_NAME);
+        Ogre::VertexElement2Vec elements;
+        elements.push_back(Ogre::VertexElement2(Ogre::VET_FLOAT4, Ogre::VES_POSITION));
+        const size_t numVertices = vb.size() / 4u;
+        Ogre::VertexBufferPacked *vbuf =
+            vao->createVertexBuffer(elements, numVertices, Ogre::BT_IMMUTABLE, vb.data(), false);
+        Ogre::VertexBufferPackedVec buffers;
+        buffers.push_back(vbuf);
+        Ogre::VertexArrayObject *v =
+            vao->createVertexArrayObject(buffers, 0, Ogre::OT_TRIANGLE_LIST);
+        Ogre::SubMesh *sub = mHamMesh->createSubMesh();
+        sub->mVao[Ogre::VpNormal].push_back(v);
+        // The SHADOW pass's Vao is deliberately the same object (the pin's
+        // generator does this too): nothing ever renders this mesh into a
+        // shadow map — it carries no kVisibleBit and casts no shadows — but a
+        // SubMesh with an empty shadow Vao asserts inside Ogre the moment
+        // anything asks for one.
+        sub->mVao[Ogre::VpShadow].push_back(v);
+        sub->mMaterialName = "Ogre/VR/HiddenAreaMeshVr";
+        // INFINITE, and it must be: the vertices are in CLIP space and the
+        // object has no world transform at all, so a bounding box computed from
+        // them would cull the mask out of the frustum it covers. The pin's
+        // generator says the same thing in one line.
+        mHamMesh->_setBounds(Ogre::Aabb::BOX_INFINITE, false);
+
+        Ogre::SceneManager *sm = mScene->sceneManager();
+        mHamItem = sm->createItem(mHamMesh, Ogre::SCENE_DYNAMIC);
+        mHamItem->setCastShadows(false);
+        mHamItem->setRenderQueueGroup(0u);
+        // SUBGROUP 0 of queue 0, which is the ordering this whole feature rests
+        // on: the sky is at subgroup 1 (OgreSky.cpp) and the subgroup is the top
+        // field of the render queue's sort key.
+        mHamItem->getSubItem(0)->setRenderQueueSubGroup(0u);
+        // THE VERTICES ARE ALREADY IN CLIP SPACE. Identity projection is what
+        // makes the pin's vertex program a pass-through — and it is also what
+        // applies this backend's Y convention, because the `projection_matrix`
+        // auto-param for an identity-projection renderable is
+        // `_convertProjectionMatrix(IDENTITY)` with Y NEGATED when the render
+        // pass requires texture flipping, which every Vulkan target does
+        // (OgreAutoParamDataSource.cpp:341-364). So the mesh is built +Y up,
+        // Ogre's own convention, and lands right side up.
+        mHamItem->getSubItem(0)->setUseIdentityProjection(true);
+        // ITS OWN CHANNEL, INSTEAD OF kVisibleBit (kVrMaskBit's note): no probe
+        // face, sky capture, planar mirror, shadow map or GI gather can see it,
+        // and no view but a session's eye pair draws it.
+        mHamItem->setVisibilityFlags(kVrMaskBit);
+        sm->getRootSceneNode(Ogre::SCENE_DYNAMIC)->attachObject(mHamItem);
+        mHamFov[0] = mViews[0].fov;
+        mHamFov[1] = mViews[1].fov;
+        mHamBuilt = true;
+        vrLog("hidden-area mesh: built %zu triangles, masking %.2f %% of the left eye and "
+              "%.2f %% of the right (the runtime's own geometry)", numVertices / 3u,
+              double(mHamFraction[0] * 100.0f), double(mHamFraction[1] * 100.0f));
+        // The tangent-space reading, re-checkable on any runtime: the mask's own
+        // extent against the eye's edge in the same units (see the note above).
+        vrLog("hidden-area mesh: eye 0 tangents L%.6f R%.6f D%.6f U%.6f",
+              double(std::tan(mViews[0].fov.angleLeft)), double(std::tan(mViews[0].fov.angleRight)),
+              double(std::tan(mViews[0].fov.angleDown)), double(std::tan(mViews[0].fov.angleUp)));
+    } catch (Ogre::Exception &e) {
+        // NEVER FATAL. A session that cannot build the mask renders the whole
+        // eye, which is what every session before this lane did — and it says
+        // so, once, rather than taking VR away.
+        vrLog("the hidden-area mesh could not be built: %s", e.getFullDescription().c_str());
+        destroyHiddenAreaMesh();
+    } catch (std::exception &e) {
+        vrLog("the hidden-area mesh could not be built: %s", e.what());
+        destroyHiddenAreaMesh();
+    }
+}
+
+void VrSession::destroyHiddenAreaMesh() {
+    // ORDER: the Item first (it holds the Vaos through the mesh), then the
+    // mesh — and the mesh really is unloaded rather than just dropped, because
+    // a MeshPtr that outlives Root throws in the VaoManager (CLAUDE.md's rule).
+    if (mHamItem && mScene && mScene->sceneManager()) {
+        if (mHamItem->getParentSceneNode())
+            mHamItem->getParentSceneNode()->detachObject(mHamItem);
+        mScene->sceneManager()->destroyItem(mHamItem);
+    }
+    mHamItem = nullptr;
+    if (mHamMesh) {
+        Ogre::MeshManager::getSingleton().remove(mHamMesh);
+        mHamMesh.reset();
+    }
+    mHamMeshName.clear();
+    mHamBuilt = false;
+    mHamFraction[0] = mHamFraction[1] = 0.0f;
+    mHamTriangles[0] = mHamTriangles[1] = 0u;
+    // The VIEW's channel is NOT touched here: it was opened at creation and
+    // dies with the view (see the note there). Only the object goes.
 }
 
 // ---------------------------------------------------------------------------
