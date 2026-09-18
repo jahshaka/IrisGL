@@ -4029,6 +4029,22 @@ private:
     /// when the chain cannot answer at all (no chain, or nothing built yet), in
     /// which case the caller takes the from-scratch `rebuildVct`.
     bool refreshCascadesFast();
+    /// ONE DEFINITION OF AN AT-REST CASCADE INJECTION, shared by the light tick
+    /// and the incremental settle (LAMPREST-3 fix round).
+    void injectCascade(size_t i, bool coarse);
+    /// The field re-integrates once, after the LAST injection of a tick or of a
+    /// settle — never per injection.
+    void reintegrateFieldAfterInjection();
+    /// One injection of an owed settle, out of the scheduler's frame slot.
+    void payChainSettleStep();
+    /// Remember / compare the lights and ambient an owed settle's steps must all
+    /// see: a light that moves mid-settle restarts it (a settle that mixed two
+    /// lamp poses is the fixed point of neither).
+    void noteSettleInputs();
+    bool settleInputsUnchanged() const;
+    /// Record the chain as settled for the inputs it was injected with.
+    void noteChainSettled();
+
     /// Records WHERE the scene changed, for the dirty path above. `box` is the
     /// region the edit touched (a mover's old box united with its new one, or a
     /// vanishing item's last box); nullptr means "somewhere" and marks the whole
@@ -4101,6 +4117,45 @@ private:
     static constexpr int kAtRestSweeps = 3;
     /// What the last light tick actually spent (GiStatus::chainSweeps).
     int mGiChainSweeps = 0;
+    /// A CASCADE REBUILD LEFT THE CHAIN OFF ITS FIXED POINT (LAMPREST-3). A
+    /// rebuild injects ONE cascade once, over the radiance it held somewhere
+    /// else, and the mirror's cadence never ticks for a camera walk — so the
+    /// chain stayed one Jacobi pass from where it belonged until something
+    /// unrelated happened to re-inject it (measured: 60,852 of cascade 0's
+    /// 82,176 lit light-voxel bytes wrong by up to 55/255, permanently, after
+    /// a walk that returned to its own starting pose).
+    ///
+    /// THE DEBT IS A COUNT OF INJECTIONS, NOT A FLAG, and it is paid ONE PER
+    /// FRAME out of the scheduler's own one-slot budget: the at-rest tick is
+    /// kAtRestSweeps passes over every cascade (twelve sequential injections at
+    /// Medium, 12.0-12.9 ms in Debug on the rig) and spending that in ONE frame
+    /// is a whole frame at 90 Hz — a hitch, for a picture that is only owed
+    /// because the camera moved. Spread over frames, in the SAME order the tick
+    /// uses (sweeps outer, cascades outermost-first), it leaves the same bytes
+    /// (verified by sha256 of the light voxels) for ~1 ms a frame, the rebuild
+    /// queue keeps priority, and a walk that never ends never starves: it keeps
+    /// paying one cheap injection per idle slot.
+    int    mGiSettleStepsOwed = 0;
+    /// The cascade count the debt was raised against — a chain that changed
+    /// shape under an unfinished settle abandons it rather than injecting a
+    /// cascade the sequence no longer describes.
+    size_t mGiSettleCascades = 0;
+    /// The light-write serial and ambient the running settle was raised with.
+    unsigned long long mGiSettleSerial = 0;
+    Colour             mGiSettleAmbient[2];
+    /// How many of those settles this scene has paid (GiStatus::chainSettles) —
+    /// cumulative, so a suite can assert "one per gesture, not one per frame"
+    /// from outside.
+    long long mGiChainSettles = 0;
+    /// WHOEVER PAYS THE INJECTION PAYS THE DEBT (fix round item 3): a full
+    /// at-rest chain tick IS the settle the scheduler owes, so it clears an
+    /// unfinished one rather than letting it run on top of the answer the tick
+    /// just computed. (The other half of that item — letting the mirror's
+    /// stability tick SKIP a chain that is already settled — was built, measured
+    /// and NOT shipped: the engine's light-write serial does not see a movable
+    /// lamp's pose change the way an injection does, and the skip cost
+    /// scripting.e2e.movable_lamp_rest 3/255 in 10 runs of 10. The saving
+    /// belongs in the mirror, which owns the signature.)
     /// The irradiance field's pass-buffer block (JahIfd_piece_ps.any).
     void          pushIfdState(const Ogre::uint32 numProbes[3]);
     /// THE FIELD FOLLOWS CASCADE 0 (PHOTON_SPEC E1 item 1). Called by the
