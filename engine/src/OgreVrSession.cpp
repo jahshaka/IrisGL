@@ -1186,8 +1186,8 @@ bool VrSession::create(std::string &reason) {
     // wearer's eye — ours — with the runtime's decode and its display encode
     // cancelling.
     //
-    // NO SILENT FALLBACK (phase 1a fix round F4), and ONE format rather than a
-    // preference list, because a raw copy fixes both halves of the contract:
+    // ONE FORMAT ASKED FOR, AND ONLY ONE, because a raw copy fixes both halves
+    // of the contract:
     //
     //   * THE CHANNEL ORDER. `vkCmdCopyImage` moves BYTES. B8G8R8A8_SRGB is
     //     size-compatible with our R8G8B8A8 eye target and the copy is legal,
@@ -1201,6 +1201,15 @@ bool VrSession::create(std::string &reason) {
     //     target is 8-bit, and WiVRn video-encodes 8 bits to the Quest — so
     //     every offered format is ENUMERATED AND LOGGED and none of them is
     //     taken on a guess.
+    //
+    // AND THE FALLBACK IS LOUD, NOT ABSENT. A runtime that offers no
+    // R8G8B8A8_SRGB at all would otherwise be a runtime this editor refuses to
+    // enter — a colour question taking VR away entirely — so the UNORM
+    // spelling is still taken when it is the only 8-bit RGBA on offer, with
+    // the consequence named in the log: the picture reaches the wearer with one
+    // encode too many and reads about a stop too bright. No runtime seen so far
+    // needs it (Monado 25 and WiVRn 26 both offer the _SRGB form), and a log
+    // line is what tells us the day one does.
     uint32_t fmtCount = 0;
     xrEnumerateSwapchainFormats(mSession, 0, &fmtCount, nullptr);
     std::vector<int64_t> formats(fmtCount);
@@ -1220,15 +1229,23 @@ bool VrSession::create(std::string &reason) {
     mSwapchainFormat = 0;
     for (int64_t f : formats)
         if (f == int64_t(VK_FORMAT_R8G8B8A8_SRGB)) { mSwapchainFormat = f; break; }
-    if (!mSwapchainFormat) {
-        reason = "the runtime does not offer VK_FORMAT_R8G8B8A8_SRGB (the eye target's "
-                 "channel order, and the format that tells the runtime our bytes are "
-                 "already display-encoded)";
-        return false;
+    if (mSwapchainFormat) {
+        vrLog("swapchain format: R8G8B8A8_SRGB (our display-encoded bytes, copied raw; the "
+              "runtime decodes and re-encodes them, so the picture reaching the wearer is "
+              "encoded exactly once)");
+    } else {
+        for (int64_t f : formats)
+            if (f == int64_t(VK_FORMAT_R8G8B8A8_UNORM)) { mSwapchainFormat = f; break; }
+        if (!mSwapchainFormat) {
+            reason = "the runtime offers no 8-bit RGBA swapchain format (R8G8B8A8_SRGB or "
+                     "R8G8B8A8_UNORM); the eye target is PFG_RGBA8_UNORM and the copy into "
+                     "the swapchain is a raw byte transfer";
+            return false;
+        }
+        vrLog("swapchain format: R8G8B8A8_UNORM - THIS RUNTIME OFFERS NO R8G8B8A8_SRGB, so it "
+              "will treat our display-encoded bytes as linear and encode them a SECOND time: "
+              "the wearer's picture will read about a stop too bright. Report this runtime.");
     }
-    vrLog("swapchain format: %s (our display-encoded bytes, copied raw; the runtime "
-          "decodes and re-encodes them, so the picture is encoded exactly once)",
-          vkFormatName(mSwapchainFormat).c_str());
 
     mEyeWidth  = mConfig.overrideEyeWidth  ? mConfig.overrideEyeWidth
                                            : mBoot->mViewCfg[0].recommendedImageRectWidth;

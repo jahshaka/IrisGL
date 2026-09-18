@@ -564,7 +564,25 @@ void OgreView::applyPip() {
 // `vr.state().postFx` shows and what the suite asserts against the desktop's.
 void OgreView::setPostFx(const PostFxDesc &pushed) {
     PostFxDesc fx = pushed;
-    if (mStereo) applyVrViewPolicy(fx, mVrSsrOverride);
+    if (mStereo) {
+        applyVrViewPolicy(fx, mVrSsrOverride);
+        // A DROPPED LOOK IS SAID OUT LOUD, ONCE PER CHANGE. Everything else the
+        // policy removes is invisible to an author (nobody misses an SSAO they
+        // never saw in there), but a LOOK is a thing they added on purpose and
+        // can see on the desktop — so "why is my radial blur not in the
+        // headset" must be answerable from the log rather than from this file.
+        const size_t dropped = pushed.looks.size() - fx.looks.size();
+        if (dropped != mVrLooksDropped) {
+            mVrLooksDropped = dropped;
+            if (dropped)
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka VR: " + std::to_string(dropped) +
+                    " of this project's " + std::to_string(pushed.looks.size()) +
+                    " look(s) are not drawn in the headset: their geometry is measured "
+                    "from the frame's centre, which in a target holding two eyes side by "
+                    "side is the inner edge of both (jahshaka::engine::stereoSafeLook)");
+        }
+    }
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free
     const ChainDesc before = chainDesc();
     mPostFx = fx;

@@ -5510,6 +5510,10 @@ private:
     /// `vr.begin({reflections:n})`). -1 — every view but a session's — means
     /// "whatever the project's row says", which is what the mirror pushes.
     int                        mVrSsrOverride = -1;
+    /// How many of the project's looks the VR policy last dropped — the latch
+    /// behind the one log line that tells an author why a look they can see on
+    /// the desktop is not in the headset. size_t(-1) = nothing said yet.
+    size_t                     mVrLooksDropped = size_t(-1);
     /// The located eyes of THIS frame (@see StereoEyeBasis). Not part of the
     /// chain's identity — they change every frame and change no pass.
     StereoEyeBasis             mStereoEyes[2];
