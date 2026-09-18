@@ -3065,6 +3065,10 @@ public:
     /// immediately (one empty() test) when nothing is parked, which is every
     /// frame after a scene has finished loading.
     void settleTextureResidency();
+    /// Whether the GI flush should wait for a voxel-input texture that is still
+    /// streaming (BOOTVOX-1). Counts the frames it has waited, so it is not
+    /// const. See the definition in OgreGi.cpp.
+    bool giVoxelTexturesPending();
     /// THE GI MOVEMENT SCAN, once per frame, run by its consumer (the
     /// probe budget) — which is EARLIER in the frame than
     /// any scene graph update, so it reads updated bounds. Same pass, same
@@ -4905,6 +4909,12 @@ private:
     /// slider drag into one re-voxelize when it stops WITHOUT running the
     /// light re-inject cadence a material cannot need.
     unsigned long long mGiMaterialGeneration      = 0;
+    /// BOOTVOX-1: how many consecutive frames the GI flush has waited for a
+    /// voxel-input texture, and the cap past which it builds anyway. One frame
+    /// or two is the normal case (the default scene's ground tile); the cap
+    /// exists so a decode that never completes cannot park GI for ever.
+    unsigned           mGiVoxelTextureWaitFrames  = 0u;
+    static const unsigned kGiVoxelTextureWaitFrames = 30u;
     unsigned long long mGiBuiltMaterialGeneration = 0;
     /// THE PROBE CACHE's bookkeeping (ENGINE_CACHE_POLICY_SPEC P1). See
     /// staleProbeGrid and GiStatus: why the grid was last staled, a serial per

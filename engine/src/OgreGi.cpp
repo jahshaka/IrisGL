@@ -971,7 +971,13 @@ void OgreScene::settleTextureResidency() {
         mMaterialsAwaitingTexture.pop_back();
     }
     if (stale) staleProbeGrid(GiStaleReason::Material);
-    if (bumpVoxels) ++mGiMaterialGeneration;
+    if (bumpVoxels) {
+        ++mGiMaterialGeneration;
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
+                " (a voxel-input texture finished streaming)");
+    }
 }
 
 // WHAT A MATERIAL EDIT COSTS THE GI CACHES — THE ONE DEFINITION, so the single
@@ -1007,7 +1013,13 @@ void OgreScene::noteMaterialChanged(MaterialId id, bool voxelInputsChanged) {
     bool bumpVoxels = false;
     if (!giMaterialChangeEffect(id, voxelInputsChanged, bumpVoxels)) return;
     staleProbeGrid(GiStaleReason::Material);
-    if (bumpVoxels) ++mGiMaterialGeneration;
+    if (bumpVoxels) {
+        ++mGiMaterialGeneration;
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: material generation -> " + std::to_string(mGiMaterialGeneration) +
+                " (material " + std::to_string((unsigned long long)id) + " changed a voxel input)");
+    }
 }
 
 void OgreScene::staleProbeGrid(GiStaleReason why) {
@@ -2040,6 +2052,25 @@ void OgreScene::noteGiDatablockDied() {
     for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
 }
 
+// The stale reasons by name, for the JAHSHAKA_GI_DEBUG log alone (the monitor
+// has its own mapping to WorkReason, and the host's to a script string).
+static const char *giStaleReasonName(GiStaleReason r) {
+    switch (r) {
+    case GiStaleReason::None:     return "none";
+    case GiStaleReason::Rebuild:  return "rebuild";
+    case GiStaleReason::Refresh:  return "refresh";
+    case GiStaleReason::Moved:    return "moved";
+    case GiStaleReason::Light:    return "light";
+    case GiStaleReason::Material: return "material";
+    case GiStaleReason::Sky:      return "sky";
+    case GiStaleReason::Ambient:  return "ambient";
+    case GiStaleReason::Fog:      return "fog";
+    case GiStaleReason::Mobility: return "mobility";
+    case GiStaleReason::Camera:   return "camera";
+    }
+    return "?";
+}
+
 // The cascades the recorded dirty region can be seen from, marked `pending`.
 // Returns how many were marked; clears the region either way.
 size_t OgreScene::markDirtyCascadesPending(GiStaleReason why) {
@@ -2115,10 +2146,18 @@ bool OgreScene::refreshCascadesFast() {
         // `refreshVctFast`'s `freshVoxels`, spread over frames: every cascade
         // needs a voxeliser whose material cache has not already decided what
         // that datablock looks like.
-        if (mGiBuiltMaterialGeneration != mGiMaterialGeneration) {
+        const bool materialGen = mGiBuiltMaterialGeneration != mGiMaterialGeneration;
+        if (materialGen) {
             for (VctCascade &c : mVctCascades) { c.freshVoxels = true; c.itemsStale = true; }
             mGiBuiltMaterialGeneration = mGiMaterialGeneration;
         }
+        // WHY this refresh is about to mark what it marks (BOOTVOX-1's
+        // diagnosis needed it and nothing reported it): the three inputs of
+        // `markDirtyCascadesPending`'s hit test, beside the reason. A refresh
+        // that marks the whole chain for a material generation reads very
+        // differently from one that marks two cascades for a box.
+        const bool dirtyAllNow = mGiCascadeDirtyAll;
+        const size_t dirtyBoxes = mGiCascadeDirtyBoxes.size();
         // (THE MOVERS ARE NOT RE-RECORDED HERE, round-2 F4. `walkItems` folds
         // every mover's box into the region as it finds it — once, at the one
         // place that knows a box moved — and re-reading `mGiMovedBoxes` on this
@@ -2167,9 +2206,63 @@ bool OgreScene::refreshCascadesFast() {
             Ogre::LogManager::getSingleton().logMessage(
                 "Jahshaka GI: cascade refresh marked " + std::to_string(marked) + " of " +
                 std::to_string(mVctCascades.size()) +
-                " cascades pending (one per frame); nothing was torn down");
+                " cascades pending (one per frame); nothing was torn down — reason " +
+                std::string(giStaleReasonName(mLastStaleReason)) +
+                ", dirtyAll " + (dirtyAllNow ? "yes" : "no") +
+                ", dirty boxes " + std::to_string(dirtyBoxes) +
+                ", material generation " + (materialGen ? "changed" : "same"));
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// A VOXEL INPUT THAT IS STILL STREAMING MEANS "BUILD LATER", NOT "BUILD TWICE"
+// (BOOTVOX-1, 2026-09-18, measured on the default scene at boot).
+//
+// THE DEFECT. The voxeliser reads a material's ALBEDO and EMISSIVE textures
+// (VctMaterial copies exactly those two into its texture pool), so voxelising
+// before they are resident stores the wrong albedo — and the engine knows it
+// does: `settleTextureResidency` bumps `mGiMaterialGeneration` when the pixels
+// arrive, and the next refresh gives every cascade a FRESH voxeliser through
+// `refreshCascadesFast`. On the DEFAULT SCENE that fired every single boot: the
+// ground's `tile.png` is bound on slot 0 (a voxel input) before it is
+// data-ready, the chain is built from scratch in that same frame, the texture
+// lands one frame later, and all four cascades were re-voxelised one per frame
+// — rebuilds 1 -> 2 on each of them (5.75 / 1.29 / 1.42 / 1.36 ms CPU, plus the
+// settle debt LAMPREST-3's incremental settle then owes), with the camera
+// perfectly still. That is where the self-test's "boot re-voxelisation" came
+// from; no phantom camera move was ever involved.
+//
+// THE RULE. The flush that BUILDS the arm waits for the voxel inputs it already
+// knows are in flight. `settleTextureResidency` runs earlier in the same frame
+// (OgreEngine::renderOneFrame), so the wait ends in the frame the last texture
+// lands and the build then reads it — one build, correct the first time. And
+// while the flush is owed, `updateGiTracking` does not run the cascade
+// scheduler either, so nothing is voxelised in the meantime.
+//
+// IT IS BOUNDED, because a texture that never becomes ready must not park GI
+// for ever (a decode that fails, a file that vanished): after
+// `kGiVoxelTextureWaitFrames` deferrals the arm is built anyway, which is
+// exactly the behaviour this replaces. The counter is per SCENE, it counts
+// DEFERRALS (the flush asks once per frame, so that is frames in the case this
+// exists for) and it resets the moment nothing is pending.
+//
+// ONLY THE AUTOMATIC FLUSH WAITS. `refreshGlobalIllumination` — the host asking
+// explicitly, which is what a script's `world.refreshGi()` and every suite that
+// asserts on the frame after it do — is answered immediately, as it always was.
+bool OgreScene::giVoxelTexturesPending() {
+    bool pending = false;
+    for (const auto &e : mMaterialsAwaitingTexture)
+        if (e.second) { pending = true; break; }        // .second = "a voxel input"
+    if (!pending) { mGiVoxelTextureWaitFrames = 0u; return false; }
+    if (++mGiVoxelTextureWaitFrames > kGiVoxelTextureWaitFrames) {
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: a voxel-input texture never became ready in " +
+                std::to_string(kGiVoxelTextureWaitFrames) + " frames — building the arm anyway");
+        mGiVoxelTextureWaitFrames = 0u;
+        return false;
+    }
+    return true;
 }
 
 void OgreScene::applyPendingGi() {
@@ -3151,6 +3244,15 @@ void OgreScene::rebuildVct() {
     }
     mGiCascadeAwaitingCamera = false;
 
+    // AND IT WAITS FOR THE ALBEDO IT IS ABOUT TO VOXELISE (BOOTVOX-1), the same
+    // shape as the camera wait above and for the same reason: building now
+    // means building again. See giVoxelTexturesPending — the request stays
+    // armed through `mGiCachesDirty` and the flush retries on the frame the
+    // last voxel-input texture is resident. Whatever is bound stays bound
+    // while it waits (no teardown): a frame of the previous arm is a better
+    // answer than a frame of nothing.
+    if (giVoxelTexturesPending()) { mGiCachesDirty = true; return; }
+
     ++mGiRebuilds;
     // THE MONITOR'S GI EVENT (§4.7 / §4.8). A rebuild is the single most
     // expensive thing this engine does on the UI thread — measured in seconds
@@ -3625,6 +3727,13 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
                                 std::chrono::steady_clock::now() - tCascade).count());
         c.built = true;
         ++c.rebuilds;
+        // WHAT A BOOT COSTS, AND HOW OFTEN (BOOTVOX-1 needed it and nothing
+        // reported it per rebuild): giStatus carries only the LAST rebuild's
+        // cost, so a burst — a boot's, a teleport's — could not be added up.
+        if (std::getenv("JAHSHAKA_GI_DEBUG"))
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka GI: cascade " + std::to_string(i) + " BUILT (rebuild #" +
+                std::to_string(c.rebuilds) + ") in " + std::to_string(c.lastCpuMs) + " ms CPU");
     }
 
     // The head IS cascade 0 — from here on every existing rule in this file
@@ -4214,6 +4323,11 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     }
     c.lastCpuMs = float(std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0).count());
+    if (std::getenv("JAHSHAKA_GI_DEBUG"))
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka GI: cascade " + std::to_string(idx) + (ok ? " re-voxelised" : " FAILED") +
+            " (rebuild #" + std::to_string(c.rebuilds) + ", reason " +
+            std::string(giStaleReasonName(reason)) + ") in " + std::to_string(c.lastCpuMs) + " ms CPU");
     if (!ok) {
         // The row STANDS (the frame really did spend that time) with no units:
         // nothing was voxelised. Logged once per scene — a cascade that throws
