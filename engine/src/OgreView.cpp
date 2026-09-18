@@ -99,6 +99,11 @@ ChainDesc OgreView::chainDesc() const {
     // picture in this process — the desktop, a thumbnail, a preview, a
     // screenshot — is built with that channel masked out.
     d.vrHelpers  = mVrHelpersVisible;
+    // ...AND THE RUNTIME'S HIDDEN-AREA MESH (kVrMaskBit, lane HAM-1), set here
+    // beside the two helper channels and BEFORE the offscreen early-out for the
+    // same reason `stereo` is: the only view that ever asks for it is the VR
+    // session's eye pair, which is offscreen.
+    d.hiddenAreaMask = mHiddenAreaMask;
     // LETTERBOX (CAMERAS_SPEC §7.4) is a property of the CAMERA the host
     // pushed, not of the view — a camera that constrains its aspect does so in
     // every view that shows it. Unlike the effects below it is NOT cleared for
@@ -1068,6 +1073,17 @@ void OgreView::setHelpersVisible(bool on) {
 void OgreView::setVrHelpersVisible(bool on) {
     if (on == mVrHelpersVisible) return;
     mVrHelpersVisible = on;
+    rebuildWorkspaceDef();
+}
+
+// THE HIDDEN-AREA MESH'S CHANNEL, PER VIEW (kVrMaskBit, lane HAM-1). Graph
+// shape exactly like the two above, and the VR session is its only caller: it
+// opens the channel ONCE, when it creates its view and before the scene, so
+// this rebuild never happens on a live workspace. (Not when the MASK is built,
+// which is inside a frame — see the note at that call site.)
+void OgreView::setHiddenAreaMask(bool on) {
+    if (on == mHiddenAreaMask) return;
+    mHiddenAreaMask = on;
     rebuildWorkspaceDef();
 }
 
