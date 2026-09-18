@@ -79,21 +79,7 @@
 			"inform_shader_of_texture_data_change" : true,
 			"textures" : [ {} ],
 			"thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [1, 1, 1] },
-			"uav_units" : 1,
-			"properties" : { "hzb_msaa" : 0 }
-		},
-
-		"Jahshaka/HzbSeedMsaa" :
-		{
-			"threads_per_group" : [8, 8, 1],
-			"thread_groups" : [1, 1, 1],
-			"source" : "JahHzbSeed_cs",
-			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
-			"inform_shader_of_texture_data_change" : true,
-			"textures" : [ {} ],
-			"thread_groups_based_on_uav" : { "slot" : 0, "divisor" : [1, 1, 1] },
-			"uav_units" : 1,
-			"properties" : { "hzb_msaa" : 1 }
+			"uav_units" : 1
 		},
 
 		"Jahshaka/HzbReduce" :
