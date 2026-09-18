@@ -832,7 +832,33 @@ struct StereoEyeBasis {
 struct ChainDesc {
     Colour   background;
     bool     shadows = false;   ///< instantiate the process-wide shadow node
-    unsigned samples = 1u;      ///< achieved MSAA count of the view's target
+
+    /// THE CHAIN RENDERS AT 1x, BY CONSTRUCTION, AND THAT IS WHY THERE IS NO
+    /// SAMPLE COUNT IN THIS DESCRIPTION (CHAIN-MSAA-CRUD, 2026-09-18).
+    ///
+    /// There used to be `unsigned samples`, the view target's achieved MSAA
+    /// count, and `chain::build` opened with `bool msaa = desc.samples > 1`
+    /// — and then, 115 lines later, `msaa = false` unconditionally, because
+    /// two combinations were reproduced BROKEN on this pin and driver (the
+    /// note at that line has the detail: HDR + MSAA segfaults the driver
+    /// inside the tonemapped box-filter resolve's pipeline creation, SSAO +
+    /// MSAA renders black). Everything downstream of that assignment —
+    /// `fsaa` on four targets, the non-MSAA depth copy the refraction pass
+    /// sampled, the MSAA HZB seed job, the subsample SSAO downscale, the
+    /// store-and-resolve action — was therefore DEAD, reachable only by
+    /// deleting the policy line above it. The policy is not a workaround to
+    /// be lifted later either: the AA in this engine is SMAA, a post pass
+    /// that composes with everything in the chain, and the World Modes table
+    /// asks for no tier with both.
+    ///
+    /// So the count is gone rather than pinned to 1: a field that may only
+    /// ever hold one value is not a description, it is scaffolding, and
+    /// `sameShape` comparing it made a window's sample-count change look like
+    /// a graph change when the graph cannot see it (the window is recreated
+    /// for its own reasons — OgreView::setSampleCount). The VIEW still has a
+    /// sample count and the on-screen window still honours it; the chain's
+    /// own targets are 1x, which is what makes a post-chain picture and a
+    /// passthrough picture the same colours.
 
     // ---- Effects (phases 3-7). Every one of them is OFF on offscreen views by
     //      construction: OgreView::chainDesc() clears them (POST_CHAIN_SPEC §7.3).

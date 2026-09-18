@@ -65,7 +65,6 @@ ChainDesc OgreView::chainDesc() const {
     ChainDesc d;
     d.background = mBackground;
     d.shadows    = mShadows;
-    d.samples    = sampleCount();
     // STEREO (VR_SPEC §4.3), before the offscreen early-out: the VR session's
     // view IS offscreen (its target is the both-eyes RTT), and it is the one
     // offscreen view in the engine that must keep the post chain — it opts in
