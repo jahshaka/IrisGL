@@ -911,6 +911,27 @@ public:
 	/// roles at once. ONE flag, because two would eventually disagree.
 	bool vrDominantRight = true;
 
+	// ---- THE PLAYER (PLAYER-FLOOR-1) -----------------------------------
+	/// HIDE THE DEFAULT FLOOR IN THE PLAYER — a PROJECT setting (owner,
+	/// 2026-09-18, VR_INPUT_SPEC §16 row 6: "hide the floor in the Player").
+	///
+	/// A scene whose own ground is a level, a terrain or nothing at all still
+	/// wants the editor's checkered default floor while it is being BUILT: it
+	/// is where the grid is legible and what a dropped object lands on. What it
+	/// does not want is that floor in the PLAYER, which is the finished thing.
+	/// So this is one flag on the document — it travels with the project,
+	/// exactly like the tier or the VR rows, because it is a property of the
+	/// work and not of the machine or the session.
+	///
+	/// It hides the floor the app itself made (MeshNode::defaultFloor) and, with
+	/// it, the mirror-owned horizon plane that extends it — never an authored
+	/// ground, and never by deleting or unticking anything in the document: the
+	/// EDITOR is untouched with this on, and the node keeps its own visibility.
+	/// SceneMirror::setHideDefaultFloor is the one place it is carried out.
+	/// Default false — a new project plays on its floor until somebody says
+	/// otherwise.
+	bool playerHidesFloor = false;
+
 
 	// ---- THE SUN -------------------------------------------------------
 	// (SUN_AND_LIGHT_DEFAULTS_SPEC, owner decisions Q1/Q1e.) "Sun" is a UI
