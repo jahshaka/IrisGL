@@ -2455,6 +2455,37 @@ void SceneMirror::setHideDefaultFloor(bool hidden)
     mHideFloorPending = true;
 }
 
+// THE WEARER'S BARE HAND (VR_INPUT_SPEC §7, phase 4b stage 3). See the header
+// for the shape; this is the store, and syncVrProxies draws it.
+void SceneMirror::setVrHandJoints(unsigned hand, const jahshaka::engine::VrPose *joints,
+                                  unsigned count)
+{
+    if (hand > 1u) return;
+    const unsigned n = (!joints || count == 0u)
+                           ? 0u
+                           : (count < jahshaka::engine::kVrHandJointCount
+                                  ? count
+                                  : unsigned(jahshaka::engine::kVrHandJointCount));
+    for (unsigned j = 0; j < jahshaka::engine::kVrHandJointCount; ++j)
+        mVrJoints[hand][j] = j < n ? joints[j] : jahshaka::engine::VrPose();
+    mVrJointCount[hand] = n;
+}
+
+unsigned SceneMirror::vrHandBonesShown(unsigned hand) const
+{
+    return hand > 1u ? 0u : mVrHandBonesShownCount[hand];
+}
+
+unsigned SceneMirror::vrHandBoneNodes(unsigned hand, jahshaka::engine::NodeId *out,
+                                      unsigned count) const
+{
+    if (hand > 1u || !mVrHandBonesBuilt[hand]) return 0u;
+    if (out)
+        for (unsigned b = 0; b < count && b < jahshaka::engine::kVrHandBoneCount; ++b)
+            out[b] = mVrHandBoneNode[hand][b];
+    return unsigned(jahshaka::engine::kVrHandBoneCount);
+}
+
 void SceneMirror::setVrProxyModels(const QString &leftPath, const QString &rightPath)
 {
     const QString wanted[2] = { leftPath, rightPath };
@@ -2567,6 +2598,9 @@ void SceneMirror::syncVrProxies()
             // that is the switch, not the end.)
             for (int i = 0; i < 2; ++i)
                 if (mVrRayNode[i]) mTarget->setNodeVisible(mVrRayNode[i], false);
+            // ...AND THE WEARER'S HANDS (stage 3), for the same reason and on
+            // the same terms as the wands: the session that placed them is gone.
+            syncVrHandBones(false);
         }
         return;
     }
@@ -2704,6 +2738,11 @@ void SceneMirror::syncVrProxies()
                 mTarget->setNodeVisible(mVrProxyNode[i], false);
                 mVrProxyVisible[i] = 0;
             }
+        // A BARE HAND IS A HAND MARKER TOO (stage 3): `vr.proxies(false)` means
+        // "do not draw a marker where my hand is", and the wearer's own
+        // skeleton is exactly that marker for a hand holding nothing. The ray
+        // is untouched, as above — it is the pointing tool, not a marker.
+        syncVrHandBones(false);
         return;
     }
 
@@ -2713,9 +2752,17 @@ void SceneMirror::syncVrProxies()
     // WMR, bare hands, nothing bound at all — gets the WAND, because a wand is
     // the honest drawing for a controller whose shape we do not know. The
     // model is loaded the first frame it is asked for and never otherwise.
-    const bool touch = mVrStatus.profile.contains("touch_controller");
+    // THE WEARER'S OWN HANDS FIRST (stage 3): whether a hand draws a skeleton
+    // decides whether it draws a controller, and the two are never both.
+    syncVrHandBones(true);
+    // ...AND WHICH MODEL EACH HAND WEARS IS THAT HAND'S OWN PROFILE'S ANSWER
+    // (stage 3). It used to be the SESSION's one summary string, which was true
+    // while only controllers existed; from stage 3 on a wearer can hold a
+    // controller in one hand and nothing in the other (WiVRn binds per hand),
+    // and asking the session would put a Touch model on a bare hand.
     for (int i = 0; i < 2; ++i) {
         if (!mVrProxyNode[i]) continue;
+        const bool touch = mVrStatus.input[i].profile.contains("touch_controller");
         MeshId want = mVrProxyWandMesh[i];
         MaterialId material = mVrProxyMaterial[i];
         if (touch) {
@@ -2739,7 +2786,12 @@ void SceneMirror::syncVrProxies()
     for (int i = 0; i < 2; ++i) {
         if (!mVrProxyNode[i]) continue;
         const jahshaka::engine::VrPose &p = mVrStatus.hands[i];
-        const int want = (p.valid && mVrProxyMesh[i]) ? 1 : 0;
+        // A HAND WITH A HAND PROFILE BOUND DRAWS NO WAND, EVER (stage 3): its
+        // pose is a PALM, there is no controller in it, and a box round the
+        // wearer's own knuckles beside the fingers drawn from their joints is
+        // two drawings of one hand. The skeleton is that hand's marker.
+        const bool bare = jahshaka::engine::vrIsHandProfile(mVrStatus.input[i].profile.c_str());
+        const int want = (p.valid && mVrProxyMesh[i] && !bare) ? 1 : 0;
         if (want) {
             // A WORLD pose on a node with no parent — the proxies hang off the
             // scene root, exactly like the GI boxes, so "local" IS "world".
@@ -2777,6 +2829,127 @@ void SceneMirror::syncVrProxies()
             mTarget->setNodeVisible(mVrProxyNode[i], false);
             mVrProxyVisible[i] = 0;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE WEARER'S BARE HANDS, DRAWN (VR_INPUT_SPEC §7, phase 4b stage 3)
+// ---------------------------------------------------------------------------
+//
+// TWENTY-FOUR SEGMENTS PER HAND AND ONE MESH IN THE SCENE. The geometry is a
+// single unit line down -Z — the ray's own trick — and each bone's NODE is
+// stood at one joint, turned onto the next and scaled to the distance between
+// them (`vrBoneTransform`, the one definition this and the session both call).
+// So a hand that moves every frame rebuilds nothing: twenty-four transforms.
+//
+// WHY NOT A LINE STRIP PER FINGER (which is what the spec's first sketch
+// suggested): a strip's points ARE its vertex buffer, so a moving hand would
+// destroy and create twelve GPU buffers ninety times a second — and a recycled
+// Vulkan block aliasing a frame still in flight is what hung this box's driver
+// for a fortnight (XID-1, patch 0067). Twenty-four nodes sharing one static
+// two-vertex mesh costs nothing anybody can measure and rebuilds no memory.
+//
+// UNLIT, AND THAT IS PHYSICS RATHER THAN TASTE — the same argument the wands'
+// material carries (VR-INPUT-1E-FIX): a LINE has no surface and no normals, so
+// a lit datablock has nothing to shade, and a line's colour IS its whole
+// appearance. (The vendored controller MODELS are lit, because they are solid
+// geometry with normals; the owner's own smoke found that flat unlit shapes read
+// as white silhouettes in the eyes. Fingers drawn as lines never had a surface
+// to lose.) They carry the two hand colours instead, which is the question
+// anybody asks second of a pair of hands.
+//
+// BUILT ON FIRST USE, PER HAND: a wearer who holds controllers for a whole
+// session creates none of this.
+void SceneMirror::syncVrHandBones(bool draw)
+{
+    if (!mTarget) return;
+    for (unsigned h = 0; h < 2u; ++h) {
+        // WHAT THIS HAND SHOULD SHOW. A skeleton is drawn when the hand HAS one
+        // and is not holding a controller — a controller profile bound for it
+        // means the model or the wand is its drawing, and the two are never
+        // both (the same rule the session's placeHandBones applies inside the
+        // frame, because both writers must agree about it).
+        const bool controller =
+            !mVrStatus.input[h].profile.empty() &&
+            !jahshaka::engine::vrIsHandProfile(mVrStatus.input[h].profile.c_str());
+        const bool want = draw && !controller && mVrJointCount[h] > 0u;
+        if (!want && !mVrHandBonesBuilt[h]) {
+            mVrHandBonesShownCount[h] = 0u;
+            continue;   // the common case: nobody in this scene has ever had hands
+        }
+        if (!want) {
+            // TAKEN AWAY AT BOTH ENDS: hidden here, and UNREGISTERED from the
+            // scene so the running session — the other writer — has nothing to
+            // put back inside its own frame (the asymmetry rule the proxies
+            // spelled out: the session may hide a marker, never show one the
+            // host took down).
+            //
+            // ...AND ONCE, NOT EVERY FRAME (mVrHandBonesRegistered): a session
+            // whose wearer holds controllers would otherwise pay twenty-four
+            // subtree walks a frame to re-hide what is already hidden.
+            if (!mVrHandBonesRegistered[h]) { mVrHandBonesShownCount[h] = 0u; continue; }
+            for (unsigned b = 0; b < jahshaka::engine::kVrHandBoneCount; ++b)
+                if (mVrHandBoneNode[h][b]) mTarget->setNodeVisible(mVrHandBoneNode[h][b], false);
+            mTarget->setVrHandBoneNodes(h, nullptr, 0u);
+            mVrHandBonesRegistered[h] = false;
+            mVrHandBonesShownCount[h] = 0u;
+            continue;
+        }
+        if (!mVrHandBonesBuilt[h]) {
+            if (!mVrHandBoneMesh) {
+                const std::vector<Vec3> segment = { Vec3(0, 0, 0), Vec3(0, 0, -1) };
+                mVrHandBoneMesh = mTarget->createLineMesh(segment, false);
+                if (!mVrHandBoneMesh) return;
+            }
+            // BUILT IS SET FIRST, AND A NODE THE SCENE REFUSED IS A ZERO
+            // (stage 3's fix round, the lead's item 6). The first cut returned
+            // mid-loop on a refusal with the flag still false, which ORPHANED
+            // every node already made for that hand and started again from bone
+            // 0 on the next tick — a leak per frame for as long as the scene
+            // kept refusing. Every loop that walks these rows already skips a
+            // zero, so a partial row draws what it has and leaks nothing.
+            mVrHandBonesBuilt[h] = true;
+            for (unsigned b = 0; b < jahshaka::engine::kVrHandBoneCount; ++b) {
+                const NodeId node = mTarget->createNode();
+                if (!node) { mVrHandBoneNode[h][b] = 0; continue; }
+                // BOTH HELPER CHANNELS, exactly like the wands: kHelperBit
+                // keeps the wearer's hands out of every probe capture, every
+                // shadow map and every user screenshot and puts them in the
+                // desktop editor's picture; kVrHelperBit puts them in EVERY VR
+                // eye, including a Player's, which draws no other furniture.
+                mTarget->setNodeHelper(node, true);
+                mTarget->setNodeVrHelper(node, true);
+                mTarget->setNodeVisible(node, false);
+                mTarget->attachMesh(node, mVrHandBoneMesh, mVrProxyMaterial[h]);
+                mVrHandBoneNode[h][b] = node;
+            }
+        }
+        // THE SESSION IS TOLD WHICH NODES THEY ARE, so it can place them inside
+        // the frame that draws them — this write below is the host's own best
+        // answer for a frame no session drew (a suite with no runtime, the first
+        // frame of a session), one tick old, exactly like the wands'.
+        mTarget->setVrHandBoneNodes(h, mVrHandBoneNode[h],
+                                    unsigned(jahshaka::engine::kVrHandBoneCount));
+        mVrHandBonesRegistered[h] = true;
+        unsigned shown = 0u;
+        for (unsigned b = 0; b < jahshaka::engine::kVrHandBoneCount; ++b) {
+            const NodeId node = mVrHandBoneNode[h][b];
+            if (!node) continue;
+            const jahshaka::engine::VrHandBone &bone = jahshaka::engine::kVrHandBones[b];
+            const jahshaka::engine::VrPose &from = mVrJoints[h][bone.from];
+            const jahshaka::engine::VrPose &to = mVrJoints[h][bone.to];
+            Vec3 position, scale;
+            Quat rotation;
+            const bool ok = bone.from < mVrJointCount[h] && bone.to < mVrJointCount[h] &&
+                            from.valid && to.valid &&
+                            jahshaka::engine::vrBoneTransform(from.position, to.position,
+                                                              position, rotation, scale);
+            if (!ok) { mTarget->setNodeVisible(node, false); continue; }
+            mTarget->setNodeTransform(node, position, rotation, scale);
+            mTarget->setNodeVisible(node, true);
+            ++shown;
+        }
+        mVrHandBonesShownCount[h] = shown;
     }
 }
 

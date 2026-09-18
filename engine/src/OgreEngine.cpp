@@ -906,10 +906,35 @@ void OgreEngine::renderOneFrame() {
         // desktop view would place the cascades and the headset would look at a
         // field centred on somebody else's camera. A view that declares itself
         // the GI driver wins outright; nothing but a VR session ever does.
+        //
+        // AND IT WINS WHETHER OR NOT IT IS ENABLED THIS FRAME (lane V1-RIG fix
+        // round item 1, the Fable read). The session switches its own View OFF
+        // on every frame the runtime asks for no picture and on every frame with
+        // no valid pose (`VrSession::beginFrame`'s two `setSessionViewEnabled(false)`
+        // paths) — which is what keeps the DESKTOP drawing through a doff, an
+        // open dashboard or WiVRn's first frames. With `isEnabled()` tested
+        // before the priority test, the driver fell to the desktop view on each
+        // of those frames and came back on the next, and each flip was seen by
+        // `updateGiTracking` as a change of driver PROFILE: `mGiChainShapeDirty`,
+        // then `rebuildVct()` — a teardown, every cascade and the whole field,
+        // TWICE per doff, with the chain's centre jumping to the editor's camera
+        // in between. Every WiVRn session start did it, because its first frames
+        // are no-picture ones.
+        //
+        // So the GI-priority pass reads only `giPriority()`. The slot stays the
+        // session's View and the DESKTOP NEVER TAKES THE CHAIN OVER while a
+        // session exists; the `authoritative` test below still requires an
+        // enabled view, so on such a frame NOBODY drives GI and the chain simply
+        // HOLDS STILL — the camera it was placed around stays the headset's last
+        // located head, which is the answer that costs nothing and lies about
+        // nothing. The profile follows the SESSION (it flips on
+        // `setGiPriority(false)` and on the View's destruction, both of which
+        // happen when the session ends), never the frame.
         for (int pass = -1; pass < 2; ++pass)        // -1: the GI driver, 0: on-screen, 1: any
             for (auto &v : mViews) {
-                if (!v->isEnabled() || !v->ogreScene()) continue;
+                if (!v->ogreScene()) continue;
                 if (pass == -1 && !v->giPriority()) continue;
+                if (pass != -1 && !v->isEnabled()) continue;
                 if (pass == 0 && v->isOffscreen()) continue;
                 OgreView **slot = driverSlot(v->ogreScene());
                 if (!*slot) *slot = v.get();
@@ -1511,7 +1536,17 @@ VrStatus OgreEngine::vrStatus() const {
             if (!mVrInjected[h]) continue;
             s.input[h] = mVrInject[h];
             s.hands[h] = mVrInject[h].grip;   // `input[i].grip` IS `hands[i]`
+            // ...AND WHETHER A SKELETON WAS INJECTED FOR IT (stage 3): with no
+            // session there is no runtime to track a hand, so the injected
+            // joints are the only ones there can be.
+            s.input[h].jointsTracked = mVrJointsInjected[h];
         }
+        // THE SESSION'S PROFILE SUMMARY, DERIVED FROM THE HANDS, with no
+        // session at all: an injected sample may name a profile (that is how
+        // the hand/controller half of stage 3 is driven headlessly), and
+        // `vr.state().profile` answers the same question a live session's does.
+        s.profile = !s.input[VrHandRight].profile.empty() ? s.input[VrHandRight].profile
+                                                          : s.input[VrHandLeft].profile;
         // NOTHING IS FOCUSED WHEN THERE IS NO SESSION — unless a hand is
         // INJECTED, and then focus is whatever the test said (true by default:
         // a test that says nothing about focus means the wearer was there).
@@ -1541,6 +1576,8 @@ VrStatus OgreEngine::vrStatus() const {
         s.input[h] = mVrInject[h];
         s.input[h].fromInjection = true;
         s.hands[h] = mVrInject[h].grip;   // `input[i].grip` IS `hands[i]`
+        s.input[h].jointsTracked = mVrJointsInjected[h] ||
+                                   vrSessionHasLiveJoints(mVrSession, int(h));
         overlaid = true;
     }
     // ...AND THE SESSION'S FOCUS IS THE TEST'S while it is driving the hands,
@@ -1606,7 +1643,65 @@ bool OgreEngine::vrInjectInput(int hand, const VrHandState &state) {
     }
     mVrInject[hand] = state;
     mVrInject[hand].fromInjection = true;
+    // A SAMPLE THAT SAID NOTHING ABOUT ITS MANIPULATION FRAME HOLDS BY ITS GRIP
+    // (stage 3, VrHandState::manipPose) — the rule lives HERE, once, so that
+    // every injector gets it and the session's own read does not have to guess.
+    if (!mVrInject[hand].manipPose.valid) mVrInject[hand].manipPose = mVrInject[hand].grip;
     mVrInjected[hand] = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE WEARER'S SKELETON (Engine::vrHandJoints / vrInjectJoints; VR_INPUT_SPEC
+// §7, stage 3).
+//
+// WHY THE JOINTS ARE FETCHED AND NOT REPORTED. Fifty-two poses is 1.7 kB, and
+// `VrStatus` is copied several times per FRAME by every host that reads it — so
+// the status carries one bit per hand (`jointsTracked`) and the poses are asked
+// for by the two callers that want them: the mirror, which draws them, and a
+// test. The session holds this frame's set; with no session the store below is
+// the only source there can be.
+unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
+    if (hand < 0 || hand >= int(VrHandCount)) return 0u;
+    if (mVrSession) {
+        if (const unsigned n = vrSessionHandJoints(mVrSession, hand, out, count)) return n;
+    }
+    // THE INJECTED SKELETON, and only for a hand the runtime is not tracking —
+    // the session's own answer above has already been asked for and preferred.
+    if (!vrInjectedJoints(hand, out, count)) return 0u;
+    return kVrHandJointCount;
+}
+
+// EVERY SUGGESTED-BINDING BLOCK, AND WHAT THE RUNTIME DID WITH IT (stage 3's
+// fix round; Engine::vrBindingBlocks). Only a session can answer: the blocks
+// are suggested once, at its creation.
+unsigned OgreEngine::vrBindingBlocks(VrBindingBlock *out, unsigned count) const {
+    return mVrSession ? vrSessionBindingBlocks(mVrSession, out, count) : 0u;
+}
+
+bool OgreEngine::vrInjectJoints(int hand, const VrPose *joints, unsigned count) {
+    if (hand < 0 || hand >= int(VrHandCount)) {
+        mLastError = "vrInjectJoints: hand must be 0 (left) or 1 (right)";
+        return false;
+    }
+    // A WITHDRAWAL IS NEVER REFUSED, exactly as for a sample (VR-INPUT-1E-FIX
+    // finding 1): taking a fake hand away cannot fool anybody.
+    if (!joints || count == 0u) {
+        mVrJointsInjected[hand] = false;
+        return true;
+    }
+    // THE WEARER'S OWN HAND WINS. A hand the runtime is really tracking is not
+    // overwritten by a script's skeleton; the escape is the same explicit,
+    // live-read process switch the controls use.
+    if (mVrSession && vrSessionHasLiveJoints(mVrSession, hand) && !vrTestInjectAllowed()) {
+        mLastError = "vrInjectJoints: refused - the runtime is tracking that hand's joints "
+                     "(set JAHSHAKA_VR_TEST_INJECT=1 to override)";
+        return false;
+    }
+    const unsigned n = count < kVrHandJointCount ? count : unsigned(kVrHandJointCount);
+    for (unsigned j = 0; j < kVrHandJointCount; ++j)
+        mVrInjectJoints[hand][j] = j < n ? joints[j] : VrPose();
+    mVrJointsInjected[hand] = true;
     return true;
 }
 

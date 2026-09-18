@@ -2041,6 +2041,9 @@ private:
     /// Empty on any mismatch — the caller then wipes.
     bool  readVerified(const Entry &e, std::vector<char> &out) const;
     void  wipe() const;
+    /// May THIS run delete the cache directory? Only the writer may
+    /// (SHADERCACHE-LOCK-1) — see the definition.
+    bool  mayWipe() const;
     bool  acquireLock();
     void  releaseLock();
     std::string path(const std::string &name) const;
@@ -2908,6 +2911,8 @@ public:
     void vrProxyNodes(NodeId out[2]) const override;
     void setVrRayNodes(NodeId line, NodeId marker) override;
     void vrRayNodes(NodeId out[2]) const override;
+    void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
+    unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeBackdrop(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
@@ -3843,7 +3848,7 @@ public:
     void latchProbeCaptures(bool drawn);
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
-    void updateGiTracking(const Ogre::Vector3 &camPos);
+    void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
     /// Re-derives the Forward+ clustered depth-slice range from this camera and
     /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
     /// hysteretic — `setForwardClustered` recreates the grid buffers, so it must
@@ -3888,6 +3893,7 @@ private:
     /// No-op when the field is converged, when there is no field, or when the
     /// update budget is 0 (paused). Called once a frame from updateGiTracking.
     void updateIrradianceField();
+    void oweCascade0FieldFollow(GiStaleReason reason);
     /// Per-axis PROBE COUNTS for a field over `size`, each a power of two
     /// (upstream only ASSERTS that, and the assert is compiled out of our
     /// release engine) and together kIfdTotalProbes. Fitted from the volume's
@@ -4375,6 +4381,13 @@ private:
     /// VR_INPUT_SPEC §3): the same arrangement as the proxies above, placed by
     /// the running session from `Engine::setVrRay`'s state.
     NodeId              mVrRayNode[2] = { 0, 0 };
+    /// THE HOST'S HAND-BONE NODES, per hand, in `kVrHandBones` order
+    /// (Scene::setVrHandBoneNodes, VR_INPUT_SPEC §7): the same arrangement as
+    /// the two above — ids and nothing else; the segments, their one shared
+    /// mesh and their material are the mirror's. `mVrHandBones[h]` is how many
+    /// of the row are registered (0 = this hand draws no skeleton).
+    NodeId              mVrHandBoneNode[2][kVrHandBoneCount] = {};
+    unsigned            mVrHandBones[2] = { 0u, 0u };
     std::map<MeshId, MeshRec> mMeshes;
     /// ATOM stage 1: THE LOD ERRORS BY OGRE MESH — the one lookup that takes an
     /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the baked
@@ -4562,7 +4575,49 @@ private:
     /// last build (GiStatus::ifdFollows) — the counter the follow suite reads,
     /// and the honest answer to "is the field tracking the chain at all".
     unsigned long long                mIfdFollows = 0;
+    /// A FIELD FOLLOW OWED TO THE NEXT FRAME, AND WHY IT IS NOT PAID ON THE
+    /// FRAME THAT MOVED THE CASCADE (lane V1-RIG item 2, LATER_OPTIMISATIONS
+    /// L11, measured).
+    ///
+    /// Cascade 0's rebuild and the field's WHOLE re-integration used to land on
+    /// one frame, and at a headset's pixel count that frame is over the 90 Hz
+    /// bar: measured in a Monado session with the eye render forced to Quest
+    /// Pro size (2160x2376 per eye, 10.26 Mpx of stereo target), a Medium walk's
+    /// quiet frame is 5.84 ms of GPU and its step frame 11.72 ms mean / 12.45
+    /// max, twelve of a hundred and sixty frames over 11.1 — one dropped frame
+    /// every five metres of travel (spikes/v1-rig/COST.txt). The two halves are
+    /// 2.43 ms (the cascade) and 3.40 ms (the field) and NEITHER alone crosses
+    /// the bar: split across two frames the same walk peaks at 8.3 and 9.2 ms.
+    ///
+    /// WHAT IT COSTS IN CORRECTNESS: for exactly one frame the field describes
+    /// the place cascade 0 has just left — one step of staleness, 11 ms of it,
+    /// against L11's double-buffered atlas which accepts the same staleness for
+    /// as many frames as a progressive re-integration takes. It is never a
+    /// WRONG PLACE: the field's volume and its atlas move together, so the
+    /// shader reads probes that were integrated where the field says it is.
+    ///
+    /// It also owns the frame's one GI slot, so the frame that pays it rebuilds
+    /// no cascade — which is the whole point — and `updateIrradianceField`
+    /// refuses to run a progressive batch while it is owed: cascade 0's rebuild
+    /// may have re-created the light voxel textures the field's generation job
+    /// binds, and the re-bind is the first thing `followCascade0Field` does.
+    int          mIfdFollowOwed = 0;
+    GiStaleReason mIfdFollowReason = GiStaleReason::Camera;
     bool mRefractionsActive = false;   // see setRefractionsActive
+    /// Is the view that DRIVES GI a stereo (headset) one? It picks the tier
+    /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the
+    /// once-a-frame driver hook.
+    bool mGiDriverStereo = false;
+    /// The chain's SHAPE (its cascade count and steps) no longer matches the
+    /// table it should be built from — the driver's profile changed. The dirty
+    /// BOX path cannot express it, so the flush builds the chain again.
+    bool mGiChainShapeDirty = false;
+    /// Which column of the tier table the LIVE chain was built from, recorded at
+    /// the build (`GiStatus::cascadeProfileVr`). Not the same reading as
+    /// `mGiDriverStereo`, which says who is driving NOW: the two differ for the
+    /// one frame a profile change is owed, and only this one is a fact about the
+    /// chain the shader is sampling.
+    bool mGiChainProfileVr = false;
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
     /// What the last (re)build ACTUALLY used, recorded rather than recomputed:
@@ -5585,6 +5640,16 @@ bool    vrSessionEyeScreenshot(VrSession *, unsigned eye, Image &out, std::strin
 /// HAS THE RUNTIME BOUND A REAL PROFILE for this hand? (The injection refusal
 /// rule, VR_INPUT_SPEC §2.4 I1: the wearer's own hardware always wins.)
 bool    vrSessionHasBoundProfile(const VrSession *, int hand);
+/// THIS FRAME'S JOINTS for one hand, world space through the rig, in the
+/// extension's order (stage 3; `Engine::vrHandJoints`). 0 = that hand's
+/// skeleton is not being tracked this frame.
+unsigned vrSessionHandJoints(const VrSession *, int hand, VrPose *out, unsigned count);
+/// THE SUGGESTED-BINDING BLOCKS THE SESSION OFFERED, and what the runtime did
+/// with each (`Engine::vrBindingBlocks`).
+unsigned vrSessionBindingBlocks(const VrSession *, VrBindingBlock *out, unsigned count);
+/// IS THE RUNTIME REALLY TRACKING that hand's skeleton? (The injection refusal
+/// rule for joints: a wearer's own hand always wins over a script's.)
+bool    vrSessionHasLiveJoints(const VrSession *, int hand);
 /// THE ONE READING OF `JAHSHAKA_VR_TEST_INJECT` (VR_INPUT_SPEC §2.4 I1), for
 /// the two places that enforce the refusal rule: the WRITE (Engine::
 /// vrInjectInput refuses one) and the per-frame READ (the session ignores and
@@ -5657,6 +5722,9 @@ public:
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     bool vrInjectInput(int hand, const VrHandState &state) override;
     void vrInjectFocus(bool focused) override { mVrInjectFocus = focused; }
+    unsigned vrHandJoints(int hand, VrPose *out, unsigned count) const override;
+    bool vrInjectJoints(int hand, const VrPose *joints, unsigned count) override;
+    unsigned vrBindingBlocks(VrBindingBlock *out, unsigned count) const override;
     bool vrHaptic(int hand, float amplitude01, float seconds) override;
     void setVrRay(const VrRayState &ray) override { mVrRay = ray; }
     const VrRayState &vrRay() const override { return mVrRay; }
@@ -5680,6 +5748,11 @@ public:
         if (hand < 0 || hand >= int(VrHandCount)) return;
         mVrInjected[hand] = false;
         mVrInject[hand] = VrHandState();
+        // ...AND THAT HAND'S INJECTED SKELETON WITH IT (stage 3). The joints
+        // are part of the same fiction — a hand a script put in the room — and
+        // a skeleton left behind after the hand was withdrawn would be drawn
+        // in the wearer's eyes with nothing holding it up.
+        mVrJointsInjected[hand] = false;
     }
     void vrClearInjectedInput() {
         for (unsigned h = 0; h < VrHandCount; ++h) vrClearInjectedInput(int(h));
@@ -5694,6 +5767,16 @@ public:
         return false;
     }
     bool vrInjectedFocus() const { return mVrInjectFocus; }
+    /// THE INJECTED SKELETON FOR ONE HAND, or false when none is live (stage
+    /// 3). Asked by the session (which prefers the runtime's own joints and
+    /// falls back to this) and by `vrHandJoints` with no session at all.
+    bool vrInjectedJoints(int hand, VrPose *out, unsigned count) const {
+        if (hand < 0 || hand >= int(VrHandCount) || !mVrJointsInjected[hand]) return false;
+        if (!out || count == 0u) return true;
+        const unsigned n = count < kVrHandJointCount ? count : kVrHandJointCount;
+        for (unsigned j = 0; j < n; ++j) out[j] = mVrInjectJoints[hand][j];
+        return true;
+    }
     /// The live session, for the TU that owns it and for the frame. Null when
     /// none runs.
     VrSession *vrSession() const { return mVrSession; }
@@ -5774,6 +5857,12 @@ public:
     /// process, because focus is the session's and not a hand's. True by
     /// default and reset with the store.
     bool        mVrInjectFocus = true;
+    /// THE INJECTED SKELETONS (Engine::vrInjectJoints, stage 3), beside the
+    /// samples and cleared with them. Two hands' worth of joints is 1.7 kB of
+    /// engine state that only a test ever writes — it is here rather than on
+    /// `VrStatus` precisely so that no host pays for it per frame.
+    VrPose      mVrInjectJoints[VrHandCount][kVrHandJointCount];
+    bool        mVrJointsInjected[VrHandCount] = { false, false };
     VrRayState  mVrRay;
     /// ARE WE INSIDE renderOneFrame? (VR-4-FIX's second read, finding 3.)
     /// Nothing in this tree destroys a scene from inside a frame — and if

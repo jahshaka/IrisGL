@@ -566,6 +566,36 @@ public:
     /// exist. Placed by the running session (Scene::setVrRayNodes).
     void vrRayNodes(jahshaka::engine::NodeId out[2]) const;
 
+    /// THE WEARER'S OWN HAND, AS A SKELETON (VR_INPUT_SPEC §7, phase 4b stage
+    /// 3) — what is drawn for a hand that is holding no controller.
+    ///
+    /// ONE HAND'S JOINTS, in the extension's order (`kVrHandJointCount`), world
+    /// space, as `Engine::vrHandJoints` answered them; `count` 0 means "that
+    /// hand has no skeleton this frame" and takes its bones down. The poses are
+    /// NOT on `VrStatus` on purpose (fifty-two of them would ride every host's
+    /// per-frame copy) so they arrive here on their own, from the same push
+    /// that hands over the status.
+    ///
+    /// THE DRAWING IS TWENTY-FOUR SEGMENTS, not fifty-two meshes and not a line
+    /// strip per finger: one unit line mesh in the whole scene, shared by every
+    /// bone of both hands, each node stood between two joints
+    /// (`vrBoneTransform`). A hand that moves every frame therefore rebuilds no
+    /// geometry at all.
+    ///
+    /// A RUNNING SESSION PLACES THEM ITSELF, inside its frame
+    /// (Scene::setVrHandBoneNodes) — this write is the host's own best answer
+    /// for a frame no session drew, exactly like the wands'.
+    void setVrHandJoints(unsigned hand, const jahshaka::engine::VrPose *joints,
+                         unsigned count);
+    /// How many of that hand's bone segments are SHOWN right now — what a suite
+    /// asks to know whether the wearer can see their hand (the arc's
+    /// `segmentsShown` is the same question asked of the same kind of drawer).
+    unsigned vrHandBonesShown(unsigned hand) const;
+    /// That hand's bone nodes (up to `count`), for the suite that asserts which
+    /// helper channels they are in. Returns how many exist.
+    unsigned vrHandBoneNodes(unsigned hand, jahshaka::engine::NodeId *out,
+                             unsigned count) const;
+
     /// WHICH CONTROLLER MODEL IS DRAWN, PER HAND — the slot the owner asked for
     /// (2026-09-17 answer 6: "the controller/hand models are a slot games can
     /// fill later").
@@ -974,6 +1004,14 @@ private:
     /// The two controller markers, positioned from the status last pushed
     /// (setVrProxies). Draws nothing at all while no session is running.
     void syncVrProxies();
+    /// THE BARE-HAND HALF OF THAT SYNC (stage 3): which hands draw a skeleton,
+    /// their twenty-four segment nodes built on first use, and where each
+    /// segment stands. `draw` false is every reason there is not to draw one at
+    /// all — no session, or the wearer switched the hand markers off — and it
+    /// UNREGISTERS the nodes from the scene as well as hiding them, so a
+    /// running session (the other writer, inside its own frame) cannot put back
+    /// what the host has just taken away.
+    void syncVrHandBones(bool draw);
     /// The vendored model for one hand, loaded ONCE and only when a profile
     /// asks for it (the six parts of the glTF baked to one mesh at vendoring —
     /// app/content/vr/make-controller-obj.py). 0 when there is none, which is
@@ -1710,6 +1748,27 @@ private:
     jahshaka::engine::NodeId mVrRayNode[2] = { 0, 0 };
     jahshaka::engine::MeshId mVrRayMesh[2] = { 0, 0 };
     jahshaka::engine::MaterialId mVrRayMaterial[2] = { 0, 0 };
+    // ---- THE WEARER'S BARE HANDS (phase 4b stage 3) ----------------------
+    /// The last joint set pushed per hand (setVrHandJoints) and how many of
+    /// them there are — 0 = that hand has no skeleton and draws none.
+    jahshaka::engine::VrPose mVrJoints[2][jahshaka::engine::kVrHandJointCount];
+    unsigned mVrJointCount[2] = { 0u, 0u };
+    /// TWENTY-FOUR SEGMENT NODES PER HAND, and ONE unit line mesh for all
+    /// forty-eight of them. Built the first frame a hand actually reports a
+    /// skeleton — a session whose wearer holds controllers for its whole life
+    /// creates none of this — and never destroyed afterwards (they live for the
+    /// scene, like the ray's nodes, and a wearer who puts the controllers down
+    /// and picks them up again pays for them once).
+    jahshaka::engine::NodeId mVrHandBoneNode[2][jahshaka::engine::kVrHandBoneCount] = {};
+    jahshaka::engine::MeshId mVrHandBoneMesh = 0;
+    bool mVrHandBonesBuilt[2] = { false, false };
+    unsigned mVrHandBonesShownCount[2] = { 0u, 0u };
+    /// ARE THAT HAND'S BONES REGISTERED WITH THE SCENE right now? A latch, for
+    /// the same reason the GI volume boxes have one: `setNodeVisible` is a
+    /// SUBTREE WALK in the engine, and hiding twenty-four nodes every frame of
+    /// every session whose wearer holds controllers — which is most of them —
+    /// would be twenty-four walks a frame for a picture nobody is drawing.
+    bool mVrHandBonesRegistered[2] = { false, false };
     /// The highlighted SET, primary first. Empty = nothing selected.
     QList<iris::SceneNodePtr> mHighlighted;
     /// The same set, for the membership test (isHighlighted). The list keeps
