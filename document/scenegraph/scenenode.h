@@ -397,6 +397,19 @@ public:
 	uint64_t pickingGroups;
     bool castShadow;
 
+    // PRESERVE THE SCALE RATIO (SCALE-LOCK-1; the owner's "a lock for the
+    // transformations", 2026-09-17). Per NODE, as Unreal's preserve-ratio is
+    // per actor: with it on, an edit to ONE scale channel scales the other two
+    // by the same ratio (iris::scalelock::apply is the arithmetic, and its
+    // header carries the three degenerate cases). A pure EDITING flag — it
+    // changes what a write to one channel means and nothing about how the node
+    // renders — which is why it lives here beside the other per-node flags
+    // rather than in an editor-side table: it is the node's own property, it
+    // travels with a duplicate, and it is saved with the scene.
+    //
+    // Default OFF, so no existing scene and no existing gesture changes.
+    bool scaleLock = false;
+
     // PLANAR REFLECTIONS (PLANAR_REFLECTIONS_SPEC.md §7 option A): this node's
     // flat surface is a mirror plane. Deliberately a FLAG on an ordinary mesh
     // node rather than a MirrorNode scene-node type — the plane, its size and
@@ -722,6 +735,27 @@ public:
     bool isPickable() {
         return pickable;
     }
+
+    /// PRESERVE THE SCALE RATIO on this node (see `scaleLock` above).
+    /// Reported as a Flags change like every other per-node flag: nothing in
+    /// the renderer reads it, but the dirty set's contract is that every setter
+    /// says so (document.no_silent_setters), and the hierarchy/panel refresh
+    /// rides the same signal.
+    void setScaleLock(bool on)
+    {
+        scaleLock = on;
+        notifyChanged(NodeChange::Flags);
+    }
+
+    bool getScaleLock() const { return scaleLock; }
+
+    /// The arithmetic every single-channel scale edit shares lives in
+    /// `iris::scalelock::apply` (document/scenegraph/scalelock.h) rather than
+    /// in a method here, because two of its three callers do NOT start from the
+    /// node's current scale: a panel scrub and a gizmo drag both measure their
+    /// ratio from the scale the GESTURE started at. Its callers include that
+    /// header themselves — this one does not use it, and does not drag it into
+    /// every TU that sees a scene node.
 
     /// Sets the node's lighting channels (see `lightMask` above). No bit is
     /// special and 0 is legal — a light on no channels lights nothing, and an

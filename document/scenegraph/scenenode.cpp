@@ -626,6 +626,15 @@ QList<Property*> SceneNode::getProperties()
     boolProp->value = pickable;
     props.append(boolProp);
 
+    // PRESERVE THE SCALE RATIO (SCALE-LOCK-1) — the transform panel's lock
+    // icon, reached from a script as node.setScaleLock(id, true) or
+    // node.setProperty(id, "scaleLock", true).
+    boolProp = new BoolProperty();
+    boolProp->displayName = "Lock Scale Ratio";
+    boolProp->name = "scaleLock";
+    boolProp->value = scaleLock;
+    props.append(boolProp);
+
     // LIGHTING CHANNELS as a plain 32-bit row.
     //
     // THE ROW IS SIGNED AND THAT IS THE POINT: `int(0xFFFFFFFF)` is -1, so the
@@ -673,6 +682,7 @@ QVariant SceneNode::getPropertyValue(QString valueName)
     if (valueName == "planarReflector") return getPlanarReflector();
     if (valueName == "giBoundsExcluded") return getGiBoundsExcluded();
     if (valueName == "pickable")   return isPickable();
+    if (valueName == "scaleLock")  return getScaleLock();
     // Signed, matching the row above: -1 is "all channels".
     if (valueName == "lightMask")  return static_cast<int>(lightMask);
     if (valueName == "mobility")   return static_cast<int>(mMobility);
@@ -693,6 +703,7 @@ bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "planarReflector") { setPlanarReflector(value.toBool());     return true; }
     if (valueName == "giBoundsExcluded") { setGiBoundsExcluded(value.toBool());   return true; }
     if (valueName == "pickable")   { setPickable(value.toBool());                return true; }
+    if (valueName == "scaleLock")  { setScaleLock(value.toBool());               return true; }
     // Accepts BOTH spellings of the same 32 bits: -1 (the signed row this node
     // reflects) and 4294967295 (what an unsigned-minded caller will send).
     // toInt() alone would turn the latter into 0 with ok=false — i.e. "no
@@ -1011,6 +1022,10 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	node->visible		= this->visible;
 	node->removable		= this->removable;
 	node->pickable		= this->pickable;
+	// THE LOCK TRAVELS WITH THE COPY (SCALE-LOCK-1): a duplicate of a node
+	// whose proportions you are keeping is a node whose proportions you are
+	// keeping.
+	node->scaleLock		= this->scaleLock;
 	node->planarReflector = this->planarReflector;
 	node->giBoundsExcluded = this->giBoundsExcluded;
 	node->lightMask		= this->lightMask;
