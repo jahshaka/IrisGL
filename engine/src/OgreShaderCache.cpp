@@ -549,6 +549,27 @@ bool ShaderCache::readVerified(const Entry &e, std::vector<char> &out) const {
     return true;
 }
 
+/// THE WIPE IS THE WRITER'S ALONE (SHADERCACHE-LOCK-1, found by VR-JERK-1's
+/// rig, reproduced 2026-09-18): every "this cache is no good to me" path in
+/// `load()` used to delete the whole directory whether or not this process had
+/// the writer lock — so a SECOND instance on the same data root deleted the
+/// FIRST one's live cache and left it to recompile from cold. Measured before
+/// the guard: with a long-lived instance holding the lock, a second launch that
+/// read a manifest it could not use logged "another process holds the writer
+/// lock — read-only for this run" and then took the manifest, both Hlms caches,
+/// the microcode cache and the pipeline blob with it (10 files to 5).
+///
+/// A read-only run that cannot use the cache needs nothing from the directory:
+/// it simply runs cold itself, which is what it would have done anyway. So the
+/// three call sites in `load()` ask this first, and the directory outlives them.
+/// (The size-cap wipe in `save()` is the writer's by construction, and
+/// `clear()` is a host asking for it outright.)
+bool ShaderCache::mayWipe() const {
+    if (mWriter) return true;
+    logLine("this run does not hold the writer lock — leaving the cache for whoever does");
+    return false;
+}
+
 void ShaderCache::wipe() const {
     DIR *d = opendir(mDir.c_str());
     if (!d) return;
@@ -626,7 +647,7 @@ void ShaderCache::load(Ogre::Root *root) {
     Ogre::GpuProgramManager::getSingleton().setSaveMicrocodesToCache(true);
 
     std::vector<Entry> files;
-    if (!readManifest(files)) { wipe(); return; }
+    if (!readManifest(files)) { if (mayWipe()) wipe(); return; }
 
     // Read and VERIFY everything before handing a single byte to Ogre. If any
     // file is short, corrupt or missing, the whole generation goes: a cache that
@@ -635,7 +656,11 @@ void ShaderCache::load(Ogre::Root *root) {
     std::vector<std::pair<int, std::vector<char>>> hlms;
     for (const Entry &e : files) {
         std::vector<char> bytes;
-        if (!readVerified(e, bytes)) { wipe(); logLine("verification failed — starting cold"); return; }
+        if (!readVerified(e, bytes)) {
+            if (mayWipe()) wipe();
+            logLine("verification failed — starting cold");
+            return;
+        }
         if      (e.name == "pipeline.cache")  pipeline.swap(bytes);
         else if (e.name == "microcode.cache") microcode.swap(bytes);
         else if (e.name.compare(0, 5, "hlms.") == 0) {
@@ -737,7 +762,7 @@ void ShaderCache::load(Ogre::Root *root) {
         // Rule 7: never fatal. Ogre throws typed exceptions here and the
         // canonical wiring catches them exactly like this.
         logLine(std::string("load failed (") + e.getDescription() + ") — starting cold");
-        wipe();
+        if (mayWipe()) wipe();
         mPipelineLoaded = mMicrocodeLoaded = false;
         mPipelineReason = "rejected";
         mHlmsLoaded = 0;

@@ -53,6 +53,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -684,6 +685,32 @@ private:
     /// The session's own View, on for a frame the runtime wants a picture for
     /// and off for one it does not (F4).
     void setSessionViewEnabled(bool on);
+    /// Everything the eyes are derived from `mViews` — see the definition.
+    void applyEyeViews();
+    /// ONE STEREO WARM-UP FRAME (VrConfig::warmUpFrames, lane VR-WARMUP-1).
+    ///
+    /// Arms the frame the engine is about to render as a warm-up: writes a
+    /// SYNTHETIC pair of views (the rig's origin, a deliberately wide frustum,
+    /// the heading turned 180 degrees on every other frame), applies them
+    /// through `applyEyeViews` and switches the session's View on — with NO XR
+    /// frame open, so the engine's frame renders both eyes into the eye target
+    /// and `copyEyes` (which needs `mInFrame`) never submits them. Returns
+    /// with the frame owed to nobody: the runtime is not waited on, not begun
+    /// and not ended, and the wearer is still looking at the runtime's own
+    /// picture.
+    ///
+    /// WHY A WIDE FRUSTUM AND NOT THE RUNTIME'S. A warm-up frame is worth
+    /// exactly the permutations it draws, and culling is what decides that: the
+    /// runtime's own ~100-degree frustum from a head we cannot locate yet would
+    /// leave whatever is behind the wearer to compile on the frame they turn
+    /// round. Two frames of 85 degrees in every direction, opposite each other,
+    /// see the whole room. Nothing about WHICH shader gets built depends on the
+    /// frustum being plausible — only on what falls inside it.
+    void warmUpBeginFrame();
+    /// Closes the warm-up frame the engine has just rendered: charges its cost
+    /// (the whole engine frame, measured across the pump's two ends, which is
+    /// what the compile storm actually lands in) and counts it down.
+    void warmUpEndFrame();
     /// Has the Vulkan device gone? (F3 — the frame's commit is where a loss
     /// surfaces, and the engine's catch swallows it.)
     bool deviceLost() const;
@@ -854,6 +881,16 @@ private:
     Ogre::Quaternion mEyeWorldRot[2];
     bool        mHavePose = false;
     bool        mViewEnabled = true;
+    // ---- THE STEREO WARM-UP (VrConfig::warmUpFrames) ---------------------
+    /// How many warm-up frames are still owed; counts down to 0 and stays there
+    /// for the life of the session.
+    unsigned    mWarmUpLeft = 0;
+    unsigned    mWarmUpDone = 0;
+    float       mWarmUpMs = 0.0f;
+    /// Set by warmUpBeginFrame, cleared by warmUpEndFrame: the frame the engine
+    /// is rendering right now is a warm-up frame.
+    bool        mWarmUpFrame = false;
+    std::chrono::steady_clock::time_point mWarmUpStart;
     std::vector<StereoQuad> mStereoQuads;
     OgreView   *mView = nullptr;
     Ogre::Camera *mCullCamera = nullptr;
@@ -1188,6 +1225,16 @@ bool VrSession::create(std::string &reason) {
     // only hands.
     createHandTrackers();
 
+    // THE STEREO WARM-UP IS ARMED HERE AND SPENT ON THE SESSION'S FIRST FRAMES
+    // (VrConfig::warmUpFrames, lane VR-WARMUP-1). Not rendered here: at this
+    // moment the runtime has not begun running (no xrBeginSession has been
+    // answered with a SYNCHRONIZED state yet) and the HOST has not placed the
+    // rig — `Engine::setVrOrigin` is called right after `beginVrSession`, and a
+    // warm-up from the wrong place would draw the wrong room.
+    mWarmUpLeft = mConfig.warmUpFrames;
+    if (mWarmUpLeft)
+        vrLog("stereo warm-up armed: %u frame(s) at %ux%u per eye before the first "
+              "committed frame", mWarmUpLeft, mEyeWidth, mEyeHeight);
     vrLog("session created on the runtime's device");
     if (mTestNoRenderLeft)
         vrLog("TEST HOOK: the first %u frames will be answered 'no picture' "
@@ -2351,6 +2398,22 @@ void VrSession::beginFrame() {
     }
     syncMirror();
 
+    // ---- THE STEREO WARM-UP, BEFORE THE FIRST FRAME THE RUNTIME IS SHOWN ---
+    // (VrConfig::warmUpFrames; lane VR-WARMUP-1.)
+    //
+    // HERE, and not one line later: from this point on the function OWES the
+    // runtime a frame (xrWaitFrame paces it, xrBeginFrame opens it, xrEndFrame
+    // pays it), and a frame that takes 1.2 s to record is a frame the runtime
+    // waited 1.2 s for. Above it, nothing is owed and nothing is paced: the
+    // session simply does not submit for a frame or two while it builds what
+    // the eyes need, and the wearer keeps looking at the runtime's own picture.
+    //
+    // The warm-up runs only while the session is RUNNING, which is why it is
+    // below the `mRunning` gate: the rig has been placed by then (the host sets
+    // the origin right after `beginVrSession`), the scene is live, and the
+    // eye target exists at its final size.
+    if (mWarmUpLeft) { warmUpBeginFrame(); return; }
+
     XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
     mFrameState = XrFrameState{ XR_TYPE_FRAME_STATE };
     // THE CLOCK. This is where a VR frame waits — not in a timer and not in a
@@ -2444,6 +2507,62 @@ void VrSession::beginFrame() {
     }
     mSaidNoPose = false;
     setSessionViewEnabled(true);
+
+    // EVERYTHING THE EYES ARE DERIVED FROM IS ONE FUNCTION (lane VR-WARMUP-1),
+    // because the session needs to apply a pose that the runtime did NOT
+    // locate: the stereo warm-up renders the eyes from the rig's origin
+    // through a wide frustum before the first committed frame, and it must
+    // build the camera, VrData, the cull frustum and the screen quads by
+    // exactly the same arithmetic as a real frame or it would warm a chain
+    // shaped differently from the one the wearer gets.
+    applyEyeViews();
+    mHavePose = true;
+    // ...AND THE HANDS, at the SAME predicted display time as the views (phase
+    // 4). One time for every pose in a frame is what keeps a hand attached to
+    // the body it belongs to; locating them a millisecond apart is how a
+    // controller ends up lagging its own arm.
+    //
+    // AFTER the eye geometry rather than in the middle of it (VR-WARMUP-1's
+    // extraction): nothing in the cull camera, the corner rays or the screen
+    // quads reads a hand, and nothing a hand is placed from is written by
+    // them — the proxies are scene nodes, and culling happens later in the
+    // frame, when the render runs. The order between the two groups is free;
+    // the order INSIDE each is not, and neither moved.
+    const bool synced = locateHands(mFrameState.predictedDisplayTime);
+    // ...AND WHAT THE HANDS ARE DOING, UNCONDITIONALLY (finding 3). Same frame
+    // and the same sync the locate used: `synced` false means the controllers
+    // answer nothing this frame (no action set, or a sync the runtime refused),
+    // which is not the same as "there is nothing to report" — an INJECTED hand
+    // is reported through this call, and `focused` is read from the session's
+    // own state rather than left at a struct default.
+    readInput(mFrameState.predictedDisplayTime, synced);
+    // ...AND THE MARKERS THE HOST HUNG FOR THEM, MOVED INSIDE THIS FRAME
+    // (VR-4-FIX finding 4). The poses above did not exist until xrWaitFrame
+    // returned, which is inside this call — so a host pushing the proxies from
+    // its own tick can only ever push the frame before last's (measured: two
+    // frames, ~22 ms at 90 Hz). Placed here, a proxy is drawn exactly where the
+    // hand it stands for is this frame.
+    placeProxies();
+    ++mRendered;
+    return;
+}
+
+// ---------------------------------------------------------------------------
+// THE EYES, FROM `mViews` (lane VR-WARMUP-1's extraction — the body is
+// beginFrame's, moved, not rewritten).
+//
+// IN: `mViews[2]` (the runtime's located views, or the warm-up's synthetic
+// pair) plus the rig (`mOriginPos`/`mOriginRot`) and the world scale.
+// OUT: `mIpd`, the session View's camera pose and custom projection,
+// `mVrData` (both eyes' eye-to-head and reverse-Z projections), the
+// unconverted/converted projection pairs, the eyes' world poses and corner
+// rays, `mAsymmetricFov`, `mWorldHeadPos`/`mWorldHeadRot`, the cull camera and
+// the stereo screen quads.
+//
+// It deliberately does NOT touch `mHavePose`, `mRendered` or the hands: those
+// are statements about the RUNTIME having answered, and a warm-up frame is not
+// the runtime answering.
+void VrSession::applyEyeViews() {
 
     // ---- the pose, in three parts -----------------------------------------
     // THE HEAD is the midpoint of the two eyes, oriented like the left eye (the
@@ -2592,31 +2711,11 @@ void VrSession::beginFrame() {
         }
         mView->setStereoEyes(eyes[0], eyes[1]);
     }
-    mHavePose = true;
     // WHERE THE WEARER'S HEAD ENDED UP, for the host that has to move them
     // (VrStatus::headPosition/headRotation). Reported in WORLD space, after the
     // rig, because that is the only frame a locomotion rule can reason in.
     mWorldHeadPos = worldHead;
     mWorldHeadRot = worldHeadRot;
-    // ...AND THE HANDS, at the SAME predicted display time as the views (phase
-    // 4). One time for every pose in a frame is what keeps a hand attached to
-    // the body it belongs to; locating them a millisecond apart is how a
-    // controller ends up lagging its own arm.
-    const bool synced = locateHands(mFrameState.predictedDisplayTime);
-    // ...AND WHAT THE HANDS ARE DOING, UNCONDITIONALLY (finding 3). Same frame
-    // and the same sync the locate used: `synced` false means the controllers
-    // answer nothing this frame (no action set, or a sync the runtime refused),
-    // which is not the same as "there is nothing to report" — an INJECTED hand
-    // is reported through this call, and `focused` is read from the session's
-    // own state rather than left at a struct default.
-    readInput(mFrameState.predictedDisplayTime, synced);
-    // ...AND THE MARKERS THE HOST HUNG FOR THEM, MOVED INSIDE THIS FRAME
-    // (VR-4-FIX finding 4). The poses above did not exist until xrWaitFrame
-    // returned, which is inside this call — so a host pushing the proxies from
-    // its own tick can only ever push the frame before last's (measured: two
-    // frames, ~22 ms at 90 Hz). Placed here, a proxy is drawn exactly where the
-    // hand it stands for is this frame.
-    placeProxies();
     // THE SECOND EYE'S FOUR CORNER RAYS (F2), in world space, from its own fov
     // and its own orientation — the same quantity SceneManager writes into the
     // sky quad's normals for a mono camera (OgreSceneManager.cpp:1487-1499),
@@ -2691,8 +2790,109 @@ void VrSession::beginFrame() {
     }
     // THE SCREEN QUADS, with the poses this frame located (F2).
     syncStereoQuads();
-    ++mRendered;
-    return;
+}
+
+// ---------------------------------------------------------------------------
+// THE STEREO WARM-UP (VrConfig::warmUpFrames; lane VR-WARMUP-1).
+//
+// THE JERK THIS REMOVES, measured by the rig on the pushed smoke build before
+// this existed (spikes/vr-jerk-1, spikes/vr-warmup-1): the session's SECOND
+// frame — the first the runtime asks a picture of — cost 1,179 ms cold and
+// 89 ms warm on the Grand Showroom, 889/920 ms cold and 20 ms warm on the
+// default scene, with `engine.record` holding all of it and the GPU at 0.1 ms.
+// Nothing in that frame is rendering: it is Hlms permutations being generated,
+// SPIR-V compiled and pipelines built, on the frame thread, at the instant the
+// wearer is first shown the world. At the Quest Pro's 62.5 Hz a 1,179 ms frame
+// is 73 repeated headset frames.
+//
+// WHY THE DESKTOP'S WARM-UP CANNOT PAY IT. `hlms_instanced_stereo` is a PASS
+// property (Hlms::preparePassHash reads `CompositorPassSceneDef::
+// mInstancedStereo`), so every shader the eyes need is a different shader from
+// the one the desktop compiled for the same object — measured: 783 ms on the
+// second VR frame after 200 mono frames in the same process. And even a fully
+// warm microcode cache paid 498 ms when the EYE SIZE changed, because two
+// permutations' generated source depends on the target. The only warm-up that
+// covers both is one that renders THIS session's chain, in stereo, at THIS
+// session's eye size — which is what this is.
+//
+// WHY NOT Ogre's own CompositorPassWarmUp (chain::warmUp, the route ogre-patch
+// 0016 unblocked). Two reasons, and the second is the deciding one:
+//   1. `Hlms::preparePassHash`, `HlmsPbs::preparePassHash` and
+//      `HlmsUnlit::preparePassHash` all read the instanced-stereo flag through
+//      `pass->getType() == PASS_SCENE` and a downcast to
+//      CompositorPassSceneDef. A PASS_WARM_UP pass is not PASS_SCENE and
+//      `CompositorPassWarmUpDef` has no such field, so upstream's warm-up
+//      pass can only ever compile the MONO permutation set — the one the eyes
+//      will not use. (Recorded for SPECS/OGRE_UPSTREAM_ISSUES.md; a patch
+//      giving the warm-up def the flag and letting the three readers honour it
+//      is ~20 SOURCE lines, and would still not answer (2).)
+//   2. `WarmUpHelper` shrinks every local texture and renders into a 4x4
+//      target BY DESIGN. That is exactly right for "which shader", and no help
+//      at all for the eye-size half of this defect, which is about the target.
+// A frame of the session's own chain answers both at once, needs no patch, and
+// cannot drift from the chain the wearer gets because it IS that chain.
+//
+// WHAT IT COSTS AND WHO PAYS IT: one or two frames at the start of the session,
+// while the runtime is still showing its own picture (WiVRn answers
+// `shouldRender = 0` for its first frames) and before this session has asked
+// the runtime for a frame at all. Nothing is submitted, nothing is mirrored,
+// no XR frame is opened and none is owed.
+void VrSession::warmUpBeginFrame() {
+    mWarmUpFrame = true;
+    mWarmUpStart = std::chrono::steady_clock::now();
+
+    // THE SYNTHETIC PAIR OF VIEWS. A runtime pose we have not got (no frame has
+    // been waited for, so nothing has been located) and do not need: the rig's
+    // own origin is a place we know is in the room, and 85 degrees in every
+    // direction is what makes the answer independent of where the wearer
+    // actually looks. `mWarmUpDone * 180` turns the second frame right round,
+    // so two frames between them see everything the room holds.
+    //
+    // The eyes are a real 64 mm apart because the IPD is not cosmetic here: it
+    // sets the cull camera's apex pull-back (applyEyeViews), and a zero
+    // separation would warm a frustum narrower than the one the eyes render.
+    const float kWarmUpFovDeg = 85.0f;
+    const float kWarmUpHalfIpd = 0.032f;
+    const float fov = float(Ogre::Degree(kWarmUpFovDeg).valueRadians());
+    const Ogre::Quaternion yaw(Ogre::Degree(float(mWarmUpDone) * 180.0f),
+                               Ogre::Vector3::UNIT_Y);
+    for (int eye = 0; eye < 2; ++eye) {
+        mViews[eye] = XrView{ XR_TYPE_VIEW };
+        mViews[eye].pose.orientation = { yaw.x, yaw.y, yaw.z, yaw.w };
+        const Ogre::Vector3 off =
+            yaw * Ogre::Vector3((eye == 0 ? -1.0f : 1.0f) * kWarmUpHalfIpd, 0.0f, 0.0f);
+        mViews[eye].pose.position = { off.x, off.y, off.z };
+        // XrFovf is (left, right, up, down) and the two horizontal angles are
+        // signed: left is negative, exactly as a runtime reports them.
+        mViews[eye].fov = { -fov, fov, fov, -fov };
+    }
+    // ...THROUGH THE SAME ARITHMETIC AS A REAL FRAME, which is the whole point
+    // of the extraction: the camera, VrData, the cull frustum and the stereo
+    // screen quads are built by the code the wearer's frames use, so the chain
+    // that warms is the chain that runs. `mHavePose` is deliberately NOT set —
+    // the runtime has located nothing, and `status().posesValid` must not claim
+    // otherwise.
+    applyEyeViews();
+    setSessionViewEnabled(true);
+    // AND THE MONITOR IS TOLD WHAT THIS FRAME IS (FrameCause::WarmUp), so a
+    // capture of a session start reads "warmup" on the expensive frames and
+    // "driver" on the wearer's. Consumed by the monitor's own beginFrame, which
+    // the engine opens a few lines after this call returns.
+    if (mEngine) mEngine->setNextFrameCause(FrameCause::WarmUp);
+}
+
+void VrSession::warmUpEndFrame() {
+    mWarmUpFrame = false;
+    const float ms = std::chrono::duration<float, std::milli>(
+                         std::chrono::steady_clock::now() - mWarmUpStart).count();
+    mWarmUpMs += ms;
+    ++mWarmUpDone;
+    if (mWarmUpLeft) --mWarmUpLeft;
+    vrLog("stereo warm-up frame %u: %.1f ms (%ux%u per eye, heading %.0f deg)",
+          mWarmUpDone, ms, mEyeWidth, mEyeHeight, float((mWarmUpDone - 1u) * 180u));
+    if (!mWarmUpLeft)
+        vrLog("stereo warm-up done: %u frame(s), %.1f ms - the eyes' permutations and "
+              "pipelines are built before the first committed frame", mWarmUpDone, mWarmUpMs);
 }
 
 /// HAS THE DEVICE GONE? (F3.) The frame that just ran may have thrown
@@ -2709,6 +2909,11 @@ bool VrSession::deviceLost() const {
 }
 
 void VrSession::endFrame() {
+    // A WARM-UP FRAME CLOSES HERE TOO, and it is the only close it gets: there
+    // is no XR frame to end (warmUpBeginFrame opened none), but the engine's
+    // frame — the one that just recorded the two eyes and built everything they
+    // needed — ends at this call, which is where its cost can be charged.
+    if (mWarmUpFrame) { warmUpEndFrame(); return; }
     if (!mInFrame) return;
     // A LOST DEVICE ENDS THE SESSION — IT DOES NOT KEEP SUBMITTING (F3).
     //
@@ -2929,6 +3134,13 @@ void VrSession::setMirrorView(OgreView *v) {
 void VrSession::syncMirror() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     if (!root || !mView) return;
+    // NOT WHILE THE SESSION IS WARMING UP (VR-WARMUP-1). A warm-up frame draws
+    // the room through an 85-degree frustum from the rig's origin — a correct
+    // thing to compile from and a nonsense thing to look at — and the mirror
+    // is a quad over that very target on the DESKTOP's picture. The mirror is
+    // built on the session's first real frame instead, one or two frames later,
+    // and the desktop never shows the warm-up.
+    if (mWarmUpLeft) return;
     // A camera IS required even though every pass in the mirror node is a quad:
     // CompositorWorkspace takes a default camera and dereferences it. A view
     // whose scene has not been set yet has none.
@@ -3017,6 +3229,8 @@ VrStatus VrSession::status() const {
     s.frames = mFrames;
     s.rendered = mRendered;
     s.ipd = mIpd;
+    s.warmUpFrames = mWarmUpDone;
+    s.warmUpMs = mWarmUpMs;
     s.eyeWidth = mEyeWidth;
     s.eyeHeight = mEyeHeight;
     s.mirror = mMirrorView ? mConfig.mirror : VrMirrorMode::None;
