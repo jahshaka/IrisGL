@@ -42,6 +42,51 @@ const int  kSrcFace[6] = { 0, 1, 2, 3, 5, 4 };   // +Z and -Z swap
 const bool kFlipH[6]   = { true, true, false, false, true, true };
 const bool kFlipV[6]   = { false, false, true, true, false, false };
 
+// A CUBE WE DREW OURSELVES MUST BE HANDED OVER IN THE LAYOUT A SAMPLER EXPECTS
+// (ENVPROBE-LAYOUT-1, 2026-09-18). Everything HlmsPbs samples has to be in
+// `ResourceLayout::Texture` — the Vulkan render system writes
+// `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL` into the descriptor whatever the
+// image's real layout is (`VulkanRenderSystem::_setTexture`), and its own
+// debug-high check throws "Did you forget to expose it to compositor?" for a
+// texture that is not. A compositor NODE gets this for free: the next pass that
+// names the texture resolves the transition. THIS engine's reflection cubemap
+// is written by a workspace of its own (`applyPendingIbl`) and then handed
+// straight to the datablocks, so no later pass names it and nothing moved it
+// out of the `Uav` layout the convolution left it in:
+// `VUID-vkCmdDraw-None-09600` on ten subresources of that one cube, twice
+// each, on an ordinary editor run (a new project with one cube — the repro is
+// in OGRE_UPSTREAM_ISSUES.md). The driver READ it correctly, which is why no
+// picture was ever wrong and why this stood for days; sampling an image in
+// GENERAL is legal for the hardware and illegal by the descriptor rule, so it
+// is the class that works until a driver stops tolerating it.
+//
+// Called INSIDE the frame (applyPendingIbl runs at the top of
+// renderOneFrame), which is where a command buffer exists. The array is a
+// LOCAL and not the solver's shared scratch (`getNewResourceTransitionsArrayTmp`
+// says not to hold that in two places), and `executeResourceTransition` closes
+// every open encoder itself.
+void handOverForSampling(Ogre::Root *root, Ogre::TextureGpu *tex) {
+    if (!root || !tex) return;
+    Ogre::RenderSystem *rs = root->getRenderSystem();
+    if (!rs) return;
+    // AND THE COPY ENCODER IS CLOSED FIRST. The fallback route below writes
+    // the cube with `copyTo` + `_autogenerateMipmaps`, which leaves it
+    // `CopyEncoderManaged` — and `resolveTransition` asserts exactly that
+    // ("Call RenderSystem::endCopyEncoder first!", OgreResourceTransition.cpp
+    // ~206) because the solver cannot reason about a texture the encoder still
+    // owns. Closing it also hands the solver the layout the encoder left
+    // (`assumeTransition`), so the resolve below starts from the truth. A no-op
+    // with no copy encoder open, which is the convolution's own route.
+    rs->endCopyEncoder();
+    Ogre::BarrierSolver &solver = rs->getBarrierSolver();
+    Ogre::ResourceTransitionArray trans;
+    // The PIXEL stage alone: this cube is `texEnvProbeMap` in HlmsPbs, and the
+    // mask only narrows the barrier's destination stages.
+    solver.resolveTransition(trans, tex, Ogre::ResourceLayout::Texture,
+                             Ogre::ResourceAccess::Read, 1u << Ogre::PixelShader);
+    rs->executeResourceTransition(trans);
+}
+
 const char *kIblWorkspace = "JahshakaIblSpecularWorkspace";
 const char *kSkyCaptureWorkspace = "JahshakaSkyCaptureWorkspace";
 
@@ -1257,6 +1302,22 @@ void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsS
     cube->setPixelFormat(srcCube->getPixelFormat());
     cube->setNumMipmaps(Ogre::PixelFormatGpuUtils::getMaxMipmapCount(w, h));
     cube->scheduleTransitionTo(Ogre::GpuResidency::Resident);
+    // A NEWBORN RENDER TEXTURE IS BORN READY TO RENDER, NOT READY TO SAMPLE
+    // (ENVPROBE-LAYOUT-1's second site, found by sky.env_layout under the
+    // validation layer). `VulkanTextureGpu::createInternalResourcesImpl`
+    // assumes "render textures always start ready to render" and sets
+    // `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` — and this cube is bound to
+    // every datablock by `applyReflectionToAll` BELOW, while the convolution
+    // that fills it only runs at the top of the NEXT frame (the documented one
+    // frame of IBL latency). Every draw in between samples it, so that frame
+    // reported `VUID-vkCmdDrawIndexed-imageLayout-00344` on `texEnvProbeMap`:
+    // one report per sky change, which is the class lane VR-3b recorded from
+    // its VR fixture (V2F-9) and could not reproduce without a headset.
+    //
+    // The CONTENT of that frame is unchanged — an unwritten cube is what the
+    // in-between frame always sampled; only the layout it is sampled in is
+    // corrected.
+    handOverForSampling(mRoot, cube);
     mReflectionTex = cube;
     // TELL HlmsPbs HOW MANY MIPS THE PROBE HAS. Without this the roughness->LOD
     // map (envSpecularRoughness, 800.PixelShader_piece_ps.any:4) multiplies by
@@ -1304,6 +1365,7 @@ void OgreScene::applyPendingIbl() {
             mIblSourceTex->copyTo(mReflectionTex, mReflectionTex->getEmptyBox(0), 0,
                                   mIblSourceTex->getEmptyBox(0), 0);
             mReflectionTex->_autogenerateMipmaps();
+            handOverForSampling(mRoot, mReflectionTex);
             return;
         }
         if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
@@ -1316,6 +1378,13 @@ void OgreScene::applyPendingIbl() {
         ws->_update();
         ws->_endUpdate(false);
         cm->removeWorkspace(ws);
+        // THE CONVOLUTION LEFT IT A UAV, AND EVERY DATABLOCK SAMPLES IT
+        // (ENVPROBE-LAYOUT-1): `CompositorPassIblSpecular::analyzeBarriers`
+        // resolves the output to `ResourceLayout::Uav` and this workspace has
+        // no later pass to move it back, so without this the cube is sampled in
+        // `VK_IMAGE_LAYOUT_GENERAL` for the rest of its life. See
+        // handOverForSampling.
+        handOverForSampling(mRoot, mReflectionTex);
         return;
     } catch (Ogre::Exception &e) {
         mError = e.getFullDescription();
@@ -1331,6 +1400,7 @@ void OgreScene::applyPendingIbl() {
         mIblSourceTex->copyTo(mReflectionTex, mReflectionTex->getEmptyBox(0), 0,
                               mIblSourceTex->getEmptyBox(0), 0);
         mReflectionTex->_autogenerateMipmaps();
+        handOverForSampling(mRoot, mReflectionTex);
     } JAH_CATCH(mError, );
 }
 
