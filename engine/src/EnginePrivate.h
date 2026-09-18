@@ -5564,6 +5564,7 @@ public:
     unsigned long long textureLoadRequests() const override;
     unsigned textureMultiLoadThreads() const override;
     unsigned textureWaitTimeouts() const override { return mTextureWaitTimeouts; }
+    unsigned long long textureWaitAdvances() const override;
     double textureWaitWorstMs() const override { return mTextureWaitWorstMs; }
     unsigned textureWaitBudgetMs() const override { return mTextureWaitBudgetMs; }
     unsigned textureMetadataCacheEntries() const override;
@@ -6047,6 +6048,30 @@ private:
     /// only way to prove the give-up path, because the real trigger kills a
     /// decode worker before the main thread can time anything.
     bool            mTextureWaitFault = false;
+    /// THE DRAIN'S ADVANCE CADENCE, in ms (lane ENGINE-SMALL-A / DRAIN-1, audit
+    /// ON-17). The drain polls every 1 ms and used to call
+    /// `VaoManager::_update()` on EVERY poll — and a bare `_update` outside a
+    /// frame commits a command buffer with a fence at the TOP of the call
+    /// whenever the previous one left the fence unflushed
+    /// (OgreVulkanVaoManager.cpp, the pin's issue #433), so a drain that waits
+    /// a second for a scene's textures submitted ~1,000 empty command buffers,
+    /// advanced the descriptor pools ~1,000 times and reset the BarrierSolver
+    /// as often. One advance per FRAME's worth of time does the same work per
+    /// tick — the commit, the frame-index advance, the staging/semaphore/
+    /// delayed-block retires — 16 times more cheaply, and the drain's progress
+    /// never depended on the rate (it depends on the decode workers, which run
+    /// on their own threads; `TextureGpuManager::_update(true)` is still called
+    /// on every poll, exactly as upstream's own wait does).
+    ///
+    /// JAH_TEXTURE_DRAIN_ADVANCE_MS overrides it for the A/B (0 = advance on
+    /// every poll, i.e. the pre-DRAIN-1 behaviour) — the same shape as every
+    /// other measurable rule in this engine.
+    double          mTextureDrainAdvanceMs = 16.0;
+    /// How many times the drain advanced the VaoManager, this process
+    /// (`Engine::textureWaitAdvances`, `app.textureStreaming().waitAdvances`).
+    /// Monotonic; the guard `threading.texture_wait_watchdog` asserts it against
+    /// the cadence over a known 300 ms stuck drain.
+    unsigned long long mTextureWaitAdvances = 0ull;
     /// How many times advanceResources() has run (RenderStats::resourceAdvances).
     unsigned long long mResourceAdvances = 0ull;
 

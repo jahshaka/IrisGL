@@ -1970,6 +1970,19 @@ public:
     /// frame was drawn without them.
     virtual unsigned textureWaitTimeouts() const = 0;
 
+    /// HOW MANY TIMES THE DRAIN ADVANCED THE RENDERER'S RESOURCE BOOKKEEPING
+    /// (lane ENGINE-SMALL-A / DRAIN-1, audit ON-17). Monotonic, never reset.
+    ///
+    /// The drain polls the texture manager every millisecond and, on a cadence
+    /// of one frame's worth of time, calls `VaoManager::_update()` — the call
+    /// that commits whatever the manager recorded, advances the frame index and
+    /// retires staging buffers, semaphores and delayed blocks. It used to be
+    /// called on EVERY poll, which is an empty command buffer plus a fence per
+    /// millisecond of waiting (up to ~1,000/s while a scene loads). Only
+    /// differences mean anything; it is here so a suite can assert the cadence
+    /// rather than trusting it.
+    virtual unsigned long long textureWaitAdvances() const = 0;
+
     /// The longest single bounded wait this process has performed, in ms.
     /// A timing observation, not a budget — useful for a suite that wants to
     /// say "the import path never blocked the UI for more than N ms".
