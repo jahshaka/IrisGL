@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #include <OgreHlmsManager.h>
 
@@ -1867,13 +1868,35 @@ void OgreScene::noteGiCascadeDirty(const Ogre::Aabb *box) {
     if (mVctCascades.empty()) return;          // no chain: nothing to describe
     if (mGiCascadeDirtyAll) return;            // already the strongest statement
     if (!box) { mGiCascadeDirtyAll = true; mGiCascadeDirtyBoxes.clear(); return; }
-    // BOUNDED. Past the cap a list of boxes costs more to carry and to test than
-    // the answer it saves, and a scene changing in sixteen places at once is one
-    // the whole chain has to answer for anyway.
-    if (mGiCascadeDirtyBoxes.size() >= kGiCascadeDirtyBoxCap) {
-        mGiCascadeDirtyAll = true; mGiCascadeDirtyBoxes.clear(); return;
+    if (mGiCascadeDirtyBoxes.size() < kGiCascadeDirtyBoxCap) {
+        mGiCascadeDirtyBoxes.push_back(*box);
+        return;
     }
-    mGiCascadeDirtyBoxes.push_back(*box);
+    // AT THE CAP THE LIST MERGES; IT DOES NOT GIVE UP (PHOTON audit F14). The
+    // member's note has the why — seventeen crates settling in one corner used
+    // to read as "the scene changed everywhere" and rebuild the chain out to the
+    // horizon, one cascade per frame, for as long as they moved.
+    //
+    // LEAST ENLARGEMENT, an R-tree's choice: the new box joins the entry whose
+    // union grows the least, so boxes near each other coalesce and boxes far
+    // apart stay apart. O(cap) per call with cap 16, against a test that is
+    // O(cap) per cascade anyway.
+    const auto volumeOf = [](const Ogre::Aabb &a) {
+        // The half-size product, not the volume — the comparison is what
+        // matters and a factor of 8 changes no ordering. A degenerate (null)
+        // box has a negative half size; max() keeps the growth monotonic.
+        return double(std::max(a.mHalfSize.x, 0.0f)) * double(std::max(a.mHalfSize.y, 0.0f)) *
+               double(std::max(a.mHalfSize.z, 0.0f));
+    };
+    size_t best = 0;
+    double bestGrowth = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < mGiCascadeDirtyBoxes.size(); ++i) {
+        Ogre::Aabb merged = mGiCascadeDirtyBoxes[i];
+        merged.merge(*box);
+        const double growth = volumeOf(merged) - volumeOf(mGiCascadeDirtyBoxes[i]);
+        if (growth < bestGrowth) { bestGrowth = growth; best = i; }
+    }
+    mGiCascadeDirtyBoxes[best].merge(*box);
 }
 
 // A DATABLOCK OR A TEXTURE THE VOXELISERS' MATERIAL CACHE HOLDS IS DYING.

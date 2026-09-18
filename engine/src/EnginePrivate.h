@@ -4381,9 +4381,27 @@ private:
     /// boxes) plus the box of every edit that carried one. A cascade is marked
     /// `pending` only when its own box intersects one of these, which is what
     /// makes dragging a chair in one corner cost the cascades that can see the
-    /// chair and nothing else. Bounded: past `kGiCascadeDirtyBoxCap` the list
-    /// collapses into `mGiCascadeDirtyAll`, because a scene-wide edit is cheaper
-    /// to answer whole than to describe.
+    /// chair and nothing else.
+    ///
+    /// BOUNDED BY MERGING, NOT BY GIVING UP (PHOTON audit F14, 2026-09-18). Past
+    /// `kGiCascadeDirtyBoxCap` the list used to collapse into
+    /// `mGiCascadeDirtyAll` — "the scene changed everywhere" — on the reasoning
+    /// that a scene changing in sixteen places is one the whole chain has to
+    /// answer for anyway. That reasoning is wrong for the commonest case there
+    /// is: SEVENTEEN OBJECTS SETTLING IN ONE CORNER (a physics pile, an animated
+    /// set, a crowd) produce seventeen SMALL boxes a metre apart, and answering
+    /// "everywhere" marks every cascade out to the horizon, so the chain
+    /// rebuilds one cascade per frame for as long as they keep moving — the
+    /// exact cost the per-cascade path exists to avoid, reached by having TOO
+    /// MUCH information rather than too little.
+    ///
+    /// At the cap a new box is therefore MERGED into the existing entry whose
+    /// union grows least (an R-tree's least-enlargement choice). The list stays
+    /// bounded, the description stays conservative in the only direction that is
+    /// safe — a merged box covers everything both boxes did — and seventeen
+    /// crates in a corner stay a corner. `mGiCascadeDirtyAll` survives for the
+    /// one statement that really is scene-wide: a null box, i.e. "somewhere, I
+    /// cannot say where".
     std::vector<Ogre::Aabb> mGiCascadeDirtyBoxes;
     bool mGiCascadeDirtyAll = false;
     static const size_t kGiCascadeDirtyBoxCap = 16;
