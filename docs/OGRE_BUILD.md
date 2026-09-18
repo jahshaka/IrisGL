@@ -1815,8 +1815,11 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     for a view a person watches over time (on-screen, and the VR session's stereo view)
     and 0 for every capture, so thumbnails, previews, screenshots and pixel suites keep
     taking the exact level their own value asks for. `JAHSHAKA_NO_LOD_HYSTERESIS` still
-    zeroes the band run-wide; `JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN` grants it to
-    offscreen views for the one suite that can read pixels.
+    zeroes the band run-wide; the offscreen exception is a PER-VIEW field,
+    `View::setLodHysteresisOffscreen` (LOD-LATCH-1, 2026-09-18 — it replaced the
+    process-wide env latch `JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN`, deleted), asked for by
+    the one suite that can read pixels and by nothing else. The patch's own header
+    still names the old latch; its bytes are deliberately untouched.
 
   0076-vct-bounce-is-a-jacobi-iteration — THE VOXEL BOUNCE IS A JACOBI ITERATION, AND
     ITS DAMPENING IS 1 (lane PHOTON-M2, the physics read of ledger §659 findings F-B

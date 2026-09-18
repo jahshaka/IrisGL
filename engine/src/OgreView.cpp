@@ -79,8 +79,10 @@ ChainDesc OgreView::chainDesc() const {
     // the most motion-sensitive picture this engine draws; and off for every
     // thumbnail, preview, screenshot and pixel suite, which must take the level
     // their own value asks for so one pose is always one set of pixels.
-    // `jahLodHysteresisOffscreen()` is the suite's latch (see its note).
-    d.lodHysteresis  = (!isOffscreen() || d.stereo || detail::jahLodHysteresisOffscreen())
+    // ...and an offscreen view may ASK for it, per view
+    // (View::setLodHysteresisOffscreen — the suite that reads what the band
+    // does is the only caller; see the note on the public method).
+    d.lodHysteresis  = (!isOffscreen() || d.stereo || mLodHysteresisOffscreen)
                            ? detail::jahLodHysteresis() : 0.0f;
     // Set BEFORE the offscreen early-out below: the overlay's entitlement is
     // its own opt-in (ViewOverlayDesc::allowOffscreen), not the post chain's,
@@ -1066,6 +1068,14 @@ void OgreView::setHelpersVisible(bool on) {
 void OgreView::setVrHelpersVisible(bool on) {
     if (on == mVrHelpersVisible) return;
     mVrHelpersVisible = on;
+    rebuildWorkspaceDef();
+}
+
+void OgreView::setLodHysteresisOffscreen(bool on) {
+    if (on == mLodHysteresisOffscreen) return;
+    mLodHysteresisOffscreen = on;
+    // The band is written onto the pass definitions (applyLodHysteresis), so
+    // this is graph shape exactly like the two flags above.
     rebuildWorkspaceDef();
 }
 

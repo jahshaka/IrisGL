@@ -136,7 +136,6 @@ inline Ogre::ColourValue toOgre(const Colour &c) { return Ogre::ColourValue(c.r,
 /// The LOD switch band a WATCHED view's scene passes carry, and the suite's
 /// offscreen latch (OgreMesh.cpp; ogre-patch 0075). @see ChainDesc::lodHysteresis.
 float jahLodHysteresis();
-bool  jahLodHysteresisOffscreen();
 
 /// ATOM stage 1's VIEW rule (OgreMesh.cpp): registers `jah_world_error` — the
 /// LOD strategy whose per-object value is the world-space error the pass's own
@@ -5002,6 +5001,8 @@ public:
     bool helpersVisible() const override { return mHelpersVisible; }
     void setVrHelpersVisible(bool on) override;
     bool vrHelpersVisible() const override { return mVrHelpersVisible; }
+    void setLodHysteresisOffscreen(bool on) override;
+    bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -5333,6 +5334,10 @@ private:
     /// ...and the VR channel (kVrHelperBit). Off everywhere but the session's
     /// own view, so nothing meant for a headset reaches a desktop picture.
     bool                       mVrHelpersVisible = false;
+    /// Does this OFFSCREEN view get the LOD switch band anyway
+    /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
+    /// everywhere but the one suite that has to read what the band does.
+    bool                       mLodHysteresisOffscreen = false;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
     /// on the chain it builds, once; 0 = nothing owed.
