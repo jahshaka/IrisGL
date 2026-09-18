@@ -976,6 +976,13 @@ void OgreEngine::renderOneFrame() {
         // only postponed to the frame it can be seen in.
         for (auto &s : mScenes)
             if (drawnThisFrame(s.get())) {
+                // THE SKY AMBIENT'S DEFERRED READ (audit ON-14), first: it is a
+                // `queryIsTransferDone` and, when the copy has landed, a map
+                // and 6 x 1024 texels of integral. Never a wait — see
+                // OgreScene::pollSkyShRead — and here rather than beside the
+                // capture because a read issued inside a frame must not be
+                // polled in that same frame.
+                s->pollSkyShRead();
                 s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
             }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
@@ -1851,6 +1858,18 @@ bool OgreEngine::drainTextureStreaming(double *msSpent) {
     size_t bestPending = std::numeric_limits<size_t>::max();
     double lastProgressMs = 0.0;
     double lastPollMs = -1000.0;
+    // THE VAO ADVANCE IS ON A CADENCE, NOT ON THE POLL (DRAIN-1, audit ON-17;
+    // mTextureDrainAdvanceMs has the measurement and the reason). -1e9 so the
+    // first iteration advances immediately — and WHAT THAT FIRST ADVANCE DOES
+    // IS ARM, NOT COMMIT: a bare `VulkanVaoManager::_update` outside a frame
+    // commits at the TOP of the call, only when the previous one left the fence
+    // unflushed (the pin's issue #433; the note at `advanceResources` above
+    // spells the pair out). So the first advance of a drain arms and the SECOND
+    // — one cadence later — commits and advances the frame index. A drain that
+    // finishes inside one cadence therefore commits nothing itself, exactly as
+    // before this line: the drain never submitted the capture-free first call's
+    // work either, and the next frame's own commit carries it.
+    double lastAdvanceMs = -1.0e9;
     bool ok = true;
 
     for (;;) {
@@ -1882,7 +1901,11 @@ bool OgreEngine::drainTextureStreaming(double *msSpent) {
             ok = false;
             break;
         }
-        if (vao) vao->_update();
+        if (vao && now - lastAdvanceMs >= mTextureDrainAdvanceMs) {
+            lastAdvanceMs = now;
+            ++mTextureWaitAdvances;
+            vao->_update();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
@@ -1897,6 +1920,8 @@ double OgreEngine::waitForTextureLoads() {
     drainTextureStreaming(&ms);
     return ms;
 }
+
+unsigned long long OgreEngine::textureWaitAdvances() const { return mTextureWaitAdvances; }
 
 unsigned long long OgreEngine::textureLoadRequests() const {
     Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
@@ -2670,6 +2695,13 @@ void OgreEngine::ensureHlms() {
     }
     if (const char *fault = std::getenv("JAH_TEXTURE_WAIT_FAULT"))
         mTextureWaitFault = (std::strtol(fault, nullptr, 10) != 0);
+    // The drain's advance cadence (DRAIN-1; the member's note has the why).
+    // Read here with the budget and the fault, for the same reason: a frame
+    // drawn before this point still drains, at the shipped 16 ms.
+    if (const char *cadence = std::getenv("JAH_TEXTURE_DRAIN_ADVANCE_MS")) {
+        const long n = std::strtol(cadence, nullptr, 10);
+        mTextureDrainAdvanceMs = double(std::max(0l, std::min(1000l, n)));
+    }
     // The texture cache (configured beside the shader cache in init(); it shares
     // that directory and its lifetime, with its own manifest and its own simpler
     // validity key — I-5). Loaded HERE, after the Hlms exists and before
