@@ -2828,6 +2828,72 @@ struct RayQueryStatus {
     float reflectMs = -1.0f;
 };
 
+/// WHAT THE VOXEL LIGHTING VOLUME ACTUALLY HOLDS — a TEST AND TOOL readback
+/// (PHOTON-M3), never a per-frame path: it flushes the render system's
+/// commands and blocks on a texture download of the whole 3D volume.
+///
+/// It exists because the voxel volume is the one place in this renderer where
+/// a PHYSICAL quantity is stored in a FIXED-RANGE format, and "the bounce's
+/// fixed point fits in the format" cannot be measured from the picture: a
+/// clipped voxel makes a picture that is merely dimmer than it should be, with
+/// the same hue and no hitch, exactly like a scene with less bounce in it
+/// (PHOTON-M2's finding F1, where a saturated gather read as a "contraction").
+/// What a guard needs is the histogram's top bin, and that is this.
+///
+/// EVERY VALUE IS IN THE STORE'S OWN NORMALISED UNITS — the units the volume
+/// holds, i.e. scene radiance times `multiplier`. `formatMax` is the ceiling
+/// that format can represent in those units (1.0 for the UNORM formats, 0 for
+/// a float one: unbounded), so `peak` against `formatMax` and `voxelsAtMax`
+/// against `voxelsLit` are the whole question. Multiply by
+/// `1 / multiplier` for scene radiance.
+struct GiVoxelStats {
+    /// False when there is nothing to read: no VCT arm on this scene, no such
+    /// cascade, a headless stand-in, or a download this device refused. Every
+    /// number below is then 0 and none of them means anything.
+    bool available = false;
+    /// Which cascade of the chain was read (0 = the innermost, the one the
+    /// camera stands in).
+    int  cascade = 0;
+    /// The volume's resolution, so a caller can weigh the counts below.
+    int  width = 0, height = 0, depth = 0;
+    /// The pixel format the TOTAL volume is stored in, spelled as Ogre spells
+    /// it ("PFG_RGBA8_UNORM_SRGB", "PFG_RGBA16_FLOAT").
+    std::string format;
+    /// The largest value that format can hold in the store's units — 1.0 for
+    /// UNORM, 0.0 for a float format (no ceiling worth naming).
+    float formatMax = 0.0f;
+    /// The store's normalisation `k`: a voxel holds `k` times the surface's
+    /// outgoing radiance (`VctLighting`'s baking multiplier, k = pi /
+    /// (headroom * D_max) in this engine).
+    float multiplier = 0.0f;
+    /// The peak channel over the whole TOTAL volume, and over the DIRECT
+    /// volume beside it when the cascade bounces (the fixed point's D term,
+    /// which is <= 1/headroom by construction — a peak above that is a defect
+    /// in the normalisation, not a bright scene).
+    float peak = 0.0f;
+    float peakDirect = 0.0f;
+    /// The mean of the channel maximum over LIT voxels — what the picture's
+    /// indirect term is made of, and the number a convergence test watches
+    /// stop moving.
+    double meanLit = 0.0;
+    /// Voxels with any light in them at all (> 0 in any channel) and, of
+    /// those, how many sit on the format's top bin in ANY channel. On a UNORM
+    /// total a non-zero `voxelsAtMax` IS the clip: the bounce's fixed point
+    /// did not fit, and every one of those voxels is darker than the physics
+    /// asked for, in a hue the clip has shifted.
+    long long voxelsLit = 0;
+    long long voxelsAtMax = 0;
+    /// The same count on the DIRECT volume (0 unless the normalisation itself
+    /// is wrong), and the total voxel count for the record.
+    long long directAtMax = 0;
+    long long voxels = 0;
+    /// Voxels whose peak channel is ABOVE 1.0 in the store's units — zero by
+    /// definition on a UNORM store, and on a float one exactly the set an
+    /// 8-bit store would have CLIPPED. It is the measurement that says whether
+    /// the format's range is being used or merely provided.
+    long long voxelsAboveOne = 0;
+};
+
 // ---------------------------------------------------------------------------
 // VR (SPECS/VR_SPEC.md v3 phase 2). The whole surface is Ogre-free AND
 // OpenXR-free: nothing below names a runtime type, so a host compiled against

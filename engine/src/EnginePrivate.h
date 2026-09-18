@@ -2856,6 +2856,9 @@ public:
     bool setGiTuning(const GiParams &p) override;
     void refreshGlobalIllumination() override;
     GiStatus giStatus() const override;
+    /// PHOTON-M3's readback: what the voxel lighting volume holds. Blocks on a
+    /// flush and a whole-volume download — a test and tool path (Engine.h).
+    GiVoxelStats giVoxelStats(int cascade) override;
     /// THE RAY TIER'S READING for this scene (PHOTON_SPEC §7 R1). Defined in
     /// OgreRayQuery.cpp — like gatherRayInstances below, so that not one line
     /// of the ray tier lives in a TU that does not include Vulkan.
