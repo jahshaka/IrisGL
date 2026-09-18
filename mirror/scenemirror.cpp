@@ -7282,13 +7282,14 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // one-re-solve-on-settle debounce but NOT the cheap light re-inject
         // cadence (and its irradiance-field reset) — nothing a re-inject reads
         // changed. Every mode (Instant Radiosity re-traces on it too).
-        // A HOVER PREVIEW IS NOT A MATERIAL EDIT (MATERIAL-PREVIEW-1, measured).
+        // A HOVER PREVIEW IS NOT A MATERIAL EDIT (MATERIAL-PREVIEW-1).
         // The editor lends a mesh's material slot to whatever is being dragged
         // over it and takes it back when the drag leaves; the document is never
         // written and no undo step exists. The engine's material signature
-        // cannot tell the two apart, so a hover held for the stability window
-        // used to cost a FULL GI re-solve for a state that will never be saved —
-        // and a second one on the restore.
+        // cannot tell the two apart. (Measured 2026-09-19, ledger 804: a material
+        // SWAP does not move that signature today — a defect of its own, queued
+        // as MATERIAL-SWAP-GI-1 — so this gate has nothing to hold back yet; it
+        // is here for the day a swap does.)
         //
         // The whole answer is here, at the ONE read: while the scene says a
         // preview is on screen the material term reads as whatever was

@@ -519,11 +519,16 @@ public:
     /// The editor's hover preview borrows a mesh's material slot while a
     /// material is dragged over it and puts the original back when the drag
     /// leaves, drops or is cancelled — the document is never written and no
-    /// undo step exists. The renderer, though, cannot tell a borrowed material
-    /// from a committed one: the mirror's GI debounce sees the material
-    /// signature move, arms a pending refresh, and ~15 still frames later pays
-    /// a FULL GI re-solve for a state that will never be saved — then a second
-    /// one when the original goes back.
+    /// undo step exists. The renderer cannot tell a borrowed material from a
+    /// committed one, so whatever a material change costs the GI caches a hover
+    /// would be charged too — for a state that will never be saved.
+    ///
+    /// MEASURED 2026-09-19 (ledger 804): today that cost is ZERO, because a
+    /// material SWAP on a voxelised item does not reach the engine's material
+    /// generation at all — which is a defect (a committed swap leaves the voxels
+    /// carrying the old albedo), queued as MATERIAL-SWAP-GI-1. That lane is when
+    /// this flag starts to matter, and it owns the falling edge (the restore's
+    /// own bump lands in the first unflagged sync).
     ///
     /// So the preview says so. While this is true the mirror neither arms nor
     /// ADOPTS the material term: it keeps the signature it remembered before
