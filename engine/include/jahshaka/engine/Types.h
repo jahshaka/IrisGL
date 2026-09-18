@@ -2092,12 +2092,15 @@ struct GiParams {
 ///   a rescue.
 ///
 /// So the VR column is the tier's own chain with the REDUNDANT MIDDLE cascade
-/// dropped (four rows become three; Low's two are already minimal) and the
-/// outermost step doubled. Nothing about a "room", a volume or an axis count
-/// enters it: the reach is unchanged, the inner cell is unchanged, and what is
-/// given up is one hand-over in the mid field (Medium's 10 m row sits between a
-/// 5 m and a 15 m one) and up to 30 m of off-centring on a 120 m box at 1.875 m
-/// per cell instead of 15.
+/// dropped and the OUTERMOST STEP DOUBLED. The two halves apply independently:
+/// four rows become three at Medium, High and Epic, while LOW KEEPS ITS TWO (it
+/// has no middle to drop) — but Low's outer step doubles with everybody else's,
+/// so no tier's VR column equals its desktop one. Nothing about a "room", a
+/// volume or an axis count enters it: the reach is unchanged, the inner cell is
+/// unchanged, and what is given up is one hand-over in the mid field (Medium's
+/// 10 m row sits between a 5 m and a 15 m one) and up to twice the off-centring
+/// of the outermost cascade — 30 m on Medium's 120 m box at 1.875 m per cell
+/// instead of 15, 60 m on Low's 40 m box at 0.625 m per cell instead of 30.
 enum class GiViewProfile {
     Desktop = 0,
     Vr      = 1,
@@ -2171,6 +2174,10 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
     // middle cascade goes and the outermost steps twice as far. `stepCells` on
     // a row means "pinned"; the engine derives the rest.
     if (profile == GiViewProfile::Vr) {
+        // Both halves are independent, and LOW GETS ONLY THE SECOND: with two
+        // rows there is no middle to drop (corrected 2026-09-18 — the first
+        // note claimed Low was untouched, which the doubled outer step makes
+        // false).
         if (f.cascadeCount >= 4) {
             // Drop index 1 — the row closest in reach to the one outside it
             // (Medium 5/10/15/60, High 5/10/15/60 at its own resolutions), so

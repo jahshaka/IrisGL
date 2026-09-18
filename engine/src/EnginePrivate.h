@@ -4596,6 +4596,12 @@ private:
     /// table it should be built from — the driver's profile changed. The dirty
     /// BOX path cannot express it, so the flush builds the chain again.
     bool mGiChainShapeDirty = false;
+    /// Which column of the tier table the LIVE chain was built from, recorded at
+    /// the build (`GiStatus::cascadeProfileVr`). Not the same reading as
+    /// `mGiDriverStereo`, which says who is driving NOW: the two differ for the
+    /// one frame a profile change is owed, and only this one is a fact about the
+    /// chain the shader is sampling.
+    bool mGiChainProfileVr = false;
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
     /// What the last (re)build ACTUALLY used, recorded rather than recomputed:

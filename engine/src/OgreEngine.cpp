@@ -906,10 +906,35 @@ void OgreEngine::renderOneFrame() {
         // desktop view would place the cascades and the headset would look at a
         // field centred on somebody else's camera. A view that declares itself
         // the GI driver wins outright; nothing but a VR session ever does.
+        //
+        // AND IT WINS WHETHER OR NOT IT IS ENABLED THIS FRAME (lane V1-RIG fix
+        // round item 1, the Fable read). The session switches its own View OFF
+        // on every frame the runtime asks for no picture and on every frame with
+        // no valid pose (`VrSession::beginFrame`'s two `setSessionViewEnabled(false)`
+        // paths) — which is what keeps the DESKTOP drawing through a doff, an
+        // open dashboard or WiVRn's first frames. With `isEnabled()` tested
+        // before the priority test, the driver fell to the desktop view on each
+        // of those frames and came back on the next, and each flip was seen by
+        // `updateGiTracking` as a change of driver PROFILE: `mGiChainShapeDirty`,
+        // then `rebuildVct()` — a teardown, every cascade and the whole field,
+        // TWICE per doff, with the chain's centre jumping to the editor's camera
+        // in between. Every WiVRn session start did it, because its first frames
+        // are no-picture ones.
+        //
+        // So the GI-priority pass reads only `giPriority()`. The slot stays the
+        // session's View and the DESKTOP NEVER TAKES THE CHAIN OVER while a
+        // session exists; the `authoritative` test below still requires an
+        // enabled view, so on such a frame NOBODY drives GI and the chain simply
+        // HOLDS STILL — the camera it was placed around stays the headset's last
+        // located head, which is the answer that costs nothing and lies about
+        // nothing. The profile follows the SESSION (it flips on
+        // `setGiPriority(false)` and on the View's destruction, both of which
+        // happen when the session ends), never the frame.
         for (int pass = -1; pass < 2; ++pass)        // -1: the GI driver, 0: on-screen, 1: any
             for (auto &v : mViews) {
-                if (!v->isEnabled() || !v->ogreScene()) continue;
+                if (!v->ogreScene()) continue;
                 if (pass == -1 && !v->giPriority()) continue;
+                if (pass != -1 && !v->isEnabled()) continue;
                 if (pass == 0 && v->isOffscreen()) continue;
                 OgreView **slot = driverSlot(v->ogreScene());
                 if (!*slot) *slot = v.get();

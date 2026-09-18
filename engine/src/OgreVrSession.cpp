@@ -224,6 +224,28 @@ unsigned vrTestNoRenderFrames() { return vrEnvFrames("JAHSHAKA_VR_TEST_NO_RENDER
 /// pacing back — is the product path, byte for byte. Only who asked differs.
 unsigned vrTestStopAfterFrames() { return vrEnvFrames("JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES"); }
 
+/// THE THIRD HOOK — A BLINKING RUNTIME (`JAHSHAKA_VR_TEST_BLINK_EVERY=N`, lane
+/// V1-RIG fix round item 1).
+///
+/// The one thing no simulated runtime will do on request and every real one does
+/// constantly: answer "no picture" for a frame HERE AND THERE, in the middle of
+/// a live session. That is a doff, an open dashboard, a guardian breach, a
+/// moment of lost tracking — and each of them switches the session's own View
+/// off for that frame and on again for the next, which is the toggle that made
+/// the GI driver flip and cost two from-scratch cascade-chain builds a cycle.
+///
+/// `JAHSHAKA_VR_TEST_NO_RENDER_FRAMES` cannot express it: it answers "no
+/// picture" for the first N frames and then never again, so the session's View
+/// goes off once and comes back once — a transition, not a cycle. This one makes
+/// every Nth frame a no-picture frame for as long as the session lives, which
+/// turns a defect that costs a rebuild PER CYCLE into something a counter can
+/// see.
+///
+/// Unset — every ordinary run and every gate that does not ask for it — it is
+/// one getenv per session and one modulo per frame, and it is read fresh per
+/// session like its two siblings.
+unsigned vrTestBlinkEvery() { return vrEnvFrames("JAHSHAKA_VR_TEST_BLINK_EVERY"); }
+
 }   // namespace
 
 // ===========================================================================
@@ -766,6 +788,10 @@ private:
     /// TEST ONLY (vrTestNoRenderFrames): how many more located frames must be
     /// answered "no picture" regardless of what the runtime said.
     unsigned    mTestNoRenderLeft = vrTestNoRenderFrames();
+    /// TEST ONLY (vrTestBlinkEvery): every Nth frame of the session is answered
+    /// "no picture", for as long as it lives — a doff, a dashboard, a lost
+    /// tracking moment, repeated.
+    unsigned    mTestBlinkEvery = vrTestBlinkEvery();
     /// TEST ONLY (vrTestStopAfterFrames): ask the runtime to exit after this
     /// many accepted frames, once. Zero = never.
     unsigned    mTestStopAfter = vrTestStopAfterFrames();
@@ -1110,6 +1136,9 @@ bool VrSession::create(std::string &reason) {
     if (mTestNoRenderLeft)
         vrLog("TEST HOOK: the first %u frames will be answered 'no picture' "
               "(JAHSHAKA_VR_TEST_NO_RENDER_FRAMES)", mTestNoRenderLeft);
+    if (mTestBlinkEvery)
+        vrLog("TEST HOOK: every %uth frame will be answered 'no picture' "
+              "(JAHSHAKA_VR_TEST_BLINK_EVERY)", mTestBlinkEvery);
     if (mTestStopAfter)
         vrLog("TEST HOOK: the runtime will be asked to exit after %u frames "
               "(JAHSHAKA_VR_TEST_STOP_AFTER_FRAMES)", mTestStopAfter);
@@ -2088,6 +2117,12 @@ void VrSession::beginFrame() {
         --mTestNoRenderLeft;
         mFrameState.shouldRender = XR_FALSE;
     }
+    // ...AND THE BLINK (vrTestBlinkEvery), which is the same replacement made
+    // periodically instead of once: every Nth accepted frame is answered "no
+    // picture", so the session's View goes off and on again, over and over, the
+    // way a real runtime does through a doff or a dashboard.
+    if (mTestBlinkEvery && mFrames && (mFrames % mTestBlinkEvery) == 0ull)
+        mFrameState.shouldRender = XR_FALSE;
     if (!mFrameState.shouldRender) {
         if (!mSaidNoRender) { vrLog("the runtime asks for NO picture (shouldRender=0) in state %d", int(mState)); mSaidNoRender = true; }
         // A FRAME IS STILL OWED, with no layers (the spec's contract, and what

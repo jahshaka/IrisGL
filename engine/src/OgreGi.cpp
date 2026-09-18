@@ -903,8 +903,10 @@ GiStatus OgreScene::giStatus() const {
         }
         st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;
         st.cascadeVoxelLod = mCascadeVoxelLod;
-        // WHICH COLUMN OF THE TIER TABLE THE CHAIN CAME FROM (V1-RIG item 4).
-        st.cascadeProfileVr = mGiDriverStereo;
+        // WHICH COLUMN OF THE TIER TABLE THE CHAIN CAME FROM (V1-RIG item 4) —
+        // the chain's own record, so the MONOLITHIC arm (no chain at all) reads
+        // false whoever is driving.
+        st.cascadeProfileVr = !mVctCascades.empty() && mGiChainProfileVr;
         st.cascadeFullRebuilds = mCascadeFullRebuilds;
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
@@ -3582,6 +3584,13 @@ size_t OgreScene::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
     mVctCascades.clear();
     mVctCascades.resize(table.size());
+    // WHICH COLUMN OF THE TIER TABLE THIS CHAIN IS (V1-RIG fix round item 4).
+    // Recorded at the build and not read back from the driver flag: the flag is
+    // a live reading of who is driving and the CHAIN is what was built, and the
+    // two differ for exactly as long as a profile change is owed (the frame
+    // between `mGiChainShapeDirty` and the flush). `giStatus` reports this one,
+    // so "the chain is the VR column" is a fact about the chain.
+    mGiChainProfileVr = mGiDriverStereo;
     for (size_t i = 0; i < table.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         c.halfSize   = table[i].halfSize;
@@ -4506,7 +4515,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // WHY (fix round item 1): in a session the GI driver is the headset's view
     // and its camera is the tracked HEAD, written every frame, so a rule that
     // waited for two frames at the same position would never fire for a wearer
-    // — room-scale walking re-voxelises (Medium's cascade-0 step is 0.625 m)
+    // — room-scale walking re-voxelises (cascade 0's step is 5 m at EVERY tier:
+    // the derived step is clamped to resolution/2 cells, which is 32 cells of a
+    // 64^3 cascade over 10 m and 64 of a 128^3 one over the same 10 m — corrected
+    // 2026-09-18, lane V1-RIG; the 0.625 m here was a cell, not a step)
     // and the 55/255 error would simply live in the headset until something
     // else moved. With no gate, a walk that never ends keeps paying one cheap
     // injection per idle slot and never starves.
@@ -5567,6 +5579,11 @@ void OgreScene::pushIfdState(const Ogre::uint32 numProbes[3]) {
 }
 
 void OgreScene::teardownIrradianceField() {
+    // THE FOLLOW DEBT DIES WITH THE FIELD (V1-RIG fix round item 4, symmetry
+    // with `teardownVct`): `oweCascade0FieldFollow` refuses to raise one without
+    // a field, so a debt outliving its field could only be paid into the next
+    // one — which converges WHOLE at its build and owes nothing.
+    mIfdFollowOwed = 0;
     mIfdTotalProbes = mIfdProbesDone = mIfdProbesPerFrame = mIfdMinProbes = 0u;
     mIfdVolumeOrigin = mIfdVolumeSize = Ogre::Vector3::ZERO;
     mIfdProbeCounts[0] = mIfdProbeCounts[1] = mIfdProbeCounts[2] = 0u;
@@ -5771,6 +5788,12 @@ void OgreScene::teardownVct() {
     // and a cascade that are about to stop existing, and whatever chain comes
     // next converges its field WHOLE in `buildIrradianceField`.
     mIfdFollowOwed = 0;
+    // ...NOR A CHAIN-SHAPE REBUILD (fix round item 4). Every path that tears the
+    // arm down is followed by a build from the CURRENT table, so a shape debt
+    // raised before it is already paid; left set, a teardown reached directly
+    // (`rebuildVct`, a mode or quality change, GI off) would make the next
+    // flush spend one more whole rebuild for nothing.
+    mGiChainShapeDirty = false;
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;
     // Unbind what the shader reads FROM THIS SCENE, by pointer identity (the
