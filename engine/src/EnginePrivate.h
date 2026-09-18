@@ -465,6 +465,30 @@ constexpr Ogre::uint32 kBackdropBit    = 1u << 7;
 // one of them (chain::helperBitsToDrop does).
 constexpr Ogre::uint32 kVrHelperBit    = 1u << 8;
 
+// THE HIDDEN-AREA MESH'S OWN CHANNEL (lane HAM-1, VR_SPEC §9). The SEVENTH use
+// of the inversion above, and the narrowest: exactly one object in the process
+// ever carries this bit — the mask the runtime handed over — and it carries it
+// INSTEAD OF kVisibleBit.
+//
+// WHAT THE INVERSION BUYS HERE. The mask is a depth-only draw at the NEAR
+// plane, so anything that renders it and then shades through it comes out
+// EMPTY: a probe face would capture black corners, a sky capture would
+// integrate them into the ambient, a planar mirror would lose a wedge, a shadow
+// map would be stamped with a wall one centimetre from the light. Every one of
+// those passes asks for kVisibleBit (the probe faces' `visibility_mask 0x1`,
+// the shadow nodes' shadowCasterChannels, OgrePlanar's allowlist, the GI
+// gathers' kGiGeometryBit), so not carrying kVisibleBit keeps the mask out of
+// all of them with no new rule.
+//
+// WHAT STILL NEEDS ONE is the VIEW CHAINS, whose scene passes are born holding
+// every RESERVED bit: `chain::helperBitsToDrop` takes this bit out of every
+// view's node UNLESS that view is a VR session's eye pair
+// (ChainDesc::hiddenAreaMask). So the desktop viewport, the Player's window, a
+// thumbnail, a preview and a user's screenshot cannot draw it even while a
+// session is live — which is the channel requirement HAM-1 was given, stated
+// where the bit is defined.
+constexpr Ogre::uint32 kVrMaskBit      = 1u << 9;
+
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
 // ---------------------------------------------------------------------------
@@ -1000,6 +1024,22 @@ struct ChainDesc {
     /// desktop window, the offscreen view a user's screenshot renders through —
     /// so nothing meant for a wearer reaches a picture that is not theirs.
     bool  vrHelpers = false;
+    /// Does THIS view draw the RUNTIME'S HIDDEN-AREA MESH (kVrMaskBit, lane
+    /// HAM-1)? True for the VR session's eye pair and false everywhere else,
+    /// which is what keeps a depth-only near-plane draw out of the desktop, the
+    /// mirror, a probe and a user's shot.
+    ///
+    /// It is the same mechanism as `helpers` and for the same reason — a
+    /// per-pass visibility mask on the view's own node, written by
+    /// `helperBitsToDrop`, never state on the object (one scene, many views).
+    /// GRAPH SHAPE (sameShape) — which is exactly why it is set ONCE, when the
+    /// session creates its view, and not when the mask mesh is built: the mesh
+    /// can only be built inside a frame (it needs the runtime's located fovs),
+    /// and a workspace rebuild there would re-attach the eye copy's own
+    /// listener at a seam no suite can see the far side of. With the channel
+    /// open and no mask built, nothing in the process carries the bit, so it
+    /// costs no pixel and no pass.
+    bool  hiddenAreaMask = false;
 
     // ---- INSTANCED STEREO (SPECS/VR_SPEC.md §4.3, phase 2) ----------------
     /// Render BOTH EYES in one pass into a target that is two eyes wide
@@ -5196,6 +5236,11 @@ public:
     bool helpersVisible() const override { return mHelpersVisible; }
     void setVrHelpersVisible(bool on) override;
     bool vrHelpersVisible() const override { return mVrHelpersVisible; }
+    /// THE RUNTIME'S HIDDEN-AREA MESH, for this view only (kVrMaskBit, lane
+    /// HAM-1). Engine-internal: the VR session is the only caller, and there is
+    /// no public View verb for it because no host has a reason to ask.
+    void setHiddenAreaMask(bool on);
+    bool hiddenAreaMask() const { return mHiddenAreaMask; }
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     float measuredExposureScale() const override;
@@ -5529,6 +5574,7 @@ private:
     /// ...and the VR channel (kVrHelperBit). Off everywhere but the session's
     /// own view, so nothing meant for a headset reaches a desktop picture.
     bool                       mVrHelpersVisible = false;
+    bool                       mHiddenAreaMask = false;
     /// Does this OFFSCREEN view get the LOD switch band anyway
     /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
     /// everywhere but the one suite that has to read what the band does.

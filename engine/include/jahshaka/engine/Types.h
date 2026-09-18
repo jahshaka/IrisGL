@@ -3299,6 +3299,18 @@ struct VrConfig {
     /// can write it, so a machine with no ray queries does not even pay the
     /// prepass and renders exactly what it renders today.
     int ssr = 0;
+    /// THE RUNTIME'S HIDDEN-AREA MESH (lane HAM-1): mask out the corners of
+    /// each eye that the headset's own lenses never show, so no shading is
+    /// spent on them.
+    ///
+    /// ON BY DEFAULT and there is no host row for it: it costs nothing a wearer
+    /// can see (the pixels it removes are behind the lens barrel) and it is
+    /// bought from the runtime's own geometry (`XR_KHR_visibility_mask`), so a
+    /// runtime that answers no mask simply renders what it rendered before.
+    /// The flag exists so a MEASUREMENT can take the other arm in the same
+    /// process — the suite's mask-off control and the lane's own A/B — which is
+    /// the same reason `overrideEyeWidth` is here.
+    bool hiddenAreaMask = true;
 };
 
 
@@ -3389,6 +3401,24 @@ struct VrStatus {
     /// host that sees it climbing while nobody touched the headset is looking
     /// at a runtime problem, not at its own locomotion.
     unsigned long long spaceChanges = 0;
+
+    // ---- THE HIDDEN-AREA MESH (lane HAM-1) -------------------------------
+    /// WHERE THE MASK CAME FROM: "runtime" (the eye's own geometry through
+    /// `XR_KHR_visibility_mask`), "off" (the host asked for none —
+    /// `VrConfig::hiddenAreaMask` false) or "none" (the runtime has no mask to
+    /// give, which is what Monado's simulated HMD used to be read as and what
+    /// every runtime without the extension is). Empty with no session.
+    std::string        hiddenAreaSource;
+    /// THE FRACTION OF EACH EYE THE MASK COVERS, indexed by eye (0 = left),
+    /// measured on the geometry the runtime handed over: the sum of its
+    /// triangles' areas in the eye's own clip rectangle, which has area 4. It
+    /// is the number the saving is computed from (the pixels never shaded), and
+    /// it is the RUNTIME'S answer — a Quest Pro and a simulated HMD do not
+    /// report the same shape, so a measurement that does not carry this number
+    /// cannot be read on another headset.
+    float              hiddenAreaFraction[2] = { 0.0f, 0.0f };
+    /// ...and how many triangles that was, per eye. 0 = no mask on that eye.
+    unsigned           hiddenAreaTriangles[2] = { 0u, 0u };
 
     // ---- THE HANDS (phase 4) ---------------------------------------------
     /// WHERE THE WEARER'S HANDS ARE, in world space, through the rig exactly

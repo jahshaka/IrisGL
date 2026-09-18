@@ -535,7 +535,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.rayReflect == b.rayReflect &&
            a.refractions == b.refractions &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
-           a.vrHelpers == b.vrHelpers &&
+           a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
            a.background.r == b.background.r && a.background.g == b.background.g &&
            a.background.b == b.background.b && a.background.a == b.background.a;
 }
@@ -657,6 +657,14 @@ Ogre::uint32 helperBitsToDrop(const ChainDesc &desc) {
     Ogre::uint32 drop = 0u;
     if (!desc.helpers) drop |= kHelperBit;
     if (!desc.vrHelpers) drop |= kVrHelperBit;
+    // THE HIDDEN-AREA MESH (kVrMaskBit, lane HAM-1). Not a helper channel at
+    // all — it is a depth-only draw at the near plane — but it is dropped by
+    // exactly the same sweep, because the requirement is the same shape: every
+    // view but a VR session's eye pair must be unable to draw it, and a scene
+    // pass is born holding every RESERVED bit. A picture that DID draw it would
+    // come out with two empty corners; see kVrMaskBit for why no capture path
+    // needs a rule of its own.
+    if (!desc.hiddenAreaMask) drop |= kVrMaskBit;
     return drop;
 }
 
