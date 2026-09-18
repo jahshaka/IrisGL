@@ -934,6 +934,13 @@ private:
     /// tangents — so the mesh is rebuilt when they move.
     XrFovf      mHamFov[2] = {};
     bool        mHamBuilt = false;
+    /// The build that exists was made in a WARM-UP frame, against the
+    /// synthetic fov the warm-up renders with (VR-WARMUP-1) — it warmed the
+    /// mask's PSO, which is what a warm-up frame is for, but its geometry and
+    /// fractions are not the runtime's. The first located frame replaces it
+    /// (the fov "moves" to the real one), and the status reports no fraction
+    /// until then.
+    bool        mHamSynthetic = false;
     Ogre::MeshPtr mHamMesh;
     Ogre::Item *mHamItem = nullptr;
     std::string mHamMeshName;
@@ -3347,9 +3354,11 @@ VrStatus VrSession::status() const {
     // handed over — the number a saving is computed from, and the one that
     // differs between a simulated HMD and a real headset.
     s.hiddenAreaSource = mHamSource.empty() ? std::string("none") : mHamSource;
+    // A warm-up build's numbers are the synthetic fov's, not the runtime's:
+    // report nothing until the real build exists.
     for (int e = 0; e < 2; ++e) {
-        s.hiddenAreaFraction[e] = mHamFraction[e];
-        s.hiddenAreaTriangles[e] = mHamTriangles[e];
+        s.hiddenAreaFraction[e] = mHamSynthetic ? 0.0f : mHamFraction[e];
+        s.hiddenAreaTriangles[e] = mHamSynthetic ? 0u : mHamTriangles[e];
     }
     for (int h = 0; h < 2; ++h) {
         s.hands[h].valid = mHandValid[h];
@@ -3506,7 +3515,8 @@ VrSession::~VrSession() {
 // and not a config file: THE RUNTIME KNOWS IT. `XR_KHR_visibility_mask` hands
 // over a triangle mesh per eye for the headset that is actually plugged in —
 // WiVRn answers it for the owner's Quest Pro and Monado's simulated HMD answers
-// it on the rig (12 vertices, 4 triangles, an eighth of the eye). The pin also
+// it on the rig (12 vertices, 4 triangles — an eighth along each edge, so 1/32
+// of the area, the 3.12 % the session logs). The pin also
 // ships `HiddenAreaMeshVrGenerator` + `HiddenAreaMeshVr.cfg`, which BUILDS a
 // shape from two circles and a nose radius per device name — but the only
 // enabled entry in that file is the Vive, so it answers for no headset we own
@@ -3540,10 +3550,12 @@ VrSession::~VrSession() {
 // SCISSOR, which `chain::applyStereo` sets to the same half as the viewport.
 //
 // WHY IT DRAWS AT RENDER QUEUE 0 AND NOT IN A PASS OF ITS OWN. A pass of its
-// own is a second full scene CULL (CompositorPassScene::execute calls
-// `_updateCullPhase01` unconditionally) for four triangles — on a heavy scene
-// that CPU cost is the same order as the GPU saving the mask buys. So the mask
-// is an object in the FIRST scene pass instead, at queue 0 SUBGROUP 0, and the
+// own runs its own cull (CompositorPassScene::execute calls
+// `_updateCullPhase01`; the pin culls per render-queue RANGE, so a queue-0-only
+// pass would walk queue 0 alone, and a pass can also reuse the previous cull's
+// data through `mReuseCullData`) plus a pass's own setup and target work, for
+// four triangles. An object in the first scene pass costs none of that — it is
+// simply the first thing drawn. So the mask is an object at queue 0 SUBGROUP 0, and the
 // sky (the only other tenant of queue 0) moved to subgroup 1 to be behind it
 // (OgreSky.cpp's tuneSkyRenderable says the same thing from the sky's side).
 // With SSR on, the pass that draws it first is the depth prepass, which is
@@ -3672,7 +3684,10 @@ void VrSession::ensureHiddenAreaMesh() {
     if (mHamBuilt && sameFov(mHamFov[0], mViews[0].fov) && sameFov(mHamFov[1], mViews[1].fov))
         return;                                                       // the common path
     if (!mScene || !mScene->sceneManager()) return;
-    if (mHamBuilt)
+    if (mHamBuilt && mHamSynthetic)
+        vrLog("hidden-area mesh: building for the runtime's fov (the warm-up build "
+              "used the synthetic one)");
+    else if (mHamBuilt)
         vrLog("hidden-area mesh: the runtime's fov moved - rebuilding");
     destroyHiddenAreaMesh();
 
@@ -3781,6 +3796,7 @@ void VrSession::ensureHiddenAreaMesh() {
         mHamFov[0] = mViews[0].fov;
         mHamFov[1] = mViews[1].fov;
         mHamBuilt = true;
+        mHamSynthetic = mWarmUpFrame;
         vrLog("hidden-area mesh: built %zu triangles, masking %.2f %% of the left eye and "
               "%.2f %% of the right (the runtime's own geometry)", numVertices / 3u,
               double(mHamFraction[0] * 100.0f), double(mHamFraction[1] * 100.0f));
@@ -3817,6 +3833,7 @@ void VrSession::destroyHiddenAreaMesh() {
     }
     mHamMeshName.clear();
     mHamBuilt = false;
+    mHamSynthetic = false;
     mHamFraction[0] = mHamFraction[1] = 0.0f;
     mHamTriangles[0] = mHamTriangles[1] = 0u;
     // The VIEW's channel is NOT touched here: it was opened at creation and
