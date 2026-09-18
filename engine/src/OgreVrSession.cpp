@@ -119,6 +119,8 @@ OgreScene *vrSessionScene(const VrSession *) { return nullptr; }
 void vrSessionSetMirror(VrSession *, OgreView *) {}
 void vrSessionSetOrigin(VrSession *, const Vec3 &, float) {}
 bool vrSessionHasBoundProfile(const VrSession *, int) { return false; }
+unsigned vrSessionHandJoints(const VrSession *, int, VrPose *, unsigned) { return 0u; }
+bool vrSessionHasLiveJoints(const VrSession *, int) { return false; }
 bool vrSessionHaptic(VrSession *, int, float, float, std::string &error) {
     error = "this build has no OpenXR support";
     return false;
@@ -733,6 +735,15 @@ private:
     /// Re-anchors the line to THIS frame's aim pose when the state names a
     /// hand, which is the same lag argument the proxies were moved here for.
     void placeRay();
+    /// THE WEARER'S OWN HANDS, BONE BY BONE, in the frame that draws them
+    /// (Scene::setVrHandBoneNodes; VR_INPUT_SPEC §7). Called from placeProxies
+    /// with this frame's located joints — the runtime's, or a test's injected
+    /// skeleton for a hand the runtime is not tracking.
+    void placeHandBones();
+    /// WHERE THIS HAND'S JOINTS COME FROM, in one place: the runtime's own
+    /// (`mJoints`) when it located them this frame, else a test's injected
+    /// skeleton. False when neither exists, which is the normal answer.
+    bool jointsFor(int hand, VrPose out[kVrHandJointCount]) const;
     void destroyActions();
 public:
     /// One buzz on one hand (Engine::vrHaptic).
@@ -741,6 +752,20 @@ public:
     /// injection refusal rule — the wearer's hardware always wins.)
     bool hasBoundProfile(int hand) const {
         return hand >= 0 && hand < 2 && !mProfilePath[hand].empty();
+    }
+    /// THIS FRAME'S JOINTS for one hand (Engine::vrHandJoints), world space.
+    /// Returns how many were written — 0 when that hand is not tracked.
+    unsigned handJoints(int hand, VrPose *out, unsigned count) const {
+        if (hand < 0 || hand >= 2 || !mJointsValid[hand]) return 0u;
+        if (out)
+            for (unsigned j = 0; j < count && j < kVrHandJointCount; ++j)
+                out[j] = mJoints[hand][j];
+        return kVrHandJointCount;
+    }
+    /// IS THE RUNTIME TRACKING that hand's skeleton right now? (The joint
+    /// injection's refusal rule — the wearer's own hand wins.)
+    bool hasLiveJoints(int hand) const {
+        return hand >= 0 && hand < 2 && mJointsValid[hand] && !mInput[hand].fromInjection;
     }
 private:
 
@@ -845,6 +870,13 @@ private:
     /// out of the grip pose disagrees with the controller it is held in.
     XrAction    mAimPoseAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     XrSpace     mAimSpace[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    /// THE PINCH POSE (stage 3, `pinch_ext/pose`): where a bare hand's
+    /// fingertips MEET, which is where that hand holds things. Bound on the
+    /// hand-interaction profile only — no controller profile has such a path —
+    /// so on a controller it never locates and the manipulation frame stays the
+    /// grip, which is the right answer for a fist round a controller.
+    XrAction    mManipPoseAction[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+    XrSpace     mManipSpace[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     /// ONE FLOAT ACTION PER ANALOGUE CONTROL, never a float and a bool for the
     /// same input: OpenXR converts a boolean input to 0.0/1.0 for a float
     /// action (the simple profile's `select/click` and WMR's `squeeze/click`
@@ -878,6 +910,14 @@ private:
     XrHandTrackerEXT mHandTracker[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     bool        mHandActions = false;   ///< the set was attached
     bool        mHandJoints = false;    ///< a joint answered this session
+    /// THIS FRAME'S SKELETON PER HAND, world space through the rig, in the
+    /// extension's joint order (stage 3). Located in full — all 26 — whenever
+    /// the tracker answers `isActive`, because the wearer's own hand is drawn
+    /// from it; the PALM joint is also the fallback the controller route has
+    /// always used for `hands[]`. Never latched: `mJointsValid` is this frame's
+    /// answer and a hand that stopped being tracked draws nothing.
+    VrPose      mJoints[2][kVrHandJointCount];
+    bool        mJointsValid[2] = { false, false };
     /// The last located hand poses, in WORLD space (the rig applied), and the
     /// runtime's own validity for THIS frame — never latched (VrPose's note).
     Ogre::Vector3    mHandPos[2] = { Ogre::Vector3::ZERO, Ogre::Vector3::ZERO };
@@ -1193,6 +1233,11 @@ void VrSession::createActions() {
     // phase-4 spelling so a runtime's own action-set logs stay comparable.
     makeAction(mHandPoseAction, XR_ACTION_TYPE_POSE_INPUT, "hand_pose", "hand pose");
     makeAction(mAimPoseAction, XR_ACTION_TYPE_POSE_INPUT, "aim_pose", "aim pose");
+    // THE MANIPULATION POSE (stage 3): the pinch point on bare hands, and
+    // NOTHING on a controller — the action exists either way, and a pose action
+    // no profile bound simply never locates (VrHandState::manipPose then stays
+    // the grip, which is what a fist round a controller holds things in).
+    makeAction(mManipPoseAction, XR_ACTION_TYPE_POSE_INPUT, "manip_pose", "manipulation pose");
     makeAction(mSelectAction, XR_ACTION_TYPE_FLOAT_INPUT, "select", "select");
     makeAction(mGrabAction, XR_ACTION_TYPE_FLOAT_INPUT, "grab", "grab");
     makeAction(mMenuAction, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "menu");
@@ -1226,8 +1271,9 @@ void VrSession::createActions() {
     //                              xrSyncActions on the rig (§17).
     //   ext/hand_interaction_ext   BARE HANDS pressing the same actions: pinch
     //                              for select, grasp for grab, aim-activate
-    //                              for menu. Bound now (the owner's answer 9),
-    //                              acted on in stage 3.
+    //                              for menu — and `pinch_ext/pose` as the frame
+    //                              a hand HOLDS things in. Bound in stage 1
+    //                              (the owner's answer 9), ACTED ON in stage 3.
     //
     // THE RIGHT HAND'S MENU IS `b/click` ON TOUCH, not `menu/click`: the touch
     // profile has a menu button on the LEFT controller only and reserves the
@@ -1237,6 +1283,9 @@ void VrSession::createActions() {
     // =======================================================================
     struct ProfileDesc {
         const char *profile;
+        /// The MANIPULATION pose's path, or nullptr where the profile has none
+        /// (every controller: a fist's manipulation frame IS its grip).
+        const char *manip;
         const char *select;       ///< nullptr = unbound on this profile
         const char *grab;
         const char *menu[2];      ///< per hand; nullptr = unbound
@@ -1246,19 +1295,27 @@ void VrSession::createActions() {
         bool        needsHandInteraction;
     };
     static const ProfileDesc kProfiles[] = {
-        { "/interaction_profiles/khr/simple_controller",
+        { "/interaction_profiles/khr/simple_controller", nullptr,
           "/input/select/click", nullptr,
           { "/input/menu/click", "/input/menu/click" },
           nullptr, nullptr, "/output/haptic", false },
-        { "/interaction_profiles/oculus/touch_controller",
+        { "/interaction_profiles/oculus/touch_controller", nullptr,
           "/input/trigger/value", "/input/squeeze/value",
           { "/input/menu/click", "/input/b/click" },
           "/input/thumbstick", "/input/thumbstick/click", "/output/haptic", false },
-        { "/interaction_profiles/microsoft/motion_controller",
+        { "/interaction_profiles/microsoft/motion_controller", nullptr,
           "/input/trigger/value", "/input/squeeze/click",
           { "/input/menu/click", "/input/menu/click" },
           "/input/thumbstick", "/input/thumbstick/click", "/output/haptic", false },
-        { "/interaction_profiles/ext/hand_interaction_ext",
+        // BARE HANDS, ACTED ON (stage 3, VR_INPUT_SPEC §7). The same actions the
+        // controllers press, off the fingers: a PINCH is the trigger, a whole-hand
+        // GRASP is the squeeze, and `aim_activate_ext` — the runtime's own "the
+        // wearer pinched at the thing they are pointing at" — is the menu button.
+        // No stick and no haptic exist on a hand (locomotion is the teleport, and
+        // a hand cannot be buzzed), so those stay unbound rather than standing in.
+        // The MANIPULATION frame is `pinch_ext/pose`, which is the one path here
+        // no controller has.
+        { "/interaction_profiles/ext/hand_interaction_ext", "/input/pinch_ext/pose",
           "/input/pinch_ext/value", "/input/grasp_ext/value",
           { "/input/aim_activate_ext/value", "/input/aim_activate_ext/value" },
           nullptr, nullptr, nullptr, true },
@@ -1289,6 +1346,7 @@ void VrSession::createActions() {
         for (int h = 0; h < 2; ++h) {
             add(mHandPoseAction[h], "/input/grip/pose", h);
             add(mAimPoseAction[h], "/input/aim/pose", h);
+            add(mManipPoseAction[h], pd.manip, h);
             add(mSelectAction[h], pd.select, h);
             add(mGrabAction[h], pd.grab, h);
             add(mMenuAction[h], pd.menu[h], h);
@@ -1343,9 +1401,15 @@ void VrSession::createActions() {
     // points, and an offset here would be this engine's opinion about somebody
     // else's controller.
     for (int h = 0; h < 2; ++h) {
-        XrAction actions[2] = { mHandPoseAction[h], mAimPoseAction[h] };
-        XrSpace *spaces[2] = { &mHandSpace[h], &mAimSpace[h] };
-        for (int k = 0; k < 2; ++k) {
+        // THREE SPACES PER HAND since stage 3: the grip, the aim, and the
+        // pinch. The third is created for every session, bound or not — an
+        // action space of an action no profile bound is legal and simply never
+        // locates, and creating it conditionally would mean a wearer who puts
+        // their controllers DOWN mid-session (the profile changes to hands
+        // then, and only then) had no pinch space to locate.
+        XrAction actions[3] = { mHandPoseAction[h], mAimPoseAction[h], mManipPoseAction[h] };
+        XrSpace *spaces[3] = { &mHandSpace[h], &mAimSpace[h], &mManipSpace[h] };
+        for (int k = 0; k < 3; ++k) {
             XrActionSpaceCreateInfo asi{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
             asi.action = actions[k];
             asi.poseInActionSpace.orientation.w = 1.0f;
@@ -1445,7 +1509,18 @@ bool VrSession::locateHands(XrTime displayTime) {
         // same question the grip pose answers — the middle of the hand — so the
         // two sources put a proxy in the same place and a wearer who puts a
         // controller down does not see their hand jump.
-        if (!got && mHandTracker[h] != XR_NULL_HANDLE && mBoot->LocateHandJoints) {
+        //
+        // ...AND THE WHOLE SKELETON, NOT JUST THE PALM (stage 3). The locate is
+        // ONE call for all twenty-six joints whether a caller wants one of them
+        // or all of them, so the joints are kept: the palm answers "where is
+        // that hand" for `hands[]` exactly as it did, and the other
+        // twenty-five are what the wearer's own hand is DRAWN from
+        // (placeHandBones). Asked whenever there is a tracker — no longer only
+        // when the controller route came up empty — because a hand can be
+        // tracked and bound at the same time on a runtime that offers both, and
+        // the drawer decides which of the two it shows from the PROFILE.
+        mJointsValid[h] = false;
+        if (mHandTracker[h] != XR_NULL_HANDLE && mBoot->LocateHandJoints) {
             XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT] = {};
             XrHandJointLocationsEXT locs{ XR_TYPE_HAND_JOINT_LOCATIONS_EXT };
             locs.jointCount = XR_HAND_JOINT_COUNT_EXT;
@@ -1455,23 +1530,57 @@ bool VrSession::locateHands(XrTime displayTime) {
             li.time = displayTime;
             if (XR_SUCCEEDED(mBoot->LocateHandJoints(mHandTracker[h], &li, &locs)) &&
                 locs.isActive == XR_TRUE) {
-                const XrHandJointLocationEXT &palm = joints[XR_HAND_JOINT_PALM_EXT];
-                if ((palm.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
-                    (palm.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
-                    pos = toOgreVec(palm.pose.position);
-                    rot = toOgreQuat(palm.pose.orientation);
-                    got = true;
-                    mHandJoints = true;
+                for (unsigned j = 0; j < kVrHandJointCount &&
+                                     j < unsigned(XR_HAND_JOINT_COUNT_EXT); ++j) {
+                    const XrHandJointLocationEXT &jl = joints[j];
+                    VrPose &out = mJoints[h][j];
+                    out = VrPose();
+                    if (!(jl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ||
+                        !(jl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+                        continue;
+                    // THROUGH THE RIG, exactly like the head and the grip pose:
+                    // a joint composed any other way drifts away from the hand
+                    // it belongs to as the wearer walks.
+                    const Ogre::Vector3 p = mOriginPos +
+                        mOriginRot * (toOgreVec(jl.pose.position) * mConfig.worldScale);
+                    const Ogre::Quaternion q = mOriginRot * toOgreQuat(jl.pose.orientation);
+                    out.position = Vec3(p.x, p.y, p.z);
+                    out.rotation = Quat(q.x, q.y, q.z, q.w);
+                    out.valid = true;
                 }
+                mJointsValid[h] = mJoints[h][XR_HAND_JOINT_PALM_EXT].valid;
+                if (mJointsValid[h]) mHandJoints = true;
             }
+        }
+        // The PALM is the hand-tracking answer to the grip pose's question, and
+        // it is a FALLBACK: a hand holding a controller is located by the
+        // controller, so this runs only when that route came up empty.
+        bool palmIsWorld = false;
+        if (!got && mJointsValid[h]) {
+            const VrPose &palm = mJoints[h][XR_HAND_JOINT_PALM_EXT];
+            pos = Ogre::Vector3(palm.position.x, palm.position.y, palm.position.z);
+            rot = Ogre::Quaternion(palm.rotation.w, palm.rotation.x, palm.rotation.y,
+                                   palm.rotation.z);
+            // ALREADY THROUGH THE RIG (the joints are stored in world space,
+            // because that is what a drawer needs), so the tail below must NOT
+            // compose it a second time — a palm turned and carried twice over
+            // walks away from the head it belongs to.
+            palmIsWorld = true;
+            got = true;
         }
         if (!got) continue;
         // THROUGH THE RIG, EXACTLY LIKE THE HEAD (beginFrame's note): the world
         // scale multiplies the OFFSET inside the room, the rig's yaw turns it,
         // and the rig's position carries it. A hand composed any other way
-        // drifts away from the head it belongs to as the wearer walks.
-        mHandPos[h] = mOriginPos + mOriginRot * (pos * mConfig.worldScale);
-        mHandRot[h] = mOriginRot * rot;
+        // drifts away from the head it belongs to as the wearer walks. (The
+        // palm route composed itself, joint by joint, above.)
+        if (palmIsWorld) {
+            mHandPos[h] = pos;
+            mHandRot[h] = rot;
+        } else {
+            mHandPos[h] = mOriginPos + mOriginRot * (pos * mConfig.worldScale);
+            mHandRot[h] = mOriginRot * rot;
+        }
         mHandValid[h] = true;
     }
 
@@ -1550,9 +1659,14 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
             y = st.currentState.y;
         }
     };
-    // ONE THRESHOLD, TWO EDGES: 0.5 to press, 0.4 to release.
-    auto press = [](float v, bool &latch) {
-        latch = latch ? (v > 0.4f) : (v >= 0.5f);
+    // ONE THRESHOLD, TWO EDGES — AND WHICH PAIR DEPENDS ON WHAT THE HAND IS
+    // (stage 3): 0.5/0.4 for a controller's trigger, 0.7/0.3 for a PINCH, which
+    // has no detent and no end stop and whose value wanders while two
+    // fingertips are merely close (Types.h spells out why, once, where a header
+    // suite can assert it).
+    auto press = [](float v, bool &latch, bool hands) {
+        latch = vrPressLatched(v, latch, hands ? kVrPinchPressOn : kVrTriggerPressOn,
+                               hands ? kVrPinchPressOff : kVrTriggerPressOff);
         return latch;
     };
 
@@ -1597,6 +1711,12 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
                 // would.
                 in = injected;
                 in.fromInjection = true;
+                // A SAMPLE THAT SAID NOTHING ABOUT ITS MANIPULATION FRAME
+                // HOLDS BY ITS GRIP (the same rule the runtime path applies),
+                // and a sample that named a PROFILE keeps it: that is how the
+                // hand/controller half of stage 3 is driven with no runtime.
+                if (!in.manipPose.valid) in.manipPose = in.grip;
+                in.jointsTracked = mEngine->vrInjectedJoints(h, nullptr, 0u);
                 mHandValid[h] = in.grip.valid;
                 if (in.grip.valid) {
                     mHandPos[h] = Ogre::Vector3(in.grip.position.x, in.grip.position.y,
@@ -1613,6 +1733,13 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
             }
         }
 
+        // WHAT THIS HAND IS, BEFORE ANYTHING IS READ OFF IT (stage 3). The
+        // profile decides the press thresholds and the manipulation frame, and
+        // it is reported so a host can draw the right thing for THIS hand — a
+        // wearer may hold a controller in one and nothing in the other.
+        in.profile.assign(mProfilePath[h].c_str());
+        const bool hands = vrIsHandProfile(in.profile.c_str());
+        VrPose pinch;
         if (controllers) {
             if (mAimSpace[h] != XR_NULL_HANDLE) {
                 XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
@@ -1621,14 +1748,25 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
                     (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
                     toWorld(loc.pose, in.aim);
             }
+            // THE PINCH POSE, ASKED FOR ONLY ON A HAND. On a controller the
+            // action is bound by no profile, so the locate would answer nothing
+            // — and asking anyway is one IPC round trip per hand per frame for
+            // a "no" that the profile already gave us.
+            if (hands && mManipSpace[h] != XR_NULL_HANDLE) {
+                XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
+                if (XR_SUCCEEDED(xrLocateSpace(mManipSpace[h], mSpace, displayTime, &loc)) &&
+                    (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                    (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+                    toWorld(loc.pose, pinch);
+            }
             readFloat(mSelectAction[h], in.select);
             readFloat(mGrabAction[h], in.grab);
             readBool(mMenuAction[h], in.menuPressed);
             readStick(mStickAction[h], in.stickX, in.stickY);
             readBool(mStickClickAction[h], in.stickPressed);
         }
-        in.selectPressed = press(in.select, mSelectLatch[h]);
-        in.grabPressed = press(in.grab, mGrabLatch[h]);
+        in.selectPressed = press(in.select, mSelectLatch[h], hands);
+        in.grabPressed = press(in.grab, mGrabLatch[h], hands);
         // THE GRIP IS THE SAME POSE `hands[]` REPORTS — located above, by the
         // controller or by the palm joint. Reported twice because `hands` is
         // what phase 4's hosts read and the pair is what a gesture needs.
@@ -1637,6 +1775,15 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
             in.grip.position = Vec3(mHandPos[h].x, mHandPos[h].y, mHandPos[h].z);
             in.grip.rotation = Quat(mHandRot[h].x, mHandRot[h].y, mHandRot[h].z, mHandRot[h].w);
         }
+        // WHERE THIS HAND HOLDS THINGS (VrHandState::manipPose): the PINCH
+        // POINT on bare fingers, the grip in a fist — chosen here, once, from
+        // the profile, so nothing above the boundary has to know which the
+        // wearer has. With no pinch pose located it IS the grip, which is also
+        // what a hand whose pinch the runtime lost this frame should hold with.
+        in.manipPose = pinch.valid ? pinch : in.grip;
+        // IS THE SKELETON BEING TRACKED? (The cheap bit; the joints themselves
+        // are fetched on demand — Engine::vrHandJoints.)
+        in.jointsTracked = mJointsValid[h];
         // A HAND IS "REPORTED" WHEN EITHER POSE IS: a controller whose aim
         // located but whose grip did not is still a hand in the room, and a
         // hand-tracked palm with no aim is too.
@@ -1751,6 +1898,70 @@ void VrSession::placeProxies() {
                                  Vec3(1.0f, 1.0f, 1.0f));
     }
     placeRay();
+    placeHandBones();
+}
+
+// WHERE A HAND'S JOINTS COME FROM, IN ONE PLACE (stage 3).
+//
+// THE RUNTIME'S OWN ALWAYS WIN. A test's injected skeleton stands in only for a
+// hand the runtime is not tracking — the same rule the controls follow, for the
+// same reason: a smoke in a headset must never be looking at a script's hand.
+bool VrSession::jointsFor(int hand, VrPose out[kVrHandJointCount]) const {
+    if (hand < 0 || hand >= 2) return false;
+    if (mJointsValid[hand]) {
+        for (unsigned j = 0; j < kVrHandJointCount; ++j) out[j] = mJoints[hand][j];
+        return true;
+    }
+    return mEngine && mEngine->vrInjectedJoints(hand, out, kVrHandJointCount);
+}
+
+// THE WEARER'S OWN HANDS, BONE BY BONE, INSIDE THE FRAME THAT DRAWS THEM
+// (Scene::setVrHandBoneNodes; VR_INPUT_SPEC §7) — the third thing placed here
+// and the third time for the reason placeProxies spells out: the joints do not
+// exist until this frame's locate.
+//
+// AND THE TWO DRAWINGS ARE ALTERNATIVES, NEVER BOTH. A hand with a CONTROLLER
+// profile bound is drawn as that controller (the mirror's model or its wand)
+// and its skeleton is hidden, even on a runtime generous enough to report
+// synthetic joints for a hand holding a thing: two hands' worth of furniture in
+// one hand's place is worse than either. A hand with a hand profile — or with
+// nothing bound at all, which is what a wearer with no controllers reports — is
+// drawn from its joints.
+//
+// WHETHER THE BONES EXIST IS THE HOST'S (the proxy switch, the mirror): this
+// hides and places what it is given and never creates anything, so
+// `vr.proxies(false)` takes the skeleton away with the wands by unregistering
+// the nodes, and nothing here can put one back (the same asymmetry rule as the
+// proxies').
+void VrSession::placeHandBones() {
+    if (!mScene) return;
+    for (int h = 0; h < 2; ++h) {
+        NodeId nodes[kVrHandBoneCount] = {};
+        const unsigned count = mScene->vrHandBoneNodes(unsigned(h), nodes,
+                                                       unsigned(kVrHandBoneCount));
+        if (count == 0u) continue;
+        const bool controller = !mInput[h].profile.empty() &&
+                                !vrIsHandProfile(mInput[h].profile.c_str());
+        VrPose joints[kVrHandJointCount];
+        const bool draw = !controller && jointsFor(h, joints);
+        for (unsigned b = 0; b < count && b < unsigned(kVrHandBoneCount); ++b) {
+            if (!nodes[b]) continue;
+            const VrHandBone &bone = kVrHandBones[b];
+            Vec3 position, scale;
+            Quat rotation;
+            // A JOINT THE RUNTIME DID NOT LOCATE TAKES ITS OWN BONES WITH IT:
+            // a half-occluded hand really does report some joints and not
+            // others, and a segment drawn to a joint nobody located would run
+            // to wherever that joint was last seen.
+            const bool ok = draw && joints[bone.from].valid && joints[bone.to].valid &&
+                            vrBoneTransform(joints[bone.from].position,
+                                            joints[bone.to].position, position, rotation,
+                                            scale);
+            if (!ok) { mScene->setNodeVisible(nodes[b], false); continue; }
+            mScene->setNodeTransform(nodes[b], position, rotation, scale);
+            mScene->setNodeVisible(nodes[b], true);
+        }
+    }
 }
 
 // THE RAY AND ITS HIT MARKER (VR_INPUT_SPEC §3), in the same frame and for the
@@ -1849,10 +2060,13 @@ void VrSession::destroyActions() {
         mHandSpace[h] = XR_NULL_HANDLE;
         if (mAimSpace[h] != XR_NULL_HANDLE) xrDestroySpace(mAimSpace[h]);
         mAimSpace[h] = XR_NULL_HANDLE;
+        if (mManipSpace[h] != XR_NULL_HANDLE) xrDestroySpace(mManipSpace[h]);
+        mManipSpace[h] = XR_NULL_HANDLE;
         // The ACTIONS are destroyed by their set (the spec says so); naming
         // them here as well would be a double destroy.
         mHandPoseAction[h] = XR_NULL_HANDLE;
         mAimPoseAction[h] = XR_NULL_HANDLE;
+        mManipPoseAction[h] = XR_NULL_HANDLE;
         mSelectAction[h] = XR_NULL_HANDLE;
         mGrabAction[h] = XR_NULL_HANDLE;
         mMenuAction[h] = XR_NULL_HANDLE;
@@ -1860,6 +2074,7 @@ void VrSession::destroyActions() {
         mStickClickAction[h] = XR_NULL_HANDLE;
         mHapticAction[h] = XR_NULL_HANDLE;
         mHandValid[h] = false;
+        mJointsValid[h] = false;
         mInput[h] = VrHandState();
         mSelectLatch[h] = mGrabLatch[h] = false;
         mProfilePath[h].clear();
@@ -3291,6 +3506,12 @@ bool vrSessionEyeScreenshot(VrSession *s, unsigned eye, Image &out, std::string 
 }
 bool vrSessionHasBoundProfile(const VrSession *s, int hand) {
     return s && s->hasBoundProfile(hand);
+}
+unsigned vrSessionHandJoints(const VrSession *s, int hand, VrPose *out, unsigned count) {
+    return s ? s->handJoints(hand, out, count) : 0u;
+}
+bool vrSessionHasLiveJoints(const VrSession *s, int hand) {
+    return s && s->hasLiveJoints(hand);
 }
 bool vrSessionHaptic(VrSession *s, int hand, float amplitude01, float seconds,
                      std::string &error) {

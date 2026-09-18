@@ -819,6 +819,30 @@ void OgreScene::vrRayNodes(NodeId out[2]) const {
     out[1] = mVrRayNode[1];
 }
 
+// ...AND THE WEARER'S OWN HANDS, BONE BY BONE (Scene::setVrHandBoneNodes,
+// VR_INPUT_SPEC §7, stage 3). Twenty-four ids per hand and nothing else: the
+// segments are ONE unit line mesh the mirror made, shared by every bone of both
+// hands, and the running session stands each one between two joints inside the
+// frame that draws it (vrBoneTransform). A scene that never sees a tracked hand
+// carries two zero counts.
+void OgreScene::setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) {
+    if (hand >= 2u) return;
+    const unsigned n = (!nodes || count == 0u)
+                           ? 0u
+                           : (count < kVrHandBoneCount ? count : unsigned(kVrHandBoneCount));
+    for (unsigned b = 0; b < kVrHandBoneCount; ++b)
+        mVrHandBoneNode[hand][b] = b < n ? nodes[b] : 0;
+    mVrHandBones[hand] = n;
+}
+
+unsigned OgreScene::vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const {
+    if (hand >= 2u) return 0u;
+    const unsigned n = mVrHandBones[hand];
+    if (out)
+        for (unsigned b = 0; b < count && b < n; ++b) out[b] = mVrHandBoneNode[hand][b];
+    return n;
+}
+
 // WHERE A NODE ACTUALLY IS. `_getDerived*Updated` walks up to whatever parent
 // chain the node hangs from and brings the derived transform up to date first,
 // which is the whole reason this is not `node->getPosition()`: the caller is

@@ -997,6 +997,29 @@ public:
     virtual void        setVrRayNodes(NodeId line, NodeId marker) = 0;
     virtual void        vrRayNodes(NodeId out[2]) const = 0;
 
+    /// THE WEARER'S OWN HAND, BONE BY BONE (VR_INPUT_SPEC §7, phase 4b stage
+    /// 3) — the third arrangement of the same shape, for the third time for the
+    /// same reason: the host makes the nodes and owns their mesh, their
+    /// material and their visibility, and a running session PLACES them inside
+    /// the frame that draws them, because a tracked hand's joints do not exist
+    /// until xrWaitFrame has returned.
+    ///
+    /// `count` nodes for one hand, in the order of `kVrHandBones` (24 of them):
+    /// each is a UNIT SEGMENT down -Z that the writer stands at one joint,
+    /// turns onto the next and scales to the distance between them
+    /// (`vrBoneTransform`, the one definition both writers call). A hand the
+    /// runtime is not tracking has every one of its bones HIDDEN, and so has a
+    /// hand that is holding a controller — the controller model is then the
+    /// honest drawing, and the two never show at once.
+    ///
+    /// Passing `count` 0 (or a null list) unregisters that hand's bones.
+    virtual void        setVrHandBoneNodes(unsigned hand, const NodeId *nodes,
+                                          unsigned count) = 0;
+    /// How many bone nodes that hand has registered, written into `out` (up to
+    /// `count`). 0 = none registered.
+    virtual unsigned    vrHandBoneNodes(unsigned hand, NodeId *out,
+                                        unsigned count) const = 0;
+
     /// WHERE A NODE IS RIGHT NOW, in WORLD space, as the graph holds it.
     ///
     /// The read half of setNodeTransform, for the things a host cannot compute
@@ -1804,6 +1827,33 @@ public:
     /// wearer was there", and a `false` cannot outlive the session it was
     /// written for.
     virtual void vrInjectFocus(bool focused) = 0;
+    /// WHERE ONE HAND'S JOINTS ARE, in WORLD space through the rig (stage 3,
+    /// `XR_EXT_hand_tracking`). Writes up to `count` poses in the extension's
+    /// own joint order (see `kVrHandJointCount`) and returns how many it wrote:
+    /// 0 when that hand is not being tracked this frame, which is the normal
+    /// answer for a wearer holding controllers and for every runtime that has
+    /// no hand tracking at all.
+    ///
+    /// NOT ON `VrStatus`, deliberately: fifty-two poses is two kilobytes on a
+    /// value every host copies several times a frame, for an answer only a
+    /// drawer and a test ever want. `VrHandState::jointsTracked` is the cheap
+    /// bit that says whether asking is worth it.
+    ///
+    /// Each pose carries its own `valid` (a runtime locates a hand joint by
+    /// joint, and a half-occluded hand really does report some and not others).
+    virtual unsigned vrHandJoints(int hand, VrPose *out, unsigned count) const = 0;
+    /// TEST-FACING: STAND IN FOR A TRACKED HAND'S JOINTS (`vr.inject`'s
+    /// `joints`), on the same terms as `vrInjectInput` — this box's simulated
+    /// runtime has no hands at all (Monado: `hand_tracking_supported = false`),
+    /// so the wearer's own skeleton is the one thing in stage 3 that cannot be
+    /// driven by any runtime we can gate on.
+    ///
+    /// `count` poses in the extension's joint order, up to `kVrHandJointCount`;
+    /// `count` 0 (or a null list) stops injecting that hand's joints. THE
+    /// WEARER'S HARDWARE WINS, exactly as it does for the controls: a hand the
+    /// runtime is really tracking ignores the injection unless
+    /// JAHSHAKA_VR_TEST_INJECT is set.
+    virtual bool vrInjectJoints(int hand, const VrPose *joints, unsigned count) = 0;
     /// THE ONE OUTPUT: buzz a controller (product, not a test hook).
     ///
     /// `amplitude01` is clamped to 0..1 and `seconds` to a sane pulse; the

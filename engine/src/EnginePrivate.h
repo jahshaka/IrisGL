@@ -2839,6 +2839,8 @@ public:
     void vrProxyNodes(NodeId out[2]) const override;
     void setVrRayNodes(NodeId line, NodeId marker) override;
     void vrRayNodes(NodeId out[2]) const override;
+    void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
+    unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeBackdrop(NodeId id) const override;
     void setNodeLightMask(NodeId id, unsigned mask) override;
@@ -4302,6 +4304,13 @@ private:
     /// VR_INPUT_SPEC §3): the same arrangement as the proxies above, placed by
     /// the running session from `Engine::setVrRay`'s state.
     NodeId              mVrRayNode[2] = { 0, 0 };
+    /// THE HOST'S HAND-BONE NODES, per hand, in `kVrHandBones` order
+    /// (Scene::setVrHandBoneNodes, VR_INPUT_SPEC §7): the same arrangement as
+    /// the two above — ids and nothing else; the segments, their one shared
+    /// mesh and their material are the mirror's. `mVrHandBones[h]` is how many
+    /// of the row are registered (0 = this hand draws no skeleton).
+    NodeId              mVrHandBoneNode[2][kVrHandBoneCount] = {};
+    unsigned            mVrHandBones[2] = { 0u, 0u };
     std::map<MeshId, MeshRec> mMeshes;
     /// ATOM stage 1: THE LOD ERRORS BY OGRE MESH — the one lookup that takes an
     /// `Ogre::Item *` (all a voxeliser or a proxy consumer has) to the baked
@@ -5459,6 +5468,13 @@ bool    vrSessionEyeScreenshot(VrSession *, unsigned eye, Image &out, std::strin
 /// HAS THE RUNTIME BOUND A REAL PROFILE for this hand? (The injection refusal
 /// rule, VR_INPUT_SPEC §2.4 I1: the wearer's own hardware always wins.)
 bool    vrSessionHasBoundProfile(const VrSession *, int hand);
+/// THIS FRAME'S JOINTS for one hand, world space through the rig, in the
+/// extension's order (stage 3; `Engine::vrHandJoints`). 0 = that hand's
+/// skeleton is not being tracked this frame.
+unsigned vrSessionHandJoints(const VrSession *, int hand, VrPose *out, unsigned count);
+/// IS THE RUNTIME REALLY TRACKING that hand's skeleton? (The injection refusal
+/// rule for joints: a wearer's own hand always wins over a script's.)
+bool    vrSessionHasLiveJoints(const VrSession *, int hand);
 /// THE ONE READING OF `JAHSHAKA_VR_TEST_INJECT` (VR_INPUT_SPEC §2.4 I1), for
 /// the two places that enforce the refusal rule: the WRITE (Engine::
 /// vrInjectInput refuses one) and the per-frame READ (the session ignores and
@@ -5531,6 +5547,8 @@ public:
     bool vrEyeScreenshot(unsigned eye, Image &out) override;
     bool vrInjectInput(int hand, const VrHandState &state) override;
     void vrInjectFocus(bool focused) override { mVrInjectFocus = focused; }
+    unsigned vrHandJoints(int hand, VrPose *out, unsigned count) const override;
+    bool vrInjectJoints(int hand, const VrPose *joints, unsigned count) override;
     bool vrHaptic(int hand, float amplitude01, float seconds) override;
     void setVrRay(const VrRayState &ray) override { mVrRay = ray; }
     const VrRayState &vrRay() const override { return mVrRay; }
@@ -5554,6 +5572,11 @@ public:
         if (hand < 0 || hand >= int(VrHandCount)) return;
         mVrInjected[hand] = false;
         mVrInject[hand] = VrHandState();
+        // ...AND THAT HAND'S INJECTED SKELETON WITH IT (stage 3). The joints
+        // are part of the same fiction — a hand a script put in the room — and
+        // a skeleton left behind after the hand was withdrawn would be drawn
+        // in the wearer's eyes with nothing holding it up.
+        mVrJointsInjected[hand] = false;
     }
     void vrClearInjectedInput() {
         for (unsigned h = 0; h < VrHandCount; ++h) vrClearInjectedInput(int(h));
@@ -5568,6 +5591,16 @@ public:
         return false;
     }
     bool vrInjectedFocus() const { return mVrInjectFocus; }
+    /// THE INJECTED SKELETON FOR ONE HAND, or false when none is live (stage
+    /// 3). Asked by the session (which prefers the runtime's own joints and
+    /// falls back to this) and by `vrHandJoints` with no session at all.
+    bool vrInjectedJoints(int hand, VrPose *out, unsigned count) const {
+        if (hand < 0 || hand >= int(VrHandCount) || !mVrJointsInjected[hand]) return false;
+        if (!out || count == 0u) return true;
+        const unsigned n = count < kVrHandJointCount ? count : kVrHandJointCount;
+        for (unsigned j = 0; j < n; ++j) out[j] = mVrInjectJoints[hand][j];
+        return true;
+    }
     /// The live session, for the TU that owns it and for the frame. Null when
     /// none runs.
     VrSession *vrSession() const { return mVrSession; }
@@ -5647,6 +5680,12 @@ public:
     /// process, because focus is the session's and not a hand's. True by
     /// default and reset with the store.
     bool        mVrInjectFocus = true;
+    /// THE INJECTED SKELETONS (Engine::vrInjectJoints, stage 3), beside the
+    /// samples and cleared with them. Two hands' worth of joints is 1.7 kB of
+    /// engine state that only a test ever writes — it is here rather than on
+    /// `VrStatus` precisely so that no host pays for it per frame.
+    VrPose      mVrInjectJoints[VrHandCount][kVrHandJointCount];
+    bool        mVrJointsInjected[VrHandCount] = { false, false };
     VrRayState  mVrRay;
     /// ARE WE INSIDE renderOneFrame? (VR-4-FIX's second read, finding 3.)
     /// Nothing in this tree destroys a scene from inside a frame — and if
