@@ -3097,6 +3097,20 @@ enum class VrMirrorMode {
     Both      ///< both halves, squeezed into the mirror's own aspect
 };
 
+/// WHAT IS ON THE DESKTOP RIGHT NOW (lane MIRROR-LIVE-1, the owner's F2 of the
+/// push-#50 smoke). `VrMirrorMode` is the WISH — which half of the headset's
+/// picture to copy — and this is the ANSWER for the frame that just ran:
+/// either the eye's copy (one render pipeline, the desktop View switched off)
+/// or the desktop's own live camera (the runtime wants no picture, so there is
+/// no eye to copy and the editor draws its own).
+///
+/// The rule that chooses between them is stated once, in
+/// `VrSession::setDesktopShowsEye`.
+enum class VrDesktopPicture {
+    Own = 0,  ///< the desktop View is drawing its own camera
+    Eye       ///< the desktop View is off and the mirror paints the headset's eye
+};
+
 /// What the runtime is and what it wants — filled once at boot (the identity
 /// half) and completed when a session begins (the size/refresh half, which
 /// needs no session on any runtime measured but is reported from one place).
@@ -3600,6 +3614,15 @@ struct VrStatus {
     unsigned           warmUpFrames = 0;
     float              warmUpMs = 0.0f;
     VrMirrorMode       mirror = VrMirrorMode::None;
+    /// AND WHICH OF THE TWO PICTURES IS ACTUALLY ON THE DESKTOP (lane
+    /// MIRROR-LIVE-1). `mirror` above is the host's wish for the whole session;
+    /// this is what the last frame did with it, and it moves within one frame
+    /// of the runtime starting or stopping to ask for pictures. `Own` with a
+    /// mirror mode set means the runtime is not rendering (the headset is off
+    /// the head, the dashboard is up, tracking is gone) and the desktop has
+    /// taken its own camera back — which is what a person looking at the screen
+    /// at that moment needs to see.
+    VrDesktopPicture   mirrorShowing = VrDesktopPicture::Own;
     float              worldScale = 1.0f;
     /// Whether the per-eye PROJECTIONS differ, i.e. whether the runtime gave
     /// the two eyes different fovs. Monado's simulated HMD does not (both eyes
