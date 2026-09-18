@@ -60,6 +60,45 @@ bool rayTracingModeFromName(const QString &name, RayTracingMode &out)
     return false;
 }
 
+// THE VR WEARER'S LOCOMOTION, as stable strings (scene.h VrFlyMode /
+// VrTurnMode). The file, the `world.vr` and `vr.locomotion` verbs and the World
+// panel's VR section all spell them exactly one way.
+const char *vrFlyModeName(VrFlyMode mode)
+{
+    switch (mode) {
+    case VrFlyMode::Gaze:  return "gaze";
+    case VrFlyMode::Level: return "level";
+    case VrFlyMode::Aim: break;
+    }
+    return "aim";
+}
+
+bool vrFlyModeFromName(const QString &name, VrFlyMode &out)
+{
+    const QString n = name.trimmed().toLower();
+    if (n == QLatin1String("aim"))   { out = VrFlyMode::Aim;   return true; }
+    if (n == QLatin1String("gaze"))  { out = VrFlyMode::Gaze;  return true; }
+    if (n == QLatin1String("level")) { out = VrFlyMode::Level; return true; }
+    return false;
+}
+
+const char *vrTurnModeName(VrTurnMode mode)
+{
+    switch (mode) {
+    case VrTurnMode::Smooth: return "smooth";
+    case VrTurnMode::Snap: break;
+    }
+    return "snap";
+}
+
+bool vrTurnModeFromName(const QString &name, VrTurnMode &out)
+{
+    const QString n = name.trimmed().toLower();
+    if (n == QLatin1String("snap"))   { out = VrTurnMode::Snap;   return true; }
+    if (n == QLatin1String("smooth")) { out = VrTurnMode::Smooth; return true; }
+    return false;
+}
+
 // The ENGINE's own defaults (SKY-GPU): these are Ogre AtmosphereNpr's preset
 // values, which is what the sky is drawn with. The dials they replace described
 // a CPU bake that no longer exists.

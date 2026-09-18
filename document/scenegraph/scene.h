@@ -91,6 +91,63 @@ const char *rayTracingModeName(RayTracingMode mode);
 /// the verb REFUSES rather than guessing, and the reader keeps its default.
 bool rayTracingModeFromName(const QString &name, RayTracingMode &out);
 
+// ---- THE VR WEARER'S LOCOMOTION (VR-WORLD-1, owner request 2026-09-18) ------
+//
+// HOW A WEARER MOVES IS A PROPERTY OF THE PROJECT, not of the machine and not
+// of the session. A world authored at architectural scale is walked at a
+// different pace from a tabletop one, and the author who chose that pace
+// expects it back the next time they put the headset on — which is exactly the
+// argument that makes it a document field rather than a preference (the same
+// one `rayTracing` above carries). `vr.locomotion` still overrides any of them
+// FOR ONE SESSION, and an override writes nothing here.
+//
+// SERIALIZED AS STABLE STRINGS, like the modes above, so the ints stay free.
+
+/// WHICH DIRECTION THE STICK FLIES. `Aim` follows the stick hand's own aim ray
+/// (Unreal's VR editor, and the owner's pick); `Gaze` follows where the wearer
+/// is looking; `Level` walks along the head's heading with the pitch thrown
+/// away, which is the comfort option — a wearer who cannot fly downwards by
+/// looking down cannot fall through their own floor.
+enum class VrFlyMode : int
+{
+    Aim   = 0,
+    Gaze  = 1,
+    Level = 2
+};
+
+/// HOW THE STICK TURNS THE WEARER. `Snap` steps by whole degrees per flick
+/// (what nearly every shipping VR tool does, because a continuous turn makes a
+/// proportion of people sick); `Smooth` turns continuously while the stick is
+/// held.
+enum class VrTurnMode : int
+{
+    Snap   = 0,
+    Smooth = 1
+};
+
+const char *vrFlyModeName(VrFlyMode mode);
+bool vrFlyModeFromName(const QString &name, VrFlyMode &out);
+const char *vrTurnModeName(VrTurnMode mode);
+bool vrTurnModeFromName(const QString &name, VrTurnMode &out);
+
+/// THE DEFAULTS, IN ONE PLACE — used by the Scene constructor and by anything
+/// that has to answer before a scene exists (services/vrworld.h resolves a
+/// session from these when there is no document yet). A second definition of a
+/// default is the defect `document.reader_defaults` exists to catch.
+///
+/// 15 METRES PER SECOND is the lead's pick for a VR fly (2026-09-18): a brisk
+/// walk is 1.5, a car in town is 14, and a wearer crossing an authored set
+/// wants to be there — while a stick that flies faster than about 20 m/s is
+/// reliably reported as unpleasant in a headset. It replaces the desktop
+/// editor's 8 u/s camera speed, which the headset borrowed only because
+/// nothing else existed.
+inline constexpr float kDefaultVrFlySpeed = 15.0f;
+/// 30 degrees per flick — twelve of them is a full circle, small enough to aim
+/// with and large enough to be worth the gesture.
+inline constexpr float kDefaultVrSnapTurnDegrees = 30.0f;
+/// 90 degrees per second at full stick.
+inline constexpr float kDefaultVrSmoothTurnDegreesPerSecond = 90.0f;
+
 enum class SceneRenderFlags : int
 {
     Vr = 0x1
@@ -831,6 +888,28 @@ public:
 	/// asset; pushed to the renderer by SceneMirror, which is where it meets
 	/// the machine's own answer. Default Auto.
 	RayTracingMode rayTracing = RayTracingMode::Auto;
+
+	// ---- VR (VR-WORLD-1) -----------------------------------------------
+	// THE PROJECT'S VR settings — what a session adopts as its defaults when
+	// it begins (services/vrworld.h), overridable for one session by
+	// `vr.locomotion` and written only by `world.vr` and the World panel's VR
+	// section. Nothing here reaches the renderer, so no picture depends on it.
+
+	/// The wearer's fly speed in METRES PER SECOND (the document's units are
+	/// metres, and the stick's boost multiplies it).
+	float vrFlySpeed = kDefaultVrFlySpeed;
+	/// Which direction the stick flies (see VrFlyMode).
+	VrFlyMode vrFlyMode = VrFlyMode::Aim;
+	/// Snap or smooth turning (see VrTurnMode).
+	VrTurnMode vrTurnMode = VrTurnMode::Snap;
+	/// Degrees per flick in Snap.
+	float vrSnapTurnDegrees = kDefaultVrSnapTurnDegrees;
+	/// Degrees per second at full stick in Smooth.
+	float vrSmoothTurnDegreesPerSecond = kDefaultVrSmoothTurnDegreesPerSecond;
+	/// WHICH HAND MANIPULATES. True (the default) = the right hand points,
+	/// selects and grabs while the LEFT stick walks and turns; false swaps both
+	/// roles at once. ONE flag, because two would eventually disagree.
+	bool vrDominantRight = true;
 
 
 	// ---- THE SUN -------------------------------------------------------
