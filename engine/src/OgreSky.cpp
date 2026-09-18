@@ -11,6 +11,8 @@
 #include <vector>
 #include "EnginePrivate.h"
 
+#include <cstdlib>
+
 #include <OgreBitwise.h>
 #include <OgreMaterial.h>
 #include <OgreTechnique.h>
@@ -186,6 +188,7 @@ bool OgreScene::setSky(const SkyDesc &desc) {
                 // must go to zero in the same push that removed the sky.
                 mSkyCapturePending = false;
                 mSkyShValid = false;
+                destroySkyShTicket();
             }
             // Both of these paths REPLACE the reflection cubemap themselves —
             // destroySky() unbinds and frees it, and a cubemap sky rebuilds it
@@ -756,16 +759,154 @@ void OgreScene::applyPendingSkyCapture() {
     mSkyShValid = false;
 }
 
-// The ambient, read back from the captured cube's 32^2 mip: 6 x 1024 texels,
-// once per sky change. It replaces an integral the host ran over the sky's
-// FULL equirect image (a 4K HDRI is 8.4 M texels x 9 bands on the UI thread,
-// bounded to 256 wide by LIGHTS-2 and now not run at all).
+// The ambient, read off the captured cube's 32^2 mip: 6 x 1024 texels, once per
+// sky change. It replaces an integral the host ran over the sky's FULL equirect
+// image (a 4K HDRI is 8.4 M texels x 9 bands on the UI thread, bounded to 256
+// wide by LIGHTS-2 and now not run at all).
 //
 // THE READBACK RULES, both learned the hard way and both load-bearing:
 // `_autogenerateMipmaps` only RECORDS its blits, and an AsyncTextureTicket
 // issued before the command buffer is submitted reads the allocation's PREVIOUS
 // contents — not zeros, a destroyed texture's pixels. flushCommands() submits.
+//
+// ...WHICH IS WHY THE FIRST ANSWER IS SYNCHRONOUS AND EVERY LATER ONE IS NOT
+// (render audit 2026-09-17 ON-14, lane ENGINE-SMALL-A). `flushCommands()` +
+// `map()` is a GPU->CPU WAIT ON THE UI THREAD — it submits everything recorded
+// so far in the frame and blocks until the copy of the capture has executed —
+// and it ran on every sky CHANGE, i.e. on every frame of a sun drag. Measured
+// on this box (Debug engine, Xvfb, 43 sky changes): 0.94 ms mean in the flush +
+// download, 0.47 ms in the integral itself, 1.41 ms total per change, and the
+// flush's share is unbounded in principle because it waits for whatever the
+// frame had already recorded.
+//
+// The fix is not to move the integral to the GPU (the audit's first idea): the
+// 27 coefficients are a CPU CONTRACT — `Engine::skyAmbientSh`, which
+// SceneMirror reads EVERY frame and multiplies by the Sky Light's intensity and
+// tint — so a compute projection would still have to come back across the bus,
+// and what it would save is the 0.47 ms of arithmetic, not the wait. The fix is
+// to stop FLUSHING AND WAITING INSIDE THE CAPTURE FRAME: the download is issued
+// with inaccurate tracking (no fence, no driver overhead, no mid-frame submit)
+// and read at the TOP OF THE NEXT FRAME this scene is drawn in, where the copy
+// has had a whole frame of GPU time and the map returns what is already there
+// (measured 0.002 ms mean, 0.004 worst, against the 0.94 ms of flush and wait).
+// The previous coefficients stay valid meanwhile, so nothing flickers, and the
+// LATENCY IS EXACTLY THE ONE FRAME the contract already documents for this and
+// for the IBL convolution — see pollSkyShRead for why that promise is worth a
+// near-free wait rather than "whenever the transfer lands".
+//
+// AND A LONE SKY CHANGE STAYS SYNCHRONOUS. This is the rule, and it is chosen
+// rather than "always defer" on the measurement plus one behavioural fact:
+//
+//   * ONE wait is not the hazard. A dial tweak, a sky-mode switch, a project
+//     open pays 1.4 ms once and every host, thumbnail, preview and pixel suite
+//     sees the ambient exactly when it has always seen it — one frame after the
+//     sky, which is what the contract says and what the suites are written
+//     against (deferring a lone change costs one MORE frame, and
+//     mirror.document_to_engine's red-sky case, which pushes a sky and renders
+//     three frames, reads the previous sky's light instead).
+//   * A DRAG is the hazard: a sun being dragged captures on EVERY frame, and
+//     that is where 1.4 ms of flush and wait per frame is a third of a 60 Hz
+//     budget spent doing nothing. From the second consecutive capture on, the
+//     read is deferred to the next frame's top and the ambient simply trails
+//     the sky by one more frame for as long as the gesture lasts.
+//
+// `mSkyCaptureIdleFrames` is how many drawn frames have passed since the last
+// capture, so "consecutive" is a property of the gesture and not of a timer.
 void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
+    // A READ FROM THE PREVIOUS FRAME IS FREE NOW: its copy was submitted with
+    // that frame and has had one whole frame of GPU time, so this is a map, not
+    // a wait — and doing it here rather than dropping the ticket is what keeps
+    // the ambient MOVING through a drag (every frame of which would otherwise
+    // cancel the read the frame before it issued).
+    if (mSkyShTicket) readSkyShTicket(true);
+    const bool consecutive = mSkyCaptureIdleFrames <= kSkyCaptureDragFrames;
+    mSkyCaptureIdleFrames = 0;
+    // The run-wide diagnostic latch every measurable rule in this engine
+    // carries (JAHSHAKA_NO_LOD_HYSTERESIS, JAHSHAKA_NO_RAY_QUERY): with it set
+    // every capture takes the synchronous path, so the A/B is a run of the
+    // shipped binary and not a build.
+    static const bool forceSync = std::getenv("JAHSHAKA_SKY_SH_SYNC") != nullptr;
+    if (mSkyShValid && consecutive && !forceSync) { issueSkyShRead(cube); return; }
+    integrateSkyShNow(cube);
+}
+
+// THE ASYNCHRONOUS ISSUE: record the copy, keep the ticket, wait for nothing.
+// No `flushCommands()` — the frame's own commit submits it, and the pin flushes
+// the copy encoder itself if the cube is destroyed with a download pending
+// (VulkanQueue::notifyTextureDestroyed), which is what makes the capture's
+// ordinary lifetime (freed by applyPendingIbl next frame, or straight away for
+// a cubemap sky) safe to leave exactly as it was.
+void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
+    destroySkyShTicket();       // never overwrite one: the ticket owns a staging buffer
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    JAH_TRY {
+        cube->_autogenerateMipmaps();
+        const Ogre::uint8 mip = std::min<Ogre::uint8>(kSkyShMip, Ogre::uint8(cube->getNumMipmaps() - 1u));
+        const Ogre::uint32 n = std::max(1u, kSkyCaptureSize >> mip);
+        mSkyShTicket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
+                                                    cube->getPixelFormat());
+        // accurateTracking FALSE: no fence, and `queryIsTransferDone` answers
+        // off the frame counter. It must not be polled in the frame it was
+        // issued in (the pin logs a warning and switches to a fence, which
+        // would flush) — and it never is: the poll runs at the top of a frame,
+        // this issue happens inside one.
+        mSkyShTicket->download(cube, mip, false);
+        return;
+    } JAH_CATCH(mError, );
+    destroySkyShTicket();
+}
+
+// THE POLL, at the top of every frame of a scene being drawn. Non-blocking by
+// contract: `queryIsTransferDone` with inaccurate tracking is a frame-counter
+// comparison.
+void OgreScene::pollSkyShRead() {
+    if (mSkyCaptureIdleFrames < 1000u) ++mSkyCaptureIdleFrames;   // the gesture's clock
+    readSkyShTicket(false);
+}
+
+// READ THE DEFERRED DOWNLOAD, or leave it for the next frame.
+//
+// `force` false — the frame's top — never waits: `queryIsTransferDone` with
+// inaccurate tracking is a frame-counter comparison, and a transfer that has not
+// landed is simply tried again next frame. The ticket is KEPT in that case, and
+// destroyed on every other exit.
+//
+// `force` true — a new capture is about to replace it — maps unconditionally,
+// and that map is not a stall either: the download it is waiting for was
+// recorded in an EARLIER frame and submitted with that frame's own commit, so
+// the GPU has had a whole frame to do a 24 KB copy. MEASURED: over a 40-step sun
+// drag this path NEVER FIRED — every read had already landed at the frame top
+// before the next capture came — and the frame-top maps it stands in for cost
+// 0.002 ms mean, 0.004 worst (the integral that follows is 0.46 ms of CPU and is
+// the same work in both paths). It is here so that a scene capturing faster than
+// its copies land still TAKES the answer instead of dropping it: a dropped read
+// would freeze the sky's light for a whole gesture, because every frame of a
+// drag would cancel the read the frame before had issued.
+void OgreScene::readSkyShTicket(bool force) {
+    if (!mSkyShTicket) return;
+    JAH_TRY {
+        if (!force && !mSkyShTicket->queryIsTransferDone()) return;   // next frame
+        const Ogre::TextureBox box = mSkyShTicket->map(0);
+        integrateSkyShFromBox(box);
+        mSkyShTicket->unmap();
+        mSkyShValid = true;
+    } JAH_CATCH(mError, );
+    destroySkyShTicket();
+}
+
+void OgreScene::destroySkyShTicket() {
+    if (!mSkyShTicket) return;
+    Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
+    JAH_TRY {
+        if (tm) tm->destroyAsyncTextureTicket(mSkyShTicket);
+    } JAH_CATCH(mError, );
+    mSkyShTicket = nullptr;
+}
+
+// The synchronous form — the first capture of a scene, and the oracle the
+// asynchronous one is measured against (JAHSHAKA_SKY_SH_SYNC forces it for
+// every capture, which is how the two are A/B'd on one binary).
+void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
     mSkyShValid = false;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::AsyncTextureTicket *ticket = nullptr;
@@ -778,6 +919,27 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
                                               cube->getPixelFormat());
         ticket->download(cube, mip, true);
         const Ogre::TextureBox box = ticket->map(0);
+        integrateSkyShFromBox(box);
+        ticket->unmap();
+        tm->destroyAsyncTextureTicket(ticket);
+        ticket = nullptr;
+        mSkyShValid = true;
+        return;
+    } catch (Ogre::Exception &e) {
+        mError = e.getFullDescription();
+    } catch (std::exception &e) {
+        mError = std::string("engine: ") + e.what();
+    }
+    if (ticket) { try { tm->destroyAsyncTextureTicket(ticket); } catch (...) {} }
+    Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky ambient integral failed: " + mError);
+}
+
+// ONE INTEGRAL, TWO CALLERS: the cube face's texels -> the nine coefficients.
+// Neither path may have its own copy of this — the synchronous form is the
+// oracle for the asynchronous one, and two implementations could not be.
+void OgreScene::integrateSkyShFromBox(const Ogre::TextureBox &box) {
+    const Ogre::uint32 n = box.width;
+    {
         ShAccum acc;
         for (int f = 0; f < 6; ++f) {
             const float *fw = kFaceFwd[f], *rt = kFaceRight[f], *up = kFaceUp[f];
@@ -806,19 +968,8 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
                 }
             }
         }
-        ticket->unmap();
-        tm->destroyAsyncTextureTicket(ticket);
-        ticket = nullptr;
         acc.finish(mSkySh);
-        mSkyShValid = true;
-        return;
-    } catch (Ogre::Exception &e) {
-        mError = e.getFullDescription();
-    } catch (std::exception &e) {
-        mError = std::string("engine: ") + e.what();
     }
-    if (ticket) { try { tm->destroyAsyncTextureTicket(ticket); } catch (...) {} }
-    Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky ambient integral failed: " + mError);
 }
 
 bool OgreScene::applySkyReflectionFaces(const TextureId faces[6]) {
@@ -1496,6 +1647,7 @@ void OgreScene::destroySky() {
     if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
     mSkyCapturePending = false;
     mSkyShValid = false;
+    destroySkyShTicket();      // it was answering for a sky that is gone
     // Unbind the reflection cubemap from every datablock before it goes away.
     destroyReflection();
     if (mSceneMgr->getSky())

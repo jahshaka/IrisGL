@@ -2512,6 +2512,13 @@ struct GiStatus {
     /// construction. 1 in the single-volume arm, which is not an iteration at
     /// all, and 0 before any injection.
     int chainSweeps = 0;
+    /// HOW MANY POST-REBUILD SETTLES this scene has paid (LAMPREST-3): a
+    /// cascade rebuild injects one cascade once, over the radiance it held
+    /// where it used to stand, so the chain owes an at-rest injection
+    /// afterwards — paid on the first frame the rebuild queue is empty, once
+    /// per burst of rebuilds. Cumulative over the scene's life; 0 in the
+    /// single-volume arm, which has no chain to leave behind.
+    long long chainSettles = 0;
     /// Scrolls where MORE THAN HALF of the cascade's volume was new — the
     /// second DIRTY_ALL guard, counted rather than acted on in the whole-rebuild
     /// arm. It is the reading that says whether an incremental (slab-shifting)

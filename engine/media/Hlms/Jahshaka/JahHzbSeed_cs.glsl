@@ -2,10 +2,10 @@
 //
 // Copies the scene depth buffer into mip 0 of the R32F pyramid, 1:1. It exists
 // as its own pass because mip 0 is the only level whose SOURCE is a depth
-// attachment rather than the level above it, and because under MSAA the source
-// is a multisample image (the `Jahshaka/HzbSeedMsaa` job, same file, reads
-// sample 0 — the same choice Ogre's own Depth/DownscaleMax_Subsample0 makes for
-// SSAO).
+// attachment rather than the level above it. (There used to be a second job
+// here, `Jahshaka/HzbSeedMsaa`, reading sample 0 of a multisample depth image;
+// the chain renders at 1x by construction and it was unreachable —
+// CHAIN-MSAA-CRUD, 2026-09-18.)
 //
 // An out-of-range invocation needs no guard: imageStore outside the image is
 // discarded by the Vulkan specification, and the thread groups are ceil(size/8).
@@ -17,11 +17,7 @@
 	#define ogre_u0 binding = 0
 @end
 
-@property( hzb_msaa )
-	vulkan_layout( ogre_t0 ) uniform texture2DMS depthTexture;
-@else
-	vulkan_layout( ogre_t0 ) uniform texture2D depthTexture;
-@end
+vulkan_layout( ogre_t0 ) uniform texture2D depthTexture;
 
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece( uav0_pf_type ) )
 uniform restrict writeonly image2D dstMip;
