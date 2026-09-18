@@ -1511,7 +1511,17 @@ VrStatus OgreEngine::vrStatus() const {
             if (!mVrInjected[h]) continue;
             s.input[h] = mVrInject[h];
             s.hands[h] = mVrInject[h].grip;   // `input[i].grip` IS `hands[i]`
+            // ...AND WHETHER A SKELETON WAS INJECTED FOR IT (stage 3): with no
+            // session there is no runtime to track a hand, so the injected
+            // joints are the only ones there can be.
+            s.input[h].jointsTracked = mVrJointsInjected[h];
         }
+        // THE SESSION'S PROFILE SUMMARY, DERIVED FROM THE HANDS, with no
+        // session at all: an injected sample may name a profile (that is how
+        // the hand/controller half of stage 3 is driven headlessly), and
+        // `vr.state().profile` answers the same question a live session's does.
+        s.profile = !s.input[VrHandRight].profile.empty() ? s.input[VrHandRight].profile
+                                                          : s.input[VrHandLeft].profile;
         // NOTHING IS FOCUSED WHEN THERE IS NO SESSION — unless a hand is
         // INJECTED, and then focus is whatever the test said (true by default:
         // a test that says nothing about focus means the wearer was there).
@@ -1541,6 +1551,8 @@ VrStatus OgreEngine::vrStatus() const {
         s.input[h] = mVrInject[h];
         s.input[h].fromInjection = true;
         s.hands[h] = mVrInject[h].grip;   // `input[i].grip` IS `hands[i]`
+        s.input[h].jointsTracked = mVrJointsInjected[h] ||
+                                   vrSessionHasLiveJoints(mVrSession, int(h));
         overlaid = true;
     }
     // ...AND THE SESSION'S FOCUS IS THE TEST'S while it is driving the hands,
@@ -1606,7 +1618,65 @@ bool OgreEngine::vrInjectInput(int hand, const VrHandState &state) {
     }
     mVrInject[hand] = state;
     mVrInject[hand].fromInjection = true;
+    // A SAMPLE THAT SAID NOTHING ABOUT ITS MANIPULATION FRAME HOLDS BY ITS GRIP
+    // (stage 3, VrHandState::manipPose) — the rule lives HERE, once, so that
+    // every injector gets it and the session's own read does not have to guess.
+    if (!mVrInject[hand].manipPose.valid) mVrInject[hand].manipPose = mVrInject[hand].grip;
     mVrInjected[hand] = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// THE WEARER'S SKELETON (Engine::vrHandJoints / vrInjectJoints; VR_INPUT_SPEC
+// §7, stage 3).
+//
+// WHY THE JOINTS ARE FETCHED AND NOT REPORTED. Fifty-two poses is 1.7 kB, and
+// `VrStatus` is copied several times per FRAME by every host that reads it — so
+// the status carries one bit per hand (`jointsTracked`) and the poses are asked
+// for by the two callers that want them: the mirror, which draws them, and a
+// test. The session holds this frame's set; with no session the store below is
+// the only source there can be.
+unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
+    if (hand < 0 || hand >= int(VrHandCount)) return 0u;
+    if (mVrSession) {
+        if (const unsigned n = vrSessionHandJoints(mVrSession, hand, out, count)) return n;
+    }
+    // THE INJECTED SKELETON, and only for a hand the runtime is not tracking —
+    // the session's own answer above has already been asked for and preferred.
+    if (!vrInjectedJoints(hand, out, count)) return 0u;
+    return kVrHandJointCount;
+}
+
+// EVERY SUGGESTED-BINDING BLOCK, AND WHAT THE RUNTIME DID WITH IT (stage 3's
+// fix round; Engine::vrBindingBlocks). Only a session can answer: the blocks
+// are suggested once, at its creation.
+unsigned OgreEngine::vrBindingBlocks(VrBindingBlock *out, unsigned count) const {
+    return mVrSession ? vrSessionBindingBlocks(mVrSession, out, count) : 0u;
+}
+
+bool OgreEngine::vrInjectJoints(int hand, const VrPose *joints, unsigned count) {
+    if (hand < 0 || hand >= int(VrHandCount)) {
+        mLastError = "vrInjectJoints: hand must be 0 (left) or 1 (right)";
+        return false;
+    }
+    // A WITHDRAWAL IS NEVER REFUSED, exactly as for a sample (VR-INPUT-1E-FIX
+    // finding 1): taking a fake hand away cannot fool anybody.
+    if (!joints || count == 0u) {
+        mVrJointsInjected[hand] = false;
+        return true;
+    }
+    // THE WEARER'S OWN HAND WINS. A hand the runtime is really tracking is not
+    // overwritten by a script's skeleton; the escape is the same explicit,
+    // live-read process switch the controls use.
+    if (mVrSession && vrSessionHasLiveJoints(mVrSession, hand) && !vrTestInjectAllowed()) {
+        mLastError = "vrInjectJoints: refused - the runtime is tracking that hand's joints "
+                     "(set JAHSHAKA_VR_TEST_INJECT=1 to override)";
+        return false;
+    }
+    const unsigned n = count < kVrHandJointCount ? count : unsigned(kVrHandJointCount);
+    for (unsigned j = 0; j < kVrHandJointCount; ++j)
+        mVrInjectJoints[hand][j] = j < n ? joints[j] : VrPose();
+    mVrJointsInjected[hand] = true;
     return true;
 }
 

@@ -2848,6 +2848,53 @@ struct VrInfo {
     bool        depthLayer = false;      ///< XR_KHR_composition_layer_depth is advertised
 };
 
+// (MOVED UP FROM BESIDE `VrStatus` BY STAGE 3, VR-HANDS-1: a profile path is now
+//  a field of a HAND — `VrHandState::profile` — because the runtime binds one per
+//  hand and a wearer may hold a controller in one and nothing in the other, so the
+//  type has to be declared before the hand is. Nothing about it changed.)
+/// AN INTERACTION PROFILE'S PATH, WITHOUT A HEAP (VR-INPUT-1E-FIX finding 8).
+///
+/// `VrStatus` is COPIED several times per frame — every host reads it by value
+/// (`const VrStatus st = engine->vrStatus()`), the mirror keeps its own copy,
+/// and at ninety frames a second that was three or four small allocations a
+/// frame for one string nobody edits. A fixed array makes the whole status
+/// trivially copyable, which is what a per-frame value type should be.
+///
+/// SIXTY-FOUR BYTES IS THE WHOLE OPENXR NAMESPACE with room to spare: the
+/// longest profile path any runtime can bind here is
+/// `/interaction_profiles/microsoft/motion_controller` (49) and the registry's
+/// longest is 57. A longer one is TRUNCATED rather than dropped — the string is
+/// diagnostic and a prefix still names the vendor — and always terminated.
+///
+/// It converts to `std::string` implicitly so the one place that hands the path
+/// out of the engine (the `vr.state()` verb) is unchanged: the allocation
+/// happens THERE, once per call, instead of on every frame's copy.
+struct VrProfileName {
+    char text[64] = { 0 };
+    bool empty() const { return text[0] == '\0'; }
+    const char *c_str() const { return text; }
+    /// Is `needle` somewhere in the path? (Which model to draw is decided this
+    /// way: a Touch controller is any path with `touch_controller` in it.)
+    bool contains(const char *needle) const {
+        return needle && *needle && std::strstr(text, needle) != nullptr;
+    }
+    /// Does the path START with `prefix`? (`/interaction_profiles/` — "the
+    /// runtime bound something real".)
+    bool startsWith(const char *prefix) const {
+        if (!prefix) return false;
+        const size_t n = std::strlen(prefix);
+        return std::strncmp(text, prefix, n) == 0;
+    }
+    void assign(const char *s) {
+        if (!s) { text[0] = '\0'; return; }
+        std::strncpy(text, s, sizeof(text) - 1);
+        text[sizeof(text) - 1] = '\0';
+    }
+    void clear() { text[0] = '\0'; }
+    VrProfileName &operator=(const char *s) { assign(s); return *this; }
+    operator std::string() const { return std::string(text); }
+};
+
 /// ONE LOCATED THING, IN WORLD SPACE — the rig already applied (phase 4).
 ///
 /// `valid` is the runtime's own answer for THIS frame: a controller that is
@@ -2865,6 +2912,122 @@ struct VrPose {
 
 /// WHICH HAND, and what indexes VrStatus::hands.
 enum VrHand : unsigned { VrHandLeft = 0, VrHandRight = 1, VrHandCount = 2 };
+
+// ---------------------------------------------------------------------------
+// BARE HANDS (SPECS/VR_INPUT_SPEC.md §7, phase 4b stage 3). Everything in this
+// block is a PURE RULE over numbers and a profile path — no OpenXR type, no
+// engine state — so the session applies it, the host's drawer applies the same
+// one, and `vr.grab_maths` asserts all of it with no runtime, no display and no
+// headset (which is the only way a sign or a threshold in here is ever seen to
+// be wrong before somebody is wearing it).
+// ---------------------------------------------------------------------------
+
+/// IS THIS PROFILE A HAND RATHER THAN A CONTROLLER?
+///
+/// Both hand profiles in the OpenXR registry carry `hand_interaction` in their
+/// path — `/interaction_profiles/ext/hand_interaction_ext` (the one this engine
+/// suggests) and `/interaction_profiles/microsoft/hand_interaction` (which some
+/// runtimes advertise; if one ever binds it, it is still a hand and the same
+/// answers are right). A controller profile never does.
+///
+/// WHAT IT DECIDES: the press thresholds (a pinch is not a trigger, below), the
+/// MANIPULATION FRAME (a pinch point is not a palm, below), and which model a
+/// host draws for that hand (the vendored controller, or the wearer's own
+/// joints).
+inline bool vrIsHandProfile(const char *profile) {
+    return profile && *profile && std::strstr(profile, "hand_interaction") != nullptr;
+}
+
+/// THE PRESS THRESHOLDS — TWO PAIRS, BECAUSE A PINCH IS NOT A TRIGGER.
+///
+/// The VALUE is always the runtime's (it decides what "pinched" means from its
+/// own tracking, and on hands it is a confidence rather than a travel); the
+/// HYSTERESIS is ours, and it exists so that a hand resting on the threshold
+/// cannot chatter a gesture on and off at ninety frames a second.
+///
+/// A TRIGGER travels a centimetre under a finger that is already braced against
+/// it, so 0.5 up / 0.4 down is a tenth of its travel and enough.
+/// A PINCH has no detent, no spring and no end stop: the wearer's fingers drift
+/// through the middle of the range on the way to anything else they do, and a
+/// runtime's pinch value wanders while two fingertips are merely close. So the
+/// band is WIDE — 0.7 to press, 0.3 to release — which costs a pinch a little
+/// more commitment and buys the wearer a hold that does not let go while they
+/// move their hand. (The numbers are the spec's §7 and are the one thing in
+/// this lane that only the owner's headset can judge; they live here, once.)
+inline constexpr float kVrTriggerPressOn = 0.5f, kVrTriggerPressOff = 0.4f;
+inline constexpr float kVrPinchPressOn = 0.7f, kVrPinchPressOff = 0.3f;
+
+/// ONE PRESS, FROM ONE VALUE AND THE LAST ANSWER. `latch` is the previous
+/// frame's press for that control; the return is this frame's.
+inline bool vrPressLatched(float value, bool latch, float on, float off) {
+    return latch ? (value > off) : (value >= on);
+}
+
+/// HOW MANY JOINTS A TRACKED HAND HAS (`XR_HAND_JOINT_COUNT_EXT`), and the
+/// ORDER they arrive in — which is the extension's own enumeration and is
+/// relied on by the bone table below:
+///
+///   0 palm · 1 wrist · 2-5 thumb (metacarpal, proximal, distal, tip)
+///   6-10 index · 11-15 middle · 16-20 ring · 21-25 little
+///   (each finger: metacarpal, proximal, intermediate, distal, tip)
+enum : unsigned { kVrHandJointCount = 26 };
+
+/// THE HAND'S SKELETON AS SEGMENTS — what a drawer draws.
+///
+/// TWENTY-FOUR BONES: the four finger chains (4 each), the thumb's three, and
+/// the FAN from the wrist out to the five metacarpals, which is the palm. The
+/// palm JOINT (0) is deliberately not in it: it is the middle of the hand, not
+/// an end of anything, and it is what a controller's grip pose stands in for.
+struct VrHandBone { unsigned char from, to; };
+enum : unsigned { kVrHandBoneCount = 24 };
+inline constexpr VrHandBone kVrHandBones[kVrHandBoneCount] = {
+    // the palm: the wrist out to each metacarpal
+    { 1, 2 }, { 1, 6 }, { 1, 11 }, { 1, 16 }, { 1, 21 },
+    // the thumb (no intermediate joint)
+    { 2, 3 }, { 3, 4 }, { 4, 5 },
+    // index, middle, ring, little
+    { 6, 7 }, { 7, 8 }, { 8, 9 }, { 9, 10 },
+    { 11, 12 }, { 12, 13 }, { 13, 14 }, { 14, 15 },
+    { 16, 17 }, { 17, 18 }, { 18, 19 }, { 19, 20 },
+    { 21, 22 }, { 22, 23 }, { 23, 24 }, { 24, 25 },
+};
+
+/// WHERE ONE BONE'S SEGMENT GOES — the ONE definition, because there are two
+/// writers (a running session, inside its own frame, and the host's mirror for
+/// a frame no session drew — the same arrangement as the controller proxies).
+///
+/// THE GEOMETRY IS A UNIT SEGMENT DOWN -Z, exactly like the pointing ray's
+/// (SceneMirror::syncVrProxies): the node is stood at `from`, turned so that
+/// its own -Z runs to `to`, and scaled along Z to the distance between them. So
+/// a hand that moves every frame rebuilds NO geometry at all — twenty-four
+/// transforms per hand and one mesh in the whole scene — which is why this is
+/// not a line strip per finger (a strip's points ARE its vertex buffer, and a
+/// per-frame rebuild is a create-and-destroy of a GPU buffer ninety times a
+/// second; see XID-1 for what recycled Vulkan blocks cost).
+///
+/// A DEGENERATE BONE (two joints at the same place, which a runtime reports
+/// while a hand is half-tracked) answers false and is drawn by nobody, rather
+/// than becoming a normalisation by zero.
+inline bool vrBoneTransform(const Vec3 &from, const Vec3 &to,
+                            Vec3 &position, Quat &rotation, Vec3 &scale) {
+    const float dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(len > 1e-5f)) return false;
+    const float ix = dx / len, iy = dy / len, iz = dz / len;
+    // The shortest rotation taking -Z onto the bone's direction. `v = -Z x d`,
+    // `w = 1 + (-Z . d)`, then normalise — the standard two-vector form, with
+    // the antiparallel case (d == +Z, w == 0) spelled out rather than left to
+    // divide by zero: any axis perpendicular to Z will do and X is one.
+    // u = (0, 0, -1), v = d:  u x v = (v.y, -v.x, 0),  u . v = -v.z.
+    const float dot = -iz;
+    float qx = iy, qy = -ix, qz = 0.0f, qw = 1.0f + dot;
+    if (qw < 1e-6f) { qx = 1.0f; qy = 0.0f; qz = 0.0f; qw = 0.0f; }
+    const float n = std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+    position = from;
+    rotation = Quat(qx / n, qy / n, qz / n, qw / n);
+    scale = Vec3(1.0f, 1.0f, len);
+    return true;
+}
 
 /// ONE HAND'S WHOLE INPUT, FOR ONE FRAME (SPECS/VR_INPUT_SPEC.md §2, phase 4b
 /// stage 1). Two poses and the controls, in the frame a caller can reason in.
@@ -2896,6 +3059,24 @@ struct VrHandState {
     bool   valid = false;        ///< the runtime reports this hand this frame
     VrPose aim;                  ///< world space through the rig: the pointing ray
     VrPose grip;                 ///< world space through the rig: where the model is drawn
+    /// THE MANIPULATION FRAME — WHERE THE HAND HOLDS SOMETHING (stage 3,
+    /// VR_INPUT_SPEC §7). It is the frame a grab is measured in: the object is
+    /// captured relative to it and follows it rigidly.
+    ///
+    /// ON A CONTROLLER IT IS THE GRIP, and nothing changes: the wearer's fist
+    /// is round the controller and the thing they pick up is in that fist.
+    /// ON BARE HANDS IT IS THE PINCH POSE (`pinch_ext/pose`) — the point where
+    /// the fingertips meet — because the grip of a hand is the PALM, and an
+    /// object welded to the palm while the wearer pinches hangs several
+    /// centimetres off the fingers that are supposed to be holding it, rotating
+    /// about the wrong point every time they turn their hand.
+    ///
+    /// WHICH ONE IS CHOSEN BY THE BOUND PROFILE (`vrIsHandProfile(profile)`),
+    /// and the choice is made ONCE, in the engine, so nothing above the
+    /// boundary has to know whether the wearer is holding anything. It is never
+    /// invalid while `grip` is valid: with no pinch pose to be had it IS the
+    /// grip.
+    VrPose manipPose;
     float  select = 0.0f;        ///< trigger 0..1
     bool   selectPressed = false;
     float  grab = 0.0f;          ///< squeeze 0..1
@@ -2903,6 +3084,30 @@ struct VrHandState {
     bool   menuPressed = false;
     float  stickX = 0.0f, stickY = 0.0f;   ///< -1..1
     bool   stickPressed = false;
+    /// WHAT THE RUNTIME HAS BOUND FOR THIS HAND, as its own path (stage 3).
+    ///
+    /// PER HAND, BECAUSE THE RUNTIME BINDS PER HAND: WiVRn binds
+    /// `ext/hand_interaction_ext` while the controllers are down and
+    /// `oculus/touch_controller` for a hand that picks one up — each hand on
+    /// its own, so a wearer really can hold a controller in one hand and
+    /// nothing in the other (hands and controllers are alternative MODES on
+    /// WiVRn, never simultaneous per hand: VR_INPUT_SPEC §1.5).
+    ///
+    /// It is what decides the press thresholds and the manipulation frame
+    /// above, which model a host draws for this hand, and — because a mode
+    /// change means the wearer's hand physically changed shape mid-gesture —
+    /// when a gesture on this hand is CANCELLED (a host compares it with the
+    /// previous frame's; the engine keeps no edge of its own).
+    ///
+    /// Empty = the runtime has bound nothing for this hand: no controller, bare
+    /// hands the runtime does not track, or an unfocused session.
+    VrProfileName profile;
+    /// IS THIS HAND'S SKELETON BEING TRACKED this frame (`XR_EXT_hand_tracking`
+    /// answered `isActive` and located its joints)? The joints themselves are
+    /// NOT in this struct — fifty-two poses would be two kilobytes on a value
+    /// every host copies several times a frame — they are fetched on demand
+    /// through `Engine::vrHandJoints`.
+    bool   jointsTracked = false;
     /// A TEST HOOK WROTE THIS SAMPLE (Engine::vrInjectInput), not the runtime.
     /// Reported so nothing downstream can mistake an injected gesture for a
     /// wearer's — a smoke in a headset that ever sees this true is looking at a
@@ -2997,48 +3202,29 @@ struct VrConfig {
     int ssr = 0;
 };
 
-/// AN INTERACTION PROFILE'S PATH, WITHOUT A HEAP (VR-INPUT-1E-FIX finding 8).
+
+/// ONE SUGGESTED-BINDING BLOCK, AS THE RUNTIME ANSWERED IT (stage 3's fix
+/// round; `Engine::vrBindingBlocks`).
 ///
-/// `VrStatus` is COPIED several times per frame — every host reads it by value
-/// (`const VrStatus st = engine->vrStatus()`), the mirror keeps its own copy,
-/// and at ninety frames a second that was three or four small allocations a
-/// frame for one string nobody edits. A fixed array makes the whole status
-/// trivially copyable, which is what a per-frame value type should be.
+/// WHY PER PROFILE AND NOT JUST A PAIR OF TOTALS. `bindingProfiles` /
+/// `bindingProfilesAccepted` say "four offered, four taken", which cannot
+/// distinguish a block that bound every path it meant to from one that bound
+/// half of them: a path spelled wrong, or a profile that lost an input between
+/// pin bumps, takes that hardware's control away SILENTLY and the totals still
+/// read 4 of 4. The COUNT is what pins it — the bare-hand block is twelve
+/// bindings (two poses, the pinch pose, select, grab, per hand) and a suite
+/// asserts that number.
 ///
-/// SIXTY-FOUR BYTES IS THE WHOLE OPENXR NAMESPACE with room to spare: the
-/// longest profile path any runtime can bind here is
-/// `/interaction_profiles/microsoft/motion_controller` (49) and the registry's
-/// longest is 57. A longer one is TRUNCATED rather than dropped — the string is
-/// diagnostic and a prefix still names the vendor — and always terminated.
-///
-/// It converts to `std::string` implicitly so the one place that hands the path
-/// out of the engine (the `vr.state()` verb) is unchanged: the allocation
-/// happens THERE, once per call, instead of on every frame's copy.
-struct VrProfileName {
-    char text[64] = { 0 };
-    bool empty() const { return text[0] == '\0'; }
-    const char *c_str() const { return text; }
-    /// Is `needle` somewhere in the path? (Which model to draw is decided this
-    /// way: a Touch controller is any path with `touch_controller` in it.)
-    bool contains(const char *needle) const {
-        return needle && *needle && std::strstr(text, needle) != nullptr;
-    }
-    /// Does the path START with `prefix`? (`/interaction_profiles/` — "the
-    /// runtime bound something real".)
-    bool startsWith(const char *prefix) const {
-        if (!prefix) return false;
-        const size_t n = std::strlen(prefix);
-        return std::strncmp(text, prefix, n) == 0;
-    }
-    void assign(const char *s) {
-        if (!s) { text[0] = '\0'; return; }
-        std::strncpy(text, s, sizeof(text) - 1);
-        text[sizeof(text) - 1] = '\0';
-    }
-    void clear() { text[0] = '\0'; }
-    VrProfileName &operator=(const char *s) { assign(s); return *this; }
-    operator std::string() const { return std::string(text); }
+/// `bindings` is how many `XrActionSuggestedBinding`s the block carried;
+/// `accepted` is whether `xrSuggestInteractionProfileBindings` took it (a
+/// runtime refuses a profile it does not know, which is not an error).
+struct VrBindingBlock {
+    VrProfileName profile;
+    unsigned      bindings = 0u;
+    bool          accepted = false;
 };
+/// How many blocks this engine can report (it offers four).
+enum : unsigned { kVrBindingBlockMax = 8 };
 
 /// What a live session is doing. Every number is a COUNT or a measured value,
 /// never a wall-clock derivation (VR_SPEC §6 flake class (b): count frames,
@@ -3136,10 +3322,15 @@ struct VrStatus {
     /// bound none — which is what a wearer with no controllers, and every
     /// unfocused session, reports.
     ///
-    /// It is the runtime's CHOICE out of the profiles we suggested, and it is
-    /// what a host needs to know to draw the right model: the two hands are
-    /// reported as one string because no runtime measured ever bound two
-    /// different profiles at once, and the log names both when they differ.
+    /// It is the runtime's CHOICE out of the profiles we suggested.
+    ///
+    /// A SUMMARY, DERIVED, NOT A SECOND TRUTH (stage 3): the per-hand answer is
+    /// `input[h].profile` and this is the right hand's when it has one, else
+    /// the left's — because from stage 3 on the two hands really can differ (a
+    /// controller in one hand, bare fingers in the other), and anything that
+    /// draws a model or measures a press asks the HAND. This field stays for
+    /// what it is good for: naming the session's input in a log, a report or
+    /// `vr.state().profile`.
     ///
     /// A FIXED ARRAY, not a `std::string` (VrProfileName's note): this struct
     /// is copied several times per frame and a status copy allocates nothing.
