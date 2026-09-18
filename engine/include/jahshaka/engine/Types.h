@@ -2202,6 +2202,193 @@ inline float giCascadeCell(const GiParams::GiCascadeDesc &c)
     return c.resolution > 0 ? c.halfSize * 2.0f / float(c.resolution) : 0.0f;
 }
 
+// ---- THE NEAR-FIELD GUARANTEE (CASCADE-STEP-1, owner 2026-09-18) -----------
+//
+// THE RULE, stated before the arithmetic: THE INNERMOST CASCADE GUARANTEES A
+// NEAR-FIELD RADIUS. Within `kGiNearFieldRadiusFraction` of its own half-size
+// around the head, the near field is always VOXELISED BY THAT CASCADE — its box
+// covers that radius at every moment of any walk, so the bounce a walker stands
+// in is built at its cell size and never at the coarser cascade's behind it.
+//
+// It is NOT a claim about every cone sample. A cone aimed outward leaves the
+// box and hands over to the coarser cascade by construction, carrying its age
+// across the hop (SEAM-1, ogre-patch 0066), which is what a cone aimed outward
+// should do. What the rule removes is the NEAR FIELD ITSELF changing resolution
+// as the walker moves — the hand-over arriving at the wearer's feet.
+//
+// WHY IT NEEDS A RULE, AND WHAT THE BOUND HONESTLY IS.
+//
+// The re-centre test runs on an ABSOLUTE lattice: the planes sit every
+// step*(1-h) metres of world space (h = kStepHysteresis) and the camera must be
+// h*step past the plane it left, so a re-centre comes anywhere between h*step
+// and step of travel from the camera the cascade was built for. `step` is the
+// SUPREMUM of that travel, never the distance between two rebuilds. Three more
+// terms sit on top of it:
+//
+//   * the re-centre QUANTISES the new centre onto the cascade's own cell
+//     lattice, which leaves it up to one cell below the head on each axis;
+//   * the test is a per-FRAME test — it fires on the first frame at which the
+//     camera has already crossed, so the head is up to one frame of travel
+//     (v*dt) past the threshold when the rebuild happens;
+//   * and a rebuild can be DEFERRED: the frame spends at most one cascade, and
+//     a field follow can own that slot, so each deferred frame is another v*dt.
+//
+//     off  =  step + cell + v*dt*(1 + deferrals)                 (per axis)
+//     r    =  halfSize - off                                     (the inscribed radius)
+//
+// The engine cannot know v, so the motion terms are bought with ONE CELL OF
+// SLACK. The STEP is chosen from
+//
+//     halfSize - step - 2*cell  >=  kGiNearFieldRadiusFraction * halfSize
+//
+// while `giCascadeGuaranteedRadius` reports the honest, motion-free
+// `halfSize - step - cell`: the reported radius therefore clears the required
+// one by about a cell, and that cell is the motion budget.
+//
+// WHAT THE SLACK BUYS, IN FRAMES — the number that makes this a walking-pace
+// guarantee and says so. At 1.4 m/s on the 60 Hz clock a frame is 0.0233 m:
+// Medium's margin (2.500 - 2.250 = 0.250 m) is ten frames and High's
+// (2.344 - 2.250 = 0.094 m) is four, which covers the frame the test costs plus
+// a follow or two owning the slot. At the editor's FLY speed of 15 m/s a frame
+// is 0.25 m: Medium spends its whole margin on a single frame and High is
+// 0.16 m inside the stated radius while the camera is still moving. THE
+// GUARANTEE IS FOR WALKING PACE, deliberately — a flight is a camera in
+// transit, and the only thing a cascade hand-over has to be invisible under is
+// a person moving at a person's speed. (Both numbers are measured in
+// spikes/cascade-step-1/MEASUREMENTS.txt; gi.cascades case 16b walks at 1.4 m/s
+// from a NON-lattice start so the coupled worst phase is in the measurement.)
+//
+// The hysteresis costs no radius at all: kStepHysteresis shrinks the test
+// lattice by the band and adds the band back on both sides (OgreGi.cpp), so the
+// supremum stays exactly `step` and not `(1 + h) * step` — measured, 2.637 m of
+// worst offset against a 2.656 m step before the slack landed.
+//
+// WHAT IT WAS BEFORE. The derived step was the pin's "every cascade steps the
+// same distance", floored at half the resolution — and that floor BOUND on the
+// innermost cascade at every tier but Low: 32 cells of a 64^3 5 m cascade is a
+// 5 m step, i.e. step == halfSize, i.e. r = -cell. NOTHING was guaranteed: a
+// wearer walking a straight line reached cascade 0's own face before it
+// re-centred, and the metre in front of their eyes was read from cascade 1 —
+// 3x coarser in the VR column (0.156 m -> 0.469 m). That is the artifact
+// CASCADE-STEP-1 removes; the owner's acceptance is "we should never notice a
+// change when walking around a scene".
+//
+// THE FRACTION is 0.45 of the half-size: 2.25 m of the 5 m inner cascade every
+// tier ships, about one and a half paces ahead of the walker and more than the
+// 2 m a room's near wall usually stands at. It is bought with rebuild
+// frequency, linearly — the step falls from halfSize to a little under half of
+// it, so cascade 0 re-voxelises about twice as often per metre walked, which is
+// +2 ms of GPU per metre and no frame's peak worth naming (MEASUREMENTS.txt).
+//
+// THE TABLE THE RULE PRODUCES (r = guaranteed / required, metres; every row of
+// every tier and both columns clears it, which gi.cascades case 16a asserts):
+//
+//   low    desktop  c0  2.344 m  r 2.500/2.250 | c1  5.000  r 14.375/9.000
+//   low    vr       c0  2.344    r 2.500/2.250 | c1 10.000  r  9.375/9.000 (pinned)
+//   medium desktop  c0  2.344    r 2.500/2.250 | c1  4.688  r  5.000/4.500
+//                   c2  7.031    r 7.500/6.750 | c3 15.000  r 43.125/27.000
+//   medium vr       c0  2.344    r 2.500/2.250 | c1  7.031  r  7.500/6.750
+//                   c2 30.000    r 28.125/27.000 (pinned)
+//   high   desktop  c0  2.578    r 2.344/2.250 | c1  5.156  r  4.688/4.500
+//                   c2  7.031    r 7.500/6.750 | c3 15.000  r 43.125/27.000
+//   high   vr       c0  2.578    r 2.344/2.250 | c1  7.031  r  7.500/6.750
+//                   c2 30.000    r 28.125/27.000 (pinned)
+//   (epic is high's table.)
+//
+// In cells, against what the derivation gave before this rule: Low c0 16 -> 15;
+// Medium c0 32 -> 15, c1 24 -> 15, c2 16 -> 15; High c0 64 -> 33, c1 48 -> 33,
+// c2 16 -> 15; every outermost cascade and every pinned step unchanged.
+inline constexpr float kGiNearFieldRadiusFraction = 0.45f;
+
+/// The near-field radius this cascade is REQUIRED to guarantee, in metres.
+inline float giNearFieldRadius(const GiParams::GiCascadeDesc &c)
+{
+    return kGiNearFieldRadiusFraction * c.halfSize;
+}
+
+/// The near-field radius this cascade DOES guarantee at the step it carries:
+/// `halfSize - step - cell`, in metres — the STILL-CAMERA bound, with the
+/// re-centre's supremum travel and the centre's cell quantisation in it and the
+/// motion terms (v*dt per frame the test costs and per frame a rebuild waits)
+/// deliberately NOT in it, because the engine cannot know v. The step is chosen
+/// with a cell of slack against the required radius (giNearFieldMaxStepCells)
+/// and that cell is the motion budget: at 1.4 m/s it is four to ten frames.
+/// Negative means the cascade guarantees nothing at all — the head can be
+/// outside the box before it re-centres. Meaningless on a row whose step is
+/// still 0 (not yet resolved).
+inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
+{
+    const float cell = giCascadeCell(c);
+    return c.halfSize - c.stepCells * cell - cell;
+}
+
+/// The most cells a cascade may step and still honour the rule, floored at one
+/// cell (a step below one cell re-centres the volume for a fraction of a voxel)
+/// and ceiled by the pin's own guard at half the resolution.
+///
+/// TWO cells are held back, not one: the first is the re-centre's own
+/// quantisation (it is in the guaranteed radius) and the second is the MOTION
+/// SLACK — the frame the per-frame test costs and the frames a deferred rebuild
+/// waits, which the engine cannot price because it does not know the camera's
+/// speed. One cell is 0.156 m at Medium and 0.078 m at High: ten and four
+/// frames of walking, against a bare margin of 0.016 m at High without it,
+/// which is less than ONE frame at 1.4 m/s.
+inline float giNearFieldMaxStepCells(const GiParams::GiCascadeDesc &c)
+{
+    const float cell = giCascadeCell(c);
+    if (cell <= 0.0f) return 1.0f;
+    const float metres = c.halfSize - giNearFieldRadius(c) - 2.0f * cell;
+    return std::max(1.0f, std::min(std::floor(metres / cell), float(c.resolution) * 0.5f));
+}
+
+/// RESOLVE THE DERIVED STEPS OF A WHOLE CHAIN, innermost first — the one place
+/// the step of a cascade nobody pinned is decided, so the renderer's chain and
+/// the chain a tooltip (world.tierTable) promises cannot drift.
+///
+/// A row that already carries a step (`stepCells > 0`) is PINNED and is left
+/// exactly as it is: a pinned step is the author's own statement and is held
+/// only by the pin's 1..resolution/2 guard, which the caller applies. Our own
+/// tier tables pin only the outermost cascade (the VR column's 16 cells) and
+/// they are checked against the rule by gi.cascades case 16a, not clamped
+/// here.
+///
+/// Every other row gets the pin's `autoCalculateStepSizes(4)` shape
+/// (OgreVctCascadedVoxelizer.cpp:131-161) written out here so it is ours to
+/// tune (A7) — every finer cascade steps the same DISTANCE as the outermost
+/// one, ceiled to whole cells and floored at half its resolution (the pin's own
+/// guard against a step that outruns the volume) — MET WITH the near-field rule
+/// above, which is a ceiling on it.
+///
+/// THE OUTERMOST CASCADE STEPS TWICE AS FAR AS THE REST (PHOTON_SPEC §7 E2 (1),
+/// "the outer stepCells raised"), and the reason is a measurement, not symmetry.
+/// The outermost cascade is the one that encloses the most geometry and resolves
+/// the least, so it is BY FAR the most expensive rebuild in the chain — on the
+/// 8,026-instance lattice it is 88.9 ms of GPU against cascade 0's 18.1, and
+/// even on the Showroom at Epic it is the row that peaks
+/// (spikes/photon-e2/BASELINE.md). Halving how often it runs halves that cost,
+/// and what it buys with the frames it skips is that its 60 m box sits up to
+/// 15 m off-centre instead of 7.5 — on a volume 120 m across, at 1.875 m per
+/// cell, which is a quarter of a cell of parallax on the far bounce. It still
+/// clears the near-field rule by a wide margin (43.1 m guaranteed against the
+/// 27.0 asked of it), which is why the ceiling never bites there.
+inline void giResolveCascadeSteps(GiParams::GiCascadeDesc *rows, int count)
+{
+    if (!rows || count <= 0) return;
+    static const float kOuterStepCells = 8.0f;   // the pin's own value is 4
+    static const float kInnerStepCells = 4.0f;
+    const float cellLast = giCascadeCell(rows[count - 1]);
+    for (int i = 0; i < count; ++i) {
+        if (rows[i].stepCells > 0.0f) continue;          // pinned: not ours to decide
+        const float cell = giCascadeCell(rows[i]);
+        if (cell <= 0.0f) continue;
+        float steps = (i + 1 == count) ? kOuterStepCells
+                                       : std::ceil(kInnerStepCells * cellLast / cell);
+        steps = std::max(1.0f, std::min(steps, float(rows[i].resolution) * 0.5f));
+        // THE NEAR-FIELD RULE IS A CEILING ON ALL OF IT.
+        rows[i].stepCells = std::min(steps, giNearFieldMaxStepCells(rows[i]));
+    }
+}
+
 /// What GI is ACHIEVING, as opposed to what GiParams requested — the same
 /// "the renderer beats the request" contract as View::sampleCount() and
 /// Scene::activePlanarReflectors().
@@ -2478,6 +2665,21 @@ struct GiStatus {
         float cell = 0.0f;
         /// Metres of camera travel between re-centres (stepCells * cell).
         float step = 0.0f;
+        /// THE NEAR-FIELD RADIUS THIS CASCADE GUARANTEES, in metres:
+        /// `halfSize - step - cell` (Types.h's giCascadeGuaranteedRadius and
+        /// the rule above it). Inside it the near field is VOXELISED BY THIS
+        /// cascade at every moment of any walk — its box always covers that
+        /// radius — so the bounce a walker stands in is built at this cell size
+        /// and not at the coarser cascade's. It is not a claim about every cone
+        /// SAMPLE: a cone aimed outward leaves the box and hands over to the
+        /// coarser cascade by construction. Negative means the cascade
+        /// guarantees NOTHING — the camera can be outside the box before it
+        /// re-centres, which is what every tier but Low did before
+        /// CASCADE-STEP-1. The STILL-CAMERA bound: the motion terms are bought
+        /// with a cell of slack in the step instead (see the rule). The
+        /// assertable form (gi.cascades cases 16a and 16b, and
+        /// scripting.e2e.world_modes over both columns).
+        float guaranteedRadius = 0.0f;
         /// The world-space centre it is currently built at (quantised to its
         /// own lattice, so it is NOT the camera position).
         Vec3  centre;
