@@ -1211,9 +1211,25 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     if (desc.smaaPreset >= 0) {
         // SMAA is LDR edge detection and MUST run after tonemapping (§4.3 item
-        // 2), so the chain gains one full-res sRGB target for the tonemapped
-        // image plus SMAA's own two working buffers and its output.
-        addTex(n, kLdr, Ogre::PFG_RGBA8_UNORM_SRGB);
+        // 2), so the chain gains one full-res target for the tonemapped image
+        // plus SMAA's own two working buffers and its output.
+        //
+        // PLAIN UNORM, NOT _SRGB, AND THIS WAS A REAL DEFECT (lane DITHER-1,
+        // measured). It was _SRGB for the reason upstream's sample uses one:
+        // SMAA wants a perceptual space to detect edges in. But in THIS engine
+        // the tonemapper's output already IS the display code
+        // (IEditorViewport::ScreenshotGrade writes the measurement out), so an
+        // sRGB target encoded it a SECOND time on the way in and the sampler
+        // decoded it again on the way out — and the 8-bit round trip through
+        // that encode is LOSSY IN THE WRONG DIRECTION: of the 256 display
+        // codes, 73 cannot survive it, every other code above ~160 among them.
+        // The top-down default-scene arm read 173 / 175 with SMAA on and
+        // 174 / 175 / 176 with SMAA off: the owner's "one hard camera-centred
+        // step of 2/255 that SMAA's pass produces" was this target, not SMAA.
+        // Plain UNORM stores what the tonemapper meant, bit for bit, at the
+        // same four bytes a pixel — and hands SMAA the perceptual values it
+        // wanted in the first place instead of their square.
+        addTex(n, kLdr, Ogre::PFG_RGBA8_UNORM);
         // SMAA's stencil early-out: both working buffers share one depth-stencil
         // buffer (the sample uses depth_pool 8) with a stencil-carrying format.
         {
@@ -2579,6 +2595,45 @@ void setBloomThreshold(float minThreshold, float fullColourThreshold) {
         Ogre::Vector4(minThreshold, 1.0f / (fullColourThreshold - minThreshold), 0.0f, 0.0f));
 }
 
+// ---- THE DITHER (lane DITHER-1) -------------------------------------------
+//
+// The tonemap quad is the ONE place in this engine where a floating-point
+// picture becomes 8-bit display codes, and patch 0079 makes it dither that
+// write (the amplitude, the determinism and the domain are documented once, in
+// irisgl/engine/media/Hlms/Jahshaka/JahDither.glsl). All that is left here is
+// the DIAGNOSTIC OVERRIDE: a single-process A/B for the guard suite and for the
+// selftest-hash comparison.
+//
+// It is read from the environment AT EVERY PUSH rather than cached, so a test
+// can flip it between two frames of one process — and it is process-global on
+// purpose, because the override is (the tonemap material is a MaterialManager
+// singleton, exactly like exposure and the bloom threshold above).
+//
+// The shader's parameter is named "off" and not "scale" so that its SAFE value
+// is zero: a constant buffer nobody has written renders the dithered picture,
+// which is the correct one.
+void setDither() {
+    Ogre::Pass *pass = materialPass("HDR/FinalToneMapping");
+    if (!pass || !pass->hasFragmentProgram()) return;
+    Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
+    if (!ps) return;
+    if (!ps->_findNamedConstantDefinition("jahDitherOff", false)) {
+        // Staged media that predates patch 0079. Say so ONCE — the picture is
+        // the old banded one, which is a defect, not a crash.
+        static bool sSaidSo = false;
+        if (!sSaidSo) {
+            sSaidSo = true;
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka: the staged HDR media has no jahDitherOff - the graded "
+                "picture is NOT dithered (8-bit contour banding). Re-run "
+                "irisgl/scripts/build-ogre.sh; patch 0079 is missing from this tree.");
+        }
+        return;
+    }
+    const char *off = std::getenv("JAHSHAKA_NO_DITHER");
+    ps->setNamedConstant("jahDitherOff", (off && *off && off[0] != '0') ? 1.0f : 0.0f);
+}
+
 // ---- SSAO -----------------------------------------------------------------
 // The stock SSAO/HS material arrives with NOTHING set: no hemisphere kernel, no
 // rotation noise, no projection. Ogre's sample builds all three in its game
@@ -2945,6 +3000,9 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
 void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                       unsigned viewWidth, unsigned viewHeight) {
     if (desc.hdr) {
+        // The tonemap quad's 8-bit write is dithered (patch 0079); this pushes
+        // only the diagnostic override, and the shader's default is "dithered".
+        setDither();
         setExposure(desc.exposure, desc.exposureMin, desc.exposureMax);
         // The meter's own two settings. Pushed only for the form that measures:
         // the fixed grade has no meter, and writing a process-wide job's

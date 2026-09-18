@@ -1,0 +1,134 @@
+Jahshaka patch 0079 — the final grade's 8-bit write is DITHERED.
+
+MEDIA-only patch (`Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl`
+and `Samples/Media/2.0/scripts/materials/HDR/HDR.material`). THE PROCESS COST IS
+STATED RATHER THAN AVOIDED: Studio stages its media from the SOURCE tree
+(cmake/IncludeOgre.cmake), so every tree must reset its ogre-next submodule and
+re-run `irisgl/scripts/build-ogre.sh` — no engine recompile beyond the staging,
+but the loop must run. It overlaps NO other patch in the stack (nothing else
+touches either file), so the reverse-check has no blind spot to trip over here.
+
+IT DEPENDS ON JAHSHAKA MEDIA: the dither itself lives in
+`irisgl/engine/media/Hlms/Jahshaka/JahDither.glsl` — ours, not upstream's —
+and this patch only includes it. Ogre's own `#include` (enable_include_header,
+OgreHighLevelGpuProgram::parseIncludeFile) resolves the name through the
+resource GROUP, and `Hlms/Jahshaka` is registered in the same group as the HDR
+materials (OgreEngine::registerCommonMaterials), so one file serves every
+shader that will ever need it. A tree with the patch and no staged Jahshaka
+media fails LOUD at shader compile; a tree with the media and no patch renders
+the old banded picture and says so once in the log (chain::setDither).
+
+WHY (Jahshaka lane DITHER-1, 2026-09-18, measured; the owner's smoke report on
+push #50 and ledger §768).
+
+THE DEFECT. The owner reported "faint circular rippling in the ground plane
+while flying". It is 8-BIT CONTOUR BANDING of a smooth shading gradient. The
+renderer computes in RGBA16F; the window, the offscreen render target and the
+VR eye image are all 8-bit UNORM, and 10-bit output is not available on this
+path (the X surface offers B8G8R8A8 only — LATER_OPTIMISATIONS L14). A smooth
+gradient therefore lands on a staircase of display codes, the contours sit
+where the gradient crosses a code, and they SLIDE with the camera. There was no
+dither anywhere in the final grade — only inside the SSR shaders. Every
+renderer dithers its final output, at any bit depth, for exactly this reason.
+
+THE MEASUREMENT (default scene, plain-colour ground, camera 25 m straight down,
+'scene' grade, 1920x1080, the middle half of the frame):
+
+                                      longest run   residual   radial profile
+                                      of one code   noise      max annulus jump
+  before                                  475 px    0.024 LSB      0.5756 LSB
+  after (this patch)                       24 px    0.346 LSB      0.0237 LSB
+
+The radial profile IS the owner's rippling — concentric annuli of the picture,
+averaged — and its step falls by a factor of 24.
+
+WHY THE TONEMAP QUAD AND NOWHERE ELSE. `HDR/FinalToneMapping` is the one place
+in this engine where a floating-point picture becomes display codes. Every
+target it writes is 8-bit UNORM — the window, the offscreen RTT, the VR eye
+image, the LDR buffer SMAA works on, the looks stage's first buffer, the
+picture-in-picture inset — so the dither here is UNCONDITIONAL and needs no
+per-view flag (which it could not have: this material is a MaterialManager
+singleton shared by every view). Nothing downstream needs one: SMAA's
+neighbourhood blend and the looks stage read a picture that is ALREADY
+quantised, and the dither is built so that a value already sitting exactly on a
+code rounds back to that code (amplitude 0.498 of a code, not 0.500), so a
+second dithered write over an already-quantised picture is the identity.
+
+WHY IT IS ADDED TO THE SHADER'S OWN OUTPUT VALUE, UNSCALED. In this engine the
+tonemapper's output IS the display code (measured — IEditorViewport::
+ScreenshotGrade), and the targets are plain UNORM, so `fragColour` is what the
+hardware rounds. A dither belongs on the quantiser's own axis.
+
+THE UNIFORM. `jahDitherOff` is a DIAGNOSTIC override (JAHSHAKA_NO_DITHER), and
+its name says "off" so that its SAFE value is zero: a constant buffer nobody has
+written renders the CORRECT picture, and a garbage value is clamped to the
+picture this engine drew before the dither existed. Neither failure can produce
+noise. It is what makes the one-process A/B in `hdr.dither` and the
+--engine-selftest hash comparison possible.
+
+WHAT IT MOVES. The selftest's two poses move by exactly 1/255 on 24.79 % and
+21.14 % of their pixels and by nothing more; the same binary with
+JAHSHAKA_NO_DITHER=1 reproduces the pre-lane hashes byte for byte.
+
+APPLIES TO the pinned ogre-next; verified with `git apply --check` against the
+pristine pin and `git apply --reverse --check` after applying.
+diff --git a/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl b/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl
+index c37dad61f..eb49aef15 100644
+--- a/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl
++++ b/Samples/Media/2.0/scripts/materials/HDR/GLSL/FinalToneMapping_ps.glsl
+@@ -48,6 +48,25 @@ vulkan_layout( ogre_t2 ) uniform texture2D bloomRt;
+ vulkan( layout( ogre_s0 ) uniform sampler samplerPoint );
+ vulkan( layout( ogre_s2 ) uniform sampler samplerBilinear );
+ 
++// JAHSHAKA (patch 0079, lane DITHER-1): the dither that makes this quad's
++// 8-bit write honest. This is THE place a floating-point picture becomes
++// display codes in this engine -- every target this material ever writes is
++// 8-bit UNORM (the window, the offscreen render target, the VR eye image, the
++// LDR buffer SMAA works on, the looks stage's first buffer, the
++// picture-in-picture inset) -- so the dither is unconditional here and needed
++// nowhere else. Why, how big and why it is keyed on the pixel alone: the
++// header, which is Jahshaka media and is found through the resource group.
++#include "JahDither.glsl"
++vulkan( layout( ogre_P0 ) uniform Params { )
++	// THE SAFE DEFAULT IS ZERO, i.e. DITHERED: a zero-filled constant buffer
++	// (a frame drawn before the host has pushed anything, and any target
++	// this material reaches through a path that does not push) renders the
++	// CORRECT picture rather than a banded one, and a garbage value is
++	// clamped to "off", i.e. to the picture this engine drew before the
++	// dither existed. Neither failure can produce noise.
++	uniform float jahDitherOff;	// 0 = dither (normal), 1 = JAHSHAKA_NO_DITHER
++vulkan( }; )
++
+ void main()
+ {
+ 	float fInvLumAvg = texture( vkSampler2D( lumRt, samplerPoint ), vec2( 0.0, 0.0 ) ).x;
+@@ -61,5 +80,8 @@ void main()
+ 	//vSample.xyz  = vSample.xyz / (1 + vSample.xyz); //Reinhard Simple
+ 	vSample.xyz  = ( vSample.xyz - 0.5 ) * 1.25 + 0.5 + 0.11;
+ 
++	vSample.xyz = jahDither8( vSample.xyz, gl_FragCoord.xy,
++							  1.0 - clamp( jahDitherOff, 0.0, 1.0 ) );
++
+ 	fragColour = vSample;
+ }
+diff --git a/Samples/Media/2.0/scripts/materials/HDR/HDR.material b/Samples/Media/2.0/scripts/materials/HDR/HDR.material
+index 0ff717989..cbb6f4f2b 100644
+--- a/Samples/Media/2.0/scripts/materials/HDR/HDR.material
++++ b/Samples/Media/2.0/scripts/materials/HDR/HDR.material
+@@ -32,6 +32,8 @@ fragment_program HDR/DownScale03_SumLumEnd_ps_GLSL glsl
+ fragment_program HDR/FinalToneMapping_ps_GLSL glsl
+ {
+ 	source FinalToneMapping_ps.glsl
++	// JAHSHAKA patch 0079: the tonemap includes Jahshaka/JahDither.glsl.
++	enable_include_header true
+ 	
+ 	default_params
+ 	{
+@@ -90,6 +92,7 @@ fragment_program HDR/DownScale03_SumLumEnd_ps_VK glslvk
+ fragment_program HDR/FinalToneMapping_ps_VK glslvk
+ {
+ 	source FinalToneMapping_ps.glsl
++	enable_include_header true
+ }
+ 
+ fragment_program HDR/BrightPass_Start_ps_VK glslvk
