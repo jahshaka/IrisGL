@@ -5703,6 +5703,10 @@ unsigned vrSessionBindingBlocks(const VrSession *, VrBindingBlock *out, unsigned
 /// IS THE RUNTIME REALLY TRACKING that hand's skeleton? (The injection refusal
 /// rule for joints: a wearer's own hand always wins over a script's.)
 bool    vrSessionHasLiveJoints(const VrSession *, int hand);
+/// WAS THIS SESSION ASKED FOR BARE HANDS (`VrConfig::hands`, lane
+/// HANDS-SWITCH-1)? False = a project on controllers: no hand bindings were
+/// suggested, no tracker exists, and no skeleton is reported from any source.
+bool    vrSessionHandsEnabled(const VrSession *);
 /// THE ONE READING OF `JAHSHAKA_VR_TEST_INJECT` (VR_INPUT_SPEC §2.4 I1), for
 /// the two places that enforce the refusal rule: the WRITE (Engine::
 /// vrInjectInput refuses one) and the per-frame READ (the session ignores and
