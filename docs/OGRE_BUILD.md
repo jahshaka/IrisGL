@@ -1435,20 +1435,46 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     `getNumBuckets()/getNumOctants()` are exposed so the host can report the
     dispatch count (`GiStatus::CascadeStatus::voxelDispatches`,
     `world.giStatus().cascades[].voxelDispatches`).
-    **R32_UINT AND NOT RGBA32_UINT, AND THAT IS AN UPSTREAM FINDING:** the
-    accumulator is cleared every build through `ComputeTools::clearUavUint`, and
-    clearing a PFG_RGBA32_UINT 3D uav that way HANGS THE GPU on NVIDIA 595.84 —
-    `VK_ERROR_DEVICE_LOST` with `Xid 109 CTX SWITCH TIMEOUT`, 8/8 on
-    `samples.cleanstart.Showroom{,_2}` and 0/4 with that one call removed while
-    the same texture was still created, bound and written. It is the CLEAR and
-    not the size, the binding, the shader body or the bucket key: each of those
-    was reversed on its own and the device was still lost. R32_UINT clears without
-    complaint, 4/4. Recorded for OGRE_UPSTREAM_ISSUES.md; the cost is the
-    scattered addressing sixteen scalar texels imply.
+    **R32_UINT AND NOT RGBA32_UINT — THE CAUSE CORRECTED, THE CHOICE RE-MEASURED
+    (VOXMERGE-2 / render audit ON-6, 2026-09-18; no logic moves, but two hunk
+    PAYLOADS do — the class comment and the media piece's layout comment — so
+    EVERY TREE RESETS THE SUBMODULE AND RE-RUNS `build-ogre.sh`, as for any 0065
+    amendment: the earlier text fails the reverse check on three files, the staged
+    media differs, and the voxel-merge permutations take one microcode-cache miss
+    on the first warm launch after it).** This entry used
+    to say that clearing a PFG_RGBA32_UINT 3D uav through
+    `ComputeTools::clearUavUint` HANGS THE GPU on NVIDIA 595.84 (`Xid 109 CTX
+    SWITCH TIMEOUT`, 8/8 on `samples.cleanstart.Showroom{,_2}`, 0/4 with that call
+    removed) and that the thirteen-scalar interleave was bought against it. THE
+    ATTRIBUTION WAS WRONG: patch 0067 established that the hazard was a
+    device-local block recycled ONE FRAME early while three were in flight — the
+    accumulator's whole-volume clear was simply the first and biggest write into
+    recycled memory — and patch 0071 then stopped this accumulator being recycled
+    at all (it is created with the voxel textures and stays Resident).
+    RE-MEASURED ON THAT STACK, with a full RGBA32_UINT arm built and verified
+    (four 128-bit texels per voxel, one clear; `gi.cascade_determinism`,
+    `gi.leak_room`, `gi.field_follows`, `gi.cascades`, `gi.cascade_dirty` green on
+    it and both `--engine-selftest` poses byte-identical, so it was a working
+    implementation): **the 128-bit clear is CLEAN — 16/16 rounds of
+    `samples.cleanstart.Showroom{,_2}` with ZERO Xid, against 16/16 for the
+    shipped layout.** And the four-texel layout buys nothing: on the same
+    8,026-instance lattice at Photon High (clocks locked, GPU timestamps, three
+    runs an arm, mean GPU ms per rebuild) R32 read c0 11.7/14.5/11.3,
+    c1 14.9/15.4/14.5, c2 20.2/18.3/16.6, c3 77.3/80.4/79.5 and RGBA32 read
+    c0 14.3/15.5/12.5, c1 18.3/15.5/15.3, c2 20.2/19.1/19.0, c3 85.3/80.9/75.9 —
+    the run-to-run spread is larger than any difference. Which is what the
+    arithmetic says: the merge touches only voxels a dispatch contributed to,
+    while the CLEAR touches every voxel of the volume and writes MORE bytes in the
+    RGBA32 layout (64 per voxel against 52). So the thirteen-texel layout stays on
+    its own merits — 12 MB less per 64^3 volume and 25 MB less per 128^3, RESIDENT
+    since 0071, which at Photon High is 245 MB held against 301. The RGBA32 arm is
+    kept as a measured artifact in `spikes/engine-small-b/`.
     WHAT IT COSTS: 52 bytes per voxel — 13.6 MB at 64^3, 109 MB at 128^3 —
-    TRANSIENT (OnStorage the moment `build()` returns, one volume at a time), plus
-    thirteen scalar texels read and written per touched voxel. The voxelisation job
-    gains ONE uav slot (7 instead of 6) and nothing else about its bindings moves.
+    RESIDENT for the voxeliser's life since patch 0071 (it was transient here;
+    the per-build round trip of an image that size was the second Xid 109 site),
+    plus thirteen scalar texels read and written per touched voxel. The
+    voxelisation job gains ONE uav slot (7 instead of 6) and nothing else about
+    its bindings moves.
     Measured (lane VOXMERGE-1, GPU clocks locked, the lattice at Photon High, GPU
     timestamps, mean/max ms per rebuild, two runs per arm): c0 13.7/20.4 and
     14.3/22.7 -> 13.8/19.6 and 13.4/16.5; c1 34.3/90.1 and 29.8/73.4 -> 17.3/30.7
