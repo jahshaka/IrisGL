@@ -2607,7 +2607,51 @@ public:
     void applyPendingSkyCapture();
     /// The ambient half of the capture: the cube's 32^2 mip, read back and
     /// integrated into 9 SH bands (the host scales them by its Sky Light).
+    ///
+    /// THE READ IS ASYNCHRONOUS EXCEPT THE FIRST (render audit ON-14, lane
+    /// ENGINE-SMALL-A, 2026-09-18). `flushCommands()` + `map()` is a GPU->CPU
+    /// wait on the UI thread, and it ran on every sky CHANGE — every frame of a
+    /// sun drag (measured: 0.94 ms of wait + 0.47 ms of integral per change on
+    /// this box, and the wait's share is unbounded in principle because
+    /// flushCommands submits and waits for whatever the frame had recorded).
+    /// Now: the FIRST capture of a scene is synchronous (nothing valid to lag
+    /// behind, and a thumbnail renders a handful of frames and asserts their
+    /// colours), and every later one issues the download with INACCURATE
+    /// tracking and maps it on a later frame — `pollSkyShRead` at the frame's
+    /// top — with the previous coefficients staying valid meanwhile.
+    /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture,
+    /// which is how the two are A/B'd on one binary.
     void integrateSkyShFromCube(Ogre::TextureGpu *cube);
+    void integrateSkyShNow(Ogre::TextureGpu *cube);
+    void issueSkyShRead(Ogre::TextureGpu *cube);
+    void integrateSkyShFromBox(const Ogre::TextureBox &box);
+    /// Called at the top of every frame this scene is drawn in: counts the
+    /// gesture's clock and, if the pending read has landed, integrates it.
+    /// Never blocks.
+    void pollSkyShRead();
+    /// The read itself. `force` maps unconditionally — a capture about to
+    /// replace the ticket takes its answer first, and by then the copy is a
+    /// frame old and free (see the note in OgreSky.cpp).
+    void readSkyShTicket(bool force);
+    void destroySkyShTicket();
+    /// The read in flight, or null. Owned; read (not dropped) by the next
+    /// capture, which is one frame later at worst and therefore free.
+    Ogre::AsyncTextureTicket *mSkyShTicket = nullptr;
+    /// Drawn frames since the last sky capture — the gesture's clock. A capture
+    /// within `kSkyCaptureDragFrames` of the previous one is a DRAG and defers
+    /// its read; a lone change stays synchronous, so nothing that renders a
+    /// handful of frames and asserts their colours moves. Counted by
+    /// pollSkyShRead, which runs once per drawn frame.
+    unsigned mSkyCaptureIdleFrames = 1000u;
+    /// TWO, and the number is a measurement of both sides. A sun being dragged
+    /// pushes a new sky on every frame or every other frame (one document edit
+    /// per mouse-move event against a 60 Hz loop), so 2 catches every real
+    /// gesture; and a HOST or a suite that changes a sky, renders a few frames
+    /// and asserts the picture is at 3 or more — mirror.document_to_engine's
+    /// red-sky case renders exactly three between pushes, and at a threshold of
+    /// 3 it read the previous sky's light. The rule is "the frame after, or the
+    /// one after that", not a timer.
+    static const unsigned kSkyCaptureDragFrames = 2u;
     bool mSkyCapturePending = false;
     /// The sky's ambient, 9 SH bands x 3 channels, integrated from the captured
     /// cube. Valid only while mSkyShValid; the host scales it by its Sky Light.

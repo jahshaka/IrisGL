@@ -976,6 +976,13 @@ void OgreEngine::renderOneFrame() {
         // only postponed to the frame it can be seen in.
         for (auto &s : mScenes)
             if (drawnThisFrame(s.get())) {
+                // THE SKY AMBIENT'S DEFERRED READ (audit ON-14), first: it is a
+                // `queryIsTransferDone` and, when the copy has landed, a map
+                // and 6 x 1024 texels of integral. Never a wait — see
+                // OgreScene::pollSkyShRead — and here rather than beside the
+                // capture because a read issued inside a frame must not be
+                // polled in that same frame.
+                s->pollSkyShRead();
                 s->applyPendingGi(); s->applyPendingIbl(); s->applyPendingPlanar();
             }
         // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
