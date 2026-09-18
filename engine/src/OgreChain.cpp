@@ -111,11 +111,13 @@ namespace {
 /// texture or RTT), connected with connectExternal(0, ...).
 constexpr const char *kTargetChannel = "JahTarget";
 
-/// The scene's HDR colour target, and the resolved copy the post passes read
-/// when MSAA is on (rt0 is explicit-resolve then, so the HDR box filter in
-/// HDR/Resolve_4xFP32_HDR_Box does the resolve in the right colour space).
+/// The scene's HDR colour target. (The explicit-resolve copy it once had for
+/// HDR + MSAA — `jahResolvedRt`, the HDR/Resolve_4xFP32_HDR_Box box filter —
+/// was DEAD CODE from the day hardware MSAA was switched off inside the chain
+/// (see the note at `msaa = false` below): deleted at the EXPOSURE-2 merge,
+/// HDR-MSAA-CRUD, on the Fable read's proof that the pin would have THROWN on
+/// the quad's unknown texture name had the branch ever been reached.)
 constexpr const char *kRt0        = "jahRt0";
-constexpr const char *kResolvedRt = "jahResolvedRt";
 /// Auto-exposure: a 1x1 luminance history that survives frames (keep_content),
 /// and the 64/16/4/1 reduction chain that feeds it.
 /// The constant HDR/FinalToneMapping samples in place of a measured exposure
@@ -896,6 +898,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // ever asks for both. A user who sets both by hand gets the chain at 1x and
     // an unused multisampled window, not a crash.
     //
+    // AND SO THE EXPLICIT HDR RESOLVE IS GONE (HDR-MSAA-CRUD, 2026-09-18): the
+    // `jahResolvedRt` target, the box-filter quad and its recompile were gated
+    // on `msaa && hdr`, which this line makes impossible — dead since the
+    // policy landed. The remaining `if (msaa)` sites below (the sample counts
+    // on the depth and GBuffer targets, kDepthNoMsaa, the MSAA HZB seed, the
+    // refraction store action) are the same class and go with CHAIN-MSAA-CRUD
+    // when the chain's 1x rule is written into ChainDesc itself.
+    //
     // Textures first: addTextureDefinition may reallocate, so no
     // TextureDefinition pointer is held across another call.
     msaa = false;
@@ -935,28 +945,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         auto *td = addTex(n, kRt0, desc.hdr ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
         td->depthBufferId = 1u;                      // the scene needs depth
         td->preferDepthTexture = desc.ssao || ssr;   // sampled by the AO/SSR passes
-        if (msaa) {
-            td->fsaa = std::to_string(desc.samples);
-            // Explicit resolve: with HDR the resolve is a custom box filter in
-            // the right colour space (HDR/Resolve_4xFP32_HDR_Box); a hardware
-            // resolve of RGBA16F averages pre-tonemap radiance and fireflies win.
-            //
-            // EXCEPT with refractions, which need the OPPOSITE: the refractive
-            // pass renders at the scene's sample count (it shares the depth
-            // buffer) while SAMPLING the opaque image, so the opaque image has
-            // to carry a hardware-resolved surface. HDR + MSAA + refraction
-            // therefore resolves in hardware and skips the box filter — a real,
-            // small quality trade, taken deliberately rather than crashing.
-            if (desc.hdr && !desc.refractions)
-                td->textureFlags |= Ogre::TextureFlags::MsaaExplicitResolve;
-        }
+        if (msaa) td->fsaa = std::to_string(desc.samples);
         syncRtvDepth(n, kRt0, td);
     }
-    // The custom HDR resolve target exists only when rt0 is explicit-resolve —
-    // i.e. HDR and MSAA, without refractions (see the note on rt0's flags).
-    const bool hdrExplicitResolve = msaa && desc.hdr && !desc.refractions;
-    if (hdrExplicitResolve)
-        addTex(n, kResolvedRt, Ogre::PFG_RGBA16_FLOAT);
 
     if (desc.hdr) {
         // THE FIXED-EXPOSURE VARIANT (PostFxDesc::tonemapFixed) drops the whole
@@ -1535,14 +1526,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
     }
 
-    // MSAA resolve, in HDR space.
+    // The scene result the post passes read. (No MSAA resolve stands here any
+    // more: the chain renders at 1x — see `msaa = false` above — and the
+    // explicit HDR box-filter resolve that used to be gated on a flag that
+    // could never be true is gone, HDR-MSAA-CRUD.)
     const char *hdrSrc = kRt0;
-    if (hdrExplicitResolve) {
-        auto *q = addQuad(n, kResolvedRt, "HDR/Resolve_4xFP32_HDR_Box", "Jahshaka HDR MSAA resolve");
-        q->addQuadTextureSource(0, kRt0);
-        q->addQuadTextureSource(1, kOldLum);
-        hdrSrc = kResolvedRt;
-    }
 
     // Refraction: the refractive items re-render on top, sampling the opaque
     // result and a non-MSAA depth copy (VISUAL_PARITY §4, re-hosted here).
@@ -2529,14 +2517,6 @@ void recompile(const char *material, const std::string &defines) {
 
 }   // namespace
 
-void initHdrMsaa(unsigned samples) {
-    if (samples <= 1) return;
-    std::string defines = "MSAA_INITIALIZED=1,MSAA_SUBSAMPLE_WEIGHT=";
-    defines += std::to_string(1.0f / float(samples));
-    defines += ",MSAA_NUM_SUBSAMPLES=" + std::to_string(samples);
-    recompile("HDR/Resolve_4xFP32_HDR_Box", defines);
-}
-
 namespace {
 /// A named uniform on one of the meter's compute jobs. Compute jobs are
 /// process-wide singletons exactly as the HDR materials were, so the per-frame
@@ -2613,7 +2593,6 @@ namespace {
 Ogre::TextureGpu *gSsaoNoise = nullptr;
 bool gSsaoInitialised = false;
 int  gSmaaPreset = -1;
-unsigned gHdrMsaaSamples = 0;
 
 float rangeRandom(float lo, float hi) {
     return lo + (hi - lo) * (float(std::rand()) / float(RAND_MAX));
@@ -2723,7 +2702,6 @@ void destroySsao(Ogre::Root *root) {
     gSsaoNoise = nullptr;
     gSsaoInitialised = false;
     gSmaaPreset = -1;
-    gHdrMsaaSamples = 0;
     if (!noise || !root) return;
     try {
         if (Ogre::Pass *pass = materialPass("SSAO/HS")) {
@@ -2965,10 +2943,6 @@ void updateLooks(const ChainDesc &desc) {
 // See the declarations in EnginePrivate.h for why the split exists at all.
 
 void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
-    if (desc.hdr && gHdrMsaaSamples != desc.samples) {
-        initHdrMsaa(desc.samples);
-        gHdrMsaaSamples = desc.samples;
-    }
     if (desc.smaaPreset >= 0) initSmaa(root, desc.smaaPreset);
 }
 

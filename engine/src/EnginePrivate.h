@@ -1207,7 +1207,6 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 // backend follows is "the primary on-screen view owns the globals" —
 // OgreEngine::renderOneFrame pushes them from the first enabled on-screen view
 // whose chain has effects, and every other view lives with that.
-void initHdrMsaa(unsigned samples);
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
 /// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
 /// meter's compute jobs; only meaningful for the form that measures.
