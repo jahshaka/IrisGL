@@ -131,11 +131,16 @@ public:
     /// function counts frames of GI stability, so a second call per frame would
     /// halve the settle window and re-solve the chain in the middle of a drag.
     ///
-    /// `driving` is the camera the view is drawn through (the rig is placed on
-    /// it), so the eye carries the same per-camera lens the desktop does. Null
-    /// is allowed and means "the world's description, with no camera over it".
+    /// `hostCamera` is the camera the HOST holds, and it is resolved here
+    /// through `Scene::renderCamera` exactly as applyCamera resolves its own —
+    /// so the eye carries the lens of the camera the scene is really rendered
+    /// through (an armed authored camera while playing, a possessed
+    /// character's arm), which is also the camera the VR rig was placed on.
+    /// Null is allowed and means "the world's description, no camera over it".
+    /// A CUT — this view's driving camera changing — re-seeds the view's
+    /// exposure history, like applyCamera's.
     void applyViewEnvironment(jahshaka::engine::View *view,
-                              const iris::CameraNodePtr &driving = {});
+                              const iris::CameraNodePtr &hostCamera = {});
 
     /// Forgets what applyEnvironment has already pushed, so the next call pushes
     /// everything again.

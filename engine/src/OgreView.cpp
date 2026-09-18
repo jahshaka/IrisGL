@@ -566,21 +566,31 @@ void OgreView::setPostFx(const PostFxDesc &pushed) {
     PostFxDesc fx = pushed;
     if (mStereo) {
         applyVrViewPolicy(fx, mVrSsrOverride);
-        // A DROPPED LOOK IS SAID OUT LOUD, ONCE PER CHANGE. Everything else the
-        // policy removes is invisible to an author (nobody misses an SSAO they
-        // never saw in there), but a LOOK is a thing they added on purpose and
-        // can see on the desktop — so "why is my radial blur not in the
-        // headset" must be answerable from the log rather than from this file.
+        // WHAT THE POLICY TOOK AWAY IS SAID OUT LOUD, ONCE PER CHANGE. Most of
+        // it is invisible to an author — nobody misses an SSAO they never saw
+        // in there — but three things are chosen on purpose in the World panel
+        // and are visible on the desktop: a LOOK, the REFRACTIONS row and the
+        // DISTORTION row. "Why is my glass not refracting in the headset" must
+        // be answerable from the log rather than from a header.
         const size_t dropped = pushed.looks.size() - fx.looks.size();
-        if (dropped != mVrLooksDropped) {
-            mVrLooksDropped = dropped;
+        const bool lostRefract = pushed.refractions && !fx.refractions;
+        const bool lostDistort = pushed.distortion && !fx.distortion;
+        const size_t state = dropped * 4u + (lostRefract ? 2u : 0u) + (lostDistort ? 1u : 0u);
+        if (state != mVrPolicyDropped) {
+            mVrPolicyDropped = state;
+            std::string what;
             if (dropped)
+                what = std::to_string(dropped) + " of this project's " +
+                       std::to_string(pushed.looks.size()) + " look(s)";
+            if (lostRefract) what += (what.empty() ? "" : ", ") + std::string("refractions");
+            if (lostDistort) what += (what.empty() ? "" : ", ") + std::string("distortion");
+            if (!what.empty())
                 Ogre::LogManager::getSingleton().logMessage(
-                    "Jahshaka VR: " + std::to_string(dropped) +
-                    " of this project's " + std::to_string(pushed.looks.size()) +
-                    " look(s) are not drawn in the headset: their geometry is measured "
-                    "from the frame's centre, which in a target holding two eyes side by "
-                    "side is the inner edge of both (jahshaka::engine::stereoSafeLook)");
+                    "Jahshaka VR: " + what + " are not drawn in the headset - each of them "
+                    "reads the TARGET at a coordinate that is not this pixel's (a look's "
+                    "centre, a refraction's or a distortion's offset), and in a target "
+                    "holding two eyes side by side that coordinate crosses the seam into "
+                    "the other eye (jahshaka::engine::applyVrViewPolicy)");
         }
     }
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free

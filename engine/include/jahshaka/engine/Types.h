@@ -3594,6 +3594,22 @@ struct VrStatus {
     /// — `head.valid` is false for as long as that is so.
     float              ipd = 0.0f;
     unsigned           eyeWidth = 0, eyeHeight = 0;   ///< what the chain renders per eye
+    /// THE COLOUR CONTRACT THIS SESSION IS UNDER (lane EYE-GRADE-1), reported
+    /// rather than only logged because it decides whether the wearer is looking
+    /// at the project's picture or at a picture a stop too bright.
+    ///
+    /// `swapchainFormat` is the Vulkan format the runtime gave us, by name
+    /// ("R8G8B8A8_SRGB"), and `colourEncodedOnce` is what it MEANS: the eye
+    /// target's bytes are display-encoded, so an _SRGB swapchain has the
+    /// runtime decode and re-encode them (an identity round trip, one encode
+    /// from radiance to the eye) while a UNORM one has it treat them as linear
+    /// and encode them a SECOND time. The second is a fallback for a runtime
+    /// that offers nothing better — loud in the log, visible here, and raised
+    /// to the user as a scene issue — and no runtime seen so far needs it.
+    ///
+    /// Empty / true with no session.
+    std::string        swapchainFormat;
+    bool               colourEncodedOnce = true;
     /// THE STEREO WARM-UP (VrConfig::warmUpFrames): how many warm-up frames
     /// this session has rendered, and what they cost in total. `warmUpFrames`
     /// reaching the configured number is the signal that the eyes are being
@@ -4374,6 +4390,25 @@ struct PostFxDesc {
 ///   * ssrScreenMarch — the march walks the TARGET; see the field's own note.
 ///     `chain::build` enforces it for any stereo chain whatever a host asked;
 ///     this is the place that asks.
+///   * hzb — the depth pyramid is built from the view's own depth for a trace
+///     that does not exist yet, and a pyramid over a target holding two eyes
+///     would reduce across the seam like everything else here. Nothing asks
+///     for it today; it is cleared so that the day something does, it does not
+///     arrive in the headset first.
+///   * refractions, distortion — and this is the entry that was WRONG for one
+///     round (the Fable read's F2). Both are screen-space READS of the target:
+///     the pin's refraction piece samples the scene copy at `screenPosUv +
+///     offset` and falls back only at the FRAME's edges (`abs(screenPosUv * 2 -
+///     1) * 10 - 9`, Samples/Media/Hlms/Pbs/Any/Refractions_piece_ps.any), and
+///     the distortion composite warps by an offset the same way. In a target
+///     holding two eyes there is no fallback at the seam, so a refractive pane
+///     near an eye's nasal edge shows THE OTHER EYE through it — the identical
+///     reason ssao and smaa are here, and it does not matter that the material
+///     itself shades correctly per eye through the instanced-stereo pass
+///     buffer. Off until the sample is clamped to the eye's own half and the
+///     fallback moved to the eye's own edges (a media patch; lane
+///     STEREO-REFRACT-1). They were off in the hand-written descriptor this
+///     policy replaces, so no wearer loses anything they had.
 ///   * looks — a look whose geometry is defined about the FRAME'S CENTRE reads
 ///     that centre as the pair's inner edge, which is nowhere in either eye
 ///     (see `stereoSafeLook`).
@@ -4381,10 +4416,8 @@ struct PostFxDesc {
 /// AND WHAT IS DELIBERATELY *NOT* HERE. MSAA is not a PostFxDesc field: the
 /// session pins `setSampleCount(1)` itself (HDR + MSAA segfaults this driver,
 /// OgreChain's own note) and the mirror never pushes a count into an offscreen
-/// view. Refractions and distortion follow the project: both are how a MATERIAL
-/// renders rather than a picture effect, both are shaded per eye through the
-/// instanced-stereo pass buffer, and both cost exactly nothing in a scene with
-/// no such material.
+/// view. The exposure (mode, stops, window), the meter's pattern and clips, the
+/// reflection row and the grade follow the project, whole.
 ///
 /// `ssrOverride` is the ONE session-scoped override: -1 means "the project's
 /// row", 0/1/2 are `vr.begin({reflections:n})`'s measurement arm (VrConfig::ssr).
@@ -4427,6 +4460,8 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.smaaPreset     = -1;
     fx.ssrScreenMarch = false;
     fx.hzb            = false;
+    fx.refractions    = false;
+    fx.distortion     = false;
     if (ssrOverride >= 0) fx.ssr = ssrOverride;
     if (!fx.looks.empty()) {
         std::vector<LookDesc> kept;

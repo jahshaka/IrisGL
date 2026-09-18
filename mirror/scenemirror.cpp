@@ -6825,11 +6825,37 @@ static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
 // records the FIRST one wrote — `mWorldPostFx` (the picture-in-picture inset's
 // base) and `mSunExposureGain` (the sun's night rule). They describe the view
 // the host calls applyEnvironment for, and only that one.
-void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &driving)
+void SceneMirror::applyViewEnvironment(View *view, const iris::CameraNodePtr &hostCamera)
 {
     if (!mSource || !view) return;
-    if (driving) noteDrivingCamera(view, driving);
+    // THE CAMERA THE SCENE IS RENDERED THROUGH, NOT THE ONE THE HOST HOLDS
+    // (the Fable read's F1). `applyCamera` resolves its host's camera through
+    // `Scene::renderCamera` — the three-term active-camera/possession rule —
+    // and a host that hands us its own camera instead would grade the eye with
+    // a DIFFERENT camera's lens than the desktop the moment the rule picks
+    // another one: an authored camera armed while playing, a possessed
+    // character's arm. That is the very disagreement this lane removes, and it
+    // would bite exactly where it hurts most — the rig is PLACED on
+    // renderCamera, so the wearer would be standing at the shot with somebody
+    // else's grade.
+    //
+    // Resolved HERE rather than in the two hosts, because applyCamera's own
+    // note says why: a second copy of a three-term rule is how a wearer ends up
+    // somewhere the picture never was. One rule, two callers.
+    iris::CameraNodePtr driving = hostCamera;
+    if (driving) driving = mSource->renderCamera(driving);
+    if (!driving) driving = hostCamera;
+    const bool cut = driving ? noteDrivingCamera(view, driving) : false;
     applyViewPostFx(view, /*record=*/false);
+    // A CUT IS NOT A LIGHTING CHANGE — applyCamera's rule, which this path used
+    // to drop on the floor. The chain's automatic exposure adapts at ~75 %/s,
+    // so a cut to a differently exposed camera fades over one to two seconds in
+    // the headset while the desktop re-seeds and starts at the new grade. Two
+    // eyes ramping through an exposure the desktop already arrived at is worse
+    // than a desktop doing it: it is a whole-field brightness change with no
+    // cause the wearer can see. Re-seeded AFTER the description is pushed,
+    // because the seed is derived from it.
+    if (cut) view->resetExposureHistory();
 }
 
 void SceneMirror::applyViewPostFx(View *view, bool record)

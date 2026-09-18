@@ -2990,6 +2990,14 @@ float exposureSeed(float exposure) {
 
 void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *) {
     if (!mRoot || !mView) return;
+    // COUNTED, because "did this view's globals reach the frame at all" is a
+    // question that cost a sibling lane a day (DITHER-1, 2026-09-18: a switch
+    // flipped mid-session moved zero bytes of the eye picture). It is one
+    // increment on a path that already writes a dozen material parameters, and
+    // it is what `View::globalsPushes()` and `vr.state().postFx.*.globalsPushes`
+    // report — so a suite can assert the eye pair is pushed once per frame
+    // rather than inferring it from a picture.
+    mView->noteGlobalsPush();
     // THE WHOLE MECHANISM, in three lines. Ogre fires this immediately before
     // THIS workspace's passes execute (CompositorWorkspace::_update), and the
     // material parameters these writes land in are read at pass execute time —
