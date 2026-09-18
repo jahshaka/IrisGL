@@ -3815,6 +3815,7 @@ private:
     /// No-op when the field is converged, when there is no field, or when the
     /// update budget is 0 (paused). Called once a frame from updateGiTracking.
     void updateIrradianceField();
+    void oweCascade0FieldFollow(GiStaleReason reason);
     /// Per-axis PROBE COUNTS for a field over `size`, each a power of two
     /// (upstream only ASSERTS that, and the assert is compiled out of our
     /// release engine) and together kIfdTotalProbes. Fitted from the volume's
@@ -4466,6 +4467,34 @@ private:
     /// last build (GiStatus::ifdFollows) — the counter the follow suite reads,
     /// and the honest answer to "is the field tracking the chain at all".
     unsigned long long                mIfdFollows = 0;
+    /// A FIELD FOLLOW OWED TO THE NEXT FRAME, AND WHY IT IS NOT PAID ON THE
+    /// FRAME THAT MOVED THE CASCADE (lane V1-RIG item 2, LATER_OPTIMISATIONS
+    /// L11, measured).
+    ///
+    /// Cascade 0's rebuild and the field's WHOLE re-integration used to land on
+    /// one frame, and at a headset's pixel count that frame is over the 90 Hz
+    /// bar: measured in a Monado session with the eye render forced to Quest
+    /// Pro size (2160x2376 per eye, 10.26 Mpx of stereo target), a Medium walk's
+    /// quiet frame is 5.84 ms of GPU and its step frame 11.72 ms mean / 12.45
+    /// max, twelve of a hundred and sixty frames over 11.1 — one dropped frame
+    /// every five metres of travel (spikes/v1-rig/COST.txt). The two halves are
+    /// 2.43 ms (the cascade) and 3.40 ms (the field) and NEITHER alone crosses
+    /// the bar: split across two frames the same walk peaks at 8.3 and 9.2 ms.
+    ///
+    /// WHAT IT COSTS IN CORRECTNESS: for exactly one frame the field describes
+    /// the place cascade 0 has just left — one step of staleness, 11 ms of it,
+    /// against L11's double-buffered atlas which accepts the same staleness for
+    /// as many frames as a progressive re-integration takes. It is never a
+    /// WRONG PLACE: the field's volume and its atlas move together, so the
+    /// shader reads probes that were integrated where the field says it is.
+    ///
+    /// It also owns the frame's one GI slot, so the frame that pays it rebuilds
+    /// no cascade — which is the whole point — and `updateIrradianceField`
+    /// refuses to run a progressive batch while it is owed: cascade 0's rebuild
+    /// may have re-created the light voxel textures the field's generation job
+    /// binds, and the re-bind is the first thing `followCascade0Field` does.
+    int          mIfdFollowOwed = 0;
+    GiStaleReason mIfdFollowReason = GiStaleReason::Camera;
     bool mRefractionsActive = false;   // see setRefractionsActive
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state

@@ -4183,17 +4183,75 @@ bool OgreScene::rebuildCascade(size_t idx, GiStaleReason reason, bool *placement
     return true;
 }
 
+// THE RE-CENTRE HAS A HYSTERESIS BAND, AND A MEASUREMENT IS WHY (lane V1-RIG,
+// 2026-09-18).
+//
+// THE DEFECT. The scroll test was "the camera's step cell is not the cell it
+// was built in" — a plane, with no band. A camera that OSCILLATES across such a
+// plane therefore re-voxelises on every crossing, for ever, while standing
+// still. That is not a corner case in a headset: a wearer's head sways
+// centimetres and the runtime reports every millimetre of it, so a wearer whose
+// head happens to sit on a lattice plane pays cascade rebuilds at a fraction of
+// every frame. Measured on the rig (spikes/v1-rig, Medium, a +-0.12 m sinusoid
+// about x = 0, which IS a step plane at every tier): 64 cascade rebuilds and 16
+// whole irradiance-field re-integrations in 200 still frames — 32 % of frames
+// doing 5.5-8.8 ms of GPU work each — against ZERO for the same sway at
+// x = 3.75, the middle of the same cell. The same mechanism was visible with a
+// completely still head: Monado's simulated HMD sways +-0.1 m about x = 0 and
+// the "static pose" arms of item 1 rebuilt the whole chain three times in 160
+// frames.
+//
+// THE FIX, and why it costs nothing in placement quality. The lattice the test
+// quantises on is SHRUNK by the band and the band is then added back on both
+// sides: with `kStepHysteresis` = h, the planes sit every step*(1-h) metres and
+// the camera must be h*step PAST the plane it crossed. The worst distance the
+// camera can be from the centre it was built at is therefore
+// step*(1-h) + h*step = step — EXACTLY what it was before, so no cascade holds
+// the camera any further off-centre than it does today. What changes is the
+// rebuild count while WALKING, up by 1/(1-h) = 11 % at h = 0.1, and what it buys
+// is that no rest pose can thrash the chain at all.
+//
+// It is deliberately not a velocity or a time rule: the distance is the physics
+// (how far the volume is from describing where the camera is), a clock is not.
+static const float kStepHysteresis = 0.1f;
+
 void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     if (mVctCascades.size() < 1u || !mVctCascades[0].built) return;
+
+    // ---- 0. A DEFERRED FIELD FOLLOW OWNS THE FRAME'S ONE SLOT -------------
+    // (V1-RIG item 2 / L11.) It is paid before anything reads the field this
+    // frame and it spends the slot, so the frame that pays it rebuilds no
+    // cascade: the two halves of a step never share a frame again.
+    bool followPaid = false;
+    if (mIfdFollowOwed) {
+        followCascade0Field(mIfdFollowReason);
+        mIfdFollowOwed = 0;
+        followPaid = true;
+    }
 
     // ---- 1. WHO MOVED, AND DID ANYTHING JUMP? ------------------------------
     for (VctCascade &c : mVctCascades) {
         const float cell = c.cell();
         const float step = c.step();
         if (cell <= 0.0f || step <= 0.0f) continue;
-        const bool moved = jahQuantAxis(camPos.x, step) != jahQuantAxis(c.builtCam.x, step) ||
-                           jahQuantAxis(camPos.y, step) != jahQuantAxis(c.builtCam.y, step) ||
-                           jahQuantAxis(camPos.z, step) != jahQuantAxis(c.builtCam.z, step);
+        // THE HYSTERETIC STEP TEST (kStepHysteresis, above): the planes are
+        // `lattice` apart and the camera must be `band` past the one it left.
+        const float lattice = step * (1.0f - kStepHysteresis);
+        const float band    = step * kStepHysteresis;
+        bool moved = false;
+        {
+            const float cam[3]   = { camPos.x, camPos.y, camPos.z };
+            const float built[3] = { c.builtCam.x, c.builtCam.y, c.builtCam.z };
+            for (int a = 0; a < 3 && !moved; ++a) {
+                const long long kb = jahQuantAxis(built[a], lattice);
+                if (jahQuantAxis(cam[a], lattice) == kb) continue;
+                const double lo = double(kb) * double(lattice);
+                const double hi = lo + double(lattice);
+                if (double(cam[a]) < lo - double(band) ||
+                    double(cam[a]) >= hi + double(band))
+                    moved = true;
+            }
+        }
         // THE TWO DIRTY_ALL GUARDS (Godot's, and S1 §4.4's three GPU losses are
         // why they are a prerequisite rather than an improvement).
         //
@@ -4243,7 +4301,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // The near field is what the user is looking at, so it is what gets the
     // frame. A cascade that waits keeps showing its old, correctly-lit volume:
     // the picture is never half-built, only slightly behind.
-    bool spent = false;
+    bool spent = followPaid;
     // ...AND WHETHER A CASCADE REALLY WAS RE-VOXELISED (fix round item 4): a
     // rebuild that threw BEFORE its swap put its placement back and voxelised
     // nothing, so it owes no settle even though the frame was spent on it.
@@ -4294,7 +4352,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
             // field must not be left describing the place the chain has left:
             // its volume follows (the voxels there are current — only the light
             // injection is missing, which the next rebuild supplies).
-            if (i == 0u && placementCommitted) followCascade0Field(reason);
+            if (i == 0u && placementCommitted) oweCascade0FieldFollow(reason);
             if (placementCommitted) rebuilt = true;   // those voxels ARE new
             spent = true;                          // the frame paid for it either way
             if (++c.failures >= 2u) c.pending = 0; // ...otherwise `pending` stays set
@@ -4304,11 +4362,15 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         if (c.jumped) { ++mCascadeFullRebuilds; c.jumped = false; }
         c.pending = 0;
         c.pendingReason = GiStaleReason::Camera;
-        // THE FIELD RIDES CASCADE 0 (E1 item 1), and it follows in the SAME
-        // frame the cascade moved: the pixel transform is rebuilt from the
-        // field's volume on the next pass, so a frame between the two would
-        // sample this frame's probes through last frame's placement.
-        if (i == 0u) followCascade0Field(reason);
+        // THE FIELD RIDES CASCADE 0 (E1 item 1), and it follows ON THE NEXT
+        // FRAME, out of that frame's own GI slot (V1-RIG item 2 /
+        // LATER_OPTIMISATIONS L11: the two GPU bursts together are 11.7 ms at a
+        // headset's pixel count and neither alone is over 11.1 — see
+        // `mIfdFollowOwed`). The pixel transform is rebuilt from the field's
+        // volume per pass and the volume moves WITH the atlas, so the one frame
+        // in between reads probes integrated where the field still says it is:
+        // one step of staleness, never a wrong place.
+        if (i == 0u) oweCascade0FieldFollow(reason);
         spent = true;
         rebuilt = true;
     }
@@ -5434,6 +5496,13 @@ void OgreScene::teardownIrradianceField() {
 
 void OgreScene::updateIrradianceField() {
     if (!mIfd) return;
+    // A DEFERRED FOLLOW IS OWED: nothing integrates until it is paid
+    // (mIfdFollowOwed). Cascade 0's rebuild last frame may have re-created the
+    // light voxel textures this job binds, and `followCascade0Field` is what
+    // re-binds them — a batch here would integrate from destroyed textures.
+    // It would also integrate at the OLD placement, which the follow is about
+    // to replace.
+    if (mIfdFollowOwed) return;
     // PAUSED (budget 0): nothing re-converges, and update() is not called at
     // all — which is also what keeps the zero-work-group abort unreachable on
     // this path.
@@ -5516,6 +5585,18 @@ void OgreScene::updateIrradianceField() {
 // radiance it gathers changed, so re-converging over the previous atlas shows
 // slightly stale bounce and never a wrong place — exactly what `refreshGiLighting`
 // does for a light drag.
+// THE DEBT, RAISED (V1-RIG item 2). One follow is owed at a time and owing it
+// twice means nothing: the follow always re-places the field at cascade 0's
+// CURRENT volume, so a second step before the first was paid is answered by the
+// one follow that catches it up — the same reasoning as a cascade's `pending`
+// flag. The REASON kept is the first one, which is the one that caused the move
+// the capture will attribute the work to.
+void OgreScene::oweCascade0FieldFollow(GiStaleReason reason) {
+    if (!mIfd || mIfdTotalProbes == 0u) return;   // nothing to follow
+    if (!mIfdFollowOwed) mIfdFollowReason = reason;
+    mIfdFollowOwed = 1;
+}
+
 void OgreScene::followCascade0Field(GiStaleReason reason) {
     // A field whose initialize() threw is a non-null mIfd with no atlases;
     // mIfdTotalProbes is written only after a successful build, so it is the
@@ -5597,6 +5678,10 @@ void OgreScene::teardownVct() {
     // which has just been injected by its own build.
     mGiSettleStepsOwed = 0;
     mGiSettleCascades  = 0;
+    // ...AND IT OWES NO FIELD FOLLOW (V1-RIG item 2): the debt names a field
+    // and a cascade that are about to stop existing, and whatever chain comes
+    // next converges its field WHOLE in `buildIrradianceField`.
+    mIfdFollowOwed = 0;
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;
     // Unbind what the shader reads FROM THIS SCENE, by pointer identity (the
