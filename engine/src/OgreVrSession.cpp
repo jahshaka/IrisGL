@@ -123,6 +123,7 @@ bool vrSessionHasBoundProfile(const VrSession *, int) { return false; }
 unsigned vrSessionHandJoints(const VrSession *, int, VrPose *, unsigned) { return 0u; }
 unsigned vrSessionBindingBlocks(const VrSession *, VrBindingBlock *, unsigned) { return 0u; }
 bool vrSessionHasLiveJoints(const VrSession *, int) { return false; }
+bool vrSessionHandsEnabled(const VrSession *) { return false; }
 bool vrSessionHaptic(VrSession *, int, float, float, std::string &error) {
     error = "this build has no OpenXR support";
     return false;
@@ -851,6 +852,9 @@ public:
     bool hasLiveJoints(int hand) const {
         return hand >= 0 && hand < 2 && mJointsValid[hand] && !mInput[hand].fromInjection;
     }
+    /// WAS THIS SESSION ASKED FOR BARE HANDS (`VrConfig::hands`, lane
+    /// HANDS-SWITCH-1)? The project's row, latched at creation.
+    bool handsEnabled() const { return mConfig.hands; }
 private:
 
     VrBoot     *mBoot;
@@ -1512,7 +1516,15 @@ void VrSession::createActions() {
         return XR_SUCCEEDED(xrStringToPath(mBoot->mInstance, s.c_str(), &out));
     };
     for (const ProfileDesc &pd : kProfiles) {
-        if (pd.needsHandInteraction && !mBoot->mHasHandInteractionExt) continue;
+        // THE BARE-HAND BLOCK IS OPT-IN (lane HANDS-SWITCH-1): the project's
+        // Hands row has to be on AND the runtime has to have the extension. The
+        // extension may well be ENABLED on the instance either way — enabling
+        // it costs nothing and tells us nothing — but SUGGESTING these paths is
+        // the act that lets a runtime hand a wearer's session to their bare
+        // hands the moment they set a controller down, and that is the thing
+        // this row exists to refuse.
+        if (pd.needsHandInteraction && (!mBoot->mHasHandInteractionExt || !mConfig.hands))
+            continue;
         std::vector<XrActionSuggestedBinding> binds;
         bool built = true;
         auto add = [&](XrAction action, const char *suffix, int h) {
@@ -1632,6 +1644,15 @@ void VrSession::createActions() {
 // hand and per frame: a hand holding a controller is located by the controller,
 // and only a hand the controller route left invalid asks the tracker.
 void VrSession::createHandTrackers() {
+    // WHICH WAY THIS SESSION WENT, ONCE, IN WORDS (lane HANDS-SWITCH-1) — the
+    // one log line that answers "why are there no hands" (or "why are there").
+    // A project on controllers creates no tracker at all, so nothing in the
+    // frame loop ever asks the runtime for a joint.
+    vrLog("hands: %s for this session (the project's Hands row)%s",
+          mConfig.hands ? "ON" : "OFF",
+          mConfig.hands ? "" : " - no bare-hand bindings were suggested and no hand tracker "
+                               "is created; the controllers are unaffected");
+    if (!mConfig.hands) return;
     if (!mBoot->mSystemHandTracking || !mBoot->CreateHandTracker) return;
     if (mSession == XR_NULL_HANDLE) return;
     for (int h = 0; h < 2; ++h) {
@@ -1931,7 +1952,11 @@ void VrSession::readInput(XrTime displayTime, bool controllers) {
                 // and a sample that named a PROFILE keeps it: that is how the
                 // hand/controller half of stage 3 is driven with no runtime.
                 if (!in.manipPose.valid) in.manipPose = in.grip;
-                in.jointsTracked = mEngine->vrInjectedJoints(h, nullptr, 0u);
+                // ...AND ONLY WHERE THIS SESSION HAS HANDS AT ALL (lane
+                // HANDS-SWITCH-1): with the project's Hands row off there is no
+                // skeleton to track, whoever wrote it.
+                in.jointsTracked =
+                    mConfig.hands && mEngine->vrInjectedJoints(h, nullptr, 0u);
                 mHandValid[h] = in.grip.valid;
                 if (in.grip.valid) {
                     mHandPos[h] = Ogre::Vector3(in.grip.position.x, in.grip.position.y,
@@ -2123,6 +2148,12 @@ void VrSession::placeProxies() {
 // same reason: a smoke in a headset must never be looking at a script's hand.
 bool VrSession::jointsFor(int hand, VrPose out[kVrHandJointCount]) const {
     if (hand < 0 || hand >= 2) return false;
+    // A SESSION WITH HANDS OFF HAS NO SKELETON, from any source (lane
+    // HANDS-SWITCH-1) — the runtime's (there is no tracker to answer) and a
+    // TEST'S alike. The injection route is how bare hands are driven on a box
+    // with no fingers, so leaving it open here would mean a project that asked
+    // for controllers still drew a script's hand.
+    if (!mConfig.hands) return false;
     if (mJointsValid[hand]) {
         for (unsigned j = 0; j < kVrHandJointCount; ++j) out[j] = mJoints[hand][j];
         return true;
@@ -3397,6 +3428,11 @@ VrStatus VrSession::status() const {
     s.bindingProfilesAccepted = mBindingProfilesAccepted;
     s.handActions = mHandActions;
     s.handJoints = mHandJoints;
+    // WHETHER THIS SESSION WAS ASKED FOR BARE HANDS AT ALL (lane
+    // HANDS-SWITCH-1) — the project's own row, latched at creation. It is what
+    // makes "three blocks offered, not four" legible instead of looking like a
+    // runtime that refused one.
+    s.handsEnabled = mConfig.hands;
     return s;
 }
 
@@ -4301,6 +4337,7 @@ unsigned vrSessionBindingBlocks(const VrSession *s, VrBindingBlock *out, unsigne
 bool vrSessionHasLiveJoints(const VrSession *s, int hand) {
     return s && s->hasLiveJoints(hand);
 }
+bool vrSessionHandsEnabled(const VrSession *s) { return s && s->handsEnabled(); }
 bool vrSessionHaptic(VrSession *s, int hand, float amplitude01, float seconds,
                      std::string &error) {
     if (!s) { error = "vrHaptic: no session is running"; return false; }

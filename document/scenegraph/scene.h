@@ -911,6 +911,23 @@ public:
 	/// roles at once. ONE flag, because two would eventually disagree.
 	bool vrDominantRight = true;
 
+	/// BARE-HAND TRACKING: does a session in this project BIND the wearer's own
+	/// hands (lane HANDS-SWITCH-1; the owner, 2026-09-18, joint)?
+	///
+	/// OFF, and that is the decision rather than a shipping default waiting to be
+	/// flipped: bare-hand work is deferred until the controllers are right on the
+	/// hardware this project is smoked on, and WHICH of the two a wearer uses is
+	/// the AUTHOR'S choice for their project, not the runtime's for the moment.
+	/// With it off a session suggests no `ext/hand_interaction_ext` bindings, so
+	/// a wearer who puts a controller down is left holding nothing — which is
+	/// exactly what "controllers only" must mean — instead of being handed to a
+	/// half-finished bare-hand mode in the middle of a smoke.
+	///
+	/// It is read ONCE, when a session begins (`VrConfig::hands`): the bindings
+	/// are suggested at session creation and a runtime cannot be asked to rebind
+	/// them, so changing this mid-session changes nothing until the next one.
+	bool vrHands = false;
+
 	// ---- THE PLAYER (PLAYER-FLOOR-1) -----------------------------------
 	/// HIDE THE DEFAULT FLOOR IN THE PLAYER — a PROJECT setting (owner,
 	/// 2026-09-18, VR_INPUT_SPEC §16 row 6: "hide the floor in the Player").

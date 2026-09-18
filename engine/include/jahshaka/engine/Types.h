@@ -3311,6 +3311,33 @@ struct VrConfig {
     /// process — the suite's mask-off control and the lane's own A/B — which is
     /// the same reason `overrideEyeWidth` is here.
     bool hiddenAreaMask = true;
+    /// DOES THIS SESSION BIND THE WEARER'S BARE HANDS (lane HANDS-SWITCH-1;
+    /// the owner, 2026-09-18, joint: bare-hand work is deferred until the
+    /// controllers are right, and hands-or-controllers is the AUTHOR'S choice
+    /// per project rather than the runtime's per moment)?
+    ///
+    /// OFF BY DEFAULT, and off means the session has no bare-hand route at all:
+    ///   * the `ext/hand_interaction_ext` suggested-binding block is NOT
+    ///     offered, so the runtime can never bind a hand profile for either
+    ///     hand — a wearer who puts a controller down is left holding nothing,
+    ///     which is what "controllers only" has to mean;
+    ///   * no `XrHandTrackerEXT` is created, so nothing asks the runtime for
+    ///     joints; and
+    ///   * no skeleton is reported or drawn, the test-injection route included
+    ///     (`Engine::vrHandJoints` answers 0 while such a session is live).
+    /// The controllers are untouched by it: the other three binding blocks are
+    /// offered exactly as before.
+    ///
+    /// THE HOST PASSES THE PROJECT'S OWN ROW (`iris::Scene::vrHands`, the World
+    /// panel's Hands switch and `world.vr({hands})`); `vr.begin({hands})`
+    /// overrides it for ONE session, which is what a suite and a measurement
+    /// need, exactly like `hiddenAreaMask` above.
+    ///
+    /// IT IS READ ONCE, at session creation: suggested bindings are attached to
+    /// the session's action sets before its first frame and no runtime can be
+    /// asked to rebind them, so there is nothing here for a mid-session change
+    /// to act on.
+    bool hands = false;
 };
 
 
@@ -3489,6 +3516,12 @@ struct VrStatus {
     /// It is a FALLBACK, never a replacement: a hand holding a controller is
     /// located by the controller.
     bool               handJoints = false;
+    /// WAS THIS SESSION ASKED TO BIND BARE HANDS (`VrConfig::hands`, lane
+    /// HANDS-SWITCH-1)? Reported because it is the one thing that explains the
+    /// two numbers above being three-of-three rather than four-of-four, and
+    /// because "is this project on hands or on controllers" is a question the
+    /// owner asks of a running session — `vr.state().hands.enabled`.
+    bool               handsEnabled = false;
 };
 
 /// Everything the engine needs to start. All paths are resolved by the HOST at
