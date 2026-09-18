@@ -1818,8 +1818,10 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     zeroes the band run-wide; the offscreen exception is a PER-VIEW field,
     `View::setLodHysteresisOffscreen` (LOD-LATCH-1, 2026-09-18 — it replaced the
     process-wide env latch `JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN`, deleted), asked for by
-    the one suite that can read pixels and by nothing else. The patch's own header
-    still names the old latch; its bytes are deliberately untouched.
+    the one suite that can read pixels and by nothing else. The patch's PROSE HEADER
+    was amended to say so in the same lane; no hunk of its diff mentions either name,
+    so no tree pays a `build-ogre.sh` rerun for it (the script's per-patch check reads
+    the hunks — `git apply --reverse --check` verified after the edit).
 
   0076-vct-bounce-is-a-jacobi-iteration — THE VOXEL BOUNCE IS A JACOBI ITERATION, AND
     ITS DAMPENING IS 1 (lane PHOTON-M2, the physics read of ledger §659 findings F-B

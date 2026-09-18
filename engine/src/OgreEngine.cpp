@@ -1797,9 +1797,15 @@ bool OgreEngine::drainTextureStreaming(double *msSpent) {
     double lastPollMs = -1000.0;
     // THE VAO ADVANCE IS ON A CADENCE, NOT ON THE POLL (DRAIN-1, audit ON-17;
     // mTextureDrainAdvanceMs has the measurement and the reason). -1e9 so the
-    // first iteration advances immediately: a drain shorter than one cadence
-    // still commits whatever the texture manager recorded, which is the
-    // behaviour every caller before this line depended on.
+    // first iteration advances immediately — and WHAT THAT FIRST ADVANCE DOES
+    // IS ARM, NOT COMMIT: a bare `VulkanVaoManager::_update` outside a frame
+    // commits at the TOP of the call, only when the previous one left the fence
+    // unflushed (the pin's issue #433; the note at `advanceResources` above
+    // spells the pair out). So the first advance of a drain arms and the SECOND
+    // — one cadence later — commits and advances the frame index. A drain that
+    // finishes inside one cadence therefore commits nothing itself, exactly as
+    // before this line: the drain never submitted the capture-free first call's
+    // work either, and the next frame's own commit carries it.
     double lastAdvanceMs = -1.0e9;
     bool ok = true;
 

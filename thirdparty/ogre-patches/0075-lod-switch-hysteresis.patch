@@ -112,10 +112,15 @@ thumbnails, previews, screenshots and every pixel suite therefore take the
 exact level their own value asks for, frame after frame, which is what keeps
 them assertable. The planar, probe, shadow and PiP node definitions are built
 by other functions and never see the sweep, so they are 0 by construction.
-`JAHSHAKA_NO_LOD_HYSTERESIS` still zeroes the band run-wide for an A/B, and
-`JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN` grants it to offscreen views for the one
-suite that measures it (`engine.lod_hysteresis`: an offscreen view is the only
-kind whose pixels a test can read).
+`JAHSHAKA_NO_LOD_HYSTERESIS` still zeroes the band run-wide for an A/B, and the
+offscreen exception is a PER-VIEW field, `View::setLodHysteresisOffscreen`
+(lane ENGINE-SMALL-A / LOD-LATCH-1, 2026-09-18 — it replaced the process-wide
+env latch `JAHSHAKA_LOD_HYSTERESIS_OFFSCREEN`, which is deleted), asked for by
+the one suite that measures the band (`engine.lod_hysteresis`: an offscreen view
+is the only kind whose pixels a test can read) and by nothing else. This
+paragraph is the patch's PROSE HEADER and no hunk of the diff below mentions
+either name, so amending it changes nothing a tree applies —
+`build-ogre.sh`'s reverse-check reads the hunks.
 
 ONE CONSEQUENCE TO KNOW, unchanged: with a band the measured switch distance
 depends on the direction of approach, by the width of the band — the same

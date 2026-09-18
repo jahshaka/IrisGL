@@ -115,6 +115,30 @@ public:
     /// all, or the capture has not run: it happens inside the next rendered
     /// frame, like the IBL convolution).
     ///
+    /// WHEN THE ANSWER CHANGES, exactly (lane ENGINE-SMALL-A / audit ON-14,
+    /// 2026-09-18) — because it is one frame for a lone edit and two for a
+    /// gesture, and a host that renders a fixed number of frames and then
+    /// asserts a picture has to know which:
+    ///
+    ///   * A LONE sky change is read SYNCHRONOUSLY, inside the frame that
+    ///     captured it. This call answers with the new sky from the next frame
+    ///     on, and a host pushing the ambient per frame has it in the picture
+    ///     one frame after the capture — the behaviour this contract has always
+    ///     described.
+    ///   * A GESTURE — a second capture within a couple of drawn frames of the
+    ///     previous one, i.e. a sun being dragged — DEFERS its readback: the
+    ///     download is issued without a flush and read at the top of the NEXT
+    ///     frame, so this call answers with the new sky from that frame on and
+    ///     a host's per-frame push puts it in the picture the frame after, TWO
+    ///     frames behind the capture. In exchange the capture frame does not
+    ///     block on the GPU (measured 0.94 ms of flush and wait per change,
+    ///     i.e. per frame of a drag). Nothing ever flickers: the previous
+    ///     coefficients stay valid until the new ones land.
+    ///
+    /// JAHSHAKA_SKY_SH_SYNC forces the synchronous form for every capture — the
+    /// run-wide diagnostic latch this engine's measurable rules carry, and the
+    /// way the two arms are A/B'd on one binary.
+    ///
     /// UNSCALED: this is the sky's mean incident radiance. A host that models a
     /// sky LIGHT multiplies by its intensity and tint and pushes the result
     /// through setAmbientSh — the backend never applies a light of its own.
@@ -1974,9 +1998,12 @@ public:
     /// (lane ENGINE-SMALL-A / DRAIN-1, audit ON-17). Monotonic, never reset.
     ///
     /// The drain polls the texture manager every millisecond and, on a cadence
-    /// of one frame's worth of time, calls `VaoManager::_update()` — the call
-    /// that commits whatever the manager recorded, advances the frame index and
-    /// retires staging buffers, semaphores and delayed blocks. It used to be
+    /// of one frame's worth of time, calls `VaoManager::_update()` — which
+    /// retires staging buffers, semaphores and delayed blocks, and whose
+    /// COMMIT is a pair: a bare `_update` outside a frame commits at the top of
+    /// the call and only when the previous one left the fence unflushed (the
+    /// pin's issue #433), so the first advance of a drain ARMS and the second —
+    /// one cadence later — commits and advances the frame index. It used to be
     /// called on EVERY poll, which is an empty command buffer plus a fence per
     /// millisecond of waiting (up to ~1,000/s while a scene loads). Only
     /// differences mean anything; it is here so a suite can assert the cadence

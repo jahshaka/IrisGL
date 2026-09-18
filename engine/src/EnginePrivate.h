@@ -4495,7 +4495,12 @@ private:
     /// MUCH information rather than too little.
     ///
     /// At the cap a new box is therefore MERGED into the existing entry whose
-    /// union grows least (an R-tree's least-enlargement choice). The list stays
+    /// MARGIN (the sum of its extents) grows least — the R*-tree's metric, and
+    /// deliberately not the volume: this engine's boxes go FLAT, a Plane's world
+    /// AABB has zero height, and under a volume metric every coplanar box merges
+    /// at zero growth however far apart it is (a floor of moving planes
+    /// coalesces into one scene-spanning slab — conservative, never wrong, and
+    /// the exact opposite of the point). See noteGiCascadeDirty. The list stays
     /// bounded, the description stays conservative in the only direction that is
     /// safe — a merged box covers everything both boxes did — and seventeen
     /// crates in a corner stay a corner. `mGiCascadeDirtyAll` survives for the
