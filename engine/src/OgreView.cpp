@@ -1323,7 +1323,7 @@ void OgreView::updateParticles() {
 
 void OgreView::updateGi() {
     if (mEnabled && mScene && mCamera) {
-        mScene->updateGiTracking(mCamera->getPosition());
+        mScene->updateGiTracking(mCamera->getPosition(), mStereo);
         // The Forward+ depth-slice range follows the same camera, from the same
         // once-a-frame hook (LIGHTING_FIX fix 8). The scene does the rate
         // limiting and the hysteresis; this is only where the camera is known.

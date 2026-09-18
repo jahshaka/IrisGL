@@ -3770,7 +3770,7 @@ public:
     void latchProbeCaptures(bool drawn);
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
-    void updateGiTracking(const Ogre::Vector3 &camPos);
+    void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
     /// Re-derives the Forward+ clustered depth-slice range from this camera and
     /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
     /// hysteretic — `setForwardClustered` recreates the grid buffers, so it must
@@ -4496,6 +4496,14 @@ private:
     int          mIfdFollowOwed = 0;
     GiStaleReason mIfdFollowReason = GiStaleReason::Camera;
     bool mRefractionsActive = false;   // see setRefractionsActive
+    /// Is the view that DRIVES GI a stereo (headset) one? It picks the tier
+    /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the
+    /// once-a-frame driver hook.
+    bool mGiDriverStereo = false;
+    /// The chain's SHAPE (its cascade count and steps) no longer matches the
+    /// table it should be built from — the driver's profile changed. The dirty
+    /// BOX path cannot express it, so the flush builds the chain again.
+    bool mGiChainShapeDirty = false;
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
     /// What the last (re)build ACTUALLY used, recorded rather than recomputed:

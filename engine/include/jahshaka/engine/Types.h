@@ -2071,7 +2071,40 @@ struct GiParams {
 /// through `world.tierTable()`, so a tier's description cannot drift from what
 /// the tier does.
 ///
-/// It is a pure function of the quality dial: no scene, no device, no Ogre.
+/// WHICH COLUMN OF THE TIER TABLE A VIEW READS (lane V1-RIG item 4,
+/// PHOTON_SPEC D2 "VR = world-space caches only ... a VR cascade set with
+/// larger outer steps").
+///
+/// A headset renders the chain FIVE TIMES over: 2160x2376 per eye against a
+/// desktop 1080p is 10.26 against 2.07 megapixels, and the budget HALVES (11.1
+/// ms at 90 Hz against 16.7 at 60). The cascade chain's price has two halves
+/// and only one of them is per pixel:
+///
+///   THE PIXEL MARCH — measured at Quest Pro size on the rig, one process, one
+///   pose, clocks locked (spikes/v1-rig): the opaque pass reads 3.815 ms at
+///   four 64^3 cascades, 3.253 at three and 2.568 at two, i.e. **0.31 ms PER EYE
+///   PER CASCADE**. It is the term a VR profile can actually buy back.
+///
+///   THE REBUILD BURSTS — 2.0-2.6 ms of GPU per cascade rebuild, one per frame
+///   at most, and since the field's follow moved off the rebuild frame no walk
+///   frame crosses 11.1 ms at either tier. So the steps are no longer the
+///   binding constraint; halving the OUTERMOST cascade's rate is headroom, not
+///   a rescue.
+///
+/// So the VR column is the tier's own chain with the REDUNDANT MIDDLE cascade
+/// dropped (four rows become three; Low's two are already minimal) and the
+/// outermost step doubled. Nothing about a "room", a volume or an axis count
+/// enters it: the reach is unchanged, the inner cell is unchanged, and what is
+/// given up is one hand-over in the mid field (Medium's 10 m row sits between a
+/// 5 m and a 15 m one) and up to 30 m of off-centring on a 120 m box at 1.875 m
+/// per cell instead of 15.
+enum class GiViewProfile {
+    Desktop = 0,
+    Vr      = 1,
+};
+
+/// It is a pure function of the quality dial and the view profile: no scene, no
+/// device, no Ogre.
 struct GiQualityFacts {
     /// The engine's cascade chain for this tier, innermost first, as
     /// `resolveCascadeTable()` builds it when nothing is pinned. `stepCells` is
@@ -2091,8 +2124,10 @@ struct GiQualityFacts {
 };
 
 /// THE TIER TABLE. Hand-edit this and every reader — engine and app — moves
-/// with it.
-inline GiQualityFacts giQualityFacts(GiQuality quality)
+/// with it. `profile` picks the column (see GiViewProfile for the measurement
+/// behind the VR one).
+inline GiQualityFacts giQualityFacts(GiQuality quality,
+                                     GiViewProfile profile = GiViewProfile::Desktop)
 {
     GiQualityFacts f;
     switch (quality) {
@@ -2130,6 +2165,26 @@ inline GiQualityFacts giQualityFacts(GiQuality quality)
         f.voxelResolution = 64u;
         f.probeFaceSize   = 256u;
         break;
+    }
+    // ---- THE VR COLUMN (GiViewProfile, above) ------------------------------
+    // ONE transform over the desktop rows, so the two columns cannot drift: the
+    // middle cascade goes and the outermost steps twice as far. `stepCells` on
+    // a row means "pinned"; the engine derives the rest.
+    if (profile == GiViewProfile::Vr) {
+        if (f.cascadeCount >= 4) {
+            // Drop index 1 — the row closest in reach to the one outside it
+            // (Medium 5/10/15/60, High 5/10/15/60 at its own resolutions), so
+            // the near field and the far reach are both untouched.
+            for (int i = 1; i + 1 < f.cascadeCount; ++i) f.cascades[i] = f.cascades[i + 1];
+            --f.cascadeCount;
+        }
+        if (f.cascadeCount > 0) {
+            // The engine's own outer default is 8 cells (OgreGi.cpp
+            // kOuterStepCells); doubling it halves the most expensive rebuild
+            // in the chain. Pinned here rather than in the engine so the table
+            // is the one place a tier's physics lives.
+            f.cascades[f.cascadeCount - 1].stepCells = 16.0f;
+        }
     }
     return f;
 }
@@ -2494,6 +2549,12 @@ struct GiStatus {
     /// no honest place to put it before one exists. Distinguishes "no view yet"
     /// from "the build failed", which both read as an empty `cascades` list.
     bool cascadesAwaitingCamera = false;
+    /// WHICH COLUMN OF THE TIER TABLE THIS CHAIN WAS BUILT FROM (V1-RIG item 4):
+    /// true when the view driving GI is the HEADSET'S, so the chain is the VR
+    /// profile's (see GiViewProfile). It is a reading and not a request: the
+    /// profile follows the driver, and entering or leaving a session rebuilds
+    /// the chain once because the table changed under it.
+    bool cascadeProfileVr = false;
     /// How many whole-chain rebuilds the two DIRTY_ALL guards have forced — a
     /// teleport, or a jump longer than a cascade. Cumulative over the scene's
     /// life: a re-solve of the arm does not reset it, only GI going off does.

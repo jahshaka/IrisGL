@@ -902,6 +902,8 @@ GiStatus OgreScene::giStatus() const {
         }
         st.cascadesAwaitingCamera = mGiCascadeAwaitingCamera;
         st.cascadeVoxelLod = mCascadeVoxelLod;
+        // WHICH COLUMN OF THE TIER TABLE THE CHAIN CAME FROM (V1-RIG item 4).
+        st.cascadeProfileVr = mGiDriverStereo;
         st.cascadeFullRebuilds = mCascadeFullRebuilds;
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
@@ -2146,7 +2148,15 @@ void OgreScene::applyPendingGi() {
             // change can be seen from and letting the scheduler spend them one
             // per frame; `rebuildVct` remains the answer when there is no chain
             // to mark (or nothing built yet).
-            if (mVctCascades.empty() || !refreshCascadesFast())
+            // ...AND A CHANGE OF CHAIN SHAPE IS NOT A STRUCTURAL CHANGE EITHER
+            // (V1-RIG item 4): the VR column of the tier table has a different
+            // CASCADE COUNT and a different outer step, so there is no dirty
+            // box that can express it — the chain has to be built again from
+            // the other column, exactly as a quality change is.
+            if (mGiChainShapeDirty) {
+                mGiChainShapeDirty = false;
+                rebuildVct();
+            } else if (mVctCascades.empty() || !refreshCascadesFast())
                 rebuildVct();  // fresh voxelizer over the LIVE scene
         }
     } JAH_CATCH(mError, );
@@ -2294,7 +2304,19 @@ void OgreScene::forwardPlusLightCensus(unsigned &lights, unsigned &budget) const
     }
 }
 
-void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos) {
+void OgreScene::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) {
+    // THE VR CASCADE PROFILE FOLLOWS THE DRIVER (V1-RIG item 4). The view that
+    // places the chain is the one that reads it, and in a session that is the
+    // headset's — five times the pixels for half the frame. A change of driver
+    // profile is a change of TABLE, so the chain is rebuilt through the ordinary
+    // dirty flush rather than mutated: `resolveCascadeTable` reads this.
+    if (driverStereo != mGiDriverStereo) {
+        mGiDriverStereo = driverStereo;
+        if (mGi.cascades && (mGi.mode == GiMode::Vct || mGi.mode == GiMode::VctPccHybrid)) {
+            mGiChainShapeDirty = true;
+            mGiCachesDirty = true;
+        }
+    }
     // The DDGI half runs FIRST and unconditionally: it is scene-fitted, so it
     // needs no camera at all, and it must run in plain VCT mode too — where
     // there is no PCC and the probe half below returns immediately. (Both
@@ -3401,7 +3423,14 @@ std::vector<GiParams::GiCascadeDesc> OgreScene::resolveCascadeTable() const {
         // builds and a chain a tooltip promises are one table (render audit A5).
         // Low is 2 cascades at 64^3 and NOT the quality dial's 32 (PHOTON_SPEC
         // §7 E2 (4)); the reasoning for each row is at the table.
-        const GiQualityFacts facts = giQualityFacts(mGi.quality);
+        // ...AND WHICH COLUMN OF IT (V1-RIG item 4): the VR one when the view
+        // driving GI is the headset's. `mGiDriverStereo` is written by the
+        // once-a-frame driver hook and a change marks the caches dirty, so
+        // entering or leaving a session rebuilds the chain from the other
+        // column exactly once.
+        const GiQualityFacts facts =
+            giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
+                                                        : GiViewProfile::Desktop);
         for (int i = 0; i < facts.cascadeCount; ++i) table.push_back(facts.cascades[i]);
     }
     // THE STEP TABLE, when a row did not pin one: the pin's own
