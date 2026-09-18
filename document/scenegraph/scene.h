@@ -514,6 +514,28 @@ public:
     /// still be one re-solve, and because a bool would need a clearer — which is
     /// the mirror's job, not the caller's.
     quint64 giRefreshSerial = 0;
+    /// A MATERIAL THE USER HAS NOT COMMITTED IS ON THE SCREEN (MATERIAL-PREVIEW-1).
+    ///
+    /// The editor's hover preview borrows a mesh's material slot while a
+    /// material is dragged over it and puts the original back when the drag
+    /// leaves, drops or is cancelled — the document is never written and no
+    /// undo step exists. The renderer, though, cannot tell a borrowed material
+    /// from a committed one: the mirror's GI debounce sees the material
+    /// signature move, arms a pending refresh, and ~15 still frames later pays
+    /// a FULL GI re-solve for a state that will never be saved — then a second
+    /// one when the original goes back.
+    ///
+    /// So the preview says so. While this is true the mirror neither arms nor
+    /// ADOPTS the material term: it keeps the signature it remembered before
+    /// the preview began, so the restore lands back on it and nothing has
+    /// changed as far as the debounce is concerned. A real apply ends the
+    /// preview FIRST (MaterialPreviewService), so its own signature move arms
+    /// the one re-solve it should.
+    ///
+    /// NEVER SERIALIZED and never true for longer than a gesture. A counter
+    /// rather than a bool so nested/overlapping previews cannot clear it early.
+    int materialPreviewDepth = 0;
+    bool materialPreviewActive() const { return materialPreviewDepth > 0; }
     /// The SAME shape for the cached point/spot shadow maps
     /// (ENGINE_CACHE_POLICY_SPEC P2): monotonic, never serialized, bumped by
     /// world.refreshShadows(). The mirror compares it against the value it last
