@@ -833,6 +833,13 @@ public:
     /// THIS FRAME'S JOINTS for one hand (Engine::vrHandJoints), world space.
     /// Returns how many were written — 0 when that hand is not tracked.
     unsigned handJoints(int hand, VrPose *out, unsigned count) const {
+        // A SESSION WITH HANDS OFF HAS NO SKELETON (lane HANDS-SWITCH-1) — said
+        // HERE as well as at the engine's own accessor, because this is the
+        // rule and that is one caller of it: with no tracker created
+        // `mJointsValid` is false anyway today, but a reader of
+        // `vrSessionHandJoints` that arrives tomorrow must not have to know
+        // that to be correct.
+        if (!mConfig.hands) return 0u;
         if (hand < 0 || hand >= 2 || !mJointsValid[hand]) return 0u;
         if (out)
             for (unsigned j = 0; j < count && j < kVrHandJointCount; ++j)
@@ -1609,11 +1616,13 @@ void VrSession::createActions() {
     // else's controller.
     for (int h = 0; h < 2; ++h) {
         // THREE SPACES PER HAND since stage 3: the grip, the aim, and the
-        // pinch. The third is created for every session, bound or not — an
-        // action space of an action no profile bound is legal and simply never
-        // locates, and creating it conditionally would mean a wearer who puts
-        // their controllers DOWN mid-session (the profile changes to hands
-        // then, and only then) had no pinch space to locate.
+        // pinch. The third is created for EVERY session, whether this project
+        // asked for bare hands or not (lane HANDS-SWITCH-1) — an action space
+        // of an action no profile bound is legal, costs one handle and simply
+        // never locates. Creating it conditionally would buy nothing and would
+        // put a second copy of the hands rule in a third place; the rule lives
+        // where the BINDINGS are suggested, which is what decides whether a
+        // pinch can ever be reported.
         XrAction actions[3] = { mHandPoseAction[h], mAimPoseAction[h], mManipPoseAction[h] };
         XrSpace *spaces[3] = { &mHandSpace[h], &mAimSpace[h], &mManipSpace[h] };
         for (int k = 0; k < 3; ++k) {
