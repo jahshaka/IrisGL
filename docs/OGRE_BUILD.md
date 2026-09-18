@@ -1436,8 +1436,12 @@ log clean. This media is staged into `bin/media/2.0/scripts/materials/Common` by
     dispatch count (`GiStatus::CascadeStatus::voxelDispatches`,
     `world.giStatus().cascades[].voxelDispatches`).
     **R32_UINT AND NOT RGBA32_UINT — THE CAUSE CORRECTED, THE CHOICE RE-MEASURED
-    (VOXMERGE-2 / render audit ON-6, 2026-09-18; header-and-comments amendment, no
-    code or media moved, so a tree carrying 0065 needs nothing).** This entry used
+    (VOXMERGE-2 / render audit ON-6, 2026-09-18; no logic moves, but two hunk
+    PAYLOADS do — the class comment and the media piece's layout comment — so
+    EVERY TREE RESETS THE SUBMODULE AND RE-RUNS `build-ogre.sh`, as for any 0065
+    amendment: the earlier text fails the reverse check on three files, the staged
+    media differs, and the voxel-merge permutations take one microcode-cache miss
+    on the first warm launch after it).** This entry used
     to say that clearing a PFG_RGBA32_UINT 3D uav through
     `ComputeTools::clearUavUint` HANGS THE GPU on NVIDIA 595.84 (`Xid 109 CTX
     SWITCH TIMEOUT`, 8/8 on `samples.cleanstart.Showroom{,_2}`, 0/4 with that call

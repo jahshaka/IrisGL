@@ -3862,7 +3862,9 @@ private:
     /// resolution, (re)builds VctLighting and binds it to HlmsPbs. The voxelizer
     /// and lighting are recreated from scratch every time (see invalidateGiCaches).
     /// In hybrid mode also (re)builds the PCC probe grid.
-    void rebuildVct();
+    /// TRUE when the arm was actually (re)built (see the definition): the
+    /// chain-shape debt is cleared by a BUILD, never by a call.
+    bool rebuildVct();
     /// Builds the ParallaxCorrectedCubemapAuto probe grid over `region` — the
     /// scene's own fitted box — and binds it with distance-blended VCT specular
     /// (PccVctMinDistance). Every candidate probe photographs its surroundings
@@ -4970,6 +4972,11 @@ private:
     /// exists so a decode that never completes cannot park GI for ever.
     unsigned           mGiVoxelTextureWaitFrames  = 0u;
     static const unsigned kGiVoxelTextureWaitFrames = 30u;
+    /// ...and whether the wait for THIS pending set has already been given up
+    /// on, so a texture that never becomes ready costs thirty deferrals ONCE
+    /// and not thirty per rebuild for the life of the scene. Cleared the moment
+    /// no voxel input is in flight.
+    bool               mGiVoxelTextureWaitGaveUp  = false;
     unsigned long long mGiBuiltMaterialGeneration = 0;
     /// THE PROBE CACHE's bookkeeping (ENGINE_CACHE_POLICY_SPEC P1). See
     /// staleProbeGrid and GiStatus: why the grid was last staled, a serial per

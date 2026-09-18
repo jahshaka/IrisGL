@@ -2556,6 +2556,17 @@ struct GiStatus {
     /// no honest place to put it before one exists. Distinguishes "no view yet"
     /// from "the build failed", which both read as an empty `cascades` list.
     bool cascadesAwaitingCamera = false;
+    /// The arm is WANTED but has not been built because an ALBEDO or EMISSIVE
+    /// texture it would voxelise is still streaming (BOOTVOX-1). The voxeliser
+    /// copies exactly those two slots into its texture pool, so building now
+    /// stores the wrong colours and buys a second, full re-voxelisation the
+    /// moment the pixels land — which is what the shipped default scene paid on
+    /// every boot. The build happens on the frame the last one is resident, and
+    /// the wait is BOUNDED (30 deferrals) so a decode that never completes
+    /// cannot park GI: after that the arm is built without them and this reads
+    /// false again. The other half of `cascadesAwaitingCamera`'s question —
+    /// "the chain is empty, why?" — and true in the single-volume arm too.
+    bool awaitingVoxelTextures = false;
     /// WHICH COLUMN OF THE TIER TABLE THIS CHAIN WAS BUILT FROM (V1-RIG item 4):
     /// true when the view driving GI is the HEADSET'S, so the chain is the VR
     /// profile's (see GiViewProfile). It is a reading and not a request: the

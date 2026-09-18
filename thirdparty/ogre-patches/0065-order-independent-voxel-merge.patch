@@ -123,11 +123,18 @@ unsigned sums saturate. The patch was unpushed, and a tree that already carries
 the earlier 0065 resets its ogre-next submodule and re-runs `build-ogre.sh`,
 which is the same recipe a SOURCE patch asks for anyway.
 
-AMENDED AGAIN (VOXMERGE-2, 2026-09-18) IN THE HEADER AND THE COMMENTS ONLY — no
-line of code or media changes, so a tree that carries 0065 needs nothing: the
-justification for the texel layout is replaced by the measurement below, because
-the reason it gave (a device loss from the 128-bit clear) was attributed to the
-wrong mechanism and patch 0067 named the real one.
+AMENDED AGAIN (VOXMERGE-2, 2026-09-18): the justification for the texel layout
+is replaced by the measurement below, because the reason it gave (a device loss
+from the 128-bit clear) was attributed to the wrong mechanism and patch 0067
+named the real one. NO LOGIC MOVES — but this is NOT a free amendment and it is
+not "header only": two hunk PAYLOADS changed (the class comment in
+`OgreVctVoxelizer.h` and the layout comment in `VoxelMerge_piece_cs.any`), so
+**EVERY TREE RESETS ITS ogre-next SUBMODULE AND RE-RUNS `build-ogre.sh`**, as
+for any 0065 amendment: a tree carrying the earlier text fails the script's
+per-patch reverse check on three files, the MEDIA Studio stages differs (the
+comment is part of the piece), and the voxel-merge permutations take one
+microcode-cache miss on the first warm launch after it, because the cache key is
+the source text.
 
 R32_UINT AND NOT RGBA32_UINT — THE CAUSE CORRECTED AND THE CHOICE RE-MEASURED
 (VOXMERGE-2 / render audit ON-6, 2026-09-18). THIS PARAGRAPH USED TO SAY that a
