@@ -901,6 +901,10 @@ struct ChainDesc {
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
     float ssrIntensity = 1.0f;
+    /// WHICH SAMPLE ANSWERS THE MARCH'S TWO QUESTIONS (PostFxDesc::ssrMarchPhase).
+    /// A UNIFORM, never a shape term: the rule lives inside one shader and
+    /// changing it must not rebuild a workspace.
+    int   ssrMarchPhase = 0;
     /// THE reflection roughness cutoff, in PERCEPTUAL roughness: the project's
     /// one number for both the screen-space march and the traced ray
     /// (PostFxDesc's note). A uniform, never a shape term.

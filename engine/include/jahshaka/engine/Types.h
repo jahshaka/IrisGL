@@ -3855,6 +3855,34 @@ struct PostFxDesc {
     /// A straight multiplier on the composite confidence. 1.0 is physical —
     /// the reflection replaces the probe answer where the march is confident.
     float ssrIntensity = 1.0f;
+    /// WHICH SAMPLE ANSWERS THE MARCH'S TWO QUESTIONS (SSR-RINGS-1) — is this
+    /// a hit, and how much does the depth buffer vouch for it. The march walks
+    /// the ray in FIXED STEPS of `ssrMaxDistance / steps` (0.26 m at Full-Res
+    /// rays), and today both questions are answered at the coarse sample the
+    /// ray happened to land on, so both carry the step's own phase. Measured on
+    /// the Grand Showroom's glossy sphere (the nested crescents of SMOKE-41
+    /// item 1a): the accepted hit region covers 15.3 % of the crop at a 1.04 m
+    /// step, 29.5 % at the shipped 0.26 m, 34.3 % at 0.13 m and 58.4 % when the
+    /// thickness tolerance is widened instead — the crescents are that region's
+    /// BOUNDARY, and the resolve draws it hard because a trusted hit replaces
+    /// the probe's answer outright.
+    ///
+    ///   0 `checker` — the shipped march, exactly. THE DEFAULT: nothing that
+    ///     ships moves until a project asks for something else.
+    ///   1 `refined` — a crossing is a SIGN CHANGE (the ray was in front at the
+    ///     previous sample and is behind at this one), and both the thickness
+    ///     test and the trust are evaluated at the bisected crossing, which is
+    ///     within 1/32 of a step of the true one. The step stops deciding
+    ///     WHETHER a ray hit; it only decides how finely the ray is sampled.
+    ///   2 `dither` — the SHIPPED hit rule with a 4x4 ordered phase instead of
+    ///     the two-value checkerboard: the minimal candidate, which changes
+    ///     what a ray SAMPLES and nothing about what counts as a hit, so the
+    ///     reflection covers exactly what it covers today and only the
+    ///     boundary's 2 px stipple is spread over sixteen phases for the
+    ///     resolve's 3x3 gather to average. It trades an edge for a grain.
+    ///
+    /// It is a UNIFORM and not a graph change (ChainDesc::sameShape).
+    int   ssrMarchPhase = 0;
     /// THE REFLECTION ROUGHNESS CUTOFF, in PERCEPTUAL roughness (PHOTON_SPEC
     /// §7 R5; owner, ledger §426). ONE number for BOTH sources of a per-pixel
     /// reflection (lane SSR-3): below it the reflection is MARCHED in screen
@@ -3998,6 +4026,7 @@ struct PostFxDesc {
                ssaoRadius == o.ssaoRadius && smaaPreset == o.smaaPreset &&
                ssr == o.ssr && ssrScreenMarch == o.ssrScreenMarch &&
                ssrMaxDistance == o.ssrMaxDistance &&
+               ssrMarchPhase == o.ssrMarchPhase &&
                ssrThickness == o.ssrThickness &&
                reflectionRoughnessCutoff == o.reflectionRoughnessCutoff &&
                ssrIntensity == o.ssrIntensity &&

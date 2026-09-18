@@ -163,6 +163,7 @@ ChainDesc OgreView::chainDesc() const {
     // an offscreen view. @see PostFxDesc::ssrScreenMarch.
     d.ssrScreenMarch = mPostFx.ssrScreenMarch;
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
+    d.ssrMarchPhase = mPostFx.ssrMarchPhase;
     d.ssrThickness   = mPostFx.ssrThickness;
     d.ssrIntensity   = mPostFx.ssrIntensity;
     d.reflectionRoughnessCutoff = mPostFx.reflectionRoughnessCutoff;

@@ -2870,6 +2870,12 @@ void updateSsr(Ogre::Camera *camera, const ChainDesc &desc) {
                          Ogre::Vector4(desc.ssrMaxDistance, desc.ssrThickness,
                                        desc.ssr >= 2 ? 96.0f : 48.0f,
                                        desc.reflectionRoughnessCutoff));
+    // THE MARCH'S PHASE RULE (SSR-RINGS-1), a uniform like the four above: the
+    // crossing test and the trust either read the coarse sample (0, the shipped
+    // march) or the refined crossing (1), with an optional sixteen-phase dither
+    // (2). The default is 0 and nothing that ships moves until a project asks.
+    ps->setNamedConstant("marchParams",
+                         Ogre::Vector4(float(desc.ssrMarchPhase), 0.0f, 0.0f, 0.0f));
 
     // ...AND THE FEATHER TRAVELS WITH IT (lane SSR-3 round 2, lead's call). The
     // resolve's roughness ramp is `cutoff - feather -> cutoff`, the same 0.1 the

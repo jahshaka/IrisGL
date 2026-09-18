@@ -6987,6 +6987,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         fx.ssaoRadius     = mSource->ssaoRadius;
         fx.smaaPreset     = mSource->smaaPreset;
         fx.ssr            = mSource->ssrMode;
+        fx.ssrMarchPhase  = qBound(0, mSource->ssrMarch, 2);
         // Percent in the document, a fraction in the renderer — one conversion,
         // here, so nothing downstream has to know which unit it is holding.
         fx.reflectionRoughnessCutoff = float(mSource->reflectionRoughnessCutoff) * 0.01f;

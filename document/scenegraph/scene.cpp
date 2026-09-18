@@ -376,6 +376,7 @@ Scene::Scene()
     ssaoRadius = 2.0f;
     smaaPreset = -1;
     ssrMode = 0;
+    ssrMarch = 0;
     reflectionRoughnessCutoff = 40;
     refractionsMode = 0;
     // Distortion defaults to AUTO: the pass costs nothing until a scene holds a
