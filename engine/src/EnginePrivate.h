@@ -2041,6 +2041,9 @@ private:
     /// Empty on any mismatch — the caller then wipes.
     bool  readVerified(const Entry &e, std::vector<char> &out) const;
     void  wipe() const;
+    /// May THIS run delete the cache directory? Only the writer may
+    /// (SHADERCACHE-LOCK-1) — see the definition.
+    bool  mayWipe() const;
     bool  acquireLock();
     void  releaseLock();
     std::string path(const std::string &name) const;

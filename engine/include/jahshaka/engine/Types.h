@@ -3168,6 +3168,37 @@ struct VrConfig {
     /// exactly what makes it a measurement of the RENDER and not of the runtime.
     /// 0 = use the runtime's recommendation (the product path).
     unsigned overrideEyeWidth = 0, overrideEyeHeight = 0;
+    /// HOW MANY STEREO WARM-UP FRAMES THE SESSION RENDERS BEFORE ITS FIRST
+    /// COMMITTED EYE FRAME (lane VR-WARMUP-1). 0 = none.
+    ///
+    /// THE MEASUREMENT THIS EXISTS FOR (spikes/vr-warmup-1): the session's
+    /// SECOND frame — the first one the runtime asks a picture of — cost
+    /// 1,179 ms cold and 89 ms warm on the Grand Showroom (383 / 20 on the
+    /// default scene), all of it inside `engine.record`'s two `Jahshaka opaque`
+    /// passes with the GPU idle: Hlms permutations generated, shaders compiled
+    /// and pipelines built ON THE FRAME THREAD, at the moment the wearer is
+    /// first shown the world. At 62.5 Hz that is 73 repeated headset frames.
+    ///
+    /// WHY IT CANNOT BE PAID ANYWHERE ELSE. The desktop's own warm-up does not
+    /// cover it (measured: 783 ms on the second VR frame after 200 mono frames
+    /// in the same process) because the INSTANCED-STEREO permutation set is its
+    /// own — `hlms_instanced_stereo` is a pass property, so every shader the
+    /// eyes need is a different shader from the one the desktop compiled; and
+    /// a fully warm microcode cache still paid 498 ms when the EYE SIZE changed
+    /// (two permutations whose generated source depends on the target). So the
+    /// warm-up renders the SESSION's own chain, stereo, at the SESSION's eye
+    /// size: the only shape that covers both.
+    ///
+    /// WHAT A WARM-UP FRAME IS: a real frame of the session's view, from the
+    /// rig's origin, through a deliberately wide frustum (so culling keeps
+    /// nothing back), with NO XR frame open — nothing is submitted to the
+    /// runtime and nothing is mirrored. Frame k faces the origin's heading
+    /// turned by k*180 degrees, so two frames see the whole room.
+    ///
+    /// TWO by default: one forward, one back. The cost moves to the start of
+    /// the session, where the runtime is still showing its own picture and
+    /// asking for none (VrStatus::warmUpMs says what it cost).
+    unsigned warmUpFrames = 2;
     /// DOES THE WEARER SEE THE EDITOR'S FURNITURE — the ground grid, the light
     /// and camera icons, the selection outline, the gizmo (owner, 2026-09-17)?
     ///
@@ -3238,6 +3269,14 @@ struct VrStatus {
     /// first xrLocateViews.
     float              ipd = 0.0f;
     unsigned           eyeWidth = 0, eyeHeight = 0;   ///< what the chain renders per eye
+    /// THE STEREO WARM-UP (VrConfig::warmUpFrames): how many warm-up frames
+    /// this session has rendered, and what they cost in total. `warmUpFrames`
+    /// reaching the configured number is the signal that the eyes are being
+    /// drawn with everything already built; a caller that reads it as 0 on a
+    /// session configured for 2 is looking at a session whose runtime has not
+    /// started running yet.
+    unsigned           warmUpFrames = 0;
+    float              warmUpMs = 0.0f;
     VrMirrorMode       mirror = VrMirrorMode::None;
     float              worldScale = 1.0f;
     /// Whether the per-eye PROJECTIONS differ, i.e. whether the runtime gave
