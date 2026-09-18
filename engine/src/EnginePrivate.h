@@ -3844,7 +3844,7 @@ public:
     void latchProbeCaptures(bool drawn);
     /// Called by OgreView each frame with its camera position: the PCC probe
     /// blend tracks the viewer. No-op unless the hybrid mode is live.
-    void updateGiTracking(const Ogre::Vector3 &camPos);
+    void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo);
     /// Re-derives the Forward+ clustered depth-slice range from this camera and
     /// the scene's own extent (LIGHTING_FIX fix 8 / F-F1). Rate-limited AND
     /// hysteretic — `setForwardClustered` recreates the grid buffers, so it must
@@ -3889,6 +3889,7 @@ private:
     /// No-op when the field is converged, when there is no field, or when the
     /// update budget is 0 (paused). Called once a frame from updateGiTracking.
     void updateIrradianceField();
+    void oweCascade0FieldFollow(GiStaleReason reason);
     /// Per-axis PROBE COUNTS for a field over `size`, each a power of two
     /// (upstream only ASSERTS that, and the assert is compiled out of our
     /// release engine) and together kIfdTotalProbes. Fitted from the volume's
@@ -4570,7 +4571,49 @@ private:
     /// last build (GiStatus::ifdFollows) — the counter the follow suite reads,
     /// and the honest answer to "is the field tracking the chain at all".
     unsigned long long                mIfdFollows = 0;
+    /// A FIELD FOLLOW OWED TO THE NEXT FRAME, AND WHY IT IS NOT PAID ON THE
+    /// FRAME THAT MOVED THE CASCADE (lane V1-RIG item 2, LATER_OPTIMISATIONS
+    /// L11, measured).
+    ///
+    /// Cascade 0's rebuild and the field's WHOLE re-integration used to land on
+    /// one frame, and at a headset's pixel count that frame is over the 90 Hz
+    /// bar: measured in a Monado session with the eye render forced to Quest
+    /// Pro size (2160x2376 per eye, 10.26 Mpx of stereo target), a Medium walk's
+    /// quiet frame is 5.84 ms of GPU and its step frame 11.72 ms mean / 12.45
+    /// max, twelve of a hundred and sixty frames over 11.1 — one dropped frame
+    /// every five metres of travel (spikes/v1-rig/COST.txt). The two halves are
+    /// 2.43 ms (the cascade) and 3.40 ms (the field) and NEITHER alone crosses
+    /// the bar: split across two frames the same walk peaks at 8.3 and 9.2 ms.
+    ///
+    /// WHAT IT COSTS IN CORRECTNESS: for exactly one frame the field describes
+    /// the place cascade 0 has just left — one step of staleness, 11 ms of it,
+    /// against L11's double-buffered atlas which accepts the same staleness for
+    /// as many frames as a progressive re-integration takes. It is never a
+    /// WRONG PLACE: the field's volume and its atlas move together, so the
+    /// shader reads probes that were integrated where the field says it is.
+    ///
+    /// It also owns the frame's one GI slot, so the frame that pays it rebuilds
+    /// no cascade — which is the whole point — and `updateIrradianceField`
+    /// refuses to run a progressive batch while it is owed: cascade 0's rebuild
+    /// may have re-created the light voxel textures the field's generation job
+    /// binds, and the re-bind is the first thing `followCascade0Field` does.
+    int          mIfdFollowOwed = 0;
+    GiStaleReason mIfdFollowReason = GiStaleReason::Camera;
     bool mRefractionsActive = false;   // see setRefractionsActive
+    /// Is the view that DRIVES GI a stereo (headset) one? It picks the tier
+    /// table's VR column (GiViewProfile, V1-RIG item 4) and is written by the
+    /// once-a-frame driver hook.
+    bool mGiDriverStereo = false;
+    /// The chain's SHAPE (its cascade count and steps) no longer matches the
+    /// table it should be built from — the driver's profile changed. The dirty
+    /// BOX path cannot express it, so the flush builds the chain again.
+    bool mGiChainShapeDirty = false;
+    /// Which column of the tier table the LIVE chain was built from, recorded at
+    /// the build (`GiStatus::cascadeProfileVr`). Not the same reading as
+    /// `mGiDriverStereo`, which says who is driving NOW: the two differ for the
+    /// one frame a profile change is owed, and only this one is a fact about the
+    /// chain the shader is sampling.
+    bool mGiChainProfileVr = false;
     bool mGiCachesDirty = false;   // mesh/texture/material died while GI live; flush at frame time
     GiParams         mGi;                                  // last applied GI state
     /// What the last (re)build ACTUALLY used, recorded rather than recomputed:
