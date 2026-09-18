@@ -689,6 +689,33 @@ int SceneMirror::sync()
     { MirrorStage s(mon, "mirror.sockets");
     resolveSockets();
     }
+    // THE PLAYER'S FLOOR SWITCH OWES A VISIT (PLAYER-FLOOR-1, the fix round).
+    // `setHideDefaultFloor` changed a term the WALK reads, and a still frame
+    // runs no walk: it consumes the document's change list and rotates a
+    // 32-entry verifier slice. So the flip used to land only when that rotation
+    // happened to contain the floor — exact in the default scene (four
+    // entries), a 1 − 32/N lottery in the Mirror Room or the Showroom. Here the
+    // floor goes on the change list ITSELF, before the list is taken below, so
+    // the push happens on THIS sync and on no other. The mark is the same one
+    // markMaterialUsersDirty makes for a material edit the change list cannot
+    // see, and a full walk would have covered it anyway — this is only ever the
+    // still-frame route.
+    //
+    // EVERY DEFAULT-FLOOR ENTRY, not just `mHorizonFloor`: the TERM is per node
+    // (`MeshNode::defaultFloor`) and a mark with a narrower scope than the term
+    // it exists for is the same defect one level down — mirror.ground_horizon's
+    // case D holds exactly that shape (a second node carrying the flag). One
+    // pass over the entry map per FLIP, which is a user gesture (a play, a
+    // stop, a shot) and not a frame: the verifier's own note measures a full
+    // pass over an 8,404-entry map at 0.370 ms, and this does strictly less.
+    if (mHideFloorPending) {
+        mHideFloorPending = false;
+        for (auto it = mEntries.begin(); it != mEntries.end(); ++it) {
+            if (!isDefaultFloorNode(it->docNode)) continue;
+            it->visiblePushed = -1;                       // force one application
+            it->docNode->markChanged(iris::NodeChange::Content);
+        }
+    }
 
     ++mSyncStamp;
     mVisited = 0;
@@ -2414,15 +2441,18 @@ void SceneMirror::setHideDefaultFloor(bool hidden)
     // comparison does the rest — no second visibility path, and no per-frame
     // work when nothing moves.
     //
-    // The latch is only RESET here for the case the walk cannot notice: an
-    // entry whose subtree the walk skips because nothing in the document
-    // changed. mHorizonFloor is the default floor the last sync found, so this
-    // is a no-op before the first sync (where the walk computes the term fresh
-    // anyway) and exact afterwards.
-    if (mHorizonFloor) {
-        auto it = mEntries.find(mHorizonFloor);
-        if (it != mEntries.end()) it->visiblePushed = -1;
-    }
+    // THE LATCH RESET IS NOT ENOUGH ON ITS OWN, and that was a real defect (the
+    // Fable read of PLAYER-FLOOR-1): a term is only read where a node is
+    // VISITED, and a still frame visits nothing but the document's change list
+    // and a rotating 32-entry verifier slice. So the flip reached the renderer
+    // only when the rotation happened to contain the floor — exact in the
+    // default scene (four entries), a 1 − 32/N lottery in the Mirror Room or
+    // the Showroom: a `player.screenshot` from a stopped Player missing the
+    // hide, or the Player showing the floor for up to N/32 frames after an
+    // editor shot during play. `mHideFloorPending` is the other half: the next
+    // sync puts the floor on the change list itself (consumed at the top of
+    // sync()), so the push happens on THAT sync and no other.
+    mHideFloorPending = true;
 }
 
 void SceneMirror::setVrProxyModels(const QString &leftPath, const QString &rightPath)

@@ -1191,6 +1191,14 @@ private:
     /// PLAYER-FLOOR-1's switch (setHideDefaultFloor). False = the document's
     /// own visibility decides, which is every host but a Player told to hide.
     bool mHideDefaultFloor = false;
+    /// ...AND THE FLIP STILL OWES A VISIT. The term is read where the walk
+    /// pushes visibility, and a still frame runs no walk: it consumes the
+    /// document's change list and rotates a 32-entry verifier slice. So a
+    /// change to the switch ARMS this, and the next sync puts the floor on that
+    /// change list — without it the flip landed only when the rotation happened
+    /// to reach the floor (1 − 32/N of missing it; the Fable read of
+    /// PLAYER-FLOOR-1, and mirror.ground_horizon case D fails on it).
+    bool mHideFloorPending = false;
 
     jahshaka::engine::Scene *mTarget;
     iris::ScenePtr           mSource;
