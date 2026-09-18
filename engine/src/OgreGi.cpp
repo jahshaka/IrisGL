@@ -441,6 +441,154 @@ bool OgreScene::refreshVctFast() {
 // updateSceneGraph() first: light injection reads each light's DERIVED position
 // (VctLighting::addLight -> getParentNode()->_getDerivedPosition()), and the
 // whole point of this call is that a light just moved.
+// THE CHAIN IS SETTLED FOR THESE INPUTS (LAMPREST-3 fix round item 3). Recorded
+// by WHOEVER pays a full at-rest chain injection — the light tick, or the last
+// step of an incremental settle — and consulted by the mirror's stability-window
+// tick, so one gesture costs one settle instead of two or three.
+void OgreScene::noteChainSettled() {
+    mGiSettleStepsOwed = 0;
+    noteSettleInputs();
+}
+
+// WHAT AN INJECTION READS, remembered so an unfinished settle can tell that it
+// changed underneath it (and so `chainCleanNow` can tell the same thing about a
+// finished one).
+void OgreScene::noteSettleInputs() {
+    mGiSettleSerial     = mGiLightWriteSerial;
+    mGiSettleAmbient[0] = mAmbientRadiance[0];
+    mGiSettleAmbient[1] = mAmbientRadiance[1];
+}
+
+bool OgreScene::settleInputsUnchanged() const {
+    const auto same = [](const Colour &a, const Colour &b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b;
+    };
+    return same(mGiSettleAmbient[0], mAmbientRadiance[0]) &&
+           same(mGiSettleAmbient[1], mAmbientRadiance[1]);
+}
+
+
+// ONE INJECTION OF AN OWED SETTLE (LAMPREST-3 fix round item 2), out of the
+// scheduler's own one-slot-per-frame budget and in the EXACT order the whole
+// tick uses: sweeps outermost, cascades OUTERMOST-FIRST inside each. That order
+// is why the bytes agree — the same injections, over the same voxels, in the
+// same sequence — and it is verified as such (sha256 of every cascade's light
+// voxel texture after an incremental settle against the same scene after one
+// whole `refreshGiLighting(false)`).
+void OgreScene::payChainSettleStep() {
+    const size_t n = mVctCascades.size();
+    if (mGiSettleStepsOwed <= 0 || n < 2u || n != mGiSettleCascades) {
+        mGiSettleStepsOwed = 0;                 // the chain changed shape under it
+        return;
+    }
+    JAH_TRY {
+        monitor::CacheScope work(CacheKind::Gi, WorkReason::Sweep, 0, "vct.light.settle",
+                                 mRoot->getRenderSystem());
+        mSceneMgr->updateSceneGraph();
+        // A LIGHT THAT MOVED WHILE THE SETTLE WAS RUNNING RESTARTS IT, and this
+        // is not caution: an injection reads the lights' DERIVED poses at the
+        // moment it runs, so a settle whose first steps saw one lamp pose and
+        // its last steps another leaves the chain a MIXTURE of the two and is
+        // not the fixed point of either — and `noteChainSettled` would then
+        // record that mixture as clean and let the next refresh skip the
+        // injection that would have fixed it. Measured:
+        // scripting.e2e.movable_lamp_rest read 3/255, 10/10, the moment the
+        // settle was allowed to absorb a light write (the lamp's push landed
+        // between two steps, the settle finished over it, and the suite's
+        // reference refresh was then skipped as clean).
+        //
+        // A lamp that keeps moving therefore keeps restarting this, which is
+        // right: nothing finishes while the scene is still changing, and the
+        // mirror's own at-rest tick — which fires one frame after the motion
+        // ends and clears the debt outright — is what finishes a light gesture.
+        if (mGiSettleSerial != mGiLightWriteSerial || !settleInputsUnchanged()) {
+            mGiSettleStepsOwed = kAtRestSweeps * int(n);
+            noteSettleInputs();
+        }
+        const int total = kAtRestSweeps * int(n);
+        unsigned injections = 0;
+        // A cascade with no lighting is skipped exactly as the tick skips it,
+        // and without spending the frame: the loop walks on to the next step.
+        while (mGiSettleStepsOwed > 0 && injections == 0u) {
+            const int step = total - mGiSettleStepsOwed;
+            const size_t i = n - 1u - size_t(step % int(n));
+            --mGiSettleStepsOwed;
+            if (!mVctCascades[i].lighting) continue;
+            injectCascade(i, false /*coarse: a settle is the at-rest answer*/);
+            ++injections;
+        }
+        work.setUnits(injections);
+        if (mGiSettleStepsOwed == 0) {
+            // The tick's own closing bookkeeping, once, after the LAST
+            // injection: the per-tick skip is spent and the field integrates a
+            // chain that has finished moving.
+            for (VctCascade &c : mVctCascades) c.injectedSinceTick = false;
+            reintegrateFieldAfterInjection();
+            ++mGiChainSettles;
+            noteChainSettled();
+        }
+    } JAH_CATCH(mError, );
+}
+
+// ONE DEFINITION OF AN AT-REST CASCADE INJECTION (LAMPREST-3 fix round). Two
+// paths inject a cascade over the voxels that are already there — the light
+// tick above and the scheduler's INCREMENTAL SETTLE below — and the whole point
+// of the settle is that the bytes it leaves are the bytes the whole tick would
+// have left, so there must be exactly one place that says what an injection is.
+// (The rebuild's closing injection is the same three lines with its own bounce
+// count; it lives in `rebuildCascade` because it is part of the rebuild's
+// try/catch.)
+void OgreScene::injectCascade(size_t i, bool coarse) {
+    if (i >= mVctCascades.size() || !mVctCascades[i].lighting) return;
+    applyCascadeAmbient(mVctCascades[i].lighting);
+    mVctCascades[i].lighting->update(mSceneMgr, coarse ? 0u : cascadeBounces(i),
+                                     1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
+                                     giRayMarchStepScale(coarse));
+}
+
+// THE FIELD IS AN INTEGRAL OF THE CHAIN, so it re-integrates after the chain's
+// radiance has finished moving — once, after the LAST injection of a tick or of
+// an incremental settle, never per injection (LAMPREST-3 fix round).
+void OgreScene::reintegrateFieldAfterInjection() {
+    // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
+    // object, same voxel textures, same field geometry — only the radiance
+    // in the volume changed. reset() re-arms the integration counter and
+    // does NOT clear the atlases, so the probes re-converge progressively
+    // over the previous converged data and the room never flashes black.
+    //
+    // At a PAUSED budget nothing would ever spend that counter down, so a
+    // reset there would freeze the field half-updated for ever; the field
+    // is converged inline instead. (The mirror only runs this path while
+    // the budget is above 0, so this is the belt to that braces.)
+    if (mIfd) {
+        // THE FIELD'S BINDING FIRST, AND UNCONDITIONALLY (E1 reader F2,
+        // PHOTON_SPEC §7 E2 (9)). `VctLighting::update` with extra bounces
+        // PING-PONGS its light voxel textures (`runBounce`), and the field
+        // bound whatever was current ONCE, by pointer, at `initialize()`
+        // (ogre-patch 0044). So after an odd number of bounce passes — which
+        // a chain reaches whenever the document asks for an even total (two
+        // total bounces = one pass per cascade) — a light move left the field
+        // integrating from the texture the injection had just stopped
+        // writing. Re-binding is five descriptor writes on a path that has
+        // just run a compute dispatch per bounce; deciding whether it is
+        // needed would mean comparing raw pointers that may have been
+        // recycled (the defect class patch 0041 exists for).
+        //
+        // The head, because the field rides cascade 0 and `mVctLighting`
+        // IS cascade 0's lighting under a chain.
+        if (mVctLighting) mIfd->setVctLighting(mVctLighting);
+        mIfd->reset();
+        mIfdProbesDone = 0u;
+        // Paused budget: the field converges inline (5 ms of GPU).
+        if (!mIfdProbesPerFrame) {
+            monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
+                                     mRoot->getRenderSystem());
+            mIfd->update(mIfdTotalProbes);
+            mIfdProbesDone = mIfdTotalProbes;
+            work.setUnits(mIfdTotalProbes);
+        }
+    }}
+
 bool OgreScene::refreshGiLighting(bool inMotion) {
     JAH_TRY {
         if (!mVctLighting || !mVctVoxelizer) return false;
@@ -596,12 +744,7 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
                         if (chainMotion && mVctCascades[i].injectedSinceTick &&
                             mVctCascades[i].injectedAtLightSerial == mGiLightWriteSerial)
                             continue;
-                        applyCascadeAmbient(mVctCascades[i].lighting);
-                        const bool coarse = inMotion && legacyTick;
-                        mVctCascades[i].lighting->update(mSceneMgr,
-                                                         coarse ? 0u : cascadeBounces(i),
-                                                         1.0f /*thinWallCounter*/, true /*autoMultiplier*/,
-                                                         giRayMarchStepScale(coarse));
+                        injectCascade(i, inMotion && legacyTick /*coarse*/);
                         ++injections;
                     }
                 }
@@ -621,44 +764,12 @@ bool OgreScene::refreshGiLighting(bool inMotion) {
             // reads. This is the single volume's bounce count.)
             if (mVctCascades.size() <= 1u) work.setUnits(extraBounces + 1u);
         }
-        // THE ONE PLACE `reset()` IS CORRECT (spike §8): the same VctLighting
-        // object, same voxel textures, same field geometry — only the radiance
-        // in the volume changed. reset() re-arms the integration counter and
-        // does NOT clear the atlases, so the probes re-converge progressively
-        // over the previous converged data and the room never flashes black.
-        //
-        // At a PAUSED budget nothing would ever spend that counter down, so a
-        // reset there would freeze the field half-updated for ever; the field
-        // is converged inline instead. (The mirror only runs this path while
-        // the budget is above 0, so this is the belt to that braces.)
-        if (mIfd) {
-            // THE FIELD'S BINDING FIRST, AND UNCONDITIONALLY (E1 reader F2,
-            // PHOTON_SPEC §7 E2 (9)). `VctLighting::update` with extra bounces
-            // PING-PONGS its light voxel textures (`runBounce`), and the field
-            // bound whatever was current ONCE, by pointer, at `initialize()`
-            // (ogre-patch 0044). So after an odd number of bounce passes — which
-            // a chain reaches whenever the document asks for an even total (two
-            // total bounces = one pass per cascade) — a light move left the field
-            // integrating from the texture the injection had just stopped
-            // writing. Re-binding is five descriptor writes on a path that has
-            // just run a compute dispatch per bounce; deciding whether it is
-            // needed would mean comparing raw pointers that may have been
-            // recycled (the defect class patch 0041 exists for).
-            //
-            // The head, because the field rides cascade 0 and `mVctLighting`
-            // IS cascade 0's lighting under a chain.
-            if (mVctLighting) mIfd->setVctLighting(mVctLighting);
-            mIfd->reset();
-            mIfdProbesDone = 0u;
-            // Paused budget: the field converges inline (5 ms of GPU).
-            if (!mIfdProbesPerFrame) {
-                monitor::CacheScope work(CacheKind::Gi, WorkReason::Light, 0, "ifd.converge.inline",
-                                         mRoot->getRenderSystem());
-                mIfd->update(mIfdTotalProbes);
-                mIfdProbesDone = mIfdTotalProbes;
-                work.setUnits(mIfdTotalProbes);
-            }
-        }
+        reintegrateFieldAfterInjection();
+        // WHOEVER PAYS THE INJECTION PAYS THE DEBT (fix round item 3). An
+        // at-rest tick over the chain IS the settle the scheduler owes, so an
+        // unfinished incremental one is abandoned here rather than run on top of
+        // the answer this tick has just computed.
+        if (!inMotion && mVctCascades.size() > 1u) noteChainSettled();
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -796,6 +907,7 @@ GiStatus OgreScene::giStatus() const {
         st.cascadeDeferrals    = mCascadeDeferrals;
         st.cascadeDirtyMajority = mCascadeDirtyMajority;
         st.chainSweeps          = mGiChainSweeps;
+        st.chainSettles         = mGiChainSettles;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -2004,6 +2116,20 @@ bool OgreScene::refreshCascadesFast() {
         // the voxels that are already there, on every cascade, at the full
         // bounce count: the picture the user is left looking at is the one a
         // full solve would have produced, and not one voxel was re-written.
+        // AND IT IS NEVER SKIPPED, however settled the chain looks (LAMPREST-3
+        // fix round, measured). Skipping it when the engine believed the chain
+        // was already at its fixed point for the scene's lights — keyed on the
+        // light-write serial and the ambient — turned
+        // `scripting.e2e.movable_lamp_rest` red at 3/255, 10 runs of 10: the
+        // suite's reference arm moves a MOVABLE lamp and asks for a refresh,
+        // and the engine's serial does not see that pose change the way an
+        // injection does, so the refresh injected NOTHING and the lamp's move
+        // never reached the voxels at all (`chainSweeps` 0 for the whole arm).
+        // A skipped injection that was needed is a wrong picture; the one it
+        // would have saved is ~12 ms once per gesture. The saving belongs where
+        // the signature actually lives — the mirror, which already decides
+        // whether to ask — and is recorded for the lead rather than guessed at
+        // here.
         if (!marked) refreshGiLighting(false);
         // NOTHING THE ARM HOLDS CAN STILL BE DANGLING: every cascade that could
         // hold a dead pointer re-selects its item set before its next build, and
@@ -4162,6 +4288,10 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     // frame. A cascade that waits keeps showing its old, correctly-lit volume:
     // the picture is never half-built, only slightly behind.
     bool spent = false;
+    // ...AND WHETHER A CASCADE REALLY WAS RE-VOXELISED (fix round item 4): a
+    // rebuild that threw BEFORE its swap put its placement back and voxelised
+    // nothing, so it owes no settle even though the frame was spent on it.
+    bool rebuilt = false;
     for (size_t i = 0; i < mVctCascades.size(); ++i) {
         VctCascade &c = mVctCascades[i];
         if (!c.pending) continue;
@@ -4209,6 +4339,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
             // its volume follows (the voxels there are current — only the light
             // injection is missing, which the next rebuild supplies).
             if (i == 0u && placementCommitted) followCascade0Field(reason);
+            if (placementCommitted) rebuilt = true;   // those voxels ARE new
             spent = true;                          // the frame paid for it either way
             if (++c.failures >= 2u) c.pending = 0; // ...otherwise `pending` stays set
             continue;
@@ -4223,6 +4354,7 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
         // sample this frame's probes through last frame's placement.
         if (i == 0u) followCascade0Field(reason);
         spent = true;
+        rebuilt = true;
     }
     // WHAT THE ARM LIT, KEPT CURRENT (audit B9). `giStatus().boundsMin/Max` is
     // the outermost cascade's box, and that box MOVES — it was written once at
@@ -4232,6 +4364,74 @@ void OgreScene::updateCascades(const Ogre::Vector3 &camPos) {
     if (spent && !mVctCascades.empty())
         mGiLitVolume = Ogre::Aabb(mVctCascades.back().centre,
                                   Ogre::Vector3(mVctCascades.back().halfSize));
+
+    // ---- 3. A REBUILT CHAIN IS OFF ITS FIXED POINT UNTIL SOMETHING SAYS SO --
+    //
+    // THE DEFECT (LAMPREST-3, 2026-09-18, measured at full resolution). A
+    // cascade rebuild ends with ONE injection of THAT cascade
+    // (`rebuildCascade`'s closing `VctLighting::update`) over the radiance that
+    // cascade happened to hold — which, after a scroll, is the light of
+    // wherever it was standing before. That is one Jacobi pass of a fixed point
+    // over COUPLED volumes (the same mathematics `refreshGiLighting`'s at-rest
+    // rule is written from): the cascades inside and outside it still hold the
+    // answer they had, and nothing in this engine then ran the chain's at-rest
+    // injection, because the mirror's cadence only ticks while a LIGHT or a
+    // piece of GEOMETRY is moving and a camera walk moves neither.
+    //
+    // So the chain simply STAYED off its fixed point, for ever. Measured on the
+    // sealed 12 m room of `scripting.e2e.movable_lamp_rest` (Medium, 4 cascades,
+    // 4 bounces, the lamp at 0.45): the camera walked 35 m away and back to the
+    // SAME pose — the cascade placements returned exactly and the albedo voxels
+    // came back byte-identical — and cascade 0's light voxels came back
+    // 60,852 of its 82,176 lit bytes different, by up to 55/255 (mean 12.326 →
+    // 13.072), the picture 5/255 brighter at six probes, and it never healed.
+    // ONE `world.refreshGi()` — the at-rest chain injection, nothing else —
+    // put every byte back (spikes/lamprest-3). A from-scratch rebuild of the
+    // whole arm at the same pose reproduces the boot answer to 30 bytes of a
+    // million, so the fixed point is not in doubt: the scrolled chain was the
+    // wrong one.
+    //
+    // THE RULE. A rebuild raises a DEBT of injections — `kAtRestSweeps` passes
+    // over every cascade, twelve of them at Medium — and the scheduler pays it
+    // ONE INJECTION PER FRAME out of the same one-slot budget the rebuilds come
+    // from, the rebuild queue keeping priority. It is not a settle "at the
+    // stop": there is no camera-still gate at all, deliberately. THE VR CASE IS
+    // WHY (fix round item 1): in a session the GI driver is the headset's view
+    // and its camera is the tracked HEAD, written every frame, so a rule that
+    // waited for two frames at the same position would never fire for a wearer
+    // — room-scale walking re-voxelises (Medium's cascade-0 step is 0.625 m)
+    // and the 55/255 error would simply live in the headset until something
+    // else moved. With no gate, a walk that never ends keeps paying one cheap
+    // injection per idle slot and never starves.
+    //
+    // THE COST, measured: one whole at-rest tick is 12.0-12.9 ms in Debug on
+    // the rig (four cascades x three passes; 0.9 ms of it the field), which in
+    // ONE frame is a whole frame at 90 Hz and most of one at 60 — a hitch under
+    // the no-hitch law, and the reason the settle is spread. Per frame it is one
+    // injection, ~1 ms. THE BYTES ARE THE SAME: the steps run in the tick's own
+    // order (sweeps outer, cascades outermost-first), which is verified by
+    // sha256 of every cascade's light voxels against the same scene settled by
+    // one whole `refreshGiLighting(false)`.
+    //
+    // The single-volume arm owes nothing: its rebuild injects the one volume at
+    // the document's own bounce count, which IS what the tick would compute.
+    //
+    // `JAHSHAKA_GI_NO_REBUILD_SETTLE` stands the rule down for measurement, the
+    // same way `JAHSHAKA_GI_SWEEPS` re-measures the pass count: gi.chain_converge
+    // drives it so the suite proves the defect it guards against rather than
+    // asserting a number that happens to pass (13.00/255 with it set, 0.00
+    // without, measured on that suite's room).
+    if (rebuilt && mVctCascades.size() > 1u) {
+        mGiSettleCascades  = mVctCascades.size();
+        mGiSettleStepsOwed = kAtRestSweeps * int(mGiSettleCascades);
+        noteSettleInputs();          // the lights and ambient these steps must all see
+    }
+    if (!spent && mGiSettleStepsOwed > 0 && !std::getenv("JAHSHAKA_GI_NO_REBUILD_SETTLE")) {
+        bool pending = false;
+        for (const VctCascade &c : mVctCascades)
+            if (c.pending) { pending = true; break; }
+        if (!pending) payChainSettleStep();      // one injection, this frame
+    }
 }
 
 // The FAILED-BUILD path: nothing is bound yet (mVctVoxelizer/mVctLighting are
@@ -5435,6 +5635,12 @@ void OgreScene::teardownVct() {
     // frame.
     mGiCascadeDirtyBoxes.clear();
     mGiCascadeDirtyAll = false;
+    // ...AND IT OWES NO SETTLE EITHER (LAMPREST-3 fix round item 4). The debt is
+    // a count of injections into cascades that are about to stop existing; a
+    // tier change after a walk would otherwise pay it into the FRESH chain,
+    // which has just been injected by its own build.
+    mGiSettleStepsOwed = 0;
+    mGiSettleCascades  = 0;
     mGiBuiltGeneration = ~0ull;      // nothing built: the reuse arm must refuse
     mGiReusedLastRefresh = false;
     // Unbind what the shader reads FROM THIS SCENE, by pointer identity (the
