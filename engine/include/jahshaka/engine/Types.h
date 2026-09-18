@@ -3334,7 +3334,9 @@ struct VrStatus {
     unsigned long long frames = 0;          ///< xrEndFrame calls that succeeded
     unsigned long long rendered = 0;        ///< frames the runtime asked us to draw
     /// The distance between the two located eye positions, metres. 0 before the
-    /// first xrLocateViews.
+    /// session's first frame; through the WARM-UP frames it reads the synthetic
+    /// pair's 0.064 (VrConfig::warmUpFrames) until the first real xrLocateViews
+    /// — `head.valid` is false for as long as that is so.
     float              ipd = 0.0f;
     unsigned           eyeWidth = 0, eyeHeight = 0;   ///< what the chain renders per eye
     /// THE STEREO WARM-UP (VrConfig::warmUpFrames): how many warm-up frames

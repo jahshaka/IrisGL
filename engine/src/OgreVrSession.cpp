@@ -2913,7 +2913,20 @@ void VrSession::endFrame() {
     // is no XR frame to end (warmUpBeginFrame opened none), but the engine's
     // frame — the one that just recorded the two eyes and built everything they
     // needed — ends at this call, which is where its cost can be charged.
-    if (mWarmUpFrame) { warmUpEndFrame(); return; }
+    if (mWarmUpFrame) {
+        warmUpEndFrame();
+        // A DEVICE LOST INSIDE A WARM-UP FRAME ENDS THE SESSION LIKE ANY OTHER
+        // (lead review at merge): the warm-up is the biggest frame the session
+        // records, and the loss surfaces in its commit. The app's own latch
+        // ends the process regardless; this is for the engine-only suites and
+        // a host without it. No image was acquired, so nothing is released.
+        if (deviceLost()) {
+            vrLog("the Vulkan device was lost inside a warm-up frame - ending the session");
+            mState = VrState::Lost; mRunning = false;
+            setSessionViewEnabled(false);
+        }
+        return;
+    }
     if (!mInFrame) return;
     // A LOST DEVICE ENDS THE SESSION — IT DOES NOT KEEP SUBMITTING (F3).
     //
