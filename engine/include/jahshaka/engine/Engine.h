@@ -1907,6 +1907,15 @@ public:
     /// runtime is really tracking ignores the injection unless
     /// JAHSHAKA_VR_TEST_INJECT is set.
     virtual bool vrInjectJoints(int hand, const VrPose *joints, unsigned count) = 0;
+    /// EVERY SUGGESTED-BINDING BLOCK AND WHAT THE RUNTIME DID WITH IT
+    /// (`VrBindingBlock`; stage 3's fix round). Writes up to `count` blocks in
+    /// the order they were offered and returns how many there are — 0 with no
+    /// session, and 0 for a session whose runtime refused the action set.
+    ///
+    /// Bulk introspection rather than a field on `VrStatus`, for the same
+    /// reason the hand joints are: only a report and a suite ever ask, and the
+    /// status is copied several times a frame.
+    virtual unsigned vrBindingBlocks(VrBindingBlock *out, unsigned count) const = 0;
     /// THE ONE OUTPUT: buzz a controller (product, not a test hook).
     ///
     /// `amplitude01` is clamped to 0..1 and `seconds` to a sane pulse; the

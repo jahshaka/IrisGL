@@ -120,6 +120,7 @@ void vrSessionSetMirror(VrSession *, OgreView *) {}
 void vrSessionSetOrigin(VrSession *, const Vec3 &, float) {}
 bool vrSessionHasBoundProfile(const VrSession *, int) { return false; }
 unsigned vrSessionHandJoints(const VrSession *, int, VrPose *, unsigned) { return 0u; }
+unsigned vrSessionBindingBlocks(const VrSession *, VrBindingBlock *, unsigned) { return 0u; }
 bool vrSessionHasLiveJoints(const VrSession *, int) { return false; }
 bool vrSessionHaptic(VrSession *, int, float, float, std::string &error) {
     error = "this build has no OpenXR support";
@@ -762,6 +763,14 @@ public:
                 out[j] = mJoints[hand][j];
         return kVrHandJointCount;
     }
+    /// THE SUGGESTED-BINDING BLOCKS, in the order they were offered
+    /// (Engine::vrBindingBlocks).
+    unsigned bindingBlocks(VrBindingBlock *out, unsigned count) const {
+        if (out)
+            for (unsigned b = 0; b < count && b < mBindingBlockCount; ++b)
+                out[b] = mBindingBlock[b];
+        return mBindingBlockCount;
+    }
     /// IS THE RUNTIME TRACKING that hand's skeleton right now? (The joint
     /// injection's refusal rule — the wearer's own hand wins.)
     bool hasLiveJoints(int hand) const {
@@ -907,6 +916,13 @@ private:
     /// How many suggested-binding blocks were offered, and how many the runtime
     /// took (VrStatus's note). Counted once, in createActions.
     unsigned    mBindingProfiles = 0u, mBindingProfilesAccepted = 0u;
+    /// ...AND BLOCK BY BLOCK (stage 3's fix round; VrBindingBlock): which
+    /// profile, how many bindings it carried, whether the runtime took it. The
+    /// totals cannot tell a block that bound everything it meant to from one
+    /// that bound half — a path spelled wrong takes that hardware's control
+    /// away silently — so the COUNT is reported and a suite asserts it.
+    VrBindingBlock mBindingBlock[kVrBindingBlockMax];
+    unsigned    mBindingBlockCount = 0u;
     XrHandTrackerEXT mHandTracker[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
     bool        mHandActions = false;   ///< the set was attached
     bool        mHandJoints = false;    ///< a joint answered this session
@@ -1270,9 +1286,10 @@ void VrSession::createActions() {
     //                              keyboard press a real trigger through
     //                              xrSyncActions on the rig (§17).
     //   ext/hand_interaction_ext   BARE HANDS pressing the same actions: pinch
-    //                              for select, grasp for grab, aim-activate
-    //                              for menu — and `pinch_ext/pose` as the frame
-    //                              a hand HOLDS things in. Bound in stage 1
+    //                              for select, grasp for grab, and
+    //                              `pinch_ext/pose` as the frame a hand HOLDS
+    //                              things in. NO MENU (see the block below:
+    //                              aim_activate IS the pinch). Bound in stage 1
     //                              (the owner's answer 9), ACTED ON in stage 3.
     //
     // THE RIGHT HAND'S MENU IS `b/click` ON TOUCH, not `menu/click`: the touch
@@ -1308,16 +1325,34 @@ void VrSession::createActions() {
           { "/input/menu/click", "/input/menu/click" },
           "/input/thumbstick", "/input/thumbstick/click", "/output/haptic", false },
         // BARE HANDS, ACTED ON (stage 3, VR_INPUT_SPEC §7). The same actions the
-        // controllers press, off the fingers: a PINCH is the trigger, a whole-hand
-        // GRASP is the squeeze, and `aim_activate_ext` — the runtime's own "the
-        // wearer pinched at the thing they are pointing at" — is the menu button.
-        // No stick and no haptic exist on a hand (locomotion is the teleport, and
-        // a hand cannot be buzzed), so those stay unbound rather than standing in.
-        // The MANIPULATION frame is `pinch_ext/pose`, which is the one path here
-        // no controller has.
+        // controllers press, off the fingers: a PINCH is the trigger and a
+        // whole-hand GRASP is the squeeze. The MANIPULATION frame is
+        // `pinch_ext/pose`, which is the one path here no controller has.
+        //
+        // AND A HAND HAS NO MENU BUTTON — `aim_activate_ext` IS THE PINCH
+        // (VR-HANDS-1 fix round, the lead's item 1; the first cut bound it as
+        // `menu` because §7's table says to). The extension defines
+        // aim_activate as "the wearer pinched at the thing they are pointing
+        // at", i.e. the SAME gesture as `pinch_ext/value` gated on the aim
+        // state — so on any runtime that implements it that way one pinch
+        // raises BOTH: `select` at our 0.7, and `menu` at the runtime's own
+        // bool threshold, which is lower. The editor reads a held `menu` as the
+        // Ctrl of VR — every hand select would become a TOGGLE and every hand
+        // grab a snapped one — and a light pinch that crossed the runtime's
+        // threshold but not ours would be a short, unconsumed menu tap, which
+        // is a gizmo-MODE CYCLE the wearer never asked for. `ready_ext` is
+        // worse still: it is true whenever the hand is merely pointing.
+        //
+        // So `menu` is UNBOUND on this profile and a bare hand has no
+        // modifier. Decision 10's "menu held for both" was written for two
+        // CONTROLLERS, each with a button; a modifier for fingers is a
+        // different gesture (the off hand's grasp, a dwell, a pose) and a joint
+        // decision that has not been made. No stick and no haptic exist on a
+        // hand either (locomotion is the teleport; fingers cannot be buzzed),
+        // so those stay unbound rather than standing in for each other.
         { "/interaction_profiles/ext/hand_interaction_ext", "/input/pinch_ext/pose",
           "/input/pinch_ext/value", "/input/grasp_ext/value",
-          { "/input/aim_activate_ext/value", "/input/aim_activate_ext/value" },
+          { nullptr, nullptr },
           nullptr, nullptr, nullptr, true },
     };
 
@@ -1367,6 +1402,14 @@ void VrSession::createActions() {
         sug.countSuggestedBindings = uint32_t(binds.size());
         sug.suggestedBindings = binds.data();
         const XrResult sr = xrSuggestInteractionProfileBindings(mBoot->mInstance, &sug);
+        // RECORDED WHETHER IT WAS TAKEN OR NOT (stage 3's fix round): a block
+        // the runtime refused is exactly the one a report needs to name.
+        if (mBindingBlockCount < kVrBindingBlockMax) {
+            VrBindingBlock &blk = mBindingBlock[mBindingBlockCount++];
+            blk.profile = pd.profile;
+            blk.bindings = unsigned(binds.size());
+            blk.accepted = XR_SUCCEEDED(sr);
+        }
         if (XR_FAILED(sr)) {
             // NOT FATAL, and worth one line: a runtime that does not know a
             // profile has simply not got that hardware.
@@ -1519,8 +1562,28 @@ bool VrSession::locateHands(XrTime displayTime) {
         // when the controller route came up empty — because a hand can be
         // tracked and bound at the same time on a runtime that offers both, and
         // the drawer decides which of the two it shows from the PROFILE.
+        //
+        // ...BUT NOT FOR A HAND THAT IS HOLDING A CONTROLLER AND LOCATED
+        // (VR-HANDS-1 fix round, the lead's item 2). THE RULE, in one line: the
+        // joints are located unless this hand's profile is a CONTROLLER and its
+        // controller pose came back this frame. `xrLocateHandJointsEXT` is a
+        // call into the runtime — an IPC round trip on Monado — and at ninety
+        // frames a second that was two a frame for a skeleton the drawer
+        // REFUSES to draw while a controller is bound (placeHandBones and the
+        // mirror both ask the profile first), and which no consumer can read
+        // either (`jointsTracked` and `vrHandJoints` answer for the hand the
+        // drawer would draw). The two cases that keep it are the ones where the
+        // skeleton is the wearer's only hand: nothing bound at all, and a hand
+        // profile. A controller hand whose grip did NOT locate keeps it too —
+        // that is a controller switched off or out of the volume, and the
+        // wearer's bare hand may well be there instead.
+        const bool controllerHand = !mProfilePath[h].empty() &&
+                                    !vrIsHandProfile(mProfilePath[h].c_str());
         mJointsValid[h] = false;
-        if (mHandTracker[h] != XR_NULL_HANDLE && mBoot->LocateHandJoints) {
+        if (controllerHand && got) {
+            // (No locate, and no stale joints: a hand holding a controller
+            // reports `jointsTracked` false, which is what it is.)
+        } else if (mHandTracker[h] != XR_NULL_HANDLE && mBoot->LocateHandJoints) {
             XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT] = {};
             XrHandJointLocationsEXT locs{ XR_TYPE_HAND_JOINT_LOCATIONS_EXT };
             locs.jointCount = XR_HAND_JOINT_COUNT_EXT;
@@ -2082,6 +2145,8 @@ void VrSession::destroyActions() {
     }
     mProfilesDirty = true;
     mBindingProfiles = mBindingProfilesAccepted = 0u;
+    for (unsigned b = 0; b < kVrBindingBlockMax; ++b) mBindingBlock[b] = VrBindingBlock();
+    mBindingBlockCount = 0u;
     if (mActionSet != XR_NULL_HANDLE) xrDestroyActionSet(mActionSet);
     mActionSet = XR_NULL_HANDLE;
     mHandActions = false;
@@ -2944,12 +3009,23 @@ VrStatus VrSession::status() const {
     // host cancels a gesture in flight on this going false rather than
     // believing a release nobody made.
     s.inputFocused = mState == VrState::Focused;
-    // ONE PROFILE STRING FOR THE SESSION: the right hand's when it has one
-    // (the manipulating hand by default), else the left's. No runtime measured
-    // binds two different profiles at once, and the log names both when they
-    // differ (readProfiles).
-    s.profile.assign((!mProfilePath[VrHandRight].empty() ? mProfilePath[VrHandRight]
-                                                         : mProfilePath[VrHandLeft]).c_str());
+    // ONE PROFILE STRING FOR THE SESSION, DERIVED FROM THE HANDS (stage 3's
+    // fix round, the lead's item 4): the right hand's when it has one — the
+    // manipulating hand by default — else the left's.
+    //
+    // FROM `input[h]`, NOT FROM `mProfilePath`, and that is the fix: the two
+    // are the same answer for a worn hand, but an INJECTED hand carries its own
+    // profile (that is how the hand/controller half of stage 3 is driven with
+    // no runtime) and `mProfilePath` knows nothing about it — so the summary
+    // said "nothing bound" while `input[h].profile` named a hand, and a caller
+    // reading the two together got two answers to one question. One
+    // derivation, the same one the no-session path in OgreEngine uses.
+    //
+    // THE TWO HANDS REALLY CAN DIFFER since stage 3 (a controller in one, bare
+    // fingers in the other — WiVRn binds per hand), which is why this is a
+    // SUMMARY for a log or a report and every decision asks the hand.
+    s.profile = !s.input[VrHandRight].profile.empty() ? s.input[VrHandRight].profile
+                                                      : s.input[VrHandLeft].profile;
     s.bindingProfiles = mBindingProfiles;
     s.bindingProfilesAccepted = mBindingProfilesAccepted;
     s.handActions = mHandActions;
@@ -3509,6 +3585,9 @@ bool vrSessionHasBoundProfile(const VrSession *s, int hand) {
 }
 unsigned vrSessionHandJoints(const VrSession *s, int hand, VrPose *out, unsigned count) {
     return s ? s->handJoints(hand, out, count) : 0u;
+}
+unsigned vrSessionBindingBlocks(const VrSession *s, VrBindingBlock *out, unsigned count) {
+    return s ? s->bindingBlocks(out, count) : 0u;
 }
 bool vrSessionHasLiveJoints(const VrSession *s, int hand) {
     return s && s->hasLiveJoints(hand);

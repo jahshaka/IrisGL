@@ -3203,6 +3203,29 @@ struct VrConfig {
 };
 
 
+/// ONE SUGGESTED-BINDING BLOCK, AS THE RUNTIME ANSWERED IT (stage 3's fix
+/// round; `Engine::vrBindingBlocks`).
+///
+/// WHY PER PROFILE AND NOT JUST A PAIR OF TOTALS. `bindingProfiles` /
+/// `bindingProfilesAccepted` say "four offered, four taken", which cannot
+/// distinguish a block that bound every path it meant to from one that bound
+/// half of them: a path spelled wrong, or a profile that lost an input between
+/// pin bumps, takes that hardware's control away SILENTLY and the totals still
+/// read 4 of 4. The COUNT is what pins it — the bare-hand block is twelve
+/// bindings (two poses, the pinch pose, select, grab, per hand) and a suite
+/// asserts that number.
+///
+/// `bindings` is how many `XrActionSuggestedBinding`s the block carried;
+/// `accepted` is whether `xrSuggestInteractionProfileBindings` took it (a
+/// runtime refuses a profile it does not know, which is not an error).
+struct VrBindingBlock {
+    VrProfileName profile;
+    unsigned      bindings = 0u;
+    bool          accepted = false;
+};
+/// How many blocks this engine can report (it offers four).
+enum : unsigned { kVrBindingBlockMax = 8 };
+
 /// What a live session is doing. Every number is a COUNT or a measured value,
 /// never a wall-clock derivation (VR_SPEC §6 flake class (b): count frames,
 /// never time, on a loaded box).

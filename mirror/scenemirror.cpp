@@ -2832,9 +2832,17 @@ void SceneMirror::syncVrHandBones(bool draw)
                 mVrHandBoneMesh = mTarget->createLineMesh(segment, false);
                 if (!mVrHandBoneMesh) return;
             }
+            // BUILT IS SET FIRST, AND A NODE THE SCENE REFUSED IS A ZERO
+            // (stage 3's fix round, the lead's item 6). The first cut returned
+            // mid-loop on a refusal with the flag still false, which ORPHANED
+            // every node already made for that hand and started again from bone
+            // 0 on the next tick — a leak per frame for as long as the scene
+            // kept refusing. Every loop that walks these rows already skips a
+            // zero, so a partial row draws what it has and leaks nothing.
+            mVrHandBonesBuilt[h] = true;
             for (unsigned b = 0; b < jahshaka::engine::kVrHandBoneCount; ++b) {
                 const NodeId node = mTarget->createNode();
-                if (!node) return;
+                if (!node) { mVrHandBoneNode[h][b] = 0; continue; }
                 // BOTH HELPER CHANNELS, exactly like the wands: kHelperBit
                 // keeps the wearer's hands out of every probe capture, every
                 // shadow map and every user screenshot and puts them in the
@@ -2846,7 +2854,6 @@ void SceneMirror::syncVrHandBones(bool draw)
                 mTarget->attachMesh(node, mVrHandBoneMesh, mVrProxyMaterial[h]);
                 mVrHandBoneNode[h][b] = node;
             }
-            mVrHandBonesBuilt[h] = true;
         }
         // THE SESSION IS TOLD WHICH NODES THEY ARE, so it can place them inside
         // the frame that draws them — this write below is the host's own best

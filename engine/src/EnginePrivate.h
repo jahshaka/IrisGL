@@ -5588,6 +5588,9 @@ bool    vrSessionHasBoundProfile(const VrSession *, int hand);
 /// extension's order (stage 3; `Engine::vrHandJoints`). 0 = that hand's
 /// skeleton is not being tracked this frame.
 unsigned vrSessionHandJoints(const VrSession *, int hand, VrPose *out, unsigned count);
+/// THE SUGGESTED-BINDING BLOCKS THE SESSION OFFERED, and what the runtime did
+/// with each (`Engine::vrBindingBlocks`).
+unsigned vrSessionBindingBlocks(const VrSession *, VrBindingBlock *out, unsigned count);
 /// IS THE RUNTIME REALLY TRACKING that hand's skeleton? (The injection refusal
 /// rule for joints: a wearer's own hand always wins over a script's.)
 bool    vrSessionHasLiveJoints(const VrSession *, int hand);
@@ -5665,6 +5668,7 @@ public:
     void vrInjectFocus(bool focused) override { mVrInjectFocus = focused; }
     unsigned vrHandJoints(int hand, VrPose *out, unsigned count) const override;
     bool vrInjectJoints(int hand, const VrPose *joints, unsigned count) override;
+    unsigned vrBindingBlocks(VrBindingBlock *out, unsigned count) const override;
     bool vrHaptic(int hand, float amplitude01, float seconds) override;
     void setVrRay(const VrRayState &ray) override { mVrRay = ray; }
     const VrRayState &vrRay() const override { return mVrRay; }

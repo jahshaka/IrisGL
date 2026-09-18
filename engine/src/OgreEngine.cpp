@@ -1647,6 +1647,13 @@ unsigned OgreEngine::vrHandJoints(int hand, VrPose *out, unsigned count) const {
     return kVrHandJointCount;
 }
 
+// EVERY SUGGESTED-BINDING BLOCK, AND WHAT THE RUNTIME DID WITH IT (stage 3's
+// fix round; Engine::vrBindingBlocks). Only a session can answer: the blocks
+// are suggested once, at its creation.
+unsigned OgreEngine::vrBindingBlocks(VrBindingBlock *out, unsigned count) const {
+    return mVrSession ? vrSessionBindingBlocks(mVrSession, out, count) : 0u;
+}
+
 bool OgreEngine::vrInjectJoints(int hand, const VrPose *joints, unsigned count) {
     if (hand < 0 || hand >= int(VrHandCount)) {
         mLastError = "vrInjectJoints: hand must be 0 (left) or 1 (right)";
