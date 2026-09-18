@@ -582,6 +582,25 @@ public:
     /// the models off and leaves the wands. Set it before a session starts.
     void setVrProxyModels(const QString &leftPath, const QString &rightPath);
 
+    /// HIDE THE APP'S OWN DEFAULT FLOOR (and the horizon that extends it) in
+    /// the views of whoever asked — PLAYER-FLOOR-1, the project setting
+    /// `iris::Scene::playerHidesFloor`, owner 2026-09-18.
+    ///
+    /// The HOST decides when: the Player switches it on while it owns the
+    /// picture and off when it stops, so the answer is "the project says hide
+    /// AND the Player is showing". Nothing in the DOCUMENT changes — the floor
+    /// node keeps its own visibility, its material, its physics and its place
+    /// in the outliner — and the editor, which never asks for this, is
+    /// untouched. Only the floor the app MADE (`MeshNode::defaultFloor`) and
+    /// the mirror's own horizon plane are affected; an authored ground is the
+    /// scene's own content and is never hidden by a setting.
+    ///
+    /// Idempotent, and cheap to flip: it is one more AND term in the node
+    /// walk's effective-visibility rule, so the change is pushed by the same
+    /// latch that pushes a user's hide (one setNodeVisibleUnder, on change).
+    void setHideDefaultFloor(bool hidden);
+    bool hideDefaultFloor() const { return mHideDefaultFloor; }
+
 private:
     /// Records which camera is driving `view` and answers "did it CHANGE" — the
     /// cut test the exposure re-seed rides on (CAMERA_LENS_SPEC §4). False the
@@ -1169,6 +1188,9 @@ public:
 
 private:
     jahshaka::engine::Engine *mMonitorEngine = nullptr;
+    /// PLAYER-FLOOR-1's switch (setHideDefaultFloor). False = the document's
+    /// own visibility decides, which is every host but a Player told to hide.
+    bool mHideDefaultFloor = false;
 
     jahshaka::engine::Scene *mTarget;
     iris::ScenePtr           mSource;

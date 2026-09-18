@@ -78,6 +78,21 @@ namespace {
 inline Vec3 toVec3(const iris::Vec3 &v) { return Vec3(v.x(), v.y(), v.z()); }
 inline Quat toQuat(const iris::Quat &q) { return Quat(q.x(), q.y(), q.z(), q.scalar()); }
 
+/// IS THIS THE FLOOR THE APP MADE? (PLAYER-FLOOR-1.) The DOCUMENT'S OWN FLAG
+/// (`MeshNode::defaultFloor`) and never the node's name or its mesh path —
+/// defaultfloor.h says the same thing from the other end, and a user's own
+/// ground called "Ground" must not be caught by a setting about the editor's
+/// checkered floor.
+inline bool isDefaultFloorNode(const iris::SceneNode *node)
+{
+    // getSceneNodeType() is non-const at this pin, so the test is on the
+    // MUTABLE pointer the callers already hold.
+    if (!node) return false;
+    auto *n = const_cast<iris::SceneNode *>(node);
+    if (n->getSceneNodeType() != iris::SceneNodeType::Mesh) return false;
+    return static_cast<const iris::MeshNode *>(node)->defaultFloor;
+}
+
 /// ONE 8-BIT CODE, IN POST-EXPOSURE UNITS (lane SKY-SMALL, item SKY-NIGHT-1).
 /// The smallest change to the frame that can still move an output code — and
 /// therefore the point below which the sun's disc, and its three PSSM shadow
@@ -2126,8 +2141,11 @@ void SceneMirror::syncGroundHorizon()
     const iris::MeshNode *floor = mHorizonFloor;
     // A scene with no default floor (a thumbnail scene, a preview, a project
     // whose floor was deleted) has no horizon, and a hidden floor takes its
-    // horizon with it.
-    const bool want = floor && floor->isVisibleInScene();
+    // horizon with it — by the DOCUMENT's rule (a user's hide) or by the host's
+    // one override (PLAYER-FLOOR-1: the Player hiding the app's own floor).
+    // The horizon is the floor's extension and has no separate existence; it
+    // must never be the thing that stays behind.
+    const bool want = floor && floor->isVisibleInScene() && !mHideDefaultFloor;
     if (!want) {
         if (mHorizonNode && mHorizonVisible != 0) {
             mTarget->setNodeVisible(mHorizonNode, false);
@@ -2384,6 +2402,27 @@ void SceneMirror::vrProxyNodes(jahshaka::engine::NodeId out[2]) const
 void SceneMirror::vrRayNodes(jahshaka::engine::NodeId out[2]) const
 {
     for (int i = 0; i < 2; ++i) out[i] = mVrRayNode[i];
+}
+
+void SceneMirror::setHideDefaultFloor(bool hidden)
+{
+    if (mHideDefaultFloor == hidden) return;
+    mHideDefaultFloor = hidden;
+    // ONE APPLICATION, THROUGH THE SAME LATCH A USER'S HIDE USES. The effective
+    // visibility rule in the node walk carries this as an AND term, so the flip
+    // changes `wantVisible` for the floor and the walk's own "pushed on change"
+    // comparison does the rest — no second visibility path, and no per-frame
+    // work when nothing moves.
+    //
+    // The latch is only RESET here for the case the walk cannot notice: an
+    // entry whose subtree the walk skips because nothing in the document
+    // changed. mHorizonFloor is the default floor the last sync found, so this
+    // is a no-op before the first sync (where the walk computes the term fresh
+    // anyway) and exact afterwards.
+    if (mHorizonFloor) {
+        auto it = mEntries.find(mHorizonFloor);
+        if (it != mEntries.end()) it->visiblePushed = -1;
+    }
 }
 
 void SceneMirror::setVrProxyModels(const QString &leftPath, const QString &rightPath)
@@ -3041,7 +3080,15 @@ SceneMirror::VisitResult SceneMirror::visitNode(iris::SceneNode *node, bool pare
     // document parent) and a re-parent under a hidden or a visible node. Each
     // node's own flag is untouched; pushed on CHANGE only, like every other
     // signature-guarded half of this walk.
-    const bool shown = parentShown && node->visible;
+    // ...AND THE HOST'S ONE OVERRIDE (PLAYER-FLOOR-1): a Player told by the
+    // project to hide the app's own default floor hides THAT node and nothing
+    // else. It is an AND term here, beside the document's own rule, for the
+    // reason the block above gives: one place computes what reaches the
+    // engine, latched, so a host switch cannot fight a user's hide or leave a
+    // subtree re-revealed. The document is not touched — `node->visible` is
+    // still the user's answer and comes back the moment the Player stops.
+    const bool hiddenByHost = mHideDefaultFloor && isDefaultFloorNode(node);
+    const bool shown = parentShown && node->visible && !hiddenByHost;
     const int wantVisible = shown ? 1 : 0;
     if (e.visiblePushed != wantVisible) {
         // THROUGH THE PARENT-FIRST VERB (ledger 179): this walk knows
