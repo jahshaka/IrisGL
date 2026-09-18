@@ -410,6 +410,15 @@ public:
     /// equals. 0 (the default) is no budget, which is the shipped arm exactly.
     /// The engine's own documentation for it is GiParams::cascadeInstanceCap.
     int giCascadeInstanceCap = 0;
+    /// A DRAGGED STILL RIDES THE MOVER CHANNEL FOR THE LENGTH OF THE GESTURE
+    /// (MOVER-1) — 0 (the default) is the shipped behaviour exactly. It changes
+    /// what a scene looks like WHILE an object is being dragged (the object
+    /// stops bouncing light into the room and is lit by the field and the cones
+    /// at its live pose), and nothing at all about what it looks like at rest,
+    /// so it is a per-project choice and not a tier row. The engine's own
+    /// documentation for it, with the costs on both sides, is
+    /// GiParams::dragMoverChannel.
+    int giDragMoverChannel = 0;
     /// THE GI UPDATE BUDGET (FIX WAVE B1, 2026-09-07) — probe re-captures the
     /// renderer may spend per frame, and the single "is GI live?" switch.
     ///

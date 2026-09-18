@@ -309,6 +309,7 @@ Scene::Scene()
     giUpdateBudget = 1;         // one probe re-capture per frame (FIX WAVE B1)
     giPccGrid = iris::Vec3(3, 2, 3);
     giDdgi = -1;                // auto: no tier has been applied to this scene yet
+    giDragMoverChannel = 0;     // MOVER-1: the shipped behaviour (see scene.h)
     giDdgiIntensity = 1.0f;     // the calibrated default; see scene.h
     giDdgiAmbient = 1.0f;       // the ambient fix on; see scene.h
     // The Photon quality tier this scene comes back at when GI is switched on

@@ -7135,6 +7135,7 @@ void SceneMirror::applyEnvironment(View *view, Engine *engine)
         // and the tier's own decides — the same rule the engine states.
         gi.cascades = mSource->giCascades > 0;
         gi.cascadeInstanceCap = qMax(0, mSource->giCascadeInstanceCap);
+        gi.dragMoverChannel   = mSource->giDragMoverChannel > 0;
         gi.cascadeCount = 0;
         for (const iris::Vec3 &row : mSource->giCascadeSet) {
             if (gi.cascadeCount >= 8) break;

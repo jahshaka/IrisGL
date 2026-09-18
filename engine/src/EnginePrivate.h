@@ -3172,6 +3172,15 @@ private:
             Ogre::uint32        shadowChannels = 0;
             bool                giKnown = false, probeKnown = false, shadowPresent = false;
             bool                decalKnown = false;
+            /// THE GI TICK THIS ITEM'S BOX LAST MOVED AT (MOVER-1). What makes
+            /// a GESTURE tellable from a nudge on the VOXEL side, exactly as
+            /// `mProbeMotionRun` does on the probe side and with the same
+            /// window: a second move within kProbeMotionSettleFrames ticks is a
+            /// gesture, one move on its own is an edit. 0 = never seen moving.
+            /// It cannot be a per-frame run counter, because the editor renders
+            /// about two frames per document edit and a mover's boxes therefore
+            /// arrive on alternate frames (DRAG-1's measurement).
+            unsigned long long  giMovedTick = 0;
         } scan;
         /// This node's own id. The item index (mItemNodes) is a vector of Node*,
         /// so a walk that has to name the nodes it found — the GI item set —
@@ -3315,6 +3324,19 @@ private:
         /// shadow maps, while the view, the planar mirrors, SSR and the
         /// view/reflect shadow maps keep drawing it every frame.
         bool                      movable = false;
+        /// THE DRAGGED STILL, RIDING THE MOVER CHANNEL FOR THE LENGTH OF A
+        /// GESTURE (MOVER-1, GiParams::dragMoverChannel — OFF by default).
+        ///
+        /// It is the renderer's own transient state and never the document's:
+        /// `movable` is what the host RESOLVED and this is what the gesture
+        /// borrowed, so the two are ORed wherever a channel is decided and the
+        /// document's answer is untouched when the gesture ends. While it is
+        /// set the item carries kMovableBit and no kGiGeometryBit exactly as a
+        /// Movable one does — it leaves the voxel bounce and the probe captures
+        /// and is lit by the field and the cones at its live pose — and the
+        /// cascades pay ONE re-voxelisation at each end of the gesture instead
+        /// of one per frame of it.
+        bool                      dragMover = false;
         /// THE SOFT PROMOTION'S HEALING KEY (owner decision O3). While a node is
         /// softly promoted it carries no GI bit but its voxels were never
         /// cleared — that stale bounce IS the documented ghost. If a
@@ -4143,6 +4165,10 @@ private:
     /// `why` is the reason the monitor row will carry. Returns how many cascades
     /// it marked.
     size_t markDirtyCascadesPending(GiStaleReason why);
+    /// The end of a drag gesture (MOVER-1): every promoted mover goes back to
+    /// being still world, owing one cascade box and one probe stale between
+    /// them. Called once a frame from updateGiTracking; a no-op with no movers.
+    void   endDragGestureIfStill();
     /// THE SCHEDULER, called once a frame from updateGiTracking with the
     /// authoritative camera. Re-quantises every cascade, queues the ones that
     /// moved, and spends AT MOST ONE rebuild this frame, innermost first.
@@ -4902,6 +4928,40 @@ private:
     /// photograph instead of one per frame.
     unsigned mProbeMotionRun = 0;
     bool     mProbeDragActive = false;
+    // ---- THE MOVER CHANNEL FOR A DRAGGED STILL (MOVER-1) ------------------
+    /// The scene's own GI tick, advanced once a frame in updateGiTracking. It
+    /// is what `ScanRec::giMovedTick` is measured against, and it exists
+    /// because a gesture has to be told from a nudge by a WINDOW in frames and
+    /// the walk that sees the moves does not run on every frame (its still-frame
+    /// gate skips it whenever no transform was written).
+    unsigned long long mGiTick = 1;
+    /// The nodes currently riding the mover channel for a gesture, in
+    /// promotion order. Small by construction — it is what the user has hold of.
+    std::vector<NodeId> mDragMovers;
+    /// A promoted mover's box moved this frame. It is NOT `mGiMovedBoxes`: a
+    /// mover is out of every GI gather by definition, so its motion must reach
+    /// neither the probe grid nor the cascade dirty list — only this gesture's
+    /// own clock.
+    bool     mDragMoverMoved = false;
+    /// Ticks since the last one that saw a promoted mover move, against the
+    /// same kProbeMotionSettleFrames window the probe deferral uses. The end of
+    /// the window is the end of the gesture: every mover goes back to being
+    /// still world and pays its ONE re-voxelisation there.
+    unsigned mDragQuietTicks = 0;
+    /// Gestures that have ended (a cumulative reading for gi.drag_mover and
+    /// world.giStatus: one per drag, never one per frame).
+    unsigned long long mDragMoverGestures = 0;
+    /// A GESTURE THAT ENDED OWES ONE FULL AT-REST RE-SOLVE OF THE LIGHT, paid
+    /// once its re-voxelisations have drained. MEASURED, and it is the one
+    /// thing the promotion cannot get for free: with the irradiance field on,
+    /// a drag that ended without it left the Mirror Room's dragged torus 31/255
+    /// away from the same pose reached without the promotion, stably (the field
+    /// converged during the gesture over a chain that did not contain the
+    /// object and never re-converged afterwards — LAMPREST-2's latch), and one
+    /// `world.refreshGi()` collapsed the difference to 201 pixels at 6/255.
+    /// With the field OFF the two rules already agreed to 258 px at 9/255, which
+    /// is what names the term.
+    bool     mDragSettleOwed = false;
     /// HOW STILL IS STILL. Ten frames — the same 1/6 s the mirror's own
     /// in-motion cadence (`kGiLightOnlyEveryN`) uses, and chosen from the
     /// movement quantum rather than from taste: a box counts as moved when its

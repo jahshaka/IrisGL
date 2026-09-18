@@ -540,7 +540,15 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // probe-kind shadow node — while the view, the planar mirror, SSR and the
     // view/reflect shadow nodes (which ask for both channels) go on drawing it
     // every frame.
-    const Ogre::uint32 channel = n.movable ? kMovableBit : kVisibleBit;
+    // ...AND A DRAGGED STILL IS A MOVER FOR THE LENGTH OF ITS GESTURE
+    // (MOVER-1, Node::dragMover). One OR, here and in the billboard/particle
+    // branch below, is the whole of the channel half: everything the mobility
+    // design already does for a Movable object — out of the probe captures, out
+    // of the voxel bounce, lit by the field and the cones at its live pose —
+    // is what a dragged object wants while it is being dragged, and the
+    // document's own answer is not touched.
+    const bool moving = n.movable || n.dragMover;
+    const Ogre::uint32 channel = moving ? kMovableBit : kVisibleBit;
     if (unlit) return channel;
     // A HIDDEN NODE MUST NOT BOUNCE LIGHT (SMOKE_FIX S12). Ogre's own hide —
     // SceneNode::setVisible — toggles the LAYER_VISIBILITY bit, which
@@ -567,7 +575,7 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // removes. The price is stated rather than hidden: movers cast no indirect
     // light and do not darken the room's bounce (spec §5.3, the same limit
     // Unreal has without Lumen). Contact darkening is SSAO's job.
-    return (n.shown && !n.movable) ? (channel | kGiGeometryBit) : channel;
+    return (n.shown && !moving) ? (channel | kGiGeometryBit) : channel;
 }
 
 void OgreScene::applyNodeVisibilityFlags(Node &n) {
@@ -599,7 +607,7 @@ void OgreScene::applyNodeVisibilityFlags(Node &n) {
     const Ogre::uint32 on = n.helper
                                 ? (n.backdrop ? kBackdropBit
                                               : (kHelperBit | (n.vrHelper ? kVrHelperBit : 0u)))
-                                : (n.movable ? kMovableBit : kVisibleBit);
+                                : ((n.movable || n.dragMover) ? kMovableBit : kVisibleBit);
     if (n.billboards) n.billboards->setVisibilityFlags(n.shown ? on : 0u);
     if (n.particleDef) n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
 }
