@@ -4513,6 +4513,24 @@ private:
     std::vector<Ogre::Aabb>                       mScanReach;
     std::unordered_map<NodeId, unsigned long long> mScanKeys;
     std::vector<MaterialId>                       mScanDeforming;
+    /// THE CASTERS WHOSE MATERIAL MOVES VERTICES EVERY FRAME (audit ON-16,
+    /// 2026-09-18), by node id, as the last full caster walk found them.
+    ///
+    /// A material with a VERTEX-STAGE generated piece reads the shader clock, so
+    /// its items' shadow maps are never cacheable — the way Unreal excludes
+    /// world-position-offset materials from its shadow caches. That used to take
+    /// the caster walk's still-frame gate out FOR THE WHOLE SCENE (`deforms` in
+    /// runItemWalk): one wind material anywhere and every item in the scene was
+    /// visited every frame again, which is the cost the gate exists to remove.
+    ///
+    /// The roster is what makes the gate per ITEM: it is rebuilt by every full
+    /// walk (which visits every item anyway, so it costs nothing extra), and on
+    /// a still frame the walk re-flags exactly these nodes and returns. It
+    /// cannot go stale while the gate holds, because every seam that could
+    /// change a node's material, a material's pieces, or a caster's presence
+    /// counts a shadow-scan input (markShadowShapeDirty / noteShadowScanInput)
+    /// — and that moves the epoch, which forces a full walk that rebuilds it.
+    std::vector<NodeId>                           mShadowDeformers;
     /// (materialId, the albedo/emissive half of noteMaterialChanged) for
     /// materials waiting on a texture — see settleTextureResidency.
     std::vector<std::pair<MaterialId, bool>> mMaterialsAwaitingTexture;

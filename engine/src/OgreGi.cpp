@@ -2295,21 +2295,35 @@ void OgreScene::runItemWalk(bool shadow) {
     // TWO THINGS THE GATE MUST NOT SKIP, and neither is a transform:
     //   * a caster whose Item DIED (mShadowVanished) — unindexItemNode notes a
     //     scene transform write, so the epoch moves and the walk runs;
-    //   * a material with a VERTEX-STAGE generated piece, which moves vertices
-    //     every frame off the shader clock. Its items must be re-flagged every
-    //     frame, so the presence of one takes the gate out entirely. The list
-    //     is over MATERIALS (a handful), never items, and walkItems builds it
-    //     for its own use anyway.
-    bool deforms = false;
-    for (const auto &mk : mMaterials)
-        if (!mk.second.customPiece[1].empty()) { deforms = true; break; }
+    //   * a caster whose material moves VERTICES every frame off the shader
+    //     clock (a vertex-stage generated piece). Its lamps must re-render
+    //     every frame, so it must be re-flagged every frame.
+    //
+    // THE SECOND ONE USED TO TAKE THE GATE OUT FOR THE WHOLE SCENE (audit
+    // ON-16): `deforms` was a scene-wide bool, so ONE wind or wave material
+    // anywhere meant every item in the scene was visited on every frame, at
+    // rest, for ever — O(items) per frame, which is exactly the cost this gate
+    // exists to remove. It is PER ITEM now: the full walk keeps a roster of the
+    // deforming casters (mShadowDeformers, by node id — see its note for why it
+    // cannot go stale while the gate holds), and a still frame re-flags those
+    // nodes and nothing else.
     const unsigned long long epoch = shadowEpoch();
-    if (!deforms && mShadowScanPrimed && mShadowWalkEpochValid && epoch == mShadowWalkEpoch) {
+    if (mShadowScanPrimed && mShadowWalkEpochValid && epoch == mShadowWalkEpoch) {
         // The changes are per frame by contract (walkItems clears them at its
         // head), and "the walk ran and found nothing" is what the consumer
         // must see — collectShadowCacheFrame walks for itself when the frame's
         // walk did not happen, which would undo the whole gate.
         mShadowChanges.clear();
+        // ...EXCEPT THE DEFORMERS, whose vertices have moved since the last
+        // frame even though no transform was written. Their box and channels
+        // are the ones the walk recorded, and they are still current for
+        // exactly the reason the gate fired: nothing moved.
+        for (NodeId id : mShadowDeformers) {
+            auto it = mNodes.find(id);
+            if (it == mNodes.end()) continue;              // gone; the epoch moved too
+            const Node::ScanRec &r = it->second.scan;
+            if (r.shadowPresent) mShadowChanges.push_back({ r.shadowBox, r.shadowChannels });
+        }
         mShadowWalked = true;
         mCasterWalkMicros = 0.0;
         return;
@@ -2453,6 +2467,10 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
         channelsAll = allShadowCasterChannels();
         for (const auto &mk : mMaterials)
             if (!mk.second.customPiece[1].empty()) deforming.push_back(mk.first);
+        // The per-item gate's roster, rebuilt by this walk (ON-16): which
+        // CASTERS deform, not which materials do. Cleared here and refilled
+        // below, so it describes exactly the state this walk saw.
+        mShadowDeformers.clear();
     }
     for (Node *np : mItemNodes) {
         Node &n = *np;
@@ -2568,11 +2586,14 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh) {
                         r.shadowChannels != channels) {
                         Ogre::Aabb both = r.shadowBox; both.merge(a);
                         mShadowChanges.push_back({ both, channels | r.shadowChannels });
-                    } else if (r.shadowPose != pose || (deforms && present) || n.shadowShapeDirty) {
+                    } else if (r.shadowPose != pose || deforms || n.shadowShapeDirty) {
                         mShadowChanges.push_back({ a, channels });
                     }
                 }
             }
+            // THE ROSTER (ON-16): a present caster whose material deforms owes
+            // a change on every frame, gate or no gate.
+            if (deforms && present) mShadowDeformers.push_back(n.selfId);
             n.shadowShapeDirty = false;
             r.shadowPresent = present;
             r.shadowItem = present ? item : nullptr;
