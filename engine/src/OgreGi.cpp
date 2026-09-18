@@ -899,13 +899,16 @@ GiStatus OgreScene::giStatus() const {
             cs.resolution = int(c.resolution);
             cs.cell       = c.cell();
             cs.step       = c.step();
-            // THE NEAR-FIELD GUARANTEE THIS CASCADE IS ACHIEVING (Types.h's
-            // giCascadeGuaranteedRadius, in metres): halfSize - step - cell.
-            // The step is how far the camera may travel from the camera the
-            // cascade was built for, and the cell is how far below the camera
-            // the re-centre quantised the centre — so this is the radius around
-            // the head inside which the bounce is ALWAYS this cascade's.
-            cs.guaranteedRadius = c.halfSize - c.step() - c.cell();
+            // THE NEAR-FIELD GUARANTEE THIS CASCADE IS ACHIEVING, in metres —
+            // THROUGH THE HEADER'S OWN FUNCTION, never a second copy of the
+            // formula here: the radius around the head inside which the near
+            // field is voxelised by THIS cascade (Types.h, where the derivation
+            // and what it does and does not include are written out).
+            GiParams::GiCascadeDesc shape;
+            shape.halfSize   = c.halfSize;
+            shape.resolution = int(c.resolution);
+            shape.stepCells  = c.stepCells;
+            cs.guaranteedRadius = giCascadeGuaranteedRadius(shape);
             cs.centre     = toV(c.centre);
             cs.rebuilds   = c.rebuilds;
             cs.pending    = c.pending;
@@ -3588,9 +3591,13 @@ bool OgreScene::freshVoxelArm(const Ogre::Aabb &aabb) {
 //
 // THE SCHEDULER'S RULES, all of them:
 //   1. Each cascade owns a lattice: `cell = 2*halfSize/resolution`, and it
-//      re-centres when the camera crosses `stepCells` cells (the pin's
-//      `consistentCascadeSteps` test). The new centre is quantised to the CELL
-//      lattice, so the voxel grid never slides under the geometry.
+//      re-centres when the camera crosses a plane of the `stepCells` lattice
+//      (the pin's `consistentCascadeSteps` test). That lattice is ABSOLUTE
+//      world space, not a radius about the camera it was built for, so a
+//      re-centre arrives anywhere between the hysteresis band and a whole step
+//      of travel — `step` is the SUPREMUM of the travel, never the distance
+//      between two rebuilds. The new centre is quantised to the CELL lattice,
+//      so the voxel grid never slides under the geometry.
 //   2. AT MOST ONE cascade is re-voxelised per frame, innermost first. A
 //      cascade that owes a rebuild and did not get the frame carries it (the
 //      queue), and the queue is bounded: three owed rebuilds collapse into one,

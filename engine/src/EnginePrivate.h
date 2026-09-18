@@ -4117,9 +4117,14 @@ private:
         unsigned long long injectedAtLightSerial = 0;
         float        lastCpuMs = -1.0f;
         /// The camera position this cascade was last BUILT for. The scroll test
-        /// is quantize(cam, cell*stepCells) != quantize(builtCam, cell*stepCells)
-        /// — the pin's `consistentCascadeSteps` reading, which is what keeps two
-        /// cascades from stepping on different frames for the same metre.
+        /// quantises BOTH on an absolute world lattice of `step * (1 -
+        /// kStepHysteresis)` metres and requires the camera to be the band past
+        /// the plane it left (OgreGi.cpp) — the pin's `consistentCascadeSteps`
+        /// reading with the hysteresis added, which is what keeps two cascades
+        /// from stepping on different frames for the same metre AND what stops a
+        /// head swaying on a plane from thrashing the chain. Because the lattice
+        /// is absolute, `step()` is the SUPREMUM of the travel between rebuilds,
+        /// not the distance between them.
         Ogre::Vector3 builtCam = Ogre::Vector3::ZERO;
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
         float cell() const { return halfSize * 2.0f / float(resolution); }
