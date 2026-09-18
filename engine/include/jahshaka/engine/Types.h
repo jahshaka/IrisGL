@@ -3496,14 +3496,17 @@ struct VrConfig {
     /// conservative answer.
     bool helpers = false;
     /// THE REFLECTION ROW THE HEADSET RENDERS WITH (lane REFLECT-VR-1), the
-    /// same 0/1/2 as `PostFxDesc::ssr` — 0 off, 1 half-resolution, 2 full.
+    /// same 0/1/2 as `PostFxDesc::ssr` — 0 off, 1 half-resolution, 2 full —
+    /// and since lane EYE-GRADE-1 an OVERRIDE rather than the value itself:
+    /// **-1, the default, means "whatever the project's World panel says"**.
     ///
-    /// IT IS THE HOST'S TO PASS, because the row is the PROJECT'S (the World
-    /// panel's SSR row, `iris::Scene::ssrMode`, which the mirror pushes into
-    /// the desktop view every frame) and this struct is the only channel a
-    /// session has to it: the session creates its own View inside the engine
-    /// and no mirror ever reaches it. Both Studio hosts pass the project's row,
-    /// so the wearer sees the reflections the author sees.
+    /// IT USED TO BE THE HOST'S TO PASS because the session's View was the one
+    /// view no mirror reached, so the project's row had no other channel. That
+    /// is no longer true — `SceneMirror::applyViewEnvironment` pushes the whole
+    /// of the project's post description into the session's view every frame —
+    /// so a host that says nothing gets the author's row by the ordinary route,
+    /// and this field is what `vr.begin({reflections:n})` sets: one session,
+    /// one measurement, nothing written to the project.
     ///
     /// The SOURCE is not a choice here: a stereo chain never marches in screen
     /// space (see `PostFxDesc::ssrScreenMarch`), so this row buys RAY-TRACED
@@ -3511,7 +3514,7 @@ struct VrConfig {
     /// `chain::build` declines to build the reflection stage when neither source
     /// can write it, so a machine with no ray queries does not even pay the
     /// prepass and renders exactly what it renders today.
-    int ssr = 0;
+    int ssr = -1;
     /// THE RUNTIME'S HIDDEN-AREA MESH (lane HAM-1): mask out the corners of
     /// each eye that the headset's own lenses never show, so no shading is
     /// spent on them.
@@ -4328,6 +4331,116 @@ struct PostFxDesc {
     }
     bool operator!=(const PostFxDesc &o) const { return !(*this == o); }
 };
+
+/// ---------------------------------------------------------------------------
+/// THE VR VIEW POLICY — the project's post chain, minus what a side-by-side
+/// stereo target cannot carry (lane EYE-GRADE-1, 2026-09-18).
+///
+/// WHAT IT IS FOR. The picture in the headset is a VIEW OF THE PROJECT'S SCENE
+/// and is graded by the project, exactly like the desktop's: the exposure mode
+/// and its stops, the meter's pattern and its percentile clips, the looks
+/// stack, the reflection row, the refraction and distortion rows. Until this
+/// existed the session wrote its own PostFxDesc BY HAND — "because no mirror
+/// reaches a view the session made" — so the wearer got this struct's DEFAULTS
+/// whatever the author had chosen. Measured on the rig (spikes/smoke-50/f5b):
+/// `world.postFx({exposureEv})` swept from -2 to +4 moved the DESKTOP's sampled
+/// value 8 -> 255 and the EYE's 79 -> 77. The whole World panel was inert in
+/// the headset.
+///
+/// So `SceneMirror` now pushes the project's description into the session's
+/// view like it does into every other view of that scene, and THIS is what is
+/// applied on top of it — once, here, and nowhere else. Every entry is a
+/// structural fact or a measurement, never a taste:
+///
+///   * allowOffscreen — the eye pair is offscreen only because two eyes share
+///     one texture. It is not a thumbnail: it is the picture the wearer is
+///     standing in, and it keeps the chain (PostFxDesc::allowOffscreen).
+///   * bloom — the pin's bloom ladder is ONE 256x256 ping-pong for the WHOLE
+///     target and each blur is a 65-tap box (HDR/BoxBlurH_ps.glsl: +/-32 texels
+///     of 256, and the chain runs six horizontal passes of it). With the eyes
+///     side by side each eye owns 128 texels of that buffer, so one eye's
+///     highlights would smear across the whole of the other. Not a threshold
+///     away from working: a correct bloom needs the blur clamped at the seam
+///     (upstream media) or a ladder per eye plus a tonemap that selects one.
+///   * ssao — reconstructs a view-space position from depth through ONE
+///     camera's projection, and samples a hemisphere of neighbours. A stereo
+///     target has two projections and a seam; neither is repairable here.
+///   * smaaPreset — edge detection plus a blending-weight search that walks up
+///     to 16 texels horizontally, so each eye's inner edge would resolve
+///     against the other eye's picture. That is a <=16 px column per eye rather
+///     than the whole frame, which makes SMAA the first candidate for a
+///     per-eye pass — but a wrong column is still wrong, and MSAA is already
+///     pinned at 1 here, so nothing else is covering it.
+///   * ssrScreenMarch — the march walks the TARGET; see the field's own note.
+///     `chain::build` enforces it for any stereo chain whatever a host asked;
+///     this is the place that asks.
+///   * looks — a look whose geometry is defined about the FRAME'S CENTRE reads
+///     that centre as the pair's inner edge, which is nowhere in either eye
+///     (see `stereoSafeLook`).
+///
+/// AND WHAT IS DELIBERATELY *NOT* HERE. MSAA is not a PostFxDesc field: the
+/// session pins `setSampleCount(1)` itself (HDR + MSAA segfaults this driver,
+/// OgreChain's own note) and the mirror never pushes a count into an offscreen
+/// view. Refractions and distortion follow the project: both are how a MATERIAL
+/// renders rather than a picture effect, both are shaded per eye through the
+/// instanced-stereo pass buffer, and both cost exactly nothing in a scene with
+/// no such material.
+///
+/// `ssrOverride` is the ONE session-scoped override: -1 means "the project's
+/// row", 0/1/2 are `vr.begin({reflections:n})`'s measurement arm (VrConfig::ssr).
+inline bool stereoSafeLook(LookKind k) {
+    switch (k) {
+    // POINTWISE: every sample is the pixel's own texel, and no term is
+    // defined about the frame. Correct in both eyes as written.
+    case LookKind::Desaturate:
+    case LookKind::Posterize:
+        return true;
+    // A 3x3 UNSHARP MASK. Its only reach is one texel, so at the seam ONE
+    // column of each eye reads one column of the other — named rather than
+    // waved away, and kept: dropping an author's sharpening over one column of
+    // two thousand would be the larger error.
+    case LookKind::Sharpen:
+        return true;
+    // THE GRADE RIDES, ITS VIGNETTE DOES NOT (see applyVrViewPolicy, which
+    // zeroes p[3]): saturation, contrast and tint are pointwise; the vignette
+    // is the one term measured from the frame's centre.
+    case LookKind::FilmGrade:
+        return true;
+    // MEASURED FROM THE CENTRE, OR ACROSS THE WHOLE FRAME. RadialBlur samples
+    // along a line towards a centre (and one centre cannot serve two eyes);
+    // GlassWarp's ripple is a frame-wide pattern, so the same world point
+    // would ripple differently in the two eyes; OldMovie is a frame — jitter,
+    // vignette, scratches — and half a frame in each eye is not one.
+    case LookKind::RadialBlur:
+    case LookKind::GlassWarp:
+    case LookKind::OldMovie:
+    case LookKind::Count:
+        return false;
+    }
+    return false;
+}
+
+inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
+    fx.allowOffscreen = true;
+    fx.bloom          = false;
+    fx.ssao           = false;
+    fx.smaaPreset     = -1;
+    fx.ssrScreenMarch = false;
+    fx.hzb            = false;
+    if (ssrOverride >= 0) fx.ssr = ssrOverride;
+    if (!fx.looks.empty()) {
+        std::vector<LookDesc> kept;
+        kept.reserve(fx.looks.size());
+        for (const LookDesc &l : fx.looks) {
+            if (!stereoSafeLook(l.kind)) continue;
+            LookDesc copy = l;
+            // The film grade's vignette is its p[3] (LookKind::FilmGrade).
+            if (copy.kind == LookKind::FilmGrade) copy.p[3] = 0.0f;
+            kept.push_back(copy);
+        }
+        fx.looks.swap(kept);
+    }
+}
 
 /// What the renderer measured this frame (STATS_OVERLAY_SPEC.md §4).
 /// A POD, exactly like ShaderCacheStats — `app.renderStats()` is this struct.

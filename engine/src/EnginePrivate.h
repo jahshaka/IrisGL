@@ -1275,7 +1275,8 @@ bool warmUpUsesPass(Ogre::CompositorManager2 *cm, const std::string &refNodeDef)
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure);
 /// THE METER'S PATTERN AND CLIPS (EXPOSURE-2). Uniforms on the histogram
 /// meter's compute jobs; only meaningful for the form that measures.
-void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent);
+void setMeter(ExposureMeterPattern pattern, float lowPercent, float highPercent,
+               bool stereo);
 void setBloomThreshold(float minThreshold, float fullColourThreshold);
 void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);
@@ -5213,6 +5214,14 @@ public:
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
     bool stereo() const { return mStereo; }
+    /// THE ONE-SESSION REFLECTION OVERRIDE (lane EYE-GRADE-1). The SSR row a
+    /// stereo view renders with is the PROJECT's — the mirror pushes it here
+    /// like it does into the desktop's view — and this is `vr.begin({
+    /// reflections:n})`'s measurement arm over it: -1 follows the project, 0/1/2
+    /// pin the row for as long as this view is stereo. Applied inside
+    /// `applyVrViewPolicy`, so it cannot be forgotten by a later push.
+    void setVrSsrOverride(int row);
+    int  vrSsrOverride() const { return mVrSsrOverride; }
     /// THE TWO EYES THIS VIEW IS RENDERING, this frame (@see StereoEyeBasis).
     /// Pushed by the VR session every frame it locates them, dropped when the
     /// session ends; read by the ray-traced reflection so each eye's pixels get
@@ -5497,6 +5506,10 @@ private:
     bool                       mStereo = false;
     bool                       mGiPriority = false;
     std::string                mCullCameraName;
+    /// THE SESSION'S ONE-RUN REFLECTION OVERRIDE (lane EYE-GRADE-1;
+    /// `vr.begin({reflections:n})`). -1 — every view but a session's — means
+    /// "whatever the project's row says", which is what the mirror pushes.
+    int                        mVrSsrOverride = -1;
     /// The located eyes of THIS frame (@see StereoEyeBasis). Not part of the
     /// chain's identity — they change every frame and change no pass.
     StereoEyeBasis             mStereoEyes[2];

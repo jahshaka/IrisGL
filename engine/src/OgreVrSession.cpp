@@ -163,6 +163,32 @@ std::string xrResultName(XrInstance instance, XrResult r) {
     return std::to_string(int(r));
 }
 
+/// THE SWAPCHAIN FORMATS A RUNTIME MIGHT OFFER, BY NAME (lane EYE-GRADE-1).
+///
+/// Vulkan has no format-to-string in core and the loader's one is a validation-
+/// layer facility, so this is a small table of the formats a runtime plausibly
+/// offers for a colour swapchain — enough to make the once-per-session log line
+/// readable. Anything else is printed as its number, which is still findable in
+/// vulkan_core.h.
+std::string vkFormatName(int64_t f) {
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM:          return "R8G8B8A8_UNORM";
+    case VK_FORMAT_R8G8B8A8_SRGB:           return "R8G8B8A8_SRGB";
+    case VK_FORMAT_B8G8R8A8_UNORM:          return "B8G8R8A8_UNORM";
+    case VK_FORMAT_B8G8R8A8_SRGB:           return "B8G8R8A8_SRGB";
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "A2B10G10R10_UNORM_PACK32";
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return "A2R10G10B10_UNORM_PACK32";
+    case VK_FORMAT_R16G16B16A16_UNORM:      return "R16G16B16A16_UNORM";
+    case VK_FORMAT_R16G16B16A16_SFLOAT:     return "R16G16B16A16_SFLOAT";
+    case VK_FORMAT_R32G32B32A32_SFLOAT:     return "R32G32B32A32_SFLOAT";
+    case VK_FORMAT_D16_UNORM:               return "D16_UNORM";
+    case VK_FORMAT_D32_SFLOAT:              return "D32_SFLOAT";
+    case VK_FORMAT_X8_D24_UNORM_PACK32:     return "X8_D24_UNORM_PACK32";
+    default: break;
+    }
+    return std::to_string(f);
+}
+
 /// The standard OpenXR asymmetric projection in OGRE's convention ([-1,1]
 /// depth, +Y up). `Camera::setCustomProjectionMatrix` hands it to
 /// `RenderSystem::_convertProjectionMatrix`, which applies the Vulkan clip-space
@@ -1127,29 +1153,82 @@ bool VrSession::create(std::string &reason) {
     mEngine->mVrInfo.space = spaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "stage" : "local";
     vrLog("reference space: %s", mEngine->mVrInfo.space.c_str());
 
-    // THE SWAPCHAIN FORMAT, WITH NO SILENT FALLBACK (phase 1a fix round F4).
-    // The copy is a vkCmdCopyImage, which demands format COMPATIBILITY — the
-    // same texel block size — so a 4-byte eye target cannot be copied into
-    // Monado's first preference (R16G16B16A16_UNORM, 8 bytes). We ask for the
-    // UNORM 8-bit format because that is what this engine's own view targets
-    // are (OgreView::createRtt, PFG_RGBA8_UNORM) and what its windows are
-    // (VulkanWindow picks a non-sRGB format without the `gamma` param): the
-    // HlmsPbs pixel shader does the linear->gamma conversion ITSELF when the
-    // target is not sRGB (`@property( !hw_gamma_write ) outPs_colour0.xyz =
-    // sqrt( finalColour )`), so our bytes are already display-encoded and a
-    // pass-through is exactly right. Taking an _SRGB swapchain instead would
-    // ask the runtime to encode them a second time.
+    // ---- THE COLOUR CONTRACT WITH THE RUNTIME, STATED ONCE (lane EYE-GRADE-1,
+    //      2026-09-18; it was INVERTED from phase 1a to push #50) -------------
+    //
+    // WHAT OPENXR SAYS A SWAPCHAIN FORMAT MEANS. The runtime SAMPLES the image
+    // we hand it and composites it for the display. A format with an _SRGB
+    // suffix tells it "these bytes are display-encoded": the sampler decodes
+    // them to linear on the way in and the compositor re-encodes for the
+    // display, which is an identity round trip. A NON-sRGB (UNORM) format tells
+    // it the opposite — "these bytes ARE linear" — so it encodes them a SECOND
+    // time on the way out.
+    //
+    // WHAT WE HAND IT. The eye target is `PFG_RGBA8_UNORM` (OgreView::createRtt)
+    // and the chain writes a DISPLAY-REFERRED picture into it: with the target
+    // not sRGB, `hw_gamma_write` is off and the HlmsPbs pixel shader encodes
+    // itself (`outPs_colour0.xyz = sqrt( finalColour )`), and the HDR chain's
+    // composite writes the tonemapped, display-referred value (OgreChain's
+    // kLook* note: "the composite quad writes a DISPLAY-REFERRED value"). So our
+    // bytes are ENCODED, and the format that says so is the _SRGB one.
+    //
+    // MEASURED, because phase 1a's comment reasoned the other way round and was
+    // wrong (spikes/smoke-50/f5b): through Monado's XCB compositor the runtime's
+    // displayed picture was the sRGB DECODE of the bytes we submitted, across
+    // five sky levels — 28->3, 79->20, 95->29, 99->32, a red 164->95 — i.e. one
+    // encode too many, and the wearer saw a picture that was much too dark.
+    //
+    // THE COPY IS UNCHANGED AND STILL A RAW BYTE TRANSFER. `vkCmdCopyImage`
+    // converts nothing and requires only SIZE COMPATIBILITY, and
+    // R8G8B8A8_UNORM and R8G8B8A8_SRGB are the same 32-bit block: the same
+    // bytes land in the swapchain, and only the runtime's reading of them
+    // changes. That makes the chain of encodes exactly ONE from radiance to the
+    // wearer's eye — ours — with the runtime's decode and its display encode
+    // cancelling.
+    //
+    // NO SILENT FALLBACK (phase 1a fix round F4), and ONE format rather than a
+    // preference list, because a raw copy fixes both halves of the contract:
+    //
+    //   * THE CHANNEL ORDER. `vkCmdCopyImage` moves BYTES. B8G8R8A8_SRGB is
+    //     size-compatible with our R8G8B8A8 eye target and the copy is legal,
+    //     and it would hand the wearer a picture with red and blue exchanged.
+    //     (A blit is not the way out either: `vkCmdBlitImage` CONVERTS, and
+    //     writing linear-read texels into an _SRGB destination encodes them —
+    //     the very second encode this change exists to remove.)
+    //   * THE WIDTH. Monado's first preference is R16G16B16A16_UNORM (8 bytes),
+    //     which is not copy-compatible at all and would need a blit or a quad.
+    //     A wider swapchain is also not obviously worth anything here — the eye
+    //     target is 8-bit, and WiVRn video-encodes 8 bits to the Quest — so
+    //     every offered format is ENUMERATED AND LOGGED and none of them is
+    //     taken on a guess.
     uint32_t fmtCount = 0;
     xrEnumerateSwapchainFormats(mSession, 0, &fmtCount, nullptr);
     std::vector<int64_t> formats(fmtCount);
     if (fmtCount) xrEnumerateSwapchainFormats(mSession, fmtCount, &fmtCount, formats.data());
+    {
+        // LOGGED ONCE PER SESSION (the lead's brief): what a runtime offers is
+        // the first thing anybody asks when a headset's colours are wrong, and
+        // it is not otherwise recoverable from a log.
+        std::string list;
+        for (int64_t f : formats) {
+            if (!list.empty()) list += ", ";
+            list += vkFormatName(f);
+        }
+        vrLog("swapchain formats offered by the runtime (%u): %s", fmtCount,
+              list.empty() ? "(none)" : list.c_str());
+    }
     mSwapchainFormat = 0;
     for (int64_t f : formats)
-        if (f == VK_FORMAT_R8G8B8A8_UNORM) { mSwapchainFormat = f; break; }
+        if (f == int64_t(VK_FORMAT_R8G8B8A8_SRGB)) { mSwapchainFormat = f; break; }
     if (!mSwapchainFormat) {
-        reason = "the runtime does not offer VK_FORMAT_R8G8B8A8_UNORM (the eye target's format)";
+        reason = "the runtime does not offer VK_FORMAT_R8G8B8A8_SRGB (the eye target's "
+                 "channel order, and the format that tells the runtime our bytes are "
+                 "already display-encoded)";
         return false;
     }
+    vrLog("swapchain format: %s (our display-encoded bytes, copied raw; the runtime "
+          "decodes and re-encodes them, so the picture is encoded exactly once)",
+          vkFormatName(mSwapchainFormat).c_str());
 
     mEyeWidth  = mConfig.overrideEyeWidth  ? mConfig.overrideEyeWidth
                                            : mBoot->mViewCfg[0].recommendedImageRectWidth;
@@ -1197,44 +1276,39 @@ bool VrSession::create(std::string &reason) {
     // engine that keeps the post chain (PostFxDesc::allowOffscreen) — because
     // it is not a thumbnail, it is the picture the user is standing in.
     //
-    // THE PHASE-2 PROFILE, stated here and nowhere else (VR_SPEC §9 item 6):
-    // HDR and its tonemap ON, MSAA at 1 (HDR + MSAA segfaults this driver —
-    // OgreChain.cpp's own note), SSAO / SMAA / SSR OFF because every one of
-    // them samples a neighbourhood and would read across the seam between the
-    // eyes, and ray-traced reflections off with SSR (they ride its chain).
+    // THE GRADE IS THE PROJECT'S AND IT IS NOT WRITTEN HERE (lane EYE-GRADE-1).
+    // Until this lane the phase-2 profile was a hand-written PostFxDesc at this
+    // line, on the reasoning that "no mirror reaches a view the session made" —
+    // and the consequence was that the wearer got the struct's DEFAULTS
+    // (automatic exposure across a +/-2.5 stop window) whatever the author had
+    // chosen in the World panel. `SceneMirror::applyViewEnvironment` pushes the
+    // project's description into this view every frame now, exactly as it does
+    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what a
+    // side-by-side eye pair cannot carry — in ONE place, stated once, with the
+    // reason for every entry.
+    //
+    // WHAT IS SET HERE IS THE SESSION'S OWN, AND ONLY THAT:
+    //   * MSAA at 1. Not a PostFxDesc field: HDR + MSAA segfaults this driver
+    //     (OgreChain.cpp's own note), and the mirror never pushes a sample
+    //     count into an offscreen view, so this is the one statement of it.
+    //   * the reflection OVERRIDE, `vr.begin({reflections:n})`'s measurement
+    //     arm over the project's row (VrConfig::ssr; -1 = follow the project).
+    //   * an HDR base, which is what the view renders with for the frames
+    //     BEFORE a host's first environment push — the warm-up frames, and an
+    //     engine-only caller (tests/vr) that has no mirror at all. Every other
+    //     field is the struct's default and is replaced on the first push.
     View *v = mEngine->createOffscreenView("jahshaka-vr", mEyeWidth * 2u, mEyeHeight,
                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f });
     if (!v) { reason = "createOffscreenView failed: " + mEngine->lastError(); return false; }
     mView = static_cast<OgreView *>(v);
-    PostFxDesc fx;
-    fx.allowOffscreen = true;
-    fx.hdr = true;
-    fx.bloom = false;
-    fx.ssao = false;
-    fx.smaaPreset = -1;
-    // REFLECTIONS IN THE HEADSET (lane REFLECT-VR-1). The row is the PROJECT'S —
-    // the World panel's SSR row, which the host passes in `VrConfig::ssr`
-    // because no mirror reaches a view the session made — and it selects the
-    // reflection's RESOLUTION and its prepass, exactly as on the desktop.
-    //
-    // WHAT IT DOES NOT SELECT IS THE SCREEN-SPACE MARCH, which is off here and
-    // structurally impossible in a stereo chain (PostFxDesc::ssrScreenMarch,
-    // and chain::build enforces it): the march walks the TARGET, and this
-    // target is two eyes side by side. Phase 2 read that correctly and
-    // concluded "so no reflections in VR", which is the line the owner saw the
-    // consequence of — a chrome sphere showing the room on the desktop and
-    // nothing in the headset. The rays have no such term: a ray is traced in
-    // the world from the eye that owns its pixel, so they answer per eye, and
-    // with the march off they answer ALL of it.
-    //
-    // SSAO and SMAA stay off for the reason phase 2 gave and it still holds:
-    // both are neighbourhood filters over the target, both would read across
-    // the seam, and neither has a per-eye form here yet.
-    fx.ssr = mConfig.ssr;
-    fx.ssrScreenMarch = false;
-    mView->setPostFx(fx);
     mView->setSampleCount(1u);
     mView->setStereo(true, "JahshakaVrCullCamera");
+    mView->setVrSsrOverride(mConfig.ssr);
+    {
+        PostFxDesc fx;
+        fx.hdr = true;
+        mView->setPostFx(fx);   // the policy is applied inside (the view is stereo)
+    }
     // THE TWO HELPER CHANNELS (kVrHelperBit's two-bit rule, phase 4; owner
     // 2026-09-17). Until this lane the session's view simply INHERITED
     // `mHelpersVisible = true` and never said so, which is a different thing

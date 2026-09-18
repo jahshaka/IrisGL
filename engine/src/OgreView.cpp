@@ -550,7 +550,21 @@ void OgreView::applyPip() {
     } JAH_CATCH(mError, );
 }
 
-void OgreView::setPostFx(const PostFxDesc &fx) {
+// THE PROJECT'S DESCRIPTION, THEN THE VR POLICY OVER IT (lane EYE-GRADE-1).
+//
+// A STEREO view is the picture somebody is standing in, and it is graded by the
+// project like every other view of that scene: `SceneMirror::applyViewEnvironment`
+// pushes the world's PostFxDesc (with the driving camera's lens over it) into
+// this view every frame, exactly as it does into the desktop's. What a
+// side-by-side eye pair cannot carry is filtered out HERE — in the one place
+// every push goes through, so no host can forget it and no later push can undo
+// it — by `applyVrViewPolicy`, whose header states the whole list and why.
+//
+// `postFx()` therefore reports the EFFECTIVE description, which is what
+// `vr.state().postFx` shows and what the suite asserts against the desktop's.
+void OgreView::setPostFx(const PostFxDesc &pushed) {
+    PostFxDesc fx = pushed;
+    if (mStereo) applyVrViewPolicy(fx, mVrSsrOverride);
     if (fx == mPostFx) return;   // hosts push per frame; the same value is free
     const ChainDesc before = chainDesc();
     mPostFx = fx;
@@ -802,10 +816,31 @@ bool OgreView::attachWorkspace() {
     } JAH_CATCH(mError, false);
 }
 
+void OgreView::setVrSsrOverride(int row) {
+    if (mVrSsrOverride == row) return;
+    mVrSsrOverride = row;
+    // Re-apply the policy to what this view is already carrying: the override is
+    // set before the first push in practice, but a view that never re-pushed
+    // would otherwise keep the row it was built with.
+    if (mStereo) setPostFx(mPostFx);
+}
+
 void OgreView::setStereo(bool on, const std::string &cullCamera) {
     if (mStereo == on && mCullCameraName == cullCamera) return;
     mStereo = on;
     mCullCameraName = cullCamera;
+    // THE POLICY FOLLOWS THE FLAG (lane EYE-GRADE-1). A view told it is stereo
+    // after its description was pushed — which is the order the session builds
+    // in — must re-filter what it is holding, or it would render one chain
+    // shape with a description the stereo target cannot carry until the next
+    // push arrived. Re-entering setPostFx here is safe: the policy is
+    // idempotent, so the guarded compare below drops the call when nothing
+    // moved.
+    if (on) {
+        PostFxDesc fx = mPostFx;
+        applyVrViewPolicy(fx, mVrSsrOverride);
+        mPostFx = fx;
+    }
     // The flag lives on the pass DEFINITIONS, so this is a definition rebuild
     // and not a live write — the same operation a shadow-node or an effect
     // change performs. It happens exactly twice per session (begin and end).
